@@ -6,6 +6,9 @@ struct ConversationListView: View {
   let account: Account
 
   @State private var conversations: [ConversationItem] = []
+  /// The local store was read once: until then an empty list is not "no chats yet" (no flash of
+  /// the empty state at start; the store answers at once, offline too).
+  @State private var hasLoaded = false
   @State private var previews: [String: ChatPreview] = [:]
   @State private var selection: String?
   @State private var query = ""
@@ -15,6 +18,21 @@ struct ConversationListView: View {
   @State private var isShowingFilters = false
   @State private var filters = SearchFilters()
   @State private var maybeBrowseTab: BrowseView.Tab?
+  /// DMs live outside spaces (as on desktop), so they have their own tab.
+  @State private var tab: ChatTab = .home
+  @State private var homeChip: HomeFilter = .all
+  @State private var dmFilter = ""
+  /// A mute from the long-press menu the server didn't take (#903).
+  @State private var isMuteFailed = false
+  /// An entry-menu action the core or server refused (#1105, #322).
+  @State private var maybeActionFailure: AppFailure?
+  @State private var suspectDeletions: UInt32 = 0
+  /// What the core says about leaving, per channel row and space header: the rule is the core's.
+  @State private var leaveChoices: [String: LeaveChoice] = [:]
+  @State private var spaceMenus: [String: SpaceMenuItem] = [:]
+  @State private var maybeLeaving: LeaveTarget?
+  /// A first sync's progress, shown under the title.
+  @State private var maybeFirstSync: FirstSyncItem?
 
   var body: some View {
     NavigationSplitView {
@@ -22,10 +40,32 @@ struct ConversationListView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
           VStack(spacing: 0) {
             OfflineBanner()
+            if let progress = maybeFirstSync { FirstSyncBar(progress: progress) }
             NotificationPromptCard()
+            if !isSearching && !conversations.isEmpty { tabPicker }
           }
         }
         .navigationTitle("chats_title")
+        .alert("dnd_save_failed", isPresented: $isMuteFailed) {}
+        .alert("deletions_suspect \(suspectDeletions)", isPresented: isSuspectDeletionsShown) {}
+        .task(id: shownSections.count) {
+          let count = await model.takeSuspectDeletions()
+          if count > 0 { suspectDeletions = count }
+        }
+        .alert("entry_action_failed", isPresented: isActionFailureShown) {
+        } message: {
+          if let failure = maybeActionFailure { Text(failure.message) }
+        }
+        .confirmationDialog(leaveTitle, isPresented: isLeavingShown, titleVisibility: .visible) {
+          Button(
+            LocalizedStringKey(maybeLeaving?.isDeletion == true ? "entry_delete_channel_confirm" : "entry_leave_confirm"),
+            role: .destructive
+          ) {
+            confirmLeave()
+          }
+        } message: {
+          Text(leaveMessage)
+        }
         .toolbar {
           ToolbarItem(placement: .topBarLeading) {
             Button { isShowingFilters = true } label: {
@@ -48,6 +88,10 @@ struct ConversationListView: View {
       if let conversation = conversations.first(where: { $0.id == selection }) {
         ChatPane(conversation: conversation, threadId: nil, account: account)
           .id(conversation.id)
+      } else if let selection {
+        // Opened from a notification before the sync brought it (issue #1065).
+        PendingConversationView(conversationId: selection)
+          .id(selection)
       } else {
         Text("no_conversation_selected").foregroundStyle(Theme.textMuted)
       }
@@ -55,6 +99,8 @@ struct ConversationListView: View {
     .searchable(text: $query, prompt: Text("search_hint"))
     .task(id: model.changeCount) {
       conversations = await model.conversations()
+      hasLoaded = true
+      maybeFirstSync = await model.firstSync()
       previews = await model.chatPreviews(conversations, myId: account.userId)
     }
     .task(id: fullQuery) {
@@ -69,6 +115,15 @@ struct ConversationListView: View {
         model.openConversationId = nil
       }
     }
+    // A conversation opened from elsewhere (notification, link, new message) shows in its own tab.
+    .onChange(of: selection) { _, id in
+      if let selected = conversations.first(where: { $0.id == id }) {
+        tab = selected.isDirect ? .home : .spaces
+      }
+    }
+    // Why an action on a request to join didn't go through, also for the open channel's banner;
+    // the channel browser shows its own.
+    .joinNoteAlert(model, isActive: maybeBrowseTab == nil)
     .sheet(isPresented: $isShowingSettings) { SettingsView(account: account) }
     .sheet(isPresented: $isShowingMeetings) { MeetingsView(account: account) }
     .sheet(isPresented: $isShowingFilters) { SearchFiltersView(filters: $filters) }
@@ -91,19 +146,52 @@ struct ConversationListView: View {
         selection = hit.message.conversationId
       }
     } else if conversations.isEmpty {
-      EmptyChatsView { tab in maybeBrowseTab = tab }
+      if hasLoaded {
+        EmptyChatsView { tab in maybeBrowseTab = tab }
+      } else {
+        Color.clear
+      }
     } else {
       List(selection: $selection) {
-        ForEach(conversationSections(conversations, lastActivity: previews.mapValues(\.sentDate))) { section in
-          Section(header: Text(title(of: section.title))) {
+        if tab == .home {
+          TextField("dm_filter", text: $dmFilter)
+            .textFieldStyle(.roundedBorder)
+            .autocorrectionDisabled()
+          homeChips
+          if shownSections.isEmpty {
+            let isUnfiltered = dmFilter.isEmpty && homeChip == .all
+            Text(LocalizedStringKey(isUnfiltered ? "dm_empty" : "dm_filter_empty")).foregroundStyle(Theme.textMuted)
+            if isUnfiltered {
+              Button("dm_new", systemImage: "square.and.pencil") { maybeBrowseTab = .people }
+            }
+          }
+        } else {
+          // Admins asking to join a channel the user owns: decided where the channels are (#799).
+          JoinRequestSection()
+          if shownSections.isEmpty {
+            Text("chats_no_channels").foregroundStyle(Theme.textMuted)
+          }
+        }
+        ForEach(shownSections) { section in
+          Section(
+            header: Text(title(of: section.title))
+              .contextMenu { spaceMenu(for: section) }
+              .task(id: section.id) { await loadSpaceMenu(for: section) }
+          ) {
             ForEach(section.conversations, id: \.id) { conversation in
               ConversationRow(conversation: conversation, maybePreview: previews[conversation.id])
                 .tag(conversation.id)
                 .swipeActions(edge: .leading) { readButton(for: conversation) }
                 .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
+                .task(id: conversation.id) { await loadLeaveChoice(for: conversation) }
                 .contextMenu {
                   readButton(for: conversation)
+                  muteMenu(for: conversation)
+                  levelMenu(for: conversation)
                   favoriteButton(for: conversation)
+                  copyLinkButton(for: conversation)
+                  leaveButton(for: conversation)
+                  deleteButton(for: conversation)
                 }
             }
           }
@@ -111,6 +199,59 @@ struct ConversationListView: View {
       }
       .listStyle(.sidebar)
     }
+  }
+
+  private var shownSections: [ConversationSection] {
+    switch tab {
+    case .spaces: return channelSections(conversations)
+    case .home:
+      return directSections(
+        conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip)
+    }
+  }
+
+  /// Unread / People / Groups; tapping the selected chip again shows everything.
+  private var homeChips: some View {
+    HStack {
+      ForEach(HomeFilter.chips, id: \.self) { chip in
+        Button(LocalizedStringKey(chipKey(chip))) { homeChip = homeChip == chip ? .all : chip }
+          .buttonStyle(.bordered)
+          .tint(homeChip == chip ? Theme.accent : .secondary)
+          .accessibilityAddTraits(homeChip == chip ? .isSelected : [])
+      }
+    }
+  }
+
+  private func chipKey(_ chip: HomeFilter) -> String {
+    switch chip {
+    case .all: return "home_filter_all"
+    case .unread: return "home_filter_unread"
+    case .people: return "home_filter_people"
+    case .groups: return "home_filter_groups"
+    }
+  }
+
+  /// Home and spaces, each with what is new in it.
+  private var tabPicker: some View {
+    Picker("chats_title", selection: $tab) {
+      ForEach(ChatTab.allCases, id: \.self) { tab in
+        Text(tabLabel(tab)).tag(tab)
+      }
+    }
+    .pickerStyle(.segmented)
+    .padding(.horizontal)
+    .padding(.vertical, 6)
+  }
+
+  /// "Home (3)": channels count only mentions (and the requests to join waiting for a decision),
+  /// DMs every unread message.
+  private func tabLabel(_ tab: ChatTab) -> String {
+    let isDirect = tab == .home
+    let name = isDirect ? String(localized: "home_title") : String(localized: "chats_tab_spaces")
+    let badge = TabBadge(conversations.filter { $0.isDirect == isDirect })
+    let count = isDirect ? max(badge.mentions, badge.unread) : badge.mentions + model.joinRequests.count
+    if count > 0 { return "\(name) (\(count))" }
+    return badge.unread > 0 ? "\(name) •" : name
   }
 
   /// Read when unread; otherwise unread again from the newest message.
@@ -128,6 +269,184 @@ struct ConversationListView: View {
         }
       }
       .tint(Theme.accent)
+    }
+  }
+
+  /// Mute for a while, or unmute: the same presets as the conversation's bell (#903).
+  private func muteMenu(for conversation: ConversationItem) -> some View {
+    Menu {
+      if conversation.isMuted {
+        Button("mute_end", systemImage: "bell") { setMuted(conversation, until: nil) }
+      }
+      ForEach(MutePreset.allCases) { preset in
+        Button(preset.title) { setMuted(conversation, until: preset.mutedUntil(now: Date(), calendar: .current)) }
+      }
+    } label: {
+      Label("mute_title", systemImage: conversation.isMuted ? "bell.slash" : "bell")
+    }
+  }
+
+  private func setMuted(_ conversation: ConversationItem, until maybeDate: Date?) {
+    Task {
+      if !(await model.setConversationMuted(conversation.id, until: maybeDate)) { isMuteFailed = true }
+    }
+  }
+
+  /// All messages, mentions only or nothing, besides the mute time (#1105).
+  private func levelMenu(for conversation: ConversationItem) -> some View {
+    Menu {
+      ForEach(NotifyLevel.allCases) { level in
+        Button(LocalizedStringKey(level.titleKey)) {
+          Task {
+            if !(await model.setConversationLevel(conversation.id, level: level.wire)) { isMuteFailed = true }
+          }
+        }
+      }
+    } label: {
+      Label("entry_notifications", systemImage: "bell.badge")
+    }
+  }
+
+  @ViewBuilder
+  private func copyLinkButton(for conversation: ConversationItem) -> some View {
+    if let link = model.shareLink(forConversation: conversation.id) {
+      Button("copy_link", systemImage: "link") { UIPasteboard.general.string = link }
+    }
+  }
+
+  /// Only where the core allows it; the last admin sees why it is off, before the tap.
+  @ViewBuilder
+  private func leaveButton(for conversation: ConversationItem) -> some View {
+    switch leaveChoices[conversation.id] ?? .hidden {
+    case .hidden:
+      EmptyView()
+    case .allowed:
+      Button("entry_leave_channel", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+        maybeLeaving = .channel(id: conversation.id, name: conversation.name)
+      }
+    case .lastMember:
+      Button("entry_leave_channel", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+        maybeLeaving = .lastMember(id: conversation.id, name: conversation.name)
+      }
+    case .lastAdmin:
+      Button(
+        LocalizedStringKey(
+          conversation.canDeleteChannel ? "entry_leave_last_channel_admin_or_delete" : "entry_leave_last_channel_admin"
+        ),
+        systemImage: "rectangle.portrait.and.arrow.right"
+      ) {}
+        .disabled(true)
+    }
+  }
+
+  /// Only for those who may; the confirmation says what happens to whom.
+  @ViewBuilder
+  private func deleteButton(for conversation: ConversationItem) -> some View {
+    if conversation.canDeleteChannel {
+      Button("entry_delete_channel", systemImage: "trash", role: .destructive) {
+        maybeLeaving = .deletion(id: conversation.id, name: conversation.name)
+      }
+    }
+  }
+
+  private func loadLeaveChoice(for conversation: ConversationItem) async {
+    guard !conversation.isDirect else { return }
+    leaveChoices[conversation.id] = await model.conversationLeaveChoice(conversation.id)
+  }
+
+  /// Mute (its channels follow), mark all read and leave: the menu of a space's header.
+  @ViewBuilder
+  private func spaceMenu(for section: ConversationSection) -> some View {
+    if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
+      let menu = spaceMenus[spaceId]
+      Menu {
+        Button("mute_end", systemImage: "bell") { setSpaceMuted(spaceId, until: nil) }
+        ForEach(MutePreset.allCases) { preset in
+          Button(preset.title) { setSpaceMuted(spaceId, until: preset.mutedUntil(now: Date(), calendar: .current)) }
+        }
+      } label: {
+        Label("entry_mute_space", systemImage: "bell.slash")
+      }
+      if menu?.hasUnread ?? section.conversations.contains(where: { $0.unreadCount > 0 || $0.mentionCount > 0 }) {
+        Button("entry_mark_all_read", systemImage: "envelope.open") {
+          Task { maybeActionFailure = await model.markSpaceRead(spaceId) }
+        }
+      }
+      switch menu?.leave ?? .hidden {
+      case .hidden:
+        EmptyView()
+      // `space_leave` doesn't answer `.lastMember`; the confirmation covers it either way.
+      case .allowed, .lastMember:
+        Button("entry_leave_space", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+          maybeLeaving = .space(id: spaceId, name: name)
+        }
+      case .lastAdmin:
+        Button("entry_leave_last_space_admin", systemImage: "rectangle.portrait.and.arrow.right") {}
+          .disabled(true)
+      }
+      if menu?.canDelete == true {
+        Button("entry_delete_space", systemImage: "trash", role: .destructive) {
+          maybeLeaving = .spaceDeletion(id: spaceId, name: name, channels: menu?.channelCount ?? 0)
+        }
+      }
+    }
+  }
+
+  private func loadSpaceMenu(for section: ConversationSection) async {
+    guard case .space = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first else {
+      return
+    }
+    spaceMenus[spaceId] = await model.spaceMenu(spaceId)
+  }
+
+  private func setSpaceMuted(_ spaceId: String, until maybeDate: Date?) {
+    Task {
+      if !(await model.setSpaceMuted(spaceId, until: maybeDate)) { isMuteFailed = true }
+    }
+  }
+
+  private var isActionFailureShown: Binding<Bool> {
+    Binding(get: { maybeActionFailure != nil }, set: { _ in maybeActionFailure = nil })
+  }
+
+  private var isLeavingShown: Binding<Bool> {
+    Binding(get: { maybeLeaving != nil }, set: { if !$0 { maybeLeaving = nil } })
+  }
+
+  private var isSuspectDeletionsShown: Binding<Bool> {
+    Binding(get: { suspectDeletions > 0 }, set: { if !$0 { suspectDeletions = 0 } })
+  }
+
+  private var leaveTitle: LocalizedStringKey {
+    switch maybeLeaving {
+    case .channel(_, let name), .lastMember(_, let name): return "entry_leave_channel_title \(name)"
+    case .deletion(_, let name), .spaceDeletion(_, let name, _): return "entry_delete_channel_title \(name)"
+    case .space(_, let name): return "entry_leave_space_title \(name)"
+    case nil: return ""
+    }
+  }
+
+  private var leaveMessage: LocalizedStringKey {
+    switch maybeLeaving {
+    case .space: return "entry_leave_space_text"
+    case .lastMember: return "entry_leave_last_member_text"
+    case .deletion: return "entry_delete_channel_text"
+    case .spaceDeletion(_, _, let channels): return "entry_delete_space_text \(channels)"
+    case .channel, nil: return "entry_leave_channel_text"
+    }
+  }
+
+  private func confirmLeave() {
+    guard let target = maybeLeaving else { return }
+    maybeLeaving = nil
+    Task {
+      switch target {
+      case .channel(let id, _): maybeActionFailure = await model.leaveChannel(id)
+      case .lastMember(let id, _): maybeActionFailure = await model.leaveChannel(id, deletesIfLast: true)
+      case .deletion(let id, _): maybeActionFailure = await model.deleteChannel(id)
+      case .spaceDeletion(let id, _, _): maybeActionFailure = await model.deleteSpace(id)
+      case .space(let id, _): maybeActionFailure = await model.leaveSpace(id)
+      }
     }
   }
 
@@ -160,9 +479,17 @@ struct ConversationRow: View {
   var body: some View {
     HStack(spacing: 10) {
       Image(systemName: icon).frame(width: 22).foregroundStyle(Theme.textMuted)
+        .overlay(alignment: .bottomTrailing) {
+          if let presence = conversation.maybePeerPresence {
+            Circle()
+              .fill(presence.color)
+              .frame(width: 8, height: 8)
+              .accessibilityLabel(Text(presence.label))
+          }
+        }
       VStack(alignment: .leading, spacing: 2) {
         HStack {
-          Text(conversation.name)
+          Text(conversation.listName)
             .fontWeight(isUnread ? .semibold : .regular)
             .lineLimit(1)
           if conversation.isMuted {
@@ -170,6 +497,11 @@ struct ConversationRow: View {
               .accessibilityLabel(Text("chat_muted"))
           }
           Spacer()
+          if let badge = rowBadge(
+            unreadCount: conversation.unreadCount, mentionCount: conversation.mentionCount, isMuted: conversation.isMuted)
+          {
+            RowCountBadge(badge: badge, isMuted: conversation.isMuted)
+          }
           if let preview = maybePreview {
             Text(listTime(preview.sentDate))
               .font(.caption)
@@ -182,11 +514,6 @@ struct ConversationRow: View {
             .foregroundStyle(isUnread ? Theme.text : Theme.textMuted)
             .lineLimit(1)
           Spacer()
-          if conversation.mentionCount > 0 {
-            CountBadge(count: conversation.mentionCount, isMention: true)
-          } else if isUnread {
-            CountBadge(count: conversation.unreadCount)
-          }
         }
       }
     }
@@ -198,6 +525,11 @@ struct ConversationRow: View {
     if let preview = maybePreview {
       switch (preview.sender, preview.content) {
       case (_, .noText): Text("chat_preview_event")
+      case (.none, .placeholder(let placeholder)): Text(PlaceholderLine.text(placeholder))
+      case (.me, .placeholder(let placeholder)):
+        Text("chat_preview_sender \(String(localized: "you")) \(PlaceholderLine.text(placeholder))")
+      case (.other(let name), .placeholder(let placeholder)):
+        Text("chat_preview_sender \(name) \(PlaceholderLine.text(placeholder))")
       case (.none, .text(let text)): Text(text)
       case (.me, .text(let text)): Text("chat_preview_sender \(String(localized: "you")) \(text)")
       case (.other(let name), .text(let text)): Text("chat_preview_sender \(name) \(text)")
@@ -217,6 +549,7 @@ struct ConversationRow: View {
   }
 
   private var icon: String {
+    if conversation.isNotesToSelf { return "bookmark" }
     switch conversation.kind {
     case .direct: return "person"
     case .group: return "person.2"
@@ -246,6 +579,75 @@ struct SearchResultsView: View {
         }
         .buttonStyle(.plain)
       }
+    }
+  }
+}
+
+/// What a leave confirmation is about.
+private enum LeaveTarget {
+  case channel(id: String, name: String)
+  /// Nobody else is in the channel: leaving deletes it.
+  case lastMember(id: String, name: String)
+  case deletion(id: String, name: String)
+  case spaceDeletion(id: String, name: String, channels: UInt32)
+  case space(id: String, name: String)
+
+  var isDeletion: Bool {
+    switch self {
+    case .deletion, .spaceDeletion: return true
+    case .channel, .lastMember, .space: return false
+    }
+  }
+}
+
+/// A conversation's notification level, as the server names it.
+private enum NotifyLevel: String, CaseIterable, Identifiable {
+  case all, mentions, none
+
+  var id: String { rawValue }
+  var wire: String { rawValue }
+
+  var titleKey: String {
+    switch self {
+    case .all: return "notify_all"
+    case .mentions: return "notify_mentions"
+    case .none: return "notify_none"
+    }
+  }
+}
+
+/// A first sync's progress under the title: what is loading, how far in conversations, and the bar.
+/// Numbers from the core; a spinner until it has one. Gone while the connection is down, where the
+/// banner above says why nothing moves.
+struct FirstSyncBar: View {
+  let progress: FirstSyncItem
+  @Environment(AppModel.self) private var model
+  private let network = NetworkMonitor.shared
+
+  var body: some View {
+    if !ConnectionNotice.isDown(isOnline: network.isOnline, connection: model.connection) {
+      VStack(spacing: 4) {
+        HStack {
+          Text(progress.stage == .newest ? "first_sync_newest" : "first_sync_older")
+          Spacer()
+          if progress.total > 0 {
+            Text("first_sync_count \(Int64(progress.done)) \(Int64(progress.total))")
+              .monospacedDigit()
+          } else {
+            ProgressView().controlSize(.mini)
+          }
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        if let fraction = progress.maybeFraction {
+          ProgressView(value: Double(fraction))
+            .progressViewStyle(.linear)
+            .animation(.smooth, value: fraction)
+        }
+      }
+      .padding(.horizontal)
+      .padding(.vertical, 6)
+      .accessibilityElement(children: .combine)
     }
   }
 }

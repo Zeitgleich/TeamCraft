@@ -17,8 +17,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import de.zeitgleich.teamcraft.calls.IncomingCallNotifier
 import de.zeitgleich.teamcraft.calls.IncomingRing
+import de.zeitgleich.teamcraft.notifications.AvatarCache
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationChannels
+import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
 import uniffi.teamcraft_ffi.PushNotification
 import uniffi.teamcraft_ffi.PushNotificationKind
 
@@ -38,7 +40,7 @@ class NotificationsOnDeviceTest {
       InstrumentationRegistry.getInstrumentation().uiAutomation
         .grantRuntimePermission(context.packageName, Manifest.permission.POST_NOTIFICATIONS)
     }
-    notifier = MessageNotifier(context)
+    notifier = MessageNotifier(context, NotificationContentPrefs(context), AvatarCache(context) { error("no core in this test") })
     notifier.clearAll()
   }
 
@@ -70,7 +72,11 @@ class NotificationsOnDeviceTest {
     val style = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(shown)
     assertEquals(listOf("first", "second"), style?.messages?.map { it.text.toString() })
     assertEquals(CONVERSATION, shown.shortcutId)
+    // One conversation needs no summary (a watch would mirror it as a second notification).
+    assertTrue(system.activeNotifications.none { it.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0 })
+    notifier.show(message("3000", text = "elsewhere", conversationId = OTHER_CONVERSATION), isAlerting = false)
     assertTrue(system.activeNotifications.any { it.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0 })
+    notifier.dismiss(OTHER_CONVERSATION)
 
     // Read on another device up to the first message: one line stays.
     notifier.removeRead(CONVERSATION, maybeThreadId = null, maybeUpToMessageId = "1000", maybeBadge = 1u)
@@ -97,15 +103,17 @@ class NotificationsOnDeviceTest {
   private fun active(tag: String) =
     system.activeNotifications.firstOrNull { it.tag == tag && it.id == MessageNotifier.MESSAGE_ID }
 
-  private fun message(id: String, text: String) = PushNotification(
+  private fun message(id: String, text: String, conversationId: String = CONVERSATION) = PushNotification(
     kind = PushNotificationKind.MESSAGE,
-    conversationId = CONVERSATION,
+    conversationId = conversationId,
     maybeMessageId = id,
     maybeConversationName = "planning",
     maybeSenderId = "300",
     maybeSenderName = "Alice",
     maybeText = text,
     maybeFileName = null,
+    maybeAttachmentKind = null,
+    maybeGap = null,
     isDirect = false,
     isMention = false,
     isUrgent = false,
@@ -122,5 +130,6 @@ class NotificationsOnDeviceTest {
 
   private companion object {
     const val CONVERSATION = "4242"
+    const val OTHER_CONVERSATION = "4343"
   }
 }

@@ -1,7 +1,13 @@
 package de.zeitgleich.teamcraft.core
 
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.IntArraySerializer
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -33,7 +39,18 @@ data class User(
   @SerialName("avatar_hue") val avatarHue: Int = 0,
   @SerialName("is_guest") val isGuest: Boolean = false,
   @SerialName("is_bot") val isBot: Boolean = false,
-)
+  /** Deactivated (issue #654): offered nowhere, only names their old messages. */
+  @SerialName("is_deactivated") val isDeactivated: Boolean = false,
+  /** Deleted (issue #630): a tombstone the app names by its own "Deleted user" (issue #751). */
+  @SerialName("is_deleted") val isDeleted: Boolean = false,
+) {
+  /** Whether lists, pickers and mentions may offer this person. */
+  val isOffered: Boolean get() = !isDeactivated && !isDeleted
+
+  /** Named [deletedUserName] and without a username if the account was deleted, as on desktop and web. */
+  fun namedIfDeleted(deletedUserName: String): User =
+    if (isDeleted) copy(displayName = deletedUserName, username = "") else this
+}
 
 @Serializable
 data class Space(
@@ -41,6 +58,8 @@ data class Space(
   val name: String,
   @SerialName("unread_count") val unreadCount: Int = 0,
   @SerialName("mention_count") val mentionCount: Int = 0,
+  /** Whether the user may create channels here, as the core decided it (issue #758). */
+  @SerialName("can_create_channels") val canCreateChannels: Boolean = true,
 )
 
 @Serializable
@@ -58,6 +77,8 @@ data class Conversation(
   @SerialName("is_muted") val isMuted: Boolean = false,
   @SerialName("can_post") val canPost: Boolean = true,
   val bookmarks: List<Bookmark> = emptyList(),
+  /** The user's notes to themself (issue #829); their `name` is empty. Absent from older cores. */
+  @SerialName("is_notes_to_self") val isNotesToSelf: Boolean = false,
 ) {
   val isDirect: Boolean get() = kind == "Direct" || kind == "Group"
 }
@@ -93,6 +114,12 @@ data class Message(
   val reactions: List<Reaction> = emptyList(),
   @SerialName("reply_count") val replyCount: Int = 0,
   @SerialName("maybe_thread") val maybeThread: String? = null,
+  /**
+   * Set while this device can't read the message (issue #888): `"waiting"` (its key may still
+   * come), `"not_available"` (none is expected here) or `"failed"` (it didn't decrypt). [body] is
+   * empty then; the core replaces the row once it is readable.
+   */
+  @SerialName("placeholder") val maybePlaceholder: String? = null,
 ) {
   /** Outbox messages carry the pending bit in their ID until the server accepted them. */
   val isPending: Boolean get() = (id.toLongOrNull() ?: 0L) and PENDING_ID_BIT != 0L
@@ -110,7 +137,24 @@ data class Message(
 data class SecuritySnapshot(
   @SerialName("my_fingerprint") val myFingerprint: String = "",
   val contacts: List<ContactKeys> = emptyList(),
+  /** The key backup as this device knows it (issue #410); absent before the first key bag sync. */
+  val backup: KeyBackup? = null,
 )
+
+/** Facts about the key backup; the settings put them into words. */
+@Serializable
+data class KeyBackup(
+  /** The encrypted key bag is on the server. */
+  @SerialName("is_stored") val isStored: Boolean = false,
+  @SerialName("has_pending_upload") val hasPendingUpload: Boolean = false,
+  /** `passphrase`, `passkey`, `organization`; unknown values are skipped. */
+  val recovery: List<String> = emptyList(),
+  /** When the recovery passphrase was last set (epoch milliseconds), if a device recorded it. */
+  @SerialName("passphrase_set_at") val passphraseSetAt: Long? = null,
+) {
+  val hasPassphrase: Boolean get() = "passphrase" in recovery
+  val hasOrganization: Boolean get() = "organization" in recovery
+}
 
 @Serializable
 data class ContactKeys(
@@ -122,18 +166,52 @@ data class ContactKeys(
 @Serializable
 data class ChatSnapshot(
   val me: User,
+  /** The people to offer in lists, pickers and mentions. */
   val users: List<User> = emptyList(),
   val spaces: List<Space> = emptyList(),
   val conversations: List<Conversation> = emptyList(),
   val security: SecuritySnapshot = SecuritySnapshot(),
+  /** Deactivated and deleted accounts: offered nowhere, they only name their old messages. */
+  @SerialName("former_users") val formerUsers: List<User> = emptyList(),
 ) {
-  fun user(id: String): User? = users.firstOrNull { it.id == id } ?: me.takeIf { it.id == id }
+  /** Anyone this device knows, former accounts included (the authors of old messages). */
+  fun user(id: String): User? =
+    users.firstOrNull { it.id == id } ?: me.takeIf { it.id == id } ?: formerUsers.firstOrNull { it.id == id }
+
   fun conversation(id: String): Conversation? = conversations.firstOrNull { it.id == id }
   fun name(userId: String): String = user(userId)?.displayName ?: userId
+
+  /**
+   * Deleted accounts named [deletedUserName], the app's own "Deleted user" in the user's language,
+   * instead of the server's placeholder (issue #751).
+   */
+  fun namingDeletedUsers(deletedUserName: String): ChatSnapshot =
+    copy(
+      users = users.map { it.namedIfDeleted(deletedUserName) },
+      formerUsers = formerUsers.map { it.namedIfDeleted(deletedUserName) },
+    )
 }
 
 @Serializable
-data class MessageWindow(val conversation: String, val start: Int, val total: Int, val messages: List<Message>)
+data class MessageWindow(
+  val conversation: String,
+  val start: Int,
+  val total: Int,
+  val messages: List<Message>,
+  /** Received but not readable on this device yet (keys not arrived); placeholders in [messages]. */
+  val undecrypted: Int = 0,
+)
+
+/** The newest messages of a conversation down to the oldest one a feed shows, and the page before it. */
+@Serializable
+data class MessageTail(
+  val conversation: String,
+  val messages: List<Message>,
+  /** Older messages exist: the feed can page further back. */
+  @SerialName("has_older") val hasOlder: Boolean,
+  /** Received but not readable on this device yet (keys not arrived); placeholders in [messages]. */
+  val undecrypted: Int = 0,
+)
 
 @Serializable
 data class ReplyPreview(
@@ -152,16 +230,30 @@ data class ForwardedFrom(
 @Serializable
 data class MessageEdit(val body: String, @SerialName("replaced_at") val replacedAt: Long)
 
-/** Where a file stands: `remote`, `uploading`, `downloading`, `local` or `failed`. */
+/**
+ * Where a file stands: `remote`, `uploading`, `downloading`, `local`, `failed`, or for an own file
+ * that stopped going up `upload_stalled` (retried on "Try again") and `upload_failed` (for good).
+ */
 @Serializable
 data class FileTransfer(
   val state: String,
   @SerialName("done_bytes") val doneBytes: Long = 0,
   @SerialName("total_bytes") val totalBytes: Long = 0,
+  /** Failed attempts of an upload that is retried by itself. */
+  @SerialName("failed_attempts") val failedAttempts: Int = 0,
   val path: String? = null,
   val reason: String? = null,
 ) {
   val isMoving: Boolean get() = state == "uploading" || state == "downloading"
+
+  /** An own file still on its way up, or stopped: it can be cancelled. */
+  val isCancellable: Boolean get() = state == "uploading" || state == "upload_stalled"
+
+  /** An upload whose attempts failed so far and that the core retries by itself (#742). */
+  val isRetrying: Boolean get() = state == "uploading" && doneBytes == 0L && failedAttempts > 0
+
+  /** It stopped because the file storage (or the server) is down, not this device's network. */
+  val isStorageUnavailable: Boolean get() = reason == "storage_unavailable"
 
   /** 0..1 while uploading or downloading. */
   val maybeProgress: Float?
@@ -176,11 +268,31 @@ data class FileInfo(
   @SerialName("file_name") val fileName: String,
   @SerialName("media_type") val mediaType: String,
   @SerialName("size_bytes") val sizeBytes: Long,
-  @SerialName("maybe_thumbnail_png") val maybeThumbnailPng: List<Int>? = null,
+  /** The sender's preview of an image (PNG or JPEG; decoders read the format from the bytes). */
+  @SerialName("maybe_thumbnail_png") val maybeThumbnail: ImageBytes? = null,
   val transfer: FileTransfer,
+  /**
+   * Who wrote the message and when (Unix milliseconds), for the image viewer: the original author
+   * and time of an imported message (e2ee.md §4.10).
+   */
+  @SerialName("maybe_sender") val maybeSender: String? = null,
+  @SerialName("maybe_sent_at") val maybeSentAt: Long? = null,
+  /** Who wrote an imported message when that is nobody with an account here. */
+  @SerialName("imported_author") val maybeImportedAuthor: ImportedAuthor? = null,
 ) {
   val isImage: Boolean get() = mediaType.startsWith("image/")
-  fun thumbnailBytes(): ByteArray? = maybeThumbnailPng?.let { bytes -> ByteArray(bytes.size) { bytes[it].toByte() } }
+}
+
+/** Who wrote an imported message: `person` (the file's sender), `deleted` or `named` (a bot). */
+@Serializable
+data class ImportedAuthor(val kind: String, val name: String? = null) {
+  /** The name shown instead of an account: a bot's old name, or [deletedName]; null for a person. */
+  fun standInName(deletedName: String): String? =
+    when (kind) {
+      "named" -> name
+      "deleted" -> deletedName
+      else -> null
+    }
 }
 
 @Serializable
@@ -189,9 +301,36 @@ data class LinkPreview(
   @SerialName("maybe_title") val maybeTitle: String? = null,
   @SerialName("maybe_description") val maybeDescription: String? = null,
   @SerialName("maybe_site_name") val maybeSiteName: String? = null,
-  @SerialName("maybe_image") val maybeImage: List<Int>? = null,
-) {
-  fun imageBytes(): ByteArray? = maybeImage?.let { bytes -> ByteArray(bytes.size) { bytes[it].toByte() } }
+  @SerialName("maybe_image") val maybeImage: ImageBytes? = null,
+)
+
+/**
+ * Picture bytes, which the bridge sends as a JSON array of numbers. Decoded straight into a byte
+ * array: a `List<Int>` boxed every byte of every thumbnail on each read of the feed (#315). Equal by
+ * content, so an unchanged message doesn't recompose.
+ */
+@Serializable(with = ImageBytesSerializer::class)
+class ImageBytes(val bytes: ByteArray) {
+  private val hash by lazy { bytes.contentHashCode() }
+
+  override fun equals(other: Any?): Boolean = other is ImageBytes && bytes.contentEquals(other.bytes)
+
+  override fun hashCode(): Int = hash
+}
+
+@OptIn(ExperimentalSerializationApi::class)
+object ImageBytesSerializer : KSerializer<ImageBytes> {
+  private val numbers = IntArraySerializer()
+  override val descriptor: SerialDescriptor = SerialDescriptor("de.zeitgleich.teamcraft.ImageBytes", numbers.descriptor)
+
+  override fun deserialize(decoder: Decoder): ImageBytes {
+    val values = numbers.deserialize(decoder)
+    return ImageBytes(ByteArray(values.size) { values[it].toByte() })
+  }
+
+  override fun serialize(encoder: Encoder, value: ImageBytes) {
+    numbers.serialize(encoder, IntArray(value.bytes.size) { value.bytes[it].toInt() and 0xFF })
+  }
 }
 
 @Serializable
@@ -212,6 +351,8 @@ data class MessageExtras(
   @SerialName("maybe_workspace_event") val maybeWorkspaceEvent: JsonObject? = null,
   /** The server rejected this own message; it waits for "retry" or "delete". */
   @SerialName("is_send_failed") val isSendFailed: Boolean = false,
+  /** An own message the other member of a DM read: two ticks instead of one (issue #769). */
+  @SerialName("is_read") val isRead: Boolean = false,
 )
 
 @Serializable
@@ -240,6 +381,8 @@ data class BrowsableChannel(
   @SerialName("is_member") val isMember: Boolean = false,
   @SerialName("is_archived") val isArchived: Boolean = false,
   @SerialName("has_external_people") val hasExternalPeople: Boolean = false,
+  /** How the user gets in (`open`, `as_admin`, `needs_approval`, `requested`); see `ui.BrowseJoin`. */
+  val join: String = "open",
 )
 
 @Serializable
@@ -277,6 +420,19 @@ data class ChatAnswer(
   val value: Boolean = false,
   val threads: List<ThreadSummary> = emptyList(),
   val users: List<String> = emptyList(),
+  val unseen: UnseenReactions? = null,
+  @SerialName("older_history") val olderHistory: String? = null,
+)
+
+/**
+ * Others' reactions to the user's own messages in a conversation that the user hasn't seen: the
+ * heart button over the feed (notifications.md, "Reactions to my messages").
+ */
+@Serializable
+data class UnseenReactions(
+  val count: Int = 0,
+  /** The messages they react to, oldest first. */
+  val messages: List<String> = emptyList(),
 )
 
 /** Global notification preferences the server enforces (`/me/notification-settings`). */
@@ -326,3 +482,30 @@ data class MeetingList(val meetings: List<Meeting> = emptyList())
 
 /** Reads one string field of a JSON object answer, for small replies. */
 fun JsonElement.stringField(name: String): String? = (jsonObject[name] as? JsonPrimitive)?.content
+
+/**
+ * The member's own profile (`/me/profile`), kept as the server sent it: the update replaces the
+ * whole profile, so a change to the name sends the other fields back as they are ([updateBody]).
+ */
+class OwnProfile(private val raw: JsonObject) {
+  /** The workspace policy lets people replace the name from the identity provider. */
+  val canOverrideDisplayName: Boolean
+    get() = (raw["can_override_display_name"] as? JsonPrimitive)?.content == "true"
+
+  /** The name the member chose, `null` while the sign-in name is shown. */
+  val maybeDisplayNameOverride: String?
+    get() = (raw["display_name_override"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+
+  /** The body of `PUT /me/profile` with [maybeName] as the name (`null`: the sign-in name). */
+  fun updateBody(maybeName: String?): String {
+    val kept = raw.filterKeys { it in PROFILE_FIELDS }
+    val fields = maybeName?.let { kept + ("display_name" to JsonPrimitive(it)) } ?: kept
+    return JsonObject(fields).toString()
+  }
+
+  companion object {
+    private val PROFILE_FIELDS = setOf("title", "department", "phone", "time_zone", "working_hours")
+
+    fun parse(json: String): OwnProfile = OwnProfile(WireJson.parseToJsonElement(json).jsonObject)
+  }
+}

@@ -71,6 +71,10 @@ pub struct AdminConversationSummary {
   pub member_count: u32,
   pub guest_count: u32,
   pub message_count: u64,
+  /// What the channel's attachments and search index take up in storage (ciphertext bytes).
+  /// Absent (0) from older servers.
+  #[serde(default)]
+  pub storage_bytes: u64,
   pub created_at: UnixMillis,
   /// Time of the newest message, if there is one.
   #[serde(rename = "last_activity_at", default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +103,8 @@ wire_enum! {
     Admin => "admin",
     /// The identity provider disabled the user or removed their TeamCraft roles.
     Oidc => "oidc",
+    /// A meeting guest left the meeting.
+    Left => "left",
   }
 }
 
@@ -127,6 +133,9 @@ pub struct AdminUserSummary {
   #[serde(rename = "oidc_role", default, skip_serializing_if = "Option::is_none")]
   pub maybe_oidc_role: Option<String>,
   pub is_deactivated: bool,
+  /// The account was deleted (`DELETE /admin/users/{id}`); only its tombstone is left.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_deleted: bool,
   #[serde(
     rename = "deactivation_reason",
     default,
@@ -135,6 +144,10 @@ pub struct AdminUserSummary {
   pub maybe_deactivation_reason: Option<DeactivationReason>,
   pub device_count: u32,
   pub space_count: u32,
+  /// Conversations the user is a member of. A deactivated user who still has conversations,
+  /// spaces or devices can be removed from all chats.
+  #[serde(default)]
+  pub conversation_count: u32,
   #[serde(rename = "last_seen_at", default, skip_serializing_if = "Option::is_none")]
   pub maybe_last_seen_at: Option<UnixMillis>,
   pub created_at: UnixMillis,

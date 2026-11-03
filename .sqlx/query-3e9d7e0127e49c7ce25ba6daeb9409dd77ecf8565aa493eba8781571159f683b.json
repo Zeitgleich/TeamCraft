@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO meeting_links (meeting_id, token) VALUES ($1, $2) ON CONFLICT (meeting_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3e9d7e0127e49c7ce25ba6daeb9409dd77ecf8565aa493eba8781571159f683b"
+}

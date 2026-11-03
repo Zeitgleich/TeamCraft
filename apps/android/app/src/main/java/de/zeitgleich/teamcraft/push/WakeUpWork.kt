@@ -2,10 +2,13 @@ package de.zeitgleich.teamcraft.push
 
 import android.content.Context
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 import androidx.core.app.NotificationCompat
+import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
 import androidx.work.ForegroundInfo
+import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
@@ -15,18 +18,23 @@ import kotlinx.coroutines.withTimeoutOrNull
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.notifications.NotificationChannels
+import de.zeitgleich.teamcraft.notifications.PushRetry
 
 /**
  * Wake-ups that don't finish within the push service's time budget (FCM gives a high-priority
  * message about 10 s, a broadcast receiver as much) continue as expedited work, so a slow fetch
- * neither gets the process killed nor loses the notification.
+ * neither gets the process killed nor loses the notification. A wake-up whose message could not be
+ * read in time is opened again later ([PushRetry]) to fill in the notification it showed.
  */
 object WakeUpWork {
   /** What a receiver waits for itself before it hands the wake-up over. */
   const val RECEIVER_BUDGET_MS = 8_000L
 
   private const val KEY_PAYLOAD = "payload"
+  private const val KEY_IS_VISIBLE = "is_visible"
+  private const val KEY_ATTEMPT = "attempt"
   private const val WORK_PREFIX = "wake-up-"
+  private const val RETRY_PREFIX = "wake-up-retry-"
   private const val WORK_BUDGET_MS = 60_000L
   private const val FOREGROUND_ID = 2003
 
@@ -34,15 +42,30 @@ object WakeUpWork {
    * Handles a wake-up: waits up to [RECEIVER_BUDGET_MS] for it, and if it is still running then,
    * lets expedited work wait for the rest (the same run, not a second one, while the process lives).
    */
-  suspend fun handle(context: Context, payload: ByteArray) {
-    val running = TeamCraftApplication.graph(context).push.startWakeUp(payload)
-    if (withTimeoutOrNull(RECEIVER_BUDGET_MS) { running.await() } == null) enqueue(context, payload)
+  suspend fun handle(context: Context, payload: ByteArray, isVisible: Boolean) {
+    val running = TeamCraftApplication.graph(context).push.startWakeUp(payload, isVisible)
+    if (withTimeoutOrNull(RECEIVER_BUDGET_MS) { running.await() } == null) enqueue(context, payload, isVisible)
   }
 
-  private fun enqueue(context: Context, payload: ByteArray) {
+  /**
+   * Opens the wake-up again after [PushRetry.delayMs] once a network is there; `attempt` 1 is the
+   * first retry. One per payload and attempt.
+   */
+  fun enqueueRetry(context: Context, payload: ByteArray, attempt: Int) {
+    val encoded = Base64.getEncoder().encodeToString(payload)
+    val request = OneTimeWorkRequestBuilder<RetryWorker>()
+      .setInputData(workDataOf(KEY_PAYLOAD to encoded, KEY_ATTEMPT to attempt))
+      .setInitialDelay(PushRetry.delayMs(attempt), TimeUnit.MILLISECONDS)
+      .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+      .build()
+    val name = RETRY_PREFIX + Integer.toHexString(encoded.hashCode()) + "-" + attempt
+    WorkManager.getInstance(context).enqueueUniqueWork(name, ExistingWorkPolicy.KEEP, request)
+  }
+
+  private fun enqueue(context: Context, payload: ByteArray, isVisible: Boolean) {
     val encoded = Base64.getEncoder().encodeToString(payload)
     val request = OneTimeWorkRequestBuilder<Worker>()
-      .setInputData(workDataOf(KEY_PAYLOAD to encoded))
+      .setInputData(workDataOf(KEY_PAYLOAD to encoded, KEY_IS_VISIBLE to isVisible))
       .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
       .build()
     // One unique name per payload: a wake-up handed over twice runs once.
@@ -54,7 +77,8 @@ object WakeUpWork {
     override suspend fun doWork(): Result {
       val encoded = inputData.getString(KEY_PAYLOAD) ?: return Result.failure()
       val payload = runCatching { Base64.getDecoder().decode(encoded) }.getOrNull() ?: return Result.failure()
-      val running = TeamCraftApplication.graph(applicationContext).push.startWakeUp(payload)
+      val isVisible = inputData.getBoolean(KEY_IS_VISIBLE, false)
+      val running = TeamCraftApplication.graph(applicationContext).push.startWakeUp(payload, isVisible)
       withTimeoutOrNull(WORK_BUDGET_MS) { running.await() }
       // A wake-up is not retried: a later one, or the next sync, brings what it missed.
       return Result.success()
@@ -69,6 +93,20 @@ object WakeUpWork {
         .build()
       // Only used before Android 12, where a foreground service needs no declared type.
       return ForegroundInfo(FOREGROUND_ID, notification)
+    }
+  }
+
+  /** A later try to read a message shown as a placeholder (see [enqueueRetry]). */
+  class RetryWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
+    override suspend fun doWork(): Result {
+      val encoded = inputData.getString(KEY_PAYLOAD) ?: return Result.failure()
+      val payload = runCatching { Base64.getDecoder().decode(encoded) }.getOrNull() ?: return Result.failure()
+      val attempt = inputData.getInt(KEY_ATTEMPT, PushRetry.MAX_ATTEMPTS)
+      withTimeoutOrNull(WORK_BUDGET_MS) {
+        TeamCraftApplication.graph(applicationContext).push.retryWakeUp(payload, attempt)
+      }
+      // The next attempt, if any, is its own work: WorkManager's retry would not wait for a network.
+      return Result.success()
     }
   }
 }

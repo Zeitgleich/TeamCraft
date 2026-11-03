@@ -16,9 +16,15 @@ pub struct UploadKeyPackagesRequest {
 }
 
 /// How many key packages of a device are left; clients top up when `available` runs low.
+/// Packages that expire within the server's renewal window don't count as available, and an
+/// expiring last-resort package as none, so clients replace them in time (e2ee.md §4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct KeyPackageStatusResponse {
   pub available: u32,
+  /// Regular packages that expire within the renewal window (still handed out while valid enough).
+  #[serde(default)]
+  pub expiring_soon: u32,
+  /// A last-resort package that stays valid beyond the renewal window.
   pub has_last_resort: bool,
 }
 
@@ -113,6 +119,33 @@ pub struct PostMlsCommitRequest {
   pub commit: Base64Bytes,
   #[serde(default)]
   pub welcomes: Vec<MlsWelcome>,
+  /// The group's information for the new epoch (MLS `GroupInfo` with ratchet tree and external
+  /// public key), signed by the committer. Stored so a new device of a member can join by external
+  /// commit; the server never looks inside (e2ee.md §4.6).
+  #[serde(rename = "group_info", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_group_info: Option<Base64Bytes>,
+}
+
+/// `GET /api/v1/conversations/{id}/mls/group-info`: the newest group information a member published,
+/// for the group's current epoch. `404 mls_group_info_not_found` if there is none for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MlsGroupInfoResponse {
+  pub epoch: u64,
+  pub group_info: Base64Bytes,
+}
+
+/// `PUT /api/v1/conversations/{id}/mls/group-info`: a member publishes the group information for
+/// the current epoch (when the last commit came without one). `409 epoch_conflict` if the group
+/// moved on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PutMlsGroupInfoRequest {
+  pub device_id: DeviceId,
+  pub epoch: u64,
+  pub group_info: Base64Bytes,
+  /// The meeting organizer's device founds the group again and replaces the information that
+  /// holds epoch 0 (it could not be joined). Only the organizer, only while the group is in epoch 0.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_replacement: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

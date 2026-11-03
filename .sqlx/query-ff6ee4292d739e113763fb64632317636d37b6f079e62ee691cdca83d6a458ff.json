@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM attachments\n       WHERE completed_at IS NULL\n         AND CASE WHEN multipart_upload_id IS NULL THEN created_at < $1\n                  ELSE COALESCE(last_activity_at, created_at) < $2 END\n       RETURNING s3_key, multipart_upload_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s3_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "s3_key"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "multipart_upload_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "multipart_upload_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "ff6ee4292d739e113763fb64632317636d37b6f079e62ee691cdca83d6a458ff"
+}

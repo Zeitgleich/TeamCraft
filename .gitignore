@@ -6,3 +6,15 @@ __pycache__/
 # Corpus entries the fuzzer writes are named by their SHA-1 (40 characters); only the hand-written seeds are kept.
 /fuzz/corpus/*/????????????????????????????????????????
 /.background-originals/
+# Core dumps of crashed processes (the e2e suite once committed seven of them).
+core
+core.[0-9]*
+# ... but not source folders named `core` (the Android app's `teamcraft/core/`).
+!core/
+# The UI stylesheet joined from its area files by a Trunk hook (crates/teamcraft-ui/scripts/bundle-css.sh).
+crates/teamcraft-ui/gen/
+# Signing keys (Android app, F-Droid repository): kept in the password manager and GitHub secrets,
+# never in the tree (apps/android/README.md "Signing", docs/updates.md §8.3).
+*.p12
+*.jks
+*.keystore

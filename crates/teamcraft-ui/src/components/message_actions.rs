@@ -1,5 +1,6 @@
-//! What a user can do with a message: the "more" menu (quote, forward, pin, save, copy link, mark
-//! unread, edit, delete), the forward dialog, the saved-items page and the pinned-messages panel.
+//! What a user can do with a message: the actions of the toolbar's "more" menu and of the touch
+//! action sheet (quote, forward, pin, save, copy link and text, mark unread, edit, delete), the
+//! forward dialog, the saved-items page and the pinned-messages panel.
 //! The data and the actions come from the client core through the chat backend (`message_extras`,
 //! `pinned_messages`, `saved_items`, ...).
 
@@ -7,8 +8,11 @@ use leptos::prelude::*;
 use teamcraft_client_api::actions::MessageExtras;
 use wasm_bindgen::JsCast;
 
+use crate::channel_access::{ChannelAccess, MessagePermissions};
 use crate::clock::format_date_time;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::compact_back::CompactBack;
+use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::rich_text::RichText;
@@ -28,200 +32,283 @@ pub fn excerpt(body: &str) -> String {
   }
 }
 
-/// The ⋯ button of a message and its menu.
-#[component]
-pub fn MessageMenu(
-  message: Message,
-  #[prop(into)] extras: Signal<Option<MessageExtras>>,
-  is_mine: bool,
-  in_thread: bool,
-  on_edit: Callback<()>,
-) -> impl IntoView {
+/// Something the user can do with a message: the entries of the toolbar's "more" menu and of the
+/// touch action sheet, which [`message_actions`] lists for a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageAction {
+  Thread,
+  Quote,
+  Forward,
+  Save,
+  Unsave,
+  Pin,
+  Unpin,
+  BookmarkFile,
+  CopyLink,
+  CopyText,
+  MarkUnread,
+  Edit,
+  Delete,
+}
+
+/// Where the actions are listed: the "more" menu leaves out what the toolbar shows as buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionSurface {
+  MoreMenu,
+  Sheet,
+}
+
+/// What decides which actions a message offers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ActionContext {
+  pub is_mine: bool,
+  pub in_thread: bool,
+  pub is_pinned: bool,
+  pub is_saved: bool,
+  pub has_files: bool,
+  /// What the conversation lets the user do (issue #691): nothing else is offered.
+  pub permissions: MessagePermissions,
+}
+
+impl ActionContext {
+  pub fn new(
+    is_mine: bool,
+    in_thread: bool,
+    maybe_extras: Option<&MessageExtras>,
+    permissions: MessagePermissions,
+  ) -> Self {
+    Self {
+      is_mine,
+      permissions,
+      in_thread,
+      is_pinned: maybe_extras.is_some_and(|extras| extras.is_pinned),
+      is_saved: maybe_extras.is_some_and(|extras| extras.is_saved),
+      has_files: maybe_extras.is_some_and(|extras| !extras.files.is_empty()),
+    }
+  }
+}
+
+/// The actions of a message, in menu order; edit and delete (own messages) come last. Quoting,
+/// editing and deleting take posting, pinning and file bookmarks `manage_bookmarks` as well.
+pub fn message_actions(context: ActionContext, surface: ActionSurface) -> Vec<MessageAction> {
+  let is_sheet = surface == ActionSurface::Sheet;
+  let permissions = context.permissions;
+  let mut actions = Vec::new();
+  if is_sheet && !context.in_thread {
+    actions.push(MessageAction::Thread);
+  }
+  if permissions.can_post {
+    actions.push(MessageAction::Quote);
+  }
+  if is_sheet {
+    actions.push(MessageAction::Forward);
+    actions.push(if context.is_saved {
+      MessageAction::Unsave
+    } else {
+      MessageAction::Save
+    });
+  }
+  actions.extend([
+    MessageAction::CopyLink,
+    MessageAction::CopyText,
+    MessageAction::MarkUnread,
+  ]);
+  if permissions.can_manage_bookmarks {
+    actions.push(if context.is_pinned {
+      MessageAction::Unpin
+    } else {
+      MessageAction::Pin
+    });
+    if context.has_files {
+      actions.push(MessageAction::BookmarkFile);
+    }
+  }
+  if context.is_mine && permissions.can_post {
+    actions.extend([MessageAction::Edit, MessageAction::Delete]);
+  }
+  actions
+}
+
+impl MessageAction {
+  pub fn label_key(self) -> &'static str {
+    match self {
+      Self::Thread => "action-reply",
+      Self::Quote => "action-quote",
+      Self::Forward => "action-forward",
+      Self::Save => "action-save",
+      Self::Unsave => "action-unsave",
+      Self::Pin => "action-pin",
+      Self::Unpin => "action-unpin",
+      Self::BookmarkFile => "action-bookmark-file",
+      Self::CopyLink => "action-copy-link",
+      Self::CopyText => "action-copy-text",
+      Self::MarkUnread => "action-mark-unread",
+      Self::Edit => "action-edit",
+      Self::Delete => "action-delete",
+    }
+  }
+
+  pub fn icon(self) -> IconName {
+    match self {
+      Self::Thread => IconName::Threads,
+      Self::Quote => IconName::Reply,
+      Self::Forward => IconName::Forward,
+      Self::Save | Self::Unsave | Self::BookmarkFile => IconName::Bookmark,
+      Self::Pin | Self::Unpin => IconName::Star,
+      Self::CopyLink => IconName::Link,
+      Self::CopyText => IconName::Copy,
+      Self::MarkUnread => IconName::EyeOff,
+      Self::Edit => IconName::Compose,
+      Self::Delete => IconName::Trash,
+    }
+  }
+
+  /// The key that does the same on a focused message, shown in the tooltip.
+  pub fn maybe_shortcut(self) -> Option<&'static str> {
+    match self {
+      Self::Thread => Some("T"),
+      Self::Quote => Some("R"),
+      _ => None,
+    }
+  }
+
+  /// Edit and delete are set apart from the rest of the menu.
+  pub fn starts_group(self) -> bool {
+    self == Self::Edit
+  }
+
+  pub fn is_danger(self) -> bool {
+    self == Self::Delete
+  }
+}
+
+/// A label with its keyboard shortcut, for tooltips: "Reply in thread (T)".
+pub fn with_shortcut(label: String, maybe_shortcut: Option<&str>) -> String {
+  let i18n = use_i18n();
+  match maybe_shortcut {
+    Some(shortcut) => i18n.t_with(
+      "action-with-shortcut",
+      &[("action", &label), ("shortcut", shortcut)],
+    ),
+    None => label,
+  }
+}
+
+/// Carries out an action on `message`. `maybe_extras` is what the message's row shows.
+pub fn run_message_action(action: MessageAction, message: &Message, maybe_extras: Option<&MessageExtras>) {
   let state = use_app_state();
   let i18n = use_i18n();
-  let is_open = RwSignal::new(false);
-  let conversation = message.conversation;
-  let id = message.id;
-  let thread_root = message
-    .maybe_thread
-    .unwrap_or_else(|| crate::model::thread_id_of(message.id));
-  let author_name = state
-    .read(|backend| backend.user(message.author))
-    .map(|user| user.display_name)
-    .unwrap_or_default();
-  let body = StoredValue::new(message.body.clone());
-  let author_name = StoredValue::new(author_name);
-  let is_pinned = move || extras.get().is_some_and(|extras| extras.is_pinned);
-  let is_saved = move || extras.get().is_some_and(|extras| extras.is_saved);
-  let close = move || {
-    is_open.set(false);
-  };
+  let (conversation, id) = (message.conversation, message.id);
+  match action {
+    MessageAction::Thread => {
+      let thread = message
+        .maybe_thread
+        .unwrap_or_else(|| crate::model::thread_id_of(id));
+      state.open_thread(conversation, thread);
+    },
+    MessageAction::Quote => {
+      let author_name = state
+        .read(|backend| backend.user(message.author))
+        .map(|user| user.display_name)
+        .unwrap_or_default();
+      state.reply_target.set(Some(ReplyTarget {
+        conversation,
+        message: id,
+        author_name,
+        excerpt: excerpt(&message.body),
+      }));
+    },
+    MessageAction::Forward => state.overlay.set(Overlay::Forward(conversation, id)),
+    MessageAction::Save | MessageAction::Unsave => {
+      let save = action == MessageAction::Save;
+      state.write(|backend| backend.set_saved(conversation, id, save));
+    },
+    MessageAction::Pin | MessageAction::Unpin => {
+      let pin = action == MessageAction::Pin;
+      state.write(|backend| backend.set_pinned(conversation, id, pin));
+    },
+    MessageAction::BookmarkFile => {
+      let Some(file) = maybe_extras.and_then(|extras| extras.files.first().cloned()) else {
+        return;
+      };
+      let mut bookmarks = state
+        .read(|backend| backend.conversation(conversation))
+        .map(|conv| conv.bookmarks)
+        .unwrap_or_default();
+      bookmarks.push(crate::model::Bookmark {
+        emoji: String::new(),
+        title: file.file_name,
+        kind: crate::model::BookmarkKind::File,
+        url: String::new(),
+        maybe_message: Some(id),
+      });
+      state.write(|backend| backend.set_bookmarks(conversation, bookmarks));
+    },
+    MessageAction::CopyLink => {
+      // The toolbar asked for the link when it appeared, so a backend that loads it has it by now.
+      match state.read(|backend| backend.permalink(conversation, id)) {
+        Some(link) => copy_and_confirm(link),
+        // Still loading, or the message isn't on the server yet (no ID to link to).
+        None => state.show_error(i18n.t("action-copy-link-unready"), String::new()),
+      }
+    },
+    MessageAction::CopyText => copy_and_confirm(message.body.clone()),
+    MessageAction::MarkUnread => state.write(|backend| backend.mark_unread(conversation, id)),
+    MessageAction::Edit => state.edit_request.set(Some(id)),
+    MessageAction::Delete => state.delete_with_undo(conversation, id, i18n.t("message-deleted-toast")),
+  }
+}
 
-  // Opening the menu starts fetching the permalink so that "Copy link" has it by the time it is used.
-  let toggle = move |_| {
-    let opening = !is_open.get_untracked();
-    is_open.set(opening);
-    if opening {
-      state.read(|backend| drop(backend.permalink(conversation, id)));
-    }
+/// Copies `text` and says whether it worked: "Copied", or an error when the browser refused.
+pub(crate) fn copy_and_confirm(text: String) {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let (copied, failed) = (i18n.t("action-copied"), i18n.t("action-copy-failed"));
+  let Some(promise) = clipboard_write(&text) else {
+    state.show_error(failed, String::new());
+    return;
   };
-  let copy_link = move |_| {
-    if let Some(link) = state.read(|backend| backend.permalink(conversation, id)) {
-      copy_to_clipboard(&link);
+  leptos::task::spawn_local(async move {
+    // `show_error` does nothing once the shell is gone (issue #322); the toast checks first.
+    match wasm_bindgen_futures::JsFuture::from(promise).await {
+      Ok(_) => {
+        if state.is_alive() {
+          state.show_toast(copied);
+        }
+      },
+      Err(_) => state.show_error(failed, String::new()),
     }
-    close();
-  };
+  });
+}
 
-  view! {
-    <div class="msg-menu-wrap">
-      <button
-        class="icon-btn"
-        aria-haspopup="menu"
-        aria-expanded=move || is_open.get().to_string()
-        aria-label=move || i18n.t("message-more")
-        title=move || i18n.t("message-more")
-        on:click=toggle
-      >
-        <Icon name=IconName::More />
-      </button>
-      <Show when=move || is_open.get() fallback=|| ()>
-        <div class="popover-backdrop" on:mousedown=move |_| close()></div>
-        <div class="popover msg-menu" role="menu" aria-label=move || i18n.t("message-more")>
-          {(!in_thread)
-            .then(|| {
-              view! {
-                <button class="menu-item" role="menuitem" on:click=move |_| { state.open_thread(conversation, thread_root); close(); }>
-                  <Icon name=IconName::Reply />
-                  <span class="menu-label">{move || i18n.t("action-reply")}</span>
-                </button>
-              }
-            })}
-          <button
-            class="menu-item"
-            role="menuitem"
-            on:click=move |_| {
-              state.reply_target.set(Some(ReplyTarget {
-                conversation,
-                message: id,
-                author_name: author_name.get_value(),
-                excerpt: excerpt(&body.get_value()),
-              }));
-              close();
-            }
-          >
-            <Icon name=IconName::Link />
-            <span class="menu-label">{move || i18n.t("action-quote")}</span>
-          </button>
-          <button class="menu-item" role="menuitem" on:click=move |_| { state.overlay.set(Overlay::Forward(conversation, id)); close(); }>
-            <Icon name=IconName::Send />
-            <span class="menu-label">{move || i18n.t("action-forward")}</span>
-          </button>
-          <button
-            class="menu-item"
-            role="menuitem"
-            on:click=move |_| {
-              let pin = !is_pinned();
-              state.write(|backend| backend.set_pinned(conversation, id, pin));
-              close();
-            }
-          >
-            <Icon name=IconName::Star />
-            <span class="menu-label">{move || if is_pinned() { i18n.t("action-unpin") } else { i18n.t("action-pin") }}</span>
-          </button>
-          <button
-            class="menu-item"
-            role="menuitem"
-            on:click=move |_| {
-              let save = !is_saved();
-              state.write(|backend| backend.set_saved(conversation, id, save));
-              close();
-            }
-          >
-            <Icon name=IconName::Bookmark />
-            <span class="menu-label">{move || if is_saved() { i18n.t("action-unsave") } else { i18n.t("action-save") }}</span>
-          </button>
-          <Show when=move || extras.get().is_some_and(|extras| !extras.files.is_empty()) fallback=|| ()>
-            <button
-              class="menu-item"
-              role="menuitem"
-              on:click=move |_| {
-                let Some(file) = extras.get_untracked().and_then(|extras| extras.files.into_iter().next()) else { return };
-                let mut bookmarks = state
-                  .read(|backend| backend.conversation(conversation))
-                  .map(|conv| conv.bookmarks)
-                  .unwrap_or_default();
-                bookmarks.push(crate::model::Bookmark {
-                  emoji: "📎".to_owned(),
-                  title: file.file_name,
-                  kind: crate::model::BookmarkKind::File,
-                  url: String::new(),
-                  maybe_message: Some(id),
-                });
-                state.write(|backend| backend.set_bookmarks(conversation, bookmarks));
-                close();
-              }
-            >
-              <Icon name=IconName::Bookmark />
-              <span class="menu-label">{move || i18n.t("action-bookmark-file")}</span>
-            </button>
-          </Show>
-          <button class="menu-item" role="menuitem" on:click=copy_link>
-            <Icon name=IconName::Link />
-            <span class="menu-label">{move || i18n.t("action-copy-link")}</span>
-          </button>
-          <button
-            class="menu-item"
-            role="menuitem"
-            on:click=move |_| {
-              state.write(|backend| backend.mark_unread(conversation, id));
-              close();
-            }
-          >
-            <Icon name=IconName::EyeOff />
-            <span class="menu-label">{move || i18n.t("action-mark-unread")}</span>
-          </button>
-          {is_mine
-            .then(|| {
-              view! {
-                <div class="menu-sep" role="separator"></div>
-                <button class="menu-item" role="menuitem" on:click=move |_| { on_edit.run(()); close(); }>
-                  <Icon name=IconName::Sliders />
-                  <span class="menu-label">{move || i18n.t("action-edit")}</span>
-                </button>
-                <button
-                  class="menu-item menu-danger"
-                  role="menuitem"
-                  on:click=move |_| {
-                    state.delete_with_undo(conversation, id, i18n.t("message-deleted-toast"));
-                    close();
-                  }
-                >
-                  <Icon name=IconName::Trash />
-                  <span class="menu-label">{move || i18n.t("action-delete")}</span>
-                </button>
-              }
-            })}
-        </div>
-      </Show>
-    </div>
+/// Starts copying `text` at once (inside the click, where browsers allow it) and resolves to
+/// whether the browser took it.
+pub(crate) fn copy_text(text: &str) -> impl std::future::Future<Output = bool> + 'static {
+  let maybe_promise = clipboard_write(text);
+  async move {
+    match maybe_promise {
+      Some(promise) => wasm_bindgen_futures::JsFuture::from(promise).await.is_ok(),
+      None => false,
+    }
   }
 }
 
 /// Writes to the clipboard through the page's `navigator.clipboard` (web-sys keeps that API unstable).
 pub(crate) fn copy_to_clipboard(text: &str) {
-  let Some(window) = web_sys::window() else { return };
-  let navigator = window.navigator();
-  let Ok(clipboard) = js_sys::Reflect::get(&navigator, &"clipboard".into()) else {
-    return;
-  };
-  let Ok(write_text) = js_sys::Reflect::get(&clipboard, &"writeText".into()) else {
-    return;
-  };
-  let Ok(write_text) = write_text.dyn_into::<js_sys::Function>() else {
-    return;
-  };
   // A refused write (no permission, insecure context) leaves the clipboard as it was.
-  drop(write_text.call1(&clipboard, &text.into()));
+  drop(clipboard_write(text));
+}
+
+/// Starts a clipboard write; `None` where the page has no clipboard API.
+fn clipboard_write(text: &str) -> Option<js_sys::Promise> {
+  let window = web_sys::window()?;
+  let navigator = window.navigator();
+  let clipboard = js_sys::Reflect::get(&navigator, &"clipboard".into()).ok()?;
+  let write_text = js_sys::Reflect::get(&clipboard, &"writeText".into())
+    .ok()?
+    .dyn_into::<js_sys::Function>()
+    .ok()?;
+  write_text.call1(&clipboard, &text.into()).ok()?.dyn_into().ok()
 }
 
 /// All versions of an edited message, newest first, with the changed words marked.
@@ -410,42 +497,48 @@ pub fn SavedView() -> impl IntoView {
     items
   });
   view! {
-    <section class="saved-view" aria-label=move || i18n.t("saved-title")>
+    <section class="saved-view page-view" aria-label=move || i18n.t("saved-title")>
       <header class="panel-header">
+        <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("saved-title")}</h1>
+          <span class="panel-subtitle">{move || i18n.t_count("saved-count", items.with(Vec::len))}</span>
         </div>
       </header>
-      <ul class="saved-list panel-scroll">
-        <For each=move || items.get() key=|item| (item.message.id, item.saved_at) let:item>
-          {
-            let message = item.message.clone();
-            let (conversation, id, maybe_thread) = (message.conversation, message.id, message.maybe_thread);
-            let author: Option<User> = state.read(|backend| backend.user(message.author));
-            view! {
-              <li class="saved-item">
-                <div class="saved-meta">
-                  {author.map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })}
-                  <span translate="no">{item.conversation_name.clone()}</span>
-                  <time>{format_date_time(message.sent_at, locale)}</time>
-                </div>
-                <div class="saved-body"><RichText body=message.body.clone() me=state.me().username /></div>
-                <div class="saved-actions">
-                  <button class="btn btn-small" on:click=move |_| state.open_message(conversation, id, maybe_thread)>
-                    {move || i18n.t("saved-open")}
-                  </button>
-                  <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.set_saved(conversation, id, false))>
-                    {move || i18n.t("action-unsave")}
-                  </button>
-                </div>
-              </li>
+      <div class="saved-list panel-scroll">
+        <ul class="page-cards">
+          <For each=move || items.get() key=|item| (item.message.id, item.saved_at) let:item>
+            {
+              let message = item.message.clone();
+              let (conversation, id, maybe_thread) = (message.conversation, message.id, message.maybe_thread);
+              let author: Option<User> = state.read(|backend| backend.user(message.author));
+              let author_name = author.as_ref().map(|user| user.display_name.clone()).unwrap_or_default();
+              view! {
+                <li class="page-card saved-card">
+                  <div class="saved-meta">
+                    {author.map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })}
+                    <span class="saved-author" translate="no">{author_name}</span>
+                    <span class="saved-where" translate="no">{item.conversation_name.clone()}</span>
+                    <time class="saved-time">{format_date_time(message.sent_at, locale)}</time>
+                  </div>
+                  <div class="saved-body"><RichText body=message.body.clone() me=state.me().username /></div>
+                  <div class="saved-actions">
+                    <button class="btn btn-small" on:click=move |_| state.open_message(conversation, id, maybe_thread)>
+                      {move || i18n.t("saved-open")}
+                    </button>
+                    <button class="btn btn-small btn-quiet" on:click=move |_| state.write(|backend| backend.set_saved(conversation, id, false))>
+                      {move || i18n.t("action-unsave")}
+                    </button>
+                  </div>
+                </li>
+              }
             }
-          }
-        </For>
+          </For>
+        </ul>
         <Show when=move || items.get().is_empty() fallback=|| ()>
-          <li class="empty-state">{move || i18n.t("saved-empty")}</li>
+          <EmptyState icon=IconName::Bookmark title_key="saved-empty-title" body_key="saved-empty" />
         </Show>
-      </ul>
+      </div>
     </section>
   }
 }
@@ -457,6 +550,8 @@ pub fn PinsPanel(conversation: ConversationId) -> impl IntoView {
   let i18n = use_i18n();
   let locale = i18n.locale().tag();
   let pinned = Memo::new(move |_| state.read(|backend| backend.pinned_messages(conversation)));
+  let access = ChannelAccess::new(state, conversation);
+  let can_unpin = move || access.message_permissions().can_manage_bookmarks;
   view! {
     <aside class="side-panel" aria-label=move || i18n.t("pins-title")>
       <header class="panel-header">
@@ -481,16 +576,18 @@ pub fn PinsPanel(conversation: ConversationId) -> impl IntoView {
                   <button class="btn btn-small" on:click=move |_| state.open_message(conversation, id, None)>
                     {move || i18n.t("pins-jump")}
                   </button>
-                  <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.set_pinned(conversation, id, false))>
-                    {move || i18n.t("action-unpin")}
-                  </button>
+                  <Show when=can_unpin fallback=|| ()>
+                    <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.set_pinned(conversation, id, false))>
+                      {move || i18n.t("action-unpin")}
+                    </button>
+                  </Show>
                 </div>
               </li>
             }
           }
         </For>
         <Show when=move || pinned.get().is_empty() fallback=|| ()>
-          <li class="empty-state">{move || i18n.t("pins-empty")}</li>
+          <EmptyState icon=IconName::Star title_key="pins-empty-title" body_key="pins-empty" as_item=true />
         </Show>
       </ul>
     </aside>
@@ -502,8 +599,123 @@ mod tests {
   use super::*;
 
   #[test]
+  fn the_more_menu_leaves_out_the_toolbar_buttons() {
+    let actions = message_actions(allowed(), ActionSurface::MoreMenu);
+    assert_eq!(
+      actions,
+      [
+        MessageAction::Quote,
+        MessageAction::CopyLink,
+        MessageAction::CopyText,
+        MessageAction::MarkUnread,
+        MessageAction::Pin,
+      ]
+    );
+  }
+
+  #[test]
+  fn own_messages_end_with_edit_and_delete() {
+    let context = ActionContext {
+      is_mine: true,
+      is_pinned: true,
+      has_files: true,
+      ..allowed()
+    };
+    let actions = message_actions(context, ActionSurface::MoreMenu);
+    assert!(actions.contains(&MessageAction::Unpin) && actions.contains(&MessageAction::BookmarkFile));
+    assert_eq!(
+      actions[actions.len() - 2..],
+      [MessageAction::Edit, MessageAction::Delete]
+    );
+    let others = message_actions(allowed(), ActionSurface::Sheet);
+    assert!(!others.contains(&MessageAction::Edit) && !others.contains(&MessageAction::Delete));
+  }
+
+  #[test]
+  fn the_sheet_has_everything_but_threads_inside_a_thread() {
+    let saved = ActionContext {
+      is_saved: true,
+      ..allowed()
+    };
+    let sheet = message_actions(saved, ActionSurface::Sheet);
+    assert_eq!(
+      sheet[..4],
+      [
+        MessageAction::Thread,
+        MessageAction::Quote,
+        MessageAction::Forward,
+        MessageAction::Unsave
+      ]
+    );
+    let in_thread = ActionContext {
+      in_thread: true,
+      ..allowed()
+    };
+    assert!(!message_actions(in_thread, ActionSurface::Sheet).contains(&MessageAction::Thread));
+  }
+
+  #[test]
   fn excerpts_are_one_line_and_bounded() {
     assert_eq!(excerpt("a\n\n b"), "a b");
     assert_eq!(excerpt(&"x".repeat(500)).chars().count(), EXCERPT_CHARS + 1);
+  }
+
+  mod permissions {
+    use super::*;
+
+    #[test]
+    fn without_posting_nothing_that_posts_is_offered() {
+      // An announcement channel for its members, an archived channel for everybody.
+      let context = ActionContext {
+        is_mine: true,
+        has_files: true,
+        permissions: MessagePermissions {
+          can_post: false,
+          can_react: true,
+          can_manage_bookmarks: false,
+        },
+        ..allowed()
+      };
+      for surface in [ActionSurface::MoreMenu, ActionSurface::Sheet] {
+        let actions = message_actions(context, surface);
+        for refused in [
+          MessageAction::Quote,
+          MessageAction::Pin,
+          MessageAction::BookmarkFile,
+          MessageAction::Edit,
+          MessageAction::Delete,
+        ] {
+          assert!(!actions.contains(&refused), "{refused:?} on {surface:?}");
+        }
+        // Reading actions stay.
+        assert!(actions.contains(&MessageAction::CopyLink) && actions.contains(&MessageAction::MarkUnread));
+      }
+    }
+
+    #[test]
+    fn guests_post_but_pin_nothing() {
+      // The built-in scheme gives guests no `manage_bookmarks`.
+      let guest = ActionContext {
+        is_mine: true,
+        is_pinned: true,
+        has_files: true,
+        permissions: MessagePermissions {
+          can_post: true,
+          can_react: true,
+          can_manage_bookmarks: false,
+        },
+        ..allowed()
+      };
+      let actions = message_actions(guest, ActionSurface::MoreMenu);
+      assert!(!actions.contains(&MessageAction::Unpin) && !actions.contains(&MessageAction::BookmarkFile));
+      assert!(actions.contains(&MessageAction::Quote) && actions.contains(&MessageAction::Edit));
+    }
+  }
+
+  fn allowed() -> ActionContext {
+    ActionContext {
+      permissions: MessagePermissions::ALL,
+      ..ActionContext::default()
+    }
   }
 }

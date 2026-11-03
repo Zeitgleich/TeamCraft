@@ -19,25 +19,31 @@ final class FeedTests: XCTestCase {
       isEdited: false, isPending: false, replyCount: 0, maybeThreadId: nil, reactions: [])
   }
 
-  func testDateChipBeforeEachDay() {
-    let items = feedItems(
+  func testOneSectionPerDay() {
+    let sections = feedSections(
       [message("1", "a", dayOne), message("2", "a", dayOne + 60 * minute), message("3", "a", dayOne + 1440 * minute)],
       calendar: utc)
-    XCTAssertEqual(items.count, 5)
-    guard case .day = items[0], case .day = items[3] else { return XCTFail("date chips missing: \(items)") }
+    XCTAssertEqual(sections.map { $0.entries.map(\.message.id) }, [["1", "2"], ["3"]])
   }
 
   func testFollowUpsOfTheSameAuthorAreGrouped() {
-    let items = feedItems(
+    let entries = feedSections(
       [
         message("1", "a", dayOne), message("2", "a", dayOne + minute), message("3", "b", dayOne + 2 * minute),
         message("4", "b", dayOne + 2 * minute + groupWindowMs + 1), message("5", "b", dayOne + 3 * minute + groupWindowMs, body: ""),
-      ], calendar: utc)
-    let continuations = items.compactMap { item -> Bool? in
-      if case .entry(_, let isContinuation) = item { return isContinuation }
-      return nil
-    }
-    XCTAssertEqual(continuations, [false, true, false, false, false])
+      ], calendar: utc
+    ).flatMap(\.entries)
+    XCTAssertEqual(entries.map(\.isContinuation), [false, true, false, false, false])
+    // The group's last bubble carries the avatar.
+    XCTAssertEqual(entries.map(\.isGroupEnd), [false, true, true, true, true])
+  }
+
+  func testANewDayStartsANewGroup() {
+    let entries = feedSections(
+      [message("1", "a", dayOne + 959 * minute), message("2", "a", dayOne + 961 * minute)], calendar: utc
+    ).flatMap(\.entries)
+    XCTAssertEqual(entries.map(\.isContinuation), [false, false])
+    XCTAssertEqual(entries.map(\.isGroupEnd), [true, true])
   }
 
   func testPreviewNamesSenderOnlyWhereNeeded() {
@@ -54,27 +60,13 @@ final class FeedTests: XCTestCase {
     XCTAssertEqual(oneLine(String(repeating: "x", count: 500)).count, 160)
   }
 
-  func testLinksAreOnlyWebLinks() {
-    let text = linkedText("See https://example.com/a, or mailto:someone@example.com")
-    let links = text.runs.compactMap(\.link)
-    XCTAssertEqual(links.map(\.absoluteString), ["https://example.com/a"])
-  }
-
-  func testMessageLinksAndMentions() {
-    let body = "@alex see teamcraft:/c/12/m/34 and @me, @here; mail sam@example.com @nobody"
-    let text = messageText(body, usernames: ["alex", "sam"], myUsername: "Me")
-    XCTAssertEqual(text.runs.compactMap(\.link).map(\.absoluteString), ["teamcraft:/c/12/m/34"])
-    let mentioned = text.runs.filter { $0.inlinePresentationIntent == .stronglyEmphasized }.map { String(text[$0.range].characters) }
-    XCTAssertEqual(mentioned, ["@alex", "@me", "@here"])
-  }
-
   func testDirectMessagesByRecency() {
     func dm(_ id: String, _ name: String) -> ConversationItem {
       ConversationItem(
         id: id, maybeSpaceId: nil, maybeSpaceName: nil, kind: .direct, name: name, topic: "", unreadCount: 0,
         mentionCount: 0, isFavorite: false, isMuted: false, canPost: true)
     }
-    let sections = conversationSections(
+    let sections = directSections(
       [dm("1", "Alex"), dm("2", "Bo"), dm("3", "Cy")],
       lastActivity: ["3": Date(timeIntervalSince1970: 30), "1": Date(timeIntervalSince1970: 10)])
     XCTAssertEqual(sections.first?.conversations.map(\.name), ["Cy", "Alex", "Bo"])
@@ -156,5 +148,20 @@ final class FeedTests: XCTestCase {
     // Going backwards (impossible on this clock) locks rather than not.
     clock.didEnterBackground(at: start.advanced(by: .seconds(100)))
     XCTAssertTrue(clock.shouldLock(at: start, isEnabled: true, lockAfter: .fifteenMinutes))
+  }
+
+  func testOnlyDaysOutsideTheCurrentYearShowTheirYear() {
+    let now = utcDate(2026, 10, 22)
+    XCTAssertFalse(DayPill.showsYear(utcDate(2026, 1, 1), now: now, calendar: utc))
+    XCTAssertTrue(DayPill.showsYear(utcDate(2025, 12, 31), now: now, calendar: utc))
+    XCTAssertTrue(DayPill.showsYear(utcDate(2027, 1, 1), now: now, calendar: utc))
+    // New Year's Eve: the same day gains its year once the next year has begun.
+    let eve = utcDate(2026, 12, 31, hour: 23)
+    XCTAssertFalse(DayPill.showsYear(eve, now: eve, calendar: utc))
+    XCTAssertTrue(DayPill.showsYear(eve, now: utcDate(2027, 1, 1), calendar: utc))
+  }
+
+  private func utcDate(_ year: Int, _ month: Int, _ day: Int, hour: Int = 12) -> Date {
+    utc.date(from: DateComponents(year: year, month: month, day: day, hour: hour))!
   }
 }

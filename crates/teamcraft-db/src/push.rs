@@ -18,7 +18,9 @@ pub struct PushDeviceRow {
 #[derive(Debug, Clone)]
 pub struct PushRecipientRow {
   pub user: UserId,
-  pub notification_level: NotificationLevel,
+  /// The level of the conversation, else of its space, else the user's own default; `None`: the
+  /// user never chose any of these, the instance default applies.
+  pub maybe_notification_level: Option<NotificationLevel>,
   pub presence_pref: String,
   pub maybe_dnd_until: Option<OffsetDateTime>,
   pub maybe_muted_until: Option<OffsetDateTime>,
@@ -44,9 +46,10 @@ impl Database {
   ) -> Result<Vec<PushRecipientRow>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT m.user_id,
-                -- A conversation the member never configured follows their setting for its space.
-                CASE WHEN m.notification_overridden OR sm.notification_level IS NULL
-                     THEN m.notification_level ELSE sm.notification_level END AS "notification_level!",
+                -- A conversation the member never configured follows their setting for its space,
+                -- else their own default level (NULL: the instance default).
+                CASE WHEN m.notification_overridden THEN m.notification_level
+                     ELSE COALESCE(sm.notification_level, s.notification_level) END AS "notification_level?",
                 CASE WHEN m.notification_overridden THEN m.muted_until
                      ELSE GREATEST(m.muted_until, sm.muted_until) END AS muted_until,
                 u.presence_pref, u.dnd_until,
@@ -84,7 +87,7 @@ impl Database {
         Some(last) if last.user == user => last.devices.push(device),
         _ => recipients.push(PushRecipientRow {
           user,
-          notification_level: NotificationLevel::from(row.notification_level),
+          maybe_notification_level: row.notification_level.map(NotificationLevel::from),
           presence_pref: row.presence_pref,
           maybe_dnd_until: row.dnd_until,
           maybe_muted_until: row.muted_until,
@@ -99,14 +102,16 @@ impl Database {
     Ok(recipients)
   }
 
-  /// The user's devices with a push registration (not revoked), by device ID.
+  /// The user's devices with a push registration (not revoked), by device ID. None while the
+  /// account is deactivated: the registrations are kept for a reactivation, but not used.
   pub async fn list_push_devices(&self, user: UserId) -> Result<Vec<PushDeviceRow>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT id, push_provider AS "push_provider!", push_token AS "push_token!", push_key AS "push_key!"
-         FROM devices
-         WHERE user_id = $1 AND revoked_at IS NULL AND push_provider IS NOT NULL
-           AND push_token IS NOT NULL AND push_key IS NOT NULL
-         ORDER BY id"#,
+      r#"SELECT d.id, d.push_provider AS "push_provider!", d.push_token AS "push_token!",
+                d.push_key AS "push_key!"
+         FROM devices d JOIN users u ON u.id = d.user_id AND u.deactivated_at IS NULL
+         WHERE d.user_id = $1 AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL
+           AND d.push_token IS NOT NULL AND d.push_key IS NOT NULL
+         ORDER BY d.id"#,
       to_db(user),
     )
     .fetch_all(self.pool())
@@ -137,7 +142,7 @@ impl Database {
                 SELECT 1 FROM messages m
                 WHERE m.conversation_id = ms.conversation_id AND m.thread_id IS NULL
                   AND m.sender_user_id <> ms.user_id
-                  AND m.id > COALESCE(ms.last_read_message_id, 0)
+                  AND m.id > COALESCE(ms.last_read_message_id, 0) AND NOT m.is_imported
                   AND m.id >= tc_snowflake_floor(ms.joined_at)
                   AND (c.kind IN ('dm', 'group') OR ms.user_id = ANY(m.mentioned_user_ids))))
          + (SELECT COUNT(*) FROM threads_followed tf
@@ -146,7 +151,7 @@ impl Database {
                 SELECT 1 FROM messages m
                 WHERE m.conversation_id = tf.conversation_id AND m.thread_id = tf.thread_id
                   AND m.sender_user_id <> tf.user_id
-                  AND m.id > COALESCE(tf.last_read_message_id, 0)
+                  AND m.id > COALESCE(tf.last_read_message_id, 0) AND NOT m.is_imported
                   AND tf.user_id = ANY(m.mentioned_user_ids)))
            AS "badge!""#,
       to_db(user),

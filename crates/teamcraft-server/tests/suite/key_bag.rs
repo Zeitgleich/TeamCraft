@@ -153,3 +153,137 @@ async fn the_users_devices_hear_about_a_new_key_bag() {
   );
   app.stop().await;
 }
+
+/// With the signed policy's `recovery.is_passphrase_allowed` off (e2ee.md §6.5.8), a member keeps
+/// uploading their unchanged legacy passphrase wrap but can't set a new one, neither in a key bag
+/// nor with a new identity; a recovery kit is always accepted, and guests are exempt.
+#[tokio::test]
+async fn with_passphrases_off_members_set_no_new_passphrase() {
+  let app = app!();
+  let carol = member("carol");
+  let (kit, old_passphrase, new_passphrase) = wrap_lists();
+  let first = app
+    .put(&carol, "/me/key-bag", wrapped_bag(0, &old_passphrase))
+    .await;
+  assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+
+  publish_policy_without_passphrases(&app).await;
+
+  let unchanged = app
+    .put(&carol, "/me/key-bag", wrapped_bag(1, &old_passphrase))
+    .await;
+  assert_eq!(unchanged.status, StatusCode::OK, "{}", unchanged.body);
+  let changed = app
+    .put(&carol, "/me/key-bag", wrapped_bag(2, &new_passphrase))
+    .await;
+  assert_eq!(
+    (changed.status, changed.error_code()),
+    (StatusCode::FORBIDDEN, "recovery_passphrase_not_allowed")
+  );
+  let malformed = app.put(&carol, "/me/key-bag", bag(2, "Ym9uZTE=")).await;
+  assert_eq!(malformed.status, StatusCode::BAD_REQUEST);
+  let replaced = app.put(&carol, "/me/key-bag", wrapped_bag(2, &kit)).await;
+  assert_eq!(replaced.status, StatusCode::OK, "{}", replaced.body);
+  // Once replaced, the old passphrase can't come back either.
+  let back = app
+    .put(&carol, "/me/key-bag", wrapped_bag(3, &old_passphrase))
+    .await;
+  assert_eq!(back.error_code(), "recovery_passphrase_not_allowed");
+
+  let dave = member("dave");
+  let identity = |wraps: &str| {
+    json!({
+      "public_key": "a2V5MQ==",
+      "signature": "c2ln",
+      "key_bag": {"encrypted_key_bag": "YmFn", "wrapped_backup_keys": wraps},
+    })
+  };
+  let refused = app
+    .put(&dave, "/me/identity-key", identity(&new_passphrase))
+    .await;
+  assert_eq!(refused.error_code(), "recovery_passphrase_not_allowed");
+  let enrolled = app.put(&dave, "/me/identity-key", identity(&kit)).await;
+  assert_eq!(enrolled.status, StatusCode::OK, "{}", enrolled.body);
+
+  // A meeting guest's bag is wrapped with a random secret nobody keeps.
+  let visitor = guest("visitor");
+  let guest_bag = app
+    .put(&visitor, "/me/key-bag", wrapped_bag(0, &new_passphrase))
+    .await;
+  assert_eq!(guest_bag.status, StatusCode::OK, "{}", guest_bag.body);
+  app.stop().await;
+}
+
+fn wrapped_bag(expected: u64, wrapped_backup_keys: &str) -> serde_json::Value {
+  json!({"expected_version": expected, "encrypted_key_bag": "Ym9uZTE=", "wrapped_backup_keys": wrapped_backup_keys})
+}
+
+/// Base64 wrap lists: a recovery kit's, and two different passphrases'.
+fn wrap_lists() -> (String, String, String) {
+  use base64::Engine;
+  use teamcraft_crypto::backup::{
+    Argon2Settings, BackupKey, BackupKeyWrapper, PassphraseWrapper, RecoveryKeyWrapper, WrappedBackupKey,
+    encode_wrapped_key_list,
+  };
+  use teamcraft_crypto::ids::UserId;
+  use teamcraft_crypto::recovery_key::RecoveryKey;
+  use teamcraft_crypto::secret::SecretBytes;
+
+  let cheap = Argon2Settings {
+    memory_kib: 64,
+    iterations: 1,
+    parallelism: 1,
+  };
+  let user = UserId::new(1);
+  let backup_key = BackupKey::generate(&mut rand_core::OsRng);
+  let passphrase = |text: &str| {
+    PassphraseWrapper::new(SecretBytes::new(text.as_bytes().to_vec()), cheap)
+      .unwrap()
+      .wrap_key(user, &backup_key, &mut rand_core::OsRng)
+      .unwrap()
+  };
+  let kit = RecoveryKeyWrapper::new(&RecoveryKey::generate(&mut rand_core::OsRng))
+    .wrap_key(user, &backup_key, &mut rand_core::OsRng)
+    .unwrap();
+  let encode = |wraps: &[WrappedBackupKey]| {
+    base64::engine::general_purpose::STANDARD.encode(encode_wrapped_key_list(wraps).unwrap())
+  };
+  (
+    encode(&[kit]),
+    encode(&[passphrase("the old passphrase")]),
+    encode(&[passphrase("a brand new passphrase")]),
+  )
+}
+
+/// The owner publishes the default policy with passphrases switched off (the server checks the
+/// owner and the chain, not the signature).
+async fn publish_policy_without_passphrases(app: &TestApp) {
+  use base64::Engine;
+  use teamcraft_proto::{PolicyDocument, RecoveryPolicy, WorkspacePolicy};
+
+  let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+  let alice = owner();
+  let device = register_device(app, &alice).await;
+  let document = PolicyDocument {
+    version: 1,
+    policy: WorkspacePolicy {
+      recovery: RecoveryPolicy {
+        is_passphrase_allowed: false,
+      },
+      ..WorkspacePolicy::default()
+    },
+  };
+  let reply = app
+    .post(
+      &alice,
+      "/workspace/policy",
+      json!({
+        "expected_version": 0,
+        "payload": b64(&serde_json::to_vec(&document).unwrap()),
+        "signature": b64(b"sig"),
+        "signer_device_id": device,
+      }),
+    )
+    .await;
+  assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+}

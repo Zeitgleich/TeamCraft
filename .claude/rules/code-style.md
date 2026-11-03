@@ -4,10 +4,24 @@
 
 - Latest stable Rust, edition 2024. No MSRV guarantees beyond `rust-version` in `Cargo.toml`.
 - Two spaces for indentation (`rustfmt.toml`). Run `cargo fmt --all` before committing.
-- No `unsafe` code. If a dependency needs it, that's fine; our crates never do.
+- No `unsafe` code. If a dependency needs it, that's fine; our crates never do, with one exception
+  (see "Native FFI").
 - Never use `println!`, `eprintln!` or `dbg!` outside tests; use `tracing` (`info!`, `warn!`,
   `error!`, `debug!`, `trace!`). Use structured fields: `info!(conversation_id = %id, "joined")`.
 - Optional fields and variables use the `maybe_` prefix: `maybe_thread_id`, `maybe_avatar`.
+
+## Native FFI (the `unsafe` exception)
+
+Some OS integrations have no safe crate API (e.g. wake-from-sleep hooks, notification delegates).
+For those, and only when no safe crate exists:
+
+- All `unsafe` lives in the single crate `teamcraft-desktop-native`, cfg-gated per OS. It does not
+  use the workspace lints; it sets `unsafe_code = "deny"` and each `unsafe` item carries
+  `#[allow(unsafe_code)]`. Every other crate keeps `forbid`.
+- Every `unsafe` block has a `// SAFETY:` comment naming the invariant (clippy
+  `undocumented_unsafe_blocks` is denied).
+- The public API is safe and small; prefer `objc2` / `windows` bindings over raw pointers.
+- Prefer a maintained safe crate whenever one exists.
 
 ## Language
 
@@ -103,8 +117,13 @@ Inside an `impl`:
 ## Frontend and mobile
 
 - UI: Leptos (Rust), shared between desktop (Tauri) and web. No TypeScript application code.
-- iOS: Swift + SwiftUI, formatted with `swift-format`. Android: Kotlin + Jetpack Compose, `ktlint`.
-  Mobile shells stay thin: logic belongs in `teamcraft-core` behind UniFFI.
+- The web CSP is `style-src 'self'` (and `script-src 'self'`): no `style="…"` attributes, no
+  `set_attribute("style", …)`, no inline `<style>` or `<script>`, also not in popups (they inherit
+  the policy). Dynamic styles use CSSOM: Leptos `style:prop=` / `style:--var=` directives or
+  `HtmlElement::style().set_property`; everything else is a class in the stylesheet.
+- iOS: Swift + SwiftUI, formatted with `swift-format`. Android: Kotlin + Jetpack Compose, `ktlint`
+  with the rules in `apps/android/.editorconfig` (the command is in that file). Mobile shells
+  stay thin: logic belongs in `teamcraft-core` behind UniFFI.
 
 ## Markdown
 

@@ -2,22 +2,40 @@
 //!
 //! Session flow: the client connects to `/call`, opens one bidirectional stream for signaling and
 //! sends [`CallClientMessage::Join`] with its token. Afterwards media flows as QUIC datagrams.
+//!
+//! Mobile networks: QUIC connection migration is allowed, so a client whose address changes
+//! (Wi-Fi to LTE, NAT rebinding) continues on the same connection after path validation. A
+//! connection that is lost anyway (idle timeout) keeps its participant's slot for the reconnect
+//! grace period; a deliberate close (the client leaving, a host control) ends it at once.
+//!
+//! Restarts and rolling deploys: on shutdown the SFU closes every connection with
+//! [`SFU_GOING_AWAY_CLOSE_CODE`] ([`Sfu::run_until`]). Clients rejoin with a fresh join token; the
+//! restarted SFU (or another instance at the same address) creates the room again and DAVE founds a
+//! new group. Leaves are not reported to the server while going away, so the call stays up there.
+//!
+//! Besides joins and leaves the SFU reports its whole roster: at start, every
+//! [`SfuConfig::roster_interval`] and right after a call moved between a user's devices. The server
+//! drops what the SFU no longer has, so a lost leave (or one never sent while going away, by a
+//! client that didn't come back) can't keep a device in a call for good.
 
 use std::{
-  net::SocketAddr,
+  future::Future,
+  net::{SocketAddr, UdpSocket},
   sync::Arc,
   time::{Duration, Instant},
 };
 
+use socket2::{Domain, Protocol, Socket, Type};
 use teamcraft_proto::{
-  Base64Bytes, CallClientMessage, CallEvent, CallServerMessage, ErrorBody, ErrorCode, SfuControlRequest,
+  CallClientMessage, CallEvent, CallServerMessage, ErrorBody, ErrorCode, SFU_GOING_AWAY_CLOSE_CODE,
+  SfuControlRequest, SfuRosterReport,
 };
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
+use tokio::time::MissedTickBehavior;
 use tracing::{Instrument, debug, info, info_span, warn};
 use wtransport::{
   Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig,
-  config::Ipv6DualStackConfig,
   endpoint::{IncomingSession, endpoint_side::Server},
   tls::Sha256Digest,
 };
@@ -27,7 +45,7 @@ use crate::{
   config::SfuConfig,
   prejoin::PreJoinLimiter,
   reporting::{NoReporter, ParticipantReporter},
-  room::{ParticipantHandle, Room, RoomError, Rooms},
+  room::{JoinOutcome, ParticipantHandle, Room, RoomError, Rooms, SessionId},
   signaling::{EventSequence, Outgoing, SignalingError, read_message, write_message},
 };
 
@@ -37,6 +55,8 @@ const PERIODIC_INTERVAL: Duration = Duration::from_millis(100);
 
 /// HTTP path of the WebTransport session.
 const PRE_JOIN_LIMIT: u32 = 0x4803;
+/// Rosters never go out more often than this, whatever the configuration says.
+const MIN_ROSTER_INTERVAL: Duration = Duration::from_millis(100);
 
 pub const CALL_PATH: &str = "/call";
 
@@ -53,6 +73,10 @@ struct Shared {
   verifier: Arc<dyn JoinTokenVerifier>,
   reporter: Arc<dyn ParticipantReporter>,
   prejoin: Arc<PreJoinLimiter>,
+  /// When this SFU started: the roster tells the server how fresh its rooms are.
+  started_at: Instant,
+  /// Wakes the roster reporter before its interval (a call moved between devices).
+  roster_now: Arc<Notify>,
 }
 
 /// Carries out meeting host controls on this SFU's calls (see [`crate::control`]).
@@ -68,6 +92,16 @@ struct ParticipantSession {
   grant: JoinGrant,
   signal_tx: mpsc::Sender<Outgoing>,
   max_bytes: usize,
+  roster_now: Arc<Notify>,
+}
+
+/// How a participant's session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionEnd {
+  /// The client left, or the SFU closed the connection (host control, protocol violation).
+  Closed,
+  /// The connection broke (idle timeout, reset): the client is expected back.
+  Lost,
 }
 
 #[derive(Debug, Error)]
@@ -76,6 +110,8 @@ pub enum SfuError {
   Bind(#[source] std::io::Error),
   #[error("the TLS identity has no certificate")]
   NoCertificate,
+  #[error("the idle timeout is out of range")]
+  IdleTimeout,
 }
 
 #[derive(Debug, Error)]
@@ -104,14 +140,14 @@ impl Sfu {
       .first()
       .ok_or(SfuError::NoCertificate)?
       .hash();
-    let builder = ServerConfig::builder();
-    let builder = match config.bind_addr {
-      SocketAddr::V6(addr) => builder.with_bind_address_v6(addr, Ipv6DualStackConfig::Allow),
-      SocketAddr::V4(_) => builder.with_bind_address(config.bind_addr),
-    };
-    let server_config = builder
+    let server_config = ServerConfig::builder()
+      .with_bind_socket(bind_socket(&config).map_err(SfuError::Bind)?)
       .with_identity(identity)
-      .keep_alive_interval(Some(std::time::Duration::from_secs(3)))
+      .keep_alive_interval(Some(config.keep_alive_interval))
+      .max_idle_timeout(Some(config.idle_timeout))
+      .map_err(|_| SfuError::IdleTimeout)?
+      // Clients moving between networks keep their connection (validated by QUIC path checks).
+      .allow_migration(true)
       .build();
     let endpoint = Endpoint::server(server_config).map_err(SfuError::Bind)?;
     let rooms = Rooms::new(config.clone());
@@ -124,6 +160,8 @@ impl Sfu {
         verifier,
         reporter: Arc::new(NoReporter),
         prejoin: Arc::new(PreJoinLimiter::default()),
+        started_at: Instant::now(),
+        roster_now: Arc::new(Notify::new()),
       }),
     })
   }
@@ -155,6 +193,24 @@ impl Sfu {
 
   /// Accepts sessions until the task is dropped.
   pub async fn run(self) {
+    self.run_until(std::future::pending()).await;
+  }
+
+  /// Accepts sessions until `shutdown` resolves (SIGTERM), then goes away: every connection is
+  /// closed with [`SFU_GOING_AWAY_CLOSE_CODE`], so its client rejoins instead of ending the call,
+  /// and the closes get up to [`SfuConfig::shutdown_drain`] to reach the clients.
+  pub async fn run_until(self, shutdown: impl Future<Output = ()>) {
+    let rosters = tokio::spawn(report_rosters(Arc::clone(&self.shared)));
+    tokio::select! {
+      () = self.accept_sessions() => {},
+      () = shutdown => {},
+    }
+    // Going away empties the rooms; that is no roster to tell the server.
+    rosters.abort();
+    self.go_away().await;
+  }
+
+  async fn accept_sessions(&self) {
     let mut session_number: u64 = 0;
     loop {
       session_number = session_number.wrapping_add(1);
@@ -170,6 +226,73 @@ impl Sfu {
       );
     }
   }
+
+  async fn go_away(&self) {
+    // Rooms first: from here on, the sessions' ends are not reported as leaves.
+    self.shared.rooms.go_away_gracefully().await;
+    // Also the sessions that haven't joined yet.
+    self
+      .endpoint
+      .close(SFU_GOING_AWAY_CLOSE_CODE.into(), b"going away");
+    if tokio::time::timeout(self.shared.config.shutdown_drain, self.endpoint.wait_idle())
+      .await
+      .is_err()
+    {
+      warn!("not every client confirmed the close in time");
+    }
+    info!("went away");
+  }
+}
+
+/// Reports the roster at start, every [`SfuConfig::roster_interval`] and when woken early, until
+/// the SFU goes away. A tick missed under load is not caught up: one current roster is enough.
+async fn report_rosters(shared: Arc<Shared>) {
+  let mut interval = tokio::time::interval(shared.config.roster_interval.max(MIN_ROSTER_INTERVAL));
+  interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+  loop {
+    tokio::select! {
+      _ = interval.tick() => {},
+      () = shared.roster_now.notified() => {},
+    }
+    if shared.rooms.is_going_away() {
+      return;
+    }
+    shared.reporter.roster(shared.roster());
+  }
+}
+
+impl Shared {
+  fn roster(&self) -> SfuRosterReport {
+    SfuRosterReport {
+      uptime_secs: self.started_at.elapsed().as_secs(),
+      calls: self.rooms.roster(),
+    }
+  }
+}
+
+/// The SFU's socket, dual stack where bound to IPv6, with [`SfuConfig::udp_receive_buffer_bytes`]
+/// (as far as the system allows: it caps the size at `net.core.rmem_max` without an error).
+fn bind_socket(config: &SfuConfig) -> std::io::Result<UdpSocket> {
+  let socket = Socket::new(
+    Domain::for_address(config.bind_addr),
+    Type::DGRAM,
+    Some(Protocol::UDP),
+  )?;
+  if config.bind_addr.is_ipv6() {
+    socket.set_only_v6(false)?;
+  }
+  socket.set_recv_buffer_size(config.udp_receive_buffer_bytes)?;
+  let got_bytes = socket.recv_buffer_size()?;
+  if got_bytes < config.udp_receive_buffer_bytes {
+    warn!(
+      wanted_bytes = config.udp_receive_buffer_bytes,
+      got_bytes,
+      "the system caps the UDP receive buffer, big keyframes may get lost while the SFU is busy: \
+       raise net.core.rmem_max"
+    );
+  }
+  socket.bind(&config.bind_addr.into())?;
+  Ok(socket.into())
 }
 
 async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<(), SessionError> {
@@ -179,6 +302,10 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     return Ok(());
   }
   let connection = request.accept().await?;
+  if shared.rooms.is_going_away() {
+    connection.close(SFU_GOING_AWAY_CLOSE_CODE.into(), b"going away");
+    return Ok(());
+  }
   let remote_ip = connection.remote_address().ip().to_canonical();
   let Some(prejoin_slot) = shared
     .prejoin
@@ -214,15 +341,16 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
 
   let (signal_tx, signal_rx) = mpsc::channel(shared.config.signaling_queue_len.max(1));
   let handle = ParticipantHandle {
-    connection: connection.clone(),
+    link: Arc::new(connection.clone()),
     signal_tx: signal_tx.clone(),
   };
-  let room = match shared.rooms.join(grant, capabilities, handle) {
-    Ok(room) => room,
+  let (room, session_id, outcome) = match shared.rooms.join(grant, capabilities, handle) {
+    Ok(joined) => joined,
     Err(error) => {
       let code = match error {
         RoomError::Locked => ErrorCode::CallLocked,
         RoomError::Removed => ErrorCode::RemovedFromCall,
+        RoomError::TooManyDevices(_) => ErrorCode::CallDeviceLimit,
         _ => ErrorCode::AlreadyJoined,
       };
       reject(&mut send, code, &error.to_string()).await;
@@ -231,21 +359,57 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   };
 
   drop(prejoin_slot);
-  shared.reporter.joined(grant);
+  // The call the device is in: the running call of its conversation when the token named another.
+  let grant = JoinGrant {
+    call_id: room.call_id(),
+    ..grant
+  };
+  // A device taking its slot back is still in the server's roster.
+  if outcome == JoinOutcome::Joined {
+    shared.reporter.joined(grant);
+  }
   let session = ParticipantSession {
     connection,
-    room,
+    room: Arc::clone(&room),
     grant,
     signal_tx,
     max_bytes,
+    roster_now: Arc::clone(&shared.roster_now),
   };
-  let result = session.run(send, recv, signal_rx).await;
-  shared.rooms.leave(&session.room, grant.device_id);
-  shared.reporter.left(grant);
+  let (end, result) = session.run(send, recv, signal_rx).await;
+  drop(session);
+  release_slot(shared, &room, grant, session_id, end).await;
   result
 }
 
+/// Ends a session's hold on its slot: at once after a close, after the reconnect grace period
+/// after a loss (unless the device took the slot back on a new connection meanwhile).
+async fn release_slot(
+  shared: &Shared,
+  room: &Room,
+  grant: JoinGrant,
+  session_id: SessionId,
+  end: SessionEnd,
+) {
+  if end == SessionEnd::Lost
+    && shared
+      .rooms
+      .disconnect(room, grant.device_id, session_id, Instant::now())
+  {
+    tokio::time::sleep(shared.config.reconnect_grace).await;
+  }
+  // Going away: the participant rejoins on the restarted SFU, and the server keeps it in the call.
+  if shared.rooms.leave(room, grant.device_id, session_id) && !shared.rooms.is_going_away() {
+    shared.reporter.left(grant);
+  }
+}
+
 impl SfuControl {
+  /// Every call on this SFU and who is in it, for a server that starts and takes them over.
+  pub fn roster(&self) -> SfuRosterReport {
+    self.shared.roster()
+  }
+
   pub fn apply(&self, request: &SfuControlRequest) -> Result<(), RoomError> {
     self
       .shared
@@ -257,6 +421,31 @@ impl SfuControl {
 impl ParticipantSession {
   /// Runs until the client disconnects or violates the protocol.
   async fn run(
+    &self,
+    send: SendStream,
+    recv: RecvStream,
+    signal_rx: mpsc::Receiver<Outgoing>,
+  ) -> (SessionEnd, Result<(), SessionError>) {
+    let result = self.serve(send, recv, signal_rx).await;
+    // A failed stream read says little; the connection's close reason tells a loss from a close.
+    // Still open means the session failed on its own (a protocol violation): closed by us.
+    let end = match &result {
+      Err(SessionError::Connection(error)) => session_end(error),
+      _ => match tokio::time::timeout(Duration::ZERO, self.connection.closed()).await {
+        Ok(error) => session_end(&error),
+        Err(_) => SessionEnd::Closed,
+      },
+    };
+    info!(
+      call_id = %self.grant.call_id,
+      participant_id = %self.grant.device_id,
+      ?end,
+      "session closed"
+    );
+    (end, result)
+  }
+
+  async fn serve(
     &self,
     send: SendStream,
     mut recv: RecvStream,
@@ -300,93 +489,45 @@ impl ParticipantSession {
       () = periodic => Ok(()),
     };
     writer.abort();
-    info!(
-      call_id = %self.grant.call_id,
-      participant_id = %self.grant.device_id,
-      "session closed"
-    );
     result
   }
 
   fn handle_client_message(&self, message: CallClientMessage) {
-    let participant_id = self.grant.device_id;
-    match message {
-      CallClientMessage::DaveKeyPackage {
-        key_package,
-        maybe_key_binding,
-      } => {
-        let result = self.room.on_key_package(
-          participant_id,
-          key_package.into_vec(),
-          maybe_key_binding.map(Base64Bytes::into_vec),
-        );
-        if let Err(error) = result {
-          warn!(participant_id = %participant_id, %error, "rejected key package");
-          self.send_error(ErrorCode::InvalidKeyPackage, error.to_string());
-        }
-      },
-      CallClientMessage::DaveCommit {
-        epoch,
-        commit,
-        maybe_welcome,
-      } => {
-        self.room.on_commit(
-          participant_id,
-          epoch,
-          commit.into_vec(),
-          maybe_welcome.map(Base64Bytes::into_vec),
-        );
-      },
-      CallClientMessage::Join { .. } => {
-        self.send_error(ErrorCode::ProtocolViolation, "already joined".to_owned())
-      },
-      CallClientMessage::TransportFeedback { feedback } => {
-        self
-          .room
-          .on_transport_feedback(participant_id, &feedback, Instant::now());
-      },
-      CallClientMessage::PublishVideo { kind, codec, layers } => {
-        let result = self.room.publish_video(participant_id, kind, codec, layers);
-        self.report(result);
-      },
-      CallClientMessage::UnpublishVideo { stream_id } => {
-        let result = self.room.unpublish_video(participant_id, stream_id);
-        self.report(result);
-      },
-      CallClientMessage::PublishScreenAudio => {
-        let result = self.room.publish_screen_audio(participant_id);
-        self.report(result);
-      },
-      CallClientMessage::UnpublishScreenAudio { stream_id } => {
-        let result = self.room.unpublish_screen_audio(participant_id, stream_id);
-        self.report(result);
-      },
-      CallClientMessage::Subscribe {
-        stream_id,
-        maybe_max_layer,
-      } => {
-        let result = self
-          .room
-          .subscribe(participant_id, stream_id, maybe_max_layer, Instant::now());
-        self.report(result);
-      },
-      CallClientMessage::Unknown => debug!(participant_id = %participant_id, "ignoring unknown message"),
+    // Proves the session's path to a browser, which can't see QUIC keep-alives. One small answer
+    // per ping; when the queue is full it is dropped, and the client's next ping asks again.
+    if let CallClientMessage::Ping { id } = message {
+      let _ = self.signal_tx.try_send(Outgoing::Pong(id));
+      return;
+    }
+    // The account's other devices leave for this one; one of them may be in the server's roster
+    // only (its leave got lost), which a roster right after repairs at once instead of within the
+    // interval.
+    let is_move_here = matches!(message, CallClientMessage::MoveHere);
+    if let Err(error) = self
+      .room
+      .on_client_message(self.grant.device_id, message, Instant::now())
+    {
+      // Fails only when the writer task ended, i.e. the session is closing anyway.
+      let _ = self.signal_tx.try_send(Outgoing::Error(error));
+    }
+    if is_move_here {
+      self.roster_now.notify_one();
     }
   }
+}
 
-  /// Turns a rejected request into a `protocol_violation` error for the client.
-  fn report(&self, result: Result<(), RoomError>) {
-    if let Err(error) = result {
-      debug!(participant_id = %self.grant.device_id, %error, "request rejected");
-      self.send_error(ErrorCode::ProtocolViolation, error.to_string());
-    }
-  }
-
-  fn send_error(&self, error_code: ErrorCode, message: String) {
-    // Fails only when the writer task ended, i.e. the session is closing anyway.
-    let _ = self
-      .signal_tx
-      .try_send(Outgoing::Error(ErrorBody::new(error_code, message)));
+/// Deliberate closes (by the client or by us) end the session; everything else is a loss the client
+/// may recover from by rejoining.
+fn session_end(error: &wtransport::error::ConnectionError) -> SessionEnd {
+  use wtransport::error::ConnectionError;
+  match error {
+    ConnectionError::ApplicationClosed(_)
+    | ConnectionError::LocallyClosed
+    | ConnectionError::LocalH3Error(_) => SessionEnd::Closed,
+    ConnectionError::ConnectionClosed(_)
+    | ConnectionError::TimedOut
+    | ConnectionError::QuicProto(_)
+    | ConnectionError::CidsExhausted => SessionEnd::Lost,
   }
 }
 

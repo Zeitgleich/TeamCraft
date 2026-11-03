@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-message-sound-remove"
+description = "Enables the message_sound_remove command without any pre-configured scope."
+commands.allow = ["message_sound_remove"]
+
+[[permission]]
+identifier = "deny-message-sound-remove"
+description = "Denies the message_sound_remove command without any pre-configured scope."
+commands.deny = ["message_sound_remove"]

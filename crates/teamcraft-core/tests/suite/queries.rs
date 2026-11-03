@@ -7,6 +7,7 @@
 use crate::common;
 
 use common::{Peer, backend_of, run_commands, settle};
+use teamcraft_client_api::actions::LinkedMessage;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::remote::{ChatAction, ChatAnswer, ChatQuery};
 use teamcraft_core::api::fake::FakeServer;
@@ -53,6 +54,25 @@ async fn search_mentions_and_saved_searches_answer_over_ipc() {
     panic!("no saved searches");
   };
   assert_eq!(searches[0].name, "Budget");
+
+  // A message link's preview, resolved from the asking device's own store.
+  let budget = bob_ui
+    .messages(channel, 0, 10)
+    .into_iter()
+    .find(|message| message.body.contains("Friday"))
+    .unwrap();
+  let link = bob_ui.permalink(channel, budget.id).unwrap();
+  let answer = ask(
+    &bob_ui,
+    &format!(r#"{{"kind":"linked_message","link":"{link}"}}"#),
+  );
+  let ChatAnswer::LinkedMessage {
+    maybe_linked: Some(LinkedMessage::Visible { message, .. }),
+  } = answer
+  else {
+    panic!("unexpected answer {answer:?}");
+  };
+  assert_eq!(message.id, budget.id);
 
   // Unknown queries from a newer UI are answered as unsupported, not as errors.
   assert_eq!(ask(&bob_ui, r#"{"kind":"time_travel"}"#), ChatAnswer::Unsupported);

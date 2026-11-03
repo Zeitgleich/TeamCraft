@@ -6,6 +6,7 @@
 use opus::{Application, Bitrate, Channels, Decoder, Encoder};
 use thiserror::Error;
 
+use crate::audio_frame::planned_loss_percent;
 pub use crate::audio_frame::{FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ};
 /// Largest Opus packet we produce (RFC 6716 allows 1275 bytes per frame).
 const MAX_PACKET_BYTES: usize = 1275;
@@ -14,6 +15,8 @@ const MAX_PACKET_BYTES: usize = 1275;
 pub struct OpusEncoder {
   encoder: Encoder,
   channels: AudioChannels,
+  /// The configured expected loss: the least FEC is planned for.
+  loss_floor_percent: u8,
 }
 
 /// Decodes Opus packets and conceals lost ones.
@@ -107,7 +110,14 @@ impl OpusEncoder {
     Ok(Self {
       encoder,
       channels: config.channels,
+      loss_floor_percent: config.expected_loss_percent.min(100),
     })
+  }
+
+  /// Plans in-band FEC for the loss measured on the uplink (never below the configured value).
+  pub fn set_measured_loss_percent(&mut self, measured_percent: u8) -> Result<(), OpusError> {
+    let planned = planned_loss_percent(self.loss_floor_percent, measured_percent);
+    Ok(self.encoder.set_packet_loss_perc(i32::from(planned))?)
   }
 
   /// Encodes one 20 ms frame (interleaved samples for stereo).

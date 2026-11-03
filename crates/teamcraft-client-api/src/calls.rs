@@ -2,7 +2,8 @@
 //! `teamcraft-media`; these types only describe what the UI shows and lets the user pick.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{BackgroundId, CallBackgroundMode, OrgBackgroundId};
+use teamcraft_proto::{BackgroundId, CallBackgroundMode, CallRosterEntry, OrgBackgroundId};
+pub use teamcraft_proto::{ScreenContentMode, ScreenShareResolution};
 
 use crate::model::{ConversationId, TimestampMs, UserId};
 
@@ -147,6 +148,77 @@ impl OrgBackgrounds {
           .flatten()
       });
     fallback.map_or(BackgroundEffect::None, BackgroundEffect::Org)
+  }
+
+  /// How the camera starts when the user asked for `requested`: under a required background only
+  /// with one of the organization's pictures applied, else with the allowed effect where this
+  /// device can apply it and without one where it can't.
+  pub fn camera_background(&self, requested: BackgroundEffect, can_apply_effects: bool) -> CameraBackground {
+    match (self.effective(requested), self.is_required()) {
+      (BackgroundEffect::Org(id), true) if can_apply_effects => {
+        CameraBackground::Effect(BackgroundEffect::Org(id))
+      },
+      (_, true) => CameraBackground::Refused,
+      (BackgroundEffect::None, false) => CameraBackground::Plain,
+      (_, false) if !can_apply_effects => CameraBackground::Plain,
+      (effect, false) => CameraBackground::Effect(effect),
+    }
+  }
+}
+
+/// How a camera starts under the organization's rule (admin.md §3.5), from the effect the rule
+/// leaves of the user's choice ([`OrgBackgrounds::effective`]) and whether this device can apply
+/// effects at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CameraBackground {
+  /// The camera image as it is: no effect chosen, or one this device can't apply (the camera goes
+  /// on without it).
+  Plain,
+  /// Through the effects, with this effect.
+  Effect(BackgroundEffect),
+  /// The organization requires one of its backgrounds, which this device can't put behind the
+  /// person (no effects, or the picture is missing): the camera stays off.
+  Refused,
+}
+
+/// Which background effects the UI offers on this device (#439).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EffectsOffer {
+  /// Every effect, in the pre-join check too: the desktop and mobile apps.
+  #[default]
+  Full,
+  /// Blur, the drawn illustrations and the user's own and the organization's pictures, in the
+  /// call: a browser that runs the effects (WebGPU). The photos aren't offered (their full
+  /// pictures are only in the apps) and the pre-join check shows the camera without effects.
+  InCall,
+  /// None: a browser without WebGPU, or with one too slow for video.
+  Unavailable,
+}
+
+impl EffectsOffer {
+  /// Whether the call screen offers the effects.
+  pub fn has_picker(self) -> bool {
+    self != Self::Unavailable
+  }
+
+  /// Whether the pre-join screen offers them (its self view shows the effect).
+  pub fn has_preview(self) -> bool {
+    self == Self::Full
+  }
+
+  /// Whether the photos are among them.
+  pub fn has_photos(self) -> bool {
+    self == Self::Full
+  }
+
+  /// Whether `effect` is one of the offered effects (own and organization pictures always are,
+  /// where effects are offered at all).
+  pub fn offers(self, effect: BackgroundEffect) -> bool {
+    match effect {
+      BackgroundEffect::Preset(preset) if preset.is_photo() => self.has_photos(),
+      BackgroundEffect::None => true,
+      _ => self.has_picker(),
+    }
   }
 }
 
@@ -301,11 +373,170 @@ pub struct MediaDevice {
   pub label: String,
 }
 
+/// A camera this device opened in place of the chosen (or default) one, which didn't open: declined
+/// on the iPhone, in use by another app, or no mode it could be set to (#819). The choice itself
+/// stays; the next start tries it again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraFallback {
+  /// The camera that delivers now.
+  pub used: MediaDevice,
+  /// The camera that didn't open.
+  pub failed: MediaDevice,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MediaDevices {
   pub cameras: Vec<MediaDevice>,
   pub microphones: Vec<MediaDevice>,
   pub speakers: Vec<MediaDevice>,
+  /// Whether there is a camera at all, beyond the named ones (browsers name devices only once
+  /// the page may use them). Older shells send nothing: [`DevicePresence::Unknown`].
+  #[serde(default)]
+  pub camera_presence: DevicePresence,
+  #[serde(default)]
+  pub microphone_presence: DevicePresence,
+  /// The sound system the desktop app plays and records through (#1072), for the audio settings.
+  /// Browsers and older shells send nothing: [`AudioSystem::Unknown`].
+  #[serde(default)]
+  pub audio_system: AudioSystem,
+}
+
+/// Which sound system a desktop app's call audio goes through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioSystem {
+  PipeWire,
+  PulseAudio,
+  Alsa,
+  CoreAudio,
+  Wasapi,
+  /// The browser's, another one, or not said (also what a newer value reads as).
+  #[default]
+  #[serde(other)]
+  Unknown,
+}
+
+/// What listing the devices found for one kind of input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DevicePresence {
+  /// At least one device, named in the list.
+  Present,
+  /// At least one device, unnamed until the user allows the page to use it.
+  Hidden,
+  /// There is a device, but the user or a site setting refused access to it.
+  Blocked,
+  /// No device of this kind.
+  Missing,
+  /// Not listed yet, or a platform that doesn't say (also what a newer value reads as).
+  #[default]
+  #[serde(other)]
+  Unknown,
+}
+
+/// A browser's permission for the camera or the microphone (`navigator.permissions.query`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserPermission {
+  Granted,
+  Denied,
+  /// The user hasn't been asked yet (or dismissed the question).
+  Prompt,
+  /// The browser can't say (no Permissions API, or it doesn't know the name).
+  Unknown,
+}
+
+impl BrowserPermission {
+  /// From `PermissionStatus.state`.
+  pub fn from_state(state: &str) -> Self {
+    match state {
+      "granted" => Self::Granted,
+      "denied" => Self::Denied,
+      "prompt" => Self::Prompt,
+      _ => Self::Unknown,
+    }
+  }
+}
+
+impl AudioSystem {
+  /// The sound system's own name (not translated); `None` when unknown.
+  pub fn name(self) -> Option<&'static str> {
+    match self {
+      Self::PipeWire => Some("PipeWire"),
+      Self::PulseAudio => Some("PulseAudio"),
+      Self::Alsa => Some("ALSA"),
+      Self::CoreAudio => Some("Core Audio"),
+      Self::Wasapi => Some("WASAPI"),
+      Self::Unknown => None,
+    }
+  }
+}
+
+impl MediaDevices {
+  /// Devices from a platform that names every device it lists (the desktop app).
+  pub fn listed(
+    cameras: Vec<MediaDevice>,
+    microphones: Vec<MediaDevice>,
+    speakers: Vec<MediaDevice>,
+  ) -> Self {
+    Self {
+      camera_presence: DevicePresence::of_named(&cameras),
+      microphone_presence: DevicePresence::of_named(&microphones),
+      audio_system: AudioSystem::Unknown,
+      cameras,
+      microphones,
+      speakers,
+    }
+  }
+}
+
+impl DevicePresence {
+  /// From a browser's listing of one kind of input (`enumerateDevices`), its permission for that
+  /// kind, and whether the listing had any device at all.
+  ///
+  /// Browsers name devices only once the page may use them; until then they list one unnamed
+  /// device per kind that exists. A browser that lists nothing at all before permission tells
+  /// nothing, so an empty kind counts as missing only when the permission is granted or the
+  /// browser listed other devices.
+  pub fn in_browser<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+    permission: BrowserPermission,
+    has_listed_any: bool,
+  ) -> Self {
+    match (Self::from_ids(ids), permission) {
+      (Self::Present, _) => Self::Present,
+      (_, BrowserPermission::Denied) => Self::Blocked,
+      (Self::Missing, BrowserPermission::Granted) => Self::Missing,
+      (Self::Missing, _) if has_listed_any => Self::Missing,
+      (Self::Missing, _) => Self::Unknown,
+      (other, _) => other,
+    }
+  }
+
+  /// From a listing's device ids. Browsers list a device with an empty id (one per kind) until
+  /// the page may use that kind.
+  pub fn from_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Self {
+    let mut presence = Self::Missing;
+    for id in ids {
+      if !id.is_empty() {
+        return Self::Present;
+      }
+      presence = Self::Hidden;
+    }
+    presence
+  }
+
+  /// Whether the device can't be used at all: none there, or access refused.
+  pub fn is_unavailable(self) -> bool {
+    matches!(self, Self::Missing | Self::Blocked)
+  }
+
+  fn of_named(devices: &[MediaDevice]) -> Self {
+    if devices.is_empty() {
+      Self::Missing
+    } else {
+      Self::Present
+    }
+  }
 }
 
 /// A remote participant as the media layer reports it.
@@ -322,6 +553,68 @@ pub struct Participant {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HuddleInfo {
   pub participants: Vec<UserId>,
+  /// Whether the user is in the call with a device other than this one.
+  #[serde(default)]
+  pub own_devices: OwnCallDevices,
+}
+
+/// The user's own devices in a call this device is not in (issue #976). The roster is kept per
+/// device; which of its entries is this device is known once this device joined a call.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnCallDevices {
+  /// This device doesn't know its own entry (it hasn't joined a call yet, or the roster names no
+  /// devices): the user being listed is all there is to go by.
+  #[default]
+  Unknown,
+  /// No device of the user but this one is listed: this device left, and the roster still says
+  /// so for a moment (or a leave of this device got lost).
+  NoneElsewhere,
+  /// Another device of the user is in the call.
+  Elsewhere,
+}
+
+impl HuddleInfo {
+  /// Whether `me` is in this call on another device: what "You are in this call on another
+  /// device" and its "Leave on all devices / Join here too / Bring the call here" stand for.
+  pub fn is_on_other_device(&self, me: UserId) -> bool {
+    match self.own_devices {
+      OwnCallDevices::Unknown => self.participants.contains(&me),
+      OwnCallDevices::NoneElsewhere => false,
+      OwnCallDevices::Elsewhere => true,
+    }
+  }
+}
+
+impl OwnCallDevices {
+  /// Where the user of `this_device` is in a call with the roster `devices`.
+  pub fn of(maybe_this_device: Option<CallRosterEntry>, devices: &[CallRosterEntry]) -> Self {
+    let Some(this_device) = maybe_this_device else {
+      return Self::Unknown;
+    };
+    if devices.is_empty() {
+      return Self::Unknown;
+    }
+    let is_elsewhere = devices
+      .iter()
+      .any(|entry| entry.user_id == this_device.user_id && entry.device_id != this_device.device_id);
+    if is_elsewhere {
+      Self::Elsewhere
+    } else {
+      Self::NoneElsewhere
+    }
+  }
+}
+
+/// A move of the user's DM call into a meeting room, as a member of the DM's encryption group
+/// announced it (docs/meetings.md, "A call becomes a meeting"): who moved it and whom they added.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallMoveOffer {
+  pub by: UserId,
+  pub added: Vec<UserId>,
+  /// This device asked for the move ("Add people" here): it follows without the user's tap.
+  #[serde(default)]
+  pub is_requested_here: bool,
 }
 
 /// A call someone started that the user can accept or decline.
@@ -332,11 +625,63 @@ pub struct IncomingCall {
   pub with_video: bool,
 }
 
+/// Why this app can't take part in calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallsUnavailableReason {
+  /// This app has no call support at all.
+  NotInThisApp,
+  /// The browser lacks what calls need (WebTransport, WebCodecs audio, AudioWorklet).
+  BrowserUnsupported,
+  /// TeamCraft is open in another tab of this browser, which runs the account; calls run there.
+  OtherTab,
+}
+
 /// What the user is about to join.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallRequest {
   pub conversation: ConversationId,
   pub kind: CallKind,
+}
+
+/// How this device's media starts when it joins: the pre-join screen's choice (#453). It travels
+/// with the join, so the media layer starts in it: a muted microphone sends nothing before an
+/// unmute, and the camera needs no action of its own after the join.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JoinMedia {
+  /// The microphone stays muted from the first frame.
+  pub is_muted: bool,
+  /// The camera starts with the call. One that can't start leaves the call running without it.
+  pub is_camera_on: bool,
+}
+
+/// The pre-join screen's check of this device's camera and microphone (#442). Nothing of it
+/// leaves the device: the camera only reaches the self view, the microphone only the level meter.
+/// Both off releases them; so does a join, which opens them for the call itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallPreview {
+  /// Show the camera as the call would send it, with the background effect.
+  #[serde(default)]
+  pub is_camera_on: bool,
+  /// Measure the microphone for the level meter.
+  #[serde(default)]
+  pub is_mic_on: bool,
+}
+
+/// How far the pre-join check got with the camera ([`CallPreview`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewCamera {
+  /// Not asked for, or released.
+  #[default]
+  Off,
+  /// Opening; no picture yet.
+  Starting,
+  /// Pictures arrive: the self view shows them.
+  Live,
+  /// It didn't open or sent no picture; the check's action said why where one waited.
+  Failed,
+  #[serde(other)]
+  Unknown,
 }
 
 /// The call this device is in, as the media layer reports it.
@@ -366,6 +711,16 @@ pub struct ActiveCall {
   /// Whether this device's screen share carries the computer's sound.
   #[serde(default)]
   pub screen_sound: ScreenShareSound,
+  /// This device lost its connection and is rejoining; media pauses meanwhile.
+  #[serde(default)]
+  pub is_reconnecting: bool,
+  /// Others whose connection was lost and who are rejoining.
+  #[serde(default)]
+  pub reconnecting: Vec<UserId>,
+  /// Somebody added people to this DM call: it moved into this meeting chat, and the UI switches
+  /// over to its call (docs/meetings.md, "A call becomes a meeting").
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_moved_to: Option<ConversationId>,
 }
 
 /// The sound of a screen share (the computer's playback without the call itself).
@@ -382,12 +737,94 @@ pub enum ScreenShareSound {
   Unknown,
 }
 
+/// Which call status sounds play: the soft repeating tone while this device reconnects, the cues
+/// when it is back or the call is lost, and the quieter one when someone else drops.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CallStatusSounds {
+  #[default]
+  All,
+  /// Only the sounds about this device's own connection.
+  OwnOnly,
+  Off,
+  #[serde(other)]
+  Unknown,
+}
+
+impl CallStatusSounds {
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::All | Self::Unknown => "all",
+      Self::OwnOnly => "own_only",
+      Self::Off => "off",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Self {
+    match slug {
+      "own_only" => Self::OwnOnly,
+      "off" => Self::Off,
+      _ => Self::All,
+    }
+  }
+}
+
+/// How sharp a video may be (#967), like a video player's quality menu: `Auto` leaves it to the
+/// call, `Lines` caps it at that many lines (the picture's short side: 720 for "720p"). The own
+/// camera's setting caps what this device sends; a choice on another device's tile asks for at
+/// most that layer of its video (still capped by what it sends and by the connection).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoQuality {
+  #[default]
+  Auto,
+  Lines(u16),
+  /// A choice of a newer app: taken as `Auto`.
+  #[serde(other)]
+  Unknown,
+}
+
+impl VideoQuality {
+  /// The own camera's choices, best first.
+  pub const CAMERA_CHOICES: [VideoQuality; 4] =
+    [Self::Auto, Self::Lines(1080), Self::Lines(720), Self::Lines(360)];
+
+  /// At most how many lines; `None` for Auto.
+  pub fn max_lines(self) -> Option<u16> {
+    match self {
+      Self::Lines(lines) => Some(lines),
+      Self::Auto | Self::Unknown => None,
+    }
+  }
+
+  /// For a choice in a `<select>`: `auto` or the lines.
+  pub fn slug(self) -> String {
+    match self.max_lines() {
+      Some(lines) => lines.to_string(),
+      None => "auto".to_owned(),
+    }
+  }
+
+  /// [`VideoQuality::slug`] read back; anything else is Auto.
+  pub fn from_slug(slug: &str) -> Self {
+    slug.parse().map_or(Self::Auto, Self::Lines)
+  }
+}
+
 /// Why the last call ended other than by leaving.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum CallEndReason {
-  RemovedByHost { by: UserId },
-  EndedByHost { by: UserId },
+  RemovedByHost {
+    by: UserId,
+  },
+  EndedByHost {
+    by: UserId,
+  },
+  /// The connection broke and rejoining didn't succeed within the grace period.
+  ConnectionLost,
+  /// The other side of a 1:1 call left, so the call ended for both (issue #997).
+  OtherSideLeft,
 }
 
 /// Push-to-talk: the microphone is open only while the shortcut is held.
@@ -429,7 +866,11 @@ pub struct RemoteVideoTrack {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunningCall {
   pub conversation: ConversationId,
+  /// Each person once.
   pub participants: Vec<UserId>,
+  /// Each device in the call (a person may be in it with several).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub devices: Vec<CallRosterEntry>,
   /// DMs ring until someone else joins.
   pub is_ringing: bool,
 }
@@ -444,6 +885,25 @@ pub enum CallPhase {
 
 #[cfg(test)]
 mod tests {
+
+  mod video_quality {
+    use super::super::*;
+
+    #[test]
+    fn qualities_travel_as_auto_or_lines_and_unknown_ones_count_as_auto() {
+      let wire = |quality: VideoQuality| serde_json::to_string(&quality).unwrap();
+      assert_eq!(wire(VideoQuality::Auto), r#""auto""#);
+      assert_eq!(wire(VideoQuality::Lines(720)), r#"{"lines":720}"#);
+      let read = |json: &str| serde_json::from_str::<VideoQuality>(json).unwrap();
+      assert_eq!(read(r#"{"lines":1080}"#), VideoQuality::Lines(1080));
+      assert_eq!(read(r#""best_effort""#), VideoQuality::Unknown);
+      assert_eq!(VideoQuality::Unknown.max_lines(), None);
+      for quality in VideoQuality::CAMERA_CHOICES {
+        assert_eq!(VideoQuality::from_slug(&quality.slug()), quality);
+      }
+      assert_eq!(VideoQuality::from_slug("sharp"), VideoQuality::Auto);
+    }
+  }
 
   mod org_backgrounds {
     use super::*;
@@ -512,6 +972,48 @@ mod tests {
       assert_eq!(with_default.effective(BackgroundEffect::BlurLight), picture("2"));
     }
 
+    /// #439: a browser that can't apply effects keeps the camera off only where a background is
+    /// required; elsewhere the camera goes on without the effect.
+    #[test]
+    fn the_camera_starts_with_a_required_background_or_not_at_all() {
+      let required = org(CallBackgroundMode::Required, Some("2"), true);
+      assert_eq!(
+        required.camera_background(BackgroundEffect::None, true),
+        CameraBackground::Effect(picture("2"))
+      );
+      assert_eq!(
+        required.camera_background(BackgroundEffect::BlurLight, false),
+        CameraBackground::Refused
+      );
+      let without_pictures = OrgBackgrounds {
+        images: Vec::new(),
+        ..org(CallBackgroundMode::Required, None, true)
+      };
+      assert_eq!(
+        without_pictures.camera_background(BackgroundEffect::None, true),
+        CameraBackground::Refused,
+        "required, but nothing to put behind the person"
+      );
+      let free = org(CallBackgroundMode::Free, None, true);
+      assert_eq!(
+        free.camera_background(BackgroundEffect::None, true),
+        CameraBackground::Plain
+      );
+      assert_eq!(
+        free.camera_background(BackgroundEffect::BlurStrong, true),
+        CameraBackground::Effect(BackgroundEffect::BlurStrong)
+      );
+      assert_eq!(
+        free.camera_background(BackgroundEffect::BlurStrong, false),
+        CameraBackground::Plain
+      );
+      assert_eq!(
+        OrgBackgrounds::default().camera_background(BackgroundEffect::BlurLight, true),
+        CameraBackground::Effect(BackgroundEffect::BlurLight),
+        "an unknown rule restricts nothing"
+      );
+    }
+
     #[test]
     fn exempt_users_and_unknown_modes() {
       let guest = org(CallBackgroundMode::Required, None, false);
@@ -520,6 +1022,29 @@ mod tests {
       assert_eq!(newer.rule(), CallBackgroundMode::OrgOnly);
       assert!(newer.allows(BackgroundEffect::BlurLight));
     }
+  }
+
+  #[test]
+  fn browsers_offer_effects_in_the_call_without_photos() {
+    let photo = BackgroundEffect::Preset(BackgroundPreset::LivingRoom);
+    let illustration = BackgroundEffect::Preset(BackgroundPreset::Forest);
+    let own = BackgroundEffect::Custom("4".parse().unwrap());
+    let full = EffectsOffer::Full;
+    assert!(full.has_picker() && full.has_preview() && full.has_photos());
+    assert!(
+      [photo, illustration, own]
+        .iter()
+        .all(|effect| full.offers(*effect))
+    );
+    let in_call = EffectsOffer::InCall;
+    assert!(in_call.has_picker() && !in_call.has_preview() && !in_call.has_photos());
+    assert!(!in_call.offers(photo));
+    assert!(
+      in_call.offers(illustration) && in_call.offers(own) && in_call.offers(BackgroundEffect::BlurLight)
+    );
+    let none = EffectsOffer::Unavailable;
+    assert!(!none.has_picker() && !none.has_preview());
+    assert!(!none.offers(BackgroundEffect::BlurLight) && none.offers(BackgroundEffect::None));
   }
 
   #[test]
@@ -583,6 +1108,95 @@ impl CallHistoryItem {
 
   pub fn is_ongoing(&self) -> bool {
     self.maybe_ended_at.is_none()
+  }
+}
+
+#[cfg(test)]
+mod device_tests {
+  use super::*;
+
+  #[test]
+  fn browser_listings_tell_hidden_devices_from_missing_ones() {
+    assert_eq!(DevicePresence::from_ids([]), DevicePresence::Missing);
+    assert_eq!(DevicePresence::from_ids([""]), DevicePresence::Hidden);
+    assert_eq!(DevicePresence::from_ids(["", "cam-1"]), DevicePresence::Present);
+    assert_eq!(
+      DevicePresence::from_ids(["default", "mic-1"]),
+      DevicePresence::Present
+    );
+  }
+
+  #[test]
+  fn an_empty_kind_is_missing_only_when_the_browser_would_have_listed_it() {
+    use BrowserPermission::{Granted, Prompt, Unknown};
+    // Allowed, or the browser listed other devices (unnamed ones per kind before permission).
+    assert_eq!(
+      DevicePresence::in_browser([], Granted, false),
+      DevicePresence::Missing
+    );
+    assert_eq!(
+      DevicePresence::in_browser([], Prompt, true),
+      DevicePresence::Missing
+    );
+    // A browser that lists nothing before permission tells nothing.
+    assert_eq!(
+      DevicePresence::in_browser([], Prompt, false),
+      DevicePresence::Unknown
+    );
+    assert_eq!(
+      DevicePresence::in_browser([], Unknown, false),
+      DevicePresence::Unknown
+    );
+  }
+
+  #[test]
+  fn a_refused_permission_blocks_unless_devices_are_named() {
+    use BrowserPermission::{Denied, Prompt};
+    assert_eq!(
+      DevicePresence::in_browser([""], Denied, true),
+      DevicePresence::Blocked
+    );
+    assert_eq!(
+      DevicePresence::in_browser([], Denied, false),
+      DevicePresence::Blocked
+    );
+    assert_eq!(
+      DevicePresence::in_browser([""], Prompt, true),
+      DevicePresence::Hidden
+    );
+    assert_eq!(
+      DevicePresence::in_browser(["cam-1"], Denied, true),
+      DevicePresence::Present
+    );
+    assert_eq!(BrowserPermission::from_state("denied"), Denied);
+    assert_eq!(BrowserPermission::from_state("later"), BrowserPermission::Unknown);
+  }
+
+  #[test]
+  fn named_listings_are_present_or_missing() {
+    let camera = MediaDevice {
+      id: "cam-1".into(),
+      label: "Camera".into(),
+    };
+    let devices = MediaDevices::listed(vec![camera], Vec::new(), Vec::new());
+    assert_eq!(devices.camera_presence, DevicePresence::Present);
+    assert_eq!(devices.microphone_presence, DevicePresence::Missing);
+  }
+
+  #[test]
+  fn presence_is_forward_compatible_on_the_wire() {
+    let old: MediaDevices = serde_json::from_str(r#"{"cameras":[],"microphones":[],"speakers":[]}"#).unwrap();
+    assert_eq!(old.camera_presence, DevicePresence::Unknown);
+    let newer: MediaDevices = serde_json::from_str(
+      r#"{"cameras":[],"microphones":[],"speakers":[],"camera_presence":"on_mars","microphone_presence":"blocked"}"#,
+    )
+    .unwrap();
+    assert_eq!(newer.camera_presence, DevicePresence::Unknown);
+    assert_eq!(newer.microphone_presence, DevicePresence::Blocked);
+    assert_eq!(
+      serde_json::to_value(DevicePresence::Missing).unwrap(),
+      serde_json::json!("missing")
+    );
   }
 }
 
@@ -661,6 +1275,59 @@ mod preset_tests {
       (BackgroundPreset::LakeMorning, "\"lake_morning\""),
     ] {
       assert_eq!(serde_json::to_string(&preset).unwrap(), wire);
+    }
+  }
+}
+
+#[cfg(test)]
+mod huddle_tests {
+  use super::*;
+  use crate::model::id_from_raw;
+
+  #[test]
+  fn another_device_counts_only_when_the_roster_lists_one() {
+    let (me, other) = (id_from_raw(1), id_from_raw(2));
+    let this_device = entry(me, 10);
+    let mine_elsewhere = [entry(me, 10), entry(me, 11), entry(other, 20)];
+    let only_this_one = [entry(me, 10), entry(other, 20)];
+    assert_eq!(
+      OwnCallDevices::of(Some(this_device), &mine_elsewhere),
+      OwnCallDevices::Elsewhere
+    );
+    assert_eq!(
+      OwnCallDevices::of(Some(this_device), &only_this_one),
+      OwnCallDevices::NoneElsewhere
+    );
+    assert_eq!(
+      OwnCallDevices::of(Some(this_device), &[entry(other, 20)]),
+      OwnCallDevices::NoneElsewhere
+    );
+    assert_eq!(OwnCallDevices::of(None, &mine_elsewhere), OwnCallDevices::Unknown);
+    assert_eq!(
+      OwnCallDevices::of(Some(this_device), &[]),
+      OwnCallDevices::Unknown
+    );
+  }
+
+  /// Issue #976: the bar says "on another device" only for a device other than this one; without
+  /// knowing its own entry, the user being listed counts as before.
+  #[test]
+  fn the_bar_offers_the_other_device_choices_only_for_another_device() {
+    let (me, other) = (id_from_raw(1), id_from_raw(2));
+    let huddle = |own_devices| HuddleInfo {
+      participants: vec![me, other],
+      own_devices,
+    };
+    assert!(huddle(OwnCallDevices::Elsewhere).is_on_other_device(me));
+    assert!(!huddle(OwnCallDevices::NoneElsewhere).is_on_other_device(me));
+    assert!(huddle(OwnCallDevices::Unknown).is_on_other_device(me));
+    assert!(!huddle(OwnCallDevices::Unknown).is_on_other_device(id_from_raw(3)));
+  }
+
+  fn entry(user: UserId, device: u64) -> CallRosterEntry {
+    CallRosterEntry {
+      user_id: user,
+      device_id: id_from_raw(device),
     }
   }
 }

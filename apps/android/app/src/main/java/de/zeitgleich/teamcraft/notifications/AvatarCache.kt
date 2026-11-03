@@ -1,0 +1,190 @@
+package de.zeitgleich.teamcraft.notifications
+
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.BitmapShader
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Shader
+import android.util.Log
+import android.util.LruCache
+import androidx.core.graphics.drawable.IconCompat
+import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.withContext
+import uniffi.teamcraft_ffi.TeamCraft
+
+/**
+ * The profile pictures of people, for the app's screens (issue #846) and its notifications. A
+ * picture is read from the core on demand (never from the push payload), kept as a file in the
+ * app's cache folder and drawn as a circle; the last [MEMORY_ENTRIES] decoded circles stay in
+ * memory. Without a picture, or until it arrives, the caller falls back to the generated initials.
+ * Pictures are refreshed after [PICTURE_MAX_AGE_MS]; people without one are asked again after
+ * [MISSING_MAX_AGE_MS].
+ */
+class AvatarCache(
+  private val context: Context,
+  private val core: suspend () -> TeamCraft,
+) {
+  private val inFlight = ConcurrentHashMap.newKeySet<String>()
+  private val memory = LruCache<String, Bitmap>(MEMORY_ENTRIES)
+  private val changeCount = MutableStateFlow(0)
+
+  /** Counts changed pictures: a screen reads its picture again when this moves. */
+  val changes: StateFlow<Int> = changeCount
+
+  /** Counts [clear]s: a refresh that started before one must not write its picture afterwards. */
+  private var generation = 0
+  private val writeLock = Any()
+
+  /** The circular picture of `userId` if one is cached; never touches the network. */
+  fun maybeIcon(userId: String): IconCompat? = maybeBitmap(userId)?.let(IconCompat::createWithBitmap)
+
+  /** Decodes from the cache folder unless the picture is in memory; call off the main thread. */
+  fun maybeBitmap(userId: String): Bitmap? {
+    memory.get(userId)?.let { return it }
+    val file = pictureFile(userId) ?: return null
+    if (!file.isFile) return null
+    return decodeCircle(file)?.also { memory.put(userId, it) }
+  }
+
+  /** The picture if it is decoded already; never touches the disk, so a screen can ask while drawing. */
+  fun maybeDecoded(userId: String): Bitmap? = memory.get(userId)
+
+  /** [maybeBitmap] on the IO dispatcher. */
+  suspend fun loadBitmap(userId: String): Bitmap? = withContext(Dispatchers.IO) { maybeBitmap(userId) }
+
+  /**
+   * Makes sure a fresh picture is cached. Answers `true` when a new picture arrived, so the caller
+   * can update what it already shows; `false` for no change, no picture, or a failure (a failed
+   * fetch is retried with the next message).
+   */
+  suspend fun refresh(userId: String): Boolean = withContext(Dispatchers.IO) { fetchIfStale(userId) }
+
+  private suspend fun fetchIfStale(userId: String): Boolean {
+    val picture = pictureFile(userId) ?: return false
+    val missing = missingFile(userId) ?: return false
+    if (isFresh(picture, PICTURE_MAX_AGE_MS) || isFresh(missing, MISSING_MAX_AGE_MS)) return false
+    if (!inFlight.add(userId)) return false
+    val startedIn = synchronized(writeLock) { generation }
+    return try {
+      val bytes = core().avatarPicture(userId, MAX_PICTURE_BYTES)
+      // Under the lock, so a sign-out's clear() can't be followed by this write.
+      synchronized(writeLock) {
+        when {
+          generation != startedIn -> false
+          bytes == null -> {
+            val hadPicture = picture.delete()
+            missing.parentFile?.mkdirs()
+            missing.writeBytes(ByteArray(0))
+            missing.setLastModified(System.currentTimeMillis())
+            // A picture that was removed leaves the screens too.
+            if (hadPicture) changed(userId)
+            false
+          }
+          !isDecodable(bytes) -> false
+          else -> {
+            picture.parentFile?.mkdirs()
+            picture.writeBytes(bytes)
+            missing.delete()
+            changed(userId)
+            true
+          }
+        }
+      }
+    } catch (cancelled: CancellationException) {
+      throw cancelled
+    } catch (failure: Exception) {
+      // Offline, signed out, or a storage error: the initials stay, the next message tries again.
+      Log.w(TAG, "avatar not fetched: ${failure.javaClass.simpleName}")
+      false
+    } finally {
+      inFlight.remove(userId)
+    }
+  }
+
+  /** Forgets every picture (sign-out): they belong to the account that is gone. */
+  fun clear() {
+    synchronized(writeLock) {
+      generation++
+      memory.evictAll()
+      runCatching { directory().deleteRecursively() }
+      changeCount.value++
+    }
+  }
+
+  private fun changed(userId: String) {
+    memory.remove(userId)
+    changeCount.value++
+  }
+
+  private fun directory() = File(context.cacheDir, DIRECTORY)
+
+  /** Only numeric user IDs name a file; anything else (a display name used as key) has no picture. */
+  private fun pictureFile(userId: String): File? =
+    userId.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }?.let { File(directory(), "$it.img") }
+
+  private fun missingFile(userId: String): File? = pictureFile(userId)?.let { File(directory(), "${it.nameWithoutExtension}.none") }
+
+  private fun isFresh(file: File, maxAgeMs: Long): Boolean =
+    file.isFile && System.currentTimeMillis() - file.lastModified() < maxAgeMs
+
+  private fun isDecodable(bytes: ByteArray): Boolean {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    return isReasonable(bounds.outWidth, bounds.outHeight)
+  }
+
+  private fun decodeCircle(file: File): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(file.path, bounds)
+    if (!isReasonable(bounds.outWidth, bounds.outHeight)) return null
+    val options = BitmapFactory.Options().apply {
+      inSampleSize = sampleSize(minOf(bounds.outWidth, bounds.outHeight))
+    }
+    val source = BitmapFactory.decodeFile(file.path, options) ?: return null
+    return circle(source)
+  }
+
+  companion object {
+    private const val DIRECTORY = "avatars"
+    private const val TAG = "TeamCraftNotify"
+    private const val SIZE_PX = 128
+
+    /** Decoded circles kept in memory: [SIZE_PX] squared ARGB is 64 KiB each, so 4 MiB at most. */
+    private const val MEMORY_ENTRIES = 64
+    private const val MAX_PICTURE_BYTES = 2_097_152u // 2 MiB; unsigned arithmetic is not a constant expression
+    private const val PICTURE_MAX_AGE_MS = 12L * 60 * 60 * 1000
+    private const val MISSING_MAX_AGE_MS = 60L * 60 * 1000
+
+    /** Profile pictures are small; a very long thin one would still decode to a huge bitmap. */
+    private const val MAX_SIDE_PX = 4096
+
+    /** Whether a picture of this size (as the header says) may be decoded. */
+    fun isReasonable(widthPx: Int, heightPx: Int): Boolean =
+      widthPx > 0 && heightPx > 0 && maxOf(widthPx, heightPx) <= MAX_SIDE_PX
+
+    /** The largest power of two that keeps the shorter side at least [SIZE_PX]. */
+    fun sampleSize(shorterSidePx: Int): Int {
+      var sample = 1
+      while (shorterSidePx / (sample * 2) >= SIZE_PX) sample *= 2
+      return sample
+    }
+
+    /** `source` centre-cropped to a square and drawn as a circle of [SIZE_PX]. */
+    fun circle(source: Bitmap): Bitmap {
+      val side = minOf(source.width, source.height)
+      val square = Bitmap.createBitmap(source, (source.width - side) / 2, (source.height - side) / 2, side, side)
+      val scaled = Bitmap.createScaledBitmap(square, SIZE_PX, SIZE_PX, true)
+      val result = Bitmap.createBitmap(SIZE_PX, SIZE_PX, Bitmap.Config.ARGB_8888)
+      val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { shader = BitmapShader(scaled, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP) }
+      Canvas(result).drawCircle(SIZE_PX / 2f, SIZE_PX / 2f, SIZE_PX / 2f, paint)
+      return result
+    }
+  }
+}

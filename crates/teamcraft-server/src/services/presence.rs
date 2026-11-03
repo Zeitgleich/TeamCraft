@@ -4,9 +4,9 @@ use std::collections::HashSet;
 
 use teamcraft_db::{PresencePreference, StoredLastSeen, StoredStatus};
 use teamcraft_proto::{
-  CustomStatus, GatewayEvent, LastSeenVisibility, ListPresenceResponse, ManualPresence, PresenceActivity,
-  PresenceState, PrivacyResponse, SetCustomStatusRequest, SetPresenceRequest, SetPresenceResponse,
-  UpdatePrivacyRequest, UserId, UserPresence,
+  CustomStatus, DeviceId, GatewayEvent, LastSeenVisibility, ListPresenceResponse, ManualPresence,
+  PresenceActivity, PresenceState, PrivacyResponse, SetCustomStatusRequest, SetPresenceRequest,
+  SetPresenceResponse, UpdatePrivacyRequest, UserId, UserPresence,
 };
 use time::OffsetDateTime;
 use tracing::warn;
@@ -22,8 +22,9 @@ const MAX_PRESENCE_QUERY_USERS: usize = 200;
 
 /// What other users see, from the user's manual choice and their devices.
 ///
-/// Appearing offline hides everything. Do-not-disturb wins over activity while it lasts. Otherwise
-/// the user is online if any device is active, away if devices are connected but idle, else offline.
+/// Appearing offline hides everything. Do-not-disturb wins over activity while it lasts, a manual
+/// away while any device is connected. Otherwise the user is online if any device is active, away
+/// if devices are connected but idle, else offline.
 pub fn derive_state(
   preference: &PresencePreference,
   devices: DeviceAggregate,
@@ -38,9 +39,11 @@ pub fn derive_state(
     return PresenceState::DoNotDisturb;
   }
   match devices {
+    DeviceAggregate::NoDevice => PresenceState::Offline,
+    // A manual away stays until the user picks another status, whatever the devices report.
+    _ if preference.manual == ManualPresence::Away => PresenceState::Away,
     DeviceAggregate::Active => PresenceState::Online,
     DeviceAggregate::Idle => PresenceState::Away,
-    DeviceAggregate::NoDevice => PresenceState::Offline,
   }
 }
 
@@ -152,8 +155,22 @@ async fn poll_calendar(state: &AppState, users: &[UserId], now: OffsetDateTime) 
   }
 }
 
+/// The user did something on `device` themselves (sent a message): the device counts as in use
+/// at once, whatever it last reported, and everybody learns the user is online (unless a manual
+/// status says otherwise).
+pub async fn note_user_action(state: &AppState, user: UserId, device: DeviceId) -> Result<(), ApiError> {
+  match state.hub.note_user_action(user, device) {
+    Some(user) => refresh_presence(state, user).await,
+    None => Ok(()),
+  }
+}
+
 /// Recomputes the user's presence and tells everyone who shares a conversation if it changed.
+///
+/// One refresh per user at a time, each reading the devices afresh: overlapping refreshes (two
+/// devices, the periodic refresh, a disconnect) can't announce a state older than the newest.
 pub async fn refresh_presence(state: &AppState, user: UserId) -> Result<(), ApiError> {
+  let _refreshing = state.hub.presence_refresh_lock(user).lock().await;
   let preference = state.database.get_presence_preference(user).await?;
   let now = OffsetDateTime::now_utc();
   let aggregate = state.hub.device_aggregate(user);
@@ -363,10 +380,16 @@ pub async fn set_custom_status(
   if !policy.presence.statuses_enabled {
     return Err(ApiError::Forbidden("statuses are switched off".into()));
   }
-  let maybe_preset =
-    policy.presence.presets.iter().find(|preset| {
-      preset.maybe_emoji.as_deref().map(str::trim) == emoji && Some(preset.text.trim()) == text
-    });
+  let maybe_preset = policy.presence.presets.iter().find(|preset| {
+    // A preset's empty emoji is no emoji, as in the request.
+    preset
+      .maybe_emoji
+      .as_deref()
+      .map(str::trim)
+      .filter(|e| !e.is_empty())
+      == emoji
+      && Some(preset.text.trim()) == text
+  });
   if !policy.presence.custom_status_enabled && maybe_preset.is_none() {
     return Err(ApiError::Forbidden(
       "custom statuses are switched off; choose one of the presets".into(),
@@ -383,11 +406,21 @@ pub async fn set_custom_status(
   if let Some(text) = text {
     super::validate_name(text, "status text", state.settings.get().limits.max_name_length)?;
   }
-  let maybe_expires_at = match request.maybe_expires_at {
-    Some(millis) => {
+  let now = OffsetDateTime::now_utc();
+  let maybe_expires_at = match (request.maybe_expires_in_seconds, request.maybe_expires_at) {
+    // A duration is resolved on this clock, whatever the client's clock says.
+    (Some(seconds), _) => {
+      let at = i64::try_from(seconds)
+        .ok()
+        .filter(|seconds| *seconds > 0)
+        .and_then(|seconds| now.checked_add(time::Duration::seconds(seconds)))
+        .ok_or_else(|| ApiError::InvalidRequest("invalid expires_in_seconds".into()))?;
+      Some(at)
+    },
+    (None, Some(millis)) => {
       let at =
         offset_date_time(millis).ok_or_else(|| ApiError::InvalidRequest("invalid expires_at".into()))?;
-      if at <= OffsetDateTime::now_utc() {
+      if at <= now {
         return Err(ApiError::InvalidRequest(
           "expires_at must be in the future".into(),
         ));
@@ -395,9 +428,9 @@ pub async fn set_custom_status(
       Some(at)
     },
     // A preset can end by itself.
-    None => maybe_preset
+    (None, None) => maybe_preset
       .and_then(|preset| preset.maybe_duration_minutes)
-      .map(|minutes| OffsetDateTime::now_utc() + time::Duration::minutes(i64::from(minutes))),
+      .map(|minutes| now + time::Duration::minutes(i64::from(minutes))),
   };
 
   let stored = StoredStatus {
@@ -462,6 +495,29 @@ mod tests {
     assert_eq!(
       derive_state(&auto, DeviceAggregate::NoDevice, now()),
       PresenceState::Offline
+    );
+  }
+
+  #[test]
+  fn a_manual_away_sticks_whatever_the_devices_report() {
+    let away = preference(ManualPresence::Away, None);
+    assert_eq!(
+      derive_state(&away, DeviceAggregate::Active, now()),
+      PresenceState::Away
+    );
+    assert_eq!(
+      derive_state(&away, DeviceAggregate::Idle, now()),
+      PresenceState::Away
+    );
+    assert_eq!(
+      derive_state(&away, DeviceAggregate::NoDevice, now()),
+      PresenceState::Offline
+    );
+    // Back to automatic: activity decides again.
+    let auto = preference(ManualPresence::Auto, None);
+    assert_eq!(
+      derive_state(&auto, DeviceAggregate::Active, now()),
+      PresenceState::Online
     );
   }
 

@@ -8,9 +8,10 @@ use teamcraft_proto::{
 
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_fields::{
-  CheckField, FieldErrors, SourceBadge, TextAreaField, TextField, format_scaled, list_text, parse_list,
-  parse_scaled,
+  CheckField, FieldErrors, SourceBadge, TextAreaField, TextField, format_scaled, is_web_url, list_text,
+  parse_list, parse_scaled,
 };
+use crate::form_errors::focus_first_invalid;
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 
@@ -20,7 +21,7 @@ const MINUTE: u64 = 60;
 type Values = BTreeMap<&'static str, String>;
 
 /// Groups in the order of the page.
-const GROUPS: [&str; 9] = [
+const GROUPS: [&str; 10] = [
   "server_rules",
   "notifications",
   "email_digest",
@@ -28,9 +29,14 @@ const GROUPS: [&str; 9] = [
   "limits",
   "integration",
   "local_accounts",
+  "sign_in_page",
   "mail_texts",
   "meeting_mail",
 ];
+/// The sign-in methods an admin can choose, as the form's values: comma-separated, in order.
+const METHOD_CHOICES: [&str; 4] = ["sso,local", "local,sso", "sso", "local"];
+/// The notification levels an instance default can be (`none` would silence everybody).
+const LEVEL_CHOICES: [&str; 2] = ["all", "mentions"];
 
 /// How a field is edited and checked.
 #[derive(Clone, Copy)]
@@ -41,11 +47,21 @@ enum Kind {
     scale: u64,
     max: u64,
     unit: Option<&'static str>,
+    /// Empty means none (off).
+    is_optional: bool,
   },
   Text,
   Area,
   /// Space or channel IDs.
   IdList,
+  /// The sign-in methods in order, one of [`METHOD_CHOICES`].
+  Methods,
+  /// A notification level, one of [`LEVEL_CHOICES`].
+  Level,
+  /// One language's entry of a text map (`help_text.de`); empty means none.
+  MapText,
+  /// An https link that may be empty (none).
+  Link,
 }
 
 #[derive(Clone, Copy)]
@@ -65,6 +81,7 @@ const fn count(id: &'static str) -> FieldDef {
       scale: 1,
       max: u32::MAX as u64,
       unit: None,
+      is_optional: false,
     },
   }
 }
@@ -76,6 +93,20 @@ const fn amount(id: &'static str, scale: u64, max: u64, unit: &'static str) -> F
       scale,
       max,
       unit: Some(unit),
+      is_optional: false,
+    },
+  }
+}
+
+/// Like [`amount`], but may be left empty (none).
+const fn optional_amount(id: &'static str, scale: u64, max: u64, unit: &'static str) -> FieldDef {
+  FieldDef {
+    id,
+    kind: Kind::Number {
+      scale,
+      max,
+      unit: Some(unit),
+      is_optional: true,
     },
   }
 }
@@ -86,6 +117,13 @@ const fn text(id: &'static str) -> FieldDef {
 
 const fn area(id: &'static str) -> FieldDef {
   FieldDef { id, kind: Kind::Area }
+}
+
+const fn map_text(id: &'static str) -> FieldDef {
+  FieldDef {
+    id,
+    kind: Kind::MapText,
+  }
 }
 
 const SECONDS: &str = "settings-unit-seconds";
@@ -106,9 +144,16 @@ const SERVER_RULES: &[FieldDef] = &[
     id: "default_channels",
     kind: Kind::IdList,
   },
+  optional_amount("remove_deactivated_after_days", 1, 3_650, DAYS),
+  amount("admin_join_request_days", 1, 90, DAYS),
+  flag("one_to_one_call_ends_for_both"),
 ];
 const NOTIFICATIONS: &[FieldDef] = &[
   flag("read_receipts_default"),
+  FieldDef {
+    id: "default_level",
+    kind: Kind::Level,
+  },
   amount("urgent_repeat_interval_secs", 1, U64_MAX, SECONDS),
   count("urgent_max_pushes"),
   amount("mobile_push_delay_secs", 1, U64_MAX, SECONDS),
@@ -135,6 +180,7 @@ const LIMITS: &[FieldDef] = &[
   amount("max_attachment_bytes", MIB, U64_MAX, MEGABYTES),
   amount("max_attachment_bytes_per_user", MIB, U64_MAX, MEGABYTES),
   amount("max_avatar_bytes", MIB, U64_MAX, MEGABYTES),
+  amount("max_space_image_bytes", MIB, U64_MAX, MEGABYTES),
   amount("max_background_bytes", MIB, U64_MAX, MEGABYTES),
   count("max_backgrounds_per_user"),
   count("max_group_dm_participants"),
@@ -143,11 +189,25 @@ const LIMITS: &[FieldDef] = &[
 ];
 const INTEGRATION: &[FieldDef] = &[amount("default_retention_days", 1, U32_MAX, DAYS)];
 const LOCAL_ACCOUNTS: &[FieldDef] = &[
+  flag("is_enabled"),
   flag("require_totp"),
   amount("activation_ttl_hours", 1, U32_MAX, HOURS),
   amount("session_ttl_hours", 1, U32_MAX, HOURS),
   count("max_failed_attempts"),
   amount("lockout_secs", MINUTE, U64_MAX, MINUTES),
+];
+const SIGN_IN_PAGE: &[FieldDef] = &[
+  FieldDef {
+    id: "methods",
+    kind: Kind::Methods,
+  },
+  map_text("help_text.en"),
+  map_text("help_text.de"),
+  FieldDef {
+    id: "help_link",
+    kind: Kind::Link,
+  },
+  flag("is_login_page_always_shown"),
 ];
 const MAIL_TEXTS: &[FieldDef] = &[
   text("invite_subject"),
@@ -240,8 +300,9 @@ fn GroupForm(slug: &'static str) -> impl IntoView {
     move |ev: web_sys::SubmitEvent| {
       ev.prevent_default();
       show_errors.set(true);
-      if let Ok(section) = draft.with_untracked(|values| check(&key, values)) {
-        state.write(|backend| backend.save_runtime_settings(section));
+      match draft.with_untracked(|values| check(&key, values)) {
+        Ok(section) => state.write(|backend| backend.save_runtime_settings(section)),
+        Err(_) => focus_first_invalid(form_id(slug)),
       }
     }
   };
@@ -249,7 +310,7 @@ fn GroupForm(slug: &'static str) -> impl IntoView {
   let title = format!("settings-group-{slug}");
   let hint = format!("settings-group-{slug}-hint");
   view! {
-    <form on:submit=save>
+    <form id=form_id(slug) on:submit=save>
       <fieldset class="policy-group">
         <legend>{move || i18n.t(&title)}</legend>
         <p class="settings-source small">
@@ -288,8 +349,8 @@ fn FieldRow(
   show_errors: RwSignal<bool>,
 ) -> impl IntoView {
   let id = field.id;
-  let dom_id = format!("settings-{slug}-{id}");
-  let label = leak_key(format!("settings-f-{id}"));
+  let dom_id = format!("settings-{slug}-{}", id.replace('.', "-"));
+  let label = leak_key(label_key(id));
   let value = Signal::derive(move || draft.with(|values| values.get(id).cloned().unwrap_or_default()));
   let on_input = Callback::new(move |text: String| {
     draft.update(|values| {
@@ -327,10 +388,62 @@ fn FieldRow(
       <TextField id=leak_key(dom_id) label=label value=value on_input=on_input error=error />
     }
     .into_any(),
-    Kind::Area => view! {
+    Kind::Area | Kind::MapText => view! {
       <TextAreaField id=leak_key(dom_id) label=label rows=3 value=value on_input=on_input error=error />
     }
     .into_any(),
+    Kind::Link => view! {
+      <TextField id=leak_key(dom_id) label=label input_type="url" placeholder="https://help.example.com" value=value on_input=on_input error=error />
+    }
+    .into_any(),
+    Kind::Methods => {
+      let i18n = use_i18n();
+      let dom_id = leak_key(dom_id);
+      view! {
+        <div class="field">
+          <label for=dom_id>{move || i18n.t(label)}</label>
+          <select
+            id=dom_id
+            class="input"
+            prop:value=move || value.get()
+            on:change=move |ev| on_input.run(event_target_value(&ev))
+          >
+            {METHOD_CHOICES
+              .into_iter()
+              .map(|choice| {
+                let key = method_choice_key(choice);
+                view! { <option value=choice selected=move || value.get() == choice>{move || i18n.t(key)}</option> }
+              })
+              .collect_view()}
+          </select>
+        </div>
+      }
+      .into_any()
+    },
+    Kind::Level => {
+      let i18n = use_i18n();
+      let dom_id = leak_key(dom_id);
+      view! {
+        <div class="field">
+          <label for=dom_id>{move || i18n.t(label)}</label>
+          <select
+            id=dom_id
+            class="input"
+            prop:value=move || value.get()
+            on:change=move |ev| on_input.run(event_target_value(&ev))
+          >
+            {LEVEL_CHOICES
+              .into_iter()
+              .map(|choice| {
+                let key = level_choice_key(choice);
+                view! { <option value=choice selected=move || value.get() == choice>{move || i18n.t(key)}</option> }
+              })
+              .collect_view()}
+          </select>
+        </div>
+      }
+      .into_any()
+    },
     Kind::IdList => view! {
       <TextAreaField
         id=leak_key(dom_id)
@@ -346,10 +459,38 @@ fn FieldRow(
   }
 }
 
+/// The i18n key of a field's label (Fluent names have no dots).
+fn label_key(id: &str) -> String {
+  format!("settings-f-{}", id.replace('.', "-"))
+}
+
+/// The i18n key of a choice of sign-in methods.
+fn method_choice_key(choice: &str) -> &'static str {
+  match choice {
+    "local,sso" => "settings-methods-local-sso",
+    "sso" => "settings-methods-sso",
+    "local" => "settings-methods-local",
+    _ => "settings-methods-sso-local",
+  }
+}
+
+/// The i18n key of a notification level, worded as in the user's own settings.
+fn level_choice_key(choice: &str) -> &'static str {
+  match choice {
+    "mentions" => "notify-level-mentions",
+    _ => "notify-level-all",
+  }
+}
+
 /// The i18n key or DOM id of a field, which components take as `&'static str`. The set is the
 /// fixed field tables above, so the few bytes leaked per field row are bounded.
 fn leak_key(text: String) -> &'static str {
   Box::leak(text.into_boxed_str())
+}
+
+/// The DOM id of a group's form, where a refused save looks for the first invalid field.
+fn form_id(slug: &str) -> String {
+  format!("settings-form-{slug}")
 }
 
 fn fields_of(slug: &str) -> &'static [FieldDef] {
@@ -361,6 +502,7 @@ fn fields_of(slug: &str) -> &'static [FieldDef] {
     "limits" => LIMITS,
     "integration" => INTEGRATION,
     "local_accounts" => LOCAL_ACCOUNTS,
+    "sign_in_page" => SIGN_IN_PAGE,
     "mail_texts" => MAIL_TEXTS,
     "meeting_mail" => MEETING_MAIL,
     _ => &[],
@@ -377,6 +519,7 @@ fn group_json(key: &RuntimeSettingsKey, response: &RuntimeSettingsResponse) -> O
     RuntimeSettingsKey::Limits => serde_json::to_value(&response.limits),
     RuntimeSettingsKey::Integration => serde_json::to_value(&response.integration),
     RuntimeSettingsKey::LocalAccounts => serde_json::to_value(&response.local_accounts),
+    RuntimeSettingsKey::SignInPage => serde_json::to_value(&response.sign_in_page),
     RuntimeSettingsKey::MailTexts => serde_json::to_value(&response.mail_texts),
     RuntimeSettingsKey::MeetingMail => serde_json::to_value(&response.meeting_mail),
     _ => return None,
@@ -389,8 +532,16 @@ fn to_values(key: &RuntimeSettingsKey, response: &RuntimeSettingsResponse) -> Va
   let json = group_json(key, response).unwrap_or(Value::Null);
   fields_of(key.as_str())
     .iter()
-    .map(|field| (field.id, value_text(field.kind, json.get(field.id))))
+    .map(|field| (field.id, value_text(field.kind, lookup(&json, field.id))))
     .collect()
+}
+
+/// A field's value in the group's JSON; `map.key` reaches into an object.
+fn lookup<'a>(json: &'a Value, id: &str) -> Option<&'a Value> {
+  match id.split_once('.') {
+    Some((map, key)) => json.get(map)?.get(key),
+    None => json.get(id),
+  }
 }
 
 fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
@@ -403,7 +554,19 @@ fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
       .as_u64()
       .map(|raw| format_scaled(raw, scale))
       .unwrap_or_default(),
-    Kind::Text | Kind::Area => value.as_str().unwrap_or_default().to_owned(),
+    Kind::Text | Kind::Area | Kind::MapText | Kind::Link | Kind::Level => {
+      value.as_str().unwrap_or_default().to_owned()
+    },
+    Kind::Methods => value
+      .as_array()
+      .map(|methods| {
+        methods
+          .iter()
+          .filter_map(Value::as_str)
+          .collect::<Vec<_>>()
+          .join(",")
+      })
+      .unwrap_or_default(),
     Kind::IdList => {
       let items: Vec<String> = value
         .as_array()
@@ -427,8 +590,21 @@ fn check(key: &RuntimeSettingsKey, values: &Values) -> Result<RuntimeSettingsSec
   for field in fields_of(key.as_str()) {
     let typed = values.get(field.id).map(String::as_str).unwrap_or_default();
     match field_json(field.kind, typed) {
-      Ok(value) => {
-        object.insert(field.id.to_owned(), value);
+      // Empty optional values are left out (none).
+      Ok(Value::Null) => {},
+      Ok(value) => match field.id.split_once('.') {
+        Some((map, key)) => {
+          if let Some(entries) = object
+            .entry(map.to_owned())
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+          {
+            entries.insert(key.to_owned(), value);
+          }
+        },
+        None => {
+          object.insert(field.id.to_owned(), value);
+        },
       },
       Err(message) => errors.push((field.id, message)),
     }
@@ -443,11 +619,37 @@ fn check(key: &RuntimeSettingsKey, values: &Values) -> Result<RuntimeSettingsSec
 fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
   match kind {
     Kind::Bool => Ok(Value::Bool(typed == "true")),
+    Kind::Number {
+      is_optional: true, ..
+    } if typed.trim().is_empty() => Ok(Value::Null),
     Kind::Number { scale, max, .. } => match parse_scaled(typed, scale) {
       Some(raw) if raw <= max => Ok(json!(raw)),
       _ => Err("admin-error-number"),
     },
     Kind::Text | Kind::Area => Ok(Value::String(typed.trim_end().to_owned())),
+    Kind::MapText => Ok(match typed.trim() {
+      "" => Value::Null,
+      text => Value::String(text.to_owned()),
+    }),
+    Kind::Link => match typed.trim() {
+      "" => Ok(Value::Null),
+      link if link.starts_with("https://") && is_web_url(link) => Ok(Value::String(link.to_owned())),
+      _ => Err("admin-error-url"),
+    },
+    Kind::Methods => {
+      let choice = METHOD_CHOICES
+        .into_iter()
+        .find(|choice| *choice == typed)
+        .unwrap_or(METHOD_CHOICES[0]);
+      Ok(json!(choice.split(',').collect::<Vec<_>>()))
+    },
+    Kind::Level => {
+      let choice = LEVEL_CHOICES
+        .into_iter()
+        .find(|choice| *choice == typed)
+        .unwrap_or(LEVEL_CHOICES[0]);
+      Ok(json!(choice))
+    },
     Kind::IdList => {
       let items = parse_list(typed);
       if items.iter().all(|item| item.parse::<Snowflake>().is_ok()) {
@@ -520,6 +722,7 @@ mod tests {
       ("invites_require_verified_email", "true"),
       ("default_spaces", "12, 13"),
       ("default_channels", "abc"),
+      ("admin_join_request_days", "7"),
     ]);
     assert_eq!(
       check(&kind("server_rules"), &ids).err(),
@@ -533,12 +736,106 @@ mod tests {
       ("invites_require_verified_email", "true"),
       ("default_spaces", "12\n13"),
       ("default_channels", ""),
+      ("admin_join_request_days", "7"),
     ]);
     let Ok(RuntimeSettingsSection::ServerRules(rules)) = check(&kind("server_rules"), &rules) else {
       panic!("valid");
     };
     assert_eq!(rules.default_spaces.len(), 2);
     assert!(rules.default_channels.is_empty());
+  }
+
+  #[test]
+  fn the_removal_period_is_optional() {
+    let empty = typed(&[
+      ("invites_require_verified_email", "true"),
+      ("remove_deactivated_after_days", ""),
+      ("admin_join_request_days", "7"),
+    ]);
+    let Ok(RuntimeSettingsSection::ServerRules(rules)) = check(&kind("server_rules"), &empty) else {
+      panic!("valid");
+    };
+    assert_eq!(rules.maybe_remove_deactivated_after_days, None);
+    let set = typed(&[
+      ("invites_require_verified_email", "true"),
+      ("remove_deactivated_after_days", "90"),
+      ("admin_join_request_days", "7"),
+    ]);
+    let Ok(RuntimeSettingsSection::ServerRules(rules)) = check(&kind("server_rules"), &set) else {
+      panic!("valid");
+    };
+    assert_eq!(rules.maybe_remove_deactivated_after_days, Some(90));
+    let wrong = typed(&[
+      ("invites_require_verified_email", "true"),
+      ("remove_deactivated_after_days", "-1"),
+      ("admin_join_request_days", "7"),
+    ]);
+    assert_eq!(
+      check(&kind("server_rules"), &wrong).err(),
+      Some(vec![("remove_deactivated_after_days", "admin-error-number")])
+    );
+  }
+
+  /// Issue #776: how long admins' join requests wait, in days; always set.
+  #[test]
+  fn the_join_request_expiry_is_a_number_of_days() {
+    let set = typed(&[
+      ("invites_require_verified_email", "true"),
+      ("admin_join_request_days", "14"),
+    ]);
+    let Ok(RuntimeSettingsSection::ServerRules(rules)) = check(&kind("server_rules"), &set) else {
+      panic!("valid");
+    };
+    assert_eq!(rules.admin_join_request_days, 14);
+    let empty = typed(&[
+      ("invites_require_verified_email", "true"),
+      ("admin_join_request_days", ""),
+    ]);
+    assert!(check(&kind("server_rules"), &empty).is_err());
+  }
+
+  #[test]
+  fn the_sign_in_page_maps_methods_help_texts_and_the_link() {
+    let values = typed(&[
+      ("methods", "local,sso"),
+      ("help_text.en", "Call 1234."),
+      ("help_text.de", "  "),
+      ("help_link", ""),
+    ]);
+    let Ok(RuntimeSettingsSection::SignInPage(page)) = check(&kind("sign_in_page"), &values) else {
+      panic!("valid");
+    };
+    assert_eq!(
+      page.methods,
+      [
+        teamcraft_proto::SignInMethod::Local,
+        teamcraft_proto::SignInMethod::Sso
+      ]
+    );
+    assert_eq!(page.help_text.len(), 1);
+    assert_eq!(page.help_text["en"], "Call 1234.");
+    assert!(page.maybe_help_link.is_none());
+
+    let response_json =
+      json!({"methods": ["sso"], "help_text": {"de": "Hilfe"}, "help_link": "https://help.example.com"});
+    assert_eq!(
+      value_text(Kind::Methods, lookup(&response_json, "methods")),
+      "sso"
+    );
+    assert_eq!(
+      value_text(Kind::MapText, lookup(&response_json, "help_text.de")),
+      "Hilfe"
+    );
+    assert_eq!(
+      value_text(Kind::MapText, lookup(&response_json, "help_text.en")),
+      ""
+    );
+
+    let bad_link = typed(&[("methods", "sso"), ("help_link", "http://help.example.com")]);
+    assert_eq!(
+      check(&kind("sign_in_page"), &bad_link).err(),
+      Some(vec![("help_link", "admin-error-url")])
+    );
   }
 
   #[test]
@@ -572,9 +869,13 @@ mod tests {
       keys.push(format!("settings-group-{slug}"));
       keys.push(format!("settings-group-{slug}-hint"));
       for field in fields_of(slug) {
-        keys.push(format!("settings-f-{}", field.id));
+        keys.push(label_key(field.id));
       }
     }
+    for choice in METHOD_CHOICES {
+      keys.push(method_choice_key(choice).into());
+    }
+    keys.push("admin-error-url".into());
     for locale in [Locale::En, Locale::De] {
       for key in &keys {
         assert_ne!(&translate(locale, key, None), key, "{locale:?} lacks {key}");

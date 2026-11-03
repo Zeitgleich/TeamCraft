@@ -39,12 +39,21 @@ pub struct VideoFrameRgba {
 pub(crate) struct AppCamera {
   format: CaptureFormat,
   slot: CameraSlot,
+  /// This camera's start, while its queue is the slot's.
+  maybe_start: Option<u64>,
 }
 
 /// Where pushed camera frames go while the camera track runs.
 #[derive(Clone, Default)]
 pub(crate) struct CameraSlot {
-  inner: Arc<Mutex<Option<FrameSender>>>,
+  inner: Arc<Mutex<SlotState>>,
+}
+
+/// The queue of the camera that started last, numbered by its start.
+#[derive(Default)]
+struct SlotState {
+  starts: u64,
+  maybe_current: Option<(u64, FrameSender)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,7 +66,11 @@ enum Rotation {
 
 impl AppCamera {
   pub(crate) fn new(format: CaptureFormat, slot: CameraSlot) -> Self {
-    Self { format, slot }
+    Self {
+      format,
+      slot,
+      maybe_start: None,
+    }
   }
 }
 
@@ -67,19 +80,39 @@ impl VideoCapture for AppCamera {
   }
 
   fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
-    *self.slot.lock() = Some(frames);
+    let mut state = self.slot.lock();
+    state.starts += 1;
+    state.maybe_current = Some((state.starts, frames));
+    self.maybe_start = Some(state.starts);
     Ok(())
   }
 
+  /// Leaves the slot to a camera that started since: the call starts a replacing camera track
+  /// before it stops the running one.
   fn stop(&mut self) {
-    *self.slot.lock() = None;
+    let Some(start) = self.maybe_start.take() else {
+      return;
+    };
+    let mut state = self.slot.lock();
+    if state
+      .maybe_current
+      .as_ref()
+      .is_some_and(|(current, _)| *current == start)
+    {
+      state.maybe_current = None;
+    }
   }
 }
 
 impl CameraSlot {
   /// Converts and queues `frame`; `false` while no camera track runs or the frame is malformed.
   pub(crate) fn push(&self, frame: &CameraFrame) -> bool {
-    let Some(sender) = self.lock().clone() else {
+    let Some(sender) = self
+      .lock()
+      .maybe_current
+      .as_ref()
+      .map(|(_, sender)| sender.clone())
+    else {
       return false;
     };
     match camera_to_i420(frame) {
@@ -92,10 +125,10 @@ impl CameraSlot {
   }
 
   pub(crate) fn clear(&self) {
-    *self.lock() = None;
+    self.lock().maybe_current = None;
   }
 
-  fn lock(&self) -> MutexGuard<'_, Option<FrameSender>> {
+  fn lock(&self) -> MutexGuard<'_, SlotState> {
     // Each update is a single assignment; a poisoned lock holds a consistent value.
     self
       .inner
@@ -287,6 +320,28 @@ mod tests {
     assert!(slot.push(&frame));
     assert_eq!(receiver.recv().unwrap().resolution(), format.resolution);
     camera.stop();
+    assert!(!slot.push(&frame));
+  }
+
+  /// A camera track that replaces the running one starts before the old one stops.
+  #[test]
+  fn a_replaced_camera_leaves_the_slot_to_its_successor() {
+    let slot = CameraSlot::default();
+    let frame = camera_frame(2, 2, vec![0; 4], vec![128], vec![128], 2, 1, 0);
+    let format = CaptureFormat {
+      resolution: VideoResolution { width: 2, height: 2 },
+      framerate: 15,
+    };
+    let mut old = AppCamera::new(format, slot.clone());
+    let (old_sender, _old_receiver) = teamcraft_media::video_capture::frame_queue();
+    old.start(old_sender).unwrap();
+    let mut new = AppCamera::new(format, slot.clone());
+    let (new_sender, new_receiver) = teamcraft_media::video_capture::frame_queue();
+    new.start(new_sender).unwrap();
+    old.stop();
+    assert!(slot.push(&frame));
+    assert_eq!(new_receiver.recv().unwrap().resolution(), format.resolution);
+    new.stop();
     assert!(!slot.push(&frame));
   }
 

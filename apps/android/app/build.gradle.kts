@@ -22,18 +22,17 @@ android {
     targetSdk = 37
     // docs/release.md: versionCode = MAJOR*1000000 + MINOR*10000 + PATCH*100 + stage, where stage is
     // beta.N -> N, rc.N -> 50+N and the final release -> 99, so every release sorts above the last.
-    versionCode = 1000099
-    versionName = "1.0.0"
+    versionCode = 1001899
+    versionName = "1.0.18"
     // The ABIs scripts/build.sh builds the Rust library for (phones and the x86_64 emulator).
     ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-    buildConfigField("String", "SERVER_URL", "\"${setting("serverUrl")}\"")
+    // README.md "Server address": no server is baked in; a self-built app may pre-select one.
+    buildConfigField("String", "DEFAULT_SERVER", "\"${setting("defaultServer")}\"")
     // The push gateway of the publisher this build is made for (docs/push-gateway.md); empty: the
     // gateway the server names.
     buildConfigField("String", "PUSH_GATEWAY_URL", "\"${setting("pushGatewayUrl")}\"")
-    buildConfigField("String", "OIDC_ISSUER", "\"${setting("oidcIssuer")}\"")
-    buildConfigField("String", "OIDC_CLIENT_ID", "\"${setting("oidcClientId")}\"")
     // AppAuth's redirect activity listens on this scheme; the OIDC client must allow the URI.
     manifestPlaceholders["appAuthRedirectScheme"] = setting("oidcRedirectScheme")
     buildConfigField("String", "OIDC_REDIRECT_URI", "\"${setting("oidcRedirectScheme")}:/oauth/callback\"")
@@ -70,10 +69,18 @@ android {
   }
 
   buildTypes {
+    // Installs next to the store app, so a test build doesn't replace it.
+    debug {
+      applicationIdSuffix = ".debug"
+      versionNameSuffix = "-debug"
+    }
     release {
       uploadSigning?.let { signingConfig = it }
       isMinifyEnabled = true
       proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+      // The Rust library's symbol table goes into the App Bundle's metadata, so Google Play can
+      // symbolicate native crashes (the R8 mapping is in the bundle anyway); the APKs stay stripped.
+      ndk { debugSymbolLevel = "SYMBOL_TABLE" }
     }
   }
 
@@ -128,6 +135,9 @@ dependencies {
   implementation(libs.androidx.work.runtime)
   // App lock: biometrics or the device's screen lock through the system prompt.
   implementation(libs.androidx.biometric)
+  // Installs the baseline profile (src/main/baseline-prof.txt and the libraries' own) on devices
+  // without Play, so APKs from GitHub and F-Droid start and scroll precompiled too.
+  implementation(libs.androidx.profileinstaller)
   // UniFFI's Kotlin bindings call the Rust library through JNA.
   implementation("${libs.jna.get()}@aar")
   "fullImplementation"(libs.firebase.messaging)

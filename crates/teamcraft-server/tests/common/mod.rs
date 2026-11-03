@@ -44,6 +44,18 @@ pub async fn register_device(app: &TestApp, user: &TestUser) -> String {
   reply.id()
 }
 
+/// Publishes an identity key with its first key bag, as enrollment does (e2ee.md §3.2).
+pub async fn enroll_identity(app: &TestApp, user: &TestUser) {
+  let reply = app
+    .put(
+      user,
+      "/me/identity-key",
+      json!({"public_key": "a2V5", "signature": "c2ln", "key_bag": {"encrypted_key_bag": "YmFn", "wrapped_backup_keys": "d3JhcA=="}}),
+    )
+    .await;
+  assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+}
+
 pub async fn create_space(app: &TestApp, user: &TestUser, name: &str, join_policy: &str) -> String {
   let reply = app
     .post(user, "/spaces", json!({"name": name, "join_policy": join_policy}))
@@ -221,4 +233,46 @@ pub mod ws {
     }
     seen
   }
+}
+
+/// Seconds since the Unix epoch on this machine.
+pub fn now_secs() -> u64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap()
+    .as_secs()
+}
+
+/// A real key package (base64) of a throwaway device, as made by a device whose clock shows
+/// `now_unix_secs`. The server checks packages and reads their expiry, so stand-ins don't do.
+pub fn key_package_at(now_unix_secs: u64, is_last_resort: bool) -> String {
+  use base64::Engine;
+  use teamcraft_crypto::identity::{DeviceKeyPair, IdentityKeyPair};
+  use teamcraft_crypto::ids::{DeviceId, UserId};
+  use teamcraft_crypto::mls::{DefaultMlsProvider, create_key_package, create_last_resort_key_package};
+
+  let mut rng = rand_core::OsRng;
+  let identity = IdentityKeyPair::generate(&mut rng);
+  let device = DeviceKeyPair::generate(UserId::new(1), DeviceId::new(1), &mut rng);
+  let certificate = identity
+    .certify_device(UserId::new(1), &device.public_keys())
+    .unwrap();
+  let provider = DefaultMlsProvider::default();
+  let bytes = if is_last_resort {
+    create_last_resort_key_package(&provider, &device, &certificate, now_unix_secs)
+  } else {
+    create_key_package(&provider, &device, &certificate, now_unix_secs)
+  }
+  .unwrap();
+  base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// A fresh real key package (base64).
+pub fn key_package() -> String {
+  key_package_at(now_secs(), false)
+}
+
+/// A fresh real last-resort key package (base64).
+pub fn last_resort_key_package() -> String {
+  key_package_at(now_secs(), true)
 }

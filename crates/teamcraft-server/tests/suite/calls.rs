@@ -12,7 +12,7 @@ use teamcraft_proto::{CALL_JOIN_TOKEN_AUDIENCE, CallJoinClaims};
 use teamcraft_server::testing::{TEST_ISSUER, TestApp};
 
 /// Throwaway Ed25519 key pair used only by these tests. It protects nothing.
-const SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+pub(crate) const SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEIAxxS2yuWa9SUUAfZhI0772UQ48VXZLz45+L2A5IfcWA
 -----END PRIVATE KEY-----
 ";

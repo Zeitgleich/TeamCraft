@@ -3,8 +3,16 @@
 use std::path::Path;
 
 use tauri::utils::config::BundleType;
-use teamcraft_client_api::updates::{CheckPlan, ClientVersion, InstallKind};
+use teamcraft_client_api::updates::{
+  CheckPlan, ClientVersion, InstallKind, PackageManager, PackageSource, apt_source_has_teamcraft,
+  linux_package_file, rpm_repo_has_teamcraft,
+};
 use teamcraft_proto::UpdateChannel;
+
+/// Where dnf and zypper keep their repository files.
+const RPM_REPO_DIRS: [&str; 2] = ["/etc/yum.repos.d", "/etc/zypp/repos.d"];
+const APT_SOURCES_FILE: &str = "/etc/apt/sources.list";
+const APT_SOURCES_DIR: &str = "/etc/apt/sources.list.d";
 
 /// The version of this build: the release tag's version (`1.0.0-rc.2`), which the release workflow
 /// passes in, or the crate version for local builds.
@@ -61,6 +69,82 @@ pub fn manifest_url(plan: &CheckPlan) -> String {
   manifest_url_for(plan, RELEASE_REPOSITORY)
 }
 
+/// Whether a deb or rpm install gets its updates from TeamCraft's repository (docs/updates.md §5),
+/// read from the package manager's source files. Unreadable files count as missing.
+pub fn package_source(manager: PackageManager) -> PackageSource {
+  let pages = pages_url(RELEASE_REPOSITORY);
+  let has_repository = match manager {
+    PackageManager::Dnf => RPM_REPO_DIRS
+      .iter()
+      .flat_map(|dir| source_files(Path::new(dir)))
+      .filter(|(name, _)| name.ends_with(".repo"))
+      .any(|(_, text)| rpm_repo_has_teamcraft(&text, &format!("{pages}rpm/"))),
+    PackageManager::Apt => std::fs::read_to_string(APT_SOURCES_FILE)
+      .ok()
+      .map(|text| ("sources.list".to_owned(), text))
+      .into_iter()
+      .chain(source_files(Path::new(APT_SOURCES_DIR)))
+      .filter(|(name, _)| name.ends_with(".list") || name.ends_with(".sources"))
+      .any(|(name, text)| apt_source_has_teamcraft(&name, &text, &format!("{pages}apt"))),
+    // Flatpak installs from a remote; the hint is its command either way.
+    PackageManager::Flatpak => true,
+  };
+  if has_repository {
+    PackageSource::Repository
+  } else {
+    PackageSource::File
+  }
+}
+
+/// The page that explains how to add TeamCraft's repositories (the package site).
+pub fn repository_setup_url() -> String {
+  pages_url(RELEASE_REPOSITORY)
+}
+
+/// Where the new deb or rpm of `version` can be downloaded: the release asset for this machine,
+/// or the release page where no asset name can be told (candidates, other architectures).
+pub fn package_download_url(manager: PackageManager, version: &ClientVersion) -> String {
+  package_download_url_for(manager, version, std::env::consts::ARCH, RELEASE_REPOSITORY)
+}
+
+fn package_download_url_for(
+  manager: PackageManager,
+  version: &ClientVersion,
+  arch: &str,
+  repository: &str,
+) -> String {
+  match linux_package_file(manager, version, arch) {
+    Some(file) => format!("https://github.com/{repository}/releases/download/v{version}/{file}"),
+    None => format!("https://github.com/{repository}/releases/tag/v{version}"),
+  }
+}
+
+/// The releases page, for a hint before the feed named a version.
+pub fn releases_url() -> String {
+  format!("https://github.com/{RELEASE_REPOSITORY}/releases/latest")
+}
+
+/// The files of a directory with their names; a missing directory or an unreadable file is skipped.
+fn source_files(dir: &Path) -> impl Iterator<Item = (String, String)> {
+  std::fs::read_dir(dir)
+    .into_iter()
+    .flatten()
+    .filter_map(Result::ok)
+    .filter_map(|entry| {
+      let name = entry.file_name().to_string_lossy().into_owned();
+      std::fs::read_to_string(entry.path())
+        .ok()
+        .map(|text| (name, text))
+    })
+}
+
+/// The repository's GitHub Pages site (`https://<owner>.github.io/<name>/`), with the package
+/// repositories and the prerelease feed.
+fn pages_url(repository: &str) -> String {
+  let (owner, name) = repository.split_once('/').unwrap_or((repository, ""));
+  format!("https://{}.github.io/{name}/", owner.to_ascii_lowercase())
+}
+
 fn manifest_url_for(plan: &CheckPlan, repository: &str) -> String {
   if let Some(feed) = &plan.maybe_feed_url {
     return feed.clone();
@@ -69,13 +153,7 @@ fn manifest_url_for(plan: &CheckPlan, repository: &str) -> String {
     return format!("https://github.com/{repository}/releases/download/v{pinned}/latest.json");
   }
   match plan.channel {
-    UpdateChannel::Prerelease => {
-      let (owner, name) = repository.split_once('/').unwrap_or((repository, ""));
-      format!(
-        "https://{}.github.io/{name}/updates/prerelease/latest.json",
-        owner.to_ascii_lowercase()
-      )
-    },
+    UpdateChannel::Prerelease => format!("{}updates/prerelease/latest.json", pages_url(repository)),
     _ => format!("https://github.com/{repository}/releases/latest/download/latest.json"),
   }
 }
@@ -119,6 +197,25 @@ mod tests {
       manifest_url_for(&pinned, REPOSITORY),
       "https://mirror.example.com/teamcraft/latest.json"
     );
+  }
+
+  #[test]
+  fn package_downloads_link_the_asset_or_the_release_page() {
+    let release = ClientVersion::parse("1.0.8").unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+      package_download_url_for(PackageManager::Dnf, &release, "x86_64", REPOSITORY),
+      "https://github.com/Example-Org/TeamCraft/releases/download/v1.0.8/TeamCraft-1.0.8-1.x86_64.rpm"
+    );
+    assert_eq!(
+      package_download_url_for(PackageManager::Apt, &release, "aarch64", REPOSITORY),
+      "https://github.com/Example-Org/TeamCraft/releases/download/v1.0.8/TeamCraft_1.0.8_arm64.deb"
+    );
+    let candidate = ClientVersion::parse("1.1.0-rc.1").unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+      package_download_url_for(PackageManager::Apt, &candidate, "x86_64", REPOSITORY),
+      "https://github.com/Example-Org/TeamCraft/releases/tag/v1.1.0-rc.1"
+    );
+    assert_eq!(pages_url(REPOSITORY), "https://example-org.github.io/TeamCraft/");
   }
 
   #[test]

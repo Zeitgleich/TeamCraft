@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-unwatch-camera"
+description = "Enables the call_unwatch_camera command without any pre-configured scope."
+commands.allow = ["call_unwatch_camera"]
+
+[[permission]]
+identifier = "deny-call-unwatch-camera"
+description = "Denies the call_unwatch_camera command without any pre-configured scope."
+commands.deny = ["call_unwatch_camera"]

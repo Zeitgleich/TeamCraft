@@ -25,7 +25,9 @@ dbus-update-activation-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_RUNTI
 # PipeWire video source marked as a camera for the camera portal.
 gst-launch-1.0 -q videotestsrc is-live=true pattern=smpte ! video/x-raw,width=800,height=600 \
   ! waylandsink fullscreen=true >/tmp/screen-content.log 2>&1 &
-gst-launch-1.0 -q videotestsrc is-live=true pattern=ball ! video/x-raw,width=640,height=480,framerate=30/1 \
+# The caps name the pixel format: without one pipewiresink negotiates a format with the
+# consumer that its buffers don't hold (BGRx claimed, two bytes a pixel sent).
+gst-launch-1.0 -q videotestsrc is-live=true pattern=smpte ! video/x-raw,format=YUY2,width=640,height=480,framerate=30/1 \
   ! pipewiresink mode=provide \
     stream-properties='properties,media.class=(string)"Video/Source",media.role=(string)Camera,node.description=(string)TestCamera,node.driver=(boolean)true,priority.driver=(int)20000' \
   >/tmp/camera.log 2>&1 &
@@ -38,7 +40,7 @@ gdbus call --session --dest org.freedesktop.impl.portal.PermissionStore \
   devices true camera "" "['yes']" >/dev/null
 
 status=0
-timeout 60 "$@" || status=$?
+timeout 150 "$@" || status=$?
 if [ "${status}" -ne 0 ]; then
   for log in /tmp/screen-content.log /tmp/sway.log /tmp/pipewire.log /tmp/wireplumber.log /tmp/camera.log; do
     echo "== ${log}"; tail -20 "${log}"

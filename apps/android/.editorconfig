@@ -1,0 +1,27 @@
+root = true
+
+# ktlint (code-style.md, "Frontend and mobile"): `ktlint "app/src/**/*.kt" "!app/src/main/java/uniffi/**" "*.kts" "app/*.kts"`
+# from apps/android. The rules below follow how the app's Kotlin is written; the generated UniFFI
+# bindings are left out.
+[*.{kt,kts}]
+indent_size = 2
+indent_style = space
+ktlint_code_style = intellij_idea
+# Lines are wrapped by judgement (most stay under 110, like rustfmt's limit), not by a hard cut.
+max_line_length = off
+# Composables are PascalCase.
+ktlint_function_naming_ignore_when_annotated_with = Composable
+# Short signatures stay on one line and wrap only where they are long.
+ktlint_standard_function-signature = disabled
+ktlint_standard_class-signature = disabled
+# `when` branches, related constants and one-line `{ a(); b() }` lambdas stay compact.
+ktlint_standard_blank-line-between-when-conditions = disabled
+ktlint_standard_spacing-between-declarations-with-comments = disabled
+ktlint_standard_spacing-between-declarations-with-annotations = disabled
+ktlint_standard_statement-wrapping = disabled
+# Enums end with `Last;`, not `Last,` and a `;` line of its own.
+ktlint_standard_trailing-comma-on-declaration-site = disabled
+# Files are named after their topic (`Conversation.kt` holds the conversation screen's parts).
+ktlint_standard_filename = disabled
+# Imports are grouped by hand (platform, libraries, app, bindings); no order is enforced yet.
+ktlint_standard_import-ordering = disabled

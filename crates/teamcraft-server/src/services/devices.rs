@@ -1,8 +1,11 @@
 use teamcraft_db::NewDevice;
+use teamcraft_proto::ChangeWebPushSubscriptionRequest;
 use teamcraft_proto::{
   DeviceId, DeviceResponse, GatewayEvent, ListDevicesResponse, PushProvider, RegisterDeviceRequest,
-  RegisterPushRequest, SetDeviceCertificateRequest, UserId,
+  RegisterPushRequest, SetDeviceCertificateRequest, UpdateDeviceRequest, UserId,
 };
+
+use crate::auth::AuthError;
 
 use super::audit::{self, Target as AuditTarget};
 use super::convert::device_response;
@@ -87,6 +90,27 @@ pub async fn set_device_certificate(
   devices
     .iter()
     .find(|d| d.id == device)
+    .map(device_response)
+    .ok_or_else(ApiError::device_not_found)
+}
+
+/// Renames one of the caller's devices (issue #409). Only the caller and admins see the name.
+pub async fn update_device(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  device: DeviceId,
+  request: UpdateDeviceRequest,
+) -> Result<DeviceResponse, ApiError> {
+  let name = validate_name(
+    &request.name,
+    "device name",
+    state.settings.get().limits.max_name_length,
+  )?;
+  state
+    .database
+    .rename_device(caller.user.id, device, &name)
+    .await?
+    .as_ref()
     .map(device_response)
     .ok_or_else(ApiError::device_not_found)
 }
@@ -208,6 +232,62 @@ fn check_bound_token(state: &AppState, request: &RegisterPushRequest) -> Result<
       "this server sends pushes through a push gateway; register a device token sealed for it (GET /api/v1/push/gateway)".into(),
     ));
   }
+  Ok(())
+}
+
+/// The service worker replaces a rotated Web Push subscription while no page is open (e2ee.md §7).
+/// There is no access token: the request proves knowledge of the device's push key. Every refusal
+/// that could tell a guesser something (unknown device, no Web Push, wrong proof) is the same 401,
+/// which the per-address limits count as a failed authentication.
+pub async fn change_web_push_subscription(
+  state: &AppState,
+  request: ChangeWebPushSubscriptionRequest,
+) -> Result<(), ApiError> {
+  for token in [&request.previous_token, &request.token] {
+    if token.is_empty() || token.chars().count() > MAX_PUSH_TOKEN_CHARS {
+      return Err(ApiError::InvalidRequest("push token has an invalid size".into()));
+    }
+  }
+  let provider = PushProvider::WebPush.as_str();
+  let refused = || {
+    ApiError::Auth(AuthError::InvalidToken(
+      "subscription change not authenticated".into(),
+    ))
+  };
+  let (stored_token, push_key) = state
+    .database
+    .push_registration_of(request.device_id, provider)
+    .await?
+    .ok_or_else(refused)?;
+  crate::push::crypto::verify_subscription_change(
+    &push_key,
+    request.device_id,
+    &request.previous_token,
+    &request.token,
+    request.mac.as_slice(),
+  )
+  .map_err(|_| refused())?;
+  if stored_token == request.token {
+    // A retry, or the page registered the same subscription first.
+    return Ok(());
+  }
+  crate::push::WebPushSubscription::parse(&request.token, state.settings.get().push.allow_private_endpoints)
+    .map_err(|error| ApiError::InvalidRequest(format!("invalid push subscription: {error}")))?;
+  let is_replaced = state
+    .database
+    .replace_push_token(
+      request.device_id,
+      provider,
+      &request.previous_token,
+      &request.token,
+    )
+    .await?;
+  if !is_replaced {
+    return Err(ApiError::Conflict(
+      "the device registered another push subscription meanwhile".into(),
+    ));
+  }
+  tracing::info!(device_id = %request.device_id, "web push subscription replaced by the service worker");
   Ok(())
 }
 

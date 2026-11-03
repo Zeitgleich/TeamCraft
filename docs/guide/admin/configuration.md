@@ -93,10 +93,15 @@ guest rules.
 
 ## Policy knobs in `[policy]`
 
-| Key                                        | Default | Effect                                                                     |
-|--------------------------------------------|---------|----------------------------------------------------------------------------|
-| `guests_dm_only_with_shared_conversations` | `true`  | Guests only open DMs with people they share a conversation with            |
-| `invites_require_verified_email`           | `true`  | A pending space invite only applies when the provider verified the address |
+| Key                                        | Default    | Effect                                                                         |
+|--------------------------------------------|------------|--------------------------------------------------------------------------------|
+| `guests_dm_start`                          | `"nobody"` | Whom a guest may start a DM or group DM with: `nobody`, `shared` or `anyone`   |
+| `guests_dm_only_with_shared_conversations` | unset      | Deprecated (1.0.9): `true` means `shared`, `false` means `anyone`; wins if set |
+| `invites_require_verified_email`           | `true`     | A pending space invite only applies when the provider verified the address     |
+
+`guests_dm_start` only concerns what a **guest** starts. Members, admins and owners can always open a DM
+or group DM with a guest, and a guest can always answer in a conversation somebody started with them.
+The signed policy (Administration → Security → "Guests may start direct messages with") wins over the file.
 
 ## E-mail the server sends
 

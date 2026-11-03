@@ -25,6 +25,17 @@ pub enum AudioSink {
   /// Decoded and mixed, then dropped (headless clients); still counted in the call statistics.
   Discard,
   Speakers(AudioDeviceChoice),
+  /// Nothing is played: every decrypted Opus frame goes to the app as it arrives, per sender and
+  /// unmixed, as a `CallEngineEvent::AudioFrame` (the notetaker, e2ee.md §8.2). Native driver only;
+  /// the browser treats it as [`Self::Discard`].
+  Frames,
+}
+
+impl AudioSink {
+  /// Whether received frames go to the app instead of the mixer.
+  pub fn is_frames(&self) -> bool {
+    matches!(self, Self::Frames)
+  }
 }
 
 /// Identifies an audio device on this machine; opaque to callers.

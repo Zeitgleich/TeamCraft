@@ -2,6 +2,8 @@
 //! shapes.
 
 use serde::{Deserialize, Serialize};
+use teamcraft_proto::Permission;
+pub use teamcraft_proto::{ChannelRole, InviteId, JoinPolicy, SpaceRole};
 pub use teamcraft_proto::{ConversationId, DeviceId, Id, MessageId, Snowflake, SpaceId, ThreadId, UserId};
 
 /// Builds a typed ID from a small integer. Mock data and tests use it; real IDs come from the server.
@@ -63,16 +65,22 @@ impl PresenceStatus {
   }
 }
 
-/// Emoji, text and optional expiry shown next to a user's name.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Emoji, text and optional expiry shown next to a user's name (PLAN.md §4: server-visible).
+/// Conversions to and from the wire form live in [`crate::custom_status`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CustomStatus {
   pub emoji: String,
   pub text: String,
+  /// The user's choice when setting it.
   pub expiry: StatusExpiry,
+  /// When it ends, by the server's clock: set on statuses the server reported, and by clients that
+  /// know the user's time zone when they resolve `expiry` ("today" ends at local midnight).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_expires_at: Option<TimestampMs>,
 }
 
 /// When a custom status clears itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StatusExpiry {
   Never,
   ThirtyMinutes,
@@ -122,6 +130,34 @@ pub struct User {
   /// The organization from the identity provider, shown as a badge (no permission depends on it).
   #[serde(default)]
   pub maybe_organization: Option<String>,
+  /// Whether the person has set up the app (has a device), as far as the backend knows.
+  #[serde(default)]
+  pub device_setup: DeviceSetup,
+  /// The account is deactivated: shown as the author of old messages, never offered in people
+  /// lists, pickers or mentions (issue #654).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_deactivated: bool,
+  /// The account was deleted (issue #630): only a tombstone naming old messages is left. The UI
+  /// shows its own "Deleted user" instead of the name; always deactivated too.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_deleted: bool,
+  /// The e-mail address, only where the workspace's directory policy shows it to this viewer (the
+  /// server leaves it out otherwise).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_email: Option<String>,
+}
+
+/// Whether a person has a device to receive messages on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceSetup {
+  HasDevices,
+  /// Hasn't set up the app yet: a DM is made, they get it once their first device appears.
+  NoDevices,
+  /// The backend doesn't know (older server, or only seen in member lists).
+  #[default]
+  #[serde(other)]
+  Unknown,
 }
 
 impl User {
@@ -145,9 +181,154 @@ pub fn initials(name: &str) -> String {
 pub struct Space {
   pub id: SpaceId,
   pub name: String,
+  /// Hue of the letter tile: from [`Self::maybe_color`] when it has one, else derived.
   pub hue: u16,
+  /// The `#rrggbb` color the space's admins picked.
+  #[serde(default)]
+  pub maybe_color: Option<String>,
+  /// Version of the space's picture (`GET /api/v1/spaces/{id}/image`); without one the space
+  /// shows its letter tile.
+  #[serde(default)]
+  pub maybe_image_version: Option<String>,
   pub unread_count: u32,
   pub mention_count: u32,
+  #[serde(default)]
+  pub maybe_description: Option<String>,
+  /// How many people belong to the space (0 when the server doesn't say).
+  #[serde(default)]
+  pub member_count: u32,
+  /// Who may join: an open space can be shared as a link, anyone in the company can join it.
+  #[serde(default = "invite_only")]
+  pub join_policy: JoinPolicy,
+  /// Whether the user may add people to the space (the server checks again).
+  #[serde(default)]
+  pub can_add_members: bool,
+  /// Whether the user may invite guests to the space (the server checks again).
+  #[serde(default)]
+  pub can_invite_guests: bool,
+  /// Whether the user may change the space's name, picture, join policy and archive it (the
+  /// server checks again).
+  #[serde(default)]
+  pub can_manage_space: bool,
+  /// May delete the space with its channels (`delete_space`); the server's word.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub can_delete_space: bool,
+  /// How many channels go with the space, for the confirmation.
+  #[serde(default)]
+  pub deleted_channel_count: u32,
+  /// Whether the user may create channels in the space (guests may not; the server checks
+  /// again).
+  #[serde(default)]
+  pub can_create_channels: bool,
+  /// The user's role in the space; `None` where the user only belongs to channels moved into it.
+  #[serde(default)]
+  pub maybe_my_role: Option<SpaceRole>,
+}
+
+impl Space {
+  /// Whether "Invite people" leads anywhere: adding members or guests, or sharing the link of an
+  /// open space, which guests don't do (issue #691).
+  pub fn can_invite(&self, is_guest: bool) -> bool {
+    self.can_add_members || self.can_invite_guests || (!is_guest && self.join_policy == JoinPolicy::Open)
+  }
+}
+
+/// A member of a channel with the role the member list holds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelMember {
+  pub user: UserId,
+  pub role: ChannelRole,
+  /// Whether this device verified a signed assignment of `role` (e2ee.md §4.6.1). `false` only for
+  /// an admin or moderator whose role is the server's word alone: members don't count it for
+  /// anything that needs a signed role, and the UI says so.
+  #[serde(default = "is_true")]
+  pub is_role_signed: bool,
+}
+
+fn is_true() -> bool {
+  true
+}
+
+/// A source of the integration bridge that posts into a channel, announced in the app
+/// (docs/bridge.md, "Sources"). Only sources in force are listed; the token is never known again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrationSource {
+  pub id: teamcraft_proto::SourceId,
+  pub name: String,
+  pub kind: teamcraft_proto::SourceKind,
+  pub created_by: UserId,
+  pub created_at_ms: i64,
+}
+
+/// A source to announce: the app generated the token and keeps only its hash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewIntegrationSource {
+  pub id: teamcraft_proto::SourceId,
+  pub name: String,
+  pub kind: teamcraft_proto::SourceKind,
+  pub token_sha256: teamcraft_proto::SourceTokenHash,
+  pub options: teamcraft_proto::SourceOptions,
+}
+
+/// A member of a space as the space settings list them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceMember {
+  pub user: UserId,
+  pub display_name: String,
+  pub is_guest: bool,
+  /// An integration's bot account: listed as "Integration", without a role to change (issue
+  /// #764); it is added and removed in the channels' integration settings.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_bot: bool,
+  pub role: SpaceRole,
+}
+
+/// The member list of a space as far as the user may see it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "members", rename_all = "snake_case")]
+pub enum SpaceRoster {
+  /// Not loaded yet ([`crate::backend::ChatBackend::refresh_space_roster`]).
+  #[default]
+  Loading,
+  /// The user may not see who is in the space (guests, people outside it).
+  Hidden,
+  Loaded(Vec<SpaceMember>),
+}
+
+/// An invitation by e-mail that nobody has signed in with yet.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingInvite {
+  pub id: InviteId,
+  pub email: String,
+  pub role: SpaceRole,
+}
+
+/// What a space from an older peer is taken for: nothing to share as a link.
+fn invite_only() -> JoinPolicy {
+  JoinPolicy::InviteOnly
+}
+
+/// Hue of a `#rrggbb` color, or `None` for anything else (and for greys, which have no hue).
+pub fn hue_from_hex(color: &str) -> Option<u16> {
+  let hex = color.strip_prefix('#')?;
+  if hex.len() != 6 || !hex.is_ascii() {
+    return None;
+  }
+  let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok().map(f32::from);
+  let (r, g, b) = (channel(0..2)?, channel(2..4)?, channel(4..6)?);
+  let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+  if (max - min).abs() < f32::EPSILON {
+    return None;
+  }
+  let delta = max - min;
+  let hue = if (max - r).abs() < f32::EPSILON {
+    ((g - b) / delta).rem_euclid(6.0)
+  } else if (max - g).abs() < f32::EPSILON {
+    (b - r) / delta + 2.0
+  } else {
+    (r - g) / delta + 4.0
+  };
+  Some((hue * 60.0).round() as u16 % 360)
 }
 
 /// An open space the user is not in yet and may join.
@@ -157,6 +338,90 @@ pub struct JoinableSpace {
   pub name: String,
   #[serde(default)]
   pub maybe_description: Option<String>,
+  /// Hue of the letter tile, as in [`Space::hue`].
+  #[serde(default)]
+  pub hue: u16,
+  #[serde(default)]
+  pub maybe_image_version: Option<String>,
+  #[serde(default)]
+  pub member_count: u32,
+}
+
+impl JoinableSpace {
+  /// The space as its tile shows it (picture or letters); not one the user is in.
+  pub fn tile(&self) -> Space {
+    Space {
+      id: self.id,
+      name: self.name.clone(),
+      hue: self.hue,
+      maybe_color: None,
+      maybe_image_version: self.maybe_image_version.clone(),
+      unread_count: 0,
+      mention_count: 0,
+      maybe_description: self.maybe_description.clone(),
+      member_count: self.member_count,
+      join_policy: JoinPolicy::Open,
+      can_add_members: false,
+      can_invite_guests: false,
+      can_manage_space: false,
+      can_delete_space: false,
+      deleted_channel_count: 0,
+      can_create_channels: false,
+      maybe_my_role: None,
+    }
+  }
+}
+
+/// Something about who is in a conversation's encryption group that the user should see or act
+/// on (e2ee.md §4.6, removal order).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MembershipIssue {
+  /// This device's removal of `user` (the user's own leave when it is them) is on its way.
+  RemovalPending { user: UserId },
+  /// That removal or leave was refused too often; "retry" ([`crate::backend::ChatBackend::retry_removal`]).
+  RemovalFailed { user: UserId },
+  /// An admin's removal from outside the group that can't be confirmed: the server lists `user`
+  /// again, or somebody may have added them back since. "Remove" signs it afresh
+  /// ([`crate::backend::ChatBackend::retry_removal`]), "keep" drops it
+  /// ([`crate::backend::ChatBackend::discard_removal`]).
+  RemovalUnconfirmed { user: UserId },
+  /// The server lists the user but refuses this device the encryption group: new messages may be
+  /// missing.
+  GroupRefused,
+  /// `user` hasn't set up the app yet; they are added to the encryption group (and get the
+  /// messages) once their first device appears.
+  WaitingForFirstDevice { user: UserId },
+  /// `user` still had no device after the waiting time (`pending_addition_expiry`): they never set
+  /// up the app. Their first device, should it appear, still gets them in.
+  NeverSetUp { user: UserId },
+  /// `user`'s devices have no key package left on the server; they are added once one of their
+  /// devices comes online and uploads new ones.
+  NoKeyPackage { user: UserId },
+  /// None of `user`'s devices passed the checks (signed device list, credential), so they can't
+  /// be added; a new device of theirs is tried again.
+  DevicesUnverified { user: UserId },
+  /// A DM this device opened waits for the welcome into the group the other side founded:
+  /// "setting up encryption", with a retry ([`crate::backend::ChatBackend::retry_dm_setup`]).
+  /// `remaining_ms` after it was read it becomes [`Self::EncryptionSetupFailed`]; the view reads
+  /// the issues again then.
+  EncryptionSetup {
+    #[serde(default)]
+    remaining_ms: u64,
+  },
+  /// That welcome didn't come in time; "retry" asks the members again.
+  EncryptionSetupFailed,
+  /// This device asked to be let into a channel's encryption group (a join, an admin's self-join)
+  /// and no member has let it in yet; it asks again on its own (issue #907). Only messages from
+  /// the join on become readable.
+  WaitingForAdmission,
+  /// The import account is in this DM or notes while it imports their history (e2ee.md §4.10):
+  /// it can read what is written here until the import is finished.
+  ImportInProgress { importer: UserId },
+  /// Somebody who is no participant of this DM is a member of it and can read it.
+  ReadByOutsider { user: UserId },
+  #[serde(other)]
+  Unknown,
 }
 
 /// What kind of conversation a sidebar entry is.
@@ -201,7 +466,90 @@ pub struct Conversation {
   pub is_muted: bool,
   /// Whether the signed-in user may post (announcement and integration channels may forbid it).
   pub can_post: bool,
+  /// An archived channel: read-only, and its last admin may leave (#1130).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_archived: bool,
+  /// Holds imported history (e2ee.md §4.10): the last member's leave doesn't delete it.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_imported: bool,
   pub bookmarks: Vec<Bookmark>,
+  /// The client is still catching up this conversation's history after being away (issue #247):
+  /// what it shows may be incomplete.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_catching_up: bool,
+  /// The version of the channel's picture (`GET /api/v1/conversations/{id}/image`), if it has one.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_image_version: Option<String>,
+  /// The user's notes to themself (e2ee.md, "Notes to self"), from the DM's participants
+  /// ([`teamcraft_proto::ConversationResponse::is_notes_to_self`]), not its current members.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_notes_to_self: bool,
+  /// The channel permissions the server says the user holds here
+  /// ([`teamcraft_proto::ConversationResponse::maybe_my_permissions`]); `None` when it didn't
+  /// say (an older server), and the client evaluates the built-in scheme instead
+  /// ([`crate::role_rules::RoleActor::maybe_granted`]). The UI offers an action only when it is
+  /// in here (issue #691); the server checks every request again.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_permissions: Option<Vec<teamcraft_proto::Permission>>,
+  /// A DM or group DM whose other people are all deactivated (issue #698): listed apart, after
+  /// the active conversations; its history stays readable.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_only_deactivated_others: bool,
+}
+
+impl Conversation {
+  /// Whether it is a channel of a space, the only kind with settings (topic, purpose, name): DMs,
+  /// group DMs and meeting chats live outside spaces and the server refuses settings for them.
+  pub fn has_channel_settings(&self) -> bool {
+    !self.kind.is_direct_like() && self.maybe_space.is_some()
+  }
+
+  /// Whether anything in it waits to be read: the read marker has something to move past.
+  pub fn has_unread(&self) -> bool {
+    self.unread_count > 0 || self.mention_count > 0
+  }
+
+  /// Whether the user may react here (`add_reaction`, which an archived or a moderated channel
+  /// takes away; issues #691, #758): the server's word, otherwise wherever the user may post.
+  pub fn can_react(&self) -> bool {
+    self
+      .maybe_holds(&Permission::AddReaction)
+      .unwrap_or(self.can_post)
+  }
+
+  /// Whether the user may pin messages and keep links and files as bookmarks (`manage_bookmarks`;
+  /// a pin is sent as a message, so posting too): the server's word, otherwise everybody but
+  /// guests, as in the built-in scheme.
+  pub fn can_manage_bookmarks(&self, is_guest: bool) -> bool {
+    self.can_post
+      && self
+        .maybe_holds(&Permission::ManageBookmarks)
+        .unwrap_or(!is_guest)
+  }
+
+  /// Whether the user may change the channel itself, such as its name or archiving it
+  /// (`manage_channel_properties`); never in DMs and group DMs. Without the server's word it is
+  /// offered and the server decides.
+  pub fn can_manage_channel(&self) -> bool {
+    !self.kind.is_direct_like()
+      && self
+        .maybe_holds(&Permission::ManageChannelProperties)
+        .unwrap_or(true)
+  }
+
+  /// Whether the user may delete the channel for everybody (`delete_channel`). Not undoable, so
+  /// unlike [`Self::can_manage_channel`] it is offered only on the server's word.
+  pub fn can_delete_channel(&self) -> bool {
+    !self.kind.is_direct_like() && self.maybe_holds(&Permission::DeleteChannel).unwrap_or(false)
+  }
+
+  /// Whether the server says the user holds `permission` here; `None` when it didn't say.
+  fn maybe_holds(&self, permission: &Permission) -> Option<bool> {
+    self
+      .maybe_permissions
+      .as_ref()
+      .map(|granted| granted.contains(permission))
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -319,6 +667,11 @@ pub enum SystemEvent {
 pub enum MessageKind {
   User,
   System(SystemEvent),
+  /// A change to the conversation that is no join or leave (archived, made private or public,
+  /// moved, a workspace admin who joined): a line reading the workspace event of the message's
+  /// extras, whatever the join/leave setting says. Known from the message alone, so the row is a
+  /// line before its extras arrive.
+  Change,
   /// One line of an integration channel, rendered in the compact log view.
   Log(LogLevel),
 }
@@ -328,6 +681,17 @@ pub struct Reaction {
   pub emoji: String,
   pub count: u32,
   pub reacted_by_me: bool,
+}
+
+/// Reactions of others to the user's own messages in a conversation that the user hasn't seen yet:
+/// the conversation view's "jump to reaction" button (notifications.md, "Reactions to my
+/// messages").
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnseenReactions {
+  /// One per person, emoji and message.
+  pub count: usize,
+  /// The messages they react to, oldest first.
+  pub messages: Vec<MessageId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -343,6 +707,120 @@ pub struct Message {
   pub reply_count: u32,
   /// Set on replies: the thread they belong to.
   pub maybe_thread: Option<ThreadId>,
+  /// Imported from another chat (e2ee.md §4.10), as the import account states it: `author` is the
+  /// original author when they have an account, `sent_at` the original time.
+  #[serde(rename = "imported", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_imported: Option<ImportedMark>,
+  /// Set while this device can't read the message (issue #888): a placeholder with the
+  /// envelope's sender, time and thread, and an empty `body`. It fills in place once readable.
+  #[serde(rename = "placeholder", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_placeholder: Option<Placeholder>,
+}
+
+/// How far the conversations with messages waiting for keys have caught up (issue #888): each is
+/// caught up once every message is readable or known to stay unavailable on this device. Shown as
+/// "3 of 5 conversations caught up" while `caught_up < total`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyCatchUp {
+  pub caught_up: usize,
+  pub total: usize,
+  /// The conversations with messages still waiting (not those only given up on).
+  #[serde(default)]
+  pub waiting: Vec<ConversationId>,
+}
+
+/// How far a conversation's history reaches beyond what this device holds, for the top of its list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OlderHistory {
+  /// More may be on the server: a reader near the oldest row asks for it.
+  Available,
+  /// A page is on its way.
+  Loading,
+  /// The last request failed; the user can ask again, and the next connection does.
+  Failed,
+  /// Everything this device may see is here.
+  #[default]
+  Complete,
+}
+
+/// How far the first sync of a newly set up device is, for the bar under the top bar. The core's
+/// numbers: conversations, the only total known up front.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FirstSync {
+  pub stage: FirstSyncStage,
+  /// Conversations done in this stage.
+  pub done: usize,
+  /// Conversations in this stage; 0 until the list is here.
+  pub total: usize,
+  /// How far overall, from 0 to 1; `None` for an indeterminate bar (nothing finished yet).
+  pub maybe_fraction: Option<f32>,
+}
+
+/// What the first sync is reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FirstSyncStage {
+  /// The newest messages of every conversation.
+  Newest,
+  /// Older messages, in the background.
+  Older,
+}
+
+/// Why a message shows as a placeholder (issue #888, e2ee.md §5, "History on a new device").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Placeholder {
+  /// Its key hasn't arrived on this device yet and may still come: "Waiting for this message".
+  Waiting,
+  /// No key is expected on this device: "Not available on this device".
+  NotAvailable,
+  /// It didn't decrypt with the key it names (damaged or tampered): "This message couldn't be
+  /// decrypted".
+  Failed,
+  /// A state of a newer version: shown like [`Self::NotAvailable`].
+  #[serde(other)]
+  Unknown,
+}
+
+/// Where an imported message came from, and who wrote it when that is nobody with an account.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportedMark {
+  pub source: ImportedFrom,
+  pub author: ImportedAuthorView,
+  /// The import account, whose statement the origin is ("Imported from … by …").
+  pub importer: UserId,
+}
+
+/// The chat system an imported message came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportedFrom {
+  SynologyChat,
+  #[serde(other)]
+  Other,
+}
+
+/// Who wrote an imported message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImportedAuthorView {
+  /// The message's `author`, an account.
+  Person,
+  /// Somebody without an account here: shown like a deleted account.
+  Deleted,
+  /// A bot or webhook of the old system, by its name there.
+  Named { name: String },
+}
+
+/// Other people typing in one place right now (#882): a conversation itself, or with
+/// `maybe_thread` a reply in one of its threads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypingNow {
+  pub conversation: ConversationId,
+  #[serde(default)]
+  pub maybe_thread: Option<ThreadId>,
+  pub users: Vec<UserId>,
 }
 
 /// A followed thread as listed in the threads inbox.
@@ -360,6 +838,135 @@ pub struct ThreadSummary {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn hex_colors_have_a_hue_and_everything_else_none() {
+    assert_eq!(hue_from_hex("#ff0000"), Some(0));
+    assert_eq!(hue_from_hex("#00ff00"), Some(120));
+    assert_eq!(hue_from_hex("#0000ff"), Some(240));
+    assert_eq!(hue_from_hex("#808080"), None);
+    assert_eq!(hue_from_hex("red"), None);
+    assert_eq!(hue_from_hex("#ff00"), None);
+    assert_eq!(hue_from_hex("#ffé0"), None);
+  }
+
+  #[test]
+  fn spaces_from_older_snapshots_have_no_color_or_image() {
+    let space: Space = serde_json::from_value(serde_json::json!({
+      "id": "7", "name": "Project A", "hue": 10, "unread_count": 0, "mention_count": 0,
+    }))
+    .unwrap();
+    assert_eq!(space.maybe_color, None);
+    assert_eq!(space.maybe_image_version, None);
+  }
+
+  /// Issue #758: what a conversation offers the native apps, from the server's answer and without
+  /// it (an older server).
+  mod offered_actions {
+    use super::*;
+
+    #[test]
+    fn the_servers_answer_decides() {
+      let announcements = conversation(
+        ConversationKind::Public,
+        false,
+        Some(vec![Permission::AddReaction]),
+      );
+      assert!(announcements.can_react());
+      assert!(!announcements.can_manage_bookmarks(false));
+      assert!(!announcements.can_manage_channel());
+      let managed = conversation(
+        ConversationKind::Private,
+        true,
+        Some(vec![
+          Permission::CreatePost,
+          Permission::ManageBookmarks,
+          Permission::ManageChannelProperties,
+        ]),
+      );
+      assert!(!managed.can_react(), "moderated: posting without reactions");
+      assert!(
+        managed.can_manage_bookmarks(true),
+        "the answer counts, not the guess"
+      );
+      assert!(managed.can_manage_channel());
+      let nothing = conversation(ConversationKind::Public, true, Some(Vec::new()));
+      assert!(!nothing.can_react());
+      assert!(!nothing.can_manage_bookmarks(false));
+      assert!(!nothing.can_manage_channel());
+    }
+
+    #[test]
+    fn without_an_answer_the_built_in_scheme_and_posting_decide() {
+      let open = conversation(ConversationKind::Public, true, None);
+      assert!(open.can_react());
+      assert!(open.can_manage_bookmarks(false));
+      assert!(!open.can_manage_bookmarks(true), "guests keep no bookmarks");
+      assert!(open.can_manage_channel(), "offered; the server decides");
+      let archived = conversation(ConversationKind::Public, false, None);
+      assert!(!archived.can_react());
+      assert!(!archived.can_manage_bookmarks(false));
+    }
+
+    #[test]
+    fn direct_messages_have_no_channel_to_manage() {
+      for kind in [ConversationKind::Direct, ConversationKind::Group] {
+        let everything = conversation(kind, true, Some(vec![Permission::ManageChannelProperties]));
+        assert!(!everything.can_manage_channel(), "{kind:?}");
+        assert!(!conversation(kind, true, None).can_manage_channel(), "{kind:?}");
+      }
+    }
+
+    fn conversation(
+      kind: ConversationKind,
+      can_post: bool,
+      maybe_permissions: Option<Vec<Permission>>,
+    ) -> Conversation {
+      Conversation {
+        id: id_from_raw(1),
+        maybe_space: None,
+        kind,
+        category: SidebarCategory::Channels,
+        name: "news".into(),
+        topic: String::new(),
+        member_ids: Vec::new(),
+        unread_count: 0,
+        mention_count: 0,
+        is_favorite: false,
+        is_muted: false,
+        can_post,
+        bookmarks: Vec::new(),
+        is_catching_up: false,
+        maybe_image_version: None,
+        is_notes_to_self: false,
+        is_archived: false,
+        is_imported: false,
+        maybe_permissions,
+        has_only_deactivated_others: false,
+      }
+    }
+  }
+
+  #[test]
+  fn membership_issues_keep_their_wire_form_and_tolerate_new_kinds() {
+    let issue = MembershipIssue::RemovalFailed { user: id_from_raw(7) };
+    let json = serde_json::to_value(&issue).unwrap_or_default();
+    assert_eq!(json["type"], "removal_failed");
+    // Dropped in #661: an older core's leftover issue is ignored.
+    assert_eq!(
+      serde_json::from_value::<MembershipIssue>(serde_json::json!({ "type": "left_in_group", "user": "7" }))
+        .ok(),
+      Some(MembershipIssue::Unknown)
+    );
+    assert_eq!(
+      serde_json::from_value::<MembershipIssue>(serde_json::json!({ "type": "group_refused" })).ok(),
+      Some(MembershipIssue::GroupRefused)
+    );
+    assert_eq!(
+      serde_json::from_value::<MembershipIssue>(serde_json::json!({ "type": "from_a_newer_core" })).ok(),
+      Some(MembershipIssue::Unknown)
+    );
+  }
 
   #[test]
   fn pending_ids_are_recognized() {
@@ -383,6 +990,8 @@ mod tests {
         reactions: Vec::new(),
         reply_count: 0,
         maybe_thread: None,
+        maybe_imported: None,
+        maybe_placeholder: None,
       })
     };
     assert_eq!(line("[ERROR] disk full").kind, MessageKind::Log(LogLevel::Error));
@@ -407,6 +1016,8 @@ mod tests {
       reactions: Vec::new(),
       reply_count: 0,
       maybe_thread: None,
+      maybe_imported: None,
+      maybe_placeholder: None,
     };
     as_chat_message(&mut message);
     assert_eq!(

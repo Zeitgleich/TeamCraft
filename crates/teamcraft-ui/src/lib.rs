@@ -13,54 +13,134 @@ compile_error!(
 // The backend traits and view models live in `teamcraft-client-api`; the old paths keep working.
 pub use teamcraft_client_api::{admin, backend, model, search, security};
 
+pub mod activity_place;
 pub mod admin_live;
+pub mod areas;
 pub mod attention;
+pub mod audio;
+pub mod audio_player;
 pub mod auth;
 pub mod brand;
 pub mod bundle;
+pub mod call_alerts;
 pub mod calls;
+pub mod channel_access;
 pub mod channel_policy;
 pub mod clock;
 pub mod components;
+pub mod composer_focus;
+pub mod copy_image;
 pub mod delivery;
 pub mod diff;
+pub mod download_speed;
+pub mod editor_doc;
+pub mod editor_lines;
+pub mod emoji_support;
+pub mod entry_actions;
+pub mod feed_motion;
+pub mod feedback;
+pub mod form_errors;
+pub mod gestures;
 // Shared with the mobile apps (through the FFI), so they live in the client API.
 pub use teamcraft_client_api::{emoji, emoji_catalog};
+pub mod external_links;
 pub mod groups;
 pub mod highlight;
+pub mod history;
 pub mod hybrid;
 pub mod i18n;
+pub mod image_crop;
+pub mod integrations;
+/// Which admin join requests to notify about; shared with the mobile apps through
+/// teamcraft-client-api.
+pub use teamcraft_client_api::join_request_alerts;
 pub mod keys;
+pub mod large_files;
+pub mod last_place;
+pub mod lightbox;
 pub mod live;
-pub mod markdown;
+/// The message Markdown subset; shared with the mobile apps through teamcraft-client-api.
+pub use teamcraft_client_api::markdown;
+pub mod media_cache;
+pub mod media_formats;
+pub mod media_layout;
+pub mod meeting_reminders;
 pub mod meetings;
 pub mod mention;
+pub mod message_links;
+pub mod message_sounds;
 #[cfg(any(test, feature = "demo"))]
 pub mod mock;
+pub mod motion;
 pub mod navigation;
+pub mod notetaker;
+pub mod notification_pictures;
 pub mod notifier;
 pub mod notify_sync;
+pub mod object_url;
+pub mod os_alerts;
+pub mod panic_overlay;
+pub mod paste;
+pub mod persisted_media;
 pub mod prefs;
+pub mod preview;
 pub mod profiles;
+pub mod qr;
+pub mod raster;
 pub mod reactive;
+pub mod recovery_kit;
 pub mod reminders;
 pub mod remote_backend;
 pub mod remote_calls;
 pub mod rest;
+pub mod route;
+pub mod search_scope;
 pub mod sections;
 pub mod server_backend;
 pub mod session;
 pub mod settings;
+pub mod share_link;
+pub mod shell_drop;
+#[cfg(target_arch = "wasm32")]
+pub mod shell_level;
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod shell_video;
+pub mod sign_in_page;
 pub mod slash;
+pub mod space_images;
+#[cfg(target_arch = "wasm32")]
+pub mod speaker_test;
+pub mod startup;
 pub mod state;
+pub mod sync_reads;
+pub mod tab_handover;
+pub mod text_preview;
+pub mod toast_motion;
+pub mod toast_timer;
+pub mod unread_divider;
+pub mod video_controls;
+pub mod video_quality;
+pub mod video_stats;
+pub mod viewport;
+#[cfg(target_arch = "wasm32")]
+pub mod web_calls;
 #[cfg(target_arch = "wasm32")]
 pub mod web_core;
+#[cfg(target_arch = "wasm32")]
+mod web_tabs;
 
 pub use components::app::App;
 
 /// Mounts the application into `<body>`. Called from the wasm entry point.
 pub fn mount() {
-  console_error_panic_hook::set_once();
+  panic_overlay::install();
+  // The desktop shell's incoming-call window shows only the call's card (#650).
+  if auth::tauri::window_label().as_deref() == Some(teamcraft_client_api::call_window::CALL_WINDOW_LABEL) {
+    components::incoming_call::mount_call_window();
+    return;
+  }
+  #[cfg(feature = "demo")]
+  panic_overlay::panic_on_request();
   register_service_worker();
   leptos::mount::mount_to_body(App);
 }
@@ -84,53 +164,57 @@ fn register_service_worker() {
 
 #[cfg(test)]
 mod tests {
-  /// An unclosed block swallows every rule after it without any error from the build.
+  /// An unclosed block swallows every rule after it without any error from the build, in the joined
+  /// stylesheet also those of the next files: every area file closes its own blocks.
   #[test]
   fn stylesheet_blocks_are_balanced() {
-    let css = include_str!("../style/main.css");
-    let mut depth = 0_i32;
-    let mut line = 1;
-    let mut in_comment = false;
-    let mut chars = css.chars().peekable();
-    while let Some(character) = chars.next() {
-      match character {
-        '\n' => line += 1,
-        '/' if !in_comment && chars.peek() == Some(&'*') => in_comment = true,
-        '*' if in_comment && chars.peek() == Some(&'/') => in_comment = false,
-        '{' if !in_comment => depth += 1,
-        '}' if !in_comment => depth -= 1,
-        _ => {},
+    for (name, css) in stylesheet_files() {
+      let mut depth = 0_i32;
+      let mut line = 1;
+      let mut in_comment = false;
+      let mut chars = css.chars().peekable();
+      while let Some(character) = chars.next() {
+        match character {
+          '\n' => line += 1,
+          '/' if !in_comment && chars.peek() == Some(&'*') => in_comment = true,
+          '*' if in_comment && chars.peek() == Some(&'/') => in_comment = false,
+          '{' if !in_comment => depth += 1,
+          '}' if !in_comment => depth -= 1,
+          _ => {},
+        }
+        // More closing than opening braces so far: a stray `}`.
+        assert!(depth >= 0, "unexpected `}}` at {name}:{line}");
       }
-      // More closing than opening braces so far: a stray `}`.
-      assert!(depth >= 0, "unexpected `}}` at line {line}");
+      assert_eq!(depth, 0, "unclosed block in {name}");
     }
-    assert_eq!(depth, 0, "unclosed block in style/main.css");
   }
 
   /// The shell is a grid of three rows: banners, top bar, body. A banner placed directly in the grid
   /// takes the top bar's row and pushes the top bar over the channel header.
   #[test]
   fn shell_grid_has_a_row_for_banners_top_bar_and_body() {
-    let css = include_str!("../style/main.css");
+    let css: String = stylesheet_files().into_iter().map(|(_, css)| css).collect();
     let app_rule = css
       .split("\n.app {")
       .nth(1)
       .and_then(|rest| rest.split('}').next())
-      .expect("style/main.css has an .app rule");
+      .expect("the stylesheet has an .app rule");
     let rows = app_rule
       .lines()
       .find_map(|line| line.trim().strip_prefix("grid-template-rows:"))
       .expect(".app sets grid-template-rows");
     assert_eq!(
       rows.trim().trim_end_matches(';'),
-      "auto var(--topbar-h) minmax(0, 1fr)"
+      "auto var(--topbar-h) auto minmax(0, 1fr)"
     );
 
     let shell = include_str!("components/app.rs");
+    // The opening tag spans several lines (its data attributes); the children follow its `>`.
     let grid = shell
-      .split("<div class=\"app\">")
+      .split("class=\"app\"")
       .nth(1)
-      .and_then(|rest| rest.split("<div class=\"app-body\">").next())
+      .and_then(|rest| rest.split_once("\n    >\n"))
+      .and_then(|(_, rest)| rest.split("      <div\n        class=\"app-body\"").next())
       .expect("the shell has the .app grid with its body");
     // Direct children of the grid sit one indentation level below `<div class="app">`.
     let children: Vec<&str> = grid
@@ -140,7 +224,11 @@ mod tests {
       .collect();
     assert_eq!(
       children,
-      ["<div class=\"app-banners\" node_ref=banners>", "<TopBar />"]
+      [
+        "<div class=\"app-banners\" node_ref=banners>",
+        "<TopBar />",
+        "<FirstSyncBar />"
+      ]
     );
     for banner in [
       "<BundleBanner />",
@@ -153,5 +241,28 @@ mod tests {
         "{banner} is inside .app-banners"
       );
     }
+  }
+
+  /// The stylesheet's area files (`style/main/*.css`) in the order the build joins them
+  /// (scripts/bundle-css.sh): by name.
+  fn stylesheet_files() -> Vec<(String, String)> {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("style/main");
+    let mut files: Vec<(String, String)> = std::fs::read_dir(&directory)
+      .expect("style/main is there")
+      .map(|entry| entry.expect("a readable entry").path())
+      .filter(|path| path.extension().is_some_and(|extension| extension == "css"))
+      .map(|path| {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let css = std::fs::read_to_string(&path).expect("a readable stylesheet");
+        (format!("style/main/{name}"), css)
+      })
+      .collect();
+    files.sort();
+    assert!(
+      files.len() > 10,
+      "found the area files in {}",
+      directory.display()
+    );
+    files
   }
 }

@@ -22,11 +22,14 @@ tauri = { version = "2", features = ["tray-icon"] }
 teamcraft-core = { path = "../../crates/teamcraft-core", features = ["ui"] }
 teamcraft-client-api = { path = "../../crates/teamcraft-client-api" }
 teamcraft-crypto = { path = "../../crates/teamcraft-crypto" }
-# Call media: WebTransport to the SFU, microphone and speakers, Opus, DAVE.
-teamcraft-media = { path = "../../crates/teamcraft-media", features = ["native", "segmentation", "photo-backgrounds"] }
+# Call media: WebTransport to the SFU, microphone and speakers, Opus, DAVE; the message sounds and
+# the user's own sound file (#800).
+teamcraft-media = { path = "../../crates/teamcraft-media", features = ["native", "call-view", "segmentation", "photo-backgrounds", "sound-files"] }
 # Blocks on the effects pipeline's GPU setup on a blocking thread.
 pollster = "1.0.1"
 teamcraft-proto.workspace = true
+# The few native OS calls that need unsafe code, behind a safe API (macOS and Windows resume hooks).
+teamcraft-desktop-native = { path = "../../crates/teamcraft-desktop-native" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 anyhow = "1"
@@ -37,16 +40,24 @@ secrecy.workspace = true
 tokio = { workspace = true, features = ["io-util", "rt", "time", "sync", "macros"] }
 # System browser for the OIDC login (RFC 8252): the webview never shows the identity provider.
 tauri-plugin-opener = "2"
+# Pictures pasted from the system clipboard go to the UI as PNG (#761), and notification pictures
+# (#543) are read from the media cache (avatars come as PNG, JPEG or WebP); already in the tree
+# through the client core with the same decoders.
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "webp"] }
 # Push-to-talk while another app has focus (Windows, macOS, X11).
 tauri-plugin-global-shortcut = "2"
 # System notifications for mentions and direct messages (the UI decides what to show).
 tauri-plugin-notification = "2"
+# Native save dialog for "Save…" on a file (#719): the OS's own dialog on Windows and macOS, GTK's
+# (through the portal with GTK_USE_PORTAL) on Linux. Same Tauri plugin family; used from Rust only.
+tauri-plugin-dialog = "2"
 # Opens the window with the size, position and maximized state it had when the app was closed.
 tauri-plugin-window-state = "2"
 # Self-update of the Windows, macOS and AppImage builds from a signed manifest (docs/updates.md).
 tauri-plugin-updater = "2"
-# Refresh token in the OS keyring (Secret Service on Linux, Keychain on macOS).
-keyring = "4"
+# One running instance on every OS: a second process would fork the encrypted store (e2ee.md §9.4).
+# Same Tauri plugin family; on Linux it adds zbus, already in the tree through the keyring (teamcraft-core).
+tauri-plugin-single-instance = "2"
 reqwest = { workspace = true, features = ["form"] }
 # PKCE, state and token requests; HTTP goes through our own reqwest client.
 oauth2 = { version = "5", default-features = false }
@@ -59,17 +70,30 @@ base64.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["pipewire", "v4l2", "gstreamer"] }
 # Push-to-talk on Wayland through the GlobalShortcuts portal (MIT; already in the tree for capture).
-ashpd = { version = "0.13.13", features = ["global_shortcuts"] }
+ashpd = { version = "0.13.13", features = ["global_shortcuts", "background"] }
 futures-util = "0.3"
 # Idle time, screen lock and replaceable, withdrawable notifications over D-Bus (MIT; already in the
 # tree through ashpd, same version and runtime).
 zbus = { version = "5.13", default-features = false, features = ["tokio"] }
+# The desktop's window button layout (gtk-decoration-layout) for the custom title bar (MIT; the
+# same version Tauri uses on Linux, so already in the tree).
+gtk = "0.18"
+# The webview's cache model and page cache (webview_memory.rs; MIT, the version wry uses, so already in
+# the tree).
+webkit2gtk = "2.0.2"
 
 # macOS cameras (AVFoundation) and hardware H.264 through GStreamer's VideoToolbox encoder
 # (`vtenc_h264`); untested. The dmg bundles GStreamer.framework (packaging/macos/bundle-gstreamer.sh);
 # building needs the framework's development files installed. If an encoder or GStreamer itself is
 # missing at runtime, video falls back to OpenH264.
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# Reads a picture from the system clipboard when the webview's paste event carries none (#761);
+# Linux reads the GTK clipboard instead. Same Tauri plugin family, used from Rust only.
+tauri-plugin-clipboard-manager = "2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
+# "Start at login" as a LaunchAgent (autostart.rs); the same plugin as on Windows.
+tauri-plugin-autostart = "2"
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["avfoundation", "gstreamer", "screencapturekit"] }
 # Opens the system's video effects panel (Portrait, background, Studio Light): a safe AVFoundation
 # API (MIT/Apache-2.0), same author and Core Foundation layer as screencapturekit.
@@ -77,6 +101,12 @@ avcapture = "0.7.0"
 # OS idle time for the attention report through a safe Core Graphics binding (Zlib/Apache-2.0/MIT;
 # already in the tree through the media stack).
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEventSource", "CGEventTypes"] }
+# Notifications that can be replaced and withdrawn (UNUserNotificationCenter), through the same
+# safe objc2 bindings (Zlib/Apache-2.0/MIT; already in the tree through Tauri's macOS stack).
+objc2 = "0.6.2"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSError", "NSSet", "NSString"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotificationAction", "UNNotificationAttachment", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+block2 = "0.6.2"
 
 # Windows: Media Foundation cameras and Windows Graphics Capture for screens and windows.
 # teamcraft-media's `gstreamer` feature would build the Media Foundation encoder element
@@ -84,8 +114,8 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 [target.'cfg(target_os = "windows")'.dependencies]
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["mediafoundation", "graphics-capture", "wasapi-loopback"] }
 
-# Windows shell integration: the `teamcraft://` links (registered by the installer), one running
-# instance that receives them, and the "start at login" option (a registry Run entry).
+# Windows shell integration: the `teamcraft://` links (registered by the installer), handed to the
+# running instance, and the "start at login" option (a registry Run entry).
 [target.'cfg(windows)'.dependencies]
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
@@ -93,6 +123,9 @@ tauri-plugin-autostart = "2"
 # OS idle time for the attention report: a safe wrapper of GetLastInputInfo (MIT/Apache-2.0; only
 # windows-sys and anyhow, both already in the tree).
 user-idle-time = { version = "0.7", default-features = false }
+# Toasts with buttons and a reply field that can be replaced and withdrawn (WinRT; MIT/Apache-2.0,
+# the version the notification plugin already pulls in).
+windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "Foundation_Collections", "UI_Notifications"] }
 
 [features]
 # Serve the embedded `dist` instead of the dev server URL. `cargo tauri build` enables it.
@@ -104,3 +137,13 @@ integration = []
 reqwest = { workspace = true, features = ["cookies"] }
 # Tests encode and decode without downloading Cisco's OpenH264 (release builds load that instead).
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["openh264-source"] }
+# The media task's tests run a real call against a local SFU (as the SFU's own call tests do).
+teamcraft-sfu = { path = "../../crates/teamcraft-sfu" }
+wtransport = { version = "0.7.2", features = ["self-signed"] }
+# The counting fake keychain of the sign-in tests implements `Keystore`; already in the tree.
+zeroize = "1.9.1"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# A fake notification service on a peer-to-peer connection, so tests see what a ringing call sends
+# (freedesktop.rs) without a session bus.
+zbus = { version = "5.13", default-features = false, features = ["tokio", "p2p"] }

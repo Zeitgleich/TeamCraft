@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material Symbols "bookmark", outlined (Apache License 2.0): the notes to self (#829). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+  android:width="24dp"
+  android:height="24dp"
+  android:viewportWidth="24"
+  android:viewportHeight="24">
+  <path
+    android:fillColor="#FF000000"
+    android:pathData="M5,21V5Q5,4.175 5.588,3.588Q6.175,3 7,3H17Q17.825,3 18.413,3.588Q19,4.175 19,5V21L12,18ZM7,17.95 L12,15.8 L17,17.95V5H7Z" />
+</vector>

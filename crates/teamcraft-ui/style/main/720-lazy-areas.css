@@ -1,0 +1,88 @@
+/* Parts of the app that load when first used (areas.rs, #334). The spinner shows only when the
+   chunk takes a moment, so a quick load doesn't flash. */
+.lazy-area {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lazy-area .spinner {
+  opacity: 0;
+  animation:
+    spin 0.8s linear infinite,
+    lazy-area-show var(--dur-base) var(--ease-standard) 0.3s forwards;
+}
+
+@keyframes lazy-area-show {
+  to {
+    opacity: 1;
+  }
+}
+
+.lazy-area-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+.lazy-area-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
+.lazy-area-screen {
+  min-height: 100dvh;
+}
+
+/* A part of a view (a bar, a toolbar, a prompt) on its way: a line, not a box. */
+.lazy-area-inline {
+  min-height: 24px;
+}
+
+/* A popover on its way floats like a dialog; its error keeps the app usable around the card. */
+.lazy-area-popover {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
+.lazy-area-failed {
+  padding: 16px;
+  pointer-events: auto;
+}
+
+.lazy-area-failed.lazy-area-popover {
+  pointer-events: none;
+}
+
+.lazy-area-popover .lazy-area-card {
+  pointer-events: auto;
+}
+
+.lazy-area-failed.lazy-area-overlay {
+  background: rgba(8, 12, 20, 0.55);
+}
+
+.lazy-area-card {
+  max-width: 420px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.lazy-area-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.call-move-banner { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; justify-content: center; margin: .5rem 1rem 0; padding: .6rem 1rem; border-radius: var(--radius); background: var(--surface-2); color: var(--text); }
+

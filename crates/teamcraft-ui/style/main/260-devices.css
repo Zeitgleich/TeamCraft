@@ -1,0 +1,80 @@
+/* ---- Device approval, linking, key change ---- */
+
+.modal-link {
+  width: min(720px, 100%);
+}
+
+.approval-code {
+  margin: 14px 0;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  text-align: center;
+  font: 700 34px var(--font-mono);
+  letter-spacing: 0.5em;
+  padding-left: calc(12px + 0.5em);
+}
+
+.approval-result {
+  padding: 8px 0;
+  font-size: var(--text-md);
+}
+
+.link-body {
+  display: flex;
+  gap: 28px;
+  padding: 20px;
+}
+
+.link-qr {
+  flex: none;
+  width: 220px;
+  text-align: center;
+}
+
+.qr {
+  display: block;
+  width: 220px;
+  height: 220px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.link-steps {
+  flex: 1;
+  min-width: 0;
+}
+
+.link-steps ol {
+  padding-left: 20px;
+  list-style: decimal;
+}
+
+.link-steps li + li {
+  margin-top: 8px;
+}
+
+.key-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #e5c36b;
+  background: var(--mention-bg);
+  color: var(--mention-text);
+}
+
+.key-banner-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.key-banner .btn {
+  background: transparent;
+  border-color: currentColor;
+  color: inherit;
+}
+

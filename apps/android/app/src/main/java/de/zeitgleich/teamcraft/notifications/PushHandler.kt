@@ -24,7 +24,10 @@ class PushHandler(
   fun handle(notification: PushNotification) {
     when (val decision = PushDecision.of(notification)) {
       is PushDecision.Ignore -> stats.recordIgnored(decision.reason)
-      is PushDecision.ShowMessage -> notifier.show(decision.notification, decision.isAlerting)
+      is PushDecision.ShowMessage -> {
+        stats.recordPreview(decision.notification.maybeGap)
+        notifier.show(decision.notification, decision.isAlerting)
+      }
       is PushDecision.Ring -> calls.ring(ring(decision.conversationId, decision.maybeCallId, decision.notification))
       is PushDecision.ShowQuietCall -> {
         stats.recordIgnored(IgnoreReason.SUPPRESSED)
@@ -40,6 +43,29 @@ class PushHandler(
       is PushDecision.ShowTest -> notifier.showTest(decision.maybeSentAtMs)
     }
     handled.update { it + 1 }
+  }
+
+  /**
+   * A retry of a wake-up shown as a placeholder ([PushRetry]): fills in the message if it is still
+   * shown; never alerts, never posts anything new.
+   */
+  fun handleRetry(notification: PushNotification) {
+    if (PushDecision.of(notification) is PushDecision.ShowMessage) notifier.fillIn(notification)
+  }
+
+  /** Whether a notification of this conversation shows now (a retry for it is worth making). */
+  fun isShowing(conversationId: String): Boolean = conversationId in notifier.shownConversationIds()
+
+  /** A visible wake-up that could not be opened: never nothing (see [MessageNotifier.showUnreadable]). */
+  fun handleUnreadable() {
+    stats.recordUnreadable()
+    notifier.showUnreadable()
+    handled.update { it + 1 }
+  }
+
+  /** A wake-up that could not be opened and must not show anything (it may have been a withdrawal). */
+  fun recordUnreadable() {
+    stats.recordUnreadable()
   }
 
   private fun ring(conversationId: String, maybeCallId: String?, notification: PushNotification): IncomingRing {

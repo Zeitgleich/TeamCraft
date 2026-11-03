@@ -79,7 +79,7 @@ fun DoNotDisturbScreen(viewModel: MainViewModel, account: AppState.Ready, onBack
     editor = DndEditor.from(settings?.maybeDndSchedule)
     maybeSnapshot = viewModel.readChat { snapshot() }
   }
-  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.dnd_title), maybeOnBack = onBack) }) { padding ->
+  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.dnd_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     Column(
       Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
       verticalArrangement = Arrangement.spacedBy(12.dp),

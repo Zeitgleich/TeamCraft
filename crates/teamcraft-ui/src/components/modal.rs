@@ -2,6 +2,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::motion::use_leave_ghost;
 use crate::state::use_app_state;
 
 const FOCUSABLE: &str = "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])";
@@ -14,10 +15,19 @@ pub fn Modal(
   #[prop(into)]
   labelled_by: String,
   #[prop(optional, into)] class: &'static str,
+  /// Whether the dialog fades out when it closes. The quick switcher, opened from the keyboard many
+  /// times a day, comes and goes at once (#359).
+  #[prop(default = true)]
+  has_exit_motion: bool,
   children: Children,
 ) -> impl IntoView {
   let state = use_app_state();
   let dialog = NodeRef::<html::Div>::new();
+  let backdrop = NodeRef::<html::Div>::new();
+  let is_press_on_backdrop = StoredValue::new(false);
+  if has_exit_motion {
+    use_leave_ghost(backdrop);
+  }
   let previously_focused = web_sys::window()
     .and_then(|window| window.document())
     .and_then(|document| document.active_element())
@@ -57,11 +67,20 @@ pub fn Modal(
   };
 
   view! {
-    <div class="modal-backdrop" on:mousedown=move |ev| {
-      if ev.target() == ev.current_target() {
-        state.close_overlay();
+    // Closes when a press both starts and ends on the backdrop (#639): closing on `mousedown` let
+    // the press's `click` reach whatever was under the backdrop (WebKit), and a text selection
+    // dragged out of the dialog must not close it.
+    <div
+      class="modal-backdrop"
+      node_ref=backdrop
+      on:mousedown=move |ev| is_press_on_backdrop.set_value(ev.target() == ev.current_target())
+      on:click=move |ev| {
+        if is_press_on_backdrop.get_value() && ev.target() == ev.current_target() {
+          state.close_overlay();
+        }
+        is_press_on_backdrop.set_value(false);
       }
-    }>
+    >
       <div
         class=format!("modal {class}")
         role="dialog"
@@ -87,7 +106,7 @@ fn focus_selector(selector: &str) {
   }
 }
 
-fn trap_tab(ev: &web_sys::KeyboardEvent, dialog: NodeRef<html::Div>) {
+pub(crate) fn trap_tab(ev: &web_sys::KeyboardEvent, dialog: NodeRef<html::Div>) {
   let Some(root) = dialog.get() else { return };
   let Ok(list) = root.query_selector_all(FOCUSABLE) else {
     return;

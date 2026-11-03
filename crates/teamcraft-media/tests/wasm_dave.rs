@@ -5,6 +5,8 @@
 //! `WASM_BINDGEN_USE_BROWSER=1`; see crates/vendor/davey/VENDORED.md for the commands.
 
 #![cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+// Test helpers outside `#[test]` functions panic on failure like the tests themselves.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use teamcraft_media::dave::{
   DaveCallId, DaveExternalSender, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind,

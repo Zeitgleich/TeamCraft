@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
-use crate::{CategoryId, InviteId, SpaceId, SpaceRole, UnixMillis, UserId, UserSummary};
+use crate::{CategoryId, IdempotencyKey, InviteId, SpaceId, SpaceRole, UnixMillis, UserId, UserSummary};
 
 wire_enum! {
   /// How people join a space.
@@ -23,6 +23,10 @@ pub struct SpaceResponse {
   pub maybe_color: Option<String>,
   #[serde(rename = "description", default, skip_serializing_if = "Option::is_none")]
   pub maybe_description: Option<String>,
+  /// The space's picture, if it has one (`GET /api/v1/spaces/{id}/image`). Like the name it is
+  /// directory data the server sees, not end-to-end encrypted content (e2ee.md §4.4).
+  #[serde(rename = "image", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_image: Option<SpaceImage>,
   pub join_policy: JoinPolicy,
   pub is_archived: bool,
   /// Brand tag: the space may be themed with this brand's accent color. A hint; it restricts
@@ -35,6 +39,48 @@ pub struct SpaceResponse {
   /// The caller's notification setting for the whole space; absent for non-members.
   #[serde(rename = "my_notifications", default, skip_serializing_if = "Option::is_none")]
   pub maybe_my_notifications: Option<crate::SpaceNotificationSettings>,
+  /// How many people belong to the space (expired guests not counted). Directory data, shown when
+  /// browsing spaces; 0 from servers that don't send it.
+  #[serde(default)]
+  pub member_count: u32,
+  /// Whether the caller may add members or invite them by e-mail. A hint for the UI only: the
+  /// server checks the permission again on every request.
+  #[serde(default)]
+  pub can_add_members: bool,
+  /// Whether the caller may invite guests (by e-mail or from the directory). A UI hint like
+  /// `can_add_members`.
+  #[serde(default)]
+  pub can_invite_guests: bool,
+  /// Whether the caller may change the space's properties (name, picture, join policy, archive).
+  /// A UI hint like `can_add_members`.
+  #[serde(default)]
+  pub can_manage_space: bool,
+  /// May delete the space with its channels (`delete_space`), also an archived one. A UI hint
+  /// like `can_add_members`.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub can_delete_space: bool,
+  /// How many channels go with the space, for its confirmation; only with `can_delete_space`.
+  #[serde(default, skip_serializing_if = "is_zero")]
+  pub deleted_channel_count: u32,
+  /// Whether the caller may create channels in the space (`create_channel`, which guests don't
+  /// have). A UI hint like `can_add_members`; servers that don't send it leave it to the request.
+  #[serde(default = "unknown_is_allowed")]
+  pub can_create_channels: bool,
+}
+
+/// What a client assumes for a hint an older server doesn't send: offered, and the server decides.
+fn unknown_is_allowed() -> bool {
+  true
+}
+
+/// The picture of a space: a square PNG the server re-encoded from the upload
+/// (`PUT /api/v1/spaces/{id}/image`, space admins).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SpaceImage {
+  /// Changes with every new picture (a content hash); the image's `ETag` is this value in quotes.
+  /// Clients key their cache by it.
+  pub version: String,
+  pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -52,6 +98,10 @@ pub struct CreateSpaceRequest {
   #[serde(rename = "description", default, skip_serializing_if = "Option::is_none")]
   pub maybe_description: Option<String>,
   pub join_policy: JoinPolicy,
+  /// Client-generated key that makes a retry of this request return the original result instead
+  /// of creating a second one. Optional so older clients keep working.
+  #[serde(rename = "idempotency_key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 /// `PATCH /api/v1/spaces/{id}`: only the fields that are present change; an empty string clears
@@ -151,6 +201,9 @@ pub struct CreateInviteRequest {
   pub channel_ids: Vec<crate::ConversationId>,
   #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
   pub maybe_expires_at: Option<UnixMillis>,
+  /// A personal note from the inviter, added to the invitation e-mail. Not stored.
+  #[serde(rename = "message", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_message: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -169,4 +222,100 @@ pub struct InviteResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListInvitesResponse {
   pub invites: Vec<InviteResponse>,
+}
+
+fn is_zero(count: &u32) -> bool {
+  *count == 0
+}
+
+#[cfg(test)]
+mod tests {
+  use serde_json::json;
+
+  use super::*;
+  use crate::{Id, Snowflake};
+
+  #[test]
+  fn a_space_without_an_image_has_no_image_field() {
+    let space = space(None);
+    let value = serde_json::to_value(&space).unwrap();
+    assert!(value.get("image").is_none(), "{value}");
+    // Older servers send no `image`: it reads as none.
+    let parsed: SpaceResponse = serde_json::from_value(json!({
+      "id": "7",
+      "name": "Project A",
+      "join_policy": "open",
+      "is_archived": false,
+    }))
+    .unwrap();
+    assert_eq!(parsed, space);
+  }
+
+  #[test]
+  fn a_space_image_has_a_stable_shape() {
+    let space = space(Some(SpaceImage {
+      version: "3f2a".into(),
+      size_bytes: 1234,
+    }));
+    let value = serde_json::to_value(&space).unwrap();
+    assert_eq!(value["image"], json!({"version": "3f2a", "size_bytes": 1234}));
+    assert_eq!(serde_json::from_value::<SpaceResponse>(value).unwrap(), space);
+  }
+
+  #[test]
+  fn browse_fields_have_a_stable_shape() {
+    let space = SpaceResponse {
+      member_count: 12,
+      can_add_members: true,
+      can_invite_guests: false,
+      can_create_channels: false,
+      ..space(None)
+    };
+    let value = serde_json::to_value(&space).unwrap();
+    assert_eq!(value["member_count"], json!(12));
+    assert_eq!(value["can_add_members"], json!(true));
+    assert_eq!(value["can_invite_guests"], json!(false));
+    assert_eq!(value["can_create_channels"], json!(false));
+    assert_eq!(serde_json::from_value::<SpaceResponse>(value).unwrap(), space);
+  }
+
+  #[test]
+  fn an_invite_message_is_optional_on_the_wire() {
+    let parsed: CreateInviteRequest = serde_json::from_value(json!({
+      "email": "guest@example.com",
+      "role": "guest",
+    }))
+    .unwrap();
+    assert_eq!(parsed.maybe_message, None);
+    let with_message = CreateInviteRequest {
+      maybe_message: Some("Welcome to Project A".into()),
+      ..parsed
+    };
+    let value = serde_json::to_value(&with_message).unwrap();
+    assert_eq!(value["message"], json!("Welcome to Project A"));
+  }
+
+  fn space(maybe_image: Option<SpaceImage>) -> SpaceResponse {
+    SpaceResponse {
+      id: SpaceId::from_snowflake(Snowflake::new(7).unwrap()),
+      name: "Project A".into(),
+      maybe_icon: None,
+      maybe_color: None,
+      maybe_description: None,
+      maybe_image,
+      join_policy: JoinPolicy::Open,
+      is_archived: false,
+      maybe_brand_id: None,
+      maybe_my_role: None,
+      maybe_my_notifications: None,
+      member_count: 0,
+      can_add_members: false,
+      can_invite_guests: false,
+      can_manage_space: false,
+      can_delete_space: false,
+      deleted_channel_count: 0,
+      // What an older server, which doesn't send it, is taken to mean.
+      can_create_channels: true,
+    }
+  }
 }

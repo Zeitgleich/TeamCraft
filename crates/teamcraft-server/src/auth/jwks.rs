@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use jsonwebtoken::DecodingKey;
@@ -10,6 +11,7 @@ use tokio::time::Instant;
 use tracing::{debug, warn};
 
 use super::error::AuthError;
+use crate::dependencies::{DependencyGuard, Fault, Retries};
 
 /// Upper bound for identity provider responses; real documents are a few kilobytes.
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -40,6 +42,8 @@ pub struct JwksCache {
   // last fetch was attempted, successful or not: during a provider outage a failed fetch must
   // count too, or every request would wait for its own fetch to time out.
   refresh: Mutex<Option<Instant>>,
+  /// The identity provider's breaker: its health for `/readyz`, and no fetch while it is down.
+  maybe_guard: Option<Arc<DependencyGuard>>,
 }
 
 struct CachedKeys {
@@ -54,7 +58,14 @@ impl JwksCache {
       options,
       state: RwLock::new(None),
       refresh: Mutex::new(None),
+      maybe_guard: None,
     }
+  }
+
+  /// Fetches go through `guard` (issue #743).
+  pub fn with_guard(mut self, guard: Arc<DependencyGuard>) -> Self {
+    self.maybe_guard = Some(guard);
+    self
   }
 
   /// The verification key for `key_id`, refreshing the cached set if needed.
@@ -102,7 +113,7 @@ impl JwksCache {
     }
 
     *last_attempt = Some(Instant::now());
-    match self.source.fetch().await {
+    match self.fetch().await {
       Ok(keys) => {
         debug!(key_count = keys.keys.len(), "signing keys refreshed");
         *self.state.write().await = Some(CachedKeys {
@@ -118,6 +129,23 @@ impl JwksCache {
       },
       Err(error) => Err(error),
     }
+  }
+
+  /// One fetch, through the breaker when there is one. Not retried here: the refresh lock is held
+  /// meanwhile, and the minimum refresh interval already paces the next attempt.
+  async fn fetch(&self) -> Result<JwkSet, AuthError> {
+    let Some(guard) = &self.maybe_guard else {
+      return self.source.fetch().await;
+    };
+    guard.call(Retries::Once, fault, || self.source.fetch()).await
+  }
+}
+
+/// Only an unreachable provider is an outage; anything else is an answer.
+fn fault(error: &AuthError) -> Fault {
+  match error {
+    AuthError::KeysUnavailable(_) => Fault::Outage,
+    _ => Fault::Refusal,
   }
 }
 
@@ -295,6 +323,42 @@ mod tests {
       ));
     }
     assert_eq!(source.fetches(), 1);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn the_guard_reports_an_outage_and_the_recovery() {
+    use teamcraft_proto::{DependencyName, DependencyState};
+    let source = FakeSource::with_key(TEST_KEY_ID);
+    source.set_failing(true);
+    let guard = DependencyGuard::standalone(DependencyName::IdentityProvider);
+    let cache = JwksCache::new(Box::new(source.clone()), OPTIONS).with_guard(guard.clone());
+    for _ in 0..3 {
+      assert!(cache.key(TEST_KEY_ID).await.is_err());
+      tokio::time::advance(Duration::from_secs(31)).await;
+    }
+    assert_eq!(guard.state(), DependencyState::Recovering, "down, probe due");
+    assert_eq!(source.fetches(), 3);
+
+    source.set_failing(false);
+    cache.key(TEST_KEY_ID).await.unwrap();
+    assert_eq!(guard.state(), DependencyState::Ok);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn while_the_provider_is_down_no_fetch_is_made() {
+    use teamcraft_proto::DependencyName;
+    let source = FakeSource::with_key(TEST_KEY_ID);
+    source.set_failing(true);
+    let guard = DependencyGuard::standalone(DependencyName::IdentityProvider);
+    for _ in 0..3 {
+      guard.record_failure();
+    }
+    let cache = JwksCache::new(Box::new(source.clone()), OPTIONS).with_guard(guard);
+    assert!(matches!(
+      cache.key(TEST_KEY_ID).await,
+      Err(AuthError::KeysUnavailable(_))
+    ));
+    assert_eq!(source.fetches(), 0, "the open breaker answered");
   }
 
   #[tokio::test(start_paused = true)]

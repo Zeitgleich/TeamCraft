@@ -209,38 +209,6 @@
         }
       }
     },
-    "approve_compare": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Does the new device show this number?"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Zeigt das neue Gerät diese Zahl an?"
-          }
-        }
-      }
-    },
-    "approve_confirm": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Yes, link it"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ja, verknüpfen"
-          }
-        }
-      }
-    },
     "approve_done": {
       "localizations": {
         "en": {
@@ -262,13 +230,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enter the code the new device shows."
+            "value": "Scan the code the new computer shows, or type it."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Gib den Code ein, den das neue Gerät anzeigt."
+            "value": "Scanne den Code, den der neue Computer zeigt, oder gib ihn ein."
           }
         }
       }
@@ -417,6 +385,214 @@
         }
       }
     },
+    "backup_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Key backup"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schlüssel-Backup"
+          }
+        }
+      }
+    },
+    "backup_ok": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your keys are backed up"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Schlüssel sind gesichert"
+          }
+        }
+      }
+    },
+    "backup_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your keys aren’t backed up yet"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Schlüssel sind noch nicht gesichert"
+          }
+        }
+      }
+    },
+    "backup_no_recovery": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery isn’t set up"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wiederherstellung ist nicht eingerichtet"
+          }
+        }
+      }
+    },
+    "backup_missing_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Without a backup, a new device can’t read your earlier messages. Set a recovery passphrase on the desktop or web app to create one."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ohne Backup kann ein neues Gerät deine früheren Nachrichten nicht lesen. Lege in der Desktop- oder Web-App eine Wiederherstellungs-Passphrase fest, um eines anzulegen."
+          }
+        }
+      }
+    },
+    "backup_no_recovery_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If you lose all your devices, you can’t read your messages again. Set a recovery passphrase on the desktop or web app."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn du alle deine Geräte verlierst, kannst du deine Nachrichten nicht mehr lesen. Lege in der Desktop- oder Web-App eine Wiederherstellungs-Passphrase fest."
+          }
+        }
+      }
+    },
+    "backup_passphrase": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your recovery passphrase protects it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Wiederherstellungs-Passphrase schützt es."
+          }
+        }
+      }
+    },
+    "backup_passphrase_set": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your recovery passphrase protects it. You set it on %@."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Wiederherstellungs-Passphrase schützt es. Du hast sie am %@ festgelegt."
+          }
+        }
+      }
+    },
+    "backup_organization": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization can also restore it if you lose all your devices."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Organisation kann es auch wiederherstellen, wenn du alle deine Geräte verlierst."
+          }
+        }
+      }
+    },
+    "call_add_people": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add people"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personen hinzufügen"
+          }
+        }
+      }
+    },
+    "call_add_people_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add and move the call"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hinzufügen und Anruf verlegen"
+          }
+        }
+      }
+    },
+    "call_add_people_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The call moves into a new meeting room with everyone in it and the people you add. This conversation stays as it is."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Anruf wechselt in einen neuen Besprechungsraum mit allen Beteiligten und den Personen, die du hinzufügst. Diese Unterhaltung bleibt, wie sie ist."
+          }
+        }
+      }
+    },
+    "call_add_people_none": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "There is nobody else you can add."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Es gibt niemanden, den du noch hinzufügen kannst."
+          }
+        }
+      }
+    },
     "call_camera_denied": {
       "localizations": {
         "en": {
@@ -497,6 +673,22 @@
         }
       }
     },
+    "call_device_limit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your account is already in this call on as many devices as are allowed. Leave the call on one of them first, then join from this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Konto ist bereits auf so vielen Geräten im Anruf, wie erlaubt sind. Verlasse den Anruf zuerst auf einem davon und tritt dann von diesem Gerät bei."
+          }
+        }
+      }
+    },
     "call_ended_by_host": {
       "localizations": {
         "en": {
@@ -561,6 +753,102 @@
         }
       }
     },
+    "call_move_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't join the meeting room"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitritt zum Besprechungsraum fehlgeschlagen"
+          }
+        }
+      }
+    },
+    "call_move_join": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Join the meeting room"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dem Besprechungsraum beitreten"
+          }
+        }
+      }
+    },
+    "call_move_refused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The move into the meeting room couldn't be verified. You stay in this call."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Wechsel in den Besprechungsraum ließ sich nicht bestätigen. Du bleibst in diesem Anruf."
+          }
+        }
+      }
+    },
+    "call_move_someone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Someone"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jemand"
+          }
+        }
+      }
+    },
+    "call_moved_by %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ moved the call into a meeting room."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat den Anruf in einen Besprechungsraum verlegt."
+          }
+        }
+      }
+    },
+    "call_moved_by %@ added %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ moved the call into a meeting room and added %2$@."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ hat den Anruf in einen Besprechungsraum verlegt und %2$@ hinzugefügt."
+          }
+        }
+      }
+    },
     "call_mute": {
       "localizations": {
         "en": {
@@ -589,22 +877,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Gehalten"
-          }
-        }
-      }
-    },
-    "call_ongoing": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "TeamCraft call"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "TeamCraft-Anruf"
           }
         }
       }
@@ -661,6 +933,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Vergleiche diesen Code mit den anderen, um sicherzugehen, dass niemand mithört:"
+          }
+        }
+      }
+    },
+    "call_reconnecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection lost, reconnecting…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verbindung unterbrochen, wird wiederhergestellt …"
           }
         }
       }
@@ -729,6 +1017,22 @@
         }
       }
     },
+    "call_server_lost": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The call server can't be reached anymore, so the call ended. Try again in a moment."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Anrufserver ist zurzeit nicht mehr erreichbar, der Anruf wurde deshalb beendet. Versuche es gleich noch einmal."
+          }
+        }
+      }
+    },
     "call_start": {
       "localizations": {
         "en": {
@@ -757,6 +1061,86 @@
           "stringUnit": {
             "state": "translated",
             "value": "Videoanruf starten"
+          }
+        }
+      }
+    },
+    "call_status_sounds": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Call status sounds"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Statustöne im Anruf"
+          }
+        }
+      }
+    },
+    "call_status_sounds_all": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mine and others'"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meine und die anderer"
+          }
+        }
+      }
+    },
+    "call_status_sounds_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A soft tone repeats while your connection is lost; short tones tell when it is back or the call ended. Only you hear them, on the call's audio output."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ein leiser Ton wiederholt sich, solange deine Verbindung unterbrochen ist; kurze Töne zeigen, wenn sie wieder steht oder der Anruf beendet ist. Nur du hörst sie, über die Audioausgabe des Anrufs."
+          }
+        }
+      }
+    },
+    "call_status_sounds_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aus"
+          }
+        }
+      }
+    },
+    "call_status_sounds_own_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only mine"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur meine"
           }
         }
       }
@@ -841,6 +1225,46 @@
         }
       }
     },
+    "chat_mentions %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld mention"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld mentions"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Erwähnung"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Erwähnungen"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "chat_muted": {
       "localizations": {
         "en": {
@@ -869,6 +1293,382 @@
           "stringUnit": {
             "state": "translated",
             "value": "Unterhaltung geändert"
+          }
+        }
+      }
+    },
+    "chat_unread %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld unread message"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld unread messages"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld ungelesene Nachricht"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld ungelesene Nachrichten"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "event_joined %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ joined the channel."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ ist dem Kanal beigetreten."
+          }
+        }
+      }
+    },
+    "event_left %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ left the channel."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat den Kanal verlassen."
+          }
+        }
+      }
+    },
+    "event_renamed %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ renamed the channel to %2$@."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ hat den Kanal in %2$@ umbenannt."
+          }
+        }
+      }
+    },
+    "event_topic_changed %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ changed the topic to “%2$@”."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ hat das Thema auf „%2$@“ geändert."
+          }
+        }
+      }
+    },
+    "event_member_added %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ added %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ hat %2$@ hinzugefügt"
+          }
+        }
+      }
+    },
+    "event_member_added_history %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ added %2$@ and shared the earlier history"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ hat %2$@ hinzugefügt und den bisherigen Verlauf geteilt"
+          }
+        }
+      }
+    },
+    "event_member_removed %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ removed %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ hat %2$@ entfernt"
+          }
+        }
+      }
+    },
+    "event_archived %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ archived this channel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat diesen Kanal archiviert"
+          }
+        }
+      }
+    },
+    "event_unarchived %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ restored this channel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat diesen Kanal wiederhergestellt"
+          }
+        }
+      }
+    },
+    "event_made_private %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ made this channel private"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat diesen Kanal privat gemacht"
+          }
+        }
+      }
+    },
+    "event_made_public %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ made this channel public"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat diesen Kanal öffentlich gemacht"
+          }
+        }
+      }
+    },
+    "event_pinned %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ pinned a message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat eine Nachricht angeheftet"
+          }
+        }
+      }
+    },
+    "event_moved %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ moved this channel to %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ hat diesen Kanal in %2$@ verschoben"
+          }
+        }
+      }
+    },
+    "event_moved_unnamed %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ moved this channel to another space"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat diesen Kanal in einen anderen Bereich verschoben"
+          }
+        }
+      }
+    },
+    "event_archived_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was archived"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde archiviert"
+          }
+        }
+      }
+    },
+    "event_unarchived_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was restored"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde wiederhergestellt"
+          }
+        }
+      }
+    },
+    "event_made_private_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was made private"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde privat gemacht"
+          }
+        }
+      }
+    },
+    "event_made_public_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was made public"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde öffentlich gemacht"
+          }
+        }
+      }
+    },
+    "event_moved_unattributed %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was moved to %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde in %@ verschoben"
+          }
+        }
+      }
+    },
+    "event_moved_unnamed_unattributed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel was moved to another space"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal wurde in einen anderen Bereich verschoben"
+          }
+        }
+      }
+    },
+    "message_read": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gelesen"
           }
         }
       }
@@ -2665,6 +3465,54 @@
         }
       }
     },
+    "error_backup_damaged": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your key backup is damaged and can't be opened. Link this device from another device, or ask an admin to recover your account."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Schlüsselsicherung ist beschädigt und lässt sich nicht öffnen. Verknüpfe dieses Gerät von einem anderen Gerät aus oder bitte einen Admin, dein Konto wiederherzustellen."
+          }
+        }
+      }
+    },
+    "error_backup_out_of_memory": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device doesn't have enough free memory to unlock your key backup. Close other apps and try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät hat nicht genug freien Speicher, um deine Schlüsselsicherung zu entsperren. Schließe andere Apps und versuche es erneut."
+          }
+        }
+      }
+    },
+    "error_backup_too_new": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your key backup was made by a newer version of TeamCraft. Update the app and try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Schlüsselsicherung stammt aus einer neueren Version von TeamCraft. Aktualisiere die App und versuche es erneut."
+          }
+        }
+      }
+    },
     "error_generic": {
       "localizations": {
         "en": {
@@ -2725,6 +3573,278 @@
           "stringUnit": {
             "state": "translated",
             "value": "Die lokalen Daten konnten nicht geöffnet werden."
+          }
+        }
+      }
+    },
+    "older_history_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Older messages could not be loaded."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ältere Nachrichten konnten nicht geladen werden."
+          }
+        }
+      }
+    },
+    "older_history_retry": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try again"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erneut versuchen"
+          }
+        }
+      }
+    },
+    "profile_name_change": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Change name"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Namen ändern"
+          }
+        }
+      }
+    },
+    "profile_name_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a name, or use the name from your sign-in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib einen Namen ein oder verwende den Namen aus deiner Anmeldung."
+          }
+        }
+      }
+    },
+    "profile_name_invalid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The name can't contain control characters."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Name darf keine Steuerzeichen enthalten."
+          }
+        }
+      }
+    },
+    "profile_name_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your name"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Name"
+          }
+        }
+      }
+    },
+    "profile_name_rejected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The name was refused. It may be too long, or your organization no longer allows changing it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Name wurde abgelehnt. Er ist vielleicht zu lang, oder deine Organisation erlaubt die Änderung nicht mehr."
+          }
+        }
+      }
+    },
+    "profile_name_reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use name from sign-in"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Namen aus der Anmeldung verwenden"
+          }
+        }
+      }
+    },
+    "profile_name_save": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save name"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Namen speichern"
+          }
+        }
+      }
+    },
+    "store_damaged_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The data on this device can't be read"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Daten auf diesem Gerät können nicht gelesen werden"
+          }
+        }
+      }
+    },
+    "store_damaged_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft's encrypted data on this device is damaged, or the key that opens it is gone. Your messages are not lost: set this device up again and unlock your keys with your recovery passphrase, or link it from another device. The old data is kept aside, not deleted."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die verschlüsselten Daten von TeamCraft auf diesem Gerät sind beschädigt, oder der Schlüssel, der sie öffnet, fehlt. Deine Nachrichten sind nicht verloren: Richte dieses Gerät neu ein und entsperre deine Schlüssel mit deiner Wiederherstellungs-Passphrase oder verbinde es von einem anderen Gerät aus. Die alten Daten werden beiseitegelegt, nicht gelöscht."
+          }
+        }
+      }
+    },
+    "store_newer_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This data is from a newer TeamCraft"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Daten stammen von einem neueren TeamCraft"
+          }
+        }
+      }
+    },
+    "store_newer_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A newer version of TeamCraft changed the data on this device, and this version can't read it. Update TeamCraft to the newest version, then try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine neuere Version von TeamCraft hat die Daten auf diesem Gerät geändert, und diese Version kann sie nicht lesen. Aktualisiere TeamCraft auf die neueste Version und versuche es dann erneut."
+          }
+        }
+      }
+    },
+    "store_reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set up this device again"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät neu einrichten"
+          }
+        }
+      }
+    },
+    "store_reset_confirm_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set this device up again?"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät neu einrichten?"
+          }
+        }
+      }
+    },
+    "store_reset_confirm_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft keeps the unreadable data beside the new data, so nothing is deleted, but this device starts empty and fills again from the server once you unlocked your keys."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft behält die unlesbaren Daten neben den neuen, es wird also nichts gelöscht, aber das Gerät startet leer und füllt sich wieder vom Server, sobald du deine Schlüssel entsperrt hast."
+          }
+        }
+      }
+    },
+    "store_reset_confirm_button": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Yes, set up again"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ja, neu einrichten"
           }
         }
       }
@@ -2825,22 +3945,6 @@
         }
       }
     },
-    "favorite": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Favorite"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Favorit"
-          }
-        }
-      }
-    },
     "favorite_add": {
       "localizations": {
         "en": {
@@ -2905,6 +4009,22 @@
         }
       }
     },
+    "file_cancel_upload": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abbrechen"
+          }
+        }
+      }
+    },
     "file_failed": {
       "localizations": {
         "en": {
@@ -2933,6 +4053,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "Zum Herunterladen tippen"
+          }
+        }
+      }
+    },
+    "file_upload_retrying": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retrying…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wird erneut versucht …"
+          }
+        }
+      }
+    },
+    "file_upload_stalled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Upload failed. The message waits for the file."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hochladen fehlgeschlagen. Die Nachricht wartet auf die Datei."
+          }
+        }
+      }
+    },
+    "file_upload_storage_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The file storage is unavailable right now. Try again in a moment."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Dateispeicher ist gerade nicht erreichbar. Versuche es gleich noch einmal."
           }
         }
       }
@@ -3033,6 +4201,22 @@
         }
       }
     },
+    "loading_older_messages": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading older messages…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ältere Nachrichten werden geladen …"
+          }
+        }
+      }
+    },
     "jump_down": {
       "localizations": {
         "en": {
@@ -3089,18 +4273,58 @@
         }
       }
     },
+    "jump_to_reaction %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld new reaction to your messages, jump to it"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld new reactions to your messages, jump to the first"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld neue Reaktion auf deine Nachrichten, dorthin springen"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld neue Reaktionen auf deine Nachrichten, zur ersten springen"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "link_compare": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Check that the other device shows the same number:"
+            "value": "Type this number on your other device:"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Prüfe, dass das andere Gerät dieselbe Zahl anzeigt:"
+            "value": "Gib diese Zahl auf deinem anderen Gerät ein:"
           }
         }
       }
@@ -3110,13 +4334,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Confirm on the other device to finish."
+            "value": "Then wait here until it finishes."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bestätige auf dem anderen Gerät, um abzuschließen."
+            "value": "Warte dann hier, bis es fertig ist."
           }
         }
       }
@@ -3473,6 +4697,22 @@
         }
       }
     },
+    "notes_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mein Speicher"
+          }
+        }
+      }
+    },
     "notification_answer_call": {
       "localizations": {
         "en": {
@@ -3558,13 +4798,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sent a file: %@"
+            "value": "File: %@"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hat eine Datei gesendet: %@"
+            "value": "Datei: %@"
           }
         }
       }
@@ -3677,6 +4917,134 @@
           "stringUnit": {
             "state": "translated",
             "value": "Keine Verbindung. Nachrichten werden gesendet, sobald du wieder online bist."
+          }
+        }
+      }
+    },
+    "connection_unreachable %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server can't be reached. Messages wait until it is back. Next attempt in %lld s."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server ist nicht erreichbar. Nachrichten warten, bis er wieder da ist. Nächster Versuch in %lld s."
+          }
+        }
+      }
+    },
+    "connection_captive_portal %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This network wants you to sign in first. Open a web page to sign in; messages wait. Next attempt in %lld s."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Netzwerk verlangt zuerst eine Anmeldung. Öffne eine Webseite, um dich anzumelden; Nachrichten warten. Nächster Versuch in %lld s."
+          }
+        }
+      }
+    },
+    "connection_untrusted_certificate %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server's certificate isn't trusted. On a network that inspects encrypted traffic, use another network or ask your IT; if it happens everywhere, tell your administrator. Next attempt in %lld s."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dem Zertifikat des Servers wird nicht vertraut. In einem Netzwerk, das verschlüsselten Verkehr prüft: Nutze ein anderes Netzwerk oder frag deine IT; passiert es überall, sag deiner Administration Bescheid. Nächster Versuch in %lld s."
+          }
+        }
+      }
+    },
+    "connection_retry": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try now"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jetzt versuchen"
+          }
+        }
+      }
+    },
+    "connection_sign_in": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your session has expired. Messages wait until you sign in again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Sitzung ist abgelaufen. Nachrichten warten, bis du dich wieder anmeldest."
+          }
+        }
+      }
+    },
+    "connection_sign_in_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in again"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erneut anmelden"
+          }
+        }
+      }
+    },
+    "connection_connecting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connecting to the server…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verbindung zum Server wird aufgebaut…"
+          }
+        }
+      }
+    },
+    "connection_slow": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Slow connection. Messages still go out, but may take longer."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Langsame Verbindung. Nachrichten gehen weiter raus, brauchen aber länger."
           }
         }
       }
@@ -4921,6 +6289,70 @@
         }
       }
     },
+    "sign_in_provider_denied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your account isn't allowed to use TeamCraft. Ask your admin for access, or sign in with another account."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Konto darf TeamCraft nicht nutzen. Bitte deinen Admin um Zugriff oder melde dich mit einem anderen Konto an."
+          }
+        }
+      }
+    },
+    "sign_in_provider_misconfigured %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign-in is set up wrongly on your organization's side. Tell your admin (error: %@)."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Anmeldung deiner Organisation ist falsch eingerichtet. Sag deinem Admin Bescheid (Fehler: %@)."
+          }
+        }
+      }
+    },
+    "sign_in_provider_already_signed_in": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The sign-in page had already been used. Close other sign-in windows, then sign in again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Anmeldeseite war schon benutzt. Schließe andere Anmeldefenster und melde dich erneut an."
+          }
+        }
+      }
+    },
+    "sign_in_provider_refused %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization's sign-in refused (error: %@). Try again, or tell your admin."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Anmeldung deiner Organisation hat abgelehnt (Fehler: %@). Versuche es erneut oder sag deinem Admin Bescheid."
+          }
+        }
+      }
+    },
     "sign_in_hint": {
       "localizations": {
         "en": {
@@ -4933,6 +6365,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "Melde dich mit dem Konto deiner Organisation an, um fortzufahren."
+          }
+        }
+      }
+    },
+    "export_diagnostics_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Export diagnostics"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diagnose exportieren"
+          }
+        }
+      }
+    },
+    "export_diagnostics_summary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share the app and system version and recent log lines with support. Nothing is sent until you pick an app."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Teilt App- und Systemversion sowie die letzten Protokollzeilen mit dem Support. Es wird nichts gesendet, bis du eine App auswählst."
+          }
+        }
+      }
+    },
+    "export_diagnostics_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not export the diagnostics."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Diagnose konnte nicht exportiert werden."
           }
         }
       }
@@ -5061,6 +6541,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Du"
+          }
+        }
+      }
+    },
+    "user_deleted_name": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deleted user"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gelöschter Nutzer"
           }
         }
       }
@@ -5209,6 +6705,230 @@
         }
       }
     },
+    "sign_in_with %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in with %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anmelden mit %@"
+          }
+        }
+      }
+    },
+    "sign_in_or": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "or"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "oder"
+          }
+        }
+      }
+    },
+    "sign_in_email": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "E-mail address"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "E-Mail-Adresse"
+          }
+        }
+      }
+    },
+    "sign_in_password": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Password"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Passwort"
+          }
+        }
+      }
+    },
+    "sign_in_show_password": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show password"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Passwort anzeigen"
+          }
+        }
+      }
+    },
+    "sign_in_hide_password": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hide password"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Passwort verbergen"
+          }
+        }
+      }
+    },
+    "sign_in_code_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One-time code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einmalcode"
+          }
+        }
+      }
+    },
+    "sign_in_code_optional": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "One-time code (if you set one up)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einmalcode (falls eingerichtet)"
+          }
+        }
+      }
+    },
+    "sign_in_error_credentials": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The e-mail address, password or one-time code is not correct."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "E-Mail-Adresse, Passwort oder Einmalcode ist nicht korrekt."
+          }
+        }
+      }
+    },
+    "sign_in_error_disabled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Signing in with e-mail and password is not available on this server."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Anmeldung mit E-Mail und Passwort ist auf diesem Server nicht verfügbar."
+          }
+        }
+      }
+    },
+    "sign_in_error_rate_limited": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many attempts. Wait a moment, then try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zu viele Versuche. Warte einen Moment und versuche es dann erneut."
+          }
+        }
+      }
+    },
+    "sign_in_error_unreachable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Can't reach the server. Check your connection, then try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut."
+          }
+        }
+      }
+    },
+    "sign_in_help_link": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Help with signing in"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hilfe zur Anmeldung"
+          }
+        }
+      }
+    },
+    "sign_in_e2ee_note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your messages are end-to-end encrypted. The server can't read them."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Nachrichten sind Ende-zu-Ende-verschlüsselt. Der Server kann sie nicht lesen."
+          }
+        }
+      }
+    },
     "brand_support": {
       "localizations": {
         "en": {
@@ -5349,38 +7069,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Kein anderes Gerät zur Hand? Gib deine Wiederherstellungs-Passphrase ein."
-          }
-        }
-      }
-    },
-    "link_steps_phone": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "On your other phone: open TeamCraft, Settings → Devices → Link a device, and scan or enter this code."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Auf deinem anderen Telefon: TeamCraft öffnen, Einstellungen → Geräte → Gerät verknüpfen, und diesen Code scannen oder eingeben."
-          }
-        }
-      }
-    },
-    "link_steps_computer": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "On a computer: Settings → Devices and security → Link a new device, and enter this code."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Am Computer: Einstellungen → Geräte und Sicherheit → Neues Gerät verknüpfen, und diesen Code eingeben."
           }
         }
       }
@@ -5541,6 +7229,3278 @@
           "stringUnit": {
             "state": "translated",
             "value": "Du bist noch in keinem Space. Bitte deine Admins, dich hinzuzufügen."
+          }
+        }
+      }
+    },
+    "chats_tab_spaces": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spaces"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spaces"
+          }
+        }
+      }
+    },
+    "chats_no_channels": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No channels yet. Browse the channels of your spaces to join one."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch keine Kanäle. Durchsuche die Kanäle deiner Spaces, um einem beizutreten."
+          }
+        }
+      }
+    },
+    "dm_new": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neue Nachricht"
+          }
+        }
+      }
+    },
+    "dm_filter": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Filter direct messages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direktnachrichten filtern"
+          }
+        }
+      }
+    },
+    "dm_filter_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No direct messages match."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keine Direktnachricht passt."
+          }
+        }
+      }
+    },
+    "dm_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direct messages with one or several colleagues show up here. They don't belong to a space."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direktnachrichten mit einer oder mehreren Personen erscheinen hier. Sie gehören zu keinem Space."
+          }
+        }
+      }
+    },
+    "dm_pick_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pick one person for a direct message, or several for a group."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine Person für eine Direktnachricht, mehrere für eine Gruppe."
+          }
+        }
+      }
+    },
+    "dm_start": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open conversation"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unterhaltung öffnen"
+          }
+        }
+      }
+    },
+    "dm_start_group": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start group"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gruppe starten"
+          }
+        }
+      }
+    },
+    "presence_peer_offline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Offline"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Offline"
+          }
+        }
+      }
+    },
+    "home_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Home"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Startseite"
+          }
+        }
+      }
+    },
+    "home_filter_all": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle"
+          }
+        }
+      }
+    },
+    "home_filter_unread": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unread"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ungelesen"
+          }
+        }
+      }
+    },
+    "home_filter_people": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "People"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personen"
+          }
+        }
+      }
+    },
+    "home_filter_groups": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Groups"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gruppen"
+          }
+        }
+      }
+    },
+    "server_entry_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter your server address"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib die Adresse deines Servers ein"
+          }
+        }
+      }
+    },
+    "server_entry_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization's TeamCraft address, for example team.example.com. You can also paste an invite or message link."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die TeamCraft-Adresse deiner Organisation, zum Beispiel team.example.com. Du kannst auch einen Einladungs- oder Nachrichtenlink einfügen."
+          }
+        }
+      }
+    },
+    "server_managed_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization set up this server for this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Organisation hat diesen Server für dieses Gerät eingerichtet."
+          }
+        }
+      }
+    },
+    "server_entry_placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "team.example.com"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "team.example.com"
+          }
+        }
+      }
+    },
+    "server_entry_continue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Weiter"
+          }
+        }
+      }
+    },
+    "server_confirm_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check that this is your organization's server before you sign in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prüfe vor der Anmeldung, ob das der Server deiner Organisation ist."
+          }
+        }
+      }
+    },
+    "server_confirm_continue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue to sign in"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Weiter zur Anmeldung"
+          }
+        }
+      }
+    },
+    "server_use_another": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use another server"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anderen Server verwenden"
+          }
+        }
+      }
+    },
+    "change_server": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Change server"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server wechseln"
+          }
+        }
+      }
+    },
+    "server_error_invalid_address": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That is not a valid server address."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist keine gültige Serveradresse."
+          }
+        }
+      }
+    },
+    "server_error_https_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only secure (https) server addresses are supported."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Es werden nur sichere Serveradressen (https) unterstützt."
+          }
+        }
+      }
+    },
+    "server_error_not_teamcraft": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No TeamCraft server was found at this address."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unter dieser Adresse wurde kein TeamCraft-Server gefunden."
+          }
+        }
+      }
+    },
+    "server_error_unreachable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Can't reach the server. Check the address and your connection, then try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server ist nicht erreichbar. Prüfe die Adresse und deine Verbindung und versuche es erneut."
+          }
+        }
+      }
+    },
+    "server_error_tls": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A secure connection to the server could not be established. Its certificate may be invalid."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Es konnte keine sichere Verbindung zum Server aufgebaut werden. Möglicherweise ist sein Zertifikat ungültig."
+          }
+        }
+      }
+    },
+    "server_error_captive_portal": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This network asks you to sign in first. Open a web page in Safari, sign in to the network, then try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Netzwerk verlangt zuerst eine Anmeldung. Öffne eine Webseite in Safari, melde dich im Netzwerk an und versuche es dann erneut."
+          }
+        }
+      }
+    },
+    "server_error_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server is not available right now. Try again later."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server ist gerade nicht verfügbar. Versuche es später erneut."
+          }
+        }
+      }
+    },
+    "server_error_app_too_old": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This app is too old for the server. Please update TeamCraft."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese App ist zu alt für den Server. Bitte aktualisiere TeamCraft."
+          }
+        }
+      }
+    },
+    "server_error_server_too_old": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server is too old for this app. Ask your administrator to update it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server ist zu alt für diese App. Bitte deine Administration, ihn zu aktualisieren."
+          }
+        }
+      }
+    },
+    "server_error_invalid_sign_in": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server's sign-in settings are invalid. Ask your administrator."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Anmeldeeinstellungen des Servers sind ungültig. Wende dich an deine Administration."
+          }
+        }
+      }
+    },
+    "server_error_not_set_up": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server is not set up for this app. Ask your administrator."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Server ist nicht für diese App eingerichtet. Wende dich an deine Administration."
+          }
+        }
+      }
+    },
+    "server_error_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization only allows its own server on this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Organisation erlaubt auf diesem Gerät nur ihren eigenen Server."
+          }
+        }
+      }
+    },
+    "server_confirm_provider %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You will sign in at %@."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du meldest dich bei %@ an."
+          }
+        }
+      }
+    },
+    "server_confirm_provider_elsewhere %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This server signs you in through %@, which is not part of its own domain. Continue only if your organization uses this sign-in service; otherwise someone could be impersonating your server."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Server meldet dich über %@ an, das nicht zu seiner eigenen Domain gehört. Fahre nur fort, wenn deine Organisation diesen Anmeldedienst nutzt; sonst könnte sich jemand als dein Server ausgeben."
+          }
+        }
+      }
+    },
+    "call_toggle_controls": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show or hide the call controls"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anruf-Steuerung ein- oder ausblenden"
+          }
+        }
+      }
+    },
+    "call_video_spotlight": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show larger"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Größer anzeigen"
+          }
+        }
+      }
+    },
+    "call_you_muted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You're muted"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du bist stummgeschaltet"
+          }
+        }
+      }
+    },
+    "call_audio_route": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio output"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audioausgabe"
+          }
+        }
+      }
+    },
+    "call_encryption_open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shows the encryption code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zeigt den Verschlüsselungscode"
+          }
+        }
+      }
+    },
+    "call_encryption_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "End-to-end encrypted"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ende-zu-Ende-verschlüsselt"
+          }
+        }
+      }
+    },
+    "call_encryption_body": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only the people in this call can hear and see it, not even the server can. To be sure nobody sits in between, compare the code with the others."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur die Personen in diesem Anruf können ihn hören und sehen, nicht einmal der Server. Damit sicher niemand dazwischensitzt, vergleiche den Code mit den anderen."
+          }
+        }
+      }
+    },
+    "notification_photo": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Photo"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Foto"
+          }
+        }
+      }
+    },
+    "notification_video": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video"
+          }
+        }
+      }
+    },
+    "notification_audio": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio"
+          }
+        }
+      }
+    },
+    "notification_new_message_from %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New message from %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neue Nachricht von %@"
+          }
+        }
+      }
+    },
+    "notification_content_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notification content"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Inhalt von Benachrichtigungen"
+          }
+        }
+      }
+    },
+    "notification_content_full": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sender and message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Absender und Nachricht"
+          }
+        }
+      }
+    },
+    "notification_content_sender_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sender only"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur Absender"
+          }
+        }
+      }
+    },
+    "notification_content_nothing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nothing"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nichts"
+          }
+        }
+      }
+    },
+    "notification_content_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "What notifications show on this device. Your workspace can limit it further."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Was Benachrichtigungen auf diesem Gerät zeigen. Dein Arbeitsbereich kann es weiter einschränken."
+          }
+        }
+      }
+    },
+    "notification_content_limit %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your workspace limits this to: %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Arbeitsbereich begrenzt das auf: %@"
+          }
+        }
+      }
+    },
+    "approve_scan": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code scannen"
+          }
+        }
+      }
+    },
+    "scan_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan the code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code scannen"
+          }
+        }
+      }
+    },
+    "scan_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Point the camera at the code on the other device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Richte die Kamera auf den Code des anderen Geräts."
+          }
+        }
+      }
+    },
+    "scan_denied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft has no access to the camera. Allow it in Settings, or type the code instead."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft hat keinen Zugriff auf die Kamera. Erlaube ihn in den Einstellungen oder gib den Code stattdessen ein."
+          }
+        }
+      }
+    },
+    "scan_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device can't scan codes with the camera. Type the code instead."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät kann Codes nicht mit der Kamera scannen. Gib den Code stattdessen ein."
+          }
+        }
+      }
+    },
+    "scan_open_settings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Settings"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einstellungen öffnen"
+          }
+        }
+      }
+    },
+    "scan_type_instead": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type the code instead"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code stattdessen eingeben"
+          }
+        }
+      }
+    },
+    "link_type_code_generic": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type the code that the new device shows."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib den Code ein, den das neue Gerät anzeigt."
+          }
+        }
+      }
+    },
+    "link_typed_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code"
+          }
+        }
+      }
+    },
+    "link_approve": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approve"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Genehmigen"
+          }
+        }
+      }
+    },
+    "link_wrong_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That is not the code on the new device. Check it and try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist nicht der Code auf dem neuen Gerät. Prüfe ihn und versuche es erneut."
+          }
+        }
+      }
+    },
+    "link_attempt_ended": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many wrong codes. Start again on the new device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zu viele falsche Codes. Beginne auf dem neuen Gerät von vorn."
+          }
+        }
+      }
+    },
+    "link_prompt_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A new device wants to join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ein neues Gerät möchte beitreten"
+          }
+        }
+      }
+    },
+    "link_prompt_warning": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only continue if you are setting up this device right now. Otherwise deny."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fahre nur fort, wenn du dieses Gerät gerade selbst einrichtest. Sonst lehne ab."
+          }
+        }
+      }
+    },
+    "link_deny": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deny"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ablehnen"
+          }
+        }
+      }
+    },
+    "link_review": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prüfen"
+          }
+        }
+      }
+    },
+    "link_platform_android": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Android"
+          }
+        }
+      }
+    },
+    "link_platform_ios": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPhone or iPad"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPhone oder iPad"
+          }
+        }
+      }
+    },
+    "link_platform_macos": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mac"
+          }
+        }
+      }
+    },
+    "link_platform_windows": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Windows"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Windows"
+          }
+        }
+      }
+    },
+    "link_platform_linux": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linux"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linux"
+          }
+        }
+      }
+    },
+    "link_platform_web": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Web browser"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Webbrowser"
+          }
+        }
+      }
+    },
+    "link_platform_other": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Other device"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anderes Gerät"
+          }
+        }
+      }
+    },
+    "link_prompt_says %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Says it is %1$@ (%2$@)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gibt sich als %1$@ (%2$@) aus"
+          }
+        }
+      }
+    },
+    "link_prompt_unverified": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not verified: the new device chose this name."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht überprüft: Das neue Gerät hat sich diesen Namen selbst gegeben."
+          }
+        }
+      }
+    },
+    "link_ask": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask my other devices"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meine anderen Geräte fragen"
+          }
+        }
+      }
+    },
+    "link_ask_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your signed-in devices (computer or phone) show a prompt; type the number this phone then shows there. The server sees the one-time key of this request, but nothing is approved without the number."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine angemeldeten Geräte (Computer oder Handy) zeigen eine Anfrage; gib dort die Zahl ein, die dieses Handy dann zeigt. Der Server sieht den Einmalschlüssel dieser Anfrage, ohne die Zahl wird aber nichts bestätigt."
+          }
+        }
+      }
+    },
+    "link_asked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your other devices show a prompt now."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine anderen Geräte zeigen jetzt eine Anfrage."
+          }
+        }
+      }
+    },
+    "link_ask_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The other devices could not be asked."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die anderen Geräte konnten nicht gefragt werden."
+          }
+        }
+      }
+    },
+    "call_person_muted %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, muted"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, stummgeschaltet"
+          }
+        }
+      }
+    },
+    "attach_camera": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Take photo"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Foto aufnehmen"
+          }
+        }
+      }
+    },
+    "more": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mehr"
+          }
+        }
+      }
+    },
+    "forwarded_from %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forwarded from %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Weitergeleitet von %@"
+          }
+        }
+      }
+    },
+    "message_deleted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This message was deleted"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Nachricht wurde gelöscht"
+          }
+        }
+      }
+    },
+    "message_placeholder_waiting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for this message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Warte auf diese Nachricht"
+          }
+        }
+      }
+    },
+    "message_placeholder_not_available": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not available on this device"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auf diesem Gerät nicht verfügbar"
+          }
+        }
+      }
+    },
+    "message_placeholder_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This message couldn't be decrypted"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Nachricht konnte nicht entschlüsselt werden"
+          }
+        }
+      }
+    },
+    "first_sync_newest": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading messages…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lade Nachrichten…"
+          }
+        }
+      }
+    },
+    "first_sync_older": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading older messages…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lade ältere Nachrichten…"
+          }
+        }
+      }
+    },
+    "first_sync_count %lld %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld of %2$lld conversations"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld von %2$lld Unterhaltungen"
+          }
+        }
+      }
+    },
+    "key_catch_up %lld %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Getting the keys for older messages. Conversations caught up: %1$lld of %2$lld. Messages fill in when one of your other devices or a member comes online."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schlüssel für ältere Nachrichten werden geholt. Vollständige Unterhaltungen: %1$lld von %2$lld. Nachrichten erscheinen, sobald eines deiner anderen Geräte oder ein Mitglied online ist."
+          }
+        }
+      }
+    },
+    "message_link_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link to a message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Link zu einer Nachricht"
+          }
+        }
+      }
+    },
+    "message_sent": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sent"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gesendet"
+          }
+        }
+      }
+    },
+    "album_more_pictures %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld more picture"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld more pictures"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld weiteres Bild"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld weitere Bilder"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "picture_close": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Close"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schließen"
+          }
+        }
+      }
+    },
+    "picture_share": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Teilen"
+          }
+        }
+      }
+    },
+    "picture_forward": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forward message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachricht weiterleiten"
+          }
+        }
+      }
+    },
+    "picture_position %lld %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld of %2$lld"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld von %2$lld"
+          }
+        }
+      }
+    },
+    "picture_scope": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Which pictures"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Welche Bilder"
+          }
+        }
+      }
+    },
+    "picture_scope_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Nachricht"
+          }
+        }
+      }
+    },
+    "picture_scope_conversation": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Whole chat"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ganzer Chat"
+          }
+        }
+      }
+    },
+    "picture_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading the original"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Original wird geladen"
+          }
+        }
+      }
+    },
+    "picture_load_original": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Load original"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Original laden"
+          }
+        }
+      }
+    },
+    "picture_load_original_size %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Load original (%@)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Original laden (%@)"
+          }
+        }
+      }
+    },
+    "picture_load_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The original couldn't be loaded."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Original konnte nicht geladen werden."
+          }
+        }
+      }
+    },
+    "picture_try_again": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try again"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erneut versuchen"
+          }
+        }
+      }
+    },
+    "picture_unreadable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This picture can't be shown on this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Bild kann auf diesem Gerät nicht angezeigt werden."
+          }
+        }
+      }
+    },
+    "original_download_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Download original images automatically"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Originalbilder automatisch laden"
+          }
+        }
+      }
+    },
+    "original_download_always": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Always"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Immer"
+          }
+        }
+      }
+    },
+    "original_download_unmetered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On Wi-Fi only"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur im WLAN"
+          }
+        }
+      }
+    },
+    "original_download_never": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Never"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nie"
+          }
+        }
+      }
+    },
+    "original_download_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "An opened picture shows its preview at once. Otherwise its original loads when you tap “Load original”. Mobile data, hotspots and Low Data Mode don't count as Wi-Fi."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ein geöffnetes Bild zeigt sofort seine Vorschau. Sonst wird das Original geladen, wenn du auf „Original laden“ tippst. Mobile Daten, Hotspots und der Modus „Wenig Daten“ zählen nicht als WLAN."
+          }
+        }
+      }
+    },
+    "join_requests_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Requests to join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitrittsanfragen"
+          }
+        }
+      }
+    },
+    "join_request_summary %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ asks to join %2$@ as a workspace admin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ möchte %2$@ als Workspace-Admin beitreten"
+          }
+        }
+      }
+    },
+    "join_request_summary_here %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ asks to join as a workspace admin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ möchte als Workspace-Admin beitreten"
+          }
+        }
+      }
+    },
+    "join_request_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approving lets them read what is posted from now on, as joining by themselves would. Everybody in the channel sees that a workspace admin joined."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn du zustimmst, kann die Person lesen, was ab jetzt geschrieben wird, wie bei einem Beitritt aus eigener Kraft. Alle im Kanal sehen, dass ein Workspace-Admin beigetreten ist."
+          }
+        }
+      }
+    },
+    "join_request_not_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The signed roster on this device doesn’t list them as a workspace admin, so you can only decline."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die signierte Rollenliste auf diesem Gerät führt die Person nicht als Workspace-Admin, du kannst nur ablehnen."
+          }
+        }
+      }
+    },
+    "join_request_approve": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approve"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zustimmen"
+          }
+        }
+      }
+    },
+    "join_request_decline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Decline"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ablehnen"
+          }
+        }
+      }
+    },
+    "join_request_gone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This request is no longer open: it was decided on another device or by another owner, withdrawn, or it expired."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Anfrage ist nicht mehr offen: Sie wurde auf einem anderen Gerät oder von einem anderen Eigentümer entschieden, zurückgezogen oder ist abgelaufen."
+          }
+        }
+      }
+    },
+    "join_ask_not_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device doesn’t have a current signed roster that lists you as a workspace admin yet. Try again in a moment."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auf diesem Gerät gibt es noch keine aktuelle signierte Rollenliste, die dich als Workspace-Admin führt. Versuche es gleich noch einmal."
+          }
+        }
+      }
+    },
+    "join_request_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your decision didn’t go through. Try again, or open TeamCraft."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Entscheidung ist nicht angekommen. Versuche es noch einmal oder öffne TeamCraft."
+          }
+        }
+      }
+    },
+    "join_request_note_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request to join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitrittsanfrage"
+          }
+        }
+      }
+    },
+    "browse_private": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Private channel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Privater Kanal"
+          }
+        }
+      }
+    },
+    "browse_join_ask": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask to join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitritt anfragen"
+          }
+        }
+      }
+    },
+    "browse_join_requested": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Requested"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Angefragt"
+          }
+        }
+      }
+    },
+    "browse_join_requested_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The channel’s owners decide. The request expires if nobody does."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Eigentümer des Kanals entscheiden. Die Anfrage läuft ab, wenn niemand entscheidet."
+          }
+        }
+      }
+    },
+    "browse_join_withdraw": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Withdraw"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zurückziehen"
+          }
+        }
+      }
+    },
+    "browse_join_admin_elsewhere": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Join as admin on desktop or web"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Als Admin am Desktop oder im Web beitreten"
+          }
+        }
+      }
+    },
+    "event_admin_joined %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ joined this channel as a workspace admin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ ist diesem Kanal als Workspace-Admin beigetreten"
+          }
+        }
+      }
+    },
+    "event_admin_joined_added %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ joined this channel as a workspace admin, added by %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ ist diesem Kanal als Workspace-Admin beigetreten, hinzugefügt von %2$@"
+          }
+        }
+      }
+    },
+    "event_admin_joined_approved %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ joined this channel as a workspace admin, approved by %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ ist diesem Kanal als Workspace-Admin beigetreten, zugelassen von %2$@"
+          }
+        }
+      }
+    },
+    "join_request_notification_title %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ asks to join %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ möchte %2$@ beitreten"
+          }
+        }
+      }
+    },
+    "join_request_notification_title_unnamed %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ asks to join a channel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ möchte einem Kanal beitreten"
+          }
+        }
+      }
+    },
+    "join_request_notification_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "As a workspace admin. Approve shares only what is posted from now on; to share the earlier history, approve in the app."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Als Workspace-Admin. Zustimmen teilt nur, was ab jetzt geschrieben wird; um den bisherigen Verlauf zu teilen, stimme in der App zu."
+          }
+        }
+      }
+    },
+    "join_request_notification_hidden_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Request to join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitrittsanfrage"
+          }
+        }
+      }
+    },
+    "join_request_notification_hidden_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A workspace admin asks to join a channel you own."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ein Workspace-Admin möchte einem deiner Kanäle beitreten."
+          }
+        }
+      }
+    },
+    "join_request_hint_history": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approving lets them read the earlier history too. Everybody in the channel sees that a workspace admin joined."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn du zustimmst, kann die Person auch den bisherigen Verlauf lesen. Alle im Kanal sehen, dass ein Workspace-Admin beigetreten ist."
+          }
+        }
+      }
+    },
+    "join_request_share_history": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Also share the earlier history"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auch den bisherigen Verlauf teilen"
+          }
+        }
+      }
+    },
+    "join_ask_too_soon": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You asked to join this channel recently, and that request was declined or withdrawn. You can ask again once it would have expired."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du hast kürzlich angefragt, diesem Kanal beizutreten, und die Anfrage wurde abgelehnt oder zurückgezogen. Du kannst erneut anfragen, sobald sie abgelaufen wäre."
+          }
+        }
+      }
+    },
+    "join_request_not_approvable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device can’t approve this request: the signed policy no longer asks for an owner’s approval, or it isn’t a private channel you are in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät kann die Anfrage nicht annehmen: Die signierte Richtlinie verlangt keine Zustimmung eines Eigentümers mehr, oder es ist kein privater Kanal, in dem du bist."
+          }
+        }
+      }
+    },
+    "link_phone_intro": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approve this phone from a device where you are already signed in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bestätige dieses Handy auf einem Gerät, auf dem du schon angemeldet bist."
+          }
+        }
+      }
+    },
+    "link_scan_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scan code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code scannen"
+          }
+        }
+      }
+    },
+    "link_scan_code_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On a computer, open TeamCraft, then Settings, Devices and security, Link a new device: it shows a code for this phone to scan."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Öffne auf einem Computer TeamCraft, dann Einstellungen, Geräte und Sicherheit, Neues Gerät verknüpfen: Dort steht ein Code, den dieses Handy scannt."
+          }
+        }
+      }
+    },
+    "link_no_other_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only signed in on another phone? Ask your other devices: the phone shows the prompt too. No other device at all? Go back and use your recovery key or organization recovery."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur auf einem anderen Handy angemeldet? Frag deine anderen Geräte: Auch das Handy zeigt die Anfrage. Gar kein anderes Gerät? Geh zurück und nutze deinen Wiederherstellungsschlüssel oder die Wiederherstellung durch die Organisation."
+          }
+        }
+      }
+    },
+    "link_expired_restarted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The request or code ran out. Ask your devices again, or scan a new code."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Anfrage oder der Code ist abgelaufen. Frag deine Geräte erneut oder scanne einen neuen Code."
+          }
+        }
+      }
+    },
+    "link_code_invalid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That is not a TeamCraft link code."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist kein TeamCraft-Verknüpfungscode."
+          }
+        }
+      }
+    },
+    "link_code_for_new_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This code is for the new phone: scan it there with Scan code."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Code ist für das neue Handy: Scanne ihn dort mit „Code scannen“."
+          }
+        }
+      }
+    },
+    "link_code_for_signed_in_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This code comes from a new device: scan it with a device that is already signed in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Code kommt von einem neuen Gerät: Scanne ihn mit einem Gerät, auf dem du schon angemeldet bist."
+          }
+        }
+      }
+    },
+    "link_code_expired": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The code ran out. Show a new code and try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Code ist abgelaufen. Lass einen neuen Code anzeigen und versuche es erneut."
+          }
+        }
+      }
+    },
+    "approve_new_phone_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Setting up a new phone? Choose Ask my other devices on it, or let it scan the code a computer shows under Link a new device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Richtest du ein neues Handy ein? Wähle dort „Meine anderen Geräte fragen“ oder lass es den Code scannen, den ein Computer unter „Neues Gerät verknüpfen“ zeigt."
+          }
+        }
+      }
+    },
+    "conversation_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading the conversation…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unterhaltung wird geladen …"
+          }
+        }
+      }
+    },
+    "messages_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading messages…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachrichten werden geladen …"
+          }
+        }
+      }
+    },
+    "server_entry_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server address"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Serveradresse"
+          }
+        }
+      }
+    },
+    "passphrase_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a passphrase."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib eine Passphrase ein."
+          }
+        }
+      }
+    },
+    "passphrase_repeat_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the passphrase again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib die Passphrase noch einmal ein."
+          }
+        }
+      }
+    },
+    "sign_in_email_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter your e-mail address."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib deine E-Mail-Adresse ein."
+          }
+        }
+      }
+    },
+    "sign_in_password_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter your password."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib dein Passwort ein."
+          }
+        }
+      }
+    },
+    "sign_in_code_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the code from your authenticator app."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib den Code aus deiner Authenticator-App ein."
+          }
+        }
+      }
+    },
+    "sign_in_code_incomplete": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter all 6 digits of the code."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib alle 6 Ziffern des Codes ein."
+          }
+        }
+      }
+    },
+    "link_code_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the code shown on the new device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib den Code ein, den das neue Gerät zeigt."
+          }
+        }
+      }
+    },
+    "link_code_incomplete": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter all 6 digits shown on the new device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib alle 6 Ziffern ein, die das neue Gerät zeigt."
+          }
+        }
+      }
+    },
+    "link_code_digits": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "6 digits"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "6 Ziffern"
+          }
+        }
+      }
+    },
+    "approve_code_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter the link code, or scan the QR code instead."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib den Verknüpfungscode ein oder scanne stattdessen den QR-Code."
+          }
+        }
+      }
+    },
+    "custom_status_emoji_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Emoji"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Emoji"
+          }
+        }
+      }
+    },
+    "custom_status_text_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Status"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Status"
+          }
+        }
+      }
+    },
+    "custom_status_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a status text or an emoji."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib einen Statustext oder ein Emoji ein."
+          }
+        }
+      }
+    },
+    "rules_keyword_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keyword"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stichwort"
+          }
+        }
+      }
+    },
+    "rules_keyword_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a keyword."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib ein Stichwort ein."
+          }
+        }
+      }
+    },
+    "rules_keyword_duplicate": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This keyword is already in the list."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Stichwort steht schon in der Liste."
+          }
+        }
+      }
+    },
+    "channel_name_placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "project-a"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "projekt-a"
+          }
+        }
+      }
+    },
+    "channel_name_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a name for the channel."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib einen Namen für den Kanal ein."
+          }
+        }
+      }
+    },
+    "channel_create_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erstellen"
+          }
+        }
+      }
+    },
+    "entry_action_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That didn’t work"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das hat nicht geklappt"
+          }
+        }
+      }
+    },
+    "deletions_suspect %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server says %lld of your conversations were deleted at once. They are hidden, and their messages stay on this device for now. Tell your administrator."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server meldet %lld deiner Unterhaltungen auf einmal als gelöscht. Sie sind ausgeblendet, ihre Nachrichten bleiben vorerst auf diesem Gerät. Informiere deine Administration."
+          }
+        }
+      }
+    },
+    "entry_delete_channel": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete channel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kanal löschen"
+          }
+        }
+      }
+    },
+    "entry_delete_channel_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Löschen"
+          }
+        }
+      }
+    },
+    "entry_delete_channel_title %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete %@ for everyone?"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ für alle löschen?"
+          }
+        }
+      }
+    },
+    "entry_delete_channel_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All members lose this channel and its messages and files. This can't be undone."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle Mitglieder verlieren diesen Kanal mit seinen Nachrichten und Dateien. Das lässt sich nicht rückgängig machen."
+          }
+        }
+      }
+    },
+    "entry_leave_last_member_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nobody else is in this channel, so leaving deletes it with its messages and files. This can't be undone."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sonst ist niemand in diesem Kanal, daher wird er beim Verlassen mit seinen Nachrichten und Dateien gelöscht. Das lässt sich nicht rückgängig machen."
+          }
+        }
+      }
+    },
+    "entry_leave_last_channel_admin_or_delete": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make someone else channel admin in the channel's settings first, or delete the channel."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ernenne zuerst in den Kanaleinstellungen jemand anderen zum Kanal-Admin oder lösche den Kanal."
+          }
+        }
+      }
+    },
+    "entry_delete_space": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete space"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Space löschen"
+          }
+        }
+      }
+    },
+    "entry_delete_space_text %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Channels that go with it: %lld, with their messages and files, for all their members. This can't be undone."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kanäle, die mit verschwinden: %lld, mit ihren Nachrichten und Dateien für alle ihre Mitglieder. Das lässt sich nicht rückgängig machen."
+          }
+        }
+      }
+    },
+    "entry_leave_channel": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave channel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kanal verlassen"
+          }
+        }
+      }
+    },
+    "entry_leave_channel_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You will no longer receive messages from this conversation."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du erhältst keine Nachrichten aus dieser Unterhaltung mehr."
+          }
+        }
+      }
+    },
+    "entry_leave_channel_title %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave %@?"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ verlassen?"
+          }
+        }
+      }
+    },
+    "entry_leave_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verlassen"
+          }
+        }
+      }
+    },
+    "entry_leave_last_channel_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make someone else channel admin first."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ernenne zuerst jemand anderen zum Kanal-Admin."
+          }
+        }
+      }
+    },
+    "entry_leave_last_space_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make someone else space admin first."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ernenne zuerst jemand anderen zum Space-Admin."
+          }
+        }
+      }
+    },
+    "entry_leave_space": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave space"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Space verlassen"
+          }
+        }
+      }
+    },
+    "entry_leave_space_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You also leave all of its channels. Channels only you are in are deleted."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du verlässt damit auch alle Kanäle darin. Kanäle, in denen nur du bist, werden gelöscht."
+          }
+        }
+      }
+    },
+    "entry_leave_space_title %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave %@?"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ verlassen?"
+          }
+        }
+      }
+    },
+    "entry_mark_all_read": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mark all as read"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle als gelesen markieren"
+          }
+        }
+      }
+    },
+    "entry_mute_space": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mute space"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Space stummschalten"
+          }
+        }
+      }
+    },
+    "entry_notifications": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Benachrichtigungen"
+          }
+        }
+      }
+    },
+    "notify_all": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All messages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle Nachrichten"
+          }
+        }
+      }
+    },
+    "notify_mentions": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mentions only"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur Erwähnungen"
+          }
+        }
+      }
+    },
+    "notify_none": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nothing"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nichts"
           }
         }
       }

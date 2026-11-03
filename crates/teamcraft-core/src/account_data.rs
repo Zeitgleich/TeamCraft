@@ -42,13 +42,91 @@ pub struct AccountData {
   /// encrypted picture lives only here.
   #[serde(default)]
   pub backgrounds: BTreeMap<String, Stamped<BackgroundEntry>>,
-  /// Everything in the activity feed up to this time (the sent time of its newest entry when the
-  /// user looked) counts as read.
+  /// Superseded (issue #534): the feed's unread state follows the read positions of its targets.
+  /// Still merged and written back so that older devices keep their value.
   #[serde(rename = "activity_read", default, skip_serializing_if = "Option::is_none")]
   pub maybe_activity_read: Option<Stamped<i64>>,
+  /// Per conversation ID, the newest MLS epoch in which one of the user's devices switched the
+  /// content key (a removal, a "from join" addition, a rejoin). A new device of the user refuses
+  /// group information older than that: a server could hand out an old one to fork the device into
+  /// a group that still holds a removed member (e2ee.md §4.6). Only grows.
+  #[serde(default)]
+  pub group_epochs: BTreeMap<String, u64>,
+  /// When devices left conversations and came back, keyed `conversation/user/device`, in the server
+  /// times of the commits, as the user's devices processed them: a new device of the user refuses
+  /// messages a device signs while it is out (e2ee.md §4.4). Merging keeps the later time of each,
+  /// so no device's clock decides.
+  #[serde(default)]
+  pub removed_senders: BTreeMap<String, SenderAbsence>,
+  /// Removal records dropped because they can't matter any more (issue #186), keyed like
+  /// `removed_senders`: an absence that left at or before the tombstone's time is not taken back
+  /// from another device or an older key bag. Kept for [`TOMBSTONE_LIFETIME_MS`].
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub pruned_senders: BTreeMap<String, PrunedSender>,
   /// The workspace's first owner, as the first of the user's devices verified it.
   #[serde(rename = "workspace_root", default, skip_serializing_if = "Option::is_none")]
   pub maybe_workspace_root: Option<PinnedKey>,
+  /// When one of the user's devices last set the recovery passphrase (its clock), for the security
+  /// settings (issue #410). Merging keeps the later time; an older app drops the field on upload,
+  /// and the next newer device puts it back.
+  #[serde(
+    rename = "recovery_passphrase_set_at",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_recovery_passphrase_set_at: Option<i64>,
+  /// When one of the user's devices last made a recovery kit (e2ee.md §6.5), merged like
+  /// `maybe_recovery_passphrase_set_at`.
+  #[serde(
+    rename = "recovery_key_set_at",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_recovery_key_set_at: Option<i64>,
+}
+
+/// When a device last left a conversation, and when it was last added back, in server times.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SenderAbsence {
+  pub left_at_ms: i64,
+  #[serde(rename = "back_at_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_back_at_ms: Option<i64>,
+}
+
+impl SenderAbsence {
+  /// Whether a message the device signed at `sent_at_ms` falls into its absence: after it left
+  /// (with `grace_ms` for messages on the way) and before it came back, if it did.
+  pub fn covers(&self, sent_at_ms: i64, grace_ms: i64) -> bool {
+    let is_after_leaving = sent_at_ms > self.left_at_ms.saturating_add(grace_ms);
+    let is_before_return = match self.maybe_back_at_ms {
+      Some(back) if back >= self.left_at_ms => sent_at_ms < back,
+      _ => true,
+    };
+    is_after_leaving && is_before_return
+  }
+
+  /// Takes the later time of each from `other`; returns whether that changed anything.
+  pub fn merge(&mut self, other: &Self) -> bool {
+    let before = *self;
+    self.left_at_ms = self.left_at_ms.max(other.left_at_ms);
+    self.maybe_back_at_ms = self.maybe_back_at_ms.max(other.maybe_back_at_ms);
+    *self != before
+  }
+}
+
+/// A dropped removal record: when the device had left (server time) and when it was dropped
+/// (the pruning device's clock, for forgetting the tombstone like the others).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrunedSender {
+  pub left_at_ms: i64,
+  pub pruned_at_ms: i64,
+}
+
+impl PrunedSender {
+  /// Whether an absence that started at `left_at_ms` was dropped with this tombstone.
+  pub fn covers(&self, left_at_ms: i64) -> bool {
+    left_at_ms <= self.left_at_ms
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,6 +204,29 @@ impl AccountData {
     merge_map(&mut self.marked_unread, &other.marked_unread);
     merge_map(&mut self.pins, &other.pins);
     merge_map(&mut self.backgrounds, &other.backgrounds);
+    for (key, theirs) in &other.pruned_senders {
+      let entry = self.pruned_senders.entry(key.clone()).or_insert(*theirs);
+      entry.left_at_ms = entry.left_at_ms.max(theirs.left_at_ms);
+      entry.pruned_at_ms = entry.pruned_at_ms.max(theirs.pruned_at_ms);
+    }
+    for (key, theirs) in &other.removed_senders {
+      self
+        .removed_senders
+        .entry(key.clone())
+        .or_insert(*theirs)
+        .merge(theirs);
+    }
+    // Pruned on either side stays pruned, unless the device left again since.
+    let pruned = &self.pruned_senders;
+    self.removed_senders.retain(|key, absence| {
+      !pruned
+        .get(key)
+        .is_some_and(|tombstone| tombstone.covers(absence.left_at_ms))
+    });
+    for (conversation, epoch) in &other.group_epochs {
+      let entry = self.group_epochs.entry(conversation.clone()).or_insert(*epoch);
+      *entry = (*entry).max(*epoch);
+    }
     // Reading only moves forward: the later read time wins whatever device recorded it.
     let newer_read = [self.maybe_activity_read.take(), other.maybe_activity_read.clone()]
       .into_iter()
@@ -140,6 +241,12 @@ impl AccountData {
     if self.maybe_workspace_root.is_none() {
       self.maybe_workspace_root = other.maybe_workspace_root.clone();
     }
+    self.maybe_recovery_passphrase_set_at = self
+      .maybe_recovery_passphrase_set_at
+      .max(other.maybe_recovery_passphrase_set_at);
+    self.maybe_recovery_key_set_at = self
+      .maybe_recovery_key_set_at
+      .max(other.maybe_recovery_key_set_at);
     self.forget_tombstones(now_ms);
   }
 
@@ -162,6 +269,111 @@ impl AccountData {
     self
       .backgrounds
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
+    self
+      .pruned_senders
+      .retain(|_, tombstone| is_fresh(true, tombstone.pruned_at_ms));
+  }
+
+  /// Drops the removal records `is_spent` picks (issue #186) and leaves tombstones, so the same
+  /// absence isn't taken back from another device's records or an older key bag. Returns whether
+  /// anything was dropped.
+  pub fn prune_removed_senders(
+    &mut self,
+    is_spent: impl Fn(&str, &SenderAbsence) -> bool,
+    now_ms: i64,
+  ) -> bool {
+    let spent: Vec<(String, i64)> = self
+      .removed_senders
+      .iter()
+      .filter(|(key, absence)| is_spent(key, absence))
+      .map(|(key, absence)| (key.clone(), absence.left_at_ms))
+      .collect();
+    for (key, left_at_ms) in &spent {
+      self.removed_senders.remove(key);
+      let tombstone = self.pruned_senders.entry(key.clone()).or_insert(PrunedSender {
+        left_at_ms: *left_at_ms,
+        pruned_at_ms: now_ms,
+      });
+      tombstone.left_at_ms = tombstone.left_at_ms.max(*left_at_ms);
+      tombstone.pruned_at_ms = tombstone.pruned_at_ms.max(now_ms);
+    }
+    !spent.is_empty()
+  }
+
+  /// Whether the absence of `key` that started at `left_at_ms` was dropped as spent.
+  pub fn is_pruned_sender(&self, key: &str, left_at_ms: i64) -> bool {
+    self
+      .pruned_senders
+      .get(key)
+      .is_some_and(|tombstone| tombstone.covers(left_at_ms))
+  }
+
+  /// When the device `key` (`conversation/user/device`) left its conversation, if it is out (not
+  /// added back since).
+  pub fn removed_sender(&self, key: &str) -> Option<i64> {
+    self
+      .removed_senders
+      .get(key)
+      .filter(|entry| entry.maybe_back_at_ms.is_none_or(|back| back < entry.left_at_ms))
+      .map(|entry| entry.left_at_ms)
+  }
+
+  /// Records that a device left a conversation at `left_at_ms` (server time); returns whether that
+  /// changed anything. A removal before the one recorded, or one already pruned, changes nothing.
+  pub fn note_removed_sender(&mut self, key: &str, left_at_ms: i64) -> bool {
+    if self.is_pruned_sender(key, left_at_ms) {
+      return false;
+    }
+    match self.removed_senders.get_mut(key) {
+      Some(entry) if entry.left_at_ms >= left_at_ms => false,
+      Some(entry) => {
+        entry.left_at_ms = left_at_ms;
+        true
+      },
+      None => {
+        self.removed_senders.insert(
+          key.to_string(),
+          SenderAbsence {
+            left_at_ms,
+            maybe_back_at_ms: None,
+          },
+        );
+        true
+      },
+    }
+  }
+
+  /// Records that a device that had left was added back at `back_at_ms` (server time); returns
+  /// whether that changed anything.
+  pub fn note_sender_back(&mut self, key: &str, back_at_ms: i64) -> bool {
+    let Some(entry) = self.removed_senders.get_mut(key) else {
+      return false;
+    };
+    if entry.maybe_back_at_ms.is_some_and(|back| back >= back_at_ms) {
+      return false;
+    }
+    entry.maybe_back_at_ms = Some(back_at_ms);
+    true
+  }
+
+  /// The newest epoch in which the user's devices switched the conversation's content key; 0 if
+  /// none did.
+  pub fn group_epoch(&self, conversation: ConversationId) -> u64 {
+    self
+      .group_epochs
+      .get(&conversation.to_string())
+      .copied()
+      .unwrap_or(0)
+  }
+
+  /// Records that the conversation's content key changed in `epoch`; returns whether that moved
+  /// the floor.
+  pub fn note_group_epoch(&mut self, conversation: ConversationId, epoch: u64) -> bool {
+    if epoch <= self.group_epoch(conversation) {
+      return false;
+    }
+    self.group_epochs.insert(conversation.to_string(), epoch);
+    true
   }
 
   /// Activity entries sent up to this time (Unix milliseconds) were read; 0 if never.
@@ -265,6 +477,40 @@ impl AccountData {
       .saved
       .get(&saved_key(conversation, message))
       .is_some_and(|entry| !entry.is_removed)
+  }
+
+  /// Drops what the user kept about a conversation that is gone for good: its drafts, saved
+  /// messages and unread mark, on all devices. Whether anything changed.
+  pub fn forget_conversation(&mut self, conversation: ConversationId, now_ms: i64) -> bool {
+    let id = conversation.to_string();
+    let prefix = format!("{conversation}/");
+    let is_about_it = |key: &str| key == id || key.starts_with(&prefix);
+    let mut has_changed = false;
+    for (_, entry) in self
+      .saved
+      .iter_mut()
+      .filter(|(key, entry)| is_about_it(key) && !entry.is_removed)
+    {
+      entry.is_removed = true;
+      entry.updated_at_ms = now_ms;
+      has_changed = true;
+    }
+    for (_, entry) in self
+      .drafts
+      .iter_mut()
+      .filter(|(key, entry)| is_about_it(key) && !entry.is_removed)
+    {
+      entry.is_removed = true;
+      entry.value.body = String::new();
+      entry.updated_at_ms = now_ms;
+      has_changed = true;
+    }
+    if let Some(entry) = self.marked_unread.get_mut(&id).filter(|entry| !entry.is_removed) {
+      entry.is_removed = true;
+      entry.updated_at_ms = now_ms;
+      has_changed = true;
+    }
+    has_changed
   }
 
   pub fn set_saved(
@@ -461,6 +707,107 @@ mod tests {
   }
 
   #[test]
+  fn removals_and_returns_merge_by_server_time_not_by_device_clock() {
+    let key = "9/1/2";
+    let mut phone = AccountData::default();
+    let mut laptop = AccountData::default();
+    // The laptop saw the device leave at 100 and come back at 200; the phone (whatever its clock)
+    // saw it leave again at 300.
+    assert!(laptop.note_removed_sender(key, 100));
+    assert!(laptop.note_sender_back(key, 200));
+    assert!(phone.note_removed_sender(key, 300));
+    let mut merged = laptop.clone();
+    merged.merge(&phone, 0);
+    let mut merged_other_way = phone.clone();
+    merged_other_way.merge(&laptop, 0);
+    assert_eq!(merged, merged_other_way);
+    assert_eq!(merged.removed_sender(key), Some(300));
+    // Back after the last removal: a member again.
+    assert!(merged.note_sender_back(key, 400));
+    assert_eq!(merged.removed_sender(key), None);
+  }
+
+  mod pruned_senders {
+    use super::*;
+
+    const KEY: &str = "9/1/2";
+
+    #[test]
+    fn a_pruned_absence_is_not_taken_back_from_an_older_bag() {
+      let mut older = AccountData::default();
+      assert!(older.note_removed_sender(KEY, 100));
+      assert!(older.note_sender_back(KEY, 200));
+      // A device that missed the return still has only the removal.
+      let mut stale = AccountData::default();
+      assert!(stale.note_removed_sender(KEY, 100));
+
+      let mut pruned = older.clone();
+      assert!(pruned.prune_removed_senders(|key, _| key == KEY, 1_000));
+      assert!(!pruned.removed_senders.contains_key(KEY));
+      for other in [&older, &stale] {
+        let mut merged = pruned.clone();
+        merged.merge(other, 1_000);
+        assert!(!merged.removed_senders.contains_key(KEY), "stays pruned");
+        let mut merged_other_way = other.clone();
+        merged_other_way.merge(&pruned, 1_000);
+        assert_eq!(merged, merged_other_way, "merging is symmetric");
+      }
+      assert!(!pruned.note_removed_sender(KEY, 100), "the same absence");
+    }
+
+    #[test]
+    fn a_later_removal_after_pruning_counts() {
+      let mut data = AccountData::default();
+      assert!(data.note_removed_sender(KEY, 100));
+      assert!(data.prune_removed_senders(|_, _| true, 1_000));
+      assert!(data.note_removed_sender(KEY, 300));
+      assert_eq!(data.removed_sender(KEY), Some(300));
+      let mut other = AccountData::default();
+      other.merge(&data, 1_000);
+      assert_eq!(other.removed_sender(KEY), Some(300));
+    }
+
+    #[test]
+    fn only_picked_records_are_pruned() {
+      let mut data = AccountData::default();
+      assert!(data.note_removed_sender(KEY, 100));
+      assert!(data.note_removed_sender("9/1/3", 100));
+      assert!(!data.prune_removed_senders(|_, _| false, 1_000));
+      assert!(data.prune_removed_senders(|key, _| key == KEY, 1_000));
+      assert_eq!(data.removed_sender("9/1/3"), Some(100));
+      assert!(data.pruned_senders.contains_key(KEY));
+      assert!(!data.pruned_senders.contains_key("9/1/3"));
+    }
+
+    #[test]
+    fn tombstones_are_forgotten_like_the_others() {
+      let mut data = AccountData::default();
+      assert!(data.note_removed_sender(KEY, 100));
+      assert!(data.prune_removed_senders(|_, _| true, 1_000));
+      data.forget_tombstones(1_000 + TOMBSTONE_LIFETIME_MS - 1);
+      assert!(data.is_pruned_sender(KEY, 100));
+      data.forget_tombstones(1_000 + TOMBSTONE_LIFETIME_MS);
+      assert!(data.pruned_senders.is_empty());
+    }
+  }
+
+  #[test]
+  fn group_epoch_floors_only_grow_and_merge_to_the_higher_one() {
+    let conversation = ConversationId::from_snowflake(Snowflake::new(9).unwrap());
+    let mut phone = AccountData::default();
+    let mut laptop = AccountData::default();
+    assert!(phone.note_group_epoch(conversation, 7));
+    assert!(!phone.note_group_epoch(conversation, 5), "never back");
+    assert!(laptop.note_group_epoch(conversation, 4));
+    laptop.merge(&phone, 0);
+    phone.merge(&laptop, 0);
+    assert_eq!(
+      (laptop.group_epoch(conversation), phone.group_epoch(conversation)),
+      (7, 7)
+    );
+  }
+
+  #[test]
   fn the_activity_read_mark_only_moves_forward_and_merges_to_the_later_one() {
     let mut phone = AccountData::default();
     let mut laptop = AccountData::default();
@@ -476,6 +823,52 @@ mod tests {
     assert_eq!(merged_on_phone, merged_on_laptop);
     assert_eq!(merged_on_phone.activity_read_at_ms(), 900);
     assert_eq!(AccountData::default().activity_read_at_ms(), 0);
+  }
+
+  #[test]
+  fn the_later_passphrase_change_wins_and_survives_an_older_app() {
+    let phone = AccountData {
+      maybe_recovery_passphrase_set_at: Some(5_000),
+      ..AccountData::default()
+    };
+    let laptop = AccountData {
+      maybe_recovery_passphrase_set_at: Some(9_000),
+      ..AccountData::default()
+    };
+    let mut merged = phone.clone();
+    merged.merge(&laptop, 10_000);
+    assert_eq!(merged.maybe_recovery_passphrase_set_at, Some(9_000));
+    // An older app uploads the account data without the field.
+    let mut older_upload: serde_json::Value = serde_json::from_slice(&merged.to_bytes().unwrap()).unwrap();
+    older_upload
+      .as_object_mut()
+      .unwrap()
+      .remove("recovery_passphrase_set_at");
+    let older = AccountData::from_bytes(&serde_json::to_vec(&older_upload).unwrap()).unwrap();
+    assert_eq!(older.maybe_recovery_passphrase_set_at, None);
+    let mut kept = laptop.clone();
+    kept.merge(&older, 10_000);
+    assert_eq!(kept.maybe_recovery_passphrase_set_at, Some(9_000));
+  }
+
+  #[test]
+  fn the_later_recovery_kit_wins() {
+    let phone = AccountData {
+      maybe_recovery_key_set_at: Some(5_000),
+      ..AccountData::default()
+    };
+    let laptop = AccountData {
+      maybe_recovery_key_set_at: Some(9_000),
+      ..AccountData::default()
+    };
+    let mut merged = laptop.clone();
+    merged.merge(&phone, 10_000);
+    assert_eq!(merged.maybe_recovery_key_set_at, Some(9_000));
+    let json: serde_json::Value = serde_json::from_slice(&merged.to_bytes().unwrap()).unwrap();
+    assert_eq!(json["recovery_key_set_at"], 9_000);
+    let without: serde_json::Value =
+      serde_json::from_slice(&AccountData::default().to_bytes().unwrap()).unwrap();
+    assert!(without.get("recovery_key_set_at").is_none());
   }
 
   #[test]

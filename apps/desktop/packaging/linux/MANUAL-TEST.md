@@ -71,3 +71,18 @@ Mark each line with pass/fail and a note. "Dialog" is what the desktop should sh
 | R4 | Attach a file                           | The file dialog is the desktop's (FileChooser portal); only the chosen file is visible to the app      |
 | R5 | First video use                         | OpenH264 is downloaded once (`~/.var/app/de.zeitgleich.teamcraft/data/de.zeitgleich.teamcraft/codecs/`)    |
 | R6 | Hardware encoding (AMD/Intel)           | `flatpak run --env=GST_DEBUG=va*:3 de.zeitgleich.teamcraft` shows the VA encoder in use; else software    |
+
+### Start at login (#676)
+
+Run once each with the `.deb`/`.rpm`, the AppImage and the Flatpak. The tray needs a host (GNOME:
+the AppIndicator extension); without one the window starts minimized instead.
+
+| #  | Step                                                  | Expected                                                                                                               |
+|----|-------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------|
+| A1 | Settings → Desktop → turn on "Start at login"         | deb/rpm/AppImage: `~/.config/autostart/de.zeitgleich.teamcraft.desktop` appears; Flatpak: a portal dialog asks         |
+| A2 | Check the entry (not Flatpak)                         | `Exec=` names `/usr/bin/teamcraft-desktop`, or the `.AppImage` file itself (never `/tmp/.mount_…`), then `--autostart` |
+| A3 | Log out and in                                        | TeamCraft starts in the tray, no window in front                                                                       |
+| A4 | Move the AppImage, start it, open the settings        | The switch is still on and the entry's `Exec` names the new place                                                      |
+| A5 | Turn the switch off                                   | The entry is gone (Flatpak: the portal removes it); after logging in again the app doesn't start                       |
+| A6 | Flatpak: refuse the portal dialog                     | The switch goes back to off                                                                                            |
+| A7 | GNOME Tweaks / KDE Autostart: disable the entry there | Reopened settings show the switch off                                                                                  |

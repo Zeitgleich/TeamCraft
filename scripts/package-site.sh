@@ -156,11 +156,14 @@ build_rpm() {
   sign --detach-sign --armor --output "$dir/repodata/repomd.xml.asc" "$dir/repodata/repomd.xml"
   local name="teamcraft" title="TeamCraft"
   if [ "$channel" != stable ]; then name="teamcraft-$channel"; title="TeamCraft ($channel)"; fi
+  # dnf's default metadata_expire is 48 hours: a new version would show only after `dnf upgrade
+  # --refresh`. The rpm's %post adds the same to .repo files written before (rpm-post-install.sh).
   cat > "$dir/$name.repo" <<EOF
 [$name]
 name=$title
 baseurl=$SITE_URL/rpm/$channel
 enabled=1
+metadata_expire=1h
 gpgcheck=1
 repo_gpgcheck=1
 gpgkey=$SITE_URL/teamcraft-archive-keyring.asc

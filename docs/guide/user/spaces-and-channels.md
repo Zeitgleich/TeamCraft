@@ -32,7 +32,11 @@ is in it and how it is configured, but never what is written in it.
   *Private (invitation only)* and what new members can read. Members may create channels by default.
 - **Channel settings:** rename, topic, move to a category, **archive**, and **make private / public**.
   Making a channel private removes access for people who are not members; making it public lets
-  anyone in the space join and read new messages. Everyone sees a system message about it.
+  anyone in the space join and read new messages. Everyone sees a line about it, such as "Ada
+  archived this channel". Each app takes that line from your server's record of the channel, so a
+  member can't make one up or hide one; it names who made the change only when their own app told
+  the others, and otherwise reads "This channel was archived" (see
+  [Security basics](security-basics.md#channel-changes)).
 - **Add people** from the members panel. Choose whether to **share the earlier history** with them
   (the workspace default applies if you do not choose); guests never get earlier history.
 - **Invite people** to a space by e-mail, optionally **as guest** (limited access).

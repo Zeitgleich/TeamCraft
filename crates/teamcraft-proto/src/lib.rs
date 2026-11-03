@@ -11,29 +11,51 @@ mod conversation;
 mod error;
 mod gateway;
 mod id;
+mod import;
+mod integration;
+pub mod live;
+mod notetaker;
 mod permission;
 mod rendezvous;
 mod role;
+pub mod role_rules;
 mod wire_enum;
 
 pub use api::*;
-pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, UnixMillis};
+pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, IdempotencyKey, UnixMillis};
 pub use call_media::{
-  AudioCodec, MAX_SIMULCAST_LAYERS, MediaCapabilities, TransportFeedback, VideoCodec, VideoLayerInfo,
-  VideoTrack, VideoTrackKind,
+  AudioCodec, KNOWN_VIDEO_CODECS, LEGACY_SIMULCAST_LAYERS, MAX_SIMULCAST_LAYERS, MAX_VIDEO_FRAME_FRAGMENTS,
+  MediaCapabilities, SHORT_VIDEO_FRAME_FRAGMENTS, ScreenShareResolution, TransportFeedback, VideoCodec,
+  VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 pub use calls::{
   CALL_JOIN_TOKEN_AUDIENCE, CallClientMessage, CallEvent, CallJoinClaims, CallParticipant, CallServerMessage,
-  DaveKeyBinding, MediaStreamId, ScreenAudioTrack,
+  DaveKeyBinding, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenAudioTrack, ScreenContentMode,
 };
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
-pub use error::{ErrorBody, ErrorCode};
+pub use error::{ErrorBody, ErrorCode, SignInReason};
 pub use gateway::{ATTENTION_AWAY_DELAY_SECS, GatewayClientMessage, GatewayEvent, GatewayServerMessage};
 pub use id::{
   AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId, DeviceId, Id,
   IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId,
-  RecoveryRequestId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, Snowflake, SpaceId,
-  SystemEventId, ThreadId, UserGroupId, UserId,
+  PushRetryId, RecoveryRequestId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS,
+  Snowflake, SpaceId, SystemEventId, ThreadId, UserGroupId, UserId,
+};
+pub use import::{
+  IMPORT_WORKER, ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
+  ImportPolicy, ImportedMessage, ImportedMessageId, MAX_IMPORT_BATCH, MAX_PROVISION_BATCH, ProvisionStatus,
+  ProvisionUsersRequest, ProvisionUsersResponse, ProvisionedUser, next_import_id,
+};
+pub use integration::{
+  DEFAULT_SOURCE_ALERT_LEVELS, DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE, MAX_SOURCE_ALERT_LEVEL_CHARS,
+  MAX_SOURCE_ALERT_LEVELS, MAX_SOURCE_FILES_PER_MESSAGE, MAX_SOURCE_NAME_CHARS,
+  MAX_SOURCE_RATE_LIMIT_PER_MINUTE, SourceChange, SourceId, SourceKind, SourceOptions, SourceTokenHash,
+  SourceTokenHashError,
+};
+pub use notetaker::{
+  DEFAULT_SUMMARY_MODEL, DEFAULT_SUMMARY_PROMPT, DEFAULT_TRANSCRIPTION_MODEL, LANGUAGE_AUTO, MAX_MODEL_CHARS,
+  MAX_PROMPT_CHARS, NotetakerInviters, NotetakerPolicy, NotetakerPolicyError, NotetakerRequest,
+  NotetakerScope,
 };
 pub use permission::{
   ALL_KNOWN as ALL_PERMISSIONS, ChannelContext, ChannelModeration, ChannelRole, Permission, PermissionScheme,

@@ -1,6 +1,6 @@
 //! "Jump to date" through the UI adapter and the fake server: the history is requested by time,
 //! merged into the local store, and the request is reported as answered.
-#![cfg(feature = "ui")]
+#![cfg(all(feature = "ui", not(target_arch = "wasm32")))]
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
 

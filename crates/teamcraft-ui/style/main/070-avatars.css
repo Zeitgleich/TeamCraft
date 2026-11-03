@@ -1,0 +1,79 @@
+/* ---- Avatars and presence ---- */
+
+.avatar {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  border-radius: 50%;
+  /* Dark enough for white initials on every hue (at least 4.5:1). */
+  background: hsl(var(--hue) 45% 32%);
+  color: var(--on-fill);
+  font-weight: var(--weight-semibold);
+  user-select: none;
+}
+
+.avatar-sm {
+  width: 20px;
+  height: 20px;
+  font-size: 11px;
+  margin-left: -6px;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.avatar-md {
+  width: 30px;
+  height: 30px;
+  font-size: var(--text-2xs);
+  letter-spacing: var(--tracking-2xs);
+}
+
+.avatar-lg {
+  width: 38px;
+  height: 38px;
+  font-size: var(--text-sm);
+  border-radius: var(--radius);
+}
+
+.avatar-xl {
+  width: clamp(72px, 22vmin, 128px);
+  height: clamp(72px, 22vmin, 128px);
+  font-size: clamp(26px, 7vmin, 44px);
+}
+
+.avatar .presence {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  box-shadow: 0 0 0 2px var(--chrome);
+}
+
+.presence {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.presence-online {
+  background: var(--online);
+}
+
+.presence-away {
+  background: var(--away);
+}
+
+.presence-dnd {
+  background: var(--dnd);
+  background-image: linear-gradient(var(--on-fill), var(--on-fill));
+  background-size: 6px 2px;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+.presence-offline {
+  background: transparent;
+  border: 2px solid var(--offline);
+}
+

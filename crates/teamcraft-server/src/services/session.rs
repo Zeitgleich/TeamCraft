@@ -130,9 +130,7 @@ pub async fn enforce(state: &AppState, identity: &TokenIdentity) -> Result<(), A
     .await?
   {
     SessionState::Active => Ok(()),
-    SessionState::Expired | SessionState::Unknown => {
-      Err(AuthError::InvalidToken("the session timed out; sign in again".into()).into())
-    },
+    SessionState::Expired | SessionState::Unknown => Err(AuthError::SessionTimedOut.into()),
   }
 }
 
@@ -241,6 +239,7 @@ mod tests {
       is_email_verified: false,
       role: Role::Member,
       issued_at: 0,
+      authenticated_at: 0,
       maybe_session_id: Some("sid".into()),
       authentication_methods: methods.iter().map(|m| (*m).to_owned()).collect(),
       maybe_acr: maybe_acr.map(str::to_owned),

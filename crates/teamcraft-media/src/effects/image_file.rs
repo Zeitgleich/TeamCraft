@@ -67,14 +67,10 @@ impl BackgroundImage {
   /// Scaled down (keeping the aspect ratio) to fit `max_width` x `max_height`; unchanged if it
   /// fits already.
   pub fn fit_within(self, max_width: u32, max_height: u32) -> Self {
-    if self.width <= max_width && self.height <= max_height {
+    let (width, height) = fitted_size(self.width, self.height, max_width, max_height);
+    if (width, height) == (self.width, self.height) {
       return self;
     }
-    let scale =
-      (f64::from(max_width) / f64::from(self.width)).min(f64::from(max_height) / f64::from(self.height));
-    // Both factors are below 1 here, so the results fit in u32 and are at least 1.
-    let width = ((f64::from(self.width) * scale).round() as u32).max(1);
-    let height = ((f64::from(self.height) * scale).round() as u32).max(1);
     let rgba = downscale(&self, width, height);
     Self { width, height, rgba }
   }
@@ -90,6 +86,18 @@ impl BackgroundImage {
       .map_err(|error| EffectsError::UnsupportedImage(error.to_string()))?;
     Ok(jpeg)
   }
+}
+
+/// The size of a `width` x `height` picture scaled down (keeping the aspect ratio) to fit
+/// `max_width` x `max_height`; its own size if it fits already.
+pub fn fitted_size(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
+  if width <= max_width && height <= max_height {
+    return (width, height);
+  }
+  let scale = (f64::from(max_width) / f64::from(width)).min(f64::from(max_height) / f64::from(height));
+  // Both factors are below 1 here, so the results fit in u32 and are at least 1.
+  let scaled = |side: u32| ((f64::from(side) * scale).round() as u32).max(1);
+  (scaled(width), scaled(height))
 }
 
 /// A user's picture as it is stored and synced: decoded (JPEG or PNG), scaled to fit Full HD and

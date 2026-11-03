@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+  <string name="call_person_muted">%1$s, stummgeschaltet</string>
+  <string name="call_more">Weitere Optionen</string>
+  <string name="call_you_muted">Du bist stummgeschaltet</string>
+  <string name="call_toggle_controls">Anruf-Steuerung ein- oder ausblenden</string>
+  <string name="call_video_spotlight">Größer anzeigen</string>
+  <string name="call_encryption_open">Verschlüsselungscode anzeigen</string>
+  <string name="call_encryption_title">Ende-zu-Ende-verschlüsselt</string>
+  <string name="call_encryption_body">Nur die Personen in diesem Anruf können ihn hören und sehen, nicht einmal der Server. Damit sicher niemand dazwischensitzt, vergleiche den Code mit den anderen.</string>
   <string name="call_deafen">Taub schalten</string>
   <string name="call_undeafen">Ton wieder an</string>
   <string name="call_camera_on">Kamera an</string>
@@ -13,6 +21,15 @@
   <string name="call_prejoin_camera">Kamera an</string>
   <string name="call_prejoin_muted">Stummgeschaltet beitreten</string>
   <string name="call_prejoin_join">Beitreten</string>
+  <string name="call_add_people">Personen hinzufügen</string>
+  <string name="call_add_hint">Der Anruf zieht mit allen Teilnehmenden in einen neuen Meetingraum um. Die Direktnachrichten bleiben, wie sie sind; die hinzugefügten Personen sehen sie nicht.</string>
+  <string name="call_add_nobody">Es gibt niemanden mehr zum Hinzufügen.</string>
+  <string name="call_add">Zum Anruf hinzufügen</string>
+  <string name="call_meeting_title">Anruf</string>
+  <string name="call_move_offer">%1$s hat den Anruf in einen Meetingraum verschoben und %2$s hinzugefügt.</string>
+  <string name="call_move_join">Meetingraum beitreten</string>
+  <string name="error_call_device_limit">Dein Konto ist bereits auf so vielen Geräten im Anruf, wie erlaubt sind. Verlasse den Anruf zuerst auf einem davon und tritt dann von diesem Gerät bei.</string>
+  <string name="error_call_move_refused">Der Anruf wurde nicht verschoben: Der Meetingraum passt nicht zu dem, was in der Unterhaltung angekündigt wurde. Bleib in diesem Anruf oder tritt dem Meetingraum über die Liste bei, wenn du ihm vertraust.</string>
   <string name="channel_mention_confirm_title">Alle benachrichtigen?</string>
   <plurals name="channel_mention_confirm">
     <item quantity="one">Diese Nachricht benachrichtigt %d Mitglied.</item>
@@ -24,9 +41,35 @@
   <string name="mention_keywords">Stichwörter</string>
   <string name="mention_keywords_hint">Durch Kommas getrennt. Nachrichten mit diesen Wörtern zählen als Erwähnung, wenn sie dieses Telefon erreichen.</string>
   <string name="mention_confirm_over">@channel ab so vielen Mitgliedern bestätigen</string>
-  <string name="mention_confirm_over_hint">0 fragt nie.</string>
+  <string name="mention_confirm_over_hint">0 bis 99999. 0 fragt nie.</string>
   <string name="search_prefetch_title">Suche</string>
   <string name="search_prefetch">Suchverlauf im WLAN beim Laden herunterladen</string>
   <string name="search_prefetch_hint">Ältere Nachrichten bleiben ohne Verbindung durchsuchbar. Der Suchindex bleibt verschlüsselt auf diesem Telefon.</string>
   <string name="search_prefetch_cap">Bis %1$d MB</string>
+  <string name="call_channel">Anrufe</string>
+  <string name="call_ongoing">TeamCraft-Anruf</string>
+  <string name="call_connecting">Verbinde…</string>
+  <string name="call_reconnecting">Verbindung unterbrochen, wird wiederhergestellt…</string>
+  <string name="call_securing">Anruf wird abgesichert…</string>
+  <string name="call_secured">Ende-zu-Ende-verschlüsselt</string>
+  <string name="call_ended">Anruf beendet</string>
+  <string name="call_failed">Der Anruf wurde unterbrochen.</string>
+  <string name="call_server_lost">Der Anrufserver ist zurzeit nicht mehr erreichbar, der Anruf wurde deshalb beendet. Versuche es gleich noch einmal.</string>
+  <string name="call_removed_by_host">Der Gastgeber hat dich aus dem Anruf entfernt.</string>
+  <string name="call_ended_by_host">Der Gastgeber hat den Anruf für alle beendet.</string>
+  <string name="call_privacy_code_hint">Vergleiche diesen Code mit den anderen, damit niemand mithört:</string>
+  <string name="call_mute">Stumm</string>
+  <string name="call_unmute">Stumm aus</string>
+  <string name="call_hang_up">Auflegen</string>
+  <string name="call_car_title">Anrufen</string>
+  <plurals name="call_participants">
+    <item quantity="one">%d weitere Person im Anruf</item>
+    <item quantity="other">%d weitere Personen im Anruf</item>
+  </plurals>
+  <string name="call_start">Anruf starten</string>
+  <string name="mention_confirm_over_range">Gib eine Zahl von 0 bis 99999 ein.</string>
+  <plurals name="mention_confirm_over_unit">
+    <item quantity="one">Mitglied</item>
+    <item quantity="other">Mitglieder</item>
+  </plurals>
 </resources>

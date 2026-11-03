@@ -1,14 +1,19 @@
-//! Composes the chat backend with the server's live state, the admin API and the desktop calls.
+//! Composes the chat backend with the server's live state, the admin API and the calls.
 //!
 //! The chat (spaces, conversations, messages, search, own devices, keys) comes from `C`: the client
 //! core over the desktop bridge or in the page, or the REST reader without a core. Live state
 //! (unread counts, threads, presence, receipts, announcements) comes from the server, the
-//! administration console from the admin API (admins and owners only), calls from the desktop shell.
+//! administration console from the admin API (admins and owners only), calls from the desktop shell
+//! or, in the browser, from the page (`web_calls`).
 //! Whatever is missing answers empty: there is no demo data here (it only exists in development
 //! builds with the `demo` feature).
 
+use leptos::prelude::{Get, GetUntracked, RwSignal, Set};
 use std::rc::Rc;
-use teamcraft_client_api::calls::OrgBackgroundRule;
+use teamcraft_client_api::calls::{
+  CallEndReason, CallMoveOffer, CallStatusSounds, CallsUnavailableReason, OrgBackgroundRule,
+  RemoteVideoTrack, ScreenContentMode, ScreenShareResolution, VideoQuality,
+};
 use teamcraft_proto::OrgBackgroundId;
 
 use teamcraft_proto::{
@@ -20,34 +25,38 @@ use teamcraft_proto::{
 };
 
 use teamcraft_client_api::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, MessageExtras, NewChannel, NewSpace,
-  OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MediaAnchor, MediaPage,
+  MessageExtras, NewChannel, NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
+  ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
-use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy};
+use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, PresencePolicy};
 
 use crate::admin::{
-  AdminChannel, AdminSpace, AdminUser, AuditEntry, AuditFilter, DeviceInfo, PolicyBlocker, Retention,
-  SelfJoinOutcome, SettingsTestKind,
+  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter, DeviceInfo,
+  PolicyBlocker, Retention, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
 use crate::backend::{AdminBackend, CallBackend, ChatBackend, SearchBackend, SecurityBackend};
 use crate::calls::{
-  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallRequest, HuddleInfo, IncomingCall, MediaDevices,
-  Participant,
+  ActiveCall, BackgroundEffect, BackgroundImageInfo, CallPreview, CallRequest, CameraFallback, EffectsOffer,
+  HuddleInfo, IncomingCall, JoinMedia, MediaDevices, Participant, PreviewCamera,
 };
 use crate::clock::now_ms;
-use crate::live::{LiveScope, LiveServer, POLL_INTERVAL_MS, thread_summary};
+use crate::i18n::translate_current;
+use crate::live::{LiveScope, LiveServer, REST_ONLY_POLL_INTERVAL_MS, thread_summary, with_local_expiry};
 use crate::model::{
   Conversation, ConversationId, ConversationKind, CustomStatus, DeviceId, Message, MessageId, PresenceStatus,
-  Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId, as_log_line,
+  Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, UnseenReactions, User, UserId, as_log_line,
 };
-use crate::reactive::use_interval;
+use crate::reactive::{use_interval_while, use_page_visible};
 use crate::remote_calls::RemoteCalls;
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use crate::security::KeyChange;
 use crate::settings::{load_string, store_string};
+use teamcraft_client_api::custom_status::shown_status;
 use teamcraft_client_api::remote::CallAction;
+use teamcraft_client_api::video_stats::VideoStatsJson;
 
 pub struct Hybrid<C> {
   chat: Rc<C>,
@@ -55,15 +64,25 @@ pub struct Hybrid<C> {
   maybe_live: Option<LiveServer>,
   /// The administration console on the admin API; only for admins and owners.
   maybe_admin: Option<AdminLive>,
-  /// Calls of the desktop shell; without them the app offers no calls.
+  /// Calls (media in the desktop shell or in the page); without them the app offers no calls.
   maybe_calls: Option<RemoteCalls>,
+  /// Why there are no calls, when there are none.
+  calls_unavailable: CallsUnavailableReason,
 }
 
 impl<C: ChatBackend + 'static> Hybrid<C> {
-  /// Calls through the desktop shell.
+  /// Calls, with the media in the desktop shell or in the page.
   #[must_use]
   pub fn with_calls(mut self, calls: RemoteCalls) -> Self {
     self.maybe_calls = Some(calls);
+    self
+  }
+
+  /// No calls, for this reason.
+  #[must_use]
+  pub fn without_calls(mut self, reason: CallsUnavailableReason) -> Self {
+    self.maybe_calls = None;
+    self.calls_unavailable = reason;
     self
   }
 
@@ -73,11 +92,6 @@ impl<C: ChatBackend + 'static> Hybrid<C> {
     let scope_chat = chat.clone();
     let scope = Rc::new(move || LiveScope {
       users: scope_chat.users().into_iter().map(|user| user.id).collect(),
-      direct: scope_chat
-        .direct_conversations()
-        .into_iter()
-        .map(|conversation| conversation.id)
-        .collect(),
     });
     let maybe_admin = (role >= Role::Admin).then(|| AdminLive::new(auth.clone()));
     Self {
@@ -86,8 +100,19 @@ impl<C: ChatBackend + 'static> Hybrid<C> {
       maybe_live: Some(LiveServer::new(auth, scope)),
       maybe_admin,
       maybe_calls: None,
+      calls_unavailable: CallsUnavailableReason::NotInThisApp,
     }
   }
+}
+
+/// A deleted account (issue #630) is shown as "Deleted user" in the UI's language wherever its
+/// name appears (profile, members, messages); it has no username to show either.
+fn named_if_deleted(mut user: User) -> User {
+  if user.is_deleted {
+    user.display_name = translate_current("user-deleted-name");
+    user.username.clear();
+  }
+  user
 }
 
 impl<C: ChatBackend> Hybrid<C> {
@@ -98,8 +123,9 @@ impl<C: ChatBackend> Hybrid<C> {
     }
   }
 
-  /// The server knows who is online and what status they set; the chat only knows the roster.
-  fn with_live_presence(&self, mut user: User) -> User {
+  /// The server knows who is online and what status they set; the chat only knows the roster. A
+  /// status shows only while the workspace allows statuses and until it ended.
+  fn with_live_presence(&self, mut user: User, policy: &PresencePolicy, now: TimestampMs) -> User {
     if let Some((presence, maybe_status)) = self
       .maybe_live
       .as_ref()
@@ -108,11 +134,22 @@ impl<C: ChatBackend> Hybrid<C> {
       user.presence = presence;
       user.maybe_custom_status = maybe_status;
     }
+    user.maybe_custom_status = shown_status(policy, user.maybe_custom_status.take(), now);
     user
+  }
+
+  /// [`Self::with_live_presence`] for many people: the policy is read once.
+  fn with_live_presences(&self, users: Vec<User>) -> Vec<User> {
+    let policy = self.chat.presence_policy();
+    let now = now_ms();
+    users
+      .into_iter()
+      .map(|user| self.with_live_presence(user, &policy, now))
+      .collect()
   }
 }
 
-impl<C: ChatBackend> ChatBackend for Hybrid<C> {
+impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
   fn set_change_notifier(&self, notify: Rc<dyn Fn()>) {
     if let Some(calls) = &self.maybe_calls {
       calls.set_change_notifier(notify.clone());
@@ -125,32 +162,57 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     if let Some(admin) = &self.maybe_admin {
       admin.set_change_notifier(notify.clone());
     }
-    // Chat changes (sync steps) are the cue to look at the server's counters again.
-    let refresher = live.clone();
+    // The core's snapshot carries the counters it keeps from gateway events; it says when the
+    // rest must be read again (after a reconnect). Applied before the UI re-reads. The first
+    // snapshot is taken before deciding about the poll, so a chat with a core never starts it.
+    live.observe(self.chat.live_snapshot());
+    // No core, so no gateway: polling is the only way to see new counts. Stops for good once a
+    // snapshot shows a core (a shell that reports its live state only later).
+    let is_rest_only = RwSignal::new(!live.is_core_fed());
+    let observer = live.clone();
+    // Weak: the chat keeps this notifier, which must not keep the chat alive after sign-out.
+    let chat = Rc::downgrade(&self.chat);
     self.chat.set_change_notifier(Rc::new(move || {
+      if let Some(chat) = chat.upgrade() {
+        observer.observe(chat.live_snapshot());
+      }
+      if is_rest_only.try_get_untracked() == Some(true) && observer.is_core_fed() {
+        is_rest_only.set(false);
+      }
       notify();
-      refresher.queue_refresh();
     }));
     live.queue_refresh();
+    // Paused while the page is hidden.
+    let is_visible = use_page_visible();
     let poller = live.clone();
-    use_interval(POLL_INTERVAL_MS, move || poller.queue_refresh());
+    use_interval_while(
+      REST_ONLY_POLL_INTERVAL_MS,
+      move || is_rest_only.get() && is_visible.get(),
+      move || poller.queue_refresh(),
+    );
+  }
+
+  fn meetings_revision(&self) -> u64 {
+    self.chat.meetings_revision()
   }
 
   fn me(&self) -> User {
-    self.with_live_presence(self.chat.me())
+    self.with_live_presence(self.chat.me(), &self.chat.presence_policy(), now_ms())
   }
 
   fn user(&self, id: UserId) -> Option<User> {
-    self.chat.user(id).map(|user| self.with_live_presence(user))
+    self
+      .chat
+      .user(id)
+      .map(|user| self.with_live_presence(named_if_deleted(user), &self.chat.presence_policy(), now_ms()))
   }
 
   fn users(&self) -> Vec<User> {
-    self
-      .chat
-      .users()
-      .into_iter()
-      .map(|user| self.with_live_presence(user))
-      .collect()
+    self.with_live_presences(self.chat.users())
+  }
+
+  fn search_people(&self, query: &str) -> Vec<User> {
+    self.with_live_presences(self.chat.search_people(query))
   }
 
   fn spaces(&self) -> Vec<Space> {
@@ -184,6 +246,22 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
 
   fn message_count(&self, conversation: ConversationId) -> usize {
     self.chat.message_count(conversation)
+  }
+
+  fn rows_prepended(&self, conversation: ConversationId) -> usize {
+    self.chat.rows_prepended(conversation)
+  }
+
+  fn older_history(&self, conversation: ConversationId) -> teamcraft_client_api::model::OlderHistory {
+    self.chat.older_history(conversation)
+  }
+
+  fn load_older_history(&self, conversation: ConversationId) {
+    self.chat.load_older_history(conversation);
+  }
+
+  fn prefetch_messages(&self, conversation: ConversationId, start: usize, len: usize) {
+    self.chat.prefetch_messages(conversation, start, len);
   }
 
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
@@ -232,6 +310,10 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.mark_read(conversation);
   }
 
+  fn mark_read_through(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.mark_read_through(conversation, message);
+  }
+
   fn set_bookmarks(
     &self,
     conversation: ConversationId,
@@ -248,6 +330,10 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.open_dm(user);
   }
 
+  fn open_group_dm(&self, users: Vec<UserId>) {
+    self.chat.open_group_dm(users);
+  }
+
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool) {
     self.chat.set_favorite(conversation, is_favorite);
   }
@@ -260,15 +346,36 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.set_presence_until(presence, maybe_until);
   }
 
+  /// The end is resolved here, where the user's time zone is known. With a client core the core
+  /// queues the change (offline, retries); without one it goes over REST.
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
+    let now = now_ms();
+    let maybe_status = maybe_status.map(|status| with_local_expiry(status, now));
     match &self.maybe_live {
-      Some(live) => live.set_custom_status(self.chat.me().id, maybe_status.as_ref(), now_ms()),
+      Some(live) if live.is_core_fed() => {
+        let me = self.chat.me().id;
+        live.show_own_status(me, maybe_status.as_ref().and_then(|status| status.to_wire(now)));
+        self.chat.set_custom_status(maybe_status);
+      },
+      Some(live) => live.set_custom_status(self.chat.me().id, maybe_status.as_ref(), now),
       None => self.chat.set_custom_status(maybe_status),
     }
   }
 
+  fn presence_policy(&self) -> PresencePolicy {
+    self.chat.presence_policy()
+  }
+
+  fn screen_share_policy(&self) -> teamcraft_proto::ScreenSharePolicy {
+    self.chat.screen_share_policy()
+  }
+
   fn set_activity(&self, is_idle: bool) {
     self.chat.set_activity(is_idle);
+  }
+
+  fn focus_conversation(&self, conversation: ConversationId) {
+    self.chat.focus_conversation(conversation);
   }
 
   fn set_attention(&self, is_attentive: bool) {
@@ -347,12 +454,135 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.resolve_permalink(link)
   }
 
+  fn linked_message(&self, link: &str) -> Option<LinkedMessage> {
+    self.chat.linked_message(link)
+  }
+
   fn mark_unread(&self, conversation: ConversationId, from: MessageId) {
     self.chat.mark_unread(conversation, from);
   }
 
   fn first_unread(&self, conversation: ConversationId) -> Option<MessageId> {
     self.chat.first_unread(conversation)
+  }
+
+  fn unseen_reactions(&self, conversation: ConversationId) -> UnseenReactions {
+    self.chat.unseen_reactions(conversation)
+  }
+
+  fn mark_reactions_seen(&self, conversation: ConversationId, messages: Vec<MessageId>) {
+    self.chat.mark_reactions_seen(conversation, messages);
+  }
+
+  fn newest_message(&self, conversation: ConversationId) -> Option<MessageId> {
+    self.chat.newest_message(conversation)
+  }
+
+  fn is_waiting_for_device(&self, conversation: ConversationId) -> bool {
+    self.chat.is_waiting_for_device(conversation)
+  }
+
+  fn first_sync(&self) -> Option<teamcraft_client_api::model::FirstSync> {
+    self.chat.first_sync()
+  }
+
+  fn key_catch_up(&self) -> Option<teamcraft_client_api::model::KeyCatchUp> {
+    self.chat.key_catch_up()
+  }
+
+  fn membership_issues(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::MembershipIssue> {
+    self.chat.membership_issues(conversation)
+  }
+
+  fn retry_removal(&self, conversation: ConversationId, user: UserId) {
+    self.chat.retry_removal(conversation, user);
+  }
+
+  fn retry_dm_setup(&self, conversation: ConversationId) {
+    self.chat.retry_dm_setup(conversation);
+  }
+
+  fn set_up_meeting_chat(&self, conversation: ConversationId, invitees: Vec<UserId>) {
+    self.chat.set_up_meeting_chat(conversation, invitees);
+  }
+
+  fn update_meeting_chat_members(
+    &self,
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+    removed: Vec<UserId>,
+  ) {
+    self
+      .chat
+      .update_meeting_chat_members(conversation, invitees, removed);
+  }
+
+  fn add_people_to_call(
+    &self,
+    from: ConversationId,
+    in_call: Vec<UserId>,
+    added: Vec<UserId>,
+    maybe_title: Option<String>,
+    key: teamcraft_proto::IdempotencyKey,
+  ) {
+    self
+      .chat
+      .add_people_to_call(from, in_call, added, maybe_title, key);
+  }
+
+  fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
+    self.chat.let_into_meeting_chat(conversation, user);
+  }
+
+  fn prepare_guest_link(&self, conversation: ConversationId, meeting: teamcraft_proto::MeetingId) {
+    self.chat.prepare_guest_link(conversation, meeting);
+  }
+
+  fn guest_link_fragment(&self, meeting: teamcraft_proto::MeetingId) -> Option<String> {
+    self.chat.guest_link_fragment(meeting)
+  }
+
+  fn let_guest_into_meeting_chat(
+    &self,
+    conversation: ConversationId,
+    guest: UserId,
+    knock_fingerprint: String,
+    access_ends_at_ms: i64,
+  ) {
+    self
+      .chat
+      .let_guest_into_meeting_chat(conversation, guest, knock_fingerprint, access_ends_at_ms);
+  }
+
+  fn prepare_guest_key_code(&self, guest: UserId) {
+    self.chat.prepare_guest_key_code(guest);
+  }
+
+  fn guest_key_code(&self, guest: UserId) -> Option<String> {
+    self.chat.guest_key_code(guest)
+  }
+
+  fn note_meeting_lobby(&self, meeting: teamcraft_proto::MeetingId, has_lobby: bool) {
+    self.chat.note_meeting_lobby(meeting, has_lobby);
+  }
+
+  fn is_open_by_own_record(&self, meeting: teamcraft_proto::MeetingId) -> bool {
+    self.chat.is_open_by_own_record(meeting)
+  }
+
+  fn discard_removal(&self, conversation: ConversationId, user: UserId) {
+    self.chat.discard_removal(conversation, user);
+  }
+
+  fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {
+    self.chat.unconfirmed_removals()
+  }
+
+  fn group_leftovers(&self) -> Vec<(ConversationId, UserId)> {
+    self.chat.group_leftovers()
   }
 
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
@@ -363,6 +593,18 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.set_draft(conversation, maybe_thread, body);
   }
 
+  fn retry_send(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.retry_send(conversation, message);
+  }
+
+  fn discard_unsent(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.discard_unsent(conversation, message);
+  }
+
+  fn cancel_upload(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    self.chat.cancel_upload(conversation, message, file_id);
+  }
+
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
     self.chat.acknowledge(conversation, message);
   }
@@ -371,20 +613,59 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.conversation_files(conversation)
   }
 
+  fn conversation_media(
+    &self,
+    conversation: ConversationId,
+    anchor: MediaAnchor,
+    max_messages: usize,
+  ) -> Option<MediaPage> {
+    self.chat.conversation_media(conversation, anchor, max_messages)
+  }
+
   fn download_file(&self, conversation: ConversationId, message: MessageId) {
     self.chat.download_file(conversation, message);
   }
 
-  fn create_share_link(&self, conversation: ConversationId, message: MessageId, options: ShareLinkOptions) {
-    self.chat.create_share_link(conversation, message, options);
+  fn create_share_link(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    options: ShareLinkOptions,
+  ) {
+    self
+      .chat
+      .create_share_link(conversation, message, file_id, options);
   }
 
-  fn share_links(&self, conversation: ConversationId, message: MessageId) -> Vec<ShareLink> {
-    self.chat.share_links(conversation, message)
+  fn share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) -> Vec<ShareLink> {
+    self.chat.share_links(conversation, message, file_id)
+  }
+  fn revoke_share_link(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    share_id: &str,
+  ) {
+    self
+      .chat
+      .revoke_share_link(conversation, message, file_id, share_id);
+  }
+  fn refresh_share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    self.chat.refresh_share_links(conversation, message, file_id);
   }
 
   fn max_upload_bytes(&self) -> Option<u64> {
     self.chat.max_upload_bytes()
+  }
+
+  fn downloads(&self) -> Option<Vec<teamcraft_client_api::actions::DownloadEntry>> {
+    self.chat.downloads()
+  }
+
+  fn control_download(&self, file_id: &str, control: teamcraft_client_api::actions::DownloadControl) {
+    self.chat.control_download(file_id, control);
   }
 
   fn create_space(&self, space: NewSpace) {
@@ -419,8 +700,24 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.join_space(space);
   }
 
-  fn leave_channel(&self, conversation: ConversationId) {
-    self.chat.leave_channel(conversation);
+  fn leave_channel(&self, conversation: ConversationId, deletes_if_last: bool) {
+    self.chat.leave_channel(conversation, deletes_if_last);
+  }
+
+  fn suspect_deletions(&self) -> u32 {
+    self.chat.suspect_deletions()
+  }
+
+  fn dismiss_suspect_deletions(&self) {
+    self.chat.dismiss_suspect_deletions();
+  }
+
+  fn delete_channel(&self, conversation: ConversationId) {
+    self.chat.delete_channel(conversation);
+  }
+
+  fn delete_space(&self, space: SpaceId) {
+    self.chat.delete_space(space);
   }
 
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {
@@ -447,12 +744,120 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     self.chat.invite_to_space(invite);
   }
 
+  fn space_members(&self, space: SpaceId) -> teamcraft_client_api::model::SpaceRoster {
+    self.chat.space_members(space)
+  }
+
+  fn integration_sources(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::IntegrationSource> {
+    self.chat.integration_sources(conversation)
+  }
+
+  fn can_manage_integration_sources(&self) -> bool {
+    self.chat.can_manage_integration_sources()
+  }
+
+  fn add_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_client_api::model::NewIntegrationSource,
+  ) {
+    self.chat.add_integration_source(conversation, source);
+  }
+
+  fn revoke_integration_source(&self, conversation: ConversationId, source: teamcraft_proto::SourceId) {
+    self.chat.revoke_integration_source(conversation, source);
+  }
+
+  fn notetaker_policy(&self) -> Option<teamcraft_proto::NotetakerPolicy> {
+    self.chat.notetaker_policy()
+  }
+
+  fn request_notetaker(&self, conversation: ConversationId, request: teamcraft_proto::NotetakerRequest) {
+    self.chat.request_notetaker(conversation, request);
+  }
+
+  fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
+    self.chat.channel_roles(conversation)
+  }
+
+  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
+    self.chat.can_sign_channel_roles(conversation)
+  }
+
+  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
+    self.chat.confirm_channel_role(conversation, user);
+  }
+
+  fn refresh_channel_roles(&self, conversation: ConversationId) {
+    self.chat.refresh_channel_roles(conversation);
+  }
+
+  fn set_channel_role(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    role: teamcraft_client_api::model::ChannelRole,
+  ) {
+    self.chat.set_channel_role(conversation, user, role);
+  }
+
+  fn space_invites(&self, space: SpaceId) -> Vec<teamcraft_client_api::model::PendingInvite> {
+    self.chat.space_invites(space)
+  }
+
+  fn add_people_to_channel(
+    &self,
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  ) {
+    self
+      .chat
+      .add_people_to_channel(conversation, people, history, joins_space);
+  }
+
+  fn refresh_space_roster(&self, space: SpaceId) {
+    self.chat.refresh_space_roster(space);
+  }
+
+  fn set_space_role(&self, space: SpaceId, user: UserId, role: teamcraft_client_api::model::SpaceRole) {
+    self.chat.set_space_role(space, user, role);
+  }
+
+  fn remove_space_member(&self, space: SpaceId, user: UserId) {
+    self.chat.remove_space_member(space, user);
+  }
+
+  fn revoke_space_invite(&self, space: SpaceId, invite: teamcraft_client_api::model::InviteId) {
+    self.chat.revoke_space_invite(space, invite);
+  }
+
+  fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {
+    self.chat.add_space_members(space, users, is_guest);
+  }
+
+  fn call_move_offer(&self, from: ConversationId, to: ConversationId) -> Option<CallMoveOffer> {
+    self.chat.call_move_offer(from, to)
+  }
+
+  fn accept_call_move(&self, from: ConversationId, to: ConversationId) {
+    self.chat.accept_call_move(from, to);
+  }
+
   fn has_external_people(&self, conversation: ConversationId) -> bool {
     self.chat.has_external_people(conversation)
   }
 
   fn activity(&self) -> teamcraft_client_api::activity::ActivityFeed {
     self.chat.activity()
+  }
+
+  fn join_requests(&self) -> Vec<teamcraft_client_api::activity::JoinRequest> {
+    self.chat.join_requests()
   }
 
   fn mark_activity_read(&self) {
@@ -477,6 +882,10 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
 
   fn refresh_call_history(&self) {
     self.chat.refresh_call_history();
+  }
+
+  fn is_loaded(&self, list: teamcraft_client_api::backend::LoadingList) -> bool {
+    self.chat.is_loaded(list)
   }
 
   fn is_in_call(&self, user: UserId) -> bool {
@@ -507,7 +916,9 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
       self
         .chat
         .thread(conversation, thread)
-        .last()
+        .iter()
+        // The root opens the list but isn't a reply; the server only accepts replies.
+        .rfind(|message| message.maybe_thread == Some(thread))
         .map(|message| message.id),
     ) else {
       return;
@@ -517,6 +928,34 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
 
   fn push_content_mode(&self) -> teamcraft_proto::PushContentMode {
     self.chat.push_content_mode()
+  }
+
+  fn owner_roster(&self) -> Option<teamcraft_client_api::admin::OwnerRosterStatus> {
+    self.chat.owner_roster()
+  }
+
+  fn can_sign_workspace(&self) -> bool {
+    self.chat.can_sign_workspace()
+  }
+
+  fn admin_add_self(&self, conversation: ConversationId) {
+    self.chat.admin_add_self(conversation);
+  }
+
+  fn request_admin_join(&self, conversation: ConversationId) {
+    self.chat.request_admin_join(conversation);
+  }
+
+  fn withdraw_admin_join(&self, conversation: ConversationId) {
+    self.chat.withdraw_admin_join(conversation);
+  }
+
+  fn approve_admin_join(&self, conversation: ConversationId, user: UserId, history: HistoryPolicy) {
+    self.chat.approve_admin_join(conversation, user, history);
+  }
+
+  fn decline_admin_join(&self, conversation: ConversationId, user: UserId) {
+    self.chat.decline_admin_join(conversation, user);
   }
 
   fn current_announcement(&self) -> Option<AnnouncementResponse> {
@@ -529,11 +968,27 @@ impl<C: ChatBackend> ChatBackend for Hybrid<C> {
     }
   }
 
+  fn link_request_mark(&self) -> u64 {
+    self.chat.link_request_mark()
+  }
+
   fn seen_by(&self, conversation: ConversationId, message: MessageId) -> Vec<UserId> {
     self
       .maybe_live
       .as_ref()
       .map_or_else(Vec::new, |live| live.seen_by(conversation, message))
+  }
+
+  fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
+    self.chat.typing_users(conversation)
+  }
+
+  fn typing_now(&self) -> Vec<crate::model::TypingNow> {
+    self.chat.typing_now()
+  }
+
+  fn notify_typing(&self, conversation: ConversationId, maybe_thread: Option<crate::model::ThreadId>) {
+    self.chat.notify_typing(conversation, maybe_thread);
   }
 }
 
@@ -598,6 +1053,42 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     self.maybe_calls.is_some()
   }
 
+  fn calls_unavailable_reason(&self) -> CallsUnavailableReason {
+    self.calls_unavailable
+  }
+
+  fn effects_offer(&self) -> EffectsOffer {
+    self
+      .maybe_calls
+      .as_ref()
+      .map_or(EffectsOffer::Full, RemoteCalls::effects_offer)
+  }
+
+  fn call_join_failures(&self) -> u64 {
+    self.maybe_calls.as_ref().map_or(0, RemoteCalls::join_failures)
+  }
+
+  fn has_pending_call_actions(&self) -> bool {
+    self
+      .maybe_calls
+      .as_ref()
+      .is_some_and(RemoteCalls::has_pending_actions)
+  }
+
+  fn call_video_tracks(&self) -> Vec<RemoteVideoTrack> {
+    self
+      .maybe_calls
+      .as_ref()
+      .map_or_else(Vec::new, RemoteCalls::video_tracks)
+  }
+
+  fn fetch_call_video_stats(&self, done: Box<dyn FnOnce(Option<VideoStatsJson>)>) {
+    match &self.maybe_calls {
+      Some(calls) => calls.fetch_video_stats(done),
+      None => done(None),
+    }
+  }
+
   fn huddle(&self, conversation: ConversationId) -> Option<HuddleInfo> {
     self
       .maybe_calls
@@ -609,6 +1100,10 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     self.maybe_calls.as_ref().and_then(RemoteCalls::active)
   }
 
+  fn call_end_reason(&self) -> Option<CallEndReason> {
+    self.maybe_calls.as_ref().and_then(RemoteCalls::end_reason)
+  }
+
   fn incoming_calls(&self) -> Vec<IncomingCall> {
     self
       .maybe_calls
@@ -616,9 +1111,9 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
       .map_or_else(Vec::new, RemoteCalls::incoming)
   }
 
-  fn join_call(&self, request: CallRequest) {
+  fn join_call(&self, request: CallRequest, media: JoinMedia) {
     if let Some(calls) = &self.maybe_calls {
-      calls.join(request);
+      calls.join(request, media);
     }
   }
 
@@ -646,6 +1141,18 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn move_call_here(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::MoveHere);
+    }
+  }
+
+  fn leave_call_everywhere(&self, conversation: ConversationId) {
+    if let Some(live) = &self.maybe_live {
+      live.leave_call_everywhere(conversation);
+    }
+  }
+
   fn select_microphone(&self, maybe_device: Option<String>) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SelectMicrophone { maybe_device });
@@ -655,6 +1162,18 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
   fn select_speakers(&self, maybe_device: Option<String>) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SelectSpeakers { maybe_device });
+    }
+  }
+
+  fn refresh_media_devices(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::RefreshDevices);
+    }
+  }
+
+  fn test_speakers(&self, maybe_device: Option<String>) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.test_speakers(maybe_device);
     }
   }
 
@@ -670,15 +1189,24 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn camera_fallback(&self) -> Option<CameraFallback> {
+    self.maybe_calls.as_ref().and_then(RemoteCalls::camera_fallback)
+  }
+
   fn set_background_effect(&self, effect: BackgroundEffect) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SetBackgroundEffect { effect });
     }
   }
 
-  fn start_screen_share(&self, has_sound: bool) {
+  fn start_screen_share(
+    &self,
+    has_sound: bool,
+    content_mode: ScreenContentMode,
+    resolution: ScreenShareResolution,
+  ) {
     if let Some(calls) = &self.maybe_calls {
-      calls.act(CallAction::StartScreenShare { has_sound });
+      calls.start_screen_share(has_sound, content_mode, resolution);
     }
   }
 
@@ -691,6 +1219,47 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
   fn open_system_video_effects(&self) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::OpenSystemVideoEffects);
+    }
+  }
+
+  fn set_call_status_sounds(&self, sounds: CallStatusSounds) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetStatusSounds { sounds });
+    }
+  }
+
+  fn set_camera_quality(&self, quality: VideoQuality) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetCameraQuality { quality });
+    }
+  }
+
+  fn set_video_quality(&self, stream_id: teamcraft_proto::MediaStreamId, quality: VideoQuality) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetVideoQuality { stream_id, quality });
+    }
+  }
+
+  fn set_call_preview(&self, preview: CallPreview) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.set_preview(preview);
+    }
+  }
+
+  fn call_preview_camera(&self) -> PreviewCamera {
+    self
+      .maybe_calls
+      .as_ref()
+      .map_or(PreviewCamera::Off, RemoteCalls::preview_camera)
+  }
+
+  fn call_preview_level(&self) -> f32 {
+    self.maybe_calls.as_ref().map_or(0.0, RemoteCalls::preview_level)
+  }
+
+  fn watch_call_level(&self, is_watching: bool) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.watch_call_level(is_watching);
     }
   }
 }
@@ -721,11 +1290,17 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
-  fn set_workspace_policy(&self, policy: WorkspacePolicy) {
+  fn set_workspace_policy(
+    &self,
+    policy: WorkspacePolicy,
+    genesis: Vec<teamcraft_client_api::admin::RosterEntry>,
+  ) {
     let Some(admin) = &self.maybe_admin else {
       return;
     };
-    let (owners, admins) = admin.roster_candidates();
+    // Only the roster the owner confirmed with IDs and keys, never the server's role holders as
+    // they come (#265).
+    let (owners, admins) = teamcraft_client_api::admin::roster_by_role(&genesis);
     // The editor started from what the server showed; the core signs only if that is also what it
     // verified itself (a compromised server could show altered fields).
     self.chat.publish_policy(admin.policy(), policy, owners, admins);
@@ -736,6 +1311,19 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     match &self.maybe_admin {
       Some(admin) => admin.spaces(),
       None => Vec::new(),
+    }
+  }
+
+  fn admin_load(&self) -> AdminLoad {
+    self
+      .maybe_admin
+      .as_ref()
+      .map_or(AdminLoad::Loaded, AdminLive::list_load)
+  }
+
+  fn change_admin_space(&self, space: SpaceId, changes: AdminSpaceChanges) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.change_space(space, changes);
     }
   }
 
@@ -835,6 +1423,36 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
+  fn remove_user_from_chats(&self, user: UserId) {
+    // Signed by this client, never the server's removal alone (security review A8).
+    if self.can_remove_from_chats() {
+      self.chat.admin_remove_from_all_chats(user);
+      if let Some(admin) = &self.maybe_admin {
+        admin.queue_refresh_after_publish();
+      }
+    }
+  }
+
+  fn can_remove_from_chats(&self) -> bool {
+    self.chat.can_sign_workspace()
+  }
+
+  fn delete_user(&self, user: UserId) {
+    // The signed removals come first, in the client (security review A8).
+    if self.can_remove_from_chats() {
+      self.chat.admin_delete_user(user);
+      if let Some(admin) = &self.maybe_admin {
+        admin.queue_refresh_after_publish();
+      }
+    }
+  }
+
+  fn remove_group_leftover(&self, conversation: ConversationId, user: UserId) {
+    if self.can_remove_from_chats() {
+      self.chat.admin_remove_group_leftover(conversation, user);
+    }
+  }
+
   /// Organization recovery needs the recovery key ceremony of the core, which the console does not
   /// drive yet; `can_start_org_recovery` keeps the button disabled.
   fn start_org_recovery(&self, _user: UserId) {}
@@ -848,7 +1466,11 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
         self.chat.admin_add_self(channel);
         SelfJoinOutcome::Joined
       },
-      teamcraft_proto::AdminSelfJoin::OwnerApproval => SelfJoinOutcome::ApprovalRequested,
+      // The channel's owners decide (admin.md §2.4).
+      teamcraft_proto::AdminSelfJoin::OwnerApproval => {
+        self.chat.request_admin_join(channel);
+        SelfJoinOutcome::ApprovalRequested
+      },
       teamcraft_proto::AdminSelfJoin::Disabled | teamcraft_proto::AdminSelfJoin::Unknown(_) => {
         SelfJoinOutcome::Disabled
       },
@@ -874,6 +1496,47 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
       return Some(PolicyBlocker::NotOwner);
     }
     (!self.chat.can_sign_workspace()).then_some(PolicyBlocker::NoSigningKeys)
+  }
+
+  fn admin_owner_roster(&self) -> Option<teamcraft_client_api::admin::OwnerRosterStatus> {
+    self.maybe_admin.as_ref()?;
+    self.chat.owner_roster()
+  }
+
+  fn admin_role_holders(&self) -> (Vec<UserId>, Vec<UserId>) {
+    match &self.maybe_admin {
+      Some(admin) => admin.roster_candidates(),
+      None => (Vec::new(), Vec::new()),
+    }
+  }
+
+  fn admin_genesis_roster(&self) -> Option<Vec<teamcraft_client_api::admin::RosterEntry>> {
+    let admin = self.maybe_admin.as_ref()?;
+    if self.policy_edit_blocker().is_some() || self.chat.owner_roster().is_some() {
+      return None;
+    }
+    let (owners, admins) = admin.roster_candidates();
+    Some(teamcraft_client_api::admin::genesis_roster(
+      self.chat.me().id,
+      &owners,
+      &admins,
+    ))
+  }
+
+  fn admin_identity_keys(&self) -> teamcraft_client_api::remote::SecuritySnapshot {
+    self.chat.security_keys()
+  }
+
+  fn admin_publish_roster(&self, base_version: u64, members: Vec<teamcraft_client_api::admin::RosterEntry>) {
+    // The form is read-only otherwise; the core refuses a non-owner as well.
+    if self.policy_edit_blocker().is_some() {
+      return;
+    }
+    let Some(admin) = &self.maybe_admin else {
+      return;
+    };
+    self.chat.publish_roster(base_version, members);
+    admin.queue_refresh_after_publish();
   }
 
   fn admin_brands(&self) -> Option<AdminBrandsResponse> {
@@ -925,6 +1588,19 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
 
   fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
     self.maybe_admin.as_ref().and_then(|admin| admin.mail_settings())
+  }
+
+  fn notetaker_settings(&self) -> Option<teamcraft_proto::AdminNotetakerResponse> {
+    self
+      .maybe_admin
+      .as_ref()
+      .and_then(|admin| admin.notetaker_settings())
+  }
+
+  fn set_notetaker_key(&self, key: teamcraft_proto::SecretUpdate) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.set_notetaker_key(key);
+    }
   }
 
   fn save_mail_settings(&self, request: UpdateMailSettingsRequest) {
@@ -1016,6 +1692,19 @@ impl<C: ChatBackend> SecurityBackend for Hybrid<C> {
 
   fn refresh_my_devices(&self) {
     self.chat.refresh_own_devices();
+  }
+
+  fn rename_my_device(&self, device: DeviceId, name: String) {
+    self.chat.rename_own_device(device, name);
+  }
+
+  fn test_push_my_device(&self, device: DeviceId) {
+    self.chat.test_push_own_device(device);
+  }
+
+  /// `None` while the core has not reported it (or there is no core).
+  fn key_backup(&self) -> Option<teamcraft_client_api::security::KeyBackupState> {
+    self.chat.security_keys().maybe_backup
   }
 
   fn key_change(&self, conversation: ConversationId) -> Option<KeyChange> {

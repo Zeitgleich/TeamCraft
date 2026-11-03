@@ -3,10 +3,11 @@
 
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
 
-use super::Client;
 use super::messaging::apply_control;
+use super::{Client, PendingAction};
 use crate::api::ServerApi;
 use crate::error::CoreError;
+use crate::imported::{Authorship, ImportedAuthor};
 use crate::read_state;
 use crate::store::{Forwarded, LocalStore, MessageContent, MessageMeta, ReplyRef, StoredMessage};
 
@@ -65,26 +66,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.set_server_pin(conversation, target, is_pinned).await
   }
 
+  /// The server's pin flag (retention). Queued: it follows once the device is online and the
+  /// message has its server ID.
   pub(crate) async fn set_server_pin(
     &mut self,
     conversation: ConversationId,
     target: ClientMessageId,
     is_pinned: bool,
   ) -> Result<(), CoreError> {
-    let maybe_server_id = self
-      .store
-      .message(conversation, target)?
-      .and_then(|stored| stored.maybe_server_id);
-    match maybe_server_id {
-      Some(message) => Ok(
-        self
-          .api
-          .set_message_pinned(conversation, message, is_pinned)
-          .await?,
-      ),
-      // Not sent yet: the encrypted pin still works; the retention flag follows on the next pin.
-      None => Ok(()),
-    }
+    self
+      .queue_action(PendingAction::ServerPin {
+        conversation,
+        target,
+        is_pinned,
+      })
+      .await
   }
 
   /// Sends a copy of a message to another conversation with an optional comment. The copy is a new
@@ -100,23 +96,49 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .store
       .message(from, target)?
       .ok_or_else(|| CoreError::Corrupt("forwarding a message that isn't stored".into()))?;
-    let author_name = self.display_name(original.sender_user_id)?;
+    let authorship = Authorship::of(&original, crate::imported::importer(&self.store));
+    let author_name = match authorship.maybe_account() {
+      Some(author) => self.display_name(author)?,
+      None => imported_author_name(&authorship),
+    };
     let maybe_conversation_name = self.conversation_name(from)?;
-    let content = forward_content(&original, author_name, maybe_conversation_name, comment)
-      .ok_or_else(|| CoreError::Corrupt("this kind of message can't be forwarded".into()))?;
+    let content = forward_content(
+      &authorship,
+      &original,
+      author_name,
+      maybe_conversation_name,
+      comment,
+    )
+    .ok_or_else(|| CoreError::Corrupt("this kind of message can't be forwarded".into()))?;
     let id = self.enqueue(to, None, content)?;
     self.flush_outbox().await?;
     Ok(id)
   }
 
-  /// Confirms having read a message that asked for it; the sender sees it.
+  /// Confirms having read a message that asked for it; the sender sees it once the server has it
+  /// (queued while offline).
   pub async fn acknowledge(
     &mut self,
     conversation: ConversationId,
     message: MessageId,
   ) -> Result<(), CoreError> {
-    self.api.acknowledge_message(conversation, message).await?;
-    read_state::note_acknowledgement(&self.store, conversation, message, self.account.user_id)
+    read_state::note_acknowledgement(&self.store, conversation, message, self.account.user_id)?;
+    self
+      .queue_action(PendingAction::Acknowledge {
+        conversation,
+        message,
+      })
+      .await
+  }
+
+  /// Reads how far the other members of a DM or group DM read: receipts sent while this device was
+  /// offline never arrive as events. Receipts only move forward, so a stale answer changes nothing.
+  pub async fn refresh_read_receipts(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let response = self.api.read_receipts(conversation).await?;
+    for receipt in response.receipts {
+      read_state::note_read_receipt(&self.store, conversation, receipt.user_id, receipt.message_id)?;
+    }
+    Ok(())
   }
 
   /// Marks the conversation unread from `from` on (synced to the user's devices).
@@ -151,8 +173,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
-/// The reference a reply carries to the quoted message.
-pub fn reply_ref(target: &StoredMessage) -> ReplyRef {
+/// The name a forward quotes for an imported author without an account: a bot's name in the old
+/// system, nothing for a deleted account (shown like one).
+pub fn imported_author_name(authorship: &Authorship<'_>) -> String {
+  match authorship.maybe_origin.map(|origin| &origin.author) {
+    Some(ImportedAuthor::Named { name }) => name.clone(),
+    _ => String::new(),
+  }
+}
+
+/// The reference a reply carries to the quoted message, naming the author the list shows (the
+/// original one of an imported message, see [`Authorship`]).
+pub fn reply_ref(target: &StoredMessage, maybe_importer: Option<UserId>) -> ReplyRef {
   let text = match &target.content {
     MessageContent::Text { body, .. } => body.as_str(),
     MessageContent::File { attachment } => attachment.file_name.as_str(),
@@ -160,15 +192,16 @@ pub fn reply_ref(target: &StoredMessage) -> ReplyRef {
   };
   ReplyRef {
     target: target.client_message_id,
-    author: target.sender_user_id,
+    author: Authorship::of(target, maybe_importer).author,
     excerpt: text.chars().take(REPLY_EXCERPT_CHARS).collect(),
   }
 }
 
 /// The content of a forward of `original`: the comment as text, the original quoted with its
-/// author, its files attached again. `None` for messages that can't be forwarded (deleted ones,
-/// reactions and other control messages).
+/// author and time (`authorship`, of `original`), its files attached again. `None` for messages
+/// that can't be forwarded (deleted ones, reactions and other control messages).
 pub fn forward_content(
+  authorship: &Authorship<'_>,
   original: &StoredMessage,
   author_name: String,
   maybe_conversation_name: Option<String>,
@@ -186,7 +219,7 @@ pub fn forward_content(
       maybe_forwarded: Some(Forwarded {
         author_name,
         maybe_conversation_name,
-        sent_at_ms: original.sent_at_ms,
+        sent_at_ms: authorship.sent_at_ms,
         body,
       }),
       attachments,

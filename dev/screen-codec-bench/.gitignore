@@ -1,0 +1,4 @@
+# Browser profiles, run matrices and results of the bench (server.py, make_runs.py).
+profile-*/
+*.json
+*.jsonl

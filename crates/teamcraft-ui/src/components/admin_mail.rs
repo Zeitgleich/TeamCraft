@@ -8,13 +8,14 @@ use crate::admin::{AdminSection, SettingsTestKind};
 use crate::clock::format_date_time;
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_fields::{
-  CheckField, FieldErrors, SourceBadge, TextField, Validated, bind, bind_bool, is_dns_name, is_email_address,
-  parse_number,
+  CheckField, FieldErrors, SourceBadge, TextField, Validated, accept_or_refuse, bind, bind_bool, is_dns_name,
+  is_email_address, parse_number,
 };
 use crate::components::admin_policy::SelectRow;
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 
+const FORM_ID: &str = "admin-mail-form";
 const DEFAULT_PORT: u16 = 587;
 const MAX_TEXT_CHARS: usize = 200;
 const SECURITY_MODES: [(&str, &str); 3] = [
@@ -102,14 +103,10 @@ pub fn MailSection() -> impl IntoView {
   });
   let save = move |ev: web_sys::SubmitEvent| {
     ev.prevent_default();
-    show_errors.set(true);
-    let request = draft.with_untracked(|draft| {
-      draft
-        .errors()
-        .is_empty()
-        .then(|| draft.to_request(can_store_secrets.get_untracked()))
-        .flatten()
-    });
+    if !accept_or_refuse(draft, show_errors, FORM_ID) {
+      return;
+    }
+    let request = draft.with_untracked(|draft| draft.to_request(can_store_secrets.get_untracked()));
     if let Some(request) = request {
       state.write(|backend| backend.save_mail_settings(request));
     }
@@ -143,7 +140,7 @@ pub fn MailSection() -> impl IntoView {
         .is_none()
         .then(|| view! { <p class="muted-text" role="status">{i18n.t("admin-settings-loading")}</p> })
     }}
-    <form class="policy-form" on:submit=save>
+    <form id=FORM_ID class="policy-form" on:submit=save>
       <fieldset class="policy-group">
         <legend>{move || i18n.t("admin-mail-server")}</legend>
         <p class="settings-source small">

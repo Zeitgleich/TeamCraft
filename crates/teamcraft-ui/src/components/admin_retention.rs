@@ -72,20 +72,12 @@ fn RetentionRow(channel: AdminChannel) -> impl IntoView {
   let keeps_pinned = RwSignal::new(initial.keeps_pinned);
 
   // Blank means "keep everything"; anything else must be a whole number within the instance maximum.
+  let days_parsed = move || parse_limit(&days.get(), MAX_DAYS);
+  let messages_parsed = move || parse_limit(&messages.get(), MAX_MESSAGES);
   let parsed = move || -> Result<Retention, &'static str> {
-    let parse = |text: String, max: u32| -> Result<Option<u32>, &'static str> {
-      let text = text.trim().to_owned();
-      if text.is_empty() {
-        return Ok(None);
-      }
-      match text.parse::<u32>() {
-        Ok(value) if (1..=max).contains(&value) => Ok(Some(value)),
-        _ => Err("retention-invalid"),
-      }
-    };
     Ok(Retention {
-      maybe_days: parse(days.get(), MAX_DAYS)?,
-      maybe_max_messages: parse(messages.get(), MAX_MESSAGES)?,
+      maybe_days: days_parsed()?,
+      maybe_max_messages: messages_parsed()?,
       keeps_pinned: keeps_pinned.get(),
     })
   };
@@ -107,8 +99,11 @@ fn RetentionRow(channel: AdminChannel) -> impl IntoView {
           autocomplete="off"
           name="days"
           placeholder=move || i18n.t("retention-forever")
-          aria-invalid=move || parsed().is_err().to_string()
-          aria-describedby=error_id.clone()
+          aria-invalid=move || days_parsed().is_err().then_some("true")
+          aria-describedby={
+            let error_id = error_id.clone();
+            move || days_parsed().is_err().then(|| error_id.clone())
+          }
           prop:value=move || days.get()
           on:input=move |ev| days.set(event_target_value(&ev))
         />
@@ -122,7 +117,11 @@ fn RetentionRow(channel: AdminChannel) -> impl IntoView {
           autocomplete="off"
           name="messages"
           placeholder=move || i18n.t("retention-forever")
-          aria-invalid=move || parsed().is_err().to_string()
+          aria-invalid=move || messages_parsed().is_err().then_some("true")
+          aria-describedby={
+            let error_id = error_id.clone();
+            move || messages_parsed().is_err().then(|| error_id.clone())
+          }
           prop:value=move || messages.get()
           on:input=move |ev| messages.set(event_target_value(&ev))
         />
@@ -150,5 +149,30 @@ fn RetentionRow(channel: AdminChannel) -> impl IntoView {
         </button>
       </td>
     </tr>
+  }
+}
+
+/// One limit as typed: blank keeps everything, otherwise a whole number from 1 to `max`.
+fn parse_limit(text: &str, max: u32) -> Result<Option<u32>, &'static str> {
+  let text = text.trim();
+  if text.is_empty() {
+    return Ok(None);
+  }
+  match text.parse::<u32>() {
+    Ok(value) if (1..=max).contains(&value) => Ok(Some(value)),
+    _ => Err("retention-invalid"),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn each_limit_is_checked_on_its_own() {
+    assert_eq!(parse_limit(" ", 10), Ok(None));
+    assert_eq!(parse_limit("7", 10), Ok(Some(7)));
+    assert_eq!(parse_limit("0", 10), Err("retention-invalid"));
+    assert_eq!(parse_limit("11", 10), Err("retention-invalid"));
   }
 }

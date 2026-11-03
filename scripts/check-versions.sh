@@ -7,7 +7,7 @@
 #   scripts/check-versions.sh v1.2.3     ... and the tag fits it (release workflow)
 #
 # A tag fits when it equals the version (v1.2.3 for 1.2.3) or is a prerelease of it (v1.2.3-rc.1 for
-# 1.2.3: a candidate built from the release tree). CHANGELOG.md needs a section for the version.
+# 1.2.3: a candidate built from the release tree).
 # With GITHUB_OUTPUT set, writes version, tree_version and is_prerelease to it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -42,7 +42,6 @@ code=$((major * 1000000 + minor * 10000 + patch * 100 + stage))
 # App Store versions are numeric only; the build number follows the Android code.
 [ "$ios_marketing" = "$base" ] || fail "iOS MARKETING_VERSION is $ios_marketing, $cargo needs $base"
 [ "$ios_build" = "$code" ] || fail "iOS CURRENT_PROJECT_VERSION is $ios_build, $cargo needs $code"
-grep -q "^## \[$cargo\]" CHANGELOG.md || fail "CHANGELOG.md has no section '## [$cargo]'"
 
 version="$cargo"
 if [ $# -gt 0 ]; then

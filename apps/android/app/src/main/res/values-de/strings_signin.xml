@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="sign_in_with">Anmelden mit %1$s</string>
+  <string name="sign_in_or">oder</string>
+  <string name="sign_in_loading">Anmeldemöglichkeiten werden geladen</string>
+  <string name="sign_in_help_link">Hilfe zur Anmeldung</string>
+  <string name="sign_in_e2ee_note">Nachrichten sind Ende-zu-Ende-verschlüsselt: Nur deine Geräte können sie lesen.</string>
+  <string name="local_email">E-Mail</string>
+  <string name="local_password">Passwort</string>
+  <string name="local_password_show">Passwort anzeigen</string>
+  <string name="local_password_hide">Passwort verbergen</string>
+  <string name="local_code">Einmalcode</string>
+  <string name="local_code_optional">Einmalcode (falls eingerichtet)</string>
+  <string name="local_sign_in_rejected">E-Mail, Passwort oder Code falsch.</string>
+  <string name="local_sign_in_disabled">Die Anmeldung mit E-Mail und Passwort ist auf diesem Server nicht verfügbar. Frag deine Administration.</string>
+  <string name="local_sign_in_rate_limited">Zu viele Versuche. Warte ein paar Minuten und versuche es dann erneut.</string>
+  <string name="sign_in">Anmelden</string>
+  <string name="sign_in_hint">Melde dich mit deinem Organisationskonto an, um fortzufahren.</string>
+  <string name="sign_in_failed">Die Anmeldung ist fehlgeschlagen. Bitte versuche es erneut.</string>
+  <string name="sign_in_provider_denied">Dein Konto darf TeamCraft nicht nutzen. Bitte deinen Admin um Zugriff oder melde dich mit einem anderen Konto an.</string>
+  <string name="sign_in_provider_misconfigured">Die Anmeldung deiner Organisation ist falsch eingerichtet. Sag deinem Admin Bescheid (Fehler: %1$s).</string>
+  <string name="sign_in_provider_already_signed_in">Die Anmeldeseite war schon benutzt. Schließe andere Anmelde-Tabs im Browser und melde dich erneut an.</string>
+  <string name="sign_in_provider_refused">Die Anmeldung deiner Organisation hat abgelehnt (Fehler: %1$s). Versuche es erneut oder sag deinem Admin Bescheid.</string>
+  <string name="sign_out">Abmelden</string>
+  <string name="local_email_missing">Gib deine E-Mail-Adresse ein.</string>
+  <string name="local_password_missing">Gib dein Passwort ein.</string>
+  <string name="local_code_missing">Gib den Code aus deiner Authenticator-App ein.</string>
+  <string name="local_code_incomplete">Gib alle Ziffern des Codes ein: 6 bis 8.</string>
+</resources>

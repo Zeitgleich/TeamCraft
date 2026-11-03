@@ -1,0 +1,453 @@
+//! Pictures keep their content from the capture to the viewer (issue #683: shared screens and
+//! cameras arrived black). The captures hand over what macOS delivers – packed BGRA from
+//! ScreenCaptureKit, 4:2:2 YUYV (`yuvs`) from an AVFoundation camera – through the same conversion,
+//! encoder, packetization, encryption and SFU as a call; every picture the viewer decodes has to
+//! show what was captured, not black.
+
+// clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::collections::BTreeMap;
+use std::net::{Ipv6Addr, SocketAddr};
+use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use teamcraft_media::bwe::BweConfig;
+use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
+use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
+use teamcraft_media::capture_convert::{PixelFormat, RawPicture};
+use teamcraft_media::picture_check::{PictureContent, PictureStats};
+use teamcraft_media::video::{VideoFrame, VideoResolution, screen_layers, simulcast_layers};
+use teamcraft_media::video_capture::{CaptureError, CaptureFormat, FrameSender, VideoCapture};
+use teamcraft_media::video_pipeline::{VideoSendConfig, software_encoders};
+use teamcraft_proto::{
+  AudioCodec, DeviceId, MediaCapabilities, ScreenContentMode, ScreenShareResolution, VideoCodec,
+  VideoTrackKind,
+};
+use teamcraft_sfu::auth::DevTokenVerifier;
+use teamcraft_sfu::config::SfuConfig;
+use teamcraft_sfu::server::{CALL_PATH, Sfu};
+use wtransport::Identity;
+
+const SIZE: VideoResolution = VideoResolution {
+  width: 640,
+  height: 360,
+};
+const FRAMERATE: u8 = 30;
+/// Decoded pictures the viewer has to see.
+const WANTED_PICTURES: usize = 15;
+const DEADLINE: Duration = Duration::from_secs(10);
+/// What `DEADLINE` is for a real capture: the portal, a camera starting up, a dark room's 10 fps.
+#[cfg(all(feature = "portal-e2e", target_os = "linux"))]
+const PORTAL_DEADLINE: Duration = Duration::from_secs(30);
+/// Luma PSNR every decoded picture keeps at least against what was captured: lossy, not black
+/// (a black picture against these scenes is below 10 dB). The first pictures of a camera's smallest
+/// layer (160x90) measure 24 to 30 dB, while its rate control settles.
+const MIN_PSNR_DB: f64 = 20.0;
+/// What the pictures keep once the stream has settled, from [`SETTLED_PICTURE`] on: the bound
+/// that notices a picture that only resembles what was captured.
+const MIN_SETTLED_PSNR_DB: f64 = 25.0;
+const SETTLED_PICTURE: usize = WANTED_PICTURES / 2;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shared_screen_reaches_the_viewer_with_its_content() {
+  let capture = SyntheticCapture::new(PixelFormat::Bgrx);
+  let layers = screen_layers(
+    SIZE,
+    FRAMERATE,
+    ScreenContentMode::Detail,
+    &ScreenShareResolution::Standard,
+  );
+  let captured = Arc::clone(&capture.captured);
+  check_content_arrives(
+    VideoTrackKind::Screen,
+    Box::new(capture),
+    Some(captured),
+    layers,
+    DEADLINE,
+  )
+  .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_camera_reaches_the_viewer_with_its_content() {
+  let capture = SyntheticCapture::new(PixelFormat::Yuyv);
+  let layers = simulcast_layers(SIZE, FRAMERATE, 1_000_000, 3);
+  let captured = Arc::clone(&capture.captured);
+  check_content_arrives(
+    VideoTrackKind::Camera,
+    Box::new(capture),
+    Some(captured),
+    layers,
+    DEADLINE,
+  )
+  .await;
+}
+
+/// The desktop app's real Linux capture (xdg-desktop-portal + PipeWire) through the call and the
+/// SFU to a viewer (issue #683: a PipeWire camera that hands out DMA-BUFs never linked, and the
+/// others saw black). Needs a desktop session with the portals and a camera, or the headless one
+/// of `apps/desktop/packaging/linux/portal-test/run.sh`, which runs these:
+///
+/// ```sh
+/// cargo test -p teamcraft-sfu --features portal-e2e --test suite -- --ignored portal_
+/// ```
+#[cfg(all(feature = "portal-e2e", target_os = "linux"))]
+mod portal {
+  use teamcraft_media::capture_portal::PortalCapture;
+
+  use super::*;
+
+  const WANTED: CaptureFormat = CaptureFormat {
+    resolution: VideoResolution {
+      width: 1280,
+      height: 720,
+    },
+    framerate: FRAMERATE,
+  };
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  #[ignore = "needs the desktop portals and a camera (portal-test/run.sh)"]
+  async fn portal_camera_reaches_the_viewer_with_its_content() {
+    let capture = tokio::task::spawn_blocking(|| PortalCapture::camera(WANTED))
+      .await
+      .unwrap()
+      .expect("camera portal");
+    let layers = simulcast_layers(capture.format().resolution, FRAMERATE, 1_500_000, 3);
+    check_content_arrives(
+      VideoTrackKind::Camera,
+      Box::new(capture),
+      None,
+      layers,
+      PORTAL_DEADLINE,
+    )
+    .await;
+  }
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  #[ignore = "needs the desktop portals and a screen to pick (portal-test/run.sh)"]
+  async fn portal_screen_reaches_the_viewer_with_its_content() {
+    let (capture, _) = tokio::task::spawn_blocking(|| PortalCapture::screen(WANTED, None))
+      .await
+      .unwrap()
+      .expect("screencast portal");
+    let layers = screen_layers(
+      capture.format().resolution,
+      FRAMERATE,
+      ScreenContentMode::Detail,
+      &ScreenShareResolution::Standard,
+    );
+    check_content_arrives(
+      VideoTrackKind::Screen,
+      Box::new(capture),
+      None,
+      layers,
+      PORTAL_DEADLINE,
+    )
+    .await;
+  }
+}
+
+/// Sends `capture` from one participant and checks that the other decodes at least
+/// [`WANTED_PICTURES`] pictures with content within `deadline`. With `maybe_captured` (what a
+/// synthetic capture sent, by timestamp) every picture has to have content and show its frame;
+/// without (a real capture) dark pictures are allowed while a camera's exposure settles, as long
+/// as the pictures with content come and the last one has content.
+async fn check_content_arrives(
+  kind: VideoTrackKind,
+  capture: Box<dyn VideoCapture>,
+  maybe_captured: Option<Arc<Mutex<BTreeMap<u64, VideoFrame>>>>,
+  layers: Vec<teamcraft_proto::VideoLayerInfo>,
+  deadline: Duration,
+) {
+  let (port, certificate_hash) = start_sfu().await;
+  let mut presenter = join(port, certificate_hash, 1, 2).await;
+  let mut viewer = join(port, certificate_hash, 2, 1).await;
+  let config = VideoSendConfig {
+    maybe_layer_plan: None,
+    kind: kind.clone(),
+    maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&kind),
+    capture,
+    layers,
+    encoders: software_encoders(),
+    maybe_filter: None,
+  };
+  presenter.start_video(config).await.unwrap();
+
+  let decoded: Arc<Mutex<Vec<VideoFrame>>> = Arc::default();
+  let deadline = tokio::time::Instant::now() + deadline;
+  let is_synthetic = maybe_captured.is_some();
+  let with_content = |decoded: &[VideoFrame]| {
+    decoded
+      .iter()
+      .filter(|picture| PictureStats::of(picture).content() == PictureContent::Detailed)
+      .count()
+  };
+  let is_enough = |decoded: &[VideoFrame]| match is_synthetic {
+    true => decoded.len() >= WANTED_PICTURES,
+    false => with_content(decoded) >= WANTED_PICTURES,
+  };
+  while tokio::time::Instant::now() < deadline && !is_enough(&decoded.lock().unwrap()) {
+    // The presenter's events must be read for its call to go on.
+    let _ = tokio::time::timeout(Duration::from_millis(5), presenter.next_event()).await;
+    if let Ok(Some(CallEngineEvent::VideoPublished(track))) =
+      tokio::time::timeout(Duration::from_millis(5), viewer.next_event()).await
+    {
+      assert_eq!(track.kind, kind);
+      let sink = Arc::clone(&decoded);
+      viewer.watch_video(
+        track.stream_id,
+        None,
+        Box::new(move |frame| sink.lock().unwrap().push(frame)),
+      );
+    }
+  }
+  presenter.stop_video(kind.clone());
+  presenter.leave().await.unwrap();
+  viewer.leave().await.unwrap();
+
+  let decoded = decoded.lock().unwrap();
+  assert!(
+    decoded.len() >= WANTED_PICTURES,
+    "{kind:?}: {} pictures decoded",
+    decoded.len()
+  );
+  let Some(captured) = maybe_captured else {
+    let last = PictureStats::of(decoded.last().unwrap());
+    assert!(
+      with_content(&decoded) >= WANTED_PICTURES && last.content() == PictureContent::Detailed,
+      "{kind:?}: {} of {} pictures with content, the last {last:?}",
+      with_content(&decoded),
+      decoded.len()
+    );
+    return;
+  };
+  for picture in decoded.iter() {
+    let stats = PictureStats::of(picture);
+    assert_eq!(stats.content(), PictureContent::Detailed, "{kind:?}: {stats:?}");
+  }
+  let captured = captured.lock().unwrap();
+  let judged: Vec<(&VideoFrame, f64)> = decoded
+    .iter()
+    .map(|picture| {
+      let source = captured_at(&captured, picture.timestamp_us())
+        .scaled(picture.resolution())
+        .unwrap();
+      (picture, luma_psnr(&source, picture))
+    })
+    .collect();
+  let timeline = judged
+    .iter()
+    .enumerate()
+    .map(|(index, (picture, psnr))| {
+      let size = picture.resolution();
+      format!(
+        "{index:3}: {:7} µs, {}x{}: {psnr:.1} dB",
+        picture.timestamp_us(),
+        size.width,
+        size.height
+      )
+    })
+    .collect::<Vec<_>>()
+    .join("\n");
+  for (index, (picture, psnr)) in judged.iter().enumerate() {
+    let min_psnr_db = if index < SETTLED_PICTURE {
+      MIN_PSNR_DB
+    } else {
+      MIN_SETTLED_PSNR_DB
+    };
+    assert!(
+      *psnr >= min_psnr_db,
+      "{kind:?} at {} µs, {:?}: PSNR {psnr:.1} dB:\n{timeline}",
+      picture.timestamp_us(),
+      picture.resolution()
+    );
+  }
+}
+
+/// Draws a scene in a raw format the way a device delivers it, converts it like the platform
+/// captures do (`RawPicture::to_i420`), and keeps what it sent for the comparison.
+struct SyntheticCapture {
+  format: PixelFormat,
+  captured: Arc<Mutex<BTreeMap<u64, VideoFrame>>>,
+  maybe_running: Option<(std_mpsc::Sender<()>, JoinHandle<()>)>,
+}
+
+impl SyntheticCapture {
+  fn new(format: PixelFormat) -> Self {
+    Self {
+      format,
+      captured: Arc::default(),
+      maybe_running: None,
+    }
+  }
+}
+
+impl VideoCapture for SyntheticCapture {
+  fn format(&self) -> CaptureFormat {
+    CaptureFormat {
+      resolution: SIZE,
+      framerate: FRAMERATE,
+    }
+  }
+
+  fn start(&mut self, frames: FrameSender) -> Result<(), CaptureError> {
+    let (stop, stopped) = std_mpsc::channel();
+    let (format, captured) = (self.format, Arc::clone(&self.captured));
+    let thread = std::thread::spawn(move || {
+      let period = Duration::from_secs(1) / u32::from(FRAMERATE);
+      // Stamped when captured, as the platforms' captures do: a picture the encoder thread
+      // encodes again after a pause (a keyframe asked for, an idle screen) is stamped with the
+      // time since the last one and has to fall between the captured frames.
+      let start = std::time::Instant::now();
+      for index in 0u64.. {
+        let timestamp_us = u64::try_from(start.elapsed().as_micros()).unwrap();
+        let raw = draw(format, index);
+        let picture = RawPicture {
+          format,
+          width: u32::from(SIZE.width),
+          height: u32::from(SIZE.height),
+          stride: 0,
+          data: &raw,
+        };
+        let frame = picture.to_i420(timestamp_us).unwrap();
+        captured.lock().unwrap().insert(timestamp_us, frame.clone());
+        if !frames.send(frame) {
+          return;
+        }
+        if !matches!(
+          stopped.recv_timeout(period),
+          Err(std_mpsc::RecvTimeoutError::Timeout)
+        ) {
+          return;
+        }
+      }
+    });
+    self.maybe_running = Some((stop, thread));
+    Ok(())
+  }
+
+  fn stop(&mut self) {
+    if let Some((stop, thread)) = self.maybe_running.take() {
+      drop(stop);
+      thread.join().unwrap();
+    }
+  }
+}
+
+/// A desktop-like scene: a coloured gradient, a light "window" with dark lines of "text", and a
+/// box that moves with `index`, so pictures differ.
+fn draw(format: PixelFormat, index: u64) -> Vec<u8> {
+  let (width, height) = (usize::from(SIZE.width), usize::from(SIZE.height));
+  let box_x = (index as usize * 8) % (width - 64);
+  let rgb = |x: usize, y: usize| -> [u8; 3] {
+    if (box_x..box_x + 64).contains(&x) && (40..104).contains(&y) {
+      return [230, 60, 40];
+    }
+    if (160..600).contains(&x) && (140..340).contains(&y) {
+      let is_text = (y - 140) % 16 < 3 && (x - 160) % 40 < 30;
+      return if is_text { [20, 20, 30] } else { [245, 245, 240] };
+    }
+    [(x * 255 / width) as u8, (y * 255 / height) as u8, 128]
+  };
+  match format {
+    PixelFormat::Bgrx => (0..height)
+      .flat_map(|y| (0..width).map(move |x| (x, y)))
+      .flat_map(|(x, y)| {
+        let [r, g, b] = rgb(x, y);
+        [b, g, r, 255]
+      })
+      .collect(),
+    PixelFormat::Yuyv => (0..height)
+      .flat_map(|y| (0..width).step_by(2).map(move |x| (x, y)))
+      .flat_map(|(x, y)| {
+        let (y0, u0, v0) = yuv(rgb(x, y));
+        let (y1, u1, v1) = yuv(rgb(x + 1, y));
+        [y0, average(u0, u1), y1, average(v0, v1)]
+      })
+      .collect(),
+    other => panic!("no scene for {other:?}"),
+  }
+}
+
+/// BT.601 limited range, as cameras deliver it.
+fn yuv([r, g, b]: [u8; 3]) -> (u8, u8, u8) {
+  let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
+  let y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+  let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+  let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+  (y as u8, u.clamp(0, 255) as u8, v.clamp(0, 255) as u8)
+}
+
+fn average(a: u8, b: u8) -> u8 {
+  ((u16::from(a) + u16::from(b)).div_ceil(2)) as u8
+}
+
+/// The captured frame a decoded picture came from: the last one captured at or before its
+/// timestamp, which went through the 90 kHz RTP clock (it rounds). A picture the encoder thread
+/// encoded again when no frame came for a while (`video_pipeline`: a keyframe request waiting
+/// 150 ms, an idle screen) carries a later timestamp than the frame it shows (#989: a CI
+/// runner's capture paused that long).
+fn captured_at(captured: &BTreeMap<u64, VideoFrame>, timestamp_us: u64) -> &VideoFrame {
+  captured
+    .range(..=timestamp_us + 100)
+    .map(|(_, frame)| frame)
+    .next_back()
+    .unwrap_or_else(|| panic!("no captured frame at or before {timestamp_us} µs"))
+}
+
+fn luma_psnr(a: &VideoFrame, b: &VideoFrame) -> f64 {
+  let (ya, yb) = (a.planes().0, b.planes().0);
+  let mse = ya
+    .iter()
+    .zip(yb)
+    .map(|(x, y)| (f64::from(*x) - f64::from(*y)).powi(2))
+    .sum::<f64>()
+    / ya.len() as f64;
+  10.0 * (255.0f64.powi(2) / mse.max(1e-9)).log10()
+}
+
+async fn join(port: u16, certificate_hash: [u8; 32], device: i64, other: i64) -> NativeCall {
+  let engine = CallEngineConfig {
+    user_id: id(device),
+    device_id: id(device),
+    capabilities: MediaCapabilities {
+      audio_codecs: vec![AudioCodec::Opus],
+      video_encoders: vec![VideoCodec::H264],
+      video_decoders: vec![VideoCodec::H264],
+      max_simulcast_layers: 3,
+      max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
+    },
+    bwe: BweConfig::default(),
+  };
+  let sfu_url = format!(
+    "https://{}{CALL_PATH}",
+    SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port)
+  );
+  let mut config = NativeCallConfig::new(sfu_url, format!("dev:14:{device}:{device}"), engine);
+  config.maybe_certificate_hash = Some(certificate_hash);
+  config.maybe_trusted_roster = Some(vec![id::<DeviceId>(other)]);
+  NativeCall::join(config).await.unwrap()
+}
+
+async fn start_sfu() -> (u16, [u8; 32]) {
+  let config = SfuConfig {
+    bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+    ..SfuConfig::default()
+  };
+  let identity = Identity::self_signed(["localhost", "127.0.0.1", "::1"]).unwrap();
+  let sfu = Sfu::bind(config, identity, Arc::new(DevTokenVerifier)).unwrap();
+  let port = sfu.local_addr().unwrap().port();
+  let certificate_hash = *sfu.certificate_hash().as_ref();
+  tokio::spawn(sfu.run());
+  (port, certificate_hash)
+}
+
+fn id<T: std::str::FromStr>(raw: i64) -> T
+where
+  T::Err: std::fmt::Debug,
+{
+  raw.to_string().parse().unwrap()
+}

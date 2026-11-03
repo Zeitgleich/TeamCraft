@@ -3,32 +3,40 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use teamcraft_proto::{
-  ConversationId, DeviceActivity, DeviceId, ErrorBody, GatewayClientMessage, GatewayEvent,
-  GatewayServerMessage, Permission,
+  ConversationId, DeviceActivity, DeviceId, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
+  Permission, ThreadId, UserId,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 use tracing::{debug, warn};
 
 use super::hub::Attached;
 use crate::auth::AuthenticatedUser;
+use crate::drain::CLOSE_SERVICE_RESTART;
 use crate::error::ApiError;
+use crate::outage_gate::OutageGate;
 use crate::services::access::{load_conversation, require};
 use crate::services::{accounts, presence};
 use crate::state::AppState;
 
-/// Minimum time between two typing events of one connection for the same conversation.
+/// Minimum time between two typing events of one connection for the same conversation (or thread).
 const TYPING_THROTTLE: Duration = Duration::from_secs(3);
 /// Conversations a connection tracks typing for; more is ignored until entries age out.
 const MAX_TRACKED_TYPING: usize = 256;
 /// Changes of the activity state a connection may make: one per this long (each one costs queries
 /// and may broadcast to everybody who shares a conversation).
 const ACTIVITY_CHANGE_INTERVAL: Duration = Duration::from_secs(1);
+/// Longest a frame may wait for the peer to take it. A client that stops reading (a frozen tab, a
+/// stalled proxy) would otherwise block its connection task in the write for as long as TCP keeps
+/// the connection, with its queue and socket held and no heartbeat check running meanwhile.
+const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// WebSocket close code "policy violation" (RFC 6455).
 const CLOSE_POLICY: u16 = 1008;
 const CLOSE_NORMAL: u16 = 1000;
 
 /// Runs one gateway connection from `hello` to close.
 pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
+  // Counted until the task ends, so a shutdown waits for the close frame (bounded).
+  let _socket = state.drain.track();
   let config = state.settings.get().gateway.clone();
   let hello = GatewayServerMessage::Hello {
     heartbeat_interval_ms: config.heartbeat_interval_secs * 1000,
@@ -59,7 +67,7 @@ pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
 
   serve(&state, &caller, &mut attached, &mut socket).await;
 
-  state.hub.detach(&attached.session_id);
+  state.hub.detach(&attached.session_id, attached.connection_id);
   debug!(user_id = %user, "gateway disconnected");
   // Reconnects are common (network changes); only report offline if the user stays gone.
   let grace = Duration::from_secs(config.presence_offline_grace_secs);
@@ -85,6 +93,9 @@ async fn handshake(
     } => {
       let caller = authenticate(state, socket, &token, device_id, ip).await?;
       let attached = state.hub.open_session(caller.user.id, device_id, activity);
+      if !is_still_active(state, socket, caller.user.id, &attached).await {
+        return None;
+      }
       if let Some(oidc_session) = &caller.maybe_oidc_session {
         state.hub.set_oidc_session(&attached.session_id, oidc_session);
       }
@@ -107,6 +118,9 @@ async fn handshake(
         .resume_session(&session_id, caller.user.id, device_id, last_seq)
       {
         Ok(mut attached) => {
+          if !is_still_active(state, socket, caller.user.id, &attached).await {
+            return None;
+          }
           let replay = std::mem::take(&mut attached.replay);
           send(
             socket,
@@ -117,7 +131,8 @@ async fn handshake(
           .await
           .ok()?;
           for event in &replay {
-            send(socket, event).await.ok()?;
+            send_text(socket, event.to_frame()).await.ok()?;
+            attached.delivered(event.seq);
           }
           Some((caller, attached))
         },
@@ -140,7 +155,9 @@ async fn authenticate(
   device: DeviceId,
   ip: &str,
 ) -> Option<AuthenticatedUser> {
+  let gate = OutageGate::from_state(state);
   let result = async {
+    gate.admit().await?;
     let identity = accounts::validate_token(state, token).await?;
     let caller = accounts::authenticate(state, identity).await?;
     if !state.database.is_active_device_of(caller.user.id, device).await? {
@@ -149,20 +166,47 @@ async fn authenticate(
     Ok::<_, ApiError>(caller)
   }
   .await;
+  gate.note_outcome(&result);
   match result {
     Ok(caller) => Some(caller),
     Err(error) => {
-      // Guessing tokens over the gateway counts like guessing them over HTTP.
-      if matches!(error, ApiError::Auth(_)) {
+      // Guessing tokens over the gateway counts like guessing them over HTTP. Expired tokens don't:
+      // clients waking up from sleep reconnect with them, and an office behind one address would
+      // otherwise lock itself out.
+      if matches!(&error, ApiError::Auth(auth) if auth.is_guess()) {
         state
           .rate_limits
           .record_auth_failure(ip, std::time::Instant::now());
       }
-      let body = ErrorBody::new(error.error_code(), error.public_message());
-      let _ = send(socket, &GatewayServerMessage::Error { error: body }).await;
+      let _ = send(socket, &GatewayServerMessage::Error { error: error.body() }).await;
       None
     },
   }
+}
+
+/// Checks the account again once its session is registered: a deactivation that committed after
+/// [`authenticate`] already ended the user's sessions (`Hub::revoke_user`) before this one existed.
+/// Seen now, it ends this one as well; a later deactivation finds it in the hub. When the account
+/// can't be read, only this connection is refused (fail closed); the client tries again.
+async fn is_still_active(
+  state: &AppState,
+  socket: &mut WebSocket,
+  user: UserId,
+  attached: &Attached,
+) -> bool {
+  let error = match state.database.get_user(user).await {
+    Ok(Some(stored)) if !stored.is_deactivated => return true,
+    Ok(_) => {
+      state.hub.revoke_user(user);
+      ApiError::from(crate::auth::AuthError::AccountDeactivated)
+    },
+    Err(error) => {
+      state.hub.detach(&attached.session_id, attached.connection_id);
+      ApiError::from(error)
+    },
+  };
+  let _ = send(socket, &GatewayServerMessage::Error { error: error.body() }).await;
+  false
 }
 
 async fn serve(
@@ -197,12 +241,19 @@ async fn serve(
           break;
         }
       }
-      outgoing = attached.receiver.recv() => {
-        // `None`: the hub dropped this connection because it was too slow.
-        let Some(message) = outgoing else { break };
-        if send(socket, &message).await.is_err() {
+      outgoing = attached.next_outgoing() => {
+        // `None`: the hub dropped this connection (too slow, replaced by a resume, revoked).
+        let Some(outgoing) = outgoing else { break };
+        if send_text(socket, outgoing.to_frame()).await.is_err() {
           break;
         }
+        attached.delivered(outgoing.seq);
+      }
+      () = state.drain.started() => {
+        // The server shuts down: the client reconnects at once (to the next instance or after the
+        // restart) instead of waiting for a dead connection to time out.
+        close(socket, CLOSE_SERVICE_RESTART, "server restarting").await;
+        break;
       }
       () = sleep_until(deadline) => {
         close(socket, CLOSE_POLICY, "heartbeat timeout").await;
@@ -227,14 +278,18 @@ async fn handle_client_message(
 ) -> bool {
   match message {
     GatewayClientMessage::Heartbeat => {
-      state.hub.renew_attention(&attached.session_id);
+      let maybe_woken = state.hub.renew_attention(&attached.session_id);
+      refresh_if_woken(state, maybe_woken).await;
       send(socket, &GatewayServerMessage::HeartbeatAck).await.is_ok()
     },
     GatewayClientMessage::SetActivity { activity } => {
       let now = Instant::now();
+      // Becoming active again always goes through: activity after an away shows at once. Only
+      // repeated changes are throttled (at most one idle report per accepted active one).
       let is_too_soon = connection
         .maybe_last_activity_change
-        .is_some_and(|at| now.duration_since(at) < ACTIVITY_CHANGE_INTERVAL);
+        .is_some_and(|at| now.duration_since(at) < ACTIVITY_CHANGE_INTERVAL)
+        && !state.hub.is_waking(&attached.session_id, &activity);
       if !is_too_soon {
         connection.maybe_last_activity_change = Some(now);
         set_activity(state, caller, attached, activity).await;
@@ -246,16 +301,23 @@ async fn handle_client_message(
       // needed. Ignored where the instance turned attention off; the user's own choice is applied
       // in the routing, and clients that know it send nothing.
       if state.settings.get().notifications.is_desktop_attention_enabled {
-        state.hub.set_attention(&attached.session_id, is_attentive);
+        let maybe_woken = state.hub.set_attention(&attached.session_id, is_attentive);
+        refresh_if_woken(state, maybe_woken).await;
       }
       true
     },
-    GatewayClientMessage::Typing { conversation_id } => {
-      state.hub.touch_activity(&attached.session_id);
+    GatewayClientMessage::Typing {
+      conversation_id,
+      maybe_thread_id,
+    } => {
+      let maybe_woken = state.hub.touch_activity(&attached.session_id);
+      refresh_if_woken(state, maybe_woken).await;
       let now = Instant::now();
+      // Throttled per place: a reply in a thread right after the conversation still goes out.
+      let place = (conversation_id, maybe_thread_id);
       let last_typing = &mut connection.last_typing;
       if last_typing
-        .get(&conversation_id)
+        .get(&place)
         .is_some_and(|at| now.duration_since(*at) < TYPING_THROTTLE)
       {
         return true;
@@ -268,13 +330,12 @@ async fn handle_client_message(
       }
       // Only conversations the caller may type in are remembered: made-up IDs cost a lookup each
       // (bounded by the frame limit) but never grow the map.
-      if let Err(error) = publish_typing(state, caller, conversation_id).await {
-        let body = ErrorBody::new(error.error_code(), error.public_message());
-        return send(socket, &GatewayServerMessage::Error { error: body })
+      if let Err(error) = publish_typing(state, caller, conversation_id, maybe_thread_id).await {
+        return send(socket, &GatewayServerMessage::Error { error: error.body() })
           .await
           .is_ok();
       }
-      last_typing.insert(conversation_id, now);
+      last_typing.insert(place, now);
       true
     },
     // A second identify/resume or a frame this version doesn't know: ignore, stay compatible.
@@ -290,16 +351,30 @@ async fn set_activity(
   attached: &Attached,
   activity: DeviceActivity,
 ) {
-  state.hub.set_activity(&attached.session_id, activity);
+  // A repeated report only counts for the away timeout: no presence refresh, no queries.
+  if !state.hub.set_activity(&attached.session_id, activity) {
+    return;
+  }
   if let Err(error) = presence::refresh_presence(state, caller.user.id).await {
     warn!(%error, "presence refresh failed");
   }
 }
 
+/// A sign of life ended an away timeout: everybody learns the user is online again.
+async fn refresh_if_woken(state: &AppState, maybe_woken: Option<UserId>) {
+  let Some(user) = maybe_woken else { return };
+  if let Err(error) = presence::refresh_presence(state, user).await {
+    warn!(%error, "presence refresh failed");
+  }
+}
+
+/// The thread goes out as given, to the conversation's members only: it is no secret from them, and
+/// clients show it only in that conversation's thread of that ID (#882).
 async fn publish_typing(
   state: &AppState,
   caller: &AuthenticatedUser,
   conversation: ConversationId,
+  maybe_thread: Option<ThreadId>,
 ) -> Result<(), ApiError> {
   let access = load_conversation(state, caller, conversation).await?;
   require(state, caller, Permission::CreatePost, &access.target())?;
@@ -309,6 +384,7 @@ async fn publish_typing(
     &GatewayEvent::TypingStart {
       conversation_id: conversation,
       user_id: caller.user.id,
+      maybe_thread_id: maybe_thread,
     },
   );
   Ok(())
@@ -352,7 +428,8 @@ async fn next_client_message(socket: &mut WebSocket) -> Option<GatewayClientMess
 /// What one connection remembers between frames.
 #[derive(Default)]
 struct ConnectionState {
-  last_typing: HashMap<ConversationId, Instant>,
+  /// Per conversation, and per thread for replies.
+  last_typing: HashMap<(ConversationId, Option<ThreadId>), Instant>,
   maybe_last_activity_change: Option<Instant>,
 }
 
@@ -389,20 +466,33 @@ impl FrameBucket {
   }
 }
 
+/// Sends one frame; fails if the peer hasn't taken it within [`SEND_TIMEOUT`].
 async fn send(socket: &mut WebSocket, message: &GatewayServerMessage) -> Result<(), ()> {
   let Ok(text) = serde_json::to_string(message) else {
     return Err(());
   };
-  socket.send(Message::Text(text.into())).await.map_err(|_| ())
+  send_text(socket, text).await
+}
+
+/// Sends one serialized frame; fails if the peer hasn't taken it within [`SEND_TIMEOUT`].
+async fn send_text(socket: &mut WebSocket, text: String) -> Result<(), ()> {
+  match timeout(SEND_TIMEOUT, socket.send(Message::Text(text.into()))).await {
+    Ok(Ok(())) => Ok(()),
+    Ok(Err(_)) => Err(()),
+    Err(_) => {
+      debug!("gateway peer stopped reading, dropping the connection");
+      Err(())
+    },
+  }
 }
 
 async fn close(socket: &mut WebSocket, code: u16, reason: &'static str) {
-  let _ = socket
-    .send(Message::Close(Some(CloseFrame {
-      code,
-      reason: reason.into(),
-    })))
-    .await;
+  let frame = Message::Close(Some(CloseFrame {
+    code,
+    reason: reason.into(),
+  }));
+  // Best effort: a peer that stopped reading never takes the close frame either.
+  let _ = timeout(SEND_TIMEOUT, socket.send(frame)).await;
 }
 
 #[cfg(test)]

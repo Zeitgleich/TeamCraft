@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="presence_title">Status</string>
+  <string name="presence_online">Online</string>
+  <string name="presence_away">Abwesend</string>
+  <string name="presence_dnd">Nicht stören</string>
+  <string name="presence_offline">Offline erscheinen</string>
+  <string name="notifications_conversation">Benachrichtigungen</string>
+  <string name="notify_all">Alle Nachrichten</string>
+  <string name="notify_mentions">Nur Erwähnungen und Direktnachrichten</string>
+  <string name="notify_none">Keine</string>
+  <string name="notify_mute">Stummschalten</string>
+  <string name="read_receipts">Lesebestätigungen senden</string>
+  <string name="auto_follow_threads">Threads folgen, in denen ich erwähnt werde</string>
+  <string name="custom_status_title">Eigener Status</string>
+  <string name="custom_status_hint">Was machst du gerade?</string>
+  <string name="custom_status_set">Bis heute Abend setzen</string>
+  <string name="custom_status_clear">Entfernen</string>
+  <string name="custom_status_emoji">Emoji</string>
+  <string name="custom_status_text">Status</string>
+  <string name="custom_status_missing">Gib einen Statustext ein.</string>
+  <string name="profile_name_change">Namen ändern</string>
+  <string name="profile_name_label">Dein Name</string>
+  <string name="profile_name_save">Namen speichern</string>
+  <string name="profile_name_reset">Namen aus der Anmeldung verwenden</string>
+  <string name="profile_name_empty">Gib einen Namen ein oder verwende den Namen aus deiner Anmeldung.</string>
+  <string name="profile_name_invalid">Der Name darf keine Steuerzeichen enthalten.</string>
+  <string name="profile_name_rejected">Der Name wurde abgelehnt. Er ist vielleicht zu lang, oder deine Organisation erlaubt die Änderung nicht mehr.</string>
+  <string name="export_diagnostics">Diagnose exportieren</string>
+  <string name="export_diagnostics_summary">Teilt App- und Systemversion sowie die letzten Protokollzeilen mit dem Support. Es wird nichts gesendet, bis du eine App auswählst.</string>
+  <string name="export_diagnostics_share_title">TeamCraft-Diagnose</string>
+  <string name="export_diagnostics_failed">Die Diagnose konnte nicht exportiert werden.</string>
+</resources>

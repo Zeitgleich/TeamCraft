@@ -1,14 +1,39 @@
+<p align="center">
+  <img src="assets/brand/mark.svg" alt="" width="112"><br>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/wordmark-dark.svg">
+    <img src="assets/brand/wordmark.svg" alt="TeamCraft" width="300">
+  </picture>
+</p>
+
 # TeamCraft
 
 Self-hosted, end-to-end encrypted business team chat with calls, meetings and an AI phone hotline,
 written in Rust. License: AGPL-3.0-or-later.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme-channel-dark.webp">
+    <img src="docs/images/readme-channel-light.webp" alt="A channel with a thread open beside it" width="860">
+  </picture>
+</p>
+<p align="center">
+  <img src="docs/images/readme-call-dark.webp" alt="A video call with screen sharing" width="560">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/readme-phone-dark.webp">
+    <img src="docs/images/readme-phone-light.webp" alt="A channel on a phone" width="162">
+  </picture>
+</p>
 
 - Architecture, threat model and data model: [ARCHITECTURE.md](ARCHITECTURE.md)
 - Feature catalog and roadmap: [PLAN.md](PLAN.md)
 - User and administrator guide: [docs/guide/index.md](docs/guide/index.md)
 - Run your own server: [Zeitgleich/teamcraft-deploy](https://github.com/Zeitgleich/teamcraft-deploy)
   (Ansible playbook, rootless Podman) and [docs/operations.md](docs/operations.md)
-- Releases and changes: [CHANGELOG.md](CHANGELOG.md), [docs/release.md](docs/release.md)
+- Download the apps: the [package site](https://zeitgleich.github.io/TeamCraft/) or the
+  [releases](https://github.com/Zeitgleich/TeamCraft/releases) (Windows x64 and arm64; macOS 14 or newer
+  for Apple silicon or Intel; Linux x86_64 and aarch64; Android)
+- Releases and changes: [GitHub Releases](https://github.com/Zeitgleich/TeamCraft/releases), [docs/release.md](docs/release.md)
 - Rules for contributors and coding agents: [AGENTS.md](AGENTS.md)
 
 ## Development setup

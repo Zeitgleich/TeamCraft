@@ -1,0 +1,73 @@
+/* ---- The menu of a sidebar entry (#903): a channel, chat or space ---- */
+
+/* It grows from the pointer (or from under the entry, for the keyboard), like the link menu. */
+.popover.entry-menu {
+  min-width: 15rem;
+  max-width: min(20rem, calc(100vw - 16px));
+  max-height: calc(100dvh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* The sheet names what it is about; the popover sits on its entry, which already does. */
+.entry-menu-title {
+  margin-top: 6px;
+  text-transform: none;
+  letter-spacing: var(--tracking-xs);
+  font-size: var(--text-xs);
+}
+
+.entry-menu .menu-item .icon:last-child:not(:first-child) {
+  margin-inline-start: auto;
+  color: var(--text-muted);
+}
+
+.entry-menu .menu-item.is-destructive {
+  color: var(--danger);
+}
+
+/* "Leave" where it can't be done yet: readable, but plainly not an action, with the reason. */
+.entry-menu .menu-item[aria-disabled="true"] {
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.entry-menu .menu-hint,
+.entry-menu .menu-confirm {
+  margin: 0 14px 6px;
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  color: var(--text-muted);
+  max-width: 18rem;
+}
+
+.entry-menu .menu-hint {
+  margin-inline-start: 40px;
+}
+
+.entry-menu .menu-confirm {
+  margin-block: 6px 8px;
+  color: var(--text);
+}
+
+.sheet.entry-menu .menu-hint,
+.sheet.entry-menu .menu-confirm {
+  margin-inline: var(--space-4);
+  max-width: none;
+}
+
+/* A finger resting on an entry tints it before the menu comes. */
+:is(.sb-item, .sb-space-toggle, .space-btn).is-pressing {
+  background: var(--surface-2);
+}
+
+.space-name-entry {
+  display: contents;
+}
+
+/* The head's space name opens its menu on a long-press: it selects no text and opens no callout. */
+.sidebar-head .space-name {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}

@@ -5,6 +5,8 @@
 pub mod auth;
 pub mod brand;
 pub mod config;
+pub mod dependencies;
+pub mod drain;
 pub mod error;
 pub mod extract;
 pub mod gateway;
@@ -13,6 +15,7 @@ pub mod listener;
 pub mod logging;
 pub mod meetings;
 pub mod openapi;
+pub mod outage_gate;
 pub mod push;
 pub mod rendezvous;
 pub mod router;

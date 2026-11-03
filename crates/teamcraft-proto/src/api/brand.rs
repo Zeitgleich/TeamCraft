@@ -17,6 +17,8 @@ wire_enum! {
     IconDark => "icon_dark",
     Favicon => "favicon",
     FaviconDark => "favicon_dark",
+    /// The provider icon on the sign-in button.
+    SsoIcon => "sso_icon",
   }
 }
 
@@ -106,17 +108,24 @@ pub fn is_brand_hex_color(value: &str) -> bool {
   matches!(digits.len(), 3 | 6) && digits.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Links shown on the login screen and in the footer; each is optional.
+/// Links shown on the login screen, in the footer and under Settings > Help & about; each is
+/// optional.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct BrandLinks {
+  /// Where users ask for help (a help desk page or a `mailto:` contact).
   #[serde(rename = "support", default, skip_serializing_if = "Option::is_none")]
   pub maybe_support: Option<String>,
+  /// The user documentation of this instance (issue #410). Absent from older servers.
+  #[serde(rename = "documentation", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_documentation: Option<String>,
   #[serde(rename = "privacy", default, skip_serializing_if = "Option::is_none")]
   pub maybe_privacy: Option<String>,
   #[serde(rename = "terms", default, skip_serializing_if = "Option::is_none")]
   pub maybe_terms: Option<String>,
   #[serde(rename = "imprint", default, skip_serializing_if = "Option::is_none")]
   pub maybe_imprint: Option<String>,
+  #[serde(rename = "download", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_download: Option<String>,
 }
 
 #[cfg(test)]
@@ -146,6 +155,20 @@ mod tests {
       serde_json::to_string(&brand).unwrap(),
       r##"{"id":"brand-a","display_name":"Brand A","origin":"https://chat.example.com","assets":{"logo":"/api/v1/brand/assets/logo"},"colors":{"light":{"accent":"#0b7f78"},"dark":{}},"login_title":{"en":"Welcome"},"login_text":{},"links":{"support":"https://support.example.com"}}"##
     );
+  }
+
+  #[test]
+  fn the_documentation_link_is_optional_on_the_wire() {
+    let links = BrandLinks {
+      maybe_documentation: Some("https://docs.example.com".into()),
+      ..BrandLinks::default()
+    };
+    assert_eq!(
+      serde_json::to_string(&links).unwrap(),
+      r#"{"documentation":"https://docs.example.com"}"#
+    );
+    let older: BrandLinks = serde_json::from_str(r#"{"support":"https://support.example.com"}"#).unwrap();
+    assert_eq!(older.maybe_documentation, None);
   }
 
   #[test]

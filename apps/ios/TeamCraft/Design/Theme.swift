@@ -1,13 +1,13 @@
 import SwiftUI
 import UIKit
 
-/// The desktop UI's design tokens (crates/teamcraft-ui/style/main.css), the same values as the
+/// The desktop UI's design tokens (crates/teamcraft-ui/style/main/000-tokens.css), the same values as the
 /// Android theme, so the apps look alike. Each color has a light and a dark value.
 enum Theme {
-  static let accent = dynamic(light: 0x0B7F78, dark: 0x35C6BA)
-  static let onAccent = dynamic(light: 0xFFFFFF, dark: 0x04211E)
-  static let accentSoft = dynamic(light: 0xDFF3F1, dark: 0x123A38)
-  static let accentStrong = dynamic(light: 0x096C66, dark: 0x5FD8CE)
+  static let accent = dynamic(light: 0x005DFC, dark: 0x5C9DFF)
+  static let onAccent = dynamic(light: 0xFFFFFF, dark: 0x04122E)
+  static let accentSoft = dynamic(light: 0xE3EDFF, dark: 0x13284A)
+  static let accentStrong = dynamic(light: 0x004BD3, dark: 0x8AB8FF)
   static let background = dynamic(light: 0xF6F7F9, dark: 0x0F141D)
   static let surface = dynamic(light: 0xFFFFFF, dark: 0x151B27)
   static let text = dynamic(light: 0x1B2230, dark: 0xE4E9F2)
@@ -21,8 +21,12 @@ enum Theme {
   static let badge = dynamic(light: 0xC8441F, dark: 0xC8441F)
   static let mentionBackground = dynamic(light: 0xFFF2CC, dark: 0x4A3B10)
   static let mentionText = dynamic(light: 0x6A4B00, dark: 0xFFD978)
-  /// Own messages.
-  static let ownBubble = accentSoft
+  /// Own message bubbles: the accent, a deeper shade of it in dark mode so white text stays
+  /// readable (4.5:1 and more in both).
+  static let ownBubble = dynamic(light: 0x005DFC, dark: 0x1F57C2)
+  static let onOwnBubble = Color.white
+  /// Other people's bubbles: a neutral tone that stands off the conversation's background.
+  static let otherBubble = dynamic(light: 0xE8EBF0, dark: 0x232B3B)
 
   static let radius: CGFloat = 12
   static let spacing: CGFloat = 12
@@ -82,18 +86,45 @@ struct AvatarView: View {
   }
 }
 
-/// An unread or mention counter.
+/// An unread or mention counter: red for mentions, quiet for plain unread.
 struct CountBadge: View {
   let count: UInt32
-  var isMention = false
+  var tone: BadgeTone = .mention
 
   var body: some View {
     Text(count > 99 ? "99+" : "\(count)")
       .font(.caption2.weight(.bold))
-      .foregroundStyle(.white)
+      .foregroundStyle(tone == .mention ? Color.white : Theme.textMuted)
       .padding(.horizontal, 7)
       .padding(.vertical, 2)
-      .background(isMention ? Theme.badge : Theme.accent)
+      .background(tone == .mention ? Theme.badge : Color(.tertiarySystemFill))
       .clipShape(Capsule())
+  }
+}
+
+/// The unread number next to a conversation's name in the chat list (#897). Count, label and tone
+/// come from the shared rule (`rowBadge`): red for a conversation that notifies and for mentions,
+/// grey for a muted one. The minimum width keeps the name from shifting while the count changes.
+struct RowCountBadge: View {
+  let badge: RowBadge
+  let isMuted: Bool
+
+  var body: some View {
+    Text(badge.label)
+      .font(.caption2.weight(.bold))
+      .monospacedDigit()
+      .foregroundStyle(badge.tone == .red ? Color.white : Theme.textMuted)
+      .padding(.horizontal, 7)
+      .padding(.vertical, 2)
+      .frame(minWidth: 24)
+      .background(badge.tone == .red ? Theme.badge : Color(.tertiarySystemFill))
+      .clipShape(Capsule())
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(
+        // A red badge in a muted conversation counts only its mentions.
+        isMuted && badge.tone == .red
+          ? Text("chat_mentions \(Int(badge.count))")
+          : Text("chat_unread \(Int(badge.count))")
+      )
   }
 }

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE mls_group_infos SET group_info = $2, updated_at = now() WHERE conversation_id = $1 AND epoch = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ef23e190a92d8f59491001163f6494a7e58442ac26f41a83737392e708d088b0"
+}

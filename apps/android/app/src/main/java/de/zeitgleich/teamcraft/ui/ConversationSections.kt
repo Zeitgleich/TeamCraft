@@ -9,22 +9,71 @@ sealed interface SectionTitle {
   data class Space(val name: String) : SectionTitle
   data object Channels : SectionTitle
   data object DirectMessages : SectionTitle
+
+  /** The user's notes to themself, pinned above everything (the share picker, issue #829). */
+  data object Notes : SectionTitle
+
+  /** The most recently active conversations (the share picker). */
+  data object Recent : SectionTitle
+
+  /** The Activity tab's one list (shown without a header). */
+  data object Activity : SectionTitle
 }
 
 data class Section(val title: SectionTitle, val conversations: List<ConversationItem>)
 
 /**
- * Favorites first, then the channels of each space (spaces and channels by name), then direct
- * messages, the most recent first (`lastActivity`: newest message per conversation; by name
- * without one). Empty sections are left out.
+ * The bottom navigation of the main screen (the desktop's One Home, #237): Home (global entries
+ * and the DMs, outside spaces), Activity (what waits for the user) and the channels by space.
  */
-fun sections(conversations: List<ConversationItem>, lastActivity: Map<String, Long> = emptyMap()): List<Section> {
+enum class ChatTab { Home, Activity, Spaces }
+
+/**
+ * The Activity tab: every conversation with a mention, or unread and not muted (the Unread filter
+ * across DMs and channels), the most recent first.
+ */
+fun activityConversations(conversations: List<ConversationItem>, lastActivity: Map<String, Long> = emptyMap()): List<ConversationItem> =
+  conversations
+    .filter { HomeFilter.Unread.matches(it) }
+    .sortedWith(
+      compareByDescending<ConversationItem> { it.mentionCount }
+        .thenByDescending { lastActivity[it.id] ?: Long.MIN_VALUE }
+        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+    )
+
+/** The filter chips of Home (as in Element): one at a time, `All` is none selected. */
+enum class HomeFilter {
+  All,
+  Unread,
+  People,
+  Groups,
+  ;
+
+  fun matches(item: ConversationItem): Boolean = when (this) {
+    All -> true
+    Unread -> item.mentionCount > 0u || (item.unreadCount > 0u && !item.isMuted)
+    People -> item.kind == ConversationKind.DIRECT
+    Groups -> item.kind == ConversationKind.GROUP
+  }
+}
+
+/**
+ * The name lists show: the notes have none of their own (they are named after the other people,
+ * and there are none), so they are called [notesTitle] in the user's language.
+ */
+fun ConversationItem.listName(notesTitle: String): String = if (isNotesToSelf) notesTitle else name
+
+/** DMs and group DMs live outside spaces and have their own tab. */
+val ConversationItem.isDirect: Boolean
+  get() = kind == ConversationKind.DIRECT || kind == ConversationKind.GROUP
+
+/** Channels of the spaces: favorite channels first, then each space (spaces and channels by name). */
+fun channelSections(conversations: List<ConversationItem>): List<Section> {
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
-  val favorites = conversations.filter { it.isFavorite }.sortedWith(byName)
-  val rest = conversations.filterNot { it.isFavorite }
-  val direct = rest.filter { it.kind == ConversationKind.DIRECT || it.kind == ConversationKind.GROUP }
-  val channels = rest - direct.toSet()
+  val channels = conversations.filterNot { it.isDirect }
+  val favorites = channels.filter { it.isFavorite }.sortedWith(byName)
   val bySpace = channels
+    .filterNot { it.isFavorite }
     .groupBy { it.maybeSpaceName }
     .toSortedMap(nullsLast(String.CASE_INSENSITIVE_ORDER))
     .map { (maybeSpace, items) ->
@@ -33,7 +82,44 @@ fun sections(conversations: List<ConversationItem>, lastActivity: Map<String, Lo
   return buildList {
     if (favorites.isNotEmpty()) add(Section(SectionTitle.Favorites, favorites))
     addAll(bySpace)
-    val byRecency = compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName)
-    if (direct.isNotEmpty()) add(Section(SectionTitle.DirectMessages, direct.sortedWith(byRecency)))
   }
+}
+
+/**
+ * The Home tab: favorites, then the rest, each the most recent first (`lastActivity`: newest
+ * message per conversation; by name without one). Only conversations `chip` lets through whose
+ * names contain `filter` (any case) are kept. Empty sections are left out.
+ */
+fun directSections(
+  conversations: List<ConversationItem>,
+  lastActivity: Map<String, Long> = emptyMap(),
+  filter: String = "",
+  chip: HomeFilter = HomeFilter.All,
+): List<Section> {
+  val needle = filter.trim()
+  val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
+  val byRecency = compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName)
+  val direct = conversations
+    .filter { it.isDirect && chip.matches(it) && (needle.isEmpty() || it.name.contains(needle, ignoreCase = true)) }
+    .sortedWith(byRecency)
+  val (favorites, rest) = direct.partition { it.isFavorite }
+  return buildList {
+    if (favorites.isNotEmpty()) add(Section(SectionTitle.Favorites, favorites))
+    if (rest.isNotEmpty()) add(Section(SectionTitle.DirectMessages, rest))
+  }
+}
+
+/** What a tab shows next to its name: mentions, unread messages, or nothing. */
+data class TabBadge(val mentions: Int, val unread: Int)
+
+/**
+ * The badge of a tab: mentions everywhere; unread messages count in DMs (they are addressed to the
+ * user), in channels only as "something new". Muted conversations count only mentions.
+ */
+fun tabBadge(conversations: List<ConversationItem>): TabBadge {
+  val audible = conversations.filterNot { it.isMuted }
+  return TabBadge(
+    mentions = conversations.sumOf { it.mentionCount.toInt() },
+    unread = audible.sumOf { it.unreadCount.toInt() },
+  )
 }

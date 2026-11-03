@@ -70,7 +70,10 @@ final class CameraStreamer: NSObject, AVCaptureVideoDataOutputSampleBufferDelega
   /// Front or back camera.
   func flip() {
     sessionQueue.async { [self] in
-      position = position == .front ? .back : .front
+      let other: AVCaptureDevice.Position = position == .front ? .back : .front
+      // A device without the other lens keeps the one it has.
+      guard AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: other) != nil else { return }
+      position = other
       captureSession.beginConfiguration()
       for input in captureSession.inputs { captureSession.removeInput(input) }
       addInput()

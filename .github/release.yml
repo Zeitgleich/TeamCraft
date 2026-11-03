@@ -2,7 +2,7 @@
 # docs/release.md). A pull request lands in the first category whose label it has.
 changelog:
   exclude:
-    labels: [skip-changelog]
+    labels: [skip-release-notes]
     authors: ["dependabot[bot]", "dependabot"]
   categories:
     - title: Security

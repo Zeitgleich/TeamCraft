@@ -9,8 +9,9 @@ use teamcraft_proto::{
   EmailDigestSettings, IntegrationSettings, LimitSettings, LocalAccountSettings, MailDeliveryStatus,
   MailTextSettings, MeetingMailSettings, NotificationRuntimeSettings, RuntimeSettingsKey,
   RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState, SecretUpdate, ServedHostname,
-  ServerRulesSettings, SettingSource, SettingsTestResponse, ShareSettings, SmtpSecurityMode, SmtpSettings,
-  UnixMillis, UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest,
+  ServerRulesSettings, SettingSource, SettingsTestResponse, ShareSettings, SignInMethod, SignInPageSettings,
+  SmtpSecurityMode, SmtpSettings, UnixMillis, UpdateBrandRequest, UpdateCalendarSettingsRequest,
+  UpdateMailSettingsRequest,
 };
 
 use crate::admin::SettingsTestKind;
@@ -24,6 +25,7 @@ pub(super) struct SettingsMock {
   pub(super) calendar: AdminCalendarSettingsResponse,
   pub(super) runtime: RuntimeSettingsResponse,
   pub(super) last_test: Option<(SettingsTestKind, SettingsTestResponse)>,
+  pub(super) notetaker: teamcraft_proto::AdminNotetakerResponse,
 }
 
 impl SettingsMock {
@@ -86,6 +88,11 @@ impl SettingsMock {
       },
       runtime: default_runtime(),
       last_test: None,
+      notetaker: teamcraft_proto::AdminNotetakerResponse {
+        is_key_stored: false,
+        can_store_secrets: true,
+        maybe_key_updated_at: None,
+      },
     };
     mock.sync_hostnames();
     mock
@@ -209,6 +216,7 @@ impl SettingsMock {
       RuntimeSettingsSection::Limits(values) => self.runtime.limits = values,
       RuntimeSettingsSection::Integration(values) => self.runtime.integration = values,
       RuntimeSettingsSection::LocalAccounts(values) => self.runtime.local_accounts = values,
+      RuntimeSettingsSection::SignInPage(values) => self.runtime.sign_in_page = values,
       RuntimeSettingsSection::MailTexts(values) => self.runtime.mail_texts = values,
       RuntimeSettingsSection::MeetingMail(values) => self.runtime.meeting_mail = values,
       // A section a newer wire version added; the mock has nothing to store.
@@ -228,6 +236,7 @@ impl SettingsMock {
       RuntimeSettingsKey::Limits => self.runtime.limits = defaults.limits,
       RuntimeSettingsKey::Integration => self.runtime.integration = defaults.integration,
       RuntimeSettingsKey::LocalAccounts => self.runtime.local_accounts = defaults.local_accounts,
+      RuntimeSettingsKey::SignInPage => self.runtime.sign_in_page = defaults.sign_in_page,
       RuntimeSettingsKey::MailTexts => self.runtime.mail_texts = defaults.mail_texts,
       RuntimeSettingsKey::MeetingMail => self.runtime.meeting_mail = defaults.meeting_mail,
       _ => return,
@@ -296,6 +305,7 @@ fn demo_brand(id: &str, name: &str, source: BrandSource, is_default: bool, hosts
         ..BrandLinks::default()
       },
       mail: BrandMailSettings::default(),
+      maybe_sso_label: None,
     },
     assets: Vec::new(),
     maybe_updated_at: None,
@@ -314,9 +324,13 @@ fn default_runtime() -> RuntimeSettingsResponse {
       invites_require_verified_email: true,
       default_spaces: Vec::new(),
       default_channels: Vec::new(),
+      maybe_remove_deactivated_after_days: None,
+      admin_join_request_days: teamcraft_proto::DEFAULT_ADMIN_JOIN_REQUEST_DAYS,
+      one_to_one_call_ends_for_both: true,
     },
     notifications: NotificationRuntimeSettings {
       read_receipts_default: true,
+      default_level: teamcraft_proto::NotificationLevel::All,
       urgent_repeat_interval_secs: 120,
       urgent_max_pushes: 5,
       mobile_push_delay_secs: 30,
@@ -343,6 +357,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
       max_attachment_bytes: 100 * MIB,
       max_attachment_bytes_per_user: 2_048 * MIB,
       max_avatar_bytes: 2 * MIB,
+      max_space_image_bytes: MIB,
       max_background_bytes: 5 * MIB,
       max_backgrounds_per_user: 5,
       max_group_dm_participants: 9,
@@ -353,11 +368,18 @@ fn default_runtime() -> RuntimeSettingsResponse {
       default_retention_days: 30,
     },
     local_accounts: LocalAccountSettings {
+      is_enabled: true,
       require_totp: false,
       activation_ttl_hours: 72,
       session_ttl_hours: 12,
       max_failed_attempts: 5,
       lockout_secs: 900,
+    },
+    sign_in_page: SignInPageSettings {
+      methods: vec![SignInMethod::Sso, SignInMethod::Local],
+      help_text: BTreeMap::new(),
+      maybe_help_link: None,
+      is_login_page_always_shown: true,
     },
     mail_texts: MailTextSettings {
       invite_subject,

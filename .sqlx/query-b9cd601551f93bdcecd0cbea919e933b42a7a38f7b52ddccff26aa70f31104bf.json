@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE memberships SET sees_imported_history = true WHERE conversation_id = $1 AND user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b9cd601551f93bdcecd0cbea919e933b42a7a38f7b52ddccff26aa70f31104bf"
+}

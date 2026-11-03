@@ -5,21 +5,23 @@ use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, State};
 use teamcraft_client_api::calls::{BackgroundEffect as UiBackgroundEffect, MediaDevices, OrgBackgrounds};
-use teamcraft_client_api::remote::{CallAction, CallSnapshot};
+use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_client_api::remote::{ChatAnswer, ChatQuery};
+use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_media::effects::BackgroundImage;
+use teamcraft_media::video::ScreenProfile;
 use teamcraft_proto::MediaStreamId;
 
-use super::{CallHost, push_to_talk, video};
+use super::{CallHost, ChannelId, CoreJoinTickets, push_to_talk, video};
 use crate::core::commands::{CommandError, CoreHost};
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn call_snapshot(calls: State<'_, Arc<CallHost>>) -> CallSnapshot {
   calls.snapshot()
 }
 
 /// Lists microphones and speakers again; the snapshot keeps the result.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn call_media_devices(calls: State<'_, Arc<CallHost>>) -> Result<MediaDevices, CommandError> {
   Ok(calls.refresh_devices().await?)
 }
@@ -27,7 +29,7 @@ pub async fn call_media_devices(calls: State<'_, Arc<CallHost>>) -> Result<Media
 /// Streams another device's video track to the webview through `frames`, one binary message
 /// per frame (format: `calls::video::video_message`): H.264 for WebCodecs, or with `prefer_jpeg`
 /// JPEG images for webviews without it.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn call_watch_video(
   calls: State<'_, Arc<CallHost>>,
   stream_id: MediaStreamId,
@@ -35,28 +37,122 @@ pub async fn call_watch_video(
   prefer_jpeg: bool,
   frames: Channel,
 ) -> Result<(), CommandError> {
-  let send = move |message| {
-    if let Err(error) = frames.send(InvokeResponseBody::Raw(message)) {
+  let channel = ChannelId(frames.id());
+  let send = move |message| match frames.send(InvokeResponseBody::Raw(message)) {
+    Ok(()) => true,
+    Err(error) => {
       tracing::debug!(%error, "video frame not delivered to the webview");
-    }
+      false
+    },
   };
   let sink = if prefer_jpeg {
     calls.ensure_video_codec().await?;
-    video::jpeg_sink(send)
+    let host = Arc::clone(calls.inner());
+    // Called on the transcoder's thread: the request goes through the call's control queue.
+    let keyframe_needed = move || {
+      let host = Arc::clone(&host);
+      tauri::async_runtime::spawn(async move { host.request_keyframe(stream_id).await });
+    };
+    video::jpeg_sink(send, keyframe_needed)
   } else {
     video::h264_sink(send)
   };
-  calls.watch_video(stream_id, maybe_max_layer, sink).await;
+  calls.watch_video(stream_id, channel, maybe_max_layer, sink).await;
   Ok(())
 }
 
-#[tauri::command]
+/// Streams the own camera's capture (with background effects) to the webview's self
+/// view through `frames`: JPEG images in the format of `call_watch_video`, sized by
+/// `call_size_camera`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_watch_camera(calls: State<'_, Arc<CallHost>>, frames: Channel) {
+  let channel = ChannelId(frames.id());
+  calls.watch_camera(channel, move |message| {
+    match frames.send(InvokeResponseBody::Raw(message)) {
+      Ok(()) => true,
+      Err(error) => {
+        tracing::debug!(%error, "self view image not delivered to the webview");
+        false
+      },
+    }
+  });
+}
+
+/// Stops the self view; `channel` is the id of the `frames` channel it was started with.
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_unwatch_camera(calls: State<'_, Arc<CallHost>>, channel: u32) {
+  calls.unwatch_camera(ChannelId(channel));
+}
+
+/// The size the webview draws the self view in, in device pixels (the tile's size times the
+/// display's scale): the images of `call_watch_camera` are made just large enough to cover it.
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_size_camera(calls: State<'_, Arc<CallHost>>, width: u32, height: u32) {
+  calls.size_camera(width, height);
+}
+
+/// The size the webview shows a watched track in, in device pixels (the tile's size times the
+/// display's scale): while the viewer leaves the quality to the call, it receives the smallest
+/// layer that covers it (#967).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn call_size_video(
+  calls: State<'_, Arc<CallHost>>,
+  stream_id: MediaStreamId,
+  width: u32,
+  height: u32,
+) -> Result<(), CommandError> {
+  calls.size_video(stream_id, width, height).await;
+  Ok(())
+}
+
+/// Sends the pre-join check's microphone level (0.0 to 1.0) through `levels`, about ten times a
+/// second while the check measures (#442).
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_watch_level(calls: State<'_, Arc<CallHost>>, levels: Channel<f32>) {
+  let channel = ChannelId(levels.id());
+  calls.watch_level(channel, move |level| match levels.send(level) {
+    Ok(()) => true,
+    Err(error) => {
+      tracing::debug!(%error, "microphone level not delivered to the webview");
+      false
+    },
+  });
+}
+
+/// Stops the level; `channel` is the id of the `levels` channel it was started with.
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_unwatch_level(calls: State<'_, Arc<CallHost>>, channel: u32) {
+  calls.unwatch_level(ChannelId(channel));
+}
+
+#[tauri::command(rename_all = "snake_case")]
 pub async fn call_unwatch_video(
   calls: State<'_, Arc<CallHost>>,
   stream_id: MediaStreamId,
+  channel: u32,
 ) -> Result<(), CommandError> {
-  calls.unwatch_video(stream_id).await;
+  calls.unwatch_video(stream_id, ChannelId(channel)).await;
   Ok(())
+}
+
+/// The webview's decoder of a watched track failed: the call asks for a keyframe (at most once
+/// a second) and drops the track's deltas until it comes.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn call_request_keyframe(
+  calls: State<'_, Arc<CallHost>>,
+  stream_id: MediaStreamId,
+) -> Result<(), CommandError> {
+  calls.request_keyframe(stream_id).await;
+  Ok(())
+}
+
+/// What the active call's video does (stats for nerds, #938): the counters of every own and
+/// received track, the encoders and the round trip; `None` outside a call.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn call_video_stats(
+  calls: State<'_, Arc<CallHost>>,
+) -> Result<Option<VideoStatsReport>, CommandError> {
+  Ok(calls.video_stats().await)
 }
 
 /// Applies `requested` as far as the organization's rule allows (admin.md §3.5) and loads the
@@ -65,7 +161,7 @@ async fn apply_background(
   core: &CoreHost,
   calls: &CallHost,
   requested: UiBackgroundEffect,
-) -> Result<(), CommandError> {
+) -> Result<(), String> {
   let org = org_backgrounds(core).await;
   let effect = org.effective(requested);
   match load_background_picture(core, effect).await {
@@ -77,10 +173,22 @@ async fn apply_background(
     // anyway (strong blur, or the camera goes off) rather than send it.
     Err(error) if org.is_required() => {
       calls.fail_closed_background().await;
-      Err(error.into())
+      Err(error)
     },
-    Err(error) => Err(error.into()),
+    Err(error) => Err(error),
   }
+}
+
+/// Turns the camera on behind the current background choice under the current rule (it may have
+/// changed since the choice was made).
+async fn start_camera(core: &CoreHost, calls: &CallHost) -> Result<(), String> {
+  let current = calls
+    .snapshot()
+    .maybe_active
+    .map(|active| active.background)
+    .unwrap_or_default();
+  apply_background(core, calls, current).await?;
+  calls.set_camera(true).await
 }
 
 /// Opens the system's video effects panel (macOS 14+: Portrait, background replacement, Studio
@@ -134,7 +242,7 @@ async fn org_backgrounds(core: &CoreHost) -> OrgBackgrounds {
 }
 
 /// A small JPEG of a preset or one of the user's own backgrounds, for the picker.
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn call_background_preview(
   core: State<'_, CoreHost>,
   effect: UiBackgroundEffect,
@@ -155,39 +263,54 @@ pub async fn call_background_preview(
   Ok(tauri::ipc::Response::new(jpeg))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub async fn call_action(
   app: AppHandle,
   core: State<'_, CoreHost>,
   calls: State<'_, Arc<CallHost>>,
   action: CallAction,
-) -> Result<(), CommandError> {
+) -> Result<CallActionAnswer, CommandError> {
   match action {
-    CallAction::Join { request } => {
-      let preparation = core.current()?.prepare_call(request.conversation).await?;
-      calls.join(request, preparation).await?;
+    CallAction::Join {
+      request,
+      is_muted,
+      is_camera_on,
+      video_decoders,
+    } => {
+      let runtime = core.current()?;
+      let preparation = runtime.prepare_call(request.conversation).await?;
+      let tickets = Arc::new(CoreJoinTickets::new(runtime, request.conversation));
+      calls
+        .join(request, is_muted, &video_decoders, preparation, tickets)
+        .await?;
+      // The camera starts with the call (#453). One that can't start leaves the call running; the
+      // answer says why.
+      if is_camera_on {
+        return Ok(start_camera(&core, &calls).await.err());
+      }
     },
     CallAction::Leave => calls.leave().await,
     CallAction::Decline { conversation } => calls.decline(conversation),
     CallAction::SetMuted { is_muted } => calls.set_muted(is_muted).await,
     CallAction::SetDeafened { is_deafened } => calls.set_deafened(is_deafened).await,
+    CallAction::MoveHere => calls.move_here().await,
     CallAction::SelectMicrophone { maybe_device } => calls.select_microphone(maybe_device).await?,
     CallAction::SelectSpeakers { maybe_device } => calls.select_speakers(maybe_device).await?,
-    CallAction::SetCamera { is_on } => {
-      if is_on {
-        // The current choice under the current rule (it may have changed since it was made).
-        let current = calls
-          .snapshot()
-          .maybe_active
-          .map(|active| active.background)
-          .unwrap_or_default();
-        apply_background(&core, &calls, current).await?;
-      }
-      calls.set_camera(is_on).await?;
-    },
+    CallAction::SetCamera { is_on: true } => start_camera(&core, &calls).await?,
+    CallAction::SetCamera { is_on: false } => calls.set_camera(false).await?,
     CallAction::SelectCamera { maybe_device } => calls.select_camera(maybe_device).await?,
     CallAction::SetBackgroundEffect { effect } => apply_background(&core, &calls, effect).await?,
-    CallAction::StartScreenShare { has_sound } => calls.start_screen_share(has_sound).await?,
+    CallAction::StartScreenShare {
+      has_sound,
+      content_mode,
+      resolution,
+    } => {
+      let profile = ScreenProfile {
+        mode: content_mode,
+        size: resolution,
+      };
+      calls.start_screen_share(has_sound, profile).await?
+    },
     CallAction::StopScreenShare => calls.stop_screen_share().await,
     CallAction::OpenSystemVideoEffects => open_system_video_effects(&app)?,
     CallAction::SetPushToTalk {
@@ -202,7 +325,24 @@ pub async fn call_action(
       calls.set_push_to_talk(is_enabled, shortcut, is_global).await;
     },
     CallAction::SetTalking { is_talking } => calls.set_talking(is_talking).await,
+    CallAction::SetStatusSounds { sounds } => calls.set_status_sounds(sounds).await,
+    CallAction::SetCameraQuality { quality } => calls.set_camera_quality(quality).await?,
+    CallAction::SetVideoQuality { stream_id, quality } => calls.set_video_quality(stream_id, quality).await,
+    CallAction::RefreshDevices => drop(calls.refresh_devices().await?),
+    CallAction::SetPreview { preview } => {
+      // The current choice under the current rule, as for the call's camera: the check shows
+      // what the call would send. A failure still leaves the check running (a picture the
+      // organization requires that can't load: strong blur).
+      let applied = if preview.is_camera_on {
+        apply_background(&core, &calls, calls.background()).await
+      } else {
+        Ok(())
+      };
+      calls.set_preview(preview).await?;
+      applied?;
+    },
+    CallAction::TestSpeakers { maybe_device } => calls.test_speakers(maybe_device).await?,
     CallAction::Unknown => return Err(CommandError::from("unknown call action".to_owned())),
   }
-  Ok(())
+  Ok(None)
 }

@@ -1,7 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Decrypted downloads the user opens in another app (the core writes them to store/downloads),
-     and photos the camera app writes for the composer. -->
+     photos the camera app writes for the composer, and the diagnostics text
+     the user exports from settings. -->
 <paths>
   <files-path name="downloads" path="store/downloads/" />
   <cache-path name="camera" path="camera/" />
+  <cache-path name="diagnostics" path="diagnostics/" />
 </paths>

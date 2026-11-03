@@ -1,11 +1,11 @@
 use leptos::prelude::*;
+use teamcraft_client_api::call_window::{CallWindow, CallWindowTheme};
+use teamcraft_client_api::os_notify::NotificationAction;
 
 use crate::auth::tauri;
-use crate::calls::{CallKind, CallRequest};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::model::ConversationKind;
 use crate::state::use_app_state;
 
 /// Ringing card for an incoming call. It does not take focus from what the user is typing; screen
@@ -19,27 +19,13 @@ pub fn IncomingCallDialog() -> impl IntoView {
   move || {
     let incoming = call.incoming.get()?;
     let caller = state.read(|backend| backend.user(incoming.caller))?;
-    let conversation = state.read(|backend| backend.conversation(incoming.conversation));
-    let kind = match conversation.as_ref().map(|conv| conv.kind) {
-      Some(ConversationKind::Direct) | None => CallKind::Direct,
-      Some(_) => CallKind::Group,
-    };
-    let request = CallRequest {
-      conversation: incoming.conversation,
-      kind,
-    };
     let caller_name = caller.display_name.clone();
     let text = if incoming.with_video {
       i18n.t_with("incoming-video", &[("name", &caller_name)])
     } else {
       i18n.t_with("incoming-audio", &[("name", &caller_name)])
     };
-    let accept = move |with_video: bool| {
-      call.incoming.set(None);
-      call.is_camera_on.set(with_video);
-      state.open_conversation(request.conversation);
-      call.join(request);
-    };
+    let accept = move |with_video: bool| state.accept_call(incoming, with_video);
 
     Some(view! {
       <div class="incoming" role="alertdialog" aria-labelledby="incoming-title" aria-describedby="incoming-text">
@@ -67,5 +53,107 @@ pub fn IncomingCallDialog() -> impl IntoView {
         </div>
       </div>
     })
+  }
+}
+
+/// The page of the desktop shell's incoming-call window (#650): only the card above, with what the
+/// main window put into it, in a window of its own above all others. Its buttons go back to the
+/// shell, which hands them to the main window like the call notification's.
+pub fn mount_call_window() {
+  if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+    // The window stays hidden until the card is drawn; the loading screen has nothing to do here.
+    if let Some(loader) = document.get_element_by_id("tc-loader") {
+      loader.remove();
+    }
+    if let Some(root) = document.document_element() {
+      let _ = root.class_list().add_1("call-window");
+    }
+  }
+  leptos::mount::mount_to_body(IncomingCallWindow);
+}
+
+#[component]
+fn IncomingCallWindow() -> impl IntoView {
+  let shown = RwSignal::new(None::<CallWindow>);
+  leptos::task::spawn_local(async move {
+    let maybe_window =
+      match tauri::call::<Option<CallWindow>>("call_window_info", &serde_json::json!({})).await {
+        Ok(maybe_window) => maybe_window,
+        Err(error) => {
+          tracing::warn!(%error, "the incoming-call window could not read its call");
+          None
+        },
+      };
+    if let Some(window) = &maybe_window {
+      apply_window_theme(window.theme);
+    }
+    if shown.try_set(maybe_window).is_some() {
+      return;
+    }
+    // Shown once the card is laid out, so the window never appears empty.
+    request_animation_frame(|| {
+      leptos::task::spawn_local(async {
+        if let Err(error) = tauri::call::<()>("call_window_ready", &serde_json::json!({})).await {
+          tracing::warn!(%error, "the incoming-call window could not appear");
+        }
+      });
+    });
+  });
+
+  move || {
+    let window = shown.get()?;
+    let act = move |action: NotificationAction| {
+      leptos::task::spawn_local(async move {
+        let args = serde_json::json!({ "action": action });
+        if let Err(error) = tauri::call::<()>("call_window_action", &args).await {
+          tracing::warn!(%error, "the incoming-call window could not answer");
+        }
+      });
+    };
+    let decline_label = window.decline_label.clone();
+    let accept_label = window.accept_label.clone();
+    Some(view! {
+      <div class="incoming is-window" data-tauri-drag-region role="alertdialog" aria-labelledby="incoming-title" aria-describedby="incoming-text">
+        <div class="incoming-ring" aria-hidden="true">
+          <span class="avatar avatar-lg" style:--hue=window.avatar_hue.to_string()>
+            <span class="avatar-initials">{window.initials}</span>
+          </span>
+        </div>
+        <div class="incoming-body" data-tauri-drag-region>
+          <h2 id="incoming-title" data-tauri-drag-region>{window.title}</h2>
+          <p id="incoming-text" data-tauri-drag-region aria-live="assertive" translate="no">
+            {window.text}
+          </p>
+        </div>
+        <div class="incoming-actions">
+          <button class="round-btn decline" aria-label=decline_label.clone() title=decline_label on:click=move |_| act(NotificationAction::Decline)>
+            <Icon name=IconName::Phone class="hangup" />
+          </button>
+          <button class="round-btn accept" aria-label=accept_label.clone() title=accept_label on:click=move |_| act(NotificationAction::AcceptAudio)>
+            <Icon name=IconName::Phone />
+          </button>
+        </div>
+      </div>
+    })
+  }
+}
+
+/// The main window's theme: "system" leaves `data-theme` unset, so the CSS media queries apply.
+fn apply_window_theme(theme: CallWindowTheme) {
+  let Some(root) = web_sys::window()
+    .and_then(|window| window.document())
+    .and_then(|document| document.document_element())
+  else {
+    return;
+  };
+  let maybe_slug = match theme {
+    CallWindowTheme::System => None,
+    CallWindowTheme::Light => Some("light"),
+    CallWindowTheme::Dark => Some("dark"),
+  };
+  if let Some(slug) = maybe_slug
+    && root.set_attribute("data-theme", slug).is_err()
+  {
+    tracing::debug!("could not apply the theme to the incoming-call window");
   }
 }

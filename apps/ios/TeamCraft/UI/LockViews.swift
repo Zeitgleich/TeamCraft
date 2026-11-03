@@ -106,18 +106,70 @@ struct DeviceSecuritySection: View {
   }
 }
 
-/// A thin bar while the device is offline: new messages wait, sent ones stay in the outbox.
+/// A thin bar while the app can't reach the server: the device is offline, the server is unreachable
+/// although the device is online, or the session expired. The screens show the local store
+/// meanwhile; new messages wait, sent ones stay in the outbox. A connection that comes back within
+/// the grace period never shows the bar (`ConnectionNotice`, issue #713).
 struct OfflineBanner: View {
+  @Environment(AppModel.self) private var model
   private let network = NetworkMonitor.shared
 
   var body: some View {
-    if !network.isOnline {
-      Text("offline_banner")
-        .font(.footnote)
-        .foregroundStyle(Theme.danger)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal).padding(.vertical, 6)
-        .background(Theme.danger.opacity(0.12))
+    // A clock only while the connection is down: a connected app doesn't wake up every second.
+    if ConnectionNotice.isDown(isOnline: network.isOnline, connection: model.connection) {
+      TimelineView(.periodic(from: .now, by: 1)) { timeline in
+        bar(at: timeline.date)
+      }
+    } else {
+      bar(at: .now)
+    }
+  }
+
+  @ViewBuilder
+  private func bar(at now: Date) -> some View {
+    if let notice = ConnectionNotice.current(
+      isOnline: network.isOnline, connection: model.connection, grace: model.connectionGrace, now: now)
+    {
+      // Slow is no failure: the neutral colour, not the danger one.
+      let tint = notice == .slow ? Color.secondary : Theme.danger
+      HStack {
+        text(of: notice)
+          .font(.footnote)
+          .foregroundStyle(tint)
+          .frame(maxWidth: .infinity, alignment: .leading)
+        switch notice {
+        case .unreachable:
+          Button("connection_retry") { model.networkChanged() }
+            .font(.footnote.weight(.semibold))
+        case .signInRequired:
+          Button("connection_sign_in_action") { Task { await model.signOut() } }
+            .font(.footnote.weight(.semibold))
+        case .deviceOffline, .connecting, .slow:
+          EmptyView()
+        }
+      }
+      .padding(.horizontal).padding(.vertical, 6)
+      .background(tint.opacity(0.12))
+      .accessibilityElement(children: .combine)
+    }
+  }
+
+  private func text(of notice: ConnectionNotice) -> Text {
+    switch notice {
+    case .deviceOffline:
+      return Text("offline_banner")
+    case .connecting:
+      return Text("connection_connecting")
+    case .slow:
+      return Text("connection_slow")
+    case .unreachable(let seconds, let maybeInterception):
+      switch maybeInterception {
+      case .captivePortal: return Text("connection_captive_portal \(seconds)")
+      case .untrustedCertificate: return Text("connection_untrusted_certificate \(seconds)")
+      case nil: return Text("connection_unreachable \(seconds)")
+      }
+    case .signInRequired:
+      return Text("connection_sign_in")
     }
   }
 }

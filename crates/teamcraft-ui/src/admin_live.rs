@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use futures_util::future::{join, join3, join5};
+use futures_util::stream::{self, StreamExt};
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
@@ -23,13 +25,13 @@ use teamcraft_proto::{
   RetentionSetting, RetentionStatusResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
   RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest,
   SetChannelModerationRequest, SetRetentionRequest, SettingsTestResponse, SpaceId, UpdateBrandRequest,
-  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, UpdatePermissionSchemeRequest, UserKind,
-  WorkspacePolicy, WorkspacePolicyResponse,
+  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, UpdatePermissionSchemeRequest,
+  UpdateSpaceRequest, UserKind, WorkspacePolicy, WorkspacePolicyResponse,
 };
 
 use crate::admin::{
-  AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, Retention,
-  SettingsTestKind,
+  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditAction, AuditEntry, AuditFilter,
+  DeviceInfo, DeviceVerification, Retention, SettingsTestKind,
 };
 use crate::auth::{ApiMethod, Authenticator, BinaryBody};
 use crate::model::{
@@ -41,6 +43,8 @@ const REFRESH_DELAY: Duration = Duration::from_millis(500);
 const LIST_LIMIT: u32 = 200;
 /// Channels beyond this many get no per-channel details (owner, retention) until the list shrinks.
 const DETAIL_LIMIT: usize = 100;
+/// Requests in flight at once when the details of many channels or users are read.
+const DETAIL_CONCURRENCY: usize = 8;
 /// Signing and publishing happens in the core; the server shows the result after this long.
 const PUBLISH_SETTLE: Duration = Duration::from_millis(1500);
 
@@ -52,12 +56,15 @@ pub struct AdminLive {
   data: Rc<RefCell<AdminData>>,
   notify: Rc<RefCell<Option<ChangeNotifier>>>,
   refresh_queued: Rc<Cell<bool>>,
+  /// A refresh is running; another request meanwhile makes it run once more, never in parallel.
+  is_refreshing: Rc<Cell<bool>>,
+  is_refresh_wanted_again: Rc<Cell<bool>>,
 }
 
 /// What the last refresh returned.
 #[derive(Default)]
 pub struct AdminData {
-  is_loaded: bool,
+  load: AdminLoad,
   channels: Vec<AdminChannel>,
   users: Vec<AdminUser>,
   audit: Vec<AuditEntry>,
@@ -68,6 +75,9 @@ pub struct AdminData {
   instance: Option<AdminInstanceResponse>,
   brands: Option<AdminBrandsResponse>,
   mail: Option<AdminMailSettingsResponse>,
+  /// Loaded when the console shows the notetaker page.
+  notetaker: Option<teamcraft_proto::AdminNotetakerResponse>,
+  has_asked_notetaker: bool,
   calendar: Option<AdminCalendarSettingsResponse>,
   runtime: Option<RuntimeSettingsResponse>,
   last_test: Option<(SettingsTestKind, SettingsTestResponse)>,
@@ -90,6 +100,8 @@ impl AdminLive {
       data: Rc::new(RefCell::new(AdminData::default())),
       notify: Rc::new(RefCell::new(None)),
       refresh_queued: Rc::new(Cell::new(false)),
+      is_refreshing: Rc::new(Cell::new(false)),
+      is_refresh_wanted_again: Rc::new(Cell::new(false)),
     }
   }
 
@@ -119,6 +131,24 @@ impl AdminLive {
 
   pub fn spaces(&self) -> Vec<AdminSpace> {
     self.data.borrow().spaces.clone()
+  }
+
+  pub fn list_load(&self) -> AdminLoad {
+    self.data.borrow().load.clone()
+  }
+
+  /// Renames, archives or restores a space, or changes its join policy. The server checks that
+  /// the caller may; the answer shows up with the refresh.
+  pub fn change_space(&self, space: SpaceId, changes: AdminSpaceChanges) {
+    let request = UpdateSpaceRequest {
+      maybe_name: changes.maybe_name,
+      maybe_join_policy: changes.maybe_join_policy,
+      maybe_is_archived: changes.maybe_is_archived,
+      ..UpdateSpaceRequest::default()
+    };
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send(ApiMethod::Patch, format!("/api/v1/spaces/{space}"), Some(body));
+    }
   }
 
   pub fn announcement(&self) -> Option<AnnouncementResponse> {
@@ -151,14 +181,12 @@ impl AdminLive {
   }
 
   pub fn delete_brand(&self, id: &str) {
-    let forgotten = id.to_owned();
     self.send_stored(
       ApiMethod::Delete,
       format!("/api/v1/admin/brands/{id}"),
       None,
-      move |data, brands: AdminBrandsResponse| {
-        data.brands = Some(brands);
-        forget_previews(data, &forgotten);
+      Stored::Brands {
+        maybe_forgotten: Some(id.to_owned()),
       },
     );
   }
@@ -168,7 +196,9 @@ impl AdminLive {
       ApiMethod::Post,
       format!("/api/v1/admin/brands/{id}/take-over"),
       Some("{}".to_owned()),
-      |data, brands: AdminBrandsResponse| data.brands = Some(brands),
+      Stored::Brands {
+        maybe_forgotten: None,
+      },
     );
   }
 
@@ -182,71 +212,63 @@ impl AdminLive {
     if !self.data.borrow_mut().loading.insert(format!("preview:{key}")) {
       return None;
     }
-    let live = self.clone();
     let path = format!("/api/v1/admin/brands/{id}/assets/{}", slot.as_str());
-    spawn_local(async move {
-      let maybe_url = match live.auth.api_request_bytes(ApiMethod::Get, &path, None).await {
-        Ok(response) if response.status == 200 => {
-          preview_data_url(response.maybe_content_type.as_deref(), &response.body)
-        },
-        _ => None,
-      };
-      {
-        let mut data = live.data.borrow_mut();
-        // The loading entry stays, which is what keeps a failed image from being requested again.
-        if let Some(url) = maybe_url {
-          data.loading.remove(&format!("preview:{key}"));
-          data.brand_previews.insert(key, url);
-        }
-      }
-      live.changed();
-    });
+    self.run(AdminTask::BrandPreview { key, path });
     None
   }
 
   pub fn upload_brand_asset(&self, id: &str, slot: &BrandAssetSlot, bytes: Vec<u8>, content_type: String) {
-    let live = self.clone();
-    let (id, slot) = (id.to_owned(), slot.clone());
-    spawn_local(async move {
-      let path = format!("/api/v1/admin/brands/{id}/assets/{}", slot.as_str());
-      let body = BinaryBody { content_type, bytes };
-      let message = match live
-        .auth
-        .api_request_bytes(ApiMethod::Put, &path, Some(body))
-        .await
-      {
-        Ok(response) if response.status < 300 => {
-          let text = String::from_utf8_lossy(&response.body);
-          if let Ok(brands) = serde_json::from_str::<AdminBrandsResponse>(&text) {
-            live.data.borrow_mut().brands = Some(brands);
-          }
-          None
-        },
-        Ok(response) => Some(format!(
-          "{path}: {}",
-          refusal_of(&String::from_utf8_lossy(&response.body), response.status)
-        )),
-        Err(error) => Some(error.to_string()),
-      };
-      {
-        let mut data = live.data.borrow_mut();
-        data.maybe_error = message;
-        forget_previews(&mut data, &id);
-      }
-      live.changed();
-      live.queue_refresh();
+    self.run(AdminTask::UploadBrandAsset {
+      id: id.to_owned(),
+      slot: slot.clone(),
+      bytes,
+      content_type,
     });
   }
 
+  async fn upload_brand_asset_now(
+    &self,
+    id: String,
+    slot: BrandAssetSlot,
+    bytes: Vec<u8>,
+    content_type: String,
+  ) {
+    let path = format!("/api/v1/admin/brands/{id}/assets/{}", slot.as_str());
+    let body = BinaryBody { content_type, bytes };
+    let message = match self
+      .auth
+      .api_request_bytes(ApiMethod::Put, &path, Some(body))
+      .await
+    {
+      Ok(response) if response.status < 300 => {
+        let text = String::from_utf8_lossy(&response.body);
+        if let Ok(brands) = serde_json::from_str::<AdminBrandsResponse>(&text) {
+          self.data.borrow_mut().brands = Some(brands);
+        }
+        None
+      },
+      Ok(response) => Some(format!(
+        "{path}: {}",
+        refusal_of(&String::from_utf8_lossy(&response.body), response.status)
+      )),
+      Err(error) => Some(error.to_string()),
+    };
+    {
+      let mut data = self.data.borrow_mut();
+      data.maybe_error = message;
+      forget_previews(&mut data, &id);
+    }
+    self.changed();
+    self.queue_refresh();
+  }
+
   pub fn delete_brand_asset(&self, id: &str, slot: &BrandAssetSlot) {
-    let forgotten = id.to_owned();
     self.send_stored(
       ApiMethod::Delete,
       format!("/api/v1/admin/brands/{id}/assets/{}", slot.as_str()),
       None,
-      move |data, brands: AdminBrandsResponse| {
-        data.brands = Some(brands);
-        forget_previews(data, &forgotten);
+      Stored::Brands {
+        maybe_forgotten: Some(id.to_owned()),
       },
     );
   }
@@ -255,13 +277,40 @@ impl AdminLive {
     self.data.borrow().mail.clone()
   }
 
+  /// Whether the notetaker's key is stored; loaded once the console shows its page.
+  pub fn notetaker_settings(&self) -> Option<teamcraft_proto::AdminNotetakerResponse> {
+    let maybe_settings = self.data.borrow().notetaker.clone();
+    // Once per console session: a refusal (no `manage_workspace`) must not ask again on every render.
+    let is_first_ask = !std::mem::replace(&mut self.data.borrow_mut().has_asked_notetaker, true);
+    if maybe_settings.is_none() && is_first_ask {
+      self.load(
+        "notetaker".to_owned(),
+        "/api/v1/admin/notetaker".to_owned(),
+        Loaded::Notetaker,
+      );
+    }
+    maybe_settings
+  }
+
+  pub fn set_notetaker_key(&self, key: teamcraft_proto::SecretUpdate) {
+    let request = teamcraft_proto::PutNotetakerKeyRequest { key };
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send_stored(
+        ApiMethod::Put,
+        "/api/v1/admin/notetaker/key".to_owned(),
+        Some(body),
+        Stored::Notetaker,
+      );
+    }
+  }
+
   pub fn save_mail_settings(&self, request: UpdateMailSettingsRequest) {
     if let Ok(body) = serde_json::to_string(&request) {
       self.send_stored(
         ApiMethod::Put,
         "/api/v1/admin/settings/mail".to_owned(),
         Some(body),
-        |data, mail: AdminMailSettingsResponse| data.mail = Some(mail),
+        Stored::Mail,
       );
     }
   }
@@ -271,7 +320,7 @@ impl AdminLive {
       ApiMethod::Delete,
       "/api/v1/admin/settings/mail".to_owned(),
       None,
-      |data, mail: AdminMailSettingsResponse| data.mail = Some(mail),
+      Stored::Mail,
     );
   }
 
@@ -291,7 +340,7 @@ impl AdminLive {
         ApiMethod::Put,
         "/api/v1/admin/settings/calendar".to_owned(),
         Some(body),
-        |data, calendar: AdminCalendarSettingsResponse| data.calendar = Some(calendar),
+        Stored::Calendar,
       );
     }
   }
@@ -301,7 +350,7 @@ impl AdminLive {
       ApiMethod::Delete,
       "/api/v1/admin/settings/calendar".to_owned(),
       None,
-      |data, calendar: AdminCalendarSettingsResponse| data.calendar = Some(calendar),
+      Stored::Calendar,
     );
   }
 
@@ -327,7 +376,7 @@ impl AdminLive {
         ApiMethod::Put,
         "/api/v1/admin/settings".to_owned(),
         Some(body),
-        |data, runtime: RuntimeSettingsResponse| data.runtime = Some(runtime),
+        Stored::Runtime,
       );
     }
   }
@@ -337,7 +386,7 @@ impl AdminLive {
       ApiMethod::Delete,
       format!("/api/v1/admin/settings/{}", key.as_str()),
       None,
-      |data, runtime: RuntimeSettingsResponse| data.runtime = Some(runtime),
+      Stored::Runtime,
     );
   }
 
@@ -356,9 +405,11 @@ impl AdminLive {
       Some(space) => format!("/api/v1/admin/spaces/{space}/permission-scheme"),
       None => "/api/v1/admin/permission-scheme".to_owned(),
     };
-    self.load(format!("scheme:{maybe_space:?}"), path, move |data, scheme| {
-      data.schemes.insert(maybe_space, scheme);
-    });
+    self.load(
+      format!("scheme:{maybe_space:?}"),
+      path,
+      Loaded::Scheme(maybe_space),
+    );
     PermissionSchemeResponse { roles: Vec::new() }
   }
 
@@ -380,9 +431,7 @@ impl AdminLive {
     self.load(
       format!("moderation:{channel}"),
       format!("/api/v1/admin/conversations/{channel}/moderation"),
-      move |data, moderation| {
-        data.moderation.insert(channel, moderation);
-      },
+      Loaded::Moderation(channel),
     );
     ChannelModeration::default()
   }
@@ -410,12 +459,7 @@ impl AdminLive {
     self.load(
       format!("members:{channel}"),
       format!("/api/v1/admin/conversations/{channel}/members"),
-      move |data, list: ListConversationMembersResponse| {
-        data.members.insert(
-          channel,
-          list.members.into_iter().map(|member| member.user.id).collect(),
-        );
-      },
+      Loaded::Members(channel),
     );
     Vec::new()
   }
@@ -448,63 +492,87 @@ impl AdminLive {
     self.data.borrow().maybe_error.clone()
   }
 
-  /// Owners and admins by role: the first signed roster, if the workspace has none.
+  /// Owners and admins as the server lists them (active accounts only, each once): proposed for the
+  /// first roster, and as additions to a signed one (issue #765).
   pub fn roster_candidates(&self) -> (Vec<UserId>, Vec<UserId>) {
-    let data = self.data.borrow();
-    let by_role = |wanted: Role| {
-      data
-        .users
-        .iter()
-        .filter(|user| user.role == wanted)
-        .map(|user| user.user.id)
-        .collect()
-    };
-    (by_role(Role::Owner), by_role(Role::Admin))
+    teamcraft_client_api::admin::role_holders(&self.data.borrow().users)
   }
 
-  /// Fetches everything now; a part that fails keeps its previous value and shows its error.
+  /// Fetches everything now; a part that fails keeps its previous value and shows its error. Only
+  /// one refresh runs at a time (the console polls); a request meanwhile reruns it once.
   pub async fn refresh(&self) {
-    let mut errors: Vec<String> = Vec::new();
-    let spaces = self
-      .fetch::<ListAdminSpacesResponse>("/api/v1/admin/spaces", &mut errors)
-      .await;
-    let conversations = self
-      .fetch::<ListAdminConversationsResponse>(
-        &format!("/api/v1/admin/conversations?limit={LIST_LIMIT}"),
-        &mut errors,
-      )
-      .await;
-    let users = self
-      .fetch::<ListAdminUsersResponse>(
-        &format!("/api/v1/admin/users?status=all&limit={LIST_LIMIT}"),
-        &mut errors,
-      )
-      .await;
-    let audit_path = audit_path(self.data.borrow().audit_filter);
-    let audit = self.fetch::<ListAuditResponse>(&audit_path, &mut errors).await;
-    let policy = self
-      .fetch::<WorkspacePolicyResponse>("/api/v1/workspace/policy", &mut errors)
-      .await;
-    let announcement = self
-      .fetch::<GetAnnouncementResponse>("/api/v1/announcement", &mut errors)
-      .await;
-    let instance = self
-      .fetch::<AdminInstanceResponse>("/api/v1/admin/instance", &mut errors)
-      .await;
-    let brands = self
-      .fetch::<AdminBrandsResponse>("/api/v1/admin/brands", &mut errors)
-      .await;
-    let mail = self
-      .fetch::<AdminMailSettingsResponse>("/api/v1/admin/settings/mail", &mut errors)
-      .await;
-    let calendar = self
-      .fetch::<AdminCalendarSettingsResponse>("/api/v1/admin/settings/calendar", &mut errors)
-      .await;
-    let runtime = self
-      .fetch::<RuntimeSettingsResponse>("/api/v1/admin/settings", &mut errors)
-      .await;
+    if self.is_refreshing.replace(true) {
+      self.is_refresh_wanted_again.set(true);
+      return;
+    }
+    loop {
+      self.is_refresh_wanted_again.set(false);
+      // The reading and its wire types are in the console's chunk (`areas::admin_refresh`): an
+      // admin's first visit doesn't load them.
+      match crate::areas::admin_refresh(self.clone()).await {
+        Ok(refresh) => refresh.await,
+        Err(error) => self.chunk_failed(&error.to_string()),
+      }
+      // async-ok: a Cell, not a signal.
+      if !self.is_refresh_wanted_again.get() {
+        break;
+      }
+    }
+    // async-ok: a Cell, not a signal.
+    self.is_refreshing.set(false);
+  }
 
-    self.reload_cached(&mut errors).await;
+  /// The console's chunk didn't load (offline, a deploy in between): the lists say so, as a failed
+  /// read would.
+  fn chunk_failed(&self, error: &str) {
+    tracing::warn!(%error, "the administration console's data did not load");
+    {
+      let mut data = self.data.borrow_mut();
+      if data.load != AdminLoad::Loaded {
+        data.load = AdminLoad::Failed(error.to_owned());
+      }
+      data.maybe_error = Some(error.to_owned());
+    }
+    self.changed();
+  }
+
+  /// The lists first and all at once, so the console shows spaces and channels after one round
+  /// trip; the per-channel and per-user details follow with bounded concurrency (not one request
+  /// after the other: work proportional to the instance size on open).
+  pub(crate) async fn refresh_once(&self) {
+    let mut errors: Vec<String> = Vec::new();
+    let ((spaces, conversations, users, policy, announcement), (instance, brands, mail, calendar, runtime)) =
+      join(
+        join5(
+          self.fetch_result::<ListAdminSpacesResponse>("/api/v1/admin/spaces".to_owned()),
+          self.fetch_result::<ListAdminConversationsResponse>(format!(
+            "/api/v1/admin/conversations?limit={LIST_LIMIT}"
+          )),
+          self.fetch_result::<ListAdminUsersResponse>(format!(
+            "/api/v1/admin/users?status=all&limit={LIST_LIMIT}"
+          )),
+          self.fetch_result::<WorkspacePolicyResponse>("/api/v1/workspace/policy".to_owned()),
+          self.fetch_result::<GetAnnouncementResponse>("/api/v1/announcement".to_owned()),
+        ),
+        join5(
+          self.fetch_result::<AdminInstanceResponse>("/api/v1/admin/instance".to_owned()),
+          self.fetch_result::<AdminBrandsResponse>("/api/v1/admin/brands".to_owned()),
+          self.fetch_result::<AdminMailSettingsResponse>("/api/v1/admin/settings/mail".to_owned()),
+          self.fetch_result::<AdminCalendarSettingsResponse>("/api/v1/admin/settings/calendar".to_owned()),
+          self.fetch_result::<RuntimeSettingsResponse>("/api/v1/admin/settings".to_owned()),
+        ),
+      )
+      .await;
+    let spaces = settle(spaces, &mut errors);
+    let conversations = settle(conversations, &mut errors);
+    let users = settle(users, &mut errors);
+    let policy = settle(policy, &mut errors);
+    let announcement = settle(announcement, &mut errors);
+    let instance = settle(instance, &mut errors);
+    let brands = settle(brands, &mut errors);
+    let mail = settle(mail, &mut errors);
+    let calendar = settle(calendar, &mut errors);
+    let runtime = settle(runtime, &mut errors);
 
     let space_names: HashMap<SpaceId, String> = spaces
       .as_ref()
@@ -520,38 +588,92 @@ impl AdminLive {
       policy.policy.history_default.clone()
     });
 
-    let mut channels = Vec::new();
-    if let Some(list) = &conversations {
-      for (index, summary) in list.conversations.iter().enumerate() {
-        let details = if index < DETAIL_LIMIT {
+    // Show the lists now, with what the summaries carry; owners and retention fill in below.
+    {
+      let mut data = self.data.borrow_mut();
+      let is_first_load = data.load != AdminLoad::Loaded;
+      if is_first_load {
+        if let Some(list) = &conversations {
+          data.channels = list
+            .conversations
+            .iter()
+            .map(|summary| {
+              channel_from_wire(
+                summary,
+                &space_names,
+                ChannelDetails::default(),
+                policy_default_history.clone(),
+              )
+            })
+            .collect();
+        }
+        if let Some(spaces) = &spaces {
+          data.spaces = spaces.spaces.iter().map(space_from_wire).collect();
+        }
+        data.load = match (&spaces, &conversations) {
+          (Some(_), Some(_)) => AdminLoad::Loaded,
+          _ => AdminLoad::Failed(errors.first().cloned().unwrap_or_default()),
+        };
+      }
+    }
+    self.changed();
+
+    let mut reload_errors = Vec::new();
+    self.reload_cached(&mut reload_errors).await;
+    errors.extend(reload_errors);
+
+    let summaries: Vec<&AdminConversationSummary> = conversations
+      .as_ref()
+      .map(|list| list.conversations.iter().collect())
+      .unwrap_or_default();
+    let user_summaries: Vec<&AdminUserSummary> = users
+      .as_ref()
+      .map(|list| list.users.iter().collect())
+      .unwrap_or_default();
+    let (details, space_memberships, devices) = join3(
+      stream::iter(summaries.iter().enumerate().map(|(index, summary)| async move {
+        if index < DETAIL_LIMIT {
           self.channel_details(summary).await
         } else {
           ChannelDetails::default()
-        };
-        channels.push(channel_from_wire(
-          summary,
-          &space_names,
-          details,
-          policy_default_history.clone(),
-        ));
-      }
-    }
-    let space_memberships = match &spaces {
-      Some(spaces) => self.space_memberships(&spaces.spaces).await,
-      None => HashMap::new(),
-    };
-    let mut admin_users = Vec::new();
-    if let Some(list) = &users {
-      for summary in &list.users {
-        let devices = self.devices_of(summary.id).await;
+        }
+      }))
+      .buffered(DETAIL_CONCURRENCY)
+      .collect::<Vec<_>>(),
+      async {
+        match &spaces {
+          Some(spaces) => self.space_memberships(&spaces.spaces).await,
+          None => HashMap::new(),
+        }
+      },
+      stream::iter(user_summaries.iter().map(|summary| self.devices_of(summary.id)))
+        .buffered(DETAIL_CONCURRENCY)
+        .collect::<Vec<_>>(),
+    )
+    .await;
+    let channels: Vec<AdminChannel> = summaries
+      .iter()
+      .zip(details)
+      .map(|(summary, details)| {
+        channel_from_wire(summary, &space_names, details, policy_default_history.clone())
+      })
+      .collect();
+    let admin_users: Vec<AdminUser> = user_summaries
+      .iter()
+      .zip(devices)
+      .map(|(summary, devices)| {
         let names = space_memberships.get(&summary.id).cloned().unwrap_or_default();
-        admin_users.push(user_from_wire(summary, devices, names));
-      }
-    }
+        user_from_wire(summary, devices, names)
+      })
+      .collect();
+    let audit_path = audit_path(self.data.borrow().audit_filter);
+    let audit = settle(
+      self.fetch_result::<ListAuditResponse>(audit_path).await,
+      &mut errors,
+    );
 
     {
       let mut data = self.data.borrow_mut();
-      data.is_loaded = true;
       if conversations.is_some() {
         data.channels = channels;
       }
@@ -563,14 +685,7 @@ impl AdminLive {
         data.policy_version = policy.version;
       }
       if let Some(spaces) = &spaces {
-        data.spaces = spaces
-          .spaces
-          .iter()
-          .map(|space| AdminSpace {
-            id: space.id,
-            name: space.name.clone(),
-          })
-          .collect();
+        data.spaces = spaces.spaces.iter().map(space_from_wire).collect();
       }
       if let Some(announcement) = announcement {
         data.announcement = announcement.maybe_announcement;
@@ -598,6 +713,9 @@ impl AdminLive {
           .map(|entry| audit_from_wire(entry, &space_names, &channels, &users))
           .collect();
       }
+      if data.load != AdminLoad::Loaded && spaces.is_some() && conversations.is_some() {
+        data.load = AdminLoad::Loaded;
+      }
       data.maybe_error = errors.into_iter().next();
     }
     self.changed();
@@ -620,6 +738,7 @@ impl AdminLive {
     let live = self.clone();
     set_timeout(
       move || {
+        // async-ok: a Cell, not a signal.
         live.refresh_queued.set(false);
         spawn_local(async move { live.refresh().await });
       },
@@ -746,78 +865,100 @@ impl AdminLive {
   }
 
   /// Fetches data the console shows on demand and stores it; one request per key at a time.
-  fn load<T: serde::de::DeserializeOwned + 'static>(
-    &self,
-    key: String,
-    path: String,
-    store: impl FnOnce(&mut AdminData, T) + 'static,
-  ) {
+  fn load(&self, key: String, path: String, what: Loaded) {
     if !self.data.borrow_mut().loading.insert(key.clone()) {
       return;
     }
-    let live = self.clone();
-    spawn_local(async move {
-      let mut errors = Vec::new();
-      let value = live.fetch::<T>(&path, &mut errors).await;
-      {
-        let mut data = live.data.borrow_mut();
-        data.loading.remove(&key);
-        match value {
-          Some(value) => store(&mut data, value),
-          None => data.maybe_error = errors.into_iter().next(),
-        }
+    self.run(AdminTask::Load { key, path, what });
+  }
+
+  async fn load_now(&self, key: String, path: String, what: Loaded) {
+    let mut errors = Vec::new();
+    let stored = match what {
+      Loaded::Scheme(maybe_space) => self
+        .fetch::<PermissionSchemeResponse>(&path, &mut errors)
+        .await
+        .map(|scheme| {
+          Box::new(move |data: &mut AdminData| drop(data.schemes.insert(maybe_space, scheme))) as Store
+        }),
+      Loaded::Moderation(channel) => {
+        self
+          .fetch::<ChannelModeration>(&path, &mut errors)
+          .await
+          .map(|moderation| {
+            Box::new(move |data: &mut AdminData| drop(data.moderation.insert(channel, moderation))) as Store
+          })
+      },
+      Loaded::Members(channel) => self
+        .fetch::<ListConversationMembersResponse>(&path, &mut errors)
+        .await
+        .map(|list| {
+          let members = list.members.into_iter().map(|member| member.user.id).collect();
+          Box::new(move |data: &mut AdminData| drop(data.members.insert(channel, members))) as Store
+        }),
+      Loaded::Notetaker => self
+        .fetch::<teamcraft_proto::AdminNotetakerResponse>(&path, &mut errors)
+        .await
+        .map(|settings| Box::new(move |data: &mut AdminData| data.notetaker = Some(settings)) as Store),
+    };
+    {
+      let mut data = self.data.borrow_mut();
+      data.loading.remove(&key);
+      match stored {
+        Some(store) => store(&mut data),
+        None => data.maybe_error = errors.into_iter().next(),
       }
-      live.changed();
-    });
+    }
+    self.changed();
   }
 
   async fn fetch<T: serde::de::DeserializeOwned>(&self, path: &str, errors: &mut Vec<String>) -> Option<T> {
-    let response = match self.auth.api_get(path).await {
-      Ok(response) => response,
-      Err(error) => {
-        errors.push(error.to_string());
-        return None;
-      },
-    };
+    settle(self.fetch_result(path.to_owned()).await, errors)
+  }
+
+  async fn fetch_result<T: serde::de::DeserializeOwned>(&self, path: String) -> Result<T, String> {
+    let response = self
+      .auth
+      .api_get(&path)
+      .await
+      .map_err(|error| error.to_string())?;
     if response.status != 200 {
-      errors.push(format!("{path}: {}", response.status));
-      return None;
+      return Err(format!("{path}: {}", response.status));
     }
-    match serde_json::from_str(&response.body) {
-      Ok(value) => Some(value),
-      Err(error) => {
-        errors.push(format!("{path}: {error}"));
-        None
-      },
-    }
+    serde_json::from_str(&response.body).map_err(|error| format!("{path}: {error}"))
   }
 
   /// Like [`Self::send`], and an answer of type `T` replaces the cached copy at once, so the form
   /// shows the saved state without waiting for the refresh.
-  fn send_stored<T: serde::de::DeserializeOwned + 'static>(
+  fn send_stored(&self, method: ApiMethod, path: String, maybe_body: Option<String>, store: Stored) {
+    self.run(AdminTask::SendStored {
+      method,
+      path,
+      maybe_body,
+      store,
+    });
+  }
+
+  async fn send_stored_now(
     &self,
     method: ApiMethod,
     path: String,
     maybe_body: Option<String>,
-    store: impl FnOnce(&mut AdminData, T) + 'static,
+    store: Stored,
   ) {
-    let live = self.clone();
-    spawn_local(async move {
-      let message = match live.auth.api_request(method, &path, maybe_body).await {
-        Ok(response) if response.status < 300 => {
-          match serde_json::from_str::<T>(&response.body) {
-            Ok(value) => store(&mut live.data.borrow_mut(), value),
-            Err(error) => tracing::debug!(%error, %path, "the answer could not be read"),
-          }
-          None
-        },
-        Ok(response) => Some(format!("{path}: {}", refusal_of(&response.body, response.status))),
-        Err(error) => Some(error.to_string()),
-      };
-      live.data.borrow_mut().maybe_error = message;
-      live.changed();
-      live.queue_refresh();
-    });
+    let message = match self.auth.api_request(method, &path, maybe_body).await {
+      Ok(response) if response.status < 300 => {
+        if let Err(error) = store.apply(&mut self.data.borrow_mut(), &response.body) {
+          tracing::debug!(%error, %path, "the answer could not be read");
+        }
+        None
+      },
+      Ok(response) => Some(format!("{path}: {}", refusal_of(&response.body, response.status))),
+      Err(error) => Some(error.to_string()),
+    };
+    self.data.borrow_mut().maybe_error = message;
+    self.changed();
+    self.queue_refresh();
   }
 
   fn send_brands(
@@ -828,59 +969,190 @@ impl AdminLive {
     maybe_forgotten: Option<String>,
   ) {
     if let Ok(body) = serde_json::to_string(request) {
-      self.send_stored(
-        method,
-        path,
-        Some(body),
-        move |data, brands: AdminBrandsResponse| {
-          data.brands = Some(brands);
-          if let Some(id) = maybe_forgotten {
-            forget_previews(data, &id);
-          }
-        },
-      );
+      self.send_stored(method, path, Some(body), Stored::Brands { maybe_forgotten });
     }
   }
 
   /// A connection test: its answer, or the refusal, is kept for the console to show.
   fn run_settings_test(&self, kind: SettingsTestKind, path: &'static str, body: String) {
     self.data.borrow_mut().last_test = None;
-    let live = self.clone();
-    spawn_local(async move {
-      let outcome = match live.auth.api_request(ApiMethod::Post, path, Some(body)).await {
-        Ok(response) if response.status < 300 => serde_json::from_str::<SettingsTestResponse>(&response.body)
-          .unwrap_or_else(|error| SettingsTestResponse {
-            is_ok: false,
-            maybe_error: Some(error.to_string()),
-          }),
-        Ok(response) => SettingsTestResponse {
-          is_ok: false,
-          maybe_error: Some(refusal_of(&response.body, response.status)),
-        },
-        Err(error) => SettingsTestResponse {
+    self.run(AdminTask::SettingsTest { kind, path, body });
+  }
+
+  async fn run_settings_test_now(&self, kind: SettingsTestKind, path: &'static str, body: String) {
+    let outcome = match self.auth.api_request(ApiMethod::Post, path, Some(body)).await {
+      Ok(response) if response.status < 300 => serde_json::from_str::<SettingsTestResponse>(&response.body)
+        .unwrap_or_else(|error| SettingsTestResponse {
           is_ok: false,
           maybe_error: Some(error.to_string()),
-        },
-      };
-      live.data.borrow_mut().last_test = Some((kind, outcome));
-      live.changed();
-      // Mail tests change the delivery status shown next to the form.
-      live.queue_refresh();
-    });
+        }),
+      Ok(response) => SettingsTestResponse {
+        is_ok: false,
+        maybe_error: Some(refusal_of(&response.body, response.status)),
+      },
+      Err(error) => SettingsTestResponse {
+        is_ok: false,
+        maybe_error: Some(error.to_string()),
+      },
+    };
+    self.data.borrow_mut().last_test = Some((kind, outcome));
+    self.changed();
+    // Mail tests change the delivery status shown next to the form.
+    self.queue_refresh();
   }
 
   /// Fire and forget; a refusal is shown in the console, then the next refresh shows the truth.
   fn send(&self, method: ApiMethod, path: String, maybe_body: Option<String>) {
+    self.run(AdminTask::Send {
+      method,
+      path,
+      maybe_body,
+    });
+  }
+
+  async fn send_now(&self, method: ApiMethod, path: String, maybe_body: Option<String>) {
+    let message = match self.auth.api_request(method, &path, maybe_body).await {
+      Ok(response) if response.status < 300 => None,
+      Ok(response) => Some(format!("{path}: {}", refusal_of(&response.body, response.status))),
+      Err(error) => Some(error.to_string()),
+    };
+    self.data.borrow_mut().maybe_error = message;
+    self.queue_refresh();
+  }
+
+  /// Runs a request of the console in the background. Its code and the answers' wire types are in
+  /// the console's chunk (`areas::admin_task`), like the refresh.
+  fn run(&self, task: AdminTask) {
     let live = self.clone();
     spawn_local(async move {
-      let message = match live.auth.api_request(method, &path, maybe_body).await {
-        Ok(response) if response.status < 300 => None,
-        Ok(response) => Some(format!("{path}: {}", refusal_of(&response.body, response.status))),
-        Err(error) => Some(error.to_string()),
-      };
-      live.data.borrow_mut().maybe_error = message;
-      live.queue_refresh();
+      match crate::areas::admin_task(live.clone(), task).await {
+        Ok(running) => running.await,
+        Err(error) => {
+          // Nothing is under way any more: a later look asks again.
+          live.data.borrow_mut().loading.clear();
+          live.chunk_failed(&error.to_string());
+        },
+      }
     });
+  }
+
+  /// Does what [`Self::run`] was given.
+  pub(crate) async fn perform(&self, task: AdminTask) {
+    match task {
+      AdminTask::Send {
+        method,
+        path,
+        maybe_body,
+      } => self.send_now(method, path, maybe_body).await,
+      AdminTask::SendStored {
+        method,
+        path,
+        maybe_body,
+        store,
+      } => self.send_stored_now(method, path, maybe_body, store).await,
+      AdminTask::Load { key, path, what } => self.load_now(key, path, what).await,
+      AdminTask::SettingsTest { kind, path, body } => self.run_settings_test_now(kind, path, body).await,
+      AdminTask::BrandPreview { key, path } => self.brand_preview_now(key, path).await,
+      AdminTask::UploadBrandAsset {
+        id,
+        slot,
+        bytes,
+        content_type,
+      } => self.upload_brand_asset_now(id, slot, bytes, content_type).await,
+    }
+  }
+
+  async fn brand_preview_now(&self, key: String, path: String) {
+    let maybe_url = match self.auth.api_request_bytes(ApiMethod::Get, &path, None).await {
+      Ok(response) if response.status == 200 => {
+        preview_data_url(response.maybe_content_type.as_deref(), &response.body)
+      },
+      _ => None,
+    };
+    {
+      let mut data = self.data.borrow_mut();
+      // The loading entry stays, which is what keeps a failed image from being requested again.
+      if let Some(url) = maybe_url {
+        data.loading.remove(&format!("preview:{key}"));
+        data.brand_previews.insert(key, url);
+      }
+    }
+    self.changed();
+  }
+}
+
+/// A request of the console, run in the background by [`AdminLive::run`].
+pub enum AdminTask {
+  /// Fire and forget; a refusal is shown, then the next refresh shows the truth.
+  Send {
+    method: ApiMethod,
+    path: String,
+    maybe_body: Option<String>,
+  },
+  /// Like `Send`, and the answer replaces the cached copy at once.
+  SendStored {
+    method: ApiMethod,
+    path: String,
+    maybe_body: Option<String>,
+    store: Stored,
+  },
+  /// Data the console shows on demand.
+  Load { key: String, path: String, what: Loaded },
+  /// A connection test.
+  SettingsTest {
+    kind: SettingsTestKind,
+    path: &'static str,
+    body: String,
+  },
+  /// A brand image for the editor.
+  BrandPreview { key: String, path: String },
+  UploadBrandAsset {
+    id: String,
+    slot: BrandAssetSlot,
+    bytes: Vec<u8>,
+    content_type: String,
+  },
+}
+
+/// Which cached copy an answer replaces.
+pub enum Stored {
+  /// The brands; `maybe_forgotten` is a brand whose cached images are stale now.
+  Brands {
+    maybe_forgotten: Option<String>,
+  },
+  Mail,
+  Calendar,
+  Runtime,
+  Notetaker,
+}
+
+/// What on-demand data a load is for.
+pub enum Loaded {
+  Scheme(Option<SpaceId>),
+  Moderation(ConversationId),
+  Members(ConversationId),
+  Notetaker,
+}
+
+/// Stores a loaded value in the cache.
+type Store = Box<dyn FnOnce(&mut AdminData)>;
+
+impl Stored {
+  /// Puts the answer `body` into the cache.
+  fn apply(self, data: &mut AdminData, body: &str) -> Result<(), serde_json::Error> {
+    match self {
+      Self::Brands { maybe_forgotten } => {
+        data.brands = Some(serde_json::from_str(body)?);
+        if let Some(id) = maybe_forgotten {
+          forget_previews(data, &id);
+        }
+      },
+      Self::Mail => data.mail = Some(serde_json::from_str(body)?),
+      Self::Calendar => data.calendar = Some(serde_json::from_str(body)?),
+      Self::Runtime => data.runtime = Some(serde_json::from_str(body)?),
+      Self::Notetaker => data.notetaker = Some(serde_json::from_str(body)?),
+    }
+    Ok(())
   }
 }
 
@@ -936,6 +1208,30 @@ fn refusal_of(body: &str, status: u16) -> String {
 
 // ---- Mappings (pure, tested) ------------------------------------------------------------------------
 
+/// Puts a failed request's reason on the list of errors and gives the value of a good one.
+fn settle<T>(result: Result<T, String>, errors: &mut Vec<String>) -> Option<T> {
+  match result {
+    Ok(value) => Some(value),
+    Err(error) => {
+      errors.push(error);
+      None
+    },
+  }
+}
+
+fn space_from_wire(space: &AdminSpaceSummary) -> AdminSpace {
+  AdminSpace {
+    id: space.id,
+    name: space.name.clone(),
+    join_policy: space.join_policy.clone(),
+    is_archived: space.is_archived,
+    member_count: space.member_count,
+    guest_count: space.guest_count,
+    channel_count: space.channel_count,
+    created_at: space.created_at.0,
+  }
+}
+
 fn channel_from_wire(
   summary: &AdminConversationSummary,
   space_names: &HashMap<SpaceId, String>,
@@ -973,8 +1269,8 @@ fn channel_from_wire(
     maybe_owner: details.maybe_owner,
     last_activity: summary.maybe_last_activity_at.unwrap_or(summary.created_at).0,
     message_count: summary.message_count,
-    // The server cannot see attachments' sizes in ciphertext it does not index; shown as unknown (0).
-    storage_bytes: 0,
+    // Ciphertext bytes of the channel's files and search index in storage.
+    storage_bytes: summary.storage_bytes,
     retention,
     history,
     is_archived: summary.is_archived,
@@ -1006,6 +1302,10 @@ fn user_from_wire(
       is_guest: summary.kind == UserKind::Guest,
       is_bot: false,
       maybe_organization: None,
+      is_deactivated: false,
+      is_deleted: summary.is_deleted,
+      device_setup: crate::model::DeviceSetup::Unknown,
+      maybe_email: None,
     },
     role,
     devices: devices
@@ -1017,11 +1317,15 @@ fn user_from_wire(
         platform: String::new(),
         last_seen: device.maybe_last_seen_at.unwrap_or(device.created_at).0,
         is_current: false,
+        // Admins see the server's list; verifying is for the user's own devices.
+        verification: DeviceVerification::Unknown,
+        maybe_push: None,
       })
       .collect(),
     last_seen: summary.maybe_last_seen_at.unwrap_or(summary.created_at).0,
     space_names,
     is_active: !summary.is_deactivated,
+    is_in_chats: summary.conversation_count > 0 || summary.space_count > 0 || summary.device_count > 0,
     maybe_guest: None,
   }
 }
@@ -1034,6 +1338,8 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     "device_revoked" => AuditAction::DeviceRemoved,
     "user_deactivated" => AuditAction::UserDeactivated,
     "user_reactivated" => AuditAction::UserReactivated,
+    "user_removed_from_chats" => AuditAction::UserRemovedFromChats,
+    "user_deleted" => AuditAction::UserDeleted,
     "invite_created" => AuditAction::GuestInvited,
     "conversation_member_added" | "space_member_added" => AuditAction::MemberAdded,
     "conversation_member_removed" | "space_member_removed" => AuditAction::MemberRemoved,
@@ -1041,8 +1347,10 @@ pub fn action_from_wire(action: &str) -> AuditAction {
       AuditAction::MemberRoleChanged
     },
     "conversation_updated" => AuditAction::ChannelUpdated,
+    "channel_deleted" | "channel_deleted_last_member" => AuditAction::ChannelDeleted,
     "space_created" => AuditAction::SpaceCreated,
     "space_updated" => AuditAction::SpaceUpdated,
+    "space_deleted" => AuditAction::SpaceDeleted,
     "oidc_backchannel_logout" => AuditAction::SessionEnded,
     "permission_scheme_changed" => AuditAction::PermissionsChanged,
     "channel_moderation_set" => AuditAction::ModerationChanged,
@@ -1181,9 +1489,11 @@ mod tests {
       kind: UserKind::Member,
       maybe_oidc_role: Some("admin".into()),
       is_deactivated: true,
+      is_deleted: false,
       maybe_deactivation_reason: Some(DeactivationReason::Admin),
       device_count: 2,
       space_count: 1,
+      conversation_count: 3,
       maybe_last_seen_at: None,
       created_at: UnixMillis(1000),
     };
@@ -1208,6 +1518,7 @@ mod tests {
     let user = user_from_wire(&summary, devices, vec!["Space A".into()]);
     assert_eq!(user.role, Role::Admin);
     assert!(!user.is_active);
+    assert!(user.is_in_chats);
     assert_eq!(user.devices.len(), 1);
     assert_eq!(user.devices[0].last_seen, 5000);
     assert_eq!(user.last_seen, 1000);
@@ -1292,6 +1603,7 @@ mod tests {
       member_count: 3,
       guest_count: 1,
       message_count: 40,
+      storage_bytes: 2048,
       created_at: UnixMillis(100),
       maybe_last_activity_at: None,
     };
@@ -1318,6 +1630,10 @@ mod tests {
     assert_eq!(channel.retention.maybe_days, Some(30));
     assert!(!channel.retention.keeps_pinned);
     assert_eq!(channel.last_activity, 100);
+    assert_eq!(
+      channel.storage_bytes, 2048,
+      "the storage column shows what the server counted"
+    );
     assert_eq!(channel.maybe_owner, Some(id_from_raw(1)));
   }
 }

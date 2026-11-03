@@ -123,6 +123,57 @@ async fn the_host_selects_the_brand() {
 }
 
 #[tokio::test]
+async fn server_info_carries_the_brand_of_the_host_and_the_configured_sign_in() {
+  let files = Files::create();
+  let dir = files.dir.clone();
+  let Some(app) = TestApp::start_with(move |settings| {
+    settings.web.maybe_static_dir = Some(dir.join("site"));
+    let mut b = brand("b", HOST_B, false);
+    b.maybe_sso_label = Some("Example SSO".into());
+    settings.brands = vec![brand("a", HOST_A, true), b];
+    settings.sign_in = teamcraft_server::state::SignInSettings::new(
+      "https://auth.example.com/realms/company".into(),
+      "teamcraft-apps".into(),
+      &["offline_access".into(), "openid".into()],
+      Some(vec!["http://127.0.0.1/callback".into()]),
+    );
+  })
+  .await
+  else {
+    return;
+  };
+
+  let (status, headers, body) = get_as(&app, Some(HOST_B), "/api/v1/server-info").await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(headers["vary"], "Host, X-Forwarded-Host");
+  let info = json(&body);
+  assert_eq!(info["brand"]["id"], "b");
+  assert_eq!(info["brand"]["origin"], "https://chat.b.example.com");
+  assert_eq!(
+    info["sign_in"]["issuer"],
+    "https://auth.example.com/realms/company"
+  );
+  assert_eq!(info["sign_in"]["client_id"], "teamcraft-apps");
+  // `openid` first and only once.
+  assert_eq!(
+    info["sign_in"]["scopes"],
+    serde_json::json!(["openid", "offline_access"])
+  );
+  assert_eq!(
+    info["sign_in"]["redirect_uris"],
+    serde_json::json!(["http://127.0.0.1/callback"])
+  );
+
+  assert_eq!(info["sign_in"]["sso_label"], "Example SSO");
+  assert_eq!(info["sign_in"]["methods"], serde_json::json!(["sso"]));
+
+  let (_, _, body) = get_as(&app, Some(HOST_A), "/api/v1/server-info").await;
+  assert_eq!(json(&body)["brand"]["id"], "a");
+  assert!(json(&body)["sign_in"].get("sso_label").is_none());
+  app.stop().await;
+}
+
+#[tokio::test]
 async fn an_unknown_host_gets_the_default_brand_and_is_never_reflected() {
   let files = Files::create();
   let Some(app) = start(&files, UnknownHostPolicy::Default).await else {
@@ -154,7 +205,13 @@ async fn unknown_hosts_can_be_refused_except_for_probes() {
     return;
   };
 
-  for path in ["/api/v1/brand", "/", "/api/v1/me", "/api/v1/brand/theme.css"] {
+  for path in [
+    "/api/v1/brand",
+    "/api/v1/server-info",
+    "/",
+    "/api/v1/me",
+    "/api/v1/brand/theme.css",
+  ] {
     let (status, _, body) = get_as(&app, Some("evil.example"), path).await;
     assert_eq!(status, StatusCode::MISDIRECTED_REQUEST, "{path}");
     assert_eq!(json(&body)["error_code"], "unknown_host", "{path}");
@@ -227,6 +284,27 @@ async fn the_theme_is_a_stylesheet_of_the_brands_colors() {
   );
   let (_, _, body) = get_as(&app, Some(HOST_A), "/api/v1/brand/theme.css").await;
   assert!(body.is_empty());
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn the_web_manifest_names_the_request_brand() {
+  let files = Files::create();
+  let Some(app) = start(&files, UnknownHostPolicy::Default).await else {
+    return;
+  };
+  let (status, headers, body) = get_as(&app, Some(HOST_B), "/api/v1/brand/manifest.webmanifest").await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(headers["content-type"], "application/manifest+json");
+  let manifest = json(&body);
+  let (_, _, brand) = get_as(&app, Some(HOST_B), "/api/v1/brand").await;
+  assert_eq!(manifest["name"], json(&brand)["display_name"]);
+  assert_eq!(manifest["display"], "standalone");
+  assert_eq!(manifest["start_url"], "/");
+  assert!(
+    !String::from_utf8_lossy(&body).contains(HOST_B),
+    "no host name in the manifest"
+  );
   app.stop().await;
 }
 

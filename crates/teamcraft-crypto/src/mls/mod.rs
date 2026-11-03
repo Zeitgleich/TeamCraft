@@ -11,24 +11,43 @@
 mod content_keys;
 mod credential;
 mod group;
+mod rejoin;
+mod stored_key_packages;
 
 use std::fmt;
 
-use openmls::prelude::{Capabilities, Ciphersuite, ExtensionType, KeyPackage, KeyPackageIn, ProtocolVersion};
+use openmls::prelude::{
+  Capabilities, Ciphersuite, ExtensionType, KeyPackage, KeyPackageIn, Lifetime, MlsMessageIn,
+  ProtocolMessage, ProtocolVersion,
+};
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize as _, Serialize as _};
 
-pub use content_keys::ContentKeyBundle;
+pub use content_keys::{ContentKeyBundle, SealedContentKeys};
 pub use group::{
   ChangeHistory, CommitOutput, ConversationGroup, GroupEvent, MAX_CHANGE_AGE_EPOCHS, MembershipUpdate,
+  PendingCommit, StagedJoin, StoredGroupState, VerifiedWelcome,
 };
+pub use rejoin::{RejoinRequest, SignedRejoinRequest, VerifiedRejoinRequest};
+pub use stored_key_packages::{StoredKeyPackage, delete_key_package, key_package_ref, stored_key_packages};
 
 use crate::identity::{DeviceKeyPair, IdentityError, SignedDeviceCertificate, VerifiedDevice};
 use crate::ids::{ConversationId, DeviceId, UserId};
-use crate::membership::{ChangeId, IdentityDirectory, MembershipError};
+use crate::membership::{
+  ChangeId, IdentityDirectory, MembershipAction, MembershipError, SignedMembershipChange,
+};
 
 /// The only ciphersuite: X25519, ChaCha20-Poly1305, SHA-256, Ed25519 (matches the device keys).
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519;
+
+/// How long a key package is valid after its creation. With [`KEY_PACKAGE_BACKDATE`] this is the
+/// longest range `openmls` accepts (84 days and an hour). Clients replace packages long before
+/// (e2ee.md §4.3).
+pub const KEY_PACKAGE_LIFETIME_SECS: u64 = 83 * DAY_SECS;
+/// How far a key package's validity starts before its creation, so a creator whose clock runs up to
+/// a day fast still uploads packages others accept.
+pub const KEY_PACKAGE_BACKDATE_SECS: u64 = DAY_SECS;
+const DAY_SECS: u64 = 24 * 60 * 60;
 
 /// The default `openmls` provider (RustCrypto primitives, in-memory storage). Clients will plug
 /// in persistent storage behind the same `OpenMlsProvider` trait.
@@ -85,6 +104,8 @@ pub enum MlsError {
   StaleChange { signed_epoch: u64, current_epoch: u64 },
   #[error("commit does not match its signed membership change")]
   ChangeDoesNotMatchCommit,
+  #[error("a guest's commit may only change the guest's own devices")]
+  GuestOverreach,
   #[error("commit contains a proposal type TeamCraft does not use")]
   UnsupportedProposal,
   #[error("commit or message from a sender outside the group")]
@@ -95,33 +116,118 @@ pub enum MlsError {
   UnexpectedMessage(&'static str),
   #[error("there is no pending commit to confirm")]
   NoPendingCommit,
+  /// Joining by external commit: the group already has a leaf of this device (a join whose answer
+  /// was lost, or state this device lost). It has to be added back instead.
+  #[error("this device is in the group already")]
+  AlreadyInGroup,
+  /// A welcome for a key package this device doesn't hold (any more): used up, deleted after it
+  /// expired or was replaced (e2ee.md §4.3.1), or never this device's. It has to be added back.
+  #[error("no key package of this device matches the welcome")]
+  NoMatchingKeyPackage,
+  /// Joining by external commit: the group information is older than an epoch this user's devices
+  /// already saw (a server handing out an old one).
+  #[error("group information for epoch {epoch} is older than epoch {floor} seen before")]
+  StaleGroupInfo { epoch: u64, floor: u64 },
+  #[error("HPKE failed: {0}")]
+  Hpke(String),
+  /// Content keys sealed to a device didn't open there: for another device, tampered with, or
+  /// moved to another group, epoch or sender.
+  #[error("sealed content keys rejected")]
+  SealedKeysRejected,
   #[error("encoding failed: {0}")]
   Encoding(#[from] tls_codec::Error),
 }
 
+/// What the server and the owning device need to know about an uploaded key package, read from the
+/// package itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyPackageInfo {
+  /// Seconds since the Unix epoch after which nobody accepts the package any more.
+  pub not_after_unix_secs: u64,
+  pub is_last_resort: bool,
+}
+
 /// Creates a key package for this device and stores its private part in the provider's storage.
-/// Upload the returned bytes to the server so others can add this device.
+/// Upload the returned bytes to the server so others can add this device. `now_unix_secs` is the
+/// creator's clock (injectable for tests); the package is valid for [`KEY_PACKAGE_LIFETIME_SECS`].
 pub fn create_key_package(
   provider: &impl OpenMlsProvider,
   device: &DeviceKeyPair,
   certificate: &SignedDeviceCertificate,
+  now_unix_secs: u64,
 ) -> Result<Vec<u8>, MlsError> {
-  build_key_package(provider, device, certificate, KeyPackage::builder())
+  let builder = KeyPackage::builder().key_package_lifetime(lifetime_from(now_unix_secs));
+  build_key_package(provider, device, certificate, builder)
 }
 
 /// Creates the device's last-resort key package (RFC 9420 §16.8): the server hands it out when the
 /// regular ones are used up, and its private key survives joining, so it can be used repeatedly.
+/// The device replaces it regularly (e2ee.md §4.3).
 pub fn create_last_resort_key_package(
   provider: &impl OpenMlsProvider,
   device: &DeviceKeyPair,
   certificate: &SignedDeviceCertificate,
+  now_unix_secs: u64,
 ) -> Result<Vec<u8>, MlsError> {
   // The leaf must announce support for the last_resort extension the key package carries.
   let capabilities = Capabilities::new(None, None, Some(&[ExtensionType::LastResort]), None, None);
   let builder = KeyPackage::builder()
     .leaf_node_capabilities(capabilities)
+    .key_package_lifetime(lifetime_from(now_unix_secs))
     .mark_as_last_resort();
   build_key_package(provider, device, certificate, builder)
+}
+
+/// Checks an uploaded key package (encoding, signature, ciphersuite, lifetime against this
+/// machine's clock) and reads its expiry. The server records the expiry so it never hands out an
+/// expired package; it does not check the credential, which members do when they add the device.
+pub fn inspect_key_package(bytes: &[u8]) -> Result<KeyPackageInfo, MlsError> {
+  let crypto = openmls_rust_crypto::RustCrypto::default();
+  let key_package = KeyPackageIn::tls_deserialize_exact(bytes)?
+    .validate(&crypto, ProtocolVersion::Mls10)
+    .map_err(|error| MlsError::openmls("key package validation", error))?;
+  if key_package.ciphersuite() != CIPHERSUITE {
+    return Err(MlsError::UnexpectedMessage(
+      "key package with another ciphersuite",
+    ));
+  }
+  Ok(KeyPackageInfo {
+    not_after_unix_secs: key_package.life_time().not_after(),
+    is_last_resort: key_package.last_resort(),
+  })
+}
+
+/// The users the signed membership change of a group message names: the user it adds or removes,
+/// and its signer. Read from the message's authenticated data, which MLS sends unencrypted, and
+/// verified by nothing here: a member pins their identity keys before it processes the message,
+/// which verifies the change as always. A commit read hours later can add somebody who has left
+/// again since, whom the conversation's current member list no longer names (issue #972). Empty
+/// for a message without a signed change.
+pub fn users_named_in_change(message: &[u8]) -> Vec<UserId> {
+  let Ok(protocol) =
+    MlsMessageIn::tls_deserialize_exact(message).map(MlsMessageIn::try_into_protocol_message)
+  else {
+    return Vec::new();
+  };
+  let Ok(ProtocolMessage::PrivateMessage(private)) = protocol else {
+    return Vec::new();
+  };
+  let Ok(signed) = SignedMembershipChange::from_bytes(private.aad()) else {
+    return Vec::new();
+  };
+  let target = match signed.unverified().action() {
+    MembershipAction::AddUser { user_id, .. }
+    | MembershipAction::RemoveUser { user_id }
+    | MembershipAction::RemoveDevice { user_id, .. } => *user_id,
+  };
+  vec![target, signed.signer_user()]
+}
+
+fn lifetime_from(now_unix_secs: u64) -> Lifetime {
+  Lifetime::init(
+    now_unix_secs.saturating_sub(KEY_PACKAGE_BACKDATE_SECS),
+    now_unix_secs.saturating_add(KEY_PACKAGE_LIFETIME_SECS),
+  )
 }
 
 fn build_key_package(

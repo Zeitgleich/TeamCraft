@@ -35,6 +35,19 @@ class ChatActionsTest {
   }
 
   @Test
+  fun theViewerDownloadsOneFileOfAMessage() {
+    assertEquals(
+      """{"action":"download_attachment","conversation":"7","message":"9","file_id":"12"}""",
+      ChatActions.downloadAttachment("7", "9", "12"),
+    )
+  }
+
+  @Test
+  fun groupDmListsThePeople() {
+    assertEquals("""{"action":"open_group_dm","users":["2","3"]}""", ChatActions.openGroupDm(listOf("2", "3")))
+  }
+
+  @Test
   fun archiveChannelSetsOnlyTheArchivedChange() {
     assertEquals(
       """{"action":"update_channel","conversation":"7","changes":{"maybe_is_archived":true}}""",

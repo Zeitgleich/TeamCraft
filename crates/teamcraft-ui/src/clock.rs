@@ -23,6 +23,15 @@ pub fn local_day(ts: TimestampMs) -> i64 {
   (ts + local_offset_ms(ts)).div_euclid(MS_PER_DAY)
 }
 
+/// Midnight in the user's time zone that starts the local day `days_back` days before `ts`.
+pub fn local_day_start(ts: TimestampMs, days_back: i64) -> TimestampMs {
+  let day = local_day(ts) - days_back;
+  // The offset is read around midday of that day, so a daylight saving change at night cannot
+  // shift it onto the wrong side.
+  let midday = day * MS_PER_DAY + MS_PER_DAY / 2 - local_offset_ms(ts);
+  day * MS_PER_DAY - local_offset_ms(midday)
+}
+
 /// Offset of the user's time zone from UTC in minutes (east is positive).
 pub fn local_utc_offset_minutes(ts: TimestampMs) -> i16 {
   i16::try_from(local_offset_ms(ts) / MS_PER_MINUTE).unwrap_or(0)
@@ -74,12 +83,9 @@ pub fn format_time_seconds(ts: TimestampMs, locale: &str) -> String {
   {
     let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts as f64));
     let options = js_sys::Object::new();
-    for (key, value) in [
-      ("hour", "2-digit"),
-      ("minute", "2-digit"),
-      ("second", "2-digit"),
-      ("hour12", "false"),
-    ] {
+    // The locale decides 12 or 24 hours, as for `format_time` (#702). No `hour12` option: set as
+    // the string "false" it is truthy and forced a 12-hour clock with AM/PM on every locale.
+    for (key, value) in [("hour", "2-digit"), ("minute", "2-digit"), ("second", "2-digit")] {
       // Setting a plain data property on a fresh object cannot fail.
       let _ = js_sys::Reflect::set(&options, &key.into(), &value.into());
     }
@@ -98,13 +104,24 @@ pub fn format_time_seconds(ts: TimestampMs, locale: &str) -> String {
   }
 }
 
-/// "Tuesday, October 21" in the user's locale and time zone.
+/// "Tuesday, October 21" in the user's locale and time zone, with the year for a day outside the
+/// current one: "Wednesday, July 24, 2024" (#1086). The current year is read from the clock on
+/// every call, so a label made after New Year's Eve has the year without any timer.
 pub fn format_date(ts: TimestampMs, locale: &str) -> String {
+  format_date_at(ts, now_ms(), locale)
+}
+
+fn format_date_at(ts: TimestampMs, now: TimestampMs, locale: &str) -> String {
+  let has_year = shows_year(ts, now);
   #[cfg(target_arch = "wasm32")]
   {
     let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts as f64));
     let options = js_sys::Object::new();
-    for (key, value) in [("weekday", "long"), ("month", "long"), ("day", "numeric")] {
+    let year = has_year.then_some(("year", "numeric"));
+    for (key, value) in [("weekday", "long"), ("month", "long"), ("day", "numeric")]
+      .into_iter()
+      .chain(year)
+    {
       // Setting a plain data property on a fresh object cannot fail.
       let _ = js_sys::Reflect::set(&options, &key.into(), &value.into());
     }
@@ -113,12 +130,36 @@ pub fn format_date(ts: TimestampMs, locale: &str) -> String {
   #[cfg(not(target_arch = "wasm32"))]
   {
     let _ = locale;
-    format!("day {}", ts.div_euclid(MS_PER_DAY))
+    let day = local_day(ts);
+    match has_year {
+      true => format!("day {day} of {}", local_year(ts)),
+      false => format!("day {day}"),
+    }
   }
+}
+
+/// Whether a date label for `ts` names its year: only when it is not the year of `now`.
+fn shows_year(ts: TimestampMs, now: TimestampMs) -> bool {
+  local_year(ts) != local_year(now)
+}
+
+/// The calendar year of `ts` in the user's time zone.
+fn local_year(ts: TimestampMs) -> i64 {
+  civil_from_days(local_day(ts)).0
 }
 
 /// "5 minutes ago" / "in 3 days" in the user's locale, relative to `now`.
 pub fn format_relative(ts: TimestampMs, now: TimestampMs, locale: &str) -> String {
+  format_relative_in(ts, now, locale, "long")
+}
+
+/// "5 min. ago" / "in 3 days": the abbreviated form, for tight places like the channel header.
+pub fn format_relative_short(ts: TimestampMs, now: TimestampMs, locale: &str) -> String {
+  format_relative_in(ts, now, locale, "short")
+}
+
+/// `style` is an `Intl.RelativeTimeFormat` style: "long", "short" or "narrow".
+fn format_relative_in(ts: TimestampMs, now: TimestampMs, locale: &str, style: &str) -> String {
   let delta = ts - now;
   let (value, unit) = relative_parts(delta);
   #[cfg(target_arch = "wasm32")]
@@ -126,12 +167,13 @@ pub fn format_relative(ts: TimestampMs, now: TimestampMs, locale: &str) -> Strin
     let options = js_sys::Object::new();
     // Setting a plain data property on a fresh object cannot fail.
     let _ = js_sys::Reflect::set(&options, &"numeric".into(), &"auto".into());
+    let _ = js_sys::Reflect::set(&options, &"style".into(), &style.into());
     let formatter = js_sys::Intl::RelativeTimeFormat::new(&js_sys::Array::of1(&locale.into()), &options);
     formatter.format(value as f64, unit).into()
   }
   #[cfg(not(target_arch = "wasm32"))]
   {
-    let _ = locale;
+    let _ = (locale, style);
     if value < 0 {
       format!("{} {unit}s ago", -value)
     } else {
@@ -350,6 +392,58 @@ mod tests {
   fn tomorrow_morning_is_on_the_next_day() {
     let afternoon = 1_792_828_800_000 + 7 * 3_600_000;
     assert_eq!(tomorrow_at(afternoon, 8 * 60), 1_792_828_800_000 + 24 * 3_600_000);
+  }
+
+  #[test]
+  fn day_starts_are_midnights_counted_back_from_today() {
+    let afternoon = 1_792_828_800_000 + 7 * 3_600_000;
+    let today = local_day_start(afternoon, 0);
+    assert_eq!(local_day(today), local_day(afternoon));
+    assert!(today <= afternoon && afternoon - today < MS_PER_DAY);
+    assert_eq!(local_day(local_day_start(afternoon, 1)), local_day(afternoon) - 1);
+    assert_eq!(local_day(local_day_start(afternoon, 7)), local_day(afternoon) - 7);
+  }
+
+  mod date_labels {
+    use super::*;
+
+    #[test]
+    fn a_day_of_the_current_year_has_no_year() {
+      let now = utc_ms("2026-10-22T14:30");
+      assert!(!shows_year(utc_ms("2026-01-01T00:00"), now));
+      assert!(!shows_year(utc_ms("2026-07-24T09:00"), now));
+      assert_eq!(format_date_at(now, now, "en"), format!("day {}", local_day(now)));
+    }
+
+    #[test]
+    fn a_day_of_the_previous_year_has_its_year() {
+      let now = utc_ms("2026-10-22T14:30");
+      let then = utc_ms("2024-07-24T09:00");
+      assert!(shows_year(utc_ms("2025-12-31T23:59"), now));
+      assert_eq!(
+        format_date_at(then, now, "en"),
+        format!("day {} of 2024", local_day(then))
+      );
+    }
+
+    #[test]
+    fn a_day_of_a_future_year_has_its_year() {
+      let now = utc_ms("2026-10-22T14:30");
+      assert!(shows_year(utc_ms("2027-01-01T00:00"), now));
+    }
+
+    #[test]
+    fn new_years_eve_gains_its_year_at_midnight() {
+      let eve = utc_ms("2026-12-31T23:59");
+      assert!(!shows_year(eve, utc_ms("2026-12-31T00:00")));
+      assert!(shows_year(eve, utc_ms("2027-01-01T00:00")));
+      assert!(shows_year(utc_ms("2027-01-01T00:00"), eve));
+    }
+
+    /// The native build's clock is UTC, so a local date-time input is a UTC instant.
+    fn utc_ms(text: &str) -> TimestampMs {
+      parse_local_datetime(text).expect("valid date-time")
+    }
   }
 
   #[test]

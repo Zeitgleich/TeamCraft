@@ -23,9 +23,15 @@ use teamcraft_server::testing::{FakeCalendar, FakeMailer, TestApp, TestUser};
 /// Operations that need no bearer token, and why.
 const PUBLIC: &[(&str, &str)] = &[
   ("get", "/api/v1/openapi.json"),
+  // Clients check the server version and the oldest supported client before they can sign in.
+  ("get", "/api/v1/client-compatibility"),
+  // The apps learn how to sign in to a server from it, before anyone is signed in.
+  ("get", "/api/v1/server-info"),
   // Public presentation of the host (name, colors, logo): the login screen needs it before sign-in.
   ("get", "/api/v1/brand"),
   ("get", "/api/v1/brand/theme.css"),
+  // Installing the web app: the browser fetches the manifest without credentials.
+  ("get", "/api/v1/brand/manifest.webmanifest"),
   ("get", "/api/v1/brand/assets/{slot}"),
   // The link's token is the credential.
   ("post", "/api/v1/meetings/join"),
@@ -36,6 +42,9 @@ const PUBLIC: &[(&str, &str)] = &[
   // The link's ID is the credential (256 random bits); both answer 410 for anything not usable.
   ("get", "/api/v1/shares/{share_id}"),
   ("post", "/api/v1/shares/{share_id}/download"),
+  // The service worker replaces a rotated Web Push subscription without a session; the device's
+  // push key authenticates it (public since #406).
+  ("post", "/api/v1/push/web/subscription-change"),
   // Authenticated by the logout token's signature.
   ("post", "/api/v1/auth/backchannel-logout"),
   // Authenticated by the SFU's / inbox handler's own bearer token (checked below).
@@ -51,6 +60,10 @@ const OPEN_TO_MEMBERS: &[&str] = &[
   "/users/{user_id}/devices",
   "/users/{user_id}/identity-key",
 ];
+
+/// Operations outsiders may call on a meeting: a member with the meeting's link knocks and waits
+/// in its lobby until a host decides (`meeting_guests.rs`, `knocking`, covers who may).
+const OPEN_TO_OUTSIDERS: &[(&str, &str)] = &[("post", "/api/v1/meetings/{meeting_id}/lobby/me")];
 
 struct Scene {
   meeting: String,
@@ -71,6 +84,8 @@ async fn start() -> Option<TestApp> {
     max_invitees: 10,
     guest_token_secret: "0123456789abcdef0123456789abcdef".to_owned().into(),
     guest_grace_secs: 7200,
+    max_shared_link_guests: 50,
+    start_ring_lead_secs: 3600,
     maybe_inbox_token: Some("inbox-token-for-tests".to_owned().into()),
     smtp: None,
     mail_texts: MailTexts::default(),
@@ -280,6 +295,7 @@ async fn outsiders_cannot_touch_conversations_spaces_or_meetings_they_are_not_pa
     if !scoped
       || path.starts_with("/api/v1/admin/")
       || OPEN_TO_MEMBERS.iter().any(|open| path.ends_with(open))
+      || OPEN_TO_OUTSIDERS.contains(&(method.as_str().to_lowercase().as_str(), path.as_str()))
     {
       continue;
     }

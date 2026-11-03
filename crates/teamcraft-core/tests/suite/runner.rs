@@ -7,14 +7,59 @@ use crate::common;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
-use common::{PASSPHRASE, clock, options, settings};
-use teamcraft_core::PendingEnrollment;
+use common::{PASSPHRASE, TokioClock, clock, options, settings};
 use teamcraft_core::api::ServerApi;
-use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::clock::Clock;
+use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
+use teamcraft_core::client::PushRegistrar;
+use teamcraft_core::clock::SystemClock;
 use teamcraft_core::runner::{RunnerCommand, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageFilter};
+use teamcraft_core::{Client, PendingEnrollment};
+use teamcraft_proto::{DeviceActivity, GatewayEvent, PushProvider};
+
+/// The server's default `heartbeat_timeout_secs`.
+const SERVER_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Issue #1142: push registration runs beside the loop, which keeps the one connection it has.
+#[tokio::test]
+async fn push_work_beside_the_runner_leaves_its_connection_open() {
+  let server = FakeServer::new();
+  let api = server.add_user("Alice");
+  let store = Arc::new(MemoryStore::new());
+  let client = PendingEnrollment::new()
+    .complete(
+      api.clone(),
+      store.clone(),
+      clock(),
+      settings(),
+      options(PASSPHRASE),
+    )
+    .await
+    .unwrap();
+  let device = client.device_id();
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  let client_settings = settings();
+  let push_clock = SystemClock;
+  let registrar = PushRegistrar::new(&api, &store, &push_clock, &client_settings, device);
+  let push_work = async {
+    while server.gateway_connect_count() == 0 {
+      tokio::task::yield_now().await;
+    }
+    registrar
+      .register_keeping_key(PushProvider::WebPush, "token")
+      .await
+      .unwrap();
+    assert!(!registrar.refresh().await.unwrap());
+    assert!(handle.send(RunnerCommand::Stop));
+  };
+
+  let (_client, ()) = tokio::join!(runner.run(), push_work);
+
+  assert_eq!(server.gateway_connect_count(), 1);
+  assert_eq!(server.push_registration(device).unwrap().token, "token");
+}
 
 #[tokio::test]
 async fn runner_connects_flushes_and_returns_the_client_on_stop() {
@@ -64,14 +109,14 @@ async fn a_busy_runner_keeps_sending_heartbeats() {
     .complete(
       server.add_user("Carol"),
       Arc::new(MemoryStore::new()),
-      Box::new(TokioClock::new()),
+      Box::new(TokioClock::new().0),
       settings(),
       options(PASSPHRASE),
     )
     .await
     .unwrap();
   let settings = RunnerSettings::default();
-  let heartbeat = settings.heartbeat;
+  let heartbeat = settings.connection.max_heartbeat;
   let (runner, handle) = SyncRunner::new(client, settings, Box::new(|| {}));
   // Something wakes the runner every second, more often than its tick: a busy conversation.
   let busy_for = heartbeat * 4;
@@ -89,6 +134,152 @@ async fn a_busy_runner_keeps_sending_heartbeats() {
     "heartbeats while busy: {}",
     server.heartbeat_count()
   );
+}
+
+/// Issue #325: a full sync that takes longer than the server's heartbeat timeout (90 s) keeps its
+/// connection, and an event that arrives meanwhile is applied afterwards.
+#[tokio::test(start_paused = true)]
+async fn a_sync_longer_than_the_heartbeat_timeout_keeps_its_connection() {
+  let server = FakeServer::new();
+  let api = server.add_user("Carol");
+  let carol = api.user_id();
+  let client = PendingEnrollment::new()
+    .complete(
+      api,
+      Arc::new(MemoryStore::new()),
+      Box::new(TokioClock::new().0),
+      settings(),
+      options(PASSPHRASE),
+    )
+    .await
+    .unwrap();
+  // A fresh session, so the runner's connect runs the full sync, and a slow server during it.
+  server.expire_sessions();
+  server.enforce_heartbeat_timeout(Arc::new(TokioClock::new().0), SERVER_HEARTBEAT_TIMEOUT);
+  server.delay_conversation_list(carol, SERVER_HEARTBEAT_TIMEOUT + Duration::from_secs(60));
+  let connects_before = server.gateway_connect_count();
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  let event_server = server.clone();
+  let driver = async move {
+    // In the middle of the sync.
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    event_server.publish_event(&[carol], &GatewayEvent::AnnouncementUpdate);
+    // Well past the sync, so heartbeats after it count too.
+    tokio::time::sleep(SERVER_HEARTBEAT_TIMEOUT * 2).await;
+    assert!(handle.send(RunnerCommand::Stop));
+  };
+  let (client, ()) = tokio::join!(runner.run(), driver);
+  assert_eq!(server.heartbeat_timeout_count(), 0, "a connection timed out");
+  assert_eq!(
+    server.gateway_connect_count() - connects_before,
+    1,
+    "the connection was replaced"
+  );
+  let marks = teamcraft_core::read_state::marks(client.store()).unwrap();
+  assert_eq!(
+    marks.announcements, 1,
+    "the event held during the sync was applied"
+  );
+}
+
+/// Issue #472: the app's activity reaches the server at once, and every new connection repeats
+/// the last report, so a resumed session the server timed out comes back online.
+#[tokio::test]
+async fn the_device_activity_is_reported_now_and_on_every_new_connection() {
+  let server = FakeServer::new();
+  let api = server.add_user("Dave");
+  let me = api.user_id();
+  let client = enrolled(api).await;
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  // Handled in order after connecting.
+  assert!(handle.send(RunnerCommand::SetActivity(DeviceActivity::Idle)));
+  assert!(handle.send(RunnerCommand::Stop));
+  let client = runner.run().await;
+  assert_eq!(
+    server.activity_reports(me),
+    [DeviceActivity::Active, DeviceActivity::Idle],
+    "the new session hears the activity, then the change"
+  );
+
+  // Back in the foreground: the session resumes and hears what the device said last, then the
+  // change.
+  let connects_before = server.gateway_connect_count();
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(RunnerCommand::SetActivity(DeviceActivity::Active)));
+  assert!(handle.send(RunnerCommand::Stop));
+  runner.run().await;
+  assert_eq!(server.gateway_connect_count() - connects_before, 1);
+  assert_eq!(
+    server.activity_reports(me),
+    [
+      DeviceActivity::Active,
+      DeviceActivity::Idle,
+      DeviceActivity::Idle,
+      DeviceActivity::Active
+    ]
+  );
+}
+
+#[tokio::test]
+async fn activity_reported_offline_goes_out_with_the_next_connection() {
+  let server = FakeServer::new();
+  let api = server.add_user("Erin");
+  let me = api.user_id();
+  let client = enrolled(api).await;
+  server.set_offline(me, true);
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(RunnerCommand::SetActivity(DeviceActivity::Idle)));
+  assert!(handle.send(RunnerCommand::Stop));
+  let client = runner.run().await;
+  assert!(server.activity_reports(me).is_empty());
+
+  server.set_offline(me, false);
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(RunnerCommand::Stop));
+  runner.run().await;
+  assert_eq!(server.activity_reports(me), [DeviceActivity::Idle]);
+}
+
+/// Issue #733: typing goes out at most once per interval, and is dropped while offline (a late
+/// indicator would be wrong), not queued like the activity.
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn typing_goes_out_once_per_interval_and_never_late() {
+  use teamcraft_core::ui_backend::CoreCommand;
+
+  let server = FakeServer::new();
+  let api = server.add_user("Frank");
+  let me = api.user_id();
+  let mut client = enrolled(api.clone()).await;
+  let space = api.list_spaces().await.unwrap().spaces[0].id;
+  let channel = client.create_channel(space, "general").await.unwrap();
+  let other = client.create_channel(space, "random").await.unwrap();
+  let typing = |conversation| {
+    RunnerCommand::Ui(CoreCommand::Typing {
+      conversation,
+      maybe_thread: None,
+    })
+  };
+
+  // Handled in order after connecting, all within the interval.
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(typing(channel)));
+  assert!(handle.send(typing(channel)));
+  assert!(handle.send(typing(other)));
+  assert!(handle.send(RunnerCommand::Stop));
+  let client = runner.run().await;
+  assert_eq!(server.typing_reports(me), [channel, other]);
+
+  server.set_offline(me, true);
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(typing(channel)));
+  assert!(handle.send(RunnerCommand::Stop));
+  let client = runner.run().await;
+  server.set_offline(me, false);
+  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  assert!(handle.send(RunnerCommand::Stop));
+  runner.run().await;
+  assert_eq!(server.typing_reports(me), [channel, other]);
 }
 
 #[tokio::test]
@@ -115,21 +306,15 @@ async fn dropping_every_handle_stops_the_runner() {
   );
 }
 
-/// Wall-clock time that follows tokio's (paused) clock, so the runner's deadlines and its sleeps agree.
-struct TokioClock {
-  started: tokio::time::Instant,
-}
-
-impl TokioClock {
-  fn new() -> Self {
-    Self {
-      started: tokio::time::Instant::now(),
-    }
-  }
-}
-
-impl Clock for TokioClock {
-  fn now_ms(&self) -> i64 {
-    1_800_000_000_000 + i64::try_from(self.started.elapsed().as_millis()).unwrap()
-  }
+async fn enrolled(api: FakeServerApi) -> Client<FakeServerApi, Arc<MemoryStore>> {
+  PendingEnrollment::new()
+    .complete(
+      api,
+      Arc::new(MemoryStore::new()),
+      clock(),
+      settings(),
+      options(PASSPHRASE),
+    )
+    .await
+    .unwrap()
 }

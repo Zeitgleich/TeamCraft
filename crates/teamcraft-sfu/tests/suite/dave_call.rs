@@ -33,8 +33,6 @@ use tokio::sync::{Barrier, Notify, mpsc};
 use wtransport::{ClientConfig, Connection, Endpoint, Identity, tls::Sha256Digest};
 
 const CALL_ID: u64 = 42;
-/// All participants belong to this user; the SFU only cares about devices.
-const USER_ID: u64 = 1000;
 const FRAMES_PER_SENDER: u32 = 50;
 const FRAME_INTERVAL: Duration = Duration::from_millis(20);
 /// Typical size of a 20 ms Opus voice frame at ~24 kbit/s.
@@ -85,6 +83,62 @@ async fn invalid_join_token_is_rejected() {
     panic!("expected an error, got {reply:?}");
   };
   assert_eq!(error.error_code, ErrorCode::InvalidJoinToken);
+}
+
+/// Browsers prove a quiet session's path with pings (#841): the SFU answers each one, outside the
+/// event numbering.
+#[tokio::test]
+async fn a_ping_is_answered_without_taking_an_event_number() {
+  let (port, certificate_hash) = start_sfu().await;
+  let connection = connect(SocketAddr::new(V4, port), certificate_hash).await;
+  let (mut send, mut recv) = connection.open_bi().await.unwrap().await.unwrap();
+  let token = format!("dev:{CALL_ID}:{id}:{id}", id = device(9));
+  write_message(
+    &mut send,
+    &CallClientMessage::Join {
+      token,
+      capabilities: MediaCapabilities::default(),
+    },
+  )
+  .await
+  .unwrap();
+  let joined: CallServerMessage = read_message(&mut recv, MAX_SIGNALING_BYTES).await.unwrap();
+  assert!(
+    matches!(joined, CallServerMessage::Event { seq: 1, .. }),
+    "{joined:?}"
+  );
+
+  for id in [7, 8] {
+    write_message(&mut send, &CallClientMessage::Ping { id })
+      .await
+      .unwrap();
+  }
+  let mut last_seq = 1;
+  let mut answers = Vec::new();
+  tokio::time::timeout(TEST_TIMEOUT, async {
+    while answers.len() < 2 {
+      match read_message::<CallServerMessage>(&mut recv, MAX_SIGNALING_BYTES)
+        .await
+        .unwrap()
+      {
+        // Events of the call (the DAVE setup) go on being numbered without a gap.
+        CallServerMessage::Event { seq, .. } => {
+          assert_eq!(seq, last_seq + 1);
+          last_seq = seq;
+        },
+        other => answers.push(other),
+      }
+    }
+  })
+  .await
+  .expect("no answer");
+  assert_eq!(
+    answers,
+    vec![
+      CallServerMessage::Pong { id: 7 },
+      CallServerMessage::Pong { id: 8 }
+    ]
+  );
 }
 
 /// Runs one call; `client_ips[i]` is the SFU address participant `i` connects to.
@@ -223,7 +277,8 @@ async fn run_client(
 ) -> ClientReport {
   let connection = connect(addr, certificate_hash).await;
   let (mut send, mut recv) = connection.open_bi().await.unwrap().await.unwrap();
-  let token = format!("dev:{CALL_ID}:{USER_ID}:{participant_id}");
+  // One account per participant: the SFU limits the devices of one account in a call.
+  let token = format!("dev:{CALL_ID}:{participant_id}:{participant_id}");
   write_message(
     &mut send,
     &CallClientMessage::Join {

@@ -23,6 +23,9 @@ integration = []
 [dependencies]
 # Records sealed on plain SQLite (e2ee.md §9.2): SQLCipher can't link on Android.
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui", "sealed-sqlite"] }
+# The core's network-change stream, polled on the call thread (already in the tree via the core).
+futures-channel = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 teamcraft-client-api = { path = "../teamcraft-client-api" }
 teamcraft-crypto = { path = "../teamcraft-crypto" }
 # Calls: the native call driver (WebTransport, Opus, audio devices; AAudio on Android).
@@ -35,13 +38,25 @@ serde_json.workspace = true
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 thiserror.workspace = true
 tracing.workspace = true
+# The system log subscriber (logcat, os_log) with its level filter (issue #1067).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt", "std"] }
 # The engine thread runs the (non-Send) core on a current-thread runtime; calls run on a
 # multi-thread runtime of their own.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 # Kotlin (and later Swift) bindings from proc-macros; Mozilla's generator, used by Firefox mobile.
 uniffi = "0.32.2"
 
+[target.'cfg(target_os = "android")'.dependencies]
+# Core tracing to logcat (liblog through ndk-sys), the maintained tracing layer for it.
+paranoid-android = "0.2.2"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# Core tracing to os_log (Console.app, `log stream`), the maintained tracing layer for it.
+tracing-oslog = "0.3.0"
+
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "net", "io-util"] }
+# The Happy Eyeballs test kit (`api::black_hole`) for `http_fetch`'s tests.
+teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui", "sealed-sqlite", "test-support"] }
 # The other side of the dev-stack conversation is a plain core client.
 reqwest.workspace = true

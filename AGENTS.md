@@ -10,20 +10,21 @@ untrusted VPS.
 
 Read before changing behaviour:
 
-| Document                                       | Content                                                       |
-|------------------------------------------------|---------------------------------------------------------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md)             | Components, threat model, data model, Keycloak, calls         |
-| [PLAN.md](PLAN.md)                             | Feature catalog with priorities, roadmap                      |
-| [docs/e2ee.md](docs/e2ee.md)                   | Encryption, devices, backup, push, search, compliance         |
-| [docs/admin.md](docs/admin.md)                 | Roles, admin actions without content access                   |
-| [docs/telephony.md](docs/telephony.md)         | SIP trunk, AI hotline, agents                                 |
-| [docs/notifications.md](docs/notifications.md) | Threads, unread counts, notifications, urgent                 |
-| [docs/bridge.md](docs/bridge.md)               | Integration bridge: webhooks and logs into encrypted channels |
-| [docs/meetings.md](docs/meetings.md)           | Meetings, invitations, guests and lobby                       |
-| [docs/push-gateway.md](docs/push-gateway.md)   | Push gateway for store apps (own repo): server side, contract |
-| [docs/operations.md](docs/operations.md)       | Running an instance; deployment: Zeitgleich/teamcraft-deploy  |
-| [docs/release.md](docs/release.md)             | Versions and the release procedure                            |
-| [docs/updates.md](docs/updates.md)             | Desktop self-update, package repositories, update policy      |
+| Document                                           | Content                                                       |
+|----------------------------------------------------|---------------------------------------------------------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md)                 | Components, threat model, data model, Keycloak, calls         |
+| [PLAN.md](PLAN.md)                                 | Feature catalog with priorities, roadmap                      |
+| [docs/e2ee.md](docs/e2ee.md)                       | Encryption, devices, backup, push, search, compliance         |
+| [docs/admin.md](docs/admin.md)                     | Roles, admin actions without content access                   |
+| [docs/telephony.md](docs/telephony.md)             | SIP trunk, AI hotline, agents                                 |
+| [docs/notifications.md](docs/notifications.md)     | Threads, unread counts, notifications, urgent                 |
+| [docs/bridge.md](docs/bridge.md)                   | Integration bridge: webhooks and logs into encrypted channels |
+| [docs/meetings.md](docs/meetings.md)               | Meetings, invitations, guests and lobby                       |
+| [docs/push-gateway.md](docs/push-gateway.md)       | Push gateway for store apps (own repo): server side, contract |
+| [docs/operations.md](docs/operations.md)           | Running an instance; deployment: Zeitgleich/teamcraft-deploy  |
+| [docs/release.md](docs/release.md)                 | Versions and the release procedure                            |
+| [docs/updates.md](docs/updates.md)                 | Desktop self-update, package repositories, update policy      |
+| [docs/import-synology.md](docs/import-synology.md) | Importing history from Synology Chat (runbook)                |
 
 ## Repository layout
 
@@ -34,6 +35,7 @@ teamcraft/
 │   ├── teamcraft-crypto/    # All cryptography: MLS, keys, key bag, rendezvous (wasm-compatible)
 │   ├── teamcraft-media/     # RTP, jitter buffer, codecs, DAVE, video effects shaders
 │   ├── teamcraft-core/      # Client logic shared by desktop, web and mobile
+│   ├── teamcraft-desktop-native/ # The only crate with `unsafe`: native OS calls of the desktop shell
 │   ├── teamcraft-server/    # REST API + gateway (binary)
 │   └── teamcraft-sfu/       # Media forwarding (binary)
 ├── docs/                    # Design documents
@@ -50,7 +52,8 @@ Details: [.claude/rules/](.claude/rules/). The short version:
   `Option<Option<T>>`, no stringly-typed state. Shared logic goes into a library crate, not copied.
 - **Errors:** `thiserror` enums in libraries, `anyhow` only at the top of binaries. No `unwrap()` /
   `expect()` outside tests (except for documented invariants with a reason).
-- **No `unsafe`** (`unsafe_code = "forbid"` workspace-wide).
+- **No `unsafe`** (`unsafe_code = "forbid"` workspace-wide). One exception: `teamcraft-desktop-native`
+  holds the few OS calls with no safe crate API, behind a safe API (code-style.md, "Native FFI").
 - **Logging:** `tracing` macros only, never `println!` / `eprintln!` / `dbg!` outside tests.
   **Never log plaintext message content, keys, tokens or passwords.**
 - **Crypto lives only in `teamcraft-crypto`.** No hand-rolled primitives; use audited crates.
@@ -73,6 +76,10 @@ Details: [.claude/rules/](.claude/rules/). The short version:
   in code, docs, examples or tests – use neutral placeholders (`Project A`, `example.com`).
 - **Vendor-neutral.** Integrations (SIP trunks, voice AI, push, S3, identity provider) go behind
   interfaces/config; a specific vendor is an implementation, never a hard dependency of the design.
+- **Design:** all UI work uses the `apple-design` skill, and emoji are never icons (user content
+  only) – see [design.md](.claude/rules/design.md).
+- **Forms:** errors at their field (`aria-invalid`, `aria-describedby`), a refused submit focuses and
+  scrolls to the first one, units visible – see [forms.md](.claude/rules/forms.md).
 - **Markdown tables are space-padded** so columns align in plain text.
 
 ## Before you commit
@@ -89,7 +96,17 @@ cargo deny check
 - Work on **feature branches** (`feat/…`, `fix/…`, `docs/…`), one feature or milestone step each.
 - **Commit every meaningful step** on the branch – a working sub-step, not every line. Each commit
   builds and passes `cargo fmt --check` and `clippy`.
+- Pull requests of people with write access get **auto-merge (squash)** on opening
+  (`.github/workflows/auto-merge.yml`): they merge once `ci-gate` passes. Turn it off on a PR that must
+  wait: `gh pr merge --disable-auto <number>`.
 - `main` only receives **squash merges** of reviewed branches; the squash commit message summarizes
   the feature (subject ≤ 72 chars, body explains what and why).
+- **Releases are nightly** (03:00 Berlin, `nightly-release.yml`, [docs/release.md](docs/release.md)):
+  finished PRs go to `main` as soon as they are done; PR titles become the release highlights, so write them for readers, and label them (`feature`, `bug`, `security`,
+  `breaking`) so the release notes group them. Don't bump the version or tag by hand for a patch.
+- **Merging:** `main` requires one check, `ci-gate` (`ci.yml`). With the `ci` label it passes only
+  when the whole CI passed; without it CI is skipped and it passes at once. So auto-merge
+  (`gh pr merge --auto --squash`) waits for CI exactly when the pull request asked for it. Admins
+  bypass the rule (batch merges); the nightly workflow marks its bump commit (docs/release.md).
 - Commit messages: imperative subject line (≤ 72 chars), body explains *why*. Sign off with
   `git commit -s` (Developer Certificate of Origin, as in CalCraft).

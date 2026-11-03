@@ -12,7 +12,9 @@ use teamcraft_core::client::OutgoingFile;
 use teamcraft_core::store::{LocalStore, MessageContent, MessageFilter};
 use teamcraft_crypto::push::seal_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::{ConversationId, PushKind, PushProvider, PushWakeUp};
+use teamcraft_proto::{
+  ConversationId, GatewayClientMessage, Id, PushKind, PushProvider, PushWakeUp, Snowflake, ThreadId,
+};
 
 #[tokio::test]
 async fn files_are_encrypted_end_to_end() {
@@ -127,6 +129,26 @@ async fn typing_shows_until_the_message_arrives() {
   bob.client.send_text(channel, None, "done typing").await.unwrap();
   settle(&mut [&mut alice, &mut bob]).await;
   assert!(alice.client.typing_users(channel).is_empty());
+}
+
+#[tokio::test]
+async fn typing_a_reply_shows_in_its_thread_only() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let thread = ThreadId::from_snowflake(Snowflake::new(4242).unwrap());
+  bob
+    .gateway
+    .send(&GatewayClientMessage::Typing {
+      conversation_id: channel,
+      maybe_thread_id: Some(thread),
+    })
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert!(alice.client.typing_users(channel).is_empty());
+  assert_eq!(
+    alice.client.typing_everywhere(),
+    vec![((channel, Some(thread)), vec![bob.client.user_id()])]
+  );
 }
 
 #[tokio::test]

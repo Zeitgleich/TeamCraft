@@ -10,7 +10,7 @@ private val PERMALINK = Regex("""teamcraft:/c/\d+/m/\d+(?:/t/\d+)?""")
 private val MENTION = Regex("""(?<![\w@])@([\w.\-]+)""")
 
 /** The core's names for "everyone here" (teamcraft-client-api `notify::CHANNEL_MENTIONS`). */
-private val CHANNEL_MENTIONS = setOf("channel", "here", "all")
+internal val CHANNEL_MENTIONS = setOf("channel", "here", "all")
 
 /** Punctuation that ends a sentence rather than the link ("see https://example.com."). */
 private const val TRAILING = ".,;:!?'\""

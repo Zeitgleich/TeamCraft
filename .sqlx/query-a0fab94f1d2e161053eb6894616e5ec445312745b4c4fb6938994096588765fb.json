@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO deleted_conversations (user_id, conversation_id)\n         SELECT unnest($1::bigint[]), $2 ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a0fab94f1d2e161053eb6894616e5ec445312745b4c4fb6938994096588765fb"
+}

@@ -67,6 +67,7 @@ impl Database {
     sender: DeviceId,
     commit: &NewMlsMessage<'_>,
     welcomes: &[NewMlsMessage<'_>],
+    maybe_group_info: Option<&[u8]>,
   ) -> Result<CommitOutcome, DbError> {
     let epoch_db = epoch_to_db(epoch)?;
     let mut tx = self.pool().begin().await?;
@@ -88,6 +89,9 @@ impl Database {
     insert_message(&mut tx, conversation, epoch_db, sender, commit).await?;
     for welcome in welcomes {
       insert_message(&mut tx, conversation, new_epoch, sender, welcome).await?;
+    }
+    if let Some(group_info) = maybe_group_info {
+      store_group_info(&mut tx, conversation, new_epoch, group_info).await?;
     }
     tx.commit().await?;
     Ok(CommitOutcome::Accepted {
@@ -121,6 +125,63 @@ impl Database {
     insert_message(&mut tx, conversation, epoch_db, sender, message).await?;
     tx.commit().await?;
     Ok(PostOutcome::Accepted)
+  }
+
+  /// Stores the group information for `epoch` if the group is still in it (a member publishing it
+  /// later than its commit). With `is_replacement`, information that holds epoch 0 is replaced
+  /// (the caller checked that this is allowed).
+  pub async fn put_mls_group_info(
+    &self,
+    conversation: ConversationId,
+    epoch: u64,
+    group_info: &[u8],
+    is_replacement: bool,
+  ) -> Result<PostOutcome, DbError> {
+    let epoch_db = epoch_to_db(epoch)?;
+    let mut tx = self.pool().begin().await?;
+    ensure_head(&mut tx, conversation).await?;
+    let current = sqlx::query_scalar!(
+      "SELECT epoch FROM mls_epoch_heads WHERE conversation_id = $1 FOR SHARE",
+      to_db(conversation),
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if current != epoch_db {
+      return Ok(PostOutcome::EpochConflict {
+        current_epoch: u64::try_from(current).unwrap_or(u64::MAX),
+      });
+    }
+    if !store_group_info(&mut tx, conversation, epoch_db, group_info).await? {
+      // Another founder's information holds epoch 0 (see `store_group_info`).
+      if !(is_replacement && epoch_db == 0) {
+        return Ok(PostOutcome::EpochConflict { current_epoch: epoch });
+      }
+      sqlx::query!(
+        "UPDATE mls_group_infos SET group_info = $2, updated_at = now() WHERE conversation_id = $1 AND epoch = 0",
+        to_db(conversation),
+        group_info,
+      )
+      .execute(&mut *tx)
+      .await?;
+    }
+    tx.commit().await?;
+    Ok(PostOutcome::Accepted)
+  }
+
+  /// The group information for the group's current epoch, if a member published one.
+  pub async fn current_mls_group_info(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<Option<(u64, Vec<u8>)>, DbError> {
+    let row = sqlx::query!(
+      r#"SELECT g.epoch, g.group_info FROM mls_group_infos g
+         JOIN mls_epoch_heads h ON h.conversation_id = g.conversation_id AND h.epoch = g.epoch
+         WHERE g.conversation_id = $1"#,
+      to_db(conversation),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(row.map(|row| (u64::try_from(row.epoch).unwrap_or(u64::MAX), row.group_info)))
   }
 
   pub async fn current_epoch(&self, conversation: ConversationId) -> Result<u64, DbError> {
@@ -226,6 +287,32 @@ async fn ensure_head(tx: &mut sqlx::PgConnection, conversation: ConversationId) 
   .execute(tx)
   .await?;
   Ok(())
+}
+
+/// Stores the group information of `epoch`; `false` when it was not stored. At epoch 0 the first
+/// information wins: groups founded by two devices at once differ, and only the first one may be
+/// joined (a repeat of the same bytes is fine). From epoch 1 on, the group is the same one and the
+/// newest information replaces the older.
+async fn store_group_info(
+  tx: &mut sqlx::PgConnection,
+  conversation: ConversationId,
+  epoch: i64,
+  group_info: &[u8],
+) -> Result<bool, DbError> {
+  let result = sqlx::query!(
+    r#"INSERT INTO mls_group_infos (conversation_id, epoch, group_info) VALUES ($1, $2, $3)
+       ON CONFLICT (conversation_id) DO UPDATE
+         SET epoch = EXCLUDED.epoch, group_info = EXCLUDED.group_info, updated_at = now()
+         WHERE mls_group_infos.epoch < EXCLUDED.epoch
+            OR (mls_group_infos.epoch = EXCLUDED.epoch
+                AND (EXCLUDED.epoch > 0 OR mls_group_infos.group_info = EXCLUDED.group_info))"#,
+    to_db(conversation),
+    epoch,
+    group_info,
+  )
+  .execute(tx)
+  .await?;
+  Ok(result.rows_affected() > 0)
 }
 
 async fn current_epoch_in(tx: &mut sqlx::PgConnection, conversation: ConversationId) -> Result<u64, DbError> {

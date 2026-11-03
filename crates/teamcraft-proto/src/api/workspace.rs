@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
-use crate::{Base64Bytes, DeviceId, HistoryPolicy, OrgBackgroundId, UnixMillis};
+use crate::{
+  Base64Bytes, DeviceId, HistoryPolicy, NotetakerPolicy, OrgBackgroundId, ScreenShareResolution, UnixMillis,
+};
 
 wire_enum! {
   /// Which log an entry belongs to.
@@ -179,6 +181,12 @@ impl Default for CallBackgroundPolicy {
   }
 }
 
+/// The shortest away timeout a workspace may set: a real buffer before somebody shows as away.
+/// Stored policies with less are applied as this.
+pub const MIN_AWAY_TIMEOUT_MINUTES: u32 = 5;
+/// The away timeout of a new workspace.
+pub const DEFAULT_AWAY_TIMEOUT_MINUTES: u32 = 15;
+
 /// Which presence features exist (PLAN.md §4, §11).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PresencePolicy {
@@ -188,7 +196,8 @@ pub struct PresencePolicy {
   /// People may write their own status. Off leaves them the presets.
   pub custom_status_enabled: bool,
   /// A device that reported itself active but has been silent this long counts as idle (clients
-  /// repeat the active report while the user works). Absent: devices decide.
+  /// repeat the active report while the user works). At least [`MIN_AWAY_TIMEOUT_MINUTES`];
+  /// [`DEFAULT_AWAY_TIMEOUT_MINUTES`] for a new workspace. Absent: devices decide.
   #[serde(
     rename = "away_timeout_minutes",
     default,
@@ -207,12 +216,22 @@ fn is_last_seen_enabled_by_default() -> bool {
   true
 }
 
+impl PresencePolicy {
+  /// The away timeout to apply: the stored one, never below the minimum (older policies may hold
+  /// less).
+  pub fn effective_away_timeout_minutes(&self) -> Option<u32> {
+    self
+      .maybe_away_timeout_minutes
+      .map(|minutes| minutes.max(MIN_AWAY_TIMEOUT_MINUTES))
+  }
+}
+
 impl Default for PresencePolicy {
   fn default() -> Self {
     Self {
       statuses_enabled: true,
       custom_status_enabled: true,
-      maybe_away_timeout_minutes: None,
+      maybe_away_timeout_minutes: Some(DEFAULT_AWAY_TIMEOUT_MINUTES),
       presets: Vec::new(),
       is_last_seen_enabled: true,
     }
@@ -227,6 +246,14 @@ pub struct DirectoryPolicy {
   pub shows_full_name: bool,
   /// Show e-mail addresses to members in directory lookups (guests never see them).
   pub shows_email: bool,
+  /// Members may replace the name from the identity provider with their own (issue #408). Existing
+  /// overrides stay until their owner clears them. Allowed when the policy predates the setting.
+  #[serde(default = "default_true")]
+  pub allow_display_name_override: bool,
+}
+
+fn default_true() -> bool {
+  true
 }
 
 impl Default for DirectoryPolicy {
@@ -235,6 +262,7 @@ impl Default for DirectoryPolicy {
       display_name_format: DisplayNameFormat::AsProvided,
       shows_full_name: true,
       shows_email: false,
+      allow_display_name_override: true,
     }
   }
 }
@@ -268,14 +296,83 @@ pub struct GuestPolicy {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_default_expiry_days: Option<u32>,
-  /// Guests open direct messages only with people they share a conversation with. Absent: the
-  /// server file decides.
+  /// Whom a guest may start a direct message with. Absent: the older
+  /// `dm_only_with_shared_conversations` decides, and without it the server file.
+  #[serde(rename = "dm_start", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_dm_start: Option<GuestDmStart>,
+  /// The 1.0.9 form of `dm_start` (`true`: [`GuestDmStart::Shared`], `false`: [`GuestDmStart::Anyone`]).
+  /// Still read from policies signed before `dm_start` existed, and written next to it as the
+  /// closest value (`nobody` as `true`) so older servers and clients stay on the safe side.
   #[serde(
     rename = "dm_only_with_shared_conversations",
     default,
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_dm_only_with_shared_conversations: Option<bool>,
+}
+
+impl GuestPolicy {
+  /// What guests may start: the explicit setting, else the 1.0.9 flag, else the server file's
+  /// default. An unknown (newer) value counts as [`GuestDmStart::Nobody`], the strictest.
+  pub fn effective_dm_start(&self, server_default: GuestDmStart) -> GuestDmStart {
+    match (&self.maybe_dm_start, self.maybe_dm_only_with_shared_conversations) {
+      (Some(GuestDmStart::Unknown(_)), _) => GuestDmStart::Nobody,
+      (Some(explicit), _) => explicit.clone(),
+      (None, Some(is_shared_only)) => GuestDmStart::from_shared_only_flag(is_shared_only),
+      (None, None) => server_default,
+    }
+  }
+
+  /// Sets `dm_start` and the 1.0.9 flag next to it; `None` clears both (the server file decides).
+  pub fn set_dm_start(&mut self, maybe_start: Option<GuestDmStart>) {
+    self.maybe_dm_only_with_shared_conversations =
+      maybe_start.as_ref().map(|start| *start != GuestDmStart::Anyone);
+    self.maybe_dm_start = maybe_start;
+  }
+}
+
+wire_enum! {
+  /// Whom a guest may start a direct or group conversation with. Members, admins and owners may
+  /// always start one with a guest; and a guest can always read and answer in a conversation
+  /// somebody else started with them (PLAN.md §12).
+  pub enum GuestDmStart {
+    /// Nobody: a guest only answers.
+    Nobody => "nobody",
+    /// People the guest already shares a conversation with.
+    Shared => "shared",
+    /// Any person the guest can find.
+    Anyone => "anyone",
+  }
+}
+
+impl GuestDmStart {
+  /// What the server file and its default give when neither the policy nor the old flag says.
+  pub const DEFAULT: Self = Self::Nobody;
+
+  /// The 1.0.9 setting `dm_only_with_shared_conversations`.
+  pub fn from_shared_only_flag(is_shared_only: bool) -> Self {
+    if is_shared_only {
+      Self::Shared
+    } else {
+      Self::Anyone
+    }
+  }
+
+  /// Whether a guest may start a conversation with a person, given whether they already share a
+  /// conversation with that person.
+  pub fn allows(&self, shares_conversation: bool) -> bool {
+    match self {
+      Self::Anyone => true,
+      Self::Shared => shares_conversation,
+      Self::Nobody | Self::Unknown(_) => false,
+    }
+  }
+}
+
+impl Default for GuestDmStart {
+  fn default() -> Self {
+    Self::DEFAULT
+  }
 }
 
 /// Rules for accounts that live in TeamCraft instead of the identity provider.
@@ -368,6 +465,62 @@ impl Default for ClientUpdatePolicy {
   }
 }
 
+/// How members may protect their key backup (e2ee.md §6.5.8). Clients apply what the owners signed;
+/// the server refuses new passphrases for members as a sanity check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RecoveryPolicy {
+  /// Whether members may still set or change a recovery passphrase instead of a recovery kit.
+  /// Existing passphrases keep opening the backup either way.
+  pub is_passphrase_allowed: bool,
+}
+
+impl Default for RecoveryPolicy {
+  fn default() -> Self {
+    // Today's behaviour for workspaces whose policy predates the setting.
+    Self {
+      is_passphrase_allowed: true,
+    }
+  }
+}
+
+/// How sharp screen shares may be (#565). Clients apply it: a share asked for at a higher
+/// resolution than the policy allows is sent at the allowed one. Not a security boundary (the
+/// SFU doesn't check it); it keeps the bandwidth of shares within what the workspace wants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ScreenSharePolicy {
+  /// The largest picture people may share their screen at: `uhd` lets them pick 4K for a share,
+  /// `standard` keeps every share at up to 1440p.
+  pub max_resolution: ScreenShareResolution,
+}
+
+impl Default for ScreenSharePolicy {
+  fn default() -> Self {
+    // 4K is offered: each share still starts at the standard size unless its sharer picks 4K.
+    Self {
+      max_resolution: ScreenShareResolution::Uhd,
+    }
+  }
+}
+
+/// Default for [`OwnerPolicy::recommended_minimum`].
+pub const DEFAULT_RECOMMENDED_OWNERS: u8 = 2;
+
+/// How many owners the admin console asks for (admin.md §2.3). Only a warning: a roster with at
+/// least one owner is always valid, a roster without one never is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct OwnerPolicy {
+  /// Fewer owners than this shows a warning in the admin console; 1 switches it off.
+  pub recommended_minimum: u8,
+}
+
+impl Default for OwnerPolicy {
+  fn default() -> Self {
+    Self {
+      recommended_minimum: DEFAULT_RECOMMENDED_OWNERS,
+    }
+  }
+}
+
 /// The security and retention policy of the workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WorkspacePolicy {
@@ -396,6 +549,18 @@ pub struct WorkspacePolicy {
   pub call_backgrounds: CallBackgroundPolicy,
   #[serde(default)]
   pub client_updates: ClientUpdatePolicy,
+  #[serde(default)]
+  pub owners: OwnerPolicy,
+  #[serde(default)]
+  pub recovery: RecoveryPolicy,
+  #[serde(default)]
+  pub screen_share: ScreenSharePolicy,
+  /// The AI notetaker of calls (e2ee.md §8.2); off when absent.
+  #[serde(default)]
+  pub notetaker: NotetakerPolicy,
+  /// Importing history from another chat (e2ee.md §4.10); off when absent.
+  #[serde(default)]
+  pub import: crate::ImportPolicy,
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -437,6 +602,11 @@ impl Default for WorkspacePolicy {
       notifications: NotificationDefaults::default(),
       call_backgrounds: CallBackgroundPolicy::default(),
       client_updates: ClientUpdatePolicy::default(),
+      owners: OwnerPolicy::default(),
+      recovery: RecoveryPolicy::default(),
+      screen_share: ScreenSharePolicy::default(),
+      notetaker: NotetakerPolicy::default(),
+      import: crate::ImportPolicy::default(),
     }
   }
 }
@@ -500,6 +670,153 @@ mod tests {
     assert_eq!(policy.compliance_archive.mode, ComplianceArchiveMode::Off);
     assert!(json.contains(r#""admin_self_join":"visible""#));
     assert!(policy.org_recovery.is_enabled_for_members && !policy.org_recovery.is_enabled_for_guests);
+    assert!(json.contains(r#""recovery":{"is_passphrase_allowed":true}"#));
+  }
+
+  #[test]
+  fn policies_without_the_recovery_group_allow_passphrases() {
+    let mut json = serde_json::to_value(WorkspacePolicy::default()).unwrap();
+    json.as_object_mut().unwrap().remove("recovery");
+    let older: WorkspacePolicy = serde_json::from_value(json).unwrap();
+    assert!(older.recovery.is_passphrase_allowed);
+    let strict: RecoveryPolicy = serde_json::from_str(r#"{"is_passphrase_allowed":false}"#).unwrap();
+    assert!(!strict.is_passphrase_allowed);
+  }
+
+  #[test]
+  fn policies_without_the_notetaker_group_have_it_off() {
+    let mut json = serde_json::to_value(WorkspacePolicy::default()).unwrap();
+    assert_eq!(json["notetaker"]["is_enabled"], serde_json::json!(false));
+    json.as_object_mut().unwrap().remove("notetaker");
+    let older: WorkspacePolicy = serde_json::from_value(json).unwrap();
+    assert!(!older.notetaker.is_enabled);
+    assert_eq!(older.notetaker.active_bot(), None);
+  }
+
+  mod guest_dm_start {
+    use super::*;
+
+    #[test]
+    fn stored_1_0_9_policies_keep_their_meaning() {
+      for (json, expected) in [
+        (r#"{}"#, GuestDmStart::Nobody),
+        (
+          r#"{"dm_only_with_shared_conversations":true}"#,
+          GuestDmStart::Shared,
+        ),
+        (
+          r#"{"dm_only_with_shared_conversations":false}"#,
+          GuestDmStart::Anyone,
+        ),
+        (r#"{"dm_start":"anyone"}"#, GuestDmStart::Anyone),
+        (
+          r#"{"dm_start":"nobody","dm_only_with_shared_conversations":false}"#,
+          GuestDmStart::Nobody,
+        ),
+        (r#"{"dm_start":"mentioned_only"}"#, GuestDmStart::Nobody),
+      ] {
+        let policy: GuestPolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(
+          policy.effective_dm_start(GuestDmStart::Nobody),
+          expected,
+          "{json}"
+        );
+      }
+    }
+
+    #[test]
+    fn absent_values_fall_back_to_the_server_default() {
+      let policy = GuestPolicy::default();
+      assert_eq!(
+        policy.effective_dm_start(GuestDmStart::Anyone),
+        GuestDmStart::Anyone
+      );
+    }
+
+    #[test]
+    fn unknown_values_are_kept_and_treated_as_nobody() {
+      let policy: GuestPolicy = serde_json::from_str(r#"{"dm_start":"mentioned_only"}"#).unwrap();
+      assert_eq!(
+        policy.maybe_dm_start,
+        Some(GuestDmStart::Unknown("mentioned_only".into()))
+      );
+      assert_eq!(
+        serde_json::to_string(&policy).unwrap(),
+        r#"{"allowed_email_domains":[],"dm_start":"mentioned_only"}"#
+      );
+      assert!(!GuestDmStart::Unknown("x".into()).allows(true));
+    }
+
+    #[test]
+    fn setting_it_mirrors_the_old_flag_on_the_safe_side() {
+      let mut policy = GuestPolicy::default();
+      for (start, flag) in [
+        (GuestDmStart::Nobody, true),
+        (GuestDmStart::Shared, true),
+        (GuestDmStart::Anyone, false),
+      ] {
+        policy.set_dm_start(Some(start));
+        assert_eq!(policy.maybe_dm_only_with_shared_conversations, Some(flag));
+      }
+      assert_eq!(
+        serde_json::to_string(&policy).unwrap(),
+        r#"{"allowed_email_domains":[],"dm_start":"anyone","dm_only_with_shared_conversations":false}"#
+      );
+      policy.set_dm_start(None);
+      assert_eq!(policy, GuestPolicy::default());
+    }
+
+    #[test]
+    fn what_each_value_allows() {
+      for (start, shared, other) in [
+        (GuestDmStart::Nobody, false, false),
+        (GuestDmStart::Shared, true, false),
+        (GuestDmStart::Anyone, true, true),
+      ] {
+        assert_eq!(start.allows(true), shared, "{start} shared");
+        assert_eq!(start.allows(false), other, "{start} other");
+      }
+    }
+  }
+
+  #[test]
+  fn a_new_workspace_has_an_away_timeout_and_short_ones_are_raised_to_the_minimum() {
+    let policy = PresencePolicy::default();
+    assert_eq!(
+      policy.maybe_away_timeout_minutes,
+      Some(DEFAULT_AWAY_TIMEOUT_MINUTES)
+    );
+    assert_eq!(policy.effective_away_timeout_minutes(), Some(15));
+    for (stored, effective) in [
+      (Some(1), Some(5)),
+      (Some(5), Some(5)),
+      (Some(30), Some(30)),
+      (None, None),
+    ] {
+      let policy = PresencePolicy {
+        maybe_away_timeout_minutes: stored,
+        ..PresencePolicy::default()
+      };
+      assert_eq!(policy.effective_away_timeout_minutes(), effective, "{stored:?}");
+    }
+    // A stored policy without the field keeps "devices decide".
+    let older: PresencePolicy =
+      serde_json::from_str(r#"{"statuses_enabled":true,"custom_status_enabled":true}"#).unwrap();
+    assert_eq!(older.maybe_away_timeout_minutes, None);
+  }
+
+  #[test]
+  fn screen_share_allows_4k_by_default_and_older_policies_still_parse() {
+    let mut value = serde_json::to_value(WorkspacePolicy::default()).unwrap();
+    assert_eq!(
+      value["screen_share"],
+      serde_json::json!({"max_resolution": "uhd"})
+    );
+    value.as_object_mut().unwrap().remove("screen_share");
+    let older: WorkspacePolicy = serde_json::from_value(value).unwrap();
+    assert_eq!(older.screen_share, ScreenSharePolicy::default());
+    let limited: ScreenSharePolicy = serde_json::from_str(r#"{"max_resolution":"standard"}"#).unwrap();
+    assert_eq!(limited.max_resolution, ScreenShareResolution::Standard);
   }
 
   #[test]

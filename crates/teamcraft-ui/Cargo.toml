@@ -13,14 +13,17 @@ rust-version.workspace = true
 workspace = true
 
 [features]
-# Built-in demo data (`MockBackend`) for UI development and screenshots: `trunk serve --features demo`,
-# then `?backend=mock`. Never part of a shipped build: release builds refuse it (src/lib.rs) and the
+# Built-in demo data (`MockBackend`) for UI development and screenshots:
+# `TEAMCRAFT_WEB_FEATURES=demo trunk serve` (scripts/build-app.sh builds the app), then `?backend=mock`. Never part of a shipped build: release builds refuse it (src/lib.rs) and the
 # release workflows check the bundle for demo data (scripts/check-no-demo-data.py).
 demo = []
 
 [dependencies]
 teamcraft-proto.workspace = true
 teamcraft-client-api = { path = "../teamcraft-client-api" }
+# Bridge source tokens are generated in the app (integrations.rs); the browser build also uses it
+# for the client core.
+teamcraft-crypto = { path = "../teamcraft-crypto" }
 leptos = { version = "0.8.22", features = ["csr"] }
 # Browser bindings: DOM access for focus, scroll measurement, storage and clipboard-free helpers.
 wasm-bindgen = "0.2"
@@ -28,14 +31,29 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = [
   "Document", "Element", "Event", "EventTarget", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement",
   "HtmlCollection", "KeyboardEvent", "MediaQueryList", "CssStyleDeclaration", "Node", "NodeList", "Storage", "Window",
-  "DomTokenList", "ScrollToOptions", "ScrollBehavior", "File", "FileList", "Navigator", "ServiceWorkerContainer", "ServiceWorker", "MessageEvent", "ServiceWorkerRegistration", "Location", "History",
-  "Blob", "BlobPropertyBag", "Url", "DragEvent", "DataTransfer", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams", "ResizeObserver", "DomRect",
+  "DomTokenList", "ScrollToOptions", "ScrollBehavior", "ScrollIntoViewOptions", "ScrollLogicalPosition", "FocusOptions", "File", "FileList", "FilePropertyBag", "Navigator", "ServiceWorkerContainer", "ServiceWorker", "MessageEvent", "ServiceWorkerRegistration", "Location", "History",
+  "Blob", "BlobPropertyBag", "ReadableStream", "Url", "DragEvent", "DataTransfer", "DataTransferItemList", "DataTransferItem", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams", "ResizeObserver", "DomRect",
+  "BroadcastChannel", "MouseEvent", "StorageManager", "ServiceWorkerState", "VisibilityState", "NotificationOptions",
+  "PointerEvent", "WheelEvent", "HtmlAnchorElement", "HtmlImageElement", "AddEventListenerOptions",
+  "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "HtmlMediaElement", "HtmlVideoElement", "Selection", "MediaStream",
+  "VisualViewport", "MutationObserver", "MutationObserverInit", "Performance", "TouchEvent", "TouchList", "Touch",
+  "HtmlDocument", "DomParser", "SupportedType", "Range", "DocumentFragment", "Text", "CharacterData", "InputEvent", "TreeWalker",
+  "ImageBitmap", "IntersectionObserver", "IntersectionObserverEntry", "TimeRanges", "HtmlButtonElement",
+  # The pre-join speaker test (speaker_test.rs): it has to start inside the click.
+  "AudioContext", "AudioContextState", "AudioBuffer", "AudioBufferSourceNode", "AudioDestinationNode",
+  "AudioNode", "AudioScheduledSourceNode", "BaseAudioContext",
+  # Decoding the user's own message sound without opening the audio device (message_sounds/page.rs).
+  "OfflineAudioContext",
 ] }
 # Fluent: the i18n format mandated by the project rules (English source + translations).
 fluent-bundle = "0.16"
 unic-langid = "0.9"
-# Real QR codes for device linking (pure Rust, no image support needed).
+# Real QR codes for device linking and the recovery kit (pure Rust, no image support needed).
 qrcode = { version = "0.14", default-features = false }
+# The recovery kit (e2ee.md §6.5): its key comes from the OS RNG (WebCrypto in the browser), its
+# text forms are cleared after use. Both already in the tree through teamcraft-crypto.
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+zeroize = "1.9.1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -43,11 +61,17 @@ thiserror.workspace = true
 base64.workspace = true
 secrecy.workspace = true
 wasm-bindgen-futures = "0.4"
+# Joins and selects of futures (the desktop mirror refreshes its reads concurrently, web_core).
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# One-shot handoff of a free download slot between inline image previews (media_cache).
+futures-channel = "0.3"
 # OIDC authorization code + PKCE for the browser flow. Only the protocol parts are used; HTTP goes
 # through the browser's fetch (no reqwest on wasm). PKCE is delegated to this audited crate.
 oauth2 = { version = "5", default-features = false }
 # oauth2 draws its random values (state, PKCE verifier) from getrandom; wasm needs the JS backend.
 getrandom = { version = "0.2", features = ["js"] }
+# The rules the apps share with mobile (row_badge); the browser build adds the engine below.
+teamcraft-core = { path = "../teamcraft-core", default-features = false }
 tracing = "0.1"
 console_error_panic_hook = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt"] }
@@ -56,6 +80,8 @@ tracing-web = "0.1"
 # The browser build runs the client core in the page (src/web_core.rs): same engine as the desktop app.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui"] }
-teamcraft-crypto = { path = "../teamcraft-crypto" }
-futures-channel = "0.3"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# Signs and verifies call key bindings for the call module (web_calls); the call engine itself is
+# in that module, which the page loads only for a call. `web-api`: the WebCodecs bindings with
+# which the desktop webview decodes the shell's call video (shell_video). `message-sounds`: the
+# synthesized sounds for new messages, which the page plays in a browser (message_sounds.rs).
+teamcraft-media = { path = "../teamcraft-media", default-features = false, features = ["call-auth", "web-api", "message-sounds"] }

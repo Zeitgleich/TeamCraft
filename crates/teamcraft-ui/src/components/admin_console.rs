@@ -1,14 +1,17 @@
 use leptos::prelude::*;
 
-use crate::admin::AdminSection;
+use crate::admin::{AdminSection, admin_error_i18n_key};
 use crate::components::admin_announcement::AnnouncementSection;
 use crate::components::admin_audit::AuditSection;
 use crate::components::admin_backgrounds::BackgroundsSection;
 use crate::components::admin_brands::BrandsSection;
 use crate::components::admin_calendar::CalendarSection;
 use crate::components::admin_channels::ChannelsSection;
+use crate::components::admin_import::ImportSection;
 use crate::components::admin_instance::InstanceSection;
+use crate::components::admin_integrations::IntegrationsSection;
 use crate::components::admin_mail::MailSection;
+use crate::components::admin_notetaker::NotetakerSection;
 use crate::components::admin_people::PeopleSection;
 use crate::components::admin_permissions::PermissionsSection;
 use crate::components::admin_retention::RetentionSection;
@@ -17,11 +20,14 @@ use crate::components::admin_settings::SettingsSection;
 use crate::components::admin_updates::UpdatesPolicySection;
 use crate::components::admin_users::UsersSection;
 use crate::components::icons::{Icon, IconName};
+use crate::components::roster_banner::RosterBanner;
+use crate::history::back_or_home;
 use crate::i18n::use_i18n;
-use crate::reactive::use_interval;
+use crate::reactive::use_interval_while_visible;
 use crate::state::use_app_state;
 
-/// How often the console reloads from the server while it is open.
+/// How often the console reloads from the server while it is open and the page is visible: admins
+/// watch audit entries and device lists change, nobody else needs the requests.
 const REFRESH_MS: u64 = 30_000;
 
 /// Administration inside the normal client. Everything here is metadata: admins can manage rooms
@@ -32,7 +38,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
   let i18n = use_i18n();
   // Backends that read the server fetch fresh data when the console opens and while it stays open.
   state.read(|backend| backend.admin_refresh());
-  use_interval(REFRESH_MS, move || state.read(|backend| backend.admin_refresh()));
+  use_interval_while_visible(REFRESH_MS, move || state.read(|backend| backend.admin_refresh()));
   let maybe_error = Memo::new(move |_| state.read(|backend| backend.admin_error()));
 
   let nav_item = move |target: AdminSection, icon: IconName| {
@@ -53,6 +59,10 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
   view! {
     <section class="admin" aria-label=move || i18n.t("admin-title")>
       <nav class="admin-nav" aria-label=move || i18n.t("admin-nav-label")>
+        <button class="admin-back" on:click=move |_| back_or_home(state)>
+          <Icon name=IconName::ChevronRight class="flip" />
+          <span>{move || i18n.t("admin-back")}</span>
+        </button>
         <h1>{move || i18n.t("admin-title")}</h1>
         <ul>
           {nav_item(AdminSection::Channels, IconName::Layers)}
@@ -69,18 +79,24 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           {nav_item(AdminSection::Retention, IconName::Clock)}
           {nav_item(AdminSection::Updates, IconName::Download)}
           {nav_item(AdminSection::Instance, IconName::Monitor)}
+          {nav_item(AdminSection::Integrations, IconName::Terminal)}
+          {nav_item(AdminSection::Notetaker, IconName::Compose)}
+          {nav_item(AdminSection::Import, IconName::Download)}
           {nav_item(AdminSection::Audit, IconName::List)}
         </ul>
-        <button class="admin-back" on:click=move |_| state.exit_admin()>
-          <Icon name=IconName::ChevronRight class="flip" />
-          <span>{move || i18n.t("admin-back")}</span>
-        </button>
       </nav>
       <div class="admin-content">
+        // On every page: an admin role nobody signed is refused by other people's apps (#765).
+        <RosterBanner />
         {move || {
-          maybe_error
-            .get()
-            .map(|detail| view! { <p class="auth-alert" role="alert">{i18n.t_with("admin-error", &[("detail", &detail)])}</p> })
+          maybe_error.get().map(|detail| {
+            let text = match admin_error_i18n_key(&detail) {
+              Some(key) => i18n.t(key),
+              None => i18n.t_with("admin-error", &[("detail", &detail)]),
+            };
+            // Sticky: a save refused far down the page still shows (forms.md, #1054).
+            view! { <p class="auth-alert admin-error" role="alert">{text}</p> }
+          })
         }}
         {move || match section {
           AdminSection::Channels => view! { <ChannelsSection /> }.into_any(),
@@ -97,6 +113,9 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           AdminSection::Instance => view! { <InstanceSection /> }.into_any(),
           AdminSection::Retention => view! { <RetentionSection /> }.into_any(),
           AdminSection::Updates => view! { <UpdatesPolicySection /> }.into_any(),
+          AdminSection::Integrations => view! { <IntegrationsSection /> }.into_any(),
+          AdminSection::Notetaker => view! { <NotetakerSection /> }.into_any(),
+          AdminSection::Import => view! { <ImportSection /> }.into_any(),
           AdminSection::Audit => view! { <AuditSection /> }.into_any(),
         }}
       </div>

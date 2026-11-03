@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="sign_in_with">Sign in with %1$s</string>
+  <string name="sign_in_or">or</string>
+  <string name="sign_in_loading">Loading the ways to sign in</string>
+  <string name="sign_in_help_link">Help with signing in</string>
+  <string name="sign_in_e2ee_note">Messages are end-to-end encrypted: only your devices can read them.</string>
+  <string name="local_email">E-mail</string>
+  <string name="local_password">Password</string>
+  <string name="local_password_show">Show password</string>
+  <string name="local_password_hide">Hide password</string>
+  <string name="local_code">One-time code</string>
+  <string name="local_code_optional">One-time code (if you set one up)</string>
+  <string name="local_sign_in_rejected">Wrong e-mail, password or code.</string>
+  <string name="local_sign_in_disabled">Signing in with e-mail and password is not available on this server. Ask your admin.</string>
+  <string name="local_sign_in_rate_limited">Too many attempts. Wait a few minutes, then try again.</string>
+  <string name="sign_in">Sign in</string>
+  <string name="sign_in_hint">Sign in with your organization account to continue.</string>
+  <string name="sign_in_failed">Sign-in failed. Please try again.</string>
+  <string name="sign_in_provider_denied">Your account isn\'t allowed to use TeamCraft. Ask your admin for access, or sign in with another account.</string>
+  <string name="sign_in_provider_misconfigured">Sign-in is set up wrongly on your organization\'s side. Tell your admin (error: %1$s).</string>
+  <string name="sign_in_provider_already_signed_in">The sign-in page had already been used. Close other sign-in tabs in your browser, then sign in again.</string>
+  <string name="sign_in_provider_refused">Your organization\'s sign-in refused (error: %1$s). Try again, or tell your admin.</string>
+  <string name="sign_out">Sign out</string>
+  <string name="local_email_missing">Enter your e-mail address.</string>
+  <string name="local_password_missing">Enter your password.</string>
+  <string name="local_code_missing">Enter the code from your authenticator app.</string>
+  <string name="local_code_incomplete">Enter all digits of the code: 6 to 8.</string>
+</resources>

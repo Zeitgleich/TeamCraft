@@ -21,6 +21,27 @@ impl<'a> Target<'a> {
   }
 }
 
+/// An audit row to write in the same transaction as the change it records, with no details.
+pub fn prepared<'a>(
+  state: &AppState,
+  actor: UserId,
+  action: &'a str,
+  target: &Target<'a>,
+) -> Result<NewAuditEntry<'a>, ApiError> {
+  let id = state
+    .ids
+    .next_snowflake()
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+  Ok(NewAuditEntry {
+    id,
+    maybe_actor: Some(actor),
+    action,
+    maybe_target_kind: Some(target.kind),
+    maybe_target_id: Some(target.id),
+    detail: "{}",
+  })
+}
+
 /// Records an action. `detail` must never contain message content, keys or tokens.
 pub async fn record(
   state: &AppState,

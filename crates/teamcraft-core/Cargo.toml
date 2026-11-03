@@ -22,10 +22,13 @@ sealed-sqlite = ["dep:rusqlite", "rusqlite/bundled"]
 # Adapter implementing the UI's backend traits (crates/teamcraft-client-api).
 ui = ["dep:teamcraft-client-api"]
 # The Web Push service worker's entry points (`handlePush`, `handleNotificationClick`), exported
-# with wasm-bindgen for web/service-worker.js. Only has an effect on wasm32.
-service-worker = []
+# with wasm-bindgen for web/service-worker.js. Only has an effect on wasm32. The worker reads the
+# notification's picture from the media cache, whose keys are the UI contract's (#543).
+service-worker = ["dep:teamcraft-client-api"]
 # Tests against the running dev stack (README.md): server on 8081, Keycloak on 8080.
 integration = []
+# Test kits for other crates' tests (`api::black_hole`: Happy Eyeballs with a black-holed IPv6).
+test-support = []
 
 [dependencies]
 teamcraft-proto.workspace = true
@@ -44,17 +47,22 @@ rand_core = { version = "0.6.4", features = ["getrandom"] }
 zeroize = "1.9.1"
 # Async plumbing shared by the gateway abstraction and the in-process fake server.
 futures-channel = "0.3"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+futures-util = { version = "0.3", default-features = false, features = ["async-await", "async-await-macro", "sink", "std"] }
 # REST client; uses fetch in the browser.
 reqwest.workspace = true
 # Thumbnails of image attachments, made by the sender's client (already in the tree via the
 # desktop stack; only the common decoders, no native code).
 # Link previews: the URL in a message and the page's image URL (already in the tree via reqwest).
 url = "2.5.8"
-image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 teamcraft-client-api = { path = "../teamcraft-client-api", optional = true }
+# The shared retry policy (src/retry.rs); natively also Happy Eyeballs for the WebSocket connects
+# (src/api/connect.rs).
+teamcraft-net.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Upload bodies streamed in chunks, so the bytes sent are counted for the progress (src/api/http.rs).
+reqwest = { workspace = true, features = ["stream"] }
 # SQLCipher: e2ee.md §9. Version matches the libsqlite3-sys already in the lock file (sqlx).
 rusqlite = { version = "0.39", optional = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
@@ -64,15 +72,23 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 # src/api/tls.rs; same rustls as reqwest. Mozilla roots for Android and as a fallback.
 rustls = "0.23.46"
 webpki-roots = "1.0.10"
+# Proxy settings from the environment, macOS and Windows for the native WebSockets (src/api/proxy.rs),
+# the same matcher reqwest uses for REST; already in the tree through reqwest.
+hyper-util = { version = "0.1.21", default-features = false, features = ["client-proxy", "client-proxy-system"] }
+http = "1.5"
 # Full-text search over decrypted messages and shared index segments (e2ee.md §10.1). Native only:
 # tantivy doesn't target wasm32; the browser falls back to scanning the local store.
 tantivy = { version = "0.27.0", default-features = false, features = ["lz4-compression", "stemmer"] }
+# SVG thumbnails (issue #337): pure Rust, without text shaping, system fonts or embedded raster
+# images, so an SVG can't make it load anything. Native only: the browser rasterizes SVG itself,
+# which keeps the web bundle within its budget.
+resvg = { version = "0.49.0", default-features = false }
 
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android")))'.dependencies]
-# The operating system's roots for the WebSockets (src/api/tls.rs); already in the tree via
-# tokio-tungstenite's native-roots feature.
-rustls-native-certs = "0.8.5"
+# The operating system's certificate verification for the WebSockets (src/api/tls.rs), as reqwest
+# does for HTTP; already in the tree through reqwest.
+rustls-platform-verifier = "0.7.1"
 
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))'.dependencies]
 # OS keystore for the database key (Keychain, Secret Service, Windows Credential Manager). Android
@@ -95,6 +111,8 @@ web-sys = { version = "0.3.83", features = [
   "AesGcmParams",
   "AesKeyGenParams",
   "BinaryType",
+  "Blob",
+  "BlobPropertyBag",
   "Client",
   "ClientQueryOptions",
   "ClientType",
@@ -104,10 +122,16 @@ web-sys = { version = "0.3.83", features = [
   "CryptoKey",
   "DomException",
   "DomStringList",
+  "Document",
+  "Element",
   "Event",
   "ExtendableEvent",
+  "File",
+  "HtmlAnchorElement",
+  "HtmlElement",
   "IdbDatabase",
   "IdbFactory",
+  "IdbKeyRange",
   "IdbObjectStore",
   "IdbOpenDbRequest",
   "IdbRequest",
@@ -118,6 +142,7 @@ web-sys = { version = "0.3.83", features = [
   "Notification",
   "NotificationEvent",
   "NotificationOptions",
+  "Node",
   "PushManager",
   "PushSubscription",
   "PushSubscriptionJson",
@@ -126,18 +151,40 @@ web-sys = { version = "0.3.83", features = [
   "ServiceWorkerGlobalScope",
   "ServiceWorkerRegistration",
   "SubtleCrypto",
+  "Url",
   "WebSocket",
   "Window",
   "WindowClient",
   "WorkerGlobalScope",
+  # Blob transfers with progress (fetch reports none for uploads): src/api/xhr.rs.
+  "ProgressEvent",
+  "XmlHttpRequest",
+  "XmlHttpRequestEventTarget",
+  "XmlHttpRequestResponseType",
+  "XmlHttpRequestUpload",
 ] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+# The call view the apps keep from the call events, for the roster tests (tests/suite/calls.rs).
+teamcraft-client-api = { path = "../teamcraft-client-api" }
+# A TLS server with a certificate nobody trusts, as a TLS-inspecting proxy presents (api/http.rs
+# tests); both already in the tree (rcgen through wtransport, tokio-rustls through reqwest).
+rcgen = "0.14.10"
+tokio-rustls = { version = "0.26.6", default-features = false }
 # A fake identity provider signing ES256 ID tokens in the attestation tests (both already in the
 # tree through teamcraft-crypto).
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "std"] }
 base64 = "0.23.1"
+# Peak heap use in the large-upload memory test (tests/upload_memory.rs): a counting global
+# allocator needs `unsafe`, which the workspace forbids in our own code.
+peak_alloc = "0.3.0"
+
+# The desktop build's zbus features, so the keystore tests see the same Secret Service backend: with
+# `tokio`, zbus' blocking API nests a tokio runtime (store/key_source.rs). Already in the tree
+# through keyring.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+zbus = { version = "5.13", default-features = false, features = ["tokio"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 # Store and crypto round trips in headless Chromium (tests/web.rs).

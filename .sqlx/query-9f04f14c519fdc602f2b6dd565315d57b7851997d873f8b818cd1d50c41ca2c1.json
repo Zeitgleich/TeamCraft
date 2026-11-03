@@ -1,0 +1,154 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.user_id,\n                -- A conversation the member never configured follows their setting for its space,\n                -- else their own default level (NULL: the instance default).\n                CASE WHEN m.notification_overridden THEN m.notification_level\n                     ELSE COALESCE(sm.notification_level, s.notification_level) END AS \"notification_level?\",\n                CASE WHEN m.notification_overridden THEN m.muted_until\n                     ELSE GREATEST(m.muted_until, sm.muted_until) END AS muted_until,\n                u.presence_pref, u.dnd_until,\n                COALESCE(s.push_mode, 'away_only') AS \"push_mode!\", s.dnd_schedule, s.uses_desktop_attention,\n                tf.user_id IS NOT NULL AS \"is_following_thread!\",\n                d.id AS device_id, d.push_provider AS \"push_provider!\", d.push_token AS \"push_token!\",\n                d.push_key AS \"push_key!\"\n         FROM memberships m\n         JOIN conversations c ON c.id = m.conversation_id\n         LEFT JOIN space_members sm ON sm.space_id = c.space_id AND sm.user_id = m.user_id\n         JOIN users u ON u.id = m.user_id AND u.deactivated_at IS NULL\n         JOIN devices d ON d.user_id = u.id AND d.revoked_at IS NULL AND d.push_provider IS NOT NULL\n         LEFT JOIN user_notification_settings s ON s.user_id = u.id\n         LEFT JOIN threads_followed tf ON tf.user_id = u.id AND tf.conversation_id = m.conversation_id\n                                      AND tf.thread_id = $3 AND tf.state = 'following'\n         WHERE m.conversation_id = $1 AND m.user_id <> $2\n         ORDER BY m.user_id, d.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "notification_level?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "muted_until",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "presence_pref",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "presence_pref"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "dnd_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "dnd_until"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "push_mode!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "dnd_schedule",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "user_notification_settings",
+            "name": "dnd_schedule"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "uses_desktop_attention",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "user_notification_settings",
+            "name": "uses_desktop_attention"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "is_following_thread!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "device_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "push_provider!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "push_provider"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "push_token!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "push_token"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "push_key!",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "push_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      false,
+      true,
+      null,
+      true,
+      true,
+      null,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "9f04f14c519fdc602f2b6dd565315d57b7851997d873f8b818cd1d50c41ca2c1"
+}

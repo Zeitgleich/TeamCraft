@@ -155,6 +155,8 @@ async fn the_dnd_schedule_from_the_server_is_checked_again_with_its_overrides() 
       send_read_receipts: true,
       maybe_dnd_schedule: Some(schedule),
       maybe_uses_desktop_attention: None,
+      maybe_level: None,
+      maybe_default_level: None,
     },
   );
   bob.client.refresh_notification_settings().await.unwrap();

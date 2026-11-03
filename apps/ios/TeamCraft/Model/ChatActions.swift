@@ -11,6 +11,8 @@ enum ChatAction {
   case setActivity(isIdle: Bool)
   case sendMessage(SendRequest)
   case downloadFile(conversationId: String, messageId: String)
+  /// One file of a message (the image viewer fetches only the picture on screen).
+  case downloadAttachment(conversationId: String, messageId: String, fileId: String)
   /// Unread again from `fromMessageId` on (account data, synced to the user's devices).
   case markUnread(conversationId: String, fromMessageId: String)
   case forward(fromConversationId: String, messageId: String, toConversationId: String)
@@ -21,10 +23,29 @@ enum ChatAction {
   /// An own message the server rejected: send it again, or drop it.
   case retrySend(conversationId: String, messageId: String)
   case discardUnsent(conversationId: String, messageId: String)
+  /// Stops one file of an own message that is still going up; the message goes without it.
+  case cancelUpload(conversationId: String, messageId: String, fileId: String)
   case joinChannel(conversationId: String)
+  /// Leaves a channel (never a DM); the core sends it once the connection is back.
+  case leaveChannel(conversationId: String, deletesIfLast: Bool)
+  /// Deletes a channel for everybody, after the user confirmed it.
+  case deleteChannel(conversationId: String)
+  /// Deletes a space with its channels for everybody, after the user confirmed it.
+  case deleteSpace(spaceId: String)
   case createChannel(spaceId: String, name: String)
   /// The direct conversation with a person; created when there is none yet.
   case openDm(userId: String)
+  /// The group DM with exactly these people (and the user); created when there is none yet.
+  case openGroupDm(userIds: [String])
+  /// Reads again how far the others read: receipts sent while the app was offline never arrive.
+  case refreshReadReceipts(conversationId: String)
+  /// The reactions to these own messages were on screen, or the user jumped to them: seen on
+  /// every device (issue #1009).
+  case markReactionsSeen(conversationId: String, messageIds: [String])
+  case loadOlderHistory(conversationId: String)
+  /// The composer's unsent text, kept by the core (synced to the user's devices) so it survives the
+  /// app being killed (issue #158). An empty body clears it.
+  case setDraft(conversationId: String, maybeThreadId: String?, body: String)
 
   /// The wire form.
   var json: String {
@@ -51,6 +72,8 @@ enum ChatAction {
       object = ["action": "send_message", "message": request.object]
     case .downloadFile(let conversation, let message):
       object = ["action": "download_file", "conversation": conversation, "message": message]
+    case .downloadAttachment(let conversation, let message, let file):
+      object = ["action": "download_attachment", "conversation": conversation, "message": message, "file_id": file]
     case .markUnread(let conversation, let message):
       object = ["action": "mark_unread", "conversation": conversation, "from": message]
     case .forward(let from, let message, let to):
@@ -65,12 +88,33 @@ enum ChatAction {
       object = ["action": "retry_send", "conversation": conversation, "message": message]
     case .discardUnsent(let conversation, let message):
       object = ["action": "discard_unsent", "conversation": conversation, "message": message]
+    case .cancelUpload(let conversation, let message, let file):
+      object = ["action": "cancel_upload", "conversation": conversation, "message": message, "file_id": file]
     case .joinChannel(let conversation):
       object = ["action": "join_channel", "conversation": conversation]
     case .createChannel(let space, let name):
       object = ["action": "create_channel", "space": space, "name": name]
     case .openDm(let user):
       object = ["action": "open_dm", "user": user]
+    case .openGroupDm(let users):
+      object = ["action": "open_group_dm", "users": users]
+    case .refreshReadReceipts(let conversation):
+      object = ["action": "refresh_read_receipts", "conversation": conversation]
+    case .leaveChannel(let conversation, let deletesIfLast):
+      object = ["action": "leave_channel", "conversation": conversation, "deletes_if_last": deletesIfLast]
+    case .deleteChannel(let conversation):
+      object = ["action": "delete_channel", "conversation": conversation]
+    case .deleteSpace(let space):
+      object = ["action": "delete_space", "space": space]
+    case .markReactionsSeen(let conversation, let messages):
+      object = ["action": "mark_reactions_seen", "conversation": conversation, "messages": messages]
+    case .loadOlderHistory(let conversation):
+      object = ["action": "load_older_history", "conversation": conversation]
+    case .setDraft(let conversation, let maybeThread, let body):
+      object = [
+        "action": "set_draft", "conversation": conversation,
+        "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(), "body": body,
+      ]
     }
     return jsonText(object)
   }
@@ -124,6 +168,11 @@ enum ChatQuery {
   case permalink(conversationId: String, messageId: String)
   /// The channels of a space the user is in or can join.
   case browseChannels(spaceId: String)
+  /// Others' reactions to the user's messages here that the user hasn't seen.
+  case unseenReactions(conversationId: String)
+  case olderHistory(conversationId: String)
+  /// The composer text left unsent here, from this or another device of the user.
+  case draft(conversationId: String, maybeThreadId: String?)
 
   var json: String {
     switch self {
@@ -141,6 +190,14 @@ enum ChatQuery {
       return jsonText(["kind": "permalink", "conversation": conversation, "message": message])
     case .browseChannels(let space):
       return jsonText(["kind": "browse_channels", "space": space])
+    case .unseenReactions(let conversation):
+      return jsonText(["kind": "unseen_reactions", "conversation": conversation])
+    case .olderHistory(let conversation):
+      return jsonText(["kind": "older_history", "conversation": conversation])
+    case .draft(let conversation, let maybeThread):
+      return jsonText([
+        "kind": "draft", "conversation": conversation, "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(),
+      ])
     }
   }
 }

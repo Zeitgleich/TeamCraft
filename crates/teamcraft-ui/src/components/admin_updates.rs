@@ -4,6 +4,7 @@ use teamcraft_proto::{ClientUpdateMode, ClientUpdatePolicy, UpdateChannel};
 
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_policy::{PolicyBlockerNote, PolicyFooter, SelectRow, use_policy_draft};
+use crate::form_errors::error_id;
 use crate::i18n::use_i18n;
 
 /// Desktop updates (docs/updates.md §4.4): part of the signed policy, so every desktop app follows
@@ -142,6 +143,17 @@ fn TextRow(
   let i18n = use_i18n();
   let is_invalid = RwSignal::new(false);
   let hint_id = format!("{id}-hint");
+  let message_id = error_id(id);
+  let described = {
+    let (hint_id, message_id) = (hint_id.clone(), message_id.clone());
+    move || {
+      if is_invalid.get() {
+        format!("{hint_id} {message_id}")
+      } else {
+        hint_id.clone()
+      }
+    }
+  };
   view! {
     <div class="field">
       <label for=id>{move || i18n.t(label)}</label>
@@ -150,7 +162,7 @@ fn TextRow(
         class="input"
         translate="no"
         placeholder=placeholder
-        aria-describedby=hint_id.clone()
+        aria-describedby=described
         aria-invalid=move || is_invalid.get().then_some("true")
         prop:value=move || value.get()
         on:change=move |ev| {
@@ -165,7 +177,7 @@ fn TextRow(
         }
       />
       <p id=hint_id class="muted-text small">{move || i18n.t(hint)}</p>
-      {move || is_invalid.get().then(|| view! { <p class="composer-error small" role="alert">{i18n.t(error)}</p> })}
+      <p id=message_id class="field-error">{move || is_invalid.get().then(|| i18n.t(error))}</p>
     </div>
   }
 }

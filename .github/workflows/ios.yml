@@ -18,6 +18,7 @@ on:
       - "Cargo.lock"
       - ".github/workflows/ios.yml"
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - "apps/ios/**"
       - "crates/teamcraft-ffi/**"
@@ -44,6 +45,10 @@ env:
 
 jobs:
   build-and-test:
+    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
+    # before merging, and main gets one run per batch. This keeps the runner budget for main and
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     # macOS 26 image: Xcode 26 (its default) with the iOS 26 SDK and simulators.
     runs-on: macos-26
     timeout-minutes: 90
@@ -56,6 +61,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ios
+          # Only main saves (the repository's 10 GB cache budget); pull requests restore main's cache.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Rust core as XCFramework and Swift bindings
         # Debug profile: much faster to build than release, and the tests never run the core.
         run: apps/ios/scripts/build-xcframework.sh --debug

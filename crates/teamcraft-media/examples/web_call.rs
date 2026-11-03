@@ -18,7 +18,9 @@ use futures::{StreamExt, future};
 use js_sys::{Function, Object, Reflect};
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioSink, AudioSource};
 use teamcraft_media::bwe::BweConfig;
+use teamcraft_media::call_cues::StatusCues;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, CallStats};
+use teamcraft_media::call_resilience::ResilienceConfig;
 use teamcraft_media::call_web::{WebCall, WebCallConfig};
 use teamcraft_media::jitter::JitterBufferConfig;
 use teamcraft_proto::{AudioCodec, DeviceId, MediaCapabilities, VideoCodec};
@@ -69,6 +71,7 @@ pub async fn join_dev_call(
       video_encoders: vec![VideoCodec::H264],
       video_decoders: vec![VideoCodec::H264, VideoCodec::Vp9],
       max_simulcast_layers: 1,
+      max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
     },
     bwe: BweConfig::default(),
   };
@@ -81,7 +84,7 @@ pub async fn join_dev_call(
   };
   let config = WebCallConfig {
     sfu_url,
-    maybe_certificate_hash,
+    certificate_hashes: maybe_certificate_hash.into_iter().collect(),
     token,
     engine,
     source: parse_source(&source)?,
@@ -89,6 +92,14 @@ pub async fn join_dev_call(
     maybe_trusted_roster: None,
     maybe_authenticator: None,
     jitter: JitterBufferConfig::default(),
+    resilience: ResilienceConfig::browser(),
+    // The test page has one dev token; it is reused for a rejoin while still valid.
+    maybe_ticket_source: None,
+    maybe_trust_source: None,
+    status_cues: StatusCues::default(),
+    is_muted_at_start: false,
+    // The development page has no Content-Security-Policy.
+    maybe_worklet_url: None,
   };
   let call = WebCall::join(config)
     .await
@@ -195,14 +206,21 @@ async fn pump(
       future::Either::Left(Some(Control::StartScreenShare { maybe_stream, done })) => {
         let result = match maybe_stream {
           Some(stream) => call.share_video_stream(stream).await,
-          None => call.start_screen_share().await,
+          None => call
+            .start_screen_share(&Default::default(), false)
+            .await
+            .map(|_| ()),
         }
         .map_err(|error| error.to_string());
         let _ = done.send(result);
       },
       future::Either::Left(Some(Control::StopScreenShare)) => call.stop_screen_share(),
       future::Either::Left(Some(Control::StartCamera(done))) => {
-        let result = call.start_camera(None).await.map_err(|error| error.to_string());
+        let limit = teamcraft_media::video::camera_limit(None);
+        let result = call
+          .start_camera(None, limit)
+          .await
+          .map_err(|error| error.to_string());
         let _ = done.send(result);
       },
       future::Either::Left(Some(Control::StopCamera)) => call.stop_camera(),

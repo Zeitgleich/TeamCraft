@@ -427,6 +427,8 @@ mod d7_quotas {
       max_invitees: 10,
       guest_token_secret: "0123456789abcdef0123456789abcdef".to_owned().into(),
       guest_grace_secs: 7200,
+      max_shared_link_guests: 50,
+      start_ring_lead_secs: 3600,
       maybe_inbox_token: None,
       smtp: None,
       mail_texts: MailTexts::default(),
@@ -648,8 +650,9 @@ mod a8_admin_channels_of_user {
     let (alice, carol) = (owner(), member("carol"));
     let carol_id = user_id(&app, &carol).await;
     user_id(&app, &alice).await;
-    let with_carol = channel_with(&app, &[&alice, &carol]).await;
-    let _without = channel_with(&app, &[&alice]).await;
+    // Alice creates both (`channel_with` makes the owner the creator, so she isn't added again).
+    let with_carol = channel_with(&app, &[&carol]).await;
+    let _without = channel_with(&app, &[]).await;
 
     let reply = app
       .get(&alice, &format!("/admin/conversations?user_id={carol_id}"))

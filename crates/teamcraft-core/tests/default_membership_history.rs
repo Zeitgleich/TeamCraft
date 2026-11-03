@@ -1,5 +1,7 @@
 //! A member the server put into a channel (an instance default) claims the place with a signed
 //! self-add, which only ever asks for history from the join on.
+// Runs on tokio; the wasm tests are web.rs and web_service_worker.rs.
+#![cfg(not(target_arch = "wasm32"))]
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
 
@@ -21,12 +23,14 @@ async fn a_default_member_joins_the_group_and_reads_only_from_the_join_on() {
     .create_channel_with(
       alice.space().await,
       ChannelOptions {
+        maybe_idempotency_key: None,
         name: "general".into(),
         is_private: false,
         maybe_topic: None,
         maybe_category: None,
         // Even a channel that shows its history to members does not show it to a self-add.
         maybe_history: Some(HistoryPolicy::Full),
+        is_integration: false,
       },
     )
     .await

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM create_idempotency_keys WHERE ctid IN (\n           SELECT ctid FROM create_idempotency_keys\n           WHERE created_at < now() - make_interval(days => $1) LIMIT $2 FOR UPDATE SKIP LOCKED)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fb71f0055e684852f8532c4d37fe864615e83e5b50609785952d74eb7473809d"
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-link-requests"
+description = "Enables the core_link_requests command without any pre-configured scope."
+commands.allow = ["core_link_requests"]
+
+[[permission]]
+identifier = "deny-core-link-requests"
+description = "Denies the core_link_requests command without any pre-configured scope."
+commands.deny = ["core_link_requests"]

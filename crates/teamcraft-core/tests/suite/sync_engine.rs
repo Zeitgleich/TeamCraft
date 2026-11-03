@@ -278,6 +278,27 @@ async fn an_expired_token_keeps_queued_messages_pending() {
   assert_eq!(alice.client.flush_outbox().await.unwrap().sent, 2);
 }
 
+/// Hotel Wi-Fi before signing in: the portal's login page answers instead of the server (issue
+/// #157). Queued messages wait for the network instead of failing as unreadable answers.
+#[tokio::test]
+async fn a_captive_portal_keeps_queued_messages_pending() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "on the train")
+    .await
+    .unwrap();
+
+  server.set_behind_captive_portal(alice.client.user_id(), true);
+  let _ = alice.client.send_text(channel, None, "boarding now").await;
+  let report = alice.client.flush_outbox().await.unwrap();
+  assert_eq!((report.pending, report.failed), (1, 0));
+
+  server.set_behind_captive_portal(alice.client.user_id(), false);
+  assert_eq!(alice.client.flush_outbox().await.unwrap().sent, 1);
+}
+
 #[tokio::test]
 async fn gateway_resumes_and_falls_back_to_full_sync() {
   let server = FakeServer::new();
@@ -373,6 +394,36 @@ async fn direct_messages_work_both_ways() {
   bob.client.send_text(dm, None, "hi Alice").await.unwrap();
   settle(&mut [&mut alice, &mut bob]).await;
   assert_eq!(alice.texts(dm), vec!["hi Alice"]);
+}
+
+#[tokio::test]
+async fn group_direct_messages_reach_everyone() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let (bob_id, carol_id) = (bob.client.user_id(), carol.client.user_id());
+
+  // Duplicates and the user themself are ignored.
+  let group = alice
+    .client
+    .open_group_dm(&[bob_id, carol_id, bob_id, alice.client.user_id()])
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  assert_eq!(
+    carol
+      .client
+      .open_group_dm(&[alice.client.user_id(), bob_id])
+      .await
+      .unwrap(),
+    group,
+    "the same people find the same group"
+  );
+  carol.client.send_text(group, None, "hi both").await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  assert_eq!(alice.texts(group), vec!["hi both"]);
+  assert_eq!(bob.texts(group), vec!["hi both"]);
 }
 
 #[tokio::test]
@@ -535,4 +586,31 @@ async fn client_reopens_from_its_store() {
   bob.client.send_text(channel, None, "yes").await.unwrap();
   settle(&mut [&mut alice, &mut bob]).await;
   assert_eq!(alice.texts(channel), vec!["still there?", "yes"]);
+}
+
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn every_user_gets_one_notes_to_self() {
+  use teamcraft_client_api::backend::ChatBackend;
+
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll_with_settings(&server, "Alice", settings().with_notes_to_self()).await;
+  let me = alice.client.user_id();
+  let (gateway, _) = alice.client.connect_gateway().await.unwrap();
+  alice.gateway = gateway;
+
+  let notes = common::backend_of(&alice).direct_conversations();
+  assert_eq!(notes.len(), 1, "the sync made the notes");
+  let id = notes[0].id;
+  alice.client.send_text(id, None, "buy milk").await.unwrap();
+  settle(&mut [&mut alice]).await;
+  assert_eq!(alice.texts(id), vec!["buy milk"]);
+
+  // Another sync finds them and makes no second conversation.
+  let (gateway, _) = alice.client.connect_gateway().await.unwrap();
+  alice.gateway = gateway;
+  let notes = common::backend_of(&alice).direct_conversations();
+  assert_eq!(notes.len(), 1);
+  assert!(notes[0].is_notes_to_self, "its only member is the user");
+  assert_eq!(alice.client.open_dm(me).await.unwrap(), id);
 }

@@ -2,10 +2,27 @@ use axum::Json;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use teamcraft_db::DbError;
-use teamcraft_proto::{ErrorBody, ErrorCode};
+use teamcraft_proto::{DependencyName, ErrorBody, ErrorCode};
 use tracing::error;
 
 use crate::auth::AuthError;
+use crate::dependencies::CircuitOpen;
+
+/// `Retry-After` of a 503 for a backend that is not reachable (issue #743): long enough that
+/// clients don't add load while it recovers, short enough that they notice its return soon.
+pub const UNAVAILABLE_RETRY_AFTER_SECS: u64 = 30;
+/// `Retry-After` of a 503 for a database that failed for a moment (pool timeout, reset).
+pub const DATABASE_RETRY_AFTER_SECS: u64 = 5;
+
+/// How long clients wait before they ask again when the object storage failed (an outage of the
+/// storage provider, #742). Clients back off further on their own; this keeps a storm of retries
+/// off the server and the storage while it recovers.
+const STORAGE_RETRY_AFTER_SECS: u64 = 30;
+
+/// In a response's extensions: the answer failed because the database looks down, for the database's
+/// breaker around the request (`outage_gate.rs`).
+#[derive(Debug, Clone, Copy)]
+pub struct DatabaseOutage;
 
 /// Every error a handler can return; maps to a status code and the stable `error_code` body.
 #[derive(Debug, thiserror::Error)]
@@ -29,22 +46,88 @@ pub enum ApiError {
   /// Compare-and-swap on a versioned object failed.
   #[error("the stored version is {current_version}, not the expected one")]
   VersionConflict { current_version: u64 },
+  /// A roster without an owner: nobody could ever sign a roster or policy again (admin.md §2.3).
+  #[error("the roster must keep at least one owner")]
+  LastOwner,
+  /// An admin tried to delete their own account.
+  #[error("admins can't delete their own account")]
+  CannotDeleteSelf,
+  /// Deleting the account would leave the workspace without an active admin.
+  #[error("the workspace must keep at least one active admin")]
+  LastAdmin,
+  #[error("make another member channel admin first, or delete the channel")]
+  LastChannelAdmin,
+  #[error("nobody else is in this channel: leaving deletes it")]
+  LastMember,
+  #[error("an import account holds this channel")]
+  ImportInProgress,
+  #[error("the space holds private channels you aren't in")]
+  SpaceHasHiddenChannels,
+  #[error("assign a channel admin before restoring this channel")]
+  ChannelNeedsAdmin,
+  #[error("not allowed for DMs and group DMs")]
+  NotAChannel,
+  /// Channel members must belong to the channel's space; the user is not in it (yet).
+  #[error("the user is not a member of the space")]
+  NotSpaceMember,
+  /// The signed policy doesn't name the caller as the importer, or the import period is over.
+  #[error("this account may not import")]
+  ImportNotAllowed,
+  /// No ID is left for imported messages below the conversation's first live message.
+  #[error("no room for imported messages before the conversation's first message")]
+  ImportWindowFull,
+  /// A guest tried to start a direct message that `guest_dm_start` doesn't allow.
+  #[error("guests may not start this direct message")]
+  GuestDmNotAllowed,
+  /// The admin's last request to join was declined or withdrawn and would not have expired yet.
+  #[error("asked to join this channel recently; ask again once that request would have expired")]
+  AdminJoinRequestTooSoon,
   #[error("the user has no key package left")]
   KeyPackageExhausted,
+  /// An uploaded key package doesn't parse, isn't validly signed, or is (nearly) expired.
+  #[error("invalid key package: {0}")]
+  InvalidKeyPackage(String),
   #[error("payload too large: {0}")]
   PayloadTooLarge(String),
   /// Too many requests; retry after this many seconds.
   #[error("too many requests, retry in {retry_after_secs} seconds")]
   RateLimited { retry_after_secs: u64 },
+  /// The account already has the most devices one call allows.
+  #[error("the account already has {max_devices} devices in this call")]
+  CallDeviceLimit { max_devices: usize },
   /// A needed backend (e.g. attachment storage) is not configured or not reachable.
   #[error("unavailable: {0}")]
   Unavailable(String),
+  /// A backend is down (its circuit breaker is open, see `dependencies.rs`): 503 with
+  /// `Retry-After` until its next probe.
+  #[error("{dependency} is unavailable, retry in {retry_after_secs} seconds")]
+  DependencyDown {
+    dependency: DependencyName,
+    retry_after_secs: u64,
+  },
+  /// The server is at its limit for this kind of work (e.g. image decoding), or the object storage
+  /// is down ([`Self::storage_unavailable`]); retry after this many seconds. 503 with `Retry-After`.
+  #[error("busy: {what}, retry in {retry_after_secs} seconds")]
+  Busy {
+    what: &'static str,
+    retry_after_secs: u64,
+  },
   /// The workspace policy requires a second factor and the sign-in had none.
   #[error("multi-factor authentication is required")]
   MfaRequired,
   /// A share link that is unknown, revoked, expired or used up (one answer for all, so links cannot be probed).
   #[error("this link is not available")]
   ShareUnavailable,
+  /// An admin switched local accounts off: no sign-in with e-mail and password.
+  #[error("sign-in with e-mail and password is turned off on this server")]
+  LocalAccountsDisabled,
+  /// The signed policy lets members protect their key backup only with a recovery kit: a new or
+  /// changed recovery passphrase is refused (e2ee.md §6.5.8).
+  #[error("the workspace policy allows only a recovery kit, no new recovery passphrase")]
+  RecoveryPassphraseNotAllowed,
+  /// The signed policy does not let members replace the name from the identity provider.
+  #[error("the workspace policy does not allow changing the display name")]
+  DisplayNameOverrideNotAllowed,
   /// The request arrived on a host name no brand is configured for and `unknown_host = "reject"`.
   #[error("this host name is not served here")]
   UnknownHost,
@@ -53,10 +136,33 @@ pub enum ApiError {
 }
 
 impl ApiError {
+  /// The object storage failed or answered "unavailable" while it holds `what`: 503 with
+  /// `Retry-After`, so clients retry later instead of at once.
+  pub fn storage_unavailable(what: &'static str) -> Self {
+    Self::Busy {
+      what,
+      retry_after_secs: STORAGE_RETRY_AFTER_SECS,
+    }
+  }
+
   pub fn space_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::SpaceNotFound,
       what: "space",
+    }
+  }
+
+  pub fn space_image_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::SpaceImageNotFound,
+      what: "space image",
+    }
+  }
+
+  pub fn channel_image_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::ChannelImageNotFound,
+      what: "channel image",
     }
   }
 
@@ -74,10 +180,25 @@ impl ApiError {
     }
   }
 
+  /// The admin's request to join is no longer open (decided, withdrawn or expired).
+  pub fn admin_join_request_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::AdminJoinRequestNotFound,
+      what: "admin join request",
+    }
+  }
+
   pub fn device_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::DeviceNotFound,
       what: "device",
+    }
+  }
+
+  pub fn device_link_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::DeviceLinkNotFound,
+      what: "link request",
     }
   }
 
@@ -195,22 +316,50 @@ impl ApiError {
 
   pub fn status(&self) -> StatusCode {
     match self {
-      Self::Auth(AuthError::MissingToken | AuthError::InvalidToken(_)) => StatusCode::UNAUTHORIZED,
+      Self::Auth(
+        AuthError::MissingToken
+        | AuthError::InvalidToken(_)
+        | AuthError::Expired(_)
+        | AuthError::SessionEnded
+        | AuthError::SessionTimedOut
+        | AuthError::AccountDeleted,
+      ) => StatusCode::UNAUTHORIZED,
       Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated)
       | Self::Forbidden(_)
+      | Self::GuestDmNotAllowed
+      | Self::ImportNotAllowed
+      | Self::RecoveryPassphraseNotAllowed
+      | Self::DisplayNameOverrideNotAllowed
       | Self::MfaRequired => StatusCode::FORBIDDEN,
       Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
-      Self::InvalidRequest(_) => StatusCode::BAD_REQUEST,
+      Self::NotAChannel
+      | Self::InvalidRequest(_)
+      | Self::InvalidKeyPackage(_)
+      | Self::LastOwner
+      | Self::NotSpaceMember => StatusCode::BAD_REQUEST,
       Self::Conflict(_)
+      | Self::AdminJoinRequestTooSoon
+      | Self::CallDeviceLimit { .. }
+      | Self::CannotDeleteSelf
+      | Self::LastAdmin
+      | Self::LastChannelAdmin
+      | Self::LastMember
+      | Self::ImportInProgress
+      | Self::SpaceHasHiddenChannels
+      | Self::ChannelNeedsAdmin
+      | Self::ImportWindowFull
       | Self::KeyPackageExhausted
       | Self::EpochConflict { .. }
       | Self::VersionConflict { .. } => StatusCode::CONFLICT,
       Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
       Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
-      Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+      Self::Unavailable(_) | Self::Busy { .. } | Self::DependencyDown { .. } => {
+        StatusCode::SERVICE_UNAVAILABLE
+      },
       Self::Database(error) if error.is_transient() => StatusCode::SERVICE_UNAVAILABLE,
       Self::ShareUnavailable => StatusCode::GONE,
+      Self::LocalAccountsDisabled => StatusCode::FORBIDDEN,
       Self::UnknownHost => StatusCode::MISDIRECTED_REQUEST,
       Self::Database(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
@@ -219,24 +368,73 @@ impl ApiError {
   pub fn error_code(&self) -> ErrorCode {
     match self {
       Self::Auth(AuthError::MissingToken) => ErrorCode::Unauthorized,
-      Self::Auth(AuthError::InvalidToken(_)) => ErrorCode::InvalidToken,
+      Self::Auth(AuthError::InvalidToken(_) | AuthError::Expired(_)) => ErrorCode::InvalidToken,
+      Self::Auth(AuthError::SessionEnded) => ErrorCode::SessionEnded,
+      Self::Auth(AuthError::SessionTimedOut) => ErrorCode::SessionTimedOut,
       Self::Auth(AuthError::NoTeamcraftRole) => ErrorCode::NoTeamcraftRole,
-      Self::Auth(AuthError::AccountDeactivated) | Self::Forbidden(_) => ErrorCode::Forbidden,
+      Self::Auth(AuthError::AccountDeactivated) => ErrorCode::AccountDeactivated,
+      Self::Auth(AuthError::AccountDeleted) => ErrorCode::AccountDeleted,
+      Self::Forbidden(_) => ErrorCode::Forbidden,
+      Self::GuestDmNotAllowed => ErrorCode::GuestDmNotAllowed,
+      Self::ImportNotAllowed => ErrorCode::ImportNotAllowed,
+      Self::ImportWindowFull => ErrorCode::ImportWindowFull,
       Self::Auth(AuthError::KeysUnavailable(_)) => ErrorCode::Unavailable,
       Self::NotFound { code, .. } => code.clone(),
       Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
       Self::MfaRequired => ErrorCode::MfaRequired,
       Self::ShareUnavailable => ErrorCode::ShareUnavailable,
+      Self::LocalAccountsDisabled => ErrorCode::LocalAccountsDisabled,
+      Self::RecoveryPassphraseNotAllowed => ErrorCode::RecoveryPassphraseNotAllowed,
+      Self::DisplayNameOverrideNotAllowed => ErrorCode::DisplayNameOverrideNotAllowed,
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
+      Self::LastOwner => ErrorCode::LastOwner,
+      Self::CannotDeleteSelf => ErrorCode::CannotDeleteSelf,
+      Self::LastAdmin => ErrorCode::LastAdmin,
+      Self::LastChannelAdmin => ErrorCode::LastChannelAdmin,
+      Self::LastMember => ErrorCode::LastMember,
+      Self::ImportInProgress => ErrorCode::ImportInProgress,
+      Self::SpaceHasHiddenChannels => ErrorCode::SpaceHasHiddenChannels,
+      Self::ChannelNeedsAdmin => ErrorCode::ChannelNeedsAdmin,
+      Self::NotAChannel => ErrorCode::NotAChannel,
+      Self::NotSpaceMember => ErrorCode::NotSpaceMember,
+      Self::AdminJoinRequestTooSoon => ErrorCode::AdminJoinRequestTooSoon,
+      Self::CallDeviceLimit { .. } => ErrorCode::CallDeviceLimit,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
+      Self::InvalidKeyPackage(_) => ErrorCode::InvalidKeyPackage,
       Self::EpochConflict { .. } => ErrorCode::EpochConflict,
       Self::VersionConflict { .. } => ErrorCode::VersionConflict,
       Self::PayloadTooLarge(_) => ErrorCode::PayloadTooLarge,
       Self::RateLimited { .. } => ErrorCode::RateLimited,
-      Self::Unavailable(_) => ErrorCode::Unavailable,
+      Self::Unavailable(_) | Self::Busy { .. } | Self::DependencyDown { .. } => ErrorCode::Unavailable,
       Self::Database(error) if error.is_transient() => ErrorCode::Unavailable,
       Self::Database(_) | Self::Internal(_) => ErrorCode::Internal,
+    }
+  }
+
+  /// `Retry-After` in seconds. Every 503 carries one (issue #743), so clients back off instead of
+  /// retrying at once while a backend recovers.
+  pub fn retry_after_secs(&self) -> Option<u64> {
+    match self {
+      Self::RateLimited { retry_after_secs }
+      | Self::Busy { retry_after_secs, .. }
+      | Self::DependencyDown { retry_after_secs, .. } => Some(*retry_after_secs),
+      Self::Database(error) if error.is_transient() => Some(DATABASE_RETRY_AFTER_SECS),
+      _ if self.status() == StatusCode::SERVICE_UNAVAILABLE => Some(UNAVAILABLE_RETRY_AFTER_SECS),
+      _ => None,
+    }
+  }
+
+  /// The body clients see, over HTTP and in the gateway's error frame.
+  pub fn body(&self) -> ErrorBody {
+    let mut body = ErrorBody::new(self.error_code(), self.public_message());
+    if let Some(seconds) = self.retry_after_secs() {
+      body = body.with_retry_after_secs(seconds);
+    }
+    match self {
+      Self::EpochConflict { current_epoch } => body.with_current_epoch(*current_epoch),
+      Self::VersionConflict { current_version } => body.with_current_version(*current_version),
+      _ => body,
     }
   }
 
@@ -247,30 +445,40 @@ impl ApiError {
       Self::Database(error) if error.is_transient() => "the service is busy, try again".into(),
       Self::Database(_) | Self::Internal(_) => "internal server error".into(),
       Self::Unavailable(_) => "the service is not available".into(),
+      Self::Busy { .. } => "the service is busy, try again".into(),
+      Self::DependencyDown { dependency, .. } => format!("{dependency} is unavailable, try again later"),
       other => other.to_string(),
+    }
+  }
+}
+
+impl From<CircuitOpen> for ApiError {
+  fn from(open: CircuitOpen) -> Self {
+    Self::DependencyDown {
+      dependency: open.dependency,
+      retry_after_secs: open.retry_after.as_secs().max(1),
     }
   }
 }
 
 impl IntoResponse for ApiError {
   fn into_response(self) -> Response {
+    // An open breaker rejects many requests at once, and said so once when it opened.
     if matches!(
       self.status(),
       StatusCode::INTERNAL_SERVER_ERROR | StatusCode::SERVICE_UNAVAILABLE
-    ) {
+    ) && !matches!(self, Self::DependencyDown { .. })
+    {
       error!(error = %self, "request failed");
     }
-    let mut body = ErrorBody::new(self.error_code(), self.public_message());
-    match &self {
-      Self::EpochConflict { current_epoch } => body = body.with_current_epoch(*current_epoch),
-      Self::VersionConflict { current_version } => body = body.with_current_version(*current_version),
-      _ => {},
-    }
-    let mut response = (self.status(), Json(body)).into_response();
-    if let Self::RateLimited { retry_after_secs } = &self {
+    let mut response = (self.status(), Json(self.body())).into_response();
+    if let Some(seconds) = self.retry_after_secs() {
       response
         .headers_mut()
-        .insert(header::RETRY_AFTER, HeaderValue::from(*retry_after_secs));
+        .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+    }
+    if matches!(&self, Self::Database(error) if error.is_outage()) {
+      response.extensions_mut().insert(DatabaseOutage);
     }
     if self.status() == StatusCode::UNAUTHORIZED {
       response
@@ -299,6 +507,21 @@ mod tests {
         ErrorCode::InvalidToken,
       ),
       (
+        AuthError::Expired("x".into()),
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::InvalidToken,
+      ),
+      (
+        AuthError::SessionEnded,
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::SessionEnded,
+      ),
+      (
+        AuthError::SessionTimedOut,
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::SessionTimedOut,
+      ),
+      (
         AuthError::NoTeamcraftRole,
         StatusCode::FORBIDDEN,
         ErrorCode::NoTeamcraftRole,
@@ -306,7 +529,12 @@ mod tests {
       (
         AuthError::AccountDeactivated,
         StatusCode::FORBIDDEN,
-        ErrorCode::Forbidden,
+        ErrorCode::AccountDeactivated,
+      ),
+      (
+        AuthError::AccountDeleted,
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::AccountDeleted,
       ),
       (
         AuthError::KeysUnavailable("x".into()),
@@ -321,8 +549,46 @@ mod tests {
   }
 
   #[test]
+  fn a_busy_server_answers_503_with_retry_after() {
+    let response = ApiError::Busy {
+      what: "image decoding",
+      retry_after_secs: 2,
+    }
+    .into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+  }
+
+  #[test]
+  fn a_storage_outage_answers_503_unavailable_with_retry_after() {
+    let error = ApiError::storage_unavailable("attachment storage");
+    assert_eq!(error.error_code(), ErrorCode::Unavailable);
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+      response.headers()[header::RETRY_AFTER],
+      STORAGE_RETRY_AFTER_SECS.to_string().as_str()
+    );
+  }
+
+  #[test]
   fn domain_errors_map_to_status_and_code() {
     let cases = [
+      (
+        ApiError::space_image_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::SpaceImageNotFound,
+      ),
+      (
+        ApiError::channel_image_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::ChannelImageNotFound,
+      ),
+      (
+        ApiError::InvalidKeyPackage("expired".into()),
+        StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidKeyPackage,
+      ),
       (
         ApiError::UnknownHost,
         StatusCode::MISDIRECTED_REQUEST,
@@ -373,6 +639,58 @@ mod tests {
         StatusCode::CONFLICT,
         ErrorCode::Conflict,
       ),
+      (ApiError::LastOwner, StatusCode::BAD_REQUEST, ErrorCode::LastOwner),
+      (
+        ApiError::GuestDmNotAllowed,
+        StatusCode::FORBIDDEN,
+        ErrorCode::GuestDmNotAllowed,
+      ),
+      (
+        ApiError::CannotDeleteSelf,
+        StatusCode::CONFLICT,
+        ErrorCode::CannotDeleteSelf,
+      ),
+      (ApiError::LastAdmin, StatusCode::CONFLICT, ErrorCode::LastAdmin),
+      (
+        ApiError::ImportNotAllowed,
+        StatusCode::FORBIDDEN,
+        ErrorCode::ImportNotAllowed,
+      ),
+      (
+        ApiError::ImportWindowFull,
+        StatusCode::CONFLICT,
+        ErrorCode::ImportWindowFull,
+      ),
+      (
+        ApiError::RecoveryPassphraseNotAllowed,
+        StatusCode::FORBIDDEN,
+        ErrorCode::RecoveryPassphraseNotAllowed,
+      ),
+      (
+        ApiError::DisplayNameOverrideNotAllowed,
+        StatusCode::FORBIDDEN,
+        ErrorCode::DisplayNameOverrideNotAllowed,
+      ),
+      (
+        ApiError::NotSpaceMember,
+        StatusCode::BAD_REQUEST,
+        ErrorCode::NotSpaceMember,
+      ),
+      (
+        ApiError::AdminJoinRequestTooSoon,
+        StatusCode::CONFLICT,
+        ErrorCode::AdminJoinRequestTooSoon,
+      ),
+      (
+        ApiError::CallDeviceLimit { max_devices: 3 },
+        StatusCode::CONFLICT,
+        ErrorCode::CallDeviceLimit,
+      ),
+      (
+        ApiError::admin_join_request_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::AdminJoinRequestNotFound,
+      ),
       (
         ApiError::PayloadTooLarge("x".into()),
         StatusCode::PAYLOAD_TOO_LARGE,
@@ -392,6 +710,101 @@ mod tests {
     for (error, status, code) in cases {
       assert_eq!((error.status(), error.error_code()), (status, code), "{error}");
     }
+  }
+
+  #[tokio::test]
+  async fn every_503_carries_retry_after_in_header_and_body() {
+    let cases = [
+      (
+        ApiError::from(CircuitOpen {
+          dependency: DependencyName::Sfu,
+          retry_after: std::time::Duration::from_secs(12),
+        }),
+        12,
+      ),
+      (
+        ApiError::Unavailable("attachment storage".into()),
+        UNAVAILABLE_RETRY_AFTER_SECS,
+      ),
+      (
+        ApiError::from(AuthError::KeysUnavailable("x".into())),
+        UNAVAILABLE_RETRY_AFTER_SECS,
+      ),
+      (
+        ApiError::Busy {
+          what: "image decoding",
+          retry_after_secs: 2,
+        },
+        2,
+      ),
+    ];
+    for (error, seconds) in cases {
+      assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE, "{error}");
+      assert_eq!(error.error_code(), ErrorCode::Unavailable, "{error}");
+      let response = error.into_response();
+      assert_eq!(
+        response.headers()[header::RETRY_AFTER],
+        seconds.to_string().as_str()
+      );
+      let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+      let body: ErrorBody = serde_json::from_slice(&bytes).unwrap();
+      assert_eq!(body.maybe_retry_after_secs, Some(seconds));
+    }
+  }
+
+  /// The gateway sends the same body: a client that can't connect waits as it would over HTTP.
+  #[test]
+  fn the_body_for_the_gateway_carries_retry_after() {
+    let body = ApiError::Database(teamcraft_db::DbError::Query(refused())).body();
+    assert_eq!(body.error_code, ErrorCode::Unavailable);
+    assert_eq!(body.maybe_retry_after_secs, Some(DATABASE_RETRY_AFTER_SECS));
+  }
+
+  /// Only an outage feeds the database's breaker: a lost race between transactions is not one.
+  #[test]
+  fn only_a_database_outage_is_marked_for_the_breaker() {
+    let marked = |error: ApiError| {
+      error
+        .into_response()
+        .extensions()
+        .get::<DatabaseOutage>()
+        .is_some()
+    };
+    let database = |error| ApiError::Database(teamcraft_db::DbError::Query(error));
+    assert!(marked(database(refused())));
+    assert!(marked(database(sqlx::Error::PoolTimedOut)));
+    assert!(!marked(database(sqlx::Error::RowNotFound)));
+    assert!(!marked(ApiError::Conflict("x".into())));
+  }
+
+  fn refused() -> sqlx::Error {
+    sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+  }
+
+  #[test]
+  fn other_errors_carry_no_retry_after() {
+    let response = ApiError::Conflict("x".into()).into_response();
+    assert!(response.headers().get(header::RETRY_AFTER).is_none());
+    assert_eq!(ApiError::Internal("x".into()).retry_after_secs(), None);
+    assert_eq!(
+      ApiError::Database(teamcraft_db::DbError::InvalidStoredValue("x".into())).retry_after_secs(),
+      None
+    );
+  }
+
+  #[test]
+  fn a_dependency_outage_names_the_dependency_but_no_details() {
+    let error = ApiError::from(CircuitOpen {
+      dependency: DependencyName::ObjectStorage,
+      retry_after: std::time::Duration::from_millis(10),
+    });
+    assert_eq!(
+      error.public_message(),
+      "object_storage is unavailable, try again later"
+    );
+    assert_eq!(error.retry_after_secs(), Some(1), "at least a second");
   }
 
   #[tokio::test]

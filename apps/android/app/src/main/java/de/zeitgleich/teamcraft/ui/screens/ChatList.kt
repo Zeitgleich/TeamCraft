@@ -19,30 +19,34 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
@@ -62,6 +66,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
@@ -72,6 +77,38 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Surface
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.unit.Dp
+import de.zeitgleich.teamcraft.ui.Section
+import de.zeitgleich.teamcraft.ui.TabBadge
+import de.zeitgleich.teamcraft.ui.activityConversations
+import de.zeitgleich.teamcraft.ui.theme.Spacing
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.ui.ChatListEntry
@@ -80,19 +117,40 @@ import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.PreviewContent
 import de.zeitgleich.teamcraft.ui.PreviewSender
 import de.zeitgleich.teamcraft.ui.SectionTitle
-import de.zeitgleich.teamcraft.ui.sections
+import de.zeitgleich.teamcraft.ui.ChatTab
+import de.zeitgleich.teamcraft.ui.HomeFilter
+import de.zeitgleich.teamcraft.ui.channelSections
+import de.zeitgleich.teamcraft.ui.directSections
+import de.zeitgleich.teamcraft.ui.isDirect
+import de.zeitgleich.teamcraft.ui.listName
+import de.zeitgleich.teamcraft.ui.tabBadge
 import de.zeitgleich.teamcraft.ui.toggled
 import de.zeitgleich.teamcraft.ui.selectionActions
+import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
+import uniffi.teamcraft_ffi.FirstSyncItem
 import uniffi.teamcraft_ffi.ConversationItem
+import uniffi.teamcraft_ffi.JoinRequestItem
 import uniffi.teamcraft_ffi.ConversationKind
+import uniffi.teamcraft_ffi.Presence
+import uniffi.teamcraft_ffi.RowBadge
+import uniffi.teamcraft_ffi.RowBadgeTone
+import uniffi.teamcraft_ffi.rowBadge
 
-/** Room below the last conversation so the New chat button doesn't cover it. */
+/** Room below the last conversation so the New message button doesn't cover it. */
 private val FAB_CLEARANCE = 88.dp
+private val AVATAR_SIZE = 40.dp
+private val BRAND_LOGO_HEIGHT = 28.dp
 
+/**
+ * The main screen, as the desktop's One Home (#237): the brand and the user's avatar on top, one
+ * bottom navigation (Home, Activity, Spaces) and one FAB, "New message".
+ */
 @Composable
 fun ChatListScreen(
   viewModel: MainViewModel,
+  accountUserId: String,
+  accountName: String,
   onOpen: (String) -> Unit,
   onSearch: () -> Unit,
   onSettings: () -> Unit,
@@ -101,23 +159,80 @@ fun ChatListScreen(
 ) {
   var conversations by remember { mutableStateOf<List<ConversationItem>?>(null) }
   var previews by remember { mutableStateOf<Map<String, ChatListEntry>>(emptyMap()) }
-  // Long-press starts selecting several conversations, as in WhatsApp; back or ✕ ends it.
+  // Admins' requests to join channels the user owns: on top of Activity and on its badge.
+  var joinRequests by remember { mutableStateOf<List<JoinRequestItem>>(emptyList()) }
+  // Long-press starts selecting several conversations, as in WhatsApp; back or the close button ends it.
   var selection by rememberSaveable { mutableStateOf(listOf<String>()) }
   var maybeNotifying by remember { mutableStateOf<String?>(null) }
+  var tab by rememberSaveable { mutableStateOf(ChatTab.Home) }
+  // An account stays a guest or not; read again only when the list changes size (the first sync
+  // is what names the user).
+  var isGuest by remember { mutableStateOf(false) }
+  LaunchedEffect(conversations?.size) { isGuest = viewModel.readChat { snapshot() }?.me?.isGuest == true }
   BackHandler(enabled = selection.isNotEmpty()) { selection = emptyList() }
+  // Back on Activity or Spaces goes Home first, as in other apps with a bottom navigation.
+  BackHandler(enabled = selection.isEmpty() && tab != ChatTab.Home) { tab = ChatTab.Home }
+  // A conversation opened from elsewhere (notification, link) shows in its own tab.
+  LaunchedEffect(maybeSelectedId, conversations) {
+    conversations?.firstOrNull { it.id == maybeSelectedId }?.let { selected ->
+      if (tab != ChatTab.Activity) tab = if (selected.isDirect) ChatTab.Home else ChatTab.Spaces
+    }
+  }
+  var maybeFirstSync by remember { mutableStateOf<FirstSyncItem?>(null) }
   LaunchedEffect(Unit) {
     // Every read finishes before the next starts: while syncing, changes come faster than a full
     // pass over all conversations, and restarting on each would never show the previews.
     viewModel.changeCount.collect {
       val loaded = viewModel.conversations()
       conversations = loaded
+      maybeFirstSync = viewModel.firstSync()
+      joinRequests = viewModel.joinRequests.list()
       previews = viewModel.chatPreviews(loaded)
     }
   }
-  Scaffold(
-    topBar = {
-      val selected = conversations.orEmpty().filter { it.id in selection }
-      if (selected.isNotEmpty()) {
+  val loaded = conversations
+  val maybeBrand by viewModel.loginBrand.collectAsState()
+  val isDark = isSystemInDarkTheme()
+  val maybeLogo = remember(maybeBrand, isDark) { viewModel.brandLogo(isDark)?.asImageBitmap() }
+  val selected = loaded.orEmpty().filter { it.id in selection }
+  // A decision on a request to join that didn't go through, among others.
+  val snackbars = rememberFailureSnackbars(viewModel)
+  val suspectDeletionsText = stringResource(R.string.deletions_suspect)
+  // The server claimed many conversations deleted at once (e2ee.md §4.6): told once.
+  LaunchedEffect(conversations?.size) {
+    val count = viewModel.takeSuspectDeletions()
+    if (count > 0u) snackbars.showSnackbar(suspectDeletionsText.format(count.toInt()))
+  }
+  MainScaffold(
+    brand = MainBrand(maybeBrand?.displayName ?: stringResource(R.string.app_name), maybeLogo),
+    accountUserId = accountUserId,
+    accountName = accountName,
+    tab = tab,
+    onTab = { tab = it },
+    maybeConversations = loaded,
+    list = ListState(
+      previews = previews,
+      maybeSelectedId = maybeSelectedId,
+      selection = selection,
+      actionsFor = { conversation, maybeEntry -> rowActions(viewModel, conversation, maybeEntry) },
+      onOpen = { id -> if (selection.isEmpty()) onOpen(id) else selection = toggled(selection, id) },
+      onLongPress = { id -> selection = toggled(selection, id) },
+      conversationMenu = { conversation, isOpen, onDismiss ->
+        ConversationEntryMenu(
+          viewModel = viewModel,
+          conversation = conversation,
+          isOpen = isOpen,
+          onDismiss = onDismiss,
+          onSelect = { selection = toggled(selection, conversation.id) },
+          onNotifications = { maybeNotifying = conversation.id },
+        )
+      },
+      spaceMenu = { spaceId, name, isOpen, onDismiss -> SpaceEntryMenu(viewModel, spaceId, name, isOpen, onDismiss) },
+    ),
+    maybeSelectionBar = if (selected.isEmpty()) {
+      null
+    } else {
+      {
         SelectionTopBar(
           viewModel = viewModel,
           selected = selected,
@@ -125,105 +240,491 @@ fun ChatListScreen(
           onNotifications = { maybeNotifying = it },
           onDone = { selection = emptyList() },
         )
-      } else {
-        ChromeTopBar(
-          title = stringResource(R.string.chats_title),
-          actions = {
-            IconButton(onClick = onSearch) {
-              Icon(Icons.Filled.Search, contentDescription = stringResource(R.string.search))
-            }
-            IconButton(onClick = onSettings) {
-              Icon(Icons.Filled.Settings, contentDescription = stringResource(R.string.settings_title))
-            }
-          },
-        )
       }
     },
+    onSearch = onSearch,
+    onAccount = onSettings,
+    onNavigate = onNavigate,
+    banners = {
+      OfflineBanner(onSignInAgain = { viewModel.signOut() })
+      maybeFirstSync?.let { FirstSyncBar(it) }
+      NotificationPermissionCard()
+    },
+    isGuest = isGuest,
+    joinRequestCount = joinRequests.size,
+    joinRequests = { JoinRequestSection(joinRequests, viewModel.joinRequests) },
+    snackbarHost = { SnackbarHost(snackbars) },
+  )
+  // Mute or change notifications without opening the conversation.
+  maybeNotifying?.let { id -> ConversationNotificationsDialog(viewModel, id) { maybeNotifying = null } }
+}
+
+/** The server's brand as the top bar shows it: its name and, when it has one, its logo. */
+internal class MainBrand(val name: String, val maybeLogo: ImageBitmap?)
+
+/**
+ * The main screen without its data sources, so it can be shown with any data (the screenshots of
+ * the androidTest `MainScreenScreenshots`). [maybeSelectionBar] replaces the brand bar while
+ * conversations are selected.
+ */
+@Composable
+internal fun MainScaffold(
+  brand: MainBrand,
+  accountUserId: String,
+  accountName: String,
+  tab: ChatTab,
+  onTab: (ChatTab) -> Unit,
+  maybeConversations: List<ConversationItem>?,
+  list: ListState,
+  maybeSelectionBar: (@Composable () -> Unit)?,
+  onSearch: () -> Unit,
+  onAccount: () -> Unit,
+  onNavigate: (String) -> Unit,
+  banners: @Composable () -> Unit = {},
+  /** Guests browse no channels (as on desktop); the Spaces tab lists only their own. */
+  isGuest: Boolean = false,
+  /** Admins' requests waiting for the user's decision: counted on Activity, shown on top of it. */
+  joinRequestCount: Int = 0,
+  joinRequests: @Composable () -> Unit = {},
+  snackbarHost: @Composable () -> Unit = {},
+) {
+  val hasDirect = maybeConversations.orEmpty().any { it.isDirect }
+  Scaffold(
+    contentWindowInsets = ScreenInsets,
+    topBar = { maybeSelectionBar?.invoke() ?: BrandTopBar(brand, accountUserId, accountName, onSearch = onSearch, onAccount = onAccount) },
+    bottomBar = {
+      if (maybeSelectionBar == null) MainNavigation(tab, maybeConversations.orEmpty(), joinRequestCount, onSelect = onTab)
+    },
+    snackbarHost = snackbarHost,
     floatingActionButton = {
-      if (selection.isEmpty()) {
+      // Only where it fits and not twice: an empty Home has the same action in its middle.
+      if (maybeSelectionBar == null && tab == ChatTab.Home && hasDirect) {
         ExtendedFloatingActionButton(
           onClick = { onNavigate("browse?people=true") },
           icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
-          text = { Text(stringResource(R.string.new_chat)) },
+          text = { Text(stringResource(R.string.dm_new)) },
         )
       }
     },
   ) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
-      OfflineBanner()
-      NotificationPermissionCard()
-      LazyRow(
-        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-      ) {
-        for ((route, label) in QUICK_ROUTES) {
-          item(key = route) {
-            AssistChip(onClick = { onNavigate(route) }, label = { Text(stringResource(label)) })
-          }
-        }
-      }
-      val loaded = conversations
+      banners()
       when {
-        loaded == null -> LoadingScreen()
-        loaded.isEmpty() -> EmptyChats(onBrowse = { onNavigate("browse") }, onMessage = { onNavigate("browse?people=true") })
-        else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
-          val lastActivity = previews.mapValues { it.value.preview.sentAt }
-          for (section in sections(loaded, lastActivity)) {
-            item(key = "section-${section.title}") { SectionHeader(section.title) }
-            items(section.conversations, key = { "${section.title}-${it.id}" }) { conversation ->
-              SwipeableConversationRow(
-                viewModel = viewModel,
-                conversation = conversation,
-                maybeEntry = previews[conversation.id],
-                isSelected = conversation.id == maybeSelectedId,
-                isChecked = conversation.id in selection,
-                isSelecting = selection.isNotEmpty(),
-                onClick = {
-                  if (selection.isEmpty()) onOpen(conversation.id) else selection = toggled(selection, conversation.id)
-                },
-                onLongPress = { selection = toggled(selection, conversation.id) },
-              )
-            }
-          }
-        }
+        maybeConversations == null -> LoadingScreen()
+        tab == ChatTab.Home -> HomeTab(maybeConversations, list, onNavigate)
+        tab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests)
+        else -> SpacesTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
       }
     }
   }
-  // Mute or change notifications without opening the conversation.
-  maybeNotifying?.let { id -> ConversationNotificationsDialog(viewModel, id) { maybeNotifying = null } }
+}
+
+/** What every tab's conversation rows need. */
+internal class ListState(
+  val previews: Map<String, ChatListEntry>,
+  val maybeSelectedId: String?,
+  val selection: List<String>,
+  val actionsFor: (ConversationItem, ChatListEntry?) -> RowActions,
+  val onOpen: (String) -> Unit,
+  val onLongPress: (String) -> Unit,
+  /** The long-press menu of a conversation: the conversation, whether it is open, how to close it. */
+  val conversationMenu: @Composable (ConversationItem, Boolean, () -> Unit) -> Unit = { _, _, _ -> },
+  /** The long-press menu of a space header: id, name, whether it is open, how to close it. */
+  val spaceMenu: @Composable (String, String, Boolean, () -> Unit) -> Unit = { _, _, _, _ -> },
+) {
+  val lastActivity: Map<String, Long> get() = previews.mapValues { it.value.preview.sentAt }
+}
+
+/** Home: the global entries, then the DMs (outside spaces) with their filters. */
+@Composable
+private fun HomeTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit) {
+  var dmFilter by rememberSaveable { mutableStateOf("") }
+  var homeChip by rememberSaveable { mutableStateOf(HomeFilter.All) }
+  if (conversations.none { it.isDirect }) {
+    Column(Modifier.fillMaxSize()) {
+      HomeEntries(onNavigate)
+      RemainingEmptyState(
+        icon = Icons.Filled.Email,
+        title = stringResource(R.string.dm_empty_title),
+        text = stringResource(R.string.dm_empty),
+        maybeAction = stringResource(R.string.dm_new) to { onNavigate("browse?people=true") },
+      )
+    }
+    return
+  }
+  val sections = directSections(conversations, list.lastActivity, dmFilter, homeChip)
+  LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
+    item(key = "entries") { HomeEntries(onNavigate) }
+    item(key = "filter") { DirectFilter(dmFilter, onChange = { dmFilter = it }) }
+    item(key = "chips") { HomeChips(homeChip, onSelect = { homeChip = if (homeChip == it) HomeFilter.All else it }) }
+    if (sections.isEmpty()) item(key = "no-match") { EmptyHint(stringResource(R.string.dm_filter_empty)) }
+    conversationRows(sections, list)
+  }
+}
+
+/**
+ * Activity: threads and saved items, then the requests to join that wait for the user's decision,
+ * then every conversation that waits for the user.
+ */
+@Composable
+private fun ActivityTab(
+  conversations: List<ConversationItem>,
+  list: ListState,
+  onNavigate: (String) -> Unit,
+  joinRequestCount: Int,
+  joinRequests: @Composable () -> Unit,
+) {
+  val waiting = activityConversations(conversations, list.lastActivity)
+  Column(Modifier.fillMaxSize()) {
+    EntryRow(Icons.AutoMirrored.Filled.List, stringResource(R.string.threads_title)) { onNavigate("threads") }
+    EntryRow(Icons.Filled.Star, stringResource(R.string.saved_title)) { onNavigate("saved") }
+    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+    if (waiting.isEmpty() && joinRequestCount == 0) {
+      RemainingEmptyState(
+        icon = Icons.Filled.Done,
+        title = stringResource(R.string.activity_empty_title),
+        text = stringResource(R.string.activity_empty),
+        maybeAction = null,
+      )
+    } else {
+      LazyColumn(Modifier.fillMaxSize()) {
+        if (joinRequestCount > 0) item(key = "join-requests") { joinRequests() }
+        conversationRows(listOf(Section(SectionTitle.Activity, waiting)), list, hasHeader = false)
+      }
+    }
+  }
+}
+
+/**
+ * Spaces: the channels by space; browsing for more is the first row (or the empty state's action),
+ * for those who may browse.
+ */
+@Composable
+private fun SpacesTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit, canBrowse: Boolean) {
+  val sections = channelSections(conversations)
+  if (sections.isEmpty()) {
+    EmptyState(
+      icon = Icons.Filled.Search,
+      title = stringResource(R.string.spaces_empty_title),
+      text = stringResource(R.string.spaces_empty),
+      maybeAction = if (canBrowse) stringResource(R.string.browse_channels) to { onNavigate("browse") } else null,
+    )
+    return
+  }
+  LazyColumn(Modifier.fillMaxSize()) {
+    if (canBrowse) {
+      item(key = "browse") { EntryRow(Icons.Filled.Add, stringResource(R.string.browse_channels)) { onNavigate("browse") } }
+    }
+    conversationRows(sections, list)
+  }
+}
+
+private fun LazyListScope.conversationRows(sections: List<Section>, list: ListState, hasHeader: Boolean = true) {
+  for (section in sections) {
+    if (hasHeader) item(key = "section-${section.title}") { SectionHeaderWithMenu(section, list) }
+    items(section.conversations, key = { "${section.title}-${it.id}" }) { conversation ->
+      SwipeableConversationRow(
+        actions = list.actionsFor(conversation, list.previews[conversation.id]),
+        conversation = conversation,
+        maybeEntry = list.previews[conversation.id],
+        isSelected = conversation.id == list.maybeSelectedId,
+        isChecked = conversation.id in list.selection,
+        isSelecting = list.selection.isNotEmpty(),
+        onClick = { list.onOpen(conversation.id) },
+        onLongPress = { list.onLongPress(conversation.id) },
+        menu = { isOpen, onDismiss -> list.conversationMenu(conversation, isOpen, onDismiss) },
+      )
+    }
+  }
+}
+
+/** A section's header; a space's also opens the space menu on a long-press (#1105). */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SectionHeaderWithMenu(section: Section, list: ListState) {
+  val title = section.title
+  val maybeSpaceId = section.conversations.firstNotNullOfOrNull { it.maybeSpaceId }
+  if (title !is SectionTitle.Space || maybeSpaceId == null) {
+    SectionHeader(title)
+    return
+  }
+  val haptics = LocalHapticFeedback.current
+  var isOpen by remember { mutableStateOf(false) }
+  Box(
+    Modifier.fillMaxWidth().combinedClickable(
+      onClick = {},
+      onLongClickLabel = stringResource(R.string.entry_space_menu),
+      onLongClick = {
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        isOpen = true
+      },
+    ),
+  ) {
+    SectionHeader(title)
+    list.spaceMenu(maybeSpaceId, title.name, isOpen) { isOpen = false }
+  }
+}
+
+/** The top app bar of the main screen: the server's brand (logo and name) and the user's avatar. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BrandTopBar(brand: MainBrand, accountUserId: String, accountName: String, onSearch: () -> Unit, onAccount: () -> Unit) {
+  TopAppBar(
+    title = {
+      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
+        brand.maybeLogo?.let { logo ->
+          // Decorative: the name next to it is what TalkBack reads.
+          Image(logo, contentDescription = null, modifier = Modifier.height(BRAND_LOGO_HEIGHT), contentScale = ContentScale.Fit)
+        }
+        Text(
+          brand.name,
+          style = MaterialTheme.typography.titleLarge,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+          modifier = Modifier.semantics { heading() },
+        )
+      }
+    },
+    actions = {
+      IconButton(onClick = onSearch) {
+        Icon(Icons.Filled.Search, contentDescription = stringResource(R.string.search))
+      }
+      val description = stringResource(R.string.account_menu, accountName)
+      IconButton(onClick = onAccount, modifier = Modifier.semantics { contentDescription = description }) {
+        AccountAvatar(accountUserId, accountName, size = 32.dp)
+      }
+    },
+    windowInsets = TopBarInsets,
+    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+  )
+}
+
+/** Home, Activity and Spaces, each with what is new in it. */
+@Composable
+private fun MainNavigation(
+  selected: ChatTab,
+  conversations: List<ConversationItem>,
+  joinRequestCount: Int,
+  onSelect: (ChatTab) -> Unit,
+) {
+  val (direct, channels) = conversations.partition { it.isDirect }
+  // In landscape the bar's items stay clear of a side cutout too (#309).
+  NavigationBar(
+    containerColor = MaterialTheme.colorScheme.surfaceContainer,
+    windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
+  ) {
+    for (tab in ChatTab.entries) {
+      val label = stringResource(
+        when (tab) {
+          ChatTab.Home -> R.string.nav_home
+          ChatTab.Activity -> R.string.nav_activity
+          ChatTab.Spaces -> R.string.nav_spaces
+        },
+      )
+      val badge = when (tab) {
+        ChatTab.Home -> tabBadge(direct)
+        // A request waits for a decision like a mention waits for an answer.
+        ChatTab.Activity -> TabBadge(mentions = tabBadge(conversations).mentions + joinRequestCount, unread = 0)
+        ChatTab.Spaces -> tabBadge(channels)
+      }
+      // Channels and Activity count only mentions; DMs count every unread message.
+      val count = if (tab == ChatTab.Home) maxOf(badge.mentions, badge.unread) else badge.mentions
+      val description = when {
+        count > 0 -> pluralStringResource(R.plurals.chat_tab_unread, count, label, count)
+        badge.unread > 0 -> stringResource(R.string.chat_tab_new, label)
+        else -> label
+      }
+      NavigationBarItem(
+        selected = tab == selected,
+        onClick = { onSelect(tab) },
+        modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = description },
+        label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        icon = {
+          BadgedBox(
+            badge = {
+              when {
+                count > 0 -> Badge(
+                  containerColor = LocalTeamCraftColors.current.badge,
+                  contentColor = LocalTeamCraftColors.current.chromeText,
+                ) { Text(count.toString()) }
+                badge.unread > 0 -> Badge(containerColor = MaterialTheme.colorScheme.outline)
+              }
+            },
+          ) { NavigationIcon(tab) }
+        },
+      )
+    }
+  }
 }
 
 @Composable
-private fun EmptyChats(onBrowse: () -> Unit, onMessage: () -> Unit) {
-  Column(
-    Modifier.fillMaxSize().padding(32.dp),
-    verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
-    horizontalAlignment = Alignment.CenterHorizontally,
+private fun NavigationIcon(tab: ChatTab) {
+  when (tab) {
+    ChatTab.Home -> Icon(Icons.Filled.Home, contentDescription = null)
+    ChatTab.Activity -> Icon(Icons.Filled.Notifications, contentDescription = null)
+    // The channel marker of the lists, so the tab reads as "channels".
+    // In an icon-sized box, so the label lines up with the other tabs at any font scale.
+    ChatTab.Spaces -> Box(Modifier.size(24.dp).clearAndSetSemantics {}, contentAlignment = Alignment.Center) {
+      Text("#", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), maxLines = 1)
+    }
+  }
+}
+
+/** The global entries of Home (#237), in one row that never clips: each takes a quarter. */
+@Composable
+private fun HomeEntries(onNavigate: (String) -> Unit) {
+  Row(
+    Modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.s),
+    horizontalArrangement = Arrangement.spacedBy(Spacing.s),
   ) {
-    Icon(
-      Icons.Filled.Email,
-      contentDescription = null,
-      tint = MaterialTheme.colorScheme.primary,
-      modifier = Modifier.size(48.dp),
-    )
-    Text(stringResource(R.string.no_conversations), style = MaterialTheme.typography.titleMedium)
+    for ((route, icon, label) in HOME_ENTRIES) {
+      EntryTile(icon, stringResource(label), Modifier.weight(1f)) { onNavigate(route) }
+    }
+  }
+}
+
+@Composable
+private fun EntryTile(icon: ImageVector, label: String, modifier: Modifier, onClick: () -> Unit) {
+  Surface(
+    onClick = onClick,
+    shape = MaterialTheme.shapes.medium,
+    color = MaterialTheme.colorScheme.surfaceContainer,
+    modifier = modifier,
+  ) {
+    Column(
+      Modifier.padding(vertical = Spacing.m, horizontal = Spacing.xs),
+      horizontalAlignment = Alignment.CenterHorizontally,
+      verticalArrangement = Arrangement.spacedBy(Spacing.xs),
+    ) {
+      Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+      Text(
+        label,
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurface,
+        textAlign = TextAlign.Center,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+  }
+}
+
+/** One entry as a full-width row (Activity, Spaces). */
+@Composable
+private fun EntryRow(icon: ImageVector, label: String, onClick: () -> Unit) {
+  ListItem(
+    headlineContent = { Text(label, style = MaterialTheme.typography.titleSmall) },
+    leadingContent = { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+    modifier = Modifier.clickable(onClick = onClick),
+  )
+}
+
+/**
+ * An empty list: icon, title, text and at most one action, centered in the space that is left
+ * (not in the whole screen, which would push it below the middle).
+ */
+@Composable
+private fun ColumnScope.RemainingEmptyState(icon: ImageVector, title: String, text: String, maybeAction: Pair<String, () -> Unit>?) {
+  Box(Modifier.fillMaxWidth().weight(1f).padding(horizontal = Spacing.xxl), contentAlignment = Alignment.Center) {
+    EmptyStateContent(icon, title, text, maybeAction)
+  }
+}
+
+@Composable
+internal fun EmptyState(icon: ImageVector, title: String, text: String, maybeAction: Pair<String, () -> Unit>?) {
+  Box(Modifier.fillMaxSize().padding(horizontal = Spacing.xxl), contentAlignment = Alignment.Center) {
+    EmptyStateContent(icon, title, text, maybeAction)
+  }
+}
+
+@Composable
+private fun EmptyStateContent(icon: ImageVector, title: String, text: String, maybeAction: Pair<String, () -> Unit>?) {
+  Column(
+    Modifier.widthIn(max = 360.dp).verticalScroll(rememberScrollState()),
+    horizontalAlignment = Alignment.CenterHorizontally,
+    verticalArrangement = Arrangement.spacedBy(Spacing.m),
+  ) {
+    Box(
+      Modifier.size(64.dp).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+      contentAlignment = Alignment.Center,
+    ) {
+      Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(32.dp))
+    }
     Text(
-      stringResource(R.string.chats_empty_hint),
+      title,
+      style = MaterialTheme.typography.titleMedium,
+      textAlign = TextAlign.Center,
+      modifier = Modifier.semantics { heading() },
+    )
+    Text(
+      text,
       style = MaterialTheme.typography.bodyMedium,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
       textAlign = TextAlign.Center,
     )
-    Button(onClick = onBrowse, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.browse_channels)) }
-    OutlinedButton(onClick = onMessage, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.message_someone)) }
+    maybeAction?.let { (label, action) ->
+      Button(onClick = action, modifier = Modifier.padding(top = Spacing.s)) { Text(label) }
+    }
+  }
+}
+
+/** Unread / People / Groups; pressing the selected chip again shows everything. */
+@Composable
+private fun HomeChips(selected: HomeFilter, onSelect: (HomeFilter) -> Unit) {
+  Row(
+    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = Spacing.l),
+    horizontalArrangement = Arrangement.spacedBy(Spacing.s),
+  ) {
+    for ((chip, label) in listOf(
+      HomeFilter.Unread to R.string.home_filter_unread,
+      HomeFilter.People to R.string.home_filter_people,
+      HomeFilter.Groups to R.string.home_filter_groups,
+    )) {
+      FilterChip(selected = chip == selected, onClick = { onSelect(chip) }, label = { Text(stringResource(label)) })
+    }
   }
 }
 
 @Composable
-private fun SectionHeader(title: SectionTitle) {
+private fun DirectFilter(value: String, onChange: (String) -> Unit) {
+  OutlinedTextField(
+    value = value,
+    onValueChange = onChange,
+    modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.xs),
+    placeholder = { Text(stringResource(R.string.dm_filter)) },
+    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+    trailingIcon = {
+      if (value.isNotEmpty()) {
+        IconButton(onClick = { onChange("") }) {
+          Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.clear))
+        }
+      }
+    },
+    shape = MaterialTheme.shapes.large,
+    singleLine = true,
+  )
+}
+
+@Composable
+internal fun EmptyHint(text: String) {
+  Text(
+    text,
+    style = MaterialTheme.typography.bodyMedium,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    textAlign = TextAlign.Center,
+    modifier = Modifier.fillMaxWidth().padding(32.dp),
+  )
+}
+
+@Composable
+internal fun SectionHeader(title: SectionTitle) {
   val text = when (title) {
     SectionTitle.Favorites -> stringResource(R.string.favorites)
     SectionTitle.Channels -> stringResource(R.string.channels)
     SectionTitle.DirectMessages -> stringResource(R.string.direct_messages)
+    SectionTitle.Activity -> stringResource(R.string.nav_activity)
+    SectionTitle.Notes -> stringResource(R.string.notes_title)
+    SectionTitle.Recent -> stringResource(R.string.share_recent)
     is SectionTitle.Space -> title.name
   }
   Text(
@@ -246,7 +747,7 @@ private fun SectionHeader(title: SectionTitle) {
  */
 @Composable
 private fun SwipeableConversationRow(
-  viewModel: MainViewModel,
+  actions: RowActions,
   conversation: ConversationItem,
   maybeEntry: ChatListEntry?,
   isSelected: Boolean,
@@ -254,10 +755,12 @@ private fun SwipeableConversationRow(
   isSelecting: Boolean,
   onClick: () -> Unit,
   onLongPress: () -> Unit,
+  menu: @Composable (Boolean, () -> Unit) -> Unit,
 ) {
   val haptics = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
-  val actions = rowActions(viewModel, conversation, maybeEntry)
+  // While rows are being selected, a long-press keeps toggling; otherwise it opens the menu.
+  var isMenuOpen by remember { mutableStateOf(false) }
   val state = rememberSwipeToDismissBoxState()
   SwipeToDismissBox(
     state = state,
@@ -275,12 +778,23 @@ private fun SwipeableConversationRow(
       scope.launch { state.reset() }
     },
   ) {
-    ConversationRow(conversation, maybeEntry, actions, isSelected, isChecked, onClick, onLongPress)
+    Box {
+      ConversationRow(
+        conversation,
+        maybeEntry,
+        actions,
+        isSelected,
+        isChecked,
+        onClick,
+        onLongPress = { if (isSelecting) onLongPress() else isMenuOpen = true },
+      )
+      menu(isMenuOpen) { isMenuOpen = false }
+    }
   }
 }
 
 /** What can be done with a row, shared by swipe, menu and accessibility. */
-private class RowActions(
+internal class RowActions(
   val isUnread: Boolean,
   val toggleRead: (() -> Unit)?,
   val toggleFavorite: () -> Unit,
@@ -390,7 +904,7 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
   val isUnread = conversation.unreadCount > 0u
   Row(verticalAlignment = Alignment.CenterVertically) {
     Text(
-      conversation.name,
+      conversation.listName(stringResource(R.string.notes_title)),
       modifier = Modifier.weight(1f),
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
@@ -400,11 +914,15 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
     )
     if (conversation.isMuted) {
       val mutedLabel = stringResource(R.string.chat_muted)
-      Text(
-        "🔕",
-        style = MaterialTheme.typography.labelSmall,
-        modifier = Modifier.padding(start = 4.dp).semantics { contentDescription = mutedLabel },
+      Icon(
+        painterResource(R.drawable.ic_notifications_off),
+        contentDescription = mutedLabel,
+        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 4.dp).size(14.dp),
       )
+    }
+    rowBadge(conversation.unreadCount, conversation.mentionCount, conversation.isMuted)?.let { badge ->
+      RowCount(badge, conversation.isMuted)
     }
     maybeEntry?.let { entry ->
       Text(
@@ -429,21 +947,6 @@ private fun PreviewLine(conversation: ConversationItem, maybeEntry: ChatListEntr
       style = MaterialTheme.typography.bodyMedium,
       color = if (isUnread) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    if (conversation.mentionCount > 0u) {
-      val count = conversation.mentionCount.toInt()
-      Badge(
-        "@${count}",
-        LocalTeamCraftColors.current.badge,
-        pluralStringResource(R.plurals.chat_mentions, count, count),
-      )
-    } else if (isUnread) {
-      val count = conversation.unreadCount.toInt()
-      Badge(
-        count.toString(),
-        if (conversation.isMuted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
-        pluralStringResource(R.plurals.chat_unread, count, count),
-      )
-    }
   }
 }
 
@@ -453,6 +956,13 @@ private fun previewText(preview: ChatPreview): String {
     is PreviewContent.Text -> content.text
     PreviewContent.Deleted -> stringResource(R.string.chat_preview_deleted)
     PreviewContent.Event -> stringResource(R.string.chat_preview_event)
+    is PreviewContent.Placeholder -> stringResource(
+      when (content.state) {
+        "waiting" -> R.string.message_placeholder_waiting
+        "failed" -> R.string.message_placeholder_failed
+        else -> R.string.message_placeholder_not_available
+      },
+    )
   }
   return when (val sender = preview.sender) {
     PreviewSender.None -> body
@@ -471,43 +981,107 @@ private fun listTime(context: Context, sentAt: Long): String {
   return DateUtils.formatDateTime(context, sentAt, flags)
 }
 
-/** A round marker with the conversation's initial (people) or its kind (channels). */
+/**
+ * A round marker: the DM peer's picture, or the conversation's initial (people) or its kind
+ * (channels); the notes show a bookmark.
+ */
 @Composable
-private fun ConversationAvatar(conversation: ConversationItem) {
+internal fun ConversationAvatar(conversation: ConversationItem) {
+  if (conversation.isNotesToSelf) {
+    NotesAvatar()
+    return
+  }
   val isPerson = conversation.kind == ConversationKind.DIRECT || conversation.kind == ConversationKind.GROUP
-  val label = if (isPerson) conversation.name.firstOrNull()?.uppercase() ?: "?" else prefix(conversation.kind)
+  val label = if (isPerson || conversation.kind == ConversationKind.INTEGRATION) conversation.name.firstOrNull()?.uppercase() ?: "?" else prefix(conversation.kind)
+  Box {
+    UserAvatar(conversation.maybePeerId, Modifier.size(AVATAR_SIZE)) {
+      Box(
+        Modifier
+          .size(AVATAR_SIZE)
+          .background(
+            if (isPerson) avatarColor(conversation.name) else MaterialTheme.colorScheme.surfaceVariant,
+            CircleShape,
+          ),
+        contentAlignment = Alignment.Center,
+      ) {
+        Text(
+          label,
+          style = MaterialTheme.typography.titleMedium,
+          color = if (isPerson) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+    }
+    conversation.maybePeerPresence?.let { presence ->
+      val description = stringResource(presenceLabel(presence))
+      Box(
+        Modifier
+          .align(Alignment.BottomEnd)
+          .size(12.dp)
+          .background(MaterialTheme.colorScheme.background, CircleShape)
+          .padding(2.dp)
+          .background(presenceColor(presence), CircleShape)
+          .semantics { contentDescription = description },
+      )
+    }
+  }
+}
+
+@Composable
+private fun NotesAvatar() {
   Box(
-    Modifier
-      .size(40.dp)
-      .background(
-        if (isPerson) avatarColor(conversation.name) else MaterialTheme.colorScheme.surfaceVariant,
-        CircleShape,
-      ),
+    Modifier.size(AVATAR_SIZE).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
     contentAlignment = Alignment.Center,
   ) {
-    Text(
-      label,
-      style = MaterialTheme.typography.titleMedium,
-      color = if (isPerson) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+    Icon(
+      painterResource(R.drawable.ic_bookmark),
+      contentDescription = null,
+      tint = MaterialTheme.colorScheme.onPrimaryContainer,
+      modifier = Modifier.size(22.dp),
     )
   }
+}
+
+private fun presenceColor(presence: Presence): Color = when (presence) {
+  Presence.ONLINE -> Color(0xFF2E9E5B)
+  Presence.AWAY -> Color(0xFFE0A030)
+  Presence.DO_NOT_DISTURB -> Color(0xFFD0453A)
+  Presence.OFFLINE -> Color(0xFF8A8F98)
+}
+
+private fun presenceLabel(presence: Presence): Int = when (presence) {
+  Presence.ONLINE -> R.string.presence_online
+  Presence.AWAY -> R.string.presence_away
+  Presence.DO_NOT_DISTURB -> R.string.presence_dnd
+  Presence.OFFLINE -> R.string.presence_peer_offline
 }
 
 /** A stable hue per name, so people are recognizable at a glance. */
 private fun avatarColor(name: String): Color = Color.hsl(((name.hashCode() % 360 + 360) % 360).toFloat(), 0.45f, 0.45f)
 
+/**
+ * The unread number next to a conversation's name (#897): count and tone come from the shared rule
+ * (`rowBadge`), red for a conversation that notifies and for mentions, grey for a muted one. The
+ * minimum width keeps the name from shifting while the count changes.
+ */
 @Composable
-private fun Badge(text: String, color: Color, description: String) {
-  Text(
-    text,
-    color = LocalTeamCraftColors.current.chromeText,
-    style = MaterialTheme.typography.labelSmall,
+private fun RowCount(badge: RowBadge, isMuted: Boolean) {
+  val colors = LocalTeamCraftColors.current
+  val description = pluralStringResource(
+    // A red badge in a muted conversation counts only its mentions.
+    if (isMuted && badge.tone == RowBadgeTone.RED) R.plurals.chat_mentions else R.plurals.chat_unread,
+    badge.count.toInt(),
+    badge.count.toInt(),
+  )
+  Badge(
+    containerColor = if (badge.tone == RowBadgeTone.RED) colors.badge else MaterialTheme.colorScheme.surfaceContainerHighest,
+    contentColor = if (badge.tone == RowBadgeTone.RED) colors.chromeText else MaterialTheme.colorScheme.onSurfaceVariant,
     modifier = Modifier
       .padding(start = 8.dp)
-      .background(color, RoundedCornerShape(10.dp))
-      .padding(horizontal = 7.dp, vertical = 2.dp)
+      .widthIn(min = 24.dp)
       .semantics { contentDescription = description },
-  )
+  ) {
+    Text(badge.label, maxLines = 1, style = MaterialTheme.typography.labelSmall)
+  }
 }
 
 /** The sidebar's markers: `#` public, lock-like `◆` private, `@` direct. */
@@ -516,15 +1090,15 @@ private fun prefix(kind: ConversationKind): String = when (kind) {
   ConversationKind.PRIVATE -> "◆"
   ConversationKind.DIRECT -> "@"
   ConversationKind.GROUP -> "@"
-  ConversationKind.INTEGRATION -> "⚙"
+  ConversationKind.INTEGRATION -> ""
 }
 
-/** Entry points above the conversation list. */
-private val QUICK_ROUTES = listOf(
-  "threads" to R.string.threads_title,
-  "saved" to R.string.saved_title,
-  "browse" to R.string.browse_title,
-  "meetings" to R.string.meetings_title,
+/** The global entries of Home: route, icon, label. */
+private val HOME_ENTRIES = listOf(
+  Triple("threads", Icons.AutoMirrored.Filled.List, R.string.home_entry_threads),
+  Triple("saved", Icons.Filled.Star, R.string.home_entry_saved),
+  Triple("meetings", Icons.Filled.DateRange, R.string.home_entry_meetings),
+  Triple("browse?people=true", Icons.Filled.Person, R.string.home_entry_people),
 )
 
 /** Instead of the title while conversations are selected: how many, and what to do with them. */
@@ -540,6 +1114,7 @@ private fun SelectionTopBar(
   val actions = selectionActions(selected)
   TopAppBar(
     title = { Text(pluralStringResource(R.plurals.chats_selected, selected.size, selected.size)) },
+    windowInsets = TopBarInsets,
     navigationIcon = {
       IconButton(onClick = onDone) { Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.cancel)) }
     },
@@ -576,7 +1151,22 @@ private fun SelectionTopBar(
 /** The avatar of a selected conversation: a check mark. */
 @Composable
 private fun CheckedAvatar() {
-  Box(Modifier.size(40.dp).background(MaterialTheme.colorScheme.primary, CircleShape), contentAlignment = Alignment.Center) {
+  Box(Modifier.size(AVATAR_SIZE).background(MaterialTheme.colorScheme.primary, CircleShape), contentAlignment = Alignment.Center) {
     Icon(Icons.Filled.Done, contentDescription = null, tint = MaterialTheme.colorScheme.onPrimary)
+  }
+}
+
+/** The user's own avatar: their picture, or the initial on the stable hue of the name, as for other people. */
+@Composable
+private fun AccountAvatar(userId: String, name: String, size: Dp) {
+  UserAvatar(userId, Modifier.size(size)) {
+    Box(Modifier.size(size).background(avatarColor(name), CircleShape), contentAlignment = Alignment.Center) {
+      Text(
+        name.firstOrNull()?.uppercase() ?: "?",
+        style = MaterialTheme.typography.titleSmall,
+        color = Color.White,
+        modifier = Modifier.clearAndSetSemantics {},
+      )
+    }
   }
 }

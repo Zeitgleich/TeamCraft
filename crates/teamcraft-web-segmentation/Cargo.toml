@@ -1,0 +1,28 @@
+[package]
+publish = false
+name = "teamcraft-web-segmentation"
+description = "The browser's person segmentation for background effects: a wasm module the call module runs in a worker once the first effect starts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Built by crates/teamcraft-ui/scripts/build-segmentation.sh (a step of the web build) with
+# WebAssembly SIMD (`+simd128`), which Trunk can't set for one module alone.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Only tract, the model check and the masks: no call engine, no compositor.
+teamcraft-media = { path = "../teamcraft-media", default-features = false, features = ["segmentation"] }
+console_error_panic_hook = "0.1"
+wasm-bindgen = "0.2.129"
+wasm-bindgen-futures = "0.4.79"
+js-sys = "0.3.106"
+web-sys = { version = "0.3.106", features = [
+  "DedicatedWorkerGlobalScope", "MessageEvent", "Performance", "Response", "WorkerGlobalScope", "console",
+] }

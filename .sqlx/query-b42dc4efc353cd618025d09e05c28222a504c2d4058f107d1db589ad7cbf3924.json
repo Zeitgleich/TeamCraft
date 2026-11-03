@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.id FROM users u\n         WHERE u.deleted_at IS NOT NULL\n           AND EXISTS (SELECT 1 FROM conversations c\n                       WHERE c.kind = 'dm'\n                         AND u.id = ANY(string_to_array(c.participants_key, '-')::bigint[]))\n         ORDER BY u.id LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b42dc4efc353cd618025d09e05c28222a504c2d4058f107d1db589ad7cbf3924"
+}

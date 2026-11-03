@@ -29,6 +29,19 @@ pub struct UserSummary {
   /// depends on it.
   #[serde(rename = "organization", default, skip_serializing_if = "Option::is_none")]
   pub maybe_organization: Option<String>,
+  /// Whether the user has a device (set up the app). Only directory answers carry it; absent from
+  /// older servers and from member lists.
+  #[serde(rename = "has_devices", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_has_devices: Option<bool>,
+  /// The account is deactivated: still named on its old messages, never offered to pick (issue
+  /// #654). Absent (false) from older servers.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_deactivated: bool,
+  /// The account was deleted (issue #630): a tombstone without username that only names old
+  /// messages; clients show their own "Deleted user". Always deactivated too. Absent (false) from
+  /// older servers.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_deleted: bool,
 }
 
 /// `GET /api/v1/users?query=` – the directory. Guests only find people they share a conversation with.
@@ -45,9 +58,18 @@ pub struct RegisterDeviceRequest {
   pub cross_signature: Base64Bytes,
 }
 
+/// `PATCH /api/v1/devices/{id}`: renames one of the caller's devices. The name is for the user
+/// (and admins): other users' clients get the device's keys, never its name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UpdateDeviceRequest {
+  pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct DeviceResponse {
   pub id: DeviceId,
+  /// What the user calls the device. Empty in another user's device list: device names can be
+  /// personal ("Anna's phone"), and other clients only need the keys.
   pub name: String,
   pub public_key: Base64Bytes,
   /// The identity key's signature over the device key; clients verify it, the server doesn't.
@@ -79,6 +101,21 @@ pub struct RegisterPushRequest {
   pub push_key: Base64Bytes,
 }
 
+/// `POST /api/v1/push/web/subscription-change`: the service worker replaces a device's Web Push
+/// subscription after the browser rotated it while no page was open (e2ee.md §7). It sends no access
+/// token: `mac` proves knowledge of the device's push key over the device and both subscriptions, and
+/// the server only swaps `previous_token` for `token` if `previous_token` is what it holds.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ChangeWebPushSubscriptionRequest {
+  pub device_id: DeviceId,
+  /// The subscription JSON the device registered last.
+  pub previous_token: String,
+  /// The browser's new subscription JSON.
+  pub token: String,
+  /// HMAC-SHA-256, see `teamcraft_crypto::push::subscription_change_mac`.
+  pub mac: Base64Bytes,
+}
+
 /// `GET /api/v1/push/web-key`: the key a browser subscribes to Web Push with (`applicationServerKey`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WebPushKeyResponse {
@@ -94,6 +131,18 @@ impl std::fmt::Debug for RegisterPushRequest {
       .field("provider", &self.provider)
       .field("token", &"[redacted]")
       .field("push_key", &"[redacted]")
+      .finish()
+  }
+}
+
+// Subscriptions carry the browser's push secrets (`auth`, `p256dh`).
+impl std::fmt::Debug for ChangeWebPushSubscriptionRequest {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("ChangeWebPushSubscriptionRequest")
+      .field("device_id", &self.device_id)
+      .field("previous_token", &"[redacted]")
+      .field("token", &"[redacted]")
+      .field("mac", &"[redacted]")
       .finish()
   }
 }
@@ -114,6 +163,20 @@ mod push_request_tests {
       "{text}"
     );
     assert!(text.contains("Fcm") || text.contains("fcm"));
+  }
+
+  #[test]
+  fn a_subscription_change_has_a_stable_wire_form_and_hides_the_subscriptions() {
+    let json = r#"{"device_id":"42","previous_token":"{\"endpoint\":\"https://push.example.com/old\"}","token":"{\"endpoint\":\"https://push.example.com/new\"}","mac":"AAEC"}"#;
+    let request: ChangeWebPushSubscriptionRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(request.device_id.to_string(), "42");
+    assert_eq!(request.mac.as_slice(), &[0, 1, 2]);
+    assert_eq!(serde_json::to_string(&request).unwrap(), json);
+    let text = format!("{request:?}");
+    assert!(
+      !text.contains("push.example.com") && !text.contains("AAEC"),
+      "{text}"
+    );
   }
 }
 
@@ -180,6 +243,18 @@ pub struct UploadIdentityKeyRequest {
   /// Replaces an existing key. Only a full reset does this; other clients see the change.
   #[serde(default)]
   pub replace: bool,
+  /// The first key bag of the new identity, stored in the same transaction, so the server never
+  /// holds an identity whose keys can't be recovered (e2ee.md §3.2). Required: an upload without
+  /// it fails with `invalid_request`.
+  #[serde(rename = "key_bag", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_key_bag: Option<InitialKeyBag>,
+}
+
+/// The key bag uploaded together with a new identity key; becomes version 1 of the user's key bag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct InitialKeyBag {
+  pub encrypted_key_bag: Base64Bytes,
+  pub wrapped_backup_keys: Base64Bytes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -190,6 +265,20 @@ pub struct IdentityKeyResponse {
   #[serde(rename = "attestation", default, skip_serializing_if = "Option::is_none")]
   pub maybe_attestation: Option<String>,
   pub created_at: UnixMillis,
+  /// Version of the key bag stored with the key; only in the answer to the upload.
+  #[serde(rename = "key_bag_version", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_key_bag_version: Option<u64>,
+}
+
+/// `GET /api/v1/users/{user_id}/enrollment`: what the user has published so far. Before their first
+/// device is enrolled they have neither, which is an answer, not an error: the single endpoints
+/// (`identity-key`, `device-list`) answer 404 then, which browsers log as failed requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UserEnrollmentResponse {
+  #[serde(rename = "identity_key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_identity_key: Option<IdentityKeyResponse>,
+  #[serde(rename = "device_list", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_device_list: Option<DeviceListResponse>,
 }
 
 wire_enum! {
@@ -272,5 +361,61 @@ impl PushWakeUp {
       maybe_badge: None,
       maybe_sent_at: None,
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::{Id, Snowflake};
+
+  #[test]
+  fn enrollment_of_a_user_without_keys_is_an_empty_object() {
+    let response = UserEnrollmentResponse::default();
+    assert_eq!(serde_json::to_string(&response).unwrap(), "{}");
+    assert_eq!(
+      serde_json::from_str::<UserEnrollmentResponse>("{}").unwrap(),
+      response
+    );
+  }
+
+  #[test]
+  fn enrollment_wire_format_is_stable() {
+    let json = serde_json::json!({
+      "identity_key": {
+        "user_id": "42",
+        "public_key": "AQID",
+        "signature": "BAUG",
+        "created_at": 1700000000000_i64
+      },
+      "device_list": { "sequence": 3, "signed_list": "BwgJ" }
+    });
+    let response: UserEnrollmentResponse = serde_json::from_value(json.clone()).unwrap();
+    let identity_key = response.maybe_identity_key.as_ref().unwrap();
+    assert_eq!(identity_key.public_key.as_slice(), [1, 2, 3]);
+    assert_eq!(response.maybe_device_list.as_ref().unwrap().sequence, 3);
+    assert_eq!(serde_json::to_value(&response).unwrap(), json);
+  }
+
+  #[test]
+  fn a_tombstone_says_deleted_and_older_servers_mean_not_deleted() {
+    let tombstone = UserSummary {
+      id: UserId::from_snowflake(Snowflake::new(3).unwrap()),
+      maybe_username: None,
+      display_name: "Deleted user".into(),
+      kind: UserKind::Member,
+      maybe_email: None,
+      maybe_organization: None,
+      maybe_has_devices: None,
+      is_deactivated: true,
+      is_deleted: true,
+    };
+    assert_eq!(
+      serde_json::to_string(&tombstone).unwrap(),
+      r#"{"id":"3","display_name":"Deleted user","kind":"member","is_deactivated":true,"is_deleted":true}"#
+    );
+    let older: UserSummary =
+      serde_json::from_str(r#"{"id":"3","display_name":"Carol","kind":"member"}"#).unwrap();
+    assert!(!older.is_deleted && !older.is_deactivated);
   }
 }

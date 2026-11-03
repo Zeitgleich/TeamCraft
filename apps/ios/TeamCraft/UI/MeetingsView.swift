@@ -12,11 +12,12 @@ struct MeetingsView: View {
   var body: some View {
     NavigationStack {
       Group {
-        if let meetings {
+        if let meetings = meetings?.filter({ $0.status == "scheduled" }) {
           if meetings.isEmpty {
             Text("meetings_empty").foregroundStyle(Theme.textMuted)
           } else {
-            List(meetings) { meeting in
+            // A repeating meeting is listed once per occurrence, all with the series' ID.
+            List(meetings, id: \.occurrenceKey) { meeting in
               row(meeting)
             }
           }

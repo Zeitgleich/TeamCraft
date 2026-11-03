@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT key_package FROM key_packages\n       WHERE device_id = $1 AND is_last_resort AND consumed_at IS NULL AND expires_at > $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key_package",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "key_packages",
+            "name": "key_package"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "982d3b13f8acf30b891b441f89aee0c02ff5331d187fcc88df7f6fc785e2a0c7"
+}

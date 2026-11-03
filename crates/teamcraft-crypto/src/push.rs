@@ -6,6 +6,10 @@
 //!   bytes to this crate (the server uses JSON naming the conversation and message).
 //! * **Web Push:** RFC 8291 `aes128gcm` content encryption (single record) for a browser
 //!   subscription, and the RFC 8292 VAPID `Authorization` header (ES256 JWT).
+//! * **Subscription change:** the service worker proves that a rotated Web Push subscription comes
+//!   from the device that registered the old one, with an HMAC-SHA-256 under a key derived from the
+//!   push key, over the device, the old and the new subscription (e2ee.md §7). It can only replace
+//!   the subscription it names: once replaced, the same proof no longer matches.
 //!
 //! No custom primitives: ECDH P-256, HKDF-SHA-256, AES-128-GCM and ECDSA P-256 compose as the RFCs
 //! prescribe. The RFC 8291 appendix A test vector is a known-answer test.
@@ -15,20 +19,22 @@ use aes_gcm::{Aes128Gcm, Nonce};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hkdf::Hkdf;
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use p256::ecdh::diffie_hellman;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::{PublicKey, SecretKey};
 use rand_core::CryptoRngCore;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 /// The user agent's private key; exposed so tests can play the browser.
 pub use p256::SecretKey as UserAgentSecretKey;
 
 use crate::aead::{self, NONCE_LEN, TAG_LEN};
-use crate::domain::{self, PUSH_WAKEUP_AAD};
+use crate::domain::{self, PUSH_SUBSCRIPTION_CHANGE, PUSH_SUBSCRIPTION_CHANGE_KEY, PUSH_WAKEUP_AAD};
+use crate::ids::DeviceId;
 use crate::secret::{SecretBytes, SymmetricKey};
 
 const WAKEUP_VERSION: u8 = 1;
@@ -45,6 +51,8 @@ const GCM_TAG_LEN: usize = 16;
 pub const MAX_WEB_PUSH_PLAINTEXT: usize = RECORD_SIZE as usize - GCM_TAG_LEN - 1;
 /// VAPID tokens may live at most 24 hours (RFC 8292 §2); 12 leaves room for clock differences.
 const VAPID_LIFETIME_SECS: u64 = 12 * 60 * 60;
+/// Length of the proof of a subscription change (HMAC-SHA-256).
+pub const SUBSCRIPTION_CHANGE_MAC_LEN: usize = 32;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PushCryptoError {
@@ -60,6 +68,8 @@ pub enum PushCryptoError {
   BadPushKey,
   #[error("encryption failed")]
   Encrypt,
+  #[error("the subscription change is not authenticated by this push key")]
+  BadSubscriptionChange,
 }
 
 /// Seals a wake-up for a device with its push key. A fresh random nonce is drawn per call.
@@ -88,6 +98,58 @@ pub fn open_wakeup(push_key: &SymmetricKey, sealed: &[u8]) -> Result<SecretBytes
   let nonce = <[u8; NONCE_LEN]>::try_from(nonce).map_err(|_| PushCryptoError::BadWakeUp)?;
   let aad = domain::labeled(PUSH_WAKEUP_AAD, &[]);
   aead::open(push_key, &nonce, &aad, ciphertext).map_err(|_| PushCryptoError::BadWakeUp)
+}
+
+/// The proof that `device`, holding `push_key`, replaces its Web Push subscription `previous_token`
+/// with `token` (both the subscription JSON the server stores).
+pub fn subscription_change_mac(
+  push_key: &SymmetricKey,
+  device: DeviceId,
+  previous_token: &str,
+  token: &str,
+) -> [u8; SUBSCRIPTION_CHANGE_MAC_LEN] {
+  subscription_change_hmac(push_key, device, previous_token, token)
+    .finalize()
+    .into_bytes()
+    .into()
+}
+
+/// Checks a proof made by [`subscription_change_mac`], in constant time.
+pub fn verify_subscription_change(
+  push_key: &SymmetricKey,
+  device: DeviceId,
+  previous_token: &str,
+  token: &str,
+  mac: &[u8],
+) -> Result<(), PushCryptoError> {
+  subscription_change_hmac(push_key, device, previous_token, token)
+    .verify_slice(mac)
+    .map_err(|_| PushCryptoError::BadSubscriptionChange)
+}
+
+/// HMAC under a key of its own, so the push key's other use (sealing wake-ups) never meets it. The
+/// body has fixed-length fields only: the device ID and the SHA-256 of both subscriptions.
+fn subscription_change_hmac(
+  push_key: &SymmetricKey,
+  device: DeviceId,
+  previous_token: &str,
+  token: &str,
+) -> Hmac<Sha256> {
+  let hkdf = Hkdf::<Sha256>::new(None, push_key.expose_secret());
+  let mut key = Zeroizing::new([0u8; 32]);
+  // Invariant: 32 bytes is far below HKDF-SHA-256's output limit of 255 * 32 bytes.
+  let _ = hkdf.expand(PUSH_SUBSCRIPTION_CHANGE_KEY.as_bytes(), key.as_mut());
+  let mut body = Vec::with_capacity(8 + 2 * 32);
+  body.extend_from_slice(&device.get().to_be_bytes());
+  body.extend_from_slice(&Sha256::digest(previous_token.as_bytes()));
+  body.extend_from_slice(&Sha256::digest(token.as_bytes()));
+  // Invariant: HMAC takes keys of any length.
+  let mut mac = match Hmac::<Sha256>::new_from_slice(key.as_ref()) {
+    Ok(mac) => mac,
+    Err(_) => unreachable!("HMAC-SHA-256 rejects a 32-byte key"),
+  };
+  mac.update(&domain::labeled(PUSH_SUBSCRIPTION_CHANGE, &body));
+  mac
 }
 
 /// A browser's push subscription keys (`p256dh` and `auth`).
@@ -332,6 +394,54 @@ mod tests {
       SubscriptionKeys::from_bytes(ua_private.public_key().to_encoded_point(false).as_bytes(), &auth)
         .unwrap();
     (ua_private, auth, keys)
+  }
+
+  mod subscription_change {
+    use super::*;
+
+    const OLD: &str = r#"{"endpoint":"https://push.example.com/old"}"#;
+    const NEW: &str = r#"{"endpoint":"https://push.example.com/new"}"#;
+
+    #[test]
+    fn verifies_for_the_same_device_key_and_subscriptions() {
+      let mac = subscription_change_mac(&key(1), DeviceId::new(42), OLD, NEW);
+      verify_subscription_change(&key(1), DeviceId::new(42), OLD, NEW, &mac).unwrap();
+    }
+
+    #[test]
+    fn rejects_another_key_device_subscription_or_a_tampered_mac() {
+      let mac = subscription_change_mac(&key(1), DeviceId::new(42), OLD, NEW);
+      let device = DeviceId::new(42);
+      for (push_key, device, previous, token) in [
+        (key(2), device, OLD, NEW),
+        (key(1), DeviceId::new(43), OLD, NEW),
+        (key(1), device, NEW, NEW),
+        (key(1), device, OLD, OLD),
+        // Swapping old and new must not verify: the proof can't undo a change.
+        (key(1), device, NEW, OLD),
+      ] {
+        assert!(verify_subscription_change(&push_key, device, previous, token, &mac).is_err());
+      }
+      let mut tampered = mac;
+      tampered[0] ^= 1;
+      assert!(verify_subscription_change(&key(1), device, OLD, NEW, &tampered).is_err());
+      assert!(verify_subscription_change(&key(1), device, OLD, NEW, &mac[..31]).is_err());
+      assert!(verify_subscription_change(&key(1), device, OLD, NEW, &[]).is_err());
+    }
+
+    #[test]
+    fn is_stable_across_versions() {
+      let mac = subscription_change_mac(&key(1), DeviceId::new(42), OLD, NEW);
+      assert_eq!(hex(&mac), KNOWN_MAC);
+    }
+
+    /// Fixed so a server and an older service worker keep agreeing; checked against an independent
+    /// HKDF/HMAC implementation (Python's `hmac` and `hashlib`).
+    const KNOWN_MAC: &str = "b55f79e587ad4fc553861d31e577236263740d3ba74dcc191e89ef50c931550d";
+
+    fn hex(bytes: &[u8]) -> String {
+      bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
   }
 
   mod wakeup {

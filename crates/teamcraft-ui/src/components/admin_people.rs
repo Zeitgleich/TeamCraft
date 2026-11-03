@@ -8,7 +8,9 @@ use crate::components::admin_policy::{
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 
-const AWAY_MINUTES: [u32; 5] = [0, 5, 10, 15, 30];
+/// Away timeouts an admin can pick, from the server's minimum up; `0` lets the devices decide
+/// (kept so workspaces without a timeout show and keep their choice).
+const AWAY_MINUTES: [u32; 6] = [5, 10, 15, 30, 60, 0];
 const PRESET_DURATIONS: [u32; 6] = [0, 30, 60, 240, 480, 1440];
 const MAX_PRESETS: usize = 20;
 
@@ -76,6 +78,13 @@ pub fn PeopleSection() -> impl IntoView {
           hint=Signal::derive(move || i18n.t("policy-show-email-hint"))
           checked=Signal::derive(move || draft.get().directory.shows_email)
           on_change=move |value| policy.edit(|p| p.directory.shows_email = value)
+        />
+        <CheckRow
+          name="allow_display_name_override"
+          label=Signal::derive(move || i18n.t("policy-name-override"))
+          hint=Signal::derive(move || i18n.t("policy-name-override-hint"))
+          checked=Signal::derive(move || draft.get().directory.allow_display_name_override)
+          on_change=move |value| policy.edit(|p| p.directory.allow_display_name_override = value)
         />
       </fieldset>
 

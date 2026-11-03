@@ -1,0 +1,181 @@
+/* ---- People picker (#540): one token field, rows that highlight instead of a checkbox ---- */
+.token-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-height: 40px;
+  margin: 0 0 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  list-style: none;
+  cursor: text;
+}
+
+.token-field:focus-within {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: -1px;
+}
+
+.token {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 28px;
+  padding: 0 4px 0 3px;
+  border-radius: 14px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-weight: var(--weight-medium);
+}
+
+.token .avatar-sm {
+  width: 22px;
+  height: 22px;
+  margin-left: 0;
+  box-shadow: none;
+}
+
+.token-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-remove {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.token-remove svg {
+  width: 12px;
+  height: 12px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .token-remove:hover {
+    background: color-mix(in srgb, currentColor 16%, transparent);
+  }
+}
+
+.token-entry {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
+.token-input {
+  width: 100%;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  outline: none;
+}
+
+.people-picker {
+  position: relative;
+  max-height: 14rem;
+  margin: 0;
+}
+
+.person-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+
+.person-item.is-active {
+  background: var(--surface-2);
+}
+
+.person-item.is-picked {
+  background: var(--accent-soft);
+}
+
+.person-item.is-member {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* The ring of the presence dot matches the row, not the app chrome, and the avatar leaves room for it. */
+.person-item .avatar {
+  margin-right: 2px;
+}
+
+.person-item .avatar .presence {
+  right: -3px;
+  bottom: -3px;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.person-item.is-picked .avatar .presence {
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.person-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.person-handle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.person-note {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+.person-check {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  margin-left: auto;
+  color: var(--accent);
+}
+
+.person-note + .person-check {
+  margin-left: 0;
+}
+
+.person-check svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Feedback on press, not on release (apple-design: response). */
+.person-item:not(.is-member):active {
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+}
+
+.chats-filter {
+  margin: 0 12px 6px;
+}
+
+.chats-filter .input {
+  width: 100%;
+}
+

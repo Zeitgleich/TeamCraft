@@ -78,6 +78,80 @@ fn kinds(reply: &Reply) -> Vec<String> {
     .collect()
 }
 
+mod group_info {
+  use super::*;
+
+  #[tokio::test]
+  async fn the_group_information_of_the_current_epoch_is_served_to_members() {
+    let app = app!();
+    let g = group(&app).await;
+    let path = format!("/conversations/{}/mls/group-info", g.channel);
+    assert_eq!(
+      app.get(&g.carol, &path).await.error_code(),
+      "mls_group_info_not_found"
+    );
+
+    // A commit carries the information for the epoch it starts.
+    let first = app
+      .post(
+        &g.carol,
+        &format!("/conversations/{}/mls/commits", g.channel),
+        json!({"device_id": g.carol_device, "epoch": 0, "commit": b64("commit-0"), "group_info": b64("info-1")}),
+      )
+      .await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    let served = app.get(&g.dave, &path).await;
+    assert_eq!(served.status, StatusCode::OK, "{}", served.body);
+    assert_eq!(served.body, json!({"epoch": 1, "group_info": b64("info-1")}));
+
+    // A commit without one makes the stored one stale: it is not served any more.
+    commit(&app, &g.dave, &g.channel, &g.dave_device, 1, json!([])).await;
+    assert_eq!(
+      app.get(&g.dave, &path).await.error_code(),
+      "mls_group_info_not_found"
+    );
+    // A member publishes it for the current epoch; another epoch is a conflict.
+    let stale = app
+      .put(
+        &g.dave,
+        &path,
+        json!({"device_id": g.dave_device, "epoch": 1, "group_info": b64("info-old")}),
+      )
+      .await;
+    assert_eq!(stale.error_code(), "epoch_conflict");
+    let put = app
+      .put(
+        &g.dave,
+        &path,
+        json!({"device_id": g.dave_device, "epoch": 2, "group_info": b64("info-2")}),
+      )
+      .await;
+    assert_eq!(put.status, StatusCode::NO_CONTENT, "{}", put.body);
+    assert_eq!(app.get(&g.carol, &path).await.body["epoch"], 2);
+
+    // Too large to keep: the commit goes through without it.
+    let big = "x".repeat(2 * 1024 * 1024);
+    let third = app
+      .post(
+        &g.carol,
+        &format!("/conversations/{}/mls/commits", g.channel),
+        json!({"device_id": g.carol_device, "epoch": 2, "commit": b64("commit-2"), "group_info": b64(&big)}),
+      )
+      .await;
+    assert_eq!(third.status, StatusCode::CREATED, "{}", third.body);
+    assert_eq!(
+      app.get(&g.carol, &path).await.error_code(),
+      "mls_group_info_not_found"
+    );
+
+    // Not for outsiders.
+    let erin = member("erin");
+    register_device(&app, &erin).await;
+    assert_ne!(app.get(&erin, &path).await.status, StatusCode::OK);
+    app.stop().await;
+  }
+}
+
 mod commits {
   use super::*;
 
@@ -291,6 +365,62 @@ mod welcomes {
         .await
         .status,
       StatusCode::NOT_FOUND
+    );
+    app.stop().await;
+  }
+}
+
+/// e2ee.md §4.6, removal order: the remover commits the MLS removal first, then drops the server's
+/// membership. What the removed member can still get from the server afterwards.
+mod removal {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_removed_member_gets_nothing_of_the_next_epoch() {
+    let app = app!();
+    let g = group(&app).await;
+    let dave_id = user_id(&app, &g.dave).await;
+    let alice = owner();
+
+    // Carol commits Dave's removal (no welcome for him), then the owner drops his membership.
+    let removal = commit(&app, &g.carol, &g.channel, &g.carol_device, 0, json!([])).await;
+    assert_eq!(removal.status, StatusCode::CREATED, "{}", removal.body);
+    let removed = app
+      .delete(&alice, &format!("/conversations/{}/members/{dave_id}", g.channel))
+      .await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT, "{}", removed.body);
+
+    // Nothing of the queue, the group information or the next epoch reaches him.
+    for path in ["mls", "mls/group-info"] {
+      let reply = app
+        .get(&g.dave, &format!("/conversations/{}/{path}", g.channel))
+        .await;
+      assert!(
+        matches!(reply.status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+        "{path}: {}",
+        reply.status
+      );
+    }
+    let next = commit(
+      &app,
+      &g.carol,
+      &g.channel,
+      &g.carol_device,
+      1,
+      json!([{"device_id": g.dave_device, "welcome": b64("welcome-for-dave")}]),
+    )
+    .await;
+    assert_eq!(next.status, StatusCode::BAD_REQUEST, "{}", next.body);
+    let waiting = app
+      .get(&g.dave, &format!("/devices/{}/welcomes", g.dave_device))
+      .await;
+    assert_eq!(waiting.body["messages"], json!([]));
+    // Nor can he commit or post into the group any more.
+    let own = commit(&app, &g.dave, &g.channel, &g.dave_device, 1, json!([])).await;
+    assert!(
+      matches!(own.status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
+      "{}",
+      own.status
     );
     app.stop().await;
   }

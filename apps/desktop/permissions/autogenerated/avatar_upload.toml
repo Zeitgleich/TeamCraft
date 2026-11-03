@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-avatar-upload"
+description = "Enables the avatar_upload command without any pre-configured scope."
+commands.allow = ["avatar_upload"]
+
+[[permission]]
+identifier = "deny-avatar-upload"
+description = "Denies the avatar_upload command without any pre-configured scope."
+commands.deny = ["avatar_upload"]

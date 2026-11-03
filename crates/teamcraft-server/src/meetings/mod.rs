@@ -3,6 +3,7 @@
 
 pub mod caldav;
 pub mod guest;
+pub mod guest_scope;
 pub mod ical;
 pub mod mailer;
 
@@ -30,6 +31,9 @@ pub struct MeetingService {
   mailer: Arc<Slot<dyn Mailer>>,
   tokens: GuestTokens,
   guest_grace: Duration,
+  max_shared_link_guests: u32,
+  /// How long before an occurrence a call in the meeting's chat rings the invitees (`None`: never).
+  maybe_start_ring_lead: Option<Duration>,
   /// Token of the inbox handler that forwards RSVP e-mail; `None` disables that endpoint.
   maybe_inbox_token: Option<Vec<u8>>,
 }
@@ -80,6 +84,9 @@ impl MeetingService {
       mailer: backends.mailer,
       tokens: GuestTokens::new(&config.guest_token_secret)?,
       guest_grace: Duration::from_secs(config.guest_grace_secs),
+      max_shared_link_guests: config.max_shared_link_guests,
+      maybe_start_ring_lead: (config.start_ring_lead_secs > 0)
+        .then(|| Duration::from_secs(config.start_ring_lead_secs)),
       maybe_inbox_token: config
         .maybe_inbox_token
         .as_ref()
@@ -87,9 +94,10 @@ impl MeetingService {
     })
   }
 
-  /// The link members open to join; guests get personal links with a token.
-  pub fn join_url(&self, meeting: MeetingId) -> String {
-    format!("{}/meeting/{meeting}", self.base_url)
+  /// A meeting link on the service's base without its fragment: `handle` is the meeting's link
+  /// token (docs/meetings.md, "Links").
+  pub fn join_url(&self, handle: &str) -> String {
+    format!("{}/meeting/{handle}", self.base_url)
   }
 
   /// The iCalendar UID of a meeting.
@@ -124,9 +132,14 @@ impl MeetingService {
     self.guest_grace
   }
 
-  /// A personal join link: the token is in the fragment, which browsers never send to servers.
-  pub fn guest_join_url(&self, meeting: MeetingId, token: &str) -> String {
-    format!("{}#invite={token}", self.join_url(meeting))
+  /// How long before an occurrence a call started in the meeting's chat rings its invitees.
+  pub fn start_ring_lead(&self) -> Option<Duration> {
+    self.maybe_start_ring_lead
+  }
+
+  /// Most guests one shared guest link lets into the lobby.
+  pub fn max_shared_link_guests(&self) -> u32 {
+    self.max_shared_link_guests
   }
 
   /// Whether `presented` is the inbox handler's token (constant time); `None` if the endpoint is

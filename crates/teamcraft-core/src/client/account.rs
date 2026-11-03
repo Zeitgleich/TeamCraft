@@ -4,7 +4,7 @@ use teamcraft_crypto::key_bag::EncryptedKeyBag;
 
 use super::Client;
 use super::enroll::WrapsOnMerge;
-use teamcraft_proto::{Base64Bytes, UserId};
+use teamcraft_proto::{Base64Bytes, ConversationId, UserId};
 
 use crate::account_data::{AccountData, PinnedKey};
 use crate::api::ServerApi;
@@ -39,6 +39,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.persist_keys()
   }
 
+  /// Writes the decoded account data next to the key bag for readers without the backup key (the
+  /// UI), as the key bag holds it now: after enrollment, before anything changed it.
+  pub(crate) fn mirror_account_data(&mut self) -> Result<(), CoreError> {
+    let data = self.account_data();
+    self.store_account_data(&data)
+  }
+
+  /// Records that the recovery passphrase was set now (issue #410): in the account data, so the
+  /// user's other devices learn it with the next key bag upload. Leaves the stored key bag alone
+  /// (enrollment stores it with the account); [`Self::update_account_data`] does that otherwise.
+  pub(crate) fn note_passphrase_set(&mut self) -> Result<(), CoreError> {
+    let mut data = self.account_data();
+    data.maybe_recovery_passphrase_set_at = Some(self.now_ms());
+    self.store_account_data(&data)?;
+    self.sync.is_key_bag_dirty = true;
+    self.persist_sync()
+  }
+
   /// Whether local key bag changes (content keys or account data) wait for upload.
   pub fn is_key_bag_dirty(&self) -> bool {
     self.sync.is_key_bag_dirty
@@ -47,7 +65,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Brings the account data up to date with the user's other devices: merges a newer key bag
   /// from the server, and uploads local changes.
   pub async fn sync_account_data(&mut self) -> Result<(), CoreError> {
-    let remote = self.api.key_bag().await?;
+    let remote = match self.read_ahead.key_bag.take() {
+      Some(remote) => remote?,
+      None => self.api.key_bag().await?,
+    };
     if remote.version > self.sync.key_bag_version {
       self.merge_key_bag(
         remote.encrypted_key_bag.as_slice(),
@@ -138,12 +159,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if wraps == WrapsOnMerge::Adopt {
       self.store_wrapped_keys_blob(wrapped_keys)?;
     }
+    let mut gained = Vec::new();
     for ring in decrypted.conversations() {
+      // A device that joined by external commit takes the current key from a member, not from
+      // a key bag that may predate the last key switch (#178).
+      let conversation = convert::conversation_from_crypto(ring.conversation_id())?;
+      let is_waiting = super::member_device::is_waiting_for_current_key(&self.store, conversation)?;
       let local = self.account.key_bag.ring_mut(ring.conversation_id());
+      let known = local.len();
       for key in ring.keys() {
         local.insert(key.duplicate())?;
       }
+      if local.len() > known {
+        gained.push(conversation);
+      }
       if local.current().is_none()
+        && !is_waiting
         && let Some(current) = ring.current()
       {
         local.set_current(current.id())?;
@@ -154,13 +185,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let mut data = self.account_data();
     data.merge(&remote_data, self.now_ms());
     self.store_account_data(&data)?;
+    // Removals another device of the user saw count here before the next message is decrypted.
+    self.apply_shared_removals()?;
     // Entries the other device didn't have yet still need an upload.
     if data != remote_data {
       self.sync.is_key_bag_dirty = true;
     }
     self.sync.key_bag_version = version;
     records::save_key_bag(&self.store, &self.account)?;
-    self.persist_sync()
+    self.persist_sync()?;
+    self.retry_with_new_keys(&gained);
+    Ok(())
+  }
+
+  /// Tries the parked messages of the conversations whose key ring gained keys in a merge, so
+  /// messages waiting for a key the user's other devices had fill in now, not at the conversation's
+  /// next catch-up (issue #888). Only those conversations, and only when something is parked there.
+  /// A failure is logged: the merge is stored, and the next catch-up tries again.
+  fn retry_with_new_keys(&mut self, conversations: &[ConversationId]) {
+    for conversation in conversations {
+      if let Err(error) = self.retry_undecrypted(*conversation) {
+        tracing::warn!(conversation_id = %conversation, %error, "parked messages not tried again after a key bag merge");
+      }
+    }
   }
 
   fn store_account_data(&mut self, data: &AccountData) -> Result<(), CoreError> {

@@ -17,18 +17,45 @@
     <item quantity="other">%d ungelesene Nachrichten</item>
   </plurals>
   <string name="offline_banner">Keine Verbindung. Nachrichten werden gesendet, sobald du wieder online bist.</string>
+  <!-- The language these strings are in, as a BCP 47 tag: the app's language for the identity provider's login page (issue #448). -->
+  <string name="app_language">de</string>
+  <string name="connection_slow">Langsame Verbindung. Nachrichten gehen weiter raus, brauchen aber länger.</string>
+  <string name="connection_unreachable">Der Server ist nicht erreichbar. Nachrichten warten, bis er wieder da ist. Nächster Versuch in %1$d s.</string>
+  <string name="connection_captive_portal">Dieses Netzwerk verlangt zuerst eine Anmeldung. Öffne eine Webseite, um dich anzumelden; Nachrichten warten. Nächster Versuch in %1$d s.</string>
+  <string name="connection_untrusted_certificate">Dem Zertifikat des Servers wird nicht vertraut. In einem Netzwerk, das verschlüsselten Verkehr prüft: Nutze ein anderes Netzwerk oder frag deine IT; passiert es überall, sag deiner Administration Bescheid. Nächster Versuch in %1$d s.</string>
+  <string name="connection_retry">Jetzt versuchen</string>
+  <string name="connection_sign_in">Deine Sitzung ist abgelaufen. Nachrichten warten, bis du dich wieder anmeldest.</string>
+  <string name="connection_sign_in_action">Erneut anmelden</string>
+  <string name="connection_connecting">Verbindung zum Server wird aufgebaut…</string>
+  <string name="connection_sync_not_started">Synchronisierung konnte nicht starten. Neuer Versuch läuft…</string>
+  <string name="message_link_label">Link zu einer Nachricht</string>
+  <string name="message_sent">Gesendet</string>
+  <string name="message_read">Gelesen</string>
+  <plurals name="conversation_members">
+    <item quantity="one">%d Mitglied</item>
+    <item quantity="other">%d Mitglieder</item>
+  </plurals>
 
   <!-- Conversation -->
   <string name="jump_down">Zur neuesten Nachricht springen</string>
   <plurals name="jump_down_new">
-    <item quantity="one">%d neuere Nachricht, nach unten springen</item>
-    <item quantity="other">%d neuere Nachrichten, nach unten springen</item>
+    <item quantity="one">%d neue Nachricht, nach unten springen</item>
+    <item quantity="other">%d neue Nachrichten, nach unten springen</item>
+  </plurals>
+  <plurals name="jump_down_unseen">
+    <item quantity="one">%s neue</item>
+    <item quantity="other">%s neue</item>
+  </plurals>
+  <plurals name="jump_to_reaction">
+    <item quantity="one">%d neue Reaktion auf deine Nachrichten, dorthin springen</item>
+    <item quantity="other">%d neue Reaktionen auf deine Nachrichten, zur ersten springen</item>
   </plurals>
   <string name="day_today">Heute</string>
   <string name="day_yesterday">Gestern</string>
   <string name="react_quick">Mit %1$s reagieren</string>
   <string name="file_open">Öffnen</string>
   <string name="image_unreadable">Dieses Bild kann nicht angezeigt werden.</string>
+  <string name="image_open_with">Mit anderer App öffnen</string>
   <string name="close">Schließen</string>
   <string name="share">Teilen</string>
   <string name="delete_confirm_title">Nachricht löschen?</string>
@@ -44,6 +71,14 @@
     <item quantity="one">%d Datei</item>
     <item quantity="other">%d Dateien</item>
   </plurals>
+  <!-- The notes to self, as the web and desktop name them (notes-title). -->
+  <string name="notes_title">Mein Speicher</string>
+  <string name="share_recent">Zuletzt</string>
+  <string name="share_no_match">Keine Unterhaltung passt.</string>
+  <string name="share_empty_title">Noch nichts zum Teilen</string>
+  <string name="share_empty">Unterhaltungen, in denen du schreiben kannst, erscheinen hier, sobald sie synchronisiert sind.</string>
+  <string name="share_load_failed_title">Unterhaltungen nicht geladen</string>
+  <string name="share_load_failed">Deine geteilten Inhalte bleiben erhalten. Versuche es gleich noch einmal.</string>
 
   <!-- App lock and composer settings -->
   <string name="app_lock">App-Sperre (Fingerabdruck, Gesicht oder Displaysperre)</string>
@@ -74,6 +109,11 @@
   <string name="typing_two">%1$s und %2$s schreiben …</string>
   <string name="typing_several">Mehrere Personen schreiben …</string>
   <string name="share_typing">Anderen zeigen, wenn ich schreibe</string>
+  <string name="call_status_sounds">Statustöne im Anruf</string>
+  <string name="call_status_sounds_hint">Ein leiser Ton wiederholt sich, solange deine Verbindung unterbrochen ist; kurze Töne zeigen, wenn sie wieder steht oder der Anruf beendet ist. Nur du hörst sie, über die Audioausgabe des Anrufs.</string>
+  <string name="call_status_sounds_all">Meine und die anderer</string>
+  <string name="call_status_sounds_own_only">Nur meine</string>
+  <string name="call_status_sounds_off">Aus</string>
   <string name="no_conversation_selected">Wähle eine Unterhaltung.</string>
   <string name="image_save">Speichern</string>
   <string name="image_saved">In Bilder/TeamCraft gespeichert</string>
@@ -92,4 +132,18 @@
     <item quantity="one">%d ausgewählt</item>
     <item quantity="other">%d ausgewählt</item>
   </plurals>
+  <!-- Main screen (#262): bottom navigation, global entries of Home, empty states. -->
+  <string name="nav_home">Start</string>
+  <string name="nav_activity">Aktivität</string>
+  <string name="nav_spaces">Spaces</string>
+  <string name="home_entry_threads">Threads</string>
+  <string name="home_entry_saved">Gemerkt</string>
+  <string name="home_entry_meetings">Meetings</string>
+  <string name="home_entry_people">Personen</string>
+  <string name="account_menu">%1$s: Konto, Status und Einstellungen</string>
+  <string name="dm_empty_title">Noch keine Direktnachrichten</string>
+  <string name="activity_empty_title">Alles gelesen</string>
+  <string name="activity_empty">Erwähnungen und ungelesene Nachrichten aus all deinen Unterhaltungen erscheinen hier.</string>
+  <string name="spaces_empty_title">Noch keine Kanäle</string>
+  <string name="spaces_empty">Durchsuche die Kanäle deiner Spaces, um einem beizutreten.</string>
 </resources>

@@ -57,7 +57,8 @@ pub enum Attention {
   Away,
   /// A phone or tablet has the app in the foreground.
   MobileActive,
-  /// The user is looking at a desktop or web session.
+  /// The user is at a desktop or web session: looking at it, or using the computer
+  /// ([`crate::gateway::Hub::active_devices`]).
   DesktopAttentive,
 }
 
@@ -104,8 +105,9 @@ pub struct RecipientState {
 /// 2. Do-not-disturb suppresses the push unless an override applies (decided by the caller).
 /// 3. Mentions, direct messages and replies in followed threads push; otherwise only `all` channels
 ///    do, and integration channels only for mentions.
-/// 4. Unless the user chose to be pushed always: no push while a phone is in use; while a desktop
-///    is attentive, the push waits for the grace delay (or is dropped without one).
+/// 4. Unless the user chose to be pushed always: no push while a phone is in use; while the user is
+///    at a desktop (attentive, or recently active on it), the push waits for the grace delay (or is
+///    dropped without one).
 pub fn decide(state: RecipientState) -> Result<Decision, Skip> {
   if state.level_is_none {
     return Err(Skip::Muted);
@@ -214,8 +216,8 @@ async fn push_to_recipient(
   now: OffsetDateTime,
 ) {
   let verdict = decide(RecipientState {
-    level_is_all: recipient.notification_level == NotificationLevel::All,
-    level_is_none: is_muted(&recipient, now),
+    level_is_all: level(state, &recipient) == NotificationLevel::All,
+    level_is_none: is_muted(state, &recipient, now),
     is_mentioned: event.mentioned.contains(&recipient.user),
     is_direct: matches!(event.kind, ConversationKind::Dm | ConversationKind::Group),
     is_integration: event.is_integration,
@@ -265,8 +267,15 @@ async fn push_to_recipient(
 }
 
 /// Rings the members of a DM or group DM (except the caller) on every device without a live
-/// connection; devices with one get the gateway's `call_ring`.
-pub async fn notify_ring(state: AppState, conversation: ConversationId, call: CallId, caller: UserId) {
+/// connection; devices with one get the gateway's `call_ring`. With `maybe_only`, just those members
+/// ring (the people added to a call that moved into a meeting).
+pub async fn notify_ring(
+  state: AppState,
+  conversation: ConversationId,
+  call: CallId,
+  caller: UserId,
+  maybe_only: Option<HashSet<UserId>>,
+) {
   if !state
     .push_tracker
     .try_start_ring(caller, state.settings.get().push.max_rings_per_minute)
@@ -287,9 +296,14 @@ pub async fn notify_ring(state: AppState, conversation: ConversationId, call: Ca
   };
   let now = OffsetDateTime::now_utc();
   let mut targets = Vec::new();
+  let recipients = recipients.into_iter().filter(|recipient| {
+    maybe_only
+      .as_ref()
+      .is_none_or(|only| only.contains(&recipient.user))
+  });
   for recipient in recipients {
     let verdict = decide_ring(
-      is_muted(&recipient, now),
+      is_muted(&state, &recipient, now),
       is_dnd(
         &recipient,
         now,
@@ -341,6 +355,12 @@ pub async fn notify_ring(state: AppState, conversation: ConversationId, call: Ca
 
 /// The ring ended (answered, timed out, cancelled): phones that rang stop.
 pub async fn end_ring(state: AppState, call: CallId) {
+  // Queued retries of the ring go first, for every device: also those without a dismissal.
+  match state.database.delete_queued_rings(call).await {
+    Ok(0) => {},
+    Ok(count) => debug!(call_id = %call, count, "queued rings dropped"),
+    Err(error) => warn!(%error, call_id = %call, "dropping queued rings failed"),
+  }
   let Some(ring) = state.push_tracker.take_ring(call) else {
     return;
   };
@@ -450,7 +470,7 @@ pub async fn send_test(
     Ok(()) => TestPushOutcome::Sent,
     Err(PushError::Gone) => TestPushOutcome::Gone,
     Err(PushError::NotConfigured) => TestPushOutcome::NotConfigured,
-    Err(PushError::Unavailable(_)) => TestPushOutcome::Unavailable,
+    Err(PushError::Unavailable { .. }) => TestPushOutcome::Unavailable,
     Err(PushError::Rejected(_) | PushError::Invalid(_) | PushError::Crypto(_)) => TestPushOutcome::Rejected,
   };
   Ok(TestPushResponse {
@@ -633,9 +653,18 @@ fn always_pushes(recipient: &PushRecipientRow) -> bool {
   PushMode::from(recipient.push_mode.clone()) == PushMode::Always
 }
 
-fn is_muted(recipient: &PushRecipientRow, now: OffsetDateTime) -> bool {
-  recipient.notification_level == NotificationLevel::None
+fn is_muted(state: &AppState, recipient: &PushRecipientRow, now: OffsetDateTime) -> bool {
+  level(state, recipient) == NotificationLevel::None
     || notifications::is_muted(recipient.maybe_muted_until, now)
+}
+
+/// The recipient's level for the conversation, with the instance default for somebody who never
+/// chose one (issue #1011).
+fn level(state: &AppState, recipient: &PushRecipientRow) -> NotificationLevel {
+  recipient
+    .maybe_notification_level
+    .clone()
+    .unwrap_or_else(|| state.settings.get().notifications.default_level.clone())
 }
 
 /// DND, manual or scheduled, unless an override (allowed sender, urgent message) lets this through.
@@ -1013,7 +1042,7 @@ mod tests {
     fn recipient(presence_pref: &str, maybe_dnd_schedule: Option<String>) -> PushRecipientRow {
       PushRecipientRow {
         user: user(1),
-        notification_level: NotificationLevel::All,
+        maybe_notification_level: Some(NotificationLevel::All),
         presence_pref: presence_pref.into(),
         maybe_dnd_until: None,
         maybe_muted_until: None,

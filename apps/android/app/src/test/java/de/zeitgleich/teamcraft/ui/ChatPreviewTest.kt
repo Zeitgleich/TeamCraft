@@ -34,7 +34,7 @@ class ChatPreviewTest {
 
   @Test
   fun directMessagesAreSortedByRecency() {
-    val result = sections(
+    val result = directSections(
       listOf(item("1", "Alice"), item("2", "Bob"), item("3", "Carol")),
       lastActivity = mapOf("3" to 30L, "1" to 10L),
     )

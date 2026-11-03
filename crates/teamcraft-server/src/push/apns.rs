@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_proto::PushKind;
 use tracing::warn;
 
-use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency};
+use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency, retry_after};
 use crate::auth::BoxFuture;
 
 pub const APNS_PRODUCTION_URL: &str = "https://api.push.apple.com";
@@ -125,7 +125,7 @@ impl ApnsSender {
     }
     let http = builder
       .build()
-      .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
+      .map_err(|e| PushError::unavailable(e.without_url().to_string()))?;
     Ok(Self {
       key,
       key_id: settings.key_id,
@@ -247,24 +247,32 @@ impl PushSender for ApnsSender {
         .body(request.body)
         .send()
         .await
-        .map_err(|e| PushError::Unavailable(e.without_url().to_string()))?;
+        .map_err(|e| PushError::unavailable(e.without_url().to_string()))?;
       let status = response.status();
       if status.is_success() {
         return Ok(());
       }
+      let maybe_retry_after = retry_after(response.headers());
       let reason = response
         .json::<ApnsError>()
         .await
         .ok()
         .and_then(|error| error.reason)
         .unwrap_or_default();
-      classify(status, &reason, || self.forget_provider_token())
+      classify(status, &reason, maybe_retry_after, || {
+        self.forget_provider_token()
+      })
     })
   }
 }
 
 /// Maps an APNs error response (<https://developer.apple.com/documentation/usernotifications>).
-fn classify(status: StatusCode, reason: &str, on_bad_credentials: impl FnOnce()) -> Result<(), PushError> {
+fn classify(
+  status: StatusCode,
+  reason: &str,
+  maybe_retry_after: Option<std::time::Duration>,
+  on_bad_credentials: impl FnOnce(),
+) -> Result<(), PushError> {
   match (status.as_u16(), reason) {
     // The token is dead: unregistered, or made for another app or environment.
     (410, _) | (400, "BadDeviceToken" | "DeviceTokenNotForTopic") => Err(PushError::Gone),
@@ -273,7 +281,10 @@ fn classify(status: StatusCode, reason: &str, on_bad_credentials: impl FnOnce())
       warn!(%reason, "APNs rejected the provider token");
       Err(PushError::Rejected(403))
     },
-    (429, _) | (500..=599, _) => Err(PushError::Unavailable(format!("status {status}"))),
+    (429, _) | (500..=599, _) => Err(PushError::unavailable_for(
+      format!("status {status}"),
+      maybe_retry_after,
+    )),
     (code, _) => {
       warn!(status = code, %reason, "APNs rejected the push");
       Err(PushError::Rejected(code))
@@ -382,8 +393,9 @@ dgo8LHX0AxF1j8QPNmXOWNMLAbz+fRtRJGmQiDQP92HZZ1d7Hu/IeczB
 
   #[test]
   fn error_responses_are_classified() {
-    let class =
-      |status: u16, reason: &str| classify(StatusCode::from_u16(status).unwrap(), reason, || {}).unwrap_err();
+    let class = |status: u16, reason: &str| {
+      classify(StatusCode::from_u16(status).unwrap(), reason, None, || {}).unwrap_err()
+    };
     assert!(matches!(class(410, "Unregistered"), PushError::Gone));
     assert!(matches!(class(400, "BadDeviceToken"), PushError::Gone));
     assert!(matches!(class(400, "BadTopic"), PushError::Rejected(400)));
@@ -391,10 +403,13 @@ dgo8LHX0AxF1j8QPNmXOWNMLAbz+fRtRJGmQiDQP92HZZ1d7Hu/IeczB
       class(403, "InvalidProviderToken"),
       PushError::Rejected(403)
     ));
-    assert!(matches!(class(429, "TooManyRequests"), PushError::Unavailable(_)));
+    assert!(matches!(
+      class(429, "TooManyRequests"),
+      PushError::Unavailable { .. }
+    ));
     assert!(matches!(
       class(503, "ServiceUnavailable"),
-      PushError::Unavailable(_)
+      PushError::Unavailable { .. }
     ));
   }
 }

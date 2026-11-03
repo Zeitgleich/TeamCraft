@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "call-window",
+  "description": "What the incoming-call window may call (#650): read the call it shows, appear once rendered, report its two buttons and be dragged. Nothing else of the shell.",
+  "windows": [
+    "incoming-call"
+  ],
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "allow-call-window-info",
+    "allow-call-window-ready",
+    "allow-call-window-action"
+  ]
+}

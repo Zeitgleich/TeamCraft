@@ -478,6 +478,33 @@ mod tests {
       );
     }
 
+    /// An AV1 temporal unit as WebCodecs' encoder gives it comes out of DAVE without its
+    /// temporal delimiter and the last OBU's size, and whole again after `av1_temporal_unit`
+    /// (#565).
+    #[test]
+    fn av1_frames_come_back_whole() {
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_participant(&gateway, ALICE);
+      let mut bob = joined_participant(&gateway, BOB);
+      add_members(
+        &gateway,
+        &mut alice,
+        &mut [],
+        &mut [(BOB, &mut bob)],
+        &[ALICE, BOB],
+      );
+      // A temporal delimiter, a sequence header and a frame OBU of 300 bytes.
+      let mut unit = vec![0x12, 0x00, 0x0a, 0x04, 0, 1, 2, 3, 0x32, 0xac, 0x02];
+      unit.extend((0..300u32).map(|value| (value % 251) as u8));
+      let encrypted = alice
+        .encrypt_frame(MediaKind::Video, FrameCodec::Av1, &unit)
+        .unwrap()
+        .into_owned();
+      let decrypted = bob.decrypt_frame(ALICE, MediaKind::Video, &encrypted).unwrap();
+      assert_ne!(decrypted, unit, "DAVE sends the unit as AV1's RTP format does");
+      assert_eq!(crate::video::av1_temporal_unit(&decrypted), unit);
+    }
+
     #[test]
     fn third_participant_joins_existing_group() {
       let gateway = DaveExternalSender::new().unwrap();
@@ -506,6 +533,42 @@ mod tests {
       assert_round_trip(&mut carol, CAROL, &mut alice);
       assert_round_trip(&mut alice, ALICE, &mut carol);
       assert_round_trip(&mut bob, BOB, &mut carol);
+    }
+
+    #[test]
+    fn a_joiner_cannot_decrypt_frames_from_before_it_joined() {
+      // A meeting guest's device is added like Carol: its commit starts a new epoch, and the
+      // frames sent before were encrypted under keys the welcome never gives it (e2ee.md §4.6).
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_participant(&gateway, ALICE);
+      let mut bob = joined_participant(&gateway, BOB);
+      let mut carol = joined_participant(&gateway, CAROL);
+      add_members(
+        &gateway,
+        &mut alice,
+        &mut [],
+        &mut [(BOB, &mut bob)],
+        &[ALICE, BOB],
+      );
+      let before = alice
+        .encrypt_frame(MediaKind::Audio, FrameCodec::Opus, OPUS_FRAME)
+        .unwrap()
+        .into_owned();
+
+      add_members(
+        &gateway,
+        &mut alice,
+        &mut [&mut bob],
+        &mut [(CAROL, &mut carol)],
+        &[ALICE, BOB, CAROL],
+      );
+
+      assert!(carol.decrypt_frame(ALICE, MediaKind::Audio, &before).is_err());
+      assert_eq!(
+        bob.decrypt_frame(ALICE, MediaKind::Audio, &before).unwrap(),
+        OPUS_FRAME
+      );
+      assert_round_trip(&mut alice, ALICE, &mut carol);
     }
 
     #[test]

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"count!\" FROM key_packages\n         WHERE device_id = $1 AND consumed_at IS NULL AND NOT is_last_resort AND expires_at > $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a0e81ff1f4ae498bda84fc6bc44f7ea39db8fabc9d140e7e9c6b7e1ed0eab0de"
+}

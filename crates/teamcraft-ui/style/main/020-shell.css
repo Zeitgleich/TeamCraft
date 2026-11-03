@@ -1,0 +1,106 @@
+/* ---- Shell layout ---- */
+
+.app {
+  display: grid;
+  /* Banners (unsigned bundle, offline, announcement, update) share the first row; it is empty
+     without them. The row below the top bar holds a first sync's progress, empty without one. */
+  grid-template-rows: auto var(--topbar-h) auto minmax(0, 1fr);
+  /* Without it the column grows to the content's minimum and the page scrolls sideways (~1100px). */
+  grid-template-columns: minmax(0, 1fr);
+  height: 100dvh;
+}
+
+.app-body {
+  display: flex;
+  min-height: 0;
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  background: var(--surface);
+  /* Takes focus only from code (tabindex -1, after navigation), never from Tab: no ring. */
+  outline: none;
+}
+
+.top-bar {
+  display: grid;
+  grid-template-columns: minmax(var(--rail-w), auto) minmax(0, 1fr) auto;
+  align-items: center;
+  background: var(--chrome);
+  color: var(--chrome-text);
+  padding-right: 12px;
+}
+
+/* The search and, in the desktop app, back and forward to its left (#874): one centred group in the
+   middle column. */
+.top-nav {
+  grid-column: 2;
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(560px, 100%);
+  min-width: 0;
+}
+
+.top-nav.has-history {
+  width: min(632px, 100%);
+}
+
+.top-nav .search-field {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+
+.top-bar .history-buttons {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.top-bar .history-buttons .icon-btn:disabled {
+  opacity: 0.35;
+}
+
+.top-bar .brand {
+  /* As wide as it needs, up to the sidebar's width; long names end in an ellipsis. */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  grid-column: 1;
+  min-width: 0;
+  max-width: calc(var(--rail-w) + var(--sidebar-w));
+  padding: 0 12px;
+  color: var(--chrome-strong);
+  text-decoration: none;
+  cursor: pointer;
+  align-self: stretch;
+}
+
+.top-bar .brand:focus-visible {
+  outline: var(--focus-width) solid var(--chrome-strong);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+}
+
+/* No `display` here: `.brand-light`/`.brand-dark` switch the theme's variant. */
+.top-bar .brand-logo {
+  height: 24px;
+  max-width: 120px;
+  object-fit: contain;
+  flex: none;
+}
+
+.top-bar .brand-name {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-base);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+

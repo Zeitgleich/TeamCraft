@@ -1,0 +1,11 @@
+# Baseline profile (#315): code the runtime compiles ahead of time at install instead of
+# interpreting it on first use. Covers start, opening a conversation, scrolling the feed and
+# decoding pictures: the app's UI and core bridge, and the UniFFI bindings every core call goes
+# through. Compose and the other libraries ship their own profiles. Hand-written with wildcards;
+# a generated profile (Macrobenchmark on a signed-in device) can replace it later.
+HSPLde/zeitgleich/teamcraft/ui/**->**(**)**
+HSPLde/zeitgleich/teamcraft/core/**->**(**)**
+HSPLuniffi/teamcraft_ffi/**->**(**)**
+Lde/zeitgleich/teamcraft/ui/**;
+Lde/zeitgleich/teamcraft/core/**;
+Luniffi/teamcraft_ffi/**;

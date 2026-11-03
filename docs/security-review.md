@@ -249,6 +249,8 @@ Rollback below an applied version is prevented (lines 145-148 and 182-185). That
 
 **Location:** `crates/teamcraft-core/src/trust.rs:78-80`. This is documented at lines 23-24 as a gap: "signed per-channel roles aren't in the roster yet". Any single member can add arbitrary users with full history, or remove anyone, which amplifies #3 and #8. It matches the stated interim design. Track it so it is closed before release.
 
+**Status: partly addressed** (issue #380). Channel roles are a signed, chained log per channel that every member verifies (e2ee.md §4.6.1, `teamcraft-core::channel_roles`). Commits don't depend on them yet: every group member may still sign membership changes until channels from before signed roles are signed, so legitimate admins aren't locked out and older clients don't split from the group.
+
 #### 12. Low: org recovery shares are sealed to device keys whose device ID is not bound
 
 **Status: fixed** in `153d020`. Shares go only to devices the signed device list names with that key.
@@ -744,7 +746,7 @@ with full history. The same applies to `api_request` with the user's bearer toke
 **Status: fixed** in `8a121e6` (`fix/security-server`). `connect-src` is generated from the configuration (`web.connect_origins`, issuer, SFU and storage origins) instead of allowing any HTTPS host, an invalid configured CSP is a startup error (and the fallback is `default-src 'none'`), and `init.js` and `sw.js` are served `no-cache`. Trusted Types are not in the default CSP; operators can add `require-trusted-types-for 'script'` through `content_security_policy`.
 
 Default CSP (`config.rs:342-344`): `script-src 'self' 'wasm-unsafe-eval'`, no inline scripts (the
-inline loader is moved out by `scripts/externalize-init.sh`), plus `frame-ancestors 'none'`,
+loader is `init.js`, written by `scripts/build-app.sh`), plus `frame-ancestors 'none'`,
 `base-uri 'none'`, `form-action 'self'`. That is good. The gaps:
 
 - `connect-src 'self' wss: https:` lets injected code `fetch` any HTTPS host, which makes #2 an
@@ -769,7 +771,7 @@ operator. It matters only if Keycloak is operated separately from the app server
 
 #### Done correctly (a)
 
-- Markdown (`teamcraft-ui/src/markdown.rs`) builds a typed tree. Links come only from
+- Markdown (`teamcraft-client-api/src/markdown.rs`) builds a typed tree. Links come only from
   `http://`/`https://` prefixes (`markdown.rs:133-140`), and `javascript:` is tested
   (`markdown.rs:186-191`). They render as `<a href target=_blank rel="noopener noreferrer">`
   (`components/rich_text.rs:46-49`). Recursion depth is bounded because each nesting level drops a
@@ -1157,10 +1159,10 @@ guest user deactivated. `validate_token` also ignores the `meeting` claim, so th
 guest login rather than a meeting-bound one.
 
 **Impact:** limited (the guest is a member of nothing, guest directory/DM restrictions apply when
-`guests_dm_only_with_shared_conversations` is on, which is the default), but a denied guest can
-reconnect to the gateway, poll lobby state, register devices/identity keys and consume resources
-until the meeting ends. If an admin later turns the DM restriction off, a denied stranger can DM
-users by ID.
+`guests_dm_start` is not `anyone`; the default is `nobody`, so a guest starts no DM), but a denied
+guest can reconnect to the gateway, poll lobby state, register devices/identity keys and consume
+resources until the meeting ends. If an admin later sets `guests_dm_start` to `anyone`, a denied
+stranger can DM users by ID.
 
 **Fix:** on deny, deactivate the guest account (or revoke the guest subject in `Revocations` and
 persist it), and reject guest tokens whose lobby entry is `denied`.

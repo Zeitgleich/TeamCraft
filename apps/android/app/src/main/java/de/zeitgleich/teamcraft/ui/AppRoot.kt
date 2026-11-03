@@ -35,6 +35,8 @@ import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.screens.BrowseScreen
 import de.zeitgleich.teamcraft.ui.screens.ChatListScreen
+import de.zeitgleich.teamcraft.ui.screens.ConfirmServerScreen
+import de.zeitgleich.teamcraft.ui.screens.ServerEntryScreen
 import de.zeitgleich.teamcraft.ui.screens.FilesScreen
 import de.zeitgleich.teamcraft.ui.screens.MeetingsScreen
 import de.zeitgleich.teamcraft.ui.screens.SavedScreen
@@ -44,14 +46,15 @@ import de.zeitgleich.teamcraft.ui.screens.DoNotDisturbScreen
 import de.zeitgleich.teamcraft.ui.screens.NotificationDiagnosticsScreen
 import de.zeitgleich.teamcraft.ui.screens.PushBatteryScreen
 import de.zeitgleich.teamcraft.ui.screens.EnrollScreen
+import de.zeitgleich.teamcraft.ui.screens.LinkRequestPrompts
 import de.zeitgleich.teamcraft.ui.screens.LinkThisDeviceScreen
-import de.zeitgleich.teamcraft.ui.screens.LoadingScreen
 import de.zeitgleich.teamcraft.ui.screens.LoginScreen
 import de.zeitgleich.teamcraft.ui.screens.MessageScreen
 import de.zeitgleich.teamcraft.ui.screens.OrgRecoveryScreen
 import de.zeitgleich.teamcraft.ui.screens.SearchScreen
 import de.zeitgleich.teamcraft.ui.screens.SettingsScreen
 import de.zeitgleich.teamcraft.ui.screens.SharePickerScreen
+import de.zeitgleich.teamcraft.ui.screens.StoreRecoveryScreen
 import de.zeitgleich.teamcraft.ui.screens.ThreadScreen
 
 @Composable
@@ -66,40 +69,85 @@ fun AppRoot(
   val state by viewModel.appState.collectAsState()
   val isBusy by viewModel.isBusy.collectAsState()
   val brand by viewModel.loginBrand.collectAsState()
+  val brandIcons by viewModel.brandIcons.collectAsState()
+  val maybeServer by viewModel.server.collectAsState()
+  val isServerLocked by viewModel.isServerLocked.collectAsState()
+  val maybeSignInPage by viewModel.signInPage.collectAsState()
+  val maybeSsoIcon by viewModel.ssoIcon.collectAsState()
   val isDark = isSystemInDarkTheme()
   val scope = rememberCoroutineScope()
-  when (val current = state) {
-    AppState.Starting -> LoadingScreen()
-    is AppState.SignedOut -> LoginScreen(
-      maybeBrand = brand,
-      maybeLogo = remember(brand, isDark) { viewModel.brandLogo(isDark) },
-      serverHost = viewModel.serverHost,
-      maybeError = current.maybeError,
-      isBusy = isBusy,
-      onLogin = { scope.launch { runCatching { onLogin(viewModel.loginIntent()) } } },
-    )
-    is AppState.NeedsEnrollment -> EnrollScreen(
-      hasExistingIdentity = current.hasExistingIdentity,
-      maybeError = current.maybeError,
-      isBusy = isBusy,
-      onEnroll = viewModel::enroll,
-      onLink = viewModel::linkThisDevice,
-      onOrgRecovery = viewModel::recoverThroughOrganization,
-    )
-    is AppState.RecoveringThroughOrganization -> OrgRecoveryScreen(
-      code = current.code,
-      maybeError = current.maybeError,
-      isBusy = isBusy,
-      onFinish = viewModel::finishOrgRecovery,
-      onCancel = viewModel::cancelLinking,
-    )
-    is AppState.LinkingThisDevice -> LinkThisDeviceScreen(
-      code = current.code,
-      maybeShortCode = current.maybeShortCode,
-      onCancel = viewModel::cancelLinking,
-    )
-    is AppState.Failed -> MessageScreen(message = current.error, onRetry = viewModel::refresh)
-    is AppState.Ready -> ReadyNavigation(viewModel, current, maybeConversationToOpen, onConversationOpened, maybeShare, onShareHandled)
+  Box(Modifier.fillMaxSize()) {
+    when (val current = state) {
+      // The loading mark (MainActivity) stands in for this screen.
+      AppState.Starting -> Unit
+      is AppState.NeedsServer -> ServerEntryScreen(
+        prefill = current.prefill,
+        maybeError = current.maybeError,
+        isLocked = current.isLocked,
+        isBusy = isBusy,
+        onSubmit = viewModel::submitServer,
+      )
+      is AppState.ConfirmServer -> ConfirmServerScreen(
+        checked = current.checked,
+        maybeBrand = brand,
+        maybeLogo = remember(brand, isDark) { viewModel.brandLogo(isDark) },
+        isBusy = isBusy,
+        onContinue = {
+          scope.launch {
+            if (viewModel.confirmServer()) viewModel.loginIntent()?.let(onLogin)
+          }
+        },
+        maybeOnOtherServer = if (isServerLocked) null else viewModel::useAnotherServer,
+      )
+      is AppState.SignedOut -> LoginScreen(
+        maybeBrand = brand,
+        maybeLogo = remember(brand, isDark) { viewModel.brandLogo(isDark) },
+        maybeIcon = brandIcons?.forTheme(isDark),
+        maybePage = maybeSignInPage,
+        maybeSsoIcon = maybeSsoIcon,
+        serverHost = maybeServer?.address?.host.orEmpty(),
+        maybeError = current.maybeError,
+        maybeErrorCode = current.maybeErrorCode,
+        isBusy = isBusy,
+        onSso = { scope.launch { viewModel.loginIntent()?.let(onLogin) } },
+        onLocal = viewModel::signInLocal,
+        maybeOnChangeServer = if (isServerLocked) null else ({ viewModel.changeServer() }),
+      )
+      is AppState.NeedsEnrollment -> EnrollScreen(
+        hasExistingIdentity = current.hasExistingIdentity,
+        maybeError = current.maybeError,
+        isBusy = isBusy,
+        onEnroll = viewModel::enroll,
+        onLink = { viewModel.linkThisDevice() },
+        onOrgRecovery = viewModel::recoverThroughOrganization,
+      )
+      is AppState.RecoveringThroughOrganization -> OrgRecoveryScreen(
+        code = current.code,
+        maybeError = current.maybeError,
+        isBusy = isBusy,
+        onFinish = viewModel::finishOrgRecovery,
+        onCancel = viewModel::cancelLinking,
+      )
+      is AppState.LinkingThisDevice -> LinkThisDeviceScreen(
+        state = current,
+        onAskOtherDevices = viewModel::askOtherDevices,
+        onScanned = viewModel::linkScannedCode,
+        onCancel = viewModel::cancelLinking,
+      )
+      is AppState.Failed -> MessageScreen(message = current.error, onRetry = viewModel::refresh)
+      is AppState.StoreUnreadable -> StoreRecoveryScreen(
+        problem = current.problem,
+        maybeError = current.maybeError,
+        isBusy = isBusy,
+        onReset = viewModel::resetStore,
+        onRetry = viewModel::retryStore,
+        onSignOut = viewModel::signOut,
+      )
+      is AppState.Ready -> {
+        ReadyNavigation(viewModel, current, maybeConversationToOpen, onConversationOpened, maybeShare, onShareHandled)
+        LinkRequestPrompts(viewModel, Modifier.align(Alignment.TopCenter))
+      }
+    }
   }
 }
 
@@ -151,6 +199,8 @@ private fun ReadyNavigation(
       val list = @Composable {
         ChatListScreen(
           viewModel = viewModel,
+          accountUserId = account.userId,
+          accountName = account.displayName,
           onOpen = { if (isWide) maybeSelected = it else navigation.navigate("conversation/$it") },
           onSearch = { navigation.navigate("search") },
           onSettings = { navigation.navigate("settings") },

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO key_packages (id, device_id, key_package, is_last_resort, expires_at)\n         VALUES ($1, $2, $3, true, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bytea",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8b00c60eaad68a4d70f56f5591a18713e772d682a5696be907c2c898433980a5"
+}

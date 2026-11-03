@@ -19,9 +19,9 @@ self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim(
 self.addEventListener('push', (event) => {
   // The browser already removed the Web Push encryption; this is the sealed wake-up.
   const payload = event.data ? new Uint8Array(event.data.arrayBuffer()) : new Uint8Array();
-  event.waitUntil(ready.then(() => wasm_bindgen.handlePush(DATABASE_NAME, payload)));
+  event.waitUntil(ready.then(() => wasm_bindgen.handlePush(DATABASE_NAME, payload, null)));
 });
 
 self.addEventListener('notificationclick', (event) => {
-  event.waitUntil(ready.then(() => wasm_bindgen.handleNotificationClick(event)));
+  event.waitUntil(ready.then(() => wasm_bindgen.handleNotificationClick(event, DATABASE_NAME)));
 });

@@ -35,7 +35,7 @@ Git for Windows' Perl) for building OpenSSL, and Git Bash for `crates/teamcraft-
 ```powershell
 cd apps\desktop
 cargo tauri build --bundles nsis,msi                                    # x64, results in target\release\bundle\
-cargo tauri build --target aarch64-pc-windows-msvc --bundles nsis,msi   # arm64 (cross build on x64)
+cargo tauri build --target aarch64-pc-windows-msvc --bundles nsis,msi   # arm64 (native, or cross on x64)
 cargo tauri build --no-bundle                                           # just teamcraft-desktop.exe
 ```
 
@@ -101,4 +101,5 @@ Compile-checked or covered by unit tests only:
   whose item lives on the picker's thread.
 - WASAPI audio devices and exclusive-mode apps, the push-to-talk global shortcut, toast notifications,
   `teamcraft://` links, second-instance hand-over, autostart.
-- arm64 builds (cross-built; the OpenH264 `win-arm64` hash is in the `openh264` crate).
+- arm64 builds (built natively on the `windows-11-arm` runner; the OpenH264 `win-arm64` hash is in the
+  `openh264` crate).

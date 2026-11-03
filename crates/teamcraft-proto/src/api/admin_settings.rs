@@ -11,7 +11,13 @@ use utoipa::ToSchema;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::wire_enum::wire_enum;
-use crate::{BrandAssetSlot, BrandColors, BrandLinks, ConversationId, SpaceId, UnixMillis};
+use crate::{
+  BrandAssetSlot, BrandColors, BrandLinks, ConversationId, NotificationLevel, SignInMethod, SpaceId,
+  UnixMillis,
+};
+
+/// Default of [`LimitSettings::max_space_image_bytes`]: a 256×256 PNG stays well below it.
+pub const DEFAULT_MAX_SPACE_IMAGE_BYTES: u64 = 1024 * 1024;
 
 wire_enum! {
   /// Where the value in force comes from.
@@ -57,6 +63,7 @@ wire_enum! {
     Limits => "limits",
     Integration => "integration",
     LocalAccounts => "local_accounts",
+    SignInPage => "sign_in_page",
     MailTexts => "mail_texts",
     MeetingMail => "meeting_mail",
   }
@@ -122,6 +129,10 @@ pub struct BrandSettings {
   pub links: BrandLinks,
   #[serde(default)]
   pub mail: BrandMailSettings,
+  /// The provider part of the sign-in button "Sign in with …" (e.g. "Microsoft"); else the
+  /// display name. Its icon is the `sso_icon` image.
+  #[serde(rename = "sso_label", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_sso_label: Option<String>,
 }
 
 /// The sender of mail that goes out as this brand.
@@ -302,6 +313,7 @@ pub struct RuntimeSettingsResponse {
   pub limits: LimitSettings,
   pub integration: IntegrationSettings,
   pub local_accounts: LocalAccountSettings,
+  pub sign_in_page: SignInPageSettings,
   pub mail_texts: MailTextSettings,
   pub meeting_mail: MeetingMailSettings,
   /// One entry per group.
@@ -327,6 +339,7 @@ pub enum RuntimeSettingsSection {
   Limits(LimitSettings),
   Integration(IntegrationSettings),
   LocalAccounts(LocalAccountSettings),
+  SignInPage(SignInPageSettings),
   MailTexts(MailTextSettings),
   MeetingMail(MeetingMailSettings),
 }
@@ -343,18 +356,54 @@ pub struct ServerRulesSettings {
   /// Public channels of those spaces they join with them.
   #[serde(default)]
   pub default_channels: Vec<ConversationId>,
+  /// Deactivated accounts are removed from all chats (devices removed, keys rotated) this many
+  /// days after the deactivation; none (the default) keeps them until an admin removes them.
+  #[serde(
+    rename = "remove_deactivated_after_days",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_remove_deactivated_after_days: Option<u32>,
+  /// Days an admin's request to join a private channel stays open for its owners (admin.md §2.4,
+  /// `admin_self_join = owner_approval`). Absent from older servers: the default.
+  #[serde(default = "default_admin_join_request_days")]
+  pub admin_join_request_days: u32,
+  /// A 1:1 direct message call ends for both as soon as one side leaves (issue #997); off, it keeps
+  /// running until the last person leaves. Absent from older servers: on, the default.
+  #[serde(default = "default_one_to_one_call_ends_for_both")]
+  pub one_to_one_call_ends_for_both: bool,
+}
+
+/// How long an admin's request to join a private channel waits for an owner by default: a week
+/// covers a holiday, and a stale request doesn't hang around for months.
+pub const DEFAULT_ADMIN_JOIN_REQUEST_DAYS: u32 = 7;
+
+fn default_admin_join_request_days() -> u32 {
+  DEFAULT_ADMIN_JOIN_REQUEST_DAYS
+}
+
+fn default_one_to_one_call_ends_for_both() -> bool {
+  true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct NotificationRuntimeSettings {
   /// People who never chose send read receipts in DMs and group DMs.
   pub read_receipts_default: bool,
+  /// Which messages notify people who never chose a level: `all` or `mentions` (issue #1011).
+  #[serde(default = "default_notification_level")]
+  pub default_level: NotificationLevel,
   /// Urgent DMs are pushed again this often until acknowledged.
   pub urgent_repeat_interval_secs: u64,
   pub urgent_max_pushes: u32,
   /// While a desktop is in use, phone pushes wait this long (0: none while the desktop is attentive).
   pub mobile_push_delay_secs: u64,
   pub is_desktop_attention_enabled: bool,
+}
+
+/// Groups stored before the setting existed get the built-in default.
+fn default_notification_level() -> NotificationLevel {
+  NotificationLevel::All
 }
 
 /// The mail digest of missed mentions. Placeholders: `{count}` `{url}`.
@@ -388,6 +437,10 @@ pub struct LimitSettings {
   pub max_attachment_bytes: u64,
   pub max_attachment_bytes_per_user: u64,
   pub max_avatar_bytes: u64,
+  /// Largest space or channel picture (the one limit for both) after the server re-encoded it. Absent from older clients' requests:
+  /// the default applies.
+  #[serde(default = "default_max_space_image_bytes")]
+  pub max_space_image_bytes: u64,
   pub max_background_bytes: u64,
   pub max_backgrounds_per_user: u32,
   pub max_group_dm_participants: u32,
@@ -401,15 +454,45 @@ pub struct IntegrationSettings {
   pub default_retention_days: u32,
 }
 
-/// Rules for local (password) accounts; whether they exist at all stays in the configuration, the
-/// shortest password is part of the signed workspace policy.
+/// Rules for local (password) accounts. They need `[local_accounts]` with a session secret in the
+/// configuration; `is_enabled` switches them off and on at runtime (sign-in refused, sessions end).
+/// The shortest password is part of the signed workspace policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct LocalAccountSettings {
+  #[serde(default = "enabled")]
+  pub is_enabled: bool,
   pub require_totp: bool,
   pub activation_ttl_hours: u32,
   pub session_ttl_hours: u32,
   pub max_failed_attempts: u32,
   pub lockout_secs: u64,
+}
+
+/// How the sign-in page looks (`GET /api/v1/server-info`). The SSO button's provider name and
+/// icon are brand settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SignInPageSettings {
+  /// The methods offered, in this order; at least one, each once. `local` only shows while local
+  /// accounts are available.
+  pub methods: Vec<SignInMethod>,
+  /// Language code -> help text below the form; `en` is the fallback.
+  #[serde(default)]
+  pub help_text: BTreeMap<String, String>,
+  /// A help page (https).
+  #[serde(rename = "help_link", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_help_link: Option<String>,
+  /// Every sign-in shows the identity provider's login page (`prompt=login`), also with an
+  /// existing provider session; off for operators who prefer silent single sign-on.
+  #[serde(default = "enabled")]
+  pub is_login_page_always_shown: bool,
+}
+
+fn enabled() -> bool {
+  true
+}
+
+fn default_max_space_image_bytes() -> u64 {
+  DEFAULT_MAX_SPACE_IMAGE_BYTES
 }
 
 /// Texts of the server's own mail. Placeholders: invitation `{inviter}` `{space}` `{role}` `{url}`,
@@ -463,6 +546,7 @@ impl RuntimeSettingsSection {
       Self::Limits(_) => RuntimeSettingsKey::Limits,
       Self::Integration(_) => RuntimeSettingsKey::Integration,
       Self::LocalAccounts(_) => RuntimeSettingsKey::LocalAccounts,
+      Self::SignInPage(_) => RuntimeSettingsKey::SignInPage,
       Self::MailTexts(_) => RuntimeSettingsKey::MailTexts,
       Self::MeetingMail(_) => RuntimeSettingsKey::MeetingMail,
     }

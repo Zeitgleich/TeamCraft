@@ -26,21 +26,25 @@ RUN --mount=type=cache,id=teamcraft-cargo-registry,target=/usr/local/cargo/regis
  && install -D target/release/teamcraft-bridge /out/teamcraft-bridge \
  && mkdir -p /out/data
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:83b9b50586253821cf63ffcec87d3d94265a093ad30da232039af962dd8f4edf
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
 LABEL org.opencontainers.image.title="teamcraft-bridge" \
       org.opencontainers.image.description="TeamCraft integration bridge: webhooks and logs into encrypted channels" \
       org.opencontainers.image.source="https://github.com/Zeitgleich/TeamCraft" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later"
 COPY --from=build /out/teamcraft-bridge /usr/local/bin/teamcraft-bridge
 COPY --from=build --chown=65532:65532 /out/data /var/lib/teamcraft-bridge
-# Non-root. The bridge writes only its database, in the volume at /var/lib/teamcraft-bridge (owned
-# by 65532); the rest of the filesystem can be read-only.
+COPY --from=build --chown=65532:65532 /out/data /var/spool/teamcraft-bridge
+# Non-root. The bridge writes its database in the volume at /var/lib/teamcraft-bridge, and the files
+# of webhooks while they upload in the volume at /var/spool/teamcraft-bridge (both owned by 65532;
+# the spool is narrowed to 0700 at start, and kept apart so files can't fill the database's volume).
+# The rest of the filesystem can be read-only.
 USER 65532:65532
 # Inside a container the endpoints must listen on all interfaces (publish the port on loopback
 # only on the host: `-p 127.0.0.1:8088:8088`). `[::]` is dual stack.
 ENV TEAMCRAFT_BRIDGE_LISTEN__ADDRS='["[::]:8088"]' \
-    TEAMCRAFT_BRIDGE_STORE__PATH=/var/lib/teamcraft-bridge/bridge.db
-VOLUME ["/var/lib/teamcraft-bridge"]
+    TEAMCRAFT_BRIDGE_STORE__PATH=/var/lib/teamcraft-bridge/bridge.db \
+    TEAMCRAFT_BRIDGE_FILES__SPOOL_DIR=/var/spool/teamcraft-bridge
+VOLUME ["/var/lib/teamcraft-bridge", "/var/spool/teamcraft-bridge"]
 EXPOSE 8088/tcp
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD ["/usr/local/bin/teamcraft-bridge", "healthcheck"]

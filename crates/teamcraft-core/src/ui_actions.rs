@@ -2,19 +2,27 @@
 //! [`CoreChatBackend`] reads directly, and the commands it queues for the engine.
 
 use teamcraft_client_api::actions::{
-  ForwardedFrom, LinkPreview, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage, PermalinkTarget,
-  ReplyPreview, SavedItem, WorkspaceEvent,
+  ForwardedFrom, LinkPreview, LinkedMessage, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage,
+  PermalinkTarget, ReplyPreview, SavedItem, WorkspaceEvent,
 };
-use teamcraft_client_api::model::{Bookmark, ConversationId, Message, MessageId, ThreadId, UserId};
-use teamcraft_proto::ClientMessageId;
+use teamcraft_client_api::model::{
+  Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, PENDING_ID_BIT,
+  ThreadId, UserId,
+};
+use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
+use teamcraft_proto::{ClientMessageId, SourceChange, SourceId};
 
 use crate::client::previews::queue_preview;
-use crate::client::{apply_control, forward_content, reply_ref, stored_account_data};
+use crate::client::{apply_control, forward_content, imported_author_name, reply_ref, stored_account_data};
+use crate::error::CoreError;
+use crate::imported::Authorship;
+use crate::integration_sources::{SourceAuthority, SourceLedger};
 use crate::link_preview::is_allowed;
 use crate::read_state;
 use crate::records;
 use crate::store::{
-  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, Priority, StoredMessage,
+  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, MessageSlot, Priority,
+  StoredMessage, Table,
 };
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
@@ -45,10 +53,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
   pub(crate) fn ui_saved_items(&self) -> Vec<SavedItem> {
     let data = self.read(stored_account_data(self.store_ref()));
     let users = self.summaries();
+    let preferences = self.mention_preferences();
     let names: std::collections::BTreeMap<ConversationId, String> = self
       .conversations_raw()
       .iter()
-      .map(|conversation| (conversation.id, self.to_conversation(conversation, &users).name))
+      .map(|conversation| {
+        (
+          conversation.id,
+          self.to_conversation(conversation, &users, &preferences).name,
+        )
+      })
       .collect();
     data
       .saved_items()
@@ -89,7 +103,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let maybe_reply_to = message
       .maybe_reply_to
       .and_then(|id| self.find_stored(conversation, id))
-      .map(|target| reply_ref(&target));
+      .map(|target| reply_ref(&target, self.importer()));
     let meta = MessageMeta {
       maybe_reply_to,
       priority: priority_of(message.priority),
@@ -177,6 +191,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let Some(target) = self.find_stored(conversation, message) else {
       return;
     };
+    // A message whose files stopped retrying waits in the outbox; its files are due again.
+    match crate::client::files::retry_stalled_upload(self.store_ref(), conversation, target.client_message_id)
+    {
+      Ok(true) => return self.command(CoreCommand::UploadFiles),
+      Ok(false) => {},
+      Err(error) => tracing::error!(%error, "could not retry the files"),
+    }
     match records::retry_failed(self.store_ref(), conversation, target.client_message_id) {
       Ok(()) => self.command(CoreCommand::FlushOutbox),
       Err(error) => tracing::error!(%error, "could not retry the message"),
@@ -203,17 +224,27 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let Some(original) = self.find_stored(from, message) else {
       return;
     };
-    let users = self.summaries();
-    let author_name = users
-      .get(&original.sender_user_id)
-      .map(|summary| summary.display_name.clone())
-      .unwrap_or_default();
+    let authorship = Authorship::of(&original, self.importer());
+    let author_name = match authorship.maybe_account() {
+      Some(author) => self
+        .summaries()
+        .get(&author)
+        .map(|summary| summary.display_name.clone())
+        .unwrap_or_default(),
+      None => imported_author_name(&authorship),
+    };
     let maybe_conversation_name = self
       .conversations_raw()
       .iter()
       .find(|conversation| conversation.id == from)
       .and_then(|conversation| conversation.maybe_name.clone());
-    match forward_content(&original, author_name, maybe_conversation_name, comment) {
+    match forward_content(
+      &authorship,
+      &original,
+      author_name,
+      maybe_conversation_name,
+      comment,
+    ) {
       Some(content) => {
         self.enqueue(to, None, content);
       },
@@ -255,6 +286,107 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.control(conversation, MessageContent::Bookmarks { items });
   }
 
+  /// The channel's sources in force as this device judges them (integration_sources.rs). The UI
+  /// process doesn't look into the MLS group: decryption already proved the announcer was in it,
+  /// and the bridge checks the group itself.
+  pub(crate) fn ui_integration_sources(&self, conversation: ConversationId) -> Vec<IntegrationSource> {
+    let ledger = self.read(SourceLedger::load(self.store_ref(), conversation));
+    if ledger.revision == 0 {
+      return Vec::new();
+    }
+    let Some(authority) = self.source_authority() else {
+      return Vec::new();
+    };
+    ledger
+      .active(conversation, &authority)
+      .into_iter()
+      .map(|source| IntegrationSource {
+        id: source.id,
+        name: source.name,
+        kind: source.kind,
+        created_by: source.created_by,
+        created_at_ms: source.created_at_ms,
+      })
+      .collect()
+  }
+
+  /// Whether the user's sources would be in force: an admin of the verified, fresh roster.
+  pub(crate) fn ui_can_manage_integration_sources(&self) -> bool {
+    self
+      .source_authority()
+      .is_some_and(|authority| authority.may_manage(self.me_id()))
+  }
+
+  /// Whether this user signs the channel's roles in a way members accept: an admin of the fresh
+  /// workspace roster, a signed channel admin, or, while nothing is signed, an admin the server
+  /// lists, who founds the log (e2ee.md §4.6.1).
+  pub(crate) fn ui_can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
+    let members: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
+      self.store_ref(),
+      Table::Members,
+      &conversation.to_string(),
+    ));
+    let is_listed_admin = members
+      .into_iter()
+      .flat_map(|list| list.members)
+      .any(|member| member.user.id == self.me_id() && member.role == teamcraft_proto::ChannelRole::Admin);
+    let workspace: crate::workspace::WorkspaceState = self.read(
+      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
+        .map(Option::unwrap_or_default),
+    );
+    let signed: crate::channel_roles::ChannelRoleState = self.read(
+      records::get_json(
+        self.store_ref(),
+        Table::Workspace,
+        &crate::client::channel_roles_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    let max_age_ms =
+      i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    signed
+      .signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms)
+      .into_iter()
+      .any(|authority| authority != crate::channel_roles::SignerAuthority::Founder || is_listed_admin)
+  }
+
+  fn source_authority(&self) -> Option<SourceAuthority> {
+    let workspace: crate::workspace::WorkspaceState = self.read(
+      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
+        .map(Option::unwrap_or_default),
+    );
+    let max_age_ms =
+      i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    let is_fresh = workspace.is_roster_fresh(self.now_ms(), max_age_ms);
+    self.read(SourceAuthority::from_store(self.store_ref(), &workspace, is_fresh, None, []).map(Some))
+  }
+
+  pub(crate) fn ui_add_integration_source(&self, conversation: ConversationId, source: NewIntegrationSource) {
+    let change = SourceChange::Created {
+      source: source.id,
+      name: source.name,
+      kind: source.kind,
+      token_sha256: source.token_sha256,
+      options: source.options,
+    };
+    self.control(conversation, MessageContent::IntegrationSource { change });
+  }
+
+  /// A request to the notetaker (e2ee.md §8.2), taken into this device's ledger at once and sent
+  /// encrypted like any control message.
+  pub(crate) fn ui_request_notetaker(
+    &self,
+    conversation: ConversationId,
+    request: teamcraft_proto::NotetakerRequest,
+  ) {
+    self.control(conversation, MessageContent::Notetaker { request });
+  }
+
+  pub(crate) fn ui_revoke_integration_source(&self, conversation: ConversationId, source: SourceId) {
+    let change = SourceChange::Revoked { source };
+    self.control(conversation, MessageContent::IntegrationSource { change });
+  }
+
   pub(crate) fn ui_pinned_messages(&self, conversation: ConversationId) -> Vec<Message> {
     let all = self.all_messages(conversation);
     all
@@ -288,15 +420,54 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .then_some(target)
   }
 
+  /// Point lookups only (the conversation's record, then the message by its server ID): previews
+  /// are read again on every store change, so they must not read whole conversations.
+  pub(crate) fn ui_linked_message(&self, link: &str) -> LinkedMessage {
+    let Some(target) = parse_permalink(link) else {
+      return LinkedMessage::Unavailable;
+    };
+    // Only conversations this device is a member of: the preview never asks the server.
+    let is_member = self
+      .read(
+        self
+          .store_ref()
+          .get(Table::Conversations, &target.conversation.to_string())
+          .map_err(CoreError::from),
+      )
+      .is_some();
+    if !is_member {
+      return LinkedMessage::Unavailable;
+    }
+    let maybe_stored = self.read(
+      self
+        .store_ref()
+        .message_by_server_id(target.conversation, target.message)
+        .map_err(CoreError::from),
+    );
+    let Some(stored) = maybe_stored else {
+      // A member whose device hasn't synced (or has purged) the message yet.
+      return LinkedMessage::NotLoaded { target };
+    };
+    match stored.content {
+      MessageContent::Deleted => LinkedMessage::Deleted { target },
+      // Without the rest of the conversation: a preview shows no reactions or reply counts.
+      MessageContent::Text { .. } | MessageContent::File { .. } => LinkedMessage::Visible {
+        target,
+        message: self.to_message(&stored, &[]),
+        files: self.files_of(&stored, self.importer()),
+      },
+      // Reactions, edits, events and the like are no message one can link to.
+      _ => LinkedMessage::Unavailable,
+    }
+  }
+
   pub(crate) fn ui_first_unread(&self, conversation: ConversationId) -> Option<MessageId> {
     let response = self
       .conversations_raw()
       .into_iter()
       .find(|candidate| candidate.id == conversation)?;
-    self
-      .unread_messages(&response)
-      .first()
-      .and_then(|stored| stored.maybe_server_id)
+    // A line derived from a commit can be the first unread one: its row goes by the commit's ID.
+    self.unread_messages(&response).first().map(ui_message_id)
   }
 
   pub(crate) fn ui_message_extras(
@@ -304,13 +475,34 @@ impl<S: LocalStore> CoreChatBackend<S> {
     conversation: ConversationId,
     messages: &[MessageId],
   ) -> Vec<MessageExtras> {
-    let all = self.all_messages(conversation);
     let data = self.read(stored_account_data(self.store_ref()));
+    let ticks = Ticks::read(self, conversation);
+    let maybe_importer = self.importer();
     messages
       .iter()
       .filter_map(|id| {
-        let stored = all.iter().find(|stored| ui_message_id(stored) == *id)?;
+        // Looked up by its place: the UI asks for each row it shows, and reading the whole
+        // conversation per row kept a core busy in a large channel (issue #1000).
+        let slot = if teamcraft_proto::Id::snowflake(*id).get() & PENDING_ID_BIT != 0 {
+          MessageSlot::Pending
+        } else {
+          MessageSlot::At(*id)
+        };
+        let candidates = self.read(
+          self
+            .store_ref()
+            .messages_at(conversation, slot)
+            .map_err(CoreError::from),
+        );
+        // A server can give a message the ID a derived line sits at (a commit's, issue #811; the
+        // announcement a line moved to is hidden, issue #818); the line wins, so the ID clash
+        // can't hide it.
+        let stored = candidates
+          .iter()
+          .find(|stored| stored.is_local_line() && ui_message_id(stored) == *id)
+          .or_else(|| candidates.iter().find(|stored| ui_message_id(stored) == *id))?;
         let mut extras = MessageExtras::new(*id);
+        extras.is_read = ticks.is_read(stored, self.me_id());
         extras.is_pinned = stored.is_pinned;
         extras.is_saved = data.is_saved(conversation, stored.client_message_id);
         extras.is_deleted = matches!(stored.content, MessageContent::Deleted);
@@ -330,13 +522,15 @@ impl<S: LocalStore> CoreChatBackend<S> {
           ));
         }
         match &stored.content {
-          MessageContent::Text { meta, .. } => self.fill_from_meta(&mut extras, meta, &all),
+          MessageContent::Text { meta, .. } => {
+            self.fill_from_meta(&mut extras, meta, conversation, maybe_importer)
+          },
           MessageContent::Event { event } => {
-            extras.maybe_workspace_event = workspace_event(event, stored.sender_user_id);
+            extras.maybe_workspace_event = workspace_event(event, stored);
           },
           _ => {},
         }
-        extras.files = self.files_of(stored);
+        extras.files = self.files_of(stored, maybe_importer);
         if stored.maybe_server_id.is_none() {
           extras.is_send_failed = self.read(records::is_send_failed(
             self.store_ref(),
@@ -349,14 +543,29 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  fn fill_from_meta(&self, extras: &mut MessageExtras, meta: &MessageMeta, all: &[StoredMessage]) {
-    extras.maybe_reply = meta.maybe_reply_to.as_ref().map(|reply| ReplyPreview {
-      maybe_message: all
-        .iter()
-        .find(|stored| stored.client_message_id == reply.target)
-        .map(ui_message_id),
-      author: reply.author,
-      excerpt: reply.excerpt.clone(),
+  fn fill_from_meta(
+    &self,
+    extras: &mut MessageExtras,
+    meta: &MessageMeta,
+    conversation: ConversationId,
+    maybe_importer: Option<UserId>,
+  ) {
+    extras.maybe_reply = meta.maybe_reply_to.as_ref().map(|reply| {
+      let maybe_target = self.read(
+        self
+          .store_ref()
+          .message(conversation, reply.target)
+          .map_err(CoreError::from),
+      );
+      ReplyPreview {
+        maybe_message: maybe_target.as_ref().map(ui_message_id),
+        // The author the list shows, also for replies that named the import account as the
+        // author of an imported message before it was told apart.
+        author: maybe_target.as_ref().map_or(reply.author, |target| {
+          Authorship::of(target, maybe_importer).author
+        }),
+        excerpt: reply.excerpt.clone(),
+      }
     });
     extras.maybe_forwarded = meta.maybe_forwarded.as_ref().map(|forwarded| ForwardedFrom {
       author_name: forwarded.author_name.clone(),
@@ -412,6 +621,37 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 }
 
+/// What the two ticks of the user's own messages need, read once per conversation: its members
+/// and their receipts where receipts show as ticks (a DM, #635), nothing elsewhere.
+struct Ticks {
+  maybe_members: Option<Vec<UserId>>,
+  receipts: Vec<(UserId, MessageId)>,
+}
+
+impl Ticks {
+  fn read<S: LocalStore>(backend: &CoreChatBackend<S>, conversation: ConversationId) -> Self {
+    let maybe_members = backend.tick_members(conversation);
+    let receipts = match maybe_members {
+      Some(_) => backend.read_receipts(conversation),
+      None => Vec::new(),
+    };
+    Self {
+      maybe_members,
+      receipts,
+    }
+  }
+
+  /// Whether every other member read `stored`, an own message the server has (#568, #769).
+  fn is_read(&self, stored: &StoredMessage, me: UserId) -> bool {
+    match (&self.maybe_members, stored.maybe_server_id) {
+      (Some(members), Some(server_id)) if stored.sender_user_id == me => {
+        is_read_by_all(&seen_by(&self.receipts, server_id), members, me)
+      },
+      _ => false,
+    }
+  }
+}
+
 fn priority_of(priority: MessagePriority) -> Priority {
   match priority {
     MessagePriority::Normal => Priority::Normal,
@@ -443,9 +683,12 @@ fn parse_permalink(link: &str) -> Option<PermalinkTarget> {
   })
 }
 
-/// The UI's view of a conversation event, sent by `actor`; `None` for events the UI shows through
-/// its own system events only (joins, leaves, renames, topics).
-fn workspace_event(event: &ConversationEvent, actor: UserId) -> Option<WorkspaceEvent> {
+/// The UI's view of the conversation event `stored` holds; `None` for events the UI shows through
+/// its own system events only (joins, leaves, renames, topics). A change the server reports names
+/// whoever the line names, if anybody (issue #818); other events their sender.
+fn workspace_event(event: &ConversationEvent, stored: &StoredMessage) -> Option<WorkspaceEvent> {
+  let actor = stored.sender_user_id;
+  let maybe_by = stored.maybe_actor();
   Some(match event {
     ConversationEvent::MemberAdded { user, history } => WorkspaceEvent::MemberAdded {
       user: *user,
@@ -456,18 +699,26 @@ fn workspace_event(event: &ConversationEvent, actor: UserId) -> Option<Workspace
       user: *user,
       by: actor,
     },
-    ConversationEvent::Archived => WorkspaceEvent::Archived { by: actor },
-    ConversationEvent::Unarchived => WorkspaceEvent::Unarchived { by: actor },
-    ConversationEvent::MadePrivate => WorkspaceEvent::MadePrivate { by: actor },
-    ConversationEvent::MadePublic => WorkspaceEvent::MadePublic { by: actor },
+    // Only the line derived from the commit shows (issue #811): its author is who let the admin
+    // in, or the admin for their own self-join.
+    ConversationEvent::AdminJoined { user, is_approved } => WorkspaceEvent::AdminJoined {
+      user: *user,
+      maybe_approved_by: is_approved.then_some(actor),
+      maybe_added_by: (!is_approved && actor != *user).then_some(actor),
+    },
+    ConversationEvent::Archived => WorkspaceEvent::Archived { maybe_by },
+    ConversationEvent::Unarchived => WorkspaceEvent::Unarchived { maybe_by },
+    ConversationEvent::MadePrivate => WorkspaceEvent::MadePrivate { maybe_by },
+    ConversationEvent::MadePublic => WorkspaceEvent::MadePublic { maybe_by },
     ConversationEvent::Moved { space } => WorkspaceEvent::Moved {
-      by: actor,
+      maybe_by,
       space: space.clone(),
     },
     ConversationEvent::Joined
     | ConversationEvent::Left
     | ConversationEvent::Renamed { .. }
     | ConversationEvent::TopicChanged { .. }
+    | ConversationEvent::CallMoved { .. }
     | ConversationEvent::Unknown => return None,
   })
 }

@@ -1,37 +1,33 @@
-//! Profiles: the form for the signed-in user (picture, title, department, phone, time zone, working
-//! hours) and the card of another person with their local time.
+//! Profiles: the card of a person (name, presence, custom status, role, local time, what the user
+//! shares with them), the custom status line other views reuse, and the helpers the profile form
+//! (Settings > Account, `settings_account.rs`) shares with it.
 
 use leptos::prelude::*;
-use teamcraft_proto::{UpdateProfileRequest, UserId, WorkingHours};
-use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::JsFuture;
+use teamcraft_proto::{UserId, WorkingHours};
 
+use crate::calls::{CallKind, CallRequest};
 use crate::clock::{
-  format_date_time, format_relative, local_time_zone, now_ms, time_in_zone, time_zone_names,
+  end_of_local_day, format_date_time, format_relative, format_relative_short, format_time, local_day, now_ms,
+  time_in_zone,
 };
-use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
 use crate::components::icons::{Icon, IconName};
+use crate::components::message_actions::copy_to_clipboard;
 use crate::components::modal::Modal;
-use crate::i18n::use_i18n;
-use crate::model::{PresenceStatus, User};
-use crate::profiles::{MAX_AVATAR_BYTES, avatar_type, use_profiles};
-use crate::state::use_app_state;
+use crate::i18n::{I18n, use_i18n};
+use crate::model::{
+  Conversation, ConversationId, ConversationKind, CustomStatus, PresenceStatus, Space, SpaceId, TimestampMs,
+  User,
+};
+use crate::profiles::use_profiles;
+use crate::state::{Overlay, use_app_state};
 
 pub use teamcraft_proto::Weekday;
 
-fn weekdays() -> [Weekday; 7] {
-  [
-    Weekday::Monday,
-    Weekday::Tuesday,
-    Weekday::Wednesday,
-    Weekday::Thursday,
-    Weekday::Friday,
-    Weekday::Saturday,
-    Weekday::Sunday,
-  ]
-}
-const DEFAULT_START: u16 = 9 * 60;
-const DEFAULT_END: u16 = 17 * 60;
+/// Below this, "last seen" reads "just now": seconds are noise, and the label doesn't tick.
+const LAST_SEEN_JUST_NOW_MS: i64 = 2 * 60_000;
+/// Shared channels the card lists before it sums up the rest ("and 4 more").
+const MAX_SHARED_CHANNELS: usize = 8;
 
 /// `HH:MM` (what `<input type=time>` holds) to minutes since midnight.
 pub fn parse_minutes(text: &str) -> Option<u16> {
@@ -42,227 +38,6 @@ pub fn parse_minutes(text: &str) -> Option<u16> {
 
 pub fn format_minutes(minutes: u16) -> String {
   format!("{:02}:{:02}", minutes / 60, minutes % 60)
-}
-
-fn non_empty(text: &str) -> Option<String> {
-  let trimmed = text.trim();
-  (!trimmed.is_empty()).then(|| trimmed.to_owned())
-}
-
-/// The form of the signed-in user's own profile.
-#[component]
-pub fn EditProfileDialog() -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let Some(hub) = use_profiles() else {
-    return view! { <Modal labelled_by="profile-title"><p>{move || i18n.t("profile-unavailable")}</p></Modal> }.into_any();
-  };
-  let me = state.me();
-  let current = hub.profile(me.id);
-  let title = RwSignal::new(String::new());
-  let department = RwSignal::new(String::new());
-  let phone = RwSignal::new(String::new());
-  let time_zone = RwSignal::new(String::new());
-  let has_hours = RwSignal::new(false);
-  let days = RwSignal::new(vec![
-    Weekday::Monday,
-    Weekday::Tuesday,
-    Weekday::Wednesday,
-    Weekday::Thursday,
-    Weekday::Friday,
-  ]);
-  let start = RwSignal::new(format_minutes(DEFAULT_START));
-  let end = RwSignal::new(format_minutes(DEFAULT_END));
-  let error = RwSignal::new(None::<String>);
-  let is_saving = RwSignal::new(false);
-  let zones = time_zone_names();
-
-  // The stored profile arrives after the dialog opened: fill the form once.
-  let is_filled = RwSignal::new(false);
-  Effect::new(move |_| {
-    if is_filled.get_untracked() {
-      return;
-    }
-    let Some(profile) = hub.profile(me.id) else { return };
-    is_filled.set(true);
-    title.set(profile.maybe_title.unwrap_or_default());
-    department.set(profile.maybe_department.unwrap_or_default());
-    phone.set(profile.maybe_phone.unwrap_or_default());
-    time_zone.set(
-      profile
-        .maybe_time_zone
-        .unwrap_or_else(|| local_time_zone().unwrap_or_default()),
-    );
-    if let Some(hours) = profile.maybe_working_hours {
-      has_hours.set(true);
-      days.set(hours.weekdays);
-      start.set(format_minutes(hours.start_minute));
-      end.set(format_minutes(hours.end_minute));
-    }
-  });
-  drop(current);
-
-  let save = move |ev: leptos::ev::SubmitEvent| {
-    ev.prevent_default();
-    let maybe_working_hours = if has_hours.get_untracked() {
-      let (Some(start_minute), Some(end_minute)) = (
-        parse_minutes(&start.get_untracked()),
-        parse_minutes(&end.get_untracked()),
-      ) else {
-        error.set(Some(i18n.t("profile-hours-invalid")));
-        return;
-      };
-      if end_minute <= start_minute || days.with_untracked(Vec::is_empty) {
-        error.set(Some(i18n.t("profile-hours-invalid")));
-        return;
-      }
-      Some(WorkingHours {
-        weekdays: days.get_untracked(),
-        start_minute,
-        end_minute,
-      })
-    } else {
-      None
-    };
-    let request = UpdateProfileRequest {
-      maybe_title: non_empty(&title.get_untracked()),
-      maybe_department: non_empty(&department.get_untracked()),
-      maybe_phone: non_empty(&phone.get_untracked()),
-      maybe_time_zone: non_empty(&time_zone.get_untracked()),
-      maybe_working_hours,
-    };
-    is_saving.set(true);
-    leptos::task::spawn_local(async move {
-      match hub.save(request).await {
-        Ok(()) => state.close_overlay(),
-        Err(failure) => error.set(Some(failure.to_string())),
-      }
-      is_saving.set(false);
-    });
-  };
-
-  let pick_avatar = move |ev: leptos::ev::Event| {
-    let Some(input) = ev
-      .target()
-      .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
-    else {
-      return;
-    };
-    let Some(file) = input.files().and_then(|files| files.item(0)) else {
-      return;
-    };
-    input.set_value("");
-    let Some(content_type) = avatar_type(&file.type_()) else {
-      error.set(Some(i18n.t("profile-avatar-type")));
-      return;
-    };
-    if file.size() as u64 > MAX_AVATAR_BYTES {
-      error.set(Some(i18n.t("profile-avatar-size")));
-      return;
-    }
-    error.set(None);
-    leptos::task::spawn_local(async move {
-      let Ok(buffer) = JsFuture::from(file.array_buffer()).await else {
-        error.set(Some(i18n.t("profile-avatar-unreadable")));
-        return;
-      };
-      let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-      if let Err(failure) = hub.upload_avatar(me.id, content_type, bytes).await {
-        error.set(Some(failure.to_string()));
-      }
-    });
-  };
-  let remove_avatar = move |_| {
-    leptos::task::spawn_local(async move {
-      if let Err(failure) = hub.remove_avatar(me.id).await {
-        error.set(Some(failure.to_string()));
-      }
-    });
-  };
-
-  view! {
-    <Modal labelled_by="profile-title">
-      <form on:submit=save>
-        <header class="modal-head">
-          <h2 id="profile-title">{move || i18n.t("profile-edit-title")}</h2>
-          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
-            <Icon name=IconName::Close />
-          </button>
-        </header>
-        <div class="modal-body">
-          <div class="profile-avatar-row">
-            <Avatar user=me.clone() size=AvatarSize::Large />
-            <label class="btn btn-small">
-              {move || i18n.t("profile-avatar-change")}
-              <input type="file" class="visually-hidden" accept="image/png,image/jpeg,image/webp" on:change=pick_avatar />
-            </label>
-            <Show when=move || hub.profile(me.id).is_some_and(|profile| profile.has_avatar) fallback=|| ()>
-              <button type="button" class="btn btn-small" on:click=remove_avatar>{move || i18n.t("profile-avatar-remove")}</button>
-            </Show>
-          </div>
-          <label for="profile-title-field">{move || i18n.t("profile-title")}</label>
-          <input id="profile-title-field" class="input" maxlength="100" prop:value=move || title.get() on:input=move |ev| title.set(event_target_value(&ev)) />
-          <label for="profile-department">{move || i18n.t("profile-department")}</label>
-          <input id="profile-department" class="input" maxlength="100" prop:value=move || department.get() on:input=move |ev| department.set(event_target_value(&ev)) />
-          <label for="profile-phone">{move || i18n.t("profile-phone")}</label>
-          <input id="profile-phone" class="input" type="tel" maxlength="40" prop:value=move || phone.get() on:input=move |ev| phone.set(event_target_value(&ev)) />
-          <label for="profile-zone">{move || i18n.t("profile-time-zone")}</label>
-          <input id="profile-zone" class="input" list="profile-zones" autocomplete="off" prop:value=move || time_zone.get() on:input=move |ev| time_zone.set(event_target_value(&ev)) />
-          <datalist id="profile-zones">
-            {zones.into_iter().map(|zone| view! { <option value=zone></option> }).collect_view()}
-          </datalist>
-          <label class="check-row">
-            <input type="checkbox" prop:checked=move || has_hours.get() on:change=move |ev| has_hours.set(event_target_checked(&ev)) />
-            <span>{move || i18n.t("profile-hours")}</span>
-          </label>
-          <Show when=move || has_hours.get() fallback=|| ()>
-            <fieldset class="weekday-picker">
-              <legend class="visually-hidden">{move || i18n.t("profile-hours-days")}</legend>
-              {weekdays()
-                .into_iter()
-                .map(|day| {
-                  let key = format!("weekday-{}", day.as_str());
-                  let day_on_change = day.clone();
-                  let day_checked = day.clone();
-                  view! {
-                    <label class="check-row">
-                      <input
-                        type="checkbox"
-                        prop:checked=move || days.with(|list| list.contains(&day_checked))
-                        on:change=move |ev| {
-                          let on = event_target_checked(&ev);
-                          days.update(|list| {
-                            list.retain(|candidate| *candidate != day_on_change);
-                            if on {
-                              list.push(day_on_change.clone());
-                            }
-                          });
-                        }
-                      />
-                      <span>{move || i18n.t(&key)}</span>
-                    </label>
-                  }
-                })
-                .collect_view()}
-            </fieldset>
-            <div class="hours-row">
-              <label for="profile-start">{move || i18n.t("profile-hours-from")}</label>
-              <input id="profile-start" class="input" type="time" prop:value=move || start.get() on:input=move |ev| start.set(event_target_value(&ev)) />
-              <label for="profile-end">{move || i18n.t("profile-hours-to")}</label>
-              <input id="profile-end" class="input" type="time" prop:value=move || end.get() on:input=move |ev| end.set(event_target_value(&ev)) />
-            </div>
-          </Show>
-          {move || error.get().map(|message| view! { <p class="field-error" role="alert">{message}</p> })}
-        </div>
-        <footer class="modal-foot">
-          <span class="grow"></span>
-          <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
-          <button type="submit" class="btn btn-primary" prop:disabled=move || is_saving.get()>{move || i18n.t("save")}</button>
-        </footer>
-      </form>
-    </Modal>
-  }
-  .into_any()
 }
 
 /// "In a meeting" next to a person who is in a call right now (from the server's call rosters).
@@ -282,8 +57,9 @@ pub fn InMeetingBadge(user: UserId) -> impl IntoView {
 
 /// "Last seen 5 minutes ago" for a person who is offline and lets others see it. Shows nothing
 /// while they are online, hide it, appear offline or the workspace switched last seen off.
+/// `is_compact` abbreviates it ("last seen: 5 min. ago") for the line under a name.
 #[component]
-pub fn LastSeen(user: UserId) -> impl IntoView {
+pub fn LastSeen(user: UserId, #[prop(optional)] is_compact: bool) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let locale = i18n.locale().tag();
@@ -294,83 +70,338 @@ pub fn LastSeen(user: UserId) -> impl IntoView {
         .is_some_and(|person| person.presence == PresenceStatus::Offline);
       let maybe_at = is_offline.then(|| state.read(|backend| backend.last_seen(user))).flatten();
       maybe_at.map(|at| {
-        let when = format_relative(at, now_ms(), locale);
+        let now = now_ms();
+        let is_just_now = now - at < LAST_SEEN_JUST_NOW_MS;
+        let label = match (is_compact, is_just_now) {
+          (false, true) => i18n.t("last-seen-just-now"),
+          (false, false) => i18n.t_with("last-seen", &[("when", &format_relative(at, now, locale))]),
+          (true, true) => i18n.t("last-seen-short-just-now"),
+          (true, false) => i18n.t_with("last-seen-short", &[("when", &format_relative_short(at, now, locale))]),
+        };
         let exact = format_date_time(at, locale);
-        view! {
-          <span class="last-seen" title=exact>{i18n.t_with("last-seen", &[("when", &when)])}</span>
-        }
+        view! { <span class="last-seen" title=exact>{label}</span> }
       })
     }}
   }
 }
 
-/// Another person's card: name, status, role in the company, local time and a way to message them.
+/// A person's card: picture, name and handle, presence and custom status first, then the ways to
+/// reach them (message, call, e-mail), what their profile says about their role and hours, and the
+/// spaces and channels the user shares with them. Opened from a name or picture anywhere (message
+/// author, member list, the header of a direct conversation). A centred dialog on wide screens, a
+/// sheet from the bottom on a phone (`.modal-profile` in style/main/440-profile-card.css).
 #[component]
 pub fn UserProfileDialog(user: UserId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let locale = i18n.locale().tag();
   let person: Option<User> = state.read(|backend| backend.user(user));
   let Some(person) = person else {
-    return view! { <Modal labelled_by="profile-card-title"><p>{move || i18n.t("profile-unavailable")}</p></Modal> }.into_any();
+    return view! { <Modal labelled_by="profile-card-title"><p id="profile-card-title">{move || i18n.t("profile-unavailable")}</p></Modal> }.into_any();
   };
-  let profile = move || use_profiles().and_then(|hub| hub.profile(user));
   let is_me = person.id == state.me().id;
   let name = person.display_name.clone();
+  let handle = Some(person.username.clone()).filter(|username| !username.is_empty());
+  let shared = (!is_me).then(|| {
+    state.read(|backend| {
+      let spaces = backend.spaces();
+      let channels: Vec<Conversation> = spaces
+        .iter()
+        .flat_map(|space| backend.space_conversations(space.id))
+        .collect();
+      shared_places(&spaces, &channels, user)
+    })
+  });
   view! {
-    <Modal labelled_by="profile-card-title" class="modal-small">
-      <header class="modal-head">
-        <h2 id="profile-card-title" translate="no">{name}</h2>
-        <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
-          <Icon name=IconName::Close />
-        </button>
-      </header>
+    <Modal labelled_by="profile-card-title" class="modal-small modal-profile">
+      <button type="button" class="icon-btn profile-close" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+        <Icon name=IconName::Close />
+      </button>
       <div class="modal-body profile-card">
-        <Avatar user=person.clone() size=AvatarSize::Large show_presence=true />
-        {person.maybe_custom_status.clone().map(|status| view! { <p>{status.emoji} " " {status.text}</p> })}
-        <p><InMeetingBadge user=user /></p>
-        <p><LastSeen user=user /></p>
-        {person.maybe_organization.clone().map(|name| view! { <p><crate::components::org_badge::OrgBadge organization=Some(name) /></p> })}
-        {move || {
-          profile().map(|profile| {
-            let zone = profile.maybe_time_zone.clone();
-            let local = zone.as_deref().and_then(|zone| time_in_zone(now_ms(), zone, locale));
-            view! {
-              <dl class="profile-facts">
-                {profile.maybe_title.map(|value| view! { <dt>{move || i18n.t("profile-title")}</dt><dd translate="no">{value}</dd> })}
-                {profile.maybe_department.map(|value| view! { <dt>{move || i18n.t("profile-department")}</dt><dd translate="no">{value}</dd> })}
-                {profile.maybe_phone.map(|value| view! { <dt>{move || i18n.t("profile-phone")}</dt><dd translate="no">{value}</dd> })}
-                {local.map(|time| view! { <dt>{move || i18n.t("profile-local-time")}</dt><dd translate="no">{time} " · " {zone.clone().unwrap_or_default()}</dd> })}
-                {profile.maybe_working_hours.map(|hours| view! {
-                  <dt>{move || i18n.t("profile-hours")}</dt>
-                  <dd>{working_hours_text(&hours, |key| i18n.t(key))}</dd>
-                })}
-              </dl>
-            }
-          })
-        }}
+        <header class="profile-hero">
+          <Avatar user=person.clone() size=AvatarSize::ExtraLarge show_presence=true />
+          <h2 id="profile-card-title" class="profile-name" translate="no">{name}</h2>
+          {handle.map(|handle| view! { <p class="profile-handle" translate="no">"@" {handle}</p> })}
+          <p class="profile-presence">
+            <PresenceDot presence=person.presence />
+            <span>{move || i18n.t(&format!("presence-{}", person.presence.slug()))}</span>
+            <InMeetingBadge user=user />
+            <LastSeen user=user is_compact=true />
+          </p>
+          <ProfileBadges person=person.clone() />
+        </header>
+        {person.maybe_custom_status.clone().map(|status| view! { <CustomStatusLine status=status class="profile-status" /> })}
+        <ProfileActions person=person.clone() is_me=is_me />
+        <ProfileFacts user=user maybe_email=person.maybe_email.clone() />
+        {shared.map(|shared| view! { <SharedPlacesList shared=shared /> })}
       </div>
-      <footer class="modal-foot">
-        <span class="grow"></span>
-        {is_me
-          .then(|| view! { <button class="btn" on:click=move |_| state.overlay.set(crate::state::Overlay::EditProfile)>{move || i18n.t("profile-edit-title")}</button> })}
-        {(!is_me)
-          .then(|| {
-            view! {
-              <button class="btn btn-primary" on:click=move |_| { state.close_overlay(); state.open_direct(user); }>
-                {move || i18n.t("profile-message")}
-              </button>
-            }
-          })}
-      </footer>
     </Modal>
   }
   .into_any()
 }
 
+/// Guest and organization badges under the name.
+#[component]
+fn ProfileBadges(person: User) -> impl IntoView {
+  let i18n = use_i18n();
+  let state = use_app_state();
+  let is_guest_shown = person.is_guest && state.shows_guest_markers();
+  let has_badges = is_guest_shown || person.maybe_organization.is_some();
+  has_badges.then(|| {
+    view! {
+      <p class="profile-badges">
+        {is_guest_shown.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
+        {person.maybe_organization.clone().map(|name| view! { <crate::components::org_badge::OrgBadge organization=Some(name) /> })}
+      </p>
+    }
+  })
+}
+
+/// Message, call and copy e-mail for another person; set status and edit profile for oneself.
+#[component]
+fn ProfileActions(person: User, is_me: bool) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let user = person.id;
+  if is_me {
+    let can_set_status = state.read(|backend| backend.presence_policy()).statuses_enabled;
+    return view! {
+      <div class="profile-actions">
+        {can_set_status.then(|| view! {
+          <button type="button" class="btn btn-primary" data-autofocus on:click=move |_| state.overlay.set(Overlay::CustomStatus)>
+            <Icon name=IconName::Smile />
+            <span>{move || i18n.t("status-custom-set")}</span>
+          </button>
+        })}
+        <button type="button" class="btn" on:click=move |_| state.open_settings_at(crate::state::SettingsTab::Account)>
+          <Icon name=IconName::User />
+          <span>{move || i18n.t("profile-edit-title")}</span>
+        </button>
+      </div>
+    }
+    .into_any();
+  }
+  // A call needs the direct conversation; without one yet, "Message" creates it first.
+  let maybe_direct = state.direct_with(&[user]);
+  let can_message = crate::channel_access::can_start_direct(state, &[user]);
+  let can_call = maybe_direct.is_some() && !person.is_bot;
+  let is_copied = RwSignal::new(false);
+  let maybe_email = person.maybe_email.clone();
+  view! {
+    <div class="profile-actions">
+      <button
+        type="button"
+        class="btn btn-primary"
+        data-autofocus
+        disabled=!can_message
+        title=move || (!can_message).then(|| i18n.t("profile-message-guest-blocked"))
+        on:click=move |_| { state.close_overlay(); state.open_direct(user); }
+      >
+        <Icon name=IconName::Compose />
+        <span>{move || i18n.t("profile-message")}</span>
+      </button>
+      {(!can_message).then(|| view! { <p class="small muted-text">{move || i18n.t("profile-message-guest-blocked")}</p> })}
+      {maybe_direct.filter(|_| can_call).map(|conversation| view! {
+        <button
+          type="button"
+          class="btn"
+          on:click=move |_| {
+            state.close_overlay();
+            state.open_conversation(conversation);
+            if state.read(|backend| backend.has_calls()) {
+              state.call.prepare(CallRequest { conversation, kind: CallKind::Direct }, false);
+            } else {
+              state.overlay.set(Overlay::CallsUnavailable);
+            }
+          }
+        >
+          <Icon name=IconName::Phone />
+          <span>{move || i18n.t("profile-call")}</span>
+        </button>
+      })}
+      {maybe_email.map(|email| view! {
+        <button
+          type="button"
+          class="btn"
+          on:click=move |_| {
+            copy_to_clipboard(&email);
+            is_copied.set(true);
+          }
+        >
+          <Icon name=move || if is_copied.get() { IconName::Check } else { IconName::Copy } />
+          <span>{move || if is_copied.get() { i18n.t("profile-email-copied") } else { i18n.t("profile-copy-email") }}</span>
+        </button>
+      })}
+    </div>
+  }
+  .into_any()
+}
+
+/// Role, contact and time facts from the person's profile, plus the e-mail address where the
+/// workspace's directory policy shows it (the server leaves it out otherwise).
+#[component]
+fn ProfileFacts(user: UserId, maybe_email: Option<String>) -> impl IntoView {
+  let i18n = use_i18n();
+  let locale = i18n.locale().tag();
+  let profile = move || use_profiles().and_then(|hub| hub.profile(user));
+  move || {
+    let maybe_profile = profile();
+    let email = maybe_email.clone();
+    if maybe_profile.is_none() && email.is_none() {
+      return None;
+    }
+    let (title, department, phone, zone, hours) = match maybe_profile {
+      Some(profile) => (
+        profile.maybe_title,
+        profile.maybe_department,
+        profile.maybe_phone,
+        profile.maybe_time_zone,
+        profile.maybe_working_hours,
+      ),
+      None => (None, None, None, None, None),
+    };
+    let local = zone
+      .as_deref()
+      .and_then(|zone| time_in_zone(now_ms(), zone, locale));
+    Some(view! {
+      <dl class="profile-facts">
+        {title.map(|value| view! { <dt>{move || i18n.t("profile-title")}</dt><dd translate="no">{value}</dd> })}
+        {department.map(|value| view! { <dt>{move || i18n.t("profile-department")}</dt><dd translate="no">{value}</dd> })}
+        {email.map(|value| {
+          let href = format!("mailto:{value}");
+          view! { <dt>{move || i18n.t("profile-email")}</dt><dd translate="no"><a href=href>{value}</a></dd> }
+        })}
+        {phone.map(|value| view! { <dt>{move || i18n.t("profile-phone")}</dt><dd translate="no">{value}</dd> })}
+        {local.map(|time| view! { <dt>{move || i18n.t("profile-local-time")}</dt><dd translate="no">{time} " · " {zone.clone().unwrap_or_default()}</dd> })}
+        {hours.map(|hours| view! {
+          <dt>{move || i18n.t("profile-hours")}</dt>
+          <dd>{working_hours_text(&hours, |key| i18n.t(key))}</dd>
+        })}
+      </dl>
+    })
+  }
+}
+
+/// The spaces and channels the user shares with a person, from the user's own lists.
+#[component]
+fn SharedPlacesList(shared: SharedPlaces) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let SharedPlaces { spaces, channels } = shared;
+  let more = channels.len().saturating_sub(MAX_SHARED_CHANNELS);
+  (!spaces.is_empty() || !channels.is_empty()).then(|| {
+    view! {
+      <section class="profile-shared" aria-labelledby="profile-shared-title">
+        <h3 id="profile-shared-title" class="profile-section-title">{move || i18n.t("profile-shared")}</h3>
+        {(!spaces.is_empty()).then(|| view! {
+          <ul class="profile-chips" aria-label=move || i18n.t("profile-shared-spaces")>
+            {spaces.into_iter().map(|(_, name)| view! { <li class="profile-chip" translate="no">{name}</li> }).collect_view()}
+          </ul>
+        })}
+        {(!channels.is_empty()).then(|| view! {
+          <ul class="profile-channels" aria-label=move || i18n.t("profile-shared-channels")>
+            {channels
+              .into_iter()
+              .take(MAX_SHARED_CHANNELS)
+              .map(|channel| {
+                let icon = if channel.kind == ConversationKind::Private { IconName::Lock } else { IconName::Hash };
+                let id = channel.id;
+                view! {
+                  <li>
+                    <button type="button" class="profile-channel" on:click=move |_| { state.close_overlay(); state.open_conversation(id); }>
+                      <Icon name=icon />
+                      <span translate="no">{channel.name}</span>
+                    </button>
+                  </li>
+                }
+              })
+              .collect_view()}
+          </ul>
+        })}
+        {(more > 0).then(|| view! {
+          <p class="profile-more">{move || i18n.t_with("profile-shared-more", &[("count", &more.to_string())])}</p>
+        })}
+      </section>
+    }
+  })
+}
+
+/// Emoji, text and "until …" of a custom status, in the profile card, the hover card and the
+/// account menu.
+#[component]
+pub fn CustomStatusLine(status: CustomStatus, #[prop(optional)] class: &'static str) -> impl IntoView {
+  let i18n = use_i18n();
+  let maybe_until = status
+    .maybe_expires_at
+    .map(|at| status_until_label(at, now_ms(), i18n));
+  view! {
+    <p class=format!("custom-status-line {class}")>
+      {(!status.emoji.is_empty()).then(|| view! { <span class="custom-status-emoji" aria-hidden="true">{status.emoji.clone()}</span> })}
+      <span class="custom-status-text" translate="no">{status.text.clone()}</span>
+      {maybe_until.map(|label| view! { <span class="custom-status-until">{label}</span> })}
+    </p>
+  }
+}
+
+/// "until 18:00" today, "until end of today" at local midnight, else with the date.
+pub fn status_until_label(at: TimestampMs, now: TimestampMs, i18n: I18n) -> String {
+  let locale = i18n.locale().tag();
+  if at == end_of_local_day(now) {
+    return i18n.t("status-until-today");
+  }
+  let time = if local_day(at) == local_day(now) {
+    format_time(at, locale)
+  } else {
+    format_date_time(at, locale)
+  };
+  i18n.t_with("status-until", &[("time", &time)])
+}
+
+/// What the user shares with a person: spaces (by name) and channels, each sorted by name.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SharedPlaces {
+  pub spaces: Vec<(SpaceId, String)>,
+  pub channels: Vec<SharedChannel>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedChannel {
+  pub id: ConversationId,
+  pub name: String,
+  pub kind: ConversationKind,
+}
+
+/// The channels among `channels` that have `user` as a member, and the spaces they are in.
+pub fn shared_places(spaces: &[Space], channels: &[Conversation], user: UserId) -> SharedPlaces {
+  let mut shared: Vec<SharedChannel> = channels
+    .iter()
+    .filter(|channel| matches!(channel.kind, ConversationKind::Public | ConversationKind::Private))
+    .filter(|channel| channel.member_ids.contains(&user))
+    .map(|channel| SharedChannel {
+      id: channel.id,
+      name: channel.name.clone(),
+      kind: channel.kind,
+    })
+    .collect();
+  shared.sort_by_key(|channel| channel.name.to_lowercase());
+  let mut shared_spaces: Vec<(SpaceId, String)> = spaces
+    .iter()
+    .filter(|space| {
+      channels.iter().any(|channel| {
+        channel.maybe_space == Some(space.id) && shared.iter().any(|found| found.id == channel.id)
+      })
+    })
+    .map(|space| (space.id, space.name.clone()))
+    .collect();
+  shared_spaces.sort_by_key(|(_, name)| name.to_lowercase());
+  SharedPlaces {
+    spaces: shared_spaces,
+    channels: shared,
+  }
+}
+
 /// "Mon–Fri 09:00–17:00" style summary in the viewer's language.
 pub fn working_hours_text(hours: &WorkingHours, translate: impl Fn(&str) -> String) -> String {
-  let days: Vec<String> = weekdays()
+  let days: Vec<String> = crate::prefs::EVERY_DAY
     .iter()
     .filter(|day| hours.weekdays.contains(day))
     .map(|day| translate(&format!("weekday-{}", day.as_str())))
@@ -394,6 +425,7 @@ pub fn local_time_label(user: UserId, locale: &'static str) -> Option<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::model::id_from_raw;
 
   #[test]
   fn times_round_trip_and_reject_nonsense() {
@@ -401,6 +433,27 @@ mod tests {
     assert_eq!(format_minutes(570), "09:30");
     assert_eq!(parse_minutes("24:00"), None);
     assert_eq!(parse_minutes("9"), None);
+  }
+
+  #[test]
+  fn shared_places_are_the_person_s_channels_and_their_spaces_by_name() {
+    let (me, other) = (id_from_raw::<UserId>(1), id_from_raw::<UserId>(2));
+    let spaces = [space(10, "Zeta"), space(11, "Alpha"), space(12, "Unshared")];
+    let channels = [
+      channel(20, Some(10), "random", ConversationKind::Public, &[me, other]),
+      channel(21, Some(11), "Design", ConversationKind::Private, &[me, other]),
+      channel(22, Some(12), "solo", ConversationKind::Public, &[me]),
+      channel(23, None, "dm", ConversationKind::Direct, &[me, other]),
+    ];
+    let shared = shared_places(&spaces, &channels, other);
+    let names: Vec<&str> = shared
+      .channels
+      .iter()
+      .map(|channel| channel.name.as_str())
+      .collect();
+    assert_eq!(names, ["Design", "random"]);
+    let space_names: Vec<&str> = shared.spaces.iter().map(|(_, name)| name.as_str()).collect();
+    assert_eq!(space_names, ["Alpha", "Zeta"]);
   }
 
   #[test]
@@ -412,6 +465,59 @@ mod tests {
     };
     let text = working_hours_text(&hours, |key| key.trim_start_matches("weekday-").to_owned());
     assert_eq!(text, "mon fri, 09:00–17:00");
+  }
+
+  fn space(id: u64, name: &str) -> Space {
+    Space {
+      id: id_from_raw(id),
+      name: name.to_owned(),
+      hue: 0,
+      maybe_color: None,
+      maybe_image_version: None,
+      unread_count: 0,
+      mention_count: 0,
+      maybe_description: None,
+      member_count: 0,
+      join_policy: crate::model::JoinPolicy::InviteOnly,
+      can_add_members: false,
+      can_invite_guests: false,
+      can_manage_space: false,
+      can_delete_space: false,
+      deleted_channel_count: 0,
+      can_create_channels: false,
+      maybe_my_role: None,
+    }
+  }
+
+  fn channel(
+    id: u64,
+    maybe_space: Option<u64>,
+    name: &str,
+    kind: ConversationKind,
+    members: &[UserId],
+  ) -> Conversation {
+    Conversation {
+      id: id_from_raw(id),
+      maybe_space: maybe_space.map(id_from_raw),
+      kind,
+      category: crate::model::SidebarCategory::Channels,
+      name: name.to_owned(),
+      topic: String::new(),
+      member_ids: members.to_vec(),
+      unread_count: 0,
+      mention_count: 0,
+      is_favorite: false,
+      is_muted: false,
+      can_post: true,
+      bookmarks: Vec::new(),
+      is_catching_up: false,
+      is_notes_to_self: false,
+      is_archived: false,
+      is_imported: false,
+      maybe_permissions: None,
+      has_only_deactivated_others: false,
+      maybe_image_version: None,
+    }
   }
 }
 
@@ -454,12 +560,12 @@ pub fn UserHoverCard(
         <Avatar user=person.clone() size=AvatarSize::Large show_presence=true />
         <div>
           <strong translate="no">{name}</strong>
-          {person.maybe_custom_status.clone().map(|status| view! { <p class="small">{status.emoji} " " {status.text}</p> })}
+          {person.maybe_custom_status.clone().map(|status| view! { <CustomStatusLine status=status class="small" /> })}
           {move || local_time().map(|time| view! { <p class="small muted-text">{move || i18n.t_with("hover-card-local-time", &[("time", &time)])}</p> })}
         </div>
       </div>
       <div class="hover-card-actions">
-        {(!is_me).then(|| view! {
+        {(!is_me && crate::channel_access::can_start_direct(state, &[user])).then(|| view! {
           <button class="btn btn-small btn-primary" on:click=move |_| { on_leave.run(()); state.open_direct(user); }>
             {move || i18n.t("profile-message")}
           </button>

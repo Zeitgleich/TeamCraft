@@ -1,5 +1,6 @@
 //! Localisation with Fluent. English is the source language; every user-facing string goes through
-//! [`I18n::t`] and friends. Translation files live in `i18n/*.ftl`.
+//! [`I18n::t`] and friends. Translations live in `i18n/<language>/<area>.ftl`, one Fluent resource
+//! per area of the app (#614); a language's bundle loads all of its files, which build.rs embeds.
 
 use fluent_bundle::FluentBundle as MessageBundle;
 use fluent_bundle::{FluentArgs, FluentResource};
@@ -8,8 +9,8 @@ use unic_langid::LanguageIdentifier;
 
 use crate::reactive::get_if_observed;
 
-const EN_SOURCE: &str = include_str!("../i18n/en.ftl");
-const DE_SOURCE: &str = include_str!("../i18n/de.ftl");
+// `fn sources(tag)`: the embedded files of one language.
+include!(concat!(env!("OUT_DIR"), "/i18n_sources.rs"));
 
 /// UI languages that ship with translations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +85,16 @@ impl I18n {
     fluent_args.set("count", count);
     translate(get_if_observed(self.locale), key, Some(&fluent_args))
   }
+
+  /// Translates a message that selects a plural form from `$count` and has further arguments.
+  pub fn t_count_with(&self, key: &str, count: usize, args: &[(&str, &str)]) -> String {
+    let mut fluent_args = FluentArgs::new();
+    fluent_args.set("count", count);
+    for (name, value) in args {
+      fluent_args.set(name.to_string(), value.to_string());
+    }
+    translate(get_if_observed(self.locale), key, Some(&fluent_args))
+  }
 }
 
 pub fn provide_i18n(initial: Locale) -> I18n {
@@ -94,6 +105,13 @@ pub fn provide_i18n(initial: Locale) -> I18n {
 
 pub fn use_i18n() -> I18n {
   expect_context::<I18n>()
+}
+
+/// Translates a message without arguments in the UI's language, for code outside components that
+/// may run without the translator in reach (then English).
+pub fn translate_current(key: &str) -> String {
+  let locale = use_context::<I18n>().map_or(Locale::En, |i18n| i18n.locale());
+  translate(locale, key, None)
 }
 
 pub(crate) fn translate(locale: Locale, key: &str, maybe_args: Option<&FluentArgs>) -> String {
@@ -125,8 +143,8 @@ struct Bundles {
 impl Bundles {
   fn load() -> Self {
     Self {
-      en: build_bundle(Locale::En, EN_SOURCE),
-      de: build_bundle(Locale::De, DE_SOURCE),
+      en: build_bundle(Locale::En),
+      de: build_bundle(Locale::De),
     }
   }
 
@@ -138,27 +156,41 @@ impl Bundles {
   }
 }
 
-fn build_bundle(locale: Locale, source: &str) -> MessageBundle<FluentResource> {
+fn build_bundle(locale: Locale) -> MessageBundle<FluentResource> {
   let langid: LanguageIdentifier = locale.tag().parse().unwrap_or_default();
   let mut bundle = MessageBundle::new(vec![langid]);
   // Isolation marks confuse text selection and tests; the UI sets `dir` itself.
   bundle.set_use_isolating(false);
-  // `FluentResource::try_new` returns the partial resource together with the errors; keep what parsed.
-  let resource = match FluentResource::try_new(source.to_owned()) {
-    Ok(resource) => resource,
-    Err((resource, errors)) => {
+  for (file, source) in sources(locale.tag()) {
+    // `FluentResource::try_new` returns the partial resource together with the errors; keep what parsed.
+    let resource = match FluentResource::try_new((*source).to_owned()) {
+      Ok(resource) => resource,
+      Err((resource, errors)) => {
+        tracing::error!(
+          locale = locale.tag(),
+          file,
+          error_count = errors.len(),
+          "invalid Fluent resource"
+        );
+        resource
+      },
+    };
+    // An id defined in two files keeps its first definition (the tests rule that out).
+    if bundle.add_resource(resource).is_err() {
       tracing::error!(
         locale = locale.tag(),
-        error_count = errors.len(),
-        "invalid Fluent resource"
+        file,
+        "duplicate message ids in Fluent resource"
       );
-      resource
-    },
-  };
-  if bundle.add_resource(resource).is_err() {
-    tracing::error!(locale = locale.tag(), "duplicate message ids in Fluent resource");
+    }
   }
   bundle
+}
+
+/// All Fluent files of `locale` as one text, for tests that look for messages in the sources.
+#[cfg(test)]
+pub(crate) fn joined_source(locale: Locale) -> String {
+  sources(locale.tag()).iter().map(|(_, source)| *source).collect()
 }
 
 #[cfg(test)]
@@ -167,51 +199,102 @@ mod tests {
 
   #[test]
   fn translations_parse_without_errors() {
-    for source in [EN_SOURCE, DE_SOURCE] {
-      assert!(FluentResource::try_new(source.to_owned()).is_ok());
+    for locale in Locale::ALL {
+      assert!(
+        !sources(locale.tag()).is_empty(),
+        "no Fluent files for {locale:?}"
+      );
+      for (file, source) in sources(locale.tag()) {
+        assert!(
+          FluentResource::try_new((*source).to_owned()).is_ok(),
+          "i18n/{}/{file} doesn't parse",
+          locale.tag()
+        );
+      }
     }
   }
 
+  /// A duplicate makes `add_resource` fail and logs an error at startup, also when the two
+  /// definitions are in different area files.
   #[test]
-  fn message_ids_are_unique_per_file() {
-    // A duplicate makes `add_resource` fail and logs an error at startup.
-    for (name, source) in [("en", EN_SOURCE), ("de", DE_SOURCE)] {
-      let ids = message_ids(source);
-      let mut sorted = ids.clone();
-      sorted.sort();
-      sorted.dedup();
-      assert_eq!(sorted.len(), ids.len(), "duplicate message ids in {name}.ftl");
+  fn message_ids_are_unique_across_files() {
+    for locale in Locale::ALL {
+      let mut seen: std::collections::BTreeMap<String, &str> = Default::default();
+      for (file, source) in sources(locale.tag()) {
+        for id in message_ids(source) {
+          if let Some(first) = seen.insert(id.clone(), file) {
+            panic!(
+              "{id} is defined in i18n/{0}/{first} and i18n/{0}/{file}",
+              locale.tag()
+            );
+          }
+        }
+      }
     }
   }
 
   #[test]
   fn german_covers_every_english_message() {
-    let german = message_ids(DE_SOURCE);
-    let missing: Vec<String> = message_ids(EN_SOURCE)
+    let german = message_ids(&joined_source(Locale::De));
+    let missing: Vec<String> = message_ids(&joined_source(Locale::En))
       .into_iter()
       .filter(|id| !german.contains(id))
       .collect();
-    assert!(missing.is_empty(), "missing in de.ftl: {missing:?}");
+    assert!(missing.is_empty(), "missing in i18n/de: {missing:?}");
   }
 
   #[test]
   fn german_has_no_messages_english_lacks() {
-    let english = message_ids(EN_SOURCE);
-    let orphans: Vec<String> = message_ids(DE_SOURCE)
+    let english = message_ids(&joined_source(Locale::En));
+    let orphans: Vec<String> = message_ids(&joined_source(Locale::De))
       .into_iter()
       .filter(|id| !english.contains(id))
       .collect();
     assert!(
       orphans.is_empty(),
-      "only in de.ftl (stale or misspelled): {orphans:?}"
+      "only in i18n/de (stale or misspelled): {orphans:?}"
     );
+  }
+
+  /// Every language has the same area files as English, each with the same messages, so a
+  /// translation is found (and missed) where its English text is.
+  #[test]
+  fn every_language_has_the_english_area_files() {
+    let files_of = |locale: Locale| -> std::collections::BTreeMap<&str, Vec<String>> {
+      sources(locale.tag())
+        .iter()
+        .map(|(file, source)| {
+          let mut ids = message_ids(source);
+          ids.sort();
+          (*file, ids)
+        })
+        .collect()
+    };
+    let english = files_of(Locale::En);
+    for locale in Locale::ALL {
+      let translated = files_of(locale);
+      assert_eq!(
+        translated.keys().collect::<Vec<_>>(),
+        english.keys().collect::<Vec<_>>(),
+        "i18n/{} has other files than i18n/en",
+        locale.tag()
+      );
+      for (file, ids) in &english {
+        assert_eq!(
+          &translated[file],
+          ids,
+          "i18n/{}/{file} has other messages than i18n/en/{file}",
+          locale.tag()
+        );
+      }
+    }
   }
 
   /// A translation that drops or renames a `$placeholder` shows wrong or empty text.
   #[test]
   fn translations_use_the_same_placeholders() {
-    let german = placeholders(DE_SOURCE);
-    for (id, english_vars) in placeholders(EN_SOURCE) {
+    let german = placeholders(&joined_source(Locale::De));
+    for (id, english_vars) in placeholders(&joined_source(Locale::En)) {
       if let Some(german_vars) = german.get(&id) {
         assert_eq!(
           &english_vars, german_vars,
@@ -230,6 +313,37 @@ mod tests {
     assert_eq!(
       translate(Locale::De, "thread-replies", Some(&count_args(2))),
       "2 Antworten"
+    );
+  }
+
+  #[test]
+  fn sidebar_rows_say_how_many_messages_are_unread() {
+    let say = |locale, key, count: i64, unread: &str| {
+      let mut args = FluentArgs::new();
+      args.set("name", "Team");
+      args.set("unread", unread);
+      args.set("count", count);
+      translate(locale, key, Some(&args))
+    };
+    assert_eq!(
+      say(Locale::En, "sidebar-item-unread", 1, ""),
+      "Team, 1 unread message"
+    );
+    assert_eq!(
+      say(Locale::En, "sidebar-item-unread", 120, ""),
+      "Team, 120 unread messages"
+    );
+    assert_eq!(
+      say(Locale::En, "sidebar-item-unread-mentions", 2, "5"),
+      "Team, 5 unread messages, 2 mentions"
+    );
+    assert_eq!(
+      say(Locale::De, "sidebar-item-unread", 1, ""),
+      "Team, 1 ungelesene Nachricht"
+    );
+    assert_eq!(
+      say(Locale::De, "sidebar-item-unread-mentions", 1, "3"),
+      "Team, 3 ungelesene Nachrichten, 1 Erwähnung"
     );
   }
 
@@ -291,6 +405,189 @@ mod tests {
     }
   }
 
+  /// Every key the lightbox and the file views ask for exists in each language.
+  #[test]
+  fn lightbox_and_file_keys_exist() {
+    let keys: Vec<String> = [
+      include_str!("components/lightbox.rs"),
+      include_str!("components/lightbox_controls.rs"),
+      include_str!("components/file_views.rs"),
+    ]
+    .into_iter()
+    .flat_map(keys_in_source)
+    .collect();
+    for expected in [
+      "lightbox-save",
+      "lightbox-saving",
+      "lightbox-shortcut",
+      "lightbox-details-dimensions-value",
+      "media-open",
+      "file-upload-stalled",
+      "file-too-large",
+    ] {
+      assert!(
+        keys.iter().any(|key| key == expected),
+        "the scan missed {expected}"
+      );
+    }
+    for locale in [Locale::En, Locale::De] {
+      for key in &keys {
+        assert_ne!(&translate(locale, key, None), key, "{locale:?} lacks {key}");
+      }
+    }
+  }
+
+  /// Every key the settings sections ask for exists in each language: the `.t(..)` calls, the
+  /// `label`, `hint` and `heading` of their rows and cards, and what the settings search reads.
+  #[test]
+  fn settings_keys_exist() {
+    let sources = [
+      include_str!("components/settings_account.rs"),
+      include_str!("components/settings_keyboard.rs"),
+      include_str!("components/settings_modal.rs"),
+      include_str!("components/settings_notifications.rs"),
+      include_str!("components/settings_security.rs"),
+      include_str!("components/settings_tabs.rs"),
+    ];
+    let mut keys: Vec<String> = sources.into_iter().flat_map(keys_in_source).collect();
+    for source in sources {
+      for marker in [
+        "label=\"",
+        "hint=\"",
+        "heading=\"",
+        "heading_key: \"",
+        ".t_count(\"",
+      ] {
+        for (at, _) in source.match_indices(marker) {
+          // `enterkeyhint="…"` is no key: only attributes that start a word count.
+          let starts_word = source[..at].ends_with(char::is_whitespace) || marker.starts_with('.');
+          let rest = &source[at + marker.len()..];
+          if let (true, Some(end)) = (starts_word, rest.find('"')) {
+            keys.push(rest[..end].to_owned());
+          }
+        }
+      }
+    }
+    keys.extend(crate::components::settings_search::every_key());
+    assert!(
+      keys.iter().any(|key| key == "notif-master"),
+      "the scan missed rows"
+    );
+    for locale in [Locale::En, Locale::De] {
+      for key in &keys {
+        assert_ne!(&translate(locale, key, None), key, "{locale:?} lacks {key}");
+      }
+    }
+  }
+
+  /// Every key any component asks for exists in each language: the `.t`, `.t_with` and `.t_count`
+  /// calls, and the key props components hand on (`label="…"` of a toolbar button, `title_key`,
+  /// `body_key`, …). The per-area scans above miss keys that only travel through a prop, as
+  /// `file-copy-share` did (#742).
+  #[test]
+  fn every_key_the_code_names_exists() {
+    let mut sources = Vec::new();
+    collect_sources(
+      &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+      &mut sources,
+    );
+    assert!(sources.len() > 50, "the scan found the sources");
+    let mut missing = Vec::new();
+    for (path, source) in &sources {
+      // Test modules name keys that must not exist (`no-such-key`).
+      let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+      for key in named_keys(code) {
+        for locale in [Locale::En, Locale::De] {
+          if translate(locale, &key, None) == key {
+            missing.push(format!("{} lacks {key} ({locale:?})", path.display()));
+          }
+        }
+      }
+    }
+    assert!(missing.is_empty(), "keys without a translation: {missing:#?}");
+  }
+
+  #[test]
+  fn the_key_scan_finds_calls_and_key_props() {
+    let source = r#"
+      i18n.t("a-key"); i18n.t_with(
+        "b-key", &[]); i18n.t_count("c-key", 2);
+      <ToolbarButton label="d-key" />
+      <EmptyState title_key="e-key" body_key="f-key" />
+      EmptyAction { label_key: "g-key" }
+      <input enterkeyhint="send" aria-label="plain words" />
+      i18n.t(&format!("level-{}", slug));
+    "#;
+    assert_eq!(
+      named_keys(source),
+      ["a-key", "b-key", "c-key", "d-key", "e-key", "f-key", "g-key"]
+    );
+  }
+
+  /// The literal i18n keys `source` names (built keys like `format!(…)` aren't literals).
+  fn named_keys(source: &str) -> Vec<String> {
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for marker in [".t(", ".t_with(", ".t_count("] {
+      for (at, _) in source.match_indices(marker) {
+        let rest = source[at + marker.len()..].trim_start();
+        if let Some(quoted) = rest.strip_prefix('"')
+          && let Some(end) = quoted.find('"')
+        {
+          found.push((at, quoted[..end].to_owned()));
+        }
+      }
+    }
+    for marker in [
+      "label=\"",
+      "title_key=\"",
+      "body_key=\"",
+      "placeholder_key=\"",
+      "label_key: \"",
+      "title_key: \"",
+      "body_key: \"",
+      "heading_key: \"",
+    ] {
+      for (at, _) in source.match_indices(marker) {
+        // `aria-label="…"` or `enterkeyhint="…"` are no keys: only props that start a word count.
+        let starts_word = source[..at].ends_with(|c: char| c.is_whitespace() || c == '{');
+        let rest = &source[at + marker.len()..];
+        if let (true, Some(end)) = (starts_word, rest.find('"')) {
+          found.push((at, rest[..end].to_owned()));
+        }
+      }
+    }
+    found.sort();
+    found
+      .into_iter()
+      .map(|(_, key)| key)
+      .filter(|key| is_key_like(key))
+      .collect()
+  }
+
+  /// Keys are lowercase words joined by dashes; anything else is plain text or a value.
+  fn is_key_like(text: &str) -> bool {
+    text.contains('-')
+      && text
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+  }
+
+  fn collect_sources(directory: &std::path::Path, sources: &mut Vec<(std::path::PathBuf, String)>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+      return;
+    };
+    for entry in entries.flatten() {
+      let path = entry.path();
+      if path.is_dir() {
+        collect_sources(&path, sources);
+      } else if path.extension().is_some_and(|extension| extension == "rs")
+        && let Ok(source) = std::fs::read_to_string(&path)
+      {
+        sources.push((path, source));
+      }
+    }
+  }
+
   #[test]
   fn locale_tags_parse() {
     assert_eq!(Locale::from_tag("de-DE"), Some(Locale::De));
@@ -330,6 +627,28 @@ mod tests {
       }
     }
     found
+  }
+
+  /// The literal keys of `.t("…")`, `.t_with("…", …)` and of match arms that pick a key (`=> "…"`).
+  fn keys_in_source(source: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    // rustfmt may break a long call after its parenthesis: the key starts after the whitespace.
+    for marker in [".t(", ".t_with(", "=> \""] {
+      for (at, _) in source.match_indices(marker) {
+        let rest = &source[at + marker.len()..];
+        let rest = match marker.ends_with('"') {
+          true => rest,
+          false => match rest.trim_start().strip_prefix('"') {
+            Some(quoted) => quoted,
+            None => continue,
+          },
+        };
+        if let Some(end) = rest.find('"') {
+          keys.push(rest[..end].to_owned());
+        }
+      }
+    }
+    keys
   }
 
   fn message_ids(source: &str) -> Vec<String> {

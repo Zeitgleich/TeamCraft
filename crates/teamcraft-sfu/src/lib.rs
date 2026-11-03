@@ -14,6 +14,8 @@ pub mod ids;
 pub mod layers;
 pub mod net;
 pub mod prejoin;
+pub mod probe;
+pub mod rate_limit;
 pub mod reporting;
 pub mod room;
 pub mod server;

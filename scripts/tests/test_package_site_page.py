@@ -19,8 +19,10 @@ RELEASE_FILES = [
     "TeamCraft_1.0.1_arm64-setup.exe",
     "TeamCraft_1.0.1_x64_en-US.msi",
     "TeamCraft_1.0.1_arm64_en-US.msi",
-    "TeamCraft_1.0.1_universal.dmg",
-    "TeamCraft_1.0.1_universal.app.tar.gz",
+    "TeamCraft_1.0.1_x64.dmg",
+    "TeamCraft_1.0.1_aarch64.dmg",
+    "TeamCraft_1.0.1_x64.app.tar.gz",
+    "TeamCraft_1.0.1_aarch64.app.tar.gz",
     "TeamCraft_1.0.1_amd64.AppImage",
     "TeamCraft_1.0.1_aarch64.AppImage",
     "TeamCraft_1.0.1_amd64.deb",
@@ -45,7 +47,7 @@ class ClassifyAssetsTest(unittest.TestCase):
         self.assertEqual(kinds, {
             ("windows", "exe", "x64"), ("windows", "exe", "arm64"),
             ("windows", "msi", "x64"), ("windows", "msi", "arm64"),
-            ("macos", "dmg", "universal"),
+            ("macos", "dmg", "arm64"), ("macos", "dmg", "x64"),
             ("linux", "appimage", "x64"), ("linux", "appimage", "arm64"),
             ("linux", "deb", "x64"), ("linux", "deb", "arm64"),
             ("linux", "rpm", "x64"), ("linux", "rpm", "arm64"),
@@ -58,6 +60,14 @@ class ClassifyAssetsTest(unittest.TestCase):
         self.assertNotIn("TeamCraft_1.0.1_x64-setup.exe.sig", names)
         self.assertNotIn("teamcraft-android-1.0.1-full-debug-signed.apk", names)
         self.assertFalse(any(n.endswith((".json", ".tar.gz")) or n == "SHA256SUMS" for n in names))
+
+    def test_apple_silicon_comes_before_intel_and_x64_before_arm64_elsewhere(self):
+        downloads = page.classify_assets(assets(RELEASE_FILES), allow_debug=True)
+        self.assertEqual([d.arch for d in downloads if d.os == "macos"], ["arm64", "x64"])
+        self.assertEqual([d.arch for d in downloads if d.kind == "exe"], ["x64", "arm64"])
+
+    def test_universal_dmgs_are_no_longer_offered(self):
+        self.assertEqual(page.classify_assets(assets(["TeamCraft_1.0.0_universal.dmg"]), allow_debug=False), [])
 
     def test_unsigned_apks_are_never_offered(self):
         files = ["teamcraft-android-1.0.1-full-release-unsigned.apk"]
@@ -85,7 +95,7 @@ class RenderTest(unittest.TestCase):
         self.add_repositories("prerelease")
         html = self.render()
         self.assertIn("first stable release is coming soon", html)
-        self.assertIn("Beta (pre-releases)", html)
+        self.assertIn('id="linux-prerelease" data-tab-title="Beta" data-selected', html)
         self.assertIn("rpm/prerelease/teamcraft-prerelease.repo", html)
         self.assertIn('id="apt-prerelease"', html)
         self.assertIn("Switch back from beta to stable", html)
@@ -101,14 +111,76 @@ class RenderTest(unittest.TestCase):
         html = self.render()
         self.assertNotIn("coming soon", html)
         self.assertLess(html.index('id="apt-stable"'), html.index('id="apt-prerelease"'))
+        self.assertIn('id="linux-stable" data-tab-title="Stable" data-selected', html)
+        self.assertNotIn('data-tab-title="Beta" data-selected', html)
         self.assertIn("rpm/stable/teamcraft.repo", html)
         self.assertEqual(page.check_links(self.site, SITE_URL), [])
 
     def test_downloads_link_the_release_assets(self):
         self.add_release("prerelease", "v1.0.0-rc.1")
         html = self.render()
-        self.assertIn(f"https://github.com/{REPO}/releases/download/v1.0.0-rc.1/TeamCraft_1.0.1_universal.dmg", html)
+        base = f"https://github.com/{REPO}/releases/download/v1.0.0-rc.1"
+        self.assertIn(f"{base}/TeamCraft_1.0.1_aarch64.dmg", html)
+        self.assertIn(f"{base}/TeamCraft_1.0.1_x64.dmg", html)
         self.assertNotIn(".sig\"", html)
+
+    def test_the_mac_card_offers_both_architectures_apple_silicon_highlighted(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        html = self.render()
+        card = html[html.index('data-os="macos" aria-labelledby'):]
+        card = card[:card.index("</article>")]
+        apple = card.index('href="https://github.com/Example-Org/TeamCraft/releases/download/v1.0.0-rc.1/TeamCraft_1.0.1_aarch64.dmg"')
+        intel = card.index('TeamCraft_1.0.1_x64.dmg"')
+        self.assertLess(apple, intel)
+        self.assertEqual(card.count("button button-primary download choice"), 1)
+        self.assertLess(card.index("button-primary download choice"), apple)
+        self.assertLess(card.index("button-secondary download choice"), intel)
+        self.assertGreater(card.index("button-secondary download choice"), apple)
+        self.assertIn("Apple silicon</span>", card)
+        self.assertIn("M1 and newer", card)
+        self.assertIn("Intel</span>", card)
+        self.assertIn("Which Mac do I have?", card)
+        self.assertIn("macOS 14 or newer · Apple silicon and Intel", card)
+        self.assertNotIn("Also for", card)
+
+    def test_the_linux_card_recommends_the_repository_and_lists_appimage_last(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        self.add_repositories("prerelease")
+        html = self.render()
+        card = html[html.index('data-os="linux" aria-labelledby'):]
+        card = card[:card.index("</article>")]
+        repo = card.index("Install from the package repository")
+        deb = card.index("TeamCraft_1.0.1_amd64.deb")
+        rpm = card.index("TeamCraft-1.0.1-1.x86_64.rpm")
+        more = card.index('<details class="more">')
+        self.assertLess(repo, deb)
+        self.assertLess(deb, rpm)
+        self.assertLess(rpm, more)
+        self.assertIn('href="#linux"', card[:deb])
+        self.assertIn("Debian, Ubuntu · Fedora, openSUSE", card)
+        self.assertIn("Also for", card)
+        self.assertIn("TeamCraft_1.0.1_arm64.deb", card[:more])
+        self.assertIn("TeamCraft-1.0.1-1.aarch64.rpm", card[:more])
+        options = card[more:]
+        self.assertLess(options.index("Flatpak bundle"), options.index("AppImage"))
+        self.assertIn("TeamCraft_1.0.1_amd64.AppImage", options)
+        self.assertIn("TeamCraft_1.0.1_aarch64.AppImage", options)
+        self.assertIn("Portable, no automatic system integration", options)
+        self.assertNotIn(".deb", options)
+        self.assertNotIn("Download AppImage", card)
+        # Only the repository, .deb and .rpm are offered to the hero.
+        for line in card.split("<a "):
+            if "AppImage" in line:
+                self.assertNotIn("data-primary", line)
+
+    def test_the_linux_card_without_repositories_still_offers_the_packages(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        html = self.render()
+        card = html[html.index('data-os="linux" aria-labelledby'):]
+        card = card[:card.index("</article>")]
+        self.assertNotIn("Install from the package repository", card)
+        self.assertIn("TeamCraft_1.0.1_amd64.deb", card)
+        self.assertIn("TeamCraft-1.0.1-1.x86_64.rpm", card)
 
     def test_fingerprint_and_store_link_come_from_the_environment(self):
         self.add_release("prerelease", "v1.0.0-rc.1")
@@ -126,6 +198,35 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("teamcraft-archive-keyring", html)
         self.assertEqual(page.check_links(self.site, SITE_URL), [])
 
+    def test_test_build_warning_only_for_debug_signed_apks(self):
+        self.add_release("prerelease", "v1.0.0-rc.1", files=[
+            "teamcraft-android-1.0.0-rc.1-full-release-unsigned.apk",
+            "teamcraft-android-1.0.0-rc.1-full-debug-signed.apk",
+        ])
+        self.assertIn("throwaway key", self.render())
+
+    def test_signed_release_apks_have_no_test_build_warning(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        html = self.render()
+        self.assertIn("teamcraft-android-1.0.1-full-release.apk", html)
+        self.assertNotIn("throwaway key", html)
+        self.assertNotIn("debug-signed", html)
+
+    def test_static_files_and_illustrations_are_published(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        html = self.render()
+        for name in ("style.css", "site.js", "fonts/inter-latin-variable.woff2", "fonts/OFL.txt", "logo.svg"):
+            self.assertTrue((self.site / name).is_file(), name)
+        self.assertIn('class="showcase"', html)
+        self.assertNotIn("<!--", html)
+        self.assertNotIn(' style="', html)
+        self.assertEqual(page.check_links(self.site, SITE_URL), [])
+
+    def test_app_store_tile_follows_the_environment(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        self.assertIn("Coming soon", self.render())
+        self.assertIn("App Store", self.render({"APP_STORE_URL": "https://apps.example.com/teamcraft"}))
+
     def test_html_in_release_names_is_escaped(self):
         self.add_release("prerelease", "v1.0.0-rc.1", name="<script>x</script>")
         self.assertNotIn("<script>x", self.render())
@@ -137,14 +238,14 @@ class RenderTest(unittest.TestCase):
         (self.site / "index.html").write_text(html, encoding="utf-8")
         return html
 
-    def add_release(self, channel, tag, name=None):
+    def add_release(self, channel, tag, name=None, files=None):
         (self.work / channel).mkdir(parents=True)
         release = {
             "tag_name": tag,
             "name": name or f"TeamCraft {tag}",
             "published_at": "2026-11-02T10:00:00Z",
             "html_url": f"https://github.com/{REPO}/releases/tag/{tag}",
-            "assets": assets(RELEASE_FILES, tag),
+            "assets": assets(files or RELEASE_FILES, tag),
         }
         (self.work / channel / "release.json").write_text(json.dumps(release), encoding="utf-8")
 
@@ -182,6 +283,12 @@ class CheckLinksTest(unittest.TestCase):
     def test_missing_site_url_in_a_snippet_fails(self):
         self.write_page(f"<pre>sudo curl -o x {SITE_URL}/rpm/stable/teamcraft.repo</pre>")
         self.assertEqual(len(page.check_links(self.site, SITE_URL)), 1)
+
+    def test_missing_file_in_a_style_sheet_fails(self):
+        self.write_page("")
+        (self.site / "style.css").write_text('@font-face { src: url("fonts/missing.woff2"); }\n'
+                                             'a { background: url(key.asc); }', encoding="utf-8")
+        self.assertEqual(page.check_links(self.site, SITE_URL), [("style.css", "fonts/missing.woff2")])
 
     def test_directory_link_without_index_fails(self):
         self.write_page('<a href="apt/">apt</a>')

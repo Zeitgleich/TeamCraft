@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM meeting_invites WHERE meeting_id = $1 AND lower(email) = lower($2) AND redeemed_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9dea2e820011e3bca5c2ed4aed8c73335dc992d7b560a6ed3c24780f3ca30072"
+}

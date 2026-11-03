@@ -8,7 +8,9 @@
 pub mod browser;
 mod config;
 pub(crate) mod fetch;
+pub mod guest;
 pub mod tauri;
+mod token_vault;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -16,6 +18,7 @@ use std::rc::Rc;
 
 pub use config::AppConfig;
 pub use teamcraft_client_api::remote::ApiMethod;
+pub use teamcraft_client_api::sign_in_look::SignInLook;
 
 /// A boxed future that does not need to be `Send`; everything here runs on the UI thread.
 pub type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -28,6 +31,10 @@ pub enum AuthError {
   /// The identity provider refused the request (`error` and `error_description` of RFC 6749).
   #[error("the identity provider refused the request: {0}")]
   Denied(String),
+  /// The identity provider answered the sign-in redirect with an `error` (RFC 6749 §4.1.2.1); the
+  /// code as [`shown_error_code`](teamcraft_client_api::oidc_login::shown_error_code) cleaned it.
+  #[error("the identity provider refused the sign-in: {0}")]
+  AuthorizationRefused(String),
   /// The identity provider or the server could not be reached.
   #[error("network error: {0}")]
   Network(String),
@@ -76,7 +83,7 @@ pub trait Authenticator {
   fn restore(&self) -> LocalFuture<'_, Result<bool, AuthError>>;
   /// Starts a login. In the browser this navigates away and never resolves; on desktop it resolves when
   /// the system browser has returned.
-  fn login(&self) -> LocalFuture<'_, Result<(), AuthError>>;
+  fn login(&self, look: SignInLook) -> LocalFuture<'_, Result<(), AuthError>>;
   /// Aborts a login that waits for the system browser. Nothing to do in the browser flow.
   fn cancel_login(&self) {}
   /// Ends the session and forgets stored tokens.
@@ -90,9 +97,9 @@ pub trait Authenticator {
     maybe_body: Option<String>,
   ) -> LocalFuture<'_, Result<ApiResponse, AuthError>>;
 
-  /// Signs in with a local account (guests without an identity provider account): e-mail, password
-  /// and, when the account has one, the current code of the authenticator app. A refusal that asks for
-  /// the code comes back as `Denied("mfa_required")`. Only the browser build has local sign-in.
+  /// Signs in with a local account (people without an identity provider account): e-mail, password
+  /// and, when the account has one, the current code of the authenticator app. A refusal comes back
+  /// as `Denied(code)` with the server's error code (browser) or the shell's kind (desktop).
   fn login_local(
     &self,
     _login: String,
@@ -101,7 +108,7 @@ pub trait Authenticator {
   ) -> LocalFuture<'_, Result<(), AuthError>> {
     Box::pin(async {
       Err(AuthError::Unsupported(
-        "local accounts sign in in the browser".to_owned(),
+        "local accounts are not available here".to_owned(),
       ))
     })
   }

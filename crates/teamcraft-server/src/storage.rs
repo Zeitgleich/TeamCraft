@@ -2,14 +2,18 @@
 //! sees the data or the keys (e2ee.md §4.5). The server itself only stores public objects this
 //! way: the brand images admins upload (docs/branding.md §2.1).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::StatusCode;
+use rusty_s3::actions::CreateMultipartUpload;
 use rusty_s3::{Bucket, BucketError, Credentials, S3Action, UrlStyle};
 use secrecy::ExposeSecret;
+use teamcraft_proto::DependencyName;
 use url::Url;
 
 use crate::config::StorageConfig;
+use crate::dependencies::{CircuitOpen, DependencyGuard, Fault, Retries};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
@@ -21,6 +25,16 @@ pub enum StorageError {
   Status(StatusCode),
   #[error("the stored object is larger than expected")]
   TooLarge,
+  #[error("the storage's answer could not be read: {0}")]
+  Answer(String),
+  /// The storage refused a request of an upload in parts (4xx, or an error in a 200 answer): the
+  /// upload is gone (`NoSuchUpload`), a part is missing (`InvalidPart`) or too small. Carries the
+  /// S3 error code.
+  #[error("the storage refused the upload in parts: {0}")]
+  MultipartRefused(String),
+  /// Not asked: the storage failed several times in a row and its next probe is not due.
+  #[error(transparent)]
+  Unavailable(#[from] CircuitOpen),
 }
 
 /// Signs requests against one bucket.
@@ -28,8 +42,11 @@ pub struct BlobStore {
   bucket: Bucket,
   credentials: Credentials,
   expiry: Duration,
+  multipart_expiry: Duration,
   max_attachment_bytes: u64,
   http: reqwest::Client,
+  /// The storage's breaker and retries (issue #743).
+  guard: Arc<DependencyGuard>,
 }
 
 impl BlobStore {
@@ -49,15 +66,34 @@ impl BlobStore {
       bucket,
       credentials: Credentials::new(config.access_key.clone(), config.secret_key.expose_secret()),
       expiry: Duration::from_secs(config.presign_expiry_secs),
+      multipart_expiry: Duration::from_secs(config.multipart_expiry_secs),
       max_attachment_bytes: config.max_attachment_bytes,
       http: reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?,
+      guard: DependencyGuard::standalone(DependencyName::ObjectStorage),
     })
+  }
+
+  /// Requests go through `guard`, the registry's breaker of the object storage.
+  pub fn with_guard(mut self, guard: Arc<DependencyGuard>) -> Self {
+    self.guard = guard;
+    self
+  }
+
+  /// Fails fast while the storage is down, before an upload URL is handed out: the client then hears
+  /// "later" from us (503 with `Retry-After`) instead of a raw error from the storage.
+  pub fn check_available(&self) -> Result<(), CircuitOpen> {
+    self.guard.check()
   }
 
   pub fn expiry(&self) -> Duration {
     self.expiry
+  }
+
+  /// How long an unfinished upload in parts waits for its next part.
+  pub fn multipart_expiry(&self) -> Duration {
+    self.multipart_expiry
   }
 
   pub fn max_attachment_bytes(&self) -> u64 {
@@ -89,6 +125,96 @@ impl BlobStore {
     action.sign(self.expiry)
   }
 
+  /// A URL that accepts part `part_number` of an upload in parts, of exactly `content_length`
+  /// bytes, until it expires. The storage answers with the part's `ETag`.
+  pub fn presign_upload_part(
+    &self,
+    key: &str,
+    upload_id: &str,
+    part_number: u16,
+    content_length: u64,
+  ) -> Url {
+    let mut action = self
+      .bucket
+      .upload_part(Some(&self.credentials), key, part_number, upload_id);
+    action
+      .headers_mut()
+      .insert("content-length", content_length.to_string());
+    action.sign(self.expiry)
+  }
+
+  /// Starts an upload in parts to `key` and returns the storage's upload ID. Not retried: each
+  /// attempt would start another upload.
+  pub async fn create_multipart(&self, key: &str) -> Result<String, StorageError> {
+    self
+      .guard
+      .call(Retries::Once, fault, || self.create_multipart_once(key))
+      .await
+  }
+
+  /// Joins the uploaded parts, given by their `ETag`s in part order (1, 2, …), into the object.
+  /// Not retried here: a completion that went through but whose answer was lost would be refused
+  /// (`NoSuchUpload`) when repeated.
+  pub async fn complete_multipart(
+    &self,
+    key: &str,
+    upload_id: &str,
+    etags: &[String],
+  ) -> Result<(), StorageError> {
+    self
+      .guard
+      .call(Retries::Once, fault, || {
+        self.complete_multipart_once(key, upload_id, etags)
+      })
+      .await
+  }
+
+  /// Aborts an upload in parts and frees its parts; one the storage doesn't know counts as aborted.
+  pub async fn abort_multipart(&self, key: &str, upload_id: &str) -> Result<(), StorageError> {
+    self
+      .guard
+      .call(Retries::Idempotent, fault, || {
+        self.abort_multipart_once(key, upload_id)
+      })
+      .await
+  }
+
+  /// Stores an object the server itself writes (brand images).
+  pub async fn put_object(&self, key: &str, bytes: Vec<u8>, content_type: &str) -> Result<(), StorageError> {
+    self
+      .guard
+      .call(Retries::Idempotent, fault, || {
+        self.put_object_once(key, bytes.clone(), content_type)
+      })
+      .await
+  }
+
+  /// Reads an object the server wrote, if it exists and is at most `max_bytes` long.
+  pub async fn get_object(&self, key: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, StorageError> {
+    self
+      .guard
+      .call(Retries::Idempotent, fault, || {
+        self.get_object_once(key, max_bytes)
+      })
+      .await
+  }
+
+  /// Deletes an object; a missing object counts as deleted.
+  pub async fn delete_object(&self, key: &str) -> Result<(), StorageError> {
+    self
+      .guard
+      .call(Retries::Idempotent, fault, || self.delete_object_once(key))
+      .await
+  }
+
+  /// The size of the stored object, `None` if it doesn't exist (yet).
+  pub async fn object_size(&self, key: &str) -> Result<Option<u64>, StorageError> {
+    self
+      .guard
+      .call(Retries::Idempotent, fault, || self.object_size_once(key))
+      .await
+  }
+
   pub fn presign_download(&self, key: &str) -> Url {
     self
       .bucket
@@ -96,8 +222,58 @@ impl BlobStore {
       .sign(self.expiry)
   }
 
-  /// Stores an object the server itself writes (brand images).
-  pub async fn put_object(&self, key: &str, bytes: Vec<u8>, content_type: &str) -> Result<(), StorageError> {
+  /// One attempt of [`Self::create_multipart`].
+  async fn create_multipart_once(&self, key: &str) -> Result<String, StorageError> {
+    let url = self
+      .bucket
+      .create_multipart_upload(Some(&self.credentials), key)
+      .sign(self.expiry);
+    let response = self.http.post(url).send().await?;
+    let body = success_body(response).await?;
+    CreateMultipartUpload::parse_response(&body)
+      .map(|created| created.upload_id().to_owned())
+      .map_err(|error| StorageError::Answer(error.to_string()))
+  }
+
+  /// One attempt of [`Self::complete_multipart`].
+  async fn complete_multipart_once(
+    &self,
+    key: &str,
+    upload_id: &str,
+    etags: &[String],
+  ) -> Result<(), StorageError> {
+    let action = self.bucket.complete_multipart_upload(
+      Some(&self.credentials),
+      key,
+      upload_id,
+      etags.iter().map(String::as_str),
+    );
+    let url = action.sign(self.expiry);
+    let response = self.http.post(url).body(action.body()).send().await?;
+    let body = success_body(response).await?;
+    // S3 may report a failed completion in a 200 answer.
+    if body.contains("<Error>") {
+      return Err(refusal(&body));
+    }
+    Ok(())
+  }
+
+  /// One attempt of [`Self::abort_multipart`].
+  async fn abort_multipart_once(&self, key: &str, upload_id: &str) -> Result<(), StorageError> {
+    let url = self
+      .bucket
+      .abort_multipart_upload(Some(&self.credentials), key, upload_id)
+      .sign(self.expiry);
+    let response = self.http.delete(url).send().await?;
+    match response.status() {
+      StatusCode::NOT_FOUND => Ok(()),
+      status if status.is_success() => Ok(()),
+      status => Err(StorageError::Status(status)),
+    }
+  }
+
+  /// One attempt of [`Self::put_object`].
+  async fn put_object_once(&self, key: &str, bytes: Vec<u8>, content_type: &str) -> Result<(), StorageError> {
     let url = self.presign_typed_upload(key, bytes.len() as u64, content_type);
     let response = self
       .http
@@ -112,8 +288,8 @@ impl BlobStore {
     }
   }
 
-  /// Reads an object the server wrote, if it exists and is at most `max_bytes` long.
-  pub async fn get_object(&self, key: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, StorageError> {
+  /// One attempt of [`Self::get_object`].
+  async fn get_object_once(&self, key: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, StorageError> {
     let response = self.http.get(self.presign_download(key)).send().await?;
     match response.status() {
       StatusCode::NOT_FOUND => Ok(None),
@@ -131,8 +307,8 @@ impl BlobStore {
     }
   }
 
-  /// Deletes an object; a missing object counts as deleted.
-  pub async fn delete_object(&self, key: &str) -> Result<(), StorageError> {
+  /// One attempt of [`Self::delete_object`].
+  async fn delete_object_once(&self, key: &str) -> Result<(), StorageError> {
     let url = self
       .bucket
       .delete_object(Some(&self.credentials), key)
@@ -145,8 +321,8 @@ impl BlobStore {
     }
   }
 
-  /// The size of the stored object, `None` if it doesn't exist (yet).
-  pub async fn object_size(&self, key: &str) -> Result<Option<u64>, StorageError> {
+  /// One attempt of [`Self::object_size`].
+  async fn object_size_once(&self, key: &str) -> Result<Option<u64>, StorageError> {
     let url = self
       .bucket
       .head_object(Some(&self.credentials), key)
@@ -167,6 +343,45 @@ impl BlobStore {
   }
 }
 
+/// How a failed request reflects on the storage: unreachable, timed out or 5xx/429 is an outage,
+/// any other answer means it works.
+fn fault(error: &StorageError) -> Fault {
+  match error {
+    StorageError::Request(error) if error.is_timeout() => Fault::Timeout,
+    StorageError::Request(_) | StorageError::Unavailable(_) => Fault::Outage,
+    StorageError::Status(status) if status.is_server_error() || *status == StatusCode::TOO_MANY_REQUESTS => {
+      Fault::Outage
+    },
+    StorageError::Status(_)
+    | StorageError::Endpoint(_)
+    | StorageError::TooLarge
+    | StorageError::Answer(_)
+    | StorageError::MultipartRefused(_) => Fault::Refusal,
+  }
+}
+
+/// The body of a successful answer; a refusal (4xx) is [`StorageError::MultipartRefused`].
+async fn success_body(response: reqwest::Response) -> Result<String, StorageError> {
+  let status = response.status();
+  let body = response.text().await?;
+  if status.is_success() {
+    Ok(body)
+  } else if status.is_client_error() {
+    Err(refusal(&body))
+  } else {
+    Err(StorageError::Status(status))
+  }
+}
+
+/// The refusal an S3 error document describes, by its error code.
+fn refusal(body: &str) -> StorageError {
+  let code = body
+    .split_once("<Code>")
+    .and_then(|(_, rest)| rest.split_once("</Code>"))
+    .map_or("unknown", |(code, _)| code);
+  StorageError::MultipartRefused(code.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
   use secrecy::SecretString;
@@ -183,6 +398,7 @@ mod tests {
       path_style: true,
       presign_expiry_secs: 600,
       max_attachment_bytes: 1000,
+      multipart_expiry_secs: 3600,
     })
     .unwrap()
   }
@@ -216,6 +432,31 @@ mod tests {
   }
 
   #[test]
+  fn part_urls_name_the_upload_and_part_and_sign_the_length() {
+    let url = store().presign_upload_part("attachments/42", "upload-1", 3, 5_242_880);
+    let query = url.query().unwrap();
+    assert!(query.contains("partNumber=3"), "{query}");
+    assert!(query.contains("uploadId=upload-1"), "{query}");
+    assert!(
+      query.contains("X-Amz-SignedHeaders=content-length%3Bhost"),
+      "{query}"
+    );
+  }
+
+  #[test]
+  fn refusals_carry_the_storage_error_code() {
+    let refused = "<Error><Code>NoSuchUpload</Code><Message>gone</Message></Error>";
+    assert!(matches!(
+      refusal(refused),
+      StorageError::MultipartRefused(code) if code == "NoSuchUpload"
+    ));
+    assert!(matches!(
+      refusal("not xml"),
+      StorageError::MultipartRefused(code) if code == "unknown"
+    ));
+  }
+
+  #[test]
   fn download_urls_are_signed_and_ipv6_endpoints_work() {
     let url = store().presign_download("attachments/42");
     assert!(url.query().unwrap().contains("X-Amz-Signature="));
@@ -229,6 +470,7 @@ mod tests {
       path_style: true,
       presign_expiry_secs: 60,
       max_attachment_bytes: 1,
+      multipart_expiry_secs: 60,
     })
     .unwrap();
     assert_eq!(v6.presign_download("x").host_str(), Some("[::1]"));
@@ -245,6 +487,7 @@ mod tests {
       path_style: true,
       presign_expiry_secs: 60,
       max_attachment_bytes: 1,
+      multipart_expiry_secs: 60,
     };
     assert!(BlobStore::new(&config("not a url")).is_err());
     assert!(BlobStore::new(&config("ftp://example.com")).is_err());

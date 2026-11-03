@@ -1,5 +1,6 @@
 //! Preferences of the desktop shell itself, which it needs before the webview has loaded: whether
-//! closing the window keeps the app running in the tray, and whether it starts without a window.
+//! closing the window keeps the app running in the tray, whether it starts without a window, who
+//! draws the title bar, and how the tray icon looks.
 //! Stored as `shell.json` in the app's config directory; the UI edits them in Settings.
 
 use std::path::PathBuf;
@@ -7,6 +8,10 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
+use teamcraft_client_api::window_chrome::{TitleBar, TrayIconStyle};
+
+use crate::tray::MAIN_WINDOW;
+use crate::window_chrome::{self, TITLE_BAR_ENV};
 
 const FILE_NAME: &str = "shell.json";
 
@@ -17,6 +22,10 @@ pub struct ShellPrefs {
   pub is_close_to_tray: bool,
   /// Start with the window hidden in the tray (for "start at login").
   pub is_start_minimized: bool,
+  /// TeamCraft's top bar as the title bar, or the system's ("Use the system title bar").
+  pub title_bar: TitleBar,
+  /// The tray icon's look on Linux and Windows (#726).
+  pub tray_icon: TrayIconStyle,
 }
 
 impl Default for ShellPrefs {
@@ -25,8 +34,18 @@ impl Default for ShellPrefs {
       // Linux desktops don't all show tray icons, and without one a hidden window can't come back.
       is_close_to_tray: !cfg!(target_os = "linux"),
       is_start_minimized: false,
+      title_bar: default_title_bar(),
+      tray_icon: TrayIconStyle::default(),
     }
   }
+}
+
+/// A packager or admin can make the system title bar the default; the user's choice still wins.
+fn default_title_bar() -> TitleBar {
+  std::env::var(TITLE_BAR_ENV)
+    .ok()
+    .and_then(|value| TitleBar::parse(&value))
+    .unwrap_or_default()
 }
 
 /// The current preferences, shared by the window events and the commands.
@@ -57,18 +76,27 @@ impl ShellPrefsState {
   }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn shell_prefs_get(state: State<'_, ShellPrefsState>) -> ShellPrefs {
   state.get()
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "snake_case")]
 pub fn shell_prefs_set(
   app: AppHandle,
   state: State<'_, ShellPrefsState>,
   prefs: ShellPrefs,
 ) -> Result<(), ShellPrefsError> {
+  let previous = state.get();
   state.set(prefs);
+  if prefs.title_bar != previous.title_bar
+    && let Some(window) = app.get_webview_window(MAIN_WINDOW)
+  {
+    window_chrome::apply(&window, prefs.title_bar);
+  }
+  if prefs.tray_icon != previous.tray_icon {
+    crate::tray::refresh_icon(&app);
+  }
   let path = path(&app).ok_or_else(|| ShellPrefsError {
     kind: "failed",
     message: "no config directory".to_owned(),
@@ -107,6 +135,9 @@ mod tests {
     let prefs = parse(r#"{"is_start_minimized": true}"#);
     assert!(prefs.is_start_minimized);
     assert_eq!(prefs.is_close_to_tray, ShellPrefs::default().is_close_to_tray);
+    assert_eq!(parse(r#"{"title_bar": "system"}"#).title_bar, TitleBar::System);
+    assert_eq!(parse(r#"{"tray_icon": "black"}"#).tray_icon, TrayIconStyle::Black);
+    assert_eq!(parse("{}").tray_icon, TrayIconStyle::Colour);
   }
 
   #[test]
@@ -114,6 +145,8 @@ mod tests {
     let prefs = ShellPrefs {
       is_close_to_tray: true,
       is_start_minimized: true,
+      title_bar: TitleBar::System,
+      tray_icon: TrayIconStyle::White,
     };
     let text = serde_json::to_string(&prefs).unwrap_or_default();
     assert_eq!(parse(&text), prefs);

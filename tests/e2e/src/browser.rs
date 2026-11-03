@@ -9,6 +9,10 @@ use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::page::{Page, ScreenshotParams};
 use futures_util::{FutureExt, StreamExt};
 
+/// How long a command to the browser (a page script, a click) may take. A script that waits for
+/// something that never comes fails the test after this, not after the job's timeout.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A browser process with one page; closed on drop of the handler task.
 pub struct BrowserSession {
   browser: Browser,
@@ -21,6 +25,21 @@ impl BrowserSession {
   /// Launches headless Chromium. `None` (with a skip message) when no browser is installed, unless
   /// `E2E_REQUIRED=1` demands one.
   pub async fn launch() -> Option<Self> {
+    Self::launch_with(&[]).await
+  }
+
+  /// [`Self::launch`] with more command line switches (fake camera and microphone for calls).
+  pub async fn launch_with(extra_args: &[&str]) -> Option<Self> {
+    Self::launch_with_timeout(extra_args, REQUEST_TIMEOUT).await
+  }
+
+  /// [`Self::launch`] for page scripts that wait for the app much longer than
+  /// [`REQUEST_TIMEOUT`] (perf.rs).
+  pub async fn launch_for_measurements() -> Option<Self> {
+    Self::launch_with_timeout(&[], std::time::Duration::from_secs(300)).await
+  }
+
+  async fn launch_with_timeout(extra_args: &[&str], request_timeout: std::time::Duration) -> Option<Self> {
     let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
     let Some(executable) = find_chrome() else {
       assert!(
@@ -32,20 +51,27 @@ impl BrowserSession {
     };
     // A fresh profile per launch: the default one is shared and would keep Keycloak's session cookie.
     let profile = std::env::temp_dir().join(format!("teamcraft-e2e-chrome-{:016x}", random_u64()));
-    let config = BrowserConfig::builder()
+    let mut builder = BrowserConfig::builder();
+    // chromiumoxide adds the leading `--` itself.
+    for arg in extra_args {
+      builder = builder.arg(arg.trim_start_matches('-'));
+    }
+    let config = builder
       .chrome_executable(executable)
       .user_data_dir(profile.clone())
       // CI containers run as root without user namespaces.
       .no_sandbox()
       // The UI follows the browser language; the tests look for English texts.
-      .arg("--lang=en-US")
-      .arg("--accept-lang=en-US")
+      .arg("lang=en-US")
+      .arg("accept-lang=en-US")
       .window_size(1360, 840)
+      .request_timeout(request_timeout)
       .build()
       .expect("browser config");
     let (browser, mut handler) = Browser::launch(config).await.expect("launching the browser");
     let handler = tokio::spawn(async move { while handler.next().await.is_some() {} });
     let page = browser.new_page("about:blank").await.expect("opening a page");
+    let_workers_start(&page).await;
     Some(Self {
       browser,
       page,
@@ -78,11 +104,58 @@ impl BrowserSession {
     }
   }
 
+  /// Opens another tab of the same browser (same profile and origin storage) at `url`.
+  pub async fn new_page(&self, url: &str) -> Page {
+    let page = self.browser.new_page(url).await.expect("opening a page");
+    let_workers_start(&page).await;
+    prefer_mouse(&page).await;
+    page
+  }
+
+  /// The browser's own profile directory: every process of this browser has it on its command line
+  /// (see [`crate::resources::ProcessUsage::of_matching`]).
+  pub fn profile_dir(&self) -> &std::path::Path {
+    &self.profile
+  }
+
   pub async fn close(mut self) {
     let _ = self.browser.close().await;
     let _ = self.browser.wait().await;
     self.handler.abort();
     let _ = std::fs::remove_dir_all(&self.profile);
+  }
+}
+
+/// Exclusive use of a web client port (one the dev realm registers as redirect URI: 8082, 8083)
+/// for as long as it is held, across every test process on the machine: other checkouts run the
+/// suite too, and a second server on the port fails to start.
+pub struct WebPortLease {
+  _turn: tokio::sync::MutexGuard<'static, ()>,
+  _file: std::fs::File,
+}
+
+static WEB_PORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Waits until no other test (in this process or another) uses `port`.
+pub async fn lease_web_port(port: u16) -> WebPortLease {
+  let turn = WEB_PORT.lock().await;
+  let path = std::env::temp_dir().join(format!("teamcraft-e2e-web-port-{port}.lock"));
+  let file = std::fs::File::options()
+    .create(true)
+    .truncate(false)
+    .write(true)
+    .open(&path)
+    .expect("opening the port lock file");
+  // An advisory lock, released when the file is closed (also when the test process dies).
+  let file = tokio::task::spawn_blocking(move || {
+    file.lock().expect("locking the port lock file");
+    file
+  })
+  .await
+  .expect("waiting for the port lock");
+  WebPortLease {
+    _turn: turn,
+    _file: file,
   }
 }
 
@@ -127,4 +200,32 @@ fn find_chrome() -> Option<PathBuf> {
       .map(|dir| dir.join(name))
       .find(|candidate| candidate.is_file())
   })
+}
+
+/// chromiumoxide attaches to every target a page starts and pauses it until it is told to run
+/// (`waitForDebuggerOnStart`); the page's service worker then stays in "starting" for good, and
+/// `navigator.serviceWorker.ready` never settles (#460). The page's own auto-attach is set again
+/// without the pause.
+async fn let_workers_start(page: &Page) {
+  use chromiumoxide::cdp::browser_protocol::target::SetAutoAttachParams;
+  let params = SetAutoAttachParams::builder()
+    .auto_attach(true)
+    .wait_for_debugger_on_start(false)
+    .flatten(true)
+    .build()
+    .expect("auto-attach parameters");
+  page
+    .execute(params)
+    .await
+    .expect("letting the page's workers start");
+}
+
+/// A headless browser has no mouse and, on a machine with a touch screen, reports a coarse primary
+/// pointer: Enter would then insert a newline instead of sending (issue #444). Turns touch off.
+pub async fn prefer_mouse(page: &Page) {
+  use chromiumoxide::cdp::browser_protocol::emulation::SetTouchEmulationEnabledParams;
+  page
+    .execute(SetTouchEmulationEnabledParams::new(false))
+    .await
+    .expect("turning touch emulation off");
 }

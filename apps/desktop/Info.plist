@@ -7,5 +7,17 @@
   <string>TeamCraft uses the camera for video calls and meetings.</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>TeamCraft uses the microphone for calls, huddles and meetings.</string>
+  <!-- The languages of the UI (crates/teamcraft-ui/i18n): AppKit then shows what it draws itself
+       (the Services menu, the items it adds to Edit and Window, standard panels) in the user's
+       language instead of English (#712). -->
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleLocalizations</key>
+  <array>
+    <string>en</string>
+    <string>de</string>
+  </array>
+  <key>CFBundleAllowMixedLocalizations</key>
+  <true/>
 </dict>
 </plist>

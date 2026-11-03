@@ -80,6 +80,50 @@ For larger channels the cost grows linearly: 5,000 connected members mean about 
 a send on the request path. If that becomes the limit, move publishing off the request path (the
 event is already stored before it is published) before adding instances.
 
+## Server process: restarts, outages, stalled clients
+
+`tests/e2e` `server_robustness.rs` runs the real `teamcraft-server` binary against the dev stack and
+drives it with `teamcraft-core` clients and raw gateway connections (tests/e2e/README.md has the
+setup). It covers the "Server side" conditions of robustness.md; every scenario except the
+measurement is a regular test of the e2e suite:
+
+```sh
+cargo test -p teamcraft-e2e --features e2e --test suite server_robustness::
+E2E_BIN_DIR=target/release cargo test -p teamcraft-e2e --features e2e --test suite \
+  server_robustness::resources -- --ignored --nocapture        # memory and CPU
+```
+
+Measured in a cloud VM (4 vCPUs, 15 GiB, a kernel without IPv6), release server, Postgres 18 in a
+container on the same VM; October 2026, `main` dd957c6 plus the fixes of the same change.
+
+| Scenario                                                      | Result                                                                                       |
+|---------------------------------------------------------------|----------------------------------------------------------------------------------------------|
+| SIGTERM with gateway connections open                         | Exits in about 10 ms, without waiting for WebSockets; they end without a close frame         |
+| After the restart                                             | Clients get `session_invalid`, identify and sync over REST; a message sent meanwhile arrives |
+| Resume within the window                                      | Exactly the missed events are replayed                                                       |
+| Resume after more events than the buffer holds, or too late   | `session_invalid`, then a full sync                                                          |
+| Ten concurrent retries of one send (same `client_message_id`) | One 201 and nine 200 with the same message ID; one stored row                                |
+| A late or repeated read position                              | Never moves it back                                                                          |
+| Postgres unreachable for a few seconds                        | 503 after `acquire_timeout_secs` (5 s), no restart needed (was 500)                          |
+| Server started while Postgres is down                         | Waits up to `startup_wait_secs` (300 s) and comes up with Postgres (exited before)           |
+| A client stops reading during a flood (3,000 × 16 KiB)        | Dropped after 1024 queued events; the others get every event; RSS 51 → 106 MiB               |
+| A client never reads again                                    | Connection released 23 s after the flood (30 s write deadline; was held indefinitely)        |
+
+During the database outage `/healthz` stays 200 and `/readyz` answers 503; open gateway connections
+stay up and keep answering heartbeats, so clients don't reconnect for a database blip.
+
+| Server process (release)                                | Value                                                       |
+|---------------------------------------------------------|-------------------------------------------------------------|
+| Resident memory after start                             | 31 MiB                                                      |
+| With 200 gateway connections                            | 60 MiB, about 150 KiB per connection                        |
+| Idle with 200 connections (heartbeats every 25 s), CPU  | 0.17 % of one core                                          |
+| 2,000 sends of 1 KiB, each delivered to 200 connections | 6.1 s (326 sends/s, 65,000 deliveries/s), 144 % CPU, 73 MiB |
+
+The memory a slow or stalled connection holds is bounded by count, not by size: 1024 queued events
+per connection plus 1000 per session in the resume buffer, each a copy of the event. With 16 KiB
+messages that is about 32 MiB per stalled session; at the 1 MiB `max_ciphertext_bytes` it would be
+about 2 GiB (#156).
+
 ## Video send path
 
 Per-frame cost of sending a 720p camera at 30 fps (33 ms per frame), from
@@ -111,9 +155,1537 @@ encoding the three layers in parallel would bring the latency down. The software
 the fallback when no hardware encoder is usable. Segmentation plus blur and the software encoder
 together stay below the 33 ms frame budget on average.
 
+### Cameras larger than the send size (issue #537)
+
+The desktop sender shrinks a camera's frames to the 1280x720 send target on the CPU before the
+effects and encoders (`VideoFrame::scaled`), and each encoder shrinks the lower simulcast layers
+from that the same way. `capture_negotiate` picks the smallest mode at or above 720p, so only
+cameras without one (4K-only, or 1080p-only) pay for it. What that costs, from
+`crates/teamcraft-media/examples/camera_scaling_bench.rs` (synthetic frames: the moving test
+pattern with sensor noise, as packed YUV like AVFoundation delivers it; no camera needed):
+
+```sh
+crates/teamcraft-media/models/fetch.sh
+TEAMCRAFT_SEGMENTATION_MODEL=crates/teamcraft-media/models/selfie_segmentation_landscape.onnx \
+  cargo run --release -p teamcraft-media --example camera_scaling_bench \
+  --features openh264-source,segmentation,gstreamer
+```
+
+macOS only so far: an Apple M4 Max (10 performance + 4 efficiency cores), macOS 26.6, with other
+work on the machine (load average 3 to 4). 300 frames per row. "CPU" is the process's CPU time
+per frame over all threads (encoder threads, GPU driver), "% core" that time against the 33 ms a
+frame has at 30 fps. Linux and Windows are still to be measured.
+
+Per stage, before and after the faster scaler and YUYV conversion of #537:
+
+| Stage (CPU per frame)                                    | Before  | After   | After, % core |
+|----------------------------------------------------------|---------|---------|---------------|
+| 4K: copy out of the camera's buffer                      | 0.21 ms | 0.21 ms | 0.6 %         |
+| 4K: YUYV → I420                                          | 2.84 ms | 1.18 ms | 3.5 %         |
+| 4K → 720p, `VideoFrame::scaled`                          | 2.13 ms | 0.85 ms | 2.6 %         |
+| 1080p: YUYV → I420                                       | 0.70 ms | 0.29 ms | 0.9 %         |
+| 1080p → 720p, `VideoFrame::scaled`                       | 2.07 ms | 1.05 ms | 3.1 %         |
+| 720p: YUYV → I420                                        | 0.31 ms | 0.13 ms | 0.4 %         |
+| 720p: the encoders' own layer scaling (720p, 360p, 180p) | 0.68 ms | 0.15 ms | 0.5 %         |
+| Light blur, compositor only (GPU; 0.6 ms latency)        | 0.25 ms | 0.23 ms | 0.7 %         |
+| Segmentation (tract, CPU)                                | 3.07 ms | 3.06 ms | 9.2 %         |
+
+The whole send path at 30 fps (copy, YUYV → I420, scaling, the effect with segmentation,
+three-layer simulcast), after the change; latency is the wall time from the camera's buffer to the
+last layer's picture:
+
+| Camera | Effect | Encoder             | CPU per frame (before) | % core | Latency, average / worst |
+|--------|--------|---------------------|------------------------|--------|--------------------------|
+| 4K     | none   | OpenH264            | 8.2 ms (10.5 ms)       | 24 %   | 8.2 / 25.7 ms            |
+| 4K     | blur   | OpenH264            | 11.4 ms (14.4 ms)      | 34 %   | 12.6 / 15.9 ms           |
+| 4K     | none   | VideoToolbox        | 7.5 ms (8.6 ms)        | 23 %   | 14.8 / 19.9 ms           |
+| 4K     | blur   | VideoToolbox        | 8.9 ms (11.3 ms)       | 27 %   | 16.7 / 22.2 ms           |
+| 1080p  | none   | OpenH264            | 8.0 ms (9.0 ms)        | 24 %   | 8.0 / 16.0 ms            |
+| 1080p  | blur   | OpenH264            | 10.7 ms (11.9 ms)      | 32 %   | 11.8 / 15.5 ms           |
+| 1080p  | none   | VideoToolbox        | 6.3 ms (8.0 ms)        | 19 %   | 14.5 / 37.2 ms           |
+| 1080p  | blur   | VideoToolbox        | 8.4 ms (9.8 ms)        | 25 %   | 16.2 / 21.7 ms           |
+| 720p   | none   | OpenH264            | 7.4 ms (7.8 ms)        | 22 %   | 7.4 / 14.5 ms            |
+| 720p   | blur   | OpenH264            | 10.0 ms (10.3 ms)      | 30 %   | 11.2 / 16.4 ms           |
+| 720p   | none   | VideoToolbox        | 3.5 ms (5.5 ms)        | 11 %   | 12.4 / 28.1 ms           |
+| 720p   | blur   | VideoToolbox        | 8.0 ms (8.6 ms)        | 24 %   | 16.1 / 21.2 ms           |
+
+What it shows:
+
+- Before, the stages a 4K camera adds over a 720p one (the larger copy and conversion, the
+  scaling) cost about 4.9 ms of CPU per frame (15 % of a core), a 1080p camera's about 2.5 ms
+  (7 %). In the whole chain the difference is smaller (2.8 to 4 ms at 4K), since the encoders
+  spend less on a shrunk picture, whose sensor noise the scaling partly averages out. The
+  scaler worked pixel by pixel in 64-bit arithmetic; it now works out the source positions once
+  per row and column, uses 8-bit weights (within one level of the old output, tested), averages
+  2x2 blocks for the halving the simulcast layers do, and reuses source rows neighbouring target
+  rows share. The YUYV conversion goes through whole rows the compiler vectorizes. Now those
+  stages cost about 2.1 ms at 4K (6 % of a core) and 1.2 ms at 1080p (4 %), and every camera,
+  720p included, saves about 0.7 ms on the encoders' layer scaling and the conversion.
+- Scaling adds no noticeable latency (about 1 ms at 4K). The latency is the encoders': OpenH264
+  encodes the three layers in about 7 ms; VideoToolbox waits for each layer's picture in turn
+  (12 to 15 ms) while the CPU idles, as on Linux with VA-API above. Since #990 the layers
+  encode at once.
+- Segmentation (3 ms) is the largest single cost of an effect, the GPU compositor itself is
+  below 1 ms.
+- The hardware rows' CPU time varies by 1 to 2 ms between runs (GStreamer's and VideoToolbox's
+  threads); the OpenH264 rows within a few tenths of a millisecond.
+
+Not done, since the CPU scaling now costs about 1 ms: asking AVFoundation for the send size
+(`AVCaptureVideoDataOutput`'s `videoSettings` width and height let the hardware scale) needs
+calls nokhwa's bindings don't offer and `unsafe` the workspace forbids; scaling on the GPU in the
+effects pipeline would first upload the full 4K picture (12 MB per frame) and only helps when an
+effect is on. Bilinear shrinking by 3 (4K → 720p) samples one source pixel of nine and can
+alias fine patterns; an area filter would look better at about the same cost, if it shows.
+
+### What each camera layer sends (issue #967)
+
+In calls a Mac's 720p camera layer, meant for 1.5 Mbit/s, sent 155 to 306 kbit/s through
+VideoToolbox, and the picture looked soft. From
+`crates/teamcraft-media/examples/camera_bitrate.rs`: frames encoded as they come, at 30 fps in
+real time, as the call's encoder thread does; a calm synthetic camera picture (a room and a
+person who barely moves, a denoised camera's faint noise); the first second left out; luma PSNR
+of a sample of each layer decoded with OpenH264 against what its encoder was given. Apple M4 Max,
+macOS 26.6, GStreamer 1.28; runs vary by about 0.5 dB.
+
+```sh
+cargo run --release -p teamcraft-media --example camera_bitrate \
+  --features gstreamer,openh264-source -- calm --seconds 10 [--max 720] [--encoder software]
+```
+
+A 720p camera (and before #967 every camera, a 1080p one shrunk to 720p):
+
+| Layer | Target     | VideoToolbox, average bitrate (before) | VideoToolbox, constant bitrate (after) | OpenH264            |
+|-------|------------|----------------------------------------|----------------------------------------|---------------------|
+| 180p  | 94 kbit/s  | 15 kbit/s (16 %), 38.4 dB              | 97 kbit/s (103 %), 45.2 dB             | 19 kbit/s, 45.5 dB  |
+| 360p  | 375 kbit/s | 29 kbit/s (8 %), 40.2 dB               | 377 kbit/s (101 %), 46.3 dB            | 73 kbit/s, 47.2 dB  |
+| 720p  | 1.5 Mbit/s | 602 kbit/s (40 %), 41.2 dB             | 1504 kbit/s (100 %), 45.4 dB           | 424 kbit/s, 44.9 dB |
+
+A 1080p camera since #967 (the average bitrate measured with these layers before the change):
+
+| Layer | Target     | VideoToolbox, average bitrate | VideoToolbox, constant bitrate | OpenH264             |
+|-------|------------|-------------------------------|--------------------------------|----------------------|
+| 360p  | 375 kbit/s | 42 kbit/s (11 %), 39.7 dB     | 381 kbit/s (102 %), 46.0 dB    | 71 kbit/s, 47.2 dB   |
+| 720p  | 1.5 Mbit/s | 440 kbit/s (29 %), 42.0 dB    | 1504 kbit/s (100 %), 45.5 dB   | 420 kbit/s, 44.9 dB  |
+| 1080p | 3 Mbit/s   | 1348 kbit/s (45 %), 41.6 dB   | 3038 kbit/s (101 %), 43.9 dB   | 1146 kbit/s, 46.2 dB |
+
+Encoding a frame (shrinking it to the layers and encoding all three) took 2.0 ms of CPU with
+VideoToolbox for both cameras (2.9 and 4.5 ms wall time), 2.6 and 4.9 ms with OpenH264.
+
+- VideoToolbox at an average bitrate (`AverageBitRate`) stops spending bits on a calm picture
+  long before it looks good: the 720p layer at 41 dB where its bitrate buys 45. A camera with
+  less noise than this picture (a Mac's in daylight) undershoots further, as in the calls. At a
+  constant bitrate (`rate-control=cbr`; `kVTCompressionPropertyKey_ConstantBitRate`, Apple
+  silicon from macOS 13, which GStreamer emulates with data rate limits elsewhere) every layer
+  sends its target, 4 to 7 dB sharper. A quality floor (`quality`) instead made VideoToolbox
+  ignore the bitrate: 0.9 sent 9.3 Mbit/s for the 1.5 Mbit/s layer.
+- OpenH264 stops below its target on a calm picture too, but only once the picture is as sharp as
+  the bitrate would make it (45 dB and more): its rate control bottoms out at its lowest
+  quantizer, not at a soft picture. On the busy camera of the SFU's tests it uses its whole
+  bitrate.
+- Through a real SFU (`video_quality` in its test suite: a busy 720p camera, the viewer picks
+  720p) the 720p layer arrived at 143 kbit/s with VideoToolbox at an average bitrate and at
+  1496 kbit/s at a constant one (OpenH264: 1365 kbit/s with the rest of the suite running).
+- The browser has the same problem in Chrome's hardware encoder on a Mac. A page encoding a calm
+  30 fps picture with WebCodecs (H.264 Constrained Baseline, Chrome 156, same Mac): in
+  `latencyMode: "realtime"` 36 of 375 kbit/s at 360p, 503 of 1500 at 720p and 1940 of 3000 at
+  1080p, and still 533 kbit/s when 720p was given 3 Mbit/s; `bitrateMode: "constant"` changed
+  nothing. In `"quality"` mode 424, 1700 and 3053 kbit/s, with the pictures out 5 to 9 ms after
+  the frame (6 to 11 ms in `"realtime"`). Chrome's software encoder sent about 1.1 Mbit/s at 720p
+  in either mode. Camera encoders in browsers on Apple devices use `"quality"` now
+  (`call_web/video.rs`, `camera_latency_mode`); Safari, Firefox and other platforms' hardware
+  encoders are not measured.
+
+### Screen share: profiles and codecs (issue #565)
+
+A share is sent per its profile (`video::ScreenProfile`): detail up to 1440p30, motion up to
+1080p60, and with the 4K option detail up to 4K30 and motion up to 1440p60 (top layer up to 16
+Mbit/s instead of 8). A detail share goes out in AV1 with WebCodecs' screen content tools where
+the sender's browser encodes AV1 and every viewer decodes it (ARCHITECTURE.md §6.3, "Video
+codecs"); H.264 otherwise. All numbers: Apple M4 Max (10 performance + 4 efficiency cores),
+macOS 26.6, on AC power, other work on the machine.
+
+**Which codec, in the browser.** `dev/screen-codec-bench/` draws an editor-like screen (code in
+real fonts, a file list, a tab strip; text at 1.25× at 1440p and 2× at 4K, as a HiDPI display
+draws it) into a canvas, encodes it with WebCodecs, decodes it again and compares every tenth
+picture's luma plane with the source's (BT.709). "Still": the page with one line being typed and
+a blinking cursor; "scroll": the page scrolling 6 px per frame at 1× (a fast, steady scroll).
+150 frames at 30 fps (60 for motion), the first second left out, `latencyMode: "realtime"`, as
+the call configures its screen encoders. Chrome 156, headless.
+
+```sh
+cd dev/screen-codec-bench && python3 make_runs.py
+python3 server.py chrome q1440.json q1440.jsonl && python3 table.py q1440.jsonl
+```
+
+1440p at 30 fps, scrolling text (what is sent, luma PSNR):
+
+| Target     | H.264, hardware      | H.264, software      | AV1, `contentHint: "text"` | AV1, no hint         |
+|------------|----------------------|----------------------|----------------------------|----------------------|
+| 1 Mbit/s   | 918 kbit/s, 37.1 dB  | 778 kbit/s, 34.8 dB  | 1015 kbit/s, 47.8 dB       | 954 kbit/s, 40.3 dB  |
+| 2 Mbit/s   | 1914 kbit/s, 43.4 dB | 1928 kbit/s, 43.2 dB | 1990 kbit/s, 50.4 dB       | 1890 kbit/s, 45.4 dB |
+| 4 Mbit/s   | 3905 kbit/s, 50.8 dB | 3855 kbit/s, 49.2 dB | 3489 kbit/s, 53.0 dB       | 3615 kbit/s, 50.4 dB |
+| 6.6 Mbit/s | 5982 kbit/s, 55.1 dB | 6338 kbit/s, 51.3 dB | 4576 kbit/s, 53.9 dB       | 5496 kbit/s, 53.0 dB |
+
+1440p at 30 fps, a still page with a line being typed:
+
+| Target     | H.264, hardware      | H.264, software     | AV1, `contentHint: "text"` | AV1, no hint        |
+|------------|----------------------|---------------------|----------------------------|---------------------|
+| 1 Mbit/s   | 1110 kbit/s, 44.9 dB | 421 kbit/s, 45.8 dB | 314 kbit/s, 51.1 dB        | 532 kbit/s, 47.6 dB |
+| 2 Mbit/s   | 673 kbit/s, 51.8 dB  | 110 kbit/s, 45.3 dB | 249 kbit/s, 51.7 dB        | 397 kbit/s, 50.2 dB |
+| 4 Mbit/s   | 527 kbit/s, 53.6 dB  | 46 kbit/s, 47.7 dB  | 152 kbit/s, 51.9 dB        | 334 kbit/s, 50.8 dB |
+| 6.6 Mbit/s | 237 kbit/s, 53.9 dB  | 46 kbit/s, 45.0 dB  | 102 kbit/s, 52.0 dB        | 210 kbit/s, 51.2 dB |
+
+4K at 30 fps (text at 2×) and 1080p at 60 fps (motion):
+
+| Picture, scene  | Target    | H.264, hardware      | H.264, software      | AV1 (`"text"`; `"motion"` at 60 fps) |
+|-----------------|-----------|----------------------|----------------------|--------------------------------------|
+| 4K30, scroll    | 4 Mbit/s  | 2283 kbit/s, 51.6 dB | 3452 kbit/s, 49.8 dB | 1241 kbit/s, 53.4 dB                 |
+| 4K30, scroll    | 15 Mbit/s | 2007 kbit/s, 55.7 dB | 2392 kbit/s, 50.1 dB | 1011 kbit/s, 54.4 dB                 |
+| 4K30, still     | 4 Mbit/s  | 1209 kbit/s, 51.7 dB | 219 kbit/s, 47.5 dB  | 430 kbit/s, 52.8 dB                  |
+| 4K30, still     | 15 Mbit/s | 585 kbit/s, 55.4 dB  | 76 kbit/s, 47.5 dB   | 139 kbit/s, 53.5 dB                  |
+| 1080p60, scroll | 4 Mbit/s  | 2061 kbit/s, 54.2 dB | 2652 kbit/s, 50.8 dB | 2899 kbit/s, 51.7 dB                 |
+| 1080p60, scroll | 8 Mbit/s  | 1842 kbit/s, 54.5 dB | 2406 kbit/s, 50.2 dB | 2738 kbit/s, 52.6 dB                 |
+
+- **AV1 with its screen content tools keeps text sharp at a fraction of the bitrate.** Scrolling
+  at 1440p, AV1 at 1 Mbit/s (47.8 dB) is as sharp as H.264 at about 3 Mbit/s, and at 2 Mbit/s
+  (50.4 dB) as H.264 at 4: 10.7 and 7.0 dB more than Chrome's hardware H.264 at the same bitrate.
+  That is what a viewer on a weak link gets, and what the half-size layer has. At the full
+  1440p bitrate both are sharp (53.9 and 55.1 dB), AV1 with a third less. A still page costs AV1
+  100 to 300 kbit/s against H.264's 240 to 1100.
+- **The hint matters:** without `contentHint: "text"` (libaom without its screen content mode)
+  AV1 is 5 to 7 dB less sharp at 1 to 2 Mbit/s. Chrome 156 and Firefox 159 accept the hint.
+- **Motion stays H.264:** at 1080p60 the hardware H.264 encoder was sharper (54.2 against 51.7 dB)
+  with less bitrate, at a fraction of the CPU (below). Motion shares and cameras keep H.264.
+- **4K text is cheap to send:** text drawn at 2× compresses well; the 4K top layer sent 1 to 2.4
+  Mbit/s of its 15 at 51 to 55 dB. The cap matters for pictures, video and fast changes.
+- **VP9 is not used:** Chrome's VP9 (libvpx) took the canvas' full-range RGB but tagged its
+  decoded pictures with limited range and the BT.709 transfer, so a canvas drew them with a
+  constant shift (33 dB at any bitrate; the Y plane 22 dB off the source). It also cost 1.5 to 2×
+  AV1's CPU. VP9 would have been the codec for viewers without AV1 decoding (Safari on Macs before
+  M3); they get H.264.
+- **Who encodes and decodes AV1:** Chrome 156 and Firefox 159 here encode AV1 and VP9 in software
+  only and decode both in hardware (`isConfigSupported`). VideoToolbox on this Mac has no AV1 or
+  VP9 encoder (H.264, HEVC, ProRes, JPEG only) and decodes AV1 in hardware (Apple silicon from
+  M3), VP9 not; Safari and the desktop's WebKit view decode AV1 where the hardware does. The
+  desktop's own encoders stay H.264 (VideoToolbox, VA-API, OpenH264): a software AV1 encoder in
+  the desktop (GStreamer's `svtav1enc` with its screen content mode, `av1enc`, `rav1enc`) is a
+  follow-up.
+
+**CPU in the browser** (same page, the encoder's CPU time per frame: the browser's processes
+while encoding, as fast as it goes and without decoding, minus the page drawing the same frames
+without encoding; one encoder at the top layer's size; a share adds its half-size layer, about a
+quarter more):
+
+| Picture, scene  | H.264, hardware | H.264, software | AV1, `"text"`  |
+|-----------------|-----------------|-----------------|----------------|
+| 1080p30, still  | 5.0 ms (15 %)   | 5.0 ms (15 %)   | 4.1 ms (12 %)  |
+| 1080p30, scroll | 1.9 ms (6 %)    | 7.2 ms (22 %)   | 8.1 ms (24 %)  |
+| 1440p30, still  | 3.6 ms (11 %)   | 7.6 ms (23 %)   | 7.5 ms (22 %)  |
+| 1440p30, scroll | 3.7 ms (11 %)   | 13.1 ms (39 %)  | 15.4 ms (46 %) |
+| 4K30, still     | 8.1 ms (24 %)   | 22.0 ms (66 %)  | 15.9 ms (48 %) |
+| 4K30, scroll    | 7.6 ms (23 %)   | 27.0 ms (81 %)  | 32.9 ms (99 %) |
+| 1080p60, scroll | 2.0 ms (12 %)   | 6.9 ms (41 %)   | 8.6 ms (52 %)  |
+| 1440p60, scroll | 3.6 ms (21 %)   | 13.2 ms (79 %)  | 15.4 ms (92 %) |
+
+The percentage is of one core at the picture's frame rate. libaom spreads the work over several
+threads, so a 4K share in AV1 takes about one core in all, spread over several.
+
+**The desktop's encoders** (`crates/teamcraft-media/examples/screen_bench.rs`: every layer of the
+profile, encoded in real time as the call's encoder thread does, from a synthetic page of
+pixel-font text on a 3840x2160 display, 10 s per row; CPU is the process's over all threads,
+VideoToolbox's included; capture and its BGRA conversion are not part of it):
+
+```sh
+cargo run --release -p teamcraft-media --features gstreamer,openh264-source --example screen_bench -- \
+  --profile detail-4k --scene scroll [--encoder software]
+```
+
+| Profile (top layer) | Scene  | VideoToolbox, CPU per frame | OpenH264, CPU per frame (frame rate reached) |
+|---------------------|--------|-----------------------------|----------------------------------------------|
+| detail (1440p30)    | still  | 0.6 ms (2 %)                | 19.2 ms (58 %)                               |
+| detail (1440p30)    | scroll | 0.7 ms (2 %)                | 19.9 ms (60 %)                               |
+| motion (1080p60)    | still  | 0.3 ms (2 %)                | 10.7 ms (64 %)                               |
+| motion (1080p60)    | scroll | 0.3 ms (1 %)                | 10.5 ms (63 %)                               |
+| 4K detail (4K30)    | still  | 1.4 ms (4 %)                | 46.6 ms (140 %; 18 fps)                      |
+| 4K detail (4K30)    | scroll | 1.4 ms (4 %)                | 93.3 ms (280 %; 10 fps)                      |
+| 4K motion (1440p60) | still  | 0.4 ms (2 %)                | 19.2 ms (115 %; 45 fps)                      |
+| 4K motion (1440p60) | scroll | 0.4 ms (2 %)                | 18.9 ms (113 %; 46 fps)                      |
+
+The GPU's utilization (`ioreg`, "Device Utilization %") stayed at 0 to 9 % during the
+VideoToolbox runs, as without them: the encoder is a media engine of its own. Battery drain was
+not measured (the Mac ran on AC power, and `powermetrics` needs root); CPU time is the stand-in.
+
+**Budgets** that follow from these numbers:
+
+- Desktop with a hardware encoder: encoding a share costs at most about 2 % of a core at the
+  standard sizes and 4 % at 4K. Without one (OpenH264), 60 % of a core at the standard sizes,
+  and a 4K share doesn't keep its frame rate (10 to 18 fps on 1.4 to 2.8 cores): 4K needs a
+  hardware encoder.
+- Browser: a detail share in AV1 costs about half a core at 1440p30 (both layers) and one core at
+  4K30, against a tenth and a quarter with the hardware H.264 encoder. The call's encoders skip a
+  frame while two wait (`MAX_ENCODE_QUEUE`), so a slower machine sends a detail share at a lower
+  frame rate, as detail mode intends.
+- Viewers: AV1 is decoded in hardware where it is announced on Apple silicon (M3 and later) and
+  by dav1d in Chrome and Firefox (not measured here).
+
+Seen on the way: VideoToolbox sent the *lower* layers of the scrolling page far above their
+targets. Fixed in #979 (next section).
+
+### Screen layers at their bitrate (issue #979)
+
+VideoToolbox at an average bitrate (`rate-control=abr`, what screen shares use since #530, so a
+still screen sends next to nothing) encodes at the `quality` GStreamer always sets
+(`kVTCompressionPropertyKey_Quality`, 0.5 by default) and ignores the bitrate: with the 720p
+layer's bitrate set to 100 kbit/s instead of 1.7 Mbit/s it still sent 9.1 Mbit/s of scrolled text,
+and `data-rate-limits` (`kVTCompressionPropertyKey_DataRateLimits`, set and accepted) changed
+nothing either. The top layer of a share stays below its target because the scrolling page moves
+by whole pixels in it; a half-size layer gets half-pixel motion that the encoder can't follow by
+moving blocks, and at a fixed quality it pays for that in bits. A constant bitrate
+(`rate-control=cbr`) holds the target but spends it on every change: 5.8 of 6.6 Mbit/s for a
+line being typed on a 1440p screen, against 22 kbit/s at the average bitrate. A `quality` changed
+on a running encoder is taken by GStreamer but not by VideoToolbox.
+
+So `video_gstreamer::QualityGovernor` measures each VideoToolbox screen layer's pictures (the last
+eight, without keyframes and the 200 ms of pictures after one, which VideoToolbox makes several
+times larger) and rebuilds the layer's encoder at a lower `quality` while it sends more than its
+bitrate, in a step sized by how far over (ln(share) / 4), and at a higher one once it sends less
+than half (aimed at 60 %, at most once a second; straight back to 0.5 below 5 %, as a screen
+that stands still sends). Each change costs a keyframe: 2 to 4 changes per scroll here. Cameras (constant
+bitrate) and the other platforms' encoders (VA-API, Media Foundation: constant bitrate) are not
+touched.
+
+`screen_bench`, M4 Max, macOS 26.6, GStreamer 1.28.8, 10 s per row, every frame encoded; target and
+sent in kbit/s, luma PSNR of the layer's own pictures (the synthetic 1 px text, harsher than real
+text after scaling):
+
+| Profile, scene        | Layer      | Target | Before: sent (PSNR) | After: sent (PSNR) | Keyframes after |
+|-----------------------|------------|-------:|--------------------:|-------------------:|----------------:|
+| detail, scroll        | 720p       |   1659 |      9096 (31.3 dB) |     1352 (19.2 dB) |               6 |
+|                       | 1440p      |   6636 |       281 (40.8 dB) |      281 (40.8 dB) |               1 |
+| detail 4K, scroll     | 540p       |    933 |     10616 (18.7 dB) |      502 (14.6 dB) |               3 |
+|                       | 1080p      |   3732 |     20457 (32.4 dB) |     2698 (20.9 dB) |               4 |
+|                       | 4K         |  14930 |       382 (43.8 dB) |      382 (43.8 dB) |               1 |
+| motion, scroll        | 540p60     |   1866 |     23231 (29.9 dB) |     1261 (16.6 dB) |               5 |
+|                       | 1080p60    |   7465 |      1099 (36.5 dB) |     1100 (36.5 dB) |               2 |
+| motion 4K, scroll     | 720p60     |   3318 |     18300 (31.3 dB) |     2554 (19.2 dB) |               6 |
+|                       | 1440p60    |  13271 |      1038 (40.7 dB) |     1038 (40.7 dB) |               2 |
+
+Still screens (a line being typed) send the same before and after, every layer at its old quality
+(detail: 31 and 70 kbit/s at 31.1 and 36.4 dB; 4K: 119, 41 and 216 kbit/s); with
+`--frames changes` (only changed pictures, plus one a second, as a share sends) 11 and 22 kbit/s,
+and the scrolling rows as above. The scrolled lower layers lose their sharpness (as with a
+constant bitrate: 20.7 dB for the 720p layer at 1515 kbit/s) and get it back with the first
+pictures after the scroll stops (on a still screen the next picture once a second, then a sharp
+keyframe with the one after). Encoding costs a little more while a layer is held (detail scroll: 0.85 ms
+CPU per frame against 0.6), and a rebuilt encoder answers each frame before the next (3.4 ms wall
+per frame against 0.4: the first encoder of a layer, whose first picture takes longer than the
+50 ms wait, then hands each picture out with the next frame; fixed in #990, below).
+
+Through the real SFU (`screen_layer_bitrate` in the SFU suite, release build with
+`--features teamcraft-media/gstreamer`; the viewer picks each layer and measures 4 s of it):
+
+| Share | Layer | Target | Before            | After            | OpenH264 (debug build) |
+|-------|-------|-------:|------------------:|-----------------:|-----------------------:|
+| 1440p | 720p  |   1658 | 22613 (1363 %)    | 1235 (74 %)      | –                      |
+|       | 1440p |   6635 | 537 (8 %)         | 575 (9 %)        | –                      |
+| 720p  | 360p  |    500 | 6428 (1286 %)     | 314 (63 %)       | 480–585 (8 frames)     |
+|       | 720p  |   2000 | 269 (13 %)        | 259 (13 %)       | 334–351                |
+
+### Each picture with its own frame (issue #990)
+
+The first VideoToolbox session of a process takes 55 to 71 ms for its first picture (a 1440p or
+4K screen layer, a 720p camera; later sessions 12 to 35 ms), longer than the 50 ms the encoder
+waited. That picture then came out with the next frame, and every picture after it too, for as
+long as the encoder lived: a camera's pictures a frame late, a still screen's latest change until
+the next picture pushed it out, up to a second later. Measured per frame by reading the frame
+counter of `test_pattern` from the decoded pictures (`every_hardware_picture_shows_its_own_frame`
+in `video_gstreamer.rs` fails on the old code when it runs alone, so that its camera is the
+process's first session):
+
+| Encoder (first of the process)  | Before: frame shown for frames 0, 1, 2, … | After          |
+|---------------------------------|-------------------------------------------|----------------|
+| 1440p screen layer, 30 fps      | –, 0, 1, 2, … (first wait 60 ms)          | 0, 1, 2, … (55 ms) |
+| 1440p screen layer, once a second | –, 0, 1, 2, … (each change a second late) | 0, 1, 2, …    |
+| 720p camera, 30 fps             | –, 0, 1, 2, … (first wait 62 ms)          | 0, 1, 2, … (71 ms) |
+| Later encoders, rebuilt ones    | 0, 1, 2, …                                | 0, 1, 2, …     |
+
+Now a pipeline's first picture may take 500 ms; a later one that misses its 50 ms is dropped when
+it comes, and the next frame is a keyframe (the pictures after it would refer to the dropped one).
+Waiting for each picture made the layers' times add up, which the late encoder had hidden: a
+simulcast frame now hands every layer its frame first and then takes their pictures, so the
+layers encode at once. `screen_bench`, 8 s per row, before and after, with the process's first
+VideoToolbox session the share's ("cold") and with one started before it ("warm", a camera on):
+
+| Profile, scene                | Before cold      | Before warm       | After cold       | After warm       |
+|-------------------------------|------------------|-------------------|------------------|------------------|
+| detail (1440p30), scroll      | 5.4 ms, 30.0 fps | 24.4 ms, 29.9 fps | 17.0 ms, 29.9 fps | 9.4 ms, 30.0 fps |
+| detail, still                 | 6.0 ms, 30.0 fps | 24.1 ms, 29.9 fps | 17.6 ms, 29.9 fps | 9.5 ms, 30.0 fps |
+| motion (1080p60), scroll      | 3.9 ms, 60.0 fps | 14.3 ms, 54.4 fps | 8.9 ms, 59.9 fps | 5.6 ms, 59.9 fps |
+| motion, still                 | 4.3 ms, 60.0 fps | 13.2 ms, 59.2 fps | 10.7 ms, 59.9 fps | 5.7 ms, 59.9 fps |
+| 4K detail (4K30), scroll      | 12.7 ms, 30.0 fps | 8.0 ms, 30.0 fps | 29.5 ms, 24.9 fps | 24.6 ms, 28.8 fps |
+| 4K detail, still              | 16.4 ms, 30.0 fps | 44.1 ms, 17.8 fps | 28.3 ms, 24.7 fps | 29.1 ms, 25.7 fps |
+| detail, `--frames changes`    | 7.9 ms, 9.1 fps  | 25.3 ms, 9.1 fps  | 15.1 ms, 9.1 fps | 19.3 ms, 9.1 fps |
+| 4K detail, `--frames changes` | 9.2 ms, 9.1 fps  | 17.7 ms, 9.1 fps  | 31.2 ms, 9.1 fps | 20.2 ms, 9.1 fps |
+
+The time is the wall time of a frame's encoding; the CPU time per frame stays as it was (0.9 to
+2.3 ms, 2.5 to 5.4 ms with `--frames changes`). Before, the frame rate depended on whether a
+layer's first picture had missed its wait (the cold 4K rows, and the warm 4K scroll, whose 4K
+layer is rebuilt and missed it then). VideoToolbox takes 20 to 41 ms for a 4K picture, more than a
+frame at 30 fps, so a 4K share whose every frame changes now reaches 25 to 29 fps: keeping 30 would
+need two frames in the encoder at once, with each picture sent when it comes out rather than with
+the next frame.
+
+## Clients
+
+How fast and how lean the apps are for the person using them; the budgets they must stay within are
+in [.claude/rules/robustness.md](../.claude/rules/robustness.md) ("Performance and resources").
+
+### Background effects in the browser (#439)
+
+Local bench page with the call module's code paths (`call_web` camera effects, the segmentation
+worker built like the release), MacBook (Apple Silicon), a 720p `<video>` in, strong blur, one
+picture every 33 ms, encoded with WebCodecs H.264. Main thread per frame:
+
+| Browser     | Compositing | Main thread per frame | Of that                                                   | Segmentation (worker) |
+|-------------|-------------|-----------------------|-----------------------------------------------------------|-----------------------|
+| Chrome 156  | WebGPU      | 5.4 ms                | getImageData 1.4, RGBx→I420 1.9, GPU and read-back 1.6    | 7.4 ms, every frame   |
+| Safari 26.6 | WebGPU      | 6.2 ms                | getImageData 2.3, RGBx→I420 2.1, GPU and read-back 1.4    | 8.2 ms, every frame   |
+| Firefox 158 | WebGL2      | 5.3 ms                | texImage2D 0.4, model input 1.2, `VideoFrame(canvas)` 3.5 | 11.0 ms, every second |
+| Firefox 158 | WebGPU      | 103 ms                | read-back 93                                              | –                     |
+
+- The segmentation runs in its worker, as often as keeps it within 8 ms a frame on average
+  (`MaskCadence`); the main thread only hands it the model's 256x144 input. Before the worker it
+  ran on the main thread: 14.6 ms a frame in Chrome with the WebGPU compositor, 13.3 ms in Safari.
+- WebAssembly SIMD (`+simd128`) for the segmentation module, in the worker with one picture a
+  frame: 8.6 instead of 15.0 ms in Chrome, 9.2 instead of 15.3 ms in Safari, 11.4 instead of
+  19.8 ms in Firefox 147.
+- RGBx→I420 has a function of its own for the browser (`capture_convert::rgbx_to_i420`, whole rows
+  and 2x2 blocks): 1.9 ms instead of about 30 ms with the general per-pixel path in the
+  size-optimized call module.
+- WebGL2 in Chrome and Safari would cost 1.1 and 4.2 ms a frame on the main thread; they use
+  WebGPU where it starts and WebGL2 otherwise.
+- A CPU compositor for Firefox would pay getImageData and RGBx→I420 alone with 9 ms a frame there,
+  more than the whole WebGL2 path. Firefox 147 measured 7.0 ms with WebGL2.
+
+### Web client (Chrome)
+
+`tests/e2e` `perf.rs` drives the release web build in headless Chrome against the release server
+(tests/e2e/README.md has the setup):
+
+```sh
+cargo test -p teamcraft-e2e --features browser --test suite -- --nocapture perf::   # PERF_SCALE=small
+```
+
+Carol signs in, leaves, and comes back to a workspace that grew while she was away. "Small" is 3
+spaces, 24 channels, 3,000 messages (1,500 in one channel) and 12 photos; it runs in the nightly e2e
+suite and fails on a regression. Measured on the machine above while it was otherwise idle (one
+Android emulator running), web bundle 9.5 MB of wasm:
+
+| What                                                          | Small workspace       |
+|---------------------------------------------------------------|-----------------------|
+| Sign in and unlock the keys on a new browser                  | 1.1 s                 |
+| Coming back: catch-up until the channel list shows            | 2.1 s                 |
+| Coming back: until every channel of the space is read         | 2.4 s                 |
+| Reload of a signed-in tab until the channel list shows        | 0.4 s                 |
+| Main-thread tasks over 50 ms while catching up                | none                  |
+| Channel switch, p50 / p95 / max                               | 31 / 35 / 41 ms       |
+| Opening the 1,500-message channel                             | 35 ms                 |
+| Message rows in the DOM, after opening / after scrolling back | 24 / 23 (virtualised) |
+| Frames over 50 ms while scrolling back 120 steps              | 0 of 121              |
+| Memory of the browser's processes (PSS): empty / app started  | 335 / 548 MiB         |
+| JS heap after start / after 40 / after 80 channel switches    | 4.8 / 4.9 / 4.9 MiB   |
+| PSS after 80 channel switches                                 | 560 MiB               |
+| Idle in the foreground: CPU / wakeups (whole browser)         | 1.4 % / 163 per s     |
+
+What the numbers say:
+
+- The app adds about 210 MiB to the browser; most of it is the compiled wasm and its linear memory
+  (the JS heap is under 5 MiB). Channel switches don't grow it.
+- The message list is virtualised: the DOM holds about 25 rows whatever the channel's length.
+- While idle the page ran about 0.4 s of tasks per minute at the time of this table: the sync
+  loop's 3 s tick and a 30 s REST poll of unread counts, threads, presence and read receipts. The
+  poll is gone since (#183, #252; see "Idle traffic and updates per conversation" below). A
+  one-second banner timer that ran even while connected is fixed.
+- Sending used to read the whole conversation for every message (fixed); it showed when filling a
+  20,000-message channel.
+- Against the budgets in robustness.md: switching, scrolling, start and memory are well within them.
+  Idle network was not at the time (the 30 s poll and the once-a-minute account data sync); both are
+  gone since (#183, #252), re-measured below.
+
+#### Scrolling back through held history (issue #1050)
+
+The scroll back above never left the newest page: a browser that joins a channel holds only its
+newest messages (the core loads one page of history), so the 1,500-message channel was about 50
+rows in the browser. The desktop app, open for weeks in a busy channel, holds all of it and reads it
+from the core a page of 100 at a time while the reader scrolls up; that is where scrolling stalled.
+`perf.rs` now also lets Carol be away while the long channel grows by 1,500 messages, so the
+catch-up stores them all, and scrolls up from the newest one at a brisk, steady wheel speed (60 px
+a frame, about 3,600 px a second, 400 frames, several pages). Release web build in headless Chrome,
+the machine above with other builds running (load 3 to 6), CPU profile of the scroll:
+
+| While scrolling 400 frames                           | Before  | After   |
+|------------------------------------------------------|---------|---------|
+| Main-thread time of the app                          | 2.44 s  | 1.73 s  |
+| Of that in `document.execCommand` (forced layout)    | 0.85 s  | –       |
+| Frames with a placeholder row in sight               | 0       | 0       |
+| Frames over 33 ms / longest frame                    | 1 / 33  | 1 / 33  |
+| Tasks over 50 ms                                     | 0–1     | 0       |
+| Frames in which the list moved backwards             | 0       | 0       |
+
+What the numbers say, and what changed:
+
+- In the browser the core runs in the page and answers a page within the frame, so nothing waited
+  for messages even before; the stall there was work on the main thread when a page arrived. On the
+  desktop the answer crosses the shell's IPC from the core thread, which may be busy, and the
+  WebKitGTK webview lays out slower: there the same work showed as a stop.
+- Each page the list read told the whole UI to read again (one change notification for the app),
+  and with no draft for the conversation, the composer answered every such notification with two
+  editing commands that make the browser lay out the page. The composer prepares its editor once
+  now, and a page loaded ahead tells the UI nothing unless a row on screen waits for it: the rows
+  read it from the mirror when they come into view.
+- The list asks for the rows four viewport heights beyond what it renders
+  (`ChatBackend::prefetch_messages`), so a page is in the mirror before it is reached, also over a
+  slow IPC answer. With 22 px log lines that is about 150 rows ahead.
+- A refresh after a change in the core (a new line in a log channel) reloaded every page the
+  mirror ever read: the further back the reader had scrolled, the more pages every new line cost.
+  It now reloads the pages read or asked ahead for since the last change and drops the others.
+- Android and iOS show the newest 200 messages without paging back, so they have no page boundary
+  to stall at.
+
+#### Large workspace
+
+`PERF_SCALE=large`: 20 spaces, 300 channels, 100k messages (20,000 in one channel), 200 photos,
+seeded through the real APIs in 12 minutes. Measured in a cloud VM (4 vCPUs, 15 GiB, headless
+Chromium 1243, release server, Postgres in a container on the same VM), October 2026, `main` dd957c6
+plus the fixes of the same change. A VM is noisy; read the numbers for leaks, outliers and growth
+with the workspace, not to the millisecond. The small workspace on the same VM is given for
+comparison.
+
+```sh
+PERF_SCALE=large E2E_BIN_DIR=target/release cargo test -p teamcraft-e2e --features browser \
+  --test suite -- --nocapture perf::
+```
+
+| What                                                    | Large            | Small (same VM)  | Budget       |
+|---------------------------------------------------------|------------------|------------------|--------------|
+| Reload of a signed-in tab until the channel list shows  | 0.7 s            | 0.4 s            | ≤ 1.5 s      |
+| Coming back after the workspace grew: channel list      | 191 s            | 2.1 s            | -            |
+| Channel switch, p50 / p95 / max                         | 34 / 43 / 43 ms  | 34 / 40 / 42 ms  | p95 ≤ 100 ms |
+| Opening the 20,000-message channel                      | 36 ms            | -                | -            |
+| Message rows in the DOM, after opening / scrolling back | 14 / 23          | 24 / 23          | -            |
+| Frames over 50 ms while scrolling back 120 steps        | 1 of 121         | 0 of 121         | -            |
+| PSS of the browser: empty / app started                 | 426 / 664 MiB    | 428 / 609 MiB    | +350 MiB     |
+| PSS after 100 more channel switches                     | 686 MiB (+3.4 %) | 650 MiB (+6.7 %) | ≤ 10 %       |
+| JS heap after start / after the switches                | 5.0 / 5.1 MiB    | 5.0 / 5.0 MiB    | -            |
+| Idle in the foreground: CPU, whole browser              | 7.3 %            | 1.4 %            | ≤ 1 %        |
+| Idle: main-thread tasks per minute                      | 3,773 ms         | 471 ms           | -            |
+| Idle: HTTP requests / gateway frames per minute         | 63 / 5           | 30 / 5           | none / -     |
+| wasm, app / with the service worker                     | 9.41 / 10.19 MB  | same             | -            |
+
+The empty browser idles at 0.6 % CPU and 25 wakeups per second.
+
+What the numbers say:
+
+- **Within budget:** start, channel switches, scrolling and memory. The app adds 238 MiB to the
+  browser on the large workspace (181 MiB on the small one), and neither the JS heap nor the PSS
+  grows with channel switches beyond the noise. The message list stays virtualised at 20,000
+  messages.
+- **Idle was not** (#246, #183): every change notification re-read work that grows with the
+  workspace (about 0.6 s of main-thread time per round on the large workspace, 70 ms on the small
+  one), and refresh rounds triggered further rounds. Each heartbeat answer (every 25 s) counted as a
+  change too (fixed with this measurement), the 30 s poll and the loop went with #183 and #253, the
+  rest with #246 and #252: see "Idle traffic and updates per conversation" below.
+- **Coming back** to a workspace that grew by 300 channels and 100k messages takes three minutes
+  before the channel list shows (#247); the main thread is mostly free meanwhile (14 tasks over
+  50 ms, 1 s in total), the time goes to the sequential catch-up (#155).
+- **wasm:** uncompressed sizes at the time (#248); the budget now counts the compressed transfer,
+  see "Web bundle size" below for the current numbers.
+
+#### Opening the store and the first catalog build (issue #1127)
+
+The large workspace on this machine (Linux, Ryzen, headless Chrome, release server and web build),
+November 2026, other sessions' builds at times beside it (load 1 to 3). One run on `main` a7182eb2
+plus only the measuring (`perf.rs`, one log line), and two of the change. `perf.rs` forces the build
+by deleting the catalog's state from IndexedDB, so the next start builds it under a new generation,
+as an update that changes the catalog does.
+
+| Large workspace                                   | Before    | After, run 1 | After, run 2 |
+|---------------------------------------------------|-----------|--------------|--------------|
+| Build: page load until the channel list           | 11.8 s    | 18.7 s       | 18.1 s       |
+| Build: longest main-thread task                   | 10,974 ms | 928 ms       | 904 ms       |
+| Build: tasks over 50 ms / their total             | 3 / 11 s  | 92 / 12.9 s  | 91 / 12.5 s  |
+| Build: steps the progress bar showed              | none      | 89           | 87           |
+| Reload during the build: percent before, after it | -         | -            | 36 / 37      |
+| The same: from the reload until the channel list  | -         | 24.6 s       | 21.9 s       |
+
+| The store, on a reload                             | Value                   |
+|----------------------------------------------------|-------------------------|
+| Records / their ciphertext                         | 23,487 / 22 MiB         |
+| Reading them, before anything else (`read_all`)    | 350 ms                  |
+| Wasm memory right after that                       | 29 MiB                  |
+| Reload until the channel list                      | 1.6 s (budget ≤ 1.5 s)  |
+| PSS of the browser: empty / app started            | 294 / 577 MiB           |
+
+What the numbers say:
+
+- **The page keeps its thread:** the one task of 11 s is gone. The build takes one batch per task
+  and waits for its commit. Most tasks still run over 50 ms (median 133 ms, up to 193 ms, longer as
+  the indexes grow), so the bar moves a few times a second; the 904 ms is not a batch, a plain reload
+  has one of that size too (777 ms). On this screen nothing but the bar and "Sign out" responds, and
+  it happens once per update.
+- **It costs about 6 s more (+53 %) here:** the commit after every batch, and before it the writes
+  went out in far fewer transactions. Not profiled. A smaller batch would mean shorter tasks and more
+  rewrites of the same index nodes; that trade was not tried.
+- **A reload goes on:** the bar stood at 36 % in a screenshot just before the reload and came back at
+  37 %. The rest then took longer than a whole build from the start (21.9 s for about 64 % against
+  18.1 s), which is not explained.
+- **The waiting costs no timers:** the commit is what gives the thread back, so a hidden tab's
+  throttled timers don't slow the build. Not measured in a hidden or frozen tab.
+- **This store is small for the workspace:** 100k messages on the server are 23,487 records here,
+  because a browser holds what it caught up (one page per channel, plus what it read). A store that
+  really holds 100,000 messages would be about four times this if it grows linearly (about 1.5 s and
+  90 MiB); that is an estimate, no such store was measured.
+- **Reading a page at a time was tried and dropped:** `getAll` with a limit, in one transaction, read
+  in 405 ms instead of 350 ms in both runs, with the same three long tasks on a reload and the same
+  wasm memory, so it bought nothing measurable on a hot path over its budget. The tasks of the reload
+  before the change were not recorded separately, and a larger store may show a difference. The
+  columns "After" were measured with it; the code is back to the single read of "Before", and that
+  combination has no large run of its own. It changes only the first 400 ms of a start.
+- **Not the change, as far as the code says:** channel switches at p95 while catching up went from
+  126 to 164 and 152 ms, right after it from 75 to 100 and 93 ms, and one long channel open from 38
+  to 130 ms in the second run. Nothing after opening changed; one baseline run can't rule it out.
+
+**Fetching records per conversation at the async boundaries: not sound, so not done.** `LocalStore`
+is synchronous, and IndexedDB has no synchronous read, so what a read may touch has to be in memory
+before it starts:
+
+- A record that isn't loaded can't look absent: `upsert_message` would take an existing message for
+  new and leave its old place in the indexes. It would have to fail instead.
+- It can't fail either: a group of writes can't be undone in the browser (the backend keeps every
+  write, and `Client` state has moved on), so a read that fails in the middle of a group leaves half
+  of it applied, MLS state included.
+- So every path would have to name its records up front. About 128 calls read or write messages in
+  the client and the UI backend alone, a gateway frame names its conversation only once it is parsed,
+  a catch-up crosses conversations, record IDs are pseudorandom (so a conversation's records are found
+  only through its sealed index, one step after another), and a repair of the catalog or a removed
+  conversation's sweep walks every record, synchronously, from inside a read.
+- A key prefix per conversation would make the fetch easy, and would show in one copy of the files
+  which records belong together, more than e2ee.md §9.1 allows today.
+
+What it would take, either of: the core in a dedicated worker over a store with synchronous reads
+(OPFS sync access handles), which gives the browser what the mobile apps have, O(1) open, and takes
+the build and the catch-up off the main thread; the `remote_backend` calls are already the boundary
+for that. Or an async `LocalStore`, which rewrites the client on every platform. At the numbers above
+(350 ms of a reload, 22 of 283 MiB) neither is urgent for this workspace; it matters for a browser
+that holds far more history. The service worker reads the whole store for every push, too.
+
+#### Idle traffic and updates per conversation
+
+Re-measured for #246, #247, #252, #259 and #270 in the same kind of cloud VM (4 vCPUs, 15 GiB,
+headless Chromium 1243, Postgres in a container on the VM), with the **debug** server binary (the
+disk of the VM had no room for two release builds; the client is the release web build either
+way). "Before" is `main` e569848, "after" the change. Same harness as above, with three additions:
+API requests while idle apart from token renewal (`idle_api_requests_per_minute`, the regression
+check asserts 0), when the first channel opened after coming back shows its newest message, and
+when the background catch-up is done (no connection banner and no API request for 10 s). The idle
+period starts only after that.
+
+| What                                                      | Small before | Small after | Large before | Large after |
+|-----------------------------------------------------------|--------------|-------------|--------------|-------------|
+| Coming back: channel list shows                           | 4.4 s        | 1.6 s       | 247 s        | 1.6 s       |
+| Coming back: first channel read                           | -            | 2.8 s       | 247 s        | 30.4 s      |
+| Coming back: every channel of the first space read        | 5.0 s        | 3.4 s       | 250 s        | 32.9 s      |
+| Coming back: whole workspace caught up                    | 5.0 s        | -           | 250 s        | 39.1 s      |
+| Reload of a signed-in tab until the channel list shows    | 0.5 s        | 0.5 s       | 1.0 s        | 0.8 s       |
+| Channel switch, p50 / p95                                 | 40 / 54 ms   | 41 / 52 ms  | 48 / 72 ms   | 66 / 155 ms |
+| Idle: CPU, whole browser (first 5 min, see below)         | 0.8 %        | 0.7 %       | 8.0 %        | 33.2 %      |
+| Idle: CPU, whole browser, the 5 min after that            | -            | -           | -            | 0.2 %       |
+| Idle: main-thread tasks per minute                        | 115 ms       | 113 ms      | 3,731 ms     | 771 ms      |
+| Idle: HTTP requests per minute (API)                      | 2.0          | 0 (0)       | 99           | 0.2 (0)     |
+| Idle: gateway frames per minute                           | 5.0          | 5.0         | 33           | 5.0         |
+
+Small: 3 spaces, 24 channels, 3,000 messages; idle 60 s. Large: 20 spaces, 300 channels, 100k
+messages; idle 300 s. "Before" shows the channel list only once the whole catch-up is done, so its
+first-channel and caught-up times are the same moment.
+
+What the numbers say:
+
+- **No idle traffic** besides the gateway heartbeat (#252): account data, presence, receipts and
+  last seen are read once per connection or when shown. The server closes every connection after
+  an hour (`connection_max_age_secs`, to check a fresh token); the resume then costs the
+  once-per-connection reads: the unread counts and threads, presence in batches of 200, the
+  announcement, the account data.
+- **Change notifications cost what changed** (#246): on the large workspace main-thread work while
+  idle went from 3.7 s to 0.8 s per minute; a new message re-reads one conversation and
+  sends one entry, a presence event one person's entry. A write that leaves the entry as it was
+  (a reply that stays in its thread, an edit, a reaction) sends only the conversation's ID, so the
+  UI re-reads the feed and threads it shows of it.
+- **Coming back** (#247): the list shows as soon as the conversation list arrived (1.6 s instead of
+  four minutes), the channel the user opens is caught up first, the rest in the background with up
+  to six conversations' round trips at once. Before any conversation's messages, the sync still
+  reads every member list and joins the 300 groups from their welcomes, one after the other in the
+  server's order; that is where the 30 s until the first channel is readable go.
+- **After a large catch-up the browser was busy for minutes** (first idle window: Chrome's
+  browser process at 31 %, the renderer at 2.4 %; the five minutes after that 0.2 %), and channel
+  switches measured 155 ms at p95 meanwhile. The cause was the IndexedDB store: one read-write
+  transaction per record written, and the whole MLS state (one record for all groups, rewritten
+  after every group the catch-up processed) written again each time. Chrome worked through that
+  backlog for minutes after the catch-up, and every committed transaction woke the page. Writes now
+  go out in batches (one transaction after 50 ms, or at once beyond 8 MiB or on a flush), and of
+  several writes of one record in a batch only the last; re-measured below.
+
+#### Release server, after the catch-up settled
+
+The large workspace again, after the IndexedDB batching and the review fixes of the same change
+(presence log and snapshot indexes, per-conversation lookups in the UI mirror). Local machine
+(24 threads, 62 GiB, headless Google Chrome 156, dev stack in containers on the same machine, other
+work running beside it), **release** server and release test harness, October 2026. Two additions
+to the harness: after the catch-up and again after the reload it waits until the whole browser
+stays under 3 % CPU for 10 s (`seconds_*_until_browser_settled`) before it switches channels and
+idles, and a second idle window of the same length (`PERF_SECOND_IDLE=1`).
+
+```sh
+PERF_SCALE=large PERF_SECOND_IDLE=1 cargo test --release -p teamcraft-e2e --features browser \
+  --test suite -- --nocapture perf::
+```
+
+| What                                                     | Large                | Budget       |
+|----------------------------------------------------------|----------------------|--------------|
+| Coming back: channel list shows                          | 1.7 s                | -            |
+| Coming back: first channel read / whole space read       | 26.1 / 27.2 s        | -            |
+| Coming back: whole workspace caught up                   | 30.8 s               | -            |
+| Caught up until the browser is quiet (after the reload)  | 0.1 s (0.1 s)        | -            |
+| Reload of a signed-in tab until the channel list shows   | 1.0 s                | ≤ 1.5 s      |
+| Channel switch, p50 / p95 / max                          | 40 / 58 / 64 ms      | p95 ≤ 100 ms |
+| Opening the 20,000-message channel                       | 68 ms                | -            |
+| PSS of the browser: empty / app started / after switches | 346 / 274 / 308 MiB  | -            |
+| JS heap after the first / 100 more switches              | 2.7 / 2.8 MiB        | -            |
+| Idle: CPU, whole browser, first 5 min / the 5 min after  | 0.1 % / 0.1 %        | ≤ 1 %        |
+| Idle: main-thread tasks per minute                       | 40 ms                | -            |
+| Idle: HTTP requests per minute (API)                     | 0.2 (0)              | none         |
+| Idle: gateway frames per minute                          | 5.0                  | -            |
+
+Seeding took 24.5 minutes. The empty browser idled at 4.1 % CPU here (the shared machine and a
+newer Chrome; the cloud VM above measured 0.6 %); the app's idle numbers are the difference over
+the same profile, so they don't include it. The empty-browser PSS is higher than the app's because
+the empty page was measured while the machine was busier; read PSS for growth, not as absolute.
+
+What the numbers say:
+
+- **Within budget once settled:** channel switches at 58 ms p95 and the whole browser at 0.1 % CPU
+  idle, in both five-minute windows. With the batched writes the browser is quiet 0.1 s after the
+  catch-up is done; there is no backlog left to settle.
+- The first channel is still readable only after 26 s: member lists and welcomes of all 300
+  conversations come first (#247, "Left open" in the change).
+- 63 tasks over 50 ms (3.9 s in total, the longest 130 ms) while coming back: the catch-up's MLS
+  work and decryption on the page's thread.
+
+#### Coming back: the open channel first, heartbeats during the sync
+
+The large workspace again for #247, #325 and #326, same machine and harness, release server,
+October 2026. Two additions to the harness: the client's catch-up phase timings and lost gateway
+connections are printed from its console, and 20 switches each are measured while the background
+catch-up runs and right after it, while the browser still writes it. "Before" ran while other
+builds loaded the machine (load about 12); "after" is the final change on a quiet machine (load
+1.5). An intermediate run of the change under load 28 measured 84 ms during and 125 ms right after
+the catch-up, and 47 / 87 ms settled: switch times move with the machine's load; the catch-up
+times did not.
+
+| What                                                 | Before             | After              | Budget       |
+|------------------------------------------------------|--------------------|--------------------|--------------|
+| Coming back: channel list shows                      | 1.5 s              | 1.5 s              | ≤ 2 s        |
+| Coming back: first channel read                      | 22.4 s             | 1.7 s              | ≤ 5 s        |
+| Coming back: all 15 channels of the first space read | 23.8 s             | 4.9 s              | -            |
+| Coming back: whole workspace caught up               | 28.7 s             | 16.1 s             | -            |
+| Catch-up phases: member lists / welcomes / content   | 0.3 / 20.7 / 6.3 s | 0.3 / 11.5 / 3.6 s | -            |
+| Switch p95 while the catch-up runs                   | 133 ms             | 73 ms              | ≤ 100 ms     |
+| Switch p95 right after the catch-up                  | 98 ms              | 92 ms              | ≤ 100 ms     |
+| Switch p50 / p95, settled                            | 38 / 72 ms         | 39 / 65 ms         | p95 ≤ 100 ms |
+| Tasks over 50 ms while coming back (count / total)   | 60 / 3.6 s         | 57 / 3.2 s         | -            |
+| Gateway connections lost while coming back           | 0                  | 0                  | -            |
+| Idle: CPU, whole browser / API requests per minute   | 0.1 % / 0          | 0.1 % / 0          | ≤ 1 % / none |
+
+What changed and what the numbers say:
+
+- **The open channel first** (#247): between two member-list batches and between two welcomes the
+  catch-up takes the conversation the user opened completely (members, its welcomes, MLS queue,
+  messages). The UI tells the core when a conversation opens (`core_focus`): a channel with nothing
+  stored asked the core for no messages, so the core never learned the focus before. The web core
+  shows a conversation caught up ahead at once instead of with the next one-second progress round.
+  Each of the 15 channels the harness opens in turn is readable 0.3 to 1 s after the click.
+- **Welcomes are the bulk of a catch-up**: 300 joins in the server's order, each reading the
+  conversation, its members and its MLS queue, and each rewriting the MLS state (3.6 MB here, one
+  record for all groups). Those rewrites are what kept the page busy: every write was sealed at
+  once (base64 in JSON, then AES-GCM). IndexedDB now seals a record when its batch goes out, so a
+  replaced write costs nothing, and a batch over 1 MiB waits 200 ms more to take the next rewrite
+  along (#326). The welcomes phase went from 20.7 to 11.5 s.
+- **Heartbeats during the sync** (#325): the full sync, long commands and the upkeep run inside
+  `keep_alive`; the catch-up kept its one connection (before: a sync over 90 s lost it, here the
+  catch-up took less, so the test `runner::a_sync_longer_than_the_heartbeat_timeout_keeps_its_connection`
+  covers the long case).
+- **Left open (#424):** the MLS state is still one record rewritten per group, quadratic in the
+  number of groups; splitting it per group is a change to the store format and needs its own
+  review. Done since: see "The MLS state per entry (issue #424)" below.
+
+#### Coming back: requests and round trips (issue #714)
+
+Product requirement: after the app opens, the sync is done in **under 300 ms**, whatever the size of
+the workspace and its chats. `tests/e2e` `sync_perf.rs` measures the client core (the code every app
+runs) against the release harness's real server, Keycloak and MLS: Carol is in 3 spaces with 24
+channels, one message each. It measures from "a new client opens the store" to "the gateway
+connection is caught up" for a fresh session after the resume window (`session_invalid`) on an
+unchanged workspace, the same with three channels that got a message meanwhile, and a resume within
+the window. Every scenario runs once directly against the local server and once through a relay that
+adds 30 ms to every round trip, like a client in another region or on a good mobile network. Debug
+build of the server and the test, local machine (24 threads), October 2026; the core's own work (MLS,
+store) is slower in a debug build than in the apps.
+
+```sh
+E2E_REQUIRED=1 cargo test -p teamcraft-e2e --features e2e --test suite -- --nocapture sync_perf
+```
+
+| What                                       | Before: requests | Before: local | Before: 30 ms RTT | After: requests | After: local | After: 30 ms RTT | Budget   |
+|--------------------------------------------|------------------|---------------|-------------------|-----------------|--------------|------------------|----------|
+| Fresh session, unchanged workspace         | 91               | 249 ms        | 1,333 ms          | 16              | 87 ms        | 187 ms           | ≤ 300 ms |
+| Fresh session, three channels with news    | 91               | 258 ms        | 1,369 ms          | 22              | 119 ms       | 248 ms           | -        |
+| Resume within the window                   | 6                | 27 ms         | 264 ms            | 6               | 9 ms         | 74 ms            | ≤ 300 ms |
+
+"Before" is `main` f1a0f6e with the same test. The client prints the phases of each connection
+(`gateway connection caught up`, `Client::last_connection_phases`); after the change, 30 ms away, an
+unchanged workspace spends them like this: socket and `hello` 33 ms, `ready` 35 ms, the first reads
+(all at once) 56 ms, then local work: deciding what is due 12 ms, the device list check 15 ms, the
+rest a few ms.
+
+What changed and what the numbers say:
+
+- **One request per conversation was the cost.** Every member list, MLS queue and history page was read
+  for every conversation (24 × 3 requests here), so the time grew with the workspace: about 300
+  conversations took tens of seconds (see "Coming back: the open channel first" above). Now
+  `GET /sync/heads` names where each conversation stands, and only conversations whose newest message,
+  MLS entry or member list moved are read: 16 requests for 24 channels here, and in the core suite
+  as many for 8 channels as for 2
+  (`sync_heads::an_unchanged_workspace_costs_no_request_per_conversation`). The
+  server answers it with three queries and one per space; the newest IDs are one backward index probe
+  each (`mls_messages_conversation_id_idx`, migration 0063).
+- **Round trips, not requests, are what a user far away waits for.** The full sync asked one thing
+  after the other (about 30 round trips: 1.3 s at 30 ms, several seconds on a mobile network). The
+  first reads now go out together after `ready` and each step takes its answer: three round trips for an
+  unchanged workspace: socket and `hello`, `ready`, the first reads. The member lists and first
+  pages of changed conversations are read at once too, and each conversation's MLS queue and history
+  side by side.
+- **A resume** read its counts, presence and link requests one after the other after the answer; now
+  they are read while the server answers.
+- The budget test fails above 18 requests or 300 ms for an unchanged workspace, also at 30 ms RTT.
+
+Left open (see the PR of #714/#717):
+
+- The web and desktop shells still restore the sign-in (token refresh at the identity provider) and read
+  `GET /me` before they start the core; offline the web app shows the sign-in page instead of the
+  stored chats. The cached account should start the core at once and the sign-in be checked beside it.
+- The web core decrypts the whole IndexedDB store into memory before it answers the first read.
+  (Since #155 it only reads the ciphertext; #1127 says what fetching less would take.)
+- The MLS state was still one record (#424); a catch-up of many changed groups rewrote it per group.
+  Fixed since, see the next section.
+
+The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
+session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
+on their services.
+
+#### Coming back to 300 channels: no work per conversation (issue #714)
+
+The same test on a workspace like the one after an import: 10 spaces with 30 channels each
+(`SYNC_PERF_SPACES=10 SYNC_PERF_CHANNELS_PER_SPACE=30`, seeding takes about three minutes). Debug
+build, local machine, November 2026; "before" is `main` 454d92c with the same test.
+
+```sh
+E2E_REQUIRED=1 SYNC_PERF_SPACES=10 SYNC_PERF_CHANNELS_PER_SPACE=30 \
+  cargo test -p teamcraft-e2e --features e2e --test suite -- --nocapture sync_perf
+```
+
+| What, 300 channels                      | Requests | Before: local | Before: 30 ms RTT | After: local | After: 30 ms RTT | Budget   |
+|-----------------------------------------|----------|---------------|-------------------|--------------|------------------|----------|
+| Fresh session, unchanged workspace      | 16       | 314 ms        | 415 ms            | 155 ms       | 258 ms           | ≤ 300 ms |
+| Fresh session, three channels with news | 22       | 337 ms        | 468 ms            | 196 ms       | 319 ms           | -        |
+| Resume within the window                | 6        | 18 ms         | 80 ms             | 16 ms        | 81 ms            | ≤ 300 ms |
+
+The requests were already independent of the workspace (16 for 24 channels as for 300); the time
+was not. About 140 ms of it was local work with no request at all, and the phase trace showed it
+moving from step to step as each was fixed:
+
+- **Every MLS group was loaded to ask whether it exists.** A new client holds no group in memory;
+  the first step that asked `has_group` for every conversation (deciding what is due, then joining
+  missing groups, then the check for revoked devices) deserialized all 300 groups, about 0.45 ms
+  each in a debug build. These checks now read the group's state entry only
+  (`ConversationGroup::stored_state`: whether it exists and whether an own commit waits), and the
+  revocation check looks at each group once per version of the own device list, so after that
+  only groups joined since. `sync_heads::an_unchanged_workspace_loads_no_group_after_a_restart`
+  fails if a sync of an unchanged workspace loads any group again, at 2 channels as at 8.
+- **Unchanged conversation records were written again** at every fresh session; they are compared
+  first now. On the desktop's and the phones' SQLCipher file each was a write.
+- **People no list names** were asked about one after the other (up to 25 round trips, once a day
+  each), after reading every stored member list. They are asked at once now, and the member lists
+  are read only when somebody is left to ask.
+
+What is left at 300 channels, 30 ms away: socket and `hello` 33 ms, `ready` 35 ms, the first reads
+80 ms, local work about 60 ms (the device list check 15, joining missing groups 10, deciding what
+is due 9).
+
+**The heads answer on the server** digested the member list answer of every conversation and space
+of the caller on each request: every member row, formatted and serialized. In the test above (two
+people per channel) that was about 45 ms more than for 24 channels; with channels of real size it
+was the largest cost of a fresh session. Each list now has a token that database triggers renew
+whenever its answer would change (migration 0075, docs/gateway.md), and the digest covers the
+token and the directory policy. The server's load test (`sync_heads::heads_of_a_large_workspace`,
+ignored by default; debug build, dev Postgres, local machine):
+
+```sh
+DATABASE_URL=postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/teamcraft \
+  cargo test -p teamcraft-server --features integration --test suite -- --ignored --nocapture \
+  sync_heads::heads_of_a_large_workspace
+```
+
+| `GET /sync/heads`, 300 channels × 200 members, space of 2,000 | Before | After   |
+|---------------------------------------------------------------|--------|---------|
+| Server time, p50                                              | 831 ms | 19 ms   |
+| Answer                                                        | 24 KB  | 24 KB   |
+
+The first sync after the update reads every member list once: all digests change with the new
+scheme. Opening the store before the connection took about
+60 ms; it is outside the measured time and belongs to #778 (the stores loading lazily).
+
+`tests/e2e` `perf.rs` reads the same trace from the web client's console after the reload
+(`reload_sync_ms`) and fails above 3 s, a bound for the shared nightly machine.
+
+#### The MLS state per entry (issue #424)
+
+The MLS state of all groups was one record, rewritten after every change to any group: a catch-up
+that joins 300 groups wrote it two times per group. It is now one record per openmls storage entry,
+and a save writes the entries that changed (docs/e2ee.md §9.5). Measured in the client core against
+the fake server: Carol comes back to channels Alice made and added her to meanwhile, and catches up
+(`tests/suite/mls_storage.rs`, a store that counts the bytes written to the MLS table; debug build,
+local machine, October 2026; "before" is the same test on `integration/v1.0.9` ecdc727):
+
+```sh
+# MLS_STORAGE_SQLCIPHER=1: on a SQLCipher file instead of the memory store
+MLS_STORAGE_CHANNELS=300 cargo test -p teamcraft-core --all-features --test suite -- \
+  --ignored --nocapture mls_storage
+```
+
+| Catch-up of           | Before: MLS writes | Before: bytes written | After: MLS writes | After: bytes written | State in the store, before / after |
+|-----------------------|--------------------|-----------------------|-------------------|----------------------|------------------------------------|
+| 100 groups            | 201                | 92.0 MB               | 1,203             | 1.1 MB               | 0.91 / 0.96 MB                     |
+| 300 groups            | 601                | 816.2 MB              | 3,603             | 3.3 MB               | 2.71 / 2.86 MB                     |
+| Per group, 300 groups | 2                  | 2.7 MB                | 12                | 11 KB                | 9.0 / 9.5 KB                       |
+
+| Time of Carol's catch-up (debug build) | Before  | After   |
+|----------------------------------------|---------|---------|
+| 100 groups, store in memory            | 2.14 s  | 1.32 s  |
+| 300 groups, store in memory            | 15.62 s | 7.96 s  |
+| 100 groups, SQLCipher file             | 3.32 s  | 2.09 s  |
+| 300 groups, SQLCipher file             | 22.91 s | 10.30 s |
+
+- **Bytes written per join no longer grow with the number of groups:** about 11 KB per join, the
+  joined group's entries and the spent key package. Before, the n-th join wrote the whole state of
+  n groups twice. The test `writes_per_joined_group_do_not_grow_with_the_number_of_groups` fails if
+  they grow again.
+- More, smaller records: a group's state is about a dozen entries (tree, context, secrets, leaf
+  keys). Opening a store reads them all, as it read the one record; the bytes are the same.
+- What a save costs besides the writes: the client compares the provider storage with what it
+  wrote last (a copy of the state in memory, compared byte for byte: no hashing, and no read of the
+  store). With the state of 300 groups (2.7 MB in 3,600 entries) a save of one changed entry takes
+  0.3 ms in a release build (`mls_storage::tests::measure_save_of_one_change`). The copy costs as
+  much memory as the state.
+- The catch-up time still grows faster than the number of groups (memory store, debug build: 1.3 s
+  for 100, 8 s for 300). The comparison is one part of it (unoptimised in a debug build); the rest
+  was not taken apart here.
+- The browser's batches stay small now, so the extra wait for a batch over 1 MiB (#326) rarely
+  applies; the large web workspace (`perf.rs`, `PERF_SCALE=large`) is still to be measured with it.
+
+### Desktop on Linux: idle (issue #399)
+
+The 1.0.2 desktop app on Linux (WebKitGTK 2.54) grew while nobody touched it. Measured on the
+released binary and on the fix, signed in to a real workspace, window visible, untouched; memory
+and CPU of the `WebKitWebProcess` from `/proc` every 30 s:
+
+| What                                        | 1.0.2                       | Fixed            | Budget   |
+|---------------------------------------------|-----------------------------|------------------|----------|
+| Webview RSS at start / after 8 min          | 552 MiB / 3.76 GiB          | 302 / 303 MiB    | 400 MiB  |
+| Webview anonymous memory after 8 min        | 3.59 GiB                    | 136 MiB          | -        |
+| Webview CPU while idle                      | about 100 % of one core     | 0.1 %            | ≤ 0.5 %  |
+| Shell calls from the webview while idle     | about 770 per second        | none             | -        |
+
+The cause was a loop between the call state and the backend: effects in the desktop call setup emit
+call events, the handler read the backend, which subscribed the effect to every backend change, and
+each call action ends with a change notification. `CallState::emit` now runs the handler untracked
+and the call mirror only notifies when its snapshot changed (unit tests in `calls.rs` and
+`remote_calls.rs`). The web client does not wire these effects and idled cleanly before and after:
+a phone (Android, Chromium 152) over 10 minutes stayed at about 300 MiB renderer RSS, a 4 to 5 MiB
+JS heap and under 1 % CPU. `perf.rs` now also fails when the PSS or the JS heap grows over the idle
+period.
+
+### Desktop on Linux: memory
+
+A user's 1.0.3 on KDE/Wayland (AMD GPU, window maximized, a real workspace in use)
+showed 512 MiB RAM and 766 MiB GPU memory in the system monitor, 341 MiB and 711 MiB of it in the
+`WebKitWebProcess`. Measured in October 2026 on WebKitGTK 2.54, Radeon RX 7800 XT, with the demo
+workspace (`TEAMCRAFT_BACKEND=mock`) and a UI built with the release profile, the window maximized
+on a 1920×1080 screen. Driven over the WebKit inspector (`WEBKIT_INSPECTOR_HTTP_SERVER`); GPU memory
+from `/proc/<pid>/fdinfo` (`drm-memory-vram`), RAM as PSS from `smaps_rollup`, WebKit's own split
+from the inspector's `Memory` domain.
+
+Where the GPU memory goes: WebKitGTK 2.54 paints tiles on the GPU with Skia, in two painting
+threads plus the main thread. Each has a Skia resource cache that WebKit sizes by the machine's RAM:
+256 MiB per context on machines with 4 GiB or more. The caches fill with whatever was painted
+(scratch textures, pictures) and are only emptied on memory pressure, which WebKit's monitor
+reports when the system runs low. GPU memory therefore rises to a ceiling and stays there; it does
+not grow with use and does not get the app killed:
+
+| GPU memory of the webview                                     | Value    |
+|---------------------------------------------------------------|----------|
+| Signed in, idle                                               | 176 MiB  |
+| After 1,500 channel switches                                  | 219 MiB  |
+| After channels, a few lightbox pictures, 15 rounds            | 465 MiB  |
+| 20 pictures of 4000×3000 shown as thumbnails (synthetic)      | 816 MiB  |
+| The same after they went                                      | 352 MiB  |
+
+Painting on the CPU instead (`WEBKIT_SKIA_ENABLE_CPU_RENDERING=1`) keeps it at 150–190 MiB but
+made a channel switch three times slower and doubled the webview's CPU time (debug build: 300
+instead of 105 ms at p50), which costs battery on a laptop; one GPU painting thread
+(`WEBKIT_SKIA_GPU_PAINTING_THREADS=1`) saved nothing measurable. Both stay off. The cache sizes
+can only be lowered through WebKit's memory pressure settings, which are fixed when the
+`WebKitWebContext` is created; Tauri creates it without a hook for that.
+
+What was fixed:
+
+- **Window listeners per conversation.** The message list dropped the handles of three window
+  listeners (focus, blur, visibility), and Leptos only removes a listener on `handle.remove()`:
+  every conversation opened left three listeners and their closures for the life of the page.
+  `scripts/check-async-signals.py` now fails on a discarded listener handle.
+- **Browser caches.** WebKitGTK starts with the web browser cache model: up to 64 MiB of
+  resources no page shows any more stay in memory, and pages are kept for back and forward. The
+  app never navigates and its pictures are revoked `blob:` URLs, so neither cache is ever hit. The
+  shell sets the document viewer model (`webview_memory.rs`); the inspector's `images` category
+  stays at 0 instead of 17–27 MiB.
+- **The Linux window edge** of the custom title bar was a fixed `::after` over the whole window,
+  a compositing layer of the window's size (7.4 MiB at 1774×1074, 14 MiB at 2560×1440) blended on
+  every frame. Four one-pixel lines now, with no backing store. `scripts/check-css.py` fails on
+  `will-change` outside an allow-list.
+
+Webview memory over channel switches between two busy channels (PSS, same build otherwise):
+
+| Channel switches        | Before    | After     | Budget   |
+|-------------------------|-----------|-----------|----------|
+| 0 (signed in, idle)     | 176 MiB   | 176 MiB   | -        |
+| 600                     | 311 MiB   | 299 MiB   | -        |
+| 1,200                   | 383 MiB   | 371 MiB   | -        |
+| 1,500, then GC and idle | 405 MiB   | 382 MiB   | 400 MiB  |
+
+After the fix the app holds no detached DOM: the wasm-bindgen table of JS values stays at the same
+size (2,408 entries after 20 and after 60 switches), no closure outlives its view once the JS heap
+is collected, and the wasm memory grows by about 28 KiB per switch. The remaining growth is
+WebKit's: its native allocations ("other" in the inspector) level off at about 250 MiB after about
+600 switches, and the JS heap's capacity grows slowly between collections. Growth per 300 switches
+fell from 78 to 14 MiB over the run, so it levels off rather than leaks, but it ends near the
+desktop budget. Idle CPU was unchanged; no animation runs while the app is idle.
+
+### Desktop core: CPU with a large channel and after a long absence (issues #1000, #972)
+
+The 1.0.11 desktop app on Linux kept its core thread busy for long stretches while minimized and
+idle (on average 12 % of a core over 1.6 days, 4 % in the system monitor), and after 12 hours of
+standby it showed the connecting spinner for minutes. Measured on a real workspace (38
+conversations, a 32 MB SQLCipher database, the open channel holding 26,829 messages) with a
+symbolized release build, `perf` and `strace` on the `teamcraft-core` thread, and the time each UI
+read took on the core.
+
+Where the time went: SQLCipher decrypts and authenticates (HMAC-SHA512) every page it reads, and the
+UI's reads of the open conversation each read and decoded all of it, several times per change:
+
+| Read of the 26,829-message channel  | 1.0.11 per read  | Fixed per read  |
+|-------------------------------------|------------------|-----------------|
+| Feed window (count and 50 rows)     | 75–79 ms         | under 6 ms      |
+| Extras of one row (asked per row)   | 4.5 ms, ≤ 78 ms  | 0.2 ms          |
+| Activity feed (all conversations)   | 95–99 ms         | under 9 ms      |
+| Snapshot entry of the conversation  | 86–89 ms         | under 0.2 ms    |
+
+Every message, reaction or receipt in the channel set off this chain once more, and it grew with the
+channel. The core thread spent 7.8 s of CPU on the reads after a start; now 0.3 s. Minimized for
+5 minutes on a working morning, with the log channel receiving messages, the whole process now uses
+0.22 % of a core (core thread 0.13 %), within the 0.5 % budget. What changed:
+
+- The UI's reads of a conversation come from a cache of decoded messages (`TrackedStore` message
+  cache, up to 64 MiB on every platform, `DEFAULT_MESSAGE_CACHE_BYTES`; bounded by bytes since
+  #1125, see "Local store" below): it is filled on the first read
+  and updated with every write the core makes, so a new message no longer means reading the
+  conversation again. A revision per conversation lets the activity feed keep each conversation's
+  entries until its messages or read state change.
+- Row extras look their message up by its place in the order index; the catch-up cursor, older
+  history and the read position ask the index for the oldest or newest server message instead of
+  reading the conversation; parked messages and read receipts are listed by key range.
+- A feed window, a thread and the activity feed borrow the cached conversation instead of copying
+  it, read it once for count and rows, and gather reactions and replies in one pass instead of once
+  per row. The sidebar entry counts in one pass by reference, and whether a message mentions the
+  user is decided once per message and edit while the mention rules stay the same: a log channel
+  with thousands of unread messages had its every text lowercased and split again on each change.
+
+The catch-up after a long absence (#972) waited on the disk: the store used SQLite's rollback journal
+with full syncs, about four syncs per write, and every received message was several writes. In 20
+seconds of a catch-up the core made 1,335 `fsync` calls (12.8 ms each, 91 % of its time); 12
+conversations took 58.7 s. Now a page of received messages is one group of writes, a parked message
+that still can't be read is not written again on every retry, and both SQLite stores write ahead
+(`journal_mode = WAL`, `synchronous = NORMAL`, e2ee.md §9.4). A single commit on the same disk
+(btrfs on NVMe, 1.5 KB record): 17.6 ms with the rollback journal, 6.0 ms with WAL and full syncs,
+0.04 ms with WAL and `NORMAL`.
+
+### Coming back and bad networks, end to end (issue #972)
+
+`tests/e2e` runs the app as the apps do (the sync runner with its connection supervisor, the
+desktop's store on a disk, or the mobile store with `E2E_STORE=mobile`) against the real server,
+Keycloak and MLS, and makes its link to the server bad in the kernel (`tc netem`, `nft`) inside a
+rootless network namespace: `scripts/e2e-network.sh`. Each scenario checks that every message
+arrives exactly once.
+
+**Coming back** (`long_absence.rs`): 38 conversations, 12 of them changed while the device was away
+(40 messages each, somebody added and removed three times), the session expired, 30 ms round trip.
+
+| Coming back                      | Before                                         | Fixed   |
+|----------------------------------|------------------------------------------------|---------|
+| Messages readable afterwards     | `main`: 313 stayed parked, the device fell out | all 481 |
+| Per changed conversation         | 1.2 s (with the identity fix alone)            | 0.24 s  |
+| Connected after                  | 16.4 s (with the identity fix alone)           | 4.8 s   |
+| Message sent to the open channel | `main`: never                                  | 0.6 s   |
+
+The device verified each late commit against identities pinned from today's member list; somebody
+added and gone again since was not on it, the commit was refused and the device fell out of the
+group (e2ee.md §4.6). It now pins whom the commit's signed change names first. A pass over a
+conversation's queue reads the member list and each device list once, instead of again for every
+entry, one round trip after the other. With the issue's 80 ms to the server the saving is larger.
+
+The mobile apps (Android, iOS) never told the core which conversation is open, so after a long
+absence the one opened from a notification waited behind every other conversation, shown as an empty
+conversation with "?" for its name until then. Their reads of a conversation's messages now set the
+catch-up focus, as the desktop's do. Mobile store, the network back after 15 s, a direct message new
+to the device opened from its notification: it shows 4.7 s after the network is back without the
+focus (once the whole backlog is in), 0.6 s with it.
+
+**Bad links** (`network_conditions.rs`, desktop store, writers sending every 0.7 s):
+
+| Link                                       | Noticed by the app        | After it was good again           |
+|--------------------------------------------|---------------------------|-----------------------------------|
+| No UDP at all                              | nothing to notice         | live throughout (≤ 21 ms)         |
+| Loss 5–60 %, changing every 4 s, 80±60 ms  | stays connected           | all there after 28 ms             |
+| Drop-outs: 2 s dead, 3 s fine, eight times | stays connected           | all there after 34 ms             |
+| Dead 30 s, then 96 kbit/s with 300 ms      | stays connected           | all there after 224 ms            |
+| Resets for 10 s                            | at once                   | connected after 2.8 s (backoff)   |
+| Dead 8 s                                   | not (shorter than a beat) | 4.8 s (TCP retransmission)        |
+| Dead 120 s, past the resume window         | after 53 s, now 45 s      | connected after 0.6–0.8 s, all in |
+
+A silently dead link (no signal from the OS) was found only after two heartbeat intervals without a
+frame plus the probe slack, 53 s in which the app showed "connected". Every heartbeat now has to be
+answered within 10 s (`heartbeat_answer_timeout`): at most one interval plus that, 36 s in the unit
+test on a paused clock; the run above found it after 45 s, which is not yet explained. The gateway still connects after the catch-up;
+with the focused conversation caught up first (0.6 s above) that is no longer what users wait for.
+
+### Local store: opening and reading a large account (issue #155)
+
+The sealed store of the mobile apps and the browser decrypted every record when it opened, so open
+time and memory grew with the history, and the iOS notification extension (about 24 MB for
+everything) opened the same store. Records are now read when they are asked for, through a sealed
+catalog (docs/e2ee.md §9.1): a table's keys and each conversation's messages in display order,
+kept as paged sealed records. Opening reads one record; a message is the conversation's index root,
+one index page and the record.
+
+Budgets for a large account, 300 conversations with 100,000 messages (one channel holds half of
+them); `tests/store_memory.rs` checks them with generous bounds in every test run (20,000 messages,
+debug build):
+
+| Budget                                                      | Budget   | Test bound (debug) |
+|-------------------------------------------------------------|----------|--------------------|
+| Opening the store                                           | ≤ 50 ms  | 1 s                |
+| Notification extension: opening and the message, Rust heap  | ≤ 4 MiB  | 8 MiB              |
+| The newest and the oldest message of a conversation         | ≤ 20 ms  | 200 ms             |
+| The first 50 rows of the feed, on empty caches              | ≤ 20 ms  | 300 ms             |
+| The same, Rust heap at its peak                             | ≤ 1 MiB  | 4 MiB              |
+
+Measured on the sealed SQLite store (the mobile apps' store), release build, local machine
+(Linux, Ryzen, NVMe), November 2026; "before" is the same test on `main` 7dba4e60:
+
+```sh
+TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --all-features \
+  --test store_memory -- --nocapture
+```
+
+| 300 conversations, 100,000 messages                        | Before                        | After                |
+|------------------------------------------------------------|-------------------------------|----------------------|
+| Notification extension: open and show the message          | 461 ms, 148 MiB at its peak   | 0.7 ms, 0.06 MiB     |
+| App: open the store                                        | 414 ms                        | 0.3 ms               |
+| Newest and oldest message of the 50,000-message channel    | 96 ms                         | 0.6 ms               |
+| All 50,000 messages of the channel, first read             | 30 ms (all were in memory)    | 350–475 ms, 50 MiB   |
+| Newest 50 feed rows of that channel, first read            | 350–475 ms, 50 MiB (whole)    | 1.1 ms, 0.11 MiB     |
+
+- **The extension stays far under its limit**, independent of the history: its Rust heap is the
+  index root and one page of the notified conversation plus a few entries (names, the push key, the
+  policy). SQLite's own page cache comes on top (its default, 2 MiB at most; the counting allocator
+  doesn't see it). It opens the store with `SealedStoreLimits::minimal()`, keeps no message cache and
+  never builds the catalog: on the first push after an update, before the app ran the migration, it
+  fetches the message instead.
+- **The app's memory for the store is bounded, in bytes:** decrypted entries (8 MiB), decoded
+  messages (4 MiB) and index nodes (2 MiB for each of the eight root and page caches) by default,
+  plus the message cache of the conversations read last (64 MiB on every platform). Before, the
+  whole store was in memory: 148 MiB for this account, growing with every message.
+- **Limits count bytes, not items (#1125):** they used to count messages (4,096 in the store, 60,000
+  in the message cache) and nodes (256), which assumed about 1 KB a message. A channel of 10 KB
+  messages held ten times that, so the mobile budget (250 MiB) was only kept by messages of
+  ordinary length. Each message is weighed once when it enters or leaves a cache
+  (`StoredMessage::footprint_bytes`: the structs plus the length of every string, list and byte
+  buffer, 96 bytes of bookkeeping on top; an estimate, not the allocator's), an index page when it
+  is read or written (at most 256 entries), a root as pages times the size of a page reference.
+  The caches keep a running sum, so a write or a read costs O(the message) and never looks at
+  the rest of the conversation. A message cache write that grows the cache past its budget drops
+  the least recently read other conversations, never the one being written to while it fits
+  alone; one that outgrew the whole budget is dropped and read from the store next time (its
+  revision has moved, so no stale read is kept). Readers hold their conversation by `Arc`, so
+  eviction never takes it from a read in progress. A conversation larger than the whole budget is
+  not cached at all. The cap on the sealed store (`SealedStoreLimits::max_message_bytes`,
+  `max_index_node_bytes`) and on the message cache (`TrackedStore::with_message_cache`) are
+  arguments, so a platform can set its own; the defaults are the figures above (`minimal()`: 128
+  KiB each, no message cache). With the 64 MiB default, the 50,000-message channel measured above
+  (about 50 MiB read whole) still fits; 50,000 messages of 10 KB would not, and are read from
+  the store on each use instead of taking 500 MiB.
+- **A full read of a big conversation got slower:** records are read one by one under pseudorandom
+  IDs, about 9 µs a message (the file is memory-mapped, so a read is no system call).
+- **The feed no longer needs a full read:** the sealed store's catalog also keeps, per conversation,
+  a feed index (the rows; the root's page lengths count positions) and a relations index (reactions
+  by target, replies by thread, events), and the SQLCipher store has columns with partial indexes for
+  the same. `feed_tail` and `message_page` read the rows they return, their reactions and their reply
+  counts: the first page of the 50,000-message channel is at most 80 records
+  (`the_first_page_of_a_large_channel_reads_that_page` counts them). A channel with an import account
+  also reads its events once per change, the only messages the import's additions can be. The memory
+  store keeps the whole-read view, which costs it no decryption.
+- **Writes pay for it:** filling this account took 12.0 s instead of 9.7 s (+24 %, one run each; an
+  earlier pair differed by 9 %). A message outside a group of writes seals the feed index's root and
+  page as well.
+- **What still reads a conversation whole:** a sidebar entry's counts (`entry_counts`), the last
+  activity, the activity feed, a thread, toggling a reaction and the other actions that look a message
+  up. The message cache serves those after their first read, so opening a big channel is only as fast
+  as these numbers once none of them runs for it. Not measured end to end in an app.
+- **The browser** keeps the records' ciphertext in memory (IndexedDB has no synchronous reads) and
+  decrypts a record only when it is read: opening no longer decrypts the store (part of #778), but
+  it still reads all of the ciphertext, so its open time and memory stay O(store) (issue #1127, under
+  "Web client" above, has the numbers and why). The first catalog build gives the page its thread back
+  between batches and shows its progress. The catalog costs download size: about 28 kB gzip in the
+  app and 25 kB in the service worker, which doesn't carry the build (27 kB less). It is needed
+  from the first page on, so it can't move to a chunk; the guest budget went from 5.6 to 5.7 MB.
+- **Migration:** a store written before builds its catalog once, when the app opens it: every
+  record is decrypted once (what every start did before), in batches of 512 records, each a group of
+  writes that saves its progress, so a build that is killed goes on after its last batch. Tested on
+  the released 1.0.9 fixture and on a 4,500-message store stopped after two batches
+  (`store::sealed::tests::catalog`). A damaged or inconsistent catalog is built again the same way,
+  once, when it is noticed (`store::sealed::tests::repair`); that read takes as long as the build.
+  A catalog from before the feed indexes is built again under a new generation too, and SQLCipher
+  fills its new columns from every record in one layout step when it opens.
+
+### Android (first numbers)
+
+Release Rust core, debug Kotlin build (`assembleLibreDebug`), API 35 emulator (the Pixel 10 / API 37
+image does not boot on this AMD host), signed out:
+
+| What                                          | Value     |
+|-----------------------------------------------|-----------|
+| Cold start to the first frame (`am start -W`) | 1.0–1.2 s |
+| Memory after start (PSS)                      | 95 MiB    |
+
+### Mobile core: start and channel switch on a large workspace
+
+`crates/teamcraft-ffi/tests/start_budget.rs` measures through the API the apps call, on a sealed
+store with 300 conversations, 100,000 messages (half in one) and 3,000 MLS values of 4 KiB; no server
+is reachable. Release build on a desktop machine, not a phone: a phone is several times slower, so
+read these as a comparison, and the logs (`slow read`, `slow engine job`) for the device.
+
+| Measured                                      | Engine thread only | Read thread | Budget (mobile) |
+|-----------------------------------------------|--------------------|-------------|-----------------|
+| Constructor returns                           | 77 ms              | 1 ms        |                 |
+| List usable (first snapshot)                  | 2165 ms            | 1474 ms     | 2000 ms         |
+| List usable, a token refresh takes 3 s        | 5262 ms            | 1476 ms     | 2000 ms         |
+| Snapshot again, nothing changed               | 1358 ms            | 0.2 ms      |                 |
+| Same, a token refresh takes 3 s               | 4385 ms            | 0.3 ms      |                 |
+| Channel switch p95                            | 0.7 ms             | 0.7 ms      | 150 ms          |
+| Channel switch p95, a token refresh takes 3 s | 3001 ms            | 0.5 ms      | 150 ms          |
+
+The first snapshot used to read and decrypt every message of every conversation for its counts
+(`entry_counts`). Now each conversation keeps a sealed tally (`crates/teamcraft-core/src/entry_tally.rs`):
+
+| List usable (read thread, 100,000 messages)                  | Result  | Budget  |
+|--------------------------------------------------------------|---------|---------|
+| Before, and the first start after updating (counts them all) | 875 ms  | 2000 ms |
+| Next starts                                                  | 171 ms  | 2000 ms |
+| Next start, a token refresh takes 3 s                        | 140 ms  | 2000 ms |
+
+Same run, under a machine load of about 10; of those next starts about 80 ms is the start of the sync
+and about 90 ms the snapshot. This workspace is the worst case for the first start: nothing was ever
+read, so every message is unread. What a read costs since a tally was written:
+
+| Since then                                    | Reads                    |
+|-----------------------------------------------|--------------------------|
+| Nothing                                       | No message               |
+| New messages at the end                       | Those messages           |
+| Read position, mark, mention rules, an edit   | The rows from the read position on |
+| A row left, moved or got readable; older rows | The whole conversation, as before |
+
+A tally is checked against a version the store writes in the group of the messages, so it is never
+updated by hand and can't drift; one written before a crash means counting the difference.
+
+### Web bundle size
+
+Two budgets, both on the **compressed** wasm (issue #910's follow-up, 2026-10-31). The strict one
+is a **guest's meeting**: somebody from outside who opens a meeting link, often once and in a
+browser that never saw the app, downloads the lobby (the app and the service worker), then, once
+let in, the meeting's split modules (`guest`, `calls`) with the shared chunks they import, and the
+call module. The looser one is a ceiling on a **signed-in first visit**: the app, the signed-in
+app's chunks that `init.js` fetches next to it, and the service worker, which is installed on the
+first visit too; a member loads it once, then from the service worker's cache. That is what a user waits for: the server sends the wasm
+with gzip or brotli, the browser compiles it while it streams (`instantiateStreaming`), and the
+service worker serves it from its cache on every later visit. The uncompressed size of a Leptos app
+of this scope is not a useful budget on its own; 10 MB uncompressed was reached with the features of
+v1, and nothing cheap is left to cut (below).
+
+`.github/workflows/web-size.yml` builds the release bundle on every change to the crates in it and
+runs `scripts/check-web-size.py`. The script prints uncompressed, gzip -9 and (when the `brotli`
+module is installed) brotli -11 sizes, the gzip delta to `main` and a guest's first visit, and lists
+the chunks that load later. The limit:
+
+| Limit                                | Value        | Above it                        |
+|--------------------------------------|--------------|---------------------------------|
+| A guest in a meeting: gzip -9 total  | 10,000,000 B | fails; warns from 95 % (9.5 MB) |
+| Signed-in first visit: gzip -9 total | 10,000,000 B | fails; warns from 95 % (9.5 MB) |
+| The call module: gzip -9             | 1,000,000 B  | fails                           |
+
+Both budgets are temporarily 10 MB, until #1148 brings them back down; before that they were 5.7 and
+5.2 MB. The rest of this paragraph describes those.
+
+The guest budget is the guest's meeting measured below plus about 4 %, the signed-in ceiling the
+signed-in first visit on `main` 8d653d3c plus about 10 %. The single budget before (4,700,000 B,
+the signed-in first visit on `main` c55b2e58 plus about 10 %) only counted what a guest's lobby and a
+member's first screen load; a guest who was let in then loaded the whole signed-in app, uncounted. gzip -9 is the measure
+because every server and browser supports it and it is reproducible; brotli is printed as
+information. The uncompressed size is printed but not limited: what a user waits for is the
+transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
+outgrown it anyway, and the split moves code between files without changing what matters. Raising
+the budget is a decision, not a fix.
+
+#### A guest's meeting (2026-10-31)
+
+A guest's meeting view (`GuestMeeting`, after a host let them in) was a split point of the
+`session` module, the signed-in app's: a guest loaded the whole member app (sidebar, home, sign-in,
+settings entry points) to see one meeting chat and its call. It is a module of its own now,
+`guest`; what it shares with the signed-in app goes into shared chunks, so a guest loads those
+and nothing that only members use. Release `trunk build` in the local CI image (trunk 0.22.0,
+wasm-opt 131), gzip -9, every file once:
+
+| Download                                      | Before (`8d653d3c`) | After       | Delta      |
+|-----------------------------------------------|---------------------|-------------|------------|
+| A guest in a meeting (lobby, meeting, calls)  | 5,911,682 B         | 5,390,863 B | −520,819 B |
+| The lobby (app, service worker)               | 2,877,916 B         | 2,878,421 B | +505 B     |
+| Signed-in first visit                         | 4,700,571 B         | 4,724,318 B | +23,747 B  |
+
+The signed-in first visit grows by the headers of the new shared chunks. Still in a guest's
+meeting and the next candidates: the call screens' module imports a large set of shared chunks
+(1.06 MB with them), and the lobby's app carries the client core a guest without an account uses
+only in part.
+
+#### The split (#334)
+
+The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
+`crates/teamcraft-web-bundle` from the Trunk hook `scripts/build-app.sh`; Trunk 0.22 can't split):
+
+- **The signed-in app** (`session`: sign-in, the shell, everything a member uses) is a chunk of its
+  own. `init.js` fetches its files next to the app's for every page except a guest's meeting link,
+  so signed-in users load both at once and a guest only loads the guest pages. As the app grows,
+  what a guest downloads doesn't.
+- **Areas loaded when first used:** the administration console, settings, the lightbox, the
+  workspace dialogs (spaces, channels, invitations), the call screens, meetings, the directory and
+  search; since 1.0.8 also the account menu, the dialogs a first visit doesn't open, the Saved,
+  Files and Calls pages, Activity, a conversation's members and pins, an integration channel's log
+  view and the image codecs that make thumbnails (below); since 1.0.9 the synthesis of the message
+  sounds (`sounds`, #800), with the first sound, the administration console's data layer (with the
+  console, `admin`), a conversation's huddle bar (`calls`), and the formatting toolbar, the emoji
+  picker, the date pills' menu, the prompt of a device asking to be linked, the desktop app's update
+  banner and the "open in another tab" page (`dialogs`; below). `lazy_area` shows a spinner when a
+  chunk takes a moment and an error with a retry when it can't load.
+- Code several modules share goes into shared chunks (one per combination of modules), so each file
+  is downloaded once.
+- The call engine (`teamcraft-web-calls`, #330) stays a module of its own that loads in the
+  background after sign-in; the budget doesn't count it.
+- The background effects (#439) add their compositors (WebGPU and WebGL2) to it, about 57 kB gzip;
+  pictures are decoded by the browser. The person segmentation is a module of its own,
+  `teamcraft-web-segmentation` (tract, built with WebAssembly SIMD: 2.09 MB gzip), which the call
+  module runs in a worker, and the model (0.46 MB, 0.26 MB gzip) a file of its own: both are only
+  downloaded when someone first turns an effect on. A signed release lists them in `on_demand`,
+  so the service worker doesn't fetch them in the background. `check-web-size.py` keeps the call
+  module under 1 MB gzip.
+- A signed release's service worker installs without the chunks (the signed-in app's included) and
+  fetches each one, checked against its signed hash, when it is first used or in the background
+  about 15 s after a page loaded; not for a guest's meeting page (e2ee.md §9.3).
+
+Release `trunk build` in the CI image (Rust 1.99.1, trunk 0.22.0, wasm-opt 131), gzip -9:
+
+| Build                            | First visit, signed in | First visit, guest | Loaded later |
+|----------------------------------|------------------------|--------------------|--------------|
+| `main` b301a0d2 (one module)     | 4.93 MB                | 4.93 MB            | –            |
+| Split (#334)                     | 4.15 MB                | 2.47 MB            | 1.12 MB      |
+
+First visit = app + service worker (+ the signed-in app's chunks when signed in); the call module is
+not counted in either. The split costs a signed-in first visit about 0.2 MB of overhead over one
+module (each chunk imports what it uses from the app, which keeps those functions exported) and
+156 requests instead of one; in exchange a guest loads half and everything an area alone uses
+waits until it opens.
+
+Back under the budget (#695): the quick switcher, the keyboard shortcuts, the inline video player and
+the dialogs a first visit doesn't open (forward, edit history, bookmarks, share link, verifying a key
+or a contact) moved into areas. Release `trunk build` in the local CI image, gzip -9:
+
+| Web wasm       | Before (`a8778a26`) | After       | Delta     |
+|----------------|---------------------|-------------|-----------|
+| App            | 2,356,306 B         | 2,358,852 B | +2,546 B  |
+| Signed-in app  | 1,999,066 B         | 1,936,659 B | −62,407 B |
+| Service worker | 375,193 B           | 375,193 B   | 0 B       |
+| Total          | 4,730,565 B         | 4,670,704 B | −59,861 B |
+
+Over the budget again after 1.0.8 (CI: 4,809,730 B). The growth had no single cause: the 1.0.8 features (sync
+heads, the persistent media cache, one active tab, permission gating, desktop file menus and drops)
+added about 0.4 MB of first-visit code before wasm-opt, spread over the core and the shell. No
+debug code or new dependency came with them. Three kinds of code a first visit doesn't need were in
+it, and moved out:
+
+- **The image codecs** (`image`, zune-jpeg, png, image-webp, gif and the encoders, about 0.5 MB
+  before wasm-opt): `thumbnail.rs` makes thumbnails of sent pictures, and `image_dimensions` read the
+  header through `ImageReader::into_decoder`, a `dyn ImageDecoder` whose vtables link every
+  decoder's whole decoding. Now `image_dimensions` calls the format's decoder directly (headers
+  only; a test checks it reads the same sizes as before), and in the browser the engine makes
+  thumbnails through `make_thumbnail`, which the web app answers from the `images` chunk the first
+  time a picture needs one (`web_core.rs`). Natively nothing changed.
+- **`lazy_area`'s own views** were generic over each caller's closure, so every split point copied
+  the placeholder and the error view into the signed-in app (about 0.25 MB before wasm-opt for the
+  34 callers on `a6323ac5`, more with every new area). They are built once now; a caller only boxes
+  its loader.
+- **More areas:** the account menu and the custom status (`account`), a person's profile, a new
+  direct message, linking and approving a device, "calls unavailable" (`dialogs`), the Saved, Files
+  and Calls pages and a conversation's members and pins (`places`), Activity (`activity`), an
+  integration channel's log view (`log`).
+
+Release `trunk build` on macOS (trunk 0.22.0, Rust 1.99.1, wasm-opt 131, the CI job's commands; the
+before is 128 B from CI's), gzip -9:
+
+| Web wasm       | Before (`a6323ac5`) | After       | Delta      |
+|----------------|---------------------|-------------|------------|
+| App            | 2,416,993 B         | 2,287,481 B | −129,512 B |
+| Signed-in app  | 2,016,805 B         | 1,900,122 B | −116,683 B |
+| Service worker | 375,804 B           | 375,804 B   | 0 B        |
+| Total          | 4,809,602 B         | 4,563,407 B | −246,195 B |
+
+By step, measured one after the other: the areas −59 kB and −33 kB, `lazy_area` −26 kB, the image
+codecs −128 kB. A guest's first visit went from 2.79 MB to 2.66 MB. Still in the first visit and the
+next candidates: the admin console's data layer (`admin_live.rs`, about 0.1 MB before wasm-opt),
+which the shell reaches through the backend's vtable and uses for an admin's permission scheme
+outside the console, and the image headers `image_dimensions` reads (about 0.15 MB before
+wasm-opt).
+
+Over the budget again on the way to 1.0.9 (CI on `679c2dee`: 4,732,887 B; with #800, #830 and #838
+4,751,073 B). The growth came with the settings' device checks and key backup (#409, #410), #818,
+the abandoned device setups (#827) and the message sounds (#800); the settings themselves are an area
+already. Measured on the signed-in app's files (`twiggy top` on the split before wasm-opt), parts a
+first visit doesn't need were still in it, and moved out:
+
+- **The administration console's data layer** (`admin_live.rs`, about 0.2 MB before wasm-opt with
+  the admin API's wire types): the shell reaches it through the backend's vtable, so it stayed in the
+  signed-in app although only an admin's console uses it. Its refresh and its requests (changes,
+  on-demand data, connection tests, brand images) now run through `areas::admin_refresh` and
+  `areas::admin_task`, in the console's chunk; what stays is the cached data the synchronous
+  backend answers from. Nothing changes for an admin: the console loads that chunk anyway.
+- **Parts shown only in some situations**, each where it shows (`lazy_area`, new places `Inline`
+  for a part of a view and `Popover` for a popover, whose error leaves the app usable): the huddle
+  bar with the first call it shows (`calls`); the formatting toolbar (off by default), the emoji
+  picker and the date pills' menu the first time they open, the prompt of a device asking to be
+  linked with the first request, the update banner only in the desktop app, and the page a tab
+  shows while another tab runs the app (`dialogs`).
+
+Every new module multiplies the shared chunks (one per combination of modules that use a function),
+and each file costs a few hundred bytes of headers and types: a first try with four new modules
+(one per part) made the signed-in app 745 files instead of 627; in existing modules it is 629. New
+parts go into an existing module where one fits.
+
+Release `trunk build` on macOS (trunk 0.22.0, Rust 1.99.1, wasm-opt 131, the CI job's commands),
+gzip -9:
+
+| Web wasm       | Before (`4e9bfd38`) | After       | Delta      |
+|----------------|---------------------|-------------|------------|
+| App            | 2,397,220 B         | 2,399,068 B | +1,848 B   |
+| Signed-in app  | 1,959,081 B         | 1,798,771 B | −160,310 B |
+| Service worker | 394,772 B           | 394,772 B   | 0 B        |
+| Total          | 4,751,073 B         | 4,592,611 B | −158,462 B |
+
+A guest's first visit stays at 2.79 MB. Loaded later grew accordingly: the console's chunk from
+1.08 to 1.28 MB uncompressed, `dialogs` from 0.24 to 0.38 MB, `calls` from 0.29 to 0.32 MB.
+
+Release `trunk build` in the CI image (Rust 1.99.1, trunk 0.22.0, wasm-opt 131), `main` c55b2e58:
+
+| Web wasm       | Uncompressed | gzip -9     | brotli -11  |
+|----------------|--------------|-------------|-------------|
+| App            | 10,485,233 B | 3,906,338 B | 2,737,666 B |
+| Service worker | 789,797 B    | 339,884 B   | 275,586 B   |
+| Total          | 11,275,030 B | 4,246,222 B | 3,013,252 B |
+
+Earlier measurement, when wasm-opt `--converge` was added (#311):
+
+Release `trunk build`, Rust 1.99, wasm-opt 131, `main` e569848:
+
+| Web wasm       | Before (`-Oz`) | After (`-Oz --converge`) | gzip -9 (after) |
+|----------------|----------------|--------------------------|-----------------|
+| App            | 10,282,671 B   | 10,272,725 B             | 3.83 MB         |
+| Service worker | 790,289 B      | 789,496 B                | 0.34 MB         |
+| Total          | 11,072,960 B   | 11,062,221 B             | 4.17 MB         |
+
+The app grew from 9.41 MB (#248) to 10.27 MB by then and 10.49 MB at c55b2e58.
+
+Where the app's code goes (`twiggy top` on an unstripped build, before wasm-opt, by crate):
+
+| Crate(s)                                     | Share | What it is                                        |
+|----------------------------------------------|-------|---------------------------------------------------|
+| teamcraft-ui                                 | 19 %  | the views; the admin console's closures are large |
+| tachys, reactive_graph, leptos               | 21 %  | Leptos (rendering and reactivity)                 |
+| core, alloc                                  | 13 %  | the standard library                              |
+| serde, serde_json and the derived impls      | ~18 % | 2.0 MB of deserializers (overlaps the other rows) |
+| teamcraft-core, -client-api, -proto, -crypto | 18 %  | the client engine and the wire types              |
+| data (`.rodata`)                             | 8.5 % | strings, the two Fluent files (210 kB)            |
+| openmls, hpke-rs, p384, k256, curve25519     | 5 %   | MLS with every ciphersuite of openmls_rust_crypto |
+| image, zune-jpeg, image-webp, png, fdeflate  | 3 %   | attachment thumbnails (`thumbnail.rs`)            |
+
+What was tried, app wasm after wasm-opt:
+
+| Change                                                    | Size         | Taken                          |
+|-----------------------------------------------------------|--------------|--------------------------------|
+| `-Oz` (as shipped)                                        | 10,282,671 B | -                              |
+| wasm-opt `--converge`                                     | −9.9 kB      | yes                            |
+| wasm-opt `--low-memory-unused`                            | −40 kB       | no: Rust's stack is down there |
+| wasm-opt `-Oz -Oz`, `--gufa`, `--merge-similar-functions` | ≤ −10 kB     | no (same as `--converge`)      |
+| `opt-level = "s"` instead of `"z"`                        | +2.15 MB     | no                             |
+| `log` `release_max_level_off` (openmls' logging)          | −0.1 kB      | no (LTO drops it already)      |
+| `tracing` `release_max_level_info` (no debug logs on web) | −33 kB       | no: loses the console's debug  |
+
+Debug sections are already stripped (`strip = true`; the only custom sections left are 85 bytes),
+and the profile is already `opt-level = "z"`, fat LTO, one codegen unit and `panic = "abort"`. So
+there is no cheap megabyte left. What would make the first visit smaller:
+
+- **Split the bundle:** done (#334, above).
+- **Thumbnails through the browser** (`createImageBitmap` and `OffscreenCanvas`) instead of the
+  `image` decoders on wasm: about 0.35 MB. Since 1.0.8 the codecs load only with the first picture
+  (above), so this would now save a lazily loaded chunk, not first-visit bytes.
+- **Leaner deserializers** for the largest wire enums: `ChatAction` alone is 129 kB, decoded from a
+  `serde_json::Value`. Internally tagged enums go through serde's buffering `Content`, which adds
+  0.25 MB.
+
 ## Limits to keep in mind
 
 - All of this is for a single server instance and one database; rate limits and the call roster are
   per instance (`docs/operations.md`).
-- Index segments, attachments and search are client-side and not covered here.
+- Index segments, attachments and search are client-side and not covered by the server tests.
 - The load tests do not use TLS, a reverse proxy or real clients; WebSocket frames are small.

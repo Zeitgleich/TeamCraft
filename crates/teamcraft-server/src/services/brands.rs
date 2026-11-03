@@ -507,11 +507,14 @@ fn apply_settings(
   config.login_title = non_empty_map(settings.login_title);
   config.login_text = non_empty_map(settings.login_text);
   config.maybe_support_url = non_empty(settings.links.maybe_support);
+  config.maybe_documentation_url = non_empty(settings.links.maybe_documentation);
   config.maybe_privacy_url = non_empty(settings.links.maybe_privacy);
   config.maybe_terms_url = non_empty(settings.links.maybe_terms);
   config.maybe_imprint_url = non_empty(settings.links.maybe_imprint);
+  config.maybe_download_url = non_empty(settings.links.maybe_download);
   config.mail.maybe_sender_name = non_empty(settings.mail.maybe_sender_name);
   config.mail.maybe_from_address = non_empty(settings.mail.maybe_from_address);
+  config.maybe_sso_label = non_empty(settings.maybe_sso_label);
   clear_file_names(&mut config);
   config
 }
@@ -530,14 +533,17 @@ fn settings_of(config: &BrandConfig) -> BrandSettings {
     login_text: config.login_text.clone(),
     links: BrandLinks {
       maybe_support: config.maybe_support_url.clone(),
+      maybe_documentation: config.maybe_documentation_url.clone(),
       maybe_privacy: config.maybe_privacy_url.clone(),
       maybe_terms: config.maybe_terms_url.clone(),
       maybe_imprint: config.maybe_imprint_url.clone(),
+      maybe_download: config.maybe_download_url.clone(),
     },
     mail: BrandMailSettings {
       maybe_sender_name: config.mail.maybe_sender_name.clone(),
       maybe_from_address: config.mail.maybe_from_address.clone(),
     },
+    maybe_sso_label: config.maybe_sso_label.clone(),
   }
 }
 
@@ -549,6 +555,7 @@ fn clear_file_names(config: &mut BrandConfig) {
   config.maybe_icon_dark = None;
   config.maybe_favicon = None;
   config.maybe_favicon_dark = None;
+  config.maybe_sso_icon = None;
 }
 
 fn non_empty(maybe_text: Option<String>) -> Option<String> {
@@ -646,6 +653,7 @@ mod tests {
       login_title: BTreeMap::from([("en".into(), "Hi".into()), ("de".into(), " ".into())]),
       links: BrandLinks {
         maybe_support: Some("https://support.example.com".into()),
+        maybe_documentation: Some("https://docs.example.com".into()),
         ..BrandLinks::default()
       },
       ..BrandSettings::default()
@@ -665,6 +673,10 @@ mod tests {
     assert_eq!(
       settings_of(&config).links.maybe_support.as_deref(),
       Some("https://support.example.com")
+    );
+    assert_eq!(
+      settings_of(&config).links.maybe_documentation.as_deref(),
+      Some("https://docs.example.com")
     );
   }
 

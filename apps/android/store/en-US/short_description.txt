@@ -1,0 +1,1 @@
+Self-hosted team chat with calls and meetings, end-to-end encrypted.

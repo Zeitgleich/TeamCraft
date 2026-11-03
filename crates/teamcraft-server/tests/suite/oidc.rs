@@ -136,8 +136,40 @@ mod backchannel_logout {
     );
     assert!(is_closed(&mut laptop_socket).await);
     assert!(!is_closed(&mut phone_socket).await, "the other session must stay");
-    assert_eq!(app.get(&laptop, "/me").await.error_code(), "invalid_token");
+    assert_eq!(app.get(&laptop, "/me").await.error_code(), "session_ended");
     assert_eq!(app.get(&phone, "/me").await.status, StatusCode::OK);
+    app.stop().await;
+  }
+
+  /// Keycloak names the subject and the session in every logout token. Signing out on one device
+  /// (or signing in again there, which signs out first) must leave the user's other devices alone.
+  #[tokio::test]
+  async fn two_devices_stay_signed_in_when_one_signs_out() {
+    let app = app!();
+    let (desktop, phone) = (
+      member("carol").with_session("sid-desktop"),
+      member("carol").with_session("sid-phone"),
+    );
+    let desktop_device = register_device(&app, &desktop).await;
+    let phone_device = register_device(&app, &phone).await;
+    let mut desktop_socket = connect(&app, &desktop, &desktop_device).await;
+    let mut phone_socket = connect(&app, &phone, &phone_device).await;
+
+    let token = app.logout_token(Some("sub-carol"), Some("sid-phone"));
+    assert_eq!(post_logout(&app, &token).await.status(), StatusCode::OK);
+
+    assert!(is_closed(&mut phone_socket).await);
+    assert_eq!(app.get(&phone, "/me").await.error_code(), "session_ended");
+    assert!(
+      !is_closed(&mut desktop_socket).await,
+      "the desktop's gateway connection must stay"
+    );
+    assert_eq!(app.get(&desktop, "/me").await.status, StatusCode::OK);
+
+    // The phone signs in again: a new provider session, and both devices work.
+    let phone_again = member("carol").with_session("sid-phone-2");
+    assert_eq!(app.get(&phone_again, "/me").await.status, StatusCode::OK);
+    assert_eq!(app.get(&desktop, "/me").await.status, StatusCode::OK);
     app.stop().await;
   }
 
@@ -226,6 +258,7 @@ mod sync {
     assert_eq!(report.deactivated, 1);
 
     assert_eq!(app.get(&carol, "/me").await.status, StatusCode::FORBIDDEN);
+    // Suspended, not removed: she stays in the channel for when the provider enables her again.
     assert_eq!(
       app
         .get(&dave, &format!("/conversations/{channel}/members"))
@@ -234,7 +267,7 @@ mod sync {
         .as_array()
         .unwrap()
         .len(),
-      2
+      3
     );
     let users = app.get(&admin(), "/admin/users?query=carol").await;
     assert_eq!(users.body["users"][0]["deactivation_reason"], "oidc");
@@ -244,6 +277,10 @@ mod sync {
     provider.update("sub-carol", |user| user.is_enabled = true);
     assert_eq!(sync_once(&app.state).await.unwrap().reactivated, 1);
     assert_eq!(app.get(&carol, "/me").await.status, StatusCode::OK);
+    assert_eq!(
+      app.get(&carol, &format!("/conversations/{channel}")).await.status,
+      StatusCode::OK
+    );
     let log = app
       .get(
         &admin(),

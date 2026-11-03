@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM org_recovery_requests WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "60665d4efe6a4a1e084bf4314d22048ddc9c456eb9d4572fc7758aaee61a1afb"
+}

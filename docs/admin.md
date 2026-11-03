@@ -18,6 +18,41 @@ Status: design draft. Builds on [e2ee.md](e2ee.md).
 Permissions follow the scheme in PLAN.md §13 (instance / space / channel scope; a channel can only
 restrict). Custom roles: later.
 
+### 1.1 What the clients offer
+
+Every action in the UI (button, toggle, menu entry, editable field) is shown only to people whose
+rights allow it; nobody gets a "Change" that ends in an error (issue #691). Read-only information
+stays visible, and where hiding a control would confuse, it is disabled with an explanation (for
+example the channel name for non-admins). The clients decide from the same facts the server
+enforces, which the server hands out as hints:
+
+| Fact                                   | Where                                    | Gates                                                                                            |
+|----------------------------------------|------------------------------------------|--------------------------------------------------------------------------------------------------|
+| `my_permissions`                       | `ConversationResponse` (list and single) | posting, reactions, pins and bookmarks, share links, members, roles, channel properties, privacy |
+| `can_add_members`, `can_invite_guests` | `SpaceResponse`                          | "Invite people"                                                                                  |
+| `can_manage_space`                     | `SpaceResponse`                          | space settings, moving channels between spaces                                                   |
+| `can_create_channels`                  | `SpaceResponse`                          | "New channel"                                                                                    |
+| instance role (guest, member, admin)   | the signed roster                        | browsing channels and spaces, meetings, admin console                                            |
+
+`my_permissions` is evaluated with the conversation's space scheme and its moderation, so an
+announcement channel takes "post" from its members in the UI too. A server that doesn't send it
+leaves the client on the built-in scheme. The server checks every request again.
+
+The desktop, web, Android and iOS clients offer the same actions from the same facts (issue #758).
+When the facts change, the server tells the people concerned, and their clients fetch the
+conversation (`conversation_update`) or the spaces (`space_update`) again, so the UI follows
+without a reload:
+
+| Change                        | Who hears it                                               | Event                                 |
+|-------------------------------|------------------------------------------------------------|---------------------------------------|
+| channel role, moderation      | the channel's members                                      | `conversation_update`                 |
+| space role (e.g. space admin) | the space's members; the person for each of their channels | `space_update`, `conversation_update` |
+| a space's permission scheme   | the space's members; each channel's members                | `space_update`, `conversation_update` |
+
+Changes to the instance scheme reach every conversation of the instance and are not pushed (one
+update per conversation would make every client fetch all of them at once); clients see them at
+their next sync or the conversation's next update.
+
 ## 2. Managing rooms without reading them
 
 ### 2.1 What an admin sees for every conversation
@@ -37,8 +72,10 @@ actions run in two steps:
 
 1. The admin's client creates a **signed admin action** (e.g. "add Anna to #project-a-dev",
    "remove Max from #project-b-internal"), signed with the admin's device key.
-2. The server enforces it immediately for access control (e.g. stops delivering to removed users) and
-   hands the signed action to the group's member clients. v1 delivers it as a pending change; the
+2. The admin's client posts the signed action into the group's queue first and only then asks the
+   server to drop the membership, so a crash in between can't leave a removal without its signed
+   action (e2ee.md §4.6, removal order). The server enforces it immediately for access control (e.g.
+   stops delivering to removed users) and hands the signed action to the group's member clients. v1 delivers it as a pending change; the
    committing member puts it into the commit's authenticated data (e2ee.md §4.6). Later option: send
    it as an MLS **external proposal** (RFC 9420: the workspace's admin key registered as an
    `external_senders` entry in every group); the signed action stays the same.
@@ -66,33 +103,279 @@ could add itself to every channel.
   roster change, so an owner removed later can't sign a "back-dated" policy.
 - **Freshness.** Owners' clients sign the roster again regularly; when the newest roster a client has
   is older than the accepted age (default 30 days, a client setting), admins have no authority on that
-  client until an owner re-signs. A server that holds back a demotion gains at most that long.
+  client until an owner re-signs. A server that holds back a demotion gains at most that long. For
+  commits the age is judged at the server's time of the commit, so every member decides the same way
+  whatever its clock shows (e2ee.md §4.6).
+- **Never without an owner.** A roster must name at least one owner with a usable identity key:
+  nobody could sign the next roster or policy otherwise. Owners' clients refuse to sign such a
+  roster (`last_owner`), the server refuses to store one, and every client refuses to apply one even
+  when it is validly signed (an older or compromised owner device), keeping the last verified roster.
 - **Fork detection.** Members send their verified roster and policy heads inside their encrypted
   messages. A colleague with a different entry for the same version, or with entries this client
   isn't shown, raises an alarm.
-- Space admin and channel owner assignments are signed by an admin or a higher role.
+- Space admin and channel owner assignments are signed by an admin or a higher role. Channel roles
+  (admin = owner, moderator) are a signed log per channel (e2ee.md §4.6.1): each entry is signed by
+  a workspace admin or owner of the fresh roster, or by a channel admin of the previous signed
+  entry, under the same role rules the UI and the server use; a channel's creator signs the first
+  entry. Roles only the server lists (channels from before, space admins' changes, older clients)
+  are shown as not signed and count for nothing that needs a signed role; an admin who can sign
+  confirms them in the channel's members section. Space roles are not signed yet.
 - Member clients only commit membership changes that are signed by someone allowed to make them
   (admin, space admin, channel owner, or a member with `manage_members`). Unsigned or wrongly signed
   proposals are rejected and reported.
 
+#### 2.3.1 Owner lifecycle
+
+The workspace can only be administered while an owner with a working device exists: owners sign
+every roster and policy, and admin authority lapses on member clients 30 days after the newest owner
+signature (freshness above).
+
+- **Keep at least two owners.** The Security section of the console lists the owners with the time
+  each last signed a roster or policy, as this device verified it, and warns when there are fewer
+  than the recommended number. That number is part of the signed policy (`owners.recommended_minimum`,
+  default 2; 1 switches the warning off).
+- **When an owner leaves, add the successor first, then remove the old owner.** Removing the last
+  owner is refused, so a handover always passes through a roster with both.
+- **The first roster.** The first policy save in a workspace without a signed roster signs the
+  genesis roster too: the signer as first owner (the root of trust), proposed together with the
+  owners and admins the identity provider lists. That list comes from the server, so it goes
+  through the same confirmation as later edits (user ID, fingerprint, attested, trusted on first use
+  or own key) before anything is signed; the owner can also sign themselves alone and add the
+  others later. The core signs only the confirmed list (`publish_policy_with_genesis`) and ignores
+  it once a roster is verified.
+- **Editing the roster.** Administration → Security → Owners lists the signed roster. An owner on a
+  device with signing keys (desktop or web) can add a person as owner or admin, make an owner an
+  admin or the other way round, or remove someone. The console shows the changes, refuses a roster
+  without an owner, and signs the new version on the owner's device (`publish_roster`, then the
+  current policy again under it). People need an identity key (they set up TeamCraft once) before
+  they can be added.
+- **Confirm before signing.** Names come from the server and can be faked, so nothing is signed
+  from the editor directly: a confirmation lists every change with the user ID and the fingerprint
+  of the identity key this device pinned, marks keys that the identity provider didn't attest, that
+  aren't pinned yet (they are pinned when signing) or that the server now shows changed, and only
+  then signs. The owner compares ID and fingerprint with the person.
+- **Concurrent edits.** The editor signs only if the verified roster is still the version it
+  started from (`publish_roster_based_on`); if another owner signed meanwhile, nothing is signed
+  (`roster_changed`) and the owner edits the new roster.
+- **Identity provider roles.** The `owner` and `admin` roles in the identity provider don't change
+  the signed roster by themselves: the server can't sign. When the provider lists owners or admins
+  the roster doesn't have, the console lists them (with each account, so two accounts with one name
+  differ), and an owner signs them through the same confirmation. This only adds people and
+  promotes admins to owners: it never removes or demotes anybody, because the server's role list is
+  the role each account last showed in a token and can lag behind the provider; removing someone
+  is the owner's explicit edit (issue #765). Deactivated accounts are never proposed.
+- **Unsigned roles are said, not hidden.** Admin rights hold only through the fresh signed roster,
+  so an admin or owner whose provider role nobody signed yet is a member on everybody else's app.
+  A banner above the app and on every console page says so, with the owners to ask; a signing
+  owner sees there that provider roles wait for their signature, and after the freshness window
+  ran out an owner signs the unchanged roster again from the banner. Actions refused for this
+  reason (integration sources, joining private channels) say it where they are.
+- **Admins can't sign.** For admins the form is read-only; the core refuses to sign a roster or
+  policy for anyone who isn't an owner of the verified roster (`not_an_owner`), and every client
+  would refuse such an entry anyway.
+- **Keep an owner's app in use.** An owner's client signs the roster again by itself when half of
+  the 30 days have passed. The console warns a week before the window runs out (a client setting,
+  `workspace_expiry_warning`) and once it has: then an owner only needs to open TeamCraft.
+- **All owners lost** (every owner left, or lost all devices and the recovery kit): there is **no
+  recovery path**, by decision (issue #188). A recovery by key shares or by re-rooting the trust
+  would be one more way to take over a workspace, so there is none. What happens:
+  - Nobody can sign a roster or a policy again: only an owner of the verified roster can
+    (`not_an_owner`), and an owner needs a device with the identity key.
+  - Admins keep their authority on a client until the newest roster it holds is older than the
+    freshness window (30 days by default, the client setting `workspace_max_age`). After that,
+    every client treats admins as members and the console shows the banner above; nobody can sign
+    the unchanged roster again to extend it. Chat itself keeps working.
+  - A new genesis roster is refused by every client that pinned the root of trust
+    (`WorkspaceError::RootChanged`), also when the server offers it. A new device of a member takes
+    the root another of their devices pinned, so it does not help either.
+  - Restoring a backup brings back the same locked state.
+
+  The only way out is to set the workspace up from scratch: new database, new enrollment of
+  everybody, and the history of the old one stays behind. The steps and what is kept are in
+  operations.md, "Setting up again". Avoid it: keep two owners (above) and keep an owner's app in
+  use.
+
 ### 2.4 Admins joining private channels
 
-An admin could add *themselves* to a private channel and then, with full history policy, read its
-history. That is allowed, but never silent:
+An admin could add *themselves* to a private channel and read what is posted there from then on. A
+self-join asks only for the history from the join on: members' apps refuse a signed self-add that
+asks for more, whatever the workspace default (e2ee.md §4.7). Until a member's app lets the admin's
+device in, the channel says it waits and the device asks again on its own; the console's button then
+reads "Request access again" and is gone once the admin is in. That is allowed, but never silent:
 
 - Per instance setting `admin_self_join` for private channels:
-  - `visible` (default) – allowed; members see the same system message as for any added member
-    ("Paul joined"), marked with an admin badge. Unlike normal join/leave messages, it can't be
-    hidden by the user setting,
-  - `owner_approval` – a channel owner must approve,
+  - `visible` (default) – allowed; members see "Paul joined this channel as a workspace admin"
+    (§2.4.2). Unlike normal join/leave messages, it can't be hidden by the user setting,
+  - `owner_approval` – a channel owner must approve (§2.4.1),
   - `disabled`.
 - Member clients enforce this setting themselves (it's part of the signed workspace policy), so the
   server can't bypass it.
+- **Nor can another admin** (issue #816). The setting is about admins getting in without the
+  members, so members' apps hold every signed addition of an owner or admin by an admin who isn't
+  in the channel to it, not only the admin's own: under `owner_approval` and `disabled` they
+  refuse it, and two admins can't add each other around it. An addition signed by a member is an
+  ordinary one under every setting, also of an admin; the approving owner of §2.4.1 is such a
+  member. Admins outside the channel still add everybody else (§2.2). Like the self-join, this is
+  about channels the members' apps know as private or archived (the server's word, §2.4.2); in an
+  open public channel admins join like anybody.
+- **What members' apps can check.** That whoever signed an addition is in the channel's MLS group,
+  verified; not that they may add people there. Which members may (`manage_members`, the channel's
+  owners) is the server's record until channel roles are signed (issues #380, #801), so a hostile
+  server can let any member add an admin. And an admin outside the channel can still add somebody
+  who isn't an admin (§2.2), who can then add an admin as a member: each step is a signed addition
+  members verify, and the line of §2.4.2 names who let the admin in, but neither is refused.
+- **Members on older versions.** Clients before 1.0.9 still commit another admin's addition of an
+  admin whatever the setting says. A member on 1.0.9 or later refuses that commit like any it
+  can't verify, falls out of the group, asks to be added back and is added back into it, with the
+  admin in (e2ee.md §4.6, "Falling out and coming back"); it shows no line for that join, since it
+  never merged the commit. The group doesn't split, but the setting holds in a channel only once
+  none of its members' devices runs an older version. The server doesn't refuse the membership
+  either (it checks only an admin's own join, security review D11).
+- **Where admins join.** The channel browser lists a space's private channels to workspace admins,
+  marked private, as the verified policy allows: "Join as admin" for `visible`, "Ask to join" for
+  `owner_approval` (§2.4.1), nothing for `disabled`. The admin's app signs the self-join. Members'
+  apps let the admin in only while their role is in the fresh signed roster.
+- **How members are told** (§2.4.2): each member's device writes the line "… joined this channel as
+  a workspace admin" (with "approved by …" or "added by …" when somebody else let them in) itself,
+  from the MLS commit that added the admin, once it verified that commit; shown whatever the
+  join/leave setting. No message makes or suppresses it.
+
+#### 2.4.1 Asking the owners (`owner_approval`)
+
+Under `owner_approval` members' apps refuse an admin's own signed self-join, so the admin asks the
+channel's owners instead (issue #776). The server only stores and relays the request; what lets the
+admin in is an owner's own membership change.
+
+- **Asking.** "Ask to join" in the channel browser (or "Add myself" in Administration → Channels)
+  sends `POST /conversations/{id}/admin-join-requests`. The server takes it only from an instance
+  admin, under its copy of the policy, for an open private channel the admin isn't in, in a space
+  they belong to, that has an owner. There is one open request per admin and channel: asking again
+  answers with the open one and tells nobody again. The admin sees "Requested" with "Withdraw".
+  After a decline or a withdrawal the admin can ask again only once that request would have
+  expired (`admin_join_request_too_soon`), so asking and withdrawing can't notify the owners over
+  and over.
+- **Who decides.** The channel's owners: members with the channel role `admin`. The server decides
+  who is asked, but an owner's app approves only if its own verified channel roles (e2ee.md §4.6.1)
+  make that owner an admin, and members take the add in only from a signed channel admin. An owner
+  the server alone lists sees the request with "Your owner role in this channel isn't signed" and
+  can only decline, until a signed admin or a workspace admin signs the role ("Sign role" in the
+  channel's members; an owner of a channel from before signed roles signs their own, which founds
+  the log). A channel nobody signed yet keeps the rule of before for members, so older apps in the
+  group are not split off; what an approval can do is limited by the checks below. The server tells
+  them (gateway `admin_join_request_update`) and their apps show the request at the top of
+  Activity, in the channel settings above the member list and as a system notification, each with
+  Approve and Decline and the admin's name with their username. The badge counts it until it is
+  decided.
+- **Approving** is the owner's app adding the admin. The server approves the request and adds the
+  membership in one transaction (`POST …/admin-join-requests/{user}/approve`, only while the
+  request is open and the person who asked is still an instance admin, by their last sign-in), so
+  of several owners or devices exactly one approves and a decline or an expiry at the same moment
+  wins completely or not at all; only the approving owner's retry is answered again, everybody
+  else gets `admin_join_request_not_found`. Then the owner's own MLS add, which members' apps
+  check like any addition by a member and from which each of them shows "… joined this channel as
+  a workspace admin, approved by …" whatever their join/leave setting (§2.4.2). For older versions
+  the encrypted `AdminJoined` message with "approved by" goes out too, only when this commit put
+  the admin's devices in (a second approval announces nothing).
+- **History.** Approving shares what a self-join gets, the history from the join on (e2ee.md
+  §4.7). The earlier history only when the owner ticks "Also share the earlier history" in
+  Activity or the channel settings; Approve in a notification never shares it, and its text says
+  so.
+- **Declining** (`DELETE …/admin-join-requests/{user}`) closes the request; the admin can ask again
+  once it would have expired.
+- **The server's word is a hint.** The owner's app shows and approves a request only if its own
+  state agrees: the verified policy says `owner_approval`, the conversation is a private,
+  unarchived channel the owner is in (a request for a DM, a meeting chat or an unknown
+  conversation is neither shown nor approved), the owner's device is in its group and the owner is
+  a signed admin of the channel. Approve is
+  offered only for somebody the fresh verified roster lists as an admin; for anybody else the app
+  says so and offers Decline only. A request the server makes up can at most ask an owner to let a
+  real admin of the signed roster into one of the owner's private channels, with the history from
+  the join on, and the admin's devices are certified by their pinned identity key.
+- **Expiry.** A request expires after `admin_join_request_days` (instance setting, §6.3, default 7
+  days, 1 to 90, also when the configuration file says otherwise); the account housekeeping
+  deletes it and tells owners and admin. A new policy without `owner_approval` deletes every
+  request (admins join by themselves now, or not at all). Requests whose channel was archived,
+  made public or deleted, whose admin was deactivated, deleted, left the space or lost the admin
+  role, or who is in the channel already are never listed; adding the admin any other way settles
+  their request.
+- **Offline, several devices, restarts.** Requests live in the database, so a server restart loses
+  none. Apps read the list again after every gateway connection while the verified policy asks
+  for approval (otherwise they make no request), and on every `admin_join_request_update`; an
+  owner who was away sees waiting requests when they come back. Telling people and the audit log
+  follow the stored decision as best effort: a failure there is logged and never undoes or
+  strands it. Every step is in the audit log (`admin_join_requested`, `…_approved`, `…_declined`,
+  `…_withdrawn`, `…_expired` with the reason, also for a policy change).
+- **On the phones** (issue #799) owners see the requests at the top of Activity (Android; on iOS
+  above the channels of the Spaces list, whose tab counts them) and above the messages of the
+  channel itself, with the admin's name and username and the same rules: Approve only for an admin
+  of the fresh verified roster (otherwise Decline only, with the reason), the history from the join
+  on unless the owner ticks "Also share the earlier history". While the app runs, a new request
+  shows a notification with Approve and Decline (Decline only for somebody the roster doesn't
+  list; neither names nor actions behind the app lock or while notifications show nothing), once
+  per request and device and withdrawn when the request is gone; its Approve never shares the
+  earlier history, and its text says so. A decision from the notification that doesn't go through
+  shows the notification again with why. Admins ask, see "Requested" and withdraw in the channel
+  browser; joining without asking (`visible`) stays on desktop and web.
+- **Not yet:** no push wakes an owner's phone for a request (wake-ups name messages and calls
+  only; a request kind is a follow-up); a phone that was closed sees the waiting requests when it
+  connects again.
+
+#### 2.4.2 The line comes from the commit (issue #811)
+
+"Never silent" can't rest on a message: a member could send "joined as a workspace admin" without
+anybody joining, and a committer that crashed after its commit, or a server that drops the
+message, would keep a real join quiet. So the line is derived where the join happens:
+
+- **When.** A device that merges a commit, one it verified like any other (§2.3) or its own,
+  compares the group before and after: every user with a device in the group now and none before
+  (not a further device or a device added back), whom the verified roster lists as an owner or
+  admin, gets the line, in a channel that isn't open to everybody as the device knows it (a
+  private channel, or an archived public one; not a DM, group DM or meeting chat, where admins
+  have no way in of their own). The roster is the one the device holds when it processes the
+  commit, as for the commit's own check: a device that catches up late may tell about somebody
+  who was an admin then and isn't any more, or the other way round. The channel's visibility and
+  kind are the server's word here as in the members' check of a self-join (`visible` doesn't
+  apply to an open public channel), so a server that calls a private channel public keeps the
+  line away, as it turns the self-join into an ordinary join. The roster's freshness decides an
+  admin's authority, not whether members are told, so a member adding an admin while the roster
+  waits for re-signing is still told. However the admin got in, the line is there: their own
+  signed self-join, an owner's approval, a member's ordinary add, or another admin's signed change
+  (§2.2; for an admin, only under `visible`, issue #816), which used to be silent.
+- **Who let them in.** The line names the verified signer of the change that added the admin,
+  unless that is the admin (a self-join): "approved by …" when the signer was a member of the
+  channel while the verified policy says `owner_approval` (an owner's approval, whose device also
+  commits it), "added by …" otherwise (a member's ordinary add under `visible` or `disabled`, or
+  another admin who signed the change and only had a member's device commit it). A device's own
+  commit keeps its signer, with the epoch the device made it in, next to the pending commit, so a
+  commit whose answer was lost and that is merged from the queue later names the same person; a
+  kept signer of another epoch, or a commit staged by an older version, names nobody.
+- **Where.** The line sits at the commit's place in the conversation (the commit's ID is the
+  server's time-ordered ID, like a message's), is stored like a message but marked as derived
+  from that commit, and is no message of the server's (no read position, paging cursor or
+  permalink uses it). Its ID comes from the commit and the admin, so processing the commit again
+  after a restart writes it once, on every device of every member, the committer's included.
+  That ID is known to whoever saw the commit, so a message with it is never stored over the line,
+  and no edit, delete or pin changes it. The apps' row of the line goes by the commit's ID; a
+  message the server gives the same ID doesn't take the line's place there either. The apps know
+  it is a line from the message alone (the UI's `MessageKind::Change`), before its text arrives.
+- **Unread.** The line counts as unread like a message at the commit's place, from anybody but
+  the user (an owner's own approval isn't unread to them): the server's read position covers it
+  once a later message was read. A line newer than every message is read when the user reads the
+  conversation on this device; another device of theirs shows it unread until they read it there
+  too (the server's read position names messages only).
+- **Who doesn't see it.** The admin's own devices join by the welcome and see no commit: they show
+  no line. A member who joins later doesn't see lines from before their time either.
+- **Older versions.** The committer still sends the encrypted `AdminJoined` message (members'
+  self-join commits, owners' approvals), which versions before this show; this version stores it
+  hidden and never shows it, also one stored before the update. A self-join committed by an older
+  version is still told here, from its commit.
 
 ### 2.5 Orphaned channels
 
 When the last owner of a private channel leaves the company, an admin assigns a new owner from the
-remaining members. The admin doesn't need to be a member for that.
+remaining members. The admin doesn't need to be a member for that. A workspace admin's signature is
+what makes the new owner count on members' apps (e2ee.md §4.6.1); the console's assignment doesn't
+sign it yet (a follow-up of issue #380), so until then the new owner's role shows as not signed.
 
 ## 3. Admin features
 
@@ -107,22 +390,132 @@ remaining members. The admin doesn't need to be a member for that.
 | Set posting permissions (announcement channels), history policy, guest access                                               | v1    |
 | Retention per space/channel: last N days and/or last N messages; admin defaults and maximums, owners choose within them     | v1    |
 | Integration channels: who may create them, register bridges, default retention; allow server-readable mode (off by default) | v1    |
-| Delete a channel completely (all ciphertext + attachments)                                                                  | v1    |
+| Delete a channel completely (all ciphertext + attachments), members or not, archived or not; §3.1.1                         | v1    |
 | Default spaces/channels for new users (`policy.default_spaces` / `default_channels`, applied once at first sign-in)         | v1    |
 | Space templates                                                                                                             | later |
 
+#### 3.1.1 Leaving and deleting channels and spaces (issue #1130)
+
+| Case                                              | Who                                                                                                             | What happens                                                                                                                         |
+|---------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| Delete a channel (`delete_channel`)               | Channel admin, workspace admin, owner; space admin where they reach it (public, or they are in it)              | Gone for all members, also with people in it, active or archived. A channel the caller can't see answers 404                        |
+| Delete a space (`delete_space`)                   | Workspace admin, owner; space admin unless it holds a private channel they aren't in (409)                      | The space and all of its channels go for everybody in them; the confirmation names how many channels                                |
+| Either, while an import account holds a channel   | Nobody (409 `import_in_progress`)                                                                               | The import finishes first (docs/import-synology.md)                                                                                  |
+| Leave, archived channel                           | Anybody in it, also the last channel admin                                                                      | Allowed: an archived channel takes no role changes. Removing the last admin by somebody else stays refused                           |
+| Leave, last member of a private channel           | The last member, saying so (`delete_if_last`; otherwise 409 `last_member`, older clients leave it without members) | The channel is deleted. Leaving a space does the same for private channels only the leaver is in; its confirmation says so        |
+| Leave or removal, public or imported channel      | Anybody                                                                                                         | Stays without members, findable, for an admin to restore: anyone could join and leave to delete it, and imports can't come back      |
+| Admin removal or guest expiry of the last member  | As for any removal                                                                                              | Nothing is deleted                                                                                                                   |
+| Leave, active channel, last admin, others present | Refused (409 `last_channel_admin`)                                                                              | The refusal says the way out: make someone else channel admin, or delete the channel                                                 |
+
+An archived channel left without an admin stays for its members: they read it and may leave. Restoring
+it takes an admin (409 `channel_needs_admin`): a workspace admin assigns an owner (below) or deletes it.
+Roles are signed, so the server can't make the restorer one. Archiving and restoring take
+`manage_channel_properties`. None of this reaches content. On members' devices a deletion hides the
+conversation and keeps its messages for a while, since nobody signs it yet (e2ee.md §4.6). Deletions
+are in the audit log (`channel_deleted`, `channel_deleted_last_member`, `space_deleted`; a space leave
+names the channels it deleted in `space_member_removed`).
+
 ### 3.2 Users and guests
 
-| Feature                                                                                                            | Prio |
-|--------------------------------------------------------------------------------------------------------------------|------|
-| User list with status, devices, last seen, role, spaces                                                            | v1   |
-| Deactivate user (also automatically when disabled in the OIDC provider): sessions revoked, removed from all groups | v1   |
-| Remove a single device (lost phone)                                                                                | v1   |
-| Start org recovery for a user (needs a second admin, see e2ee.md §6.3)                                             | v1   |
-| Invite guests, set expiry and sponsor, see all guests and where they are                                           | v1   |
-| Local accounts: create, reset password/TOTP                                                                        | v1   |
-| OIDC group → role/space mapping                                                                                    | v1   |
-| User groups (`@devteam`)                                                                                           | v1   |
+| Feature                                                                                                          | Prio |
+|------------------------------------------------------------------------------------------------------------------|------|
+| User list with status, devices, last seen, role, spaces                                                          | v1   |
+| Deactivate (suspend) user, also automatically when disabled in the OIDC provider; reactivate restores everything | v1   |
+| Remove a deactivated user from all chats (devices leave every group, keys rotate); optionally after a set period | v1   |
+| Delete an account: a tombstone stays on old messages, direct messages go, the sign-in is released                | v1   |
+| Remove a single device (lost phone)                                                                              | v1   |
+| Start org recovery for a user (needs a second admin, see e2ee.md §6.3)                                           | v1   |
+| Invite guests, set expiry and sponsor, see all guests and where they are                                         | v1   |
+| Local accounts: create, reset password/TOTP                                                                      | v1   |
+| OIDC group → role/space mapping                                                                                  | v1   |
+| User groups (`@devteam`)                                                                                         | v1   |
+
+#### 3.2.1 Deactivating, reactivating, removing and deleting users
+
+Deactivation and removal are two steps (issue #631); deletion is the final one (issue #630):
+
+| Step                      | What happens                                                                                                                                                                                                                                                                                                                                                                                                          | Reversible                                  |
+|---------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------|
+| **Deactivate** (suspend)  | Gateway connections close and can't resume, local sessions end, every request and sign-in (SSO and local) is refused with `account_deactivated`, no pushes are sent (registrations are kept). Memberships, space memberships and devices stay; others see the user as deactivated.                                                                                                                                    | Yes: reactivate, same devices sign in again |
+| **Reactivate**            | Lifts a deactivation: the same account signs in again with its devices and whatever memberships it still has. Not possible after a deletion.                                                                                                                                                                                                                                                                          | –                                           |
+| **Remove from all chats** | Only for deactivated users. The admin's client signs the user's removal from every channel they are in; members' clients commit it, which rotates the keys (e2ee.md §4.6). Then the server revokes the devices and drops direct messages and spaces.                                                                                                                                                                  | No: they have to be added again             |
+| **Delete account**        | The removal from all chats, then: devices revoked (push registrations and key packages go), identity key, key bag, local account, sessions, profile and recovery shares removed, the OIDC identity released (signing in again creates a new, empty account), 1:1 direct messages deleted. The row stays as a tombstone named "Deleted user" because messages, reactions, the audit log and call history reference it. | No: final                                   |
+
+- **Delete account** (`DELETE /admin/users/{id}`, audit `user_deleted`). Like "Remove from all
+  chats", it runs on the admin's client, which needs its device keys: it signs the user's removal
+  from every channel (`GET /admin/conversations?user_id=`) and commits the removal in every group of
+  its own where the user is left over, and only then calls the server. The console asks for the
+  account's name to be typed and explains deactivating versus deleting. Rules:
+  - Admins delete members and guests; only owners delete admins and owners (403). Nobody deletes
+    their own account (409 `cannot_delete_self`), and deleting the last active owner (400
+    `last_owner`) or admin (409 `last_admin`) is refused.
+  - Idempotent: a retry after a lost answer finishes what is left and answers 204; the console's
+    second try after a failed channel does the same.
+  - **Direct messages.** A 1:1 DM with the deleted user is deleted entirely: the conversation, its
+    messages and ciphertext, attachments (also in storage) and MLS group state. A group DM stays
+    like a channel unless only one other person would remain; then it is deleted like a 1:1 DM. In
+    a group DM that stays, the admin's device commits the removal if it is in the group; elsewhere
+    the user is listed as left in the group for an admin who is (below). The
+    remaining participants' devices drop it with its local history when the gateway announces
+    `conversation_delete`, or on their next full sync (`deleted_conversation_ids` of
+    `GET /conversations`, remembered for `[policy] deleted_conversations_kept_days`, default 180).
+    A DM is found by its participants, not by membership: a removal from all chats before the
+    deletion took the membership, but the DM still goes (issue #1066). DMs that deletions before
+    that fix left behind are deleted by the account housekeeping, a few accounts per run.
+  - **Channels.** The user's messages stay; clients show the author as "Deleted user" (in their own
+    language) in messages, profiles, member lists, conversation titles, search and notifications
+    (the shells give the core its translation, `people_names`), and leave the tombstone out of people lists,
+    the DM list and the mention picker. Optionally deleting their messages is out of scope: the
+    server can't read them.
+  - **The identity.** The OIDC issuer of the row gets a `deleted:{id}:` prefix, so the issuer and
+    subject pair is free and the identity provider sync no longer sees the account. Only a sign-in
+    after the deletion creates the new account: tokens from an earlier sign-in (`auth_time`, else
+    `iat`, at or before the deletion), also ones refreshed since, are refused on REST, the gateway
+    and device linking with 401 `account_deleted`. To keep the person out for good, disable them at
+    the identity provider too.
+  - **Signed roster.** A deleted admin or owner stays in the signed roster until an owner signs a
+    new one; their devices are revoked, so the entry grants nothing.
+- **Users left in encryption groups** (issue #734). The console's "Spaces and channels" lists, as one
+  compact list, users still in the encryption group of a conversation the admin's device is in,
+  whom the server no longer lists (issue #661): with the account's current name (marked when it is
+  deactivated) and where (`#channel`, the direct message with someone, or a deleted conversation).
+  "Remove from the group" (and "Remove from all" for several) makes the admin's device sign and
+  commit the removal, which rotates the keys; nothing is removed on the server's word alone. The
+  admin page of a deactivated user offers "Remove from all chats" also when only such leftovers
+  remain.
+
+- **Who triggers what.** An admin deactivates in the console (`POST /admin/users/{id}/deactivate`) and
+  removes in a second, explicit step. "Remove from all chats" runs on the admin's client, which
+  needs its device keys (desktop app, or a browser with the account set up; otherwise the console
+  explains and offers nothing): it lists the user's channels (`GET /admin/conversations?user_id=`),
+  signs a removal from each like any admin removal (§2.2), and only then calls
+  `POST /admin/users/{id}/remove-from-chats` (409 `conflict` for an active user), which revokes the
+  devices and drops direct messages and spaces. A channel that fails leaves the server step out; the
+  admin removes again. Recommended for people who left the organization.
+- **Automatic removal.** `server_rules.remove_deactivated_after_days` (config `[policy]
+  remove_deactivated_after_days`, default none = never): the server removes users that long after
+  their deactivation (checked with the account housekeeping). Without an admin's client this is the
+  server's removal alone: it ends their memberships and devices on the server, but no client signs
+  a removal on its word (security review A8), so the users stay in the encryption groups and are
+  listed for admins in the console (issue #661) until an admin removes them. Users the identity
+  provider sync deactivated in a burst (10 or more within an hour: an outage or a misconfigured
+  provider) are left out of the automatic removal; an admin decides.
+- **Direct messages.** Admins don't sign changes in DMs and group DMs; the server's removal drops
+  the user there, and the participants' clients list them for admins like any server-only removal.
+- **Their direct messages** leave the participants' main list: a DM or group DM whose other people
+  are all deactivated is listed last under "Deactivated accounts", never cut off by "show more",
+  and its history stays readable (issue #698).
+- **Share links** of a deactivated user are paused (they answer like an unknown link) and work again
+  after a reactivation if they haven't expired.
+- **Per reason** (`deactivation_reason`): `admin` and `oidc` only suspend; the OIDC sync reactivates a
+  user it deactivated once the provider enables them again, with everything intact. Bots that are
+  revoked and meeting guests (`left`, turned away, removed from the meeting, access ended) are
+  removed from all chats at once: they don't come back.
+- **Why removal is separate.** While suspended, the user's devices stay in the groups and new
+  messages are still encrypted to them. The server refuses them every request, but a compromised
+  server could keep handing them that ciphertext. Removal is what takes them out
+  cryptographically: the admin's signed change, committed by members, rotates the keys. The
+  server's own removal is only a hint to the clients (security review A8).
 
 ### 3.3 Moderation
 
@@ -167,8 +560,10 @@ themselves and the server can't relax it.
   organization's look; owners can include them.
 - **Enforcement:** the client applies the rule when a background is chosen and when the camera turns
   on. Under `required`, a device that can't replace the background (no GPU or segmentation model) can't
-  turn the camera on, so the room behind the person is never sent. The browser and the mobile apps don't
-  send camera video yet; they get the same check when they do.
+  turn the camera on, so the room behind the person is never sent. The browser applies the rule the
+  same way (#439): it puts the organization's picture behind the person where it runs the effects
+  (Chrome, Edge and Safari with WebGPU, Firefox and browsers without WebGPU with WebGL2), and keeps
+  the camera off with a hint where it can't (no WebGL2, graphics acceleration turned off). The mobile apps don't send camera video yet; they get the same check when they do.
 - **Storage:** the pictures are stored unencrypted (every call participant sees them anyway); the policy
   lists each one with its SHA-256, and clients refuse a picture whose hash doesn't match (e2ee.md §8.1).
 - **Admin UI:** Administration → Backgrounds: upload (JPEG or PNG; re-encoded as a Full HD JPEG without
@@ -182,12 +577,196 @@ themselves and the server can't relax it.
   more and the row. Uploads announced but never completed are swept the same way. The same applies to
   people's own backgrounds.
 
+### 3.6 Screen sharing
+
+How sharp screen shares may be is part of the signed workspace policy (`screen_share`, §2.3):
+`max_resolution` is `uhd` (default) or `standard`. With `uhd`, people can tick "Share in 4K" in the
+share options: the share is sent at up to 4K at 30 fps (1440p at 60 fps for motion) and up to 16
+Mbit/s per share and viewer, instead of up to 1440p and 8 Mbit/s. With `standard`, the option isn't
+offered and a share asked for in 4K is sent at the standard size. Each share starts at the standard
+size unless its sharer picks 4K, so the default changes nothing for people who don't.
+
+- **Enforcement:** member clients apply it (they read the verified policy); the SFU doesn't check
+  picture sizes, so it is a bandwidth setting, not a security boundary. Clients from before the
+  setting (#565) offer no 4K. An owner client from before it that signs the policy again drops the
+  setting, which means `uhd` until an up-to-date owner client signs again.
+- **Admin UI:** Administration → Security → Screen sharing → "Allow 4K screen sharing"; saving is a
+  policy change, which needs an owner (`sign_workspace`).
+
+### 3.7 Notetaker (AI transcript and summary of calls)
+
+The notetaker is a participant people can ask into a call; afterwards it posts a summary and the
+transcript into the call's conversation. **It sends the call's audio out of the end-to-end
+encryption** to OpenRouter and the model's provider (e2ee.md §8.2), so it is off by default and every
+participant sees when it is there. Read the data processing notes below before turning it on.
+
+**Setting it up**
+
+1. Create a bot account for it (Administration → Integrations, or `POST /api/v1/admin/bots`) with a
+   name people recognize, such as "Notetaker".
+2. Run `teamcraft-notetaker` with the bot's token on a host you trust, next to the bridge or on its
+   own (`crates/teamcraft-notetaker/teamcraft-notetaker.example.toml`). Each release publishes the
+   image `ghcr.io/zeitgleich/teamcraft-notetaker:X.Y.Z` (multi-arch, signed, like the server's;
+   `containers/README.md`), and the deployment playbook
+   ([teamcraft-deploy](https://github.com/Zeitgleich/teamcraft-deploy)) runs it with its optional
+   role `teamcraft_notetaker` (`teamcraft_notetaker_enabled`, off by default). It needs to reach the
+   server, the SFU (QUIC/UDP) and `https://openrouter.ai`, and listens on no port. On its first start
+   it enrolls a device, like the bridge; keep its database volume (`/var/lib/teamcraft-notetaker`).
+   Whoever controls that host can hear the calls the notetaker is in.
+3. Administration → Notetaker (owners sign, like every policy page): turn it on, pick the bot account,
+   choose who may add it, the models, the language and the summary instructions, and enter the
+   OpenRouter API key.
+4. Add the bot to the channels where it may be used (Channel settings → Integrations), or let people
+   tick "Notetaker joins the calls" when they schedule a meeting. It can only join calls of
+   conversations it is a member of, and must be in before the call starts (e2ee.md §8.2).
+
+**Settings** (signed policy group `notetaker`, except the key)
+
+| Setting                  | Default                                 | What                                                                                        |
+|--------------------------|-----------------------------------------|---------------------------------------------------------------------------------------------|
+| Notetaker on             | off                                     | Whether people can ask it into calls                                                        |
+| Notetaker account        | none                                    | The bot account clients treat as the notetaker                                              |
+| Who may add it           | members                                 | Members (not guests), or admins only                                                        |
+| Anyone may remove it     | on                                      | Off: only whoever added it, people who may add it, and admins                               |
+| Transcription model      | `mistralai/voxtral-mini-transcribe-3-0` | Any OpenRouter speech-to-text model; German and English among its languages                 |
+| Summary model            | `mistralai/mistral-large-2512`          | Any OpenRouter chat model                                                                   |
+| Language                 | automatic                               | Language of transcript and summary; `auto` detects it per piece                             |
+| Summary instructions     | built in                                | The prompt: summary, decisions, action items with owners, open questions                    |
+| Zero data retention only | on                                      | Requests may only go to endpoints that keep no data and don't train on it                   |
+| OpenRouter API key       | none                                    | Write-only; stored encrypted with the settings key (§6.2), its SHA-256 goes into the policy |
+
+The key is never shown again and never sent to member clients; only the bot account the policy names
+can fetch it, and the notetaker refuses a key whose hash isn't the signed one. A server without a
+settings key (`[secrets]`) can't store it: then put the key into the notetaker's own configuration
+(`openrouter.api_key`) and enter it in the console all the same, which signs only its hash.
+
+**In a call.** "Add notetaker" in the call's menu asks it in, for whoever the policy lets add it. It
+need not be a member of the conversation before: in a channel where the user manages members, or in a
+meeting the user organizes, the button adds it to the conversation first (from its join on, like an
+integration bot) and then asks it in. In a DM it is offered only where it is a member already.
+Scheduling a meeting offers it as the first entry of the people to invite. While it is in the call, everybody sees a banner and a changed encryption
+badge, its tile says "Notetaker – transcribing", and it posts a message saying where the audio goes.
+"Remove notetaker" (for whoever added it, admins and, by default, anybody) or a meeting host's "Remove"
+stops it: it leaves, transcribes what it heard and posts the result. It leaves on its own a minute
+after the last person left, and after 4 hours (`limits.max_call_minutes`).
+
+**Costs.** OpenRouter bills the transcription per second of speech and the summary per token. With the
+defaults, about $0.21 per hour of speech (Voxtral Mini Transcribe 3, $0.0035 per minute) plus about
+$0.01 for the summary of an hour (Mistral Large, $0.50 per million input tokens): roughly **$0.22 per
+meeting hour**. Overlapping speakers count once each; silence is not sent. The notetaker logs what
+each call cost (`usage.cost` of every request) and the total when it posts.
+
+**Data processing (GDPR).** The organization is the controller of the call audio and the transcript.
+OpenRouter (a company in the USA) and the provider that runs the model are processors:
+
+- Conclude a data processing agreement with OpenRouter and check the providers its routing may use
+  for your models (with zero data retention on, only endpoints that store nothing); for transfers
+  outside the EU you need a transfer mechanism (EU-US Data Privacy Framework or standard contractual
+  clauses). The default models are Mistral's, a provider in the EU, but OpenRouter itself sits in the
+  middle; whether it processes in the EU depends on your OpenRouter plan.
+- Tell people before they join (privacy notice, Art. 13 GDPR) and have a legal basis. In some
+  countries transcribing non-public spoken words needs everybody's consent (in Germany § 201 StGB);
+  the notices in the app inform, they don't replace consent. In companies with a works council, a
+  tool that processes employees' speech is usually subject to co-determination (in Germany § 87 (1)
+  no. 6 BetrVG).
+- Retention: no audio is kept anywhere in TeamCraft (e2ee.md §8.2). The summary and transcript are
+  messages and follow the conversation's retention. The notetaker's own database keeps the messages
+  of its conversations like any device; delete the volume when you stop using it.
+- Access requests and erasure: transcripts are messages in the conversation; the providers keep
+  nothing with zero data retention on.
+
+### 3.8 Importing history from another chat (issue #402)
+
+Teams moving from another chat system bring their channels, direct messages, files, threads,
+reactions and read state. The import is end-to-end encrypted like every message: it runs on a client,
+`teamcraft-import`, on a host the operator trusts (e2ee.md §4.10); the runbook for Synology Chat is
+[import-synology.md](import-synology.md). The server only lets the import account post with the
+original order and keeps imports quiet.
+
+**Setting up.**
+
+1. An import account at the identity provider with the TeamCraft `admin` role, used for nothing
+   else. One account per instance.
+2. `teamcraft-import login` (runbook): it signs in as the import account in the browser and enrolls
+   the tool's device, the account's first and only one.
+3. An owner confirms the account in the signed roster like any admin (§2.3).
+4. Administration → Import (owners sign it, like every policy page): pick the import account and until
+   when it may join conversations (default 90 days). This is the signed `import` part of the
+   workspace policy (e2ee.md §4.10); "End import" clears the date.
+5. Run `teamcraft-import` with the export and the mappings (runbook).
+
+**What the import account may do on the server** while the policy names it and the date hasn't passed
+(otherwise 403 `import_not_allowed`), audit `import_*`:
+
+| Endpoint                                              | Does                                                                                                                                                                                                                                                                                              |
+|-------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST /admin/import/users`                            | Pre-provisions accounts from the identity provider by user name (`[oidc.sync]` service account): the account exists before its first sign-in, with the provider's name, e-mail and role; the sign-in finds it by issuer and subject. Unknown, disabled or role-less names come back as not found. |
+| `POST /admin/import/dms`                              | The DM of two people, or somebody's notes (one), made if missing, with the import account as a member that is not a participant.                                                                                                                                                                  |
+| `POST /admin/import/conversations/{id}/messages`      | Up to 100 encrypted messages in their original order, each with `sent_at_ms`; see below.                                                                                                                                                                                                          |
+| `PUT /admin/import/conversations/{id}/members/{user}` | That member's read position (never moved back), favourite and mute, from the old system.                                                                                                                                                                                                          |
+| `POST /admin/import/conversations/{id}/finish`        | Marks the conversation's import done (`imported_through`), announced as `conversation_update`.                                                                                                                                                                                                    |
+
+Channels are created, joined, archived and left with the ordinary endpoints; the import account is a
+workspace admin. It leaves a DM or notes it imported into with the ordinary
+`DELETE /conversations/{id}/members/{its own ID}` once its devices left the group, without a line in
+the conversation. While it may import, it passes the rate limits (per user, and per address once it
+authenticated from there, for ten minutes after its last request) and the upload limits (per file
+and per user): it brings a whole team's history and files at once.
+
+**Imported messages on the server.** They get IDs from one sequence for the whole server, on the
+reserved import worker (the highest worker number, which `server.worker_id` may not use), starting
+at the Snowflake epoch: imports wait for each other (an advisory lock), so IDs never collide between
+conversations and follow the order the importer sends. An ID must stay below the conversation's
+first message that wasn't imported (409 `import_window_full` otherwise; with IDs at the epoch that
+only happens to a server whose live messages are from its first milliseconds). The row is marked
+`is_imported`: it counts for no unread or mention count, causes no push, no reminder, no thread
+follow and no `message_create`. Everything else (size limits, thread roots in the same conversation,
+the device being the caller's) is checked like a send. A retry with the same client message IDs
+returns the stored messages.
+
+Retention judges an imported message by its ID like every message, and an imported ID is from the
+start of 2026: a retention period counts imported history as that old, whatever its original date.
+
+**People.** Only mapped accounts take part. Somebody the mapping doesn't name (left the company,
+never had an account) is like a deleted account: their channel messages stay and show "Deleted user",
+direct messages with them are not imported. Accounts are pre-provisioned so the importer can make
+them members before they sign in; until then the conversation says they haven't set up the app yet,
+and the importer adds them with the history when they do (it keeps running, `teamcraft-import serve`).
+Pre-provisioned accounts are ordinary accounts: the identity provider sync deactivates them like
+any other.
+
+**Guests.** Guests otherwise see history only from their join on. In the channels, DMs and notes the
+import made or took over, the import device also gives the guests the mapping names there the keys
+of the import, while the policy's date runs and the workspace state is fresh (e2ee.md §4.10,
+"Guests in imported conversations"): they read the imported history and everything from their
+join on, not what members wrote in between. Nobody else shares history with a guest, and in a
+channel merged into, guests keep seeing it from their join on. So guests can stay guests at the
+identity provider during the import; somebody made a member for the import and switched back to
+guest later keeps what they got. On the server, a member the import account adds to a conversation
+whose import it finished, while the policy's date runs, is marked (`memberships.sees_imported_history`,
+gone with the membership); such a guest lists the conversation's messages, files and lines from
+before their join like a member, other guests from their join on. The migration marks memberships an
+earlier import made, from the audit log: additions by an account that imported, from its first
+import on, to conversations whose import was finished.
+
+**The import account in DMs.** Clients leave it out of a DM's name and member list and show the
+banner of e2ee.md §4.10 instead; elsewhere it is an ordinary admin account.
+
+**After the import.** `teamcraft-import report` lists per conversation what was imported and skipped
+(with the reason), who is still missing, and the old system's webhooks to recreate as bridge sources
+(docs/bridge.md, "Sources"; their tokens are not carried over). Once nobody is missing the import
+account has left everywhere; then end the import (above) and deactivate the account.
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.
 
 - Admins see the full log.
-- Members see admin actions affecting their conversations as system messages.
+- Members see admin actions affecting their conversations as system messages. Archiving,
+  converting and moving a channel show as lines each member's device derives from the server's
+  record of the channel ("This channel was archived"); the member who made the change is named only
+  when their own encrypted announcement matches it (e2ee.md §4.9, issue #818). Until channel
+  properties are signed, the change itself is the server's word.
 - Users see actions affecting themselves (device removed, recovery started) in their security settings.
 - The log contains metadata only, never message content.
 
@@ -212,6 +791,9 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | Mail server (§6.2)                       | `GET/PUT/DELETE /admin/settings/mail`, `POST /admin/settings/mail/test`            |
 | Calendar (§6.2)                          | `GET/PUT/DELETE /admin/settings/calendar`, `POST /admin/settings/calendar/test`    |
 | Instance settings (§6.3)                 | `GET/PUT /admin/settings`, `DELETE /admin/settings/{section}`                      |
+| Deactivate, reactivate, remove (§3.2.1)  | `POST /admin/users/{id}/deactivate`, `.../reactivate`, `.../remove-from-chats`      |
+| Admin join requests (§2.4.1)             | `GET /admin-join-requests`; `POST /conversations/{id}/admin-join-requests`, `POST .../{user}/approve`, `DELETE .../{user}` (owners decide, the admin withdraws) |
+| Delete an account (§3.2.1)               | `DELETE /admin/users/{id}`                                                         |
 
 Session length, idle timeout, required second factor, display name format and the privacy of names and
 e-mail addresses, and the presence switches (statuses on/off, custom status on/off, presets, away
@@ -291,21 +873,25 @@ Groups that are stored and reset as a whole:
 
 | Group            | Values                                                                                                                                        |
 |------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `server_rules`   | invites need a verified e-mail address; default spaces and channels for new members                                                           |
+| `server_rules`   | invites need a verified e-mail address; default spaces and channels for new members; days until deactivated users are removed from all chats; days until an admin's request to join a private channel expires (§2.4.1); whether a 1:1 call ends for both when one side hangs up (default on) |
 | `notifications`  | read receipt default, urgent repeat interval and count, phone push delay, desktop attention                                                   |
 | `email_digest`   | on/off, default and shortest interval, grace period, subjects and texts                                                                       |
 | `shares`         | on/off, default and longest expiry, download cap, links per user                                                                              |
 | `limits`         | attachment size and per-user total, avatar and background sizes, backgrounds per user, group DM size, user group size, meeting mails per hour |
 | `integration`    | default retention of integration channels                                                                                                     |
-| `local_accounts` | second factor required, activation and session lifetime, failed attempts, lockout                                                             |
+| `local_accounts` | on/off (off: the form disappears, `/auth/local/*` answers 403 `local_accounts_disabled`, sessions end), second factor required, activation and session lifetime, failed attempts, lockout |
+| `sign_in_page`   | which methods the sign-in page offers (SSO, e-mail and password) and in which order; help text per language; help link; whether every sign-in shows the identity provider's login page |
 | `mail_texts`     | invitation and activation mail                                                                                                                |
 | `meeting_mail`   | most invitees; invitation, update and cancellation mail                                                                                       |
 
 **Signed or not.** Settings that member clients must be able to verify against a compromised server
 are part of the owner-signed workspace policy (§2.3) and are edited there: `admin_self_join`, org
-recovery, history and retention defaults, session rules, directory privacy, presence, threads, guest
-rules (allowed e-mail domains, default expiry, DMs only with shared conversations), the shortest
-password, push content, call backgrounds and desktop updates. Everything in this section is enforced
+recovery, whether members may still set a recovery passphrase instead of a recovery kit
+(`recovery.is_passphrase_allowed`, e2ee.md §6.5.8), history and retention defaults, session rules, directory privacy, presence, threads, guest
+rules (allowed e-mail domains, default expiry, whom guests may start a DM with), the shortest
+password, push content, call backgrounds, 4K screen sharing, desktop updates and the recommended
+number of owners.
+Everything in this section is enforced
 by the server alone (the server sends the mail, checks the sizes, applies invites): a compromised
 server could ignore these settings whether they were signed or not, so a signature would protect
 nothing. Brands, mail and calendar are server-side presentation and transport for the same reason.
@@ -325,5 +911,5 @@ nothing. Brands, mail and calendar are server-side presentation and transport fo
 | `[push]` credentials and the push gateway URL and key             | the store apps register against the gateway of their publisher; changing it re-registers every phone |
 | `[calls]` SFU URL, signing key, tokens                            | shared with the SFU's own configuration                                                              |
 | `[meetings]` base URL, guest token secret, inbox token            | secrets shared with other components, and the base of every join link                                |
-| `[local_accounts]` on/off and session secret                      | the password hashing setup is built at start                                                         |
+| `[local_accounts]` availability and session secret                | the password hashing setup is built at start; the console switches configured accounts off and on    |
 | `[secrets]`                                                       | the key that protects the console's passwords cannot live next to them                               |

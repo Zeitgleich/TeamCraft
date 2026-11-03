@@ -7,7 +7,7 @@ use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{ConversationId, SpaceId};
+use teamcraft_proto::{ConversationId, GuestDmStart, NotificationLevel, SignInMethod, SpaceId};
 
 /// Prefix of environment overrides. Nested keys are separated by a double underscore:
 /// `TEAMCRAFT_OIDC__ISSUER`, `TEAMCRAFT_OIDC__ROLES__GUEST`, `TEAMCRAFT_DATABASE__URL`.
@@ -56,6 +56,9 @@ pub struct Config {
   pub mail: MailConfig,
   #[serde(default)]
   pub local_accounts: LocalAccountsConfig,
+  /// What the sign-in page offers; the admin console changes it at runtime.
+  #[serde(default)]
+  pub sign_in_page: SignInPageConfig,
   /// How the server picks a brand for a request (docs/branding.md).
   #[serde(default)]
   pub branding: BrandingConfig,
@@ -74,6 +77,9 @@ pub struct Config {
   /// The key that encrypts passwords entered in the admin console (admin.md §6.2).
   #[serde(default)]
   pub secrets: SecretsConfig,
+  /// Circuit breakers and retries of the backends (issue #743).
+  #[serde(default)]
+  pub dependencies: crate::dependencies::DependenciesConfig,
 }
 
 /// Where the settings key comes from: inline (base64, 32 bytes) or a file the server creates on
@@ -94,7 +100,8 @@ pub struct ServerConfig {
   /// Address of the HTTP listener. TLS is terminated by the reverse proxy. The default `[::]` is a
   /// dual-stack socket (IPv4 and IPv6); set e.g. `127.0.0.1:8080` to bind a single address.
   pub listen_addr: SocketAddr,
-  /// Unique number (0-1023) of this server instance in generated Snowflake IDs.
+  /// Unique number (0-1022) of this server instance in generated Snowflake IDs; 1023 is reserved for
+  /// imported messages.
   pub worker_id: u16,
   /// How many months of message partitions are created ahead of time.
   pub partitions_ahead_months: u32,
@@ -109,6 +116,9 @@ pub struct DatabaseConfig {
   pub max_connections: u32,
   #[serde(default = "default_acquire_timeout_secs")]
   pub acquire_timeout_secs: u64,
+  /// How long the server waits at startup for an unreachable database before it gives up.
+  #[serde(default = "default_startup_wait_secs")]
+  pub startup_wait_secs: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +130,14 @@ pub struct OidcConfig {
   /// client roles are read from `resource_access.<client_id>.roles`.
   #[serde(default = "default_client_id")]
   pub client_id: String,
+  /// Scopes the apps ask for at sign-in, announced in `GET /api/v1/server-info`; `openid` is always
+  /// added.
+  #[serde(default = "default_app_scopes")]
+  pub app_scopes: Vec<String>,
+  /// Redirect URIs the provider allows for `client_id`, announced so an app whose redirect URI is
+  /// missing says so instead of failing at the provider. Unset: the apps do not check.
+  #[serde(rename = "app_redirect_uris", default)]
+  pub maybe_app_redirect_uris: Option<Vec<String>>,
   /// Confidential client with a service account, reserved for the admin API and back-channel logout.
   #[serde(default = "default_server_client")]
   pub server_client: String,
@@ -198,14 +216,35 @@ pub struct LoggingConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PolicyConfig {
-  /// Guests can only open DMs with people they share a conversation with.
-  pub guests_dm_only_with_shared_conversations: bool,
+  /// Whom a guest may start a direct message with when the signed policy doesn't say:
+  /// `nobody` (default), `shared` (people they share a conversation with) or `anyone`. Members,
+  /// admins and owners can always message guests.
+  pub guests_dm_start: GuestDmStart,
+  /// Deprecated, the 1.0.9 form of `guests_dm_start`: `true` is `shared`, `false` is `anyone`. Wins
+  /// over `guests_dm_start` where set, so a file that still has it keeps its meaning.
+  #[serde(rename = "guests_dm_only_with_shared_conversations")]
+  pub maybe_guests_dm_only_with_shared_conversations: Option<bool>,
   /// Pending invites only apply to accounts whose identity provider verified the email address.
   pub invites_require_verified_email: bool,
   /// Spaces (by ID) every new member joins on their first sign-in. Missing or archived ones are skipped.
   pub default_spaces: Vec<SpaceId>,
   /// Public channels (by ID) of the default spaces that new members join as well.
   pub default_channels: Vec<ConversationId>,
+  /// Deactivated users are removed from all chats (devices removed, keys rotated) this many days
+  /// after the deactivation. None (the default): only when an admin removes them (admin.md §3.4).
+  #[serde(rename = "remove_deactivated_after_days", default)]
+  pub maybe_remove_deactivated_after_days: Option<u32>,
+  /// Days an admin's request to join a private channel waits for the channel's owners before it
+  /// expires (admin.md §2.4, `admin_self_join = owner_approval`).
+  pub admin_join_request_days: u32,
+  /// A 1:1 direct message call ends for both as soon as one side leaves: hangs up, closes the app,
+  /// or is dropped after the reconnect grace period (issue #997). Off, it keeps running until the
+  /// last person leaves.
+  pub one_to_one_call_ends_for_both: bool,
+  /// Days a direct message deleted with a deleted account is remembered for the remaining
+  /// participants, so their devices that were offline that long still drop it with its local
+  /// history on the next sync (admin.md §3.2.1). After that it only leaves the list.
+  pub deleted_conversations_kept_days: u32,
 }
 
 /// Size limits of requests and results.
@@ -222,6 +261,14 @@ pub struct LimitsConfig {
   pub max_directory_results: u32,
   /// Largest avatar image.
   pub max_avatar_bytes: u64,
+  /// Largest space or channel picture (the one limit for both), after the server re-encoded the
+  /// upload as PNG.
+  pub max_space_image_bytes: u64,
+  /// Space pictures decoded at the same time; more uploads are answered 503 with `Retry-After`.
+  /// Read at start.
+  pub max_concurrent_image_decodes: usize,
+  /// How long decoding and re-encoding one picture may take before the upload is answered 503.
+  pub image_decode_timeout_secs: u64,
   /// Largest call background picture a user uploads (encrypted; apps send Full HD JPEGs).
   pub max_background_bytes: u64,
   /// How many call background pictures one user may keep.
@@ -232,16 +279,30 @@ pub struct LimitsConfig {
   pub max_recovery_blob_bytes: usize,
   /// Longest title, department and similar profile text, in characters.
   pub max_profile_text_chars: usize,
+  /// Longest display name a member may set instead of the one from the identity provider, in
+  /// characters (issue #408).
+  pub max_display_name_chars: usize,
   /// Members of a user group.
   pub max_user_group_members: usize,
   /// Unread counts look at this many of the newest unread messages per conversation; a count equal
   /// to it means "that many or more" (clients show "1000+").
   pub max_unread_counted: u32,
+  /// Reactions to a member's own messages remembered one by one as seen, per conversation; beyond
+  /// it the oldest count as seen together with everything before them (notifications.md,
+  /// "Reactions to my messages").
+  pub max_seen_reactions: usize,
   /// Unused key packages a device may have on the server.
   pub max_key_packages_per_device: usize,
   pub max_key_package_bytes: usize,
   /// Key packages in one upload.
   pub max_key_packages_per_upload: usize,
+  /// A key package is handed out only while it stays valid at least this long, so members who
+  /// process the commit that adds it later (a device offline for weeks) still accept it. Packages
+  /// below it are deleted (e2ee.md §4.3).
+  pub key_package_min_validity_secs: u64,
+  /// Key packages expiring within this window count as "expiring soon", not as available, so
+  /// devices upload replacements (and a new last-resort package) well before.
+  pub key_package_renewal_window_secs: u64,
   /// Size of one MLS commit, welcome, proposal or application message.
   pub max_mls_payload_bytes: usize,
   pub max_welcomes_per_commit: usize,
@@ -272,6 +333,13 @@ pub struct GatewayConfig {
   pub resume_window_secs: u64,
   /// Events kept per session for resuming.
   pub resume_buffer_events: usize,
+  /// Bytes of events one session keeps for resuming. Events are serialized once and shared by
+  /// every session, so this bounds what one stalled or disconnected session keeps alive; a
+  /// connection that falls further behind is dropped (it syncs afresh).
+  pub resume_buffer_bytes: usize,
+  /// Bytes all sessions' resume buffers may hold together (counted per session). Beyond it the
+  /// slowest sessions are dropped first: those waiting to resume, then those furthest behind.
+  pub max_buffered_bytes: usize,
   /// Time a new connection has to identify.
   pub identify_timeout_secs: u64,
   /// Connections are closed after this long so that a fresh token is checked; clients resume.
@@ -289,6 +357,9 @@ pub struct GatewayConfig {
   pub max_sessions_per_device: usize,
   /// Sessions one user may have in total.
   pub max_sessions_per_user: usize,
+  /// On SIGTERM, how long the server waits for its WebSockets to take their close frame (1012)
+  /// before it exits.
+  pub drain_timeout_secs: u64,
 }
 
 /// S3-compatible blob storage (Garage in development). Everything stored there is encrypted by the
@@ -312,6 +383,10 @@ pub struct StorageConfig {
   /// Largest attachment (ciphertext) a client may announce.
   #[serde(default = "default_max_attachment_bytes")]
   pub max_attachment_bytes: u64,
+  /// How long an unfinished upload in parts waits for its next part before the server aborts it
+  /// (a device that went offline continues within this time).
+  #[serde(default = "default_multipart_expiry_secs")]
+  pub multipart_expiry_secs: u64,
 }
 
 /// Push sending (e2ee.md §7). Each provider is on when its credentials are set: a VAPID key pair for
@@ -332,10 +407,21 @@ pub struct PushConfig {
   pub dismiss_ttl_secs: u64,
   /// How long a test push from the notification diagnostics may wait at the push service.
   pub test_ttl_secs: u64,
-  /// How often a push that failed for a temporary reason (5xx, timeout) is tried again. `0`: never.
+  /// How often a push that failed for a temporary reason (5xx, 429, timeout) is tried again, at most;
+  /// the wake-up's TTL usually ends the retries first. `0`: never. Retries wait in the database, so
+  /// they survive a restart.
   pub max_retries: u32,
-  /// Wait before the first retry; it doubles for each further one.
+  /// Wait before the first retry; it doubles for each further one (with jitter).
   pub retry_initial_delay_ms: u64,
+  /// The longest wait between two retries, unless the push service asks for longer (`Retry-After`).
+  pub retry_max_delay_secs: u64,
+  /// Retry workers per pool (APNs/FCM, and Web Push/UnifiedPush); each holds a database connection
+  /// while it sends.
+  pub retry_workers: usize,
+  /// Wake-ups one device may have waiting for a retry; further ones are dropped.
+  pub retry_max_queued_per_device: u32,
+  /// How often idle retry workers look for due wake-ups.
+  pub retry_poll_interval_ms: u64,
   /// The shortest time between two test pushes to one device.
   pub test_interval_secs: u64,
   /// Calls one user may ring other people's phones with per minute; further rings reach only
@@ -475,7 +561,8 @@ pub struct MailConfig {
   pub smtp: Option<SmtpConfig>,
   /// Public base URL of the web client, without trailing slash; the link in invitation e-mail.
   pub public_base_url: String,
-  /// Placeholders of both texts: `{inviter}`, `{space}`, `{role}` and `{url}`.
+  /// Placeholders of both texts: `{inviter}`, `{space}`, `{role}` and `{url}`. The body may also
+  /// place `{message}`, the inviter's personal note; without it the note is quoted below the text.
   pub invite_subject: String,
   pub invite_body: String,
   /// Activation e-mail of local guest accounts. Placeholders: `{inviter}`, `{space}` and `{url}`
@@ -529,6 +616,35 @@ pub struct LocalAccountsConfig {
   pub password_memory_kib: u32,
   pub password_iterations: u32,
   pub password_parallelism: u32,
+}
+
+/// What the sign-in page offers (`GET /api/v1/server-info`), the seed of the admin console's
+/// "Sign-in page" settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SignInPageConfig {
+  /// `sso` and `local` in display order, each at most once. `local` only shows while local
+  /// accounts are enabled.
+  pub methods: Vec<SignInMethod>,
+  /// Language code -> help text below the form.
+  pub help_text: BTreeMap<String, String>,
+  /// A help page (https).
+  #[serde(rename = "help_link")]
+  pub maybe_help_link: Option<String>,
+  /// Every sign-in shows the identity provider's login page (OIDC `prompt=login`), so users see
+  /// and can switch the account; `false` keeps silent single sign-on.
+  pub is_login_page_always_shown: bool,
+}
+
+impl Default for SignInPageConfig {
+  fn default() -> Self {
+    Self {
+      methods: vec![SignInMethod::Sso, SignInMethod::Local],
+      help_text: BTreeMap::new(),
+      maybe_help_link: None,
+      is_login_page_always_shown: true,
+    }
+  }
 }
 
 impl Default for LocalAccountsConfig {
@@ -620,31 +736,35 @@ pub struct WebConfig {
   pub content_security_policy: String,
   /// Further origins (`https://...`, `wss://...`) the web client may connect to.
   pub connect_origins: Vec<String>,
-  /// Directory with the small static download page for share links: `download.html` and the
-  /// assets it references. `{{sri:<file>}}` in the page becomes the Subresource Integrity value
-  /// (`sha384-...`) of that file in this directory, computed at startup. Without it `/f/<id>`
-  /// serves the app shell.
-  #[serde(rename = "share_page_dir")]
-  pub maybe_share_page_dir: Option<PathBuf>,
-  /// `Content-Security-Policy` of the download page: no inline script, nothing but its own files.
-  pub share_page_content_security_policy: String,
 }
 
 impl Default for WebConfig {
   fn default() -> Self {
     Self {
       maybe_static_dir: None,
-      maybe_share_page_dir: None,
       connect_origins: Vec::new(),
-      share_page_content_security_policy:
-        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
-        img-src 'self' data:; connect-src 'self' https:; base-uri 'none'; form-action 'none'; \
-        frame-ancestors 'none'"
-          .into(),
       content_security_policy: "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
         img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; connect-src {connect_src}; \
         worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         .into(),
+    }
+  }
+}
+
+impl StorageConfig {
+  /// The URL presigned requests go to: the endpoint itself with path-style addressing, else the
+  /// bucket as a subdomain of the endpoint's host (virtual-hosted style). The web client's
+  /// `connect-src` must allow exactly this origin.
+  pub fn client_url(&self) -> String {
+    if self.path_style {
+      return self.endpoint.clone();
+    }
+    match url::Url::parse(&self.endpoint) {
+      Ok(mut url) => match url.host_str().map(str::to_owned) {
+        Some(host) if url.set_host(Some(&format!("{}.{host}", self.bucket))).is_ok() => url.to_string(),
+        _ => self.endpoint.clone(),
+      },
+      Err(_) => self.endpoint.clone(),
     }
   }
 }
@@ -674,16 +794,9 @@ impl WebConfig {
 
   /// Rejects a configuration that would send no policy or a broken one.
   pub fn validate(&self) -> Result<(), String> {
-    for (name, policy) in [
-      ("content_security_policy", self.resolved_content_security_policy()),
-      (
-        "share_page_content_security_policy",
-        self.share_page_content_security_policy.clone(),
-      ),
-    ] {
-      if policy.trim().is_empty() || axum::http::HeaderValue::from_str(&policy).is_err() {
-        return Err(format!("web.{name} is empty or not a valid header value"));
-      }
+    let policy = self.resolved_content_security_policy();
+    if policy.trim().is_empty() || axum::http::HeaderValue::from_str(&policy).is_err() {
+      return Err("web.content_security_policy is empty or not a valid header value".to_owned());
     }
     for origin in &self.connect_origins {
       let is_plain = origin
@@ -778,14 +891,26 @@ pub struct BrandConfig {
   pub maybe_favicon: Option<String>,
   #[serde(rename = "favicon_dark", skip_serializing_if = "Option::is_none")]
   pub maybe_favicon_dark: Option<String>,
+  /// Icon of the identity provider on the sign-in button.
+  #[serde(rename = "sso_icon", skip_serializing_if = "Option::is_none")]
+  pub maybe_sso_icon: Option<String>,
+  /// The provider part of the sign-in button "Sign in with …" (e.g. "Microsoft"); else the
+  /// display name.
+  #[serde(rename = "sso_label", skip_serializing_if = "Option::is_none")]
+  pub maybe_sso_label: Option<String>,
   #[serde(rename = "support_url", skip_serializing_if = "Option::is_none")]
   pub maybe_support_url: Option<String>,
+  /// The user documentation, linked under Settings > Help & about. Default: none.
+  #[serde(rename = "documentation_url", skip_serializing_if = "Option::is_none")]
+  pub maybe_documentation_url: Option<String>,
   #[serde(rename = "privacy_url", skip_serializing_if = "Option::is_none")]
   pub maybe_privacy_url: Option<String>,
   #[serde(rename = "terms_url", skip_serializing_if = "Option::is_none")]
   pub maybe_terms_url: Option<String>,
   #[serde(rename = "imprint_url", skip_serializing_if = "Option::is_none")]
   pub maybe_imprint_url: Option<String>,
+  #[serde(rename = "download_url", skip_serializing_if = "Option::is_none")]
+  pub maybe_download_url: Option<String>,
   /// Language code -> text; `en` is the fallback.
   pub login_title: BTreeMap<String, String>,
   pub login_text: BTreeMap<String, String>,
@@ -867,6 +992,13 @@ pub struct MeetingsConfig {
   /// Guests may use their link until this long after the meeting's end.
   #[serde(default = "default_guest_grace_secs")]
   pub guest_grace_secs: u64,
+  /// Most guests one shared guest link of a meeting lets into the lobby (docs/meetings.md).
+  #[serde(default = "default_max_shared_link_guests")]
+  pub max_shared_link_guests: u32,
+  /// A call started in a scheduled meeting's chat rings its invitees when it starts at most this
+  /// long before an occurrence (or during it); 0: never.
+  #[serde(default = "default_start_ring_lead_secs")]
+  pub start_ring_lead_secs: u64,
   /// Shared secret of the inbox handler that forwards received RSVP e-mail (iMIP REPLY) to
   /// `POST /api/internal/v1/meetings/replies` as `Authorization: Bearer <token>`. Without it that
   /// endpoint answers 503. Prefer `TEAMCRAFT_MEETINGS__INBOX_TOKEN`.
@@ -956,6 +1088,9 @@ pub struct CalDavConfig {
 pub struct NotificationsConfig {
   /// Whether users who never chose send read receipts in DMs and group DMs.
   pub read_receipts_default: bool,
+  /// Which messages push for people who never chose a level for the conversation, its space or in
+  /// general (`all` or `mentions`; issue #1011). Integration channels push only mentions anyway.
+  pub default_level: NotificationLevel,
   /// Time between repeated pushes for an urgent DM nobody acknowledged.
   pub urgent_repeat_interval_secs: u64,
   /// How often an urgent DM is pushed in total, the first push included. `1` disables repeats.
@@ -974,6 +1109,11 @@ pub struct NotificationsConfig {
   /// heartbeats renew it, so keep it above twice `[gateway] heartbeat_interval_secs`; a session that
   /// stops (sleep, crash, lost network) no longer holds pushes back.
   pub attention_lease_secs: u64,
+  /// The user's own activity on a desktop or web session (input it reported, a message sent from
+  /// it) holds phone pushes back like an attentive report for this long, also when its window is
+  /// not in front: the user is at the computer (notifications.md, "Attention"). Keep it above the
+  /// 30 s the clients repeat "active" during input. `0`: only attention counts.
+  pub desktop_activity_secs: u64,
   /// Pushes held for an attentive desktop per user at most; beyond that the oldest goes out at once.
   pub max_held_pushes_per_user: usize,
   /// E-mail digest of missed mentions.
@@ -1021,6 +1161,9 @@ pub struct SharesConfig {
   pub public_base_url: String,
   /// Most live (not revoked, not expired) links per person.
   pub max_links_per_user: usize,
+  /// A download that failed after it was counted can be retried this long without counting again
+  /// (the download page keeps the grant it was given). `0` counts every request.
+  pub download_retry_minutes: u32,
 }
 
 impl Default for SharesConfig {
@@ -1032,6 +1175,7 @@ impl Default for SharesConfig {
       max_downloads_cap: 0,
       public_base_url: String::new(),
       max_links_per_user: 500,
+      download_retry_minutes: 10,
     }
   }
 }
@@ -1089,6 +1233,27 @@ pub struct CallsConfig {
   /// it the meeting controls answer 503.
   #[serde(rename = "sfu_control_url", default)]
   pub maybe_sfu_control_url: Option<String>,
+  /// SHA-256 of the SFU's certificate (hex, colons allowed) when it is a short-lived self-signed
+  /// one: join tokens carry it so browsers can connect (`serverCertificateHashes`: ECDSA, valid
+  /// for at most 14 days). Several, comma-separated, while a new certificate replaces the old one.
+  /// Leave unset with a certificate browsers trust.
+  #[serde(rename = "sfu_certificate_sha256", default)]
+  pub maybe_sfu_certificate_sha256: Option<String>,
+  /// The SFU reports its whole roster now and then (`/api/internal/v1/calls/roster`); a device it
+  /// no longer has leaves the call. While the SFU is fresh from a restart, its devices get this
+  /// long to rejoin first.
+  #[serde(default = "default_roster_grace_secs")]
+  pub roster_grace_secs: u64,
+  /// Once the SFU has sent a roster, no roster for this long ends every call: the SFU is gone or
+  /// cut off, and nothing confirms anybody is still in a call. Keep it a few SFU roster intervals
+  /// (`TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS`, default 30).
+  #[serde(default = "default_roster_timeout_secs")]
+  pub roster_timeout_secs: u64,
+  /// Devices of one account that may be in the same call at once; a further device gets no join
+  /// token (`call_device_limit`). Every device is a member of the call's media encryption group.
+  /// Configure the SFU with the same value (`TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL`).
+  #[serde(default = "default_max_devices_per_user_per_call")]
+  pub max_devices_per_user_per_call: usize,
 }
 
 /// Device-linking relay at /api/v1/rendezvous.
@@ -1153,6 +1318,10 @@ impl DatabaseConfig {
   pub fn acquire_timeout(&self) -> Duration {
     Duration::from_secs(self.acquire_timeout_secs)
   }
+
+  pub fn startup_wait(&self) -> Duration {
+    Duration::from_secs(self.startup_wait_secs)
+  }
 }
 
 impl Default for ServerConfig {
@@ -1190,13 +1359,28 @@ impl Default for RoleNames {
   }
 }
 
+impl PolicyConfig {
+  /// What the server file says guests may start; the deprecated 1.0.9 flag wins where it is set.
+  pub fn effective_guests_dm_start(&self) -> GuestDmStart {
+    self.maybe_guests_dm_only_with_shared_conversations.map_or_else(
+      || self.guests_dm_start.clone(),
+      GuestDmStart::from_shared_only_flag,
+    )
+  }
+}
+
 impl Default for PolicyConfig {
   fn default() -> Self {
     Self {
-      guests_dm_only_with_shared_conversations: true,
+      guests_dm_start: GuestDmStart::DEFAULT,
+      maybe_guests_dm_only_with_shared_conversations: None,
       invites_require_verified_email: true,
       default_spaces: Vec::new(),
       default_channels: Vec::new(),
+      maybe_remove_deactivated_after_days: None,
+      admin_join_request_days: teamcraft_proto::DEFAULT_ADMIN_JOIN_REQUEST_DAYS,
+      one_to_one_call_ends_for_both: true,
+      deleted_conversations_kept_days: 180,
     }
   }
 }
@@ -1213,16 +1397,23 @@ impl Default for LimitsConfig {
       max_page_size: 200,
       max_directory_results: 50,
       max_avatar_bytes: 1024 * 1024,
+      max_space_image_bytes: teamcraft_proto::DEFAULT_MAX_SPACE_IMAGE_BYTES,
+      max_concurrent_image_decodes: 2,
+      image_decode_timeout_secs: 5,
       max_background_bytes: 8 * 1024 * 1024,
       max_backgrounds_per_user: 24,
       org_recovery_request_ttl_secs: 86_400,
       max_recovery_blob_bytes: 8192,
       max_profile_text_chars: 100,
+      max_display_name_chars: 80,
       max_user_group_members: 5000,
       max_unread_counted: 1000,
+      max_seen_reactions: 200,
       max_key_packages_per_device: 200,
       max_key_package_bytes: 16 * 1024,
       max_key_packages_per_upload: 100,
+      key_package_min_validity_secs: 42 * 24 * 60 * 60,
+      key_package_renewal_window_secs: 56 * 24 * 60 * 60,
       max_mls_payload_bytes: 1024 * 1024,
       max_welcomes_per_commit: 500,
       max_key_bag_bytes: 1024 * 1024,
@@ -1242,6 +1433,8 @@ impl Default for GatewayConfig {
       heartbeat_timeout_secs: 90,
       resume_window_secs: 120,
       resume_buffer_events: 1000,
+      resume_buffer_bytes: 16 * 1024 * 1024,
+      max_buffered_bytes: 512 * 1024 * 1024,
       identify_timeout_secs: 10,
       connection_max_age_secs: 3600,
       presence_offline_grace_secs: 5,
@@ -1250,6 +1443,7 @@ impl Default for GatewayConfig {
       client_frame_burst: 60,
       max_sessions_per_device: 4,
       max_sessions_per_user: 32,
+      drain_timeout_secs: 10,
     }
   }
 }
@@ -1263,8 +1457,12 @@ impl Default for PushConfig {
       call_ttl_secs: 0,
       dismiss_ttl_secs: 86_400,
       test_ttl_secs: 300,
-      max_retries: 2,
+      max_retries: 200,
       retry_initial_delay_ms: 2000,
+      retry_max_delay_secs: 600,
+      retry_workers: 2,
+      retry_max_queued_per_device: 200,
+      retry_poll_interval_ms: 1000,
       test_interval_secs: 10,
       max_rings_per_minute: 10,
       dismiss_coalesce_ms: 3000,
@@ -1318,12 +1516,14 @@ impl Default for NotificationsConfig {
   fn default() -> Self {
     Self {
       read_receipts_default: true,
+      default_level: NotificationLevel::All,
       urgent_repeat_interval_secs: 120,
       urgent_max_pushes: 5,
       urgent_scheduler_interval_secs: 15,
       mobile_push_delay_secs: 120,
       is_desktop_attention_enabled: true,
       attention_lease_secs: 75,
+      desktop_activity_secs: 120,
       max_held_pushes_per_user: 100,
       email_digest: EmailDigestConfig::default(),
     }
@@ -1394,6 +1594,14 @@ fn default_guest_grace_secs() -> u64 {
   2 * 3600
 }
 
+fn default_max_shared_link_guests() -> u32 {
+  50
+}
+
+fn default_start_ring_lead_secs() -> u64 {
+  3600
+}
+
 fn default_smtp_port() -> u16 {
   587
 }
@@ -1412,6 +1620,18 @@ fn default_caldav_timeout_secs() -> u64 {
 
 fn default_ring_timeout_secs() -> u64 {
   30
+}
+
+fn default_roster_grace_secs() -> u64 {
+  60
+}
+
+fn default_roster_timeout_secs() -> u64 {
+  120
+}
+
+fn default_max_devices_per_user_per_call() -> usize {
+  3
 }
 
 fn default_call_idle_secs() -> u64 {
@@ -1434,6 +1654,10 @@ fn default_max_attachment_bytes() -> u64 {
   100 * 1024 * 1024
 }
 
+fn default_multipart_expiry_secs() -> u64 {
+  24 * 60 * 60
+}
+
 fn default_max_connections() -> u32 {
   10
 }
@@ -1442,12 +1666,25 @@ fn default_acquire_timeout_secs() -> u64 {
   5
 }
 
+fn default_startup_wait_secs() -> u64 {
+  300
+}
+
 fn default_client_id() -> String {
   "teamcraft".into()
 }
 
 fn default_server_client() -> String {
   "teamcraft-server".into()
+}
+
+fn default_app_scopes() -> Vec<String> {
+  vec![
+    "openid".into(),
+    "profile".into(),
+    "email".into(),
+    "offline_access".into(),
+  ]
 }
 
 fn default_algorithms() -> Vec<String> {
@@ -1477,6 +1714,26 @@ mod tests {
   use secrecy::ExposeSecret;
 
   use super::*;
+
+  #[test]
+  fn storage_client_url_follows_the_addressing_style() {
+    let toml = |path_style: bool| {
+      format!(
+        "endpoint = \"https://objects.example.com\"\nbucket = \"chat-assets\"\n\
+         access_key = \"k\"\nsecret_key = \"s\"\npath_style = {path_style}\n"
+      )
+    };
+    let path: StorageConfig = Figment::new()
+      .merge(Toml::string(&toml(true)))
+      .extract()
+      .expect("storage config");
+    assert_eq!(path.client_url(), "https://objects.example.com");
+    let hosted: StorageConfig = Figment::new()
+      .merge(Toml::string(&toml(false)))
+      .extract()
+      .expect("storage config");
+    assert_eq!(hosted.client_url(), "https://chat-assets.objects.example.com/");
+  }
 
   #[test]
   fn the_web_policy_allows_only_the_origins_the_app_needs() {
@@ -1572,6 +1829,10 @@ mod tests {
   fn example_file_parses_and_matches_the_defaults() {
     let text = include_str!("../../../teamcraft.example.toml");
     let config = Config::from_toml(text).unwrap();
+    assert_eq!(
+      config.dependencies,
+      crate::dependencies::DependenciesConfig::default()
+    );
     assert_eq!(config.limits.max_page_size, LimitsConfig::default().max_page_size);
     assert_eq!(
       config.gateway.resume_buffer_events,
@@ -1582,8 +1843,8 @@ mod tests {
       GatewayConfig::default().max_frame_bytes
     );
     assert_eq!(
-      config.policy.guests_dm_only_with_shared_conversations,
-      PolicyConfig::default().guests_dm_only_with_shared_conversations
+      config.policy.effective_guests_dm_start(),
+      PolicyConfig::default().effective_guests_dm_start()
     );
     assert_eq!(
       config.rendezvous.max_total_bytes,

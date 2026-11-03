@@ -5,8 +5,9 @@
 
 use teamcraft_db::{ConversationView, SpaceView};
 use teamcraft_proto::{
-  ChannelContext, ChannelRole, ConversationId, ConversationKind, ConversationVisibility, JoinPolicy,
-  Permission, Role, SpaceContext, SpaceId, SpaceRole, Target, UserKind, is_allowed,
+  ALL_PERMISSIONS, ChannelContext, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
+  HistoryPolicy, JoinPolicy, Permission, PermissionScope, Role, SpaceContext, SpaceId, SpaceRole, Target,
+  UserKind, is_allowed,
 };
 
 use crate::auth::AuthenticatedUser;
@@ -32,6 +33,18 @@ pub fn is_guest(caller: &AuthenticatedUser) -> bool {
   caller.user.kind == UserKind::Guest || caller.role == Role::Guest
 }
 
+/// Whether the caller sees the conversation's history from before they joined: a `full`
+/// conversation, and not a guest unless the import account added them (e2ee.md §4.10, "Guests in
+/// imported conversations"). The members' clients decide who can read it; this keeps the server
+/// from handing out more.
+pub fn sees_all_history(caller: &AuthenticatedUser, view: &ConversationView) -> bool {
+  let is_added_by_import = view
+    .maybe_membership
+    .as_ref()
+    .is_some_and(|membership| membership.sees_imported_history);
+  view.conversation.history_policy == HistoryPolicy::Full && (!is_guest(caller) || is_added_by_import)
+}
+
 /// `Ok` if the permission is granted on the target, `Forbidden` otherwise.
 pub fn require(
   state: &AppState,
@@ -39,12 +52,42 @@ pub fn require(
   permission: Permission,
   target: &Target,
 ) -> Result<(), ApiError> {
-  let scheme = state.scheme.for_space(space_of(target));
-  if is_allowed(&scheme, &caller.role, &permission, target) {
+  if allows(state, caller, &permission, target) {
     Ok(())
   } else {
     Err(ApiError::Forbidden(format!("missing permission {permission}")))
   }
+}
+
+/// Whether the permission is granted on the target, with the scheme of the target's space.
+pub fn allows(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  permission: &Permission,
+  target: &Target,
+) -> bool {
+  let scheme = state.scheme.for_space(space_of(target));
+  is_allowed(&scheme, &caller.role, permission, target)
+}
+
+/// The channel permissions the caller holds on a conversation target, as UI hints in
+/// [`teamcraft_proto::ConversationResponse::maybe_my_permissions`] (issue #691). Share links
+/// switched off for the instance take `create_share_link` away from everybody.
+pub fn channel_permissions(state: &AppState, caller: &AuthenticatedUser, target: &Target) -> Vec<Permission> {
+  let scheme = state.scheme.for_space(space_of(target));
+  let are_shares_enabled = state.settings.get().shares.is_enabled;
+  ALL_PERMISSIONS
+    .iter()
+    .filter(|permission| {
+      matches!(
+        permission.scope(),
+        Some(PermissionScope::ChannelContent | PermissionScope::ChannelManagement)
+      )
+    })
+    .filter(|permission| are_shares_enabled || **permission != Permission::CreateShareLink)
+    .filter(|permission| is_allowed(&scheme, &caller.role, permission, target))
+    .cloned()
+    .collect()
 }
 
 /// The space a target lies in, whose own scheme applies.
@@ -74,17 +117,7 @@ impl SpaceAccess {
 
 impl ConversationAccess {
   pub fn target(&self) -> Target {
-    let conversation = &self.view.conversation;
-    Target::Channel(ChannelContext {
-      maybe_space: conversation.maybe_space_id.map(|space| SpaceContext {
-        maybe_role: self.maybe_space_role.clone(),
-        maybe_space_id: Some(space),
-      }),
-      visibility: conversation.visibility.clone(),
-      is_archived: conversation.is_archived,
-      maybe_role: self.view.maybe_membership.as_ref().map(|m| m.role.clone()),
-      moderation: conversation.moderation.clone(),
-    })
+    channel_target(&self.view, self.maybe_space_role.clone())
   }
 
   pub fn is_member(&self) -> bool {
@@ -94,6 +127,21 @@ impl ConversationAccess {
   pub fn role(&self) -> Option<&ChannelRole> {
     self.view.maybe_membership.as_ref().map(|m| &m.role)
   }
+}
+
+/// The permission target of a conversation for a caller with this role in its space.
+pub fn channel_target(view: &ConversationView, maybe_space_role: Option<SpaceRole>) -> Target {
+  let conversation = &view.conversation;
+  Target::Channel(ChannelContext {
+    maybe_space: conversation.maybe_space_id.map(|space| SpaceContext {
+      maybe_role: maybe_space_role,
+      maybe_space_id: Some(space),
+    }),
+    visibility: conversation.visibility.clone(),
+    is_archived: conversation.is_archived,
+    maybe_role: view.maybe_membership.as_ref().map(|m| m.role.clone()),
+    moderation: conversation.moderation.clone(),
+  })
 }
 
 /// Loads a space the caller may see: a member, an open space (not for guests) or any space for admins.
@@ -126,16 +174,7 @@ pub async fn load_conversation(
   caller: &AuthenticatedUser,
   id: ConversationId,
 ) -> Result<ConversationAccess, ApiError> {
-  let view = state
-    .database
-    .get_conversation(id, caller.user.id)
-    .await?
-    .ok_or_else(ApiError::conversation_not_found)?;
-  let maybe_space_role = match view.conversation.maybe_space_id {
-    Some(space) => state.database.space_role(space, caller.user.id).await?,
-    None => None,
-  };
-
+  let (view, maybe_space_role) = conversation_and_space_role(state, caller, id).await?;
   let conversation = &view.conversation;
   let is_channel = conversation.kind == ConversationKind::Channel;
   let is_visible = view.maybe_membership.is_some()
@@ -152,4 +191,21 @@ pub async fn load_conversation(
   } else {
     Err(ApiError::conversation_not_found())
   }
+}
+
+async fn conversation_and_space_role(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+) -> Result<(ConversationView, Option<SpaceRole>), ApiError> {
+  let view = state
+    .database
+    .get_conversation(id, caller.user.id)
+    .await?
+    .ok_or_else(ApiError::conversation_not_found)?;
+  let maybe_space_role = match view.conversation.maybe_space_id {
+    Some(space) => state.database.space_role(space, caller.user.id).await?,
+    None => None,
+  };
+  Ok((view, maybe_space_role))
 }

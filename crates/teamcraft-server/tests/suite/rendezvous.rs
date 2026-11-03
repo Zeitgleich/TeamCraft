@@ -82,20 +82,22 @@ fn control(message: RendezvousServerMessage) -> Received {
   Received::Control(message)
 }
 
+/// The server's answer to a join, with the default relay lifetime.
+fn joined(peer_present: bool) -> Received {
+  control(RendezvousServerMessage::Joined {
+    peer_present,
+    maybe_expires_in_secs: Some(300),
+  })
+}
+
 #[tokio::test]
 async fn two_devices_of_one_user_exchange_binary_frames_in_order() {
   let app = app!();
   let carol = member("carol");
   let (mut phone, answer) = Device::join(&app, &carol, ID).await;
-  assert_eq!(
-    answer,
-    control(RendezvousServerMessage::Joined { peer_present: false })
-  );
+  assert_eq!(answer, joined(false));
   let (mut laptop, answer) = Device::join(&app, &carol, ID).await;
-  assert_eq!(
-    answer,
-    control(RendezvousServerMessage::Joined { peer_present: true })
-  );
+  assert_eq!(answer, joined(true));
   assert_eq!(phone.recv().await, control(RendezvousServerMessage::PeerJoined));
 
   phone.send(&[1, 2, 3]).await;
@@ -184,10 +186,7 @@ async fn leaving_closes_the_other_side() {
   assert_eq!(phone.recv().await, Received::Closed);
   // The ID is free again.
   let (_, answer) = Device::join(&app, &carol, ID).await;
-  assert_eq!(
-    answer,
-    control(RendezvousServerMessage::Joined { peer_present: false })
-  );
+  assert_eq!(answer, joined(false));
   app.stop().await;
 }
 

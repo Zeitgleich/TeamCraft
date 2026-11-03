@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Observation
 import SwiftUI
 import UIKit
@@ -6,16 +7,30 @@ import UserNotifications
 
 /// Why something failed, as the screens show it (translated per case).
 enum AppFailure: Equatable {
-  case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, generic
+  case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, callMoveRefused, callDeviceLimit, generic
+  case backupOutOfMemory, backupTooNew, backupDamaged
+  case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
+  /// The identity provider refused the sign-in (issue #1063); `code` is its cleaned `error`.
+  case providerDenied, providerAlreadySignedIn
+  case providerMisconfigured(code: String), providerRefused(code: String)
 
   init(_ failure: CoreFailure) {
     switch failure {
     case .network: self = .network
     case .signedOut: self = .signedOut
     case .wrongPassphrase: self = .wrongPassphrase
+    case .backupOutOfMemory: self = .backupOutOfMemory
+    case .backupTooNew: self = .backupTooNew
+    case .backupDamaged: self = .backupDamaged
     case .storage: self = .storage
     case .recoveryPending: self = .recoveryPending
-    case .notEnrolled, .other: self = .generic
+    case .callMoveRefused: self = .callMoveRefused
+    case .callDeviceLimit: self = .callDeviceLimit
+    case .linkCodeInvalid: self = .linkCodeInvalid
+    case .linkCodeForNewDevice: self = .linkCodeForNewDevice
+    case .linkCodeForSignedInDevice: self = .linkCodeForSignedInDevice
+    case .linkCodeExpired: self = .linkCodeExpired
+    case .notEnrolled, .linkCodeRejected, .linkAttemptEnded, .other: self = .generic
     }
   }
 
@@ -24,10 +39,40 @@ enum AppFailure: Equatable {
     case .network: return "error_network"
     case .signedOut: return "error_signed_out"
     case .wrongPassphrase: return "error_wrong_passphrase"
+    case .backupOutOfMemory: return "error_backup_out_of_memory"
+    case .backupTooNew: return "error_backup_too_new"
+    case .backupDamaged: return "error_backup_damaged"
     case .storage: return "error_storage"
     case .signInFailed: return "sign_in_failed"
     case .recoveryPending: return "recovery_pending"
+    case .callMoveRefused: return "call_move_refused"
+    case .callDeviceLimit: return "call_device_limit"
     case .generic: return "error_generic"
+    case .linkCodeInvalid: return "link_code_invalid"
+    case .linkCodeForNewDevice: return "link_code_for_new_device"
+    case .linkCodeForSignedInDevice: return "link_code_for_signed_in_device"
+    case .linkCodeExpired: return "link_code_expired"
+    case .providerDenied: return "sign_in_provider_denied"
+    case .providerAlreadySignedIn: return "sign_in_provider_already_signed_in"
+    case .providerMisconfigured(let code): return "sign_in_provider_misconfigured \(code)"
+    case .providerRefused(let code): return "sign_in_provider_refused \(code)"
+    }
+  }
+
+  /// What the sign-in screen says after a failed browser sign-in; `nil` when the user cancelled.
+  /// The one automatic retry of `already_logged_in` happened before (`WebLogin`).
+  static func signIn(_ error: Error) -> AppFailure? {
+    switch error {
+    case OidcError.cancelled: return nil
+    case OidcError.network: return .network
+    case OidcError.providerRefused(let code):
+      switch authorizationErrorKind(code: code) {
+      case .alreadySignedIn: return .providerAlreadySignedIn
+      case .accessDenied: return .providerDenied
+      case .misconfigured: return .providerMisconfigured(code: code)
+      case .other: return .providerRefused(code: code)
+      }
+    default: return .signInFailed
     }
   }
 }
@@ -39,10 +84,14 @@ struct Account: Equatable {
   let identityFingerprint: String
 }
 
-/// A device link this (new) device waits for: the code the other device scans or types.
+/// A device link this (new) phone waits for. It shows no code (nobody could scan it, issue #998):
+/// the other device approves it from a prompt, or this phone scans the code a computer shows.
+/// `attempt` counts fresh starts, so the screen forgets an earlier "asked"; `maybeNotice` says why
+/// the last attempt ended.
 struct LinkProgress: Equatable {
-  let code: String
   var maybeShortCode: String?
+  var attempt = 0
+  var maybeNotice: LocalizedStringKey?
 }
 
 /// An organization recovery this device asked for: the code the user reads to an admin.
@@ -53,12 +102,18 @@ struct RecoveryProgress: Equatable {
 /// What the app shows at the top level.
 enum AppPhase {
   case starting
+  /// Asks for the server address; `address` prefills the field (a preconfigured or the last input).
+  case needsServer(address: String, failure: ServerFailure?)
+  /// A server passed the checks; the user confirms it before signing in.
+  case confirmServer(CheckedServer)
   case signedOut(AppFailure?)
   case needsEnrollment(hasExistingIdentity: Bool, failure: AppFailure?)
   case linking(LinkProgress)
   case recovering(RecoveryProgress, failure: AppFailure?)
   case ready(Account)
   case failed(AppFailure)
+  /// The local data can't be read by this version (issue #414); `failure` says why a reset failed.
+  case storeUnreadable(StoreProblem, failure: AppFailure?)
 }
 
 /// The app's state and its one entry to the Rust core. Screens read; the core does the work
@@ -67,6 +122,14 @@ enum AppPhase {
 @Observable
 final class AppModel {
   static let shared = AppModel()
+  private static let signInLog = Logger(subsystem: "de.zeitgleich.teamcraft", category: "sign-in")
+  private static let syncLog = Logger(subsystem: "de.zeitgleich.teamcraft", category: "sync")
+  /// One wait for the cross-process lock; the extension holds it at most for its push budget.
+  private static let lockWaitSeconds: TimeInterval = 5
+  /// The longest a background flush waits, even if the system grants more time.
+  private static let maxBackgroundFlushSeconds: TimeInterval = 25
+  /// Background time kept for stopping the sync loop and closing the store after a flush.
+  private static let backgroundStopMarginSeconds: TimeInterval = 5
 
   private(set) var phase: AppPhase = .starting
   private(set) var isBusy = false
@@ -79,20 +142,56 @@ final class AppModel {
   /// The conversation on screen; its notifications are not shown as banners.
   var visibleConversationId: String?
   private(set) var pushStatus: PushStatus = .unknown
+  /// Where the core's gateway connection stands (`nil`: no core open); the banner follows it.
+  private(set) var connection: ConnectionState?
+  /// Since when the connection (or the device's network) is down: the banner waits out its grace
+  /// period, the screens show the local store meanwhile (#713).
+  private(set) var connectionGrace = ConnectionGrace()
+  /// New devices of this account waiting for a decision; the popup on every signed-in screen.
+  private(set) var linkPrompts: [LinkPrompt] = []
+  /// The request or scanned code this device is typing the confirmation for (see `LinkReview`).
+  private(set) var maybeLinkReview: LinkReview?
+  /// Admins' requests to join channels the user owns, oldest first (issue #799); read on every
+  /// change (`AppModel+JoinRequests`).
+  var joinRequests: [JoinRequestItem] = []
+  /// Requests (`JoinRequests.key`) and channels (ID) whose action runs: their buttons wait.
+  var pendingJoinKeys: Set<String> = []
+  /// Why the last action on a request didn't go through; the screen showing it clears it.
+  var joinNote: JoinNote?
 
   let calls = CallManager()
-  /// The server's brand for the sign-in screen.
-  let brand = BrandStore(serverURL: AppEnvironment.current.serverURL)
+  /// The server's brand for the confirmation and sign-in screens.
+  let brand = BrandStore()
+  /// The server the device's management or the build names (read at start).
+  private(set) var managedServer = ManagedServer(maybeAddress: nil, isLocked: false)
+  /// The account's server; `nil` until one is chosen.
+  private(set) var maybeServer: StoredServer?
+  /// What the sign-in screen offers; `nil` while it is being asked for.
+  private(set) var maybeSignInPage: SignInPageInfo?
 
-  @ObservationIgnored private let vault = SessionVault()
+  @ObservationIgnored private let servers = ServerStore()
+  @ObservationIgnored private lazy var vault = SessionVault(servers: servers)
   @ObservationIgnored private let container = SharedContainer()
-  @ObservationIgnored private lazy var factory = CoreFactory(container: container, vault: vault)
+  @ObservationIgnored private lazy var factory = CoreFactory(container: container, vault: vault, servers: servers)
   @ObservationIgnored private let login = WebLogin()
+  /// The running link of this (new) phone; a scan or a fresh start replaces it.
+  @ObservationIgnored private var maybeLinkTask: Task<Void, Never>?
+  @ObservationIgnored private let serverInfo = ServerInfoClient()
+  @ObservationIgnored private let localAuth = LocalAuthClient()
+  /// The sign-in page came with the server check just now: the screen need not ask again.
+  @ObservationIgnored private var isSignInPageFromCheck = false
   @ObservationIgnored private lazy var processLock = ProcessLock(fileURL: container.lockFileURL)
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
   @ObservationIgnored private var maybeCore: TeamCraft?
   @ObservationIgnored private var isSyncing = false
+  /// Background time held while what is pending goes out after the app left the foreground.
+  @ObservationIgnored private var backgroundTask = UIBackgroundTaskIdentifier.invalid
+  /// Counts the returns to the foreground: a background flush that outlasted one leaves syncing on.
+  @ObservationIgnored private var foregroundGeneration = 0
   @ObservationIgnored private var maybePushToken: String?
+  @ObservationIgnored private var isPushUpkeepRunning = false
+  @ObservationIgnored private var maybeLastPushAttempt: Date?
+  @ObservationIgnored private var maybeLinkExpiry: Task<Void, Never>?
   @ObservationIgnored private var maybeReconcile: Task<Void, Never>?
 
   private init() {}
@@ -103,58 +202,203 @@ final class AppModel {
 
   // MARK: Start and sign-in
 
-  /// Opens the stored session, if any. Safe to call more than once.
+  /// Opens the stored server and session, if any. Safe to call more than once.
   func bootstrap() async {
     guard case .starting = phase else { return }
     storeChanges.observe { [weak self] in self?.storeDidChange() }
+    // Starts following the network, so changes reach the core from now on.
+    _ = NetworkMonitor.shared
     // Copies of picked files older than a week were uploaded long ago.
     container.pruneUploads(olderThan: 7 * 24 * 3600)
-    await refreshAccountState()
+    await startWithServer()
   }
 
   /// After a failed start: tries to open the account again.
   func retry() async {
     phase = .starting
-    await refreshAccountState()
+    await startWithServer()
   }
 
-  func signIn() async {
+  // MARK: Server
+
+  /// Whether the user may only use the server the device's management set.
+  var isServerLocked: Bool { managedServer.isLocked }
+
+  /// Checks what the user typed or pasted (address, URL, invite or message link): normalises it,
+  /// asks the server and shows it for confirmation; stays at the entry with the reason otherwise.
+  func checkServer(_ input: String) async {
     await busy {
       do {
-        let session = try await login.login()
-        try vault.save(session)
-        container.activeAccount = session.subject
-        container.displayName = session.displayName
-        await refreshAccountState()
-      } catch OidcError.cancelled {
-        phase = .signedOut(nil)
+        let address = try normalizeServerAddress(input: input, allowInsecureHttp: AppEnvironment.allowsInsecureHttp)
+        guard managedServer.allows(origin: address.origin, normalize: Self.normalizedOrigin) else {
+          phase = .needsServer(address: input, failure: .locked)
+          return
+        }
+        guard let url = URL(string: address.serverInfoUrl) else { throw URLError(.badURL) }
+        let answer = try await serverInfo.fetch(url)
+        let environment = AppEnvironment.current
+        let checked = try checkServerInfo(
+          origin: address.origin, status: answer.status, contentType: answer.contentType, body: answer.body,
+          clientVersion: environment.clientVersion, redirectUri: environment.oidcRedirectURI.absoluteString,
+          allowInsecureHttp: AppEnvironment.allowsInsecureHttp, language: Locale.preferredLanguages.first ?? "en")
+        brand.select(checked.server.address, initial: checked.maybeBrand)
+        phase = .confirmServer(checked)
+      } catch let error as URLError {
+        phase = .needsServer(address: input, failure: ServerFailure(transport: error))
       } catch {
-        phase = .signedOut(.signInFailed)
+        phase = .needsServer(address: input, failure: ServerFailure(entryError: error))
       }
     }
   }
 
+  /// The user confirmed the checked server: it becomes the account's server, sign-in follows.
+  func confirmServer() {
+    guard case .confirmServer(let checked) = phase else { return }
+    servers.activate(checked.server)
+    // As stored: with the login hint of an earlier sign-in to this server kept (issue #448).
+    maybeServer = servers.activeServer ?? checked.server
+    maybeSignInPage = checked.signInPage
+    isSignInPageFromCheck = true
+    phase = .signedOut(nil)
+  }
+
+  /// Back to the server entry, from the confirmation or the sign-in screen (signed out, so no
+  /// account data is at stake). Not while the server is locked.
+  func changeServer() {
+    guard !managedServer.isLocked else { return }
+    if case .signedOut = phase {
+      servers.forgetActive()
+    }
+    maybeServer = nil
+    maybeSignInPage = nil
+    brand.select(nil)
+    phase = .needsServer(address: "", failure: nil)
+  }
+
+  /// Asks the server what the sign-in screen offers (it may change at any time), each time the
+  /// screen is shown; right after the server check its answer is used. Offline: SSO only.
+  func refreshSignInPage() async {
+    if isSignInPageFromCheck {
+      isSignInPageFromCheck = false
+      return
+    }
+    guard let server = maybeServer else { return }
+    let brandName = brand.brand?.displayName ?? server.displayName
+    let page = await SignInPageLoader(client: serverInfo).load(address: server.address, brandName: brandName)
+    // Another server may have been chosen meanwhile.
+    guard maybeServer?.address.origin == server.address.origin else { return }
+    maybeSignInPage = page
+  }
+
+  func signIn() async {
+    guard let server = maybeServer else {
+      phase = .needsServer(address: "", failure: nil)
+      return
+    }
+    await busy {
+      let session: OidcSession
+      do {
+        session = try await login.login(
+          server: server, maybeLoginPageAlwaysShown: maybeSignInPage?.maybeLoginPageAlwaysShown)
+      } catch {
+        let maybeFailure = AppFailure.signIn(error)
+        if maybeFailure != nil {
+          // The error's case and the provider's cleaned code; it carries no token or redirect code.
+          AppLog.failure("sign-in", error, logger: Self.signInLog)
+        }
+        phase = .signedOut(maybeFailure)
+        return
+      }
+      do {
+        try vault.save(session)
+      } catch {
+        Self.signInLog.warning("the session could not be stored")
+        phase = .signedOut(.storage)
+        return
+      }
+      rememberLoginHint(session.loginHint, for: server)
+      container.activeAccount = session.subject
+      container.displayName = session.displayName
+      await refreshAccountState()
+    }
+  }
+
+  /// Prefills the account at this server's next sign-in (issue #448).
+  private func rememberLoginHint(_ maybeHint: String?, for server: StoredServer) {
+    guard let hint = maybeHint, hint != server.maybeLoginHint,
+      let updated = storedServerWithLoginHint(profileJson: server.profileJson, loginHint: hint)
+    else { return }
+    servers.activate(updated)
+    if maybeServer?.address.origin == updated.address.origin { maybeServer = updated }
+  }
+
+  /// Signs in with a local account's e-mail address, password and optional one-time code. Returns
+  /// why it failed for the form to show; `nil` after a sign-in (the phase moved on).
+  func signInLocal(email: String, password: String, maybeCode: String?) async -> LocalSignInFailure? {
+    guard let server = maybeServer, let origin = URL(string: server.address.origin) else {
+      phase = .needsServer(address: "", failure: nil)
+      return nil
+    }
+    var maybeFailure: LocalSignInFailure?
+    await busy {
+      let result = await localAuth.login(origin: origin, email: email, password: password, maybeCode: maybeCode)
+      switch result {
+      case .signedIn(let session):
+        do {
+          try vault.saveLocal(session)
+        } catch {
+          AppLog.failure("saving the local session", error)
+          maybeFailure = .generic
+          return
+        }
+        container.activeAccount = session.userId
+        container.displayName = nil
+        await refreshAccountState()
+      case .failed(let failure):
+        maybeFailure = failure
+      }
+    }
+    return maybeFailure
+  }
+
+  /// Ends the session; the server stays, so signing in again is one tap ("Change server" leads to
+  /// another one).
   func signOut() async {
     await busy {
-      await stopSyncing()
-      // Before the keys go: deletes the push key here, ends the sealed device token at the gateway
-      // and the registration on the server, so the server can't push to this phone any more.
-      // Best effort and at most a few seconds; offline, the push key is still gone.
-      if let core = try? core() {
-        await Self.awaitAtMost(seconds: 5) { try? await core.unregisterPush() }
-      }
-      if let account = container.activeAccount {
-        try? factory.keys.delete(for: account)
-      }
-      maybeCore = nil
-      vault.clear()
-      NotificationAuthenticator().removeKey()
-      container.wipeDownloads()
-      container.pruneUploads(olderThan: 0)
-      container.activeAccount = nil
-      container.displayName = nil
-      UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+      await endSession()
       phase = .signedOut(nil)
+    }
+  }
+
+  // MARK: Unreadable local data
+
+  /// "Set up this device again" (issue #414): the core sets the unreadable database aside (renamed,
+  /// never deleted) and opens a new one; enrollment follows. Off the main thread, since the new
+  /// store opens while it waits.
+  func resetStore() async {
+    guard case .storeUnreadable(let problem, _) = phase, let core = maybeCore else { return }
+    await busy {
+      // The notification extension may have the old file open; the lock keeps it out meanwhile.
+      let lock = processLock
+      let hasLock = await Task.detached { lock.acquire(timeout: 5) }.value
+      defer { if hasLock { lock.release() } }
+      do {
+        try await Task.detached { try core.resetStore() }.value
+        await refreshAccountState()
+      } catch {
+        AppLog.failure("setting the local data aside", error)
+        phase = .storeUnreadable(problem, failure: AppFailure(CoreFailure(error)))
+      }
+    }
+  }
+
+  /// "Try again" on the unreadable-data screen: opens the core afresh (after an update, or a
+  /// keychain that answers again).
+  func retryStore() async {
+    guard case .storeUnreadable = phase else { return }
+    await busy {
+      maybeCore = nil
+      await refreshAccountState()
     }
   }
 
@@ -167,29 +411,76 @@ final class AppModel {
         let account = try await core().enroll(deviceName: deviceName, passphrase: passphrase)
         await adopt(account)
       } catch {
+        AppLog.failure("enrollment", error)
         phase = .needsEnrollment(hasExistingIdentity: hasExisting, failure: AppFailure(CoreFailure(error)))
       }
     }
   }
 
-  /// New device: shows a code another device scans, waits for it, receives the keys (e2ee.md §5).
-  func startLinking() async {
-    await busy {
+  /// New phone: waits in the relay so the other devices can be asked, then receives the keys
+  /// (e2ee.md §5). A wait that ran out starts again by itself, saying why.
+  func startLinking(notice maybeNotice: LocalizedStringKey? = nil) {
+    var attempt = 1
+    if case .linking(let progress) = phase { attempt = progress.attempt + 1 }
+    let deviceName = deviceName
+    runLink(LinkProgress(attempt: attempt, maybeNotice: maybeNotice)) { core in
+      _ = try await core.startDeviceLink(deviceName: deviceName, platform: .ios)
+      return try await core.waitForLinkPeer()
+    }
+  }
+
+  /// New phone: scanned the code a signed-in computer shows for it ("Link a phone", issue #998).
+  func linkScannedCode(_ code: String) {
+    guard case .linking(var progress) = phase else { return }
+    progress.maybeNotice = nil
+    let trimmed = code.trimmingCharacters(in: .whitespacesAndNewlines)
+    runLink(progress) { core in try await core.joinScannedDeviceLink(code: trimmed) }
+  }
+
+  private func runLink(_ waiting: LinkProgress, peer: @escaping (TeamCraft) async throws -> String) {
+    maybeLinkTask?.cancel()
+    maybeLinkTask = Task {
       do {
         let core = try self.core()
-        let code = try await core.startDeviceLink()
-        phase = .linking(LinkProgress(code: code))
-        let shortCode = try await core.waitForLinkPeer()
-        phase = .linking(LinkProgress(code: code, maybeShortCode: shortCode))
+        phase = .linking(waiting)
+        let shortCode = try await peer(core)
+        guard !Task.isCancelled else { return }
+        var connected = waiting
+        connected.maybeShortCode = shortCode
+        connected.maybeNotice = nil
+        phase = .linking(connected)
         let account = try await core.finishDeviceLink(deviceName: deviceName)
         await adopt(account)
       } catch {
-        phase = .needsEnrollment(hasExistingIdentity: true, failure: AppFailure(CoreFailure(error)))
+        // A replaced wait ends with an error too; the newer one owns the screen.
+        guard !Task.isCancelled else { return }
+        AppLog.failure("linking this device", error)
+        switch CoreFailure(error) {
+        case .linkCodeExpired where waiting.maybeShortCode == nil: startLinking(notice: "link_expired_restarted")
+        // The wait the scan replaced lost its listener: a fresh one, saying what was wrong.
+        case .linkCodeForSignedInDevice: startLinking(notice: "link_code_for_signed_in_device")
+        case .linkCodeInvalid: startLinking(notice: "link_code_invalid")
+        default: phase = .needsEnrollment(hasExistingIdentity: true, failure: AppFailure(CoreFailure(error)))
+        }
       }
     }
   }
 
+  /// New device: asks the account's other devices to approve this one. The server then holds the
+  /// code's key, which scanning does not need, so this runs only on the user's tap.
+  func askOtherDevices() async -> Bool {
+    do {
+      try await core().announceDeviceLink()
+      return true
+    } catch {
+      AppLog.failure("asking the other devices", error)
+      return false
+    }
+  }
+
   func cancelLinking() {
+    maybeLinkTask?.cancel()
+    maybeLinkTask = nil
     phase = .needsEnrollment(hasExistingIdentity: true, failure: nil)
   }
 
@@ -200,6 +491,7 @@ final class AppModel {
         let start = try await core().startOrgRecovery()
         phase = .recovering(RecoveryProgress(verificationCode: start.verificationCode), failure: nil)
       } catch {
+        AppLog.failure("starting the recovery request", error)
         phase = .needsEnrollment(hasExistingIdentity: true, failure: AppFailure(CoreFailure(error)))
       }
     }
@@ -212,6 +504,7 @@ final class AppModel {
         let account = try await core().finishOrgRecovery(deviceName: deviceName, newPassphrase: newPassphrase)
         await adopt(account)
       } catch {
+        AppLog.failure("recovery through the organization", error)
         phase = .recovering(progress, failure: AppFailure(CoreFailure(error)))
       }
     }
@@ -221,13 +514,72 @@ final class AppModel {
     phase = .needsEnrollment(hasExistingIdentity: true, failure: nil)
   }
 
-  /// Existing device: approves a new device by its code; returns the short code to compare.
-  func approveLink(code: String) async throws -> String {
-    try await core().approveDeviceLink(code: code.trimmingCharacters(in: .whitespacesAndNewlines))
+  // MARK: Linking another device (existing device)
+
+  /// Existing device: joins the new device whose code was scanned or typed. The new device shows
+  /// a short code the user types next (`confirmLink`); this device never shows it (docs/e2ee.md §5).
+  func approveLink(code: String) async throws {
+    do {
+      try await core().approveDeviceLink(code: code.trimmingCharacters(in: .whitespacesAndNewlines))
+    } catch {
+      AppLog.failure("joining the new device", error)
+      throw error
+    }
+    maybeLinkReview = LinkReview(maybeDeviceName: nil, maybeRequestId: nil)
   }
 
-  func confirmLink() async throws {
-    try await core().confirmDeviceLink()
+  /// Existing device: checks the code the user typed from the new device and sends the keys if it
+  /// is right.
+  func confirmLink(typedCode: String) async -> LinkConfirmResult {
+    do {
+      try await core().confirmDeviceLink(typedCode: LinkCode.digits(of: typedCode))
+      maybeLinkReview = nil
+      return .approved
+    } catch {
+      AppLog.failure("sending the keys to the new device", error)
+      switch CoreFailure(error) {
+      case .linkCodeRejected: return .wrongCode
+      case .linkAttemptEnded:
+        maybeLinkReview = nil
+        return .attemptEnded
+      case let failure: return .failed(AppFailure(failure))
+      }
+    }
+  }
+
+  /// Existing device: the user left the typed-code step; nothing is sent.
+  func cancelLinkApproval() async {
+    maybeLinkReview = nil
+    // Best effort: without a core or an attempt there is nothing to cancel.
+    try? await core().cancelDeviceLinkApproval()
+  }
+
+  /// Popup, Review: takes the request up (the other devices drop their prompt) and moves to the
+  /// typed-code step.
+  func reviewLinkRequest(_ prompt: LinkPrompt) async throws {
+    try await core().reviewLinkRequest(id: prompt.id)
+    maybeLinkReview = LinkReview(maybeDeviceName: prompt.deviceName, maybeRequestId: prompt.id)
+    linkPrompts.removeAll { $0.id == prompt.id }
+  }
+
+  /// Popup, Deny: closes the request; the new device is told and stops.
+  func rejectLinkRequest(_ prompt: LinkPrompt) async throws {
+    try await core().rejectLinkRequest(id: prompt.id)
+    linkPrompts.removeAll { $0.id == prompt.id }
+  }
+
+  /// Reads the open requests again; called on every change the core reports (cheap), and when the
+  /// account becomes ready.
+  func refreshLinkRequests() async {
+    guard case .ready = phase, let core = maybeCore else {
+      linkPrompts = []
+      maybeLinkReview = nil
+      armLinkExpiry()
+      return
+    }
+    // A failed read keeps what is shown; the next change reads again.
+    guard let requests = try? await core.linkRequests() else { return }
+    applyLinkRequests(requests)
   }
 
   // MARK: Reading
@@ -236,12 +588,44 @@ final class AppModel {
     (try? await core().conversations()) ?? []
   }
 
+  /// What the newest notification showed of a conversation, while the store hasn't caught it up
+  /// yet (issue #1065): its name and the notified message.
+  func notifiedConversation(_ conversationId: String) async -> NotifiedConversation? {
+    (try? await core().notifiedConversation(conversationId: conversationId)) ?? nil
+  }
+
+  /// How far the first sync of a newly set up device is; `nil` when none runs.
+  func firstSync() async -> FirstSyncItem? {
+    (try? await core().firstSync()) ?? nil
+  }
+
+  /// How far conversations waiting for message keys have caught up (issue #888); `nil` while none
+  /// waits.
+  func keyCatchUp() async -> KeyCatchUpItem? {
+    (try? await core().keyCatchUp()) ?? nil
+  }
+
   func messages(conversationId: String, limit: UInt32 = 200) async -> [MessageItem] {
-    (try? await core().messages(conversationId: conversationId, limit: limit)) ?? []
+    ((try? await core().messages(conversationId: conversationId, limit: limit)) ?? []).map {
+      $0.namingDeletedAuthor()
+    }
+  }
+
+  /// What a feed that pages back shows (issue #1058): the messages from `maybeOldest` (the oldest
+  /// one it shows) to the newest, and `older` messages before it; `nil` when the read failed.
+  func messages(conversationId: String, from maybeOldest: MessageItem?, older: UInt32) async -> MessagePage? {
+    guard
+      let page = try? await core().messagesFrom(
+        conversationId: conversationId, maybeOldestId: maybeOldest?.id, oldestSentAtMs: maybeOldest?.sentAtMs ?? 0,
+        older: older)
+    else { return nil }
+    return MessagePage(messages: page.messages.map { $0.namingDeletedAuthor() }, hasOlder: page.hasOlder)
   }
 
   func thread(conversationId: String, threadId: String) async -> [MessageItem] {
-    (try? await core().thread(conversationId: conversationId, threadId: threadId)) ?? []
+    ((try? await core().thread(conversationId: conversationId, threadId: threadId)) ?? []).map {
+      $0.namingDeletedAuthor()
+    }
   }
 
   /// The newest message of each conversation, for the chat list. Local reads only.
@@ -256,7 +640,7 @@ final class AppModel {
 
   func search(_ query: String) async -> [SearchHitItem] {
     guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
-    return (try? await core().search(query: query)) ?? []
+    return ((try? await core().search(query: query)) ?? []).map { $0.namingDeletedAuthor() }
   }
 
   // MARK: Acting
@@ -300,6 +684,17 @@ final class AppModel {
     }
   }
 
+  /// Like `perform`, but says why the core refused the action (nil when it was taken), so a form
+  /// shows the refusal at its field and keeps the input (forms.md, "Submitting").
+  func performReporting(_ action: ChatAction) async -> AppFailure? {
+    do {
+      try await core().act(actionJson: action.json)
+      return nil
+    } catch {
+      return AppFailure(CoreFailure(error))
+    }
+  }
+
   // MARK: Files
 
   /// Importer for picked files, with the server's upload limit if the core knows it.
@@ -311,12 +706,27 @@ final class AppModel {
     await answer(.maxUploadBytes)?.maybeBytes
   }
 
+  /// Others' reactions to the user's messages in the conversation not seen yet (offline from the
+  /// local store).
+  func olderHistory(conversationId: String) async -> OlderHistory? {
+    await answer(.olderHistory(conversationId: conversationId))?.olderHistory
+  }
+
+  func unseenReactions(conversationId: String) async -> UnseenReactions {
+    await answer(.unseenReactions(conversationId: conversationId))?.unseen ?? UnseenReactions()
+  }
+
   /// Files, link previews and other extras of the given messages, by message id.
   func extras(conversationId: String, messageIds: [String]) async -> [String: MessageExtras] {
     guard !messageIds.isEmpty,
       let extras = await answer(.messageExtras(conversationId: conversationId, messageIds: messageIds))?.extras
     else { return [:] }
     return Dictionary(extras.map { ($0.message, $0) }, uniquingKeysWith: { first, _ in first })
+  }
+
+  /// The composer text left unsent in the conversation or thread (empty: none).
+  func draft(conversationId: String, threadId: String?) async -> String {
+    await answer(.draft(conversationId: conversationId, maybeThreadId: threadId))?.maybeBody ?? ""
   }
 
   /// Every file of the conversation, newest first as the core lists them.
@@ -390,19 +800,54 @@ final class AppModel {
   // MARK: Scene and sync
 
   /// Foreground: this process syncs (it holds the cross-process lock, docs/e2ee.md §7).
+  /// The screens show the local store at once; syncing catches up in the background.
   func sceneBecameActive() async {
+    foregroundGeneration += 1
     guard case .ready = phase else { return }
+    // The time in the background doesn't count: the reconnect gets the whole grace period.
+    connectionGrace.appReturned(now: .now)
     await startSyncing()
     await reconcileNotifications()
     // APNs hands out the token once per launch, but the app may stay suspended for days: retry a
     // registration that failed (server unreachable) and re-seal the token when it is due.
-    if let token = maybePushToken { await registerPushIfNeeded(token: token) }
+    await pushUpkeep()
   }
 
+  /// Asks for background time as soon as the app leaves the foreground (Apple: before the work
+  /// starts, not at its end), so a send or upload under way finishes and the store is closed
+  /// cleanly instead of the app being suspended mid-write (issue #158). Call it synchronously from
+  /// the scene change; `sceneEnteredBackground` ends it.
+  func sceneWillEnterBackground() {
+    guard backgroundTask == .invalid else { return }
+    backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Send pending messages") { [weak self] in
+      // The time is up before the flush ended (it waits less than the time granted, so this is
+      // rare). The core can't be stopped synchronously; at least don't sleep holding the
+      // shared-container lock, which the system punishes with a kill (0xdead10cc).
+      self?.processLock.release()
+      self?.endBackgroundTask()
+    }
+  }
+
+  /// Sends what still waits for the server (outbox, uploads, queued actions) within the
+  /// background time, then stops syncing: from here on push wakes the app (robustness.md,
+  /// "Lifecycle"). What is left goes out on the next start; the core keeps it in the store.
   func sceneEnteredBackground() async {
+    let generation = foregroundGeneration
+    defer { endBackgroundTask() }
+    await flushPendingWork()
+    // Back in the foreground meanwhile: it keeps syncing.
+    guard generation == foregroundGeneration else { return }
     await stopSyncing()
     guard case .ready = phase else { return }
     if await segmentPrefetch() != .off { SegmentPrefetchTask.schedule() }
+  }
+
+  /// Presence (issue #472): the app came to the foreground, went to the background, or the user
+  /// touched it. The open core tells the server (input at most every 30 s), so coming back ends an
+  /// away timeout at once. Opens no core and never waits; call it before starting or stopping sync,
+  /// so the report is queued ahead of them.
+  func reportActivity(_ activity: AppActivity) {
+    maybeCore?.reportActivity(activity: activity)
   }
 
   // MARK: Push
@@ -410,6 +855,8 @@ final class AppModel {
   // "v2": sealed for the push gateway (docs/push-gateway.md); a registration made by an older version
   // (the raw token) is replaced at the first launch.
   private static let pushTokenKey = "apnsToken.v2"
+  /// When the registration was last registered or checked for its reseal (Unix seconds).
+  private static let pushCheckedAtKey = "apnsTokenCheckedAt"
   /// Search index segments kept on the phone by the background prefetch (newest months first).
   private static let segmentPrefetchCapBytes: UInt64 = 512 * 1024 * 1024
 
@@ -437,8 +884,9 @@ final class AppModel {
   func didRegister(deviceToken: Data) async {
     let token = deviceToken.hexString
     maybePushToken = token
-    guard case .ready = phase else { return }
-    await registerPushIfNeeded(token: token)
+    // A token APNs hands out anew is registered at once (once connected), not after the pause.
+    if UserDefaults.standard.string(forKey: Self.pushTokenKey) != token { maybeLastPushAttempt = nil }
+    await pushUpkeep()
   }
 
   /// Whether this device's push token is registered with the server (diagnostics).
@@ -449,7 +897,9 @@ final class AppModel {
   /// A notification's tap or action (reply, mark as read, answer or decline a call).
   /// The conversation ID comes from the notification, which a forged push could fill: it is only
   /// acted on if the local store knows that conversation (the extension sets it from the decrypted
-  /// payload, and drops it when it decrypted nothing).
+  /// payload, and drops it when it decrypted nothing). A tap also opens a conversation the store
+  /// doesn't have yet when the core kept what a notification of it showed (issue #1065): the
+  /// screen shows that until the sync brings the conversation.
   /// Reply, mark-as-read and answer also need the extension's tag over the ID
   /// (`NotificationAuthenticator`): the server can show an alert without the extension, naming a
   /// conversation the user is in.
@@ -457,7 +907,12 @@ final class AppModel {
     notificationAction identifier: String, conversationId: String, tag: String?, replyText: String?,
     maybeThreadId: String? = nil, notificationId: String? = nil
   ) async {
-    guard let conversation = await conversations().first(where: { $0.id == conversationId }) else { return }
+    guard let conversation = await conversations().first(where: { $0.id == conversationId }) else {
+      if identifier == UNNotificationDefaultActionIdentifier, await notifiedConversation(conversationId) != nil {
+        openConversationId = conversationId
+      }
+      return
+    }
     let isAuthentic = NotificationAuthenticator().isValid(tag: tag, for: conversationId)
     switch identifier {
     case NotificationCategories.replyAction:
@@ -531,6 +986,15 @@ final class AppModel {
   /// conversations that are read now go.
   private func storeDidChange() {
     changeCount += 1
+    calls.storeDidChange()
+    let wasConnected = connection?.isConnected == true
+    setConnection(maybeCore?.connectionState())
+    if connection?.isConnected == true && !wasConnected {
+      Task { [weak self] in await self?.pushUpkeep() }
+    }
+    Task { [weak self] in await self?.refreshLinkRequests() }
+    Task { [weak self] in await self?.refreshJoinRequests() }
+    Task { [weak self] in await self?.leaveIfStoreTurnedUnreadable() }
     guard maybeReconcile == nil else { return }
     maybeReconcile = Task { [weak self] in
       // Coalesces a burst of changes (a sync delivers many) into one pass.
@@ -538,6 +1002,34 @@ final class AppModel {
       await self?.reconcileNotifications()
       self?.maybeReconcile = nil
     }
+  }
+
+  /// Shows `requests` as prompts.
+  private func applyLinkRequests(_ requests: [LinkRequestItem]) {
+    let prompts = LinkPrompts.merge(
+      current: linkPrompts, requests: requests, readAt: Date(), hiding: maybeLinkReview?.maybeRequestId)
+    if prompts != linkPrompts { linkPrompts = prompts }
+    armLinkExpiry()
+  }
+
+  /// The one timer of the prompts: wakes when the first one runs out and drops it. Nothing runs
+  /// while no prompt is shown.
+  private func armLinkExpiry() {
+    maybeLinkExpiry?.cancel()
+    maybeLinkExpiry = nil
+    guard let expiry = LinkPrompts.nextExpiry(of: linkPrompts) else { return }
+    maybeLinkExpiry = Task { [weak self] in
+      // A moment past the deadline, so the prompt is expired when it is checked.
+      try? await Task.sleep(for: .seconds(max(expiry.timeIntervalSinceNow, 0) + 0.2))
+      guard !Task.isCancelled else { return }
+      self?.dropExpiredLinkPrompts()
+    }
+  }
+
+  private func dropExpiredLinkPrompts() {
+    let now = Date()
+    linkPrompts.removeAll { $0.isExpired(at: now) }
+    armLinkExpiry()
   }
 
   /// Removes notifications of conversations the core reports fully read and sets the badge from the
@@ -589,8 +1081,31 @@ final class AppModel {
   // MARK: Calls
 
   /// Joins the conversation's call (CallKit asked: answered, or started by the user).
-  func joinCall(conversationId: String) async throws -> CallSession {
-    try await core().joinCall(conversationId: conversationId)
+  /// `isMuted`: the microphone stays muted from the first frame.
+  func joinCall(conversationId: String, isMuted: Bool = false) async throws -> CallSession {
+    try await core().joinCall(conversationId: conversationId, isMuted: isMuted)
+  }
+
+  /// "Add people" in a DM or group DM call: the meeting room the call moves into
+  /// (docs/meetings.md, "A call becomes a meeting"). The same `requestKey` gets the same room.
+  func addPeopleToCall(conversationId: String, inCall: [String], added: [String], requestKey: String)
+    async throws -> String
+  {
+    try await core().addPeopleToCall(
+      conversationId: conversationId, inCall: inCall, added: added, maybeTitle: nil, requestKey: requestKey)
+  }
+
+  /// Who moved the call and whom they added, once the DM's encrypted announcement is in (`nil`
+  /// before; asked again on later store changes).
+  func callMoveOffer(from: String, to: String) async -> CallMoveInfo? {
+    // A failed read is the same as "not in yet": the next store change asks again.
+    try? await core().callMoveOffer(fromConversationId: from, toConversationId: to)
+  }
+
+  /// Checks an announced move before this device follows it; throws `CallMoveRefused` if it
+  /// doesn't check out.
+  func acceptCallMove(from: String, to: String) async throws {
+    try await core().acceptCallMove(fromConversationId: from, toConversationId: to)
   }
 
   /// Where a message link points, if this device is in that conversation and has the message.
@@ -613,13 +1128,19 @@ final class AppModel {
     await answer(.browseChannels(spaceId: spaceId))?.channels ?? []
   }
 
-  /// Display names by user ID, for reply quotes.
+  /// The key backup as the core knows it (Settings > Security); `nil` before the first key bag sync.
+  func keyBackup() async -> BackupSnapshot.KeyBackup? {
+    guard let json = try? await core().snapshot() else { return nil }
+    return Wire.decode(BackupSnapshot.self, from: json)?.security?.backup
+  }
+
+  /// Display names by user ID, for reply quotes; former accounts too, deleted ones by the app's own
+  /// "Deleted user".
   func displayNames() async -> [String: String] {
     guard let json = try? await core().snapshot(), let people = Wire.decode(PeopleSnapshot.self, from: json) else {
       return [:]
     }
-    let everyone = (people.users ?? []) + [people.me]
-    return Dictionary(everyone.map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
+    return people.namesById
   }
 
   /// Names of the people typing in a conversation right now.
@@ -641,7 +1162,7 @@ final class AppModel {
   }
 
   func conversationName(_ conversationId: String) async -> String {
-    await conversations().first { $0.id == conversationId }?.name ?? "TeamCraft"
+    await conversations().first { $0.id == conversationId }?.listName ?? "TeamCraft"
   }
 
   // MARK: Private
@@ -649,14 +1170,38 @@ final class AppModel {
   /// The core of the signed-in account; opened on first use (a notification action may be the first).
   func core() throws -> TeamCraft {
     if let maybeCore { return maybeCore }
-    guard let account = container.activeAccount, vault.load() != nil else { throw CoreFactoryError.noAccount }
+    guard let account = container.activeAccount, vault.hasSession else { throw CoreFactoryError.noAccount }
     let opened = try factory.open(
       account: account, createKey: true,
       listener: ClosureEventListener { [weak self] in
         Task { @MainActor in self?.storeDidChange() }
       })
     maybeCore = opened
+    setConnection(opened.connectionState())
     return opened
+  }
+
+  /// "Try again" in the banner: the open core checks its connection now. Opens no core.
+  func networkChanged() {
+    maybeCore?.networkChanged()
+  }
+
+  /// The device's network path changed (Wi-Fi to cellular, a VPN, airplane mode off): the grace
+  /// period follows it, and on a change after the first path the core checks its connection now
+  /// instead of waiting for its own detection and backoff.
+  func networkPathChanged(isFirstPath: Bool) {
+    observeConnection()
+    if !isFirstPath { networkChanged() }
+  }
+
+  private func setConnection(_ maybeConnection: ConnectionState?) {
+    connection = maybeConnection
+    observeConnection()
+  }
+
+  private func observeConnection() {
+    let isDown = ConnectionNotice.isDown(isOnline: NetworkMonitor.shared.isOnline, connection: connection)
+    connectionGrace.observe(isDown: isDown, now: .now)
   }
 
   private func answer(_ query: ChatQuery) async -> ChatAnswer? {
@@ -664,16 +1209,87 @@ final class AppModel {
     return Wire.decode(ChatAnswer.self, from: json)
   }
 
+  /// Picks the server at start: the stored one, a preconfigured one to confirm, or the entry.
+  private func startWithServer() async {
+    managedServer = ManagedServer.current()
+    let stored = servers.activeServer
+    // A stored entry the core no longer accepts is dropped; its server is entered again.
+    if stored == nil { servers.forgetActive() }
+    let decision = ServerStartDecision.decide(
+      maybeStoredOrigin: stored?.address.origin, managed: managedServer, normalize: Self.normalizedOrigin)
+    switch decision {
+    case .useStored:
+      maybeServer = stored
+      brand.select(stored?.address)
+      await refreshAccountState()
+    case .forgetStoredAndCheck(let address):
+      // The management locks another server: this account may not stay on the device.
+      await endSession()
+      servers.forgetActive()
+      maybeServer = nil
+      await checkServer(address)
+    case .check(let address):
+      await checkServer(address)
+    case .enterServer:
+      phase = .needsServer(address: "", failure: nil)
+    }
+  }
+
+  /// The origin `address` normalises to, `nil` when unusable.
+  nonisolated private static func normalizedOrigin(_ address: String) -> String? {
+    try? normalizeServerAddress(input: address, allowInsecureHttp: AppEnvironment.allowsInsecureHttp).origin
+  }
+
+  /// Signs the active account out on this device: push registration, keys, session and local
+  /// plaintext go; the server entry stays.
+  private func endSession() async {
+    await stopSyncing()
+    // Before the keys go: deletes the push key here, ends the sealed device token at the gateway
+    // and the registration on the server, so the server can't push to this phone any more.
+    // Best effort and at most a few seconds; offline, the push key is still gone.
+    if let core = try? core() {
+      await Self.awaitAtMost(seconds: 5) { try? await core.unregisterPush() }
+      // A setup given up on leaves no keys behind, and its device is revoked (issue #415); the core
+      // waits a few seconds for the server at most.
+      await Self.awaitAtMost(seconds: 6) { try? await core.forgetUnfinishedSetup() }
+    }
+    // A local session also ends on the server (best effort; offline, the token just expires).
+    if let local = vault.loadLocal(),
+      let origin = (maybeServer ?? servers.activeServer).flatMap({ URL(string: $0.address.origin) })
+    {
+      let client = localAuth
+      let token = local.accessToken
+      await Self.awaitAtMost(seconds: 5) { await client.logout(origin: origin, accessToken: token) }
+    }
+    if let account = container.activeAccount {
+      factory.deleteDatabaseKey(account: account)
+    }
+    maybeCore = nil
+    setConnection(nil)
+    vault.clear()
+    NotificationAuthenticator().removeKey()
+    container.wipeDownloads()
+    container.pruneUploads(olderThan: 0)
+    container.activeAccount = nil
+    container.displayName = nil
+    UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
+    UserDefaults.standard.removeObject(forKey: Self.pushCheckedAtKey)
+    maybeLastPushAttempt = nil
+  }
+
   private func refreshAccountState() async {
-    guard vault.load() != nil, container.activeAccount != nil else {
+    guard maybeServer != nil, vault.hasSession, container.activeAccount != nil else {
       phase = .signedOut(nil)
       return
     }
     do {
       let state = try await core().accountState()
-      if case .needsEnrollment(let hasExistingIdentity) = state {
+      switch state {
+      case .needsEnrollment(let hasExistingIdentity):
         phase = .needsEnrollment(hasExistingIdentity: hasExistingIdentity, failure: nil)
-      } else {
+      case .storeUnreadable(let problem):
+        phase = .storeUnreadable(problem, failure: nil)
+      case .ready:
         await adopt(state)
       }
     } catch {
@@ -684,6 +1300,15 @@ final class AppModel {
       } else {
         phase = .failed(AppFailure(failure))
       }
+    }
+  }
+
+  /// The app shows what the store holds before the core's client opened. Should that find the store
+  /// unreadable after all, the core says so on the next change (issue #414).
+  private func leaveIfStoreTurnedUnreadable() async {
+    guard case .ready = phase, let maybeCore else { return }
+    if case .storeUnreadable(let problem)? = try? await maybeCore.accountState() {
+      phase = .storeUnreadable(problem, failure: nil)
     }
   }
 
@@ -699,17 +1324,64 @@ final class AppModel {
       await calls.attach(core: core)
     }
     await startSyncing()
+    await refreshLinkRequests()
     await resumePush()
   }
 
   private func startSyncing() async {
-    guard !isSyncing, let core = try? core() else { return }
-    let lock = processLock
-    // The extension may be handling a push; wait a little, then go on (SQLite serializes writes).
-    let hasLock = await Task.detached { lock.acquire(timeout: 5) }.value
-    _ = hasLock
+    guard let core = try? core() else { return }
+    if isSyncing {
+      // The background time ran out while syncing, which gave the lock up: take it back.
+      if !processLock.isHeld { _ = await acquireProcessLock() }
+      return
+    }
+    // Never sync beside the extension: both would refresh the rotating refresh token, and the
+    // loser is signed out (docs/e2ee.md §7). It holds the lock at most for its push budget.
+    guard await acquireProcessLock() else { return }
     isSyncing = true
-    try? await core.start()
+    do {
+      try await core.start()
+    } catch {
+      // Not syncing after all: the next foreground tries again (issue #1142).
+      Self.syncLog.error("sync not started: \(String(describing: error), privacy: .public)")
+      isSyncing = false
+      processLock.release()
+    }
+  }
+
+  /// Waits for the cross-process lock while the app is in the foreground; `false` once it left
+  /// (the next foreground tries again).
+  private func acquireProcessLock() async -> Bool {
+    let lock = processLock
+    while UIApplication.shared.applicationState != .background {
+      if await Task.detached(operation: { lock.acquire(timeout: Self.lockWaitSeconds) }).value { return true }
+      AppLog.setup.notice("waiting for the notification extension to release the store")
+    }
+    return false
+  }
+
+  /// Gives the sync loop the background time to send what is pending, leaving a margin to stop
+  /// syncing and close the store before it runs out.
+  private func flushPendingWork() async {
+    guard isSyncing, let core = try? core() else { return }
+    let remaining = UIApplication.shared.backgroundTimeRemaining
+    let budget = min(remaining, Self.maxBackgroundFlushSeconds) - Self.backgroundStopMarginSeconds
+    guard budget > 0 else { return }
+    do {
+      let left = try await core.flushPendingWork(maxWaitMs: UInt64(budget * 1000))
+      if !left.isEmpty {
+        AppLog.setup.notice(
+          "left for the next start: \(left.sends) sends, \(left.uploads) uploads, \(left.actions) actions")
+      }
+    } catch {
+      AppLog.failure("sending pending work in the background", error)
+    }
+  }
+
+  private func endBackgroundTask() {
+    guard backgroundTask != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(backgroundTask)
+    backgroundTask = .invalid
   }
 
   private func stopSyncing() async {
@@ -734,20 +1406,38 @@ final class AppModel {
     }
   }
 
-  private func registerPushIfNeeded(token: String) async {
-    let defaults = UserDefaults.standard
-    guard let core = try? core() else { return }
-    guard defaults.string(forKey: Self.pushTokenKey) != token else {
-      // Registered already: seals the token again when that is due (it is bound to one server and
-      // expires), at most one request otherwise.
-      _ = try? await core.refreshPush()
+  /// Registers the APNs token, or re-seals a registered one when that is due. The core pauses
+  /// syncing for it and asks the server, so it never runs while the connection is down (it would
+  /// hold up every read of the local store until the request gives up) and at most once a day
+  /// otherwise; a failed attempt waits `PushUpkeepSchedule.retryPause`, not the next reconnect.
+  private func pushUpkeep() async {
+    guard case .ready = phase, connection?.isConnected == true, !isPushUpkeepRunning, let token = maybePushToken else {
       return
     }
+    let defaults = UserDefaults.standard
+    let isRegistered = defaults.string(forKey: Self.pushTokenKey) == token
+    let maybeLastCheck = (defaults.object(forKey: Self.pushCheckedAtKey) as? Double).map {
+      Date(timeIntervalSince1970: $0)
+    }
+    let now = Date.now
+    guard !isRegistered || PushUpkeepSchedule.isRefreshDue(lastCheckedAt: maybeLastCheck, now: now),
+      PushUpkeepSchedule.mayAttempt(lastAttemptAt: maybeLastPushAttempt, now: now),
+      let core = try? core()
+    else { return }
+    isPushUpkeepRunning = true
+    maybeLastPushAttempt = now
+    defer { isPushUpkeepRunning = false }
     do {
-      try await core.registerPush(service: .apns, token: token)
-      defaults.set(token, forKey: Self.pushTokenKey)
+      if isRegistered {
+        // Seals the token again when that is due (it is bound to one server and expires).
+        _ = try await core.refreshPush()
+      } else {
+        try await core.registerPush(service: .apns, token: token)
+        defaults.set(token, forKey: Self.pushTokenKey)
+      }
+      defaults.set(Date.now.timeIntervalSince1970, forKey: Self.pushCheckedAtKey)
     } catch {
-      // Not stored: the next foreground tries again.
+      // Not stored: tried again after the pause, once connected.
     }
   }
 

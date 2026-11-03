@@ -1,0 +1,78 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT kind, visibility, archived_at IS NOT NULL AS \"is_archived!\", importer_user_id,\n              imported_through_message_id, deleted_at IS NOT NULL AS \"is_deleted!\"\n       FROM conversations WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "visibility",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "visibility"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "is_archived!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "importer_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "importer_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "imported_through_message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "imported_through_message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "is_deleted!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "de584c61a8cfbd351494c376aa89486fa48d02c1506870c8158ab1b55f016659"
+}

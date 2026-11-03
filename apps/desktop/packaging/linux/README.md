@@ -37,16 +37,118 @@ architecture).
 
 ## What each package needs from the system
 
-| Package  | Brings along                                       | Needs from the system                                                                                   |
-|----------|----------------------------------------------------|---------------------------------------------------------------------------------------------------------|
-| Flatpak  | GNOME 51 runtime (WebKitGTK, GStreamer, PipeWire client libs); Mesa through the GL extension | Flatpak ≥ 1.14, `xdg-desktop-portal` with a desktop backend (GNOME, KDE, wlr), PipeWire, a Secret Service (GNOME Keyring, KWallet/ksecretd) |
-| `.deb`   | –                                                  | WebKitGTK 4.1, GTK 3, GStreamer 1.x (+ `gstreamer1.0-plugins-bad` for VA-API), PipeWire, ALSA            |
-| `.rpm`   | –                                                  | The same, with Fedora package names                                                                       |
-| AppImage | WebKitGTK and GTK                                  | GStreamer (not bundled: `bundleMediaFramework` is off), glibc ≥ 2.41, PipeWire, a Secret Service          |
+| Package  | Brings along                                                                                                                             | Needs from the system                                                                                                                                           |
+|----------|------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Flatpak  | GNOME 51 runtime (WebKitGTK, GStreamer, PipeWire client libs); Mesa through the GL extension; H.264/HEVC decoding through `codecs-extra` | Flatpak ≥ 1.14, `xdg-desktop-portal` with a desktop backend (GNOME, KDE, wlr), PipeWire, a Secret Service (GNOME Keyring, KWallet/ksecretd)                     |
+| `.deb`   | –                                                                                                                                        | WebKitGTK 4.1, GTK 3, GStreamer 1.x with gst-plugins-good (+ `gstreamer1.0-libav` for video attachments, `gstreamer1.0-plugins-bad` for VA-API), PipeWire, ALSA |
+| `.rpm`   | –                                                                                                                                        | The same, with Fedora package names (HEVC videos: RPM Fusion, see "Video attachments")                                                                          |
+| AppImage | WebKitGTK and GTK                                                                                                                        | GStreamer with gst-plugins-good and an H.264/HEVC decoder (not bundled: `bundleMediaFramework` is off), glibc ≥ 2.41, PipeWire, a Secret Service                |
 
-All of them download Cisco's OpenH264 on first video use (see `crates/teamcraft-media/README.md`)
-and use the desktop's portals for screen sharing, the camera, push-to-talk on Wayland, file dialogs
+All of them download Cisco's OpenH264 on first video use in a call (see
+`crates/teamcraft-media/README.md`) and use the desktop's portals for screen sharing, the camera, push-to-talk on Wayland, file dialogs
 and opening the login page.
+
+## Sound in calls
+
+Calls play and record through PipeWire where it runs (every current desktop), else through the
+PulseAudio protocol, else raw ALSA; the audio settings say which ("Sound goes through PipeWire").
+With PipeWire the microphones and speakers are the ones the desktop's sound settings show, named
+the same, and a device plugged in or out or a new system default reaches a running call at once.
+A chosen device is remembered by its PipeWire node name, so it survives restarts and replugging.
+The Flatpak needs `--filesystem=xdg-run/pipewire-0` for this (set in the manifest); without it
+calls fall back to the PulseAudio socket.
+
+## Video attachments
+
+The webview (WebKitGTK) plays a video attachment through the system's GStreamer, not through the
+app's own codecs: the OpenH264 the app downloads is for calls, and GStreamer doesn't see it. Phone
+videos are MP4 or MOV with H.264 or HEVC (the iPhone's default) and need two things:
+
+- `qtdemux` from gst-plugins-good to unpack MP4/MOV;
+- an H.264 and an HEVC decoder: `avdec_h264`/`avdec_h265` (gst-libav), `openh264dec` (H.264 only),
+  or the GPU's VA-API decoders (`vah264dec`/`vah265dec` from gst-plugins-bad, where the driver
+  offers them).
+
+| Package  | MP4/MOV                                  | H.264                                                                                | HEVC                                                                                                          |
+|----------|------------------------------------------|--------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
+| Flatpak  | runtime                                  | `org.freedesktop.Platform.codecs-extra` (`avdec_h264`)                               | `codecs-extra` (`avdec_h265`)                                                                                 |
+| `.deb`   | `gstreamer1.0-plugins-good` (dependency) | `gstreamer1.0-libav` (recommended)                                                   | `gstreamer1.0-libav` (recommended)                                                                            |
+| `.rpm`   | `gstreamer1-plugins-good` (dependency)   | `gstreamer1-plugin-openh264` (recommended; Fedora's Cisco repository, on by default) | RPM Fusion: `gstreamer1-plugin-libav` with `libavcodec-freeworld`; or VA-API with `mesa-va-drivers-freeworld` |
+| AppImage | the host's gst-plugins-good              | the host's gst-libav or OpenH264 plugin                                              | the host's gst-libav                                                                                          |
+
+- **Flatpak:** the GNOME runtime declares `codecs-extra` as an extension that Flatpak installs with
+  it, and puts its GStreamer directory on `GST_PLUGIN_SYSTEM_PATH`; nothing in the manifest is
+  needed. The runtime's `org.freedesktop.Platform.openh264` extension is not needed for playback
+  either (it would add `openh264dec`, H.264 only). Should `codecs-extra` be missing:
+  `flatpak install flathub org.freedesktop.Platform.codecs-extra//26.08-extra`.
+- **Fedora:** Fedora's own libavcodec (`ffmpeg-free`) leaves out the H.264 and HEVC decoders; OpenH264 covers H.264. For HEVC enable
+  [RPM Fusion](https://rpmfusion.org/Configuration) (free) and
+  `dnf install gstreamer1-plugin-libav libavcodec-freeworld` (or `dnf swap ffmpeg-free ffmpeg
+  --allowerasing`). AMD and Intel GPUs decode HEVC with `mesa-va-drivers-freeworld` (AMD) or
+  `intel-media-driver` (RPM Fusion nonfree) as well.
+- **openSUSE:** `gstreamer-plugins-libav` from Packman. **Arch:** `gst-libav`.
+
+`apt` installs recommended packages by default; `dnf` installs weak dependencies that a repository
+offers. After installing a decoder, restart TeamCraft: GStreamer reads its plugins at start.
+
+**In the app:** the shell looks the elements up in GStreamer's registry at start
+(`apps/desktop/src/video_playback.rs`, `teamcraft-media` `playback_gstreamer.rs`) and logs what is
+missing. A video that reports an error, gives no length within 8 seconds of its file being there,
+or plays without a frame or a moving clock for 8 seconds is shown as "This video can't be played
+here", with the packages to install, "Download" and "Open in video player" (the decrypted file goes
+to a private folder under `$XDG_RUNTIME_DIR`, emptied at the next start, and opens in the system's
+default player).
+
+To try it without uninstalling anything, hide the decoders from GStreamer:
+
+```sh
+GST_PLUGIN_FEATURE_RANK=avdec_h264:NONE,avdec_h265:NONE,openh264dec:NONE,vah264dec:NONE,vah265dec:NONE,libde265dec:NONE \
+  teamcraft-desktop
+```
+
+## Start-up environment
+
+Before GTK starts, the shell checks two variables that GTK and WebKitGTK read only once
+(`apps/desktop/src/startup_env.rs`). If one is missing, the app restarts itself once with it set,
+so this works the same for every package (deb, rpm, AppImage, Flatpak) and from a terminal. A value
+you set yourself is never changed.
+
+| Variable                           | Set to | Why                                                                                     |
+|------------------------------------|--------|-----------------------------------------------------------------------------------------|
+| `GTK_USE_PORTAL`                   | `1`    | File dialogs through xdg-desktop-portal, the desktop's own dialog (not in Flatpak, which does this anyway) |
+| `WEBKIT_DISABLE_DMABUF_RENDERER`   | `1`    | Only with `TEAMCRAFT_WEBKIT_DMABUF=0`, see "Rendering"                                  |
+
+### Rendering
+
+TeamCraft uses WebKitGTK's DMABUF renderer: pages are painted on the GPU and handed to the compositor
+without a copy. Without it WebKitGTK paints into shared memory and the CPU copies every frame,
+which makes animations and the lightbox stutter on large or scaled windows (#805).
+
+Version 1.0.8 turned the renderer off for everyone because transitions and animations flickered or
+flashed the window dark with some drivers and compositors (seen with AMD GPUs on KDE Plasma, #687).
+That did not reproduce with Mesa 26.2, WebKitGTK 2.54 and KWin 6.7. If it happens on your system,
+switch to the compatible renderer (shared memory) with either variable:
+
+```sh
+TEAMCRAFT_WEBKIT_DMABUF=0 teamcraft-desktop                # the app sets WebKit's switch for you
+WEBKIT_DISABLE_DMABUF_RENDERER=1 teamcraft-desktop         # WebKit's own switch, kept as you set it
+TEAMCRAFT_WEBKIT_DMABUF=0 ./TeamCraft_amd64.AppImage       # the same for the AppImage
+flatpak run --env=TEAMCRAFT_WEBKIT_DMABUF=0 de.zeitgleich.teamcraft
+```
+
+For a permanent choice, put the variable into the `.desktop` file's `Exec=env …` line or
+`~/.config/environment.d/`, or use `flatpak override --user --env=TEAMCRAFT_WEBKIT_DMABUF=0
+de.zeitgleich.teamcraft`. Please report the GPU, driver, compositor and scaling when you need it.
+
+### Dropped files
+
+WebKitGTK hands the page a file dragged from a file manager (Dolphin, GNOME Files) without its
+contents: no `File` objects, at most the `file://` addresses. The shell watches the same drop on
+the GTK widget (X11 and Wayland alike), keeps the dropped paths, and the page reads exactly those
+files from it in chunks when its `drop` arrives (`apps/desktop/src/dropped_files.rs`, #651). Should
+no `drop` reach the page, the shell tells it after half a second and the files go to the
+conversation or thread the pointer was over. A dropped file larger than 512 MiB is not read this
+way (the page would hold it in memory); attach it with the + button.
 
 ## Flatpak
 
@@ -61,7 +163,13 @@ apps/desktop/packaging/linux/build-flatpak.sh --bundle   # build a single-file .
 
 `build-flatpak.sh` first builds the web UI with Trunk in the CI's Rust container (`build-ui.sh`;
 the Flatpak SDK's Rust has no wasm32 target), then the app inside the GNOME SDK. Build state goes to
-`~/.cache/teamcraft-flatpak` (about 6 GB), never to `/tmp`.
+`~/.cache/teamcraft-flatpak` (about 6 GB), never to `/tmp`. With `--ccache` (which the script
+passes) the manifest keeps the cargo target and home in flatpak-builder's ccache directory, so a
+rebuild compiles only what changed.
+
+In the release workflow (`desktop-release.yml`) the Flatpak jobs restore the flatpak-builder state
+that the warm-up on `main` (`desktop-cache.yml`) saved, keyed on `Cargo.lock` and this manifest; the
+warm-up drops the workspace crates from the cargo target before saving, like rust-cache.
 
 ### Permissions
 
@@ -72,7 +180,7 @@ the Flatpak SDK's Rust has no wasm32 target), then the app inside the GNOME SDK.
 | `--device=dri`                               | GPU: WebKit, the effects shaders, VA-API encoding                        |
 | `--socket=pulseaudio`                        | Microphone and speakers (PipeWire serves the PulseAudio protocol)        |
 | `--filesystem=xdg-run/pipewire-0`            | Screen shares with sound (see below)                                     |
-| `--talk-name=org.freedesktop.secrets`        | The refresh token in the desktop keyring                                 |
+| `--talk-name=org.freedesktop.secrets`        | The secrets file key and the database keys in the desktop keyring       |
 | `--talk-name=org.freedesktop.Notifications`  | Mention and direct-message notifications                                 |
 
 No home directory, no `--device=all`: the camera, screen sharing, push-to-talk, file dialogs and
@@ -142,6 +250,17 @@ cd apps/desktop
 cargo tauri build --config tauri.models.conf.json --bundles deb,rpm,appimage
 ```
 
-`tauri.conf.json` declares GStreamer as a dependency of the `.deb` and `.rpm` and recommends the
-VA-API plugin (`gstreamer1.0-plugins-bad` / `gstreamer1-plugins-bad-free`). The release workflow
-builds them in a Debian 13 container (see the distribution table for what that implies).
+`tauri.conf.json` declares GStreamer and gst-plugins-good (MP4/MOV) as dependencies of the `.deb`
+and `.rpm` and recommends the video decoders (`gstreamer1.0-libav` / `gstreamer1-plugin-openh264`
+and `gstreamer1-plugin-libav`, see "Video attachments"), the VA-API plugin
+(`gstreamer1.0-plugins-bad` / `gstreamer1-plugins-bad-free`) and the tray library
+(`libayatana-appindicator3-1` / `libayatana-appindicator-gtk3`). The tray library is only
+recommended because the app runs without it, just without a tray icon (as in the Flatpak, whose
+runtime doesn't ship it). The release workflow builds them in a Debian 13 container (see the
+distribution table for what that implies).
+
+The app only counts a tray library built for its own architecture (a 32-bit one in `/usr/lib`
+doesn't), and it only hides the window to the tray (close to tray, start minimized) while a
+StatusNotifier host shows the icon: GNOME without the AppIndicator extension has none, and the
+window then stays reachable in the taskbar. The app follows the `org.kde.StatusNotifierWatcher` on
+the session bus, so a panel that starts later is picked up.

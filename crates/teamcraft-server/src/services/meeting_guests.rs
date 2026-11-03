@@ -1,21 +1,25 @@
-//! Guests of meetings: personal one-time join links, guest sessions and the lobby
-//! (ARCHITECTURE.md §6.4; PLAN.md §9, §12).
+//! Guests of meetings: personal one-time join links, the shared guest link, guest sessions and the
+//! lobby (ARCHITECTURE.md §6.4; PLAN.md §9, §12; docs/meetings.md).
 //!
 //! A guest has no account at the identity provider. The link's token is traded for a session token
 //! signed by this server; the guest then exists as an ordinary guest user (kind `guest`) and waits
 //! in the lobby until a host admits them into the meeting chat. Until then they are a member of
-//! nothing and can see nothing.
+//! nothing and can see nothing. Members who open the meeting's link without being in its chat knock
+//! the same way and wait in the same lobby.
 
-use teamcraft_db::{LobbyRow, StoredMeeting};
+use teamcraft_crypto::meeting_link::is_meeting_link_token;
+use teamcraft_db::{LobbyRow, SharedInviteClaim, StoredMeeting, StoredMeetingInvite};
 use teamcraft_proto::{
-  CreateGuestLinkRequest, GatewayEvent, GuestLinkResponse, JoinMeetingRequest, JoinMeetingResponse,
-  ListLobbyResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingId, MeetingInviteId, MeetingStatus,
-  UserId,
+  CreateGuestLinkRequest, GatewayEvent, GuestDeviceReadyRequest, GuestLinkResponse, JoinMeetingRequest,
+  JoinMeetingResponse, KnockByLinkResponse, ListLobbyResponse, LobbyEntry, LobbyState, LobbyStateResponse,
+  MeetingId, MeetingInviteId, MeetingStatus, UserId, UserKind,
 };
 use time::OffsetDateTime;
 
+use super::access::is_guest;
 use super::accounts;
 use super::convert::{unix_millis, user_summary};
+use super::meetings;
 use super::validate_name;
 use crate::auth::{AuthError, AuthenticatedUser};
 use crate::error::ApiError;
@@ -24,25 +28,37 @@ use crate::state::AppState;
 
 const MAX_NAME_CHARS: usize = 100;
 const MAX_LABEL_CHARS: usize = 100;
+/// How long a waiting guest of the meeting link holds a lobby place: a guest who reloads or walks
+/// away doesn't keep one beyond this (#987 review, M3). Admitted guests hold theirs until they leave.
+const LOBBY_PLACE_TIMEOUT: time::Duration = time::Duration::minutes(15);
+/// An identity key fingerprint in hex: SHA-256.
+const FINGERPRINT_HEX_LEN: usize = 64;
+/// Guests ended per sweep; a larger backlog is worked off over the next sweeps.
+const SWEEP_BATCH: i64 = 200;
 
-/// Trades a personal join link for a guest session and puts the guest into the lobby (or straight
-/// into the meeting if it has no lobby). Needs no authentication: the token is the credential.
+/// Trades a meeting link (its token, or a personal link's one-time `#invite=` token) for a guest
+/// session and puts the guest into the lobby. Needs no authentication: the token is the
+/// credential, and all it gets the guest is a place in the lobby (docs/meetings.md, "Guests").
 pub async fn join_meeting(
   state: &AppState,
   request: JoinMeetingRequest,
 ) -> Result<JoinMeetingResponse, ApiError> {
   let service = service_of(state)?;
   let display_name = validate_name(&request.display_name, "display_name", MAX_NAME_CHARS)?;
-  let (invite_id, meeting_id) = service
-    .tokens()
-    .verify_invite(&request.invite_token)
-    .map_err(|_| AuthError::InvalidToken("invalid join link".into()))?;
-  let invite = state
-    .database
-    .get_meeting_invite(invite_id)
-    .await?
-    .filter(|invite| invite.meeting == meeting_id)
-    .ok_or_else(|| AuthError::InvalidToken("invalid join link".into()))?;
+  let (link, maybe_link_token) = match (&request.maybe_invite_token, &request.maybe_link_token) {
+    (Some(invite_token), _) => (invite_of(state, service, invite_token).await?, None),
+    (None, Some(link_token)) => (
+      shared_invite_of(state, link_token).await?,
+      Some(link_token.as_str()),
+    ),
+    (None, None) => {
+      return Err(ApiError::InvalidRequest("a join needs the link's token".into()));
+    },
+  };
+  let meeting_id = link.meeting;
+  if link.is_revoked && !link.is_shared {
+    return Err(AuthError::InvalidToken("the join link was revoked".into()).into());
+  }
   let meeting = state
     .database
     .get_meeting(meeting_id)
@@ -56,20 +72,18 @@ pub async fn join_meeting(
   if now >= expires_at {
     return Err(AuthError::InvalidToken("the meeting is over".into()).into());
   }
-
-  // The account exists from the first request on; make it now so the invite can name it.
-  let guest = accounts::authenticate(
-    state,
-    accounts::guest_identity(invite_id.to_string(), display_name.clone(), now.unix_timestamp()),
-  )
-  .await?;
-  if !state
-    .database
-    .redeem_meeting_invite(invite.id, guest.user.id)
-    .await?
-  {
-    return Err(AuthError::InvalidToken("the join link was already used".into()).into());
-  }
+  // A shared link hands every guest a one-time invite of their own; from here on both kinds of
+  // link take the same path. Guests of a shared link always wait in the lobby.
+  let invite_id = invite_for_guest(state, service, &link, &display_name).await?;
+  let guest = match redeem_invite(state, invite_id, &display_name, now).await {
+    Ok(guest) => guest,
+    Err(error) => {
+      if link.is_shared {
+        release_claim(state, invite_id).await;
+      }
+      return Err(error);
+    },
+  };
   let token = service
     .tokens()
     .sign_session(
@@ -82,14 +96,25 @@ pub async fn join_meeting(
     .map_err(|error| ApiError::Internal(error.to_string()))?;
 
   let entry = state.database.enter_lobby(meeting_id, guest.user.id).await?;
-  let lobby_state = if meeting.has_lobby {
-    announce_waiting(state, &meeting, &guest).await?;
-    LobbyState::from(entry.state)
-  } else {
-    // No lobby: the guest is let in right away on behalf of the organizer.
-    admit_guest(state, &meeting, guest.user.id, meeting.organizer).await?;
-    LobbyState::Admitted
-  };
+  if let Some(link_token) = maybe_link_token {
+    state
+      .database
+      .mark_lobby_by_link(meeting_id, guest.user.id, true)
+      .await?;
+    // The organizer may have made the link anew while this join ran: then the guest came with a
+    // link that no longer works and waits for a click like the others (#987 review, M5).
+    if state.database.meeting_by_link(link_token).await? != Some(meeting_id) {
+      state
+        .database
+        .mark_lobby_by_link(meeting_id, guest.user.id, false)
+        .await?;
+    }
+  }
+  // Guests always wait in the lobby on the server: they can read and speak only once an
+  // organizer's device adds theirs to the chat's encryption group. Without a lobby that device
+  // does it by itself for guests of the meeting link (e2ee.md §4.6, "Meeting guests").
+  announce_waiting(state, &meeting, &guest).await?;
+  let lobby_state = LobbyState::from(entry.state);
   Ok(JoinMeetingResponse {
     guest_token: token,
     expires_at: unix_millis(expires_at),
@@ -97,6 +122,7 @@ pub async fn join_meeting(
     conversation_id: meeting.conversation,
     user_id: guest.user.id,
     lobby_state,
+    maybe_organizer_fingerprint: meetings::organizer_fingerprint(state, meeting.organizer).await?,
   })
 }
 
@@ -123,10 +149,112 @@ pub async fn create_guest_link(
     .tokens()
     .sign_invite(invite, id)
     .map_err(|error| ApiError::Internal(error.to_string()))?;
+  // The meeting link's path with the one-time token in the fragment, next to the fingerprint.
+  let link = meeting_link_of(state, service, &meeting).await?;
+  let (path, maybe_fragment) = match link.split_once('#') {
+    Some((path, fragment)) => (path, Some(fragment)),
+    None => (link.as_str(), None),
+  };
+  let join_url = match maybe_fragment {
+    Some(fragment) => format!("{path}#invite={token}&{fragment}"),
+    None => format!("{path}#invite={token}"),
+  };
   Ok(GuestLinkResponse {
-    join_url: service.guest_join_url(id, &token),
+    join_url,
     expires_at: unix_millis(access_ends_at(service, &meeting)),
   })
+}
+
+/// The meeting's shared guest link (host only): since #987 the meeting link itself. Each guest who
+/// opens it waits in the lobby, and it ends with the meeting or when the organizer makes it anew.
+pub async fn shared_guest_link(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: MeetingId,
+) -> Result<GuestLinkResponse, ApiError> {
+  let service = service_of(state)?;
+  let meeting = host_meeting(state, caller, id).await?;
+  Ok(GuestLinkResponse {
+    join_url: meeting_link_of(state, service, &meeting).await?,
+    expires_at: unix_millis(access_ends_at(service, &meeting)),
+  })
+}
+
+/// A member opened the meeting link: the meeting its token names, and their place (as
+/// [`knock`]). A knock with the token counts as "by link": in a meeting without a lobby the
+/// organizer's device lets the member in by itself. Unknown tokens get "not found".
+pub async fn knock_by_link(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  token: &str,
+) -> Result<KnockByLinkResponse, ApiError> {
+  service_of(state)?;
+  if !is_meeting_link_token(token) {
+    return Err(ApiError::meeting_not_found());
+  }
+  let meeting_id = state
+    .database
+    .meeting_by_link(token)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  let response = knock(state, caller, meeting_id).await?;
+  if response.state == LobbyState::Waiting {
+    state
+      .database
+      .mark_lobby_by_link(meeting_id, caller.user.id, true)
+      .await?;
+  }
+  Ok(KnockByLinkResponse {
+    meeting_id,
+    state: response.state,
+  })
+}
+
+/// A member with the meeting's link who is not in its chat asks to be let in and waits in the
+/// lobby like a guest; members already in the chat are in. Members always wait for a host, also in
+/// meetings without a lobby, unless they came with the link's token ([`knock_by_link`]): meeting
+/// IDs are not secret.
+pub async fn knock(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: MeetingId,
+) -> Result<LobbyStateResponse, ApiError> {
+  service_of(state)?;
+  if is_guest(caller) {
+    return Err(ApiError::Forbidden("guests join with a guest link".into()));
+  }
+  let meeting = state
+    .database
+    .get_meeting(id)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  let is_member = state
+    .database
+    .conversation_member_ids(meeting.conversation)
+    .await?
+    .contains(&caller.user.id);
+  let is_live =
+    meeting.status == MeetingStatus::Scheduled.as_str() && OffsetDateTime::now_utc() < meeting.ends_at;
+  match (is_member, is_live) {
+    (true, true) => Ok(LobbyStateResponse {
+      state: LobbyState::Admitted,
+      is_organizer_app_outdated: false,
+    }),
+    (true, false) => Err(ApiError::Conflict("the meeting is over or cancelled".into())),
+    // Outsiders learn nothing about a meeting that is over: the same answer as for no meeting.
+    (false, false) => Err(ApiError::meeting_not_found()),
+    (false, true) => {
+      // Also a member admitted before and no longer in the chat waits again.
+      let (entry, is_news) = state.database.knock_lobby(id, caller.user.id).await?;
+      if is_news {
+        announce_waiting(state, &meeting, caller).await?;
+      }
+      Ok(LobbyStateResponse {
+        state: LobbyState::from(entry.state),
+        is_organizer_app_outdated: false,
+      })
+    },
+  }
 }
 
 /// The guests waiting for a decision (hosts only).
@@ -141,16 +269,120 @@ pub async fn list_lobby(
     .database
     .get_users(&waiting.iter().map(|row| row.user).collect::<Vec<_>>())
     .await?;
+  let by_link = state.database.lobby_by_link(meeting.id).await?;
+  let mut fingerprints = state.database.knock_fingerprints(meeting.id).await?;
+  let with_devices = state
+    .database
+    .users_with_active_devices(&waiting.iter().map(|row| row.user).collect::<Vec<_>>())
+    .await?;
   let entries = waiting
     .iter()
     .filter_map(|row| {
-      users
-        .iter()
-        .find(|user| user.id == row.user)
-        .map(|user| entry(state, user, row))
+      users.iter().find(|user| user.id == row.user).map(|user| {
+        entry(
+          state,
+          user,
+          row,
+          by_link.contains(&row.user),
+          with_devices.contains(&row.user),
+          fingerprints.remove(&row.user),
+        )
+      })
     })
     .collect();
   Ok(ListLobbyResponse { entries })
+}
+
+/// One guest's lobby entry, also after they were let in (hosts only).
+pub async fn lobby_entry(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: MeetingId,
+  guest: UserId,
+) -> Result<LobbyEntry, ApiError> {
+  let meeting = host_meeting(state, caller, id).await?;
+  let row = state
+    .database
+    .get_lobby_entry(meeting.id, guest)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  let user = state
+    .database
+    .get_user(guest)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  let is_by_link = state.database.lobby_by_link(meeting.id).await?.contains(&guest);
+  let has_device = state
+    .database
+    .users_with_active_devices(&[guest])
+    .await?
+    .contains(&guest);
+  let maybe_fingerprint = state
+    .database
+    .knock_fingerprints(meeting.id)
+    .await?
+    .remove(&guest);
+  Ok(entry(
+    state,
+    &user,
+    &row,
+    is_by_link,
+    has_device,
+    maybe_fingerprint,
+  ))
+}
+
+/// A waiting guest's page set up its device and reports its identity key fingerprint, which binds
+/// the key to this knock: the organizer's device adds the guest only with a key of this
+/// fingerprint. The hosts are told once (`lobby_join`); later reports change nothing. `409` while
+/// the guest has no device; a guest who no longer waits needs nobody told, which is no error.
+pub async fn guest_device_ready(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: MeetingId,
+  request: GuestDeviceReadyRequest,
+) -> Result<(), ApiError> {
+  let fingerprint = request.fingerprint.to_ascii_lowercase();
+  if fingerprint.len() != FINGERPRINT_HEX_LEN || !fingerprint.chars().all(|c| c.is_ascii_hexdigit()) {
+    return Err(ApiError::InvalidRequest(
+      "fingerprint must be 64 hex digits".into(),
+    ));
+  }
+  service_of(state)?;
+  if caller.user.kind != UserKind::Guest {
+    return Err(ApiError::Forbidden(
+      "only guests set up a device in the lobby".into(),
+    ));
+  }
+  let meeting = state
+    .database
+    .get_meeting(id)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  let row = state
+    .database
+    .get_lobby_entry(id, caller.user.id)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  if LobbyState::from(row.state) != LobbyState::Waiting {
+    return Ok(());
+  }
+  if !state
+    .database
+    .users_with_active_devices(&[caller.user.id])
+    .await?
+    .contains(&caller.user.id)
+  {
+    return Err(ApiError::Conflict("the guest has no device yet".into()));
+  }
+  if state
+    .database
+    .set_knock_fingerprint(id, caller.user.id, &fingerprint)
+    .await?
+  {
+    announce_waiting(state, &meeting, caller).await?;
+  }
+  Ok(())
 }
 
 /// The caller's own place in the lobby (for guests that reconnect).
@@ -165,9 +397,159 @@ pub async fn my_lobby_state(
     .get_lobby_entry(id, caller.user.id)
     .await?
     .ok_or_else(ApiError::meeting_not_found)?;
+  let lobby_state = LobbyState::from(row.state);
+  // A guest waiting for an organizer whose app can't let them in yet is told so (#987 review, M4).
+  let is_organizer_app_outdated = if lobby_state == LobbyState::Waiting && caller.user.kind == UserKind::Guest
+  {
+    let meeting = state
+      .database
+      .get_meeting(id)
+      .await?
+      .ok_or_else(ApiError::meeting_not_found)?;
+    !state.database.is_guest_admitter(meeting.organizer).await?
+  } else {
+    false
+  };
   Ok(LobbyStateResponse {
-    state: LobbyState::from(row.state),
+    state: lobby_state,
+    is_organizer_app_outdated,
   })
+}
+
+/// The caller's app lets guests in by the flow without a link secret (#987): noted, so guests of
+/// their meetings aren't told the organizer's app needs an update.
+pub async fn mark_guest_admitter(state: &AppState, caller: &AuthenticatedUser) -> Result<(), ApiError> {
+  service_of(state)?;
+  if is_guest(caller) {
+    return Err(ApiError::Forbidden("guests let nobody in".into()));
+  }
+  state.database.mark_guest_admitter(caller.user.id).await?;
+  Ok(())
+}
+
+/// A guest leaves the meeting: their place in the lobby is closed and their account is
+/// deactivated, which ends their session and connections, flags their devices removed, takes them
+/// out of the chat and the call and tells the others (whose devices commit the removal from the
+/// encryption group). Members have an account that stays; they leave through the chat instead.
+pub async fn leave(state: &AppState, caller: &AuthenticatedUser, id: MeetingId) -> Result<(), ApiError> {
+  service_of(state)?;
+  if !is_guest(caller) || caller.user.kind != UserKind::Guest {
+    return Err(ApiError::Forbidden("only guests leave a meeting this way".into()));
+  }
+  let meeting = state
+    .database
+    .get_meeting(id)
+    .await?
+    .ok_or_else(ApiError::meeting_not_found)?;
+  if state
+    .database
+    .get_lobby_entry(id, caller.user.id)
+    .await?
+    .is_none()
+  {
+    return Err(ApiError::meeting_not_found());
+  }
+  // A guest who still waits must not stay in the hosts' lobby, where "admit" would let in an
+  // account that is gone. Not waiting any more is fine: they were admitted or turned away.
+  if state
+    .database
+    .decide_lobby(
+      &meeting,
+      caller.user.id,
+      LobbyState::Denied.as_str(),
+      caller.user.id,
+    )
+    .await?
+  {
+    let hosts = state.database.meeting_host_ids(&meeting).await?;
+    state.hub.publish(
+      hosts,
+      &GatewayEvent::LobbyDecision {
+        meeting_id: id,
+        state: LobbyState::Denied,
+      },
+    );
+  }
+  super::admin::deactivate_user(
+    state,
+    Some(caller.user.id),
+    caller.user.id,
+    teamcraft_proto::DeactivationReason::Left,
+    "left the meeting",
+    super::admin::AfterDeactivation::RemoveFromChats,
+  )
+  .await?;
+  Ok(())
+}
+
+/// Ends the sessions of guests whose meeting is over (plus the grace time) or cancelled. Their
+/// tokens have expired by then; this also takes them out of the chat, closes their devices and
+/// tells the members, whose devices commit the removal from the encryption group (e2ee.md §4.6,
+/// "Meeting guests"). Run periodically; returns how many guests it ended.
+pub async fn sweep_expired_guests(state: &AppState) -> Result<usize, ApiError> {
+  sweep_expired_guests_at(state, OffsetDateTime::now_utc()).await
+}
+
+/// [`sweep_expired_guests`] as of `now`.
+pub async fn sweep_expired_guests_at(state: &AppState, now: OffsetDateTime) -> Result<usize, ApiError> {
+  let Some(service) = state.maybe_meetings.as_deref() else {
+    return Ok(0);
+  };
+  let expired = state
+    .database
+    .list_guests_past_access(now, service.guest_grace().as_secs_f64(), SWEEP_BATCH)
+    .await?;
+  let mut ended = 0;
+  for (_, guest) in expired {
+    if super::admin::deactivate_user(
+      state,
+      None,
+      guest,
+      teamcraft_proto::DeactivationReason::Left,
+      "the meeting's access ended",
+      super::admin::AfterDeactivation::RemoveFromChats,
+    )
+    .await?
+    {
+      ended += 1;
+    }
+  }
+  Ok(ended)
+}
+
+/// Ends the sessions of guests who joined with the personal link of an invitee the organizer
+/// removed (`PATCH /meetings/{id}`): their lobby place is closed and their account deactivated, which
+/// ends connections and takes them out of the chat, so the others' devices commit the removal.
+pub async fn end_removed_guests(
+  state: &AppState,
+  organizer: UserId,
+  meeting: &StoredMeeting,
+  guests: &[UserId],
+) -> Result<(), ApiError> {
+  for guest in guests {
+    // Not waiting any more is fine: they may have been admitted already.
+    state
+      .database
+      .decide_lobby(meeting, *guest, LobbyState::Denied.as_str(), organizer)
+      .await?;
+    state.hub.publish(
+      [*guest],
+      &GatewayEvent::LobbyDecision {
+        meeting_id: meeting.id,
+        state: LobbyState::Denied,
+      },
+    );
+    super::admin::deactivate_user(
+      state,
+      Some(organizer),
+      *guest,
+      teamcraft_proto::DeactivationReason::Admin,
+      "removed from the meeting",
+      super::admin::AfterDeactivation::RemoveFromChats,
+    )
+    .await?;
+  }
+  Ok(())
 }
 
 /// Lets a waiting guest into the meeting chat (hosts only).
@@ -203,6 +585,15 @@ pub async fn deny(
       state: LobbyState::Denied,
     },
   );
+  // A member who knocked keeps their account; they are just not let in.
+  let is_member_account = state
+    .database
+    .get_user(guest)
+    .await?
+    .is_some_and(|user| user.kind != UserKind::Guest);
+  if is_member_account {
+    return Ok(());
+  }
   // The guest's session token would otherwise stay valid until the meeting ends: the account is
   // deactivated, which also ends their connections.
   super::admin::deactivate_user(
@@ -211,6 +602,7 @@ pub async fn deny(
     guest,
     teamcraft_proto::DeactivationReason::Admin,
     "turned away in the meeting lobby",
+    super::admin::AfterDeactivation::RemoveFromChats,
   )
   .await?;
   Ok(())
@@ -222,6 +614,12 @@ async fn admit_guest(
   guest: UserId,
   decided_by: UserId,
 ) -> Result<(), ApiError> {
+  // A place of the link counts once its guest is let in (#987 review, M3).
+  if let Some(admitted) = state.database.admitted_of_guests_link(meeting.id, guest).await?
+    && admitted >= i64::from(service_of(state)?.max_shared_link_guests())
+  {
+    return Err(ApiError::Conflict("the join link admits no more guests".into()));
+  }
   if !state
     .database
     .decide_lobby(meeting, guest, LobbyState::Admitted.as_str(), decided_by)
@@ -269,6 +667,70 @@ async fn announce_waiting(
   Ok(())
 }
 
+/// The one-time invite a guest redeems: a personal link is its own invite, a shared link makes a
+/// new one for every guest (refused once revoked or full).
+async fn invite_for_guest(
+  state: &AppState,
+  service: &MeetingService,
+  link: &StoredMeetingInvite,
+  display_name: &str,
+) -> Result<MeetingInviteId, ApiError> {
+  if !link.is_shared {
+    return Ok(link.id);
+  }
+  let revoked = || ApiError::from(AuthError::InvalidToken("the join link was revoked".into()));
+  if link.is_revoked {
+    return Err(revoked());
+  }
+  let invite: MeetingInviteId = state.next_id()?;
+  match state
+    .database
+    .claim_shared_invite(
+      link.id,
+      invite,
+      display_name,
+      service.max_shared_link_guests(),
+      OffsetDateTime::now_utc() - LOBBY_PLACE_TIMEOUT,
+    )
+    .await?
+  {
+    SharedInviteClaim::Claimed => Ok(invite),
+    SharedInviteClaim::Revoked => Err(revoked()),
+    SharedInviteClaim::Full => Err(ApiError::Conflict("the join link admits no more guests".into())),
+  }
+}
+
+/// Makes the guest's account and marks their invite redeemed by it. The account exists from the
+/// first request on; it is made first so the invite can name it.
+async fn redeem_invite(
+  state: &AppState,
+  invite: MeetingInviteId,
+  display_name: &str,
+  now: OffsetDateTime,
+) -> Result<AuthenticatedUser, ApiError> {
+  let guest = accounts::authenticate(
+    state,
+    accounts::guest_identity(invite.to_string(), display_name.to_owned(), now.unix_timestamp()),
+  )
+  .await?;
+  if !state
+    .database
+    .redeem_meeting_invite(invite, guest.user.id)
+    .await?
+  {
+    return Err(AuthError::InvalidToken("the join link was already used".into()).into());
+  }
+  Ok(guest)
+}
+
+/// Gives a shared link's place back when its guest did not get in, so failed joins don't use up
+/// the link. A place that can't be given back stays used: logged, the join fails either way.
+async fn release_claim(state: &AppState, invite: MeetingInviteId) {
+  if let Err(error) = state.database.release_shared_invite_claim(invite).await {
+    tracing::warn!(%error, "could not give back a shared guest link's place");
+  }
+}
+
 /// The meeting, if the caller hosts it (organizer or chat admin); other members get "forbidden",
 /// strangers "not found". Cancelled meetings have no lobby.
 async fn host_meeting(
@@ -308,11 +770,80 @@ fn access_ends_at(service: &MeetingService, meeting: &StoredMeeting) -> OffsetDa
   meeting.ends_at + service.guest_grace()
 }
 
-fn entry(state: &AppState, user: &teamcraft_db::User, row: &LobbyRow) -> LobbyEntry {
+fn entry(
+  state: &AppState,
+  user: &teamcraft_db::User,
+  row: &LobbyRow,
+  is_by_link: bool,
+  has_device: bool,
+  maybe_knock_fingerprint: Option<String>,
+) -> LobbyEntry {
   LobbyEntry {
     user: user_summary(state, user),
     requested_at: unix_millis(row.requested_at),
+    is_by_link,
+    has_device,
+    maybe_knock_fingerprint,
   }
+}
+
+/// The personal (or old shared) link a one-time `#invite=` token names, if it is still good.
+async fn invite_of(
+  state: &AppState,
+  service: &MeetingService,
+  invite_token: &str,
+) -> Result<StoredMeetingInvite, ApiError> {
+  let (link_id, meeting_id) = service
+    .tokens()
+    .verify_invite(invite_token)
+    .map_err(|_| AuthError::InvalidToken("invalid join link".into()))?;
+  Ok(
+    state
+      .database
+      .get_meeting_invite(link_id)
+      .await?
+      .filter(|invite| invite.meeting == meeting_id)
+      .ok_or_else(|| AuthError::InvalidToken("invalid join link".into()))?,
+  )
+}
+
+/// The shared invite behind a meeting link's token: every guest of the link gets a one-time invite
+/// of their own from it, within the link's guest limit. An unknown token is an invalid link.
+async fn shared_invite_of(state: &AppState, link_token: &str) -> Result<StoredMeetingInvite, ApiError> {
+  let invalid = || ApiError::from(AuthError::InvalidToken("invalid join link".into()));
+  if !is_meeting_link_token(link_token) {
+    return Err(invalid());
+  }
+  let meeting_id = state
+    .database
+    .meeting_by_link(link_token)
+    .await?
+    .ok_or_else(invalid)?;
+  let meeting = state
+    .database
+    .get_meeting(meeting_id)
+    .await?
+    .ok_or_else(invalid)?;
+  let new_id: MeetingInviteId = state.next_id()?;
+  let shared = state
+    .database
+    .ensure_shared_invite(meeting_id, new_id, meeting.organizer)
+    .await?;
+  state
+    .database
+    .get_meeting_invite(shared)
+    .await?
+    .ok_or_else(invalid)
+}
+
+/// The meeting's link as mails and the API carry it.
+async fn meeting_link_of(
+  state: &AppState,
+  service: &MeetingService,
+  meeting: &StoredMeeting,
+) -> Result<String, ApiError> {
+  let brand = meetings::organizer_brand(state, meeting).await?;
+  meetings::meeting_link(state, service, &brand, meeting).await
 }
 
 fn service_of(state: &AppState) -> Result<&MeetingService, ApiError> {

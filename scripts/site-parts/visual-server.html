@@ -1,0 +1,20 @@
+<!-- Feature illustration: the devices, the server that only sees ciphertext, and the organization's
+     identity provider (ARCHITECTURE.md §2–3). -->
+<div class="visual visual-server" role="img" aria-label="Laptops, phones and browsers send encrypted data to your server, which stores and forwards it without being able to read it; sign-in goes through your identity provider">
+  <ul class="srv-devices" aria-hidden="true">
+    <li><svg class="icon" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 19h20"/></svg>Laptop<i class="srv-lock"><svg class="icon" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></i></li>
+    <li><svg class="icon" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="2.5"/><path d="M10.5 18.5h3"/></svg>Phone<i class="srv-lock"><svg class="icon" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></i></li>
+    <li><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/></svg>Browser<i class="srv-lock"><svg class="icon" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></i></li>
+  </ul>
+  <div class="srv-wire" aria-hidden="true"><span>ciphertext only</span></div>
+  <div class="srv-box" aria-hidden="true">
+    <p class="srv-title"><svg class="icon" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="13" width="16" height="7" rx="1.5"/><path d="M8 7.5h.5M8 16.5h.5"/></svg>Your server<span class="srv-tag">untrusted by design</span></p>
+    <ul class="srv-list">
+      <li><strong>API and gateway</strong><span>Stores encrypted messages</span></li>
+      <li><strong>Media relay</strong><span>Forwards encrypted call frames</span></li>
+      <li><strong>Database</strong><span>Routing metadata, no content</span></li>
+      <li><strong>File storage</strong><span>Encrypted attachments</span></li>
+    </ul>
+  </div>
+  <p class="srv-idp" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg><span><strong>Your identity provider</strong>Sign-in with OpenID Connect</span></p>
+</div>

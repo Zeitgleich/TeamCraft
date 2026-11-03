@@ -11,13 +11,16 @@ use wasm_bindgen_futures::JsFuture;
 use crate::admin::format_bytes;
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_fields::{
-  Bound, CheckField, FieldErrors, TextAreaField, TextField, Validated, bind, bind_bool, is_dns_name,
-  is_email_address, is_email_domain, is_web_url, list_text, parse_list,
+  Bound, CheckField, FieldErrors, TextAreaField, TextField, Validated, accept_or_refuse, bind, bind_bool,
+  is_dns_name, is_email_address, is_email_domain, is_web_url, list_text, parse_list,
 };
+use crate::form_errors::error_id;
 use crate::i18n::use_i18n;
+use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 /// Below this contrast ratio (WCAG AA for normal text) a color pair is flagged.
+const EDITOR_ID: &str = "admin-brand-editor";
 const MIN_CONTRAST: f64 = 4.5;
 const MAX_NAME_CHARS: usize = 100;
 const MAX_TEXT_CHARS: usize = 1000;
@@ -55,14 +58,17 @@ const COLOR_FIELDS: [[&str; 7]; 2] = [
     "color_dark_chrome",
   ],
 ];
-const SLOTS: [(&str, BrandAssetSlot); 6] = [
+const SLOTS: [(&str, BrandAssetSlot); 7] = [
   ("admin-brands-slot-logo", BrandAssetSlot::Logo),
   ("admin-brands-slot-logo-dark", BrandAssetSlot::LogoDark),
   ("admin-brands-slot-icon", BrandAssetSlot::Icon),
   ("admin-brands-slot-icon-dark", BrandAssetSlot::IconDark),
   ("admin-brands-slot-favicon", BrandAssetSlot::Favicon),
   ("admin-brands-slot-favicon-dark", BrandAssetSlot::FaviconDark),
+  ("admin-brands-slot-sso-icon", BrandAssetSlot::SsoIcon),
 ];
+/// Longest provider name on the sign-in button.
+const MAX_SSO_LABEL_CHARS: usize = 64;
 const IMAGE_TYPES: [&str; 6] = [
   "image/png",
   "image/jpeg",
@@ -234,6 +240,13 @@ fn BrandEditor(
     |d| &d.organization_name,
     |d| &mut d.organization_name,
   );
+  let sso_label = bind(
+    draft,
+    show_errors,
+    "sso_label",
+    |d| &d.sso_label,
+    |d| &mut d.sso_label,
+  );
   let email_domains = bind(
     draft,
     show_errors,
@@ -258,9 +271,23 @@ fn BrandEditor(
   let text_en = bind(draft, show_errors, "text_en", |d| &d.text_en, |d| &mut d.text_en);
   let text_de = bind(draft, show_errors, "text_de", |d| &d.text_de, |d| &mut d.text_de);
   let support = bind(draft, show_errors, "support", |d| &d.support, |d| &mut d.support);
+  let documentation = bind(
+    draft,
+    show_errors,
+    "documentation",
+    |d| &d.documentation,
+    |d| &mut d.documentation,
+  );
   let privacy = bind(draft, show_errors, "privacy", |d| &d.privacy, |d| &mut d.privacy);
   let terms = bind(draft, show_errors, "terms", |d| &d.terms, |d| &mut d.terms);
   let imprint = bind(draft, show_errors, "imprint", |d| &d.imprint, |d| &mut d.imprint);
+  let download = bind(
+    draft,
+    show_errors,
+    "download",
+    |d| &d.download,
+    |d| &mut d.download,
+  );
   let sender_name = bind(
     draft,
     show_errors,
@@ -280,18 +307,16 @@ fn BrandEditor(
   let save_id = id.clone();
   let save = move |ev: web_sys::SubmitEvent| {
     ev.prevent_default();
-    show_errors.set(true);
-    let Some((settings, brand_id, is_default)) = draft.with_untracked(|draft| {
-      draft.errors().is_empty().then(|| {
-        (
-          draft.to_settings(),
-          draft.new_id.trim().to_owned(),
-          draft.is_default,
-        )
-      })
-    }) else {
+    if !accept_or_refuse(draft, show_errors, EDITOR_ID) {
       return;
-    };
+    }
+    let (settings, brand_id, is_default) = draft.with_untracked(|draft| {
+      (
+        draft.to_settings(),
+        draft.new_id.trim().to_owned(),
+        draft.is_default,
+      )
+    });
     if is_new {
       let request = CreateBrandRequest {
         id: brand_id,
@@ -328,7 +353,7 @@ fn BrandEditor(
   let colors_assets_id = id.clone();
 
   view! {
-    <form class="brand-editor" on:submit=save>
+    <form id=EDITOR_ID class="brand-editor" on:submit=save>
       <fieldset class="policy-group" prop:disabled=is_read_only>
         <legend>{move || i18n.t(&title)}</legend>
         {is_read_only
@@ -367,6 +392,15 @@ fn BrandEditor(
           on_input=organization.on_input
           error=organization.error
         />
+        <TextField
+          id="brand-sso-label"
+          label="admin-brands-sso-label"
+          hint="admin-brands-sso-label-hint"
+          placeholder="Microsoft"
+          value=sso_label.value
+          on_input=sso_label.on_input
+          error=sso_label.error
+        />
         <CheckField
           label="admin-brands-is-default"
           hint="admin-brands-is-default-hint"
@@ -398,9 +432,11 @@ fn BrandEditor(
       <fieldset class="policy-group" prop:disabled=is_read_only>
         <legend>{move || i18n.t("admin-brands-links")}</legend>
         <LinkField id="brand-link-support" label="admin-brands-link-support" bound=support />
+        <LinkField id="brand-link-documentation" label="admin-brands-link-documentation" bound=documentation />
         <LinkField id="brand-link-privacy" label="admin-brands-link-privacy" bound=privacy />
         <LinkField id="brand-link-terms" label="admin-brands-link-terms" bound=terms />
         <LinkField id="brand-link-imprint" label="admin-brands-link-imprint" bound=imprint />
+        <LinkField id="brand-link-download" label="admin-brands-link-download" bound=download />
       </fieldset>
       <fieldset class="policy-group" prop:disabled=is_read_only>
         <legend>{move || i18n.t("admin-brands-mail")}</legend>
@@ -570,7 +606,23 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
     "admin-brands-colors-light"
   };
   let colors = Signal::derive(move || draft.with(|draft| draft.theme_colors(is_dark)));
-  let style = Signal::derive(move || preview_style(&colors.get()));
+  let preview = NodeRef::<leptos::html::Div>::new();
+  // CSSOM properties, not a `style` attribute: the CSP (`style-src 'self'`) blocks those.
+  let applied = StoredValue::new(Vec::<&'static str>::new());
+  Effect::new(move || {
+    let properties = preview_properties(&colors.get());
+    let Some(element) = preview.get() else {
+      return;
+    };
+    let style = web_sys::HtmlElement::style(&element);
+    for property in applied.get_value() {
+      drop(style.remove_property(property));
+    }
+    for (property, value) in &properties {
+      drop(style.set_property(property, value));
+    }
+    applied.set_value(properties.into_iter().map(|(property, _)| property).collect());
+  });
   let checks = Signal::derive(move || contrast_checks(&colors.get()));
   view! {
     <div class="brand-color-column">
@@ -581,12 +633,13 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
         .map(|(index, key)| {
           let id = format!("brand-color-{}-{key}", if is_dark { "dark" } else { "light" });
           let label = format!("admin-brands-color-{}", key.replace('_', "-"));
-          let error_id = COLOR_FIELDS[usize::from(is_dark)][index];
+          let field = COLOR_FIELDS[usize::from(is_dark)][index];
+          let message_id = error_id(&id);
           let value = Signal::derive(move || draft.with(|draft| draft.theme_colors(is_dark)[index].1.clone()));
           let error = Signal::derive(move || {
             if show_errors.get() {
               draft.with(|draft| {
-                draft.errors().into_iter().find(|(field, _)| *field == error_id).map(|(_, key)| key)
+                draft.errors().into_iter().find(|(error_field, _)| *error_field == field).map(|(_, key)| key)
               })
             } else {
               None
@@ -603,6 +656,10 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
                   translate="no"
                   placeholder="#0b7f78"
                   aria-invalid=move || error.get().map(|_| "true")
+                  aria-describedby={
+                    let message_id = message_id.clone();
+                    move || error.get().map(|_| message_id.clone())
+                  }
                   prop:value=move || value.get()
                   on:input=move |ev| {
                     let text = event_target_value(&ev);
@@ -620,12 +677,12 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
                   }
                 />
               </div>
-              {move || error.get().map(|key| view! { <p class="field-error" role="alert">{i18n.t(key)}</p> })}
+              <p class="field-error" id=message_id.clone()>{move || error.get().map(|key| i18n.t(key))}</p>
             </div>
           }
         })
         .collect_view()}
-      <div class=if is_dark { "brand-preview is-dark" } else { "brand-preview" } style=move || style.get() aria-hidden="true">
+      <div class=if is_dark { "brand-preview is-dark" } else { "brand-preview" } node_ref=preview aria-hidden="true">
         <div class="brand-preview-chrome"></div>
         <div class="brand-preview-body">
           <div class="brand-preview-sidebar">
@@ -682,7 +739,8 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
       .is_some_and(|response| response.is_image_upload_available)
   });
   let max_bytes = Memo::new(move |_| response.get().map_or(0, |response| response.max_asset_bytes));
-  let maybe_error = RwSignal::new(None::<&'static str>);
+  // The slot (by its label) whose image was refused, and why: shown in that slot's row.
+  let maybe_error = RwSignal::new(None::<(&'static str, &'static str)>);
   view! {
     <fieldset class="policy-group" prop:disabled=is_read_only>
       <legend>{move || i18n.t("admin-brands-images")}</legend>
@@ -717,6 +775,9 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
             };
             let upload_id = id.clone();
             let upload_slot = slot.clone();
+            let field_id = format!("brand-asset-{}", slot.as_str());
+            let message_id = error_id(&field_id);
+            let slot_error = move || maybe_error.get().filter(|(slot_label, _)| *slot_label == label).map(|(_, key)| key);
             let delete_id = id.clone();
             let delete_slot = slot.clone();
             view! {
@@ -736,9 +797,15 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
                   </span>
                 </span>
                 <input
+                  id=field_id
                   type="file"
                   accept=IMAGE_TYPES.join(",")
                   aria-label=move || i18n.t(label)
+                  aria-invalid=move || slot_error().map(|_| "true")
+                  aria-describedby={
+                    let message_id = message_id.clone();
+                    move || slot_error().map(|_| message_id.clone())
+                  }
                   prop:disabled=move || !can_upload.get()
                   on:change=move |ev| {
                     let input = event_target::<web_sys::HtmlInputElement>(&ev);
@@ -747,7 +814,7 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
                     };
                     let content_type = file.type_();
                     if let Err(key) = check_asset(&content_type, file.size() as u64, max_bytes.get_untracked()) {
-                      maybe_error.set(Some(key));
+                      maybe_error.set(Some((label, key)));
                       input.set_value("");
                       return;
                     }
@@ -757,10 +824,11 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
                       match JsFuture::from(file.array_buffer()).await {
                         Ok(buffer) => {
                           let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-                          state.write(|backend| backend.upload_brand_asset(id, slot, bytes, content_type));
+                          state.try_write(|backend| backend.upload_brand_asset(id, slot, bytes, content_type));
                         },
-                        Err(_) => maybe_error.set(Some("admin-error-image-unreadable")),
+                        Err(_) => maybe_error.set_if_alive(Some((label, "admin-error-image-unreadable"))),
                       }
+                      // async-ok: a DOM input element, not a signal.
                       input.set_value("");
                     });
                   }
@@ -776,12 +844,12 @@ fn BrandAssets(id: String, response: Memo<Option<AdminBrandsResponse>>, is_read_
                 >
                   {move || i18n.t("admin-brands-image-delete")}
                 </button>
+                <p class="field-error brand-asset-error" id=message_id>{move || slot_error().map(|key| i18n.t(key))}</p>
               </li>
             }
           })
           .collect_view()}
       </ul>
-      {move || maybe_error.get().map(|key| view! { <p class="field-error" role="alert">{i18n.t(key)}</p> })}
     </fieldset>
   }
 }
@@ -812,6 +880,8 @@ struct BrandDraft {
   is_default: bool,
   display_name: String,
   organization_name: String,
+  /// The provider part of "Sign in with …".
+  sso_label: String,
   hostnames: Vec<String>,
   email_domains: String,
   title_en: String,
@@ -822,9 +892,11 @@ struct BrandDraft {
   other_titles: BTreeMap<String, String>,
   other_texts: BTreeMap<String, String>,
   support: String,
+  documentation: String,
   privacy: String,
   terms: String,
   imprint: String,
+  download: String,
   sender_name: String,
   from_address: String,
   light: [String; 7],
@@ -852,6 +924,7 @@ impl BrandDraft {
       is_default,
       display_name: settings.display_name.clone(),
       organization_name: optional(&settings.maybe_organization_name),
+      sso_label: optional(&settings.maybe_sso_label),
       hostnames: settings.hostnames.clone(),
       email_domains: list_text(&settings.email_domains),
       title_en,
@@ -861,9 +934,11 @@ impl BrandDraft {
       other_titles,
       other_texts,
       support: optional(&settings.links.maybe_support),
+      documentation: optional(&settings.links.maybe_documentation),
       privacy: optional(&settings.links.maybe_privacy),
       terms: optional(&settings.links.maybe_terms),
       imprint: optional(&settings.links.maybe_imprint),
+      download: optional(&settings.links.maybe_download),
       sender_name: optional(&settings.mail.maybe_sender_name),
       from_address: optional(&settings.mail.maybe_from_address),
       light: colors_of(&settings.colors.light),
@@ -889,14 +964,17 @@ impl BrandDraft {
       login_text: join_languages(&self.text_en, &self.text_de, &self.other_texts),
       links: BrandLinks {
         maybe_support: optional(&self.support),
+        maybe_documentation: optional(&self.documentation),
         maybe_privacy: optional(&self.privacy),
         maybe_terms: optional(&self.terms),
         maybe_imprint: optional(&self.imprint),
+        maybe_download: optional(&self.download),
       },
       mail: BrandMailSettings {
         maybe_sender_name: optional(&self.sender_name),
         maybe_from_address: optional(&self.from_address),
       },
+      maybe_sso_label: optional(&self.sso_label),
     }
   }
 
@@ -934,6 +1012,9 @@ impl Validated for BrandDraft {
     if self.organization_name.trim().chars().count() > MAX_NAME_CHARS {
       errors.push(("organization_name", "admin-error-too-long"));
     }
+    if self.sso_label.trim().chars().count() > MAX_SSO_LABEL_CHARS {
+      errors.push(("sso_label", "admin-error-too-long"));
+    }
     if !parse_list(&self.email_domains.to_ascii_lowercase())
       .iter()
       .all(|domain| is_email_domain(domain))
@@ -955,9 +1036,11 @@ impl Validated for BrandDraft {
     }
     for (field, link) in [
       ("support", &self.support),
+      ("documentation", &self.documentation),
       ("privacy", &self.privacy),
       ("terms", &self.terms),
       ("imprint", &self.imprint),
+      ("download", &self.download),
     ] {
       let link = link.trim();
       if !link.is_empty() && !is_web_url(link) {
@@ -1115,19 +1198,19 @@ fn contrast_checks(colors: &[(&'static str, String)]) -> Vec<ContrastCheck> {
   }
 }
 
-/// CSS custom properties for the preview: only valid hex colors reach the style attribute.
-fn preview_style(colors: &[(&'static str, String)]) -> String {
-  let mut style = String::new();
+/// CSS custom properties for the preview: only valid hex colors reach the element's style.
+fn preview_properties(colors: &[(&'static str, String)]) -> Vec<(&'static str, String)> {
+  let mut properties = Vec::new();
   for (key, value) in colors {
     let value = value.trim();
     if !is_brand_hex_color(value) {
       continue;
     }
     for property in brand_color_properties(key).unwrap_or_default() {
-      style.push_str(&format!("{property}:{value};"));
+      properties.push((*property, value.to_owned()));
     }
   }
-  style
+  properties
 }
 
 /// Accepted images: a known type within the size limit.
@@ -1172,6 +1255,7 @@ mod tests {
           ..BrandLinks::default()
         },
         mail: BrandMailSettings::default(),
+        maybe_sso_label: None,
       },
       assets: Vec::new(),
       maybe_updated_at: None,
@@ -1222,13 +1306,21 @@ mod tests {
   }
 
   #[test]
-  fn the_preview_style_carries_only_valid_colors() {
-    let style = preview_style(&[
+  fn the_preview_carries_only_valid_colors() {
+    let properties = preview_properties(&[
       ("accent", "#0b7f78".to_owned()),
       ("chrome", "red; background:url(x)".to_owned()),
       ("sidebar", "#123".to_owned()),
     ]);
-    assert_eq!(style, "--accent:#0b7f78;--focus:#0b7f78;--sb-bg:#123;");
+    let expected = [
+      ("--accent", "#0b7f78"),
+      ("--focus", "#0b7f78"),
+      ("--sb-bg", "#123"),
+    ];
+    assert_eq!(
+      properties,
+      expected.map(|(property, value)| (property, value.to_owned()))
+    );
   }
 
   #[test]
@@ -1361,6 +1453,8 @@ mod tests {
       "admin-brands-display-name",
       "admin-brands-organization",
       "admin-brands-organization-hint",
+      "admin-brands-sso-label",
+      "admin-brands-sso-label-hint",
       "admin-brands-is-default",
       "admin-brands-is-default-hint",
       "admin-brands-hosts",
@@ -1378,9 +1472,11 @@ mod tests {
       "admin-brands-text-de",
       "admin-brands-links",
       "admin-brands-link-support",
+      "admin-brands-link-documentation",
       "admin-brands-link-privacy",
       "admin-brands-link-terms",
       "admin-brands-link-imprint",
+      "admin-brands-link-download",
       "admin-brands-mail",
       "admin-brands-mail-hint",
       "admin-brands-sender-name",

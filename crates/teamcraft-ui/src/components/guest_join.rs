@@ -1,28 +1,47 @@
-//! The page behind a personal meeting link (`/meeting/<id>#invite=<token>`): a guest enters a name,
-//! waits in the lobby until a host lets them in, then is in. No account, no sign-in. The token is in
-//! the URL fragment, which the browser never sends to a server.
+//! The page behind a meeting link (`/meeting/<token>#v=<fingerprint>`, a personal
+//! `#invite=<token>` link, or an old `/meeting/<id>#invite=<token>`) for somebody without an
+//! account: a guest enters a name, waits in the lobby until the organizer's device lets them in,
+//! then is in. No sign-in. The link holds no secret: the page makes the guest's keys itself
+//! (e2ee.md §4.6, "Meeting guests").
+
+use std::rc::Rc;
+use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::{LobbyState, MeetingId};
+use teamcraft_client_api::remote::CoreStatus;
+use teamcraft_crypto::guest_link::code_of_fingerprint;
+use teamcraft_proto::{ConversationId, LobbyState, MeetingId, UserId};
 
-use crate::auth::AppConfig;
+use crate::areas::{self, Place, lazy_area};
+use crate::auth::guest::GuestAuth;
+use crate::auth::{AppConfig, Authenticator};
+use crate::components::guest_meeting::GuestSession;
 use crate::components::login::AuthFrame;
+use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::use_i18n;
-use crate::meetings::{GuestClient, MeetingError};
-use crate::reactive::use_interval;
+use crate::meetings::{GuestClient, GuestLink, MeetingError};
+use crate::reactive::{SetIfAlive, pause, use_interval};
+use crate::remote_backend;
 
 /// How often the lobby is asked whether the guest was admitted.
+const FORM_ID: &str = "guest-join-form";
+const NAME_ID: &str = "guest-name";
 const POLL_MS: u64 = 2000;
+/// How long the page waits for its client core to open before it gives up.
+const CORE_PATIENCE: Duration = Duration::from_secs(20);
+const CORE_POLL: Duration = Duration::from_millis(300);
+/// The device name a guest's device shows in the member list.
+const DEVICE_NAME: &str = "Guest browser";
+/// The query a member's "sign in" adds to the meeting link, so the page shows the sign-in instead.
+pub const SIGN_IN_QUERY: &str = "sign-in";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum GuestPhase {
   AskName,
   Joining,
-  /// In the lobby, with the session token of the guest.
-  Waiting {
-    guest_token: String,
-  },
+  /// In the lobby, with the page's device being set up for the encryption.
+  Waiting,
   Admitted,
   Denied,
   Failed(FailureKind),
@@ -31,130 +50,370 @@ enum GuestPhase {
 /// What went wrong, in terms the guest can act on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailureKind {
-  /// The link was used, expired, cancelled or is not valid.
+  /// The link was used, expired, cancelled, made anew or is not valid.
   LinkUnusable,
+  /// The page could not set up its encryption.
+  SetupFailed,
   Network,
 }
 
+/// What the page knows about the guest once the server let them into the lobby.
+#[derive(Clone)]
+struct Joined {
+  guest_token: String,
+  meeting: MeetingId,
+  conversation_id: ConversationId,
+  auth: Rc<dyn Authenticator>,
+}
+
 #[component]
-pub fn GuestJoinPage(meeting: MeetingId, invite_token: String) -> impl IntoView {
+pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
   let i18n = use_i18n();
-  let client = GuestClient::new(AppConfig::load());
+  let config = AppConfig::load();
+  let client = GuestClient::new(config.clone());
   let phase = RwSignal::new(GuestPhase::AskName);
   let name = RwSignal::new(String::new());
-  let invite_token = StoredValue::new(invite_token);
+  let errors = FormErrors::new();
+  let name_errors = move || {
+    let mut found = FieldErrors::new();
+    if name.with(|name| name.trim().is_empty()) {
+      found.push(NAME_ID, i18n.t("form-error-name"));
+    }
+    found
+  };
+  Effect::new(move |_| errors.follow(name_errors()));
+  // A member opens the same link; "sign in" shows them the sign-in, which comes back to it.
+  let sign_in_href = StoredValue::new(
+    web_sys::window()
+      .and_then(|window| window.location().pathname().ok())
+      .map(|path| format!("{path}?{SIGN_IN_QUERY}")),
+  );
+  let is_one_time = link.maybe_invite_token.is_some();
+  let link = StoredValue::new(link);
+  let joined = StoredValue::new_local(None::<Joined>);
+  let is_device_ready = RwSignal::new(false);
+  // The codes the guest may compare out of band (#987 review): their own key's, which the hosts see
+  // on the lobby entry, and the organizer's from the link, which the organizer's app shows.
+  let codes = RwSignal::new(None::<(String, String)>);
+  let is_organizer_app_outdated = RwSignal::new(false);
+  // The fingerprint still to report with the knock, when the first report failed.
+  let unreported = StoredValue::new(None::<String>);
+  crate::startup::first_view();
+  // What an earlier guest page left in this browser (closed without "Leave") goes now.
+  spawn_local(delete_stale_guest_store());
 
-  let join = {
+  let join: StoredValue<Rc<dyn Fn(leptos::ev::SubmitEvent)>, LocalStorage> = StoredValue::new_local({
     let client = client.clone();
-    move |ev: leptos::ev::SubmitEvent| {
+    Rc::new(move |ev: leptos::ev::SubmitEvent| {
       ev.prevent_default();
-      if name.get_untracked().trim().is_empty() {
+      let found = untrack(name_errors);
+      if !found.is_empty() {
+        errors.refuse(FORM_ID, found);
         return;
       }
+      let parts = link.get_value();
       phase.set(GuestPhase::Joining);
-      let client = client.clone();
+      // A one-time token stays in memory from here on, not in the address bar, the history or a
+      // bookmark made later.
+      strip_link_fragment();
+      let (client, config) = (client.clone(), config.clone());
       spawn_local(async move {
-        let outcome = client
-          .join(&invite_token.get_value(), &name.get_untracked())
-          .await;
-        phase.set(match outcome {
-          Ok(joined) => match joined.lobby_state {
-            LobbyState::Admitted => GuestPhase::Admitted,
-            LobbyState::Denied => GuestPhase::Denied,
-            LobbyState::Waiting | LobbyState::Unknown(_) => GuestPhase::Waiting {
-              guest_token: joined.guest_token,
-            },
+        let display_name = name.get_untracked().trim().to_owned();
+        let outcome = client.join(&parts, &display_name).await;
+        let response = match outcome {
+          Ok(response) => response,
+          Err(error) => {
+            phase.set_if_alive(GuestPhase::Failed(failure_of(&error)));
+            return;
           },
-          Err(error) => GuestPhase::Failed(failure_of(&error)),
-        });
+        };
+        if response.lobby_state == LobbyState::Denied {
+          phase.set_if_alive(GuestPhase::Denied);
+          return;
+        }
+        let auth: Rc<dyn Authenticator> =
+          Rc::new(GuestAuth::new(config.clone(), response.guest_token.clone()));
+        let is_gone = joined
+          .try_set_value(Some(Joined {
+            guest_token: response.guest_token.clone(),
+            meeting: response.meeting_id,
+            conversation_id: response.conversation_id,
+            auth: auth.clone(),
+          }))
+          .is_some();
+        if is_gone {
+          return;
+        }
+        phase.set_if_alive(GuestPhase::Waiting);
+        let organizer_fingerprint = parts
+          .maybe_organizer_fingerprint
+          .clone()
+          .or(response.maybe_organizer_fingerprint.clone());
+        let setup = prepare_device(
+          &client,
+          &config,
+          auth,
+          &response.guest_token,
+          response.user_id,
+          response.conversation_id,
+          response.meeting_id,
+          // A link without `v` (mailed before #987) takes the server's word (e2ee.md §4.6).
+          organizer_fingerprint.as_deref(),
+        )
+        .await;
+        match setup {
+          Ok((own_code, maybe_unreported)) => {
+            unreported.try_set_value(maybe_unreported);
+            let organizer_code = organizer_fingerprint
+              .as_deref()
+              .map(code_of_fingerprint)
+              .unwrap_or_default();
+            codes.set_if_alive(Some((own_code, organizer_code)));
+            is_device_ready.set_if_alive(true);
+          },
+          Err(kind) => phase.set_if_alive(GuestPhase::Failed(kind)),
+        }
       });
-    }
-  };
+    }) as Rc<dyn Fn(leptos::ev::SubmitEvent)>
+  });
 
   use_interval(POLL_MS, move || {
-    let GuestPhase::Waiting { guest_token } = phase.get_untracked() else {
+    if phase.get_untracked() != GuestPhase::Waiting || !is_device_ready.get_untracked() {
+      return;
+    }
+    let Some((guest_token, meeting)) = joined.with_value(|joined| {
+      joined
+        .as_ref()
+        .map(|joined| (joined.guest_token.clone(), joined.meeting))
+    }) else {
       return;
     };
     let client = client.clone();
+    let maybe_fingerprint = unreported.get_value();
     spawn_local(async move {
+      if let Some(fingerprint) = maybe_fingerprint
+        && report_device(&client, meeting, &guest_token, &fingerprint).await
+      {
+        unreported.try_set_value(None);
+      }
       match client.lobby_state(meeting, &guest_token).await {
-        Ok(LobbyState::Admitted) => phase.set(GuestPhase::Admitted),
-        Ok(LobbyState::Denied) => phase.set(GuestPhase::Denied),
-        Ok(LobbyState::Waiting | LobbyState::Unknown(_)) => {},
+        Ok(answer) => {
+          is_organizer_app_outdated.set_if_alive(answer.is_organizer_app_outdated);
+          match answer.state {
+            LobbyState::Admitted => phase.set_if_alive(GuestPhase::Admitted),
+            LobbyState::Denied => phase.set_if_alive(GuestPhase::Denied),
+            LobbyState::Waiting | LobbyState::Unknown(_) => {},
+          }
+        },
         // A hiccup keeps waiting; a refused session ends it.
-        Err(MeetingError::Refused { .. }) => phase.set(GuestPhase::Failed(FailureKind::LinkUnusable)),
+        Err(MeetingError::Refused { .. }) => {
+          phase.set_if_alive(GuestPhase::Failed(FailureKind::LinkUnusable))
+        },
         Err(_) => {},
       }
     });
   });
 
   view! {
-    <AuthFrame>
-      {move || match phase.get() {
-        GuestPhase::AskName | GuestPhase::Joining => {
-          let is_joining = phase.get() == GuestPhase::Joining;
-          view! {
-            <form class="auth-form" on:submit=join.clone()>
-              <h1>{move || i18n.t("guest-title")}</h1>
-              <p class="muted-text">{move || i18n.t("guest-subtitle")}</p>
-              <label for="guest-name">{move || i18n.t("guest-name")}</label>
-              <input
-                id="guest-name"
-                class="input"
-                autocomplete="name"
-                data-autofocus
-                prop:value=move || name.get()
-                on:input=move |ev| name.set(event_target_value(&ev))
-              />
-              <div class="auth-actions">
-                <button type="submit" class="btn btn-primary" prop:disabled=is_joining>
-                  {move || i18n.t("guest-join")}
-                </button>
-              </div>
-            </form>
-          }
-          .into_any()
-        },
-        GuestPhase::Waiting { .. } => {
-          view! {
-            <h1>{move || i18n.t("guest-waiting-title")}</h1>
-            <p class="auth-status" role="status">
-              <span class="spinner" aria-hidden="true"></span>
-              <span>{move || i18n.t("guest-waiting")}</span>
-            </p>
-          }
-          .into_any()
-        },
-        GuestPhase::Admitted => {
-          view! {
-            <h1>{move || i18n.t("guest-admitted-title")}</h1>
-            <p role="status">{move || i18n.t("guest-admitted")}</p>
-            <p class="muted-text small">{move || i18n.t("guest-admitted-note")}</p>
-          }
-          .into_any()
-        },
-        GuestPhase::Denied => {
-          view! {
-            <h1>{move || i18n.t("guest-denied-title")}</h1>
-            <p role="alert">{move || i18n.t("guest-denied")}</p>
-          }
-          .into_any()
-        },
-        GuestPhase::Failed(kind) => {
-          let key = match kind {
-            FailureKind::LinkUnusable => "guest-link-unusable",
-            FailureKind::Network => "guest-network",
-          };
-          view! {
-            <h1>{move || i18n.t("guest-failed-title")}</h1>
-            <p role="alert">{move || i18n.t(key)}</p>
-          }
-          .into_any()
-        },
-      }}
-    </AuthFrame>
+    {move || {
+      if phase.get() == GuestPhase::Admitted
+        && let Some(joined) = joined.get_value()
+      {
+        let session = GuestSession {
+          meeting: joined.meeting,
+          conversation: joined.conversation_id,
+          guest_token: joined.guest_token,
+          auth: joined.auth,
+        };
+        return lazy_area(Place::Screen, move || areas::guest_meeting(session.clone()));
+      }
+      view! {
+        <AuthFrame>
+          {move || match phase.get() {
+            GuestPhase::AskName | GuestPhase::Joining => {
+              let is_joining = phase.get() == GuestPhase::Joining;
+              view! {
+                <form id=FORM_ID class="auth-form" on:submit=move |ev| join.with_value(|join| join(ev))>
+                  <h1>{move || i18n.t("guest-title")}</h1>
+                  <p class="muted-text">{move || i18n.t("guest-subtitle")}</p>
+                  <label for=NAME_ID>{move || i18n.t("guest-name")}</label>
+                  <input
+                    id=NAME_ID
+                    class="input"
+                    autocomplete="name"
+                    data-autofocus
+                    aria-required="true"
+                    aria-invalid=errors.invalid(NAME_ID)
+                    aria-describedby=errors.described(NAME_ID)
+                    prop:value=move || name.get()
+                    on:input=move |ev| name.set(event_target_value(&ev))
+                  />
+                  <FieldError errors=errors field=NAME_ID />
+                  <div class="auth-actions">
+                    <button type="submit" class="btn btn-primary" prop:disabled=is_joining>
+                      {move || i18n.t("guest-join")}
+                    </button>
+                  </div>
+                  {(!is_one_time)
+                    .then(|| sign_in_href.get_value())
+                    .flatten()
+                    .map(|href| view! {
+                      <p class="muted-text small">
+                        <a href=href>{move || i18n.t("guest-sign-in")}</a>
+                      </p>
+                    })}
+                </form>
+              }
+              .into_any()
+            },
+            GuestPhase::Waiting | GuestPhase::Admitted => {
+              view! {
+                <h1>{move || i18n.t("guest-waiting-title")}</h1>
+                <p class="auth-status" role="status">
+                  <span class="spinner" aria-hidden="true"></span>
+                  <span>{move || i18n.t("guest-waiting")}</span>
+                </p>
+                {move || is_organizer_app_outdated.get().then(|| view! {
+                  <p role="alert">{move || i18n.t("guest-organizer-app-outdated")}</p>
+                })}
+                <p class="muted-text small">{move || i18n.t("guest-waiting-encryption")}</p>
+                {move || codes.get().map(|(own, organizer)| view! {
+                  <dl class="guest-codes">
+                    <dt>{move || i18n.t("guest-own-code")}</dt>
+                    <dd class="mono" translate="no">{own}</dd>
+                    <dt>{move || i18n.t("guest-organizer-code")}</dt>
+                    <dd class="mono" translate="no">{organizer}</dd>
+                  </dl>
+                  <p class="muted-text small">{move || i18n.t("guest-codes-hint")}</p>
+                })}
+              }
+              .into_any()
+            },
+            GuestPhase::Denied => {
+              view! {
+                <h1>{move || i18n.t("guest-denied-title")}</h1>
+                <p role="alert">{move || i18n.t("guest-denied")}</p>
+              }
+              .into_any()
+            },
+            GuestPhase::Failed(kind) => {
+              let key = match kind {
+                FailureKind::LinkUnusable => "guest-link-unusable",
+                FailureKind::SetupFailed => "guest-setup-failed",
+                FailureKind::Network => "guest-network",
+              };
+              view! {
+                <h1>{move || i18n.t("guest-failed-title")}</h1>
+                <p role="alert">{move || i18n.t(key)}</p>
+              }
+              .into_any()
+            },
+          }}
+        </AuthFrame>
+      }
+      .into_any()
+    }}
   }
 }
+
+/// Sets up the encryption of the guest's page while they wait: the client core opens and enrolls an
+/// ephemeral device (no passphrase, no backup; its keys are the guest's own), keeps the organizer's
+/// key from the link (or, for a link without one, the one the server names), and tells the
+/// hosts the device is ready, so an organizer's device can let it in (e2ee.md §4.6, "Meeting
+/// guests").
+#[allow(clippy::too_many_arguments)]
+async fn prepare_device(
+  client: &GuestClient,
+  config: &AppConfig,
+  auth: Rc<dyn Authenticator>,
+  guest_token: &str,
+  user_id: UserId,
+  conversation: ConversationId,
+  meeting: MeetingId,
+  maybe_organizer_fingerprint: Option<&str>,
+) -> Result<(String, Option<String>), FailureKind> {
+  configure_core(auth, config);
+  let failed = |step: &str, error: String| {
+    tracing::warn!(step, %error, "could not set up the guest's device");
+    FailureKind::SetupFailed
+  };
+  let mut waited = Duration::ZERO;
+  loop {
+    match remote_backend::core_status(user_id).await {
+      Ok(CoreStatus::NeedsEnrollment { .. }) => {
+        remote_backend::enroll_guest(DEVICE_NAME)
+          .await
+          .map_err(|error| failed("enroll", error))?;
+        break;
+      },
+      Ok(CoreStatus::Ready { .. }) => break,
+      Ok(CoreStatus::NotStarted) if waited < CORE_PATIENCE => {
+        pause(CORE_POLL).await;
+        waited += CORE_POLL;
+      },
+      Ok(other) => return Err(failed("core", format!("{other:?}"))),
+      Err(error) => return Err(failed("core", error)),
+    }
+  }
+  // Without any fingerprint the device fails closed: it joins no group (e2ee.md §4.6).
+  if let Some(fingerprint) = maybe_organizer_fingerprint {
+    remote_backend::guest_anchor(conversation, fingerprint)
+      .await
+      .map_err(|error| failed("anchor", error))?;
+  }
+  let own = remote_backend::own_key()
+    .await
+    .map_err(|error| failed("own key", error))?;
+  // Reports the key's fingerprint with the knock; the organizer's device admits only that key. A
+  // failure keeps the guest waiting and is retried on the next poll, rather than failing the page.
+  let is_reported = report_device(client, meeting, guest_token, &own.fingerprint).await;
+  Ok((own.code, (!is_reported).then_some(own.fingerprint)))
+}
+
+/// Reports the guest's key fingerprint with the knock; whether the server took it.
+async fn report_device(
+  client: &GuestClient,
+  meeting: MeetingId,
+  guest_token: &str,
+  fingerprint: &str,
+) -> bool {
+  match client.device_ready(meeting, guest_token, fingerprint).await {
+    Ok(()) => true,
+    Err(error) => {
+      tracing::warn!(%error, "could not tell the hosts that the guest's device is ready");
+      false
+    },
+  }
+}
+
+/// Removes the fragment (`#invite=…&v=…`) from the address (history entry replaced, nothing reloads).
+fn strip_link_fragment() {
+  let Some(window) = web_sys::window() else {
+    return;
+  };
+  let (Ok(history), Ok(path)) = (window.history(), window.location().pathname()) else {
+    return;
+  };
+  // A failure leaves the address as it was; the link is still in memory.
+  let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&path));
+}
+
+/// The page runs the guest's client core itself, signing with the guest's session token.
+#[cfg(target_arch = "wasm32")]
+fn configure_core(auth: Rc<dyn Authenticator>, config: &AppConfig) {
+  crate::web_core::configure(auth, &config.server_url);
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn delete_stale_guest_store() {
+  crate::web_core::delete_stale_guest_store().await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn delete_stale_guest_store() {}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn configure_core(_auth: Rc<dyn Authenticator>, _config: &AppConfig) {}
 
 fn failure_of(error: &MeetingError) -> FailureKind {
   match error {

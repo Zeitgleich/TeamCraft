@@ -15,6 +15,8 @@ base64.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 utoipa.workspace = true
+# Fresh idempotency keys for create requests (browsers use the getrandom js backend of the app).
+rand_core.workspace = true
 # Write-only secrets in admin settings requests are cleared from memory when dropped.
 zeroize = { version = "1.9.1", features = ["derive"] }
 

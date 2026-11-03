@@ -11,6 +11,17 @@ struct SettingsView: View {
   @State private var statusEmoji = ""
   @State private var statusText = ""
   @State private var statusExpiry = StatusExpiryValue.never
+  @State private var maybeStatusProblem: TextProblem?
+  @State private var isSavingStatus = false
+  @State private var maybeProfileJSON: String?
+  @State private var isEditingName = false
+  @State private var nameText = ""
+  @State private var maybeNameProblem: TextProblem?
+  @State private var isSavingName = false
+  @FocusState private var isNameFocused: Bool
+  @AccessibilityFocusState private var isNameAccessibilityFocused: Bool
+  @FocusState private var isStatusFocused: Bool
+  @AccessibilityFocusState private var isStatusAccessibilityFocused: Bool
 
   var body: some View {
     NavigationStack {
@@ -20,6 +31,9 @@ struct SettingsView: View {
             AvatarView(name: account.displayName, size: 44)
             Text(account.displayName).font(.headline)
           }
+        }
+        if let profile = maybeProfileJSON, OwnProfileDocument.canOverrideDisplayName(in: profile) {
+          displayNameSection(profile: profile)
         }
         Section("presence_title") {
           Picker("presence_title", selection: $presenceRaw) {
@@ -47,6 +61,9 @@ struct SettingsView: View {
           }
         }
         Section {
+          DiagnosticsExportRow()
+        }
+        Section {
           Button("sign_out", role: .destructive) {
             Task {
               await model.signOut()
@@ -57,30 +74,127 @@ struct SettingsView: View {
       }
       .navigationTitle("settings_title")
       .navigationBarTitleDisplayMode(.inline)
+      // The name changes through the profile update event; the profile is read again with it.
+      .task(id: account.displayName) { maybeProfileJSON = await model.ownProfileJSON() }
       .toolbar {
         ToolbarItem(placement: .confirmationAction) { Button("done") { dismiss() } }
       }
     }
   }
 
+  /// Changing the name under the picture, when the workspace policy lets people (issue #408).
+  private func displayNameSection(profile: String) -> some View {
+    Section {
+      if isEditingName {
+        VStack(alignment: .leading, spacing: 6) {
+          LabeledContent("profile_name_label") {
+            TextField("profile_name_label", text: $nameText)
+              .multilineTextAlignment(.trailing)
+              .textContentType(.name)
+              .focused($isNameFocused)
+              .accessibilityFocused($isNameAccessibilityFocused)
+              .fieldError(maybeNameProblem?.message)
+              .onChange(of: nameText) { maybeNameProblem = nil }
+          }
+          FieldMessage(maybeError: maybeNameProblem?.message)
+        }
+        Button("profile_name_save") { Task { await saveName(profile: profile, name: nameText) } }
+          .disabled(isSavingName)
+        Button("cancel", role: .cancel) {
+          isEditingName = false
+          maybeNameProblem = nil
+        }
+        .disabled(isSavingName)
+      } else {
+        Button("profile_name_change") {
+          nameText = OwnProfileDocument.displayNameOverride(in: profile) ?? account.displayName
+          maybeNameProblem = nil
+          isEditingName = true
+          isNameFocused = true
+        }
+      }
+      if OwnProfileDocument.displayNameOverride(in: profile) != nil {
+        Button("profile_name_reset") { Task { await saveName(profile: profile, name: nil) } }
+          .disabled(isSavingName)
+      }
+    }
+  }
+
+  /// A blank or invalid name is said at the field; so is the server's refusal, with the input kept.
+  private func saveName(profile: String, name maybeName: String?) async {
+    guard !isSavingName else { return }
+    if let name = maybeName, let problem = OwnProfileDocument.problem(typed: name) {
+      showNameProblem(problem)
+      return
+    }
+    isSavingName = true
+    let trimmed = maybeName?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let problem = await model.setDisplayName(profileJSON: profile, to: trimmed) {
+      if isEditingName { showNameProblem(problem) }
+    } else {
+      isEditingName = false
+      maybeProfileJSON = await model.ownProfileJSON()
+    }
+    isSavingName = false
+  }
+
+  private func showNameProblem(_ problem: TextProblem) {
+    maybeNameProblem = problem
+    isNameFocused = true
+    isNameAccessibilityFocused = true
+  }
+
   private var customStatusSection: some View {
     Section("custom_status_title") {
-      TextField("custom_status_emoji", text: $statusEmoji)
-      TextField("custom_status_text", text: $statusText)
+      LabeledContent("custom_status_emoji_label") {
+        TextField("custom_status_emoji", text: $statusEmoji)
+          .multilineTextAlignment(.trailing)
+      }
+      VStack(alignment: .leading, spacing: 6) {
+        LabeledContent("custom_status_text_label") {
+          TextField("custom_status_text", text: $statusText)
+            .multilineTextAlignment(.trailing)
+            .focused($isStatusFocused)
+            .accessibilityFocused($isStatusAccessibilityFocused)
+            .fieldError(maybeStatusProblem?.message)
+            .onChange(of: statusText) { maybeStatusProblem = nil }
+        }
+        FieldMessage(maybeError: maybeStatusProblem?.message)
+      }
       Picker("custom_status_expiry", selection: $statusExpiry) {
         ForEach(StatusExpiryValue.allCases) { expiry in Text(expiry.title).tag(expiry) }
       }
-      Button("custom_status_save") {
-        let status = CustomStatusValue(emoji: statusEmoji, text: statusText, expiry: statusExpiry)
-        Task { await model.perform(.setCustomStatus(status)) }
-      }
-      .disabled(statusEmoji.isEmpty && statusText.isEmpty)
+      Button("custom_status_save") { Task { await saveStatus() } }
+        .disabled(isSavingStatus)
       Button("custom_status_clear", role: .destructive) {
         statusEmoji = ""
         statusText = ""
+        maybeStatusProblem = nil
         Task { await model.perform(.setCustomStatus(nil)) }
       }
+      .disabled(isSavingStatus)
     }
+  }
+
+  /// An empty status is said at the text field; so is the core's refusal, with the input kept.
+  private func saveStatus() async {
+    guard !isSavingStatus else { return }
+    if statusEmoji.isEmpty, let problem = TextProblem.required(statusText, missing: "custom_status_missing") {
+      showStatusProblem(problem)
+      return
+    }
+    isSavingStatus = true
+    let status = CustomStatusValue(emoji: statusEmoji, text: statusText, expiry: statusExpiry)
+    if let failure = await model.performReporting(.setCustomStatus(status)) {
+      showStatusProblem(.refused(failure))
+    }
+    isSavingStatus = false
+  }
+
+  private func showStatusProblem(_ problem: TextProblem) {
+    maybeStatusProblem = problem
+    isStatusFocused = true
+    isStatusAccessibilityFocused = true
   }
 }
 
@@ -120,6 +234,7 @@ private struct NotificationsSettingsPage: View {
         }
       }
       Section {
+        NavigationLink("notification_content_title") { NotificationContentView() }
         NavigationLink("dnd_title") { DndSettingsView() }
         NavigationLink("rules_title") { NotificationRulesView() }
         NavigationLink("diagnostics_title") { NotificationDiagnosticsView(account: account) }
@@ -130,10 +245,12 @@ private struct NotificationsSettingsPage: View {
   }
 }
 
-/// Typing indicator and the search download.
+/// Typing indicator, call sounds, original pictures and the search download.
 private struct ChatsSettingsPage: View {
   @Environment(AppModel.self) private var model
   @AppStorage("share_typing") private var isSharingTyping = true
+  @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
+  @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.fallback.rawValue
   @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
   @State private var isPrefetchLoaded = false
 
@@ -141,6 +258,24 @@ private struct ChatsSettingsPage: View {
     Form {
       Section {
         Toggle("share_typing", isOn: $isSharingTyping)
+      }
+      Section {
+        Picker("call_status_sounds", selection: $statusSounds) {
+          Text("call_status_sounds_all").tag(CallStatusSoundsSetting.all.rawValue)
+          Text("call_status_sounds_own_only").tag(CallStatusSoundsSetting.ownOnly.rawValue)
+          Text("call_status_sounds_off").tag(CallStatusSoundsSetting.off.rawValue)
+        }
+      } footer: {
+        Text("call_status_sounds_hint")
+      }
+      Section {
+        Picker("original_download_title", selection: $originalDownload) {
+          Text("original_download_always").tag(OriginalDownloadSetting.always.rawValue)
+          Text("original_download_unmetered").tag(OriginalDownloadSetting.unmeteredOnly.rawValue)
+          Text("original_download_never").tag(OriginalDownloadSetting.never.rawValue)
+        }
+      } footer: {
+        Text("original_download_hint")
       }
       Section {
         Picker("prefetch_title", selection: $prefetch) {
@@ -166,12 +301,17 @@ private struct ChatsSettingsPage: View {
   }
 }
 
-/// The security code, the app lock and the app switcher cover.
+/// The key backup, the security code, the app lock and the app switcher cover.
 private struct SecuritySettingsPage: View {
   let account: Account
+  @Environment(AppModel.self) private var model
+  @State private var backup: BackupSnapshot.KeyBackup?
 
   var body: some View {
     Form {
+      if let backup {
+        KeyBackupSection(backup: backup)
+      }
       Section {
         Text(account.identityFingerprint)
           .font(.system(.footnote, design: .monospaced))
@@ -185,6 +325,47 @@ private struct SecuritySettingsPage: View {
     }
     .navigationTitle("settings_security_title")
     .navigationBarTitleDisplayMode(.inline)
+    .task { backup = await model.keyBackup() }
+  }
+}
+
+/// The key backup in plain words (issue #410): stored or not, and how it is protected.
+private struct KeyBackupSection: View {
+  let backup: BackupSnapshot.KeyBackup
+
+  var body: some View {
+    Section {
+      Label {
+        Text(title)
+      } icon: {
+        Image(systemName: isOk ? "checkmark.shield" : "exclamationmark.shield")
+          .foregroundStyle(isOk ? Color.green : Color.orange)
+      }
+      .accessibilityElement(children: .combine)
+    } header: {
+      Text("backup_title")
+    } footer: {
+      VStack(alignment: .leading, spacing: 4) {
+        Text(detail)
+        if backup.hasOrganization {
+          Text("backup_organization")
+        }
+      }
+    }
+  }
+
+  private var isOk: Bool { backup.isStored && backup.hasPassphrase }
+
+  private var title: LocalizedStringKey {
+    if !backup.isStored { return "backup_missing" }
+    return backup.hasPassphrase ? "backup_ok" : "backup_no_recovery"
+  }
+
+  private var detail: String {
+    if !backup.isStored { return String(localized: "backup_missing_hint") }
+    if !backup.hasPassphrase { return String(localized: "backup_no_recovery_hint") }
+    guard let date = backup.passphraseSetDate else { return String(localized: "backup_passphrase") }
+    return String(format: String(localized: "backup_passphrase_set"), date.formatted(date: .abbreviated, time: .omitted))
   }
 }
 
@@ -225,58 +406,117 @@ extension StatusExpiryValue {
   }
 }
 
-/// Existing device: approves a new device by the code it shows (e2ee.md §5).
+/// Existing device: joins a new device by the code it shows (scanned or typed), then the user types the
+/// short code the new device shows (e2ee.md §5). This device never shows that code.
 struct ApproveLinkView: View {
   @Environment(AppModel.self) private var model
 
-  private enum Step {
-    case enterCode, compare(String), done, failed
+  private enum Step: Equatable {
+    case enterCode, typeCode, done
   }
 
   @State private var code = ""
   @State private var step = Step.enterCode
+  /// Why the last attempt ended (on the new device); not about the code typed here.
+  @State private var maybeNotice: LocalizedStringKey?
+  /// A missing code or the server's refusal of it, shown at the code field.
+  @State private var maybeProblem: TextProblem?
+  @State private var isWorking = false
+  @State private var isScanning = false
+  @FocusState private var isCodeFocused: Bool
+  @AccessibilityFocusState private var isCodeAccessibilityFocused: Bool
 
   var body: some View {
     Form {
       switch step {
       case .enterCode:
         Section {
+          if let notice = maybeNotice {
+            Text(notice).font(.footnote).foregroundStyle(Theme.danger)
+          }
           Text("approve_hint").foregroundStyle(Theme.textMuted)
-          TextField("approve_code", text: $code, axis: .vertical)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .font(.system(.body, design: .monospaced))
-          Button("approve_start") { Task { await approve() } }
-            .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty)
+          Button("approve_scan", systemImage: "qrcode.viewfinder") { isScanning = true }
+            .disabled(isWorking)
+          Text("approve_new_phone_hint").font(.footnote).foregroundStyle(Theme.textMuted)
+          VStack(alignment: .leading, spacing: 6) {
+            TextField("approve_code", text: $code, axis: .vertical)
+              .textInputAutocapitalization(.never)
+              .autocorrectionDisabled()
+              .font(.system(.body, design: .monospaced))
+              .focused($isCodeFocused)
+              .accessibilityFocused($isCodeAccessibilityFocused)
+              .fieldError(maybeProblem?.message)
+              .onChange(of: code) { maybeProblem = nil }
+            FieldMessage(maybeError: maybeProblem?.message)
+          }
+          Button("approve_start") { Task { await approveTyped() } }
+            .disabled(isWorking)
         }
-      case .compare(let shortCode):
+      case .typeCode:
         Section {
-          Text("approve_compare")
-          Text(shortCode).font(.system(.largeTitle, design: .monospaced).bold())
-          Button("approve_confirm") { Task { await confirm() } }
+          LinkTypedCodeForm(
+            onApproved: { step = .done },
+            onEnded: { restart(with: "link_attempt_ended") },
+            onCancel: {
+              Task { await model.cancelLinkApproval() }
+              restart(with: nil)
+            })
         }
       case .done:
         Section { Label("approve_done", systemImage: "checkmark.circle") }
-      case .failed:
-        Section {
-          Text("error_generic").foregroundStyle(Theme.danger)
-          Button("retry") { step = .enterCode }
-        }
       }
     }
     .navigationTitle("approve_title")
     .navigationBarTitleDisplayMode(.inline)
+    .sheet(isPresented: $isScanning) {
+      ScanLinkCodeView { scanned in
+        isScanning = false
+        code = scanned
+        Task { await approve(scanned) }
+      }
+    }
+    .onDisappear {
+      // Leaving the typed-code step: nothing is sent, the attempt is dropped.
+      if step == .typeCode { Task { await model.cancelLinkApproval() } }
+    }
   }
 
-  private func approve() async {
-    do { step = .compare(try await model.approveLink(code: code)) } catch { step = .failed }
+  /// A typed code: an empty field is said at the field, not sent.
+  private func approveTyped() async {
+    if let problem = TextProblem.required(code, missing: "approve_code_missing") {
+      showAtField(problem)
+      return
+    }
+    await approve(code)
   }
 
-  private func confirm() async {
+  /// Joins the new device whose code was scanned or typed; the typed-code step follows. The
+  /// server's refusal of the code (expired, for the other device) goes to the code field.
+  private func approve(_ text: String) async {
+    guard !isWorking else { return }
+    isWorking = true
+    maybeNotice = nil
+    maybeProblem = nil
     do {
-      try await model.confirmLink()
-      step = .done
-    } catch { step = .failed }
+      try await model.approveLink(code: text)
+      step = .typeCode
+    } catch {
+      showAtField(.refused(AppFailure(CoreFailure(error))))
+    }
+    isWorking = false
+  }
+
+  private func showAtField(_ problem: TextProblem) {
+    maybeProblem = problem
+    isCodeFocused = true
+    isCodeAccessibilityFocused = true
+  }
+
+  private func restart(with maybeMessage: LocalizedStringKey?) {
+    code = ""
+    maybeProblem = nil
+    maybeNotice = maybeMessage
+    step = .enterCode
   }
 }
 
@@ -289,6 +529,9 @@ struct NotificationRulesView: View {
   @State private var rules = MentionSettings(isFirstNameMention: true, doChannelMentionsNotify: true, keywords: [])
   @State private var isLoaded = false
   @State private var newKeyword = ""
+  @State private var maybeKeywordProblem: TextProblem?
+  @FocusState private var isKeywordFocused: Bool
+  @AccessibilityFocusState private var isKeywordAccessibilityFocused: Bool
 
   var body: some View {
     Form {
@@ -301,13 +544,20 @@ struct NotificationRulesView: View {
       Section("rules_keywords") {
         ForEach(rules.keywords, id: \.self) { keyword in Text(keyword) }
           .onDelete { offsets in rules.keywords.remove(atOffsets: offsets) }
-        HStack {
-          TextField("rules_keyword_hint", text: $newKeyword)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .onSubmit(addKeyword)
-          Button("rules_keyword_add", action: addKeyword)
-            .disabled(newKeyword.trimmingCharacters(in: .whitespaces).isEmpty)
+        VStack(alignment: .leading, spacing: 6) {
+          HStack {
+            TextField("rules_keyword_hint", text: $newKeyword)
+              .textInputAutocapitalization(.never)
+              .autocorrectionDisabled()
+              .focused($isKeywordFocused)
+              .accessibilityFocused($isKeywordAccessibilityFocused)
+              .accessibilityLabel(Text("rules_keyword_label"))
+              .fieldError(maybeKeywordProblem?.message)
+              .onSubmit(addKeyword)
+              .onChange(of: newKeyword) { maybeKeywordProblem = nil }
+            Button("rules_keyword_add", action: addKeyword)
+          }
+          FieldMessage(maybeError: maybeKeywordProblem?.message)
         }
       }
     }
@@ -322,11 +572,15 @@ struct NotificationRulesView: View {
     }
   }
 
+  /// Adds the typed keyword; an empty one or one already in the list is said at the field.
   private func addKeyword() {
-    let keyword = newKeyword.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let problem = keywordProblem(newKeyword, existing: rules.keywords) {
+      maybeKeywordProblem = problem
+      isKeywordFocused = true
+      isKeywordAccessibilityFocused = true
+      return
+    }
+    rules.keywords.append(newKeyword.trimmingCharacters(in: .whitespacesAndNewlines))
     newKeyword = ""
-    guard !keyword.isEmpty, !rules.keywords.contains(where: { $0.caseInsensitiveCompare(keyword) == .orderedSame })
-    else { return }
-    rules.keywords.append(keyword)
   }
 }

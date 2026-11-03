@@ -30,6 +30,10 @@ pub(crate) fn device_from_crypto(id: crypto::DeviceId) -> Result<DeviceId, CoreE
   from_raw(id.get())
 }
 
+pub(crate) fn conversation_from_crypto(id: crypto::ConversationId) -> Result<ConversationId, CoreError> {
+  from_raw(id.get())
+}
+
 fn raw(id: impl Id) -> u64 {
   // Invariant: snowflakes are never negative (`Snowflake::new` rejects them).
   u64::try_from(id.snowflake().get()).unwrap_or(0)

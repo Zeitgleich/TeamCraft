@@ -12,6 +12,7 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use teamcraft_db::SnowflakeGenerator;
 use teamcraft_db::testing::TestDatabase;
+use teamcraft_proto::DependencyName;
 use tokio::task::JoinHandle;
 
 use crate::auth::test_keys::{TEST_KEY_ID, TEST_MODULUS_B64, TEST_PRIVATE_KEY_PEM};
@@ -21,6 +22,7 @@ use crate::auth::{
 };
 use crate::brand::{BrandInputs, BrandStore};
 use crate::config::{CallsConfig, MeetingsConfig, RoleNames, StorageConfig};
+use crate::dependencies::Dependencies;
 use crate::gateway::{Hub, HubOptions};
 use crate::listener::bind_listener;
 use time::OffsetDateTime;
@@ -28,7 +30,7 @@ use time::OffsetDateTime;
 use crate::meetings::caldav::{BusyPeriod, CalendarError, CalendarStore};
 use crate::meetings::mailer::{MailError, Mailer, OutgoingMail};
 use crate::meetings::{MeetingBackends, MeetingService};
-use crate::push::PushDispatcher;
+use crate::push::{PushDispatcher, spawn_retry_workers};
 use crate::rendezvous::RendezvousHub;
 use crate::router::router;
 use crate::runtime::mail_status::MailStatus;
@@ -38,7 +40,7 @@ use crate::services::calls::CallService;
 use crate::services::local_accounts::LocalAuth;
 use crate::services::permission_scheme::SchemeStore;
 use crate::services::session::PolicyHolder;
-use crate::state::{AppState, MeetingMailConfig, Settings};
+use crate::state::{AppState, MeetingMailConfig, Settings, SignInSettings};
 use crate::storage::BlobStore;
 
 pub const TEST_ISSUER: &str = "https://auth.example.com/realms/test";
@@ -177,6 +179,7 @@ struct Extras {
   maybe_push: Option<PushDispatcher>,
   maybe_meetings: Option<MeetingService>,
   maybe_mailer: Option<Arc<dyn Mailer>>,
+  maybe_dependencies: Option<Arc<Dependencies>>,
 }
 
 pub struct TestApp {
@@ -186,6 +189,7 @@ pub struct TestApp {
   pub state: AppState,
   test_db: TestDatabase,
   server: JoinHandle<()>,
+  retry_workers: Vec<JoinHandle<()>>,
 }
 
 /// A person with the roles the identity provider would put in their token.
@@ -274,6 +278,7 @@ impl TestApp {
       path_style: true,
       presign_expiry_secs: 300,
       max_attachment_bytes: 1024 * 1024,
+      multipart_expiry_secs: 3600,
     };
     Self::start_full(
       customize,
@@ -297,8 +302,32 @@ impl TestApp {
       maybe_sfu_registration_token: None,
       ring_timeout_secs: 30,
       maybe_sfu_control_url: None,
+      maybe_sfu_certificate_sha256: None,
+      roster_grace_secs: 60,
+      roster_timeout_secs: 120,
+      max_devices_per_user_per_call: 3,
     };
     Self::start_with_calls_config(&config, signing_key_pem).await
+  }
+
+  /// Fault injection (issue #743): storage at `maybe_storage` (a fake that fails on demand), calls
+  /// with `maybe_calls` (a fake SFU control endpoint), and the breakers of `dependencies` (on a
+  /// clock the test steps).
+  pub async fn start_with_dependencies(
+    maybe_storage: Option<StorageConfig>,
+    maybe_calls: Option<CallService>,
+    dependencies: Arc<Dependencies>,
+  ) -> Option<Self> {
+    Self::start_full(
+      |_| {},
+      Extras {
+        maybe_storage,
+        maybe_calls,
+        maybe_dependencies: Some(dependencies),
+        ..Extras::default()
+      },
+    )
+    .await
   }
 
   /// Like [`Self::start_with_calls`] with a full calls configuration (SFU token, ring timeout).
@@ -404,9 +433,19 @@ impl TestApp {
     signing_key_pem: &str,
     dispatcher: PushDispatcher,
   ) -> Option<Self> {
+    Self::start_with_calls_push_and(config, signing_key_pem, dispatcher, |_| {}).await
+  }
+
+  /// Like [`Self::start_with_calls_and_push`] with changed settings (retry timing).
+  pub async fn start_with_calls_push_and(
+    config: &CallsConfig,
+    signing_key_pem: &str,
+    dispatcher: PushDispatcher,
+    customize: impl FnOnce(&mut Settings),
+  ) -> Option<Self> {
     let calls = CallService::new(config, signing_key_pem.as_bytes()).unwrap();
     Self::start_full(
-      |_| {},
+      customize,
       Extras {
         maybe_calls: Some(calls),
         maybe_push: Some(dispatcher),
@@ -437,12 +476,16 @@ impl TestApp {
       maybe_push,
       maybe_meetings,
       maybe_mailer,
+      maybe_dependencies,
     } = extras;
+    let dependencies = maybe_dependencies.unwrap_or_default();
+    dependencies.guard(DependencyName::Database);
     let test_db = TestDatabase::create().await?;
     let mut settings = Settings {
       max_attachment_bytes: maybe_storage
         .as_ref()
         .map_or(100 * 1024 * 1024, |storage| storage.max_attachment_bytes),
+      sign_in: SignInSettings::new(TEST_ISSUER.into(), TEST_CLIENT.into(), &[], None),
       ..Settings::default()
     };
     settings.gateway.presence_offline_grace_secs = 0;
@@ -451,6 +494,8 @@ impl TestApp {
     settings.security.rate_limits.is_enabled = false;
     // Withdrawals coalesce for a moment only, so tests see them quickly.
     settings.push.dismiss_coalesce = Duration::from_millis(50);
+    // One retry worker per pool: hundreds of parallel test apps share the dev Postgres's connections.
+    settings.push.retry.workers = 1;
     customize(&mut settings);
 
     let keys = JwksCache::new(
@@ -480,16 +525,19 @@ impl TestApp {
       push: Arc::new(maybe_push.unwrap_or_else(|| PushDispatcher::new(4))),
       push_tracker: Arc::default(),
       revocations: Arc::new(Revocations::default()),
-      hub: Arc::new(Hub::new(HubOptions {
-        resume_window: Duration::from_secs(settings.gateway.resume_window_secs),
-        buffer_events: settings.gateway.resume_buffer_events,
-        max_sessions_per_device: settings.gateway.max_sessions_per_device,
-        max_sessions_per_user: settings.gateway.max_sessions_per_user,
-        attention_lease: Duration::from_secs(settings.notifications.attention_lease_secs),
-      })),
+      hub: Arc::new(new_hub(&settings)),
       rendezvous: Arc::new(RendezvousHub::new(&settings.rendezvous)),
-      maybe_blob_store: maybe_storage.map(|config| Arc::new(BlobStore::new(&config).unwrap())),
-      maybe_calls: maybe_calls.map(Arc::new),
+      drain: Arc::default(),
+      maybe_blob_store: maybe_storage.map(|config| {
+        Arc::new(
+          BlobStore::new(&config)
+            .unwrap()
+            .with_guard(dependencies.guard(DependencyName::ObjectStorage)),
+        )
+      }),
+      maybe_calls: maybe_calls
+        .map(|calls| Arc::new(calls.with_dependency_guard(dependencies.guard(DependencyName::Sfu)))),
+      dependencies,
       maybe_meetings: maybe_meetings.map(Arc::new),
       mailer: Arc::new(Slot::new(maybe_mailer)),
       mail_status: Arc::new(MailStatus::default()),
@@ -511,6 +559,9 @@ impl TestApp {
         })
         .unwrap(),
       ),
+      image_decodes: Arc::new(tokio::sync::Semaphore::new(
+        settings.limits.max_concurrent_image_decodes.max(1),
+      )),
       settings: Arc::new(SettingsCell::new(settings)),
     };
 
@@ -525,6 +576,7 @@ impl TestApp {
       .await
       .unwrap();
     });
+    let retry_workers = spawn_retry_workers(&state);
     Some(Self {
       http: reqwest::Client::new(),
       base_url: format!("http://{addr}"),
@@ -532,7 +584,52 @@ impl TestApp {
       state,
       test_db,
       server,
+      retry_workers,
     })
+  }
+
+  /// Simulates `kill -9` and a restart: the server and its background tasks stop wherever they
+  /// are, Postgres loses all their connections (rolling back what was open), and a new process
+  /// starts on the same database with fresh memory and the given push dispatcher.
+  pub async fn kill_and_restart(&mut self, dispatcher: PushDispatcher) {
+    self.server.abort();
+    for worker in self.retry_workers.drain(..) {
+      worker.abort();
+    }
+    self.test_db.terminate_connections().await;
+    let mut state = self.state.clone();
+    state.database = self.test_db.reconnect().await;
+    state.push = Arc::new(dispatcher);
+    state.push_tracker = Arc::default();
+    self.state = state;
+    self.serve();
+    self.retry_workers = spawn_retry_workers(&self.state);
+  }
+
+  /// Ends a shutdown the test began with `state.drain.begin()`: waits (at most `limit`) for the
+  /// WebSockets to close, then serves again on a new address with a fresh drain. Unlike a real
+  /// restart the gateway hub stays in memory, so tests can show that drained sessions resume.
+  /// Returns whether every socket closed in time.
+  pub async fn restart_after_drain(&mut self, limit: Duration) -> bool {
+    let closed = self.state.drain.wait_closed(limit).await;
+    self.server.abort();
+    self.state.drain = Arc::default();
+    self.serve();
+    closed
+  }
+
+  /// Ends a shutdown like [`Self::restart_after_drain`], but like a real restart: the new process
+  /// starts with a fresh gateway hub and relay, so no session can be resumed and clients sync
+  /// afresh. Returns whether every socket closed in time.
+  pub async fn restart_after_drain_with_fresh_memory(&mut self, limit: Duration) -> bool {
+    let closed = self.state.drain.wait_closed(limit).await;
+    self.server.abort();
+    let settings = self.state.settings.base();
+    self.state.hub = Arc::new(new_hub(&settings));
+    self.state.rendezvous = Arc::new(RendezvousHub::new(&settings.rendezvous));
+    self.state.drain = Arc::default();
+    self.serve();
+    closed
   }
 
   /// `true` if the table (e.g. a message partition) exists.
@@ -552,6 +649,11 @@ impl TestApp {
     customize(&mut settings);
     self.state.settings.reset(settings);
     self.server.abort();
+    self.serve();
+  }
+
+  /// Serves the state under a new address; `base_url` and `ws_url` change with it.
+  fn serve(&mut self) {
     let listener = bind_listener(([127, 0, 0, 1], 0).into()).unwrap();
     let addr = listener.local_addr().unwrap();
     let app = router(self.state.clone());
@@ -569,6 +671,9 @@ impl TestApp {
 
   pub async fn stop(self) {
     self.server.abort();
+    for worker in &self.retry_workers {
+      worker.abort();
+    }
     self.test_db.drop_database().await;
   }
 
@@ -716,6 +821,20 @@ impl JwkSource for StaticKeys {
       })
     })
   }
+}
+
+/// An empty gateway hub as a process starting with `settings` has it.
+fn new_hub(settings: &Settings) -> Hub {
+  Hub::new(HubOptions {
+    resume_window: Duration::from_secs(settings.gateway.resume_window_secs),
+    buffer_events: settings.gateway.resume_buffer_events,
+    buffer_bytes: settings.gateway.resume_buffer_bytes,
+    max_total_buffer_bytes: settings.gateway.max_buffered_bytes,
+    max_sessions_per_device: settings.gateway.max_sessions_per_device,
+    max_sessions_per_user: settings.gateway.max_sessions_per_user,
+    attention_lease: Duration::from_secs(settings.notifications.attention_lease_secs),
+    desktop_activity_window: Duration::from_secs(settings.notifications.desktop_activity_secs),
+  })
 }
 
 /// Meeting limits and texts as `[meetings]` sets them.

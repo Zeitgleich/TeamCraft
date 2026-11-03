@@ -354,6 +354,32 @@ mod caps {
     // Five unread messages, but only the newest three are looked at; the mention is the newest.
     assert_eq!(counts.body["conversations"][0]["unread_count"], 3);
     assert_eq!(counts.body["conversations"][0]["mention_count"], 1);
+    assert_eq!(
+      counts.body["max_counted"], 3,
+      "clients that count new messages stop there too"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_counts_say_which_messages_they_cover() {
+    let Some(app) = TestApp::start().await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let counted = send_in(&app, &s.bob, &s.channel, &s.bob_device, 1, None, &[]).await;
+
+    let counts = unread(&app, &s.alice).await;
+    let later = send_in(&app, &s.bob, &s.channel, &s.bob_device, 2, None, &[]).await;
+
+    // Issue #259: a client counting live events counts only messages above the boundary.
+    let through: i64 = counts.body["counted_through"]
+      .as_str()
+      .expect("counted_through")
+      .parse()
+      .unwrap();
+    assert!(counted.parse::<i64>().unwrap() <= through);
+    assert!(later.parse::<i64>().unwrap() > through);
     app.stop().await;
   }
 }

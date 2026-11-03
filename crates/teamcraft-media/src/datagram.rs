@@ -30,6 +30,10 @@ const TRANSPORT_SEQ_FLAG: u8 = 0x20;
 const RESERVED_MASK: u8 = 0x10;
 /// Highest simulcast layer representable in 4 bits.
 pub const MAX_LAYER: u8 = 0x0F;
+/// A stream the SFU never assigns: its datagrams carry no media, only bytes that probe a
+/// receiver's downlink (#994). A receiver reports their arrival like any other datagram's and
+/// drops them, as it drops every datagram of a stream it doesn't know.
+pub const PADDING_STREAM: StreamId = StreamId(u32::MAX);
 
 /// One media datagram borrowing its RTP packet from the input buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,0 +1,263 @@
+<!doctype html>
+<!-- Screen-content codec bench (issue #565): served and driven by server.py in this directory. -->
+<html><head><meta charset="utf-8"><title>screen codec bench</title></head>
+<body>
+<pre id="log"></pre>
+<script>
+// Screen-content codec bench (#565): text-heavy synthetic screen, encoded with WebCodecs per
+// codec/bitrate/contentHint, decoded again, luma PSNR against the source, achieved bitrate,
+// encode latency. CPU of the browser is sampled by the server around each run (/phase).
+const params = new URLSearchParams(location.search);
+const mode = params.get('mode') || 'bench';
+const log = (msg) => { document.getElementById('log').textContent += msg + '\n'; };
+const post = (path, body) => fetch(path, { method: 'POST', body: JSON.stringify(body) });
+
+const WORDS = ['fn', 'let', 'mut', 'self', 'match', 'Some', 'None', 'Ok', 'Err', 'impl', 'struct', 'pub',
+  'return', 'if', 'else', 'for', 'in', 'while', 'loop', 'async', 'await', 'layer', 'bitrate', 'encoder',
+  'frame', 'width', 'height', 'resolution', 'VideoCodec', 'screen_layers', '=>', '::', '&mut', '->', '{', '}',
+  '(', ')', 'u32', 'u16', 'Vec<u8>', 'config', 'participant', 'decoders', 'choose', '.iter()', '.map(|x|',
+  'x * 2)', '.collect();', '// comment about the keyframe', '"string literal"', '42', '0x1f', 'true', 'false'];
+const COLORS = ['#1f1f1f', '#0000c0', '#795e26', '#267f99', '#a31515', '#008000', '#af00db', '#001080'];
+
+function rng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+
+function makeDocument(lines) {
+  const r = rng(7);
+  const doc = [];
+  for (let i = 0; i < lines; i++) {
+    const indent = Math.floor(r() * 5) * 2;
+    const tokens = [];
+    const n = 2 + Math.floor(r() * 12);
+    for (let j = 0; j < n; j++) tokens.push([WORDS[Math.floor(r() * WORDS.length)], COLORS[Math.floor(r() * COLORS.length)]]);
+    doc.push([indent, tokens]);
+  }
+  return doc;
+}
+
+// Draws the editor-like screen: a side bar, a tab strip, line numbers and code; `scroll` in px.
+function drawScreen(ctx, w, h, scale, doc, scroll, frame, scenario) {
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, w, h);
+  const side = Math.round(260 * scale);
+  ctx.fillStyle = '#f3f3f3';
+  ctx.fillRect(0, 0, side, h);
+  ctx.fillStyle = '#e8e8e8';
+  ctx.fillRect(side, 0, w - side, Math.round(34 * scale));
+  const font = Math.round(13 * scale);
+  const lineH = Math.round(19 * scale);
+  ctx.textBaseline = 'top';
+  ctx.font = `${Math.round(12 * scale)}px -apple-system, Helvetica, Arial, sans-serif`;
+  ctx.fillStyle = '#333';
+  for (let i = 0; i < Math.floor(h / (22 * scale)); i++) {
+    ctx.fillText(`src/module_${i}/file_name_${(i * 7) % 13}.rs`, Math.round(16 * scale), Math.round((44 + i * 22) * scale));
+  }
+  ctx.fillText('call_engine.rs   video.rs   forwarding.rs   room.rs', side + Math.round(12 * scale), Math.round(10 * scale));
+  ctx.font = `${font}px Menlo, Monaco, "Courier New", monospace`;
+  const charW = ctx.measureText('M').width;
+  const top = Math.round(40 * scale);
+  const first = Math.floor(scroll / lineH);
+  const offset = scroll % lineH;
+  const visible = Math.ceil((h - top) / lineH) + 1;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(side, top, w - side, h - top);
+  ctx.clip();
+  for (let k = 0; k < visible; k++) {
+    const index = (first + k) % doc.length;
+    const y = top + k * lineH - offset;
+    ctx.fillStyle = '#237893';
+    ctx.fillText(String(first + k + 1).padStart(5, ' '), side + Math.round(4 * scale), y);
+    let x = side + Math.round(60 * scale) + doc[index][0] * charW;
+    for (const [word, color] of doc[index][1]) {
+      ctx.fillStyle = color;
+      ctx.fillText(word, x, y);
+      x += (word.length + 1) * charW;
+      if (x > w) break;
+    }
+  }
+  if (scenario === 'typing') {
+    // A line being typed: one more character every 4 frames, a blinking cursor.
+    const y = top + 12 * lineH;
+    const typed = 'let typed_text = "the quick brown fox jumps over the lazy dog";'.slice(0, (frame >> 2) % 60);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(side + Math.round(60 * scale), y, w - side, lineH);
+    ctx.fillStyle = '#1f1f1f';
+    ctx.fillText(typed, side + Math.round(60 * scale), y);
+    if ((frame >> 4) & 1) ctx.fillRect(side + Math.round(60 * scale) + typed.length * charW, y, Math.max(1, Math.round(scale * 2)), lineH);
+  }
+  ctx.restore();
+}
+
+async function supports(kind, config) {
+  try {
+    const result = kind === 'encode' ? await VideoEncoder.isConfigSupported(config) : await VideoDecoder.isConfigSupported(config);
+    return !!result.supported;
+  } catch (e) { return false; }
+}
+
+const CODECS = {
+  h264: (w, h) => ({ codec: 'avc1.42e033', avc: { format: 'annexb' } }),
+  vp9: () => ({ codec: 'vp09.00.51.08' }),
+  av1: (w, h, fps) => ({ codec: (w * h > 2560 * 1440 || fps > 30) ? 'av01.0.13M.08' : 'av01.0.12M.08' }),
+};
+const DECODE = { h264: 'avc1.42e033', vp9: 'vp09.00.51.08', av1: 'av01.0.13M.08' };
+
+async function capabilities() {
+  const out = { userAgent: navigator.userAgent, hasWebCodecs: typeof VideoEncoder !== 'undefined' };
+  if (!out.hasWebCodecs) return out;
+  for (const name of Object.keys(CODECS)) {
+    const base = CODECS[name](1920, 1080, 30);
+    out[name] = {
+      encode: await supports('encode', { ...base, width: 1920, height: 1080, bitrate: 4e6, framerate: 30, latencyMode: 'realtime' }),
+      encode4k: await supports('encode', { ...CODECS[name](3840, 2160, 30), width: 3840, height: 2160, bitrate: 15e6, framerate: 30, latencyMode: 'realtime' }),
+      encodeHw: await supports('encode', { ...base, width: 1920, height: 1080, bitrate: 4e6, framerate: 30, hardwareAcceleration: 'prefer-hardware' }),
+      encodeContentHint: await supports('encode', { ...base, width: 1920, height: 1080, bitrate: 4e6, framerate: 30, contentHint: 'text' }),
+      decode: await supports('decode', { codec: DECODE[name] }),
+      decodeHw: await supports('decode', { codec: DECODE[name], hardwareAcceleration: 'prefer-hardware' }),
+    };
+  }
+  return out;
+}
+
+// Drawing and wrapping the frames without encoding: the page's own share of the CPU time.
+async function baseline(run, docScale) {
+  const { width, height, fps, frames, scenario } = run;
+  // The same canvas as the encoding runs (drawn on the CPU), so the difference is the encoder's.
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const doc = makeDocument(400);
+  const speed = scenario === 'scroll' ? 6 * docScale : 0;
+  const t0 = performance.now();
+  for (let i = 0; i < frames; i++) {
+    drawScreen(ctx, width, height, docScale, doc, Math.round(i * speed), i, scenario);
+    const frame = new VideoFrame(canvas, { timestamp: Math.round(i * 1e6 / fps) });
+    frame.close();
+    if (i % 4 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+  return { ...run, supported: true, wallMs: performance.now() - t0 };
+}
+
+async function runOne(run) {
+  const { codec, width, height, fps, bitrate, hint, frames, scenario, latency, accel } = run;
+  const docScale = height >= 2160 ? 2 : (height >= 1440 ? 1.25 : 1);
+  const measure = run.measure !== false;
+  if (codec === 'none') return baseline(run, docScale);
+  const config = { ...CODECS[codec](width, height, fps), width, height, bitrate, framerate: fps, latencyMode: latency || 'realtime' };
+  if (hint) config.contentHint = hint;
+  if (accel) config.hardwareAcceleration = accel;
+  if (!(await supports('encode', config))) return { ...run, supported: false };
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const doc = makeDocument(400);
+  const references = new Map();
+  const sent = new Map();
+  const result = { ...run, supported: true, bytes: 0, steadyBytes: 0, keyframes: 0, keyframeBytes: [], psnr: [], latencies: [] };
+  const warmup = Math.round(fps); // first second left out
+  let pendingDecodes = [];
+  const decoder = new VideoDecoder({
+    output: (frame) => {
+      const ts = frame.timestamp;
+      const ref = references.get(ts);
+      if (!result.decodedColorSpace && frame.colorSpace) result.decodedColorSpace = JSON.stringify(frame.colorSpace.toJSON ? frame.colorSpace.toJSON() : frame.colorSpace) + ' ' + frame.format;
+      if (ref) {
+        references.delete(ts);
+        // The decoded Y plane against the source's BT.709 limited-range luma: the codec's own
+        // fidelity, whatever colour space the decoder tags its frames with (VP9 says bt709
+        // transfer, which a canvas then converts).
+        const buffer = new Uint8Array(frame.allocationSize());
+        const copied = frame.copyTo(buffer).then((layout) => {
+          const stride = layout[0].stride, offset = layout[0].offset;
+          let sse = 0;
+          for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+              const i = (y * width + x) * 4;
+              const yRef = 16 + 219 * (0.2126 * ref[i] + 0.7152 * ref[i + 1] + 0.0722 * ref[i + 2]) / 255;
+              const d = yRef - buffer[offset + y * stride + x];
+              sse += d * d;
+            }
+          }
+          const mse = sse / (width * height);
+          result.psnr.push(mse === 0 ? 99 : 10 * Math.log10(255 * 255 / mse));
+        }).finally(() => frame.close());
+        pendingDecodes.push(copied);
+        return;
+      }
+      frame.close();
+    },
+    error: (e) => { result.decodeError = String(e); },
+  });
+  const decoderBase = { codec: DECODE[codec] };
+  if (run.decoderColorSpace) decoderBase.colorSpace = run.decoderColorSpace;
+  decoder.configure(decoderBase);
+  let resolveOut = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, metadata) => {
+      if (metadata && metadata.decoderConfig && !result.encoderColorSpace) {
+        result.encoderColorSpace = JSON.stringify(metadata.decoderConfig.colorSpace || null);
+      }
+      const now = performance.now();
+      const ts = chunk.timestamp;
+      if (sent.has(ts)) { result.latencies.push(now - sent.get(ts)); sent.delete(ts); }
+      result.bytes += chunk.byteLength;
+      const index = Math.round(ts * fps / 1e6);
+      if (index >= warmup) result.steadyBytes += chunk.byteLength;
+      if (chunk.type === 'key') { result.keyframes++; result.keyframeBytes.push(chunk.byteLength); }
+      if (measure) decoder.decode(chunk);
+      if (resolveOut) { const r = resolveOut; resolveOut = null; r(); }
+    },
+    error: (e) => { result.encodeError = String(e); if (resolveOut) resolveOut(); },
+  });
+  encoder.configure(config);
+  const speed = scenario === 'scroll' ? 6 * docScale : 0;
+  const t0 = performance.now();
+  for (let i = 0; i < frames; i++) {
+    drawScreen(ctx, width, height, docScale, doc, Math.round(i * speed), i, scenario);
+    const ts = Math.round(i * 1e6 / fps);
+    if (measure && i >= warmup && i % 10 === 5) references.set(ts, ctx.getImageData(0, 0, width, height).data);
+    const frame = new VideoFrame(canvas, { timestamp: ts });
+    sent.set(ts, performance.now());
+    encoder.encode(frame, { keyFrame: i === 0 });
+    frame.close();
+    // Keep at most two frames queued, like the call's encoder (MAX_ENCODE_QUEUE).
+    while (encoder.encodeQueueSize > 1) {
+      await new Promise((r) => { resolveOut = r; setTimeout(r, 200); });
+    }
+    if (result.encodeError) break;
+  }
+  await encoder.flush();
+  await decoder.flush();
+  await Promise.all(pendingDecodes);
+  result.wallMs = performance.now() - t0;
+  encoder.close(); decoder.close();
+  const seconds = (frames - warmup) / fps;
+  result.kbps = Math.round(result.steadyBytes * 8 / seconds / 1000);
+  const sorted = [...result.latencies].sort((a, b) => a - b);
+  result.latencyAvg = +(sorted.reduce((a, b) => a + b, 0) / Math.max(1, sorted.length)).toFixed(1);
+  result.latencyP95 = +(sorted[Math.floor(sorted.length * 0.95)] || 0).toFixed(1);
+  result.psnrAvg = +(result.psnr.reduce((a, b) => a + b, 0) / Math.max(1, result.psnr.length)).toFixed(2);
+  result.psnrMin = +Math.min(...result.psnr).toFixed(2);
+  result.firstKeyframeKB = result.keyframeBytes.length ? Math.round(result.keyframeBytes[0] / 1024) : 0;
+  delete result.latencies; delete result.psnr; delete result.keyframeBytes;
+  return result;
+}
+
+(async () => {
+  try {
+    const caps = await capabilities();
+    await post('/caps', caps);
+    log(JSON.stringify(caps));
+    if (mode === 'caps') { await post('/done', {}); return; }
+    const runs = await (await fetch('/runs')).json();
+    for (const run of runs) {
+      await post('/phase', { state: 'start', run });
+      const result = await runOne(run);
+      await post('/phase', { state: 'end', run, result });
+      log(JSON.stringify(result));
+    }
+    await post('/done', {});
+  } catch (e) {
+    await post('/error', { error: String(e && e.stack || e) });
+  }
+})();
+</script>
+</body></html>

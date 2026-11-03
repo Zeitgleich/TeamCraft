@@ -345,10 +345,10 @@ impl DaveCoordinator {
   fn is_known(&self, participant_id: DeviceId) -> bool {
     self.leaf_of(participant_id).is_some()
       || self.waiting.iter().any(|(id, _)| *id == participant_id)
-      || self
-        .maybe_transition
-        .as_ref()
-        .is_some_and(|t| t.joiners.iter().any(|(id, _)| *id == participant_id))
+      || self.maybe_transition.as_ref().is_some_and(|t| {
+        // A joiner that left during the transition may come back with a new key package.
+        !t.departed_joiners.contains(&participant_id) && t.joiners.iter().any(|(id, _)| *id == participant_id)
+      })
   }
 }
 
@@ -421,6 +421,32 @@ mod tests {
       harness.leave(1);
       harness.deliver_all();
       harness.assert_all_exchange_frames(&[2, 3]);
+    }
+
+    #[test]
+    fn member_that_reconnects_rejoins_with_a_new_key_package() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.leave(2);
+      harness.join(2);
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+    }
+
+    #[test]
+    fn joiner_that_drops_mid_transition_can_join_again() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      // Proposals adding 3 are in flight when its connection drops; it is back at once.
+      harness.join_without_delivery(3);
+      harness.clients.remove(&device(3));
+      let outbound = harness.coordinator.on_leave(device(3));
+      harness.queue.extend(outbound);
+      harness.join_without_delivery(3);
+      harness.deliver_all();
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
     }
 
     #[test]

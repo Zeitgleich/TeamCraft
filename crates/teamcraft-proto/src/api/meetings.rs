@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
-use crate::{ConversationId, MeetingId, UnixMillis, UserId, UserSummary};
+use crate::{ConversationId, IdempotencyKey, MeetingId, UnixMillis, UserId, UserSummary, Weekday};
 
 wire_enum! {
   pub enum MeetingStatus {
@@ -41,6 +41,18 @@ wire_enum! {
 }
 
 wire_enum! {
+  /// What `DELETE /api/v1/meetings/{id}` cancels of a repeating meeting.
+  pub enum CancelScope {
+    /// The whole meeting (the default, and the only scope of a meeting that doesn't repeat).
+    Series => "series",
+    /// One occurrence; the others stay.
+    Occurrence => "occurrence",
+    /// The occurrence and every one after it: the series ends before it.
+    Following => "following",
+  }
+}
+
+wire_enum! {
   /// A guest's place in the lobby of a meeting.
   pub enum LobbyState {
     Waiting => "waiting",
@@ -49,15 +61,23 @@ wire_enum! {
   }
 }
 
-/// A simple recurrence (iCalendar `RRULE` with `FREQ`, `INTERVAL` and `COUNT`).
+/// A recurrence (iCalendar `RRULE` with `FREQ`, `INTERVAL`, `BYDAY` and `COUNT` or `UNTIL`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct MeetingRecurrence {
   pub frequency: RecurrenceFrequency,
   /// Every n-th day, week or month; at least 1.
   pub interval: u32,
-  /// Number of occurrences; without it the series is open ended.
+  /// Only on these days of the week (daily and weekly series; "Monday to Friday"). Empty: every
+  /// day of a daily series, the first occurrence's day of a weekly one.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub weekdays: Vec<Weekday>,
+  /// Number of occurrences, the first included. At most one of `count` and `until`; without both
+  /// the series is open ended.
   #[serde(rename = "count", default, skip_serializing_if = "Option::is_none")]
   pub maybe_count: Option<u32>,
+  /// No occurrence starts after this time.
+  #[serde(rename = "until", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_until: Option<UnixMillis>,
 }
 
 /// Somebody invited to a meeting.
@@ -89,6 +109,10 @@ pub struct CreateMeetingRequest {
   /// Guests wait for the host to admit them (default: yes).
   #[serde(default = "default_true")]
   pub has_lobby: bool,
+  /// Client-generated key that makes a retry of this request return the original result instead
+  /// of creating a second one. Optional so older clients keep working.
+  #[serde(rename = "idempotency_key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 /// `PATCH /api/v1/meetings/{id}`: changes what is set; invitees are replaced as a whole.
@@ -107,6 +131,29 @@ pub struct UpdateMeetingRequest {
   pub maybe_invitees: Option<Vec<MeetingInvitee>>,
   #[serde(rename = "has_lobby", default, skip_serializing_if = "Option::is_none")]
   pub maybe_has_lobby: Option<bool>,
+  /// A new repeat rule. A meeting that repeats keeps repeating; to end it, cancel the following
+  /// occurrences (`CancelScope::Following`).
+  #[serde(rename = "recurrence", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_recurrence: Option<MeetingRecurrence>,
+}
+
+/// Query of `DELETE /api/v1/meetings/{id}`: what to cancel. Without it the whole meeting.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct CancelMeetingQuery {
+  #[serde(rename = "scope", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_scope: Option<CancelScope>,
+  /// The start of the occurrence, as the list gives it; required for `occurrence` and `following`.
+  #[serde(rename = "occurrence", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_occurrence: Option<UnixMillis>,
+}
+
+/// `POST /api/v1/meetings/{id}/restore` (organizer only): takes a cancellation back.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RestoreMeetingRequest {
+  /// The cancelled occurrence to bring back; without it the cancelled meeting itself.
+  #[serde(rename = "occurrence", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_occurrence: Option<UnixMillis>,
 }
 
 /// `POST /api/v1/meetings/instant`: "Meet now".
@@ -114,6 +161,14 @@ pub struct UpdateMeetingRequest {
 pub struct CreateInstantMeetingRequest {
   #[serde(rename = "title", default, skip_serializing_if = "Option::is_none")]
   pub maybe_title: Option<String>,
+  /// TeamCraft users who become members of the meeting chat right away, e.g. the people of a call
+  /// that moves into the meeting (docs/meetings.md). No calendar entry and no e-mail.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub invitees: Vec<UserId>,
+  /// Client-generated key that makes a retry of this request return the original result instead
+  /// of creating a second one. Optional so older clients keep working.
+  #[serde(rename = "idempotency_key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 /// `PUT /api/v1/meetings/{id}/rsvp`: the caller's answer to an invitation.
@@ -152,6 +207,10 @@ pub struct MeetingResponse {
   pub join_url: String,
   #[serde(rename = "recurrence", default, skip_serializing_if = "Option::is_none")]
   pub maybe_recurrence: Option<MeetingRecurrence>,
+  /// Only this occurrence of the repeating meeting is cancelled (`status` is `cancelled`); the
+  /// series goes on.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_occurrence_cancelled: bool,
   pub attendees: Vec<MeetingAttendeeResponse>,
   /// Invitees whose invitation e-mail could not be sent (only set in replies to create and update).
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -175,6 +234,10 @@ pub struct ListMeetingsQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListMeetingsResponse {
   pub meetings: Vec<MeetingResponse>,
+  /// The server's clock when it answered: clients schedule meeting reminders on it, not on their
+  /// own clock, which may be off (robustness.md, "Time"). Absent from older servers.
+  #[serde(rename = "server_now", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_server_now: Option<UnixMillis>,
 }
 
 /// `POST /api/v1/meetings/{id}/guest-links`: a personal join link for somebody without an account.
@@ -202,11 +265,17 @@ impl std::fmt::Debug for GuestLinkResponse {
   }
 }
 
-/// `POST /api/v1/meetings/join` (no authentication): trades a personal join link for a guest session.
+/// `POST /api/v1/meetings/join` (no authentication): trades a meeting link for a guest session.
+/// Exactly one of the two tokens is given: the meeting link's token from its path, or the one-time
+/// token of a personal link's `#invite=` fragment (which wins when a link has both).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct JoinMeetingRequest {
-  /// The token from the link's `#invite=` fragment; usable once.
-  pub invite_token: String,
+  /// The token from a personal link's `#invite=` fragment; usable once.
+  #[serde(rename = "invite_token", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_invite_token: Option<String>,
+  /// The token from the meeting link's path (`/meeting/<token>`).
+  #[serde(rename = "link_token", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_link_token: Option<String>,
   /// How the guest is shown to the others ("Guest (unverified)" in clients).
   pub display_name: String,
 }
@@ -214,10 +283,25 @@ pub struct JoinMeetingRequest {
 impl std::fmt::Debug for JoinMeetingRequest {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("JoinMeetingRequest")
-      .field("invite_token", &"[redacted]")
+      .field(
+        "invite_token",
+        &self.maybe_invite_token.as_ref().map(|_| "[redacted]"),
+      )
+      .field(
+        "link_token",
+        &self.maybe_link_token.as_ref().map(|_| "[redacted]"),
+      )
       .field("display_name", &self.display_name)
       .finish()
   }
+}
+
+/// `POST /api/v1/meetings/link/{token}/knock`: a member opened a meeting link. The meeting it
+/// names, and where the member stands: in the chat already (`admitted`) or waiting in the lobby.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct KnockByLinkResponse {
+  pub meeting_id: MeetingId,
+  pub state: LobbyState,
 }
 
 /// A guest session: authenticate API and gateway with `guest_token` like with an access token.
@@ -231,6 +315,15 @@ pub struct JoinMeetingResponse {
   pub conversation_id: ConversationId,
   pub user_id: UserId,
   pub lobby_state: LobbyState,
+  /// The fingerprint of the organizer's identity key as the server holds it, the `v` of the
+  /// meeting's link. A guest's page takes it only for a link without `v` (one mailed before
+  /// #987): it is the server's word (e2ee.md §4.6, "Meeting guests").
+  #[serde(
+    rename = "organizer_fingerprint",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_organizer_fingerprint: Option<String>,
 }
 
 impl std::fmt::Debug for JoinMeetingResponse {
@@ -248,6 +341,29 @@ impl std::fmt::Debug for JoinMeetingResponse {
 pub struct LobbyEntry {
   pub user: UserSummary,
   pub requested_at: UnixMillis,
+  /// The guest or member knocked with the meeting link's token (not an old link): in a meeting
+  /// without a lobby the organizer's device lets them in by itself.
+  #[serde(default)]
+  pub is_by_link: bool,
+  /// The user has a device the organizer's device can add to the chat's encryption group (a
+  /// guest's page sets one up while it waits).
+  #[serde(default)]
+  pub has_device: bool,
+  /// The identity key fingerprint the guest's page reported with its device (hex). The organizer's
+  /// device adds the guest only if the key it pins has this fingerprint, and shows its key code.
+  #[serde(
+    rename = "knock_fingerprint",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_knock_fingerprint: Option<String>,
+}
+
+/// `PUT /api/v1/meetings/{id}/lobby/me/device`: a waiting guest's device is set up, with the
+/// fingerprint of its identity key (hex), which binds the key to this knock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GuestDeviceReadyRequest {
+  pub fingerprint: String,
 }
 
 /// `GET /api/v1/meetings/{id}/lobby`: who waits for the host.
@@ -260,6 +376,10 @@ pub struct ListLobbyResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct LobbyStateResponse {
   pub state: LobbyState,
+  /// No app of the organizer was seen letting guests in without a link secret (#987): an organizer
+  /// on an older app can't let this guest in until it is updated.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_organizer_app_outdated: bool,
 }
 
 /// Result of `POST /api/internal/v1/meetings/replies`.
@@ -296,6 +416,67 @@ mod tests {
     let request: CreateMeetingRequest =
       serde_json::from_str(r#"{"title":"Sync","starts_at":1000,"ends_at":2000}"#).unwrap();
     assert!(request.has_lobby && request.invitees.is_empty());
+  }
+
+  #[test]
+  fn instant_meetings_invite_nobody_unless_asked() {
+    let old: CreateInstantMeetingRequest = serde_json::from_str("{}").unwrap();
+    assert!(old.invitees.is_empty());
+    assert_eq!(serde_json::to_string(&old).unwrap(), "{}");
+    let from_call: CreateInstantMeetingRequest = serde_json::from_str(r#"{"invitees":["5"]}"#).unwrap();
+    assert_eq!(from_call.invitees.len(), 1);
+  }
+
+  const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+
+  #[test]
+  fn create_requests_carry_an_optional_idempotency_key() {
+    // Older clients send no key.
+    let old: CreateMeetingRequest =
+      serde_json::from_str(r#"{"title":"Sync","starts_at":1000,"ends_at":2000}"#).unwrap();
+    assert_eq!(old.maybe_idempotency_key, None);
+    assert!(
+      serde_json::to_value(&old)
+        .unwrap()
+        .get("idempotency_key")
+        .is_none()
+    );
+
+    let key = IdempotencyKey::from_hex(KEY_HEX).unwrap();
+    let request: CreateMeetingRequest = serde_json::from_str(&format!(
+      r#"{{"title":"Sync","starts_at":1000,"ends_at":2000,"idempotency_key":"{KEY_HEX}"}}"#
+    ))
+    .unwrap();
+    assert_eq!(request.maybe_idempotency_key, Some(key));
+    assert_eq!(
+      serde_json::to_value(&request).unwrap()["idempotency_key"],
+      KEY_HEX
+    );
+
+    let instant = CreateInstantMeetingRequest {
+      maybe_title: None,
+      invitees: Vec::new(),
+      maybe_idempotency_key: Some(key),
+    };
+    assert_eq!(
+      serde_json::to_string(&instant).unwrap(),
+      format!(r#"{{"idempotency_key":"{KEY_HEX}"}}"#)
+    );
+    assert!(serde_json::from_str::<CreateInstantMeetingRequest>(r#"{"idempotency_key":"zz"}"#).is_err());
+
+    let space: crate::CreateSpaceRequest = serde_json::from_str(&format!(
+      r#"{{"name":"S","join_policy":"open","idempotency_key":"{KEY_HEX}"}}"#
+    ))
+    .unwrap();
+    assert_eq!(space.maybe_idempotency_key, Some(key));
+    let channel: crate::CreateChannelRequest = serde_json::from_str(&format!(
+      r#"{{"name":"c","visibility":"private","idempotency_key":"{KEY_HEX}"}}"#
+    ))
+    .unwrap();
+    assert_eq!(channel.maybe_idempotency_key, Some(key));
+    let legacy: crate::CreateChannelRequest =
+      serde_json::from_str(r#"{"name":"c","visibility":"private"}"#).unwrap();
+    assert_eq!(legacy.maybe_idempotency_key, None);
   }
 
   #[test]

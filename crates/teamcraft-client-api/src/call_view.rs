@@ -1,0 +1,596 @@
+//! The call state the UI shows ([`crate::remote::CallSnapshot`]), kept from the server's call events
+//! (roster, ringing) and from what the media layer reports about the call this device is in. The
+//! desktop shell and the browser both keep a [`CallView`], so calls look and behave the same in
+//! either; `teamcraft-media` (`call_view`) applies the media engine's events to it.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use teamcraft_proto::{CallEndCause, CallRosterEntry, ConversationId, GatewayEvent, MediaStreamId, UserId};
+
+use crate::calls::{
+  ActiveCall, BackgroundEffect, CallEndReason, CallRequest, IncomingCall, RemoteVideoTrack, RunningCall,
+  ScreenShareSound,
+};
+
+/// Calls of the user's conversations and the call this device is in.
+#[derive(Clone, Debug, Default)]
+pub struct CallView {
+  pub running: BTreeMap<ConversationId, RunningCall>,
+  pub incoming: BTreeMap<ConversationId, IncomingCall>,
+  pub maybe_active: Option<ActiveCall>,
+  /// Others' video in the active call.
+  pub video_tracks: BTreeMap<MediaStreamId, RemoteVideoTrack>,
+  pub maybe_end_reason: Option<CallEndReason>,
+  /// This device's roster entry, once it joined a call: tells the user's other devices in a call
+  /// from this one's entry still listed just after it left (issue #976).
+  pub maybe_this_device: Option<CallRosterEntry>,
+  /// The active call is a 1:1 call that ends for both when one side leaves (issue #997, the
+  /// server's word in the join token).
+  pub ends_when_one_side_leaves: bool,
+}
+
+/// What a gateway call event says about the user's calls: the part [`CallView`] needs. The web
+/// client hands these to its call module (`page_calls`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "signal", rename_all = "snake_case")]
+pub enum CallSignal {
+  /// A call started or its roster changed. `participants` may name a person once per device.
+  Running {
+    conversation: ConversationId,
+    participants: Vec<UserId>,
+    is_ringing: bool,
+    /// The devices in the call (empty from an older sender).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    devices: Vec<CallRosterEntry>,
+  },
+  Ended {
+    conversation: ConversationId,
+    /// Absent from older senders, and when the last participant left.
+    #[serde(default, skip_serializing_if = "CallEndCause::is_last_left")]
+    cause: CallEndCause,
+  },
+  /// Someone calls the user.
+  Ring {
+    conversation: ConversationId,
+    caller: UserId,
+  },
+  /// Somebody added people to the call: it moves into the meeting chat `to`.
+  Moved {
+    conversation: ConversationId,
+    to: ConversationId,
+  },
+  #[serde(other)]
+  Unknown,
+}
+
+impl CallSignal {
+  /// The call part of a gateway event; `None` for every other event.
+  pub fn from_gateway(event: &GatewayEvent) -> Option<Self> {
+    match event {
+      GatewayEvent::CallStart {
+        conversation_id,
+        is_ringing,
+        participants,
+        ..
+      }
+      | GatewayEvent::CallUpdate {
+        conversation_id,
+        is_ringing,
+        participants,
+        ..
+      } => Some(Self::Running {
+        conversation: *conversation_id,
+        participants: participants.iter().map(|entry| entry.user_id).collect(),
+        is_ringing: *is_ringing,
+        devices: participants.clone(),
+      }),
+      GatewayEvent::CallEnd {
+        conversation_id,
+        cause,
+        ..
+      } => Some(Self::Ended {
+        conversation: *conversation_id,
+        cause: *cause,
+      }),
+      GatewayEvent::CallRing {
+        conversation_id,
+        from_user_id,
+        ..
+      } => Some(Self::Ring {
+        conversation: *conversation_id,
+        caller: *from_user_id,
+      }),
+      GatewayEvent::CallMove {
+        conversation_id,
+        to_conversation_id,
+        ..
+      } => Some(Self::Moved {
+        conversation: *conversation_id,
+        to: *to_conversation_id,
+      }),
+      _ => None,
+    }
+  }
+}
+
+impl CallView {
+  /// This device joined the conversation's call: it shows as active, no longer ringing, and the end
+  /// reason of the previous call is gone.
+  pub fn start_active(&mut self, request: CallRequest, background: BackgroundEffect) {
+    self.incoming.remove(&request.conversation);
+    self.maybe_active = Some(ActiveCall {
+      conversation: request.conversation,
+      kind: request.kind,
+      is_muted: false,
+      is_deafened: false,
+      is_secured: false,
+      maybe_privacy_code: None,
+      participants: Vec::new(),
+      active_speakers: Vec::new(),
+      is_camera_on: false,
+      is_sharing_screen: false,
+      background,
+      maybe_muted_by_host: None,
+      screen_sound: ScreenShareSound::Off,
+      is_reconnecting: false,
+      reconnecting: Vec::new(),
+      maybe_moved_to: None,
+    });
+    self.maybe_end_reason = None;
+  }
+
+  /// This device's roster entry, as the join token named it.
+  pub fn set_this_device(&mut self, entry: CallRosterEntry) {
+    self.maybe_this_device = Some(entry);
+  }
+
+  /// Whether the call this device joins ends for both when one side leaves, as its join token said.
+  pub fn set_ends_when_one_side_leaves(&mut self, ends: bool) {
+    self.ends_when_one_side_leaves = ends;
+  }
+
+  /// This device left the call (or it ended).
+  pub fn end_active(&mut self) {
+    self.maybe_active = None;
+    self.video_tracks.clear();
+    self.ends_when_one_side_leaves = false;
+  }
+
+  /// Leaving now ends the active call for both (issue #997): a 1:1 call with the other person in it,
+  /// and none of the user's other devices. The leaving device then plays the hang-up tone, like
+  /// the other side does when it hears of the end.
+  pub fn is_leave_a_hang_up(&self) -> bool {
+    let (Some(active), Some(this_device)) = (&self.maybe_active, self.maybe_this_device) else {
+      return false;
+    };
+    if !self.ends_when_one_side_leaves || active.maybe_moved_to.is_some() {
+      return false;
+    }
+    let Some(running) = self.running.get(&active.conversation) else {
+      return false;
+    };
+    let is_other_side_in = running
+      .devices
+      .iter()
+      .any(|entry| entry.user_id != this_device.user_id);
+    let is_another_own_device_in = running
+      .devices
+      .iter()
+      .any(|entry| entry.user_id == this_device.user_id && entry.device_id != this_device.device_id);
+    is_other_side_in && !is_another_own_device_in
+  }
+
+  /// The signal ends the call this device is in for both (issue #997): the other side of the 1:1
+  /// call left. The device then leaves with the hang-up tone. A call that moved into a meeting
+  /// isn't ended that way; the device follows it there.
+  pub fn is_end_of_active(&self, signal: &CallSignal) -> bool {
+    let CallSignal::Ended {
+      conversation,
+      cause: CallEndCause::OneSideLeft,
+    } = signal
+    else {
+      return false;
+    };
+    self
+      .maybe_active
+      .as_ref()
+      .is_some_and(|active| active.conversation == *conversation && active.maybe_moved_to.is_none())
+  }
+
+  /// Stops ringing on this device; the call goes on for the others.
+  pub fn decline(&mut self, conversation: ConversationId) {
+    self.incoming.remove(&conversation);
+  }
+
+  pub fn is_camera_on(&self) -> bool {
+    self
+      .maybe_active
+      .as_ref()
+      .is_some_and(|active| active.is_camera_on)
+  }
+
+  /// Applies one of the gateway's call events; `true` if the UI should read again.
+  pub fn apply_gateway_event(&mut self, event: &GatewayEvent) -> bool {
+    CallSignal::from_gateway(event).is_some_and(|signal| self.apply_signal(signal))
+  }
+
+  /// Applies a call event; `true` if the UI should read again.
+  pub fn apply_signal(&mut self, signal: CallSignal) -> bool {
+    match signal {
+      CallSignal::Running {
+        conversation,
+        participants,
+        is_ringing,
+        devices,
+      } => {
+        if !is_ringing {
+          self.incoming.remove(&conversation);
+        }
+        self.running.insert(
+          conversation,
+          RunningCall {
+            conversation,
+            participants: people(participants),
+            devices,
+            is_ringing,
+          },
+        );
+      },
+      CallSignal::Ended { conversation, cause } => {
+        if self.is_end_of_active(&CallSignal::Ended { conversation, cause }) {
+          self.maybe_end_reason = Some(CallEndReason::OtherSideLeft);
+        }
+        self.running.remove(&conversation);
+        self.incoming.remove(&conversation);
+      },
+      CallSignal::Ring { conversation, caller } => {
+        let is_in_it = self
+          .maybe_active
+          .as_ref()
+          .is_some_and(|active| active.conversation == conversation);
+        if !is_in_it {
+          self.incoming.insert(
+            conversation,
+            IncomingCall {
+              caller,
+              conversation,
+              with_video: false,
+            },
+          );
+        }
+      },
+      CallSignal::Moved { conversation, to } => {
+        let Some(active) = self
+          .maybe_active
+          .as_mut()
+          .filter(|active| active.conversation == conversation)
+        else {
+          // Not in that call on this device: nothing to switch.
+          return false;
+        };
+        active.maybe_moved_to = Some(to);
+      },
+      CallSignal::Unknown => return false,
+    }
+    true
+  }
+}
+
+/// Each person once (they may be in a call with several devices).
+fn people(mut users: Vec<UserId>) -> Vec<UserId> {
+  users.sort_unstable();
+  users.dedup();
+  users
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::{CallId, CallRosterEntry, Id, Snowflake, UnixMillis};
+
+  use super::*;
+  use crate::calls::CallKind;
+
+  mod ringing {
+    use super::*;
+
+    #[test]
+    fn ring_shows_until_the_call_stops_ringing() {
+      let mut view = CallView::default();
+      view.apply_gateway_event(&GatewayEvent::CallRing {
+        conversation_id: conversation(5),
+        call_id: call(),
+        from_user_id: user(1),
+      });
+      assert_eq!(view.incoming.len(), 1);
+      view.apply_gateway_event(&GatewayEvent::CallUpdate {
+        conversation_id: conversation(5),
+        call_id: call(),
+        is_ringing: false,
+        participants: vec![entry(1, 10), entry(2, 20), entry(2, 21)],
+      });
+      assert!(view.incoming.is_empty());
+      assert_eq!(
+        view.running[&conversation(5)].participants,
+        vec![user(1), user(2)]
+      );
+      assert_eq!(
+        view.running[&conversation(5)].devices,
+        vec![entry(1, 10), entry(2, 20), entry(2, 21)],
+        "each device"
+      );
+      view.apply_gateway_event(&GatewayEvent::CallEnd {
+        conversation_id: conversation(5),
+        call_id: call(),
+        cause: CallEndCause::LastLeft,
+      });
+      assert!(view.running.is_empty());
+    }
+
+    #[test]
+    fn declined_ring_disappears_but_the_call_stays_listed() {
+      let mut view = CallView::default();
+      view.apply_gateway_event(&GatewayEvent::CallStart {
+        conversation_id: conversation(5),
+        call_id: call(),
+        started_by: user(1),
+        started_at: UnixMillis(0),
+        is_ringing: true,
+        participants: vec![entry(1, 10)],
+      });
+      view.apply_gateway_event(&GatewayEvent::CallRing {
+        conversation_id: conversation(5),
+        call_id: call(),
+        from_user_id: user(1),
+      });
+      view.decline(conversation(5));
+      assert!(view.incoming.is_empty());
+      assert_eq!(view.running.len(), 1);
+    }
+
+    #[test]
+    fn a_ring_for_the_call_this_device_is_in_does_not_show() {
+      let mut view = active_view();
+      view.apply_gateway_event(&GatewayEvent::CallRing {
+        conversation_id: conversation(5),
+        call_id: call(),
+        from_user_id: user(1),
+      });
+      assert!(view.incoming.is_empty());
+    }
+  }
+
+  mod moves {
+    use super::*;
+
+    #[test]
+    fn the_call_this_device_is_in_learns_where_it_moved() {
+      let mut view = active_view();
+      let is_changed = view.apply_gateway_event(&GatewayEvent::CallMove {
+        conversation_id: conversation(5),
+        call_id: call(),
+        to_conversation_id: conversation(6),
+        moved_by: user(1),
+      });
+      assert!(is_changed);
+      assert_eq!(
+        view
+          .maybe_active
+          .as_ref()
+          .and_then(|active| active.maybe_moved_to),
+        Some(conversation(6))
+      );
+      // Joining the meeting's call starts afresh.
+      view.start_active(
+        CallRequest {
+          conversation: conversation(6),
+          kind: CallKind::Group,
+        },
+        BackgroundEffect::None,
+      );
+      assert_eq!(
+        view
+          .maybe_active
+          .as_ref()
+          .and_then(|active| active.maybe_moved_to),
+        None
+      );
+    }
+
+    #[test]
+    fn devices_outside_the_call_ignore_the_move() {
+      let mut view = CallView::default();
+      let event = GatewayEvent::CallMove {
+        conversation_id: conversation(5),
+        call_id: call(),
+        to_conversation_id: conversation(6),
+        moved_by: user(1),
+      };
+      assert!(!view.apply_gateway_event(&event));
+      let mut elsewhere = CallView::default();
+      elsewhere.start_active(
+        CallRequest {
+          conversation: conversation(7),
+          kind: CallKind::Direct,
+        },
+        BackgroundEffect::None,
+      );
+      assert!(!elsewhere.apply_gateway_event(&event));
+      assert_eq!(
+        elsewhere.maybe_active.and_then(|active| active.maybe_moved_to),
+        None
+      );
+    }
+  }
+
+  /// Issue #997: a 1:1 call ends for both when one side leaves.
+  mod one_to_one {
+    use super::*;
+
+    #[test]
+    fn the_other_side_leaving_ends_the_active_call_with_its_reason() {
+      let mut view = direct_view(&[entry(1, 10), entry(2, 20)]);
+      let signal = ended(5, CallEndCause::OneSideLeft);
+
+      assert!(view.is_end_of_active(&signal));
+      assert!(view.apply_signal(signal));
+      assert_eq!(view.maybe_end_reason, Some(CallEndReason::OtherSideLeft));
+      assert!(view.running.is_empty());
+    }
+
+    #[test]
+    fn only_a_one_side_end_of_the_own_call_ends_it() {
+      let view = direct_view(&[entry(1, 10), entry(2, 20)]);
+      assert!(!view.is_end_of_active(&ended(5, CallEndCause::LastLeft)));
+      assert!(!view.is_end_of_active(&ended(6, CallEndCause::OneSideLeft)));
+      assert!(!CallView::default().is_end_of_active(&ended(5, CallEndCause::OneSideLeft)));
+      let mut last_left = direct_view(&[entry(1, 10)]);
+      last_left.apply_signal(ended(5, CallEndCause::LastLeft));
+      assert_eq!(last_left.maybe_end_reason, None);
+    }
+
+    #[test]
+    fn a_call_that_moved_into_a_meeting_follows_the_move_instead() {
+      let mut view = direct_view(&[entry(1, 10), entry(2, 20)]);
+      view.apply_gateway_event(&GatewayEvent::CallMove {
+        conversation_id: conversation(5),
+        call_id: call(),
+        to_conversation_id: conversation(6),
+        moved_by: user(2),
+      });
+      assert!(!view.is_end_of_active(&ended(5, CallEndCause::OneSideLeft)));
+      assert!(!view.is_leave_a_hang_up());
+    }
+
+    #[test]
+    fn leaving_hangs_up_when_it_ends_the_call_for_both() {
+      assert!(direct_view(&[entry(1, 10), entry(2, 20), entry(2, 21)]).is_leave_a_hang_up());
+      assert!(
+        !direct_view(&[entry(1, 10)]).is_leave_a_hang_up(),
+        "nobody answered yet"
+      );
+      assert!(
+        !direct_view(&[entry(1, 10), entry(1, 11), entry(2, 20)]).is_leave_a_hang_up(),
+        "the user's other device stays in the call"
+      );
+      let mut not_ending = direct_view(&[entry(1, 10), entry(2, 20)]);
+      not_ending.set_ends_when_one_side_leaves(false);
+      assert!(!not_ending.is_leave_a_hang_up(), "the server keeps it running");
+      not_ending.set_ends_when_one_side_leaves(true);
+      not_ending.end_active();
+      assert!(!not_ending.ends_when_one_side_leaves, "forgotten with the call");
+    }
+
+    #[test]
+    fn the_cause_round_trips_and_an_older_sender_means_the_last_left() {
+      let signal = ended(5, CallEndCause::OneSideLeft);
+      let json = serde_json::to_string(&signal).unwrap();
+      assert!(json.contains("one_side_left"), "{json}");
+      assert_eq!(serde_json::from_str::<CallSignal>(&json).unwrap(), signal);
+      let older: CallSignal = serde_json::from_str(r#"{"signal":"ended","conversation":"5"}"#).unwrap();
+      assert_eq!(older, ended(5, CallEndCause::LastLeft));
+      let newer: CallSignal =
+        serde_json::from_str(r#"{"signal":"ended","conversation":"5","cause":"transferred"}"#).unwrap();
+      assert_eq!(newer, ended(5, CallEndCause::Unknown));
+      let mut view = direct_view(&[entry(1, 10), entry(2, 20)]);
+      assert!(!view.is_end_of_active(&newer));
+      view.apply_signal(newer);
+      assert_eq!(view.maybe_end_reason, None);
+    }
+
+    /// This device (user 1, device 10) in the DM call of conversation 5 with `devices` in it.
+    fn direct_view(devices: &[CallRosterEntry]) -> CallView {
+      let mut view = CallView::default();
+      view.set_this_device(entry(1, 10));
+      view.start_active(
+        CallRequest {
+          conversation: conversation(5),
+          kind: CallKind::Direct,
+        },
+        BackgroundEffect::None,
+      );
+      view.set_ends_when_one_side_leaves(true);
+      view.apply_gateway_event(&GatewayEvent::CallUpdate {
+        conversation_id: conversation(5),
+        call_id: call(),
+        is_ringing: false,
+        participants: devices.to_vec(),
+      });
+      view
+    }
+
+    fn ended(raw: i64, cause: CallEndCause) -> CallSignal {
+      CallSignal::Ended {
+        conversation: conversation(raw),
+        cause,
+      }
+    }
+  }
+
+  #[test]
+  fn signals_round_trip_and_unknown_ones_are_ignored() {
+    let signal = CallSignal::Ring {
+      conversation: conversation(5),
+      caller: user(1),
+    };
+    let json = serde_json::to_string(&signal).unwrap();
+    assert_eq!(serde_json::from_str::<CallSignal>(&json).unwrap(), signal);
+    let future: CallSignal = serde_json::from_str(r#"{"signal":"hold","conversation":"5"}"#).unwrap();
+    assert_eq!(future, CallSignal::Unknown);
+    assert!(!CallView::default().apply_signal(future));
+  }
+
+  #[test]
+  fn joining_clears_the_ring_and_the_last_end_reason() {
+    let mut view = CallView::default();
+    view.apply_gateway_event(&GatewayEvent::CallRing {
+      conversation_id: conversation(5),
+      call_id: call(),
+      from_user_id: user(1),
+    });
+    view.maybe_end_reason = Some(CallEndReason::ConnectionLost);
+    view.start_active(request(), BackgroundEffect::BlurLight);
+    assert!(view.incoming.is_empty());
+    assert!(view.maybe_end_reason.is_none());
+    assert_eq!(
+      view.maybe_active.as_ref().map(|active| active.background),
+      Some(BackgroundEffect::BlurLight)
+    );
+  }
+
+  fn active_view() -> CallView {
+    let mut view = CallView::default();
+    view.start_active(request(), BackgroundEffect::None);
+    view
+  }
+
+  fn request() -> CallRequest {
+    CallRequest {
+      conversation: conversation(5),
+      kind: CallKind::Group,
+    }
+  }
+
+  fn entry(user_id: i64, device_id: i64) -> CallRosterEntry {
+    CallRosterEntry {
+      user_id: user(user_id),
+      device_id: device(device_id),
+    }
+  }
+
+  fn call() -> CallId {
+    CallId::from_snowflake(Snowflake::new(99).unwrap())
+  }
+
+  fn conversation(raw: i64) -> ConversationId {
+    ConversationId::from_snowflake(Snowflake::new(raw).unwrap())
+  }
+
+  fn user(raw: i64) -> UserId {
+    UserId::from_snowflake(Snowflake::new(raw).unwrap())
+  }
+
+  fn device(raw: i64) -> teamcraft_proto::DeviceId {
+    teamcraft_proto::DeviceId::from_snowflake(Snowflake::new(raw).unwrap())
+  }
+}

@@ -88,6 +88,8 @@ fn event(uid: &str, sequence: i32, summary: &'static str) -> EventData<'static> 
     starts_at: datetime!(2030-01-01 09:00 UTC),
     ends_at: datetime!(2030-01-01 10:00 UTC),
     maybe_recurrence_rule: Some("FREQ=WEEKLY;INTERVAL=1;COUNT=3"),
+    excluded_starts: Vec::new(),
+    maybe_recurrence_id: None,
     status: EventStatus::Confirmed,
     join_url: "https://chat.example.com/meeting/42",
     organizer: EventPerson {

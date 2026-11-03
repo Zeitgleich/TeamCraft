@@ -2,13 +2,20 @@ use leptos::prelude::*;
 
 use teamcraft_proto::{ChannelModeration, HistoryPolicy, Permission};
 
-use crate::admin::{AdminChannel, SelfJoinOutcome, format_bytes};
+use crate::admin::{AdminChannel, AdminLoad, SelfJoinOutcome, format_bytes};
+use crate::channel_access::ChannelAccess;
 use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
+use crate::components::admin_spaces::{LoadNotice, SpacesPanel};
+use crate::components::channel_view::UnconfirmedRemovalActions;
 use crate::components::icons::{Icon, IconName};
-use crate::i18n::use_i18n;
-use crate::model::{ConversationId, ConversationKind, UserId};
-use crate::state::use_app_state;
+use crate::components::pending_button::PendingButton;
+use crate::components::sliding_indicator::SlidingIndicator;
+use crate::components::workspace_dialogs::DeleteChannelSection;
+use crate::feedback::PendingAction;
+use crate::i18n::{I18n, use_i18n};
+use crate::model::{ConversationId, ConversationKind, MembershipIssue, UserId};
+use crate::state::{AppState, use_app_state};
 
 const INACTIVE_AFTER_DAYS: i64 = 30;
 const DAY_MS: i64 = 86_400_000;
@@ -52,6 +59,221 @@ impl ChannelFilter {
   }
 }
 
+/// What the section lists: spaces (with their admin actions) or channels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListTab {
+  Channels,
+  Spaces,
+}
+
+impl ListTab {
+  const ALL: [ListTab; 2] = [Self::Channels, Self::Spaces];
+
+  fn slug(self) -> &'static str {
+    match self {
+      Self::Channels => "channels",
+      Self::Spaces => "spaces",
+    }
+  }
+}
+
+/// This admin's removals from channels it isn't in that can't be confirmed (e2ee.md §4.6): the
+/// admin removes again or keeps the person; the client never settles it on the server's word.
+#[component]
+fn UnconfirmedRemovals(channels: Memo<Vec<AdminChannel>>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let removals = Memo::new(move |_| state.read(|backend| backend.unconfirmed_removals()));
+  move || {
+    removals
+      .get()
+      .into_iter()
+      .map(|(conversation, user)| {
+        let channel = channels
+          .get()
+          .into_iter()
+          .find(|channel| channel.id == conversation)
+          .map(|channel| channel.name)
+          .unwrap_or_default();
+        let name = state
+          .read(|backend| backend.user(user))
+          .map(|user| user.display_name)
+          .filter(|name| !name.is_empty())
+          .unwrap_or_else(|| i18n.t("left-in-group-unknown"));
+        let text = i18n.t_with("removal-unconfirmed", &[("name", &name), ("channel", &channel)]);
+        view! {
+          <div class="key-banner" role="alert">
+            <Icon name=IconName::Lock />
+            <div class="key-banner-text">
+              <strong translate="no">{text}</strong>
+            </div>
+            <UnconfirmedRemovalActions conversation=conversation user=user />
+          </div>
+        }
+      })
+      .collect_view()
+  }
+}
+
+/// Users still in an encryption group of this admin's device whom the server no longer lists,
+/// confirmed by fresh member lists (#661), as one compact list. No client removes them on the
+/// server's word; the admin decides here, and this device signs and commits the removal (#734).
+/// Members never see this.
+#[component]
+fn GroupLeftovers(channels: Memo<Vec<AdminChannel>>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let leftovers = Memo::new(move |_| state.read(|backend| backend.group_leftovers()));
+  // The removal is signed by this client; without its keys the list only informs.
+  let can_remove = state.read(|backend| backend.can_remove_from_chats());
+  let remove_all = PendingAction::new();
+  move || {
+    let rows = leftovers.get();
+    if rows.is_empty() {
+      return ().into_any();
+    }
+    let has_several = rows.len() > 1;
+    view! {
+      <section class="key-banner leftover-list" role="status" aria-labelledby="leftover-title">
+        <Icon name=IconName::Lock />
+        <div class="key-banner-text">
+          <strong id="leftover-title">{move || i18n.t("admin-left-in-group-title")}</strong>
+          <span class="muted-text small">{move || i18n.t("admin-left-in-group-hint")}</span>
+          <ul class="leftover-rows">
+            {rows
+              .into_iter()
+              .map(|(conversation, user)| view! { <LeftoverRow conversation=conversation user=user channels=channels can_remove=can_remove /> })
+              .collect_view()}
+          </ul>
+        </div>
+        {(can_remove && has_several)
+          .then(|| {
+            view! {
+              <PendingButton
+                pending=remove_all
+                class="btn btn-small"
+                on_click=move |_| {
+                  remove_all.run(|| {
+                    for (conversation, user) in leftovers.get_untracked() {
+                      state.write(|backend| backend.remove_group_leftover(conversation, user));
+                    }
+                  });
+                }
+              >
+                {move || i18n.t("admin-left-in-group-remove-all")}
+              </PendingButton>
+            }
+          })}
+      </section>
+    }
+    .into_any()
+  }
+}
+
+#[component]
+fn LeftoverRow(
+  conversation: ConversationId,
+  user: UserId,
+  channels: Memo<Vec<AdminChannel>>,
+  can_remove: bool,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let pending = PendingAction::new();
+  let text = move || {
+    let name = leftover_name(state, i18n, user);
+    let place = conversation_label(state, i18n, conversation, user, &channels.get());
+    i18n.t_with(
+      "admin-left-in-group-row",
+      &[("name", &name), ("conversation", &place)],
+    )
+  };
+  view! {
+    <li class="leftover-row">
+      <span class="leftover-text" translate="no">{text}</span>
+      {can_remove
+        .then(|| {
+          view! {
+            <PendingButton
+              pending=pending
+              class="btn btn-small"
+              on_click=move |_| pending.run(|| state.write(|backend| backend.remove_group_leftover(conversation, user)))
+            >
+              {move || i18n.t("admin-left-in-group-remove")}
+            </PendingButton>
+          }
+        })}
+    </li>
+  }
+}
+
+/// The leftover account's current name: the console's user list has it from the server (the
+/// group may know the person under an older name), marked when the account is deactivated.
+fn leftover_name(state: AppState, i18n: I18n, user: UserId) -> String {
+  let maybe_account = state.read(|backend| {
+    backend
+      .admin_users()
+      .into_iter()
+      .find(|entry| entry.user.id == user)
+  });
+  if let Some(account) = maybe_account {
+    if account.user.is_deleted {
+      return i18n.t("user-deleted-name");
+    }
+    if !account.is_active {
+      return i18n.t_with(
+        "admin-account-deactivated-name",
+        &[("name", &account.user.display_name)],
+      );
+    }
+    return account.user.display_name;
+  }
+  state
+    .read(|backend| backend.user(user))
+    .map(|known| known.display_name)
+    .filter(|name| !name.is_empty())
+    .unwrap_or_else(|| i18n.t("left-in-group-unknown"))
+}
+
+/// Where the leftover is: `#channel`, a direct message with the other people, or a deleted
+/// conversation the console no longer knows.
+fn conversation_label(
+  state: AppState,
+  i18n: I18n,
+  conversation: ConversationId,
+  leftover: UserId,
+  channels: &[AdminChannel],
+) -> String {
+  let me = state.read(|backend| backend.me().id);
+  match state.read(|backend| backend.conversation(conversation)) {
+    Some(known) if known.kind.is_direct_like() => {
+      let names: Vec<String> = known
+        .member_ids
+        .iter()
+        .filter(|member| **member != me && **member != leftover)
+        .filter_map(|member| state.read(|backend| backend.user(*member)))
+        .map(|member| member.display_name)
+        .filter(|name| !name.is_empty())
+        .collect();
+      if names.is_empty() {
+        i18n.t("admin-conversation-direct-unnamed")
+      } else {
+        i18n.t_with("admin-conversation-direct", &[("names", &names.join(", "))])
+      }
+    },
+    Some(known) if !known.name.is_empty() => {
+      i18n.t_with("admin-conversation-channel", &[("name", &known.name)])
+    },
+    _ => channels
+      .iter()
+      .find(|channel| channel.id == conversation && !channel.name.is_empty())
+      .map_or_else(
+        || i18n.t("admin-conversation-deleted"),
+        |channel| i18n.t_with("admin-conversation-channel", &[("name", &channel.name)]),
+      ),
+  }
+}
+
 /// All spaces and channels including private ones, with metadata only.
 #[component]
 pub fn ChannelsSection() -> impl IntoView {
@@ -60,8 +282,10 @@ pub fn ChannelsSection() -> impl IntoView {
   let query = RwSignal::new(String::new());
   let filter = RwSignal::new(ChannelFilter::All);
   let selected = RwSignal::new(None::<ConversationId>);
+  let tab = RwSignal::new(ListTab::Channels);
   let now = now_ms();
 
+  let load = Memo::new(move |_| state.read(|backend| backend.admin_load()));
   let channels = Memo::new(move |_| state.read(|backend| backend.admin_channels()));
   let visible = Memo::new(move |_| {
     let needle = query.get().trim().to_lowercase();
@@ -82,12 +306,19 @@ pub fn ChannelsSection() -> impl IntoView {
       .get()
       .and_then(|id| channels.get().into_iter().find(|channel| channel.id == id))
   });
+  // The detail is built again for another channel only: a refresh with new counts updates it in
+  // place, so the moderation form and a join result stay and nothing flickers (issue #687).
+  let detail_channel = Memo::new(move |_| {
+    selected_channel.with(|maybe_channel| maybe_channel.as_ref().map(|channel| channel.id))
+  });
 
   view! {
     <SectionHeader
       title=Signal::derive(move || i18n.t("admin-channels-title"))
       subtitle=Signal::derive(move || i18n.t("admin-channels-subtitle"))
     />
+    <UnconfirmedRemovals channels=channels />
+    <GroupLeftovers channels=channels />
     <div class="admin-toolbar">
       <label class="visually-hidden" for="admin-channel-search">{move || i18n.t("admin-search")}</label>
       <input
@@ -101,7 +332,22 @@ pub fn ChannelsSection() -> impl IntoView {
         prop:value=move || query.get()
         on:input=move |ev| query.set(event_target_value(&ev))
       />
+      <div class="segmented" role="group" aria-label=move || i18n.t("admin-list-tab")>
+        <SlidingIndicator />
+        {ListTab::ALL
+          .into_iter()
+          .map(|option| {
+            view! {
+              <button aria-pressed=move || (tab.get() == option).to_string() on:click=move |_| tab.set(option)>
+                {move || i18n.t(&format!("admin-tab-{}", option.slug()))}
+              </button>
+            }
+          })
+          .collect_view()}
+      </div>
+      <Show when=move || tab.get() == ListTab::Channels fallback=|| ()>
       <div class="segmented" role="group" aria-label=move || i18n.t("admin-filter")>
+        <SlidingIndicator />
         {ChannelFilter::ALL
           .into_iter()
           .map(|option| {
@@ -113,9 +359,15 @@ pub fn ChannelsSection() -> impl IntoView {
           })
           .collect_view()}
       </div>
+      </Show>
     </div>
+    <Show when=move || tab.get() == ListTab::Spaces fallback=|| ()>
+      <SpacesPanel query=query />
+    </Show>
+    <Show when=move || tab.get() == ListTab::Channels fallback=|| ()>
     <div class="admin-split">
       <div class="table-wrap">
+        <Show when=move || load.get() == AdminLoad::Loaded fallback=move || view! { <LoadNotice load=load /> }>
         <table class="data-table">
           <caption class="visually-hidden">{move || i18n.t("admin-channels-title")}</caption>
           <thead>
@@ -137,14 +389,16 @@ pub fn ChannelsSection() -> impl IntoView {
         <Show when=move || visible.get().is_empty() fallback=|| ()>
           <p class="empty-state">{move || i18n.t("admin-empty")}</p>
         </Show>
+        </Show>
       </div>
       <aside class="detail-pane" aria-label=move || i18n.t("admin-detail-label")>
-        {move || match selected_channel.get() {
-          Some(channel) => view! { <ChannelDetail channel=channel /> }.into_any(),
+        {move || match detail_channel.get().and_then(|_| selected_channel.get_untracked()) {
+          Some(channel) => view! { <ChannelDetail channel=channel latest=selected_channel /> }.into_any(),
           None => view! { <p class="empty-state">{move || i18n.t("admin-channel-select")}</p> }.into_any(),
         }}
       </aside>
     </div>
+    </Show>
   }
 }
 
@@ -189,22 +443,34 @@ fn ChannelRow(channel: AdminChannel, selected: RwSignal<Option<ConversationId>>,
 }
 
 #[component]
-fn ChannelDetail(channel: AdminChannel) -> impl IntoView {
+fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let outcome = RwSignal::new(None::<SelfJoinOutcome>);
   let id = channel.id;
   let is_private = channel.kind == ConversationKind::Private;
-  let owner_name = channel
-    .maybe_owner
-    .and_then(|owner| state.read(|backend| backend.user(owner)))
-    .map(|user| user.display_name);
+  let delete_access = ChannelAccess::new(state, id);
+  // The channel as the last refresh has it; the one it was opened with once it is gone.
+  let current = Memo::new(move |previous: Option<&AdminChannel>| {
+    latest
+      .get()
+      .or_else(|| previous.cloned())
+      .unwrap_or_else(|| channel.clone())
+  });
+  let maybe_owner = Memo::new(move |_| current.with(|channel| channel.maybe_owner));
+  let owner_name = Memo::new(move |_| {
+    maybe_owner
+      .get()
+      .and_then(|owner| state.read(|backend| backend.user(owner)))
+      .map(|user| user.display_name)
+  });
   let retention = move || {
+    let retention = current.with(|channel| channel.retention);
     let mut parts = Vec::new();
-    if let Some(days) = channel.retention.maybe_days {
+    if let Some(days) = retention.maybe_days {
       parts.push(i18n.t_count("admin-retention-days", days as usize));
     }
-    if let Some(messages) = channel.retention.maybe_max_messages {
+    if let Some(messages) = retention.maybe_max_messages {
       parts.push(i18n.t_count("admin-retention-messages", messages as usize));
     }
     if parts.is_empty() {
@@ -213,31 +479,34 @@ fn ChannelDetail(channel: AdminChannel) -> impl IntoView {
       parts.join(" / ")
     }
   };
-  let history = match &channel.history {
-    HistoryPolicy::FromJoin => "from_join".to_owned(),
-    HistoryPolicy::Full => "full".to_owned(),
-    HistoryPolicy::Unknown(other) => other.clone(),
+  let history = move || {
+    current.with(|channel| match &channel.history {
+      HistoryPolicy::FromJoin => "from_join".to_owned(),
+      HistoryPolicy::Full => "full".to_owned(),
+      HistoryPolicy::Unknown(other) => other.clone(),
+    })
   };
 
   view! {
-    <h3 translate="no">{format!("# {}", channel.name)}</h3>
-    <p class="muted-text" translate="no">{channel.space_name.clone()}</p>
+    <h3 translate="no">{move || current.with(|channel| format!("# {}", channel.name))}</h3>
+    <p class="muted-text" translate="no">{move || current.with(|channel| channel.space_name.clone())}</p>
     <dl class="meta-list">
       <dt>{move || i18n.t("admin-col-members")}</dt>
-      <dd>{move || i18n.t_count("members-count", channel.member_count as usize)}</dd>
+      <dd>{move || i18n.t_count("members-count", current.with(|channel| channel.member_count) as usize)}</dd>
       <dt>{move || i18n.t("admin-guests")}</dt>
-      <dd>{channel.guest_count}</dd>
+      <dd>{move || current.with(|channel| channel.guest_count)}</dd>
       <dt>{move || i18n.t("admin-col-owner")}</dt>
-      <dd translate="no">{owner_name.unwrap_or_else(|| "–".to_owned())}</dd>
+      <dd translate="no">{move || owner_name.get().unwrap_or_else(|| "–".to_owned())}</dd>
       <dt>{move || i18n.t("admin-messages")}</dt>
-      <dd>{channel.message_count.to_string()}</dd>
+      <dd>{move || current.with(|channel| channel.message_count.to_string())}</dd>
       <dt>{move || i18n.t("admin-col-storage")}</dt>
-      <dd>{format_bytes(channel.storage_bytes)}</dd>
+      <dd>{move || current.with(|channel| format_bytes(channel.storage_bytes))}</dd>
       <dt>{move || i18n.t("admin-history")}</dt>
       <dd>{move || {
+        let history = history();
         let key = format!("admin-history-{history}");
         let text = i18n.t(&key);
-        if text == key { history.clone() } else { text }
+        if text == key { history } else { text }
       }}</dd>
       <dt>{move || i18n.t("admin-retention")}</dt>
       <dd>{retention}</dd>
@@ -247,17 +516,29 @@ fn ChannelDetail(channel: AdminChannel) -> impl IntoView {
       <span>{move || i18n.t("admin-no-content")}</span>
     </p>
     <div class="detail-actions">
-      {is_private.then(|| {
-        view! {
-          <button class="btn" on:click=move |_| outcome.set(Some(state.write(|backend| backend.admin_join_channel(id))))>
-            {move || i18n.t("admin-join")}
-          </button>
-        }
-      })}
+      {move || {
+        // Only for an admin who isn't in the channel yet, or whose device no member let in (a
+        // refused self-join asks again from here, issue #907).
+        let join = admin_join_state(state, id);
+        (is_private && join != AdminJoinState::Joined).then(|| {
+          let label = match join {
+            AdminJoinState::Waiting => "admin-join-again",
+            AdminJoinState::NotMember | AdminJoinState::Joined => "admin-join",
+          };
+          view! {
+            <button class="btn" on:click=move |_| outcome.set(Some(state.write(|backend| backend.admin_join_channel(id))))>
+              {move || i18n.t(label)}
+            </button>
+          }
+        })
+      }}
       <button class="btn" disabled title=move || i18n.t("admin-soon")>{move || i18n.t("admin-archive")}</button>
     </div>
-    {channel.maybe_owner.is_none().then(|| view! { <OwnerAssign channel=id /> })}
+    {move || maybe_owner.get().is_none().then(|| view! { <OwnerAssign channel=id /> })}
     <ModerationEditor channel=id />
+    <Show when=move || delete_access.can(&Permission::DeleteChannel) fallback=|| ()>
+      <DeleteChannelSection conversation=id on_deleted=Callback::new(move |()| state.write(|backend| backend.admin_refresh())) />
+    </Show>
     <p class="status-line" role="status">
       {move || {
         outcome
@@ -270,6 +551,31 @@ fn ChannelDetail(channel: AdminChannel) -> impl IntoView {
       }}
     </p>
   }
+}
+
+/// Where the admin viewing the console stands in a channel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdminJoinState {
+  NotMember,
+  /// A member whose device asked to be let into the encryption group and waits.
+  Waiting,
+  Joined,
+}
+
+fn admin_join_state(state: AppState, channel: ConversationId) -> AdminJoinState {
+  state.read(|backend| {
+    if backend.conversation(channel).is_none() {
+      return AdminJoinState::NotMember;
+    }
+    let is_waiting = backend
+      .membership_issues(channel)
+      .contains(&MembershipIssue::WaitingForAdmission);
+    if is_waiting {
+      AdminJoinState::Waiting
+    } else {
+      AdminJoinState::Joined
+    }
+  })
 }
 
 /// Picks a new owner for a channel without one, from its members (admin.md §2.5).

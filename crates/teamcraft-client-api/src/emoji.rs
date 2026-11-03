@@ -1,6 +1,8 @@
 //! Text shortcuts that become emoji while composing: classic emoticons (`:)`) and `:shortcodes:`.
 //! Only whole words are converted, and never inside code, so source code and links stay as typed.
 
+use crate::emoji_catalog;
+
 /// Emoticons and the emoji they become.
 const EMOTICONS: [(&str, &str); 14] = [
   (":)", "🙂"),
@@ -17,34 +19,6 @@ const EMOTICONS: [(&str, &str); 14] = [
   (":|", "😐"),
   ("<3", "❤️"),
   ("xD", "😆"),
-];
-
-/// `:name:` shortcodes the composer knows.
-const SHORTCODES: [(&str, &str); 24] = [
-  ("smile", "😄"),
-  ("grin", "😁"),
-  ("joy", "😂"),
-  ("wink", "😉"),
-  ("heart", "❤️"),
-  ("thumbsup", "👍"),
-  ("+1", "👍"),
-  ("thumbsdown", "👎"),
-  ("-1", "👎"),
-  ("clap", "👏"),
-  ("pray", "🙏"),
-  ("tada", "🎉"),
-  ("fire", "🔥"),
-  ("rocket", "🚀"),
-  ("eyes", "👀"),
-  ("thinking", "🤔"),
-  ("100", "💯"),
-  ("check", "✅"),
-  ("x", "❌"),
-  ("warning", "⚠️"),
-  ("coffee", "☕"),
-  ("bug", "🐛"),
-  ("sparkles", "✨"),
-  ("wave", "👋"),
 ];
 
 /// Replaces emoticons and shortcodes in `text`, leaving fenced code, `inline code` and anything
@@ -97,9 +71,9 @@ fn convert_word(word: &str) -> String {
     return (*emoji).to_owned();
   }
   if let Some(name) = word.strip_prefix(':').and_then(|rest| rest.strip_suffix(':'))
-    && let Some((_, emoji)) = SHORTCODES.iter().find(|(code, _)| *code == name)
+    && let Some(emoji) = emoji_catalog::by_shortcode(name)
   {
-    return (*emoji).to_owned();
+    return emoji.to_owned();
   }
   word.to_owned()
 }
@@ -112,6 +86,7 @@ mod tests {
   fn whole_word_emoticons_and_shortcodes_become_emoji() {
     assert_eq!(convert("hi :) see you ;) :tada:"), "hi 🙂 see you 😉 🎉");
     assert_eq!(convert("I <3 it"), "I ❤️ it");
+    assert_eq!(convert(":melting_face: :check: :+1:"), "🫠 ✅ 👍");
   }
 
   #[test]

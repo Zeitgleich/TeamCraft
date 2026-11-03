@@ -20,8 +20,14 @@ struct TeamCraftApp: App {
         .onChange(of: lock.isLocked) { _, _ in updateShield(phase: scenePhase) }
         .onChange(of: scenePhase) { _, phase in
           switch phase {
-          case .active: lock.didBecomeActive()
-          case .background: lock.didEnterBackground()
+          case .active:
+            lock.didBecomeActive()
+            model.reportActivity(.foreground)
+          case .background:
+            // First, before anything else runs: the background time for pending sends (#158).
+            model.sceneWillEnterBackground()
+            lock.didEnterBackground()
+            model.reportActivity(.background)
           default: break
           }
           updateShield(phase: phase)

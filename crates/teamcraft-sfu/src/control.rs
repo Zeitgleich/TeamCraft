@@ -6,16 +6,18 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use subtle::ConstantTimeEq;
-use teamcraft_proto::{ErrorBody, ErrorCode, SfuControlAction, SfuControlRequest};
+use teamcraft_proto::{ErrorBody, ErrorCode, SfuControlAction, SfuControlRequest, SfuRosterReport};
 
 use crate::room::RoomError;
 use crate::server::SfuControl;
 
 /// Route of the control endpoint.
 pub const CONTROL_PATH: &str = "/internal/v1/calls/control";
+/// Route a starting server reads the roster from, to take over the calls that kept running.
+pub const ROSTER_PATH: &str = "/internal/v1/calls/roster";
 
 #[derive(Clone)]
 struct ControlState {
@@ -27,6 +29,7 @@ struct ControlState {
 pub fn control_router(control: SfuControl, registration_token: impl Into<Arc<str>>) -> Router {
   Router::new()
     .route(CONTROL_PATH, post(control_handler))
+    .route(ROSTER_PATH, get(roster_handler))
     .with_state(ControlState {
       control,
       registration_token: registration_token.into(),
@@ -65,6 +68,20 @@ async fn control_handler(
       &other.to_string(),
     )),
   }
+}
+
+async fn roster_handler(
+  State(state): State<ControlState>,
+  headers: HeaderMap,
+) -> Result<Json<SfuRosterReport>, (StatusCode, Json<ErrorBody>)> {
+  if !is_authorized(&headers, &state.registration_token) {
+    return Err(error(
+      StatusCode::UNAUTHORIZED,
+      ErrorCode::Unauthorized,
+      "invalid registration token",
+    ));
+  }
+  Ok(Json(state.control.roster()))
 }
 
 /// `Authorization: Bearer <token>`, compared in constant time.

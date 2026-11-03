@@ -2,6 +2,8 @@
 //! (tokio-tungstenite on native targets, the browser's `WebSocket` in wasm).
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{PoisonError, RwLock};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -10,107 +12,228 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use teamcraft_proto::RendezvousClientMessage;
 use teamcraft_proto::{
-  AddConversationMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ConversationId,
-  ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest, DeviceId,
-  DeviceResponse, ErrorBody, GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse,
-  KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse,
-  ListDevicesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
+  AddConversationMemberRequest, AddSpaceMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse,
+  ConversationId, ConversationMemberResponse, ConversationResponse, CreateChannelRequest, CreateDmRequest,
+  CreateGroupDmRequest, DeviceId, DeviceResponse, ErrorBody, GatewayClientMessage, GatewayServerMessage,
+  GetMeResponse, IdentityKeyResponse, InviteId, KeyBagResponse, KeyPackageStatusResponse,
+  ListAdminConversationsResponse, ListConversationMembersResponse, ListConversationsResponse,
+  ListDevicesResponse, ListInvitesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
   ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse,
   MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
-  RegisterDeviceRequest, SendMessageRequest, SpaceId, UploadIdentityKeyRequest, UploadKeyPackagesRequest,
-  UserId, UserSummary,
+  RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest, SpaceId, SpaceMemberResponse,
+  UpdateSpaceMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
+use teamcraft_proto::{AdminJoinRequestResponse, ListAdminJoinRequestsResponse};
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
   WorkspaceLogKind,
 };
 use teamcraft_proto::{
-  AttachmentDownloadResponse, AttachmentId, AttachmentResponse, CreateAttachmentRequest,
-  CreateAttachmentResponse, CreateShareLinkRequest, RegisterPushRequest, ShareLinkResponse,
+  AttachmentDownloadResponse, AttachmentId, AttachmentPartUrlResponse, AttachmentResponse,
+  CompleteMultipartAttachmentRequest, CreateAttachmentRequest, CreateAttachmentResponse,
+  CreateMultipartAttachmentResponse, CreateShareLinkRequest, ListShareLinksResponse,
+  PresignAttachmentPartRequest, RegisterPushRequest, ShareLinkResponse,
 };
 use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
   CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
   OrgBackgroundId,
 };
-use teamcraft_proto::{Base64Bytes, GatewayInfoResponse, GatewayRevokeRequest, PushGatewayResponse};
-use teamcraft_proto::{CallJoinTokenResponse, CreateCallJoinTokenRequest};
+use teamcraft_proto::{
+  Base64Bytes, GatewayInfoResponse, GatewayRevokeRequest, PushGatewayResponse, WebPushKeyResponse,
+};
+use teamcraft_proto::{
+  CallJoinTokenResponse, CallStateResponse, ChangeWebPushSubscriptionRequest, CreateCallJoinTokenRequest,
+  ErrorCode, ListRunningCallsResponse, MoveCallRequest,
+};
 use teamcraft_proto::{
   CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
   InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
-use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
+use teamcraft_proto::{CreateInstantMeetingRequest, MeetingId, MeetingResponse};
+use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentResponse};
+use teamcraft_proto::{
+  ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
+  ProvisionUsersRequest, ProvisionUsersResponse,
+};
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
-use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, UnreadResponse};
+use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHeadsResponse, UnreadResponse};
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
+use teamcraft_proto::{PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
 #[cfg(target_arch = "wasm32")]
 use super::web_socket::{BrowserSocket, SocketFrame};
-use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
+use super::{
+  ApiError, DetachedDownload, DetachedPart, DetachedRequest, GatewayConnection, Interception,
+  RendezvousConnection, RendezvousFrame, ServerApi,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use super::{DetachedRange, RangedBlob};
 use crate::clock::{Clock, SystemClock};
+use crate::retry::parse_retry_after;
+use crate::transfers::ByteCounter;
+use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest, ListDeviceLinksResponse};
 
-/// How long a TCP and TLS (or WebSocket) handshake may take.
+/// How long a TCP and TLS handshake may take.
 #[cfg(not(target_arch = "wasm32"))]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long opening the gateway WebSocket may take: TCP, a proxy's `CONNECT`, TLS and the upgrade
+/// are four round trips or more, each seconds long on a saturated link (issue #1064).
+#[cfg(not(target_arch = "wasm32"))]
+const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Keepalive probes and HTTP/2 pings on open connections, below the idle timeout of common proxies.
 #[cfg(not(target_arch = "wasm32"))]
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 #[cfg(not(target_arch = "wasm32"))]
 const KEEPALIVE_RETRIES: u32 = 3;
+/// How long a JSON API call may wait for its answer to start: connecting, sending the request, the
+/// server's work and the first byte. On macOS, iOS and Windows a request on a connection that died
+/// mid-flight would otherwise hang until the OS gives up: keepalive only probes idle sockets and
+/// there is no `TCP_USER_TIMEOUT`. Per phase, not in total (issue #1064): a big answer on a slow
+/// link is slow, not dead, so its body only has to keep moving ([`API_READ_IDLE_TIMEOUT`]).
+#[cfg(not(target_arch = "wasm32"))]
+const API_ANSWER_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long the body of a JSON API answer may stop moving.
+#[cfg(not(target_arch = "wasm32"))]
+const API_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a blob upload may go without handing a byte to the connection (or, once all is handed
+/// over, without an answer) before it counts as dead. Generous: the socket's send buffer (up to a
+/// few MB) still drains after the last byte was handed over, slowly on a slow uplink.
+#[cfg(not(target_arch = "wasm32"))]
+const TRANSFER_STALL_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long sent data may stay unacknowledged before the connection counts as dead.
 #[cfg(any(target_os = "android", target_os = "linux"))]
 const UNACKNOWLEDGED_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Silence after which the gateway connection counts as dead: two heartbeat intervals (25 s, plus
-/// up to one runner tick) and room for a slow round trip.
+/// up to one runner tick) and room for a slow round trip. The apps' `ConnectionSupervisor` detects
+/// silence itself, with the interval from `hello`; this is the transport's backstop for clients that
+/// drive the connection on their own (the integration bridge).
 const GATEWAY_SILENCE_LIMIT_MS: i64 = 50_000;
 
 /// Supplies a valid OIDC access token. The app owns login and refresh; the core only asks.
 pub trait AccessTokenSource {
   fn access_token(&self) -> Result<String, ApiError>;
+
+  /// What a request waits for. A source that may block (a token refresh in the app) answers here
+  /// without holding the caller's thread, which also runs the sync loop.
+  fn fresh_token(&self) -> impl Future<Output = Result<String, ApiError>> {
+    std::future::ready(self.access_token())
+  }
 }
 
 /// A fixed token (tests, command-line tools).
 pub struct StaticToken(pub String);
 
+/// Waits until the local store has persisted what was written so far. Hosts whose store writes
+/// asynchronously (the browser's IndexedDB) set it, so nothing the server is told about can be
+/// lost locally when the page dies right after (an MLS commit, uploaded key packages).
+#[cfg(target_arch = "wasm32")]
+pub type WriteBarrier = std::rc::Rc<dyn Fn() -> futures_util::future::LocalBoxFuture<'static, ()>>;
+
 pub struct HttpServerApi<T> {
-  client: reqwest::Client,
+  /// Replaced by [`HttpServerApi::drop_connections`] after a wake-up or network change.
+  client: RwLock<reqwest::Client>,
+  /// Awaited before every request that changes server state.
+  #[cfg(target_arch = "wasm32")]
+  maybe_write_barrier: Option<WriteBarrier>,
   base_url: String,
   /// Why `base_url` is refused, checked once in [`HttpServerApi::new`].
   maybe_insecure: Option<String>,
   tokens: T,
+  /// Set once `/enrollment` answered a bare 404 (a server from before the endpoint): later calls
+  /// go to the single endpoints directly instead of probing first.
+  lacks_enrollment_endpoint: AtomicBool,
+}
+
+/// What `GET /users/{id}/enrollment` answered.
+enum Enrollment {
+  Known(UserEnrollmentResponse),
+  /// A server from before the endpoint: the single endpoints answer instead (404 for nothing).
+  NoEndpoint,
 }
 
 impl<T: AccessTokenSource> HttpServerApi<T> {
   /// `base_url` without trailing slash, e.g. `https://chat.example.com`.
   pub fn new(base_url: impl Into<String>, tokens: T) -> Self {
-    let client = http_client();
+    let client = RwLock::new(http_client());
     let base_url = base_url.into().trim_end_matches('/').to_string();
     Self {
       client,
       maybe_insecure: insecure_reason(&base_url),
       base_url,
       tokens,
+      lacks_enrollment_endpoint: AtomicBool::new(false),
+      #[cfg(target_arch = "wasm32")]
+      maybe_write_barrier: None,
     }
   }
 
-  fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ApiError> {
+  /// Awaits `barrier` before every request that changes server state.
+  #[cfg(target_arch = "wasm32")]
+  pub fn with_write_barrier(mut self, barrier: WriteBarrier) -> Self {
+    self.maybe_write_barrier = Some(barrier);
+    self
+  }
+
+  /// Forgets the pooled connections: after a suspend or a network change they are usually dead,
+  /// and a request on one would only fail once the HTTP/2 keep-alive gives up (issue #883).
+  /// Requests already running keep theirs.
+  pub fn drop_connections(&self) {
+    *self.client.write().unwrap_or_else(PoisonError::into_inner) = http_client();
+  }
+
+  /// The HTTP client of the next request (a cheap handle on the shared pool).
+  fn http(&self) -> reqwest::Client {
+    self.client.read().unwrap_or_else(PoisonError::into_inner).clone()
+  }
+
+  /// Local writes are durable before the server hears of anything that follows from them.
+  async fn before_change(&self, method: &Method) {
+    #[cfg(target_arch = "wasm32")]
+    if *method != Method::GET
+      && *method != Method::HEAD
+      && let Some(barrier) = &self.maybe_write_barrier
+    {
+      barrier().await;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = method;
+  }
+
+  async fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ApiError> {
     self.require_secure_transport()?;
-    let token = self.tokens.access_token()?;
-    Ok(
-      self
-        .client
-        .request(method, format!("{}/api/v1{path}", self.base_url))
-        .bearer_auth(token),
-    )
+    let token = self.tokens.fresh_token().await?;
+    let request = self
+      .http()
+      .request(method, format!("{}/api/v1{path}", self.base_url))
+      .bearer_auth(token);
+    Ok(request)
   }
 
   async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R, ApiError> {
-    decode(send(self.request(Method::GET, path)?).await?).await
+    decode_api(send_api(self.request(Method::GET, path).await?).await?).await
+  }
+
+  /// A user the server doesn't show the caller (404 with an error code) has published nothing, as
+  /// the single endpoints said; a bare 404 is a server that doesn't have the endpoint yet.
+  async fn enrollment(&self, user: UserId) -> Result<Enrollment, ApiError> {
+    if self.lacks_enrollment_endpoint.load(Ordering::Relaxed) {
+      return Ok(Enrollment::NoEndpoint);
+    }
+    match self.get(&format!("/users/{user}/enrollment")).await {
+      Ok(enrollment) => Ok(Enrollment::Known(enrollment)),
+      Err(error) if error.is_not_found() && error.error_code().is_none() => {
+        self.lacks_enrollment_endpoint.store(true, Ordering::Relaxed);
+        Ok(Enrollment::NoEndpoint)
+      },
+      Err(error) if error.is_not_found() => Ok(Enrollment::Known(UserEnrollmentResponse::default())),
+      Err(error) => Err(error),
+    }
   }
 
   async fn send_json<B: Serialize, R: DeserializeOwned>(
@@ -119,7 +242,8 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     path: &str,
     body: &B,
   ) -> Result<R, ApiError> {
-    decode(send(self.request(method, path)?.json(body)).await?).await
+    self.before_change(&method).await;
+    decode_api(send_api(self.request(method, path).await?.json(body)).await?).await
   }
 
   async fn send_without_response<B: Serialize>(
@@ -128,11 +252,12 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     path: &str,
     maybe_body: Option<&B>,
   ) -> Result<(), ApiError> {
-    let mut request = self.request(method, path)?;
+    self.before_change(&method).await;
+    let mut request = self.request(method, path).await?;
     if let Some(body) = maybe_body {
       request = request.json(body);
     }
-    send(request).await.map(|_| ())
+    send_api(request).await.map(|_| ())
   }
 
   /// An authenticated request to `/api/v1{path}` with a JSON body, answered with the raw JSON
@@ -149,17 +274,15 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     }
     let method =
       Method::from_bytes(method.as_bytes()).map_err(|error| ApiError::Decode(error.to_string()))?;
-    let mut request = self.request(method, path)?;
+    self.before_change(&method).await;
+    let mut request = self.request(method, path).await?;
     if let Some(body) = maybe_body {
       request = request
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body);
     }
-    send(request)
-      .await?
-      .text()
-      .await
-      .map_err(|error| ApiError::Decode(error.to_string()))
+    let body = read_api_body(send_api(request).await?).await?;
+    String::from_utf8(body).map_err(|error| ApiError::Decode(error.to_string()))
   }
 
   fn gateway_url(&self) -> String {
@@ -198,12 +321,27 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get(&format!("/users/{user}")).await
   }
 
+  async fn search_users(&self, query: &str) -> Result<SearchUsersResponse, ApiError> {
+    let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
+    self.get(&format!("/users?query={encoded}")).await
+  }
+
   async fn register_device(&self, request: &RegisterDeviceRequest) -> Result<DeviceResponse, ApiError> {
     self.send_json(Method::POST, "/devices", request).await
   }
 
   async fn list_user_devices(&self, user: UserId) -> Result<ListDevicesResponse, ApiError> {
     self.get(&format!("/users/{user}/devices")).await
+  }
+
+  async fn update_device(
+    &self,
+    device: DeviceId,
+    request: &UpdateDeviceRequest,
+  ) -> Result<DeviceResponse, ApiError> {
+    self
+      .send_json(Method::PATCH, &format!("/devices/{device}"), request)
+      .await
   }
 
   async fn put_identity_key(
@@ -213,12 +351,18 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.send_json(Method::PUT, "/me/identity-key", request).await
   }
 
-  async fn identity_key(&self, user: UserId) -> Result<IdentityKeyResponse, ApiError> {
-    self.get(&format!("/users/{user}/identity-key")).await
+  async fn identity_key(&self, user: UserId) -> Result<Option<IdentityKeyResponse>, ApiError> {
+    match self.enrollment(user).await? {
+      Enrollment::Known(enrollment) => Ok(enrollment.maybe_identity_key),
+      Enrollment::NoEndpoint => found(self.get(&format!("/users/{user}/identity-key")).await),
+    }
   }
 
-  async fn device_list(&self, user: UserId) -> Result<DeviceListResponse, ApiError> {
-    self.get(&format!("/users/{user}/device-list")).await
+  async fn device_list(&self, user: UserId) -> Result<Option<DeviceListResponse>, ApiError> {
+    match self.enrollment(user).await? {
+      Enrollment::Known(enrollment) => Ok(enrollment.maybe_device_list),
+      Enrollment::NoEndpoint => found(self.get(&format!("/users/{user}/device-list")).await),
+    }
   }
 
   async fn put_device_list(&self, request: &PutDeviceListRequest) -> Result<DeviceListResponse, ApiError> {
@@ -228,6 +372,80 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn revoke_device(&self, device: DeviceId) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(Method::DELETE, &format!("/devices/{device}"), None)
+      .await
+  }
+
+  async fn announce_device_link(
+    &self,
+    request: &CreateDeviceLinkRequest,
+  ) -> Result<DeviceLinkRequest, ApiError> {
+    self.send_json(Method::POST, "/device-links", request).await
+  }
+
+  async fn device_links(&self) -> Result<Vec<DeviceLinkRequest>, ApiError> {
+    Ok(
+      self
+        .get::<ListDeviceLinksResponse>("/device-links")
+        .await?
+        .requests,
+    )
+  }
+
+  async fn reject_device_link(&self, request_id: &str) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::POST, &format!("/device-links/{request_id}/reject"), None)
+      .await
+  }
+
+  async fn withdraw_device_link(&self, request_id: &str) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/device-links/{request_id}"), None)
+      .await
+  }
+
+  async fn admin_join_requests(&self) -> Result<Vec<AdminJoinRequestResponse>, ApiError> {
+    Ok(
+      self
+        .get::<ListAdminJoinRequestsResponse>("/admin-join-requests")
+        .await?
+        .requests,
+    )
+  }
+
+  async fn request_admin_join(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<AdminJoinRequestResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/admin-join-requests"),
+        &serde_json::json!({}),
+      )
+      .await
+  }
+
+  async fn approve_admin_join(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<ConversationMemberResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/admin-join-requests/{user}/approve"),
+        &serde_json::json!({}),
+      )
+      .await
+  }
+
+  async fn close_admin_join(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::DELETE,
+        &format!("/conversations/{conversation}/admin-join-requests/{user}"),
+        None,
+      )
       .await
   }
 
@@ -296,6 +514,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.send_json(Method::POST, "/dms", request).await
   }
 
+  async fn create_group_dm(&self, request: &CreateGroupDmRequest) -> Result<ConversationResponse, ApiError> {
+    self.send_json(Method::POST, "/group-dms", request).await
+  }
+
   async fn add_member(
     &self,
     conversation: ConversationId,
@@ -310,6 +532,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn check_member_removal(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::GET,
+        &format!("/conversations/{conversation}/members/{user}/removal"),
+        None,
+      )
+      .await
+  }
+
   async fn remove_member(&self, conversation: ConversationId, user: UserId) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(
@@ -317,6 +549,81 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         &format!("/conversations/{conversation}/members/{user}"),
         None,
       )
+      .await
+  }
+
+  async fn check_leave(
+    &self,
+    conversation: ConversationId,
+    me: UserId,
+    deletes_if_last: bool,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::GET,
+        &format!("/conversations/{conversation}/members/{me}/removal?delete_if_last={deletes_if_last}"),
+        None,
+      )
+      .await
+  }
+
+  async fn leave_conversation(
+    &self,
+    conversation: ConversationId,
+    me: UserId,
+    deletes_if_last: bool,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::DELETE,
+        &format!("/conversations/{conversation}/members/{me}?delete_if_last={deletes_if_last}"),
+        None,
+      )
+      .await
+  }
+
+  async fn delete_space(&self, space: SpaceId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/spaces/{space}"), None)
+      .await
+  }
+
+  async fn delete_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/conversations/{conversation}"), None)
+      .await
+  }
+
+  async fn admin_channels_of(&self, user: UserId) -> Result<Vec<ConversationId>, ApiError> {
+    let mut channels = Vec::new();
+    loop {
+      let after = channels
+        .last()
+        .map(|last: &ConversationId| format!("&after={last}"))
+        .unwrap_or_default();
+      let page: ListAdminConversationsResponse = self
+        .get(&format!("/admin/conversations?user_id={user}{after}"))
+        .await?;
+      channels.extend(page.conversations.iter().map(|channel| channel.id));
+      if !page.has_more || page.conversations.is_empty() {
+        return Ok(channels);
+      }
+    }
+  }
+
+  async fn admin_remove_from_chats(&self, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::POST,
+        &format!("/admin/users/{user}/remove-from-chats"),
+        None,
+      )
+      .await
+  }
+
+  async fn admin_delete_user(&self, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/admin/users/{user}"), None)
       .await
   }
 
@@ -343,9 +650,47 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn mark_reactions_seen(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::MarkReactionsSeenRequest,
+  ) -> Result<(), ApiError> {
+    let path = format!("/conversations/{conversation}/reactions-seen");
+    self
+      .send_without_response(Method::PUT, &path, Some(request))
+      .await
+  }
+
+  async fn set_thread_read(
+    &self,
+    conversation: ConversationId,
+    thread: teamcraft_proto::ThreadId,
+    request: &teamcraft_proto::SetThreadReadRequest,
+  ) -> Result<(), ApiError> {
+    let path = format!("/conversations/{conversation}/threads/{thread}/read");
+    self
+      .send_without_response(Method::PUT, &path, Some(request))
+      .await
+  }
+
   async fn set_presence(&self, request: &SetPresenceRequest) -> Result<(), ApiError> {
     self
       .send_without_response(Method::PUT, "/me/presence", Some(request))
+      .await
+  }
+
+  async fn set_custom_status(
+    &self,
+    request: &teamcraft_proto::SetCustomStatusRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(Method::PUT, "/me/status", Some(request))
+      .await
+  }
+
+  async fn clear_custom_status(&self) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, "/me/status", None)
       .await
   }
 
@@ -388,6 +733,43 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn running_call(&self, conversation: ConversationId) -> Result<Option<CallStateResponse>, ApiError> {
+    match self.get(&format!("/conversations/{conversation}/call")).await {
+      Ok(call) => Ok(Some(call)),
+      Err(error) if error.error_code() == Some(&ErrorCode::CallNotFound) => Ok(None),
+      Err(error) => Err(error),
+    }
+  }
+
+  async fn running_calls(&self) -> Result<Option<Vec<CallStateResponse>>, ApiError> {
+    match self.get::<ListRunningCallsResponse>("/calls").await {
+      Ok(list) => Ok(Some(list.calls)),
+      // A server from before the endpoint: the call events alone keep the roster.
+      Err(error) if error.is_not_found() => Ok(None),
+      Err(error) => Err(error),
+    }
+  }
+
+  async fn create_instant_meeting(
+    &self,
+    request: &CreateInstantMeetingRequest,
+  ) -> Result<MeetingResponse, ApiError> {
+    self.send_json(Method::POST, "/meetings/instant", request).await
+  }
+
+  async fn cancel_meeting(&self, meeting: MeetingId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/meetings/{meeting}"), None)
+      .await
+  }
+
+  async fn move_call(&self, conversation: ConversationId, request: &MoveCallRequest) -> Result<(), ApiError> {
+    let path = format!("/conversations/{conversation}/call/move");
+    self
+      .send_without_response(Method::POST, &path, Some(request))
+      .await
+  }
+
   async fn send_message(
     &self,
     conversation: ConversationId,
@@ -400,6 +782,110 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         request,
       )
       .await
+  }
+
+  async fn provision_users(
+    &self,
+    request: &ProvisionUsersRequest,
+  ) -> Result<ProvisionUsersResponse, ApiError> {
+    self.send_json(Method::POST, "/admin/import/users", request).await
+  }
+
+  async fn import_dm(&self, request: &ImportDmRequest) -> Result<ConversationResponse, ApiError> {
+    self.send_json(Method::POST, "/admin/import/dms", request).await
+  }
+
+  async fn import_messages(
+    &self,
+    conversation: ConversationId,
+    request: &ImportMessagesRequest,
+  ) -> Result<ImportMessagesResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/admin/import/conversations/{conversation}/messages"),
+        request,
+      )
+      .await
+  }
+
+  async fn set_import_member_state(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    request: &ImportMemberStateRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(
+        Method::PUT,
+        &format!("/admin/import/conversations/{conversation}/members/{user}"),
+        Some(request),
+      )
+      .await
+  }
+
+  async fn finish_import(&self, conversation: ConversationId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::POST,
+        &format!("/admin/import/conversations/{conversation}/finish"),
+        None,
+      )
+      .await
+  }
+
+  async fn admin_space_names(&self) -> Result<Vec<(SpaceId, String)>, ApiError> {
+    let spaces: teamcraft_proto::ListAdminSpacesResponse = self.get("/admin/spaces").await?;
+    Ok(
+      spaces
+        .spaces
+        .into_iter()
+        .map(|space| (space.id, space.name))
+        .collect(),
+    )
+  }
+
+  async fn admin_channel_names(
+    &self,
+    space: SpaceId,
+  ) -> Result<Vec<(ConversationId, Option<String>)>, ApiError> {
+    let mut channels = Vec::new();
+    loop {
+      let after = channels
+        .last()
+        .map(|(last, _): &(ConversationId, Option<String>)| format!("&after={last}"))
+        .unwrap_or_default();
+      let page: ListAdminConversationsResponse = self
+        .get(&format!("/admin/conversations?space_id={space}{after}"))
+        .await?;
+      channels.extend(
+        page
+          .conversations
+          .iter()
+          .map(|channel| (channel.id, channel.maybe_name.clone())),
+      );
+      if !page.has_more || page.conversations.is_empty() {
+        return Ok(channels);
+      }
+    }
+  }
+
+  async fn admin_find_user(&self, username: &str) -> Result<Option<UserId>, ApiError> {
+    let query: String = url::form_urlencoded::byte_serialize(username.as_bytes()).collect();
+    let page: teamcraft_proto::ListAdminUsersResponse =
+      self.get(&format!("/admin/users?query={query}")).await?;
+    Ok(
+      page
+        .users
+        .into_iter()
+        .find(|user| {
+          user
+            .maybe_username
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(username))
+        })
+        .map(|user| user.id),
+    )
   }
 
   async fn list_messages(
@@ -465,6 +951,29 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get(&format!("/devices/{device}/welcomes{parameters}")).await
   }
 
+  async fn mls_group_info(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<teamcraft_proto::MlsGroupInfoResponse, ApiError> {
+    self
+      .get(&format!("/conversations/{conversation}/mls/group-info"))
+      .await
+  }
+
+  async fn put_mls_group_info(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::PutMlsGroupInfoRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(
+        Method::PUT,
+        &format!("/conversations/{conversation}/mls/group-info"),
+        Some(request),
+      )
+      .await
+  }
+
   async fn put_key_bag(&self, request: &PutKeyBagRequest) -> Result<KeyBagResponse, ApiError> {
     self.send_json(Method::PUT, "/me/key-bag", request).await
   }
@@ -476,6 +985,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
         &format!("/spaces/{space}/join"),
         &serde_json::json!({}),
       )
+      .await
+  }
+
+  async fn add_space_member(
+    &self,
+    space: SpaceId,
+    request: &AddSpaceMemberRequest,
+  ) -> Result<SpaceMemberResponse, ApiError> {
+    self
+      .send_json(Method::POST, &format!("/spaces/{space}/members"), request)
       .await
   }
 
@@ -578,6 +1097,38 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn list_invites(&self, space: SpaceId) -> Result<ListInvitesResponse, ApiError> {
+    self.get(&format!("/spaces/{space}/invites")).await
+  }
+
+  async fn delete_invite(&self, space: SpaceId, invite: InviteId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/spaces/{space}/invites/{invite}"), None)
+      .await
+  }
+
+  async fn update_space_member(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    request: &UpdateSpaceMemberRequest,
+  ) -> Result<SpaceMemberResponse, ApiError> {
+    self
+      .send_json(Method::PATCH, &format!("/spaces/{space}/members/{user}"), request)
+      .await
+  }
+
+  async fn remove_space_member(&self, space: SpaceId, user: UserId) -> Result<(), ApiError> {
+    self
+      // Honoured only when leaving: the confirmation said that channels only they are in go.
+      .send_without_response::<()>(
+        Method::DELETE,
+        &format!("/spaces/{space}/members/{user}?delete_if_last=true"),
+        None,
+      )
+      .await
+  }
+
   async fn set_message_pinned(
     &self,
     conversation: ConversationId,
@@ -621,6 +1172,19 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get("/unread").await
   }
 
+  async fn sync_heads(&self) -> Result<SyncHeadsResponse, ApiError> {
+    self.get("/sync/heads").await
+  }
+
+  async fn read_receipts(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<teamcraft_proto::ReadReceiptsResponse, ApiError> {
+    self
+      .get(&format!("/conversations/{conversation}/read-receipts"))
+      .await
+  }
+
   async fn key_bag(&self) -> Result<KeyBagResponse, ApiError> {
     self.get("/me/key-bag").await
   }
@@ -649,6 +1213,29 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn list_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    query: &teamcraft_proto::ListChannelRoleLogQuery,
+  ) -> Result<teamcraft_proto::ListChannelRoleLogResponse, ApiError> {
+    let parameters = query_string(&[
+      ("after", query.maybe_after.map(|version| version.to_string())),
+      ("limit", query.maybe_limit.map(|limit| limit.to_string())),
+    ]);
+    self
+      .get(&format!("/conversations/{conversation}/role-log{parameters}"))
+      .await
+  }
+
+  async fn append_channel_role_log(
+    &self,
+    conversation: ConversationId,
+    request: &teamcraft_proto::AppendChannelRoleLogRequest,
+  ) -> Result<teamcraft_proto::ChannelRoleLogEntryResponse, ApiError> {
+    let path = format!("/conversations/{conversation}/role-log");
+    self.send_json(Method::POST, &path, request).await
+  }
+
   async fn create_attachment(
     &self,
     request: &CreateAttachmentRequest,
@@ -657,7 +1244,50 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   }
 
   async fn complete_attachment(&self, attachment: AttachmentId) -> Result<AttachmentResponse, ApiError> {
-    decode(send(self.request(Method::POST, &format!("/attachments/{attachment}/complete"))?).await?).await
+    self.before_change(&Method::POST).await;
+    let request = self
+      .request(Method::POST, &format!("/attachments/{attachment}/complete"))
+      .await?;
+    decode_api(send_api(request).await?).await
+  }
+
+  async fn create_multipart_attachment(
+    &self,
+    request: &CreateAttachmentRequest,
+  ) -> Result<CreateMultipartAttachmentResponse, ApiError> {
+    self
+      .send_json(Method::POST, "/attachments/multipart", request)
+      .await
+  }
+
+  async fn presign_attachment_part(
+    &self,
+    attachment: AttachmentId,
+    request: &PresignAttachmentPartRequest,
+  ) -> Result<AttachmentPartUrlResponse, ApiError> {
+    self
+      .send_json(Method::POST, &format!("/attachments/{attachment}/parts"), request)
+      .await
+  }
+
+  async fn complete_multipart_attachment(
+    &self,
+    attachment: AttachmentId,
+    request: &CompleteMultipartAttachmentRequest,
+  ) -> Result<AttachmentResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/attachments/{attachment}/multipart/complete"),
+        request,
+      )
+      .await
+  }
+
+  async fn abandon_attachment(&self, attachment: AttachmentId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/attachments/{attachment}"), None)
+      .await
   }
 
   async fn download_attachment(
@@ -729,20 +1359,149 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn put_blob(&self, url: &str, bytes: Vec<u8>) -> Result<(), ApiError> {
     // Presigned: the URL carries the authorization, so no bearer token goes to object storage.
-    send(self.client.put(url).body(bytes)).await.map(|_| ())
+    send(self.http().put(url).body(bytes)).await.map(|_| ())
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn put_blob_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedRequest {
+    // Presigned URLs want the exact length; a streamed body would otherwise go chunked.
+    let request = self
+      .http()
+      .put(url)
+      .header(reqwest::header::CONTENT_LENGTH, bytes.len())
+      .body(counted_body(bytes, sent.clone()));
+    Box::pin(unless_stalled(
+      sent,
+      async move { send(request).await.map(|_| ()) },
+    ))
+  }
+
+  #[cfg(target_arch = "wasm32")]
+  fn put_blob_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedRequest {
+    let url = url.to_owned();
+    Box::pin(async move { super::xhr::put(&url, bytes, sent).await })
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn put_part_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedPart {
+    let request = self
+      .http()
+      .put(url)
+      .header(reqwest::header::CONTENT_LENGTH, bytes.len())
+      .body(counted_body(bytes, sent.clone()));
+    Box::pin(unless_stalled(sent, async move {
+      let response = send(request).await?;
+      response
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .ok_or_else(|| ApiError::Decode("the storage answered a part without an ETag".into()))
+    }))
+  }
+
+  #[cfg(target_arch = "wasm32")]
+  fn put_part_detached(&self, url: &str, bytes: Vec<u8>, sent: ByteCounter) -> DetachedPart {
+    let url = url.to_owned();
+    Box::pin(async move { super::xhr::put_part(&url, bytes, sent).await })
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn get_blob_detached(
+    &self,
+    url: &str,
+    maybe_max_bytes: Option<u64>,
+    received: ByteCounter,
+  ) -> DetachedDownload {
+    let request = self.http().get(url);
+    Box::pin(async move {
+      let mut response = send(request).await?;
+      let max_bytes = maybe_max_bytes.unwrap_or(u64::MAX);
+      if response.content_length().is_some_and(|length| length > max_bytes) {
+        return Err(ApiError::BlobTooLarge { max_bytes });
+      }
+      let mut blob = Vec::new();
+      while let Some(chunk) = response.chunk().await.map_err(network_error)? {
+        if blob.len() as u64 + chunk.len() as u64 > max_bytes {
+          return Err(ApiError::BlobTooLarge { max_bytes });
+        }
+        blob.extend_from_slice(&chunk);
+        received.add(chunk.len() as u64);
+      }
+      Ok(blob)
+    })
+  }
+
+  #[cfg(target_arch = "wasm32")]
+  fn get_blob_detached(
+    &self,
+    url: &str,
+    maybe_max_bytes: Option<u64>,
+    received: ByteCounter,
+  ) -> DetachedDownload {
+    let url = url.to_owned();
+    Box::pin(async move { super::xhr::get(&url, maybe_max_bytes, received).await })
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn get_blob_from_detached(&self, url: &str, start: u64) -> DetachedRange {
+    let mut request = self.http().get(url);
+    if start > 0 {
+      request = request.header(reqwest::header::RANGE, format!("bytes={start}-"));
+    }
+    Box::pin(async move {
+      // Per phase: the answer within the API's answer timeout, then each piece within the stall
+      // timeout; no total timeout, a big file on a slow link is slow, not dead.
+      let answer = tokio::time::timeout(API_ANSWER_TIMEOUT, send(request))
+        .await
+        .map_err(|_| ApiError::Network(format!("no answer within {} s", API_ANSWER_TIMEOUT.as_secs())))?;
+      let response = match answer {
+        Ok(response) => response,
+        // 416: nothing from `start` on, the blob ended there (all of it was received before).
+        Err(ApiError::Status { status: 416, .. }) if start > 0 => {
+          return Ok(RangedBlob {
+            start,
+            pieces: Box::pin(futures_util::stream::empty()),
+          });
+        },
+        Err(error) => return Err(error),
+      };
+      let start = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        content_range_start(response.headers())
+          .ok_or_else(|| ApiError::Decode("the storage answered a range without Content-Range".into()))?
+      } else {
+        0
+      };
+      let pieces = futures_util::stream::try_unfold(response, |mut response| async move {
+        let piece = tokio::time::timeout(TRANSFER_STALL_TIMEOUT, response.chunk())
+          .await
+          .map_err(|_| {
+            ApiError::Network(format!(
+              "the transfer made no progress for {} s",
+              TRANSFER_STALL_TIMEOUT.as_secs()
+            ))
+          })?
+          .map_err(network_error)?;
+        Ok(piece.map(|piece| (piece.to_vec(), response)))
+      });
+      Ok(RangedBlob {
+        start,
+        pieces: Box::pin(pieces),
+      })
+    })
   }
 
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
-    let response = send(self.client.get(url)).await?;
+    let response = send(self.http().get(url)).await?;
     response
       .bytes()
       .await
       .map(|bytes| bytes.to_vec())
-      .map_err(|error| ApiError::Network(error.to_string()))
+      .map_err(network_error)
   }
 
   async fn get_blob_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
-    let response = send(self.client.get(url)).await?;
+    let response = send(self.http().get(url)).await?;
     if response.content_length().is_some_and(|length| length > max_bytes) {
       return Err(ApiError::BlobTooLarge { max_bytes });
     }
@@ -755,6 +1514,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     request: &CreateShareLinkRequest,
   ) -> Result<ShareLinkResponse, ApiError> {
     self.send_json(Method::POST, "/shares", request).await
+  }
+
+  async fn revoke_share_link(&self, share_id: &str) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/shares/{share_id}"), None)
+      .await
+  }
+
+  async fn list_share_links(&self) -> Result<ListShareLinksResponse, ApiError> {
+    self.get("/shares").await
   }
 
   async fn register_push(&self, device: DeviceId, request: &RegisterPushRequest) -> Result<(), ApiError> {
@@ -779,6 +1548,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn my_push_health(&self) -> Result<PushHealthResponse, ApiError> {
+    self.get("/me/push-health").await
+  }
+
   async fn notification_settings(&self) -> Result<NotificationSettings, ApiError> {
     self.get("/me/notification-settings").await
   }
@@ -787,9 +1560,13 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get("/push/gateway").await
   }
 
+  async fn web_push_key(&self) -> Result<WebPushKeyResponse, ApiError> {
+    self.get("/push/web-key").await
+  }
+
   async fn gateway_info(&self, gateway_url: &str) -> Result<GatewayInfoResponse, ApiError> {
     let base = gateway_base(gateway_url)?;
-    decode(send(self.client.get(format!("{base}/v1/info"))).await?).await
+    decode(send(self.http().get(format!("{base}/v1/info"))).await?).await
   }
 
   async fn revoke_gateway_token(&self, gateway_url: &str, sealed_token: &[u8]) -> Result<(), ApiError> {
@@ -797,7 +1574,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     let body = GatewayRevokeRequest {
       bound_token: Base64Bytes::new(sealed_token.to_vec()),
     };
-    send(self.client.post(format!("{base}/v1/tokens/revoke")).json(&body))
+    send(self.http().post(format!("{base}/v1/tokens/revoke")).json(&body))
       .await
       .map(drop)
   }
@@ -812,9 +1589,25 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     HttpRendezvous::connect(&self.websocket_url("/api/v1/rendezvous")).await
   }
 
-  fn gateway_token(&self) -> Result<String, ApiError> {
-    self.tokens.access_token()
+  async fn gateway_token(&self) -> Result<String, ApiError> {
+    self.tokens.fresh_token().await
   }
+}
+
+/// Sends the service worker's proof for a rotated Web Push subscription (e2ee.md §7). No access
+/// token: the request authenticates itself (`ChangeWebPushSubscriptionRequest::mac`).
+pub async fn change_web_push_subscription(
+  server_url: &str,
+  request: &ChangeWebPushSubscriptionRequest,
+) -> Result<(), ApiError> {
+  let base_url = server_url.trim_end_matches('/');
+  if let Some(reason) = insecure_reason(base_url) {
+    return Err(ApiError::InsecureServerUrl(reason));
+  }
+  let builder = http_client()
+    .post(format!("{base_url}/api/v1/push/web/subscription-change"))
+    .json(request);
+  send_api(builder).await.map(drop)
 }
 
 /// The push gateway's base URL without trailing slash; device tokens go to it, so it must be
@@ -828,7 +1621,7 @@ fn gateway_base(gateway_url: &str) -> Result<String, ApiError> {
 }
 
 /// `None` if `base_url` may carry tokens: `https://`, or `http://` to a loopback address.
-fn insecure_reason(base_url: &str) -> Option<String> {
+pub(super) fn insecure_reason(base_url: &str) -> Option<String> {
   let Ok(url) = url::Url::parse(base_url) else {
     return Some(format!("{base_url:?} is not a URL"));
   };
@@ -869,11 +1662,7 @@ impl fmt::Debug for StaticToken {
 #[cfg(not(target_arch = "wasm32"))]
 async fn read_capped(mut response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
   let mut blob = Vec::new();
-  while let Some(chunk) = response
-    .chunk()
-    .await
-    .map_err(|error| ApiError::Network(error.to_string()))?
-  {
+  while let Some(chunk) = response.chunk().await.map_err(network_error)? {
     if blob.len() as u64 + chunk.len() as u64 > max_bytes {
       return Err(ApiError::BlobTooLarge { max_bytes });
     }
@@ -882,14 +1671,71 @@ async fn read_capped(mut response: reqwest::Response, max_bytes: u64) -> Result<
   Ok(blob)
 }
 
+/// The first byte of a `206 Partial Content` answer, from `Content-Range: bytes 100-999/1000`.
+#[cfg(not(target_arch = "wasm32"))]
+fn content_range_start(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+  let value = headers.get(reqwest::header::CONTENT_RANGE)?.to_str().ok()?;
+  let (first, _) = value.strip_prefix("bytes ")?.split_once('-')?;
+  first.trim().parse().ok()
+}
+
+/// An upload body in chunks of 64 KiB, each counted into `sent` as the connection takes it.
+#[cfg(not(target_arch = "wasm32"))]
+fn counted_body(bytes: Vec<u8>, sent: ByteCounter) -> reqwest::Body {
+  const CHUNK_BYTES: usize = 64 * 1024;
+  let length = bytes.len();
+  let chunks = futures_util::stream::iter((0..length).step_by(CHUNK_BYTES).map(move |start| {
+    let end = start.saturating_add(CHUNK_BYTES).min(length);
+    let chunk = bytes[start..end].to_vec();
+    sent.add(chunk.len() as u64);
+    Ok::<_, std::io::Error>(chunk)
+  }));
+  reqwest::Body::wrap_stream(chunks)
+}
+
+/// Fails `transfer` once `moved` hasn't grown for [`TRANSFER_STALL_TIMEOUT`] (#742). Blob
+/// transfers have no total timeout (a big file on a slow link is slow, not dead), and on macOS and
+/// Windows a connection that died mid-upload is never noticed by the socket (no
+/// `TCP_USER_TIMEOUT`, keepalive only probes idle sockets): the upload would hang for good and
+/// the message wait forever. A transfer that stops moving is a network failure the retry handles.
+#[cfg(not(target_arch = "wasm32"))]
+async fn unless_stalled<T>(
+  moved: ByteCounter,
+  transfer: impl std::future::Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+  watch_progress(moved, TRANSFER_STALL_TIMEOUT, transfer).await
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn watch_progress<T>(
+  moved: ByteCounter,
+  stall_after: Duration,
+  transfer: impl std::future::Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+  let mut transfer = std::pin::pin!(transfer);
+  let mut last_moved = moved.get();
+  loop {
+    match tokio::time::timeout(stall_after, transfer.as_mut()).await {
+      Ok(result) => return result,
+      Err(_) => {
+        let now_moved = moved.get();
+        if now_moved == last_moved {
+          return Err(ApiError::Network(format!(
+            "the transfer made no progress for {} s",
+            stall_after.as_secs()
+          )));
+        }
+        last_moved = now_moved;
+      },
+    }
+  }
+}
+
 /// The browser's fetch has no chunked reads in reqwest, so the body is read whole; the
 /// Content-Length check before it already refuses announced oversized bodies.
 #[cfg(target_arch = "wasm32")]
 async fn read_capped(response: reqwest::Response, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
-  let blob = response
-    .bytes()
-    .await
-    .map_err(|error| ApiError::Network(error.to_string()))?;
+  let blob = response.bytes().await.map_err(network_error)?;
   if blob.len() as u64 > max_bytes {
     return Err(ApiError::BlobTooLarge { max_bytes });
   }
@@ -1138,6 +1984,21 @@ impl fmt::Debug for HttpRendezvous {
 /// progress (robustness.md, "Network loss and change").
 #[cfg(not(target_arch = "wasm32"))]
 fn http_client() -> reqwest::Client {
+  match http_client_builder().build() {
+    Ok(client) => client,
+    // Only a reqwest/rustls version mismatch can cause this; the default client still works for
+    // plain HTTP (development) and reports TLS errors per request.
+    Err(error) => {
+      tracing::error!(%error, "HTTP client configuration rejected, using the default client");
+      reqwest::Client::new()
+    },
+  }
+}
+
+/// reqwest races IPv6 and IPv4 itself (hyper-util's Happy Eyeballs, 300 ms; issue #420), with the
+/// connect timeout split across a family's addresses.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn http_client_builder() -> reqwest::ClientBuilder {
   let builder = reqwest::Client::builder()
     .connect_timeout(CONNECT_TIMEOUT)
     .tcp_keepalive(KEEPALIVE_INTERVAL)
@@ -1152,16 +2013,37 @@ fn http_client() -> reqwest::Client {
   let builder = builder.tcp_user_timeout(UNACKNOWLEDGED_TIMEOUT);
   #[cfg(target_os = "android")]
   let builder = builder.tls_backend_preconfigured((*super::tls::client_config()).clone());
-  match builder.build() {
-    Ok(client) => client,
-    // Only a reqwest/rustls version mismatch can cause this; the default client still works for
-    // plain HTTP (development) and reports TLS errors per request.
-    Err(error) => {
-      tracing::error!(%error, "HTTP client configuration rejected, using the default client");
-      reqwest::Client::new()
-    },
-  }
+  // The same proxy as the WebSockets, also one the mobile app set (api/proxy.rs).
+  builder
+    .proxy(reqwest::Proxy::custom(super::proxy::proxy_for))
+    .redirect(reqwest::redirect::Policy::custom(follow_redirect))
 }
+
+/// Redirects are followed up to [`MAX_REDIRECTS`] hops, but never from `https` down to `http`: a
+/// presigned URL or a token-bearing request must not leave TLS because a server said so.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn follow_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+  if attempt.previous().len() >= MAX_REDIRECTS {
+    return attempt.stop();
+  }
+  let comes_from_https = attempt
+    .previous()
+    .last()
+    .is_some_and(|previous| previous.scheme() == "https");
+  if is_downgrade(comes_from_https, attempt.url().scheme()) {
+    return attempt.error("refusing a redirect from https to http");
+  }
+  attempt.follow()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_downgrade(comes_from_https: bool, next_scheme: &str) -> bool {
+  comes_from_https && next_scheme != "https"
+}
+
+/// reqwest's own default.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_REDIRECTS: usize = 10;
 
 /// The browser's `fetch` has its own timeouts and connection handling.
 #[cfg(target_arch = "wasm32")]
@@ -1173,33 +2055,215 @@ fn http_client() -> reqwest::Client {
 type NativeSocket =
   tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// Opens a WebSocket: TCP with Happy Eyeballs, through the system or environment proxy with
+/// `CONNECT` if one applies (issue #157), then TLS and the WebSocket handshake.
 #[cfg(not(target_arch = "wasm32"))]
 async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
+  // A black-holed server or proxy would otherwise stall the caller's loop (outbox, heartbeats) for
+  // minutes.
+  let parsed = url::Url::parse(url).map_err(|error| ApiError::Network(format!("{url}: {error}")))?;
+  let maybe_proxy = super::proxy::tunnel_proxy_for(&parsed);
+  tokio::time::timeout(
+    WEBSOCKET_CONNECT_TIMEOUT,
+    open_websocket(&parsed, maybe_proxy.as_ref()),
+  )
+  .await
+  .map_err(|_| ApiError::Network("WebSocket connection timed out".into()))?
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn open_websocket(url: &url::Url, maybe_proxy: Option<&url::Url>) -> Result<NativeSocket, ApiError> {
+  let stream = super::connect::connect_via(url, maybe_proxy)
+    .await
+    .map_err(|error| ApiError::Network(error.to_string()))?;
   // Always an explicit configuration: tungstenite's default one panics in rustls (api/tls.rs).
   let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
-  let connecting = tokio_tungstenite::connect_async_tls_with_config(url, None, false, maybe_connector);
-  // A black-holed server would otherwise stall the caller's loop (outbox, heartbeats) for minutes.
-  let (socket, _) = tokio::time::timeout(CONNECT_TIMEOUT, connecting)
-    .await
-    .map_err(|_| ApiError::Network("WebSocket connection timed out".into()))?
-    .map_err(|error| ApiError::Network(error.to_string()))?;
+  let (socket, _) =
+    tokio_tungstenite::client_async_tls_with_config(url.as_str(), stream, None, maybe_connector)
+      .await
+      .map_err(websocket_error)?;
   Ok(socket)
 }
 
+/// A failed WebSocket handshake, told apart like [`network_error`]: a refused certificate, or an
+/// HTTP answer instead of the upgrade that looks like a captive portal (a page, a redirect, 511).
+#[cfg(not(target_arch = "wasm32"))]
+fn websocket_error(error: tokio_tungstenite::tungstenite::Error) -> ApiError {
+  use tokio_tungstenite::tungstenite::Error as WsError;
+  if super::tls::is_certificate_rejection(&error) {
+    return ApiError::Intercepted {
+      kind: Interception::UntrustedCertificate,
+      detail: error_chain(&error),
+    };
+  }
+  if let WsError::Http(response) = &error {
+    let status = response.status();
+    let is_portal = status.is_success()
+      || status.is_redirection()
+      || status == reqwest::StatusCode::NETWORK_AUTHENTICATION_REQUIRED;
+    if is_portal {
+      return ApiError::Intercepted {
+        kind: Interception::CaptivePortal,
+        detail: format!("HTTP {} instead of a WebSocket", status.as_u16()),
+      };
+    }
+  }
+  ApiError::Network(error_chain(&error))
+}
+
 async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
-  let response = request
-    .send()
-    .await
-    .map_err(|error| ApiError::Network(error.to_string()))?;
+  let (client, request) = request.build_split();
+  let request = request.map_err(network_error)?;
+  let origin = request.url().origin();
+  let response = client.execute(request).await.map_err(network_error)?;
   let status = response.status();
+  if let Some(detail) = captive_portal_sign(&origin, &response) {
+    return Err(ApiError::Intercepted {
+      kind: Interception::CaptivePortal,
+      detail,
+    });
+  }
   if status.is_success() {
     return Ok(response);
   }
-  let maybe_body = response.json::<ErrorBody>().await.ok();
+  let maybe_header = response
+    .headers()
+    .get(reqwest::header::RETRY_AFTER)
+    .and_then(|value| value.to_str().ok())
+    .map(str::to_owned);
+  let maybe_header_wait = maybe_header.as_deref().and_then(parse_retry_after);
+  // Uploads read the capped header wait from the error (#772); the retry policy reads the body,
+  // filled from the header when only that was sent (#743).
+  let maybe_retry_after = maybe_header.as_deref().and_then(super::parse_retry_after);
+  let maybe_body = response.json::<ErrorBody>().await.ok().map(|body| {
+    match (body.maybe_retry_after_secs, maybe_header_wait) {
+      (None, Some(wait)) => body.with_retry_after_secs(wait.as_secs()),
+      _ => body,
+    }
+  });
   Err(ApiError::Status {
     status: status.as_u16(),
     maybe_body,
+    maybe_retry_after,
   })
+}
+
+/// Why `response` comes from a captive portal rather than the server, if it does: HTTP 511, or a
+/// successful answer that is an HTML page (the API and object storage never answer HTML), named
+/// with the site it was redirected to. A redirect alone is no sign: object storage may hand a blob
+/// over to a CDN. Error pages of the server's own reverse proxy (a 502 in HTML) are server trouble,
+/// not a portal.
+fn captive_portal_sign(origin: &url::Origin, response: &Response) -> Option<String> {
+  let status = response.status();
+  if status == reqwest::StatusCode::NETWORK_AUTHENTICATION_REQUIRED {
+    return Some("HTTP 511 network authentication required".into());
+  }
+  if !status.is_success() {
+    return None;
+  }
+  if !is_html(response.headers()) {
+    return None;
+  }
+  if response.url().origin() != *origin {
+    let host = response.url().host_str().unwrap_or_default();
+    return Some(format!("redirected to an HTML page on {host}"));
+  }
+  Some(format!("HTTP {} with an HTML page", status.as_u16()))
+}
+
+fn is_html(headers: &reqwest::header::HeaderMap) -> bool {
+  headers
+    .get(reqwest::header::CONTENT_TYPE)
+    .and_then(|value| value.to_str().ok())
+    .is_some_and(|value| {
+      let essence = value.split(';').next().unwrap_or_default().trim();
+      essence.eq_ignore_ascii_case("text/html") || essence.eq_ignore_ascii_case("application/xhtml+xml")
+    })
+}
+
+/// A request that got no answer: a certificate the device refuses means interception (or a server
+/// that isn't who it claims), everything else is the network. The URL is left out of the text: a
+/// presigned storage URL carries its signature, and these errors end up in logs.
+fn network_error(error: reqwest::Error) -> ApiError {
+  let error = error.without_url();
+  #[cfg(not(target_arch = "wasm32"))]
+  if super::tls::is_certificate_rejection(&error) {
+    return ApiError::Intercepted {
+      kind: Interception::UntrustedCertificate,
+      detail: error_chain(&error),
+    };
+  }
+  ApiError::Network(error_chain(&error))
+}
+
+/// The error and its causes, so the details name the actual reason ("certificate expired") and not
+/// only reqwest's "error sending request".
+pub(super) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+  let mut text = error.to_string();
+  let mut maybe_source = error.source();
+  while let Some(source) = maybe_source {
+    let cause = source.to_string();
+    if !text.contains(&cause) {
+      text.push_str(": ");
+      text.push_str(&cause);
+    }
+    maybe_source = source.source();
+  }
+  text
+}
+
+/// The single endpoints' 404: nothing published.
+fn found<R>(result: Result<R, ApiError>) -> Result<Option<R>, ApiError> {
+  match result {
+    Ok(response) => Ok(Some(response)),
+    Err(error) if error.is_not_found() => Ok(None),
+    Err(error) => Err(error),
+  }
+}
+
+/// [`send`] for a JSON API call, within [`API_ANSWER_TIMEOUT`] (the browser's fetch has its own).
+async fn send_api(request: RequestBuilder) -> Result<Response, ApiError> {
+  #[cfg(not(target_arch = "wasm32"))]
+  return tokio::time::timeout(API_ANSWER_TIMEOUT, send(request))
+    .await
+    .map_err(|_| ApiError::Network(format!("no answer within {} s", API_ANSWER_TIMEOUT.as_secs())))?;
+  #[cfg(target_arch = "wasm32")]
+  send(request).await
+}
+
+/// The JSON of an API answer, read by [`read_api_body`].
+async fn decode_api<R: DeserializeOwned>(response: Response) -> Result<R, ApiError> {
+  let body = read_api_body(response).await?;
+  serde_json::from_slice(&body).map_err(|error| ApiError::Decode(error.to_string()))
+}
+
+/// An API answer's body; natively it fails once it stops moving for [`API_READ_IDLE_TIMEOUT`],
+/// however long it takes in total.
+async fn read_api_body(response: Response) -> Result<Vec<u8>, ApiError> {
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    let mut response = response;
+    let mut body = Vec::new();
+    loop {
+      match tokio::time::timeout(API_READ_IDLE_TIMEOUT, response.chunk()).await {
+        Ok(Ok(Some(chunk))) => body.extend_from_slice(&chunk),
+        Ok(Ok(None)) => return Ok(body),
+        Ok(Err(error)) => return Err(network_error(error)),
+        Err(_) => {
+          return Err(ApiError::Network(format!(
+            "the answer stopped for {} s",
+            API_READ_IDLE_TIMEOUT.as_secs()
+          )));
+        },
+      }
+    }
+  }
+  #[cfg(target_arch = "wasm32")]
+  response
+    .bytes()
+    .await
+    .map(|bytes| bytes.to_vec())
+    .map_err(network_error)
 }
 
 async fn decode<R: DeserializeOwned>(response: Response) -> Result<R, ApiError> {
@@ -1243,6 +2307,30 @@ fn query_string(parameters: &[(&str, Option<String>)]) -> String {
 mod tests {
   use super::*;
 
+  #[cfg(not(target_arch = "wasm32"))]
+  #[test]
+  fn a_ranged_answer_names_where_it_starts() {
+    let mut headers = reqwest::header::HeaderMap::new();
+    assert_eq!(content_range_start(&headers), None);
+    headers.insert(
+      reqwest::header::CONTENT_RANGE,
+      "bytes 100-999/1000".parse().unwrap(),
+    );
+    assert_eq!(content_range_start(&headers), Some(100));
+    headers.insert(reqwest::header::CONTENT_RANGE, "bytes */1000".parse().unwrap());
+    assert_eq!(content_range_start(&headers), None);
+    headers.insert(reqwest::header::CONTENT_RANGE, "items 1-2/3".parse().unwrap());
+    assert_eq!(content_range_start(&headers), None);
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  #[test]
+  fn a_redirect_never_leaves_https() {
+    assert!(is_downgrade(true, "http"));
+    assert!(!is_downgrade(true, "https"));
+    assert!(!is_downgrade(false, "http"));
+  }
+
   #[test]
   fn query_string_skips_absent_parameters() {
     assert_eq!(
@@ -1282,6 +2370,7 @@ mod tests {
     }
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   #[tokio::test]
   async fn a_plain_http_server_gets_no_request_and_no_token() {
     let api = HttpServerApi::new("http://chat.example.com", PanickingToken);
@@ -1295,9 +2384,40 @@ mod tests {
     ));
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
+  #[tokio::test(start_paused = true)]
+  async fn an_upload_that_stops_moving_fails_instead_of_hanging() {
+    let moved = ByteCounter::new();
+    let stalled = watch_progress(
+      moved,
+      Duration::from_secs(120),
+      std::future::pending::<Result<(), ApiError>>(),
+    )
+    .await;
+    assert!(matches!(stalled, Err(ApiError::Network(message)) if message.contains("no progress")));
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  #[tokio::test(start_paused = true)]
+  async fn a_slow_upload_that_keeps_moving_is_left_alone() {
+    let moved = ByteCounter::new();
+    let counter = moved.clone();
+    // 64 KiB every 100 s: slow, but alive for longer than one stall window.
+    let transfer = async move {
+      for _ in 0..5 {
+        tokio::time::sleep(Duration::from_secs(100)).await;
+        counter.add(64 * 1024);
+      }
+      Ok::<_, ApiError>("done")
+    };
+    let answer = watch_progress(moved, Duration::from_secs(120), transfer).await;
+    assert!(matches!(answer, Ok("done")));
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
   #[tokio::test(start_paused = true)]
   async fn a_server_that_never_answers_the_websocket_handshake_times_out() {
-    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let listener = loopback_listener().await;
     let address = listener.local_addr().unwrap();
     // Accepts the TCP connection and then stays silent, like a black-holed proxy.
     tokio::spawn(async move {
@@ -1307,6 +2427,289 @@ mod tests {
     // Paused time jumps ahead while everything waits, so the timeout fires without a real wait.
     let result = connect_websocket(&format!("ws://{address}/api/v1/gateway")).await;
     assert!(matches!(result, Err(ApiError::Network(message)) if message.contains("timed out")));
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  #[tokio::test(start_paused = true)]
+  async fn an_api_call_to_a_server_that_never_answers_times_out() {
+    let listener = loopback_listener().await;
+    let address = listener.local_addr().unwrap();
+    // Takes the request and never answers, like a connection that died mid-flight.
+    tokio::spawn(async move {
+      let (_socket, _) = listener.accept().await.unwrap();
+      std::future::pending::<()>().await;
+    });
+    let api = HttpServerApi::new(format!("http://{address}"), StaticToken("token".into()));
+    let result = api.me().await;
+    assert!(matches!(result, Err(ApiError::Network(_))), "{result:?}");
+  }
+
+  /// A presigned storage URL carries its signature; a failed upload's error (which ends up in logs)
+  /// must not repeat it.
+  #[cfg(not(target_arch = "wasm32"))]
+  #[tokio::test]
+  async fn a_failed_upload_does_not_repeat_the_presigned_url() {
+    let listener = loopback_listener().await;
+    let address = listener.local_addr().unwrap();
+    // Accepts and closes at once: the request fails without an answer.
+    tokio::spawn(async move {
+      while let Ok((socket, _)) = listener.accept().await {
+        drop(socket);
+      }
+    });
+    let api = HttpServerApi::new(format!("http://{address}"), StaticToken("token".into()));
+    let url = format!("http://{address}/bucket/blob?X-Amz-Credential=key&X-Amz-Signature=deadbeef");
+    let result = api.put_blob(&url, b"ciphertext".to_vec()).await;
+    let Err(ApiError::Network(message)) = result else {
+      panic!("{result:?}")
+    };
+    assert!(
+      !message.contains("deadbeef") && !message.contains("X-Amz"),
+      "{message}"
+    );
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  mod hostile_networks {
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
+    use crate::api::connect::black_hole::{BlackHole, FixedResolver};
+    use crate::api::tls::untrusted_tls_server;
+
+    /// A mandatory company proxy: the gateway goes through `CONNECT` to the server.
+    #[tokio::test]
+    async fn the_gateway_connects_through_a_connect_proxy() {
+      let server = loopback_listener().await;
+      let server_address = server.local_addr().unwrap();
+      tokio::spawn(async move {
+        let (socket, _) = server.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+        use futures_util::SinkExt;
+        socket
+          .send(tokio_tungstenite::tungstenite::Message::text(
+            "hello through the proxy",
+          ))
+          .await
+          .unwrap();
+      });
+      let (proxy_url, requests) = connect_proxy().await;
+      let url = url::Url::parse(&format!("ws://{server_address}/api/v1/gateway")).unwrap();
+      let mut socket = open_websocket(&url, Some(&proxy_url)).await.unwrap();
+      use futures_util::StreamExt;
+      let frame = socket.next().await.unwrap().unwrap();
+      assert_eq!(frame.into_text().unwrap().as_str(), "hello through the proxy");
+      let request = requests.await.unwrap();
+      let authority = server_address.to_string();
+      assert!(
+        request.starts_with(&format!("CONNECT {authority} HTTP/1.1\r\n")),
+        "{request}"
+      );
+    }
+
+    /// A captive portal: the login page arrives with 200 where the API answers JSON. That's a
+    /// network problem to retry (the outbox waits), not an unreadable answer that fails for good.
+    #[tokio::test]
+    async fn an_html_page_instead_of_json_is_a_captive_portal_and_retried() {
+      let base = canned_server(
+        "200 OK",
+        "text/html; charset=utf-8",
+        "<html>Sign in to the Wi-Fi</html>",
+      )
+      .await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert_eq!(error.interception(), Some(Interception::CaptivePortal), "{error}");
+      assert!(error.is_transient() && error.is_retry_later() && error.is_unreachable());
+      // Also where no answer body is read (read markers, uploads' completion).
+      let device =
+        <DeviceId as teamcraft_proto::Id>::from_snowflake(teamcraft_proto::Snowflake::new(1).unwrap());
+      let error = api.unregister_push(device).await.unwrap_err();
+      assert_eq!(error.interception(), Some(Interception::CaptivePortal), "{error}");
+    }
+
+    #[tokio::test]
+    async fn http_511_is_a_captive_portal() {
+      let base = canned_server("511 Network Authentication Required", "text/plain", "sign in").await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      assert_eq!(
+        api.me().await.unwrap_err().interception(),
+        Some(Interception::CaptivePortal)
+      );
+    }
+
+    #[tokio::test]
+    async fn an_html_error_page_of_the_reverse_proxy_is_server_trouble() {
+      let base = canned_server("502 Bad Gateway", "text/html", "<html>bad gateway</html>").await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert!(matches!(error, ApiError::Status { status: 502, .. }), "{error}");
+      assert!(error.is_transient());
+      assert_eq!(error.retry_after(), None, "no Retry-After, no wait asked for");
+    }
+
+    #[tokio::test]
+    async fn a_storage_outage_says_when_to_come_back() {
+      let base = canned_server(
+        "503 Service Unavailable\r\nretry-after: 30",
+        "application/json",
+        r#"{"error_code":"unavailable","message":"storage"}"#,
+      )
+      .await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert!(matches!(error, ApiError::Status { status: 503, .. }), "{error}");
+      assert_eq!(error.retry_after(), Some(Duration::from_secs(30)));
+      assert_eq!(error.error_code(), Some(&teamcraft_proto::ErrorCode::Unavailable));
+    }
+
+    #[tokio::test]
+    async fn a_portal_answering_the_websocket_handshake_is_a_captive_portal() {
+      let base = canned_server(
+        "302 Found\r\nlocation: http://portal.example.com/login",
+        "text/html",
+        "",
+      )
+      .await;
+      let url = url::Url::parse(&base.replace("http://", "ws://")).unwrap();
+      let error = open_websocket(&url, None).await.unwrap_err();
+      assert_eq!(error.interception(), Some(Interception::CaptivePortal), "{error}");
+    }
+
+    /// A proxy that inspects TLS with its own CA: the certificate it shows isn't trusted, both for
+    /// REST (reqwest) and the gateway WebSocket (tungstenite).
+    #[tokio::test]
+    async fn a_certificate_nobody_trusts_is_named_as_interception() {
+      let base = untrusted_tls_server().await;
+      let api = HttpServerApi::new(base.clone(), StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert_eq!(
+        error.interception(),
+        Some(Interception::UntrustedCertificate),
+        "{error}"
+      );
+      assert!(error.is_transient());
+      let url = url::Url::parse(&format!("{}/api/v1/gateway", base.replace("https://", "wss://"))).unwrap();
+      let error = open_websocket(&url, None).await.unwrap_err();
+      assert_eq!(
+        error.interception(),
+        Some(Interception::UntrustedCertificate),
+        "{error}"
+      );
+    }
+
+    /// The portal sends the request to its own site, which answers its login page.
+    #[tokio::test]
+    async fn a_redirect_to_an_html_page_elsewhere_is_a_captive_portal() {
+      let portal = canned_server("200 OK", "text/html", "<html>Accept the terms</html>").await;
+      let redirect: &'static str =
+        Box::leak(format!("302 Found\r\nlocation: {portal}/login").into_boxed_str());
+      let base = canned_server(redirect, "text/plain", "").await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let error = api.me().await.unwrap_err();
+      assert_eq!(error.interception(), Some(Interception::CaptivePortal), "{error}");
+      assert!(error.to_string().contains("redirected"), "{error}");
+    }
+
+    /// Object storage may hand a blob over to a CDN: a redirect to bytes is no portal.
+    #[tokio::test]
+    async fn a_redirect_to_a_blob_elsewhere_is_fine() {
+      let cdn = canned_server("200 OK", "application/octet-stream", "ciphertext").await;
+      let redirect: &'static str = Box::leak(format!("302 Found\r\nlocation: {cdn}/blob").into_boxed_str());
+      let storage = canned_server(redirect, "text/plain", "").await;
+      let api = HttpServerApi::new("http://[::1]:1", StaticToken("t".into()));
+      assert_eq!(
+        api.get_blob(&format!("{storage}/blob")).await.unwrap(),
+        b"ciphertext"
+      );
+    }
+
+    /// The 1.0.2 failure (issue #420) for REST: the server's name resolves to an IPv6 address that
+    /// swallows the SYN and an IPv4 address that works. The request goes out over IPv4.
+    #[tokio::test]
+    async fn rest_falls_back_to_ipv4_when_ipv6_is_black_holed() {
+      let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+      let v4 = listener.local_addr().unwrap();
+      tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+          let mut request = [0u8; 4096];
+          let _ = socket.read(&mut request).await;
+          let body = r#"{"ok":true}"#;
+          let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+          );
+          let _ = socket.write_all(response.as_bytes()).await;
+        }
+      });
+      let Some(black_hole) = BlackHole::ipv6(v4.port()).await else {
+        return;
+      };
+      let client = http_client_builder()
+        .dns_resolver(Arc::new(FixedResolver(vec![black_hole.address, v4])))
+        .build()
+        .unwrap();
+      let started = std::time::Instant::now();
+      let request = client
+        .get(format!("http://chat.example.com:{}/api/v1/me", v4.port()))
+        .send();
+      let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+        .await
+        .expect("fell back to IPv4 within the timeout")
+        .unwrap();
+      assert!(response.status().is_success());
+      // IPv6 was tried first and swallowed the attempt.
+      assert!(started.elapsed() >= std::time::Duration::from_millis(250));
+    }
+
+    /// A local `CONNECT` proxy: tunnels one connection and hands back the request head it got.
+    async fn connect_proxy() -> (url::Url, tokio::task::JoinHandle<String>) {
+      let listener = loopback_listener().await;
+      let address = listener.local_addr().unwrap();
+      let requests = tokio::spawn(async move {
+        let (mut client, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+          let mut byte = [0u8; 1];
+          client.read_exact(&mut byte).await.unwrap();
+          head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).unwrap();
+        let target = head.split_whitespace().nth(1).unwrap().to_owned();
+        let mut upstream = tokio::net::TcpStream::connect(target).await.unwrap();
+        client
+          .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+          .await
+          .unwrap();
+        tokio::spawn(async move {
+          let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        });
+        head
+      });
+      (url::Url::parse(&format!("http://{address}")).unwrap(), requests)
+    }
+
+    /// Answers every request with `status`, `content_type` and `body`.
+    async fn canned_server(status: &'static str, content_type: &'static str, body: &'static str) -> String {
+      let listener = loopback_listener().await;
+      let address = listener.local_addr().unwrap();
+      tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+          let mut request = [0u8; 4096];
+          let _ = socket.read(&mut request).await;
+          let response = format!(
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+          );
+          let _ = socket.write_all(response.as_bytes()).await;
+        }
+      });
+      format!("http://{address}")
+    }
   }
 
   mod liveness {
@@ -1345,10 +2748,20 @@ mod tests {
   }
 
   /// Serves one HTTP response per connection: `body`, with or without a content length.
+  /// IPv6 loopback, or IPv4 on hosts whose kernel has no IPv6 (some CI sandboxes).
+  #[cfg(not(target_arch = "wasm32"))]
+  async fn loopback_listener() -> tokio::net::TcpListener {
+    match tokio::net::TcpListener::bind("[::1]:0").await {
+      Ok(listener) => listener,
+      Err(_) => tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+    }
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
   async fn blob_server(body: Vec<u8>, has_length: bool) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+    let listener = loopback_listener().await;
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
       while let Ok((mut socket, _)) = listener.accept().await {
@@ -1369,6 +2782,7 @@ mod tests {
     format!("http://{address}/blob")
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   #[tokio::test]
   async fn capped_downloads_stop_at_the_cap() {
     let api = HttpServerApi::new("http://[::1]:1", StaticToken("t".into()));
@@ -1386,8 +2800,101 @@ mod tests {
     ));
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
+  mod enrollment {
+    use teamcraft_proto::{Id, Snowflake};
+
+    use super::*;
+
+    const USER: i64 = 7;
+
+    #[tokio::test]
+    async fn a_user_without_keys_is_not_enrolled_without_a_404() {
+      let base = route_server(&[("/api/v1/users/7/enrollment", 200, "{}")]).await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      assert_eq!(api.identity_key(user()).await.unwrap(), None);
+      assert_eq!(api.device_list(user()).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn the_published_keys_come_from_the_enrollment() {
+      let body = r#"{"device_list":{"sequence":2,"signed_list":"AQID"}}"#;
+      let base = route_server(&[("/api/v1/users/7/enrollment", 200, body)]).await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      assert_eq!(api.identity_key(user()).await.unwrap(), None);
+      assert_eq!(api.device_list(user()).await.unwrap().unwrap().sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_user_is_not_enrolled() {
+      let not_found = r#"{"error_code":"user_not_found","message":"no such user"}"#;
+      let base = route_server(&[("/api/v1/users/7/enrollment", 404, not_found)]).await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      assert_eq!(api.identity_key(user()).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_server_without_the_endpoint_is_asked_the_old_way() {
+      let key = r#"{"user_id":"7","public_key":"AQID","signature":"BAUG","created_at":1}"#;
+      let missing = r#"{"error_code":"device_list_not_found","message":"none"}"#;
+      let base = route_server(&[
+        ("/api/v1/users/7/identity-key", 200, key),
+        ("/api/v1/users/7/device-list", 404, missing),
+      ])
+      .await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      let identity_key = api.identity_key(user()).await.unwrap().unwrap();
+      assert_eq!(identity_key.public_key.as_slice(), [1, 2, 3]);
+      assert_eq!(api.device_list(user()).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn an_old_server_is_probed_only_once() {
+      let key = r#"{"user_id":"7","public_key":"AQID","signature":"BAUG","created_at":1}"#;
+      let base = route_server(&[("/api/v1/users/7/identity-key", 200, key)]).await;
+      let api = HttpServerApi::new(base, StaticToken("t".into()));
+      assert!(!api.lacks_enrollment_endpoint.load(Ordering::Relaxed));
+      api.identity_key(user()).await.unwrap();
+      assert!(api.lacks_enrollment_endpoint.load(Ordering::Relaxed));
+      api.identity_key(user()).await.unwrap();
+    }
+
+    fn user() -> UserId {
+      UserId::from_snowflake(Snowflake::new(USER).unwrap())
+    }
+
+    /// Answers `(path, status, body)`; any other path gets a bare 404, like an unknown API route.
+    async fn route_server(routes: &[(&'static str, u16, &'static str)]) -> String {
+      use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+      let routes = routes.to_vec();
+      let listener = loopback_listener().await;
+      let address = listener.local_addr().unwrap();
+      tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+          let mut request = [0u8; 4096];
+          let read = socket.read(&mut request).await.unwrap_or(0);
+          let head = String::from_utf8_lossy(&request[..read]);
+          let path = head.split_whitespace().nth(1).unwrap_or_default().to_owned();
+          let (status, body) = routes
+            .iter()
+            .find(|(route, ..)| *route == path)
+            .map_or((404, ""), |(_, status, body)| (*status, *body));
+          let response = format!(
+            "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+          );
+          let _ = socket.write_all(response.as_bytes()).await;
+        }
+      });
+      format!("http://{address}")
+    }
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
   struct PanickingToken;
 
+  #[cfg(not(target_arch = "wasm32"))]
   impl AccessTokenSource for PanickingToken {
     fn access_token(&self) -> Result<String, ApiError> {
       panic!("no token may be read for an insecure server");

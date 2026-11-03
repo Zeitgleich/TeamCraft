@@ -139,3 +139,34 @@ async fn direct_messages_are_end_to_end_encrypted_between_two_members() {
 
   stack.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn group_direct_messages_reach_every_participant() {
+  let Some(stack) = Stack::start().await else { return };
+  let mut alice = Peer::enroll(&stack, "alice").await;
+  let mut carol = Peer::enroll(&stack, "carol").await;
+  let mut bob = Peer::enroll(&stack, "bob").await;
+  // A group DM belongs to no space, like a DM.
+  let group = alice
+    .client
+    .open_group_dm(&[carol.user_id(), bob.user_id()])
+    .await
+    .unwrap();
+  carol.wait_joined(group).await;
+  bob.wait_joined(group).await;
+  assert_eq!(
+    carol
+      .client
+      .open_group_dm(&[alice.user_id(), bob.user_id()])
+      .await
+      .unwrap(),
+    group,
+    "the same people find the same group"
+  );
+
+  bob.client.send_text(group, None, "hello both").await.unwrap();
+  alice.wait_for_text(group, "hello both").await;
+  carol.wait_for_text(group, "hello both").await;
+
+  stack.stop().await;
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attachments SET last_activity_at = now() WHERE id = $1 AND completed_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "24f5c020da4e71d960726c9c4cc07eae52ff21e556c687f4ccb889f5dff7a165"
+}

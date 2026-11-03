@@ -20,6 +20,8 @@ pub struct StoredUserSettings {
   pub maybe_dnd_schedule: Option<String>,
   /// `None`: never chose (desktop attention is used).
   pub maybe_uses_desktop_attention: Option<bool>,
+  /// The level of conversations the user never configured; `None`: the instance default applies.
+  pub maybe_level: Option<NotificationLevel>,
 }
 
 impl Default for StoredUserSettings {
@@ -30,6 +32,7 @@ impl Default for StoredUserSettings {
       maybe_send_read_receipts: None,
       maybe_dnd_schedule: None,
       maybe_uses_desktop_attention: None,
+      maybe_level: None,
     }
   }
 }
@@ -54,7 +57,7 @@ impl Database {
     let row = sqlx::query!(
       r#"SELECT u.auto_follow_mentioned_threads,
                 COALESCE(s.push_mode, 'away_only') AS "push_mode!", s.send_read_receipts, s.dnd_schedule,
-                s.uses_desktop_attention
+                s.uses_desktop_attention, s.notification_level
          FROM users u LEFT JOIN user_notification_settings s ON s.user_id = u.id
          WHERE u.id = $1"#,
       to_db(user),
@@ -68,6 +71,7 @@ impl Database {
         maybe_send_read_receipts: row.send_read_receipts,
         maybe_dnd_schedule: row.dnd_schedule,
         maybe_uses_desktop_attention: row.uses_desktop_attention,
+        maybe_level: row.notification_level.map(NotificationLevel::from),
       }),
     )
   }
@@ -88,16 +92,18 @@ impl Database {
     .await?;
     sqlx::query!(
       r#"INSERT INTO user_notification_settings
-           (user_id, push_mode, send_read_receipts, dnd_schedule, uses_desktop_attention)
-         VALUES ($1, $2, $3, $4, $5)
+           (user_id, push_mode, send_read_receipts, dnd_schedule, uses_desktop_attention, notification_level)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT (user_id) DO UPDATE SET push_mode = EXCLUDED.push_mode,
            send_read_receipts = EXCLUDED.send_read_receipts, dnd_schedule = EXCLUDED.dnd_schedule,
-           uses_desktop_attention = EXCLUDED.uses_desktop_attention, updated_at = now()"#,
+           uses_desktop_attention = EXCLUDED.uses_desktop_attention,
+           notification_level = EXCLUDED.notification_level, updated_at = now()"#,
       to_db(user),
       settings.push_mode,
       settings.maybe_send_read_receipts,
       settings.maybe_dnd_schedule,
       settings.maybe_uses_desktop_attention,
+      settings.maybe_level.as_ref().map(NotificationLevel::as_str),
     )
     .execute(&mut *tx)
     .await?;

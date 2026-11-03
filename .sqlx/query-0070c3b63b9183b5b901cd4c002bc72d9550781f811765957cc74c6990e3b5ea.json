@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE admin_join_requests SET state = 'approved', decided_by = $3, decided_at = now()\n       WHERE conversation_id = $1 AND user_id = $2 AND state = 'open'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0070c3b63b9183b5b901cd4c002bc72d9550781f811765957cc74c6990e3b5ea"
+}

@@ -1,8 +1,11 @@
-use teamcraft_proto::{CategoryId, JoinPolicy, NotificationLevel, SpaceId, SpaceRole, UserId};
+use teamcraft_proto::{
+  CategoryId, IdempotencyKey, JoinPolicy, NotificationLevel, SpaceId, SpaceRole, UserId,
+};
 use time::OffsetDateTime;
 
 use crate::database::Database;
 use crate::error::DbError;
+use crate::idempotency::{Created, IdempotentKind, claim_key};
 use crate::ids::{from_db, from_db_opt, to_db};
 use crate::notification::StoredSpaceNotifications;
 use crate::user::User;
@@ -18,6 +21,15 @@ pub struct Space {
   pub is_archived: bool,
   /// Optional brand tag: a default theming hint (docs/branding.md §7).
   pub maybe_brand_id: Option<String>,
+  pub maybe_image: Option<StoredSpaceImage>,
+}
+
+/// The space's picture: where it is in the blob store, and the version clients cache it by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSpaceImage {
+  pub key: String,
+  pub version: String,
+  pub size_bytes: u64,
 }
 
 /// Which spaces to list for a viewer.
@@ -38,6 +50,8 @@ pub struct SpaceView {
   pub maybe_role: Option<SpaceRole>,
   /// The viewer's notification setting for the space (default for non-members).
   pub notifications: StoredSpaceNotifications,
+  /// Members whose membership hasn't expired.
+  pub member_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +63,7 @@ pub struct NewSpace<'a> {
   pub maybe_description: Option<&'a str>,
   pub join_policy: JoinPolicy,
   pub creator: UserId,
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 /// Fields to change; `None` keeps the stored value. An empty string clears icon, color, description.
@@ -107,14 +122,28 @@ pub struct Category {
 }
 
 impl Database {
-  /// Creates the space; the creator becomes its first space admin.
-  pub async fn create_space(&self, space: &NewSpace<'_>) -> Result<Space, DbError> {
+  /// Creates the space; the creator becomes its first space admin. A repeated idempotency key
+  /// creates nothing and returns the first space.
+  pub async fn create_space(&self, space: &NewSpace<'_>) -> Result<Created<SpaceId>, DbError> {
     let mut tx = self.pool().begin().await?;
-    let row = sqlx::query!(
-      r#"INSERT INTO spaces (id, name, icon_ref, color, description, join_policy)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, name, icon_ref, color, description, join_policy, brand_id,
-                   archived_at IS NOT NULL AS "is_archived!""#,
+    if let Some(key) = &space.maybe_idempotency_key {
+      let maybe_existing = claim_key(
+        &mut tx,
+        space.creator,
+        IdempotentKind::Space,
+        key,
+        to_db(space.id),
+      )
+      .await?;
+      if let Some(existing) = maybe_existing {
+        return Ok(Created {
+          id: from_db(existing)?,
+          is_new: false,
+        });
+      }
+    }
+    sqlx::query!(
+      "INSERT INTO spaces (id, name, icon_ref, color, description, join_policy) VALUES ($1, $2, $3, $4, $5, $6)",
       to_db(space.id),
       space.name,
       space.maybe_icon,
@@ -122,7 +151,7 @@ impl Database {
       space.maybe_description,
       space.join_policy.as_str(),
     )
-    .fetch_one(&mut *tx)
+    .execute(&mut *tx)
     .await?;
     sqlx::query!(
       "INSERT INTO space_members (space_id, user_id, role) VALUES ($1, $2, $3)",
@@ -133,15 +162,9 @@ impl Database {
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(Space {
-      id: from_db(row.id)?,
-      name: row.name,
-      maybe_icon: row.icon_ref,
-      maybe_color: row.color,
-      maybe_description: row.description,
-      join_policy: JoinPolicy::from(row.join_policy),
-      is_archived: row.is_archived,
-      maybe_brand_id: row.brand_id,
+    Ok(Created {
+      id: space.id,
+      is_new: true,
     })
   }
 
@@ -172,12 +195,17 @@ impl Database {
   ) -> Result<Vec<SpaceView>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT s.id, s.name, s.icon_ref, s.color, s.description, s.join_policy, s.brand_id,
+                s.image_key, s.image_version, s.image_size_bytes,
                 s.archived_at IS NOT NULL AS "is_archived!", m.role AS "role?",
-                m.notification_level AS "notification_level?", m.muted_until AS "muted_until?"
+                m.notification_level AS "notification_level?", m.muted_until AS "muted_until?",
+                (SELECT count(*) FROM space_members c
+                  WHERE c.space_id = s.id AND (c.expires_at IS NULL OR c.expires_at > now()))
+                  AS "member_count!"
          FROM spaces s
          LEFT JOIN space_members m ON m.space_id = s.id AND m.user_id = $1
               AND (m.expires_at IS NULL OR m.expires_at > now())
-         WHERE ($2::bigint IS NULL OR s.id = $2)
+         WHERE s.deleted_at IS NULL
+           AND ($2::bigint IS NULL OR s.id = $2)
            AND ($2::bigint IS NOT NULL OR $4 OR m.user_id IS NOT NULL
                 OR ($3 AND s.join_policy = 'open' AND s.archived_at IS NULL))
          ORDER BY s.name, s.id"#,
@@ -201,12 +229,14 @@ impl Database {
             join_policy: JoinPolicy::from(row.join_policy),
             is_archived: row.is_archived,
             maybe_brand_id: row.brand_id,
+            maybe_image: stored_image(row.image_key, row.image_version, row.image_size_bytes)?,
           },
           maybe_role: row.role.map(SpaceRole::from),
           notifications: StoredSpaceNotifications {
             maybe_level: row.notification_level.map(NotificationLevel::from),
             maybe_muted_until: row.muted_until,
           },
+          member_count: u32::try_from(row.member_count).unwrap_or(u32::MAX),
         })
       })
       .collect()
@@ -238,6 +268,38 @@ impl Database {
     Ok(())
   }
 
+  /// Makes `image` the space's picture (`None` removes it). Returns the blob key of the picture it
+  /// replaced, which nothing refers to any more; `Ok(None)` also when the space doesn't exist.
+  pub async fn set_space_image(
+    &self,
+    space: SpaceId,
+    maybe_image: Option<&StoredSpaceImage>,
+  ) -> Result<Option<String>, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let maybe_previous = sqlx::query_scalar!(
+      "SELECT image_key FROM spaces WHERE id = $1 FOR UPDATE",
+      to_db(space),
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten();
+    let maybe_size = maybe_image
+      .map(|image| i64::try_from(image.size_bytes))
+      .transpose()
+      .map_err(|_| DbError::InvalidStoredValue("space image size".into()))?;
+    sqlx::query!(
+      "UPDATE spaces SET image_key = $2, image_version = $3, image_size_bytes = $4 WHERE id = $1",
+      to_db(space),
+      maybe_image.map(|image| image.key.as_str()),
+      maybe_image.map(|image| image.version.as_str()),
+      maybe_size,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(maybe_previous.filter(|previous| maybe_image.is_none_or(|image| image.key != *previous)))
+  }
+
   /// The user's role in the space, `None` if not a member (or the guest membership expired).
   pub async fn space_role(&self, space: SpaceId, user: UserId) -> Result<Option<SpaceRole>, DbError> {
     let role = sqlx::query_scalar!(
@@ -253,7 +315,7 @@ impl Database {
   pub async fn list_space_members(&self, space: SpaceId) -> Result<Vec<SpaceMember>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
-                u.deactivated_at IS NOT NULL AS "is_deactivated!", m.role, m.expires_at, m.sponsor_user_id
+                u.deactivated_at IS NOT NULL AS "is_deactivated!", u.deleted_at IS NOT NULL AS "is_deleted!", m.role, m.expires_at, m.sponsor_user_id
          FROM space_members m JOIN users u ON u.id = m.user_id
          WHERE m.space_id = $1 AND (m.expires_at IS NULL OR m.expires_at > now())
          ORDER BY u.display_name, u.id"#,
@@ -272,6 +334,7 @@ impl Database {
             kind: row.kind.into(),
             created_at: row.created_at,
             is_deactivated: row.is_deactivated,
+            is_deleted: row.is_deleted,
             maybe_organization: row.organization,
           },
           role: SpaceRole::from(row.role),
@@ -356,8 +419,18 @@ impl Database {
     &self,
     space: SpaceId,
     user: UserId,
-  ) -> Result<Vec<teamcraft_proto::ConversationId>, DbError> {
+    deletes_memberless: bool,
+  ) -> Result<crate::SpaceLeft, DbError> {
     let mut tx = self.pool().begin().await?;
+    // Against a join or a leave at the same moment: who stays is counted below.
+    sqlx::query_scalar!(
+      r#"SELECT c.id FROM conversations c JOIN memberships m ON m.conversation_id = c.id
+         WHERE c.space_id = $1 AND m.user_id = $2 ORDER BY c.id FOR UPDATE OF c"#,
+      to_db(space),
+      to_db(user),
+    )
+    .fetch_all(&mut *tx)
+    .await?;
     let left = sqlx::query_scalar!(
       r#"DELETE FROM memberships USING conversations c
          WHERE memberships.conversation_id = c.id AND c.space_id = $1 AND memberships.user_id = $2
@@ -374,8 +447,16 @@ impl Database {
     )
     .execute(&mut *tx)
     .await?;
+    let deleted = if deletes_memberless {
+      crate::channel_deletion::mark_memberless_private_deleted(&mut tx, &left, user).await?
+    } else {
+      Vec::new()
+    };
     tx.commit().await?;
-    left.into_iter().map(from_db).collect()
+    Ok(crate::SpaceLeft {
+      left: left.into_iter().map(from_db).collect::<Result<_, _>>()?,
+      deleted: deleted.into_iter().map(from_db).collect::<Result<_, _>>()?,
+    })
   }
 
   /// Number of space admins; the last one can't be removed or demoted.
@@ -478,5 +559,21 @@ impl Database {
       .execute(self.pool())
       .await?;
     Ok(())
+  }
+}
+
+/// The three image columns, set together (a table constraint).
+pub(crate) fn stored_image(
+  maybe_key: Option<String>,
+  maybe_version: Option<String>,
+  maybe_size: Option<i64>,
+) -> Result<Option<StoredSpaceImage>, DbError> {
+  match (maybe_key, maybe_version, maybe_size) {
+    (Some(key), Some(version), Some(size)) => Ok(Some(StoredSpaceImage {
+      key,
+      version,
+      size_bytes: u64::try_from(size).map_err(|_| DbError::InvalidStoredValue("space image size".into()))?,
+    })),
+    _ => Ok(None),
   }
 }

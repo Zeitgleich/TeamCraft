@@ -5,9 +5,10 @@ use std::rc::Rc;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use teamcraft_proto::ErrorBody;
+use teamcraft_proto::{ErrorBody, ErrorCode};
 
 use crate::auth::{ApiMethod, ApiResponse, AuthError, Authenticator};
+use crate::feedback::{ActionFailure, FailureKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RestError {
@@ -23,6 +24,21 @@ pub enum RestError {
 #[derive(Clone)]
 pub struct RestClient {
   auth: Rc<dyn Authenticator>,
+}
+
+impl RestError {
+  /// The failure to show the user (issue #322): the server's code, a network error, or other.
+  pub fn to_failure(&self) -> ActionFailure {
+    let kind = match self {
+      Self::Auth(AuthError::Network(_)) => FailureKind::Network,
+      Self::Refused { code, .. } => match ErrorCode::from(code.clone()) {
+        ErrorCode::Unknown(_) => FailureKind::Other,
+        known => FailureKind::Server(known),
+      },
+      Self::Auth(_) | Self::Unreadable(_) => FailureKind::Other,
+    };
+    ActionFailure::new(kind, self.to_string())
+  }
 }
 
 impl RestClient {
@@ -71,7 +87,8 @@ pub fn to_json<T: Serialize + ?Sized>(value: &T) -> Result<String, RestError> {
   serde_json::to_string(value).map_err(|error| RestError::Unreadable(error.to_string()))
 }
 
-fn check(response: ApiResponse) -> Result<ApiResponse, RestError> {
+/// The response if it succeeded, otherwise the refusal with the server's `error_code`.
+pub(crate) fn check(response: ApiResponse) -> Result<ApiResponse, RestError> {
   if response.status < 300 {
     return Ok(response);
   }
@@ -108,6 +125,29 @@ mod tests {
         body: String::new()
       })
       .is_ok()
+    );
+  }
+
+  #[test]
+  fn failures_name_the_cause_for_the_toast() {
+    let refused = RestError::Refused {
+      status: 403,
+      code: "forbidden".into(),
+    };
+    assert_eq!(
+      refused.to_failure().kind,
+      FailureKind::Server(ErrorCode::Forbidden)
+    );
+    let odd = RestError::Refused {
+      status: 400,
+      code: "avatar_upload_failed".into(),
+    };
+    assert_eq!(odd.to_failure().kind, FailureKind::Other);
+    let offline = RestError::Auth(AuthError::Network("down".into()));
+    assert_eq!(offline.to_failure().kind, FailureKind::Network);
+    assert_eq!(
+      RestError::Unreadable("x".into()).to_failure().kind,
+      FailureKind::Other
     );
   }
 }

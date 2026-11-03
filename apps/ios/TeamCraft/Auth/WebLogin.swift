@@ -1,29 +1,60 @@
 import AuthenticationServices
 import Foundation
+import OSLog
 import UIKit
 
 /// The browser half of the OIDC login: authorization code with PKCE in an
-/// `ASWebAuthenticationSession` (the system browser's cookies give single sign-on), then the code
-/// exchange through `OidcClient`.
+/// `ASWebAuthenticationSession`, then the code exchange through `OidcClient`, with the sign-in
+/// settings the server announced. Where the server asks for the provider's login page (issue
+/// #448) the session is ephemeral, with `prompt=login` on top: the provider shows its login page
+/// instead of silently reusing a browser session, so the user sees which account they sign in
+/// with and can switch. Otherwise the browser's single sign-on works. The last account is
+/// prefilled (`login_hint`).
+///
+/// The provider's `already_logged_in` (the browser re-sent a login that had already finished) gets
+/// one new authorization request with a fresh state and PKCE verifier and the same `prompt`, so
+/// the login page shows again (issue #1063). A second one is the user's to see.
 @MainActor
 final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding {
+  static let maxRetries = 1
+  private static let log = Logger(subsystem: "de.zeitgleich.teamcraft", category: "sign-in")
+
   private let environment: AppEnvironment
-  private let oidc: OidcClient
   private var maybeSession: ASWebAuthenticationSession?
 
   init(environment: AppEnvironment = .current) {
     self.environment = environment
-    self.oidc = OidcClient(environment: environment)
   }
 
-  func login() async throws -> OidcSession {
+  /// `maybeLoginPageAlwaysShown` is the sign-in screen's fresh answer from the server; without it
+  /// the stored server's setting decides.
+  func login(server: StoredServer, maybeLoginPageAlwaysShown: Bool? = nil) async throws -> OidcSession {
+    guard let oidc = OidcClient(server: server, environment: environment) else { throw OidcError.discoveryFailed }
     let endpoints = try await oidc.discover()
-    let pkce = Pkce.generate()
-    let state = Pkce.randomState()
-    let url = Self.authorizationURL(endpoints: endpoints, environment: environment, pkce: pkce, state: state)
-    let callback = try await present(url)
-    let code = try Self.authorizationCode(from: callback, expectedState: state)
-    return try await oidc.exchange(code: code, verifier: pkce.verifier, endpoints: endpoints)
+    let isLoginPageShown = maybeLoginPageAlwaysShown ?? server.isLoginPageAlwaysShown
+    let parameters = LoginParameters(
+      server: server, isLoginPageShown: isLoginPageShown, locale: Self.appLanguage)
+    var retries = 0
+    while true {
+      let pkce = Pkce.generate()
+      let state = Pkce.randomState()
+      let url = Self.authorizationURL(
+        endpoints: endpoints, client: oidc, pkce: pkce, state: state, login: parameters)
+      let callback = try await present(url, isEphemeral: isLoginPageShown)
+      do {
+        let code = try Self.authorizationCode(from: callback, expectedState: state)
+        return try await oidc.exchange(code: code, verifier: pkce.verifier, endpoints: endpoints)
+      } catch OidcError.providerRefused(let code) where Self.isRetried(code: code, retries: retries) {
+        Self.log.warning("the identity provider refused the sign-in (\(code, privacy: .public)), trying again")
+        retries += 1
+      }
+    }
+  }
+
+  /// Whether a sign-in the provider refused with `code` after `retries` automatic retries starts
+  /// again by itself: only `already_logged_in`, and only once.
+  static func isRetried(code: String, retries: Int) -> Bool {
+    authorizationErrorKind(code: code) == .alreadySignedIn && retries < maxRetries
   }
 
   nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
@@ -33,7 +64,10 @@ final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding 
     }
   }
 
-  private func present(_ url: URL) async throws -> URL {
+  /// The language the app shows (one of its localizations).
+  static var appLanguage: String? { Bundle.main.preferredLocalizations.first }
+
+  private func present(_ url: URL, isEphemeral: Bool) async throws -> URL {
     try await withCheckedThrowingContinuation { continuation in
       let session = ASWebAuthenticationSession(
         url: url, callbackURLScheme: environment.oidcRedirectScheme
@@ -47,6 +81,8 @@ final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding 
         }
       }
       session.presentationContextProvider = self
+      // No cookies of earlier sign-ins: the provider asks which account (issue #448).
+      session.prefersEphemeralWebBrowserSession = isEphemeral
       maybeSession = session
       if !session.start() {
         continuation.resume(throwing: OidcError.cancelled)
@@ -55,19 +91,21 @@ final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding 
   }
 
   static func authorizationURL(
-    endpoints: OidcClient.Endpoints, environment: AppEnvironment, pkce: Pkce, state: String
+    endpoints: OidcClient.Endpoints, client: OidcClient, pkce: Pkce, state: String,
+    login: LoginParameters = .none
   ) -> URL {
     var components = URLComponents(url: endpoints.authorizationEndpoint, resolvingAgainstBaseURL: false)!
     var items = components.queryItems ?? []
     items += [
       URLQueryItem(name: "response_type", value: "code"),
-      URLQueryItem(name: "client_id", value: environment.oidcClientId),
-      URLQueryItem(name: "redirect_uri", value: environment.oidcRedirectURI.absoluteString),
-      URLQueryItem(name: "scope", value: "openid profile email"),
+      URLQueryItem(name: "client_id", value: client.clientId),
+      URLQueryItem(name: "redirect_uri", value: client.redirectURI.absoluteString),
+      URLQueryItem(name: "scope", value: client.scopes.joined(separator: " ")),
       URLQueryItem(name: "code_challenge", value: pkce.challenge),
       URLQueryItem(name: "code_challenge_method", value: "S256"),
       URLQueryItem(name: "state", value: state),
     ]
+    items += login.queryItems
     components.queryItems = items
     return components.url!
   }
@@ -76,7 +114,58 @@ final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding 
     let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems ?? []
     func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
     guard value("state") == expectedState else { throw OidcError.stateMismatch }
+    if let error = value("error") {
+      throw OidcError.providerRefused(code: shownAuthorizationErrorCode(code: error))
+    }
     guard let code = value("code"), !code.isEmpty else { throw OidcError.invalidResponse }
     return code
+  }
+}
+
+/// What a sign-in the user starts adds to the authorization request (issue #448): the login page
+/// also with an existing provider session (the server's setting), the last account on this device
+/// for this server, and the app's language. All OIDC Core parameters.
+struct LoginParameters: Equatable {
+  var prompt: String?
+  var loginHint: String?
+  var uiLocales: String?
+
+  static let none = LoginParameters()
+
+  init(prompt: String? = nil, loginHint: String? = nil, uiLocales: String? = nil) {
+    self.prompt = prompt
+    self.loginHint = loginHint
+    self.uiLocales = uiLocales
+  }
+
+  /// For a sign-in at `server`; `locale` is the app's language (a BCP 47 tag or an Apple
+  /// identifier like `de_DE`), dropped when it isn't one.
+  init(server: StoredServer, isLoginPageShown: Bool, locale: String?) {
+    self.init(isLoginPageShown: isLoginPageShown, loginHint: server.maybeLoginHint, locale: locale)
+  }
+
+  init(isLoginPageShown: Bool, loginHint: String?, locale: String?) {
+    let hint = loginHint?.trimmingCharacters(in: .whitespacesAndNewlines)
+    self.init(
+      prompt: isLoginPageShown ? "login" : nil,
+      loginHint: hint?.isEmpty == false && hint?.count ?? 0 <= 256 ? hint : nil,
+      uiLocales: locale.flatMap(Self.languageTag))
+  }
+
+  /// `de`, `en-GB`: letters and digits in parts of up to eight, a letter first; `nil` otherwise.
+  static func languageTag(_ locale: String) -> String? {
+    let tag = locale.replacingOccurrences(of: "_", with: "-")
+    let parts = tag.split(separator: "-", omittingEmptySubsequences: false)
+    let isTag = !parts.isEmpty && tag.count <= 35 && tag.first?.isLetter == true
+      && parts.allSatisfy { part in
+        !part.isEmpty && part.count <= 8 && part.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
+      }
+    return isTag ? tag : nil
+  }
+
+  var queryItems: [URLQueryItem] {
+    [("prompt", prompt), ("login_hint", loginHint), ("ui_locales", uiLocales)].compactMap { name, value in
+      value.map { URLQueryItem(name: name, value: $0) }
+    }
   }
 }

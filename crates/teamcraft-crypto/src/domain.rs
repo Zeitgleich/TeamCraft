@@ -15,11 +15,18 @@ pub(crate) const ATTACHMENT_AAD: &str = "TeamCraft-v1 attachment chunk";
 pub(crate) const KEY_BAG_AAD: &str = "TeamCraft-v1 key bag";
 pub(crate) const BACKUP_KEY_WRAP_AAD: &str = "TeamCraft-v1 backup key wrap";
 pub(crate) const PASSKEY_PRF_KDF: &str = "TeamCraft-v1 passkey prf backup key wrap";
+/// HKDF info of the key that a recovery kit's key wraps the backup key with (e2ee.md §6.5.2).
+pub(crate) const RECOVERY_KEY_WRAP_KDF: &str = "TeamCraft-v1 recovery key backup key wrap";
+/// Hash input label of a recovery key's checksum (e2ee.md §6.5.1).
+pub(crate) const RECOVERY_KEY_CHECKSUM: &str = "TeamCraft-v1 recovery key checksum";
 pub(crate) const ACCOUNT_SECRET_AAD: &str = "TeamCraft-v1 account secret";
 pub(crate) const ACCOUNT_SECRET_KEY: &str = "TeamCraft-v1 account secret key";
 pub(crate) const RECOVERY_REQUEST_FINGERPRINT: &str = "TeamCraft-v1 recovery request fingerprint";
 pub(crate) const MEMBERSHIP_CHANGE: &str = "TeamCraft-v1 membership change";
+pub(crate) const REJOIN_REQUEST: &str = "TeamCraft-v1 rejoin request";
 pub(crate) const PUSH_WAKEUP_AAD: &str = "TeamCraft-v1 push wake-up";
+pub(crate) const PUSH_SUBSCRIPTION_CHANGE: &str = "TeamCraft-v1 push subscription change";
+pub(crate) const PUSH_SUBSCRIPTION_CHANGE_KEY: &str = "TeamCraft-v1 push subscription change key";
 pub(crate) const PUSH_GATEWAY_REQUEST: &str = "TeamCraft-v1 push gateway request";
 pub(crate) const PUSH_GATEWAY_SERVER_ID: &str = "TeamCraft-v1 push gateway server id";
 pub(crate) const PUSH_GATEWAY_BOUND_TOKEN: &str = "TeamCraft-v1 push gateway bound token";
@@ -35,6 +42,10 @@ pub(crate) const RENDEZVOUS_COMMITMENT: &str = "TeamCraft-v1 rendezvous key comm
 pub(crate) const LOCAL_STORE_LOOKUP_KEY: &str = "TeamCraft-v1 local store lookup key";
 pub(crate) const LOCAL_STORE_LOOKUP: &str = "TeamCraft-v1 local store lookup";
 pub(crate) const LOCAL_STORE_RECORD: &str = "TeamCraft-v1 local store record";
+/// HKDF info of the persistent media cache's root key, derived from the local database key.
+pub(crate) const MEDIA_CACHE_ROOT_KEY: &str = "TeamCraft-v1 media cache root key";
+/// Associated data of the desktop's sealed file of local secrets (e2ee.md §9).
+pub(crate) const LOCAL_SECRETS_FILE: &str = "TeamCraft-v1 local secrets file";
 pub(crate) const SHARE_LINK_KEY_WRAP: &str = "TeamCraft-v1 share link key wrap";
 pub(crate) const SHARE_LINK_NAME: &str = "TeamCraft-v1 share link name";
 pub(crate) const SERVER_SETTING_KEY: &str = "TeamCraft-v1 server setting key";
@@ -42,7 +53,11 @@ pub(crate) const SERVER_SETTING_AAD: &str = "TeamCraft-v1 server setting";
 /// MLS exporter label (RFC 9420 §8.5) for the content key of an epoch.
 pub(crate) const EPOCH_CONTENT_KEY: &str = "TeamCraft-v1 epoch content key";
 pub(crate) const DEVICE_LIST: &str = "TeamCraft-v1 device list";
+/// HPKE info of content keys sealed to one member device.
+pub(crate) const SEALED_CONTENT_KEYS: &str = "TeamCraft-v1 sealed content keys";
 pub(crate) const WORKSPACE_LOG_HASH: &str = "TeamCraft-v1 workspace log entry hash";
+/// Hash input label of an imported message's client message ID (e2ee.md §4.10).
+pub(crate) const IMPORTED_MESSAGE_ID: &str = "TeamCraft-v1 imported message";
 
 /// Returns `len(label) || label || body`.
 pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
@@ -59,7 +74,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 32] = [
+  const ALL_LABELS: [&str; 41] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -68,8 +83,13 @@ mod tests {
     KEY_BAG_AAD,
     BACKUP_KEY_WRAP_AAD,
     PASSKEY_PRF_KDF,
+    RECOVERY_KEY_WRAP_KDF,
+    RECOVERY_KEY_CHECKSUM,
     MEMBERSHIP_CHANGE,
+    REJOIN_REQUEST,
     PUSH_WAKEUP_AAD,
+    PUSH_SUBSCRIPTION_CHANGE,
+    PUSH_SUBSCRIPTION_CHANGE_KEY,
     PUSH_GATEWAY_REQUEST,
     PUSH_GATEWAY_SERVER_ID,
     PUSH_GATEWAY_BOUND_TOKEN,
@@ -84,14 +104,18 @@ mod tests {
     RENDEZVOUS_COMMITMENT,
     EPOCH_CONTENT_KEY,
     DEVICE_LIST,
+    IMPORTED_MESSAGE_ID,
     WORKSPACE_LOG_HASH,
     LOCAL_STORE_LOOKUP_KEY,
     LOCAL_STORE_LOOKUP,
     LOCAL_STORE_RECORD,
+    MEDIA_CACHE_ROOT_KEY,
+    LOCAL_SECRETS_FILE,
     SHARE_LINK_KEY_WRAP,
     SHARE_LINK_NAME,
     SERVER_SETTING_KEY,
     SERVER_SETTING_AAD,
+    SEALED_CONTENT_KEYS,
   ];
 
   #[test]

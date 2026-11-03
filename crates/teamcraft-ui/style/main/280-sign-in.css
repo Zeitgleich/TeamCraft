@@ -1,0 +1,190 @@
+/* ---- Sign-in ----
+   Every screen before the app (server entry, confirmation, sign-in, key setup) is one card with the
+   same rhythm: brand, title, subtitle, content, actions, foot. Sizes come from the type, spacing
+   and radius tokens at the top; nothing here picks its own colour. */
+
+.auth-page {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6) var(--space-4);
+  background:
+    radial-gradient(900px 480px at 50% -12%, var(--accent-soft), transparent 70%),
+    var(--bg);
+  overflow-y: auto;
+}
+
+.auth-card {
+  width: min(472px, 100%);
+  padding: var(--space-8) var(--space-8) var(--space-6);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  font-size: var(--text-md);
+  line-height: 1.5;
+}
+
+/* A new screen fades in; the card itself stays put so switching screens does not jump. */
+.auth-content {
+  animation: auth-in var(--dur-base) var(--ease-out) both;
+}
+
+@keyframes auth-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+.auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+  text-align: center;
+}
+
+/* A brand icon: a square beside the name. */
+.auth-icon-img {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+}
+
+/* The product mark (no server brand yet) above the wordmark (assets/brand). */
+.auth-logo-img.auth-product-icon {
+  width: 64px;
+  height: 64px;
+  max-height: none;
+}
+
+/* A server brand: the product's tile and the brand's side by side, like two app icons. */
+.auth-tiles {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.auth-tile {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-card);
+}
+
+/* The mark inside its tile, as on the app icons (scripts/brand/icons.py). Above the brand's
+   tile, which the loading screen's handover slides out from behind it (loader.js). */
+.auth-tile-product {
+  position: relative;
+  z-index: 1;
+  padding: 8px;
+}
+
+.auth-tile-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.auth-tile-product .auth-tile-img {
+  object-fit: contain;
+}
+
+/* No icon: the brand's initial on its accent, like a launcher's placeholder icon. */
+.auth-tile-brand:has(.auth-tile-initial) {
+  border-color: transparent;
+  background: var(--accent);
+}
+
+.auth-tile-initial {
+  color: var(--on-accent);
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+}
+
+.auth-logo-img {
+  display: block;
+  max-width: 200px;
+  max-height: 48px;
+  object-fit: contain;
+}
+
+/* A brand's dark logo replaces the light one in the dark theme. */
+.brand-dark {
+  display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .brand-dark {
+    display: block;
+  }
+
+  :root:not([data-theme="light"]) .brand-light:has(+ .brand-dark) {
+    display: none;
+  }
+}
+
+:root[data-theme="dark"] .brand-dark {
+  display: block;
+}
+
+:root[data-theme="dark"] .brand-light:has(+ .brand-dark) {
+  display: none;
+}
+
+/* The welcome under the brand's mark: it names the server, the heading below says what to do. */
+.auth-welcome {
+  margin: calc(-1 * var(--space-2)) 0 var(--space-5);
+  color: var(--text-muted);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-lg);
+  text-align: center;
+  text-wrap: balance;
+}
+
+.auth-brand-text {
+  margin: 0 0 var(--space-5);
+  text-align: center;
+}
+
+.auth-card h1 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+  text-align: center;
+  text-wrap: balance;
+}
+
+.auth-subtitle {
+  margin: 0 0 var(--space-6);
+  text-align: center;
+  text-wrap: pretty;
+}
+
+.auth-center {
+  text-align: center;
+}
+
+/* Outside the card (settings, guest join, admin notes) these keep their simple form. */
+.auth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 20px 0 8px;
+}
+
+.auth-actions .btn {
+  height: 40px;
+  padding: 0 18px;
+}
+

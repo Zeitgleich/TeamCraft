@@ -4,8 +4,10 @@
 //! [`CallClientMessage::Join`] with a join token from `teamcraft-server`. Messages on that stream
 //! are framed as a 4-byte big-endian length followed by one JSON message. Every
 //! [`CallServerMessage::Event`] carries a sequence number that increases by one per connection.
-//! A dropped connection is not resumed: the client rejoins with a fresh token and gets a fresh
-//! `joined` event (media state is ephemeral).
+//! A QUIC connection survives a change of the client's address (connection migration). If it is
+//! lost anyway, the SFU keeps the device's slot for a grace period ([`CallEvent::Joined`] says how
+//! long) and tells the others it is reconnecting; the client joins again with a fresh token on a
+//! new connection and takes its slot back with a fresh `joined` event (ARCHITECTURE.md §6.5).
 //!
 //! Media flows as QUIC datagrams (`teamcraft-media::datagram`), not through these types.
 
@@ -14,12 +16,17 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-  Base64Bytes, CallId, DeviceId, ErrorBody, MediaCapabilities, TransportFeedback, UserId, VideoCodec,
-  VideoLayerInfo, VideoTrack, VideoTrackKind,
+  Base64Bytes, CallId, ConversationId, DeviceId, ErrorBody, MediaCapabilities, TransportFeedback, UserId,
+  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 
 /// `aud` of call join tokens.
 pub const CALL_JOIN_TOKEN_AUDIENCE: &str = "teamcraft-sfu";
+
+/// QUIC application close code of an SFU that shuts down (a restart, a rolling deploy). Unlike the
+/// SFU's other closes it is not final: clients rejoin with a fresh join token, spread over a short
+/// moment so the restarted SFU isn't hit by every client at once (ARCHITECTURE.md §6.5).
+pub const SFU_GOING_AWAY_CLOSE_CODE: u32 = 0x4805;
 
 /// Claims of a call join token: a JWT signed by `teamcraft-server` (EdDSA) and verified by the
 /// SFU with the server's public key. Short-lived (about a minute); the SFU checks it once on join.
@@ -36,6 +43,11 @@ pub struct CallJoinClaims {
   pub call_id: CallId,
   pub user_id: UserId,
   pub device_id: DeviceId,
+  /// The conversation the call belongs to. The SFU reports it with its roster, so a restarted
+  /// server takes over the calls that kept running (`SfuCallRoster`). Signed like the rest, so the
+  /// SFU can't make it up; tokens of older servers lack it.
+  #[serde(rename = "conversation_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_conversation_id: Option<ConversationId>,
 }
 
 /// Messages from the client to the SFU.
@@ -62,11 +74,14 @@ pub enum CallClientMessage {
     commit: Base64Bytes,
     maybe_welcome: Option<Base64Bytes>,
   },
-  /// Starts sending a video track; the SFU answers with [`CallEvent::VideoPublished`].
+  /// Starts sending a video track; the SFU answers with [`CallEvent::VideoPublished`], whose track
+  /// echoes `maybe_publication_id` (#929). Older clients send none; older SFUs ignore it.
   PublishVideo {
     kind: VideoTrackKind,
     codec: VideoCodec,
     layers: Vec<VideoLayerInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    maybe_publication_id: Option<VideoPublicationId>,
   },
   UnpublishVideo {
     stream_id: MediaStreamId,
@@ -86,6 +101,36 @@ pub enum CallClientMessage {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
   },
+  /// A subscribed track can't be decoded until its next keyframe (a lost fragment, a frame that
+  /// didn't decrypt, a decoder that failed): the SFU asks the publisher for one on the layer this
+  /// device receives. Rate-limited on both sides; older SFUs ignore it.
+  RequestKeyframe {
+    stream_id: MediaStreamId,
+  },
+  /// The layers of an own video track this device's uplink carries now (the lowest ones; empty:
+  /// none), whatever [`CallEvent::LayersNeeded`] asks for. The SFU forwards no higher layer of it,
+  /// so receivers move to a layer that is actually sent instead of freezing on a paused one
+  /// (#921). Sent when it changes and for every own track after a rejoin; until then the SFU
+  /// takes every published layer as sent. Older SFUs ignore it.
+  UplinkLayers {
+    stream_id: MediaStreamId,
+    layers: Vec<u8>,
+  },
+  /// This device muted or unmuted its microphone; the SFU tells the others
+  /// ([`CallEvent::ParticipantMuted`]). Sent again after every (re)join. Metadata only: it changes
+  /// nothing about what the SFU forwards.
+  SetMuted {
+    is_muted: bool,
+  },
+  /// Takes the call over to this device: the SFU closes the account's other devices in the call
+  /// with [`CallEvent::ConnectionReplaced`] (#505). Only the account's own devices are affected.
+  MoveHere,
+  /// Asks the SFU to answer with [`CallServerMessage::Pong`] of the same `id`. A page can't see
+  /// QUIC keep-alives (and Safari's `getStats()` counts nothing), so answered pings are what prove
+  /// a quiet session's path alive in the browser (#841). Older SFUs ignore it.
+  Ping {
+    id: u64,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -101,6 +146,10 @@ pub enum CallServerMessage {
   /// The request failed; for `join` the SFU closes the connection afterwards.
   Error {
     error: ErrorBody,
+  },
+  /// Answer to [`CallClientMessage::Ping`]. Not an event: it takes no sequence number.
+  Pong {
+    id: u64,
   },
   #[serde(other)]
   Unknown,
@@ -119,12 +168,35 @@ pub enum CallEvent {
     video_tracks: Vec<VideoTrack>,
     #[serde(default)]
     screen_audio_tracks: Vec<ScreenAudioTrack>,
+    /// How long the SFU keeps this device's slot after its connection was lost; rejoining within
+    /// it resumes the call. Older SFUs omit it and drop the slot at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    maybe_reconnect_grace_ms: Option<u64>,
+    /// The most simulcast layers the SFU takes per video track (#978). SFUs from before omit it
+    /// and take [`crate::LEGACY_SIMULCAST_LAYERS`]; a client publishes no more than that then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    maybe_max_simulcast_layers: Option<u8>,
   },
   ParticipantJoined {
     participant: CallParticipant,
   },
   ParticipantLeft {
     device_id: DeviceId,
+  },
+  /// A device's connection was lost; its slot is kept while it reconnects. Media from and to it
+  /// pauses; `participant_left` follows if it doesn't come back within the grace period.
+  ParticipantReconnecting {
+    device_id: DeviceId,
+  },
+  /// A reconnecting device is back on a new connection (same slot and audio stream).
+  ParticipantReconnected {
+    device_id: DeviceId,
+  },
+  /// Another device muted or unmuted its microphone. After `joined` the SFU sends one for each
+  /// device that is muted; a client forgets what it knew when it rejoins.
+  ParticipantMuted {
+    device_id: DeviceId,
+    is_muted: bool,
   },
   /// Devices whose audio the SFU currently forwards, loudest first.
   ActiveSpeakers {
@@ -180,6 +252,14 @@ pub enum CallEvent {
     stream_id: MediaStreamId,
     layers: Vec<u8>,
   },
+  /// The video codecs every other device in the call that receives video decodes, best first
+  /// (#565); every known codec while no other device does. Sent after `joined` and whenever it
+  /// changes (a device joins, leaves or rejoins with other capabilities). A publisher picks its
+  /// screen share's codec from these and publishes the share anew when its codec drops out of
+  /// them. Older SFUs send none: only H.264 is safe then.
+  DecodableVideoCodecs {
+    codecs: Vec<VideoCodec>,
+  },
   /// Arrival times of the datagrams this client sent (uplink estimation, done by the client).
   TransportFeedback {
     feedback: TransportFeedback,
@@ -196,6 +276,24 @@ pub enum CallEvent {
   EndedByHost {
     by_user_id: UserId,
   },
+  /// The same device joined the call on another connection (another window, or this one came
+  /// back after the SFU gave it up for lost), or another device of the account took the call over
+  /// ([`CallClientMessage::MoveHere`]); the SFU closes this connection right after. Not to be
+  /// answered with a rejoin.
+  ConnectionReplaced,
+  #[serde(other)]
+  Unknown,
+}
+
+/// What a screen share keeps when the link or the machine can't carry it all (WebRTC's
+/// `contentHint`): `Detail` keeps the resolution (text, slides, code) and lets the frame rate drop;
+/// `Motion` keeps the frame rate (video, games, scrolling) at a lower resolution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenContentMode {
+  #[default]
+  Detail,
+  Motion,
   #[serde(other)]
   Unknown,
 }
@@ -255,11 +353,17 @@ impl fmt::Debug for CallClientMessage {
         .field("commit", commit)
         .field("maybe_welcome", maybe_welcome)
         .finish(),
-      Self::PublishVideo { kind, codec, layers } => f
+      Self::PublishVideo {
+        kind,
+        codec,
+        layers,
+        maybe_publication_id,
+      } => f
         .debug_struct("PublishVideo")
         .field("kind", kind)
         .field("codec", codec)
         .field("layers", layers)
+        .field("maybe_publication_id", maybe_publication_id)
         .finish(),
       Self::TransportFeedback { feedback } => f
         .debug_struct("TransportFeedback")
@@ -282,6 +386,18 @@ impl fmt::Debug for CallClientMessage {
         .field("stream_id", stream_id)
         .field("maybe_max_layer", maybe_max_layer)
         .finish(),
+      Self::RequestKeyframe { stream_id } => f
+        .debug_struct("RequestKeyframe")
+        .field("stream_id", stream_id)
+        .finish(),
+      Self::UplinkLayers { stream_id, layers } => f
+        .debug_struct("UplinkLayers")
+        .field("stream_id", stream_id)
+        .field("layers", layers)
+        .finish(),
+      Self::MoveHere => f.write_str("MoveHere"),
+      Self::Ping { id } => f.debug_struct("Ping").field("id", id).finish(),
+      Self::SetMuted { is_muted } => f.debug_struct("SetMuted").field("is_muted", is_muted).finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
   }
@@ -389,6 +505,62 @@ mod tests {
   }
 
   #[test]
+  fn reconnect_wire_format() {
+    let device_id = DeviceId::from_snowflake(Snowflake::new(5).unwrap());
+    for (event, expected) in [
+      (CallEvent::ConnectionReplaced, r#"{"type":"connection_replaced"}"#),
+      (
+        CallEvent::ParticipantReconnecting { device_id },
+        r#"{"type":"participant_reconnecting","device_id":"5"}"#,
+      ),
+      (
+        CallEvent::ParticipantReconnected { device_id },
+        r#"{"type":"participant_reconnected","device_id":"5"}"#,
+      ),
+    ] {
+      assert_eq!(serde_json::to_string(&event).unwrap(), expected);
+      assert_eq!(serde_json::from_str::<CallEvent>(expected).unwrap(), event);
+    }
+    let joined = CallEvent::Joined {
+      call_id: CallId::from_snowflake(Snowflake::new(7).unwrap()),
+      participant: participant(),
+      participants: Vec::new(),
+      video_tracks: Vec::new(),
+      screen_audio_tracks: Vec::new(),
+      maybe_reconnect_grace_ms: Some(30_000),
+      maybe_max_simulcast_layers: Some(4),
+    };
+    let json = serde_json::to_string(&joined).unwrap();
+    assert!(json.ends_with(r#""maybe_reconnect_grace_ms":30000,"maybe_max_simulcast_layers":4}"#));
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), joined);
+    // Older SFUs keep no slot and name no layer limit (#978: they take three).
+    let old: CallEvent = serde_json::from_str(
+      r#"{"type":"joined","call_id":"7","participant":{"user_id":"4","device_id":"5","audio_stream_id":9},"participants":[]}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      old,
+      CallEvent::Joined {
+        maybe_reconnect_grace_ms: None,
+        maybe_max_simulcast_layers: None,
+        ..
+      }
+    ));
+    // Fields of newer SFUs are ignored, as clients from before #978 ignore the layer limit.
+    let newer: CallEvent = serde_json::from_str(
+      r#"{"type":"joined","call_id":"7","participant":{"user_id":"4","device_id":"5","audio_stream_id":9},"participants":[],"maybe_max_simulcast_layers":4,"hint":"x"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      newer,
+      CallEvent::Joined {
+        maybe_max_simulcast_layers: Some(4),
+        ..
+      }
+    ));
+  }
+
+  #[test]
   fn error_wire_format() {
     let message = CallServerMessage::Error {
       error: ErrorBody::new(ErrorCode::InvalidJoinToken, "expired"),
@@ -400,8 +572,133 @@ mod tests {
   }
 
   #[test]
+  fn mute_wire_format() {
+    assert_eq!(
+      serde_json::to_string(&CallClientMessage::SetMuted { is_muted: true }).unwrap(),
+      r#"{"type":"set_muted","is_muted":true}"#
+    );
+    let event = CallEvent::ParticipantMuted {
+      device_id: "7".parse().unwrap(),
+      is_muted: false,
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"participant_muted","device_id":"7","is_muted":false}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+  }
+
+  #[test]
+  fn keyframe_request_wire_format() {
+    let request = CallClientMessage::RequestKeyframe {
+      stream_id: MediaStreamId(12),
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert_eq!(json, r#"{"type":"request_keyframe","stream_id":12}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), request);
+  }
+
+  /// Older clients read the event as `Unknown` and keep their codec (H.264).
+  #[test]
+  fn decodable_codecs_wire_format() {
+    let event = CallEvent::DecodableVideoCodecs {
+      codecs: vec![VideoCodec::Av1, VideoCodec::H264],
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"decodable_video_codecs","codecs":["av1","h264"]}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+    let unknown: CallEvent = serde_json::from_str(r#"{"type":"some_later_event","codecs":[]}"#).unwrap();
+    assert_eq!(unknown, CallEvent::Unknown);
+  }
+
+  #[test]
+  fn move_here_wire_format() {
+    assert_eq!(
+      serde_json::to_string(&CallClientMessage::MoveHere).unwrap(),
+      r#"{"type":"move_here"}"#
+    );
+  }
+
+  #[test]
+  fn ping_and_pong_wire_format() {
+    let ping = CallClientMessage::Ping { id: 3 };
+    let json = serde_json::to_string(&ping).unwrap();
+    assert_eq!(json, r#"{"type":"ping","id":3}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), ping);
+    let pong = CallServerMessage::Pong { id: 3 };
+    let json = serde_json::to_string(&pong).unwrap();
+    assert_eq!(json, r#"{"type":"pong","id":3}"#);
+    assert_eq!(serde_json::from_str::<CallServerMessage>(&json).unwrap(), pong);
+  }
+
+  #[test]
+  fn publish_video_wire_format_with_and_without_publication_id() {
+    let publish = CallClientMessage::PublishVideo {
+      kind: VideoTrackKind::Screen,
+      codec: VideoCodec::H264,
+      layers: Vec::new(),
+      maybe_publication_id: Some(VideoPublicationId(4)),
+    };
+    let json = serde_json::to_string(&publish).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"publish_video","kind":"screen","codec":"h264","layers":[],"maybe_publication_id":4}"#
+    );
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), publish);
+    // Older clients send none: the SFU echoes none.
+    let older = r#"{"type":"publish_video","kind":"screen","codec":"h264","layers":[]}"#;
+    assert_eq!(
+      serde_json::from_str::<CallClientMessage>(older).unwrap(),
+      CallClientMessage::PublishVideo {
+        kind: VideoTrackKind::Screen,
+        codec: VideoCodec::H264,
+        layers: Vec::new(),
+        maybe_publication_id: None,
+      }
+    );
+    // An SFU from before the field reads the request as before: unknown fields of a known message
+    // are ignored, as a field newer than this one is here.
+    let newer = r#"{"type":"publish_video","kind":"screen","codec":"h264","layers":[],"priority":1}"#;
+    assert!(matches!(
+      serde_json::from_str::<CallClientMessage>(newer).unwrap(),
+      CallClientMessage::PublishVideo {
+        maybe_publication_id: None,
+        ..
+      }
+    ));
+    // The answer echoes the id in its track.
+    let answer: CallEvent = serde_json::from_str(
+      r#"{"type":"video_published","track":{"stream_id":7,"device_id":"5","kind":"screen","codec":"h264","layers":[],"maybe_publication_id":4}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      answer,
+      CallEvent::VideoPublished { track } if track.maybe_publication_id == Some(VideoPublicationId(4))
+    ));
+  }
+
+  #[test]
+  fn uplink_layers_wire_format() {
+    let message = CallClientMessage::UplinkLayers {
+      stream_id: MediaStreamId(7),
+      layers: vec![0, 1],
+    };
+    let json = serde_json::to_string(&message).unwrap();
+    assert_eq!(json, r#"{"type":"uplink_layers","stream_id":7,"layers":[0,1]}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), message);
+  }
+
+  #[test]
   fn unknown_variants_are_tolerated() {
     let client: CallClientMessage = serde_json::from_str(r#"{"type":"raise_hand"}"#).unwrap();
+    assert_eq!(client, CallClientMessage::Unknown);
+    // With fields, as `uplink_layers` reaches an SFU from before it (#921): ignored as well.
+    let client: CallClientMessage =
+      serde_json::from_str(r#"{"type":"layers_paused","stream_id":7,"layers":[0]}"#).unwrap();
     assert_eq!(client, CallClientMessage::Unknown);
     let event: CallServerMessage =
       serde_json::from_str(r#"{"type":"event","seq":2,"event":{"type":"reaction","emoji":"x"}}"#).unwrap();
@@ -426,11 +723,16 @@ mod tests {
       call_id: CallId::from_snowflake(Snowflake::new(7).unwrap()),
       user_id: UserId::from_snowflake(Snowflake::new(4).unwrap()),
       device_id: DeviceId::from_snowflake(Snowflake::new(5).unwrap()),
+      maybe_conversation_id: Some(ConversationId::from_snowflake(Snowflake::new(9).unwrap())),
     };
+    let json = serde_json::to_string(&claims).unwrap();
     assert_eq!(
-      serde_json::to_string(&claims).unwrap(),
-      r#"{"iss":"https://chat.example.com","aud":"teamcraft-sfu","iat":100,"exp":160,"call_id":"7","user_id":"4","device_id":"5"}"#
+      json,
+      r#"{"iss":"https://chat.example.com","aud":"teamcraft-sfu","iat":100,"exp":160,"call_id":"7","user_id":"4","device_id":"5","conversation_id":"9"}"#
     );
+    let older = json.replace(r#","conversation_id":"9""#, "");
+    let parsed: CallJoinClaims = serde_json::from_str(&older).unwrap();
+    assert_eq!(parsed.maybe_conversation_id, None, "tokens of older servers");
   }
 
   #[test]

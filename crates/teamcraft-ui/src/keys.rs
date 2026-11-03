@@ -23,6 +23,8 @@ pub enum Key {
   Char(&'static str),
   Up,
   Down,
+  Left,
+  Right,
   Enter,
   Escape,
 }
@@ -36,6 +38,9 @@ pub enum Platform {
 
 /// Opens the quick switcher.
 pub const QUICK_SWITCHER: Shortcut = Shortcut::primary("K");
+
+/// Searches in the open conversation (the header's search icon opens the same search).
+pub const SEARCH_IN_CONVERSATION: Shortcut = Shortcut::primary("F");
 
 /// Searches messages for the quick switcher's text.
 pub const SEARCH_MESSAGES: Shortcut = Shortcut::new(&[Modifier::Primary], Key::Enter);
@@ -85,6 +90,64 @@ impl Shortcut {
       .collect();
     names.push(spoken_key(self.key, locale));
     names.join(&plus)
+  }
+
+  /// Whether a key press is this shortcut, with exactly these modifiers. Letters match the character
+  /// on the user's layout; digits, and letters with Alt (which changes the character on macOS), match
+  /// the physical key.
+  pub fn matches(&self, ev: &web_sys::KeyboardEvent, platform: Platform) -> bool {
+    let (primary, other_control) = match platform {
+      Platform::Mac => (ev.meta_key(), ev.ctrl_key()),
+      Platform::Other => (ev.ctrl_key(), ev.meta_key()),
+    };
+    let wants = |modifier: Modifier| self.modifiers.contains(&modifier);
+    // AltGr arrives as Ctrl+Alt on Windows; it types characters (`{`, `@`), it's no shortcut.
+    if ev.get_modifier_state("AltGraph")
+      || other_control
+      || primary != wants(Modifier::Primary)
+      || ev.shift_key() != wants(Modifier::Shift)
+      || ev.alt_key() != wants(Modifier::Alt)
+    {
+      return false;
+    }
+    match self.key {
+      Key::Char(key) if key.bytes().all(|byte| byte.is_ascii_digit()) => ev.code() == format!("Digit{key}"),
+      Key::Char(key) if ev.alt_key() => ev.code() == format!("Key{}", key.to_ascii_uppercase()),
+      Key::Char(key) => ev.key().eq_ignore_ascii_case(key),
+      Key::Up => ev.key() == "ArrowUp",
+      Key::Down => ev.key() == "ArrowDown",
+      Key::Left => ev.key() == "ArrowLeft",
+      Key::Right => ev.key() == "ArrowRight",
+      Key::Enter => ev.key() == "Enter",
+      Key::Escape => ev.key() == "Escape",
+    }
+  }
+
+  /// The `aria-keyshortcuts` value: "Control+Shift+X", "Meta+B".
+  pub fn aria(&self, platform: Platform) -> String {
+    let mut parts: Vec<String> = self
+      .modifiers
+      .iter()
+      .map(|modifier| {
+        match (modifier, platform) {
+          (Modifier::Primary, Platform::Mac) => "Meta",
+          (Modifier::Primary, Platform::Other) => "Control",
+          (Modifier::Shift, _) => "Shift",
+          (Modifier::Alt, _) => "Alt",
+        }
+        .to_owned()
+      })
+      .collect();
+    parts.push(match self.key {
+      Key::Char(key) => key.to_owned(),
+      Key::Up => "ArrowUp".to_owned(),
+      Key::Down => "ArrowDown".to_owned(),
+      Key::Left => "ArrowLeft".to_owned(),
+      Key::Right => "ArrowRight".to_owned(),
+      Key::Enter => "Enter".to_owned(),
+      Key::Escape => "Escape".to_owned(),
+    });
+    parts.join("+")
   }
 
   fn separator(platform: Platform) -> &'static str {
@@ -209,6 +272,8 @@ fn key_label(key: Key, platform: Platform, locale: Locale) -> String {
     Key::Char(text) => text.to_owned(),
     Key::Up => "↑".to_owned(),
     Key::Down => "↓".to_owned(),
+    Key::Left => "←".to_owned(),
+    Key::Right => "→".to_owned(),
     Key::Enter if platform == Platform::Mac => "↵".to_owned(),
     Key::Enter => translate(locale, "key-enter", None),
     Key::Escape => translate(locale, "key-escape", None),
@@ -231,6 +296,8 @@ fn spoken_key(key: Key, locale: Locale) -> String {
     Key::Char(text) => text.to_owned(),
     Key::Up => translate(locale, "key-up", None),
     Key::Down => translate(locale, "key-down", None),
+    Key::Left => translate(locale, "key-left", None),
+    Key::Right => translate(locale, "key-right", None),
     Key::Enter => translate(locale, "key-enter", None),
     Key::Escape => translate(locale, "key-escape", None),
   }

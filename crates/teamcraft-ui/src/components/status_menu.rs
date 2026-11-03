@@ -10,18 +10,21 @@ use crate::clock::{
   tomorrow_at,
 };
 use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
+use crate::components::emoji_picker::EmojiPicker;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::components::profile_views::status_until_label;
+use crate::components::sheet::MenuSurface;
 use crate::i18n::use_i18n;
 use crate::model::{CustomStatus, PresenceStatus, StatusExpiry, TimestampMs};
 use crate::session::use_session;
-use crate::state::{Overlay, use_app_state};
+use crate::state::{Overlay, SettingsTab, use_app_state};
 
 /// "Until tomorrow morning" means 08:00 local time.
-const MORNING_MINUTE: u16 = 8 * 60;
-const MS_PER_HOUR: TimestampMs = 3_600_000;
+pub(crate) const MORNING_MINUTE: u16 = 8 * 60;
+pub(crate) const MS_PER_HOUR: TimestampMs = 3_600_000;
 
-/// Presets an admin can configure later; the label is an i18n key.
+/// Suggestions while the workspace configured no presets of its own; the label is an i18n key.
 const STATUS_PRESETS: [(&str, &str); 4] = [
   ("🗓️", "status-preset-meeting"),
   ("🚌", "status-preset-commuting"),
@@ -38,6 +41,9 @@ pub fn StatusMenu() -> impl IntoView {
   let session = use_session();
   let me = Memo::new(move |_| state.me());
   let is_admin = Memo::new(move |_| state.read(|backend| backend.my_role()).includes(&Role::Admin));
+  // The workspace may switch statuses off (PLAN.md §4): then there is nothing to set.
+  let are_statuses_enabled =
+    Memo::new(move |_| state.read(|backend| backend.presence_policy()).statuses_enabled);
 
   Effect::new(move |_| {
     if let Some(element) = menu.get() {
@@ -102,8 +108,14 @@ pub fn StatusMenu() -> impl IntoView {
   };
 
   view! {
-    <div class="popover-backdrop" on:mousedown=move |_| state.close_overlay()></div>
-    <div class="popover status-menu" role="menu" aria-label=move || i18n.t("status-menu-label") node_ref=menu on:keydown=on_keydown>
+    <MenuSurface
+      class="status-menu"
+      sheet_class="status-menu"
+      label=Signal::derive(move || i18n.t("status-menu-label"))
+      on_close=Callback::new(move |()| state.close_overlay())
+      node_ref=menu
+      on_keydown=Callback::new(on_keydown)
+    >
       <div class="menu-user">
         {move || view! { <Avatar user=me.get() size=AvatarSize::Large /> }}
         <div>
@@ -115,30 +127,37 @@ pub fn StatusMenu() -> impl IntoView {
           </div>
         </div>
       </div>
-      <button
-        class="menu-item custom-status-row"
-        role="menuitem"
-        tabindex="-1"
-        on:click=move |_| state.overlay.set(Overlay::CustomStatus)
-      >
-        {move || match me.get().maybe_custom_status {
-          Some(status) => {
-            view! {
-              <span class="menu-emoji" aria-hidden="true">{status.emoji}</span>
-              <span class="menu-label">{status.text}</span>
-            }
-            .into_any()
-          },
-          None => {
-            view! {
-              <Icon name=IconName::Smile />
-              <span class="menu-label muted-text">{move || i18n.t("status-custom-set")}</span>
-            }
-            .into_any()
-          },
-        }}
-      </button>
-      <div class="menu-sep" role="separator"></div>
+      <Show when=move || are_statuses_enabled.get() fallback=|| ()>
+        <button
+          class="menu-item custom-status-row"
+          role="menuitem"
+          tabindex="-1"
+          on:click=move |_| state.overlay.set(Overlay::CustomStatus)
+        >
+          // An empty status (no emoji, no text) is no status: offer to set one.
+          {move || match me.get().maybe_custom_status.filter(|status| !status.text.trim().is_empty() || !status.emoji.trim().is_empty()) {
+            Some(status) => {
+              let maybe_until = status.maybe_expires_at.map(|at| status_until_label(at, now_ms(), i18n));
+              view! {
+                <span class="menu-emoji" aria-hidden="true">{status.emoji}</span>
+                <span class="menu-label">
+                  {status.text}
+                  {maybe_until.map(|until| view! { <small>{until}</small> })}
+                </span>
+              }
+              .into_any()
+            },
+            None => {
+              view! {
+                <Icon name=IconName::Smile />
+                <span class="menu-label muted-text">{move || i18n.t("status-custom-set")}</span>
+              }
+              .into_any()
+            },
+          }}
+        </button>
+        <div class="menu-sep" role="separator"></div>
+      </Show>
       {PresenceStatus::ALL
         .into_iter()
         .map(|presence| {
@@ -228,12 +247,12 @@ pub fn StatusMenu() -> impl IntoView {
         </button>
       </Show>
       <Show when=|| crate::profiles::use_profiles().is_some() fallback=|| ()>
-        <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.overlay.set(Overlay::EditProfile)>
+        <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.open_settings_at(SettingsTab::Account)>
           <Icon name=IconName::User />
           <span class="menu-label">{move || i18n.t("profile-edit-title")}</span>
         </button>
       </Show>
-      <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.overlay.set(Overlay::Settings)>
+      <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.open_settings()>
         <Icon name=IconName::Sliders />
         <span class="menu-label">{move || i18n.t("menu-settings")}</span>
       </button>
@@ -261,20 +280,26 @@ pub fn StatusMenu() -> impl IntoView {
         <Icon name=IconName::Close />
         <span class="menu-label">{move || i18n.t("menu-log-out")}</span>
       </button>
-    </div>
+    </MenuSurface>
   }
 }
 
-/// Dialog to set emoji, text and expiry of the custom status.
+/// Dialog to set emoji, text and expiry of the custom status. Offers the workspace's presets (or
+/// suggestions when it has none); with custom statuses switched off only the presets can be picked.
 #[component]
 pub fn CustomStatusDialog() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  let policy = state.read(|backend| backend.presence_policy());
+  let can_write_own = policy.custom_status_enabled;
   let current = state.me().maybe_custom_status;
+  // The end of the current status, or of a preset with a duration; picking a "clear after"
+  // choice replaces it.
+  let chosen_end = RwSignal::new(current.as_ref().and_then(|status| status.maybe_expires_at));
   let emoji = RwSignal::new(
     current
       .as_ref()
-      .map_or_else(|| "💬".to_owned(), |status| status.emoji.clone()),
+      .map_or_else(String::new, |status| status.emoji.clone()),
   );
   let text = RwSignal::new(
     current
@@ -288,15 +313,49 @@ pub fn CustomStatusDialog() -> impl IntoView {
       .map_or(StatusExpiry::Today, |status| status.expiry),
   );
   let has_current = current.is_some();
+  let presets: Vec<Preset> = if policy.presets.is_empty() {
+    if can_write_own {
+      STATUS_PRESETS
+        .into_iter()
+        .map(|(emoji, key)| Preset {
+          emoji: emoji.to_owned(),
+          text: i18n.t(key),
+          maybe_duration_minutes: None,
+        })
+        .collect()
+    } else {
+      Vec::new()
+    }
+  } else {
+    policy
+      .presets
+      .iter()
+      .map(|preset| Preset {
+        emoji: preset.maybe_emoji.clone().unwrap_or_default(),
+        text: preset.text.clone(),
+        maybe_duration_minutes: preset.maybe_duration_minutes,
+      })
+      .collect()
+  };
+  let has_presets = !presets.is_empty();
+  let text_input = NodeRef::<html::Input>::new();
 
   let save = move || {
     let status = CustomStatus {
-      emoji: emoji.get_untracked(),
+      emoji: emoji.get_untracked().trim().to_owned(),
       text: text.get_untracked().trim().to_owned(),
       expiry: expiry.get_untracked(),
+      maybe_expires_at: chosen_end.get_untracked().filter(|end| *end > now_ms()),
     };
-    state.write(|backend| backend.set_custom_status((!status.text.is_empty()).then_some(status)));
+    // Without text there is no status (the emoji alone is the default one).
+    let is_empty = status.text.trim().is_empty();
+    state.write(|backend| backend.set_custom_status((!is_empty).then_some(status)));
     state.close_overlay();
+  };
+  let chosen_end_label = move || {
+    chosen_end
+      .get()
+      .map(|end| status_until_label(end, now_ms(), i18n))
   };
 
   view! {
@@ -314,46 +373,56 @@ pub fn CustomStatusDialog() -> impl IntoView {
           </button>
         </header>
         <div class="modal-body">
+          <Show when=move || !can_write_own fallback=|| ()>
+            <p class="hint">{move || i18n.t("status-presets-only")}</p>
+          </Show>
+          <Show when=move || can_write_own || !has_presets fallback=|| ()>
           <div class="field-row">
-            <label class="visually-hidden" for="status-emoji">{move || i18n.t("status-emoji")}</label>
-            <input
-              id="status-emoji"
-              class="input emoji-input"
-              name="emoji"
-              maxlength="8"
-              autocomplete="off"
-              prop:value=move || emoji.get()
-              on:input=move |ev| emoji.set(event_target_value(&ev))
-            />
+            <StatusEmojiButton emoji=emoji is_enabled=can_write_own text_input=text_input />
             <label class="visually-hidden" for="status-text">{move || i18n.t("status-text")}</label>
             <input
               id="status-text"
               class="input grow"
+              node_ref=text_input
               name="status"
               data-autofocus
               autocomplete="off"
               maxlength="100"
               placeholder=move || i18n.t("status-text-placeholder")
+              readonly=!can_write_own
               prop:value=move || text.get()
               on:input=move |ev| text.set(event_target_value(&ev))
             />
           </div>
+          </Show>
           <ul class="preset-list" aria-label=move || i18n.t("status-presets")>
-            {STATUS_PRESETS
+            {presets
               .into_iter()
-              .map(|(preset_emoji, key)| {
+              .map(|preset| {
+                let Preset { emoji: preset_emoji, text: preset_text, maybe_duration_minutes } = preset;
+                let shown_emoji = preset_emoji.clone();
+                let shown_text = preset_text.clone();
+                let is_picked = {
+                  let (preset_emoji, preset_text) = (preset_emoji.clone(), preset_text.clone());
+                  move || emoji.get() == preset_emoji && text.get() == preset_text
+                };
                 view! {
                   <li>
                     <button
                       type="button"
                       class="preset"
+                      aria-pressed=move || is_picked().to_string()
                       on:click=move |_| {
-                        emoji.set(preset_emoji.to_owned());
-                        text.set(i18n.t(key));
+                        emoji.set(preset_emoji.clone());
+                        text.set(preset_text.clone());
+                        // A preset's duration is its end, unless the user picks another below.
+                        if let Some(minutes) = maybe_duration_minutes {
+                          chosen_end.set(Some(now_ms() + i64::from(minutes) * 60_000));
+                        }
                       }
                     >
-                      <span aria-hidden="true">{preset_emoji}</span>
-                      <span>{move || i18n.t(key)}</span>
+                      <span aria-hidden="true">{shown_emoji}</span>
+                      <span translate="no">{shown_text}</span>
                     </button>
                   </li>
                 }
@@ -365,7 +434,10 @@ pub fn CustomStatusDialog() -> impl IntoView {
             <select
               id="status-expiry"
               class="input"
-              on:change=move |ev| expiry.set(StatusExpiry::from_slug(&event_target_value(&ev)))
+              on:change=move |ev| {
+                expiry.set(StatusExpiry::from_slug(&event_target_value(&ev)));
+                chosen_end.set(None);
+              }
             >
               {StatusExpiry::ALL
                 .into_iter()
@@ -378,6 +450,7 @@ pub fn CustomStatusDialog() -> impl IntoView {
                 })
                 .collect_view()}
             </select>
+            {move || chosen_end_label().map(|label| view! { <p class="hint">{label}</p> })}
           </div>
         </div>
         <footer class="modal-foot">
@@ -406,6 +479,76 @@ pub fn CustomStatusDialog() -> impl IntoView {
       </form>
     </Modal>
   }
+}
+
+/// The status emoji as a compact square button (#705): it shows the chosen emoji, or a smiley while
+/// there is none, and opens the app's emoji picker. Picking closes it and moves on to the text;
+/// Backspace or Delete on the button removes the emoji.
+#[component]
+fn StatusEmojiButton(
+  emoji: RwSignal<String>,
+  is_enabled: bool,
+  text_input: NodeRef<html::Input>,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let button = NodeRef::<html::Button>::new();
+  let maybe_anchor = RwSignal::new_local(None::<web_sys::Element>);
+  let on_pick = move |picked: String| {
+    emoji.set(picked);
+    maybe_anchor.set(None);
+    if let Some(element) = text_input.get_untracked() {
+      drop(element.focus());
+    }
+  };
+  let on_close = move |()| {
+    maybe_anchor.set(None);
+    if let Some(element) = button.get_untracked() {
+      drop(element.focus());
+    }
+  };
+  view! {
+    <button
+      type="button"
+      id="status-emoji"
+      class="emoji-pick-btn"
+      node_ref=button
+      aria-label=move || i18n.t("status-emoji")
+      title=move || i18n.t("status-emoji")
+      aria-haspopup="dialog"
+      aria-expanded=move || maybe_anchor.with(Option::is_some).to_string()
+      disabled=!is_enabled
+      on:click=move |ev| maybe_anchor.set(Some(event_target::<web_sys::Element>(&ev)))
+      on:keydown=move |ev: web_sys::KeyboardEvent| {
+        if matches!(ev.key().as_str(), "Backspace" | "Delete") {
+          ev.prevent_default();
+          emoji.set(String::new());
+        }
+      }
+    >
+      {move || {
+        let chosen = emoji.get();
+        if chosen.trim().is_empty() {
+          view! { <Icon name=IconName::Smile /> }.into_any()
+        } else {
+          view! { <span class="emoji-pick-value" aria-hidden="true">{chosen}</span> }.into_any()
+        }
+      }}
+    </button>
+    {move || {
+      maybe_anchor.get().map(|anchor| {
+        view! {
+          <EmojiPicker anchor=anchor returns_focus=false on_pick=Callback::new(on_pick) on_close=Callback::new(on_close) />
+        }
+      })
+    }}
+  }
+}
+
+/// A status the dialog offers to pick.
+struct Preset {
+  emoji: String,
+  text: String,
+  maybe_duration_minutes: Option<u32>,
 }
 
 fn move_focus(ev: &web_sys::KeyboardEvent, menu: NodeRef<html::Div>, key: &str) {

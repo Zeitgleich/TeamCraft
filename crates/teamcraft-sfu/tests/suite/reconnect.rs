@@ -1,0 +1,890 @@
+//! Calls that survive lost connections and lossy paths, without a network: the SFU's rooms and
+//! real call engines exchange signaling and datagrams through in-memory links, and time is
+//! passed in. Deterministic: losses follow fixed patterns. Simulcast layers a publisher pauses
+//! or resumes on the way (#921), and tracks stopped before the SFU confirmed them (#929), are
+//! here too.
+
+// clippy.toml only relaxes these lints inside #[test] functions; the helpers below are test code too.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use teamcraft_media::audio_frame::EncodedAudioFrame;
+use teamcraft_media::bwe::BweConfig;
+use teamcraft_media::call_engine::{CallEngine, CallEngineConfig, CallEngineEvent, EngineOutput};
+use teamcraft_media::datagram::SimulcastLayer;
+use teamcraft_media::rtp::{AudioLevel, RtpTimestamp};
+use teamcraft_media::uplink_layers::UplinkPolicy;
+use teamcraft_media::video::EncodedVideoFrame;
+use teamcraft_proto::{
+  AudioCodec, CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, Id, MediaCapabilities,
+  MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, Snowflake, UserId, VideoCodec, VideoLayerInfo,
+  VideoPublicationId, VideoTrackKind,
+};
+use teamcraft_sfu::auth::JoinGrant;
+use teamcraft_sfu::config::SfuConfig;
+use teamcraft_sfu::room::{
+  JoinOutcome, ParticipantHandle, ParticipantLink, REPLACED_BY_NEW_CONNECTION, Room, Rooms, SessionId,
+};
+use teamcraft_sfu::signaling::{EventSequence, Outgoing};
+use tokio::sync::mpsc;
+
+const CALL: i64 = 77;
+const ALICE: i64 = 1;
+const BOB: i64 = 2;
+
+mod lost_connection {
+  use super::*;
+
+  #[test]
+  fn rejoin_resumes_the_slot_with_new_keys_and_continuous_rtp_numbers() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    let bob_stream = network.audio_stream_of(BOB, ALICE);
+    network.speak(BOB, 3);
+    let before = network.heard(ALICE, BOB);
+    assert_eq!(before.len(), 3);
+
+    network.lose(BOB);
+    assert!(network.saw(ALICE, &CallEngineEvent::ParticipantReconnecting(device(BOB))));
+    assert!(network.saw(BOB, &CallEngineEvent::Reconnecting));
+    // Media pauses both ways; nobody hears of a leave.
+    network.speak(ALICE, 2);
+    network.speak(BOB, 2);
+    assert!(network.heard(BOB, ALICE).is_empty());
+    assert!(network.heard(ALICE, BOB).is_empty());
+
+    let outcome = network.rejoin(BOB);
+    assert_eq!(outcome, JoinOutcome::Resumed);
+    assert!(network.saw(BOB, &CallEngineEvent::Reconnected));
+    assert!(network.saw(ALICE, &CallEngineEvent::ParticipantReconnected(device(BOB))));
+    assert!(!network.saw(ALICE, &CallEngineEvent::ParticipantLeft(device(BOB))));
+    assert!(network.is_secured(ALICE) && network.is_secured(BOB));
+    // Same slot (audio stream), and Bob's RTP numbering simply continues.
+    assert_eq!(network.audio_stream_of(BOB, ALICE), bob_stream);
+    network.speak(BOB, 1);
+    let after = network.heard(ALICE, BOB);
+    assert_eq!(after, vec![before[2].wrapping_add(1)]);
+    network.speak(ALICE, 1);
+    assert_eq!(network.heard(BOB, ALICE).len(), 1);
+
+    // The old connection's cleanup (its grace period running out) leaves the resumed slot alone.
+    assert!(!network.expire_lost_sessions(BOB));
+    assert!(!network.saw(ALICE, &CallEngineEvent::ParticipantLeft(device(BOB))));
+  }
+
+  #[test]
+  fn slot_is_released_when_the_grace_period_runs_out() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    network.lose(BOB);
+    assert!(network.expire_lost_sessions(BOB), "the leave is reported once");
+    assert!(network.saw(ALICE, &CallEngineEvent::ParticipantLeft(device(BOB))));
+    // Back too late: a new participant with a new audio stream.
+    assert_eq!(network.rejoin(BOB), JoinOutcome::Joined);
+    assert!(network.saw(
+      ALICE,
+      &CallEngineEvent::ParticipantJoined(network.participant_of(BOB, ALICE))
+    ));
+    assert!(network.is_secured(ALICE) && network.is_secured(BOB));
+    network.speak(ALICE, 1);
+    assert_eq!(network.heard(BOB, ALICE).len(), 1);
+  }
+
+  #[tokio::test]
+  async fn new_connection_takes_over_one_the_sfu_still_thinks_alive() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    // Bob noticed the dead path before the SFU's idle timeout did.
+    let mut old = network.drop_connection_silently(BOB);
+    assert_eq!(network.rejoin(BOB), JoinOutcome::Resumed);
+    // The old connection hears why (so it doesn't rejoin in turn), then closes.
+    let mut told = Vec::new();
+    while let Ok(outgoing) = old.signals.try_recv() {
+      told.push(outgoing);
+    }
+    assert!(
+      told.contains(&Outgoing::Event(CallEvent::ConnectionReplaced)),
+      "{told:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(old.link.close_code(), Some(REPLACED_BY_NEW_CONNECTION));
+    assert!(!network.saw(ALICE, &CallEngineEvent::ParticipantLeft(device(BOB))));
+    assert!(network.is_secured(ALICE) && network.is_secured(BOB));
+    network.speak(BOB, 1);
+    assert_eq!(network.heard(ALICE, BOB).len(), 1);
+    // The replaced connection's session ends without touching the slot.
+    assert!(!network.expire_lost_sessions(BOB));
+  }
+
+  #[test]
+  fn everyone_reconnecting_at_once_still_gets_back_together() {
+    // Both on the same Wi-Fi that went away.
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    network.lose(ALICE);
+    network.lose(BOB);
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Resumed);
+    assert_eq!(network.rejoin(BOB), JoinOutcome::Resumed);
+    assert!(network.is_secured(ALICE) && network.is_secured(BOB));
+    network.speak(ALICE, 1);
+    network.speak(BOB, 1);
+    assert_eq!(network.heard(BOB, ALICE).len(), 1);
+    assert_eq!(network.heard(ALICE, BOB).len(), 1);
+  }
+}
+
+mod sfu_restart {
+  use super::*;
+
+  #[test]
+  fn going_away_closes_every_connection_as_not_final() {
+    let network = Network::with_secured(&[ALICE, BOB]);
+    assert!(!network.rooms.is_going_away());
+    let links = network.links();
+    assert_eq!(network.rooms.go_away(), 2);
+    assert!(network.rooms.is_going_away());
+    for link in links {
+      assert_eq!(link.close_code(), Some(SFU_GOING_AWAY_CLOSE_CODE));
+    }
+  }
+
+  #[test]
+  fn restarted_sfu_takes_everyone_back_in_a_fresh_room_and_group() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    network.speak(BOB, 2);
+    assert_eq!(network.heard(ALICE, BOB).len(), 2);
+
+    network.restart_sfu();
+    assert!(network.saw(ALICE, &CallEngineEvent::Reconnecting));
+    assert!(network.saw(BOB, &CallEngineEvent::Reconnecting));
+    // The new SFU knows no slots: both join afresh, the first founds a new DAVE group.
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Joined);
+    assert_eq!(network.rejoin(BOB), JoinOutcome::Joined);
+    assert!(network.saw(ALICE, &CallEngineEvent::Reconnected));
+    assert!(network.saw(BOB, &CallEngineEvent::Reconnected));
+    assert!(network.is_secured(ALICE) && network.is_secured(BOB));
+    assert_eq!(
+      network.client(ALICE).engine.privacy_code(),
+      network.client(BOB).engine.privacy_code()
+    );
+    network.speak(ALICE, 1);
+    network.speak(BOB, 1);
+    assert_eq!(network.heard(BOB, ALICE).len(), 1);
+    assert_eq!(network.heard(ALICE, BOB).len(), 1);
+    assert!(!network.client(ALICE).engine.is_over());
+  }
+
+  #[test]
+  fn rejoins_arriving_in_any_order_get_back_together() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    network.restart_sfu();
+    // Bob's spread delay happened to be shorter.
+    assert_eq!(network.rejoin(BOB), JoinOutcome::Joined);
+    network.advance(Duration::from_millis(500));
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Joined);
+    assert!(network.is_secured(ALICE) && network.is_secured(BOB));
+    network.speak(ALICE, 1);
+    assert_eq!(network.heard(BOB, ALICE).len(), 1);
+  }
+}
+
+mod lossy_path {
+  use super::*;
+
+  #[test]
+  fn uplink_loss_reaches_the_sender_as_planned_fec() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    // Every fourth datagram from Alice is lost on the way to the SFU.
+    network.client_mut(ALICE).uplink_loss_every = Some(4);
+    for _ in 0..20 {
+      network.speak(ALICE, 5);
+      network.advance(Duration::from_millis(100));
+    }
+    let heard = network.heard(BOB, ALICE).len();
+    assert_eq!(heard, 75, "a quarter of 100 frames is lost");
+    // Measured over the estimator's one-second window.
+    let last_loss = network
+      .client(ALICE)
+      .events
+      .iter()
+      .rev()
+      .find_map(|event| match event {
+        CallEngineEvent::UplinkEstimate { loss_percent, .. } => Some(*loss_percent),
+        _ => None,
+      });
+    assert!(
+      last_loss.is_some_and(|loss| (20..=30).contains(&loss)),
+      "{last_loss:?}"
+    );
+  }
+}
+
+mod simulcast_layers {
+  use super::*;
+
+  /// A shared screen from a home connection whose uplink can't carry the full layer any more:
+  /// the viewer, on the top layer so far, keeps getting pictures on a layer that is sent.
+  #[test]
+  fn a_viewer_keeps_getting_pictures_when_the_publisher_pauses_the_top_layer() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    let stream = network.publish(ALICE, VideoTrackKind::Screen);
+    network.subscribe(BOB, stream, 2);
+    network.send_video(ALICE, stream, 30);
+    let before = network.pictures(BOB, stream);
+    assert!(before.contains(&2), "on the top layer first: {before:?}");
+
+    // Some of Alice's datagrams are lost until her uplink estimate drops: in memory it falls to
+    // the floor at once, and without an audio reserve that still carries the base layer.
+    network.client_mut(ALICE).engine.set_uplink_policy(UplinkPolicy {
+      audio_reserve_bps: 0,
+      screen_audio_reserve_bps: 0,
+      ..UplinkPolicy::default()
+    });
+    network.client_mut(ALICE).uplink_loss_every = Some(10);
+    let mut rounds = 0;
+    while !network.has_paused_top_layer(ALICE, stream) {
+      rounds += 1;
+      assert!(rounds < 100, "the uplink never paused the top layer");
+      network.send_video(ALICE, stream, 3);
+    }
+    network.client_mut(ALICE).uplink_loss_every = None;
+    network.pictures(BOB, stream);
+
+    // Two seconds of video: Bob moves to a layer Alice sends and sees pictures again.
+    network.send_video(ALICE, stream, 60);
+    let after = network.pictures(BOB, stream);
+    assert!(!after.is_empty(), "the viewer froze on the paused layer");
+    assert!(after.iter().all(|layer| *layer < 2), "{after:?}");
+  }
+
+  /// A publisher that was away while someone started to watch its top layer hears about it when
+  /// it is back, and sends that layer again.
+  #[test]
+  fn a_publisher_back_from_a_lost_connection_sends_the_layers_needed_meanwhile() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    let stream = network.publish(ALICE, VideoTrackKind::Camera);
+    network.subscribe(BOB, stream, 0);
+    network.send_video(ALICE, stream, 10);
+    assert_eq!(network.last_layers_needed(ALICE, stream), Some(vec![0]));
+    assert!(network.pictures(BOB, stream).iter().all(|layer| *layer == 0));
+
+    network.lose(ALICE);
+    // Bob enlarges Alice's tile while she is away (his allocation moves up a layer per upswitch
+    // hold): the SFU can't tell her.
+    network.subscribe(BOB, stream, 2);
+    for _ in 0..50 {
+      network.advance(Duration::from_millis(100));
+    }
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Resumed);
+    assert!(network.is_secured(ALICE) && network.is_secured(BOB));
+    let needed = network.last_layers_needed(ALICE, stream).unwrap();
+    // What the SFU needs now (its answer after `joined`), not just every layer as a fallback.
+    assert!(needed.contains(&2) && !needed.contains(&1), "{needed:?}");
+
+    network.send_video(ALICE, stream, 30);
+    let after = network.pictures(BOB, stream);
+    assert!(
+      after.contains(&2),
+      "the viewer never got the top layer: {after:?}"
+    );
+  }
+}
+
+/// Issue #929: a track stopped before the SFU confirmed it must not stay published, a black tile
+/// with the camera shown on for everyone else.
+mod own_publications {
+  use super::*;
+
+  #[test]
+  fn a_camera_stopped_and_started_again_before_the_answer_leaves_one_track() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    // On, off and on again within one round trip: no answer has arrived in between.
+    let first = network.ask_for(ALICE, VideoTrackKind::Camera);
+    network.client_mut(ALICE).engine.withdraw_video(first);
+    let second = network.ask_for(ALICE, VideoTrackKind::Camera);
+    network.pump();
+
+    let live = network.live_tracks(BOB, ALICE);
+    assert_eq!(live.len(), 1, "Bob sees {live:?}");
+    assert_eq!(network.confirmed(ALICE, second), Some(live[0]));
+    assert_eq!(network.confirmed(ALICE, first), None);
+    // The one left is the one Alice sends on: Bob gets pictures.
+    network.subscribe(BOB, live[0], 0);
+    network.send_video(ALICE, live[0], 10);
+    assert!(!network.pictures(BOB, live[0]).is_empty());
+  }
+
+  /// The long window: the SFU answered just before the connection went, the answer was lost with
+  /// it, and the camera was turned off meanwhile. The track the SFU kept with the slot goes.
+  #[test]
+  fn a_camera_stopped_while_its_answer_was_lost_is_unpublished_after_the_rejoin() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    let camera = network.ask_for(ALICE, VideoTrackKind::Camera);
+    // The SFU takes the request and answers; the connection dies before the answer arrives.
+    network.drain_client(ALICE);
+    network.lose(ALICE);
+    network.client_mut(ALICE).engine.withdraw_video(camera);
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Resumed);
+    network.pump();
+    assert_eq!(network.live_tracks(BOB, ALICE), Vec::new());
+    assert_eq!(network.confirmed(ALICE, camera), None);
+  }
+
+  /// Toggling the camera twice while reconnecting: only the last request is still wanted.
+  #[test]
+  fn toggling_the_camera_twice_while_reconnecting_leaves_one_track() {
+    let mut network = Network::with_secured(&[ALICE, BOB]);
+    let stream = network.publish(ALICE, VideoTrackKind::Camera);
+    let first = network.confirmed_publication(ALICE, stream);
+    network.lose(ALICE);
+    // Off and on, twice, while away: nothing reaches the SFU.
+    network.client_mut(ALICE).engine.withdraw_video(first);
+    let second = network.ask_for(ALICE, VideoTrackKind::Camera);
+    network.client_mut(ALICE).engine.withdraw_video(second);
+    let third = network.ask_for(ALICE, VideoTrackKind::Camera);
+    network.pump();
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Resumed);
+    network.pump();
+
+    let live = network.live_tracks(BOB, ALICE);
+    assert_eq!(live.len(), 1, "Bob sees {live:?}");
+    assert_ne!(live[0], stream, "the camera from before the loss is gone");
+    assert_eq!(network.confirmed(ALICE, third), Some(live[0]));
+    assert_eq!(network.confirmed(ALICE, second), None);
+  }
+}
+
+/// Clients and the SFU's rooms, connected in memory.
+struct Network {
+  rooms: Rooms,
+  clients: BTreeMap<i64, Client>,
+  now: Instant,
+}
+
+struct Client {
+  engine: CallEngine,
+  maybe_connection: Option<MemoryConnection>,
+  /// Sessions of connections lost (or silently dropped) and not released yet.
+  lost_sessions: Vec<(Arc<Room>, SessionId)>,
+  events: Vec<CallEngineEvent>,
+  /// Drop every n-th datagram on the way to the SFU.
+  uplink_loss_every: Option<u64>,
+  uplink_sent: u64,
+  /// The id of the client's next video publication.
+  next_publication: u32,
+}
+
+/// What sending a client's outputs did.
+struct Drained {
+  has_moved: bool,
+  /// The SFU's answer to a join among them.
+  maybe_outcome: Option<JoinOutcome>,
+}
+
+/// One connection of a client to the SFU.
+struct MemoryConnection {
+  link: Arc<MemoryLink>,
+  signals: mpsc::Receiver<Outgoing>,
+  signal_tx: mpsc::Sender<Outgoing>,
+  sequence: EventSequence,
+  room: Arc<Room>,
+  session: SessionId,
+}
+
+/// The datagram side of a connection: what the SFU sends lands in the inbox.
+#[derive(Default)]
+struct MemoryLink {
+  inbox: Mutex<VecDeque<Vec<u8>>>,
+  is_dead: AtomicBool,
+  close_code: Mutex<Option<u32>>,
+}
+
+impl ParticipantLink for MemoryLink {
+  fn send_datagram(&self, bytes: &[u8]) {
+    if !self.is_dead.load(Ordering::Relaxed) {
+      self.inbox.lock().unwrap().push_back(bytes.to_vec());
+    }
+  }
+
+  fn close(&self, code: u32, _reason: &[u8]) {
+    *self.close_code.lock().unwrap() = Some(code);
+  }
+}
+
+impl MemoryLink {
+  fn close_code(&self) -> Option<u32> {
+    *self.close_code.lock().unwrap()
+  }
+}
+
+impl Network {
+  /// The clients joined and in one DAVE group.
+  fn with_secured(ids: &[i64]) -> Self {
+    let mut network = Self {
+      rooms: Rooms::new(SfuConfig::default()),
+      clients: BTreeMap::new(),
+      now: Instant::now(),
+    };
+    for &id in ids {
+      let mut engine = CallEngine::new(engine_config(id), network.now);
+      engine.join(format!("token-{id}"));
+      network.clients.insert(
+        id,
+        Client {
+          engine,
+          maybe_connection: None,
+          lost_sessions: Vec::new(),
+          events: Vec::new(),
+          uplink_loss_every: None,
+          uplink_sent: 0,
+          next_publication: 0,
+        },
+      );
+      network.pump();
+    }
+    for &id in ids {
+      assert!(network.is_secured(id), "client {id} is secured");
+    }
+    network
+  }
+
+  fn client(&self, id: i64) -> &Client {
+    &self.clients[&id]
+  }
+
+  fn client_mut(&mut self, id: i64) -> &mut Client {
+    self.clients.get_mut(&id).unwrap()
+  }
+
+  /// The connection is gone; the SFU notices and the client starts reconnecting.
+  fn lose(&mut self, id: i64) {
+    let connection = self.drop_connection_silently(id);
+    let slot_kept = self
+      .rooms
+      .disconnect(&connection.room, device(id), connection.session, self.now);
+    assert!(slot_kept);
+    self.pump();
+  }
+
+  /// The links of every connected client.
+  fn links(&self) -> Vec<Arc<MemoryLink>> {
+    self
+      .clients
+      .values()
+      .filter_map(|client| client.maybe_connection.as_ref())
+      .map(|connection| Arc::clone(&connection.link))
+      .collect()
+  }
+
+  /// The SFU shuts down (every connection closed as going away) and a fresh process takes its
+  /// place: no rooms, no slots.
+  fn restart_sfu(&mut self) {
+    self.rooms.go_away();
+    let ids: Vec<i64> = self.clients.keys().copied().collect();
+    for id in ids {
+      self.drop_connection_silently(id);
+      self.client_mut(id).lost_sessions.clear();
+    }
+    self.rooms = Rooms::new(SfuConfig::default());
+  }
+
+  /// The client's connection dies without the SFU noticing (yet).
+  fn drop_connection_silently(&mut self, id: i64) -> MemoryConnection {
+    let client = self.client_mut(id);
+    let connection = client.maybe_connection.take().unwrap();
+    connection.link.is_dead.store(true, Ordering::Relaxed);
+    client.engine.connection_lost();
+    client
+      .lost_sessions
+      .push((Arc::clone(&connection.room), connection.session));
+    self.pump();
+    connection
+  }
+
+  /// A new connection with a fresh token; returns how the SFU took the join.
+  fn rejoin(&mut self, id: i64) -> JoinOutcome {
+    let now = self.now;
+    let client = self.client_mut(id);
+    client.engine.rejoin(format!("token-{id}-again"), now);
+    let outcome = self.drain_client(id).maybe_outcome.unwrap();
+    self.pump();
+    outcome
+  }
+
+  /// Releases the client's lost sessions, as their grace periods run out. Returns whether the
+  /// participant left because of it.
+  fn expire_lost_sessions(&mut self, id: i64) -> bool {
+    let sessions = std::mem::take(&mut self.client_mut(id).lost_sessions);
+    let mut has_left = false;
+    for (room, session) in sessions {
+      has_left |= self.rooms.leave(&room, device(id), session);
+    }
+    self.pump();
+    has_left
+  }
+
+  fn advance(&mut self, by: Duration) {
+    self.now += by;
+    // What the SFU's per-session task and the clients' timers do every 100 ms.
+    for (&id, client) in &mut self.clients {
+      client.engine.on_timer(self.now);
+      if let Some(connection) = &client.maybe_connection {
+        connection.room.on_timer(device(id), self.now);
+        if let Some(feedback) = connection.room.take_uplink_feedback(device(id)) {
+          connection
+            .signal_tx
+            .try_send(Outgoing::Event(CallEvent::TransportFeedback { feedback }))
+            .unwrap();
+        }
+      }
+    }
+    self.pump();
+  }
+
+  /// The client sends `frames` audio frames.
+  fn speak(&mut self, id: i64, frames: usize) {
+    let now = self.now;
+    for _ in 0..frames {
+      self.client_mut(id).engine.send_audio(&frame(), now);
+    }
+    self.pump();
+  }
+
+  /// The client asks for a three-layer track, as its driver does when a camera or share starts;
+  /// nothing is delivered yet. Returns the publication's id.
+  fn ask_for(&mut self, id: i64, kind: VideoTrackKind) -> VideoPublicationId {
+    let client = self.client_mut(id);
+    let publication = VideoPublicationId(client.next_publication);
+    client.next_publication += 1;
+    client
+      .engine
+      .publish_video(publication, kind, VideoCodec::H264, small_layers());
+    publication
+  }
+
+  /// The client publishes a three-layer track; returns its stream id.
+  fn publish(&mut self, id: i64, kind: VideoTrackKind) -> MediaStreamId {
+    self.ask_for(id, kind.clone());
+    self.pump();
+    self
+      .client(id)
+      .events
+      .iter()
+      .find_map(|event| match event {
+        CallEngineEvent::VideoPublished(track) if track.device_id == device(id) && track.kind == kind => {
+          Some(track.stream_id)
+        },
+        _ => None,
+      })
+      .expect("the SFU published the track")
+  }
+
+  fn subscribe(&mut self, id: i64, stream: MediaStreamId, max_layer: u8) {
+    self
+      .client_mut(id)
+      .engine
+      .subscribe_video(stream, Some(max_layer));
+    self.pump();
+  }
+
+  /// The client sends `frames` pictures of every layer at 30 per second, as its driver would:
+  /// a keyframe where one was asked for; the engine drops the layers it paused.
+  fn send_video(&mut self, id: i64, stream: MediaStreamId, frames: u32) {
+    for number in 0..frames {
+      let client = self.client_mut(id);
+      let mut keyframes: Vec<u8> = Vec::new();
+      client.events.retain(|event| match event {
+        CallEngineEvent::KeyframeRequested { stream_id, layer } if *stream_id == stream => {
+          keyframes.push(*layer);
+          false
+        },
+        _ => true,
+      });
+      for layer in 0..3u8 {
+        let frame = EncodedVideoFrame {
+          codec: VideoCodec::H264,
+          layer: SimulcastLayer::new(layer).unwrap(),
+          timestamp: RtpTimestamp(number * 3000),
+          is_keyframe: keyframes.contains(&layer),
+          data: vec![layer; 200],
+        };
+        let now = self.now;
+        self.client_mut(id).engine.send_video(stream, &frame, now);
+      }
+      self.pump();
+      self.advance(Duration::from_millis(33));
+    }
+  }
+
+  /// The streams of `owner`'s tracks that `viewer` was told about and that weren't unpublished.
+  fn live_tracks(&self, viewer: i64, owner: i64) -> Vec<MediaStreamId> {
+    let mut live = Vec::new();
+    for event in &self.client(viewer).events {
+      match event {
+        CallEngineEvent::VideoPublished(track) if track.device_id == device(owner) => {
+          live.push(track.stream_id);
+        },
+        CallEngineEvent::VideoUnpublished(stream_id) => live.retain(|stream| stream != stream_id),
+        _ => {},
+      }
+    }
+    live
+  }
+
+  /// The stream the client's engine last confirmed for its `publication`, unless it was
+  /// unpublished since.
+  fn confirmed(&self, id: i64, publication: VideoPublicationId) -> Option<MediaStreamId> {
+    let mut maybe_stream = None;
+    for event in &self.client(id).events {
+      match event {
+        CallEngineEvent::VideoPublished(track)
+          if track.device_id == device(id) && track.maybe_publication_id == Some(publication) =>
+        {
+          maybe_stream = Some(track.stream_id);
+        },
+        CallEngineEvent::VideoUnpublished(stream_id) if maybe_stream == Some(*stream_id) => {
+          maybe_stream = None;
+        },
+        _ => {},
+      }
+    }
+    maybe_stream
+  }
+
+  /// The publication a confirmed own track of the client answers.
+  fn confirmed_publication(&self, id: i64, stream: MediaStreamId) -> VideoPublicationId {
+    self
+      .client(id)
+      .events
+      .iter()
+      .find_map(|event| match event {
+        CallEngineEvent::VideoPublished(track)
+          if track.device_id == device(id) && track.stream_id == stream =>
+        {
+          track.maybe_publication_id
+        },
+        _ => None,
+      })
+      .expect("the engine names the publication")
+  }
+
+  /// Layers of the pictures of `stream` the client received since the last call.
+  fn pictures(&mut self, id: i64, stream: MediaStreamId) -> Vec<u8> {
+    let mut layers = Vec::new();
+    self.client_mut(id).events.retain(|event| match event {
+      CallEngineEvent::VideoFrame(frame) if frame.stream_id == stream => {
+        layers.push(frame.layer.value());
+        false
+      },
+      _ => true,
+    });
+    layers
+  }
+
+  /// The layers of its own track the engine last told the client's driver to send.
+  fn last_layers_needed(&self, id: i64, stream: MediaStreamId) -> Option<Vec<u8>> {
+    self.client(id).events.iter().rev().find_map(|event| match event {
+      CallEngineEvent::LayersNeeded { stream_id, layers } if *stream_id == stream => Some(layers.clone()),
+      _ => None,
+    })
+  }
+
+  /// Whether the client's uplink stopped the top layer of its track but still sends a lower one.
+  fn has_paused_top_layer(&self, id: i64, stream: MediaStreamId) -> bool {
+    self
+      .last_layers_needed(id, stream)
+      .is_some_and(|layers| !layers.is_empty() && !layers.contains(&2))
+  }
+
+  /// RTP sequence numbers of the audio `listener` received from `speaker` since the last call.
+  fn heard(&mut self, listener: i64, speaker: i64) -> Vec<u16> {
+    let client = self.client_mut(listener);
+    let mut heard = Vec::new();
+    client.events.retain(|event| match event {
+      CallEngineEvent::AudioFrame {
+        sender,
+        sequence_number,
+        ..
+      } if *sender == device(speaker) => {
+        heard.push(sequence_number.0);
+        false
+      },
+      _ => true,
+    });
+    heard
+  }
+
+  fn saw(&self, id: i64, expected: &CallEngineEvent) -> bool {
+    self.client(id).events.contains(expected)
+  }
+
+  fn is_secured(&self, id: i64) -> bool {
+    self.client(id).engine.is_secured()
+  }
+
+  fn participant_of(&self, id: i64, seen_by: i64) -> teamcraft_proto::CallParticipant {
+    *self
+      .client(seen_by)
+      .engine
+      .participants()
+      .find(|participant| participant.device_id == device(id))
+      .unwrap()
+  }
+
+  fn audio_stream_of(&self, id: i64, seen_by: i64) -> u32 {
+    self.participant_of(id, seen_by).audio_stream_id.0
+  }
+
+  /// Delivers everything in flight until nothing moves.
+  fn pump(&mut self) {
+    for _ in 0..1000 {
+      let ids: Vec<i64> = self.clients.keys().copied().collect();
+      let mut has_moved = false;
+      for id in ids {
+        has_moved |= self.drain_client(id).has_moved;
+        has_moved |= self.deliver_to(id);
+      }
+      if !has_moved {
+        return;
+      }
+    }
+    panic!("the network didn't settle");
+  }
+
+  /// Sends a client's engine outputs.
+  fn drain_client(&mut self, id: i64) -> Drained {
+    let now = self.now;
+    let mut maybe_outcome = None;
+    let mut has_moved = false;
+    while let Some(output) = self.client_mut(id).engine.poll_output() {
+      has_moved = true;
+      match output {
+        EngineOutput::Signal(CallClientMessage::Join { capabilities, .. }) => {
+          maybe_outcome = Some(self.connect(id, capabilities));
+        },
+        EngineOutput::Signal(message) => {
+          let Some(connection) = &self.client(id).maybe_connection else {
+            continue;
+          };
+          if let Err(error) = connection.room.on_client_message(device(id), message, now) {
+            connection.signal_tx.try_send(Outgoing::Error(error)).unwrap();
+          }
+        },
+        EngineOutput::Datagram(bytes) => {
+          let client = self.client_mut(id);
+          client.uplink_sent += 1;
+          let is_lost = client
+            .uplink_loss_every
+            .is_some_and(|every| client.uplink_sent.is_multiple_of(every));
+          if let Some(connection) = client.maybe_connection.as_ref().filter(|_| !is_lost) {
+            connection.room.forward_datagram(device(id), &bytes, now).unwrap();
+          }
+        },
+        EngineOutput::Event(event) => self.client_mut(id).events.push(event),
+      }
+    }
+    Drained {
+      has_moved,
+      maybe_outcome,
+    }
+  }
+
+  /// Hands a client what the SFU sent it; returns whether there was anything.
+  fn deliver_to(&mut self, id: i64) -> bool {
+    let now = self.now;
+    let client = self.client_mut(id);
+    let Some(connection) = &mut client.maybe_connection else {
+      return false;
+    };
+    let mut has_moved = false;
+    while let Ok(outgoing) = connection.signals.try_recv() {
+      has_moved = true;
+      let message: CallServerMessage = connection.sequence.frame(outgoing);
+      client.engine.handle_signal(message, now).unwrap();
+    }
+    let datagrams: Vec<Vec<u8>> = connection.link.inbox.lock().unwrap().drain(..).collect();
+    for datagram in datagrams {
+      has_moved = true;
+      client.engine.handle_datagram(&datagram, now);
+    }
+    has_moved
+  }
+
+  fn connect(&mut self, id: i64, capabilities: MediaCapabilities) -> JoinOutcome {
+    let link = Arc::new(MemoryLink::default());
+    let (signal_tx, signals) = mpsc::channel(1024);
+    let handle = ParticipantHandle {
+      link: link.clone(),
+      signal_tx: signal_tx.clone(),
+    };
+    let grant = JoinGrant {
+      call_id: call(),
+      user_id: user(id),
+      device_id: device(id),
+      maybe_conversation_id: None,
+    };
+    let (room, session, outcome) = self.rooms.join(grant, capabilities, handle).unwrap();
+    self.client_mut(id).maybe_connection = Some(MemoryConnection {
+      link,
+      signals,
+      signal_tx,
+      sequence: EventSequence::default(),
+      room,
+      session,
+    });
+    outcome
+  }
+}
+
+fn engine_config(id: i64) -> CallEngineConfig {
+  CallEngineConfig {
+    user_id: user(id),
+    device_id: device(id),
+    capabilities: MediaCapabilities {
+      audio_codecs: vec![AudioCodec::Opus],
+      video_encoders: vec![VideoCodec::H264],
+      video_decoders: vec![VideoCodec::H264],
+      max_simulcast_layers: 3,
+      max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
+    },
+    bwe: BweConfig::default(),
+  }
+}
+
+/// Three layers that all fit the start estimates, up and down: the top one is the first to go
+/// when the uplink estimate drops.
+fn small_layers() -> Vec<VideoLayerInfo> {
+  [
+    (0, 320, 180, 20_000),
+    (1, 640, 360, 40_000),
+    (2, 1280, 720, 80_000),
+  ]
+  .into_iter()
+  .map(|(layer, width, height, max_bitrate_bps)| VideoLayerInfo {
+    layer,
+    width,
+    height,
+    max_framerate: 30,
+    max_bitrate_bps,
+  })
+  .collect()
+}
+
+fn frame() -> EncodedAudioFrame {
+  EncodedAudioFrame {
+    opus: vec![0x78, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    level: AudioLevel::new(20, true).unwrap(),
+  }
+}
+
+fn call() -> CallId {
+  CallId::from_snowflake(Snowflake::new(CALL).unwrap())
+}
+
+fn user(id: i64) -> UserId {
+  UserId::from_snowflake(Snowflake::new(1000 + id).unwrap())
+}
+
+fn device(id: i64) -> DeviceId {
+  DeviceId::from_snowflake(Snowflake::new(id).unwrap())
+}

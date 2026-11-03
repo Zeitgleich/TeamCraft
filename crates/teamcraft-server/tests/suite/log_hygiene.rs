@@ -59,6 +59,8 @@ async fn credentials_and_ciphertext_do_not_appear_in_trace_level_logs() {
     max_invitees: 5,
     guest_token_secret: "0123456789abcdef0123456789abcdef".to_owned().into(),
     guest_grace_secs: 7200,
+    max_shared_link_guests: 50,
+    start_ring_lead_secs: 3600,
     maybe_inbox_token: Some("inbox-token-SECRET".to_owned().into()),
     smtp: None,
     mail_texts: MailTexts::default(),
@@ -110,13 +112,22 @@ async fn credentials_and_ciphertext_do_not_appear_in_trace_level_logs() {
     )
     .await;
   assert_eq!(meeting.status, reqwest::StatusCode::CREATED, "{}", meeting.body);
-  let mail = mailer.sent().into_iter().next().unwrap();
-  let invite_token = mail
-    .text
+  // A personal one-time link: its token is a credential that must stay out of the logs.
+  let link = app
+    .post(
+      &alice,
+      &format!("/meetings/{}/guest-links", meeting.id()),
+      json!({}),
+    )
+    .await;
+  assert_eq!(link.status, reqwest::StatusCode::CREATED, "{}", link.body);
+  let invite_token = link.body["join_url"]
+    .as_str()
+    .unwrap()
     .split("#invite=")
     .nth(1)
     .unwrap()
-    .split_whitespace()
+    .split('&')
     .next()
     .unwrap()
     .to_owned();
@@ -132,6 +143,26 @@ async fn credentials_and_ciphertext_do_not_appear_in_trace_level_logs() {
     .unwrap();
   let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
   call_with_token(&app, &guest_token, Method::GET, "/me", None).await;
+  // The meeting link's token is in request paths: the page and a member's knock (#987).
+  let link_token = meeting.body["join_url"]
+    .as_str()
+    .unwrap()
+    .split("/meeting/")
+    .nth(1)
+    .unwrap()
+    .split('#')
+    .next()
+    .unwrap()
+    .to_owned();
+  app
+    .http
+    .get(format!("{}/meeting/{link_token}", app.base_url))
+    .send()
+    .await
+    .unwrap();
+  app
+    .post(&alice, &format!("/meetings/link/{link_token}/knock"), json!({}))
+    .await;
   app
     .http
     .post(format!("{}/api/internal/v1/meetings/replies", app.base_url))
@@ -160,6 +191,7 @@ async fn credentials_and_ciphertext_do_not_appear_in_trace_level_logs() {
     ("push key", PUSH_KEY),
     ("ciphertext", CIPHERTEXT),
     ("guest invite token", invite_token.as_str()),
+    ("meeting link token", link_token.as_str()),
     ("guest session token", guest_token.as_str()),
     ("inbox token", "inbox-token-SECRET"),
     ("guest token secret", "0123456789abcdef0123456789abcdef"),

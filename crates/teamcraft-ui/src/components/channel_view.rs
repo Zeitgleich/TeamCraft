@@ -1,23 +1,67 @@
 use leptos::prelude::*;
 
 use crate::calls::{CallKind, CallPhase, CallRequest};
-use crate::components::avatar::PresenceDot;
+use crate::channel_access::ChannelAccess;
+use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
 use crate::components::bookmarks::BookmarksBar;
+use crate::components::channel_glyph::ChannelGlyph;
+use crate::components::compact_back::CompactBack;
 use crate::components::composer::Composer;
+use crate::components::conversation_notify::ConversationBell;
+use crate::components::file_drop::{DropStrip, FileDrop};
+use crate::components::file_views::ChannelFiles;
 use crate::components::huddle_bar::HuddleBar;
 use crate::components::icons::{Icon, IconName};
 use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
-use crate::i18n::use_i18n;
-use crate::model::{Conversation, ConversationId, ConversationKind};
-use crate::state::{Overlay, SidePanel, use_app_state};
+use crate::components::sheet::MenuSurface;
+use crate::components::sliding_indicator::SlidingIndicator;
+use crate::components::tab_list::{on_tab_keys, roving_tabindex};
+use crate::components::typing_indicator::{TypingDots, TypingIndicator, typing_text};
+use crate::delivery::ReadIndicator;
+use crate::i18n::{I18n, use_i18n};
+use crate::keys::{SEARCH_IN_CONVERSATION, shortcut_text};
+use crate::model::{Conversation, ConversationId, ConversationKind, MembershipIssue, UserId};
+use crate::prefs::MuteFor;
+use crate::state::{AppState, Overlay, SidePanel, use_app_state};
+
+/// How long after a DM's welcome wait ran out its banner is read again (the backend's clock).
+const DM_SETUP_EXPIRY_MARGIN_MS: u64 = 500;
 
 /// How far back the seen line looks for the user's own latest message.
 const SEEN_LOOKBACK: usize = 50;
 
-/// Files dropped on a conversation, handed to its composer (provided by [`ChannelView`]).
-#[derive(Clone, Copy)]
-pub struct DroppedFiles(pub RwSignal<Vec<web_sys::File>, LocalStorage>);
+/// Members shown as pictures next to the count in a wide header; the count says the rest.
+const HEADER_AVATARS: usize = 3;
+
+/// The tabs of a conversation's header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelTab {
+  Messages,
+  /// Everything shared in the conversation.
+  Files,
+}
+
+impl ChannelTab {
+  const ALL: [Self; 2] = [Self::Messages, Self::Files];
+
+  fn slug(self) -> &'static str {
+    match self {
+      Self::Messages => "messages",
+      Self::Files => "files",
+    }
+  }
+
+  /// The element ID of the tab's button; its panel is labelled by it.
+  fn tab_id(self) -> String {
+    format!("channel-tab-{}", self.slug())
+  }
+
+  /// The element ID of the tab's panel.
+  fn panel_id(self) -> String {
+    format!("channel-panel-{}", self.slug())
+  }
+}
 
 /// Header, bookmarks bar, message feed and composer of one conversation.
 #[component]
@@ -29,107 +73,448 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
   move || {
     // Everything below is recreated per conversation, which resets scroll state and drafts.
     let conv = info.get_untracked()?;
-    let name = conv.name.clone();
-    let label_name = conv.name;
+    let name = shown_name(i18n, &conv);
+    let label_name = name.clone();
+    // The notes to self have nobody to write to (#699).
+    let placeholder_key = if conv.is_notes_to_self {
+      "composer-placeholder-notes"
+    } else {
+      "composer-placeholder"
+    };
     let can_post = conv.can_post;
+    // Nobody else writes in the notes to self.
+    let is_notes_to_self = conv.is_notes_to_self;
     // Files dropped anywhere on the conversation go to its composer.
-    let dropped = DroppedFiles(RwSignal::new_local(Vec::new()));
-    provide_context(dropped);
-    let drag_depth = RwSignal::new(0_i32);
-    let has_files = |ev: &web_sys::DragEvent| {
-      ev.data_transfer().is_some_and(|transfer| {
-        transfer
-          .types()
-          .includes(&wasm_bindgen::JsValue::from_str("Files"), 0)
-      })
-    };
-    let is_dragging = move || can_post && drag_depth.get() > 0;
-    let on_dragenter = move |ev: web_sys::DragEvent| {
-      if can_post && has_files(&ev) {
-        drag_depth.update(|depth| *depth += 1);
-      }
-    };
-    let on_dragover = move |ev: web_sys::DragEvent| {
-      if can_post && has_files(&ev) {
-        ev.prevent_default();
-      }
-    };
-    let on_drop = move |ev: web_sys::DragEvent| {
-      drag_depth.set(0);
-      // The composer attached them already when they were dropped on it.
-      if ev.default_prevented() {
-        return;
-      }
-      let Some(files) = ev.data_transfer().and_then(|transfer| transfer.files()) else {
-        return;
-      };
-      if can_post && files.length() > 0 {
-        ev.prevent_default();
-        dropped.0.set(
-          (0..files.length())
-            .filter_map(|index| files.item(index))
-            .collect(),
-        );
-      }
-    };
+    let zone = FileDrop::provide(can_post);
+    let tab = RwSignal::new(ChannelTab::Messages);
     Some(view! {
       <section
         class="channel-view"
         aria-label=move || i18n.t_with("channel-region-label", &[("name", &label_name)])
-        on:dragenter=on_dragenter
-        on:dragleave=move |_| drag_depth.update(|depth| *depth = (*depth - 1).max(0))
-        on:dragover=on_dragover
-        on:drop=on_drop
+        on:dragenter=move |ev| zone.on_dragenter(&ev)
+        on:dragleave=move |_| zone.on_dragleave()
+        on:dragover=move |ev| zone.on_dragover(&ev)
+        on:drop=move |ev| {
+          // The composer is on the messages tab. Set only when it changes: setting it again would
+          // rebuild the tab, and with it the composer and the files just handed to it.
+          if zone.on_drop(&ev) && tab.get_untracked() != ChannelTab::Messages {
+            tab.set(ChannelTab::Messages);
+          }
+        }
       >
-        <Show when=is_dragging fallback=|| ()>
-          <div class="drop-overlay" aria-hidden="true">
-            <Icon name=IconName::Paperclip />
-            <span>{move || i18n.t("drop-files-here")}</span>
-          </div>
-        </Show>
-        <ChannelHeader conversation=conversation info=info />
+        <ChannelHeader conversation=conversation info=info tab=tab />
         <KeyChangeBanner conversation=conversation />
+        <DeviceAccessBanner conversation=conversation />
+        <CatchingUpNote info=info />
+        <KeyCatchUpNote conversation=conversation />
+        <MembershipIssueBanners conversation=conversation info=info />
         <HuddleBar conversation=conversation />
         <BookmarksBar conversation=conversation info=info />
-        <ChannelFeed conversation=conversation />
-        <SeenLine conversation=conversation />
-        <Composer conversation=conversation can_post=can_post conversation_name=name />
+        {move || match tab.get() {
+          ChannelTab::Messages => {
+            let name = name.clone();
+            view! {
+              <div
+                class="channel-messages"
+                role="tabpanel"
+                id=ChannelTab::Messages.panel_id()
+                aria-labelledby=ChannelTab::Messages.tab_id()
+              >
+                <ChannelFeed conversation=conversation />
+                {(!is_notes_to_self).then(|| view! { <TypingIndicator conversation=conversation /> })}
+                <SeenLine conversation=conversation />
+                <DropStrip zone=zone />
+                <Composer conversation=conversation can_post=can_post conversation_name=name placeholder_key=placeholder_key />
+              </div>
+            }
+              .into_any()
+          },
+          ChannelTab::Files => view! {
+            <ChannelFiles
+              conversation=conversation
+              panel_id=ChannelTab::Files.panel_id()
+              labelled_by=ChannelTab::Files.tab_id()
+              on_show_message=Callback::new(move |message| {
+                tab.set(ChannelTab::Messages);
+                state.open_message(conversation, message, None);
+              })
+            />
+          }
+            .into_any(),
+        }}
       </section>
     })
   }
 }
 
+/// The name a conversation is shown with: the notes to self have none of their own (#699).
+pub fn shown_name(i18n: I18n, conversation: &Conversation) -> String {
+  if conversation.is_notes_to_self {
+    i18n.t("notes-title")
+  } else {
+    conversation.name.clone()
+  }
+}
+
+/// The client is still catching up this conversation after being away (issue #247): older
+/// messages may still arrive above what is shown.
 #[component]
-fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>) -> impl IntoView {
+fn CatchingUpNote(info: Memo<Option<Conversation>>) -> impl IntoView {
+  let i18n = use_i18n();
+  let is_catching_up = Memo::new(move |_| info.get().is_some_and(|conv| conv.is_catching_up));
+  move || {
+    is_catching_up.get().then(|| {
+      view! {
+        <div class="key-banner catching-up-note" role="status">
+          <Icon name=IconName::Clock />
+          <div class="key-banner-text">
+            <strong>{move || i18n.t("catching-up")}</strong>
+            <span>{move || i18n.t("catching-up-detail")}</span>
+          </div>
+        </div>
+      }
+    })
+  }
+}
+
+/// Messages of this conversation wait for their keys (a newly linked device, issue #888): how far
+/// the conversations that wait have caught up. Gone once this one waits no more.
+#[component]
+fn KeyCatchUpNote(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let progress = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .key_catch_up()
+        .filter(|progress| progress.waiting.contains(&conversation))
+    })
+  });
+  move || {
+    progress.get().map(|progress| {
+      let caught_up = progress.caught_up.to_string();
+      view! {
+        <div class="key-banner key-catch-up-note" role="status">
+          <Icon name=IconName::Key />
+          <div class="key-banner-text">
+            <strong>{i18n.t("key-catch-up")}</strong>
+            <span>{i18n.t_count_with("key-catch-up-progress", progress.total, &[("caught_up", &caught_up)])}</span>
+            <span>{i18n.t("key-catch-up-detail")}</span>
+          </div>
+        </div>
+      }
+    })
+  }
+}
+
+/// This device isn't in the conversation's encryption group yet (a new device whose other devices
+/// and colleagues are offline): what it can read already, and what it waits for.
+#[component]
+fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  // A DM waiting for its welcome says so in its own banner, with a retry (#278), and so does a
+  // channel this device asked to be let into (#907).
+  let is_waiting = Memo::new(move |_| {
+    state.read(|backend| {
+      backend.is_waiting_for_device(conversation)
+        && !backend.membership_issues(conversation).iter().any(|issue| {
+          matches!(
+            issue,
+            MembershipIssue::EncryptionSetup { .. }
+              | MembershipIssue::EncryptionSetupFailed
+              | MembershipIssue::WaitingForAdmission
+          )
+        })
+    })
+  });
+  // In the notes only the user's own devices can let this one in; without them, removing them
+  // in the device settings makes this device set the notes up again (e2ee.md §4.6).
+  let body_key = Memo::new(move |_| {
+    let is_notes = state.read(|backend| {
+      backend
+        .conversation(conversation)
+        .is_some_and(|conversation| conversation.is_notes_to_self)
+    });
+    if is_notes {
+      "device-waiting-notes-body"
+    } else {
+      "device-waiting-body"
+    }
+  });
+  move || {
+    is_waiting.get().then(|| {
+      view! {
+        <div class="key-banner" role="status">
+          <Icon name=IconName::Lock />
+          <div class="key-banner-text">
+            <strong>{move || i18n.t("device-waiting-title")}</strong>
+            <span>{move || i18n.t(body_key.get())}</span>
+          </div>
+        </div>
+      }
+    })
+  }
+}
+
+/// Removals and leaves still on their way or failed (with "retry"), people still in the
+/// encryption group whom the server no longer lists (admins can sign their removal), and a server
+/// refusing this device the group (e2ee.md §4.6, removal order), and people who wait to be added
+/// until they have a device with a key package (e2ee.md §4.3).
+#[component]
+fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conversation>>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  // Bumped when a DM's welcome wait runs out: nothing in the backend changes then (#278).
+  let expired = RwSignal::new(0_u32);
+  let issues = Memo::new(move |_| {
+    expired.track();
+    state.read(|backend| backend.membership_issues(conversation))
+  });
+  plan_dm_setup_expiry(issues, expired);
+  move || {
+    let me = state.me().id;
+    let channel = info.get().map(|conv| conv.name).unwrap_or_default();
+    let name_of = move |user| {
+      state
+        .read(|backend| backend.user(user))
+        .map(|user| user.display_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| i18n.t("left-in-group-unknown"))
+    };
+    issues
+      .get()
+      .into_iter()
+      .filter_map(|issue| {
+        let is_dm_setup = matches!(
+          issue,
+          MembershipIssue::EncryptionSetup { .. } | MembershipIssue::EncryptionSetupFailed
+        );
+        let (role, title, maybe_retry) = match issue {
+          MembershipIssue::RemovalPending { user } if user == me => ("status", i18n.t("leave-pending"), None),
+          MembershipIssue::RemovalPending { user } => (
+            "status",
+            i18n.t_with("removal-pending", &[("name", &name_of(user))]),
+            None,
+          ),
+          MembershipIssue::RemovalFailed { user } if user == me => ("alert", i18n.t("leave-failed"), Some(user)),
+          MembershipIssue::RemovalFailed { user } => (
+            "alert",
+            i18n.t_with("removal-failed", &[("name", &name_of(user))]),
+            Some(user),
+          ),
+          MembershipIssue::RemovalUnconfirmed { user } => (
+            "alert",
+            i18n.t_with(
+              "removal-unconfirmed",
+              &[("name", &name_of(user)), ("channel", &channel)],
+            ),
+            Some(user),
+          ),
+          MembershipIssue::GroupRefused => ("alert", i18n.t("group-refused"), None),
+          MembershipIssue::WaitingForFirstDevice { user } => (
+            "status",
+            i18n.t_with("waiting-first-device", &[("name", &name_of(user))]),
+            None,
+          ),
+          MembershipIssue::NeverSetUp { user } => (
+            "status",
+            i18n.t_with("never-set-up", &[("name", &name_of(user))]),
+            None,
+          ),
+          MembershipIssue::NoKeyPackage { user } => (
+            "status",
+            i18n.t_with("waiting-key-package", &[("name", &name_of(user))]),
+            None,
+          ),
+          MembershipIssue::DevicesUnverified { user } => (
+            "alert",
+            i18n.t_with("devices-unverified", &[("name", &name_of(user))]),
+            None,
+          ),
+          MembershipIssue::EncryptionSetup { .. } => ("status", i18n.t("dm-setup-pending"), None),
+          MembershipIssue::EncryptionSetupFailed => ("alert", i18n.t("dm-setup-failed"), None),
+          MembershipIssue::WaitingForAdmission => ("status", i18n.t("waiting-for-admission"), None),
+          MembershipIssue::ImportInProgress { importer } => (
+            "status",
+            i18n.t_with("import-in-progress", &[("name", &name_of(importer))]),
+            None,
+          ),
+          MembershipIssue::ReadByOutsider { user } => (
+            "alert",
+            i18n.t_with("read-by-outsider", &[("name", &name_of(user))]),
+            None,
+          ),
+          MembershipIssue::Unknown => return None,
+        };
+        // The DM's setup has its own retry: asking the other side's devices for a welcome (#278).
+        let dm_setup_retry = is_dm_setup.then(|| {
+          view! {
+            <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.retry_dm_setup(conversation))>
+              {i18n.t("removal-retry")}
+            </button>
+          }
+        });
+        let is_unconfirmed = matches!(issue, MembershipIssue::RemovalUnconfirmed { .. });
+        let actions = maybe_retry.map(|user| {
+          if is_unconfirmed {
+            return view! { <UnconfirmedRemovalActions conversation=conversation user=user /> }.into_any();
+          }
+          view! {
+            <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.retry_removal(conversation, user))>
+              {i18n.t("removal-retry")}
+            </button>
+          }
+          .into_any()
+        });
+        Some(view! {
+          <div class="key-banner" role=role>
+            <Icon name=IconName::Lock />
+            <div class="key-banner-text">
+              <strong translate="no">{title}</strong>
+            </div>
+            {actions}
+            {dm_setup_retry}
+          </div>
+        })
+      })
+      .collect_view()
+  }
+}
+
+/// One timer, while the banners are shown, for when a DM's welcome wait runs out: then `expired`
+/// changes and the issues are read again, so "setting up" turns into the failure with its retry.
+fn plan_dm_setup_expiry(issues: Memo<Vec<MembershipIssue>>, expired: RwSignal<u32>) {
+  use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
+
+  let timer = StoredValue::new(None::<TimeoutHandle>);
+  Effect::new(move |_| {
+    if let Some(running) = timer.get_value() {
+      running.clear();
+      timer.set_value(None);
+    }
+    let maybe_remaining_ms = issues.with(|issues| {
+      issues.iter().find_map(|issue| match issue {
+        MembershipIssue::EncryptionSetup { remaining_ms } => Some(*remaining_ms),
+        _ => None,
+      })
+    });
+    let Some(remaining_ms) = maybe_remaining_ms else {
+      return;
+    };
+    // A little later than the deadline, so the backend reads it as passed.
+    let wait = std::time::Duration::from_millis(remaining_ms.saturating_add(DM_SETUP_EXPIRY_MARGIN_MS));
+    let on_expiry = move || {
+      // A closed view ignores it.
+      let _ = expired.try_update(|count| *count += 1);
+    };
+    match set_timeout_with_handle(on_expiry, wait) {
+      Ok(started) => timer.set_value(Some(started)),
+      Err(_) => tracing::debug!("could not plan the end of the DM setup wait"),
+    }
+  });
+  on_cleanup(move || {
+    if let Some(running) = timer.try_get_value().flatten() {
+      running.clear();
+    }
+  });
+}
+
+/// "Remove" signs the removal afresh, "keep" drops it: the admin decides, not the server's list.
+#[component]
+pub fn UnconfirmedRemovalActions(conversation: ConversationId, user: UserId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  view! {
+    <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.retry_removal(conversation, user))>
+      {move || i18n.t("removal-unconfirmed-remove")}
+    </button>
+    <button class="btn btn-small" on:click=move |_| state.write(|backend| backend.discard_removal(conversation, user))>
+      {move || i18n.t("removal-unconfirmed-keep")}
+    </button>
+  }
+}
+
+#[component]
+fn ChannelHeader(
+  conversation: ConversationId,
+  info: Memo<Option<Conversation>>,
+  tab: RwSignal<ChannelTab>,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
 
+  // What the title shows: it is built again only when this changes, not with every message, which
+  // would reload the channel picture (issue #687).
+  let identity = Memo::new(move |_| {
+    info.with(|maybe_conv| {
+      maybe_conv.as_ref().map(|conv| {
+        let maybe_peer = (conv.kind == ConversationKind::Direct)
+          .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
+          .flatten();
+        (conv.kind, shown_name(i18n, conv), maybe_peer)
+      })
+    })
+  });
+  // The other person of a direct conversation.
+  let maybe_peer = Memo::new(move |_| identity.with(|maybe| maybe.as_ref().and_then(|(_, _, peer)| *peer)));
+  let peer_presence = Memo::new(move |_| {
+    maybe_peer
+      .get()
+      .and_then(|id| state.read(|backend| backend.user(id)))
+      .map(|user| user.presence)
+  });
   let title = move || {
-    let conv = info.get()?;
-    let icon = match conv.kind {
-      ConversationKind::Public => view! { <Icon name=IconName::Hash class="header-icon" /> }.into_any(),
-      ConversationKind::Private => view! { <Icon name=IconName::Lock class="header-icon" /> }.into_any(),
+    let (kind, name, maybe_person) = identity.get()?;
+    let icon = match kind {
+      ConversationKind::Public | ConversationKind::Private => {
+        let fallback = if kind == ConversationKind::Public {
+          IconName::Hash
+        } else {
+          IconName::Lock
+        };
+        let version = Signal::derive(move || info.get().and_then(|found| found.maybe_image_version));
+        view! { <ChannelGlyph conversation=conversation maybe_version=version fallback=fallback class="header-icon" /> }.into_any()
+      },
       ConversationKind::Integration => {
         view! { <Icon name=IconName::Terminal class="header-icon" /> }.into_any()
       },
       ConversationKind::Group => view! { <Icon name=IconName::Users class="header-icon" /> }.into_any(),
-      ConversationKind::Direct => {
-        let me = state.me();
-        let other = conv.member_ids.iter().copied().find(|id| *id != me.id);
-        let presence = other
-          .and_then(|id| state.read(|backend| backend.user(id)))
-          .map(|user| user.presence);
-        match presence {
-          Some(presence) => view! { <PresenceDot presence=presence /> }.into_any(),
-          None => ().into_any(),
-        }
-      },
+      ConversationKind::Direct => (move || {
+        peer_presence
+          .get()
+          .map(|presence| view! { <PresenceDot presence=presence /> })
+      })
+      .into_any(),
     };
-    Some(view! {
-      <h1 class="header-title" translate="no">
-        {icon}
-        {conv.name}
-      </h1>
+    let full_name = name.clone();
+    // A direct conversation's name is the person: it opens their profile card.
+    Some(match maybe_person {
+      Some(person) => {
+        let label = i18n.t_with("profile-open", &[("name", &name)]);
+        view! {
+          <h1 class="header-title" translate="no">
+            <button
+              type="button"
+              class="header-person"
+              title=full_name
+              aria-label=label
+              on:click=move |_| state.overlay.set(Overlay::UserProfile(person))
+            >
+              {icon}
+              <span class="header-name">{name}</span>
+            </button>
+          </h1>
+        }
+        .into_any()
+      },
+      None => view! {
+        <h1 class="header-title" translate="no" title=full_name>
+          {icon}
+          <span class="header-name">{name}</span>
+        </h1>
+      }
+      .into_any(),
     })
   };
 
@@ -150,9 +535,10 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
       .filter(|topic| !topic.is_empty())
   };
   let has_external = move || {
-    info
-      .get()
-      .is_some_and(|conv| state.read(|backend| has_external_members(backend, &conv)))
+    state.shows_guest_markers()
+      && info
+        .get()
+        .is_some_and(|conv| state.read(|backend| has_external_members(backend, &conv)))
   };
   // Jump to date: the picked day is searched in the feed; unloaded parts load while we wait.
   let jump_target = RwSignal::new(None::<i64>);
@@ -195,12 +581,78 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
   });
   let is_favorite = move || info.get().is_some_and(|conv| conv.is_favorite);
   let member_count = move || info.get().map_or(0, |conv| conv.member_ids.len());
+  // The first members' avatars; read again only when one of them changes, not on every backend
+  // change (issue #687).
+  let header_people = Memo::new(move |_| {
+    let ids = info
+      .get()
+      .map(|conv| {
+        conv
+          .member_ids
+          .into_iter()
+          .take(HEADER_AVATARS)
+          .collect::<Vec<_>>()
+      })
+      .unwrap_or_default();
+    state.read(|backend| {
+      ids
+        .into_iter()
+        .filter_map(|id| backend.user(id))
+        .collect::<Vec<_>>()
+    })
+  });
+  // Channels take people in from the header, for people who may add members; direct messages
+  // start a new group instead.
+  let access = ChannelAccess::new(state, conversation);
+  let can_add_people = move || {
+    info
+      .get()
+      .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
+      && access.can_add_members()
+  };
   let members_open = move || state.panel.get() == SidePanel::Members;
+  // While the other person of a direct conversation types, the line under the name says so (#882).
+  let peer_typing = typing_text(conversation, None, true);
+  let search_label = move || {
+    let shortcut = shortcut_text(&SEARCH_IN_CONVERSATION, i18n.locale());
+    i18n.t_with("conversation-search", &[("shortcut", &shortcut)])
+  };
 
   view! {
     <header class="channel-header">
+      <div class="header-row">
       <div class="header-main">
-        {title}
+        <CompactBack />
+        <div class="header-identity">
+          {title}
+          // A direct conversation: the other person's status under the name, as messengers do.
+          {move || {
+            maybe_peer.get().map(|other| {
+              view! {
+                <div class="header-sub">
+                  // The typing line replaces the rest for its few seconds; screen readers hear it
+                  // from the line above the composer.
+                  <Show
+                    when=move || peer_typing.with(Option::is_none)
+                    fallback=move || {
+                      view! {
+                        <span class="header-typing" aria-hidden="true" translate="no">
+                          <TypingDots />
+                          <span>{move || peer_typing.get().unwrap_or_default()}</span>
+                        </span>
+                      }
+                    }
+                  >
+                    <HeaderStatus user=other />
+                    <crate::components::profile_views::InMeetingBadge user=other />
+                    <crate::components::profile_views::LastSeen user=other is_compact=true />
+                    {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
+                  </Show>
+                </div>
+              }
+            })
+          }}
+        </div>
         <button
           class="icon-btn"
           aria-pressed=move || is_favorite().to_string()
@@ -235,20 +687,6 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
             />
           </Show>
         </div>
-        {move || {
-          info.get().and_then(|conv| {
-            (conv.kind == crate::model::ConversationKind::Direct)
-              .then(|| conv.member_ids.iter().copied().find(|id| *id != state.me().id))
-              .flatten()
-              .map(|other| {
-                view! {
-                  <crate::components::profile_views::InMeetingBadge user=other />
-                  <crate::components::profile_views::LastSeen user=other />
-                }
-              })
-          })
-        }}
-        {move || local_time().map(|label| view! { <span class="header-local-time" title=move || i18n.t("profile-local-time")>{label}</span> })}
         <Show when=has_external fallback=|| ()>
           <span class="badge badge-guest" title=move || i18n.t("external-badge-detail")>
             {move || i18n.t("external-badge")}
@@ -263,6 +701,26 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
       </div>
       <div class="header-actions">
         <CallButtons conversation=conversation info=info />
+        <ConversationBell conversation=conversation />
+        <button
+          class="header-btn compact-keep"
+          aria-label=search_label
+          title=search_label
+          on:click=move |_| state.open_scoped_switcher()
+        >
+          <Icon name=IconName::Search />
+        </button>
+        <Show when=can_add_people fallback=|| ()>
+          <button
+            class="header-btn"
+            aria-label=move || i18n.t("channel-add-people")
+            title=move || i18n.t("channel-add-people")
+            on:click=move |_| state.overlay.set(Overlay::AddToChannel(conversation))
+          >
+            <Icon name=IconName::UserPlus />
+          </button>
+        </Show>
+        <ConversationMore conversation=conversation tab=tab info=info />
         <button
           class="header-btn"
           aria-label=move || i18n.t("channel-settings-title")
@@ -270,19 +728,6 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
           on:click=move |_| state.overlay.set(Overlay::ChannelSettings(conversation))
         >
           <Icon name=IconName::Sliders />
-        </button>
-        <button
-          class="header-btn"
-          aria-pressed=move || (state.panel.get() == SidePanel::Files).to_string()
-          aria-label=move || i18n.t("files-title")
-          title=move || i18n.t("files-title")
-          on:click=move |_| {
-            state.panel.update(|panel| {
-              *panel = if *panel == SidePanel::Files { SidePanel::Closed } else { SidePanel::Files };
-            });
-          }
-        >
-          <Icon name=IconName::Paperclip />
         </button>
         <button
           class="header-btn"
@@ -307,11 +752,180 @@ fn ChannelHeader(conversation: ConversationId, info: Memo<Option<Conversation>>)
             });
           }
         >
-          <Icon name=IconName::Users />
+          <Icon name=IconName::Users class="header-members-icon" />
+          <span class="avatar-stack header-avatars" aria-hidden="true">
+            {move || {
+              header_people
+                .get()
+                .into_iter()
+                .map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })
+                .collect_view()
+            }}
+          </span>
           <span>{member_count}</span>
         </button>
       </div>
+      </div>
+      <div class="header-row header-row-tabs">
+        <ChannelTabs tab=tab />
+      </div>
     </header>
+  }
+}
+
+/// Messages and Files, on the header's second row.
+#[component]
+fn ChannelTabs(tab: RwSignal<ChannelTab>) -> impl IntoView {
+  let i18n = use_i18n();
+  let on_keydown =
+    move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, &ChannelTab::ALL, tab, ChannelTab::tab_id);
+  view! {
+    <div class="view-tabs header-tabs" role="tablist" aria-label=move || i18n.t("channel-tabs") on:keydown=on_keydown>
+      <SlidingIndicator inset_px=8.0 />
+      {ChannelTab::ALL
+        .into_iter()
+        .map(|value| {
+          view! {
+            <button
+              id=value.tab_id()
+              role="tab"
+              aria-selected=move || (tab.get() == value).to_string()
+              aria-controls=value.panel_id()
+              tabindex=move || roving_tabindex(tab.get() == value)
+              on:click=move |_| tab.set(value)
+            >
+              {move || i18n.t(&format!("channel-tab-{}", value.slug()))}
+            </button>
+          }
+        })
+        .collect_view()}
+    </div>
+  }
+}
+
+/// The "…" of a narrow conversation header (a phone, a half-screen window, a tablet; #365): what
+/// the wider header shows as its own buttons (Files, add people, pins, members, settings,
+/// favorite) as a menu.
+#[component]
+fn ConversationMore(
+  conversation: ConversationId,
+  tab: RwSignal<ChannelTab>,
+  info: Memo<Option<Conversation>>,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let is_open = RwSignal::new(false);
+  let is_favorite = move || info.get().is_some_and(|conv| conv.is_favorite);
+  let member_count = move || info.get().map_or(0, |conv| conv.member_ids.len());
+  let access = ChannelAccess::new(state, conversation);
+  let can_add_people = move || {
+    info
+      .get()
+      .is_some_and(|conv| matches!(conv.kind, ConversationKind::Public | ConversationKind::Private))
+      && access.can_add_members()
+  };
+  let choose = move |action: fn(AppState, ConversationId, RwSignal<ChannelTab>)| {
+    is_open.set(false);
+    action(state, conversation, tab);
+  };
+  view! {
+    <div class="conversation-more compact-only">
+      <button
+        type="button"
+        class="icon-btn"
+        aria-haspopup="menu"
+        aria-expanded=move || is_open.get().to_string()
+        aria-label=move || i18n.t("conversation-more")
+        title=move || i18n.t("conversation-more")
+        on:click=move |_| is_open.update(|open| *open = !*open)
+      >
+        <Icon name=IconName::More />
+      </button>
+      <Show when=move || is_open.get() fallback=|| ()>
+        <MenuSurface
+          class="conversation-menu"
+          label=Signal::derive(move || i18n.t("conversation-more"))
+          on_close=Callback::new(move |()| is_open.set(false))
+        >
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|_, _, tab| {
+            tab.update(|tab| *tab = if *tab == ChannelTab::Files { ChannelTab::Messages } else { ChannelTab::Files });
+          })>
+            <Icon name=IconName::File />
+            {move || if tab.get() == ChannelTab::Files { i18n.t("channel-tab-messages") } else { i18n.t("channel-tab-files") }}
+          </button>
+          <Show when=can_add_people fallback=|| ()>
+            <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, conversation, _| state.overlay.set(Overlay::AddToChannel(conversation)))>
+              <Icon name=IconName::UserPlus />
+              {move || i18n.t("channel-add-people")}
+            </button>
+          </Show>
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, _, _| state.panel.set(SidePanel::Members))>
+            <Icon name=IconName::Users />
+            {move || i18n.t_count("members-button-label", member_count())}
+          </button>
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, _, _| state.panel.set(SidePanel::Pins))>
+            <Icon name=IconName::Bookmark />
+            {move || i18n.t("pins-title")}
+          </button>
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
+            let id = conversation.to_string();
+            is_open.set(false);
+            state.settings.prefs.update(|prefs| {
+              let mut entry = prefs.notifications.conversation(&id);
+              entry.mute = if entry.mute == MuteFor::Off { MuteFor::Forever } else { MuteFor::Off };
+              prefs.notifications.set_conversation(&id, entry);
+            });
+          }>
+            {move || {
+              let is_muted = state
+                .settings
+                .prefs
+                .with(|prefs| prefs.notifications.conversation(&conversation.to_string()).mute != MuteFor::Off);
+              view! {
+                <Icon name=if is_muted { IconName::Bell } else { IconName::BellOff } />
+                {if is_muted { i18n.t("conversation-unmute") } else { i18n.t("conversation-mute") }}
+              }
+            }}
+          </button>
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
+            let favorite = !is_favorite();
+            is_open.set(false);
+            state.write(|backend| backend.set_favorite(conversation, favorite));
+          }>
+            <Icon name=IconName::Star />
+            {move || if is_favorite() { i18n.t("favorite-remove") } else { i18n.t("favorite-add") }}
+          </button>
+          <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, conversation, _| state.overlay.set(Overlay::ChannelSettings(conversation)))>
+            <Icon name=IconName::Sliders />
+            {move || i18n.t("channel-settings-title")}
+          </button>
+        </MenuSurface>
+      </Show>
+    </div>
+  }
+}
+
+/// The other person's custom status on the line under a direct conversation's name: the emoji and
+/// a short text (the full text, and its end, are in the title and the profile card).
+#[component]
+fn HeaderStatus(user: crate::model::UserId) -> impl IntoView {
+  let state = use_app_state();
+  // Read again only when the status changes, not on every backend change (issue #687).
+  let maybe_status = Memo::new(move |_| {
+    state
+      .read(|backend| backend.user(user))
+      .and_then(|person| person.maybe_custom_status)
+  });
+  move || {
+    maybe_status.get().map(|status| {
+        let full = format!("{} {}", status.emoji, status.text).trim().to_owned();
+        view! {
+          <span class="header-status" title=full translate="no">
+            {(!status.emoji.is_empty()).then(|| view! { <span aria-hidden="true">{status.emoji.clone()}</span> })}
+            <span class="header-status-text">{status.text.clone()}</span>
+          </span>
+        }
+      })
   }
 }
 
@@ -326,11 +940,25 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
     Some(ConversationKind::Direct) => CallKind::Direct,
     _ => CallKind::Group,
   };
-  // Without call support (the browser for now) there are no call buttons.
+  // Without call support (an old browser, a second tab) the buttons still show and say why.
   let has_calls = state.read(|backend| backend.has_calls());
-  let is_callable = move || has_calls && kind().is_some_and(|kind| kind != ConversationKind::Integration);
-  let is_channel = move || matches!(kind(), Some(ConversationKind::Public | ConversationKind::Private));
+  let is_callable = move || kind().is_some_and(|kind| kind != ConversationKind::Integration);
+  let is_channel =
+    move || has_calls && matches!(kind(), Some(ConversationKind::Public | ConversationKind::Private));
   let is_busy = move || call.phase.get() != CallPhase::Idle;
+  let start = move |with_video: bool| {
+    if has_calls {
+      call.prepare(
+        CallRequest {
+          conversation,
+          kind: call_kind(),
+        },
+        with_video,
+      );
+    } else {
+      state.overlay.set(Overlay::CallsUnavailable);
+    }
+  };
 
   view! {
     <Show when=is_callable fallback=|| ()>
@@ -339,7 +967,7 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
         disabled=is_busy
         aria-label=move || i18n.t("call-start-audio")
         title=move || i18n.t("call-start-audio")
-        on:click=move |_| call.prepare(CallRequest { conversation, kind: call_kind() }, false)
+        on:click=move |_| start(false)
       >
         <Icon name=IconName::Phone />
       </button>
@@ -348,7 +976,7 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
         disabled=is_busy
         aria-label=move || i18n.t("call-start-video")
         title=move || i18n.t("call-start-video")
-        on:click=move |_| call.prepare(CallRequest { conversation, kind: call_kind() }, true)
+        on:click=move |_| start(true)
       >
         <Icon name=IconName::Video />
       </button>
@@ -370,8 +998,8 @@ fn CallButtons(conversation: ConversationId, info: Memo<Option<Conversation>>) -
   }
 }
 
-/// "Seen by …" for the newest message of mine, when a DM member has read it. Receipts are
-/// reciprocal and only exist in DMs and group DMs; elsewhere the backend returns nobody.
+/// "Seen by …" for the newest message of mine, when a group DM member has read it. Receipts are
+/// reciprocal; a DM shows them as ticks instead (#635), channels have none.
 #[component]
 fn SeenLine(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
@@ -379,6 +1007,10 @@ fn SeenLine(conversation: ConversationId) -> impl IntoView {
   let me = state.me().id;
   let names = Memo::new(move |_| {
     state.read(|backend| {
+      let kind = backend.conversation(conversation)?.kind;
+      if ReadIndicator::of(kind) != ReadIndicator::SeenLine {
+        return None;
+      }
       let count = backend.message_count(conversation);
       let recent = backend.messages(conversation, count.saturating_sub(SEEN_LOOKBACK), SEEN_LOOKBACK);
       let newest = recent.into_iter().rev().find(|message| message.author == me)?;

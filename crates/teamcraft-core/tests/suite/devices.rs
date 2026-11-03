@@ -18,7 +18,8 @@ use teamcraft_core::store::{LocalStore, MemoryStore, Table};
 use teamcraft_core::{Client, ClientSettings, CoreError, LinkOffer, PendingEnrollment};
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, GatewayEvent, ListMlsMessagesQuery, RegisterDeviceRequest,
+  Base64Bytes, ConversationId, ConversationUnread, GatewayEvent, ListMlsMessagesQuery, RegisterDeviceRequest,
+  UnreadResponse,
 };
 
 const STAGGER: Duration = Duration::from_secs(10);
@@ -122,6 +123,118 @@ mod read_state_events {
   }
 
   #[tokio::test]
+  async fn counts_follow_new_messages_and_unread_updates_and_resync_on_reconnect() {
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let server = FakeServer::new();
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    let mut bob = enroll(&server, "Bob", &clock).await;
+    let channel = channel_of(&mut [&mut alice, &mut bob]).await;
+    let bob_id = bob.client.user_id();
+    // Whatever setting up the channel left unread (the fake keeps no read positions).
+    let (before, _) = counts(&bob, channel).expect("loaded by the full sync");
+
+    alice.client.send_text(channel, None, "one").await.unwrap();
+    alice.client.send_text(channel, None, "two").await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    assert_eq!(
+      counts(&bob, channel),
+      Some((before + 2, 0)),
+      "counted from message_create"
+    );
+    assert_eq!(
+      counts(&alice, channel),
+      Some((0, 0)),
+      "own messages are not unread"
+    );
+
+    server.publish_event(
+      &[bob_id],
+      &GatewayEvent::UnreadUpdate {
+        conversation_id: channel,
+        unread_count: 5,
+        mention_count: 1,
+      },
+    );
+    settle(&mut [&mut bob]).await;
+    assert_eq!(counts(&bob, channel), Some((5, 1)), "the server's word wins");
+
+    // A dropped connection resumes; the counts are read once anyway (the fake reports nothing
+    // unread), and the mark tells the UI to read its part again.
+    let connections = read_state::marks(bob.store.as_ref()).unwrap().connections;
+    server.drop_gateways(bob_id);
+    let (gateway, outcome) = bob.client.connect_gateway().await.unwrap();
+    assert_eq!(outcome, teamcraft_core::client::GatewayOutcome::Resumed);
+    bob.gateway = gateway;
+    assert_eq!(counts(&bob, channel), Some((0, 0)));
+    assert_eq!(
+      read_state::marks(bob.store.as_ref()).unwrap().connections,
+      connections + 1
+    );
+  }
+
+  #[tokio::test]
+  async fn a_resume_counts_the_replayed_messages_once() {
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let server = FakeServer::new();
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    let mut bob = enroll(&server, "Bob", &clock).await;
+    let channel = channel_of(&mut [&mut alice, &mut bob]).await;
+    let bob_id = bob.client.user_id();
+
+    // Bob's connection drops; two messages arrive meanwhile and wait in his session's replay.
+    server.drop_gateways(bob_id);
+    alice.client.send_text(channel, None, "one").await.unwrap();
+    alice.client.send_text(channel, None, "two").await.unwrap();
+    settle(&mut [&mut alice]).await;
+    // The server's count already includes both missed messages.
+    server.set_unread(
+      bob_id,
+      UnreadResponse {
+        conversations: vec![ConversationUnread {
+          conversation_id: channel,
+          unread_count: 7,
+          mention_count: 1,
+        }],
+        unread_thread_count: 0,
+        thread_mention_count: 0,
+        maybe_max_counted: Some(1000),
+        maybe_counted_through: None,
+      },
+    );
+
+    let connections = read_state::marks(bob.store.as_ref()).unwrap().connections;
+    let (gateway, outcome) = bob.client.connect_gateway().await.unwrap();
+    assert_eq!(outcome, teamcraft_core::client::GatewayOutcome::Resumed);
+    bob.gateway = gateway;
+    settle(&mut [&mut bob]).await;
+    assert_eq!(
+      counts(&bob, channel),
+      Some((7, 1)),
+      "the replayed message_create events are not counted on top of the server's count"
+    );
+    assert_eq!(
+      read_state::marks(bob.store.as_ref()).unwrap().connections,
+      connections + 1,
+      "one resync, after the replay"
+    );
+    let messages = bob
+      .store
+      .messages(channel, teamcraft_core::store::MessageFilter::All)
+      .unwrap();
+    assert!(messages.len() >= 2, "the replay itself was applied");
+  }
+
+  #[tokio::test]
+  async fn announcement_updates_move_the_mark() {
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let server = FakeServer::new();
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    server.publish_event(&[alice.client.user_id()], &GatewayEvent::AnnouncementUpdate);
+    settle(&mut [&mut alice]).await;
+    assert_eq!(read_state::marks(alice.store.as_ref()).unwrap().announcements, 1);
+  }
+
+  #[tokio::test]
   async fn receipts_and_acknowledgements_are_stored() {
     let clock = Arc::new(ManualClock::new(1_800_000_000_000));
     let server = FakeServer::new();
@@ -161,6 +274,159 @@ mod read_state_events {
       read_state::acknowledgements(alice.store.as_ref(), channel, message).unwrap(),
       vec![bob_id]
     );
+  }
+}
+
+/// The user's own devices in the settings (issue #409) and the key backup state (issue #410).
+#[cfg(feature = "ui")]
+mod own_devices {
+  use teamcraft_client_api::security::RecoveryMethod;
+  use teamcraft_core::client::OwnDeviceCheck;
+  use teamcraft_core::client::devices::{OWN_DEVICES_KEY, OwnDevicesRecord};
+  use teamcraft_core::records;
+  use teamcraft_core::ui_snapshot::key_backup_state;
+  use teamcraft_proto::{PushProvider, RegisterPushRequest, TestPushOutcome};
+
+  use super::*;
+
+  const START_MS: i64 = 1_800_000_000_000;
+
+  #[tokio::test]
+  async fn the_users_devices_are_verified_and_one_the_server_made_up_is_not() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(START_MS));
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    let laptop = link_new_device(&mut alice, &clock).await;
+    // Only the server's word: a device with a certificate the identity key never signed.
+    let made_up = alice
+      .api
+      .register_device(&RegisterDeviceRequest {
+        name: "Made up".into(),
+        public_key: Base64Bytes::new(vec![1; 32]),
+        cross_signature: Base64Bytes::new(vec![2; 64]),
+      })
+      .await
+      .unwrap();
+    // A real certificate of the user, copied onto another device the server lists.
+    let listed = alice.api.list_user_devices(alice.client.user_id()).await.unwrap();
+    let laptop_entry = listed
+      .devices
+      .iter()
+      .find(|device| device.id == laptop.device_id())
+      .unwrap();
+    let copied = alice
+      .api
+      .register_device(&RegisterDeviceRequest {
+        name: "Copied".into(),
+        public_key: laptop_entry.public_key.clone(),
+        cross_signature: laptop_entry.cross_signature.clone(),
+      })
+      .await
+      .unwrap();
+
+    alice.client.refresh_own_devices().await.unwrap();
+    let record = own_devices(&alice);
+    assert_eq!(record.devices.len(), 4);
+    assert_eq!(state_of(&record, copied.id), OwnDeviceCheck::Unverified);
+    assert_eq!(
+      state_of(&record, alice.client.device_id()),
+      OwnDeviceCheck::Verified
+    );
+    assert_eq!(state_of(&record, laptop.device_id()), OwnDeviceCheck::Verified);
+    assert_eq!(state_of(&record, made_up.id), OwnDeviceCheck::Unverified);
+  }
+
+  #[tokio::test]
+  async fn a_renamed_device_and_a_test_push_show_in_the_list() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(START_MS));
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    let me = alice.client.device_id();
+
+    alice
+      .client
+      .rename_own_device(me, "  Work laptop ")
+      .await
+      .unwrap();
+    let record = own_devices(&alice);
+    assert_eq!(record.devices[0].name, "Work laptop");
+    let push = record.maybe_push.as_ref().unwrap();
+    assert_eq!(push[0].maybe_provider, None);
+
+    alice
+      .api
+      .register_push(
+        me,
+        &RegisterPushRequest {
+          provider: PushProvider::Fcm,
+          token: "device-token".into(),
+          push_key: Base64Bytes::new(vec![7; 32]),
+        },
+      )
+      .await
+      .unwrap();
+    alice.client.test_push_own_device(me).await.unwrap();
+    let record = own_devices(&alice);
+    assert_eq!(record.tests.len(), 1);
+    assert_eq!(
+      (record.tests[0].device, &record.tests[0].outcome),
+      (me, &TestPushOutcome::Sent)
+    );
+    let push = record.maybe_push.as_ref().unwrap();
+    assert_eq!(push[0].maybe_provider, Some(PushProvider::Fcm));
+    // The outcome stays when the list is read again.
+    alice.client.refresh_own_devices().await.unwrap();
+    assert_eq!(own_devices(&alice).tests, record.tests);
+  }
+
+  #[tokio::test]
+  async fn the_backup_state_names_the_passphrase_and_when_it_was_last_set() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(START_MS));
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    let state = key_backup_state(alice.client.store()).unwrap().unwrap();
+    assert!(state.is_stored);
+    assert_eq!(state.recovery, [RecoveryMethod::Passphrase]);
+    assert_eq!(state.maybe_passphrase_set_at, Some(START_MS));
+
+    clock.advance(60_000);
+    alice
+      .client
+      .upload_key_bag_with(
+        &SecretBytes::new(b"a newer passphrase".to_vec()),
+        options(PASSPHRASE).argon2,
+      )
+      .await
+      .unwrap();
+    let state = key_backup_state(alice.client.store()).unwrap().unwrap();
+    assert_eq!(state.maybe_passphrase_set_at, Some(START_MS + 60_000));
+    assert!(!state.has_pending_upload, "uploaded with the new wrap");
+
+    // The user's other device learns it with the key bag.
+    let mut laptop = link_new_device(&mut alice, &clock).await;
+    laptop.sync_account_data().await.unwrap();
+    let on_laptop = key_backup_state(laptop.store()).unwrap().unwrap();
+    assert_eq!(on_laptop.maybe_passphrase_set_at, Some(START_MS + 60_000));
+  }
+
+  #[test]
+  fn without_known_wraps_the_state_is_unknown() {
+    assert_eq!(key_backup_state(&MemoryStore::new()).unwrap(), None);
+  }
+
+  fn own_devices(peer: &Peer) -> OwnDevicesRecord {
+    records::get_json(peer.store.as_ref(), Table::SyncState, OWN_DEVICES_KEY)
+      .unwrap()
+      .unwrap()
+  }
+
+  fn state_of(record: &OwnDevicesRecord, device: teamcraft_proto::DeviceId) -> OwnDeviceCheck {
+    record
+      .verification
+      .iter()
+      .find(|(id, _)| *id == device)
+      .map(|(_, state)| *state)
+      .unwrap()
   }
 }
 
@@ -211,16 +477,17 @@ async fn link_new_device(
     NewDeviceLink::connect(&api, &offer),
     owner.client.start_link_approval(&code)
   );
-  owner
-    .client
-    .complete_link_approval(owner_side.unwrap())
-    .await
-    .unwrap();
-  let link_options = linked_options(new_side.unwrap().receive_secrets().await.unwrap());
+  let new_store = Arc::new(MemoryStore::new());
+  let (approved, received) = tokio::join!(
+    owner.client.complete_link_approval(owner_side.unwrap()),
+    new_side.unwrap().receive_secrets(&new_store, "Test device")
+  );
+  approved.unwrap();
+  let link_options = linked_options(received.unwrap());
   PendingEnrollment::new()
     .complete(
       api,
-      Arc::new(MemoryStore::new()),
+      new_store,
       Box::new(clock.clone()),
       settings_with_stagger(),
       link_options,
@@ -342,4 +609,15 @@ async fn a_linked_device_inherits_pins_and_the_workspace_root() {
     laptop.workspace_root_fingerprint().unwrap(),
     phone.client.workspace_root_fingerprint().unwrap()
   );
+}
+
+/// Unread and mention counts of the conversation as the core stores them; `None` before any sync.
+fn counts(peer: &Peer, conversation: ConversationId) -> Option<(u32, u32)> {
+  read_state::unread(peer.store.as_ref()).unwrap().map(|unread| {
+    unread
+      .conversations
+      .iter()
+      .find(|entry| entry.conversation_id == conversation)
+      .map_or((0, 0), |entry| (entry.unread_count, entry.mention_count))
+  })
 }

@@ -1,6 +1,11 @@
 //! Radio group of call background effects: blur, shipped presets and the user's own pictures.
 //! Own pictures are uploaded through the backend (the host normalizes and encrypts them, the core
 //! syncs them to the user's devices) and can be deleted again here.
+//!
+//! Where space is short (the pre-join screen, the in-call popover) the picker is compact: none,
+//! blur and a first row of photos, with a button that shows the whole gallery in place (#820).
+
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use leptos::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -8,25 +13,68 @@ use wasm_bindgen_futures::JsFuture;
 use teamcraft_proto::BackgroundId;
 
 use crate::admin::format_bytes;
-use crate::calls::{BackgroundEffect, BackgroundImageInfo, EffectGroup};
+use crate::calls::{BackgroundEffect, BackgroundImageInfo, EffectGroup, EffectsOffer};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
+use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 /// Largest picture the picker offers to upload; matches the server default `max_background_bytes`
 /// (teamcraft.example.toml), which stays the authority.
 const MAX_PICTURE_BYTES: u64 = 8 * 1024 * 1024;
 const CUSTOM_SLUG_PREFIX: &str = "custom-";
+/// How many photos the compact picker shows: one row of the grid. The chosen one is among them.
+const COMPACT_PHOTOS: usize = 4;
+/// Gives each picker's grid an element id of its own (the toggle button points at it).
+static NEXT_GRID: AtomicU32 = AtomicU32::new(0);
+
+/// How much of the gallery the picker shows at first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PickerSize {
+  /// Everything at once: the settings, where the user also manages their own pictures.
+  #[default]
+  Full,
+  /// None, blur and one row of photos (the chosen background always among them), and a button
+  /// that shows the rest in place: the pre-join screen and the call, where space is short.
+  Compact,
+}
+
+/// One cell of the picker's grid, in display order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PickerItem {
+  /// The heading of a group of tiles (the i18n key).
+  Heading(&'static str),
+  Tile(BackgroundEffect),
+}
 
 /// Radio group of background effects plus an upload tile.
 #[component]
-pub fn BackgroundPicker(effect: RwSignal<BackgroundEffect>) -> impl IntoView {
+pub fn BackgroundPicker(
+  effect: RwSignal<BackgroundEffect>,
+  #[prop(optional)] size: PickerSize,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let own = Memo::new(move |_| state.read(|backend| backend.background_images()));
   let error = RwSignal::new(None::<String>);
   let file_input = NodeRef::<leptos::html::Input>::new();
-  let options = Memo::new(move |_| effect_options(&own.get()));
+  // The browser offers no photos (their full pictures are only in the apps, #439).
+  let offer = untrack(|| state.read(|backend| backend.effects_offer()));
+  let options = Memo::new(move |_| effect_options(&own.get(), offer));
+  let is_expanded = RwSignal::new(false);
+  let is_collapsed = move || size == PickerSize::Compact && !is_expanded.get();
+  // What the grid shows. Compact, it follows the chosen background so that one is never hidden;
+  // the memo only tells when the list differs, so choosing a tile in view changes nothing.
+  let shown = Memo::new(move |_| {
+    let all = options.get();
+    if is_collapsed() {
+      compact_options(&all, effect.get())
+    } else {
+      all
+    }
+  });
+  let items = Memo::new(move |_| picker_items(&shown.get()));
+  let grid_id = format!("effect-grid-{}", NEXT_GRID.fetch_add(1, Ordering::Relaxed));
 
   // A picture deleted elsewhere (another device) must not stay selected.
   Effect::new(move |_| {
@@ -38,7 +86,8 @@ pub fn BackgroundPicker(effect: RwSignal<BackgroundEffect>) -> impl IntoView {
   });
 
   let move_selection = move |ev: web_sys::KeyboardEvent| {
-    let all = options.get_untracked();
+    // Only the tiles in view: focus can't go to one that isn't there.
+    let all = shown.get_untracked();
     let Some(next) = next_effect(&all, effect.get_untracked(), &ev.key()) else {
       return;
     };
@@ -70,53 +119,52 @@ pub fn BackgroundPicker(effect: RwSignal<BackgroundEffect>) -> impl IntoView {
       match JsFuture::from(file.array_buffer()).await {
         Ok(buffer) => {
           let picture = js_sys::Uint8Array::new(&buffer).to_vec();
-          state.write(|backend| backend.add_background_image(&file.name(), picture));
+          state.try_write(|backend| backend.add_background_image(&file.name(), picture));
         },
-        Err(_) => error.set(Some(i18n.t("effect-upload-unreadable"))),
+        Err(_) => error.set_if_alive(Some(i18n.t("effect-upload-unreadable"))),
       }
     });
   };
 
   view! {
     <div
+      id=grid_id.clone()
       class="effect-grid"
       role="radiogroup"
       aria-label=move || i18n.t("prejoin-effects")
       on:keydown=move_selection
     >
-      {move || {
-        let images = own.get();
-        let mut previous = EffectGroup::Basic;
-        options
-          .get()
-          .into_iter()
-          .map(|option| {
+      // Keyed, so choosing a tile keeps the others (and the focus on the chosen one) in place.
+      <For each=move || items.get() key=|item| *item let:item>
+        {match item {
+          PickerItem::Heading(key) => {
+            view! { <p class="effect-group" role="presentation">{move || i18n.t(key)}</p> }.into_any()
+          },
+          PickerItem::Tile(option) => {
             let maybe_image = match option {
-              BackgroundEffect::Custom(id) => images.iter().find(|image| image.id == id).cloned(),
+              BackgroundEffect::Custom(id) => own
+                .read_untracked()
+                .iter()
+                .find(|image| image.id == id)
+                .cloned(),
               _ => None,
             };
-            let maybe_heading = (option.group() != previous)
-              .then(|| group_heading_key(option.group()))
-              .flatten()
-              .map(|key| view! { <p class="effect-group" role="presentation">{move || i18n.t(key)}</p> });
-            previous = option.group();
-            view! {
-              {maybe_heading}
-              <EffectTile effect=effect option=option maybe_image=maybe_image error=error />
-            }
-          })
-          .collect_view()
-      }}
-      <button type="button" class="effect-tile" on:click=move |_| {
-        if let Some(element) = file_input.get_untracked() {
-          element.click();
-        }
-      }>
-        <span class="effect-swatch effect-upload" aria-hidden="true">
-          <Icon name=IconName::Plus />
-        </span>
-        <span class="effect-name">{move || i18n.t("effect-upload")}</span>
-      </button>
+            view! { <EffectTile effect=effect option=option maybe_image=maybe_image error=error /> }.into_any()
+          },
+        }}
+      </For>
+      <Show when=move || !is_collapsed() fallback=|| ()>
+        <button type="button" class="effect-tile" on:click=move |_| {
+          if let Some(element) = file_input.get_untracked() {
+            element.click();
+          }
+        }>
+          <span class="effect-swatch effect-upload" aria-hidden="true">
+            <Icon name=IconName::Plus />
+          </span>
+          <span class="effect-name">{move || i18n.t("effect-upload")}</span>
+        </button>
+      </Show>
       <input
         type="file"
         accept="image/jpeg,image/png"
@@ -126,6 +174,17 @@ pub fn BackgroundPicker(effect: RwSignal<BackgroundEffect>) -> impl IntoView {
         on:change=on_file
       />
     </div>
+    <Show when=move || size == PickerSize::Compact fallback=|| ()>
+      <button
+        type="button"
+        class="btn btn-small effect-more"
+        aria-expanded=move || is_expanded.get().to_string()
+        aria-controls=grid_id.clone()
+        on:click=move |_| is_expanded.update(|expanded| *expanded = !*expanded)
+      >
+        {move || if is_expanded.get() { i18n.t("effect-fewer") } else { i18n.t("effect-more") }}
+      </button>
+    </Show>
     <Show when=move || error.get().is_some() fallback=|| ()>
       <p class="field-error" role="alert">{move || error.get().unwrap_or_default()}</p>
     </Show>
@@ -249,12 +308,48 @@ fn group_heading_key(group: EffectGroup) -> Option<&'static str> {
   }
 }
 
-/// All options in display order: the shipped effects, then the user's own pictures.
-pub fn effect_options(own: &[BackgroundImageInfo]) -> Vec<BackgroundEffect> {
+/// All options `offer` has, in display order: the shipped effects, then the user's own pictures.
+pub fn effect_options(own: &[BackgroundImageInfo], offer: EffectsOffer) -> Vec<BackgroundEffect> {
   BackgroundEffect::ALL
     .into_iter()
     .chain(own.iter().map(|image| BackgroundEffect::Custom(image.id)))
+    .filter(|option| offer.offers(*option))
     .collect()
+}
+
+/// The options the compact picker shows: none and blur, the first photos, and the chosen
+/// background if it is none of those (a photo takes the last photo's place). Keeps the order of
+/// `all`.
+fn compact_options(all: &[BackgroundEffect], current: BackgroundEffect) -> Vec<BackgroundEffect> {
+  let in_group = |group: EffectGroup| all.iter().copied().filter(move |option| option.group() == group);
+  let mut photos: Vec<_> = in_group(EffectGroup::Photos).take(COMPACT_PHOTOS).collect();
+  let is_listed = all.contains(&current);
+  if is_listed && current.group() == EffectGroup::Photos && !photos.contains(&current) {
+    photos.pop();
+    photos.push(current);
+  }
+  let maybe_other =
+    (is_listed && !matches!(current.group(), EffectGroup::Basic | EffectGroup::Photos)).then_some(current);
+  in_group(EffectGroup::Basic)
+    .chain(photos)
+    .chain(maybe_other)
+    .collect()
+}
+
+/// The grid's cells for `options`: a heading wherever a group starts.
+fn picker_items(options: &[BackgroundEffect]) -> Vec<PickerItem> {
+  let mut previous = EffectGroup::Basic;
+  let mut items = Vec::with_capacity(options.len() + 2);
+  for option in options {
+    if option.group() != previous
+      && let Some(key) = group_heading_key(option.group())
+    {
+      items.push(PickerItem::Heading(key));
+    }
+    previous = option.group();
+    items.push(PickerItem::Tile(*option));
+  }
+  items
 }
 
 /// Stable string for preferences and element ids; own pictures keep their id (`custom-<id>`).
@@ -309,16 +404,39 @@ fn focus_effect_tile(option: BackgroundEffect) {
 mod tests {
   use super::*;
   use crate::calls::BackgroundPreset;
-
-  const EN_FTL: &str = include_str!("../../i18n/en.ftl");
-  const DE_FTL: &str = include_str!("../../i18n/de.ftl");
+  use crate::i18n::{Locale, joined_source};
 
   #[test]
   fn slugs_round_trip_for_every_option() {
     let own = [image(7), image(9)];
-    for option in effect_options(&own) {
+    for option in effect_options(&own, EffectsOffer::Full) {
       assert_eq!(effect_from_slug(&effect_slug(option)), option);
     }
+  }
+
+  /// #439: the browser has no photos; the compact picker then shows none, blur and the rest.
+  #[test]
+  fn the_browser_picker_leaves_the_photos_out() {
+    let options = effect_options(&[image(3)], EffectsOffer::InCall);
+    assert!(!options.iter().any(|option| option.group() == EffectGroup::Photos));
+    assert!(options.contains(&BackgroundEffect::BlurStrong));
+    assert!(options.contains(&BackgroundEffect::Preset(BackgroundPreset::Forest)));
+    assert_eq!(
+      options.last(),
+      Some(&BackgroundEffect::Custom("3".parse().unwrap()))
+    );
+    assert_eq!(
+      picker_items(&options).first(),
+      Some(&PickerItem::Tile(BackgroundEffect::None))
+    );
+    assert_eq!(
+      compact_options(&options, BackgroundEffect::None),
+      vec![
+        BackgroundEffect::None,
+        BackgroundEffect::BlurLight,
+        BackgroundEffect::BlurStrong
+      ]
+    );
   }
 
   #[test]
@@ -330,7 +448,7 @@ mod tests {
 
   #[test]
   fn own_pictures_come_after_the_shipped_effects() {
-    let options = effect_options(&[image(3)]);
+    let options = effect_options(&[image(3)], EffectsOffer::Full);
     assert_eq!(options.len(), BackgroundEffect::ALL.len() + 1);
     assert_eq!(options[0], BackgroundEffect::None);
     assert!(options.contains(&BackgroundEffect::Preset(BackgroundPreset::Forest)));
@@ -339,6 +457,28 @@ mod tests {
       options.last(),
       Some(&BackgroundEffect::Custom("3".parse().unwrap()))
     );
+  }
+
+  // Trunk's copy-dir puts the directory's files *into* data-target-path; the thumbnails must land
+  // where photo_thumbnail_url looks (#636: they were one level up and every tile was broken).
+  #[test]
+  fn the_build_copies_the_thumbnails_where_the_picker_loads_them() {
+    let index = include_str!("../../index.html");
+    let url = photo_thumbnail_url("living-room");
+    let directory = url
+      .trim_start_matches('/')
+      .rsplit_once('/')
+      .map(|(dir, _)| dir)
+      .unwrap();
+    assert!(
+      index.contains(&format!(
+        r#"href="../../assets/backgrounds/thumbs" data-target-path="{directory}""#
+      )),
+      "index.html must copy the thumbnails to /{directory}"
+    );
+    let thumbs = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+      .join("../../assets/backgrounds/thumbs/living-room.jpg");
+    assert!(thumbs.is_file(), "missing {}", thumbs.display());
   }
 
   #[test]
@@ -361,7 +501,7 @@ mod tests {
 
   #[test]
   fn every_preset_name_and_heading_is_translated() {
-    for lang in [EN_FTL, DE_FTL] {
+    for lang in Locale::ALL.map(joined_source) {
       for option in BackgroundEffect::ALL {
         let key = format!("effect-{} =", option.slug());
         assert!(lang.lines().any(|line| line.starts_with(&key)), "missing {key}");
@@ -369,6 +509,95 @@ mod tests {
       for group in [EffectGroup::Photos, EffectGroup::Illustrations] {
         let key = format!("{} =", group_heading_key(group).unwrap());
         assert!(lang.lines().any(|line| line.starts_with(&key)), "missing {key}");
+      }
+    }
+  }
+
+  fn photo(index: usize) -> BackgroundEffect {
+    BackgroundEffect::Preset(BackgroundPreset::PHOTOS[index])
+  }
+
+  #[test]
+  fn the_compact_picker_shows_none_blur_and_one_row_of_photos() {
+    let all = effect_options(&[image(3)], EffectsOffer::Full);
+    let compact = compact_options(&all, BackgroundEffect::None);
+    assert_eq!(
+      compact,
+      vec![
+        BackgroundEffect::None,
+        BackgroundEffect::BlurLight,
+        BackgroundEffect::BlurStrong,
+        photo(0),
+        photo(1),
+        photo(2),
+        photo(3),
+      ]
+    );
+  }
+
+  #[test]
+  fn the_chosen_background_stays_in_view_whatever_it_is() {
+    let all = effect_options(&[image(3)], EffectsOffer::Full);
+    let own = BackgroundEffect::Custom("3".parse().unwrap());
+    let forest = BackgroundEffect::Preset(BackgroundPreset::Forest);
+    for current in [photo(9), forest, own, BackgroundEffect::BlurStrong, photo(0)] {
+      assert!(compact_options(&all, current).contains(&current), "{current:?}");
+    }
+    // A photo out of the row takes the last photo's place, so the row stays one row.
+    assert_eq!(
+      compact_options(&all, photo(9)),
+      vec![
+        BackgroundEffect::None,
+        BackgroundEffect::BlurLight,
+        BackgroundEffect::BlurStrong,
+        photo(0),
+        photo(1),
+        photo(2),
+        photo(9),
+      ]
+    );
+    // Other groups follow the photos, where the full gallery has them.
+    assert_eq!(compact_options(&all, forest).last(), Some(&forest));
+    assert_eq!(compact_options(&all, own).last(), Some(&own));
+  }
+
+  #[test]
+  fn a_choice_the_picker_does_not_list_adds_nothing() {
+    let all = effect_options(&[], EffectsOffer::Full);
+    let deleted = BackgroundEffect::Custom("9".parse().unwrap());
+    assert_eq!(compact_options(&all, deleted).len(), 3 + COMPACT_PHOTOS);
+  }
+
+  #[test]
+  fn headings_start_each_group_of_tiles() {
+    let all = effect_options(&[image(3)], EffectsOffer::Full);
+    let items = picker_items(&all);
+    let headings: Vec<_> = items
+      .iter()
+      .filter_map(|item| match item {
+        PickerItem::Heading(key) => Some(*key),
+        PickerItem::Tile(_) => None,
+      })
+      .collect();
+    assert_eq!(headings, ["effect-group-photos", "effect-group-illustrations"]);
+    assert_eq!(items.first(), Some(&PickerItem::Tile(BackgroundEffect::None)));
+    // Compact, with an illustration chosen, it still sits under its own heading.
+    let forest = BackgroundEffect::Preset(BackgroundPreset::Forest);
+    let items = picker_items(&compact_options(&all, forest));
+    assert_eq!(
+      items[items.len() - 2..],
+      [
+        PickerItem::Heading("effect-group-illustrations"),
+        PickerItem::Tile(forest)
+      ]
+    );
+  }
+
+  #[test]
+  fn the_toggle_is_translated() {
+    for lang in Locale::ALL.map(joined_source) {
+      for key in ["effect-more =", "effect-fewer ="] {
+        assert!(lang.lines().any(|line| line.starts_with(key)), "missing {key}");
       }
     }
   }

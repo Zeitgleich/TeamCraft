@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-save-attachments"
+description = "Enables the core_save_attachments command without any pre-configured scope."
+commands.allow = ["core_save_attachments"]
+
+[[permission]]
+identifier = "deny-core-save-attachments"
+description = "Denies the core_save_attachments command without any pre-configured scope."
+commands.deny = ["core_save_attachments"]

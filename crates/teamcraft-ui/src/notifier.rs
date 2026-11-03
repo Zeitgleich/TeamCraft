@@ -5,7 +5,7 @@
 //! (levels, mutes, keywords, do-not-disturb); [`Notifier`] watches the backend for new messages and
 //! thread replies and applies it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use crate::clock::{local_utc_offset_minutes, now_ms};
@@ -15,7 +15,8 @@ use teamcraft_client_api::notify::{self, MentionRules};
 use teamcraft_proto::{DndCandidate, PushContentMode};
 
 use crate::model::{
-  Conversation, ConversationId, ConversationKind, Message, MessageId, PresenceStatus, ThreadId, User, UserId,
+  Conversation, ConversationId, ConversationKind, Message, MessageId, PresenceStatus, SpaceId, ThreadId,
+  User, UserId, is_pending,
 };
 use crate::notify_sync::{LocalZone, dnd_to_server};
 use crate::prefs::{NotificationPrefs, NotifyLevel, ThreadReplies};
@@ -97,7 +98,7 @@ pub fn decide(input: &PolicyInput) -> Decision {
       return Decision::Skip(SkipReason::ThreadNotFollowedByPreference);
     }
   }
-  match input.prefs.effective_level_in(&id, maybe_space.as_deref()) {
+  match level_for(input, &id, maybe_space.as_deref()) {
     NotifyLevel::Nothing => Decision::Skip(SkipReason::LevelNothing),
     NotifyLevel::All => Decision::Notify,
     NotifyLevel::Mentions => {
@@ -113,6 +114,15 @@ pub fn decide(input: &PolicyInput) -> Decision {
         Decision::Skip(SkipReason::NotMentioned)
       }
     },
+  }
+}
+
+/// Integration channels notify only for mentions, as the push routing does (notifications.md,
+/// "Level"): machine output at "all messages" would never stop.
+fn level_for(input: &PolicyInput, id: &str, maybe_space: Option<&str>) -> NotifyLevel {
+  match input.prefs.effective_level_in(id, maybe_space) {
+    NotifyLevel::All if input.conversation.kind == ConversationKind::Integration => NotifyLevel::Mentions,
+    level => level,
   }
 }
 
@@ -167,6 +177,24 @@ pub struct Notification {
   pub conversation: ConversationId,
   pub title: NotificationTitle,
   pub body: Option<String>,
+  /// A reply from the notification goes to the conversation: offered for messages in conversations
+  /// the user may post in, not for thread replies (the answer belongs in the thread).
+  pub can_reply: bool,
+  /// Whose or which picture shows beside the text (#543); `None` where the policy hides names.
+  pub maybe_picture: Option<PictureSubject>,
+}
+
+/// What a notification's picture stands for, as messaging apps show it (#543): who wrote in a
+/// direct conversation, where it was written in a channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureSubject {
+  /// The sender's avatar: DMs and group DMs (whose own picture is their people).
+  Person(UserId),
+  /// The channel's picture, else its space's.
+  Place {
+    conversation: ConversationId,
+    maybe_space: Option<SpaceId>,
+  },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,11 +221,15 @@ pub fn preview(body: &str) -> String {
   format!("{cut}…")
 }
 
-/// Watches the backend for new messages; the first sight of a conversation only records its state.
+/// Watches the backend for new messages. The first look only records the state; a conversation
+/// that appears later (a new direct message, a channel the user was added to) reports its unread
+/// messages that are newer than everything seen before it.
 #[derive(Default)]
 pub struct Notifier {
   seen_message: RefCell<HashMap<ConversationId, MessageId>>,
   seen_replies: RefCell<HashMap<(ConversationId, ThreadId), usize>>,
+  /// The newest message the server confirmed in any conversation, as of the previous look.
+  maybe_newest_seen: Cell<Option<MessageId>>,
 }
 
 /// One new message found by the watcher, before the policy looks at it.
@@ -215,6 +247,16 @@ impl Notifier {
     let conversations = all_conversations(backend);
     for conversation in &conversations {
       self.collect_messages(backend, conversation, &mut found);
+    }
+    let newest_seen = self
+      .seen_message
+      .borrow()
+      .values()
+      .copied()
+      .filter(|id| !is_pending(*id))
+      .max();
+    if newest_seen.is_some() {
+      self.maybe_newest_seen.set(newest_seen);
     }
     for summary in backend.followed_threads() {
       let Some(conversation) = conversations
@@ -239,23 +281,27 @@ impl Notifier {
       return;
     }
     let start = count.saturating_sub(WATCH_WINDOW);
-    let window = backend.messages(conversation.id, start, WATCH_WINDOW);
+    // Placeholders of messages not readable yet notify nothing and aren't counted as seen: one
+    // that fills in later and is newer than everything seen notifies then, with its text, while
+    // older history that fills in on a newly linked device stays quiet (issue #888).
+    let window = readable(backend.messages(conversation.id, start, WATCH_WINDOW));
     let Some(newest) = window.last().map(|message| message.id) else {
-      // Still loading; try again on the next change.
+      // Still loading, or nothing readable yet; try again on the next change.
       return;
     };
-    let mut seen = self.seen_message.borrow_mut();
-    match seen.insert(conversation.id, newest) {
-      None => {},
-      Some(previous) => {
-        for message in window.into_iter().filter(|message| message.id > previous) {
-          found.push(Found {
-            conversation: conversation.clone(),
-            message,
-            kind: CandidateKind::Message,
-          });
-        }
-      },
+    let maybe_previous = self.seen_message.borrow_mut().insert(conversation.id, newest);
+    let new = new_messages(
+      window,
+      maybe_previous,
+      self.maybe_newest_seen.get(),
+      conversation.unread_count,
+    );
+    for message in new {
+      found.push(Found {
+        conversation: conversation.clone(),
+        message,
+        kind: CandidateKind::Message,
+      });
     }
   }
 
@@ -276,8 +322,7 @@ impl Notifier {
     if (summary.reply_count as usize) <= previous {
       return;
     }
-    let thread = backend.thread(conversation.id, key.1);
-    let new_replies = thread.into_iter().skip(1 + previous);
+    let new_replies = new_replies(backend.thread(conversation.id, key.1), previous);
     for message in new_replies {
       found.push(Found {
         conversation: conversation.clone(),
@@ -322,6 +367,51 @@ impl ReadWatcher {
       })
       .map(|(id, _)| *id)
       .collect()
+  }
+}
+
+/// The replies of `thread` (its root first) after the `previous` ones already counted. The reply
+/// count leaves placeholders out (issue #888), so they are left out before counting.
+fn new_replies(thread: Vec<Message>, previous: usize) -> Vec<Message> {
+  readable(thread.into_iter().skip(1).collect())
+    .into_iter()
+    .skip(previous)
+    .collect()
+}
+
+/// The messages this device can read: a placeholder (issue #888) has no text to show and may turn
+/// out to be a reaction or an edit.
+fn readable(messages: Vec<Message>) -> Vec<Message> {
+  messages
+    .into_iter()
+    .filter(|message| message.maybe_placeholder.is_none())
+    .collect()
+}
+
+/// The messages of `window` (a conversation's newest, oldest first) to report: those after the
+/// newest one seen in it before, or, in a conversation seen for the first time, its unread ones
+/// newer than everything seen elsewhere (none on the first look, which only records the state).
+fn new_messages(
+  window: Vec<Message>,
+  maybe_previous: Option<MessageId>,
+  maybe_newest_elsewhere: Option<MessageId>,
+  unread_count: u32,
+) -> Vec<Message> {
+  match (maybe_previous, maybe_newest_elsewhere) {
+    (Some(previous), _) => window
+      .into_iter()
+      .filter(|message| message.id > previous)
+      .collect(),
+    (None, Some(newest_elsewhere)) => {
+      let unread = usize::try_from(unread_count).unwrap_or(usize::MAX);
+      let skipped = window.len().saturating_sub(unread);
+      window
+        .into_iter()
+        .skip(skipped)
+        .filter(|message| message.id > newest_elsewhere)
+        .collect()
+    },
+    (None, None) => Vec::new(),
   }
 }
 
@@ -372,10 +462,25 @@ pub fn notifications_for(
         conversation: item.conversation.id,
         title,
         body: prefs.show_preview.then(|| preview(&item.message.body)),
+        can_reply: item.kind == CandidateKind::Message && item.conversation.can_post,
+        maybe_picture: Some(picture_subject(&item.conversation, item.message.author)),
       })
     })
     .map(|notification| limited_to(notification, &mode))
     .collect()
+}
+
+/// The picture of a message in `conversation` from `sender`: the person in a direct conversation,
+/// the place in a channel. Thread replies follow their conversation.
+pub fn picture_subject(conversation: &Conversation, sender: UserId) -> PictureSubject {
+  if conversation.kind.is_direct_like() {
+    PictureSubject::Person(sender)
+  } else {
+    PictureSubject::Place {
+      conversation: conversation.id,
+      maybe_space: conversation.maybe_space,
+    }
+  }
 }
 
 fn is_urgent(backend: &dyn crate::backend::Backend, message: &Message) -> bool {
@@ -387,7 +492,7 @@ fn is_urgent(backend: &dyn crate::backend::Backend, message: &Message) -> bool {
 
 /// Cuts a notification down to what the verified workspace policy allows on a lock screen, whatever
 /// the person's own "show message text" choice (the policy only ever takes away). An unknown mode
-/// counts as the strictest.
+/// counts as the strictest. A picture names who or where as a name does, so it goes with the names.
 pub fn limited_to(mut notification: Notification, mode: &PushContentMode) -> Notification {
   match mode {
     PushContentMode::Full => {},
@@ -395,6 +500,7 @@ pub fn limited_to(mut notification: Notification, mode: &PushContentMode) -> Not
     PushContentMode::Generic | PushContentMode::Unknown(_) => {
       notification.body = None;
       notification.title = NotificationTitle::Generic;
+      notification.maybe_picture = None;
     },
   }
   notification
@@ -412,6 +518,11 @@ mod tests {
         channel: "planning".into(),
       },
       body: Some("lunch at noon?".into()),
+      can_reply: true,
+      maybe_picture: Some(PictureSubject::Place {
+        conversation: id_from_raw(1),
+        maybe_space: None,
+      }),
     }
   }
 
@@ -430,10 +541,108 @@ mod tests {
     let sender = limited_to(shown(), &PushContentMode::Sender);
     assert_eq!(sender.body, None);
     assert_eq!(sender.title, shown().title);
+    assert_eq!(
+      sender.maybe_picture,
+      shown().maybe_picture,
+      "names show, so pictures do"
+    );
     for mode in [PushContentMode::Generic, PushContentMode::Unknown("x".into())] {
       let generic = limited_to(shown(), &mode);
       assert_eq!(generic.body, None);
       assert_eq!(generic.title, NotificationTitle::Generic);
+      assert_eq!(generic.maybe_picture, None, "no face or place without a name");
+    }
+  }
+
+  #[test]
+  fn direct_conversations_show_the_sender_and_channels_the_place() {
+    let sender = id_from_raw(2);
+    for kind in [ConversationKind::Direct, ConversationKind::Group] {
+      assert_eq!(
+        picture_subject(&conversation(kind), sender),
+        PictureSubject::Person(sender)
+      );
+    }
+    let mut channel = conversation(ConversationKind::Public);
+    channel.maybe_space = Some(id_from_raw(3));
+    for kind in [
+      ConversationKind::Public,
+      ConversationKind::Private,
+      ConversationKind::Integration,
+    ] {
+      channel.kind = kind;
+      assert_eq!(
+        picture_subject(&channel, sender),
+        PictureSubject::Place {
+          conversation: id_from_raw(7),
+          maybe_space: Some(id_from_raw(3)),
+        }
+      );
+    }
+  }
+
+  mod new_messages {
+    use super::*;
+    use crate::model::{MessageKind, raw_id};
+
+    #[test]
+    fn a_known_conversation_reports_what_came_after_the_last_look() {
+      let window = vec![message(5), message(6), message(7)];
+      assert_eq!(ids(new_messages(window, Some(id_from_raw(5)), None, 0)), [6, 7]);
+    }
+
+    #[test]
+    fn the_first_look_only_records_the_state() {
+      let window = vec![message(5), message(6)];
+      assert_eq!(ids(new_messages(window, None, None, 2)), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_new_conversation_reports_its_unread_messages_newer_than_everything_seen() {
+      let window = vec![message(3), message(8), message(9)];
+      assert_eq!(
+        ids(new_messages(window.clone(), None, Some(id_from_raw(7)), 5)),
+        [8, 9]
+      );
+      assert_eq!(ids(new_messages(window, None, Some(id_from_raw(7)), 1)), [9]);
+    }
+
+    #[test]
+    fn placeholders_notify_nothing_and_a_later_readable_message_does() {
+      let mut waiting = message(8);
+      waiting.maybe_placeholder = Some(crate::model::Placeholder::Waiting);
+      let window = readable(vec![message(6), message(7), waiting]);
+      assert_eq!(ids(new_messages(window, Some(id_from_raw(6)), None, 0)), [7]);
+    }
+
+    #[test]
+    fn thread_replies_after_a_placeholder_are_counted_without_it() {
+      let mut waiting = message(3);
+      waiting.maybe_placeholder = Some(crate::model::Placeholder::Waiting);
+      // Root 1, readable reply 2 seen before, a placeholder, then a new reply 4.
+      let thread = vec![message(1), message(2), waiting, message(4)];
+      assert_eq!(ids(new_replies(thread, 1)), [4]);
+    }
+
+    fn ids(messages: Vec<Message>) -> Vec<u64> {
+      messages.iter().map(|message| raw_id(message.id)).collect()
+    }
+
+    fn message(raw: u64) -> Message {
+      Message {
+        id: id_from_raw(raw),
+        conversation: id_from_raw(1),
+        author: id_from_raw(2),
+        kind: MessageKind::User,
+        sent_at: 0,
+        body: String::new(),
+        is_edited: false,
+        reactions: Vec::new(),
+        reply_count: 0,
+        maybe_thread: None,
+        maybe_imported: None,
+        maybe_placeholder: None,
+      }
     }
   }
 
@@ -485,7 +694,7 @@ mod tests {
 
   #[test]
   fn direct_messages_notify_at_the_mentions_level() {
-    let prefs = NotificationPrefs::default();
+    let prefs = mentions_only();
     assert_eq!(
       decide(&input(&prefs, ConversationKind::Direct, "hello")),
       Decision::Notify
@@ -494,13 +703,39 @@ mod tests {
 
   #[test]
   fn channel_messages_need_a_mention_at_the_mentions_level() {
-    let prefs = NotificationPrefs::default();
+    let prefs = mentions_only();
     assert_eq!(
       decide(&input(&prefs, ConversationKind::Public, "lunch?")),
       Decision::Skip(SkipReason::NotMentioned)
     );
     assert_eq!(
       decide(&input(&prefs, ConversationKind::Public, "ping @alice")),
+      Decision::Notify
+    );
+  }
+
+  #[test]
+  fn channel_messages_notify_by_default() {
+    let prefs = NotificationPrefs::default();
+    assert_eq!(
+      decide(&input(&prefs, ConversationKind::Public, "lunch?")),
+      Decision::Notify
+    );
+  }
+
+  #[test]
+  fn integration_channels_notify_only_for_mentions_even_at_all() {
+    let prefs = NotificationPrefs::default();
+    assert_eq!(
+      decide(&input(&prefs, ConversationKind::Integration, "build 42 passed")),
+      Decision::Skip(SkipReason::NotMentioned)
+    );
+    assert_eq!(
+      decide(&input(
+        &prefs,
+        ConversationKind::Integration,
+        "@alice build 42 failed"
+      )),
       Decision::Notify
     );
   }
@@ -524,7 +759,7 @@ mod tests {
 
   #[test]
   fn a_conversation_override_wins_over_the_global_level() {
-    let mut prefs = NotificationPrefs::default();
+    let mut prefs = mentions_only();
     prefs.set_conversation(
       &conversation(ConversationKind::Public).id.to_string(),
       ConversationNotify {
@@ -803,6 +1038,13 @@ mod tests {
     assert_eq!(preview(&long).chars().count(), PREVIEW_CHARS + 1);
   }
 
+  fn mentions_only() -> NotificationPrefs {
+    NotificationPrefs {
+      desktop: NotifyLevel::Mentions,
+      ..NotificationPrefs::default()
+    }
+  }
+
   fn input<'a>(prefs: &'a NotificationPrefs, kind: ConversationKind, body: &'a str) -> PolicyInput<'a> {
     // Leaked: tests need `&'a` values for a whole call and the sizes are tiny.
     let me: &'a User = Box::leak(Box::new(me()));
@@ -833,6 +1075,10 @@ mod tests {
       is_guest: false,
       is_bot: false,
       maybe_organization: None,
+      is_deactivated: false,
+      is_deleted: false,
+      device_setup: crate::model::DeviceSetup::Unknown,
+      maybe_email: None,
     }
   }
 
@@ -851,6 +1097,13 @@ mod tests {
       is_muted: false,
       can_post: true,
       bookmarks: Vec::new(),
+      is_catching_up: false,
+      is_notes_to_self: false,
+      is_archived: false,
+      is_imported: false,
+      maybe_permissions: None,
+      has_only_deactivated_others: false,
+      maybe_image_version: None,
     }
   }
 }

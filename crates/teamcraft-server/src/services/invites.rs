@@ -41,6 +41,16 @@ pub async fn create_invite(
   }
 
   let email = normalize_email(&request.email)?;
+  let limits = &state.settings.get().limits;
+  let maybe_message = request
+    .maybe_message
+    .as_deref()
+    .map(str::trim)
+    .filter(|message| !message.is_empty())
+    .map(|message| {
+      super::validate_text(message, "invite message", limits.max_text_length).map(|()| message.to_owned())
+    })
+    .transpose()?;
   if request.role == SpaceRole::Guest {
     check_guest_domain(state, &email)?;
   }
@@ -67,7 +77,14 @@ pub async fn create_invite(
     &json!({"role": invite.role.as_str()}),
   )
   .await?;
-  send_invite_mail(state, caller, &access.view.space.name, &invite).await;
+  send_invite_mail(
+    state,
+    caller,
+    &access.view.space.name,
+    &invite,
+    maybe_message.as_deref(),
+  )
+  .await;
   Ok(invite_response(&invite))
 }
 
@@ -137,6 +154,7 @@ async fn send_invite_mail(
   caller: &AuthenticatedUser,
   space_name: &str,
   invite: &teamcraft_db::Invite,
+  maybe_message: Option<&str>,
 ) {
   let Some(mailer) = state.mailer.get() else {
     return;
@@ -161,7 +179,7 @@ async fn send_invite_mail(
     to_address: invite.email.clone(),
     maybe_to_name: None,
     subject: fill(&subject),
-    text: fill(&body),
+    text: with_personal_message(&fill(&body), maybe_message),
     method: Method::Request,
     ics: String::new(),
     maybe_from_name: None,
@@ -170,6 +188,24 @@ async fn send_invite_mail(
   .as_brand(brand);
   if let Err(error) = mailer.send(&mail).await {
     warn!(%error, invite_id = %invite.id, "sending the invitation e-mail failed");
+  }
+}
+
+/// Adds the inviter's own words to the invitation text: in place of `{message}` when the template
+/// has it, else quoted below. Inserted after the other placeholders are filled, so text in the
+/// message is never taken for a placeholder.
+fn with_personal_message(text: &str, maybe_message: Option<&str>) -> String {
+  let quoted = maybe_message.map(|message| {
+    message
+      .lines()
+      .map(|line| format!("> {line}"))
+      .collect::<Vec<_>>()
+      .join("\n")
+  });
+  match quoted {
+    Some(quoted) if text.contains("{message}") => text.replace("{message}", &quoted),
+    Some(quoted) => format!("{text}\n\n{quoted}\n"),
+    None => text.replace("{message}", ""),
   }
 }
 
@@ -280,6 +316,34 @@ mod tests {
     ] {
       assert!(normalize_email(bad).is_err(), "{bad:?}");
     }
+  }
+}
+
+#[cfg(test)]
+mod message_tests {
+  use super::*;
+
+  #[test]
+  fn a_personal_message_is_quoted_below_the_invitation() {
+    assert_eq!(
+      with_personal_message("Join us.", Some("Hi!\nSee you there")),
+      "Join us.\n\n> Hi!\n> See you there\n"
+    );
+  }
+
+  #[test]
+  fn a_template_can_place_the_message() {
+    assert_eq!(
+      with_personal_message("Hello\n{message}\nBye", Some("Welcome")),
+      "Hello\n> Welcome\nBye"
+    );
+    assert_eq!(with_personal_message("Hello{message}", None), "Hello");
+  }
+
+  #[test]
+  fn placeholders_in_the_message_stay_text() {
+    let filled = with_personal_message("Open {url}", Some("{url}"));
+    assert!(filled.ends_with("> {url}\n"), "{filled}");
   }
 }
 

@@ -1,0 +1,18 @@
+ÿ--XyZ
+Content-Disposition: form-data; name="payload_json"
+
+{"text":"Deploy 42","username":"ci","mention":true}
+--XyZ
+Content-Disposition: form-data; name="files[0]"; filename="graph.png"
+Content-Type: image/png
+
+‰PNG
+
+
+--XyZ
+Content-Disposition: form-data; name="files[1]"; filename="build.log"
+
+line 1
+--Xy
+line 2
+--XyZ--

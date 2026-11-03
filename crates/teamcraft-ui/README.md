@@ -5,7 +5,7 @@ signs in to a server. For UI work without a server there is a **mock backend** w
 data behind the development-only `demo` feature:
 
 ```sh
-(cd crates/teamcraft-ui && trunk serve --features demo)   # then open /?backend=mock
+(cd crates/teamcraft-ui && TEAMCRAFT_WEB_FEATURES=demo trunk serve)   # then open /?backend=mock
 ```
 
 The demo data never ships: an optimized (`--release`) build with `demo` fails to compile, release builds
@@ -16,6 +16,7 @@ contains demo fixtures.
 |---------------------------------|----------------------------------------------------------------|
 | Channel with thread panel       | ![Channel with thread](docs/screenshots/channel-thread.png)    |
 | Threads inbox                   | ![Threads inbox](docs/screenshots/threads.png)                 |
+| Rich composer and its message   | ![Composer](docs/screenshots/rich-message-rendered-light.png)  |
 | Quick switcher                  | ![Quick switcher](docs/screenshots/quick-switcher.png)         |
 | Status menu                     | ![Status menu](docs/screenshots/status-menu.png)               |
 | Log channel (50,000 lines)      | ![Log channel](docs/screenshots/log-channel.png)               |
@@ -43,12 +44,61 @@ contains demo fixtures.
 | Compare keys                    | ![Compare keys](docs/screenshots/key-verify.png)               |
 | New login approval              | ![Device approval](docs/screenshots/device-approval.png)       |
 | QR device linking               | ![QR linking](docs/screenshots/device-link-qr.png)             |
+| Lightbox with the thread        | ![Lightbox](docs/screenshots/lightbox.png)                     |
+| Lightbox: tooltip with the key  | ![Tooltip](docs/screenshots/lightbox-tooltip.png)              |
+| Lightbox: rotated and zoomed    | ![Rotated](docs/screenshots/lightbox-rotated.png)              |
+| Lightbox: "…" menu (en, de)     | ![Menu](docs/screenshots/lightbox-menu.png) ![Menu de](docs/screenshots/lightbox-menu-de.png) |
+| Lightbox: file details          | ![Details](docs/screenshots/lightbox-details.png)              |
+| Lightbox: video                 | ![Video](docs/screenshots/lightbox-video.png)                  |
+| Lightbox: GIF, reduced motion   | ![Paused GIF](docs/screenshots/lightbox-gif-paused.png)        |
+| Labelled rail, light / dark     | ![Channel light](docs/screenshots/polish-channel-light.png) ![Channel dark](docs/screenshots/polish-channel-dark.png) |
+| Activity tabs, light / dark     | ![Activity light](docs/screenshots/polish-activity-light.png) ![Activity dark](docs/screenshots/polish-activity-dark.png) |
+| Preview of an unjoined channel  | ![Preview light](docs/screenshots/polish-preview-details-light.png) ![Preview dark](docs/screenshots/polish-preview-details-dark.png) |
+| Files tab, browse with preview  | ![Files tab](docs/screenshots/polish-files-tab-light.png) ![Browse channels](docs/screenshots/polish-browse-dark.png) |
+| Phone (390×844), light: Home, space, channel, thread, Activity, settings | ![Phone light](docs/screenshots/mobile-light.png) |
+| Phone (390×844), dark           | ![Phone dark](docs/screenshots/mobile-dark.png)                |
+| Phone in landscape, light / dark | ![Landscape light](docs/screenshots/mobile-landscape-light.png) ![Landscape dark](docs/screenshots/mobile-landscape-dark.png) |
 
-Screenshots are produced with Playwright against `trunk build --features demo` (English, 1360×840); the
+Screenshots are produced with Playwright against `TEAMCRAFT_WEB_FEATURES=demo trunk build` (English, 1360×840); the
 tour also walks every screen in German and fails on missing translation keys.
 
 The 50,000-line `#app-logs` channel (see `docs/screenshots/log-channel-dark.png`) keeps scrolling at
 frame rate because only the visible rows are in the DOM.
+
+## Stylesheets and strings
+
+Every feature used to append to `style/main.css` and `i18n/*.ftl`, so parallel branches collided at
+their ends. Both are split per area of the app (#614); new work goes into the area's file, or into a
+new file for a new area, without touching a shared list.
+
+- **Styles:** `style/main/NNN-<area>.css`. `scripts/bundle-css.sh` (a Trunk hook) joins them in name
+  order into `gen/main.css`, the one stylesheet `index.html` links: one request, nothing inline, so
+  the CSP (`style-src 'self'`) holds. The number is the file's place in the cascade: a new area
+  usually takes the next free number at the end (as an addition at the end of the old file did); a
+  file that must come before rules it overrides takes a number before them. Each file closes its own
+  blocks (a test checks), and `scripts/check-css.py` reads them in the same order as one stylesheet.
+- **Strings:** `i18n/<language>/<area>.ftl`. build.rs embeds every file it finds, the bundle of a
+  language loads them all. Each message id lives in one file, the same file name in every language;
+  the tests in `src/i18n.rs` check that no id is defined twice and that every language has every
+  English message in the same file.
+
+`scripts/split-hotspots.py` made the split from the old files; `scripts/split-hotspots.py --check`
+(CI) fails if one of them comes back, for instance from a merge that keeps a branch's `main.css`.
+
+## Motion and loading
+
+- Tokens in `style/main/000-tokens.css`: `--dur-fast` (120 ms), `--dur-base` (180 ms),
+  `--dur-slow` (260 ms), `--dur-exit` (100 ms) and the curves `--ease-standard`,
+  `--ease-emphasized`, `--ease-exit`, `--ease-pop`. With `prefers-reduced-motion` every duration is
+  ~0. The transitions themselves are in `style/main/680-motion.css`.
+- Only `transform` and `opacity` animate; entrances run once when an element mounts, nothing loops
+  while it isn't visible (placeholders pulse a few times, then stand still).
+- Exits: `motion::use_leave_ghost` leaves an inert copy of a dialog, menu or toast that plays the
+  exit while the real element is already gone, so focus and the next view never wait.
+- The feed decides how a row enters (`feed_motion.rs`): new since the conversation opened, the
+  user's own message settling once confirmed, reactions whose count changed.
+- Lists that load show `components/skeleton.rs` placeholders, empty ones `components/empty_state.rs`
+  (icon, headline, one sentence, at most one action).
 
 ## What is in the shell
 
@@ -58,13 +108,15 @@ frame rate because only the visible rows are in the DOM.
 - Virtualized message list with measured row heights, author/time grouping, date dividers, reactions,
   thread reply counts, edited marker, system messages, compact log rows with level colours, follow
   mode ("Jump to latest").
-- Composer: Markdown hint, attachments (names only), Enter or Ctrl/Cmd+Enter to send (setting).
+- Composer: rich-text editor stored as the Markdown subset (formatting toolbar, shortcuts, Markdown
+  typed as you go, sanitized paste), attachments, send options, Enter or Ctrl/Cmd+Enter to send.
 - Quick switcher (Ctrl/Cmd+K), status menu (online, away, do not disturb, offline, custom status
   with expiry and presets), settings modal (display, sidebar work; notifications and advanced are
   stubs), shortcuts reference (Ctrl/Cmd+/).
-- Light and dark theme through CSS variables (`style/main.css`, first block), "match system" default.
-- i18n with Fluent: `i18n/en.ftl` is the source, `i18n/de.ftl` the translation. A test fails when
-  German misses a message that English has.
+- Light and dark theme through CSS variables (`style/main/000-tokens.css`), "match system" default.
+- i18n with Fluent: `i18n/en/` is the source, `i18n/de/` the translation, one file per area of the
+  app with the same names in each language. A test fails when German misses a message that English
+  has, or keeps it in another file.
 - Keyboard and screen readers: skip link, landmarks, labelled controls, focus-visible rings, roving
   focus in menus and tabs, modal focus trap and focus return, arrow keys between messages,
   `prefers-reduced-motion`.
@@ -97,7 +149,34 @@ Demo triggers (`demo` builds only): Settings > Advanced simulates an incoming ca
 linking screen and a chat with a changed security key.
 
 Shortcuts: `Ctrl/Cmd+K` switcher, `Ctrl/Cmd+,` settings, `Ctrl/Cmd+/` shortcuts, `Alt+Up/Down`
-previous/next conversation, `Alt+T` threads, `Esc` close dialog or side panel.
+previous/next conversation, `Alt+T` threads, `Alt+Left/Right` back/forward, `Esc` close dialog or
+side panel.
+
+**URLs** (`src/route.rs`, `src/history.rs`): every main view has a path, so reload, Back/Forward,
+bookmarks and "open in new tab" work. Paths hold public IDs only, never names, message text or
+search queries; the message paths are the permalinks' (`teamcraft:/c/{c}/m/{m}[/t/{t}]`). The
+desktop app uses the same paths in its webview and maps the mouse's back/forward buttons and
+`Alt+Left/Right` to the history itself. The server answers every non-API path with `index.html`.
+
+| Path                              | Shows                                                   |
+|-----------------------------------|---------------------------------------------------------|
+| `/`                               | The start: first channel or the getting-started page    |
+| `/home`                           | Home                                                    |
+| `/s/{space}`                      | A space (lands in its first channel)                    |
+| `/s/{space}/c/{channel}`          | A channel                                               |
+| `/dm/{conversation}`              | A DM or group DM                                        |
+| `/c/{conversation}`               | A conversation whose kind hasn't loaded yet             |
+| `/c/{conversation}/t/{thread}`    | A conversation with a thread open                       |
+| `/c/{conversation}/m/{message}`   | A message (`/t/{thread}` appended for thread replies)   |
+| `/threads`, `/activity`, `/calls` | Threads inbox, activity, calls                          |
+| `/meetings`, `/people`, `/saved`  | Meetings, people and groups, saved messages             |
+| `/search`                         | Search (the query stays out of the URL)                 |
+| `/settings/{tab}`                 | The settings dialog on a tab                            |
+| `/admin/{section}`                | A section of the administration console (admins)        |
+
+A path the app doesn't know, or an ID that doesn't exist or isn't the user's, shows Home with a
+notice. IDs that haven't loaded yet are waited for (up to 20 s on an empty store). Sign-in returns
+to the path it started on.
 
 ## Layout of the crate
 
@@ -115,11 +194,15 @@ previous/next conversation, `Alt+T` threads, `Esc` close dialog or side panel.
 | `src/web_core.rs`       | Web build: runs the client core in the page, answers the `core_*` commands |
 | `src/calls.rs`          | `CallState` (session state of the user's call)                          |
 | `src/state.rs`          | `AppState` (context): current space, view, panel, overlay, backend      |
+| `src/route.rs`          | `Route`: the app's places as URL paths, parsing and formatting          |
+| `src/history.rs`        | Address bar and history in step with `AppState`, Back and Forward       |
 | `src/settings.rs`       | Per-device preferences (theme, language, send mode) in `localStorage`   |
 | `src/i18n.rs`           | Fluent bundles, `I18n::t`, `t_with`, `t_count`                          |
-| `src/markdown.rs`       | Safe Markdown subset producing a tree (no HTML injection)               |
+| `markdown` (re-export)  | Safe Markdown subset (teamcraft-client-api, shared with mobile)         |
+| `src/editor_doc.rs`     | Composer document model: DOM tree ↔ Markdown, paste allow-list          |
 | `src/components/`       | One module per screen area                                              |
-| `style/main.css`        | Design tokens, layout, components                                       |
+| `style/main/`           | The stylesheet, one file per area (see "Stylesheets and strings")       |
+| `i18n/<language>/`      | Fluent messages, one file per area (see "Stylesheets and strings")      |
 
 The backend traits (`ChatBackend`, `SearchBackend`, `CallBackend`, `AdminBackend`, `SecurityBackend`)
 and the view models live in `teamcraft-client-api`, which `teamcraft-core` (feature `ui`) implements
@@ -187,15 +270,21 @@ not hold (sign-in rules, guest domains, DM scope) are shown disabled.
 
 `trunk build --release` produces the web client; point the server's `[web] static_dir` at the output
 and it serves the app with its Content-Security-Policy (no inline scripts or styles). A Trunk hook
-(`scripts/externalize-init.sh`) moves the loader script into `init.js`, and all dynamic styles are set
+(`scripts/build-app.sh`) builds the app's wasm, splits it into chunks that load when their part of the
+app is first used (`crates/teamcraft-web-bundle`, `src/areas.rs`; Trunk can't split wasm) and starts it
+from `init.js`; the development demo is `TEAMCRAFT_WEB_FEATURES=demo trunk serve`. All dynamic styles are set
 through the CSSOM (`style:prop=`), so the default policy needs no `unsafe-inline`. `sw.js` is copied to
 the root and registered in the browser (not in the desktop shell); it wakes the app for pushes and, until
 the worker can open sealed payloads, shows a generic notification.
 
 `index.html` carries a loading screen in plain HTML and CSS (`style/loader.css`), painted before any
-script runs. `loader.js` is the Trunk initializer: it adds the cached brand and theme, the download
-progress and an error with a retry button, and fades the screen out once the app is mounted. Its texts
-are the `loader-*` messages of `i18n/*.ftl`, which `scripts/finish-loader.sh` (a Trunk hook) copies into
+script runs, with the TeamCraft mark assembling and typing. `loader.js` is the Trunk initializer: it
+adds the saved theme, the download progress and an error with a retry button. The screen stays while
+the app checks the session and opens the account's data, until the app's first view is there
+(`src/startup.rs`): then the mark flies onto the sign-in card's mark, or the screen crossfades into the
+chat. A check that takes longer says so under the bar. A reload with single sign-on loads the page
+twice (to the identity provider and back); the second load shows the mark already assembled. Its texts
+are the `loader-*` messages of `i18n/<language>/loader.ftl`, which `scripts/finish-loader.sh` (a Trunk hook) copies into
 `init.js` together with the size of the built wasm. Release builds use the `web-release` Cargo profile
 (size over speed) and `wasm-opt -Oz`; the release tarball adds `.br`/`.gz` variants
 (`scripts/compress-web.sh`), which the server serves by `Accept-Encoding`. Browser login needs the server's

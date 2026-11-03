@@ -231,8 +231,10 @@ mod overview {
       1
     );
 
+    // Deactivation suspends: the device stays for a reactivation.
     let devices = app.get(&bob, &format!("/admin/users/{carol_id}/devices")).await;
-    assert_eq!(devices.body["devices"][0]["is_revoked"], true);
+    assert_eq!(devices.body["devices"][0]["is_revoked"], false);
+    assert_eq!(row["device_count"], 1);
     assert_eq!(
       app.get(&bob, "/admin/users/424242/devices").await.status,
       StatusCode::NOT_FOUND
@@ -278,6 +280,7 @@ async fn events(socket: &mut Socket) -> (Vec<String>, bool) {
             GatewayEvent::SpaceMemberRemove { user_id, .. } => {
               seen.push(format!("space_member_remove {user_id}"))
             },
+            GatewayEvent::ProfileUpdate { user_id } => seen.push(format!("profile_update {user_id}")),
             _ => {},
           }
         }
@@ -291,10 +294,10 @@ mod deactivation {
   use super::*;
 
   #[tokio::test]
-  async fn a_deactivated_user_is_cut_off_everywhere_and_the_others_are_told() {
+  async fn a_deactivated_user_is_signed_out_everywhere_but_stays_in_their_chats() {
     let app = app!();
-    let (alice, bob, carol, dave) = (owner(), admin(), member("carol"), member("dave"));
-    let (carol_id, dave_id) = (user_id(&app, &carol).await, user_id(&app, &dave).await);
+    let (bob, carol, dave) = (admin(), member("carol"), member("dave"));
+    let carol_id = user_id(&app, &carol).await;
     let channel = channel_with(&app, &[&carol, &dave]).await;
     let (carol_device, dave_device) = (
       register_device(&app, &carol).await,
@@ -302,48 +305,42 @@ mod deactivation {
     );
     let mut carol_socket = connect(&app, &carol, &carol_device).await;
     let mut dave_socket = connect(&app, &dave, &dave_device).await;
-    let _ = (&alice, &dave_id);
 
     let done = app
       .post(
         &bob,
         &format!("/admin/users/{carol_id}/deactivate"),
-        json!({"note": "left the company"}),
+        json!({"note": "on leave"}),
       )
       .await;
     assert_eq!(done.status, StatusCode::NO_CONTENT, "{}", done.body);
 
-    // Her live connection ends, she can't come back and she is out of the channel.
+    // Her live connection ends and every request is refused with a code the apps explain.
     let (_, closed) = events(&mut carol_socket).await;
     assert!(closed, "the deactivated user's gateway connection stayed open");
     let login = app.get(&carol, "/me").await;
     assert_eq!(
       (login.status, login.error_code()),
-      (StatusCode::FORBIDDEN, "forbidden")
+      (StatusCode::FORBIDDEN, "account_deactivated")
     );
+
+    // She stays in the channel with her device; the others only refresh her profile.
     let members = app.get(&dave, &format!("/conversations/{channel}/members")).await;
     assert_eq!(
       members.body["members"].as_array().unwrap().len(),
-      2,
-      "alice (creator) and dave remain"
+      3,
+      "alice (creator), carol and dave"
     );
-
-    // Dave's client learns what to commit: she left the group and her device is gone.
     let (seen, _) = events(&mut dave_socket).await;
+    assert!(seen.contains(&format!("profile_update {carol_id}")), "{seen:?}");
     assert!(
-      seen.contains(&format!("membership_remove {carol_id}")),
-      "{seen:?}"
+      !seen.iter().any(|e| e.contains("remove")),
+      "nothing is removed: {seen:?}"
     );
-    assert!(
-      seen.contains(&format!("device_remove {carol_id} {carol_device}")),
-      "{seen:?}"
-    );
-    assert!(
-      seen.iter().any(|e| e.starts_with("space_member_remove")),
-      "{seen:?}"
-    );
+    let devices = app.get(&bob, &format!("/admin/users/{carol_id}/devices")).await;
+    assert_eq!(devices.body["devices"][0]["is_revoked"], false);
 
-    // Idempotent; and she can't get MLS key packages claimed any more.
+    // Idempotent.
     assert_eq!(
       app
         .post(&bob, &format!("/admin/users/{carol_id}/deactivate"), json!({}))
@@ -355,12 +352,13 @@ mod deactivation {
   }
 
   #[tokio::test]
-  async fn admins_cannot_deactivate_themselves_and_reactivation_restores_login_only() {
+  async fn reactivation_lets_the_same_devices_back_in_with_everything_intact() {
     let app = app!();
     let (bob, carol) = (admin(), member("carol"));
     let bob_id = user_id(&app, &bob).await;
     let carol_id = user_id(&app, &carol).await;
     let channel = channel_with(&app, &[&carol]).await;
+    let device = register_device(&app, &carol).await;
 
     let own = app
       .post(&bob, &format!("/admin/users/{bob_id}/deactivate"), json!({}))
@@ -379,9 +377,14 @@ mod deactivation {
     assert_eq!(app.get(&carol, "/me").await.status, StatusCode::OK);
     assert_eq!(
       app.get(&carol, &format!("/conversations/{channel}")).await.status,
-      StatusCode::NOT_FOUND,
-      "memberships stay removed"
+      StatusCode::OK,
+      "memberships are kept"
     );
+    // The same device connects again.
+    let mut socket = connect(&app, &carol, &device).await;
+    let (_, closed) = events(&mut socket).await;
+    assert!(!closed, "the reactivated device was refused");
+
     assert_eq!(
       app
         .post(&bob, &format!("/admin/users/{carol_id}/reactivate"), json!({}))
@@ -400,6 +403,157 @@ mod deactivation {
         .status,
       StatusCode::FORBIDDEN
     );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn removal_from_all_chats_takes_a_deactivated_user_out_of_every_group() {
+    let app = app!();
+    let (bob, carol, dave) = (admin(), member("carol"), member("dave"));
+    let carol_id = user_id(&app, &carol).await;
+    let channel = channel_with(&app, &[&carol, &dave]).await;
+    let (carol_device, dave_device) = (
+      register_device(&app, &carol).await,
+      register_device(&app, &dave).await,
+    );
+    let remove = format!("/admin/users/{carol_id}/remove-from-chats");
+
+    // Only after a deactivation, and only by admins.
+    let active = app.post(&bob, &remove, json!({})).await;
+    assert_eq!(
+      (active.status, active.error_code()),
+      (StatusCode::CONFLICT, "conflict")
+    );
+    assert_eq!(
+      app.post(&dave, &remove, json!({})).await.status,
+      StatusCode::FORBIDDEN
+    );
+    app
+      .post(&bob, &format!("/admin/users/{carol_id}/deactivate"), json!({}))
+      .await;
+    let mut dave_socket = connect(&app, &dave, &dave_device).await;
+    let done = app.post(&bob, &remove, json!({})).await;
+    assert_eq!(done.status, StatusCode::NO_CONTENT, "{}", done.body);
+
+    // Dave's client learns what to commit: she left the group and her device is gone.
+    let (seen, _) = events(&mut dave_socket).await;
+    assert!(
+      seen.contains(&format!("membership_remove {carol_id}")),
+      "{seen:?}"
+    );
+    assert!(
+      seen.contains(&format!("device_remove {carol_id} {carol_device}")),
+      "{seen:?}"
+    );
+    assert!(
+      seen.iter().any(|e| e.starts_with("space_member_remove")),
+      "{seen:?}"
+    );
+    let members = app.get(&dave, &format!("/conversations/{channel}/members")).await;
+    assert_eq!(members.body["members"].as_array().unwrap().len(), 2);
+    let devices = app.get(&bob, &format!("/admin/users/{carol_id}/devices")).await;
+    assert_eq!(devices.body["devices"][0]["is_revoked"], true);
+
+    // Again is fine; a reactivation does not bring the chats back.
+    assert_eq!(
+      app.post(&bob, &remove, json!({})).await.status,
+      StatusCode::NO_CONTENT
+    );
+    app
+      .post(&bob, &format!("/admin/users/{carol_id}/reactivate"), json!({}))
+      .await;
+    assert_eq!(app.get(&carol, "/me").await.status, StatusCode::OK);
+    assert_eq!(
+      app.get(&carol, &format!("/conversations/{channel}")).await.status,
+      StatusCode::NOT_FOUND
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn long_deactivated_users_are_removed_only_when_a_period_is_set() {
+    let app = app!();
+    let (bob, carol) = (admin(), member("carol"));
+    let carol_id = user_id(&app, &carol).await;
+    let channel = channel_with(&app, &[&carol]).await;
+    register_device(&app, &carol).await;
+    app
+      .post(&bob, &format!("/admin/users/{carol_id}/deactivate"), json!({}))
+      .await;
+    let later = time::OffsetDateTime::now_utc() + time::Duration::days(31);
+
+    // Off by default.
+    let swept = teamcraft_server::services::admin::sweep_deactivated_users(&app.state, later)
+      .await
+      .unwrap();
+    assert_eq!(swept, 0);
+
+    let alice = owner();
+    let mut rules = app.get(&alice, "/admin/settings").await.body["server_rules"].clone();
+    rules["remove_deactivated_after_days"] = json!(30);
+    let saved = app
+      .put(
+        &alice,
+        "/admin/settings",
+        json!({"section": "server_rules", "values": rules}),
+      )
+      .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    let not_yet = time::OffsetDateTime::now_utc() + time::Duration::days(29);
+    let swept = teamcraft_server::services::admin::sweep_deactivated_users(&app.state, not_yet)
+      .await
+      .unwrap();
+    assert_eq!(swept, 0);
+    let swept = teamcraft_server::services::admin::sweep_deactivated_users(&app.state, later)
+      .await
+      .unwrap();
+    assert_eq!(swept, 1);
+    let members = app
+      .get(&alice, &format!("/conversations/{channel}/members"))
+      .await;
+    assert_eq!(members.body["members"].as_array().unwrap().len(), 1);
+    // Nothing left to remove.
+    let swept = teamcraft_server::services::admin::sweep_deactivated_users(&app.state, later)
+      .await
+      .unwrap();
+    assert_eq!(swept, 0);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_burst_of_provider_deactivations_is_left_to_an_admin() {
+    let app = app!();
+    let (alice, bob) = (owner(), admin());
+    let people: Vec<TestUser> = (0..10).map(|n| member(&format!("person{n}"))).collect();
+    let refs: Vec<&TestUser> = people.iter().collect();
+    channel_with(&app, &refs).await;
+    for person in &people {
+      let id = user_id(&app, person).await;
+      app
+        .post(&bob, &format!("/admin/users/{id}/deactivate"), json!({}))
+        .await;
+    }
+    // As if the identity provider sync had deactivated them all at once.
+    teamcraft_db::testing::sqlx::query(
+      "UPDATE users SET deactivation_reason = 'oidc' WHERE deactivated_at IS NOT NULL",
+    )
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+    let mut rules = app.get(&alice, "/admin/settings").await.body["server_rules"].clone();
+    rules["remove_deactivated_after_days"] = json!(1);
+    app
+      .put(
+        &alice,
+        "/admin/settings",
+        json!({"section": "server_rules", "values": rules}),
+      )
+      .await;
+    let later = time::OffsetDateTime::now_utc() + time::Duration::days(2);
+    let swept = teamcraft_server::services::admin::sweep_deactivated_users(&app.state, later)
+      .await
+      .unwrap();
+    assert_eq!(swept, 0);
     app.stop().await;
   }
 

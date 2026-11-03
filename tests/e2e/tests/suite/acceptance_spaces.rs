@@ -53,13 +53,26 @@ async fn a_moved_channel_keeps_working_and_a_muted_space_is_inherited() {
     .put(&carol.tokens, &move_path, json!({"space_id": target.to_string()}))
     .await;
   assert_eq!(by_member.status, StatusCode::FORBIDDEN, "{by_member:?}");
+  // Channel members always belong to the channel's space: Carol has to join Project B first.
+  let carol_outside = stack
+    .put(&alice.tokens, &move_path, json!({"space_id": target.to_string()}))
+    .await;
+  assert_eq!(carol_outside.status, StatusCode::CONFLICT, "{carol_outside:?}");
+  stack
+    .add_space_member(
+      &alice.tokens,
+      &target.to_string(),
+      &carol.user_id().to_string(),
+      "member",
+    )
+    .await;
   let moved = stack
     .put(&alice.tokens, &move_path, json!({"space_id": target.to_string()}))
     .await
     .expect(StatusCode::OK);
   assert_eq!(moved.body["space_id"], target.to_string(), "{}", moved.body);
 
-  // Carol is no member of Project B but keeps the channel, and the group still works.
+  // Carol keeps the channel, and the group still works.
   alice
     .client
     .send_text(channel, None, "after the move")
@@ -98,12 +111,12 @@ async fn a_channel_owner_sets_retention_within_the_limit() {
   let Some(stack) = Stack::start().await else { return };
   let mut alice = Peer::enroll(&stack, "alice").await;
   let mut carol = Peer::enroll(&stack, "carol").await;
-  let mut dave = Peer::enroll(&stack, "dave").await;
+  let mut erin = Peer::enroll(&stack, "erin").await;
   let space = space_with(
     &stack,
     &alice,
     "Project A",
-    &[(&carol, "member"), (&dave, "member")],
+    &[(&carol, "member"), (&erin, "member")],
   )
   .await;
   alice
@@ -119,7 +132,7 @@ async fn a_channel_owner_sets_retention_within_the_limit() {
     })
     .await;
   // Carol founded the channel, so she owns it; she is not an administrator.
-  let channel = channel_with(&mut carol, space, "notes", &mut [&mut dave]).await;
+  let channel = channel_with(&mut carol, space, "notes", &mut [&mut erin]).await;
   let path = format!("/conversations/{channel}/retention");
 
   let own = stack
@@ -132,7 +145,7 @@ async fn a_channel_owner_sets_retention_within_the_limit() {
     .await;
   assert_eq!(too_long.status, StatusCode::BAD_REQUEST, "{too_long:?}");
   let by_member = stack
-    .put(&dave.tokens, &path, json!({"retention": {"max_age_days": 7}}))
+    .put(&erin.tokens, &path, json!({"retention": {"max_age_days": 7}}))
     .await;
   assert_eq!(by_member.status, StatusCode::FORBIDDEN, "{by_member:?}");
 }

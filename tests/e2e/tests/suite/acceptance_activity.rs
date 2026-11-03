@@ -66,13 +66,18 @@ async fn mentions_reactions_and_thread_replies_reach_the_activity_feed_of_the_pe
   // What Carol did herself is nobody's activity, and the server learned nothing of the feed.
   assert!(backend_of(&carol).activity().items.is_empty());
 
-  // Reading moves the account-data mark; the feed keeps its entries but none is unread.
+  // Reading moves the read positions of the conversation and the thread (#541); the feed keeps its
+  // entries but none is unread once the server's read state is back on the device.
   alice_ui.mark_activity_read();
   for command in alice_ui.drain_commands() {
     alice.client.run_ui_command(command).await.unwrap();
   }
-  let read = backend_of(&alice).activity();
-  assert_eq!((read.items.len(), read.unread_count), (3, 0));
+  alice
+    .wait_until("every entry is read", |peer| {
+      backend_of(peer).activity().unread_count == 0
+    })
+    .await;
+  assert_eq!(backend_of(&alice).activity().items.len(), 3);
   stack.stop().await;
 }
 

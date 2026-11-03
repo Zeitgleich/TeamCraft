@@ -2,19 +2,30 @@
 //! devices; e2ee.md §8) and the media runs in `teamcraft-media`'s native driver on a call thread of
 //! its own. The app integrates the call with the platform (Android Telecom) and drives it through
 //! [`CallSession`]; [`CallListener`] tells it about rings and the call's state.
+//!
+//! Network changes: the call listens to the same signal as the gateway (`TeamCraft::network_changed`,
+//! fed by Android's `NetworkCallback` and iOS's `NWPathMonitor`). The connection migrates to the
+//! new network, or the call rejoins with a fresh token from the engine thread; meanwhile the state
+//! is [`CallPhase::Reconnecting`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use futures_util::StreamExt;
 use teamcraft_core::client::CallKeySigner;
+use teamcraft_core::connection::{ConnectionState as CoreConnectionState, ConnectionStatus, NetworkChanges};
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioSink, AudioSource};
 use teamcraft_media::audio_processing::AudioProcessingConfig;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
-use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
-use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
+use teamcraft_media::call_cues::StatusCues;
+use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnPublication};
+use teamcraft_media::call_native::{
+  JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture, TrustFuture, TrustSource,
+};
+use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError};
 use teamcraft_media::datagram::SimulcastLayer;
 use teamcraft_media::openh264_library;
 use teamcraft_media::rtp::RtpTimestamp;
@@ -22,14 +33,19 @@ use teamcraft_media::video::{EncodedVideoFrame, VideoResolution, simulcast_layer
 use teamcraft_media::video_capture::CaptureFormat;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, CallJoinTokenResponse, ConversationId, DeviceId, GatewayEvent, MediaCapabilities,
+  AudioCodec, CallJoinTokenResponse, ConversationId, DeviceId, ErrorCode, GatewayEvent, MediaCapabilities,
   MediaStreamId, UserId, VideoCodec, VideoLayerInfo, VideoTrack, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
+use crate::engine::Job;
+
 use crate::error::TeamCraftError;
 use crate::video::{AppCamera, CameraFrame, CameraSlot, VideoFrameRgba, i420_to_rgba};
+
+/// The app's network changes, as the core hands them out.
+type NetworkChangeStream = futures_channel::mpsc::UnboundedReceiver<()>;
 
 /// Worker threads of a call's runtime: network and engine; audio has its own thread.
 const CALL_WORKER_THREADS: usize = 2;
@@ -48,6 +64,22 @@ pub trait CallListener: Send + Sync {
   fn on_incoming_call(&self, call: IncomingCallInfo);
   /// The conversation's call stopped ringing (answered elsewhere, declined or ended).
   fn on_ring_ended(&self, conversation_id: String);
+  /// The server says the call this device is in moved into the meeting chat `to_conversation_id`
+  /// because somebody added people (docs/meetings.md, "A call becomes a meeting"). Nothing moves
+  /// on this alone: ask `call_move_offer` (again on later changes, until the announcement from
+  /// the DM's encryption group is in), show who moved it and whom they added, and on the user's
+  /// tap `accept_call_move`, then join the room's call.
+  fn on_call_moved(&self, from_conversation_id: String, to_conversation_id: String);
+}
+
+/// An announced move of a DM call into a meeting room: who moved it and whom they added.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CallMoveInfo {
+  pub by_user_id: String,
+  pub added_user_ids: Vec<String>,
+  /// This device asked for the move (`add_people_to_call` here): follow it without a tap. Any
+  /// other move, the user's own from another device included, waits for the user's tap.
+  pub is_requested_here: bool,
 }
 
 /// Told about other devices' video in the call and their decoded frames (on decoder threads).
@@ -108,6 +140,13 @@ pub struct VideoTrackInfo {
   pub is_screen: bool,
 }
 
+/// One other device in the call and whose it is (to name a video tile by its device).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CallPeer {
+  pub device_id: String,
+  pub user_id: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CallStateInfo {
   pub conversation_id: String,
@@ -121,6 +160,19 @@ pub struct CallStateInfo {
   pub is_secured: bool,
   /// Other devices in the call.
   pub participant_count: u32,
+  /// The people of those devices, each once (verified against the conversation's group): who is
+  /// in the call, e.g. for "Add people" (`add_people_to_call`).
+  pub participant_user_ids: Vec<String>,
+  /// The other devices in the call, with their users.
+  pub peers: Vec<CallPeer>,
+  /// The users whose audio is forwarded right now, loudest first (the speaking ring).
+  pub speaking_user_ids: Vec<String>,
+  /// The users who muted their microphone (all of their devices in the call have).
+  pub muted_user_ids: Vec<String>,
+  /// Of those, the ones whose connection was lost and who are rejoining.
+  pub reconnecting_count: u32,
+  /// The users all of whose devices are rejoining.
+  pub reconnecting_user_ids: Vec<String>,
   /// The code participants compare to rule out a man in the middle (once secured).
   pub maybe_privacy_code: Option<String>,
   /// Why the call ended (with [`CallPhase::Ended`]).
@@ -131,6 +183,9 @@ pub struct CallStateInfo {
 pub enum CallPhase {
   Connecting,
   Connected,
+  /// The connection was lost; the call is rejoining (media paused). Show "reconnecting", not
+  /// "ended": the others keep this device's place for a while.
+  Reconnecting,
   Ended,
 }
 
@@ -139,8 +194,25 @@ pub enum CallEndReason {
   Left,
   RemovedByHost,
   EndedByHost,
-  /// The connection to the call broke.
+  /// The connection to the call broke (and rejoining failed within the grace period).
   Failed,
+  /// The call broke off and couldn't be resumed while the chat server stayed connected: the call
+  /// server went away (restarted or crashed) and didn't come back in time (issue #427).
+  ServerLost,
+  /// The SFU refused the join: the account is already in the call on as many devices as it
+  /// allows (`call_device_limit`; the join token request reports the same as an error).
+  DeviceLimit,
+}
+
+/// Which call status sounds play: a soft repeating tone while this device reconnects, short
+/// tones when it is back or the call is lost, and a quieter one when someone else drops. They are
+/// mixed into the call's own playback, so they follow its route (earpiece, speaker, Bluetooth).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CallStatusSounds {
+  All,
+  /// Only the sounds about this device's own connection.
+  OwnOnly,
+  Off,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -177,6 +249,7 @@ struct HubState {
 enum Control {
   SetMuted(bool),
   SetDeafened(bool),
+  MoveHere,
   StartCamera {
     format: CaptureFormat,
     done: oneshot::Sender<Result<(), TeamCraftError>>,
@@ -191,6 +264,7 @@ enum Control {
   StopEncodedCamera,
   WatchEncodedVideo(MediaStreamId),
   UnwatchEncodedVideo(MediaStreamId),
+  SetStatusSounds(CallStatusSounds),
   Leave,
 }
 
@@ -207,6 +281,20 @@ type SharedVideoListener = Arc<Mutex<Option<Arc<dyn VideoListener>>>>;
 /// Lets the media layer sign with the core's signer.
 struct CoreSigner(CallKeySigner);
 
+/// Fresh join tokens from the engine thread, for rejoining after a lost connection.
+struct EngineJoinTickets {
+  jobs: mpsc::UnboundedSender<Job>,
+  conversation: ConversationId,
+}
+
+/// The call's verified devices afresh from the engine thread, when a device added to the
+/// conversation during the call joins it (e2ee.md §8.2); this device keeps signing with its key.
+struct EngineTrust {
+  jobs: mpsc::UnboundedSender<Job>,
+  conversation: ConversationId,
+  signer: Arc<dyn CallBindingSigner>,
+}
+
 #[uniffi::export]
 impl CallSession {
   pub fn set_muted(&self, is_muted: bool) {
@@ -216,6 +304,11 @@ impl CallSession {
   /// Stops playing the call (and mutes, as on desktop).
   pub fn set_deafened(&self, is_deafened: bool) {
     self.send(Control::SetDeafened(is_deafened));
+  }
+
+  /// Takes the call over from the account's other devices, which leave it.
+  pub fn move_here(&self) {
+    self.send(Control::MoveHere);
   }
 
   /// Other devices' video and frames go to `listener` from now on.
@@ -251,6 +344,11 @@ impl CallSession {
   /// played. The call stays joined, so resuming is instant.
   pub fn set_held(&self, is_held: bool) {
     self.send(Control::SetHeld(is_held));
+  }
+
+  /// Which call status sounds play (the app's setting); call it after joining.
+  pub fn set_status_sounds(&self, sounds: CallStatusSounds) {
+    self.send(Control::SetStatusSounds(sounds));
   }
 
   /// Leaves the call; the listener gets the ended state.
@@ -341,6 +439,13 @@ impl CallHub {
         ..
       }
       | GatewayEvent::CallEnd { conversation_id, .. } => listener.on_ring_ended(conversation_id.to_string()),
+      GatewayEvent::CallMove {
+        conversation_id,
+        to_conversation_id,
+        ..
+      } if maybe_active == Some(*conversation_id) => {
+        listener.on_call_moved(conversation_id.to_string(), to_conversation_id.to_string());
+      },
       _ => {},
     }
   }
@@ -348,7 +453,12 @@ impl CallHub {
   fn report(&self, state: CallStateInfo) {
     let maybe_listener = {
       let mut hub = lock(&self.inner);
-      if state.phase == CallPhase::Ended {
+      // Only the end of the call this device is in: switching calls (a call moving into a
+      // meeting room) ends the previous one after the next one was set.
+      let is_active = hub
+        .maybe_active
+        .is_some_and(|active| active.to_string() == state.conversation_id);
+      if state.phase == CallPhase::Ended && is_active {
         hub.maybe_active = None;
       }
       hub.maybe_listener.clone()
@@ -362,11 +472,18 @@ impl CallHub {
 /// Joins the prepared call on a new call thread; returns once connected.
 pub(crate) async fn join(
   preparation: CallPreparation,
+  is_muted: bool,
   hub: CallHub,
+  jobs: mpsc::UnboundedSender<Job>,
+  network: &NetworkChanges,
+  connection: ConnectionStatus,
 ) -> Result<Arc<CallSession>, TeamCraftError> {
+  let network_rx = network.subscribe();
   let conversation = preparation.conversation;
   let own_device = preparation.device_id;
-  let config = native_config(preparation)?;
+  let mut config = native_config(preparation, &jobs)?;
+  config.is_muted_at_start = is_muted;
+  config.maybe_ticket_source = Some(Arc::new(EngineJoinTickets { jobs, conversation }));
   let camera = CameraSlot::default();
   let thread_camera = camera.clone();
   let (controls, control_rx) = mpsc::unbounded_channel();
@@ -375,11 +492,17 @@ pub(crate) async fn join(
   let mut state = CallStateInfo {
     conversation_id: conversation.to_string(),
     phase: CallPhase::Connecting,
-    is_muted: false,
+    is_muted,
     is_deafened: false,
     is_camera_on: false,
     is_secured: false,
     participant_count: 0,
+    participant_user_ids: Vec::new(),
+    peers: Vec::new(),
+    speaking_user_ids: Vec::new(),
+    muted_user_ids: Vec::new(),
+    reconnecting_count: 0,
+    reconnecting_user_ids: Vec::new(),
     maybe_privacy_code: None,
     maybe_end_reason: None,
   };
@@ -413,8 +536,9 @@ pub(crate) async fn join(
           own_device,
           camera: thread_camera,
           hub: thread_hub,
+          connection,
         };
-        run_call(call, control_rx, &context, &mut state).await;
+        run_call(call, control_rx, network_rx, &context, &mut state).await;
       });
     });
   if let Err(error) = spawned {
@@ -434,16 +558,23 @@ struct CallContext {
   own_device: DeviceId,
   camera: CameraSlot,
   hub: CallHub,
+  /// The chat server's (gateway's) connection: tells a call server that went away from this
+  /// device's own network.
+  connection: ConnectionStatus,
 }
 
 /// Applies the app's controls and reports the engine's events until the call ends.
 async fn run_call(
   mut call: NativeCall,
   mut controls: mpsc::UnboundedReceiver<Control>,
+  mut network: NetworkChangeStream,
   context: &CallContext,
   state: &mut CallStateInfo,
 ) {
   let mut reason = CallEndReason::Left;
+  let mut reconnecting = BTreeSet::new();
+  let mut roster = BTreeMap::new();
+  let mut muted = BTreeSet::new();
   let mut video = RemoteVideo::default();
   let mut encoded = EncodedVideoBridge::default();
   let mut audio = AudioControls::default();
@@ -456,6 +587,7 @@ async fn run_call(
           audio.is_muted = is_muted;
           call.set_muted(audio.is_silent());
         },
+        Some(Control::SetStatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
         Some(Control::SetHeld(is_held)) => {
           audio.is_held = is_held;
           call.set_muted(audio.is_silent());
@@ -469,13 +601,15 @@ async fn run_call(
           context.hub.report(state.clone());
         },
       },
+      // The same signal the gateway reconnects on: the call checks its path or rejoins at once.
+      Some(()) = network.next() => call.network_changed(),
       maybe_event = call.next_event() => match maybe_event {
         Some(event) => {
           encoded.report(context.own_device, &event);
           if !encoded.is_active() {
             watch_video(&call, &event, context.own_device, &mut video);
           }
-          if let Some(end) = apply_event(state, event) {
+          if let Some(end) = apply_event(state, &mut reconnecting, &mut roster, &mut muted, event) {
             reason = end;
             break;
           }
@@ -489,12 +623,29 @@ async fn run_call(
     }
   }
   context.camera.clear();
-  if let Err(error) = call.leave().await {
-    info!(%error, "the call ended with an error");
+  match call.leave().await {
+    Ok(_) => {},
+    Err(NativeCallError::ConnectionLost) => {
+      warn!("the connection to the call was lost");
+      reason = CallEndReason::Failed;
+    },
+    Err(error) => info!(%error, "the call ended with an error"),
+  }
+  if reason == CallEndReason::Failed {
+    reason = lost_call_reason(context.connection.get());
   }
   state.phase = CallPhase::Ended;
   state.maybe_end_reason = Some(reason);
   context.hub.report(state.clone());
+}
+
+/// Why a call that broke off couldn't be resumed (issue #427): with the chat server still
+/// connected, the call server went away; otherwise this device's own connection broke.
+fn lost_call_reason(chat: CoreConnectionState) -> CallEndReason {
+  match chat {
+    CoreConnectionState::Connected | CoreConnectionState::Slow => CallEndReason::ServerLost,
+    _ => CallEndReason::Failed,
+  }
 }
 
 async fn apply_control(
@@ -506,6 +657,7 @@ async fn apply_control(
 ) {
   match control {
     Control::SetMuted(is_muted) => call.set_muted(is_muted),
+    Control::MoveHere => call.move_here(),
     Control::SetDeafened(is_deafened) => {
       call.set_deafened(is_deafened);
       state.is_deafened = is_deafened;
@@ -532,6 +684,7 @@ async fn apply_control(
     | Control::StopEncodedCamera
     | Control::WatchEncodedVideo(_)
     | Control::UnwatchEncodedVideo(_)
+    | Control::SetStatusSounds(_)
     | Control::Leave => {},
   }
 }
@@ -542,6 +695,7 @@ async fn start_camera(
   camera: CameraSlot,
 ) -> Result<(), TeamCraftError> {
   let config = VideoSendConfig {
+    maybe_layer_plan: None,
     kind: VideoTrackKind::Camera,
     capture: Box::new(AppCamera::new(format, camera)),
     layers: simulcast_layers(
@@ -552,6 +706,7 @@ async fn start_camera(
     ),
     encoders: preferred_encoders(),
     maybe_filter: None,
+    maybe_idle_refresh: None,
   };
   call
     .start_video(config)
@@ -614,10 +769,9 @@ impl AudioControls {
 #[derive(Default)]
 struct EncodedVideoBridge {
   maybe_listener: Option<Arc<dyn EncodedVideoListener>>,
-  /// The stream id of this device's camera once the SFU announced it.
-  maybe_camera: Option<MediaStreamId>,
-  /// The camera was asked for; the track announcement may still be on its way.
-  is_camera_requested: bool,
+  /// This device's camera while it is asked for: its publication, with the stream id once the
+  /// SFU confirmed it.
+  maybe_camera: Option<OwnPublication>,
   /// Tracks of other devices that are published now; a listener that registers late (the app sets
   /// it after the join returned) learns about them when it registers.
   remote_tracks: Vec<RemoteVideoTrack>,
@@ -635,12 +789,17 @@ impl EncodedVideoBridge {
     self.maybe_listener = Some(listener);
   }
 
+  fn camera_stream(&self) -> Option<MediaStreamId> {
+    self.maybe_camera.and_then(|camera| camera.maybe_stream_id)
+  }
+
   /// Tells the app's listener what the engine reported, and notes the camera's stream.
   fn report(&mut self, own_device: DeviceId, event: &CallEngineEvent) {
     match event {
+      // Only the answer to the camera's own request (#929).
       CallEngineEvent::VideoPublished(track) if track.device_id == own_device => {
-        if track.kind == VideoTrackKind::Camera && self.is_camera_requested {
-          self.maybe_camera = Some(track.stream_id);
+        if let Some(camera) = &mut self.maybe_camera {
+          camera.follow(own_device, event);
         }
       },
       CallEngineEvent::VideoPublished(track) => {
@@ -655,8 +814,10 @@ impl EncodedVideoBridge {
         }
       },
       CallEngineEvent::VideoUnpublished(stream_id) => {
-        if self.maybe_camera == Some(*stream_id) {
-          self.maybe_camera = None;
+        if self.camera_stream() == Some(*stream_id) {
+          if let Some(camera) = &mut self.maybe_camera {
+            camera.follow(own_device, event);
+          }
         } else {
           let id = stream_id.0.to_string();
           self.remote_tracks.retain(|track| track.stream_id != id);
@@ -675,7 +836,7 @@ impl EncodedVideoBridge {
           });
         }
       },
-      CallEngineEvent::KeyframeRequested { stream_id, .. } if self.maybe_camera == Some(*stream_id) => {
+      CallEngineEvent::KeyframeRequested { stream_id, .. } if self.camera_stream() == Some(*stream_id) => {
         if let Some(listener) = &self.maybe_listener {
           listener.on_keyframe_requested();
         }
@@ -702,22 +863,22 @@ fn apply_encoded_control(
       encoded.set_listener(listener.clone());
     },
     Control::PublishEncodedCamera(layer) => {
-      if !encoded.is_camera_requested {
-        encoded.is_camera_requested = true;
+      if encoded.maybe_camera.is_none() {
         state.is_camera_on = true;
-        call.publish_video(VideoTrackKind::Camera, VideoCodec::H264, vec![*layer]);
+        let publication = call.publish_video(VideoTrackKind::Camera, VideoCodec::H264, vec![*layer]);
+        encoded.maybe_camera = Some(OwnPublication::new(publication));
       }
     },
     Control::SendEncodedCameraFrame(frame) => {
-      if let Some(stream) = encoded.maybe_camera {
+      if let Some(stream) = encoded.camera_stream() {
         call.send_video(stream, frame.clone());
       }
     },
     Control::StopEncodedCamera => {
-      encoded.is_camera_requested = false;
       state.is_camera_on = false;
-      if let Some(stream) = encoded.maybe_camera.take() {
-        call.unpublish_video(stream);
+      // Also before the SFU confirmed it: its answer is unpublished when it comes (#929).
+      if let Some(camera) = encoded.maybe_camera.take() {
+        call.withdraw_video(camera.id);
       }
     },
     Control::WatchEncodedVideo(stream) => call.subscribe_video(*stream, Some(0)),
@@ -746,29 +907,118 @@ fn upright(width: u16, height: u16) -> VideoResolution {
   }
 }
 
-/// Updates the call's state; returns why the call ends if the event ends it.
-fn apply_event(state: &mut CallStateInfo, event: CallEngineEvent) -> Option<CallEndReason> {
+/// Updates the call's state; returns why the call ends if the event ends it. `reconnecting`:
+/// other devices that are rejoining; `roster`: other devices in the call and their users.
+fn apply_event(
+  state: &mut CallStateInfo,
+  reconnecting: &mut BTreeSet<DeviceId>,
+  roster: &mut BTreeMap<DeviceId, UserId>,
+  muted: &mut BTreeSet<DeviceId>,
+  event: CallEngineEvent,
+) -> Option<CallEndReason> {
   match event {
     CallEngineEvent::Joined { participants, .. } => {
       state.phase = CallPhase::Connected;
-      state.participant_count = count(participants.len());
+      roster.clear();
+      roster.extend(participants.iter().map(|entry| (entry.device_id, entry.user_id)));
     },
-    CallEngineEvent::ParticipantJoined(_) => state.participant_count += 1,
-    CallEngineEvent::ParticipantLeft(_) => {
-      state.participant_count = state.participant_count.saturating_sub(1)
+    CallEngineEvent::ParticipantJoined(participant) => {
+      roster.insert(participant.device_id, participant.user_id);
+    },
+    CallEngineEvent::ParticipantMuted { device_id, is_muted } => {
+      if is_muted {
+        muted.insert(device_id);
+      } else {
+        muted.remove(&device_id);
+      }
+    },
+    CallEngineEvent::ParticipantLeft(device_id) => {
+      muted.remove(&device_id);
+      roster.remove(&device_id);
+      reconnecting.remove(&device_id);
+    },
+    CallEngineEvent::Reconnecting => {
+      state.phase = CallPhase::Reconnecting;
+      // Who else is away, and who is muted, comes again with the SFU's answer to the rejoin.
+      reconnecting.clear();
+      muted.clear();
+    },
+    CallEngineEvent::Reconnected => state.phase = CallPhase::Connected,
+    CallEngineEvent::ParticipantReconnecting(device_id) => {
+      reconnecting.insert(device_id);
+    },
+    CallEngineEvent::ParticipantReconnected(device_id) => {
+      reconnecting.remove(&device_id);
     },
     CallEngineEvent::Secured { privacy_code, .. } => {
       state.is_secured = true;
       state.maybe_privacy_code = Some(privacy_code);
     },
+    CallEngineEvent::ActiveSpeakers(devices) => {
+      let mut speaking: Vec<String> = Vec::new();
+      for user in devices.iter().filter_map(|device| roster.get(device)) {
+        let user = user.to_string();
+        if !speaking.contains(&user) {
+          speaking.push(user);
+        }
+      }
+      state.speaking_user_ids = speaking;
+    },
     CallEngineEvent::MuteChanged(is_muted) => state.is_muted = is_muted,
     CallEngineEvent::DeafenChanged(is_deafened) => state.is_deafened = is_deafened,
     CallEngineEvent::RemovedByHost { .. } => return Some(CallEndReason::RemovedByHost),
     CallEngineEvent::EndedByHost { .. } => return Some(CallEndReason::EndedByHost),
-    CallEngineEvent::Error(error) => warn!(error_code = ?error.error_code, "the SFU rejected a call request"),
+    // Joined from somewhere else as this device: this side just leaves.
+    CallEngineEvent::ConnectionReplaced => return Some(CallEndReason::Left),
+    CallEngineEvent::Error(error) => {
+      warn!(
+        error_code = ?error.error_code,
+        message = %error.message,
+        "the SFU rejected a call request"
+      );
+      // The engine is over after a refused join: say why instead of "interrupted".
+      if error.error_code == ErrorCode::CallDeviceLimit {
+        return Some(CallEndReason::DeviceLimit);
+      }
+    },
     _ => {},
   }
+  state.reconnecting_count = count(reconnecting.len());
+  state.participant_count = count(roster.len());
+  let users: BTreeSet<UserId> = roster.values().copied().collect();
+  state.participant_user_ids = users.iter().map(ToString::to_string).collect();
+  state.peers = roster
+    .iter()
+    .map(|(device, user)| CallPeer {
+      device_id: device.to_string(),
+      user_id: user.to_string(),
+    })
+    .collect();
+  // Someone who left is not speaking any more.
+  state
+    .speaking_user_ids
+    .retain(|speaking| users.iter().any(|user| user.to_string() == *speaking));
+  state.reconnecting_user_ids = users_whose_devices_all(&users, roster, reconnecting);
+  state.muted_user_ids = users_whose_devices_all(&users, roster, muted);
   None
+}
+
+/// The users all of whose devices in the call are in `devices`, each once.
+fn users_whose_devices_all(
+  users: &BTreeSet<UserId>,
+  roster: &BTreeMap<DeviceId, UserId>,
+  devices: &BTreeSet<DeviceId>,
+) -> Vec<String> {
+  users
+    .iter()
+    .filter(|user| {
+      roster
+        .iter()
+        .filter(|(_, owner)| owner == user)
+        .all(|(device, _)| devices.contains(device))
+    })
+    .map(ToString::to_string)
+    .collect()
 }
 
 fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
@@ -780,14 +1030,24 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     is_camera_on: false,
     is_secured: false,
     participant_count: 0,
+    participant_user_ids: Vec::new(),
+    peers: Vec::new(),
+    speaking_user_ids: Vec::new(),
+    muted_user_ids: Vec::new(),
+    reconnecting_count: 0,
+    reconnecting_user_ids: Vec::new(),
     maybe_privacy_code: None,
     maybe_end_reason: Some(reason),
   }
 }
 
 /// The phone's default microphone and output (Telecom routes them); H.264 video, sent from the
-/// app's camera frames and received once Cisco's OpenH264 is installed for decoding.
-fn native_config(preparation: CallPreparation) -> Result<NativeCallConfig, TeamCraftError> {
+/// app's camera frames and received once Cisco's OpenH264 is installed for decoding. The trusted
+/// roster is refreshed through `jobs` when a device added during the call joins.
+fn native_config(
+  preparation: CallPreparation,
+  jobs: &mpsc::UnboundedSender<Job>,
+) -> Result<NativeCallConfig, TeamCraftError> {
   let video_decoders = if openh264_library::is_available() {
     vec![VideoCodec::H264]
   } else {
@@ -801,26 +1061,90 @@ fn native_config(preparation: CallPreparation) -> Result<NativeCallConfig, TeamC
       video_encoders: vec![VideoCodec::H264],
       video_decoders,
       max_simulcast_layers: CAMERA_LAYERS,
+      max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
     },
     bwe: BweConfig::default(),
   };
-  let authenticator =
-    DeviceCallKeyAuthenticator::from_verified(Arc::new(CoreSigner(preparation.signer)), preparation.devices)
-      .map_err(|error| TeamCraftError::Call(error.to_string()))?;
-  let mut config = NativeCallConfig::device_bound(
-    preparation.join.sfu_url,
-    preparation.join.token,
-    engine,
-    authenticator,
-  );
+  let signer: Arc<dyn CallBindingSigner> = Arc::new(CoreSigner(preparation.signer));
+  let authenticator = DeviceCallKeyAuthenticator::from_verified(Arc::clone(&signer), preparation.devices)
+    .map_err(|error| TeamCraftError::Call(error.to_string()))?;
+  let ticket = JoinTicket::from(preparation.join);
+  let mut config = NativeCallConfig::device_bound(ticket.sfu_url, ticket.token, engine, authenticator);
+  config.maybe_trust_source = Some(Arc::new(EngineTrust {
+    jobs: jobs.clone(),
+    conversation: preparation.conversation,
+    signer,
+  }));
+  // A development SFU's self-signed certificates; rejoins use their fresh token's.
+  config.certificate_hashes = ticket.certificate_hashes;
   config.source = AudioSource::Microphone(AudioDeviceChoice::Default);
   config.sink = AudioSink::Speakers(AudioDeviceChoice::Default);
   config.maybe_processing = Some(AudioProcessingConfig::default());
   Ok(config)
 }
 
+fn status_cues(sounds: CallStatusSounds) -> StatusCues {
+  match sounds {
+    CallStatusSounds::All => StatusCues::All,
+    CallStatusSounds::OwnOnly => StatusCues::OwnOnly,
+    CallStatusSounds::Off => StatusCues::Off,
+  }
+}
+
 fn count(len: usize) -> u32 {
   u32::try_from(len).unwrap_or(u32::MAX)
+}
+
+impl JoinTicketSource for EngineJoinTickets {
+  fn fetch(&self) -> TicketFuture {
+    let (reply, answer) = oneshot::channel();
+    let conversation = self.conversation;
+    let job: Job = Box::new(move |engine| {
+      Box::pin(async move {
+        // The call thread may have given up waiting.
+        let _ = reply.send(engine.call_join_token(conversation).await);
+      })
+    });
+    let is_sent = self.jobs.send(job).is_ok();
+    Box::pin(async move {
+      let stopped = || JoinTicketError {
+        reason: TeamCraftError::EngineStopped.to_string(),
+      };
+      if !is_sent {
+        return Err(stopped());
+      }
+      let answered: Result<CallJoinTokenResponse, TeamCraftError> = answer.await.map_err(|_| stopped())?;
+      let join = answered.map_err(|error| JoinTicketError {
+        reason: error.to_string(),
+      })?;
+      // With this token's certificate hashes: a restarted SFU may have a new self-signed one.
+      Ok(JoinTicket::from(join))
+    })
+  }
+}
+
+impl TrustSource for EngineTrust {
+  fn fetch(&self) -> TrustFuture {
+    let (reply, answer) = oneshot::channel();
+    let conversation = self.conversation;
+    let job: Job = Box::new(move |engine| {
+      Box::pin(async move {
+        // The call thread may have given up waiting.
+        let _ = reply.send(engine.call_devices(conversation).await);
+      })
+    });
+    let is_sent = self.jobs.send(job).is_ok();
+    let signer = Arc::clone(&self.signer);
+    Box::pin(async move {
+      let stopped = || TeamCraftError::EngineStopped.to_string();
+      if !is_sent {
+        return Err(stopped());
+      }
+      let answered: Result<Vec<VerifiedDevice>, TeamCraftError> = answer.await.map_err(|_| stopped())?;
+      let devices = answered.map_err(|error| error.to_string())?;
+      DeviceCallKeyAuthenticator::from_verified(signer, devices).map_err(|error| error.to_string())
+    })
+  }
 }
 
 impl CallBindingSigner for CoreSigner {
@@ -846,9 +1170,50 @@ fn lock(state: &Mutex<HubState>) -> MutexGuard<'_, HubState> {
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::{CallId, Id, Snowflake, VideoTrack};
+  use teamcraft_proto::{CallId, Id, Snowflake, VideoPublicationId, VideoTrack};
 
   use super::*;
+
+  #[test]
+  fn a_lost_call_blames_the_call_server_only_while_the_chat_server_is_connected() {
+    let offline = CoreConnectionState::Offline {
+      retry_at_ms: 0,
+      maybe_interception: None,
+    };
+
+    assert_eq!(
+      lost_call_reason(CoreConnectionState::Connected),
+      CallEndReason::ServerLost
+    );
+    assert_eq!(lost_call_reason(offline), CallEndReason::Failed);
+    assert_eq!(
+      lost_call_reason(CoreConnectionState::Connecting),
+      CallEndReason::Failed
+    );
+  }
+
+  #[test]
+  fn a_move_reaches_the_listener_only_for_the_call_this_device_is_in() {
+    let hub = CallHub::default();
+    let listener = Arc::new(RecordingListener::default());
+    hub.set_listener(listener.clone());
+    let moved = |from: i64| GatewayEvent::CallMove {
+      conversation_id: conversation(from),
+      call_id: call(1),
+      to_conversation_id: conversation(9),
+      moved_by: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+    };
+
+    hub.on_gateway_event(&moved(5));
+    lock(&hub.inner).maybe_active = Some(conversation(5));
+    hub.on_gateway_event(&moved(5));
+    hub.on_gateway_event(&moved(6));
+
+    assert_eq!(
+      *listener.moved.lock().unwrap(),
+      vec![("5".to_owned(), "9".to_owned())]
+    );
+  }
 
   #[test]
   fn rings_reach_the_listener_unless_in_that_call() {
@@ -862,6 +1227,7 @@ mod tests {
     hub.on_gateway_event(&GatewayEvent::CallEnd {
       conversation_id: conversation(5),
       call_id: call(1),
+      cause: teamcraft_proto::CallEndCause::LastLeft,
     });
 
     assert_eq!(*listener.incoming.lock().unwrap(), vec!["5".to_string()]);
@@ -871,13 +1237,193 @@ mod tests {
   #[test]
   fn engine_events_update_the_state() {
     let mut state = ended(conversation(5), CallEndReason::Left);
+    let mut reconnecting = BTreeSet::new();
+    let mut roster = BTreeMap::new();
+    let mut muted = BTreeSet::new();
     state.phase = CallPhase::Connecting;
-    assert_eq!(apply_event(&mut state, CallEngineEvent::MuteChanged(true)), None);
+    assert_eq!(
+      apply_event(
+        &mut state,
+        &mut reconnecting,
+        &mut roster,
+        &mut muted,
+        CallEngineEvent::MuteChanged(true)
+      ),
+      None
+    );
     assert!(state.is_muted);
     assert_eq!(
-      apply_event(&mut state, CallEngineEvent::EndedByHost { by_user_id: user(1) }),
+      apply_event(
+        &mut state,
+        &mut reconnecting,
+        &mut roster,
+        &mut muted,
+        CallEngineEvent::EndedByHost { by_user_id: user(1) }
+      ),
       Some(CallEndReason::EndedByHost)
     );
+  }
+
+  #[test]
+  fn the_sfus_device_limit_refusal_ends_the_call_with_its_reason() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let (mut reconnecting, mut roster, mut muted) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new());
+    let mut apply = |code| {
+      apply_event(
+        &mut state,
+        &mut reconnecting,
+        &mut roster,
+        &mut muted,
+        CallEngineEvent::Error(teamcraft_proto::ErrorBody::new(code, "refused")),
+      )
+    };
+    assert_eq!(
+      apply(ErrorCode::CallDeviceLimit),
+      Some(CallEndReason::DeviceLimit)
+    );
+    assert_eq!(apply(ErrorCode::CallLocked), None);
+  }
+
+  #[test]
+  fn the_state_names_who_speaks_and_who_is_rejoining() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let (mut reconnecting, mut roster, mut muted) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new());
+    let participant = |user_raw: i64, device_raw: i64| teamcraft_proto::CallParticipant {
+      user_id: user(user_raw),
+      device_id: device(device_raw),
+      audio_stream_id: MediaStreamId(1),
+    };
+    for event in [
+      CallEngineEvent::ParticipantJoined(participant(2, 20)),
+      CallEngineEvent::ParticipantJoined(participant(2, 21)),
+      CallEngineEvent::ParticipantJoined(participant(3, 30)),
+      CallEngineEvent::ActiveSpeakers(vec![device(21), device(30), device(20)]),
+      CallEngineEvent::ParticipantReconnecting(device(30)),
+    ] {
+      apply_event(&mut state, &mut reconnecting, &mut roster, &mut muted, event);
+    }
+    // Loudest first, a person once however many devices they have in the call.
+    assert_eq!(state.speaking_user_ids, vec!["2".to_string(), "3".to_string()]);
+    assert_eq!(state.reconnecting_user_ids, vec!["3".to_string()]);
+    assert_eq!(state.peers.len(), 3);
+    apply_event(
+      &mut state,
+      &mut reconnecting,
+      &mut roster,
+      &mut muted,
+      CallEngineEvent::ParticipantLeft(device(30)),
+    );
+    assert_eq!(state.speaking_user_ids, vec!["2".to_string()]);
+  }
+
+  #[test]
+  fn a_person_counts_as_muted_when_all_their_devices_are() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let (mut reconnecting, mut roster, mut muted) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new());
+    let participant = |user_raw: i64, device_raw: i64| teamcraft_proto::CallParticipant {
+      user_id: user(user_raw),
+      device_id: device(device_raw),
+      audio_stream_id: MediaStreamId(1),
+    };
+    let mut apply = |state: &mut CallStateInfo, event| {
+      apply_event(state, &mut reconnecting, &mut roster, &mut muted, event);
+    };
+    apply(&mut state, CallEngineEvent::ParticipantJoined(participant(2, 20)));
+    apply(&mut state, CallEngineEvent::ParticipantJoined(participant(2, 21)));
+    apply(&mut state, CallEngineEvent::ParticipantJoined(participant(3, 30)));
+    for device_raw in [20, 30] {
+      apply(
+        &mut state,
+        CallEngineEvent::ParticipantMuted {
+          device_id: device(device_raw),
+          is_muted: true,
+        },
+      );
+    }
+    // User 2 has an unmuted second device.
+    assert_eq!(state.muted_user_ids, vec!["3".to_string()]);
+    apply(
+      &mut state,
+      CallEngineEvent::ParticipantMuted {
+        device_id: device(21),
+        is_muted: true,
+      },
+    );
+    assert_eq!(state.muted_user_ids, vec!["2".to_string(), "3".to_string()]);
+    apply(&mut state, CallEngineEvent::Reconnecting);
+    assert!(state.muted_user_ids.is_empty());
+  }
+
+  #[test]
+  fn the_state_names_the_people_in_the_call_once_each() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let (mut reconnecting, mut roster, mut muted) = (BTreeSet::new(), BTreeMap::new(), BTreeSet::new());
+    let participant = |user_raw: i64, device_raw: i64| teamcraft_proto::CallParticipant {
+      user_id: user(user_raw),
+      device_id: device(device_raw),
+      audio_stream_id: MediaStreamId(1),
+    };
+    let events = [
+      CallEngineEvent::ParticipantJoined(participant(2, 20)),
+      CallEngineEvent::ParticipantJoined(participant(2, 21)),
+      CallEngineEvent::ParticipantJoined(participant(3, 30)),
+      CallEngineEvent::ParticipantLeft(device(30)),
+    ];
+    for event in events {
+      apply_event(&mut state, &mut reconnecting, &mut roster, &mut muted, event);
+    }
+    assert_eq!(state.participant_count, 2);
+    assert_eq!(state.participant_user_ids, vec!["2".to_owned()]);
+  }
+
+  #[test]
+  fn the_end_of_another_call_leaves_the_active_one() {
+    let hub = CallHub::default();
+    lock(&hub.inner).maybe_active = Some(conversation(6));
+    hub.report(ended(conversation(5), CallEndReason::Left));
+    assert_eq!(lock(&hub.inner).maybe_active, Some(conversation(6)));
+    hub.report(ended(conversation(6), CallEndReason::Left));
+    assert_eq!(lock(&hub.inner).maybe_active, None);
+  }
+
+  #[test]
+  fn reconnecting_is_a_phase_not_an_end() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let mut reconnecting = BTreeSet::new();
+    let mut roster = BTreeMap::new();
+    let mut muted = BTreeSet::new();
+    state.phase = CallPhase::Connected;
+    for event in [
+      CallEngineEvent::ParticipantReconnecting(device(2)),
+      CallEngineEvent::ParticipantReconnecting(device(3)),
+      CallEngineEvent::ParticipantReconnected(device(2)),
+    ] {
+      assert_eq!(
+        apply_event(&mut state, &mut reconnecting, &mut roster, &mut muted, event),
+        None
+      );
+    }
+    assert_eq!(state.reconnecting_count, 1);
+    assert_eq!(
+      apply_event(
+        &mut state,
+        &mut reconnecting,
+        &mut roster,
+        &mut muted,
+        CallEngineEvent::Reconnecting
+      ),
+      None
+    );
+    assert_eq!(state.phase, CallPhase::Reconnecting);
+    assert_eq!(state.reconnecting_count, 0);
+    apply_event(
+      &mut state,
+      &mut reconnecting,
+      &mut roster,
+      &mut muted,
+      CallEngineEvent::Reconnected,
+    );
+    assert_eq!(state.phase, CallPhase::Connected);
   }
 
   #[test]
@@ -890,14 +1436,15 @@ mod tests {
       kind: VideoTrackKind::Camera,
       codec: VideoCodec::H264,
       layers: Vec::new(),
+      maybe_publication_id: Some(VideoPublicationId(0)),
     };
     video.report(own, &CallEngineEvent::VideoPublished(track(7, 2)));
     video.report(own, &CallEngineEvent::VideoPublished(track(8, 3)));
     video.report(own, &CallEngineEvent::VideoUnpublished(MediaStreamId(7)));
     // Own camera: remembered for sending, not shown as a remote track.
-    video.is_camera_requested = true;
+    video.maybe_camera = Some(OwnPublication::new(VideoPublicationId(0)));
     video.report(own, &CallEngineEvent::VideoPublished(track(9, 1)));
-    assert_eq!(video.maybe_camera, Some(MediaStreamId(9)));
+    assert_eq!(video.camera_stream(), Some(MediaStreamId(9)));
 
     let listener = Arc::new(VideoRecorder::default());
     video.set_listener(listener.clone());
@@ -941,6 +1488,7 @@ mod tests {
   struct RecordingListener {
     incoming: Mutex<Vec<String>>,
     ring_ended: Mutex<Vec<String>>,
+    moved: Mutex<Vec<(String, String)>>,
   }
 
   impl CallListener for RecordingListener {
@@ -952,6 +1500,14 @@ mod tests {
 
     fn on_ring_ended(&self, conversation_id: String) {
       self.ring_ended.lock().unwrap().push(conversation_id);
+    }
+
+    fn on_call_moved(&self, from_conversation_id: String, to_conversation_id: String) {
+      self
+        .moved
+        .lock()
+        .unwrap()
+        .push((from_conversation_id, to_conversation_id));
     }
   }
 

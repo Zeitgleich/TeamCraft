@@ -7,13 +7,19 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.DrawableRes
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
@@ -27,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -109,15 +116,15 @@ private fun newPhotoFile(context: Context): File {
 fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit, extra: @Composable ColumnScope.() -> Unit = {}) {
   ModalBottomSheet(onDismissRequest = onDismiss) {
     Column(Modifier.padding(bottom = 24.dp)) {
-      AttachOption("📷", R.string.attach_camera) {
+      AttachOption(R.drawable.ic_photo_camera, R.string.attach_camera) {
         onDismiss()
         pickers.takePhoto()
       }
-      AttachOption("🖼️", R.string.attach_gallery) {
+      AttachOption(R.drawable.ic_image, R.string.attach_gallery) {
         onDismiss()
         pickers.pickMedia()
       }
-      AttachOption("📄", R.string.attach_file) {
+      AttachOption(R.drawable.ic_description, R.string.attach_file) {
         onDismiss()
         pickers.pickFiles()
       }
@@ -126,13 +133,20 @@ fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit, extra: @Compo
   }
 }
 
+/** One picker: the symbol in a tinted circle, then its label (the whole row is the target). */
 @Composable
-private fun AttachOption(emoji: String, label: Int, onClick: () -> Unit) {
+private fun AttachOption(@DrawableRes icon: Int, label: Int, onClick: () -> Unit) {
   Row(
-    Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 14.dp),
+    Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 10.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    Text(emoji, style = MaterialTheme.typography.titleLarge)
+    Box(
+      Modifier.size(40.dp).background(MaterialTheme.colorScheme.secondaryContainer, CircleShape),
+      contentAlignment = Alignment.Center,
+    ) {
+      // Decorative: the label next to it names the action.
+      Icon(painterResource(icon), contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer)
+    }
     Text(stringResource(label), modifier = Modifier.padding(start = 16.dp), style = MaterialTheme.typography.bodyLarge)
   }
 }

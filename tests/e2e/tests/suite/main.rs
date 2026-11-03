@@ -13,6 +13,7 @@ mod acceptance_notifications;
 mod acceptance_people;
 mod acceptance_presence;
 mod acceptance_search;
+mod acceptance_space_invites;
 mod acceptance_spaces;
 mod acceptance_threads;
 mod accounts;
@@ -20,18 +21,33 @@ mod admin;
 mod bridge;
 mod calls;
 mod conversion;
+mod dependency_outages;
 mod deployed;
 mod devices;
 mod display_names;
 mod email_digest;
 mod guest_domains;
 mod guests;
+mod long_absence;
 mod meetings;
 mod membership;
 mod messaging;
 mod mfa;
 mod moderator;
+mod network_conditions;
+#[cfg(feature = "browser")]
+mod perf;
 mod retention_limits;
+mod server_robustness;
+mod sync_perf;
 mod threads_policy;
 #[cfg(feature = "browser")]
 mod web;
+#[cfg(feature = "browser")]
+mod web_calls;
+#[cfg(feature = "browser")]
+mod web_feed_stability;
+#[cfg(feature = "browser")]
+mod web_mobile;
+#[cfg(feature = "browser")]
+mod web_split;

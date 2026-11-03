@@ -4,15 +4,18 @@
 
 use std::collections::HashMap;
 
-use teamcraft_client_api::admin::DeviceInfo;
+use teamcraft_client_api::admin::{DeviceInfo, DevicePushStatus, DeviceVerification};
+use teamcraft_client_api::backend::{LoadingList, filter_people};
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
-use teamcraft_client_api::model::{TimestampMs, UserId};
+use teamcraft_client_api::model::{TimestampMs, User, UserId};
 use teamcraft_client_api::privacy::PrivacySettings;
 use teamcraft_proto::CallHistoryEntry;
 
+use crate::client::OwnDeviceCheck;
 use crate::client::devices::{OWN_DEVICES_KEY, OwnDevicesRecord};
 use crate::client::people::{
-  CALL_HISTORY_KEY, CallHistoryRecord, LastSeenRecord, PRIVACY_KEY, PrivacyRecord, last_seen_key,
+  CALL_HISTORY_KEY, CallHistoryRecord, DirectoryCache, LastSeenRecord, PRIVACY_KEY, PrivacyRecord,
+  last_seen_key,
 };
 use crate::records;
 use crate::store::{LocalStore, Table};
@@ -22,17 +25,58 @@ use crate::ui_backend::{CoreChatBackend, CoreCommand};
 const FRESH_FOR_MS: i64 = 60_000;
 /// A request that got no answer (offline, error) isn't repeated sooner than this.
 const RETRY_AFTER_MS: i64 = 15_000;
+/// How long the outcome of a test push shows next to the device.
+const TEST_OUTCOME_SHOWN_MS: i64 = 10 * 60_000;
+/// Directory searches remembered for [`FRESH_FOR_MS`]; beyond this many the oldest go first.
+const MAX_REMEMBERED_SEARCHES: usize = 64;
 
 /// When each kind of refresh was last requested.
 #[derive(Debug, Default)]
 pub(crate) struct RequestLog {
   last_seen: HashMap<UserId, i64>,
+  /// Directory searches by normalized query.
+  directory: HashMap<String, i64>,
   maybe_privacy: Option<i64>,
   maybe_call_history: Option<i64>,
   maybe_own_devices: Option<i64>,
 }
 
 impl<S: LocalStore> CoreChatBackend<S> {
+  /// People by name from the local store (which keeps earlier directory answers) and, unless the
+  /// same query went to the server within [`FRESH_FOR_MS`], a directory search whose answer shows
+  /// on the next read.
+  pub(crate) fn ui_search_people(&self, query: &str) -> Vec<User> {
+    let normalized = query.trim().to_lowercase();
+    let now = self.now_ms();
+    let mut log = self.requests.borrow_mut();
+    let is_due = log
+      .directory
+      .get(&normalized)
+      .is_none_or(|requested| now - requested > FRESH_FOR_MS);
+    if is_due {
+      remember_search(&mut log.directory, normalized.clone(), now);
+      drop(log);
+      self.command(CoreCommand::SearchDirectory {
+        query: normalized.clone(),
+      });
+    }
+    filter_people(self.known_people(), &normalized)
+  }
+
+  /// The people of the user's spaces and conversations and, once each, those the directory found
+  /// lately; whether somebody has a device comes from the directory.
+  fn known_people(&self) -> Vec<User> {
+    let cache = self.read(DirectoryCache::load(self.store_ref(), self.now_ms()));
+    let mut summaries = self.summaries();
+    for entry in cache.entries {
+      summaries
+        .entry(entry.user.id)
+        .and_modify(|known| known.maybe_has_devices = entry.user.maybe_has_devices)
+        .or_insert(entry.user);
+    }
+    summaries.values().map(|summary| self.to_user(summary)).collect()
+  }
+
   pub(crate) fn ui_last_seen(&self, user: UserId) -> Option<TimestampMs> {
     let maybe_record: Option<LastSeenRecord> = self.read(records::get_json(
       self.store_ref(),
@@ -95,6 +139,19 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .unwrap_or_default()
   }
 
+  pub(crate) fn ui_is_loaded(&self, list: LoadingList) -> bool {
+    match list {
+      LoadingList::CallHistory => {
+        let maybe_record: Option<CallHistoryRecord> = self.read(records::get_json(
+          self.store_ref(),
+          Table::SyncState,
+          CALL_HISTORY_KEY,
+        ));
+        maybe_record.is_some()
+      },
+    }
+  }
+
   /// The list was opened: fetch the newest calls (once per [`RETRY_AFTER_MS`]).
   pub(crate) fn ui_refresh_call_history(&self) {
     self.request_call_history(true);
@@ -109,7 +166,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
     if maybe_record.is_none() {
       self.request_own_devices(false);
     }
-    maybe_record.map(own_device_infos).unwrap_or_default()
+    let now = self.now_ms();
+    maybe_record
+      .map(|record| own_device_infos(record, now))
+      .unwrap_or_default()
   }
 
   /// The device settings were opened: fetch the list again (once per second at most).
@@ -146,16 +206,56 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
 /// The server's list as the settings show it: this device first, then the newest. The server
 /// keeps no "last seen" for a user's own list, so the time shown is when the device was added.
-fn own_device_infos(record: OwnDevicesRecord) -> Vec<DeviceInfo> {
+/// Verification is what this device checked; the push state is the server's (diagnostics).
+fn own_device_infos(record: OwnDevicesRecord, now: i64) -> Vec<DeviceInfo> {
+  let verification: HashMap<_, _> = record
+    .verification
+    .iter()
+    .map(|(device, check)| {
+      let state = match check {
+        OwnDeviceCheck::Verified => DeviceVerification::Verified,
+        OwnDeviceCheck::Pending => DeviceVerification::Pending,
+        OwnDeviceCheck::Unverified => DeviceVerification::Unverified,
+      };
+      (*device, state)
+    })
+    .collect();
+  // A test outcome is news for a while, not a state of the device.
+  let tests: HashMap<_, _> = record
+    .tests
+    .iter()
+    .filter(|test| now.saturating_sub(test.sent_at_ms) < TEST_OUTCOME_SHOWN_MS)
+    .map(|test| (test.device, test.outcome.clone()))
+    .collect();
+  let maybe_push: Option<HashMap<_, _>> = record
+    .maybe_push
+    .as_ref()
+    .map(|devices| devices.iter().map(|health| (health.device_id, health)).collect());
   let mut devices: Vec<DeviceInfo> = record
     .devices
     .into_iter()
-    .map(|device| DeviceInfo {
-      is_current: device.id == record.current,
-      id: device.id,
-      name: device.name,
-      platform: String::new(),
-      last_seen: device.created_at.0,
+    .map(|device| {
+      let maybe_push = maybe_push.as_ref().map(|by_device| {
+        let maybe_health = by_device.get(&device.id);
+        DevicePushStatus {
+          maybe_provider: maybe_health
+            .and_then(|health| health.maybe_provider.clone())
+            .or_else(|| device.maybe_push_provider.clone()),
+          maybe_last_sent_at: maybe_health.and_then(|health| health.counts.maybe_last_sent_at.map(|at| at.0)),
+          maybe_last_failed_at: maybe_health
+            .and_then(|health| health.counts.maybe_last_failed_at.map(|at| at.0)),
+          maybe_test: tests.get(&device.id).cloned(),
+        }
+      });
+      DeviceInfo {
+        is_current: device.id == record.current,
+        verification: verification.get(&device.id).copied().unwrap_or_default(),
+        maybe_push,
+        id: device.id,
+        name: device.name,
+        platform: String::new(),
+        last_seen: device.created_at.0,
+      }
     })
     .collect();
   devices.sort_by_key(|device| (!device.is_current, std::cmp::Reverse(device.last_seen)));
@@ -182,12 +282,29 @@ fn history_item(me: UserId, call: &CallHistoryEntry) -> CallHistoryItem {
   }
 }
 
+/// Records a search, dropping the oldest when the log is full (its bound).
+fn remember_search(log: &mut HashMap<String, i64>, query: String, now: i64) {
+  if log.len() >= MAX_REMEMBERED_SEARCHES
+    && let Some(oldest) = log
+      .iter()
+      .min_by_key(|(_, requested)| **requested)
+      .map(|(query, _)| query.clone())
+  {
+    log.remove(&oldest);
+  }
+  log.insert(query, now);
+}
+
 #[cfg(test)]
 mod tests {
+  use teamcraft_client_api::admin::DeviceVerification;
   use teamcraft_client_api::model::id_from_raw;
-  use teamcraft_proto::UnixMillis;
+  use teamcraft_proto::{
+    DevicePushHealth, DeviceResponse, PushDeliveryCounts, PushProvider, TestPushOutcome, UnixMillis,
+  };
 
   use super::*;
+  use crate::client::devices::OwnDeviceTest;
 
   #[test]
   fn calls_are_missed_outgoing_or_incoming() {
@@ -234,11 +351,17 @@ mod tests {
       maybe_push_provider: None,
       created_at: UnixMillis(created_at),
     };
-    let infos = own_device_infos(OwnDevicesRecord {
-      devices: vec![device(1, 100), device(2, 300), device(3, 200)],
-      current: id_from_raw(3),
-      fetched_at_ms: 400,
-    });
+    let infos = own_device_infos(
+      OwnDevicesRecord {
+        devices: vec![device(1, 100), device(2, 300), device(3, 200)],
+        current: id_from_raw(3),
+        fetched_at_ms: 400,
+        verification: Vec::new(),
+        maybe_push: None,
+        tests: Vec::new(),
+      },
+      400,
+    );
     let order: Vec<_> = infos
       .iter()
       .map(|info| (info.name.as_str(), info.is_current))
@@ -248,5 +371,85 @@ mod tests {
       [("Device 3", true), ("Device 2", false), ("Device 1", false)]
     );
     assert_eq!(infos[1].last_seen, 300);
+    assert!(
+      infos.iter().all(|info| info.maybe_push.is_none()),
+      "an older server"
+    );
+    assert!(
+      infos
+        .iter()
+        .all(|info| info.verification == DeviceVerification::Unknown)
+    );
+  }
+
+  #[test]
+  fn own_devices_carry_what_this_device_verified_and_their_push_state() {
+    let phone = DeviceResponse {
+      maybe_push_provider: Some(PushProvider::Fcm),
+      ..device_response(1, "Phone")
+    };
+    let laptop = device_response(2, "Laptop");
+    let infos = own_device_infos(
+      OwnDevicesRecord {
+        devices: vec![phone, laptop],
+        current: id_from_raw(2),
+        fetched_at_ms: 400,
+        verification: vec![
+          (id_from_raw(1), OwnDeviceCheck::Verified),
+          (id_from_raw(2), OwnDeviceCheck::Pending),
+        ],
+        maybe_push: Some(vec![DevicePushHealth {
+          device_id: id_from_raw(1),
+          maybe_provider: Some(PushProvider::Fcm),
+          counts: PushDeliveryCounts {
+            sent: 3,
+            maybe_last_sent_at: Some(UnixMillis(350)),
+            ..PushDeliveryCounts::default()
+          },
+        }]),
+        tests: vec![
+          OwnDeviceTest {
+            device: id_from_raw(1),
+            outcome: TestPushOutcome::Sent,
+            sent_at_ms: 390,
+          },
+          OwnDeviceTest {
+            device: id_from_raw(2),
+            outcome: TestPushOutcome::NotRegistered,
+            sent_at_ms: 400 - TEST_OUTCOME_SHOWN_MS,
+          },
+        ],
+      },
+      400,
+    );
+    let phone = infos.iter().find(|info| info.name == "Phone").unwrap();
+    assert_eq!(phone.verification, DeviceVerification::Verified);
+    assert_eq!(
+      phone.maybe_push,
+      Some(DevicePushStatus {
+        maybe_provider: Some(PushProvider::Fcm),
+        maybe_last_sent_at: Some(350),
+        maybe_last_failed_at: None,
+        maybe_test: Some(TestPushOutcome::Sent),
+      })
+    );
+    let laptop = infos.iter().find(|info| info.name == "Laptop").unwrap();
+    assert_eq!(laptop.verification, DeviceVerification::Pending);
+    assert_eq!(
+      laptop.maybe_push,
+      Some(DevicePushStatus::default()),
+      "no push service"
+    );
+  }
+
+  fn device_response(raw: u64, name: &str) -> DeviceResponse {
+    DeviceResponse {
+      id: id_from_raw(raw),
+      name: name.to_owned(),
+      public_key: teamcraft_proto::Base64Bytes::new(Vec::new()),
+      cross_signature: teamcraft_proto::Base64Bytes::new(Vec::new()),
+      maybe_push_provider: None,
+      created_at: UnixMillis(100),
+    }
   }
 }

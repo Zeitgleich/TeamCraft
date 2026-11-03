@@ -118,6 +118,14 @@ impl ContentKeyRing {
     Ok(())
   }
 
+  /// Stops encrypting with `id` if it is the current key; the key stays in the ring, so what was
+  /// encrypted with it can still be read. The next key that arrives becomes current.
+  pub fn unset_current(&mut self, id: ContentKeyId) {
+    if self.maybe_current == Some(id) {
+      self.maybe_current = None;
+    }
+  }
+
   pub fn current(&self) -> Option<&ContentKey> {
     self.maybe_current.and_then(|id| self.get(id))
   }
@@ -280,6 +288,23 @@ mod tests {
       ring.insert(conflicting),
       Err(ContentKeyError::ConflictingKey(_))
     ));
+  }
+
+  #[test]
+  fn unset_current_only_clears_that_key_and_keeps_it() {
+    let mut ring = ContentKeyRing::new(CONVERSATION);
+    let first = ring.rotate(&mut OsRng).id();
+    let second = ring.rotate(&mut OsRng).id();
+
+    ring.unset_current(first);
+    assert_eq!(
+      ring.current().map(ContentKey::id),
+      Some(second),
+      "not current: no-op"
+    );
+    ring.unset_current(second);
+    assert!(ring.current().is_none());
+    assert!(ring.get(second).is_some(), "still there for decryption");
   }
 
   #[test]

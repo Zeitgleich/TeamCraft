@@ -61,7 +61,7 @@ internally it's `space`.
 | Huge channels: paged history, no full prefetch on phones, "jump to date"                                                                                                    | v1    |                                                                     |
 | "Share history" toggle when adding members (default on, configurable in the admin panel; guests always from join)                                                           | v1    |                                                                     |
 | Discoverable private channels with join requests (approve/deny queue)                                                                                                       | v1.x  |                                                                     |
-| Sidebar: sort by recency/manual/alpha per category, "Unreads" group, limit visible DMs                                                                                      | v1    |                                                                     |
+| Sidebar: sort by recency/manual/alpha per category, "Unreads" group, limit visible DMs                                                                                      | v1    | DMs in Chats (first rail entry, mobile tab), not in a space          |
 | System messages: rename, topic/purpose change, privacy change, moved, member joined/left (join/leave hideable per user)                                                     | v1    |                                                                     |
 | Limits: max channels per space, max members per space                                                                                                                       | v1.x  | Admin setting                                                       |
 
@@ -161,6 +161,7 @@ pushes.
 | Don't push to mobile while desktop is active (with delay, e.g. 2 min) | v1    |                                            |
 | Push gateway so store apps work with any self-hosted server           | v1    | Sees only sealed wake-ups; e2ee.md §7      |
 | DND schedule, DND override for specific people (e.g. manager)         | v1    | Also: urgent messages may break through    |
+| Sound for new messages: built-in or own file (desktop, web)           | v1    | #800; own file stays on the device         |
 | Notification sound per conversation                                   | v1.x  |                                            |
 | Email digest of missed mentions                                       | later | Can only say "3 new mentions", not content |
 | Activity feed (mentions, reactions to my messages, thread replies)    | v1    | Built client-side from decrypted data      |
@@ -183,6 +184,7 @@ shared in a chat can get a download link for people outside (e2ee.md §4.5.1).
 | Upload via drag & drop, paste, picker                                                  | v1    | Encrypted before upload                          |
 | Image/video preview + gallery                                                          | v1    | Thumbnails generated client-side                 |
 | PDF preview                                                                            | v1.x  | Rendered client-side                             |
+| Text and log preview (line numbers, find, levels, JSON formatting)                     | v1.x  | Plain text only, client-side (e2ee.md §4.5.0)    |
 | Files tab per conversation                                                             | v1    |                                                  |
 | Max file size (configurable, e.g. 2 GB), resumable chunked upload                      | v1    |                                                  |
 | Screenshot paste + basic annotation                                                    | later |                                                  |
@@ -312,8 +314,8 @@ no Asterisk, no cloud telephony API. Details: [docs/telephony.md](docs/telephony
 | Invite guest by email to a space or specific channels                                                                 | v1   |                                                |
 | Guest login: the company Keycloak realm with client role `guest`, or optional local account (password + TOTP/passkey) | v1   |                                                |
 | Guests see only their channels; no directory, no channel browser                                                      | v1   | Enforced by server and by MLS group membership |
-| Guests can DM only people in their shared channels (toggle)                                                           | v1   |                                                |
-| Guest badge everywhere, "external people" banner in channels                                                          | v1   |                                                |
+| Guests start no DM on their own (nobody, shared or anyone); members can always message them                           | v1   | `guests.dm_start`                              |
+| Guest badge and "external people" banner for members, hidden from guests themselves                                   | v1   |                                                |
 | Expiry date, sponsor (responsible employee)                                                                           | v1   | Auto-removal on expiry                         |
 | Meeting-only guests (no account, one-time token)                                                                      | v1   |                                                |
 | History for guests: always from join                                                                                  | v1   |                                                |

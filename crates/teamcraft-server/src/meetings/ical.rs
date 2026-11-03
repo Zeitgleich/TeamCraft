@@ -46,6 +46,11 @@ pub struct EventData<'a> {
   pub ends_at: OffsetDateTime,
   /// RRULE value without the property name, for example `FREQ=WEEKLY;INTERVAL=1;COUNT=4`.
   pub maybe_recurrence_rule: Option<&'a str>,
+  /// Cancelled occurrences of the series (`EXDATE`), by their start in the series.
+  pub excluded_starts: Vec<OffsetDateTime>,
+  /// This VEVENT is one occurrence of the series, the one starting at this time in it
+  /// (`RECURRENCE-ID`); `starts_at` and `ends_at` are then that occurrence's.
+  pub maybe_recurrence_id: Option<OffsetDateTime>,
   pub status: EventStatus,
   /// The join link, put into `URL`, `LOCATION` and the description.
   pub join_url: &'a str,
@@ -72,6 +77,9 @@ pub fn render_event(event: &EventData<'_>, maybe_method: Option<Method>) -> Stri
   }
   lines.push("BEGIN:VEVENT".to_owned());
   lines.push(format!("UID:{}", plain(event.uid)));
+  if let Some(recurrence_id) = event.maybe_recurrence_id {
+    lines.push(format!("RECURRENCE-ID:{}", format_utc(recurrence_id)));
+  }
   lines.push(format!("DTSTAMP:{}", format_utc(event.stamp)));
   lines.push(format!("DTSTART:{}", format_utc(event.starts_at)));
   lines.push(format!("DTEND:{}", format_utc(event.ends_at)));
@@ -85,7 +93,10 @@ pub fn render_event(event: &EventData<'_>, maybe_method: Option<Method>) -> Stri
   lines.push(format!("LOCATION:{}", escape_text(event.join_url)));
   lines.push(format!("URL:{}", plain(event.join_url)));
   if let Some(rule) = event.maybe_recurrence_rule {
-    lines.push(format!("RRULE:{rule}"));
+    lines.push(format!("RRULE:{}", plain(rule)));
+    for excluded in &event.excluded_starts {
+      lines.push(format!("EXDATE:{}", format_utc(*excluded)));
+    }
   }
   lines.push(format!(
     "STATUS:{}",
@@ -415,6 +426,27 @@ mod tests {
       assert!(ics.contains("\r\nRRULE:FREQ=WEEKLY;INTERVAL=1;COUNT=4\r\n"));
       assert!(ics.contains("ORGANIZER;CN=\"Quoted\":mailto:olive@example.com"));
     }
+
+    #[test]
+    fn cancelled_occurrences_are_excluded_from_the_series() {
+      let mut data = event();
+      data.maybe_recurrence_rule = Some("FREQ=DAILY;INTERVAL=1;BYDAY=MO,TU,WE,TH,FR");
+      data.excluded_starts = vec![OffsetDateTime::from_unix_timestamp(1_893_830_400).unwrap()];
+      let ics = render_event(&data, None);
+      assert!(ics.contains("\r\nEXDATE:20300105T080000Z\r\n"));
+      assert!(!ics.contains("RECURRENCE-ID"));
+    }
+
+    #[test]
+    fn one_cancelled_occurrence_names_its_start_in_the_series() {
+      let mut data = event();
+      data.maybe_recurrence_id = Some(OffsetDateTime::from_unix_timestamp(1_893_830_400).unwrap());
+      data.status = EventStatus::Cancelled;
+      let ics = render_event(&data, Some(Method::Cancel));
+      assert!(ics.contains("\r\nRECURRENCE-ID:20300105T080000Z\r\n"));
+      assert!(ics.contains("\r\nSTATUS:CANCELLED\r\n"));
+      assert!(!ics.contains("RRULE"));
+    }
   }
 
   mod replies {
@@ -506,6 +538,8 @@ mod tests {
       starts_at: datetime!(2026-11-05 09:30 UTC),
       ends_at: datetime!(2026-11-05 10:30 UTC),
       maybe_recurrence_rule: None,
+      excluded_starts: Vec::new(),
+      maybe_recurrence_id: None,
       status: EventStatus::Confirmed,
       join_url: "https://chat.example.com/meeting/42",
       organizer: EventPerson {

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-reset-store"
+description = "Enables the core_reset_store command without any pre-configured scope."
+commands.allow = ["core_reset_store"]
+
+[[permission]]
+identifier = "deny-core-reset-store"
+description = "Denies the core_reset_store command without any pre-configured scope."
+commands.deny = ["core_reset_store"]

@@ -2,13 +2,14 @@ use std::collections::HashSet;
 
 use teamcraft_db::{HistoryQuery, NewMessage};
 use teamcraft_proto::{
-  ConversationId, GatewayEvent, HistoryPolicy, Id, ListMessagesQuery, ListMessagesResponse, MessageId,
+  ConversationId, ConversationKind, GatewayEvent, Id, ListMessagesQuery, ListMessagesResponse, MessageId,
   MessageResponse, Permission, SendMessageRequest,
 };
+use tracing::warn;
 
-use super::access::{is_guest, load_conversation, require};
+use super::access::{load_conversation, require, sees_all_history};
 use super::convert::message_response;
-use super::{threads, urgent};
+use super::{presence, threads, urgent};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -130,19 +131,28 @@ pub async fn send_message(
         message: response.clone(),
       },
     );
-    tokio::spawn(crate::push::routing::notify_message(
-      state.clone(),
-      crate::push::routing::NewMessageEvent {
-        conversation,
-        kind: access.view.conversation.kind.clone(),
-        message: outcome.message.id,
-        sender: caller.user.id,
-        mentioned: outcome.message.mentioned_user_ids.clone(),
-        maybe_thread: outcome.message.maybe_thread_id,
-        is_urgent: outcome.message.is_urgent,
-        is_integration: access.view.conversation.is_integration,
-      },
-    ));
+    // The import account's announcements (people it added, a channel it archived) are part of
+    // the import: synced quietly like the imported messages, never pushed (e2ee.md §4.10).
+    if !super::import::is_importing(state, caller.user.id) {
+      tokio::spawn(crate::push::routing::notify_message(
+        state.clone(),
+        crate::push::routing::NewMessageEvent {
+          conversation,
+          kind: access.view.conversation.kind.clone(),
+          message: outcome.message.id,
+          sender: caller.user.id,
+          mentioned: outcome.message.mentioned_user_ids.clone(),
+          maybe_thread: outcome.message.maybe_thread_id,
+          is_urgent: outcome.message.is_urgent,
+          is_integration: access.view.conversation.is_integration,
+        },
+      ));
+    }
+    // Sending is the surest sign the user is there (gateway.md, "Presence"). A failure here
+    // doesn't fail the send: the message is stored and delivered.
+    if let Err(error) = presence::note_user_action(state, caller.user.id, request.device_id).await {
+      warn!(%error, "presence refresh after a sent message failed");
+    }
   }
   Ok(Sent {
     message: response,
@@ -171,7 +181,7 @@ pub async fn list_messages(
     .maybe_limit
     .unwrap_or(limits.default_page_size)
     .clamp(1, limits.max_page_size);
-  let sees_all_history = access.view.conversation.history_policy == HistoryPolicy::Full && !is_guest(caller);
+  let sees_all_history = sees_all_history(caller, &access.view);
   let mut messages = state
     .database
     .list_messages(&HistoryQuery {
@@ -183,6 +193,11 @@ pub async fn list_messages(
       } else {
         Some(membership.joined_floor)
       },
+      // A DM's participants get its imported history, which predates their joining (e2ee.md §4.10).
+      sees_imported: matches!(
+        access.view.conversation.kind,
+        ConversationKind::Dm | ConversationKind::Group
+      ),
       limit: i64::from(limit),
     })
     .await?;

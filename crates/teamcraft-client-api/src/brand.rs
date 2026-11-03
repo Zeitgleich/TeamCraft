@@ -16,6 +16,9 @@ const MAX_NAME_CHARS: usize = 100;
 const MAX_TEXT_CHARS: usize = 1000;
 /// Name shown while no brand is known (and for a server without brands).
 const FALLBACK_NAME: &str = "TeamCraft";
+/// The id of the server's built-in brand, which it serves when no brand is configured
+/// (teamcraft-server brand.rs).
+const BUILTIN_BRAND_ID: &str = "teamcraft";
 
 /// A checked brand, ready to apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +52,16 @@ impl BrandView {
       login_title: BTreeMap::new(),
       login_text: BTreeMap::new(),
       links: BrandLinks::default(),
+    }
+  }
+
+  /// The browser tab's title: "Example – TeamCraft", or just the product name without a brand.
+  /// The product stays in it so people recognise the app among their tabs.
+  pub fn page_title(&self) -> String {
+    if self.display_name == FALLBACK_NAME {
+      FALLBACK_NAME.to_owned()
+    } else {
+      format!("{} – {FALLBACK_NAME}", self.display_name)
     }
   }
 
@@ -89,9 +102,11 @@ impl BrandView {
       login_text: clean_texts(response.login_text),
       links: BrandLinks {
         maybe_support: safe_link(response.links.maybe_support),
+        maybe_documentation: safe_link(response.links.maybe_documentation),
         maybe_privacy: safe_link(response.links.maybe_privacy),
         maybe_terms: safe_link(response.links.maybe_terms),
         maybe_imprint: safe_link(response.links.maybe_imprint),
+        maybe_download: safe_link(response.links.maybe_download),
       },
     })
   }
@@ -109,6 +124,38 @@ impl BrandView {
     self.assets.get(slot).map(String::as_str)
   }
 
+  /// The image beside the brand's name (top bar, sign-in card): the logo, else the icon, each in
+  /// the theme's variant when there is one. `None`: show the name alone (or its initial).
+  pub fn header_image(&self, is_dark: bool) -> Option<&str> {
+    self
+      .asset("logo", is_dark)
+      .or_else(|| self.asset("icon", is_dark))
+  }
+
+  /// Whether the header image is a logo (a wordmark that already carries the name), not just an
+  /// icon. With a logo the name is not repeated beside it; with an icon it is.
+  pub fn has_wordmark(&self) -> bool {
+    self.assets.contains_key("logo") || self.assets.contains_key("logo_dark")
+  }
+
+  /// Whether this is the product's own look ([`BrandView::fallback`]): no server brand is known.
+  pub fn is_fallback(&self) -> bool {
+    *self == Self::fallback()
+  }
+
+  /// Whether the product's own look applies: no server brand is known, or the server serves its
+  /// built-in brand (no brand configured), which has no images of its own.
+  pub fn is_product(&self) -> bool {
+    self.is_fallback() || (self.id == BUILTIN_BRAND_ID && self.assets.is_empty())
+  }
+
+  /// The browser tab's icon: the favicon, else the icon, each in the theme's variant.
+  pub fn favicon(&self, is_dark: bool) -> Option<&str> {
+    self
+      .asset("favicon", is_dark)
+      .or_else(|| self.asset("icon", is_dark))
+  }
+
   pub fn login_title(&self, language: &str) -> Option<&str> {
     pick(&self.login_title, language)
   }
@@ -124,7 +171,7 @@ pub fn cache_key(server_url: &str) -> String {
 }
 
 /// Text for a language: the exact tag, its primary subtag (`de-AT` → `de`), then `en`.
-fn pick<'a>(texts: &'a BTreeMap<String, String>, language: &str) -> Option<&'a str> {
+pub(crate) fn pick<'a>(texts: &'a BTreeMap<String, String>, language: &str) -> Option<&'a str> {
   let primary = language.split('-').next().unwrap_or(language);
   [language, primary, "en"]
     .into_iter()
@@ -133,7 +180,7 @@ fn pick<'a>(texts: &'a BTreeMap<String, String>, language: &str) -> Option<&'a s
 }
 
 /// An organization name is shown only when it is plain, short text.
-fn clean_name(maybe_name: Option<String>) -> Option<String> {
+pub(crate) fn clean_name(maybe_name: Option<String>) -> Option<String> {
   let name = maybe_name?;
   let name = name.trim();
   (!name.is_empty() && name.chars().count() <= MAX_NAME_CHARS && !name.chars().any(char::is_control))
@@ -166,7 +213,7 @@ fn clean_texts(texts: BTreeMap<String, String>) -> BTreeMap<String, String> {
 }
 
 /// A link is shown only when it is an https URL (http for localhost) without credentials.
-fn safe_link(maybe_link: Option<String>) -> Option<String> {
+pub(crate) fn safe_link(maybe_link: Option<String>) -> Option<String> {
   let link = maybe_link?;
   let (scheme, rest) = link.split_once("://")?;
   let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
@@ -182,6 +229,76 @@ mod tests {
   use teamcraft_proto::BrandColors;
 
   use super::*;
+
+  #[test]
+  fn the_page_title_keeps_the_product_name() {
+    let view = BrandView::from_response(response(), "").unwrap();
+    assert_eq!(view.page_title(), format!("{} – TeamCraft", view.display_name));
+    assert_eq!(BrandView::fallback().page_title(), "TeamCraft");
+  }
+
+  #[test]
+  fn header_images_fall_back_from_logo_to_icon_per_theme() {
+    let mut with_icon = response();
+    with_icon.assets = BTreeMap::from([
+      ("icon".to_owned(), "/api/v1/brand/assets/icon".to_owned()),
+      (
+        "icon_dark".to_owned(),
+        "/api/v1/brand/assets/icon_dark".to_owned(),
+      ),
+      ("favicon".to_owned(), "/api/v1/brand/assets/favicon".to_owned()),
+    ]);
+    let view = BrandView::from_response(with_icon, "https://chat.a.example.com").unwrap();
+    assert_eq!(
+      view.header_image(false),
+      Some("https://chat.a.example.com/api/v1/brand/assets/icon")
+    );
+    assert_eq!(
+      view.header_image(true),
+      Some("https://chat.a.example.com/api/v1/brand/assets/icon_dark")
+    );
+    assert_eq!(
+      view.favicon(true),
+      Some("https://chat.a.example.com/api/v1/brand/assets/favicon")
+    );
+
+    let view = BrandView::from_response(response(), "").unwrap();
+    assert_eq!(view.header_image(false), Some("/api/v1/brand/assets/logo"));
+    assert_eq!(view.header_image(true), Some("/api/v1/brand/assets/logo_dark"));
+    // No favicon or icon: the page keeps its own.
+    assert_eq!(view.favicon(false), None);
+
+    let mut bare = response();
+    bare.assets.clear();
+    let view = BrandView::from_response(bare, "").unwrap();
+    assert_eq!(view.header_image(false), None);
+  }
+
+  #[test]
+  fn only_a_logo_is_a_wordmark_and_only_the_fallback_is_the_product() {
+    let with_logo = BrandView::from_response(response(), "").unwrap();
+    assert!(with_logo.has_wordmark() && !with_logo.is_fallback());
+    let mut with_icon = response();
+    with_icon.assets = BTreeMap::from([("icon".to_owned(), "/api/v1/brand/assets/icon".to_owned())]);
+    assert!(!BrandView::from_response(with_icon, "").unwrap().has_wordmark());
+    assert!(BrandView::fallback().is_fallback() && !BrandView::fallback().has_wordmark());
+  }
+
+  #[test]
+  fn the_builtin_brand_without_images_is_the_product() {
+    let mut builtin = response();
+    builtin.id = "teamcraft".into();
+    builtin.assets.clear();
+    assert!(
+      BrandView::from_response(builtin.clone(), "")
+        .unwrap()
+        .is_product()
+    );
+    builtin.assets = BTreeMap::from([("icon".to_owned(), "/api/v1/brand/assets/icon".to_owned())]);
+    assert!(!BrandView::from_response(builtin, "").unwrap().is_product());
+    assert!(!BrandView::from_response(response(), "").unwrap().is_product());
+    assert!(BrandView::fallback().is_product());
+  }
 
   fn response() -> BrandResponse {
     BrandResponse {
@@ -262,14 +379,17 @@ mod tests {
     ]);
     hostile.links = BrandLinks {
       maybe_support: Some("javascript:alert(1)".into()),
+      maybe_documentation: Some("http://docs.example.com".into()),
       maybe_privacy: Some("https://user:pw@example.com/".into()),
       maybe_terms: Some("http://example.com/terms".into()),
       maybe_imprint: Some("https://example.com/imprint".into()),
+      maybe_download: Some("https://example.com/download".into()),
     };
     let view = BrandView::from_response(hostile, "https://chat.a.example.com").unwrap();
     assert_eq!(view.light, [("--chrome".to_owned(), "#123".to_owned())]);
     assert!(view.assets.is_empty(), "{:?}", view.assets);
     assert_eq!(view.links.maybe_support, None);
+    assert_eq!(view.links.maybe_documentation, None);
     assert_eq!(view.links.maybe_privacy, None);
     assert_eq!(view.links.maybe_terms, None);
     assert_eq!(

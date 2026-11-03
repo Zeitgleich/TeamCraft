@@ -8,8 +8,8 @@ use teamcraft_db::{
 };
 use teamcraft_proto::{
   Base64Bytes, CategoryResponse, ConversationId, ConversationResponse, DeviceResponse, DirectoryPolicy,
-  DisplayNameFormat, InviteResponse, MessageResponse, MyMembership, PushProvider, SpaceNotificationSettings,
-  SpaceResponse, UnixMillis, UserSummary,
+  DisplayNameFormat, InviteResponse, MessageResponse, MyMembership, PushProvider, SpaceImage,
+  SpaceNotificationSettings, SpaceResponse, UnixMillis, UserSummary,
 };
 use time::OffsetDateTime;
 
@@ -26,6 +26,9 @@ pub fn user_summary(state: &AppState, user: &User) -> UserSummary {
     kind: user.kind.clone(),
     maybe_email: None,
     maybe_organization: user.maybe_organization.clone(),
+    maybe_has_devices: None,
+    is_deactivated: user.is_deactivated,
+    is_deleted: user.is_deleted,
   }
 }
 
@@ -88,6 +91,10 @@ pub fn space_response(view: &SpaceView) -> SpaceResponse {
     maybe_icon: space.maybe_icon.clone(),
     maybe_color: space.maybe_color.clone(),
     maybe_description: space.maybe_description.clone(),
+    maybe_image: space.maybe_image.as_ref().map(|image| SpaceImage {
+      version: image.version.clone(),
+      size_bytes: image.size_bytes,
+    }),
     join_policy: space.join_policy.clone(),
     is_archived: space.is_archived,
     maybe_brand_id: space.maybe_brand_id.clone(),
@@ -96,6 +103,14 @@ pub fn space_response(view: &SpaceView) -> SpaceResponse {
       .maybe_role
       .as_ref()
       .map(|_| space_notification_settings(&view.notifications)),
+    member_count: view.member_count,
+    // The caller's abilities need the permission scheme: services::spaces fills them in.
+    can_add_members: false,
+    can_invite_guests: false,
+    can_manage_space: false,
+    can_delete_space: false,
+    deleted_channel_count: 0,
+    can_create_channels: false,
   }
 }
 
@@ -135,6 +150,7 @@ pub fn my_membership(membership: &Membership) -> MyMembership {
     maybe_last_read_message_id: membership.maybe_last_read_message_id,
     maybe_muted_until: membership.maybe_muted_until.map(unix_millis),
     is_notification_inherited: membership.is_notification_inherited,
+    reactions_seen: membership.reactions_seen.clone(),
   }
 }
 
@@ -164,7 +180,15 @@ pub fn conversation_response(
     is_archived: conversation.is_archived,
     moderation: conversation.moderation.clone(),
     is_integration: conversation.is_integration,
+    maybe_image: conversation.maybe_image.as_ref().map(|image| SpaceImage {
+      version: image.version.clone(),
+      size_bytes: image.size_bytes,
+    }),
     contains_guests: extras.with_guests.contains(&conversation.id),
+    maybe_organizer_user_id: None,
+    maybe_my_permissions: None,
+    maybe_importer_user_id: conversation.maybe_importer,
+    maybe_imported_through: conversation.maybe_imported_through,
     maybe_my_membership: view.maybe_membership.as_ref().map(my_membership),
     participants: extras
       .participants

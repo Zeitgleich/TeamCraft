@@ -44,6 +44,29 @@ mod authentication_and_devices {
   }
 
   #[tokio::test]
+  async fn server_info_is_public_and_tells_the_apps_how_to_sign_in() {
+    let app = app!();
+    let reply = app.call(Method::GET, None, "/server-info", None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let info: teamcraft_proto::ServerInfoResponse = serde_json::from_value(reply.body.clone()).unwrap();
+    assert_eq!(info.product, teamcraft_proto::SERVER_INFO_PRODUCT);
+    assert_eq!(info.server_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+      info.minimum_client_version,
+      teamcraft_server::handlers::MINIMUM_CLIENT_VERSION
+    );
+    assert_eq!(info.sign_in.issuer, teamcraft_server::testing::TEST_ISSUER);
+    assert_eq!(info.sign_in.client_id, teamcraft_server::testing::TEST_CLIENT);
+    assert_eq!(info.sign_in.scopes, ["openid"]);
+    assert!(info.sign_in.maybe_redirect_uris.is_none());
+    assert!(!info.sign_in.has_local_accounts);
+    // Nothing secret: only the public client and where to find the provider.
+    let text = reply.body.to_string();
+    assert!(!text.contains("secret"), "{text}");
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn users_without_a_teamcraft_role_are_rejected() {
     let app = app!();
     let nobody = teamcraft_server::testing::TestUser::new("frank", &[]);

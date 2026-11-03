@@ -1,7 +1,8 @@
 use leptos::prelude::*;
-use teamcraft_proto::{AdminSelfJoin, HistoryPolicy};
+use teamcraft_proto::{AdminSelfJoin, GuestDmStart, HistoryPolicy, ScreenShareResolution};
 
 use crate::components::admin_console::SectionHeader;
+use crate::components::admin_owners::OwnersPanel;
 use crate::components::admin_policy::{
   CheckRow, PolicyBlockerNote, PolicyFooter, SelectRow, use_policy_draft,
 };
@@ -73,7 +74,8 @@ pub fn SecuritySection() -> impl IntoView {
   let dm_options = Signal::derive(move || {
     [
       ("default", "policy-server-default"),
-      ("shared", "policy-dm-shared_spaces"),
+      ("nobody", "policy-guest-dm-nobody"),
+      ("shared", "policy-guest-dm-shared"),
       ("anyone", "policy-dm-anyone"),
     ]
     .into_iter()
@@ -109,6 +111,8 @@ pub fn SecuritySection() -> impl IntoView {
         policy.save();
       }
     >
+      <OwnersPanel policy=policy />
+
       <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
         <legend>{move || i18n.t("policy-self-join")}</legend>
         <p class="muted-text small">{move || i18n.t("policy-self-join-hint")}</p>
@@ -136,6 +140,37 @@ pub fn SecuritySection() -> impl IntoView {
             }
           })
           .collect_view()}
+      </fieldset>
+
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-backup")}</legend>
+        <p class="muted-text small">{move || i18n.t("policy-backup-hint")}</p>
+        <CheckRow
+          name="recovery_passphrase_allowed"
+          label=Signal::derive(move || i18n.t("policy-backup-passphrase"))
+          hint=Signal::derive(move || i18n.t("policy-backup-passphrase-hint"))
+          checked=Signal::derive(move || draft.get().recovery.is_passphrase_allowed)
+          on_change=move |value| policy.edit(|p| p.recovery.is_passphrase_allowed = value)
+        />
+      </fieldset>
+
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-screen-share")}</legend>
+        <CheckRow
+          name="screen_share_uhd"
+          label=Signal::derive(move || i18n.t("policy-screen-share-uhd"))
+          hint=Signal::derive(move || i18n.t("policy-screen-share-uhd-hint"))
+          checked=Signal::derive(move || draft.get().screen_share.max_resolution == ScreenShareResolution::Uhd)
+          on_change=move |value| {
+            policy.edit(|p| {
+              p.screen_share.max_resolution = if value {
+                ScreenShareResolution::Uhd
+              } else {
+                ScreenShareResolution::Standard
+              };
+            })
+          }
+        />
       </fieldset>
 
       <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
@@ -235,21 +270,22 @@ pub fn SecuritySection() -> impl IntoView {
           id="policy-dm"
           label=Signal::derive(move || i18n.t("policy-guest-dm"))
           options=dm_options
-          selected=Signal::derive(move || match draft.get().guests.maybe_dm_only_with_shared_conversations {
-            None => "default".to_owned(),
-            Some(true) => "shared".to_owned(),
-            Some(false) => "anyone".to_owned(),
+          selected=Signal::derive(move || {
+            let guests = draft.get().guests;
+            let start = guests
+              .maybe_dm_start
+              .or_else(|| guests.maybe_dm_only_with_shared_conversations.map(GuestDmStart::from_shared_only_flag));
+            match start {
+              None => "default".to_owned(),
+              Some(start) => start.to_string(),
+            }
           })
           on_select=move |value: String| {
-            policy.edit(|p| {
-              p.guests.maybe_dm_only_with_shared_conversations = match value.as_str() {
-                "shared" => Some(true),
-                "anyone" => Some(false),
-                _ => None,
-              };
-            });
+            let start = (value != "default").then(|| GuestDmStart::from(value));
+            policy.edit(|p| p.guests.set_dm_start(start));
           }
         />
+        <p class="muted-text small">{move || i18n.t("policy-guest-dm-hint")}</p>
         <SelectRow
           id="policy-guest-expiry"
           label=Signal::derive(move || i18n.t("policy-guest-expiry"))

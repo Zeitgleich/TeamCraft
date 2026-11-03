@@ -1,7 +1,8 @@
 //! Serves the web client: static files from a configured directory (the `trunk build` output of
 //! `teamcraft-ui`) as the router's fallback, so every API route wins.
 //!
-//! - Unknown paths get `index.html` (client-side routing); unknown `/api/...` paths stay 404.
+//! - Unknown paths get `index.html` (client-side routing); unknown `/api/...` and `/.well-known/...`
+//!   paths stay 404.
 //! - Files whose name carries a content hash (`app-3f2a9c1b7d4e5f60.wasm`, as trunk writes them) are
 //!   cached for a year; `index.html` and everything else must be revalidated.
 //! - Precompressed variants next to a file (`<file>.br`, `<file>.gz`, written by
@@ -14,9 +15,6 @@
 //!   referrer, because the file key lives in the URL fragment.
 
 use std::path::{Path, PathBuf};
-
-use teamcraft_crypto::account::subresource_integrity;
-use tracing::error;
 
 use axum::Router;
 use axum::extract::Request;
@@ -37,44 +35,26 @@ const REVALIDATE: &str = "no-cache";
 const SHORT_LIVED: &str = "public, max-age=3600";
 const NEVER_STORE: &str = "no-store";
 const INDEX: &str = "index.html";
-const DOWNLOAD_PAGE: &str = "download.html";
-const SRI_OPEN: &str = "{{sri:";
+const WELL_KNOWN_DIR: &str = ".well-known";
 const MIN_HASH_DIGITS: usize = 12;
 
 /// The fallback router: static files if a directory is configured, plain 404 otherwise.
 pub fn router(config: &WebConfig) -> Router {
-  let maybe_share = config
-    .maybe_share_page_dir
-    .as_deref()
-    .and_then(|dir| match ShareBundle::load(dir) {
-      Ok(bundle) => Some(bundle),
-      Err(message) => {
-        error!(%message, "the share download page cannot be served");
-        None
-      },
-    });
-  // Only the dedicated download page gets its own policy; the app shell keeps the app's.
-  let share_policy = maybe_share
-    .as_ref()
-    .map(|_| policy_header(&config.share_page_content_security_policy));
   let Some(dir) = config.maybe_static_dir.clone() else {
-    return match maybe_share {
-      Some(bundle) => share_routes(Router::new(), bundle).layer(middleware::from_fn(move |request, next| {
-        add_headers(None, share_policy.clone(), request, next)
-      })),
-      None => Router::new(),
-    };
+    return Router::new();
   };
   let files = ServeDir::new(&dir)
     .precompressed_br()
     .precompressed_gzip()
     .fallback(ServeFile::new(dir.join(INDEX)));
+  // Files that other services look up by name (security.txt, app links) are served if they exist
+  // and are a plain 404 otherwise: an app shell with 200 there would read as a broken file.
+  let well_known = ServeDir::new(dir.join(WELL_KNOWN_DIR));
   let policy = Some(policy_header(&config.resolved_content_security_policy()));
-  let router = match maybe_share {
-    Some(bundle) => share_routes(Router::new(), bundle),
-    None => Router::new().route("/f/{id}", get(share_page_handler).with_state(dir)),
-  };
-  router
+  // The share-link download page is a route of the app (it needs no sign-in, `share_download.rs`).
+  Router::new()
+    .route("/f/{id}", get(share_page_handler).with_state(dir))
+    .nest_service("/.well-known", well_known)
     .route(
       "/api/{*rest}",
       get(api_not_found)
@@ -85,63 +65,8 @@ pub fn router(config: &WebConfig) -> Router {
     )
     .fallback_service(files)
     .layer(middleware::from_fn(move |request, next| {
-      add_headers(policy.clone(), share_policy.clone(), request, next)
+      add_headers(policy.clone(), request, next)
     }))
-}
-
-/// `/f/<id>` serves the small download page and `/f-assets/...` its files.
-fn share_routes(router: Router, bundle: ShareBundle) -> Router {
-  let assets = ServeDir::new(&bundle.dir);
-  router
-    .route("/f/{id}", get(bundle_page_handler).with_state(bundle.page))
-    .nest_service("/f-assets", assets)
-}
-
-async fn bundle_page_handler(axum::extract::State(page): axum::extract::State<String>) -> Response {
-  ([(CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response()
-}
-
-/// The download page of share links with Subresource Integrity values filled in.
-struct ShareBundle {
-  dir: PathBuf,
-  page: String,
-}
-
-impl ShareBundle {
-  /// Reads `download.html` and replaces every `{{sri:<file>}}` by the SRI value of that file of
-  /// the bundle. A missing file or a name outside the bundle is an error: the page must not be
-  /// served without integrity checks.
-  fn load(dir: &Path) -> Result<Self, String> {
-    let template = std::fs::read_to_string(dir.join(DOWNLOAD_PAGE))
-      .map_err(|error| format!("reading {DOWNLOAD_PAGE}: {error}"))?;
-    let mut page = String::with_capacity(template.len() + 256);
-    let mut rest = template.as_str();
-    while let Some(start) = rest.find(SRI_OPEN) {
-      page.push_str(&rest[..start]);
-      let after = &rest[start + SRI_OPEN.len()..];
-      let end = after.find("}}").ok_or("an unterminated {{sri:...}}")?;
-      let name = &after[..end];
-      let is_plain = !name.is_empty()
-        && !name.starts_with('/')
-        && !name
-          .split('/')
-          .any(|part| part.is_empty() || part == "." || part == "..")
-        && name
-          .bytes()
-          .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'/'));
-      if !is_plain {
-        return Err(format!("{name:?} is not a file name inside the bundle"));
-      }
-      let bytes = std::fs::read(dir.join(name)).map_err(|error| format!("reading {name}: {error}"))?;
-      page.push_str(&subresource_integrity(&bytes));
-      rest = &after[end + 2..];
-    }
-    page.push_str(rest);
-    Ok(Self {
-      dir: dir.to_owned(),
-      page,
-    })
-  }
 }
 
 /// The header value of a policy. One that is not a valid header value (startup validation refuses
@@ -164,12 +89,7 @@ async fn api_not_found() -> StatusCode {
 }
 
 /// Adds cache and security headers according to what was requested.
-async fn add_headers(
-  policy: Option<HeaderValue>,
-  share_policy: Option<HeaderValue>,
-  request: Request,
-  next: Next,
-) -> Response {
+async fn add_headers(policy: Option<HeaderValue>, request: Request, next: Next) -> Response {
   let path = request.uri().path().to_owned();
   // The app's policy depends on the brand of the host (docs/branding.md §4).
   let brand_policy = request
@@ -179,8 +99,7 @@ async fn add_headers(
   let policy = brand_policy.or(policy);
   let mut response = next.run(request).await;
   let headers = response.headers_mut();
-  let is_share = path.starts_with("/f/") || path.starts_with("/f-assets/");
-  if let Some(policy) = if is_share { share_policy.or(policy) } else { policy } {
+  if let Some(policy) = policy {
     headers.insert(CONTENT_SECURITY_POLICY, policy);
   }
   headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
@@ -192,9 +111,6 @@ async fn add_headers(
     .is_some_and(|kind| kind.starts_with("text/html"));
   let cache = if path.starts_with("/f/") {
     NEVER_STORE
-  } else if path.starts_with("/f-assets/") && !has_content_hash(&path) {
-    // Integrity values pin exact versions of these files.
-    REVALIDATE
   } else if is_page || is_loader_script(&path) {
     REVALIDATE
   } else if has_content_hash(&path) {
@@ -312,6 +228,88 @@ mod tests {
       assert_eq!(header("vary"), "accept-encoding", "{accept}");
       assert_eq!(header("cache-control"), IMMUTABLE, "{accept}");
       assert_eq!(response.bytes().await.unwrap().as_ref(), body, "{accept}");
+    }
+    drop(std::fs::remove_dir_all(&dir));
+  }
+
+  /// The web client's routes (teamcraft-ui `route.rs`) are client-side: a reload or a deep link on
+  /// any of them gets the app shell, never cached, while files, the API and `/.well-known/` keep
+  /// their own answers.
+  #[tokio::test]
+  async fn client_routes_get_the_app_shell() {
+    let dir = std::env::temp_dir().join(format!("teamcraft-web-routes-{}", std::process::id()));
+    drop(std::fs::remove_dir_all(&dir));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(INDEX), "<!doctype html><title>shell</title>").unwrap();
+    std::fs::write(dir.join("favicon.ico"), b"ico").unwrap();
+    std::fs::create_dir_all(dir.join(WELL_KNOWN_DIR)).unwrap();
+    std::fs::write(dir.join(WELL_KNOWN_DIR).join("security.txt"), b"Contact: x").unwrap();
+    let base = serve(router(&WebConfig {
+      maybe_static_dir: Some(dir.clone()),
+      ..WebConfig::default()
+    }))
+    .await;
+    let client = reqwest::Client::new();
+    for path in [
+      "/",
+      "/home",
+      "/s/1000001",
+      "/s/1000001/c/2000002",
+      "/c/2000002",
+      "/c/2000002/t/4000004",
+      "/c/2000002/m/3000003",
+      "/c/2000002/m/3000003/t/4000004",
+      "/dm/2000002",
+      "/threads",
+      "/activity",
+      "/calls",
+      "/meetings",
+      "/people",
+      "/saved",
+      "/search",
+      "/settings",
+      "/settings/privacy",
+      "/admin",
+      "/admin/users",
+      "/home/",
+      // Unknown paths get the shell too; the app shows its own notice.
+      "/no/such/page",
+    ] {
+      let response = client.get(format!("{base}{path}")).send().await.unwrap();
+      assert_eq!(response.status(), StatusCode::OK, "{path}");
+      let header = |name: &str| {
+        response
+          .headers()
+          .get(name)
+          .and_then(|value| value.to_str().ok())
+          .unwrap_or("")
+          .to_owned()
+      };
+      assert!(header("content-type").starts_with("text/html"), "{path}");
+      assert_eq!(header("cache-control"), REVALIDATE, "{path}");
+      assert_eq!(
+        response.text().await.unwrap(),
+        "<!doctype html><title>shell</title>",
+        "{path}"
+      );
+    }
+    let icon = client.get(format!("{base}/favicon.ico")).send().await.unwrap();
+    assert_eq!(icon.bytes().await.unwrap().as_ref(), b"ico");
+    let api = client.get(format!("{base}/api/v1/nothing")).send().await.unwrap();
+    assert_eq!(api.status(), StatusCode::NOT_FOUND);
+    let security = client
+      .get(format!("{base}/.well-known/security.txt"))
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(security.bytes().await.unwrap().as_ref(), b"Contact: x");
+    for path in [
+      "/.well-known/assetlinks.json",
+      "/.well-known/apple-app-site-association",
+      "/.well-known/acme-challenge/token",
+    ] {
+      let missing = client.get(format!("{base}{path}")).send().await.unwrap();
+      assert_eq!(missing.status(), StatusCode::NOT_FOUND, "{path}");
     }
     drop(std::fs::remove_dir_all(&dir));
   }

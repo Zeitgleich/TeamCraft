@@ -7,17 +7,20 @@
 
 mod common;
 
+use std::ops::ControlFlow;
 use std::rc::Rc;
 
 use common::{PASSPHRASE, clock, options, settings};
+use openmls_traits::OpenMlsProvider as _;
 use rand_core::{OsRng, RngCore};
-use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::store::{
   IndexedDbStore, LocalStore, MessageContent, MessageFilter, StoreError, StoredMessage, Table,
-  browser_database_key,
+  browser_database_key, browser_database_key_without_upgrade,
 };
+use teamcraft_core::{PendingEnrollment, mls_storage};
+use teamcraft_crypto::local_store::LocalStoreKeys;
 use teamcraft_crypto::push::{open_wakeup, seal_wakeup};
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{ClientMessageId, ConversationId, Id, Snowflake, UserId};
@@ -67,6 +70,43 @@ async fn another_key_cannot_open_the_store() {
 
   let result = IndexedDbStore::open(&name, &SymmetricKey::generate(&mut OsRng)).await;
   assert!(matches!(result, Err(StoreError::WrongKey)));
+}
+
+/// e2ee.md §9.4: a newer version of the app upgrading the database closes this page's copy; writes
+/// after that are not lost silently but reported until the page reloads.
+#[wasm_bindgen_test]
+async fn a_newer_version_closes_the_store_and_writes_report_it() {
+  let name = database_name();
+  let key = SymmetricKey::generate(&mut OsRng);
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  store.put(Table::Users, "1", b"one").unwrap();
+  store.flush().await.unwrap();
+
+  open_with_newer_version(&name).await;
+  store.put(Table::Users, "2", b"two").unwrap();
+  assert!(matches!(store.flush().await, Err(StoreError::Closed)));
+  // The cache still answers; the page asks the user to reload.
+  assert_eq!(store.get(Table::Users, "2").unwrap(), Some(b"two".to_vec()));
+}
+
+/// e2ee.md §9.4: a write the browser refuses (quota) is reported by every flush and kept; once space
+/// is free it goes through, and a reopened store has it.
+#[wasm_bindgen_test]
+async fn a_refused_write_is_reported_and_written_once_there_is_space() {
+  let name = database_name();
+  let key = SymmetricKey::generate(&mut OsRng);
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  refuse_puts(true);
+  store.put(Table::Users, "1", b"one").unwrap();
+  assert!(matches!(store.flush().await, Err(StoreError::QuotaExceeded)));
+  assert!(matches!(store.flush().await, Err(StoreError::QuotaExceeded)));
+
+  refuse_puts(false);
+  store.flush().await.unwrap();
+  store.flush().await.unwrap();
+  drop(store);
+  let reopened = IndexedDbStore::open(&name, &key).await.unwrap();
+  assert_eq!(reopened.get(Table::Users, "1").unwrap(), Some(b"one".to_vec()));
 }
 
 #[wasm_bindgen_test]
@@ -142,6 +182,119 @@ async fn two_browser_clients_exchange_an_encrypted_message() {
   assert_eq!(texts(&reopened, channel), ["sealed in wasm"]);
 }
 
+/// Issue #424: a database of the first schema version opens with this one, and the MLS state a
+/// version before 1.0.9 wrote as one record moves to one record per entry, which reopens.
+#[wasm_bindgen_test]
+async fn an_older_database_opens_and_its_mls_state_moves_to_entries() {
+  let name = database_name();
+  let key = SymmetricKey::generate(&mut OsRng);
+  create_first_version(&name).await;
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  let mut legacy = Vec::new();
+  for chunk in [b"group".as_slice(), b"state".as_slice()] {
+    legacy.extend_from_slice(&u32::try_from(chunk.len()).unwrap().to_be_bytes());
+    legacy.extend_from_slice(chunk);
+  }
+  store.put(Table::MlsStorage, "provider", &legacy).unwrap();
+  store.flush().await.unwrap();
+  drop(store);
+
+  for _ in 0..2 {
+    let store = IndexedDbStore::open(&name, &key).await.unwrap();
+    let (provider, _) = mls_storage::load_mls_storage(&store).unwrap();
+    assert_eq!(
+      provider.storage().values.read().unwrap().get(b"group".as_slice()),
+      Some(&b"state".to_vec())
+    );
+    store.flush().await.unwrap();
+    assert_eq!(store.get(Table::MlsStorage, "provider").unwrap(), None);
+  }
+}
+
+/// Issue #424 review, M2: the service worker opens the store at the version it has and never
+/// upgrades it, so a push never closes an older page that still owns the store; a page does.
+#[wasm_bindgen_test]
+async fn the_service_worker_never_upgrades_the_database() {
+  let name = database_name();
+  create_first_version(&name).await;
+  let key = browser_database_key_without_upgrade(&name).await.unwrap();
+  drop(IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap());
+  assert_eq!(database_version(&name).await, 1.0);
+
+  let key = browser_database_key(&name).await.unwrap();
+  drop(IndexedDbStore::open(&name, &key).await.unwrap());
+  assert_eq!(database_version(&name).await, 2.0);
+}
+
+/// Issue #1127: a first catalog build tells how far it is, and one that stops (a reload, another tab
+/// taking over) goes on from there when the store opens next; nothing is missing afterwards.
+#[wasm_bindgen_test]
+async fn a_catalog_build_reports_progress_and_goes_on_where_it_stopped() {
+  const MESSAGES: u8 = 200;
+  const MORE_RECORDS: usize = 1600;
+  let name = database_name();
+  let key = browser_database_key(&name).await.unwrap();
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  store.begin_writes().unwrap();
+  for client in 0..MESSAGES {
+    store
+      .upsert_message(&message(1, client, &format!("message {client}")))
+      .unwrap();
+  }
+  // Enough records for several batches, quickly: an entry costs less than a message.
+  for index in 0..MORE_RECORDS {
+    store
+      .put(Table::Users, &format!("key {index}"), b"value")
+      .unwrap();
+  }
+  store.end_writes().unwrap();
+  store.flush().await.unwrap();
+  drop(store);
+  forget_catalog_state(&name, &key).await;
+
+  let mut seen = Vec::new();
+  let stopped = IndexedDbStore::open_reporting(&name, &key, |percent| {
+    seen.push(percent);
+    ControlFlow::Break(())
+  })
+  .await;
+  assert!(matches!(stopped, Err(StoreError::InUse)));
+  let stopped_at = seen[0];
+  assert!(stopped_at > 0, "one batch of about four is past the start");
+
+  let mut seen = Vec::new();
+  let store = IndexedDbStore::open_reporting(&name, &key, |percent| {
+    seen.push(percent);
+    ControlFlow::Continue(())
+  })
+  .await
+  .unwrap();
+  assert!(!seen.is_empty());
+  assert!(
+    seen[0] > stopped_at,
+    "started over: {seen:?}, stopped at {stopped_at}"
+  );
+  assert!(seen.windows(2).all(|pair| pair[0] <= pair[1]), "{seen:?}");
+  assert_eq!(
+    texts(&store, id(1)).len(),
+    usize::from(MESSAGES),
+    "every message is in the index"
+  );
+  assert_eq!(store.list(Table::Users).unwrap().len(), MORE_RECORDS);
+  store.flush().await.unwrap();
+  drop(store);
+
+  let mut was_called = false;
+  let store = IndexedDbStore::open_reporting(&name, &key, |_| {
+    was_called = true;
+    ControlFlow::Continue(())
+  })
+  .await
+  .unwrap();
+  assert!(!was_called, "built once");
+  assert_eq!(texts(&store, id(1)).len(), usize::from(MESSAGES));
+}
+
 #[wasm_bindgen_test]
 fn push_wake_up_round_trips_in_wasm() {
   let key = SymmetricKey::generate(&mut OsRng);
@@ -153,12 +306,16 @@ fn push_wake_up_round_trips_in_wasm() {
   assert!(open_wakeup(&SymmetricKey::generate(&mut OsRng), &sealed).is_err());
 }
 
+/// The text messages of a conversation; system events (a member joined) are left out.
 fn texts(store: &impl LocalStore, conversation: ConversationId) -> Vec<String> {
   store
     .messages(conversation, MessageFilter::TopLevel)
     .unwrap()
-    .iter()
-    .map(body)
+    .into_iter()
+    .filter_map(|message| match message.content {
+      MessageContent::Text { body, .. } => Some(body),
+      _ => None,
+    })
     .collect()
 }
 
@@ -184,12 +341,108 @@ fn message(conversation: i64, client: u8, text: &str) -> StoredMessage {
     },
     is_edited: false,
     edits: Vec::new(),
+    maybe_edit_id: None,
     is_pinned: false,
+    maybe_verified_commit: None,
+    maybe_server_change: None,
+    maybe_unreadable: None,
   }
 }
 
 fn id<T: Id>(raw: i64) -> T {
   T::from_snowflake(Snowflake::new(raw).unwrap())
+}
+
+/// Makes `IDBObjectStore.put` throw `QuotaExceededError`, as a full disk does, or restores it.
+fn refuse_puts(is_refusing: bool) {
+  let script = if is_refusing {
+    "globalThis.__put = IDBObjectStore.prototype.put; IDBObjectStore.prototype.put = function () { \
+     throw new DOMException('quota', 'QuotaExceededError'); };"
+  } else {
+    "IDBObjectStore.prototype.put = globalThis.__put;"
+  };
+  js_sys::eval(script).unwrap();
+}
+
+/// Opens `name` with a higher schema version, as a newer release of the app would.
+async fn open_with_newer_version(name: &str) {
+  use wasm_bindgen::JsCast;
+  let factory: web_sys::IdbFactory = js_sys::Reflect::get(&js_sys::global(), &"indexedDB".into())
+    .unwrap()
+    .unchecked_into();
+  let request = factory.open_with_u32(name, 1_000).unwrap();
+  let opened = js_sys::Promise::new(&mut |resolve, reject| {
+    request.set_onsuccess(Some(&resolve));
+    request.set_onerror(Some(&reject));
+  });
+  let database: web_sys::IdbDatabase = wasm_bindgen_futures::JsFuture::from(opened)
+    .await
+    .map(|_| request.result().unwrap())
+    .unwrap()
+    .unchecked_into();
+  database.close();
+}
+
+/// Deletes the record saying how far the catalog is built (sealed.rs `entry_id`), so the next open
+/// builds it: what an update that changes what the catalog holds does.
+async fn forget_catalog_state(name: &str, key: &SymmetricKey) {
+  use wasm_bindgen::JsCast;
+  let id = LocalStoreKeys::derive(key).lookup_id("entry", b"_catalog\0meta");
+  let record: String = id.0.iter().map(|byte| format!("{byte:02x}")).collect();
+  let script = format!(
+    "new Promise((resolve, reject) => {{
+      const request = indexedDB.open({name:?});
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {{
+        const transaction = request.result.transaction('records', 'readwrite');
+        transaction.objectStore('records').delete({record:?});
+        transaction.oncomplete = () => {{ request.result.close(); resolve(); }};
+        transaction.onerror = () => reject(transaction.error);
+      }};
+    }})"
+  );
+  let deleted: js_sys::Promise = js_sys::eval(&script).unwrap().unchecked_into();
+  wasm_bindgen_futures::JsFuture::from(deleted).await.unwrap();
+}
+
+/// Creates `name` as the first schema version did: version 1 with the same object stores.
+async fn create_first_version(name: &str) {
+  use wasm_bindgen::JsCast;
+  let script = format!(
+    "new Promise((resolve, reject) => {{
+      const request = indexedDB.open({name:?}, 1);
+      request.onupgradeneeded = () => {{
+        request.result.createObjectStore('records');
+        request.result.createObjectStore('keys');
+      }};
+      request.onsuccess = () => {{ request.result.close(); resolve(); }};
+      request.onerror = () => reject(request.error);
+    }})"
+  );
+  let created: js_sys::Promise = js_sys::eval(&script).unwrap().unchecked_into();
+  wasm_bindgen_futures::JsFuture::from(created).await.unwrap();
+}
+
+/// The version `name` has now (opened without one, so nothing is upgraded).
+async fn database_version(name: &str) -> f64 {
+  use wasm_bindgen::JsCast;
+  let script = format!(
+    "new Promise((resolve, reject) => {{
+      const request = indexedDB.open({name:?});
+      request.onsuccess = () => {{
+        const version = request.result.version;
+        request.result.close();
+        resolve(version);
+      }};
+      request.onerror = () => reject(request.error);
+    }})"
+  );
+  let opened: js_sys::Promise = js_sys::eval(&script).unwrap().unchecked_into();
+  wasm_bindgen_futures::JsFuture::from(opened)
+    .await
+    .unwrap()
+    .as_f64()
+    .unwrap()
 }
 
 /// Each test gets its own database, so tests don't see each other's data.

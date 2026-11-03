@@ -31,7 +31,7 @@ mod user_settings {
     assert_eq!(
       defaults.body,
       json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true,
-             "uses_desktop_attention": true})
+             "uses_desktop_attention": true, "default_level": "all"})
     );
 
     let schedule = json!({
@@ -47,17 +47,24 @@ mod user_settings {
       "send_read_receipts": false,
       "dnd_schedule": schedule,
       "uses_desktop_attention": false,
+      "level": "mentions",
     });
+    let mut answer = body.clone();
+    answer["default_level"] = json!("all");
     let put = app.put(&carol, "/me/notification-settings", body.clone()).await;
-    assert_eq!((put.status, &put.body), (StatusCode::OK, &body));
-    assert_eq!(app.get(&carol, "/me/notification-settings").await.body, body);
+    assert_eq!((put.status, &put.body), (StatusCode::OK, &answer));
+    assert_eq!(app.get(&carol, "/me/notification-settings").await.body, answer);
 
+    // Without a level (older clients) the stored choice stays.
     let cleared = json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true,
                          "uses_desktop_attention": true});
     app
       .put(&carol, "/me/notification-settings", cleared.clone())
       .await;
-    assert_eq!(app.get(&carol, "/me/notification-settings").await.body, cleared);
+    let mut kept = cleared;
+    kept["level"] = json!("mentions");
+    kept["default_level"] = json!("all");
+    assert_eq!(app.get(&carol, "/me/notification-settings").await.body, kept);
     app.stop().await;
   }
 

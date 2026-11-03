@@ -58,6 +58,9 @@ pub enum CallKeyError {
   Clock,
   #[error("device id {0} is not a valid snowflake")]
   InvalidDeviceId(u64),
+  /// Signing or verifying happens elsewhere (the web client's page) and failed there.
+  #[error("{0}")]
+  Remote(String),
 }
 
 impl DeviceCallKeyAuthenticator {

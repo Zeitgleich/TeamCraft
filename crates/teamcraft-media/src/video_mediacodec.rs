@@ -148,12 +148,16 @@ impl VideoEncoder for MediaCodecEncoder {
     VideoCodec::H264
   }
 
+  fn name(&self) -> &'static str {
+    "MediaCodec"
+  }
+
   fn encode(
     &mut self,
     frame: &VideoFrame,
     is_keyframe_forced: bool,
   ) -> Result<Option<EncodedPicture>, VideoCodecError> {
-    let frame = frame.scaled(self.resolution)?;
+    let frame = frame.at_size(self.resolution)?;
     if is_keyframe_forced {
       let mut request = MediaFormat::new();
       request.set_i32("request-sync", 0);

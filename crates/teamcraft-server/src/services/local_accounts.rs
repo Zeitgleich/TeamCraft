@@ -413,6 +413,16 @@ pub async fn login(state: &AppState, request: LocalLoginRequest) -> Result<Local
     }
   }
 
+  // Only after the credentials are right: others don't learn that the account is deactivated.
+  let is_deactivated = state
+    .database
+    .get_user(account.user)
+    .await?
+    .is_none_or(|user| user.is_deactivated);
+  if is_deactivated {
+    return Err(AuthError::AccountDeactivated.into());
+  }
+
   state.database.clear_login_failures(account.user).await?;
   rehash_if_needed(state, local, &account, &request.password).await?;
 
@@ -510,7 +520,12 @@ pub async fn validate_session_token(
   state: &AppState,
   token: &str,
 ) -> Result<Option<TokenIdentity>, AuthError> {
-  let Some(local) = &state.maybe_local else {
+  // Switched off in the admin console: the sessions of local accounts end with it.
+  let Some(local) = state
+    .maybe_local
+    .as_deref()
+    .filter(|_| state.settings.get().local_accounts.is_enabled)
+  else {
     return Ok(None);
   };
   let Some(claims) = local.verify(token) else {
@@ -532,8 +547,8 @@ pub async fn validate_session_token(
     .map_err(|error| internal(&error))?;
   match state_of_session {
     SessionState::Active => {},
-    SessionState::Expired => return Err(AuthError::InvalidToken("the session timed out".into())),
-    SessionState::Unknown => return Err(AuthError::InvalidToken("the session has ended".into())),
+    SessionState::Expired => return Err(AuthError::SessionTimedOut),
+    SessionState::Unknown => return Err(AuthError::SessionEnded),
   }
   let user: UserId = claims
     .sub
@@ -560,6 +575,7 @@ pub async fn validate_session_token(
     is_email_verified: true,
     role: Role::Guest,
     issued_at: claims.iat,
+    authenticated_at: claims.iat,
     maybe_session_id: Some(claims.sid),
     // Checked at sign-in; the policy's session limits were checked just now.
     authentication_methods: vec!["pwd".into(), "otp".into()],
@@ -569,11 +585,21 @@ pub async fn validate_session_token(
   }))
 }
 
+/// Whether local accounts can sign in now: configured (session secret) and switched on.
+pub fn is_available(state: &AppState) -> bool {
+  state.maybe_local.is_some() && state.settings.get().local_accounts.is_enabled
+}
+
 fn local_auth(state: &AppState) -> Result<&LocalAuth, ApiError> {
-  state
+  let local = state
     .maybe_local
     .as_deref()
-    .ok_or_else(|| ApiError::Unavailable("local accounts are not enabled".into()))
+    .ok_or_else(|| ApiError::Unavailable("local accounts are not enabled".into()))?;
+  if state.settings.get().local_accounts.is_enabled {
+    Ok(local)
+  } else {
+    Err(ApiError::LocalAccountsDisabled)
+  }
 }
 
 fn invalid_credentials() -> ApiError {

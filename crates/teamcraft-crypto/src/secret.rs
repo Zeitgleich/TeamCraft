@@ -46,6 +46,11 @@ impl SymmetricKey {
   pub fn duplicate(&self) -> Self {
     Self(self.0)
   }
+
+  /// Equality in constant time, for crates without `subtle`.
+  pub fn is_same_key(&self, other: &Self) -> bool {
+    bool::from(self.ct_eq(other))
+  }
 }
 
 impl ConstantTimeEq for SymmetricKey {

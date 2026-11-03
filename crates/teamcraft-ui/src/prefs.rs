@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use teamcraft_client_api::message_sound::{MessageSound, OwnSoundLimits};
 use teamcraft_proto::{DndWindow, Weekday};
 
 use crate::attention::DEFAULT_ATTENTION_INPUT_SECS;
@@ -188,7 +189,12 @@ pub fn default_dnd_window() -> DndWindow {
 #[serde(default)]
 pub struct NotificationPrefs {
   pub desktop: NotifyLevel,
+  /// Phone pushes; the server enforces it (the user's level in `/me/notification-settings`).
   pub push: NotifyLevel,
+  /// Which defaults `desktop` and `push` were stored with: preferences from before
+  /// [`LEVEL_DEFAULTS_REVISION`] read as 0 (field default), new ones get the current revision.
+  #[serde(default)]
+  pub level_defaults_revision: u32,
   pub push_when: PushWhen,
   /// Don't push to the phone while the desktop app is active, for this many minutes after activity.
   pub push_delay_minutes: u32,
@@ -217,13 +223,35 @@ pub struct NotificationPrefs {
   /// Per space, keyed by the space ID as text. Its channels follow it unless they have an entry of
   /// their own; "mute space" is an entry with the level `Nothing` or a mute time.
   pub spaces: BTreeMap<String, ConversationNotify>,
+  /// A ringtone plays on the default output while a call rings (notifications.md, "Calls").
+  pub plays_ringtone: bool,
+  /// Desktop: a ringing call shows a small window above all other apps while TeamCraft is in the
+  /// background, instead of the notification (#650).
+  pub shows_call_window: bool,
+  /// Remind this many minutes before a meeting starts; `None`: no reminder before.
+  pub maybe_meeting_reminder_minutes: Option<u16>,
+  /// Remind when a meeting starts.
+  pub notifies_meeting_start: bool,
+  /// What plays on this device when a message notifies (notifications.md, "Message sounds"): the
+  /// system's sound (the default), none, one of the app's own sounds or a file picked here. One
+  /// for every kind of message for now; a field per kind can follow, each of this type.
+  pub message_sound: MessageSound,
+  /// How large an own sound file may be and how long it plays.
+  pub own_sound_limits: OwnSoundLimits,
 }
+
+/// Revision of the level defaults. 1 (issue #1011): "all messages" instead of "mentions".
+pub const LEVEL_DEFAULTS_REVISION: u32 = 1;
+
+/// Default of "remind before a meeting" (notifications.md, "Meeting reminders").
+pub const DEFAULT_MEETING_REMINDER_MINUTES: u16 = 5;
 
 impl Default for NotificationPrefs {
   fn default() -> Self {
     Self {
-      desktop: NotifyLevel::Mentions,
-      push: NotifyLevel::Mentions,
+      desktop: NotifyLevel::All,
+      push: NotifyLevel::All,
+      level_defaults_revision: LEVEL_DEFAULTS_REVISION,
       push_when: PushWhen::AwayOrOffline,
       push_delay_minutes: 2,
       attention_input_secs: DEFAULT_ATTENTION_INPUT_SECS,
@@ -240,11 +268,32 @@ impl Default for NotificationPrefs {
       maybe_dnd_until: None,
       conversations: BTreeMap::new(),
       spaces: BTreeMap::new(),
+      plays_ringtone: true,
+      shows_call_window: true,
+      maybe_meeting_reminder_minutes: Some(DEFAULT_MEETING_REMINDER_MINUTES),
+      notifies_meeting_start: true,
+      message_sound: MessageSound::System,
+      own_sound_limits: OwnSoundLimits::default(),
     }
   }
 }
 
 impl NotificationPrefs {
+  /// Moves preferences stored with the old defaults to the new ones (issue #1011). "Mentions" was
+  /// the default before, and stored preferences can't tell it from a deliberate choice, so it reads
+  /// as the old default and becomes "all messages"; "nothing" was always chosen and stays.
+  pub fn upgrade_level_defaults(&mut self) {
+    if self.level_defaults_revision >= LEVEL_DEFAULTS_REVISION {
+      return;
+    }
+    for level in [&mut self.desktop, &mut self.push] {
+      if *level == NotifyLevel::Mentions {
+        *level = NotifyLevel::All;
+      }
+    }
+    self.level_defaults_revision = LEVEL_DEFAULTS_REVISION;
+  }
+
   /// Adds a keyword to a list unless it is empty or already there (case-insensitive).
   pub fn add_keyword(list: &mut Vec<String>, keyword: &str) {
     let keyword = keyword.trim();
@@ -318,6 +367,9 @@ impl NotificationPrefs {
   }
 }
 
+/// "Away after" of a new install: a real buffer before the user shows as away.
+pub const DEFAULT_AWAY_AFTER_MINUTES: u32 = 15;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrivacyPrefs {
@@ -332,7 +384,7 @@ impl Default for PrivacyPrefs {
     Self {
       share_read_receipts: true,
       share_typing: true,
-      away_after_minutes: Some(10),
+      away_after_minutes: Some(DEFAULT_AWAY_AFTER_MINUTES),
     }
   }
 }
@@ -355,6 +407,14 @@ pub struct CallPrefs {
   pub push_to_talk: bool,
   /// Screen shares include the computer's sound (off until the user turns it on).
   pub share_sound: bool,
+  /// What a screen share keeps under pressure (detail: resolution, motion: frame rate).
+  pub screen_mode: teamcraft_client_api::calls::ScreenContentMode,
+  /// How large a screen share may be (#565): standard (up to 1440p) until the user picks 4K.
+  pub screen_resolution: teamcraft_client_api::calls::ScreenShareResolution,
+  /// Tones while the connection is lost and when it is back.
+  pub status_sounds: teamcraft_client_api::calls::CallStatusSounds,
+  /// The highest quality the camera is sent at (#967).
+  pub camera_quality: teamcraft_client_api::calls::VideoQuality,
 }
 
 impl Default for CallPrefs {
@@ -371,6 +431,10 @@ impl Default for CallPrefs {
       echo_cancellation: true,
       push_to_talk: false,
       share_sound: false,
+      screen_mode: teamcraft_client_api::calls::ScreenContentMode::Detail,
+      screen_resolution: teamcraft_client_api::calls::ScreenShareResolution::Standard,
+      status_sounds: teamcraft_client_api::calls::CallStatusSounds::All,
+      camera_quality: teamcraft_client_api::calls::VideoQuality::Auto,
     }
   }
 }
@@ -378,17 +442,46 @@ impl Default for CallPrefs {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Density {
+  /// Chat-app style: own messages right in accent bubbles, others left in neutral bubbles.
+  Bubbles,
+  /// A roomy list with larger text. Stored as `comfortable` since before the layouts were
+  /// renamed, so saved preferences keep their name.
   Comfortable,
+  /// The dense list (the look `Comfortable` had before the roomier layout, issue #576).
   Compact,
 }
 
 impl Density {
-  pub const ALL: [Density; 2] = [Self::Comfortable, Self::Compact];
+  pub const ALL: [Density; 3] = [Self::Bubbles, Self::Comfortable, Self::Compact];
 
   pub fn slug(self) -> &'static str {
     match self {
+      Self::Bubbles => "bubbles",
       Self::Comfortable => "comfortable",
       Self::Compact => "compact",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|value| value.slug() == slug)
+  }
+}
+
+/// How large pictures show in the conversation (issue #316).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSize {
+  Standard,
+  Large,
+}
+
+impl ImageSize {
+  pub const ALL: [ImageSize; 2] = [Self::Standard, Self::Large];
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Standard => "standard",
+      Self::Large => "large",
     }
   }
 
@@ -401,21 +494,34 @@ impl Density {
 #[serde(default)]
 pub struct DisplayPrefs {
   pub density: Density,
+  /// Size of pictures in the conversation.
+  pub image_size: ImageSize,
   /// The custom status emoji of the author next to the name in messages.
   pub show_status_in_messages: bool,
   /// Size of the whole interface, Ctrl/Cmd + `+` / `-` / `0`.
   pub zoom: Zoom,
+  /// Size of the text only (issue #370); spacing next to text grows with it, the layout does not.
+  pub text_size: TextSize,
+  /// Seconds at the bottom of the focused conversation before the "New messages" divider goes;
+  /// `None` keeps it until the user sends, presses Esc or leaves (#321).
+  pub maybe_divider_dwell_secs: Option<u16>,
 }
 
 impl Default for DisplayPrefs {
   fn default() -> Self {
     Self {
       density: Density::Comfortable,
+      image_size: ImageSize::Large,
       show_status_in_messages: true,
       zoom: Zoom::DEFAULT,
+      text_size: TextSize::DEFAULT,
+      maybe_divider_dwell_secs: Some(DEFAULT_DIVIDER_DWELL_SECS),
     }
   }
 }
+
+/// Default of [`DisplayPrefs::maybe_divider_dwell_secs`].
+pub const DEFAULT_DIVIDER_DWELL_SECS: u16 = 10;
 
 /// Interface zoom in percent, one of [`Zoom::STEPS`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -471,6 +577,47 @@ impl Zoom {
   }
 }
 
+/// Text size in percent of the browser's (or system's) default, one of [`TextSize::STEPS`]. The
+/// stylesheet's type scale is in rem, so it follows `--text-scale` on the root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "u16", into = "u16")]
+pub struct TextSize(u16);
+
+impl From<u16> for TextSize {
+  fn from(percent: u16) -> Self {
+    Self::from_percent(percent)
+  }
+}
+
+impl From<TextSize> for u16 {
+  fn from(size: TextSize) -> Self {
+    size.0
+  }
+}
+
+impl TextSize {
+  pub const STEPS: [u16; 5] = [90, 100, 110, 125, 150];
+  pub const DEFAULT: TextSize = TextSize(100);
+
+  /// The nearest step to a stored or chosen value.
+  pub fn from_percent(percent: u16) -> Self {
+    let nearest = Self::STEPS
+      .into_iter()
+      .min_by_key(|step| step.abs_diff(percent))
+      .unwrap_or(100);
+    Self(nearest)
+  }
+
+  pub fn percent(self) -> u16 {
+    self.0
+  }
+
+  /// The value of the `--text-scale` CSS variable: `1.25` for 125 %.
+  pub fn css_scale(self) -> String {
+    format!("{}", f64::from(self.0) / 100.0)
+  }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SidebarSort {
@@ -494,23 +641,61 @@ impl SidebarSort {
   }
 }
 
+/// How Home orders its conversations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DmSort {
+  /// The newest message first.
+  #[default]
+  Recent,
+  Alphabetical,
+}
+
+impl DmSort {
+  pub const ALL: [DmSort; 2] = [Self::Recent, Self::Alphabetical];
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Recent => "recent",
+      Self::Alphabetical => "alphabetical",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|value| value.slug() == slug)
+  }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SidebarPrefs {
+  /// Order of the channels in a space.
   pub sort: SidebarSort,
+  /// Order of Home.
+  pub dm_sort: DmSort,
   /// Direct messages shown before "show more"; 0 shows all.
   pub dm_limit: u32,
   /// One sidebar with the channels of every space grouped by space (Slack style), instead of the
   /// space switcher with one space's channels at a time.
   pub is_grouped_by_space: bool,
+  /// Switching to Home or to a space reopens the conversation that was open there. Off: Home
+  /// shows its overview and a space opens its first channel (#498).
+  pub reopen_last_conversation: bool,
+  /// Conversations with unread messages in their own section at the top. Off by default: they stay
+  /// in their normal place and only the bold name and the count mark them, so the list doesn't
+  /// move under the pointer while the user works through them (#890).
+  pub shows_unreads_section: bool,
 }
 
 impl Default for SidebarPrefs {
   fn default() -> Self {
     Self {
       sort: SidebarSort::Default,
+      dm_sort: DmSort::Recent,
       dm_limit: 0,
       is_grouped_by_space: false,
+      reopen_last_conversation: true,
+      shows_unreads_section: false,
     }
   }
 }
@@ -534,6 +719,27 @@ impl Default for ComposerPrefs {
   }
 }
 
+/// A step of the "Set up your workspace" checklist on Chats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupStep {
+  ProfilePicture,
+  InstallApp,
+  BrowseChannels,
+  InvitePeople,
+  /// A step a newer version knows; ignored here.
+  #[serde(other)]
+  Unknown,
+}
+
+/// Progress through the setup checklist, remembered with the other preferences of this account.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OnboardingPrefs {
+  pub done: Vec<SetupStep>,
+  pub is_dismissed: bool,
+}
+
 /// Everything in one place, stored as a single JSON document.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -544,12 +750,15 @@ pub struct Preferences {
   pub display: DisplayPrefs,
   pub sidebar: SidebarPrefs,
   pub composer: ComposerPrefs,
+  pub onboarding: OnboardingPrefs,
 }
 
 impl Preferences {
   /// Parses stored JSON; anything unreadable falls back to the defaults.
   pub fn from_json(text: &str) -> Self {
-    serde_json::from_str(text).unwrap_or_default()
+    let mut prefs: Self = serde_json::from_str(text).unwrap_or_default();
+    prefs.notifications.upgrade_level_defaults();
+    prefs
   }
 
   pub fn to_json(&self) -> String {
@@ -569,6 +778,24 @@ mod tests {
     assert_eq!(Zoom::from_percent(10).percent(), 67);
     assert_eq!(Zoom::from_percent(67).smaller().percent(), 67);
     assert_eq!(Zoom::from_percent(104).percent(), 100);
+  }
+
+  #[test]
+  fn text_size_snaps_to_a_step_and_has_a_css_scale() {
+    assert_eq!(TextSize::from_percent(130).percent(), 125);
+    assert_eq!(TextSize::from_percent(10).percent(), 90);
+    assert_eq!(TextSize::from_percent(400).percent(), 150);
+    assert_eq!(TextSize::DEFAULT.css_scale(), "1");
+    assert_eq!(TextSize::from_percent(125).css_scale(), "1.25");
+    assert_eq!(TextSize::from_percent(90).css_scale(), "0.9");
+  }
+
+  #[test]
+  fn text_size_is_stored_as_a_number_and_defaults_for_old_prefs() {
+    let prefs = Preferences::from_json(r#"{"display":{"text_size":110}}"#);
+    assert_eq!(prefs.display.text_size.percent(), 110);
+    let old = Preferences::from_json(r#"{"display":{"zoom":125}}"#);
+    assert_eq!(old.display.text_size, TextSize::DEFAULT);
   }
 
   #[test]
@@ -606,6 +833,85 @@ mod tests {
   }
 
   #[test]
+  fn call_and_meeting_alerts_are_on_by_default_and_can_be_turned_off() {
+    let older = Preferences::from_json(r#"{"notifications":{"desktop":"all"}}"#).notifications;
+    assert!(older.plays_ringtone);
+    assert!(older.shows_call_window);
+    assert_eq!(
+      older.maybe_meeting_reminder_minutes,
+      Some(DEFAULT_MEETING_REMINDER_MINUTES)
+    );
+    assert!(older.notifies_meeting_start);
+    let off = Preferences::from_json(
+      r#"{"notifications":{"plays_ringtone":false,"shows_call_window":false,"maybe_meeting_reminder_minutes":null,"notifies_meeting_start":false}}"#,
+    )
+    .notifications;
+    assert!(!off.plays_ringtone);
+    assert!(!off.shows_call_window);
+    assert_eq!(off.maybe_meeting_reminder_minutes, None);
+    assert!(!off.notifies_meeting_start);
+  }
+
+  #[test]
+  fn the_message_sound_stays_the_system_sound_until_chosen() {
+    let older = Preferences::from_json(r#"{"notifications":{"desktop":"all"}}"#).notifications;
+    assert_eq!(older.message_sound, MessageSound::System);
+    assert_eq!(older.own_sound_limits, OwnSoundLimits::default());
+    let chosen = Preferences::from_json(
+      r#"{"notifications":{"message_sound":"uh_oh","own_sound_limits":{"max_play_seconds":2}}}"#,
+    )
+    .notifications;
+    assert_eq!(
+      chosen.message_sound,
+      MessageSound::BuiltIn(teamcraft_client_api::message_sound::BuiltInSound::UhOh)
+    );
+    assert_eq!(chosen.own_sound_limits.max_play_seconds, 2);
+    // A sound of a newer version keeps the other preferences (and plays the default sound).
+    let newer = Preferences::from_json(r#"{"notifications":{"desktop":"all","message_sound":"trumpet"}}"#);
+    assert_eq!(newer.notifications.desktop, NotifyLevel::All);
+  }
+
+  mod level_defaults {
+    use super::*;
+
+    #[test]
+    fn new_preferences_notify_for_all_messages() {
+      let notes = Preferences::from_json("{}").notifications;
+      assert_eq!((notes.desktop, notes.push), (NotifyLevel::All, NotifyLevel::All));
+      assert_eq!(NotificationPrefs::default().desktop, NotifyLevel::All);
+    }
+
+    #[test]
+    fn the_old_mentions_default_becomes_all_once() {
+      let old = Preferences::from_json(r#"{"notifications":{"desktop":"mentions","push":"mentions"}}"#);
+      assert_eq!(
+        (old.notifications.desktop, old.notifications.push),
+        (NotifyLevel::All, NotifyLevel::All)
+      );
+      assert_eq!(old.notifications.level_defaults_revision, LEVEL_DEFAULTS_REVISION);
+    }
+
+    #[test]
+    fn a_level_chosen_with_the_new_defaults_is_kept() {
+      let mut prefs = Preferences::default();
+      prefs.notifications.desktop = NotifyLevel::Mentions;
+      prefs.notifications.push = NotifyLevel::Mentions;
+      let reloaded = Preferences::from_json(&prefs.to_json()).notifications;
+      assert_eq!(
+        (reloaded.desktop, reloaded.push),
+        (NotifyLevel::Mentions, NotifyLevel::Mentions)
+      );
+    }
+
+    #[test]
+    fn nothing_stays_nothing() {
+      let old =
+        Preferences::from_json(r#"{"notifications":{"desktop":"nothing","push":"all"}}"#).notifications;
+      assert_eq!((old.desktop, old.push), (NotifyLevel::Nothing, NotifyLevel::All));
+    }
+  }
+
+  #[test]
   fn keywords_are_trimmed_and_deduplicated() {
     let mut list = vec!["Deploy".to_owned()];
     NotificationPrefs::add_keyword(&mut list, "  deploy ");
@@ -617,15 +923,15 @@ mod tests {
   #[test]
   fn conversation_overrides_apply_and_clean_up() {
     let mut prefs = NotificationPrefs::default();
-    assert_eq!(prefs.effective_level("7"), NotifyLevel::Mentions);
+    assert_eq!(prefs.effective_level("7"), NotifyLevel::All);
     prefs.set_conversation(
       "7",
       ConversationNotify {
-        maybe_level: Some(NotifyLevel::All),
+        maybe_level: Some(NotifyLevel::Mentions),
         mute: MuteFor::Off,
       },
     );
-    assert_eq!(prefs.effective_level("7"), NotifyLevel::All);
+    assert_eq!(prefs.effective_level("7"), NotifyLevel::Mentions);
     assert!(!prefs.is_muted("7"));
     prefs.set_conversation(
       "7",

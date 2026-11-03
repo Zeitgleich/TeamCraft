@@ -3,7 +3,13 @@
 //! The server owns them (they are directory data, not message content). The hub loads a profile the
 //! first time a screen asks for it and keeps it for the session; avatars are fetched from their
 //! presigned URL (the page's CSP only lets images come from `blob:` and `data:`) and shown from a
-//! `blob:` URL.
+//! `blob:` URL. In the desktop app the shell moves the bytes to and from object storage: the
+//! webview's CSP only lets it reach the shell.
+//!
+//! Avatars are also kept in the persistent media cache (#749, [`crate::persisted_media`]): the
+//! cached picture shows as soon as a screen asks for it, before the profile has loaded; once the
+//! profile names a newer version (`avatar_version`) it is downloaded in the background, and when
+//! that fails (the server or its storage is down) the cached one stays instead of the initials.
 
 use std::collections::{HashMap, HashSet};
 
@@ -16,8 +22,12 @@ use teamcraft_proto::{
 
 use crate::auth::ApiMethod;
 use crate::auth::fetch::fetch;
+use crate::auth::tauri;
 use crate::components::file_views::blob_url;
-use crate::rest::{RestClient, RestError};
+use crate::persisted_media::{self, CachedPicture, Freshness, MediaKey};
+use crate::reactive::UpdateIfAlive;
+use crate::rest::{RestClient, RestError, check};
+use crate::space_images::revoke;
 
 /// Largest avatar the picker accepts (the server has its own limit).
 pub const MAX_AVATAR_BYTES: u64 = 2 * 1024 * 1024;
@@ -26,9 +36,19 @@ pub const MAX_AVATAR_BYTES: u64 = 2 * 1024 * 1024;
 pub struct ProfileHub {
   client: StoredValue<RestClient, LocalStorage>,
   profiles: RwSignal<HashMap<UserId, ProfileResponse>>,
-  avatars: RwSignal<HashMap<UserId, String>>,
+  /// The `blob:` URL of each avatar shown, with the version it was made from (empty: unknown).
+  avatars: RwSignal<HashMap<UserId, ShownAvatar>>,
   asked_profiles: StoredValue<HashSet<UserId>>,
-  asked_avatars: StoredValue<HashSet<UserId>>,
+  /// Users whose cached avatar was looked up this session.
+  asked_cached: StoredValue<HashSet<UserId>>,
+  /// Downloads started this session, per user and announced version.
+  asked_avatars: StoredValue<HashSet<(UserId, Option<String>)>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ShownAvatar {
+  url: String,
+  version: String,
 }
 
 impl ProfileHub {
@@ -38,6 +58,7 @@ impl ProfileHub {
       profiles: RwSignal::new(HashMap::new()),
       avatars: RwSignal::new(HashMap::new()),
       asked_profiles: StoredValue::new(HashSet::new()),
+      asked_cached: StoredValue::new(HashSet::new()),
       asked_avatars: StoredValue::new(HashSet::new()),
     }
   }
@@ -51,25 +72,47 @@ impl ProfileHub {
     known
   }
 
-  /// A `blob:` URL of the user's picture, if they have one and it has loaded. Reactive.
+  /// A `blob:` URL of the user's picture, if they have one and it has loaded (or is cached).
+  /// Reactive.
   pub fn avatar_url(&self, user: UserId) -> Option<String> {
-    let url = self.avatars.with(|all| all.get(&user).cloned());
-    if url.is_some() {
-      return url;
+    let shown = self.avatars.with(|all| all.get(&user).cloned());
+    if self.asked_cached.try_update_value(|asked| asked.insert(user)) == Some(true) {
+      self.show_cached_avatar(user);
     }
-    // Only people known to have a picture are asked for it.
-    let has_avatar = self.profile(user).is_some_and(|profile| profile.has_avatar);
-    if has_avatar && self.asked_avatars.try_update_value(|asked| asked.insert(user)) == Some(true) {
-      self.load_avatar(user);
+    let Some(profile) = self.profile(user) else {
+      // Not loaded (yet, or the server is out of reach): the cached picture is the best there is.
+      return shown.map(|shown| shown.url);
+    };
+    if !profile.has_avatar {
+      if shown.is_some() {
+        // Removed on the server: the initials again, and the cached copy goes too.
+        let hub = *self;
+        spawn_local(async move { hub.forget_avatar(user) });
+        persisted_media::remove(MediaKey::Avatar(user));
+      }
+      return None;
     }
-    None
+    // Only people known to have a picture are asked for it, once per version and session.
+    let version = profile.maybe_avatar_version;
+    let is_current = shown
+      .as_ref()
+      .is_some_and(|shown| version.as_deref() == Some(shown.version.as_str()));
+    if !is_current
+      && self
+        .asked_avatars
+        .try_update_value(|asked| asked.insert((user, version.clone())))
+        == Some(true)
+    {
+      self.load_avatar(user, version);
+    }
+    shown.map(|shown| shown.url)
   }
 
   /// Saves the signed-in user's profile (fields left out are cleared).
   pub async fn save(&self, request: UpdateProfileRequest) -> Result<(), RestError> {
     let client = self.client.get_value();
     let saved: ProfileResponse = client.put("/api/v1/me/profile", &request).await?;
-    self.profiles.update(|all| {
+    self.profiles.update_if_alive(|all| {
       all.insert(saved.user_id, saved);
     });
     Ok(())
@@ -82,6 +125,25 @@ impl ProfileHub {
     content_type: AvatarContentType,
     bytes: Vec<u8>,
   ) -> Result<(), RestError> {
+    let profile = if tauri::is_available() {
+      let answer = check(tauri::avatar_upload(&content_type, &bytes).await?)?;
+      serde_json::from_str(&answer.body).map_err(|error| RestError::Unreadable(error.to_string()))?
+    } else {
+      self.upload_avatar_from_page(content_type, bytes).await?
+    };
+    self.forget_avatar(me);
+    self.profiles.update_if_alive(|all| {
+      all.insert(profile.user_id, profile);
+    });
+    Ok(())
+  }
+
+  /// The browser's way: the page reaches object storage itself.
+  async fn upload_avatar_from_page(
+    &self,
+    content_type: AvatarContentType,
+    bytes: Vec<u8>,
+  ) -> Result<ProfileResponse, RestError> {
     let client = self.client.get_value();
     let announce = CreateAvatarUploadRequest {
       content_type: content_type.clone(),
@@ -98,14 +160,9 @@ impl ProfileHub {
         code: "avatar_upload_failed".to_owned(),
       });
     }
-    let profile: ProfileResponse = client
+    client
       .post("/api/v1/me/avatar/complete", &serde_json::json!({}))
-      .await?;
-    self.forget_avatar(me);
-    self.profiles.update(|all| {
-      all.insert(profile.user_id, profile);
-    });
-    Ok(())
+      .await
   }
 
   pub async fn remove_avatar(&self, me: UserId) -> Result<(), RestError> {
@@ -115,20 +172,26 @@ impl ProfileHub {
       .send(ApiMethod::Delete, "/api/v1/me/avatar", None)
       .await?;
     self.forget_avatar(me);
-    self.profiles.update(|all| {
+    persisted_media::remove(MediaKey::Avatar(me));
+    self.profiles.update_if_alive(|all| {
       if let Some(profile) = all.get_mut(&me) {
         profile.has_avatar = false;
+        profile.maybe_avatar_version = None;
       }
     });
     Ok(())
   }
 
   fn forget_avatar(&self, user: UserId) {
-    self.avatars.update(|all| {
-      all.remove(&user);
-    });
-    self.asked_avatars.update_value(|asked| {
-      asked.remove(&user);
+    let mut maybe_removed = None;
+    self
+      .avatars
+      .update_if_alive(|all| maybe_removed = all.remove(&user));
+    if let Some(removed) = maybe_removed {
+      revoke(&removed.url);
+    }
+    self.asked_avatars.try_update_value(|asked| {
+      asked.retain(|(asked_user, _)| *asked_user != user);
     });
   }
 
@@ -137,7 +200,7 @@ impl ProfileHub {
     spawn_local(async move {
       let path = format!("/api/v1/users/{user}/profile");
       match hub.client.get_value().get::<ProfileResponse>(&path).await {
-        Ok(profile) => hub.profiles.update(|all| {
+        Ok(profile) => hub.profiles.update_if_alive(|all| {
           all.insert(user, profile);
         }),
         Err(error) => tracing::debug!(%error, "profile not loaded"),
@@ -145,49 +208,96 @@ impl ProfileHub {
     });
   }
 
-  fn load_avatar(&self, user: UserId) {
+  /// Shows the cached picture of `user` unless a downloaded one is already there.
+  fn show_cached_avatar(&self, user: UserId) {
     let hub = *self;
     spawn_local(async move {
-      let path = format!("/api/v1/users/{user}/avatar");
-      let Ok(location) = hub.client.get_value().get::<AvatarResponse>(&path).await else {
-        return;
-      };
-      match fetch("GET", &location.download_url, &[], None).await {
-        Ok(image) if image.status < 300 => {
-          if let Some(url) = blob_url(&image.body, location.content_type.as_str()) {
-            hub.avatars.update(|all| {
-              all.insert(user, url);
-            });
-          }
-        },
-        Ok(_) | Err(_) => tracing::debug!("avatar not downloaded"),
+      if let Some(cached) = persisted_media::get(MediaKey::Avatar(user)).await {
+        hub.show_avatar(user, &cached, ShowIf::NothingShown);
       }
     });
   }
+
+  /// Downloads the picture of `user` in `maybe_version` (`None`: the server names none), unless the
+  /// cache already has that version. A picture that doesn't load leaves what is shown: the cached
+  /// one, or the initials. Nothing for the user to act on.
+  fn load_avatar(&self, user: UserId, maybe_version: Option<String>) {
+    let hub = *self;
+    let key = MediaKey::Avatar(user);
+    spawn_local(async move {
+      if maybe_version.is_some()
+        && let Some(cached) = persisted_media::get(key).await
+        && cached.freshness(maybe_version.as_deref()) == Freshness::Current
+      {
+        hub.show_avatar(user, &cached, ShowIf::Always);
+        return;
+      }
+      let Some((bytes, content_type)) = hub.download_avatar(user).await else {
+        tracing::debug!("avatar not downloaded");
+        return;
+      };
+      let picture = CachedPicture {
+        version: maybe_version.unwrap_or_default(),
+        content_type,
+        bytes,
+      };
+      hub.show_avatar(user, &picture, ShowIf::Always);
+      persisted_media::put(key, picture);
+    });
+  }
+
+  fn show_avatar(&self, user: UserId, picture: &CachedPicture, condition: ShowIf) {
+    let Some(url) = blob_url(&picture.bytes, &picture.content_type) else {
+      return;
+    };
+    let shown = ShownAvatar {
+      url: url.clone(),
+      version: picture.version.clone(),
+    };
+    let mut maybe_replaced = None;
+    let mut is_kept = false;
+    self.avatars.update_if_alive(|all| {
+      if condition == ShowIf::NothingShown && all.contains_key(&user) {
+        return;
+      }
+      is_kept = true;
+      maybe_replaced = all.insert(user, shown);
+    });
+    if !is_kept {
+      revoke(&url);
+    }
+    if let Some(replaced) = maybe_replaced {
+      revoke(&replaced.url);
+    }
+  }
+
+  /// The picture's bytes and type: through the desktop shell, or the page's own fetch.
+  async fn download_avatar(&self, user: UserId) -> Option<(Vec<u8>, String)> {
+    if tauri::is_available() {
+      let image = tauri::avatar_download(user).await.ok()?;
+      return (image.status < 300).then_some((image.body, image.maybe_content_type?));
+    }
+    let path = format!("/api/v1/users/{user}/avatar");
+    let location = self
+      .client
+      .try_get_value()?
+      .get::<AvatarResponse>(&path)
+      .await
+      .ok()?;
+    let image = fetch("GET", &location.download_url, &[], None).await.ok()?;
+    (image.status < 300).then(|| (image.body, location.content_type.as_str().to_owned()))
+  }
+}
+
+/// When a picture replaces the one shown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShowIf {
+  /// A downloaded or current picture: always.
+  Always,
+  /// The cached picture at start: only while nothing else is shown.
+  NothingShown,
 }
 
 pub fn use_profiles() -> Option<ProfileHub> {
   use_context::<ProfileHub>()
-}
-
-/// The image type of a picked file, if the server accepts it.
-pub fn avatar_type(media_type: &str) -> Option<AvatarContentType> {
-  match media_type {
-    "image/png" => Some(AvatarContentType::Png),
-    "image/jpeg" => Some(AvatarContentType::Jpeg),
-    "image/webp" => Some(AvatarContentType::Webp),
-    _ => None,
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn only_the_servers_image_types_are_avatars() {
-    assert_eq!(avatar_type("image/png"), Some(AvatarContentType::Png));
-    assert_eq!(avatar_type("image/gif"), None);
-    assert_eq!(avatar_type("text/html"), None);
-  }
 }

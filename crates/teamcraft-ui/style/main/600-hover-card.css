@@ -1,0 +1,32 @@
+/* Card over a person's name while the pointer rests on it. */
+.hover-card {
+  position: fixed;
+  z-index: 42;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 280px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.hover-card-head {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.hover-card-head p {
+  margin: 2px 0 0;
+}
+
+.hover-card-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+

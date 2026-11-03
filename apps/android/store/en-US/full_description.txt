@@ -1,0 +1,39 @@
+TeamCraft is a team chat for companies and organisations that run their own server. Channels, direct messages, calls and meetings are end-to-end encrypted: the server stores and forwards messages but can't read them.
+
+You need a TeamCraft server to use the app. Your organisation runs it, and you sign in with your company account (single sign-on).
+
+CHAT
+• Channels in spaces, direct messages and group chats
+• Threads, replies, reactions, mentions and @channel
+• Edit, delete, forward, pin and save messages
+• Photos and files with previews, sharing from other apps
+• Message priority (important, urgent) and read confirmations
+• Drafts, unread markers and jump to the first unread message
+• Search with filters (person, channel, date, files, links)
+
+CALLS AND MEETINGS
+• Voice and video calls in direct messages and channels
+• Join with the camera on or muted, speaker and video controls
+• Privacy code to make sure nobody listens in
+• Upcoming meetings and joining the meeting's call
+• Calls ring like phone calls and work with Android Auto
+
+ENCRYPTION AND PRIVACY
+• End-to-end encryption with the MLS standard (RFC 9420)
+• Every device has its own keys; link a new device by QR code
+• Recovery by passphrase or through your organisation
+• Security codes to verify contacts, warning when their keys change
+• App lock with biometrics or screen lock, screenshot protection
+• No ads, no tracking; push notifications don't carry message content
+
+NOTIFICATIONS
+• Push through Firebase or UnifiedPush
+• Per-conversation notification levels, mute and do not disturb
+• Reply and mark as read from the notification
+
+FOR ORGANISATIONS
+• Runs on your own server; open source (AGPL-3.0)
+• Sign-in through your identity provider (OpenID Connect)
+• Administrators manage people and channels without access to message content
+
+TeamCraft is also available for Windows, macOS, Linux and the web. Source code, documentation and server setup: https://github.com/Zeitgleich/TeamCraft

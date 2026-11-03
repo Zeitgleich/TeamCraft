@@ -6,8 +6,9 @@ use serde_json::json;
 use teamcraft_db::StoredSetting;
 use teamcraft_proto::{
   EmailDigestSettings, IntegrationSettings, LimitSettings, LocalAccountSettings, MailTextSettings,
-  MeetingMailSettings, NotificationRuntimeSettings, Permission, RuntimeSettingsKey, RuntimeSettingsResponse,
-  RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource, ShareSettings, Target,
+  MeetingMailSettings, NotificationLevel, NotificationRuntimeSettings, Permission, RuntimeSettingsKey,
+  RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource,
+  ShareSettings, SignInMethod, SignInPageSettings, Target,
 };
 use tracing::warn;
 
@@ -20,7 +21,7 @@ use crate::state::{AppState, Settings};
 
 /// Prefix of the rows in `server_settings`.
 const NAME_PREFIX: &str = "settings.";
-const ALL_KEYS: [RuntimeSettingsKey; 9] = [
+const ALL_KEYS: [RuntimeSettingsKey; 10] = [
   RuntimeSettingsKey::ServerRules,
   RuntimeSettingsKey::Notifications,
   RuntimeSettingsKey::EmailDigest,
@@ -28,13 +29,20 @@ const ALL_KEYS: [RuntimeSettingsKey; 9] = [
   RuntimeSettingsKey::Limits,
   RuntimeSettingsKey::Integration,
   RuntimeSettingsKey::LocalAccounts,
+  RuntimeSettingsKey::SignInPage,
   RuntimeSettingsKey::MailTexts,
   RuntimeSettingsKey::MeetingMail,
 ];
 const MAX_TEXT_CHARS: usize = 5000;
+/// Longest help text of the sign-in page, per language.
+const MAX_HELP_TEXT_CHARS: usize = 1000;
 const MAX_LIST_ENTRIES: usize = 200;
 /// Longest repeat or grace interval an admin can set: a day.
 const MAX_INTERVAL_SECS: u64 = 86_400;
+/// Longest period before deactivated users are removed from all chats automatically (ten years).
+const MAX_REMOVAL_DAYS: u64 = 3_650;
+/// Longest time an admin's request to join a private channel may stay open (a quarter).
+const MAX_ADMIN_JOIN_REQUEST_DAYS: u64 = 90;
 
 /// Puts the stored groups on top of the configuration; at startup and after every change.
 pub async fn load(state: &AppState) -> Result<(), ApiError> {
@@ -169,10 +177,14 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
         .policy
         .default_channels
         .clone_from(&rules.default_channels);
+      settings.policy.maybe_remove_deactivated_after_days = rules.maybe_remove_deactivated_after_days;
+      settings.policy.admin_join_request_days = rules.admin_join_request_days;
+      settings.policy.one_to_one_call_ends_for_both = rules.one_to_one_call_ends_for_both;
     },
     RuntimeSettingsSection::Notifications(values) => {
       let notifications = &mut settings.notifications;
       notifications.read_receipts_default = values.read_receipts_default;
+      notifications.default_level = values.default_level.clone();
       notifications.urgent_repeat_interval_secs = values.urgent_repeat_interval_secs;
       notifications.urgent_max_pushes = values.urgent_max_pushes;
       notifications.mobile_push_delay_secs = values.mobile_push_delay_secs;
@@ -202,6 +214,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
       let limits = &mut settings.limits;
       limits.max_attachment_bytes_per_user = values.max_attachment_bytes_per_user;
       limits.max_avatar_bytes = values.max_avatar_bytes;
+      limits.max_space_image_bytes = values.max_space_image_bytes;
       limits.max_background_bytes = values.max_background_bytes;
       limits.max_backgrounds_per_user = values.max_backgrounds_per_user;
       limits.max_group_dm_participants = to_usize(values.max_group_dm_participants);
@@ -213,11 +226,20 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
     },
     RuntimeSettingsSection::LocalAccounts(values) => {
       let local = &mut settings.local_accounts;
+      // Turns local accounts off or on again; on needs them configured (session secret) at start.
+      local.is_enabled = values.is_enabled;
       local.require_totp = values.require_totp;
       local.activation_ttl_hours = values.activation_ttl_hours;
       local.session_ttl_hours = values.session_ttl_hours;
       local.max_failed_attempts = values.max_failed_attempts;
       local.lockout_secs = values.lockout_secs;
+    },
+    RuntimeSettingsSection::SignInPage(values) => {
+      let page = &mut settings.sign_in_page;
+      page.methods.clone_from(&values.methods);
+      page.help_text.clone_from(&values.help_text);
+      page.maybe_help_link.clone_from(&values.maybe_help_link);
+      page.is_login_page_always_shown = values.is_login_page_always_shown;
     },
     RuntimeSettingsSection::MailTexts(values) => {
       let mail = &mut settings.mail;
@@ -260,9 +282,13 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       invites_require_verified_email: settings.policy.invites_require_verified_email,
       default_spaces: settings.policy.default_spaces.clone(),
       default_channels: settings.policy.default_channels.clone(),
+      maybe_remove_deactivated_after_days: settings.policy.maybe_remove_deactivated_after_days,
+      admin_join_request_days: settings.policy.admin_join_request_days,
+      one_to_one_call_ends_for_both: settings.policy.one_to_one_call_ends_for_both,
     },
     notifications: NotificationRuntimeSettings {
       read_receipts_default: notifications.read_receipts_default,
+      default_level: notifications.default_level.clone(),
       urgent_repeat_interval_secs: notifications.urgent_repeat_interval_secs,
       urgent_max_pushes: notifications.urgent_max_pushes,
       mobile_push_delay_secs: notifications.mobile_push_delay_secs,
@@ -289,6 +315,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       max_attachment_bytes: settings.max_attachment_bytes,
       max_attachment_bytes_per_user: limits.max_attachment_bytes_per_user,
       max_avatar_bytes: limits.max_avatar_bytes,
+      max_space_image_bytes: limits.max_space_image_bytes,
       max_background_bytes: limits.max_background_bytes,
       max_backgrounds_per_user: limits.max_backgrounds_per_user,
       max_group_dm_participants: to_u32(limits.max_group_dm_participants),
@@ -299,11 +326,18 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       default_retention_days: settings.integration.default_retention_days,
     },
     local_accounts: LocalAccountSettings {
+      is_enabled: local.is_enabled,
       require_totp: local.require_totp,
       activation_ttl_hours: local.activation_ttl_hours,
       session_ttl_hours: local.session_ttl_hours,
       max_failed_attempts: local.max_failed_attempts,
       lockout_secs: local.lockout_secs,
+    },
+    sign_in_page: SignInPageSettings {
+      methods: settings.sign_in_page.methods.clone(),
+      help_text: settings.sign_in_page.help_text.clone(),
+      maybe_help_link: settings.sign_in_page.maybe_help_link.clone(),
+      is_login_page_always_shown: settings.sign_in_page.is_login_page_always_shown,
     },
     mail_texts: MailTextSettings {
       invite_subject: settings.mail.invite_subject.clone(),
@@ -329,9 +363,32 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
   match section {
     RuntimeSettingsSection::ServerRules(rules) => {
       check_count("default_spaces", rules.default_spaces.len())?;
-      check_count("default_channels", rules.default_channels.len())
+      check_count("default_channels", rules.default_channels.len())?;
+      check_range(
+        "admin_join_request_days",
+        u64::from(rules.admin_join_request_days),
+        1,
+        MAX_ADMIN_JOIN_REQUEST_DAYS,
+      )?;
+      match rules.maybe_remove_deactivated_after_days {
+        Some(days) => check_range(
+          "remove_deactivated_after_days",
+          u64::from(days),
+          1,
+          MAX_REMOVAL_DAYS,
+        ),
+        None => Ok(()),
+      }
     },
     RuntimeSettingsSection::Notifications(values) => {
+      if !matches!(
+        values.default_level,
+        NotificationLevel::All | NotificationLevel::Mentions
+      ) {
+        return Err(ApiError::InvalidRequest(
+          "default_level must be all or mentions".into(),
+        ));
+      }
       check_range(
         "urgent_repeat_interval_secs",
         values.urgent_repeat_interval_secs,
@@ -387,6 +444,12 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
         1 << 50,
       )?;
       check_range("max_avatar_bytes", values.max_avatar_bytes, 1024, 64 << 20)?;
+      check_range(
+        "max_space_image_bytes",
+        values.max_space_image_bytes,
+        64 * 1024,
+        16 << 20,
+      )?;
       check_range(
         "max_background_bytes",
         values.max_background_bytes,
@@ -445,6 +508,7 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
       )?;
       check_range("lockout_secs", values.lockout_secs, 0, MAX_INTERVAL_SECS)
     },
+    RuntimeSettingsSection::SignInPage(values) => check_sign_in_page(values),
     RuntimeSettingsSection::MailTexts(values) => {
       check_subject(&values.invite_subject)?;
       check_subject(&values.activation_subject)?;
@@ -470,6 +534,42 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
       Ok(())
     },
   }
+}
+
+/// At least one known method, each once; short help texts; an https help link.
+fn check_sign_in_page(values: &SignInPageSettings) -> Result<(), ApiError> {
+  let invalid = |reason: &str| Err(ApiError::InvalidRequest(reason.to_owned()));
+  if values.methods.is_empty() {
+    return invalid("choose at least one sign-in method");
+  }
+  for (index, method) in values.methods.iter().enumerate() {
+    if matches!(method, SignInMethod::Unknown(_)) {
+      return invalid("unknown sign-in method");
+    }
+    if values.methods[..index].contains(method) {
+      return invalid("each sign-in method at most once");
+    }
+  }
+  check_count("help_text", values.help_text.len())?;
+  for (language, text) in &values.help_text {
+    let is_language = !language.is_empty()
+      && language.len() <= 16
+      && language
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    if !is_language || text.chars().count() > MAX_HELP_TEXT_CHARS {
+      return invalid("help texts need a language code and at most 1000 characters");
+    }
+  }
+  if let Some(link) = &values.maybe_help_link {
+    let is_https = url::Url::parse(link).is_ok_and(|url| {
+      url.scheme() == "https" && url.host().is_some() && url.username().is_empty() && url.password().is_none()
+    });
+    if !is_https {
+      return invalid("the help link must be an https address");
+    }
+  }
+  Ok(())
 }
 
 fn check_range(name: &str, value: u64, min: u64, max: u64) -> Result<(), ApiError> {
@@ -541,6 +641,7 @@ mod tests {
       RuntimeSettingsSection::Limits(original.limits.clone()),
       RuntimeSettingsSection::Integration(original.integration.clone()),
       RuntimeSettingsSection::LocalAccounts(original.local_accounts.clone()),
+      RuntimeSettingsSection::SignInPage(original.sign_in_page.clone()),
       RuntimeSettingsSection::MailTexts(original.mail_texts.clone()),
       RuntimeSettingsSection::MeetingMail(original.meeting_mail.clone()),
     ];
@@ -582,11 +683,37 @@ mod tests {
       RuntimeSettingsSection::Limits(defaults.limits),
       RuntimeSettingsSection::Integration(defaults.integration),
       RuntimeSettingsSection::LocalAccounts(defaults.local_accounts),
+      RuntimeSettingsSection::SignInPage(defaults.sign_in_page),
       RuntimeSettingsSection::MailTexts(defaults.mail_texts),
       RuntimeSettingsSection::MeetingMail(defaults.meeting_mail),
     ] {
       assert!(validate(&section).is_ok(), "{}", section.key());
     }
+  }
+
+  #[test]
+  fn sign_in_pages_need_known_unique_methods_and_an_https_help_link() {
+    let page = |methods: Vec<SignInMethod>, maybe_link: Option<&str>| {
+      validate(&RuntimeSettingsSection::SignInPage(SignInPageSettings {
+        methods,
+        help_text: std::collections::BTreeMap::from([("en".to_owned(), "Call 1234.".to_owned())]),
+        maybe_help_link: maybe_link.map(str::to_owned),
+        is_login_page_always_shown: true,
+      }))
+    };
+    assert!(
+      page(
+        vec![SignInMethod::Local, SignInMethod::Sso],
+        Some("https://help.example.com")
+      )
+      .is_ok()
+    );
+    assert!(page(vec![SignInMethod::Local], None).is_ok());
+    assert!(page(vec![], None).is_err());
+    assert!(page(vec![SignInMethod::Sso, SignInMethod::Sso], None).is_err());
+    assert!(page(vec![SignInMethod::Unknown("x".into())], None).is_err());
+    assert!(page(vec![SignInMethod::Sso], Some("http://help.example.com")).is_err());
+    assert!(page(vec![SignInMethod::Sso], Some("javascript:alert(1)")).is_err());
   }
 
   #[test]

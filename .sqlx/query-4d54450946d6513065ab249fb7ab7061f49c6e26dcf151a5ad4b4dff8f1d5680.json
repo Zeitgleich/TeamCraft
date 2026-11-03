@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.epoch, g.group_info FROM mls_group_infos g\n         JOIN mls_epoch_heads h ON h.conversation_id = g.conversation_id AND h.epoch = g.epoch\n         WHERE g.conversation_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "epoch",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "mls_group_infos",
+            "name": "epoch"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "group_info",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "mls_group_infos",
+            "name": "group_info"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "4d54450946d6513065ab249fb7ab7061f49c6e26dcf151a5ad4b4dff8f1d5680"
+}

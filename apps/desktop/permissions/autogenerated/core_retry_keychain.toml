@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-retry-keychain"
+description = "Enables the core_retry_keychain command without any pre-configured scope."
+commands.allow = ["core_retry_keychain"]
+
+[[permission]]
+identifier = "deny-core-retry-keychain"
+description = "Denies the core_retry_keychain command without any pre-configured scope."
+commands.deny = ["core_retry_keychain"]

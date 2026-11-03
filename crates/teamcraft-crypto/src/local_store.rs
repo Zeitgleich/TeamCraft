@@ -17,7 +17,9 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::aead::{self, NONCE_LEN, TAG_LEN};
-use crate::domain::{self, LOCAL_STORE_LOOKUP, LOCAL_STORE_LOOKUP_KEY, LOCAL_STORE_RECORD};
+use crate::domain::{
+  self, LOCAL_STORE_LOOKUP, LOCAL_STORE_LOOKUP_KEY, LOCAL_STORE_RECORD, MEDIA_CACHE_ROOT_KEY,
+};
 use crate::secret::{SYMMETRIC_KEY_LEN, SecretBytes, SymmetricKey};
 
 const RECORD_VERSION: u8 = 1;
@@ -49,6 +51,14 @@ impl LocalStoreKeys {
       lookup: expand(&hkdf, LOCAL_STORE_LOOKUP_KEY.as_bytes()),
       record: expand(&hkdf, LOCAL_STORE_RECORD.as_bytes()),
     }
+  }
+
+  /// The keys of the persistent media cache (e2ee.md §9.6): derived like the store's, but from a
+  /// root key of their own (`HKDF(database key, "media cache root key")`), so the cache's keys and
+  /// the store's never come from the same HKDF input.
+  pub fn derive_media_cache(database_key: &SymmetricKey) -> Self {
+    let hkdf = Hkdf::<Sha256>::new(None, database_key.expose_secret());
+    Self::derive(&expand(&hkdf, MEDIA_CACHE_ROOT_KEY.as_bytes()))
   }
 
   /// The pseudorandom ID under which `name` in `namespace` is stored.
@@ -124,6 +134,21 @@ mod tests {
   use rand_core::OsRng;
 
   use super::*;
+
+  #[test]
+  fn media_cache_keys_are_apart_from_the_stores() {
+    let database_key = SymmetricKey::from_bytes([1; SYMMETRIC_KEY_LEN]);
+    let store = LocalStoreKeys::derive(&database_key);
+    let media = LocalStoreKeys::derive_media_cache(&database_key);
+    assert_ne!(store.lookup_id("n", b"x"), media.lookup_id("n", b"x"));
+    let id = media.lookup_id("n", b"x");
+    let sealed = media.seal(&id, b"picture", &mut OsRng).unwrap();
+    assert!(
+      store.open(&id, &sealed).is_err(),
+      "the store's record key doesn't open it"
+    );
+    assert_eq!(media.open(&id, &sealed).unwrap().expose_secret(), b"picture");
+  }
 
   #[test]
   fn records_round_trip() {

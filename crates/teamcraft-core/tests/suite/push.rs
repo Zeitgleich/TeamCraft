@@ -8,11 +8,82 @@ use crate::common;
 use common::{Peer, settings, settle};
 use teamcraft_core::ClientSettings;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
-use teamcraft_core::push_preview::{PreviewContent, push_preview};
+use teamcraft_core::notified::{self, NotifiedContent, notified_conversation};
+use teamcraft_core::push_preview::{
+  PreviewContent, PreviewGap, PushSession, device_push_content, push_preview, save_device_push_content,
+  save_push_session,
+};
+use teamcraft_core::push_subscription::{subscription_change, subscription_change_from};
 use teamcraft_core::store::{LocalStore, MessageFilter};
-use teamcraft_crypto::push::seal_wakeup;
+use teamcraft_crypto::ids::DeviceId as DeviceIdCrypto;
+use teamcraft_crypto::push::{seal_wakeup, verify_subscription_change};
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::{ConversationId, MessageId, PushContentMode, PushKind, PushProvider, PushWakeUp};
+use teamcraft_proto::{ConversationId, Id, MessageId, PushContentMode, PushKind, PushProvider, PushWakeUp};
+
+/// The service worker's `pushsubscriptionchange` handler (issue #145): from the store alone, with an
+/// expired session token, it proves the change with the push key the server holds.
+#[tokio::test]
+async fn the_service_worker_proves_a_rotated_subscription_with_the_push_key() {
+  let (server, _alice, bob, _channel) = channel_with_two().await;
+  let device = bob.client.device_id();
+  let rotated = r#"{"endpoint":"https://push.example.com/rotated"}"#;
+  // Nothing to send while the worker doesn't know the server.
+  assert!(
+    subscription_change(bob.store.as_ref(), rotated)
+      .unwrap()
+      .is_none()
+  );
+  let session = PushSession {
+    server_url: "https://chat.example.com".into(),
+    access_token: "expired-token".into(),
+    expires_at_ms: 0,
+  };
+  save_push_session(bob.store.as_ref(), &session).unwrap();
+  assert!(
+    subscription_change(bob.store.as_ref(), "{}").unwrap().is_none(),
+    "unchanged"
+  );
+
+  let change = subscription_change(bob.store.as_ref(), rotated).unwrap().unwrap();
+  assert_eq!(change.server_url, "https://chat.example.com");
+  assert_eq!(change.request.device_id, device);
+  assert_eq!(change.request.previous_token, "{}");
+  assert_eq!(change.request.token, rotated);
+  let push_key = server.push_registration(device).unwrap().push_key;
+  let push_key = SymmetricKey::from_slice(push_key.as_slice()).unwrap();
+  let raw = u64::try_from(device.snowflake().get()).unwrap();
+  verify_subscription_change(
+    &push_key,
+    DeviceIdCrypto::new(raw),
+    "{}",
+    rotated,
+    change.request.mac.as_slice(),
+  )
+  .unwrap();
+  // Nothing in the request is the access token or the push key.
+  let wire = serde_json::to_string(&change.request).unwrap();
+  assert!(!wire.contains("expired-token"));
+
+  // A second rotation before a page opened: the server holds what the worker sent last time.
+  let again = r#"{"endpoint":"https://push.example.com/again"}"#;
+  let second = subscription_change_from(bob.store.as_ref(), rotated, again)
+    .unwrap()
+    .unwrap();
+  assert_eq!(second.request.previous_token, rotated);
+  verify_subscription_change(
+    &push_key,
+    DeviceIdCrypto::new(raw),
+    rotated,
+    again,
+    second.request.mac.as_slice(),
+  )
+  .unwrap();
+  assert!(
+    subscription_change_from(bob.store.as_ref(), again, again)
+      .unwrap()
+      .is_none()
+  );
+}
 
 #[tokio::test]
 async fn preview_fetches_and_decrypts_a_message_the_app_has_not_seen() {
@@ -26,6 +97,7 @@ async fn preview_fetches_and_decrypts_a_message_the_app_has_not_seen() {
     .await
     .unwrap();
   assert_eq!(preview.content, PreviewContent::Text("lunch at noon?".into()));
+  assert_eq!(preview.maybe_gap, None);
   assert_eq!(preview.maybe_conversation_name.as_deref(), Some("planning"));
   assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
   assert!(!preview.is_direct);
@@ -36,6 +108,153 @@ async fn preview_fetches_and_decrypts_a_message_the_app_has_not_seen() {
     stored_before
   );
   settle(&mut [&mut bob]).await;
+}
+
+/// Opening a conversation from its notification shows what the notification showed with the link
+/// gone (issue #1065): the name and the message come from the store, without a round trip, until
+/// the sync stores the message itself.
+#[tokio::test]
+async fn the_notified_conversation_opens_from_the_store_without_the_network() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let message = alice_says(&mut alice, channel, "lunch at noon?").await;
+  let sealed = wake_up_for(&server, &bob, &alice, channel, message);
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  notified::remember(bob.store.as_ref(), &preview).unwrap();
+
+  server.set_offline(bob.client.user_id(), true);
+  let notified = notified_conversation(bob.store.as_ref(), channel)
+    .unwrap()
+    .unwrap();
+  assert_eq!(notified.maybe_name.as_deref(), Some("planning"));
+  let shown = notified.maybe_message.unwrap();
+  assert_eq!(shown.message_id, message);
+  assert_eq!(shown.maybe_sender_name.as_deref(), Some("Alice"));
+  assert_eq!(
+    shown.content,
+    NotifiedContent::Text {
+      text: "lunch at noon?".into()
+    }
+  );
+
+  // The sync brought the message: the conversation shows it from the store, the record goes.
+  server.set_offline(bob.client.user_id(), false);
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert!(
+    bob
+      .store
+      .message_by_server_id(channel, message)
+      .unwrap()
+      .is_some()
+  );
+  assert_eq!(notified_conversation(bob.store.as_ref(), channel).unwrap(), None);
+}
+
+/// A browser rotates its Web Push subscription (`pushsubscriptionchange`, e2ee.md §7): the new one
+/// is registered under the same push key, so wake-ups sealed before still open; an unchanged one
+/// costs no request.
+#[tokio::test]
+async fn a_rotated_subscription_is_registered_under_the_same_push_key() {
+  let (server, _alice, mut bob, _channel) = channel_with_two().await;
+  let device = bob.client.device_id();
+  let before = server.push_registration(device).unwrap();
+  assert_eq!(
+    bob.client.registered_push_provider().unwrap(),
+    Some(PushProvider::WebPush)
+  );
+
+  assert!(
+    !bob
+      .client
+      .renew_push_token(PushProvider::WebPush, "{}")
+      .await
+      .unwrap()
+  );
+  assert!(
+    !bob
+      .client
+      .renew_push_token(PushProvider::Fcm, "other")
+      .await
+      .unwrap()
+  );
+  let rotated = r#"{"endpoint":"https://push.example.com/rotated"}"#;
+  assert!(
+    bob
+      .client
+      .renew_push_token(PushProvider::WebPush, rotated)
+      .await
+      .unwrap()
+  );
+
+  let after = server.push_registration(device).unwrap();
+  assert_eq!(after.token, rotated);
+  assert_eq!(after.push_key.as_slice(), before.push_key.as_slice());
+  assert!(
+    !bob
+      .client
+      .renew_push_token(PushProvider::WebPush, rotated)
+      .await
+      .unwrap()
+  );
+}
+
+/// The apps hand the platform's token over again on every start and whenever a UnifiedPush
+/// distributor re-sends its endpoint (issue #826): the push key stays, so wake-ups sealed before
+/// still open, and the registration reaches the server again even when it had forgotten it.
+#[tokio::test]
+async fn a_token_delivered_again_keeps_the_push_key_and_is_sent_again() {
+  let (server, _alice, mut bob, _channel) = channel_with_two().await;
+  let device = bob.client.device_id();
+  let before = server.push_registration(device).unwrap();
+
+  server.forget_push_registration(device);
+  let moved = r#"{"endpoint":"https://push.example.com/moved"}"#;
+  bob
+    .client
+    .register_push_keeping_key(PushProvider::WebPush, moved)
+    .await
+    .unwrap();
+  let after = server.push_registration(device).unwrap();
+  assert_eq!(after.token, moved);
+  assert_eq!(after.push_key.as_slice(), before.push_key.as_slice());
+
+  // Another service starts with a key of its own.
+  bob
+    .client
+    .register_push_keeping_key(PushProvider::Fcm, "fcm-token")
+    .await
+    .unwrap();
+  let other = server.push_registration(device).unwrap();
+  assert_ne!(other.push_key.as_slice(), before.push_key.as_slice());
+}
+
+/// Issue #1142: what failed keeps nothing half-done, and the app's retry goes through. A first
+/// registration's key reaches the device only with the server's answer (issue #826).
+#[tokio::test]
+async fn a_failed_registration_stays_retryable() {
+  let (server, _alice, mut bob, _channel) = channel_with_two().await;
+  let (device, user) = (bob.client.device_id(), bob.client.user_id());
+  let before = server.push_registration(device).unwrap();
+
+  server.set_rest_failing(user, true);
+  let token = r#"{"endpoint":"https://push.example.com/retried"}"#;
+  let failed = bob
+    .client
+    .register_push_keeping_key(PushProvider::WebPush, token)
+    .await;
+  assert!(failed.is_err());
+  assert_eq!(server.push_registration(device).unwrap().token, before.token);
+
+  server.set_rest_failing(user, false);
+  bob
+    .client
+    .register_push_keeping_key(PushProvider::WebPush, token)
+    .await
+    .unwrap();
+  let after = server.push_registration(device).unwrap();
+  assert_eq!(after.token, token);
+  assert_eq!(after.push_key.as_slice(), before.push_key.as_slice());
 }
 
 #[tokio::test]
@@ -118,7 +337,77 @@ async fn the_signed_policy_decides_what_a_notification_shows() {
   // Names stay, the text is withheld.
   assert_eq!(preview.content, PreviewContent::Unavailable);
   assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
+  assert_eq!(preview.maybe_gap, Some(PreviewGap::WorkspacePolicy));
   settle(&mut [&mut bob]).await;
+}
+
+/// A first direct message from somebody Bob never shared a conversation with, while Bob's app was
+/// closed: neither the conversation, the sender's name nor the keys are on the device. The
+/// preview falls back to what it knows and says why; the app's catch-up then shows it all.
+#[tokio::test]
+async fn a_first_direct_message_shows_after_the_app_caught_the_conversation_up() {
+  let (server, _alice, mut bob, _channel) = channel_with_two().await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let dm = carol.client.open_dm(bob.client.user_id()).await.unwrap();
+  let message = carol_says(&mut carol, dm, "are you around?").await;
+  let sealed = wake_up_for(&server, &bob, &carol, dm, message);
+
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  // Never dropped: a notification still comes, it just can't say more yet.
+  assert_eq!(preview.content, PreviewContent::Unavailable);
+  assert_eq!(preview.maybe_gap, Some(PreviewGap::NotDecrypted));
+  assert!(!preview.is_conversation_verified);
+  assert!(preview.needs_catch_up());
+
+  bob.client.catch_up_for_push(dm).await.unwrap();
+  let preview = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+    .await
+    .unwrap();
+  assert_eq!(preview.content, PreviewContent::Text("are you around?".into()));
+  assert_eq!(preview.maybe_sender_name.as_deref(), Some("Carol"));
+  assert!(preview.is_direct);
+  assert!(preview.is_conversation_verified);
+  assert_eq!(preview.maybe_gap, None);
+  assert!(!preview.needs_catch_up());
+  settle(&mut [&mut carol, &mut bob]).await;
+}
+
+#[tokio::test]
+async fn without_a_session_the_preview_says_so() {
+  let (server, mut alice, bob, channel) = channel_with_two().await;
+  let message = alice_says(&mut alice, channel, "later").await;
+  let sealed = wake_up_for(&server, &bob, &alice, channel, message);
+  let preview = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+    .await
+    .unwrap();
+  assert_eq!(preview.maybe_gap, Some(PreviewGap::NoSession));
+  assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
+}
+
+#[tokio::test]
+async fn the_device_setting_shows_less_than_the_policy_allows() {
+  let (server, mut alice, bob, channel) = channel_with_two().await;
+  let message = alice_says(&mut alice, channel, "private").await;
+  let sealed = wake_up_for(&server, &bob, &alice, channel, message);
+  assert_eq!(device_push_content(bob.store.as_ref()), PushContentMode::Full);
+
+  save_device_push_content(bob.store.as_ref(), &PushContentMode::Sender).unwrap();
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  assert_eq!(preview.content, PreviewContent::Unavailable);
+  assert_eq!(preview.maybe_sender_name.as_deref(), Some("Alice"));
+  assert_eq!(preview.maybe_gap, Some(PreviewGap::DeviceSetting));
+  // Withheld on purpose: nothing to catch up.
+  assert!(!preview.needs_catch_up());
+
+  save_device_push_content(bob.store.as_ref(), &PushContentMode::Generic).unwrap();
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  assert!(preview.maybe_sender_name.is_none() && preview.maybe_conversation_name.is_none());
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
@@ -145,8 +434,12 @@ async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
 }
 
 async fn alice_says(alice: &mut Peer, channel: ConversationId, text: &str) -> MessageId {
-  alice.client.send_text(channel, None, text).await.unwrap();
-  alice
+  carol_says(alice, channel, text).await
+}
+
+async fn carol_says(sender: &mut Peer, channel: ConversationId, text: &str) -> MessageId {
+  sender.client.send_text(channel, None, text).await.unwrap();
+  sender
     .store
     .messages(channel, MessageFilter::TopLevel)
     .unwrap()

@@ -76,6 +76,16 @@ device cross-signing by the user's identity key, identity-key change warnings an
 verification codes (see [docs/e2ee.md](docs/e2ee.md) §3).
 Key transparency is a later option.
 
+**Server entry and token relay.** The native apps take the server address from the user (or the
+device's management) and the sign-in settings from that server (docs/operations.md "Server address
+in the apps"). A server the user is lured to (a typo domain) can announce a real instance's issuer
+and client ID; with a live SSO session the identity provider then hands an access token for the real
+instance to the app, which sends it to the lookalike, and the lookalike can replay it at the real
+server (bearer tokens are not bound to a client). Mitigations today: the confirmation screen shows
+the identity provider's host and warns when it lies outside the server's domain, tokens are stored
+per server origin and issuer, and E2EE keeps message content out of reach (the relayed token gives
+API access, not keys). The real fix is sender-constrained tokens with DPoP (RFC 9449, issue #120).
+
 Push goes through APNs/FCM, optionally via a **push gateway** operated by the publisher of the store
 apps. Wake-ups are sealed to the device's push key before they leave the server, so neither Apple,
 Google nor a gateway can read or forge them; a malicious gateway can only drop, delay or replay
@@ -106,6 +116,7 @@ Binaries:
 
 - **`teamcraft-server`** – REST API, real-time gateway (WebSocket), auth, permissions, MLS delivery service, CalCraft/SMTP integration. Starts as a single process (no Redis/NATS); stateless enough to run several instances behind a load balancer later.
 - **`teamcraft-bridge`** – optional, runs next to log/webhook sources: encrypts their output into integration channels.
+- **`teamcraft-notetaker`** – optional AI notetaker, runs on a host the organization trusts: a call participant (bot account and device) that people ask into a call; it sends the call's audio to OpenRouter for transcription and posts a summary. Off by default, owner-signed policy, visible to everyone in the call (e2ee.md §8.2).
 - **`teamcraft-pbx`** – optional telephony module: AI hotline on any SIP trunk (`rsipstack`), pluggable voice agent providers (first: ElevenLabs), queues, handover to agents in the app. No Asterisk.
 - **`teamcraft-sfu`** – selective forwarding unit for calls. Separate so it can run on a box with good network and be restarted without dropping chat. Registers with the server using a registration token.
 - **`teamcraft-push-gateway`** – its own repository ([Zeitgleich/teamcraft-push-gateway](https://github.com/Zeitgleich/teamcraft-push-gateway)): holds the APNs and FCM credentials of the published store apps and forwards the sealed wake-ups of any server to them, so self-hosted servers work with the store apps. Run by the app's publisher on a separate host; sees device tokens and ciphertext only ([docs/push-gateway.md](docs/push-gateway.md)).
@@ -248,7 +259,8 @@ guest  = "external"
   attribute `tc_identity_key` → ID token claim (e2ee.md §3.1).
 - User profile attribute `tc_identity_key`: editable by the user (written by the client through the
   account API at enrollment), viewable by admins, not editable by the TeamCraft service account.
-- **Deprovisioning:** Keycloak calls `teamcraft-server` via OIDC back-channel logout when sessions end;
+- **Deprovisioning:** Keycloak calls `teamcraft-server` via OIDC back-channel logout when sessions end
+  (a logout token with `sid` ends that device's session only, so the user's other devices stay signed in);
   the service account additionally polls for disabled users and role changes (every few minutes) and
   triggers removal from all groups (docs/admin.md §3.2).
 - **Roles and the admin roster:** Keycloak roles decide who *should* be admin; the cryptographic admin
@@ -267,7 +279,7 @@ guest  = "external"
 - Guests:
   - see only conversations they are members of
   - directory search returns only people they share a conversation with
-  - cannot create channels; DMs only with people from shared conversations (toggle)
+  - cannot create channels; start no DM or group DM on their own by default (policy `guests.dm_start`: `nobody`, `shared`, `anyone`); members, admins and owners can always message them, and guests can answer
   - cannot invite others
 - The server enforces visibility; MLS enforces it cryptographically as well, because a guest's devices
   are only ever in the groups of their conversations.
@@ -277,7 +289,9 @@ guest  = "external"
 - Each device reports `active` / `idle` over the gateway (desktop and web also report *attention*:
   focused, recent input, not idle, unlocked; on change and every 30 s, e2ee.md §7); the server
   aggregates per user
-  (online > away > offline) and merges manual states (DND, appear offline, in a call, in a meeting).
+  (online > away > offline) and merges manual states (DND, away, appear offline, in a call, in a
+  meeting). An automatic away (idle device, workspace away timeout) ends with the next activity; a
+  manually chosen away stays until the user picks another status (docs/gateway.md, "Presence").
 - "In a meeting" comes from CalCraft free/busy; "in a call" from the SFU roster.
 - Presence also drives push routing (no phone push while the desktop is active).
 - **Last seen**: the server stores when a user's devices last stopped being active (`users.last_seen_at`)
@@ -295,10 +309,25 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - **RTP packets inside QUIC unreliable datagrams.** QUIC handles the transport encryption and connection setup (no ICE/DTLS/SDP).
 - Signaling (join, leave, subscribe, layer selection) on a reliable QUIC stream of the same session.
 - Browser: WebTransport + **WebCodecs** for encoding/decoding; `getUserMedia` for capture (gives the browser's echo cancellation).
-- Desktop: `cpal` for audio I/O, `opus`, **`webrtc-audio-processing`** (AEC, noise suppression, AGC) – the only WebRTC component used.
+  The calls (call state, ringtone, engine) are a wasm module of their own (`teamcraft-web-calls`)
+  that the page imports in the background after sign-in, so it isn't part of the app's first
+  download; the page keeps the client core and the device key, forwards the gateway's call events,
+  and signs and verifies the call key bindings for it (`teamcraft_client_api::page_calls`). Calls run in the
+  tab that runs the client core (e2ee.md §9.4); background effects are desktop-only for now.
+- Desktop: `cpal` for audio I/O (on Linux through PipeWire, else PulseAudio, else ALSA; devices,
+  defaults and hotplug from PipeWire's registry, #1072), `opus`, **`webrtc-audio-processing`** (AEC, noise suppression, AGC) – the only WebRTC component used.
+  The media runs in the shell; for each tile on screen the shell sends the decrypted track to the
+  webview over a Tauri channel (`call_watch_video`: H.264 that WebCodecs decodes, or JPEG images
+  where the webview can't decode H.264), and the own camera as sent (with effects) as small JPEG
+  images (`call_watch_camera`). The UI draws both with the same `LiveVideo` as the browser.
+  Before a join, the pre-join screen's check opens the camera and microphone on the device only:
+  the camera through the same effects into the self view, the microphone into a level meter
+  (`call_watch_level`; in the browser the call module's `preview_level`). Nothing is encoded or
+  sent; leaving or hiding the screen releases both, and the join takes them over.
 - Browser support (MDN browser-compat-data, checked 2026-10): WebTransport incl. datagrams in Chrome 97,
   Firefox 114, **Safari / iOS Safari 26.4**; WebCodecs `VideoEncoder`/`VideoDecoder` in Chrome 94,
-  Firefox 130, Safari 16.4; `AudioEncoder`/`AudioDecoder` in Safari 26. No WebRTC fallback planned.
+  Firefox 130, Safari 16.4; `AudioEncoder`/`AudioDecoder` in Safari 26. No WebRTC fallback planned;
+  networks that block UDP: §6.6.
 - `MediaStreamTrackProcessor` (raw frames from the camera/mic track) is missing in Firefox: fall back to
   an `AudioWorklet` for audio and `<video>` → `VideoFrame` for video there. Codec availability (e.g.
   Opus in `AudioEncoder`) is checked at runtime with `isConfigSupported()`; fallback is a WASM Opus
@@ -316,8 +345,51 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 
 - Forwards encrypted frames, never decodes.
 - **Audio:** forward the 3–5 loudest speakers based on the audio-level header extension; in large calls nobody receives dozens of audio streams.
-- **Video:** simulcast (3 layers) from each sender; the SFU picks the layer per receiver from its bandwidth estimate and viewport size ("last-N" for gallery view).
+- **Video:** simulcast (up to 4 layers) from each sender; the SFU picks the layer per receiver from its bandwidth estimate and viewport size ("last-N" for gallery view).
+- **Layer limit (#978):** the SFU says in `joined` how many layers per track it takes
+  (`maybe_max_simulcast_layers`, 4). SFUs from before say nothing and take 3: a client then plans
+  its tracks within 3 (a 1080p camera sends 1080p, 720p and 360p, as before), and a publication
+  planned before the SFU's answer goes out without its top layers, whose encoders pause. Clients
+  from before read no limit, publish at most 3 layers and receive 4-layer tracks like any other
+  (layers are chosen by size).
+- **Keyframes:** the SFU asks the publisher for one when a receiver switches layers, (re)subscribes,
+  or sends `request_keyframe` because it can't decode until the next one (a lost fragment, a frame
+  that didn't decrypt, a failed decoder). Requests are rate-limited per receiver and track (1 s) and
+  per track and layer (500 ms, `KeyframeRequestConfig`); a switch waiting for its keyframe asks
+  again only after 2 s (a 1440p keyframe takes longer to encode and arrive on a slow machine, and
+  every request meanwhile cost another one of 500 KB). A sender whose capture delivers nothing
+  (a still screen) answers a keyframe request with its last picture after 150 ms, and screen
+  shares send their last picture again about once a second while the screen doesn't change
+  (`VideoSendConfig::maybe_idle_refresh`).
+- **Layers that are sent (#921):** a publisher's uplink budget pauses its top layers; it tells the
+  SFU which layers it carries (`uplink_layers`), and the SFU allocates no higher one. A layer that
+  stops arriving while a lower one keeps coming (an older publisher, a failing encoder) is
+  replaced for its receivers by the best lower layer that flows (`layer_stalled_after`, 1.5 s),
+  until it is back. A publisher back from a lost connection hears `layers_needed` again, and
+  sends every layer its new uplink carries until then. A viewer's tile whose video got no new
+  picture for 3 s says so ("Video paused: weak connection").
 - **Screen share:** separate session/stream, so a heavy share cannot degrade the call.
+- **Screen share quality** (`teamcraft_media::video::ScreenProfile`): two content modes, chosen per
+  share (remembered): *detail* (default) keeps text sharp, up to 1440p at 30 fps; *motion* keeps
+  smooth video, up to 1080p at 60 fps. The top layer's bitrate follows the pixel rate (about 0.06
+  bit per pixel, 2 to 8 Mbit/s: 1080p30 about 4, 1440p30 about 6.6); a second layer at half size and
+  a quarter of the bitrate serves weak viewers, and the uplink budget drops the big layer first.
+  A smaller source is never enlarged. Hardware encoders and the screen-content tuning of the encoders
+  apply as for cameras. **4K** (#565) is a choice per share where the workspace policy allows it
+  (`screen_share.max_resolution`, docs/admin.md §3.6): detail up to 4K at 30 fps, motion up to
+  1440p at 60 fps, the top layer at up to 16 Mbit/s, and above 1440p a third, quarter-size layer.
+  The bandwidth estimator grows past its 10 Mbit/s ceiling only up to what the sender (uplink) or
+  the SFU (a viewer's downlink) declares it needs, at most 25 Mbit/s. Budgets: docs/performance.md.
+- **Video codecs** (#565): every client announces what it encodes and decodes with `join`
+  (`MediaCapabilities`); the SFU tells each device that encodes video which codecs all the others
+  that receive video decode (`decodable_video_codecs`, again whenever that changes), and refuses a
+  subscription to a codec the receiver doesn't decode. A detail share goes out in AV1 with its
+  screen content tools (WebCodecs `contentHint: "text"`) where the sender encodes AV1 and everyone
+  else decodes it; a device that joins without AV1 makes the sender publish the share anew in
+  H.264, and the last one leaving lets it return to AV1. Cameras and motion shares stay H.264.
+  Today browsers with an AV1 WebCodecs encoder (Chrome, Edge, Firefox) send AV1; browsers and
+  desktops decode it where their WebCodecs does (the desktop's page tells its shell); the desktop's
+  own encoders and the phone apps are H.264 only, and older clients and SFUs H.264 too.
 - **Screen share sound** (opt-in): the computer's playback without the call itself, as a second
   Opus stream per device (music mode, 64 kbit/s). The SFU forwards it to everyone regardless of
   the speaker selection. It is encrypted with the device's DAVE audio key, like the microphone.
@@ -332,7 +404,7 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - **Video effects** (background blur, background images, light correction) run on the sending device
   before encoding – the SFU only ever sees encrypted frames. Pipeline per platform: [PLAN.md](PLAN.md) §8.
 - Bandwidth estimation: transport-wide feedback over the signaling stream + QUIC congestion signals.
-- Codecs: Opus (audio, 48 kHz, DTX, in-band FEC); video AV1 or VP9 where hardware supports it, H.264 as fallback.
+- Codecs: Opus (audio, 48 kHz, DTX, in-band FEC planned for the measured uplink loss, §6.5); video H.264 everywhere, AV1 for detail screen shares where sender and every viewer support it (negotiated, see "Video codecs" above).
 - The server tells the SFU directly who may join which call (roster + short-lived join tokens); clients never decide that.
 
 ### 6.4 Meetings with CalCraft
@@ -344,6 +416,346 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 5. RSVPs (`method=REPLY`) are processed by CalCraft / an inbox handler and shown in TeamCraft.
 
 The meeting title, time and invitee list are **not** E2EE (they live in CalDAV and e-mail). Meeting chat is.
+
+### 6.5 Mobile networks and lost connections
+
+A call must survive a phone moving from Wi-Fi to LTE, a laptop changing networks and the
+short outages of a train ride. Two layers do that; the call only ends when both fail.
+
+**1. Connection migration (native clients).** The client's UDP socket is bound to the wildcard
+address, so after a network change its packets leave through the new route; quinn clients don't
+pin a source address. On a reported network change (below) the client also moves the connection
+to a fresh wildcard socket of the same family (`Endpoint::rebind`; IPv6 sockets are dual-stack):
+quinn switches to a new connection ID and probes at once, which covers sockets the old network
+took with it (an OS that invalidates them with their interface, a VPN coming up). `wtransport`
+0.7.2 has no client rebind, so it is vendored with one (`crates/vendor/wtransport/VENDORED.md`).
+The SFU allows migration (`allow_migration`) and validates the new path (QUIC `PATH_CHALLENGE`),
+then sends there. The QUIC connection, the DAVE group, the RTP numbering and the jitter buffers
+carry on; the call loses what was in flight during the switch. When the new network can't reach
+the SFU at all from this connection, layer 2 takes over.
+
+**Noticing a dead path.** Clients and the SFU send QUIC keep-alives every 2 s (mobile carriers drop
+idle UDP NAT mappings after about 30 s, some after 20 s), with a 10 s idle timeout. The native
+client watches the connection's received packet count (keep-alive answers count, so quiet calls
+are covered): nothing for 5 s, or nothing within 2 s after a network change, means the path is
+dead. Network changes come from the same signal the gateway reconnects on (the core's
+`NetworkChanges`, one listener per platform): Android's default-network `NetworkCallback`, iOS's
+`NWPathMonitor`, the desktop's resume from suspend and the webview's `online`/visibility events.
+The desktop driver also looks up the local address the system would use toward the SFU once a
+second, which catches a network switch without a wake-up.
+
+**2. Rejoin.** The client opens a new connection with a fresh join token from `teamcraft-server`
+and joins again. The SFU tells a lost connection (idle timeout, reset) from a deliberate close (the
+client leaving, a host control) and keeps a lost participant's slot – audio stream id, published
+tracks, subscriptions – for a grace period (default 30 s, `TEAMCRAFT_SFU_RECONNECT_GRACE_SECS`,
+announced to clients in `joined`). Meanwhile the others see `participant_reconnecting`, not "left",
+and the server's roster (and ringing) doesn't change. A join of the same device takes the slot back
+(`participant_reconnected`), also over a connection the SFU still thinks alive, which is told
+`connection_replaced` and closed. Each connection has its own session id, so the cleanup of an old
+connection never touches the slot a newer one took over. DAVE re-keys: the group removes the lost
+device at once and adds it again with a new key package (e2ee.md §8). The client keeps its RTP
+numbering, own tracks, subscriptions and mute state, and reconciles everything else with the new
+`joined`. After the grace period the slot is released as a normal leave and the client ends the
+call ("connection lost"). Refused joins, removal or end by the host and `connection_replaced` are
+final: they are never answered with a rejoin. A locked meeting still lets a device of its roster
+back in.
+
+**Several devices of one account.** A call's participants are devices, not users: the SFU's slots,
+the server's roster and the DAVE group (one leaf per device, e2ee.md §8) are keyed by device, so a
+phone can join while the laptop is in the call and leaving on one keeps the other in. Each device
+has its own key package and call key binding, so no media key is shared between devices. A device
+doesn't play the microphone of another device of its own account (the user is in the room with
+it; playing it would echo), and a second device joins muted by default ("Join here too"). "Move
+call here" joins and then sends `move_here`: the SFU closes the account's *other* devices in that
+call with `connection_replaced`, which they treat as a final leave; it never touches another
+user's device. The server's ringing already stops for everybody once any device of a callee joins.
+
+**Mute indicator.** A device reports its microphone state with `set_muted` (after joining if it
+starts muted, on every change, and again after a rejoin whenever it could differ); the SFU keeps it
+per device and tells the others with `participant_muted`, and sends one for each muted device right
+after `joined`. It is metadata for the tiles only: the SFU forwards audio exactly as before (a muted
+client sends none). A person shows as muted when all their devices in the call are. Older clients
+ignore the new messages.
+
+Rejoin attempts back off exponentially (250 ms doubling to 2 s) with jitter (each pause between
+half and all of its interval), so clients that lost the SFU together don't come back in lockstep.
+
+**SFU restarts.** Rooms live in the SFU's memory. On SIGTERM (a restart, a rolling deploy) the SFU
+ends every WebTransport session with a `CLOSE_WEBTRANSPORT_SESSION` capsule carrying
+`SFU_GOING_AWAY_CLOSE_CODE` (what a browser reads as `closeCode`), then closes the QUIC connection
+with the same application code, and exits after a
+short drain (`TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS`, default 2 s). Unlike its other closes, clients
+answer this one with a rejoin, the first attempt after a random part of a second, then with the
+back-off above within the grace period they learnt. The restarted SFU (at the same address)
+creates the room again on the first join, and DAVE founds a new group as the others join. While
+going away the SFU reports no leaves, so `teamcraft-server` keeps the call, its roster and its
+ringing state; the new SFU's join reports change nothing there. A crash sends nothing: clients
+notice the dead path after the stall timeout (5 s) and rejoin the same way. Host controls kept in
+the SFU (locks, removals) start fresh; the server's meeting admission still applies to every join
+ticket.
+
+**Roster reconciliation** (#684). Join and leave reports alone can leave a device in the server's
+roster for good: a report given up, a leave never sent while going away by a client that didn't
+come back. So the SFU also reports its whole roster (`POST /api/internal/v1/calls/roster`) at
+start, every `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS` (30 s) and right after a call moved between a
+user's devices, in the same ordered queue as the join and leave reports. The server drops the
+devices it lacks – at once, or, while the SFU has run for less than `[calls] roster_grace_secs`
+(60 s, so it is fresh from a restart and its devices are rejoining), once they were missing that
+long – ends calls left with nobody, and takes devices it never heard join as joins. Once an SFU has
+sent a roster, none for `roster_timeout_secs` (120 s) ends every call. A restart of
+`teamcraft-server` loses its in-memory calls but not the calls themselves: join tokens carry the
+conversation id (signed), the SFU names it per call in its roster, and the server takes over the
+calls it doesn't know – at start it reads the roster from the SFU (`GET
+{sfu_control_url}/internal/v1/calls/roster`) before it serves, otherwise from the next pushed
+roster. Nothing rings again, and the history entry written at the call's start is the one closed at
+its end. Calls that ended here within `roster_grace_secs` are not taken over again. A failed read
+at start is retried in the background (1, 2, 4, 8, 15, 30 s, until a roster came in), and the
+first join token of a conversation without a call asks the SFU first (at most 1 s). Should a
+token still name a new call id for a conversation the SFU runs a call for, the SFU puts the
+device into the running room (one conversation, one room); its `joined` event names the call id
+it is in, and the reports tell the server. A user can also clear their
+own devices from a call at once ("Leave on all devices", `POST
+/api/v1/conversations/{id}/call/leave`): the SFU closes them with `connection_replaced`, so they
+don't rejoin, and the server drops them whatever the SFU answered.
+
+**The roster on the clients** (#976). Clients keep the running calls of the user's conversations
+from the `call_start`, `call_update` and `call_end` events; the call bar of a conversation ("Call
+in progress", or "You are in this call on another device") shows while that roster lists its call.
+Events can be lost for good: a gateway session the server forgot (a restart, the resume window
+passed) starts afresh without the events in between, and a call the server lost in a restart ends
+without any. So after every gateway connection, once caught up, and when the user comes back to the
+app (its attention report turns attentive), the client reads the calls running in its
+conversations (`GET /api/v1/calls`) and hands its call handling a `call_end` for each call the list
+no longer has and a `call_update` for each one whose roster it missed. The roster is kept per
+device: "on another device" shows only when another device of the user is in the call, not for
+this device's own entry still listed for a moment after it left (a device knows its entry once it
+joined a call; before that the user being listed counts).
+
+**A 1:1 call ends for both** (#997). In a direct message, a call between the two people ends as
+soon as one side is gone: hung up, the app closed, or dropped by the roster reconciliation above
+(the SFU reports a lost device only after its reconnect grace period, so a short drop that
+reconnects ends nothing). The server decides it, so every client behaves the same: when a leave
+leaves one person in a DM call that had both in it (and didn't move into a meeting), it ends the
+call, closes its history entry and sends `call_end` with `cause: one_side_left` to all devices of
+both. Devices still in the call leave by themselves, play the hang-up tone (a synthesized status
+cue, three beeps of the busy tone, following the user's call status sounds setting) and show
+"Call ended" for a moment before the chat. The side that hangs up plays the same tone: the join
+token says whether the call ends that way (`ends_when_one_side_leaves`), and a leave that ends it
+(the other person in the call, none of the user's other devices) leaves the SFU at once and then
+plays the tone. Five seconds after the end the server tells the SFU to disconnect devices still
+left behind (an older app, one that missed the event), so its roster can't bring the call back. A
+call taken over after a server restart learns its conversation's kind from the database and ends
+the same way. The instance setting `one_to_one_call_ends_for_both` (admin.md §6.3, default on)
+turns it off; group DMs, channel huddles and meetings run until the last person leaves, and so
+does a DM call once it moved into a meeting.
+
+**Browsers** can't migrate a WebTransport session to another network; when it closes, the
+browser driver rejoins as above, spreading the first attempt when the session's close code
+(`closed`'s `closeCode`) is `SFU_GOING_AWAY_CLOSE_CODE`. Where the browser reports the session's
+received packets (`getStats()`), the SFU's keep-alives (every 2 s) prove the path alive. The page
+can't see those keep-alives itself, and Safari's counts stay zero, so in every browser the
+datagrams and signaling frames the page reads count too, and a session nothing arrived on for a
+second sends `ping`, which the SFU answers with `pong` (outside the event numbering; older SFUs
+ignore it, and a session whose SFU never answered is watched by counts only, so a quiet call isn't
+taken for dead). Media alone never decides: a muted microphone, a camera that is off or a still
+screen share are quiet, the answers keep them alive. Silence for the stall timeout, or no fresh
+proof (a count after the baseline, an answer to a ping sent after the change) for 3 s after the
+page reported a network change (the core's `online` / `visibilitychange` / `pageshow` signal),
+counts as lost without waiting for QUIC's idle timeout; silence the page slept through (a timer
+gap of 2 s or more) doesn't count. A network change while rejoining makes the next attempt due at
+once. Closing or reloading the
+tab closes the sessions in the `pagehide` handler: a leave, not a lost connection.
+
+Every rejoin connects with what its own fresh join ticket names: the SFU's URL and, for a
+self-signed certificate, its SHA-256s (`[calls] sfu_certificate_sha256`), so an SFU that restarts
+with a new certificate is reached again once the server names it.
+
+**Status sounds.** The user hears the state, like in phone calls: while this device rejoins, a soft
+falling two-tone "du-dun" repeats every two seconds; a short rising two-tone says it is back, three
+falling tones that the call was lost; a quieter "du-dun" plays once when someone else drops into
+"reconnecting". The tones are synthesized in `teamcraft-media` (`call_cues`, no sound file, so the
+same sound everywhere and nothing to license), peak at about −18 dBFS, below speech, and are mixed
+into the call's own playback after the jitter buffers: they are never sent, they play even when
+muted or deafened, and they take the call's audio route on every platform (Android: the call's
+output stream and Telecom route – earpiece, speaker, Bluetooth; iOS: the active `playAndRecord`
+session; desktop: the selected speakers; browsers: the call's AudioWorklet). The echo canceller gets
+them as far-end signal, so the microphone doesn't pick them up. A device setting chooses all
+sounds, only the own connection's, or none (desktop and web: Settings → Calls; Android and iOS:
+Settings → Chats).
+
+**Media on bad links.**
+
+- Audio first: own video layers follow the uplink estimate (screen shares before cameras), keeping
+  48 kbit/s for the microphone (more while the screen's sound is shared); a layer comes back with a
+  15 % margin. The start estimate is a guess, so limits apply only after the estimator cut the rate.
+  A new own track (a camera turned on mid-call) starts the same way: the uplink is measured afresh
+  from at least the start estimate, as an estimate made while only sound went out says nothing
+  about video (#935: one lossy moment had cut it below every camera layer, and nothing was sent).
+  A track whose layers are all held back still proves its encoder with one unsent picture, so the
+  start check doesn't take held-back pictures for a failing encoder.
+- Estimates start fast: from the start value (and after measuring afresh) they triple per second
+  until the first overuse or loss, then grow 8 %/s. The SFU measures a receiver's downlink afresh
+  when it subscribes to a new track, so a viewer of a share started after a call of sound only gets
+  the sharp layer within about five seconds instead of minutes (#941). A still screen sends little
+  but keyframe bursts: while a sender sends less than half its estimate, the queue of its own
+  burst doesn't end the fast start, and a screen share keeps its layers through a dip shorter
+  than three seconds, at the SFU and on the presenter's uplink.
+- Cameras on limited and changing links (#939): the ladder and its rules below, the same estimator
+  on the uplink (client) and on each viewer's downlink (SFU).
+
+  | Camera layer | Desktop, browser: 1080p camera | 720p camera (or capped at 720p) | Phones (2 layers, 800 kbit/s) |
+  |--------------|--------------------------------|---------------------------------|-------------------------------|
+  | 0            | 320×180, 94 kbit/s             | 320×180, 94 kbit/s              | half size, 200 kbit/s         |
+  | 1            | 640×360, 375 kbit/s            | 640×360, 375 kbit/s             | full size, 800 kbit/s         |
+  | 2            | 1280×720, 1.5 Mbit/s           | 1280×720, 1.5 Mbit/s            | –                             |
+  | 3            | 1920×1080, 3 Mbit/s            | –                               | –                             |
+
+  Bitrates are the encoders' targets; a busy camera picture comes out at about 80 % of them, and
+  every layer keeps the camera's frame rate (resolution goes before frame rate). Desktop and
+  browser cameras send 1080p where the camera has it (`video::camera_layers`, #967), at 30 fps;
+  the user can cap what is sent at 1080p, 720p or 360p. A 1080p camera's fourth layer, 180p
+  (#978), keeps a viewer whose link can't carry 360p in the picture: with three layers (360p the
+  lowest) such a viewer got only the SFU's resume probes, about 15 frames every 5 s. The layers are planned for the first
+  frame the camera delivers. VideoToolbox encodes cameras at a constant bitrate (browsers where
+  WebCodecs has one): at an average bitrate it stopped spending bits on a calm picture, and a
+  720p layer sent 155 to 306 kbit/s of its 1.5 Mbit/s. Screen layers keep the average bitrate (a
+  still screen sends next to nothing), but VideoToolbox then encodes at a fixed quality and
+  ignores the bitrate: a governor (`video_gstreamer::QualityGovernor`, #979) rebuilds a screen
+  layer's encoder at a lower quality while it sends more than its bitrate (scrolled text) and at
+  the full one again when the screen calms.
+
+  *Estimator* (`teamcraft_media::bwe`): a queue building up (delay trend) cuts the estimate a
+  step, to 85 % of itself; a queue that lasts 500 ms (the window the delivered rate is measured
+  over) while more is sent than gets through cuts it to 85 % of what got through, as does loss
+  above 10 % (to what got through less half the loss; only loss of packets sent after the last
+  such cut counts); loss of 2–10 % holds it. GCC cuts to what got through at once, but a camera
+  doesn't fill its estimate (layers in steps, keyframes): the queue of one keyframe cut it below
+  its top layer. A burst's queue can last as long (a still screen's keyframe read by a slow
+  machine), but nothing more is sent meanwhile: cut to what got through of it, a CI runner's
+  screen share viewer stayed on the half-size layer (#946's test). During the fast start only such
+  a lasting backlog (or loss) ends it, for every sender: the keyframes a new subscription starts
+  with are sent far above the start estimate, and a slow receiver queues them. Growth is 8 %/s,
+  and 50 %/s once the path showed no congestion for 2 s: simulcast grows in steps, so the next
+  step is the probe. A probe that meets congestion doubles that wait (up to 32 s); once 10 % more
+  than at the last congestion gets through, it is 2 s again. Before, a camera cut to its middle
+  layer by a 500 kbit/s limit needed about 20 s back to 720p once the limit was gone.
+
+  *Sender* (`uplink_layers`, cameras the call encodes itself: desktop and phones): after 48 kbit/s
+  for the microphone, the top sent layer may be encoded at 50, 70 or 100 % of its bitrate; lower
+  layers keep theirs (other viewers on weak links take them). A layer stops only when even half
+  its bitrate doesn't fit, and the next lower one becomes the top one, at once. A lower share
+  waits 1 s, a higher one 2 s (each change rebuilds the layer's encoder, which starts with a
+  keyframe), and the way back up goes one step at a time, with a 15 % margin until the estimate
+  covers everything. The estimate may grow to 1.15 × 1.1 times what everything takes (as at the
+  SFU): capped at exactly that, every step cut (a keyframe's queue) took a screen share's sharp
+  layer away once regrowing took longer than its 3 s hold. A step up undone within 4 s was a probe
+  the uplink didn't carry: the next one waits 4 s, doubling up to 32 s, and 4 s again after a step
+  that held (the estimate grows back within seconds after a cut, and every probe costs a keyframe
+  and a moment of congestion). Before, the top layer stopped as soon as its whole bitrate didn't
+  fit: a 500 kbit/s uplink carried 320×180 at about 80 kbit/s, a 2 Mbit/s one 640×360 at 300
+  kbit/s. Browsers' cameras and screen shares send a layer whole or not at all, as before.
+
+  *SFU* (`layers`): per viewer, its downlink estimate less 120 kbit/s for sound is the budget;
+  the layer is the highest whose bitrate fits, at most the one the viewer asks for: the smallest
+  that covers its tile (#927; the desktop too since #967), or the quality picked in the video's
+  quality menu (#967). Down at
+  once, up one layer at a time once the budget covered it with 15 % headroom for 2 s (0.5 s while
+  the estimate is in its fast start: it only grows then, and the hold validates nothing; a screen
+  share's viewer got the sharp layer 2 s after the estimate covered it). A camera drops to its
+  lowest layer at once but is paused only once the budget stays below that for 2 s; a paused
+  camera is tried again at its lowest layer 2 s later, then 4 and 8 s apart (it was every 5 s:
+  a CI runner's viewer saw no picture for 5.3 s after its link's estimate collapsed). Other
+  viewers of the same camera are not affected.
+
+  Before a step up the SFU checks that the viewer's downlink carries it (`probe`, #994): the
+  estimate grows while the link isn't full, and switching to the next layer to find out stalled
+  the picture of a viewer whose link couldn't take it (a 250 kbit/s viewer of a 1080p camera:
+  gaps of 2.6–5.2 s every few seconds). The SFU sends a burst of padding datagrams back to back
+  (50 ms of the new total, at least four of 1000 bytes) on a stream it never assigns; receivers
+  report their arrival like any datagram's and drop them (every client does, also those from
+  before). The bottleneck spaces them out at its rate, so their arrival times show what the link
+  carries. A burst that gets through lets the step follow 0.5 s after the estimate covers it, and
+  after the fast start raises the estimate there (at most twice what it was sent for; during it,
+  jumping ahead switched a screen share's viewer to the sharp layer before the presenter's own
+  uplink carried it); one that falls short limits the estimate to what got through (never below
+  what keeps the current layers), and the next one waits 2 s, then 4 s.
+  Bursts also go out before the estimate covers a step, so a link that got better is found
+  within seconds instead of after the estimate's slow growth after congestion. Their queue and
+  loss don't count as congestion. Receivers that send no feedback switch up as before. After
+  (`weak_downlink`, laptop): every frame 180p, longest gap 150–200 ms (8 runs in parallel); a
+  simulated 250 kbit/s link that becomes 10 Mbit/s reaches the top layer after 4.7 s (6.6 s
+  before).
+
+  Measured (`bandwidth_limits` in the SFU's test suite: real SFU, a 720p camera with sensor noise,
+  a bottleneck with a 250 ms queue; OpenH264, laptop, release build):
+
+  | Scenario                              | Before (3 runs)                           | After (6 runs)                     |
+  |---------------------------------------|-------------------------------------------|------------------------------------|
+  | Uplink 500 kbit/s                     | 320×180, ~75 kbit/s, 33.8 dB              | 640×360, 200–350 kbit/s, 35.8 dB   |
+  | Uplink 2 Mbit/s, after 500 kbit/s     | 320×180 or 640×360, at most 300 kbit/s    | 720p 2–9 s after the step          |
+  | Uplink limit lifted                   | 720p 6 s later, or not within 10 s        | 720p already                       |
+  | Uplink drops to 500 kbit/s            | longest stall 0.2–0.3 s                   | longest stall 0.3–1.0 s            |
+  | Viewer's downlink drops to 500 kbit/s | longest stall 2.2–3.4 s, then 320×180     | 0.6–1.0 s, then 320×180 or 640×360 |
+  | Viewer's downlink limit lifted        | 640×360 after 1–2 s, 720p not within 14 s | 720p after 2–9 s                   |
+  | The other viewer                      | 720p throughout                           | 720p throughout                    |
+
+  (dB: luma PSNR of the picture as a large tile shows it, a lower layer scaled up to 720p.) A
+  sudden drop stalls a little longer than before: the top layer keeps its share for the hold
+  until the estimator's cut to what got through. While a limit stays, the next layer is tried
+  now and then (the probe: 4 s apart at first, then up to 32 s), which can hold the picture up
+  for up to a second. Not yet: QUIC's send buffer (client and SFU, up to 1 MiB of datagrams)
+  and its congestion window, which collapses after the loss of a sudden drop, deliver the old
+  layer's queue before the lower one (seconds of it on a loaded machine); browsers' cameras
+  don't adapt their bitrate (WebCodecs would need a reconfigured encoder per change); the shares
+  aren't told to the SFU, which allocates by the layers' full bitrates.
+- Large frames: a frame of more than 255 fragments (a 1440p keyframe of text is about 450 KB)
+  carries the fragment extension's long form (16-bit index and count, up to 4096 fragments); the
+  short form stays for every other frame. Before, such keyframes could not be sent, and the top
+  layer of a text-heavy share never arrived (#941).
+- Screen content in OpenH264 uses timestamp-based rate control planned for 5 pictures a second: a
+  screen changes a few times a second, and planned for 30, keyframes of text starved the pictures
+  after them.
+- Opus in-band FEC is planned for the measured uplink loss (5 % floor, 30 % cap; the native encoder
+  and WebCodecs' `packetlossperc`). Native receivers recover a lost packet from the next packet's FEC
+  data; WebCodecs can't, browsers conceal.
+- Jitter buffer: an outage drains it and it re-buffers to its target depth; a backlog that arrives
+  in a burst after a handover is skipped down to the target once it persists for half a second,
+  instead of adding its length as latency for the rest of the call.
+
+| Platform | Network change                             | Migration | Rejoin            | UI while rejoining               |
+|----------|--------------------------------------------|-----------|-------------------|----------------------------------|
+| Android  | core signal (`NetworkCallback`)            | yes       | yes, engine token | "Connection lost, reconnecting…" |
+| iOS      | core signal (`NWPathMonitor`)              | yes       | yes, engine token | "Connection lost, reconnecting…" |
+| Desktop  | core signal (wake, webview) + route lookup | yes       | yes, core token   | header status, tiles dimmed      |
+| Browser  | core signal (`online`, visibility) + stats | no        | yes, page's token | header status, tiles dimmed      |
+
+Tests: deterministic ones drive the SFU's rooms and real call engines in memory (lost connection,
+grace expiry, takeover, a lossy uplink) and the native client over loopback through a UDP relay
+that changes its address (migration) or drops everything (rejoin). Real radios:
+[docs/manual-tests/call-handover.md](docs/manual-tests/call-handover.md).
+
+### 6.6 Networks that block UDP
+
+Calls need UDP to the SFU's QUIC port (default 3478: the STUN/TURN port Teams, Zoom and WebRTC
+services use, so restrictive networks often allow it already; 443/udp is taken by the proxy's
+HTTP/3). Some corporate, hotel and guest networks block UDP or everything but 80/443 over TCP; there
+the WebTransport handshake fails and joining a call fails after the connection timeout. Chat is
+unaffected (HTTPS and WebSocket over TCP). There is no TCP fallback today.
+
+Options for a fallback, by fit with §6.1:
+
+- **WebTransport over HTTP/2** (IETF draft): the same API over TCP/TLS. Browser support is the
+  question – check the current state before relying on it; `wtransport` doesn't implement it.
+- **A TCP/TLS relay on 443 next to the SFU**: the client carries the signaling stream and the media
+  datagrams (length-prefixed frames) over one TLS connection – WebSocket in browsers, plain TLS in
+  native clients – and the relay hands them to the SFU as if they came over QUIC. Works everywhere
+  HTTPS works; costs head-of-line blocking on loss, so the relay drops media frames that wait too
+  long instead of queuing them. The SFU, DAVE and the engine stay as they are.
+- **TURN over TCP/TLS**: needs ICE, i.e. WebRTC – ruled out by §6.1.
+
+Recommendation: the TLS/WebSocket relay, tried by the client after QUIC fails or doesn't connect
+within a few seconds (happy-eyeballs style), with the relay's port behind the same reverse proxy as
+the server. Until then, operators document that calls need outbound UDP 3478 (docs/operations.md).
 
 ## 7. Clients
 
@@ -364,24 +776,25 @@ Monorepo. Deployment configuration lives in a separate private `teamcraft-deploy
 Crates that exist today: `proto`, `crypto`, `media`, `core`, `server`, `sfu`. The others are added
 when their milestone starts.
 
-| Path                      | Kind   | WASM | Purpose                                                                                                                                       |
-|---------------------------|--------|------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `crates/teamcraft-proto`  | lib    | yes  | API, gateway and SFU signaling types (serde)                                                                                                  |
-| `crates/teamcraft-crypto` | lib    | yes  | MLS (openmls), identity/device keys, content keys, key bag, rendezvous, attachment crypto                                                     |
-| `crates/teamcraft-media`  | lib    | yes  | RTP packetization, jitter buffer, DAVE (davey), simulcast layer logic                                                                         |
-| `crates/teamcraft-db`     | lib    | no   | Postgres access (sqlx, compile-time checked queries), migrations                                                                              |
-| `crates/teamcraft-ops`    | lib    | no   | Helpers of the server binaries: container health probe (`healthcheck` subcommand), graceful shutdown signal                                   |
-| `crates/teamcraft-core`   | lib    | yes  | Client state, sync, local store (SQLCipher), search (tantivy + shared encrypted segments), notification rules                                 |
-| `crates/teamcraft-ffi`    | lib    | no   | UniFFI bindings of `teamcraft-core` for Swift and Kotlin                                                                                      |
-| `crates/teamcraft-server` | bin    | no   | REST API, gateway, auth, permissions, presence, MLS delivery, push, CalCraft/SMTP                                                             |
-| `crates/teamcraft-sfu`    | bin    | no   | WebTransport SFU                                                                                                                              |
-| `crates/teamcraft-vault`  | bin    | no   | Optional trusted vault node: compliance archive, file text extraction                                                                         |
-| `crates/teamcraft-bridge` | bin    | no   | Integration bridge: local webhooks/log ingestion → E2EE messages, builds index segments                                                       |
-| `crates/teamcraft-pbx`    | bin    | no   | Telephony + AI hotline: provider-agnostic SIP trunks, voice agent adapters, queues, DAVE participant ([docs/telephony.md](docs/telephony.md)) |
-| `crates/teamcraft-ui`     | lib    | yes  | Leptos UI (desktop + web)                                                                                                                     |
-| `apps/desktop`            | Tauri  | no   | macOS + Linux shell, native audio                                                                                                             |
-| `apps/ios`                | Xcode  | no   | App + Notification Service Extension                                                                                                          |
-| `apps/android`            | Gradle | no   | App                                                                                                                                           |
+| Path                         | Kind   | WASM | Purpose                                                                                                                                       |
+|------------------------------|--------|------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `crates/teamcraft-proto`     | lib    | yes  | API, gateway and SFU signaling types (serde)                                                                                                  |
+| `crates/teamcraft-crypto`    | lib    | yes  | MLS (openmls), identity/device keys, content keys, key bag, rendezvous, attachment crypto                                                     |
+| `crates/teamcraft-media`     | lib    | yes  | RTP packetization, jitter buffer, DAVE (davey), simulcast layer logic                                                                         |
+| `crates/teamcraft-db`        | lib    | no   | Postgres access (sqlx, compile-time checked queries), migrations                                                                              |
+| `crates/teamcraft-ops`       | lib    | no   | Helpers of the server binaries: container health probe (`healthcheck` subcommand), graceful shutdown signal                                   |
+| `crates/teamcraft-core`      | lib    | yes  | Client state, sync, local store (SQLCipher), search (tantivy + shared encrypted segments), notification rules                                 |
+| `crates/teamcraft-ffi`       | lib    | no   | UniFFI bindings of `teamcraft-core` for Swift and Kotlin                                                                                      |
+| `crates/teamcraft-server`    | bin    | no   | REST API, gateway, auth, permissions, presence, MLS delivery, push, CalCraft/SMTP                                                             |
+| `crates/teamcraft-sfu`       | bin    | no   | WebTransport SFU                                                                                                                              |
+| `crates/teamcraft-vault`     | bin    | no   | Optional trusted vault node: compliance archive, file text extraction                                                                         |
+| `crates/teamcraft-bridge`    | bin    | no   | Integration bridge: local webhooks/log ingestion → E2EE messages, builds index segments                                                       |
+| `crates/teamcraft-notetaker` | bin    | no   | AI notetaker: a call participant that transcribes through OpenRouter and posts a summary ([docs/e2ee.md](docs/e2ee.md) §8.2)                  |
+| `crates/teamcraft-pbx`       | bin    | no   | Telephony + AI hotline: provider-agnostic SIP trunks, voice agent adapters, queues, DAVE participant ([docs/telephony.md](docs/telephony.md)) |
+| `crates/teamcraft-ui`        | lib    | yes  | Leptos UI (desktop + web)                                                                                                                     |
+| `apps/desktop`               | Tauri  | no   | macOS + Linux shell, native audio                                                                                                             |
+| `apps/ios`                   | Xcode  | no   | App + Notification Service Extension                                                                                                          |
+| `apps/android`               | Gradle | no   | App                                                                                                                                           |
 
 ## 9. Milestones
 

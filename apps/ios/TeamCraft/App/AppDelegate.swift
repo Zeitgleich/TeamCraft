@@ -9,6 +9,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
     UNUserNotificationCenter.current().delegate = self
+    // DM titles, members and notifications name deleted accounts in the user's language (#1066).
+    setDeletedUserName(name: String(localized: "user_deleted_name"))
     NotificationCategories.register(in: UNUserNotificationCenter.current())
     // Before anything else: a call push that launches the app is delivered to this registry.
     AppModel.shared.calls.start()
@@ -45,6 +47,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     _ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse
   ) async {
     let info = response.notification.request.content.userInfo
+    // Approve or Decline of an admin's request to join; a tap opens the channel like a message.
+    if info[NotificationKeys.kind] as? String == NotificationKeys.joinRequestKind,
+      response.actionIdentifier == NotificationCategories.approveJoinAction
+        || response.actionIdentifier == NotificationCategories.declineJoinAction
+    {
+      await AppModel.shared.handle(
+        joinRequestAction: response.actionIdentifier, tag: info[NotificationAuthenticator.tagKey] as? String,
+        notificationId: response.notification.request.identifier)
+      return
+    }
     guard let conversationId = info[NotificationCategories.conversationKey] as? String else { return }
     let reply = (response as? UNTextInputNotificationResponse)?.userText
     let tag = info[NotificationAuthenticator.tagKey] as? String

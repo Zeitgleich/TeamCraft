@@ -25,14 +25,14 @@ just self-check
 
 What you need first: a Debian 13 VPS (2 vCPU, 4 GB RAM) with public IPv4 and IPv6, A and AAAA records
 for `chat.example.com`, `sfu.chat.example.com` and, when bundled, `id.` and `s3.` below it, and UDP
-port 4433 open for calls. The playbook's documentation covers DNS, configuration, secrets (generated
+port 3478 open for calls. The playbook's documentation covers DNS, configuration, secrets (generated
 or sops + age), updating, backups and every component.
 
 Several brands on one server (`docs/branding.md`) are `teamcraft_brands` in the playbook: it adds
 the host names to Caddy and the Keycloak client.
 
 Then point the desktop app at `https://chat.example.com` and sign in. The first device of every user
-creates their keys; set up the recovery passphrase when asked.
+creates their keys; save the recovery kit when asked (e2ee.md §6.5).
 
 ### Running the images yourself
 
@@ -55,26 +55,61 @@ repository's end-to-end harness against it (`tests/e2e/tests/suite/deployed.rs`,
 
 ## Pieces and what holds state
 
-| Piece              | State                                                                     | Needs backup |
-|--------------------|---------------------------------------------------------------------------|--------------|
-| `teamcraft-server` | none of its own (calls roster and rate limits are in memory)              | config only  |
-| PostgreSQL         | accounts, structure, **ciphertext** of messages and MLS queues, audit log | yes          |
-| S3 bucket          | encrypted attachments and search index segments                           | yes          |
-| `teamcraft-sfu`    | none (rooms live while a call lasts)                                      | config only  |
-| `teamcraft-bridge` | SQLCipher database with the bot's keys and its channels' content keys     | yes          |
-| Identity provider  | users, roles, sessions                                                    | its own      |
+| Piece                 | State                                                                                                            | Needs backup |
+|-----------------------|------------------------------------------------------------------------------------------------------------------|--------------|
+| `teamcraft-server`    | none of its own (calls roster and rate limits are in memory)                                                     | config only  |
+| PostgreSQL            | accounts, structure, **ciphertext** of messages and MLS queues, audit log                                        | yes          |
+| S3 bucket             | encrypted attachments and search index segments                                                                  | yes          |
+| `teamcraft-sfu`       | none (rooms live while a call lasts)                                                                             | config only  |
+| `teamcraft-bridge`    | SQLCipher database with the bot's keys and its channels' content keys                                            | yes          |
+| `teamcraft-notetaker` | SQLCipher database with the bot's keys, its conversations' content keys and the transcripts of calls in progress | yes          |
+| Identity provider     | users, roles, sessions                                                                                           | its own      |
 
 The server only holds ciphertext. A stolen database or bucket gives an attacker metadata (who is in
 which conversation, when messages were sent) but no message content or attachment keys. Clients
-hold the keys; see `docs/e2ee.md` for what is recoverable and how (backup key, passphrase, device
+hold the keys; see `docs/e2ee.md` for what is recoverable and how (backup key, recovery kit, device
 linking, organization recovery). **Losing the database loses everybody's history** unless a backup
 exists; clients can still read what they have stored locally.
 
 ## Health and monitoring
 
-- `GET /healthz` is liveness, `GET /readyz` also checks the database. The images ship
-  `teamcraft-server healthcheck [--ready]`, `teamcraft-sfu healthcheck` and `teamcraft-bridge
-  healthcheck` for container health checks (no curl in the images).
+- `GET /healthz` is liveness, `GET /readyz` also checks the database and answers 503 once a shutdown
+  has begun. The images ship
+  `teamcraft-server healthcheck [--ready]`, `teamcraft-sfu healthcheck`, `teamcraft-bridge
+  healthcheck` and `teamcraft-notetaker healthcheck` (its liveness file, the notetaker listens on
+  no port) for container health checks (no curl in the images).
+- **Dependencies** (`[dependencies]`, issue #743). Each backend (database, object storage, identity
+  provider, push gateway, SFU control) has a circuit breaker: after `failure_threshold` (3) failures
+  in a row it counts as down, requests that need it are answered at once with **503, `Retry-After`
+  and `error_code: "unavailable"`** instead of waiting for a timeout each, and after `open_secs`
+  (15) one request probes it again. Idempotent calls are retried twice within a request first
+  (200 ms, doubling, with jitter; timeouts are not repeated). `/readyz` lists every dependency's
+  state:
+
+  ```json
+  {"status": "degraded", "dependencies": [{"dependency": "database", "state": "ok"},
+    {"dependency": "object_storage", "state": "down"}]}
+  ```
+
+  Only the database makes `/readyz` answer 503, and only after the breaker opened (one slow ping,
+  bounded by `readiness_timeout_ms`, doesn't take the instance out of the load balancer). Another
+  dependency that is down makes it `degraded` with 200: every instance would meet the same outage,
+  and taking them out would turn a storage outage into a full one. Alert on `degraded` and on the
+  log lines `dependency is down` / `dependency is back`.
+- **Database outages.** Handlers' errors feed the database's breaker, so it opens under traffic
+  without anybody asking `/readyz`: requests that need the database then answer at once rather than
+  after `acquire_timeout_secs`, and one request pings after `open_secs`. Server info, brand and client
+  compatibility answer from memory and stay up. Queries are not repeated by the server; the clients
+  do that after `Retry-After`. A pool that is exhausted under load looks the same as an outage once
+  nothing has succeeded three times in a row, and sheds load for `open_secs`.
+- **Request deadline** (`request_deadline_secs`, 60 s, 0 turns it off). An API request that makes no
+  progress this long answers 503, whatever it hangs on; receiving a piece of its body is progress, so
+  a slow upload is not cut off. Imports and the gateway are exempt. Log line: `a request made no
+  progress within the deadline`. Raise it if a legitimate admin action runs longer behind your proxy.
+- Every 503 of the server carries `Retry-After` (in the header and as `retry_after_secs` in the
+  body); the apps wait at least that long (one shared retry policy, capped exponential backoff
+  with jitter). A short database blip at startup — also between the connect and the migrations —
+  is waited for within `[database] startup_wait_secs` instead of exiting into a crash loop.
 - Logs are structured `tracing` output on stderr (`RUST_LOG` / `[logging]`). They never contain
   tokens, keys or message content (checked by tests); IDs of public objects are logged.
 - Watch: 5xx rate, 429 rate (rate limits, `docs/performance.md`), database connection saturation
@@ -90,8 +125,80 @@ exists; clients can still read what they have stored locally.
   `X-Forwarded-For` from a private address.
 - Never expose `/api/internal/` to the internet: it is for the SFU and the mail inbox handler, and is
   protected by bearer tokens, but there is no reason to publish it.
-- Everything facing the network is dual stack (IPv4 and IPv6). The SFU needs UDP `4433` reachable
-  from clients (QUIC); its health endpoint (`8081/tcp`) is for the orchestrator only.
+- Everything facing the network is dual stack (IPv4 and IPv6). The SFU needs UDP `3478` reachable
+  from clients (QUIC); its health endpoint (`8081/tcp`) is for the orchestrator only. Calls don't
+  work on networks that block outbound UDP (some corporate, hotel and guest networks); there is no
+  TCP fallback yet (ARCHITECTURE.md §6.6), so name the port in the instructions for users.
+- The SFU asks for a 4 MiB UDP receive buffer (`TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES`), so a
+  keyframe's burst isn't lost while it is busy. The kernel caps it at `net.core.rmem_max` without an
+  error, often about 200 KiB: raise that sysctl on the host to at least the same value (it isn't
+  per container). The SFU logs a warning at start when it got less. With less, a 1440p share's
+  keyframe can get lost while the SFU is busy: viewers ask for another, and fall back to the lower
+  layer if that keeps happening, so a share turns blurry or freezes for seconds rather than ends.
+- Keep the SFU's UDP port out of anything that tracks UDP "connections" by address and port (a
+  load balancer without QUIC connection-ID routing, a strict stateful firewall): when a client
+  changes networks its QUIC connection continues from a new address (connection migration,
+  ARCHITECTURE.md §6.5), and such a box would drop or misroute those packets. A plain DNAT/port
+  forward to one SFU is fine.
+- A participant whose connection is lost keeps their place in the call for
+  `TEAMCRAFT_SFU_RECONNECT_GRACE_SECS` (default 30) while their app rejoins; a connection is lost
+  after `TEAMCRAFT_SFU_IDLE_TIMEOUT_SECS` (default 10) without packets. Longer grace periods cover
+  longer outages (trains, lifts) but keep a departed participant listed as "reconnecting" longer.
+- Restarting or redeploying the SFU doesn't end running calls. On SIGTERM it closes every call
+  connection as "going away", waits up to `TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS` (default 2) for the
+  closes to go out, and exits. Apps rejoin with a fresh join token, spread over about a second, and
+  keep trying with back-off for the reconnect grace period they learnt (default 30 s): bring the
+  new SFU up at the same address within that time and the calls continue after a short gap, with a
+  fresh DAVE group. A crash works the same way, only the apps notice the dead connection after
+  about 5 s instead of at once. Rooms, locks and host removals live in the SFU's memory and start
+  fresh; the server's meeting admission still applies to every rejoin. Desktop and mobile apps of
+  version 1.0.2 and older end the call on "going away" (a browser tab rejoins).
+- The SFU reports its whole call roster to the server at start and every
+  `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS` (default 30); the server drops participants the SFU no
+  longer has (after `[calls] roster_grace_secs`, default 60, while the SFU is fresh from a restart)
+  and ends calls with nobody left. If the SFU stops reporting for `[calls] roster_timeout_secs`
+  (default 120), the server ends its calls. Keep the timeout a few intervals long.
+- One account may have `[calls] max_devices_per_user_per_call` devices (default 3) in the same call.
+  The server refuses a join token for a further device and the SFU refuses its join, both with
+  `call_device_limit`. Set the SFU's `TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL` to the same value.
+- Restarting `teamcraft-server` doesn't end running calls either: at start it reads the SFU's
+  roster over `[calls] sfu_control_url` (and otherwise from the SFU's next roster) and takes over
+  the calls that kept running, without ringing again. Calls whose join tokens came from a server
+  before 1.0.8 can't be taken over (the tokens don't name the conversation).
+
+### Company proxies, TLS inspection and captive portals (clients)
+
+How the apps behave on networks between the user and the server (issue #157):
+
+| Platform | Proxy                                                                                    | Certificate authorities                                                                                              |
+|----------|------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------|
+| Desktop  | `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`, then macOS and Windows settings | The operating system's store (Keychain and MDM profiles, Windows store and group policy, the Linux system store)     |
+| iOS      | The system's HTTP(S) proxy (Wi-Fi settings, MDM profile)                                 | The system's trust settings, including profiles the MDM installed                                                    |
+| Android  | The network's HTTP proxy (`LinkProperties`)                                              | The system CAs; user and MDM-installed CAs only with the managed configuration `trust_user_certificates` set to true |
+| Web      | The browser's                                                                            | The browser's                                                                                                        |
+
+- REST and the WebSockets (gateway, device-link relay) use the same proxy; the WebSockets tunnel with
+  HTTP `CONNECT`, including `user:password@` from a proxy URL. REST also takes `https://` proxies;
+  the WebSockets tunnel through `http://` ones only and connect directly otherwise. SOCKS proxies
+  are not used. PAC scripts are never evaluated: on a network that only has one, the apps connect
+  directly. On Linux desktops only the environment variables count (no GNOME/KDE settings). A proxy
+  change on the desktop applies after a restart of the app; on mobile it applies when the network or
+  its proxy changes, and the iOS notification extension reads it whenever it opens the core.
+- Android ignores CAs that users install themselves, as Android apps do by default, so a CA someone
+  talked the user into installing reads nothing. An organization that inspects TLS on managed
+  devices turns on `trust_user_certificates` in its MDM's managed configuration for the app; it
+  applies at the next app start.
+- Calls (QUIC over UDP to the SFU) never go through an HTTP proxy.
+- A captive portal (a login page answering instead of the server: HTML where the API answers JSON, a
+  redirect to another site, HTTP 511) and a refused certificate are shown in the connection banner
+  as such ("sign in to this network", "this network may inspect encrypted traffic"); queued messages
+  and uploads wait and are sent once the server answers.
+- Happy Eyeballs (RFC 8305, issue #420): when the host's IPv6 route swallows packets, the apps fall
+  back to IPv4 instead of staying "unreachable". REST (hyper-util, 300 ms), the gateway and relay
+  WebSockets and the QUIC handshake to the SFU for calls (250 ms) race the address families. The
+  Android app's own requests (sign-in at the identity provider and token refresh, a local
+  account's sign-in, the server check, brand images, the video codec download) go through the
+  core's HTTP client too, with the same proxy and certificate authorities (#433).
 
 ## Backup and restore
 
@@ -129,15 +236,83 @@ works. The database references objects by key; a restore needs the database and 
 about the same time. Objects without a database row are garbage (an upload that never completed) and
 harmless; rows without an object show up as failed downloads.
 
+Files over 8 MiB go up in parts (S3 multipart). Browsers read each part's `ETag` from the storage's
+answer, so the bucket's CORS rule must expose it (`<ExposeHeader>ETag</ExposeHeader>`, as
+`dev/garage-cors.py` sets); without it web uploads of large files fail. The server aborts uploads in
+parts that got no new part for `multipart_expiry_secs` (`[storage]`, default one day). The bucket
+also needs a lifecycle rule that aborts incomplete multipart uploads (`AbortIncompleteMultipartUpload`,
+for example after 3 days): the server can't abort an upload it lost track of (it crashed between
+creating the upload and recording it, or aborting a cancelled one failed), and their parts would
+take space unseen. `dev/garage-cors.py` sets both rules on the dev bucket.
+
 ### Restore order after a total loss
 
 1. Postgres from the latest backup, S3 bucket from its copy.
 2. Server and SFU with the same configuration and **the same secrets** (see below), including the
    settings key (`[secrets]`; without it the mail and calendar passwords set in the console must be
    entered again), identity provider reachable.
-3. Bridges: restore their database file (it holds the bot's keys) or re-enroll them with their
-   passphrase (the bot's backup key is on the server, so a lost bridge database is recoverable).
+3. Bridges and the notetaker: restore their database file (it holds the bot's keys) or re-enroll
+   them with their passphrase (the bot's backup key is on the server, so a lost database is
+   recoverable; a lost notetaker database also loses the transcript of a call in progress).
 4. Clients reconnect and run a full sync; devices whose rows were lost re-register.
+
+## Owners
+
+Owners (the role `owner` in the identity provider, `just ensure-admin` above) sign the workspace's
+admin roster and policy with their devices (admin.md §2.3). The server can't do it for them, and
+there is no operator override: an operator with full access to the server and database still can't
+make someone an owner.
+
+- Make sure there are **at least two owners** with a set-up device and recovery kit. Give the
+  second person the owner role in the identity provider before the first owner signs the first
+  policy: the first roster takes every owner and admin the server lists then. The console
+  (Administration → Security → Owners) warns when the signed roster has fewer owners than
+  recommended and shows when each owner last signed.
+- **Handing over:** the successor goes into the signed roster as owner first, the old owner is
+  removed afterwards. A roster without an owner is refused by the apps and the server
+  (`last_owner`). Both steps are made in the console (Administration → Security → Owners) by an
+  owner, who signs each change on their device. Role changes in the identity provider show up there
+  as a difference until an owner signs them.
+- An owner's app re-signs the roster every 15 days while it is in use. If no owner opens TeamCraft
+  for 30 days, member clients stop accepting the admins until an owner does; the console warns a
+  week ahead.
+- **If every owner is lost** (left, or lost all devices and the recovery kit), the workspace
+  can't be administered any more, and there is **no recovery path** (issue #188): chat keeps
+  working, admin actions stop once the freshness window (30 days) ran out, restoring a backup does
+  not help, and a new first owner is refused by every client (`RootChanged`). The only way out is
+  [setting up again](#setting-up-again). Details: admin.md §2.3.1.
+
+### Setting up again
+
+Only when no owner can be brought back. It starts a new workspace; the old one's history is not
+carried over. Work through it in this order:
+
+1. **Tell everybody.** All members must re-enroll, so pick a time. The old history stays readable
+   only on devices that still hold it.
+2. **Stop** `teamcraft-server`, `teamcraft-sfu`, bridges and the notetaker. Keep a last backup of the
+   old database for the record, but do not restore it.
+3. **Start from an empty database** (new database or dropped schema; the server migrates it on
+   start) and an empty bucket (or a new one: the old objects have no rows any more and are
+   ciphertext only). Keep the configuration and secrets, the identity provider and the domain.
+4. **Give the role `owner` to at least two people** in the identity provider (`just ensure-admin`
+   for the first), before anybody signs.
+5. **Every member reinstalls or clears the app's local data** and signs in again. This is not
+   optional: each app pins the old root of trust in its local store and would refuse the new
+   genesis (`RootChanged`). Everybody sets up a new key (new identity key, key bag and recovery
+   kit).
+6. **The first owner saves the first policy** (Administration → Security). That signs the genesis
+   roster with the first owner as root of trust; confirm the proposed owners and admins one by one
+   (admin.md §2.3.1, "The first roster"). Members compare the root fingerprint with that owner.
+7. **Re-enroll bridges and the notetaker** (their keys belong to the old workspace), then recreate
+   spaces, channels and memberships; guests are invited again.
+
+| Kept                                                 | Lost                                                        |
+|------------------------------------------------------|-------------------------------------------------------------|
+| Configuration file, secrets, domain, certificates    | Messages, files, channels, spaces, memberships              |
+| Identity provider accounts and roles (incl. `owner`) | Devices, identity keys, key backups, recovery kits          |
+| Deployment of server, SFU and push gateway           | The signed roster and policy (signed again)                 |
+|                                                      | Settings made in the console (mail, calendar, policy)       |
+|                                                      | Guests, invitations, integration sources, bridge enrollment |
 
 ## Upgrades
 
@@ -148,17 +323,180 @@ harmless; rows without an object show up as failed downloads.
   rate limits and the call roster live in the server's memory, and there is no bus between instances
   yet: events published on one instance never reach clients connected to another. Upgrade by
   replacing the instance (a short interruption), not by rolling several.
-- Order: database backup, new `teamcraft-server`, then `teamcraft-sfu`, then bridges. The SFU
-  verifies join tokens the server signs; the token format is versioned with the server. An old
-  server binary refuses to start against a database migrated by a newer one.
-- A restarting server drops WebSocket connections and forgets their sessions: every client
-  reconnects (with backoff) and runs a full sync, so expect a burst of API traffic right after the
-  restart. A reverse proxy in front must keep idle WebSockets open for at least 60 s (clients send a
+- Order: database backup, new `teamcraft-server`, then `teamcraft-sfu`, then bridges and the
+  notetaker. The SFU verifies join tokens the server signs; the token format is versioned with the
+  server. An old server binary refuses to start against a database migrated by a newer one.
+- On SIGTERM the server drains: `/readyz` answers 503, every gateway and device-linking socket is
+  closed with code 1012 ("service restart"), and the process waits up to `[gateway]
+  drain_timeout_secs` (default 10) for the sockets to close before it exits. Give the container a
+  stop grace period above that. The new server forgets the sessions: every client reconnects (with
+  jitter) and runs a full sync, so expect a burst of API traffic right after the restart. A reverse proxy in front must keep idle WebSockets open for at least 60 s (clients send a
   heartbeat every 25 s). Calls in progress
   live in the SFU and survive a server restart (the server's call roster is in memory and starts empty;
   it is filled by the SFU's participant reports once the SFU sends them).
 - Check `docs/` and the release notes for configuration changes before upgrading. The server rejects
   unknown configuration keys at startup, so a stale key fails fast instead of being ignored.
+
+## Server address in the apps
+
+The desktop, Android and iOS apps have no server built in. On first start they ask for the server
+address; users type `team.example.com`, the full URL, or paste any link into the server (an invitation,
+a message link). The app shows the server's logo, name, host and identity provider for confirmation
+and then signs in with the settings the server announces. "Change server" on the sign-in screen goes
+back to the entry. When a host name does not resolve, the desktop app says so and offers "Check
+similar addresses": only when the user presses it does it look up the same name under a few other
+common top-level domains (`.com` typed for `.de`) and offer the first one that exists as "Did you
+mean …?". Taking it only fills in the field; the app never connects on its own. The web client needs
+none of this: it signs in to the server that served it.
+
+After the identity provider, the browser tab of the desktop sign-in shows a page from the app's
+loopback listener in the app's language and theme, with the server's logo and name. It is answered
+only once the tokens are in, so it says whether the sign-in really worked; it is self-contained
+(content security policy `default-src 'none'`, no scripts) and never shows the redirect's
+parameters.
+
+Every sign-in the user starts shows the identity provider's login page, also when the browser still
+has a session there (OIDC `prompt=login`, issue #448), so people with several accounts see which one
+they sign in with and can switch. The page is prefilled with the account last used on that device
+for that server (`login_hint`, from the ID token's `preferred_username` or `email`) and shown in the
+app's language (`ui_locales`). The mobile apps also use an ephemeral browser session. Staying signed
+in is unaffected: the apps renew their tokens without the browser, and the web client's silent
+renewal after a reload never asks for the login page. Operators who prefer silent single sign-on
+turn it off (Admin → Settings → Sign-in page, `is_login_page_always_shown`).
+
+When the identity provider refuses a sign-in in its redirect (OAuth `error`, issue #1063), every
+app names the reason: `access_denied` says the account isn't allowed, `invalid_request`,
+`unauthorized_client`, `unsupported_response_type` and `invalid_scope` say the client is set up
+wrongly (tell the admin), and any other code is shown as it is. Keycloak's `already_logged_in`
+means the browser re-sent a login that had already finished (a resumed tab, a second submit, or a
+redirect that never reached the app): the app sends one new authorization request with a fresh
+`state` and PKCE verifier and the same `prompt`, so the login page shows again; never a silent
+sign-in with the browser's session. Only a second one is shown. Each failure is logged with its
+type and the provider's code (logcat tag of the app, the iOS log category `sign-in`, the desktop
+and web logs), never with tokens or the redirect's code.
+
+What the server announces, public and cacheable, at `GET /api/v1/server-info`:
+
+| Field                            | Source                                                                    |
+|----------------------------------|---------------------------------------------------------------------------|
+| `sign_in.issuer`                 | `[oidc] issuer`; apps require `https` (plain `http` only on loopback)     |
+| `sign_in.client_id`              | `[oidc] client_id`, the public client of the apps                         |
+| `sign_in.scopes`                 | `[oidc] app_scopes`, default `openid profile email`                       |
+| `sign_in.redirect_uris`          | `[oidc] app_redirect_uris`, optional (see below)                          |
+| `sign_in.has_local_accounts`     | Whether local guest accounts are enabled                                  |
+| `brand`                          | The brand of the requested host name, as `GET /api/v1/brand`              |
+| `server_version`, `minimum_client_version` | As `GET /api/v1/client-compatibility`                           |
+
+Nothing in it is secret. Register these redirect URIs for `client_id` at the identity provider:
+
+| App            | Redirect URI                                                     |
+|----------------|------------------------------------------------------------------|
+| Desktop        | `http://127.0.0.1/callback` (any port: loopback flow, RFC 8252)  |
+| Android, iOS   | `de.zeitgleich.teamcraft:/oauth/callback`                        |
+| Web            | `https://<host>/` of each host name                              |
+
+In Keycloak, `http://127.0.0.1/*` as a valid redirect URI covers the desktop app's changing port. When
+`app_redirect_uris` lists them, an app built with another redirect URI (a self-build with its own app
+ID) tells its user that the server is not set up for it instead of failing at the provider.
+
+**Staying signed in.** The apps ask for `offline_access` (`[oidc] app_scopes`), so each device gets a
+long-lived refresh token and stays signed in; the provider's client must allow that scope (Keycloak:
+Clients → client → Client scopes → `offline_access`, optional is enough) and its offline session idle
+time decides how long an unused device stays signed in (Realm settings → Sessions, 30 days by
+default). Without the scope a device's sign-in ends with the provider's browser session.
+
+**Devices that were off for a long time** (issue #883). A computer that was off or asleep for 12
+hours, a weekend or weeks wakes up with a long-expired access token; the app shows "offline" (never
+"sign in again"), and refreshes with its stored refresh token as soon as the network is back. Whether
+that refresh is accepted is the provider's decision:
+
+- Sessions with `offline_access` (every sign-in since #667) hold an offline token: it is accepted as
+  long as the device was off for less than the offline session idle time (Keycloak default 30 days)
+  and, if set, the offline session max. Every refresh starts the idle time anew. Set the idle time
+  longer if devices may be off longer (holidays, parental leave).
+- Sessions from before #667, or from a client without the `offline_access` scope, hold a normal
+  refresh token, which ends with the provider's browser session: Keycloak's SSO session idle (30
+  minutes by default) and SSO session max (10 hours). Such a device has to sign in again after a
+  longer pause; after that it has an offline token.
+- When the provider refuses the token (`invalid_grant`), the app forgets it and goes back to the
+  sign-in screen once, with "Your session has expired. Please sign in again." Without an answer
+  (no network, the provider down) the token is kept and tried again with a growing pause.
+
+teamcraft-deploy imports the realm with `offline_access` as an optional client scope and leaves the
+session times at Keycloak's defaults (checked in its `realm.json.j2`); an existing realm keeps
+whatever it was set to.
+
+**Several devices per account.** Every device signs in with its own provider session, and all of
+them stay signed in side by side. Signing out on one device ends that device's provider session; the
+provider's back-channel logout names it (`sid`), and the server ends only that session. A logout
+token without `sid` ends all sessions of the user (OIDC Back-Channel Logout 1.0 §2.4). In Keycloak:
+
+| Setting                                                  | Value                                               |
+|----------------------------------------------------------|-----------------------------------------------------|
+| Client `teamcraft` → Backchannel logout URL              | `https://<host>/api/v1/auth/backchannel-logout`     |
+| Client `teamcraft` → Backchannel logout session required | On: the logout token names the session              |
+| Browser flow → User session count limiter                | Not used, or without "Terminate oldest session" (¹) |
+| Realm settings → Tokens → Revoke Refresh Token           | Either: it applies to each device's own token       |
+
+(¹) With it, a sign-in on one device ends the oldest session of the user, another device's.
+
+**Signed out too often?** (issue #667) Each app runs exactly one token refresh at a time per server
+and account and hands its result to everyone waiting: the browser's tabs through a Web Lock and the
+shared token vault, the desktop app in its shell (the core only reads the token), iOS across the app
+and its notification extension through a lock file in the App Group, Android in its process. A
+refresh token is only dropped when the provider answers `invalid_grant`; network errors and other
+answers (`temporarily_unavailable`, `server_error`) keep it for the next try. The desktop app keeps
+the access token's expiry in wall-clock time, so a token that ran out while the computer slept is
+refreshed right after wake-up, and a request the server refuses with 401 gets one refresh and one
+retry (issue #883). When the session
+really ends the apps say why: signed out at the provider or on another device (`session_ended`,
+usually a back-channel logout), or the workspace's session policy timed it out
+(`session_timed_out`, Admin → Security → session length and idle timeout).
+
+Recommended provider settings (Keycloak):
+
+| Setting                                                | Recommendation                                                                                     |
+|--------------------------------------------------------|----------------------------------------------------------------------------------------------------|
+| Client scopes → `offline_access`                       | Assigned to the client (optional is enough); without it devices fall back to browser sessions      |
+| Realm settings → Sessions → Offline session idle       | At least 30 days (default); how long an unused device stays signed in                              |
+| Realm settings → Sessions → Offline session max        | Off, or as long as the organization's policy wants a sign-in at most                               |
+| Realm settings → Tokens → Revoke Refresh Token         | Off, or on with "Refresh token max reuse" at least 1: a reused token then doesn't end the session  |
+| Realm settings → Tokens → Access token lifespan        | 5 to 15 minutes; the apps refresh a minute ahead                                                   |
+
+To find out why someone was signed out: the client log names the error code (`session_ended`,
+`session_timed_out`, or a refresh refused with `invalid_grant`); the server logs back-channel logouts
+and the audit log records them (`oidc_backchannel_logout`); Keycloak's events (Realm settings →
+Events, "Save events" on) show `REFRESH_TOKEN_ERROR` with `invalid_refresh_token` for a reused token.
+
+Up to 1.0.3 the server ended every session of the user on any back-channel logout, since Keycloak
+names the subject in each logout token as well: signing out (or "sign in again", which signs out
+first) on one device signed the others out. To end all sessions of a user, sign them out in the
+provider (Keycloak: Users → user → Sessions → Sign out) or disable the user.
+
+The apps reject a server that is not a TeamCraft server, that answers with an HTML page or a redirect
+(a captive portal), whose version is too old (or for which the app is too old), or whose issuer is not
+`https`. Tokens and local data are kept per server origin; an app never switches to a server because
+a server told it to.
+
+**Preconfigured server (managed devices).** Companies can set the server so users don't type it, and
+optionally lock the apps to it:
+
+| Platform | Where                                                                                                                                          |
+|----------|------------------------------------------------------------------------------------------------------------------------------------------------|
+| Desktop  | `desktop.json` with `{"server_url": "team.example.com", "lock_server": true}` in `/etc/teamcraft/` (Linux) or `/Library/Application Support/TeamCraft/` (macOS), owned by root and writable only by root (else ignored); or the environment variable `TEAMCRAFT_SERVER_URL` (not locked). Windows: the policy registry key follows (#220) |
+| Android  | Managed configuration (Android Enterprise / MDM app restrictions): `server_url`, `lock_server`                                                  |
+| iOS      | Managed app configuration (`com.apple.configuration.managed`): `server_url`, `lock_server`                                                      |
+
+With a preconfigured server the app checks it on first start and goes straight to the confirmation.
+`lock_server` hides "Change server" and drops an account of another server.
+
+**The sign-in page.** Every client renders the same page from `server-info`: a prominent "Sign in
+with <provider>" button, and the e-mail and password form of local accounts inline, in the order the
+admin console sets (Admin → Settings → Sign-in page: SSO and local, local first, SSO only, local
+only; help text and help link). The provider name and its icon are brand settings (Admin → Brands:
+"Sign-in provider" and the "Sign-in provider icon" image). Local accounts need `[local_accounts]` with
+a session secret in the configuration; the console switches them off and on (Settings → Local
+accounts).
 
 ## Push notifications
 

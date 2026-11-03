@@ -1,14 +1,17 @@
 //! Meetings, their invitees and their chat conversation (PLAN.md §9).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use teamcraft_proto::{ChannelRole, ConversationId, MeetingAttendeeId, MeetingId, MeetingInviteId, UserId};
+use teamcraft_proto::{
+  ChannelRole, ConversationId, IdempotencyKey, MeetingAttendeeId, MeetingId, MeetingInviteId, UserId,
+};
 use time::OffsetDateTime;
 
 use crate::conversation::{NewConversation, insert_conversation, insert_membership};
 use crate::database::Database;
 use crate::error::DbError;
-use crate::ids::{from_db, from_db_opt, to_db};
+use crate::idempotency::{Created, IdempotentKind, claim_key};
+use crate::ids::{from_db, from_db_opt, to_db, to_db_all};
 
 /// A stored meeting. `kind`, `status` are the wire names (`scheduled`, `instant`; `scheduled`,
 /// `cancelled`, `ended`).
@@ -27,6 +30,9 @@ pub struct StoredMeeting {
   pub status: String,
   pub has_lobby: bool,
   pub sequence: i32,
+  /// When the whole meeting was cancelled; `None` while it is on, and for meetings cancelled before
+  /// this was recorded.
+  pub maybe_cancelled_at: Option<OffsetDateTime>,
 }
 
 /// An invitee as stored. `rsvp` is the wire name.
@@ -54,6 +60,7 @@ pub struct NewMeeting<'a> {
   pub kind: &'a str,
   pub has_lobby: bool,
   pub attendees: &'a [NewAttendee],
+  pub maybe_idempotency_key: Option<IdempotencyKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,9 +80,11 @@ pub struct MeetingChanges<'a> {
   pub maybe_starts_at: Option<OffsetDateTime>,
   pub maybe_ends_at: Option<OffsetDateTime>,
   pub maybe_has_lobby: Option<bool>,
+  /// A new RRULE value (a series is never turned back into a single meeting).
+  pub maybe_recurrence_rule: Option<&'a str>,
 }
 
-/// A personal join link of a meeting.
+/// A join link of a meeting: a personal one-time link, or the meeting's shared guest link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredMeetingInvite {
   pub id: MeetingInviteId,
@@ -84,6 +93,19 @@ pub struct StoredMeetingInvite {
   pub maybe_label: Option<String>,
   pub is_redeemed: bool,
   pub maybe_guest_user: Option<UserId>,
+  /// The shared link of the meeting: many guests, each gets an invite of their own.
+  pub is_shared: bool,
+  pub is_revoked: bool,
+}
+
+/// Why a guest could not get an invite from a shared link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharedInviteClaim {
+  Claimed,
+  /// The link was revoked (or is not a shared link).
+  Revoked,
+  /// The link has admitted as many guests as it may.
+  Full,
 }
 
 /// A guest waiting in (or let out of) the lobby.
@@ -100,6 +122,9 @@ pub struct LobbyRow {
 pub struct AttendeeDiff {
   pub added: Vec<StoredAttendee>,
   pub removed: Vec<StoredAttendee>,
+  /// Guest accounts that had redeemed the personal link of a removed e-mail invitee; their
+  /// sessions must end.
+  pub revoked_guests: Vec<UserId>,
 }
 
 /// Which invitee an answer belongs to.
@@ -112,8 +137,24 @@ pub enum AttendeeKey<'a> {
 impl Database {
   /// Creates the meeting, its chat conversation (the organizer is admin there) and the invitees;
   /// invited users become members of the chat.
-  pub async fn create_meeting(&self, new: &NewMeeting<'_>) -> Result<(), DbError> {
+  pub async fn create_meeting(&self, new: &NewMeeting<'_>) -> Result<Created<MeetingId>, DbError> {
     let mut tx = self.pool().begin().await?;
+    if let Some(key) = &new.maybe_idempotency_key {
+      let maybe_existing = claim_key(
+        &mut tx,
+        new.organizer,
+        IdempotentKind::Meeting,
+        key,
+        to_db(new.id),
+      )
+      .await?;
+      if let Some(existing) = maybe_existing {
+        return Ok(Created {
+          id: from_db(existing)?,
+          is_new: false,
+        });
+      }
+    }
     insert_conversation(&mut tx, &new.conversation).await?;
     insert_membership(&mut tx, new.conversation.id, new.organizer, ChannelRole::Admin).await?;
     sqlx::query!(
@@ -141,13 +182,16 @@ impl Database {
       }
     }
     tx.commit().await?;
-    Ok(())
+    Ok(Created {
+      id: new.id,
+      is_new: true,
+    })
   }
 
   pub async fn get_meeting(&self, id: MeetingId) -> Result<Option<StoredMeeting>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, uid, organizer_user_id, conversation_id, title, description, starts_at, ends_at,
-                recurrence_rule, kind, status, has_lobby, sequence
+                recurrence_rule, kind, status, has_lobby, sequence, cancelled_at
          FROM meetings WHERE id = $1"#,
       to_db(id),
     )
@@ -169,6 +213,7 @@ impl Database {
           status: row.status,
           has_lobby: row.has_lobby,
           sequence: row.sequence,
+          maybe_cancelled_at: row.cancelled_at,
         })
       })
       .transpose()
@@ -185,7 +230,9 @@ impl Database {
   }
 
   /// Meetings the user organizes or is invited to that end after `from` and start before `to`,
-  /// soonest first. Cancelled meetings are included (clients show them struck through).
+  /// soonest first. Cancelled meetings are included (clients show them struck through) until the
+  /// organizer takes them off the lists. A repeating series is included whatever `from` is, as its
+  /// stored first occurrence; the caller expands it.
   pub async fn list_meetings_of_user(
     &self,
     user: UserId,
@@ -195,7 +242,8 @@ impl Database {
   ) -> Result<Vec<StoredMeeting>, DbError> {
     let ids = sqlx::query_scalar!(
       r#"SELECT m.id FROM meetings m
-         WHERE m.ends_at > $2 AND ($3::timestamptz IS NULL OR m.starts_at < $3)
+         WHERE (m.ends_at > $2 OR m.recurrence_rule IS NOT NULL) AND ($3::timestamptz IS NULL OR m.starts_at < $3)
+           AND m.hidden_at IS NULL
            AND (m.organizer_user_id = $1
                 OR EXISTS (SELECT 1 FROM meeting_attendees a WHERE a.meeting_id = m.id AND a.user_id = $1))
          ORDER BY m.starts_at, m.id LIMIT $4"#,
@@ -282,6 +330,7 @@ impl Database {
            starts_at = COALESCE($4, starts_at),
            ends_at = COALESCE($5, ends_at),
            has_lobby = COALESCE($6, has_lobby),
+           recurrence_rule = COALESCE($7, recurrence_rule),
            sequence = sequence + 1
          WHERE id = $1"#,
       to_db(id),
@@ -290,6 +339,7 @@ impl Database {
       changes.maybe_starts_at,
       changes.maybe_ends_at,
       changes.maybe_has_lobby,
+      changes.maybe_recurrence_rule,
     )
     .execute(self.pool())
     .await?;
@@ -321,6 +371,30 @@ impl Database {
           )
           .execute(&mut *tx)
           .await?;
+        }
+        if let Some(email) = &existing.maybe_email {
+          // The personal join link of a removed invitee must stop working: an unused invite is
+          // deleted (a later re-invitation gets a fresh one), a redeemed one is revoked and its
+          // guest account reported so the caller ends the session.
+          sqlx::query!(
+            "DELETE FROM meeting_invites WHERE meeting_id = $1 AND lower(email) = lower($2) AND redeemed_at IS NULL",
+            to_db(meeting.id),
+            email,
+          )
+          .execute(&mut *tx)
+          .await?;
+          let guests = sqlx::query_scalar!(
+            r#"UPDATE meeting_invites SET revoked_at = now()
+               WHERE meeting_id = $1 AND lower(email) = lower($2) AND redeemed_at IS NOT NULL AND revoked_at IS NULL
+               RETURNING guest_user_id"#,
+            to_db(meeting.id),
+            email,
+          )
+          .fetch_all(&mut *tx)
+          .await?;
+          for guest in guests.into_iter().flatten() {
+            diff.revoked_guests.push(from_db(guest)?);
+          }
         }
         diff.removed.push(existing.clone());
       }
@@ -385,7 +459,8 @@ impl Database {
   pub async fn cancel_meeting(&self, meeting: &StoredMeeting) -> Result<bool, DbError> {
     let mut tx = self.pool().begin().await?;
     let result = sqlx::query!(
-      "UPDATE meetings SET status = 'cancelled', sequence = sequence + 1 WHERE id = $1 AND status = 'scheduled'",
+      r#"UPDATE meetings SET status = 'cancelled', cancelled_at = now(), sequence = sequence + 1
+         WHERE id = $1 AND status = 'scheduled'"#,
       to_db(meeting.id),
     )
     .execute(&mut *tx)
@@ -401,6 +476,110 @@ impl Database {
     .await?;
     tx.commit().await?;
     Ok(true)
+  }
+
+  /// Takes a cancellation back: the meeting is scheduled again and its chat no longer archived.
+  /// `false` if it was not cancelled.
+  pub async fn restore_meeting(&self, meeting: &StoredMeeting) -> Result<bool, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let result = sqlx::query!(
+      r#"UPDATE meetings SET status = 'scheduled', cancelled_at = NULL, hidden_at = NULL, sequence = sequence + 1
+         WHERE id = $1 AND status = 'cancelled'"#,
+      to_db(meeting.id),
+    )
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+      return Ok(false);
+    }
+    sqlx::query!(
+      "UPDATE conversations SET archived_at = NULL WHERE id = $1",
+      to_db(meeting.conversation),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+  }
+
+  /// Takes a cancelled meeting off everybody's lists; its chat stays. `false` if it is not cancelled.
+  pub async fn hide_meeting(&self, id: MeetingId) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      "UPDATE meetings SET hidden_at = now() WHERE id = $1 AND status = 'cancelled' AND hidden_at IS NULL",
+      to_db(id),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
+  }
+
+  /// Cancels one occurrence of a series (by its start in the series) and increases the iCalendar
+  /// sequence. `false` if it was cancelled already.
+  pub async fn cancel_occurrence(
+    &self,
+    meeting: MeetingId,
+    starts_at: OffsetDateTime,
+  ) -> Result<bool, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let result = sqlx::query!(
+      r#"INSERT INTO meeting_cancelled_occurrences (meeting_id, starts_at) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING"#,
+      to_db(meeting),
+      starts_at,
+    )
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+      return Ok(false);
+    }
+    bump_sequence(&mut tx, meeting).await?;
+    tx.commit().await?;
+    Ok(true)
+  }
+
+  /// Takes back the cancellation of one occurrence. `false` if it was not cancelled.
+  pub async fn restore_occurrence(
+    &self,
+    meeting: MeetingId,
+    starts_at: OffsetDateTime,
+  ) -> Result<bool, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let result = sqlx::query!(
+      "DELETE FROM meeting_cancelled_occurrences WHERE meeting_id = $1 AND starts_at = $2",
+      to_db(meeting),
+      starts_at,
+    )
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+      return Ok(false);
+    }
+    bump_sequence(&mut tx, meeting).await?;
+    tx.commit().await?;
+    Ok(true)
+  }
+
+  /// The cancelled occurrences of the meetings, soonest first per meeting.
+  pub async fn cancelled_occurrences(
+    &self,
+    meetings: &[MeetingId],
+  ) -> Result<HashMap<MeetingId, Vec<OffsetDateTime>>, DbError> {
+    let raw: Vec<i64> = meetings.iter().map(|meeting| to_db(*meeting)).collect();
+    let rows = sqlx::query!(
+      r#"SELECT meeting_id, starts_at FROM meeting_cancelled_occurrences
+         WHERE meeting_id = ANY($1) ORDER BY meeting_id, starts_at"#,
+      &raw,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    let mut found: HashMap<MeetingId, Vec<OffsetDateTime>> = HashMap::new();
+    for row in rows {
+      found
+        .entry(from_db(row.meeting_id)?)
+        .or_default()
+        .push(row.starts_at);
+    }
+    Ok(found)
   }
 
   /// Records an invitee's answer; `false` if nobody matches.
@@ -429,6 +608,13 @@ impl Database {
 
   /// Removes a meeting with its chat and invitees (rollback of a failed creation).
   pub async fn delete_meeting(&self, meeting: &StoredMeeting) -> Result<(), DbError> {
+    // The key goes with the meeting, so a retry after an undone creation creates it again.
+    sqlx::query!(
+      "DELETE FROM create_idempotency_keys WHERE kind = 'meeting' AND resource_id = $1",
+      to_db(meeting.id)
+    )
+    .execute(self.pool())
+    .await?;
     sqlx::query!(
       "DELETE FROM conversations WHERE id = $1",
       to_db(meeting.conversation)
@@ -451,29 +637,6 @@ impl Database {
       .into_iter()
       .map(|row| Ok((from_db(row.id)?, row.email)))
       .collect()
-  }
-
-  /// The unredeemed invite for this e-mail address, or a new one with `new_id`.
-  pub async fn ensure_email_invite(
-    &self,
-    meeting: MeetingId,
-    email: &str,
-    new_id: MeetingInviteId,
-    created_by: UserId,
-  ) -> Result<MeetingInviteId, DbError> {
-    let id = sqlx::query_scalar!(
-      r#"INSERT INTO meeting_invites (id, meeting_id, email, created_by) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (meeting_id, email) WHERE email IS NOT NULL AND redeemed_at IS NULL
-         DO UPDATE SET email = EXCLUDED.email
-         RETURNING id"#,
-      to_db(new_id),
-      to_db(meeting),
-      email,
-      to_db(created_by),
-    )
-    .fetch_one(self.pool())
-    .await?;
-    from_db(id)
   }
 
   /// A link the host hands out by hand.
@@ -501,7 +664,8 @@ impl Database {
     id: MeetingInviteId,
   ) -> Result<Option<StoredMeetingInvite>, DbError> {
     let row = sqlx::query!(
-      r#"SELECT id, meeting_id, email, label, redeemed_at IS NOT NULL AS "is_redeemed!", guest_user_id
+      r#"SELECT id, meeting_id, email, label, redeemed_at IS NOT NULL AS "is_redeemed!", guest_user_id,
+                is_shared, revoked_at IS NOT NULL AS "is_revoked!"
          FROM meeting_invites WHERE id = $1"#,
       to_db(id),
     )
@@ -516,9 +680,101 @@ impl Database {
           maybe_label: row.label,
           is_redeemed: row.is_redeemed,
           maybe_guest_user: from_db_opt(row.guest_user_id)?,
+          is_shared: row.is_shared,
+          is_revoked: row.is_revoked,
         })
       })
       .transpose()
+  }
+
+  /// The live shared guest link of the meeting, or a new one with `new_id`.
+  pub async fn ensure_shared_invite(
+    &self,
+    meeting: MeetingId,
+    new_id: MeetingInviteId,
+    created_by: UserId,
+  ) -> Result<MeetingInviteId, DbError> {
+    let id = sqlx::query_scalar!(
+      r#"INSERT INTO meeting_invites (id, meeting_id, created_by, is_shared) VALUES ($1, $2, $3, true)
+         ON CONFLICT (meeting_id) WHERE is_shared AND revoked_at IS NULL
+         DO UPDATE SET is_shared = EXCLUDED.is_shared
+         RETURNING id"#,
+      to_db(new_id),
+      to_db(meeting),
+      to_db(created_by),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    from_db(id)
+  }
+
+  /// Revokes the meeting's live shared guest link; `false` if it has none.
+  pub async fn revoke_shared_invite(&self, meeting: MeetingId) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      "UPDATE meeting_invites SET revoked_at = now() WHERE meeting_id = $1 AND is_shared AND revoked_at IS NULL",
+      to_db(meeting),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
+  /// Makes a one-time invite `id` for one guest of the shared link `shared`, if the link is live and
+  /// has handed out fewer than `max_guests` invites. The link's row is locked while counting, so
+  /// concurrent guests can't exceed the limit.
+  pub async fn claim_shared_invite(
+    &self,
+    shared: MeetingInviteId,
+    id: MeetingInviteId,
+    label: &str,
+    max_guests: u32,
+    waiting_since: OffsetDateTime,
+  ) -> Result<SharedInviteClaim, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let Some(link) = sqlx::query!(
+      r#"SELECT meeting_id, created_by FROM meeting_invites
+         WHERE id = $1 AND is_shared AND revoked_at IS NULL FOR UPDATE"#,
+      to_db(shared),
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+      return Ok(SharedInviteClaim::Revoked);
+    };
+    // A place counts once its guest is let in (#987 review): waiting guests and claims not yet
+    // redeemed have a bound of their own, so a leaked link can't fill the meeting, only the lobby,
+    // until the organizer makes the link anew. Turned away, left and ended guests count nowhere.
+    let places = sqlx::query!(
+      r#"SELECT
+           count(*) FILTER (WHERE l.state = 'admitted' AND u.deactivated_at IS NULL) AS "admitted!",
+           count(*) FILTER (WHERE (i.guest_user_id IS NULL AND i.created_at > $2)
+                             OR (l.state = 'waiting' AND l.requested_at > $2
+                                 AND u.deactivated_at IS NULL)) AS "waiting!"
+         FROM meeting_invites i
+         LEFT JOIN meeting_lobby l ON l.meeting_id = i.meeting_id AND l.user_id = i.guest_user_id
+         LEFT JOIN users u ON u.id = i.guest_user_id
+         WHERE i.shared_invite_id = $1"#,
+      to_db(shared),
+      waiting_since,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if places.admitted >= i64::from(max_guests) || places.waiting >= i64::from(max_guests) {
+      return Ok(SharedInviteClaim::Full);
+    }
+    sqlx::query!(
+      r#"INSERT INTO meeting_invites (id, meeting_id, label, created_by, shared_invite_id)
+         VALUES ($1, $2, $3, $4, $5)"#,
+      to_db(id),
+      link.meeting_id,
+      label,
+      link.created_by,
+      to_db(shared),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(SharedInviteClaim::Claimed)
   }
 
   /// Marks the invite redeemed by `guest`; `false` if it was redeemed before.
@@ -551,6 +807,50 @@ impl Database {
     })
   }
 
+  /// A member who is not in the meeting chat knocks: they wait in the lobby. Returns the row and
+  /// whether the knock is news for the hosts: a first knock, or a member admitted before who is no
+  /// longer in the chat (waiting again). Knocking again while waiting, or after being denied,
+  /// changes nothing.
+  pub async fn knock_lobby(&self, meeting: MeetingId, user: UserId) -> Result<(LobbyRow, bool), DbError> {
+    let maybe_changed = sqlx::query!(
+      r#"INSERT INTO meeting_lobby (meeting_id, user_id) VALUES ($1, $2)
+         ON CONFLICT (meeting_id, user_id) DO UPDATE
+           SET state = 'waiting', requested_at = now(), decided_at = NULL, decided_by = NULL
+           WHERE meeting_lobby.state = 'admitted'
+         RETURNING state, requested_at"#,
+      to_db(meeting),
+      to_db(user),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    if let Some(row) = maybe_changed {
+      let entry = LobbyRow {
+        user,
+        state: row.state,
+        requested_at: row.requested_at,
+      };
+      return Ok((entry, true));
+    }
+    let existing = self
+      .get_lobby_entry(meeting, user)
+      .await?
+      // Only gone if the meeting was deleted in between.
+      .ok_or(DbError::Query(sqlx::Error::RowNotFound))?;
+    Ok((existing, false))
+  }
+
+  /// Gives back the place a shared link handed out when the guest never got in with it (their
+  /// account or the redemption failed), so failures don't use up the link.
+  pub async fn release_shared_invite_claim(&self, id: MeetingInviteId) -> Result<(), DbError> {
+    sqlx::query!(
+      "DELETE FROM meeting_invites WHERE id = $1 AND shared_invite_id IS NOT NULL AND redeemed_at IS NULL",
+      to_db(id),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
   pub async fn get_lobby_entry(&self, meeting: MeetingId, user: UserId) -> Result<Option<LobbyRow>, DbError> {
     let row = sqlx::query!(
       "SELECT state, requested_at FROM meeting_lobby WHERE meeting_id = $1 AND user_id = $2",
@@ -564,6 +864,223 @@ impl Database {
       state: row.state,
       requested_at: row.requested_at,
     }))
+  }
+
+  /// Active guests of meetings whose access has ended: the meeting is over for longer than
+  /// `grace_secs`, or it was cancelled. At most `limit`, oldest meeting first; the caller
+  /// deactivates them and asks again.
+  pub async fn list_guests_past_access(
+    &self,
+    now: OffsetDateTime,
+    grace_secs: f64,
+    limit: i64,
+  ) -> Result<Vec<(MeetingId, UserId)>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT DISTINCT l.user_id, l.meeting_id, m.ends_at
+         FROM meeting_lobby l
+         JOIN meetings m ON m.id = l.meeting_id
+         JOIN users u ON u.id = l.user_id
+         WHERE u.kind = 'guest' AND u.deactivated_at IS NULL
+           AND (m.status <> 'scheduled' OR m.ends_at + make_interval(secs => $2) < $1)
+         ORDER BY m.ends_at, l.user_id
+         LIMIT $3"#,
+      now,
+      grace_secs,
+      limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| Ok((from_db(row.meeting_id)?, from_db(row.user_id)?)))
+      .collect()
+  }
+
+  /// The meeting's link token, stored as `candidate` if the meeting has none yet (meetings from
+  /// before #987 get theirs on first need).
+  pub async fn ensure_meeting_link(&self, meeting: MeetingId, candidate: &str) -> Result<String, DbError> {
+    // Read first: listing meetings asks for every link, and nearly all exist already.
+    if let Some(token) = self.meeting_links(&[meeting]).await?.remove(&meeting) {
+      return Ok(token);
+    }
+    sqlx::query!(
+      "INSERT INTO meeting_links (meeting_id, token) VALUES ($1, $2) ON CONFLICT (meeting_id) DO NOTHING",
+      to_db(meeting),
+      candidate,
+    )
+    .execute(self.pool())
+    .await?;
+    let row = sqlx::query!(
+      "SELECT token FROM meeting_links WHERE meeting_id = $1",
+      to_db(meeting),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok(row.token)
+  }
+
+  /// Gives the meeting a new link token in one transaction (#987 review): the old token names
+  /// nothing from now on, every live shared link and unredeemed personal invite of the meeting is
+  /// revoked, and guests still waiting lose the "came with the link" mark, so they wait for a
+  /// host's click like guests of old links.
+  pub async fn renew_meeting_link(&self, meeting: MeetingId, token: &str) -> Result<(), DbError> {
+    let mut tx = self.pool().begin().await?;
+    sqlx::query!(
+      r#"INSERT INTO meeting_links (meeting_id, token) VALUES ($1, $2)
+         ON CONFLICT (meeting_id) DO UPDATE SET token = EXCLUDED.token, created_at = now()"#,
+      to_db(meeting),
+      token,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+      r#"UPDATE meeting_invites SET revoked_at = now()
+         WHERE meeting_id = $1 AND revoked_at IS NULL AND (is_shared OR redeemed_at IS NULL)"#,
+      to_db(meeting),
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+      "UPDATE meeting_lobby SET is_by_link = false WHERE meeting_id = $1 AND state = 'waiting'",
+      to_db(meeting),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+  }
+
+  /// The link tokens of the meetings that have one.
+  pub async fn meeting_links(&self, meetings: &[MeetingId]) -> Result<HashMap<MeetingId, String>, DbError> {
+    let rows = sqlx::query!(
+      "SELECT meeting_id, token FROM meeting_links WHERE meeting_id = ANY($1)",
+      &to_db_all(meetings),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| Ok((from_db(row.meeting_id)?, row.token)))
+      .collect()
+  }
+
+  /// The meeting a link token names, if any.
+  pub async fn meeting_by_link(&self, token: &str) -> Result<Option<MeetingId>, DbError> {
+    let row = sqlx::query!("SELECT meeting_id FROM meeting_links WHERE token = $1", token)
+      .fetch_optional(self.pool())
+      .await?;
+    row.map(|row| from_db(row.meeting_id)).transpose()
+  }
+
+  /// Notes whether `user` knocked with the meeting link's token (current at the time).
+  pub async fn mark_lobby_by_link(
+    &self,
+    meeting: MeetingId,
+    user: UserId,
+    is_by_link: bool,
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE meeting_lobby SET is_by_link = $3 WHERE meeting_id = $1 AND user_id = $2",
+      to_db(meeting),
+      to_db(user),
+      is_by_link,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// The users of the meeting's lobby who knocked with its link's token.
+  pub async fn lobby_by_link(&self, meeting: MeetingId) -> Result<HashSet<UserId>, DbError> {
+    let rows = sqlx::query!(
+      "SELECT user_id FROM meeting_lobby WHERE meeting_id = $1 AND is_by_link",
+      to_db(meeting),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows.into_iter().map(|row| from_db(row.user_id)).collect()
+  }
+
+  /// Notes the identity key fingerprint a waiting guest's page reports with its device, once.
+  /// `true` the first time (the hosts are told then); `false` when it was reported before or the
+  /// guest no longer waits.
+  pub async fn set_knock_fingerprint(
+    &self,
+    meeting: MeetingId,
+    user: UserId,
+    fingerprint: &str,
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"UPDATE meeting_lobby SET knock_fingerprint = $3, device_announced_at = now()
+         WHERE meeting_id = $1 AND user_id = $2 AND state = 'waiting' AND device_announced_at IS NULL"#,
+      to_db(meeting),
+      to_db(user),
+      fingerprint,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
+  }
+
+  /// The fingerprints guests of the meeting reported with their devices, by guest.
+  pub async fn knock_fingerprints(&self, meeting: MeetingId) -> Result<HashMap<UserId, String>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT user_id, knock_fingerprint AS "fingerprint!" FROM meeting_lobby
+         WHERE meeting_id = $1 AND knock_fingerprint IS NOT NULL"#,
+      to_db(meeting),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| Ok((from_db(row.user_id)?, row.fingerprint)))
+      .collect()
+  }
+
+  /// How many guests of the shared link `guest` came with are let in now; `None` when the guest
+  /// came with no shared link (a personal invite has its own single place).
+  pub async fn admitted_of_guests_link(
+    &self,
+    meeting: MeetingId,
+    guest: UserId,
+  ) -> Result<Option<i64>, DbError> {
+    let row = sqlx::query!(
+      r#"SELECT (SELECT count(*) FROM meeting_invites j
+                 JOIN meeting_lobby l ON l.meeting_id = j.meeting_id AND l.user_id = j.guest_user_id
+                 JOIN users u ON u.id = l.user_id
+                 WHERE j.shared_invite_id = i.shared_invite_id AND l.state = 'admitted'
+                   AND u.deactivated_at IS NULL) AS "admitted!"
+         FROM meeting_invites i
+         WHERE i.meeting_id = $1 AND i.guest_user_id = $2 AND i.shared_invite_id IS NOT NULL"#,
+      to_db(meeting),
+      to_db(guest),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(row.map(|row| row.admitted))
+  }
+
+  /// Notes that `user`'s app lets guests in by the flow without a link secret (#987).
+  pub async fn mark_guest_admitter(&self, user: UserId) -> Result<(), DbError> {
+    sqlx::query!(
+      r#"INSERT INTO guest_admitters (user_id) VALUES ($1)
+         ON CONFLICT (user_id) DO UPDATE SET seen_at = now()"#,
+      to_db(user),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// Whether `user`'s app was seen letting guests in by the flow without a link secret.
+  pub async fn is_guest_admitter(&self, user: UserId) -> Result<bool, DbError> {
+    let row = sqlx::query!(
+      "SELECT 1 AS one FROM guest_admitters WHERE user_id = $1",
+      to_db(user)
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(row.is_some())
   }
 
   /// Guests waiting for a decision, longest waiting first.
@@ -652,6 +1169,17 @@ impl Database {
     users.dedup();
     Ok(users)
   }
+}
+
+/// Every change sent to invitees increases the event's iCalendar SEQUENCE.
+async fn bump_sequence(tx: &mut sqlx::PgConnection, meeting: MeetingId) -> Result<(), DbError> {
+  sqlx::query!(
+    "UPDATE meetings SET sequence = sequence + 1 WHERE id = $1",
+    to_db(meeting)
+  )
+  .execute(tx)
+  .await?;
+  Ok(())
 }
 
 fn same_person(existing: &StoredAttendee, candidate: &NewAttendee) -> bool {

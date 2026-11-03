@@ -1,6 +1,8 @@
 //! v1 acceptance, PLAN.md §7 Search: full-text search over what a device decrypted (stemming,
 //! filters). The server never sees the text; people search is in acceptance_people.
-use teamcraft_core::search::{SearchQuery, SearchService};
+use std::collections::BTreeSet;
+
+use teamcraft_core::search::{ConversationScope, SearchQuery, SearchService};
 use teamcraft_core::store::LocalStore;
 use teamcraft_e2e::scenario::{channel_with, space_with};
 use teamcraft_e2e::{Peer, Stack};
@@ -84,7 +86,7 @@ async fn search_finds_decrypted_messages_with_stemming_and_filters() {
   assert_eq!(
     search(SearchQuery {
       terms: terms(&["budget"]),
-      maybe_conversation: Some(other),
+      conversations: ConversationScope::Only(BTreeSet::from([other])),
       ..SearchQuery::default()
     }),
     0

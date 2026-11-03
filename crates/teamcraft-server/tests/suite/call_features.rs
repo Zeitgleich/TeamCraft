@@ -36,6 +36,10 @@ fn calls_config(ring_timeout_secs: u64, maybe_control_url: Option<String>) -> Ca
     maybe_sfu_registration_token: Some(SFU_TOKEN.to_owned().into()),
     ring_timeout_secs,
     maybe_sfu_control_url: maybe_control_url,
+    maybe_sfu_certificate_sha256: None,
+    roster_grace_secs: 60,
+    roster_timeout_secs: 120,
+    max_devices_per_user_per_call: 3,
   }
 }
 
@@ -218,8 +222,15 @@ mod history {
     assert_ne!(second, call);
     report(&s.app, "joined", &second, &s.alice_id, &s.alice_device).await;
     report(&s.app, "joined", &second, &s.bob_id, &s.bob_device).await;
+    // Alice hanging up ends the 1:1 call for both (#997): Bob's device leaves a call that is over.
     report(&s.app, "left", &second, &s.alice_id, &s.alice_device).await;
-    report(&s.app, "left", &second, &s.bob_id, &s.bob_device).await;
+    assert_eq!(
+      s.app
+        .get(&s.bob, &format!("/conversations/{}/call", s.dm))
+        .await
+        .status,
+      StatusCode::NOT_FOUND
+    );
     let listed = s
       .app
       .get(&s.bob, &format!("/conversations/{}/system-events", s.dm))
@@ -321,6 +332,8 @@ mod host_controls {
       max_invitees: 5,
       guest_token_secret: "0123456789abcdef0123456789abcdef".to_owned().into(),
       guest_grace_secs: 7200,
+      max_shared_link_guests: 50,
+      start_ring_lead_secs: 3600,
       maybe_inbox_token: None,
       smtp: None,
       mail_texts: MailTexts::default(),
@@ -338,6 +351,7 @@ mod host_controls {
     seen: Seen,
     host_id: String,
     carol_id: String,
+    dave_id: String,
     devices: [String; 3],
   }
 
@@ -390,6 +404,7 @@ mod host_controls {
       seen,
       host_id,
       carol_id,
+      dave_id,
       devices,
     })
   }
@@ -495,10 +510,19 @@ mod host_controls {
       return;
     };
     let path = format!("/meetings/{}/controls", s.meeting);
+    // Carol left the call; Dave's device is still in its roster (a lost connection within the
+    // SFU's reconnect grace period).
+    report(&s.app, "left", &s.call, &s.carol_id, &s.devices[1]).await;
     s.app.post(&s.host, &path, json!({"action": "lock"})).await;
     assert_eq!(
       join_token(&s.app, &s.carol, &s.chat, &s.devices[1]).await,
-      StatusCode::FORBIDDEN
+      StatusCode::FORBIDDEN,
+      "a device not in the call is a newcomer"
+    );
+    assert_eq!(
+      join_token(&s.app, &s.dave, &s.chat, &s.devices[2]).await,
+      StatusCode::OK,
+      "a device in the call rejoins after a lost connection"
     );
     assert_eq!(
       join_token(&s.app, &s.host, &s.chat, &s.devices[0]).await,
@@ -511,19 +535,27 @@ mod host_controls {
       StatusCode::OK
     );
 
+    // A removed person stays out, also while their device is still in the roster.
     s.app
       .post(
         &s.host,
         &path,
-        json!({"action": "remove_participant", "user_id": s.carol_id}),
+        json!({"action": "remove_participant", "user_id": s.dave_id}),
       )
       .await;
     assert_eq!(
-      join_token(&s.app, &s.carol, &s.chat, &s.devices[1]).await,
+      join_token(&s.app, &s.dave, &s.chat, &s.devices[2]).await,
       StatusCode::FORBIDDEN
     );
+    s.app.post(&s.host, &path, json!({"action": "lock"})).await;
     assert_eq!(
       join_token(&s.app, &s.dave, &s.chat, &s.devices[2]).await,
+      StatusCode::FORBIDDEN,
+      "the reconnect grace doesn't bring a removed person back"
+    );
+    s.app.post(&s.host, &path, json!({"action": "unlock"})).await;
+    assert_eq!(
+      join_token(&s.app, &s.carol, &s.chat, &s.devices[1]).await,
       StatusCode::OK,
       "others are unaffected"
     );

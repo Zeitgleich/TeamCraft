@@ -20,12 +20,9 @@ macro_rules! app {
   };
 }
 
-/// Distinct base64 payloads standing in for key packages.
-fn packages(prefix: &str, count: usize) -> Vec<String> {
-  use base64::Engine;
-  (0..count)
-    .map(|n| base64::engine::general_purpose::STANDARD.encode(format!("{prefix}-{n}")))
-    .collect()
+/// Distinct real key packages (base64).
+fn packages(count: usize) -> Vec<String> {
+  (0..count).map(|_| key_package()).collect()
 }
 
 async fn upload(
@@ -62,9 +59,26 @@ async fn uploads_are_counted_and_the_last_resort_is_replaced() {
   let carol = member("carol");
   let device = register_device(&app, &carol).await;
 
-  let status = upload(&app, &carol, &device, &packages("a", 3), Some("bGFzdC0x")).await;
-  assert_eq!(status, json!({"available": 3, "has_last_resort": true}));
-  let status = upload(&app, &carol, &device, &packages("b", 2), Some("bGFzdC0y")).await;
+  let status = upload(
+    &app,
+    &carol,
+    &device,
+    &packages(3),
+    Some(&last_resort_key_package()),
+  )
+  .await;
+  assert_eq!(
+    status,
+    json!({"available": 3, "expiring_soon": 0, "has_last_resort": true})
+  );
+  let status = upload(
+    &app,
+    &carol,
+    &device,
+    &packages(2),
+    Some(&last_resort_key_package()),
+  )
+  .await;
   assert_eq!(status["available"], 5);
   let status = app.get(&carol, &format!("/devices/{device}/key-packages")).await;
   assert_eq!(status.body["has_last_resort"], true);
@@ -87,7 +101,7 @@ async fn uploads_are_validated_and_limited() {
 
   assert_eq!(
     app
-      .post(&carol, &path, json!({"key_packages": packages("a", 3)}))
+      .post(&carol, &path, json!({"key_packages": packages(3)}))
       .await
       .status,
     StatusCode::BAD_REQUEST
@@ -99,17 +113,17 @@ async fn uploads_are_validated_and_limited() {
       .status,
     StatusCode::BAD_REQUEST
   );
-  upload(&app, &carol, &device, &packages("a", 2), None).await;
-  upload(&app, &carol, &device, &packages("b", 1), None).await;
+  upload(&app, &carol, &device, &packages(2), None).await;
+  upload(&app, &carol, &device, &packages(1), None).await;
   let over = app
-    .post(&carol, &path, json!({"key_packages": packages("c", 1)}))
+    .post(&carol, &path, json!({"key_packages": packages(1)}))
     .await;
   assert_eq!(over.status, StatusCode::CONFLICT);
 
   // Another user's device is not yours.
   assert_eq!(
     app
-      .post(&dave, &path, json!({"key_packages": packages("d", 1)}))
+      .post(&dave, &path, json!({"key_packages": packages(1)}))
       .await
       .error_code(),
     "device_not_found"
@@ -128,15 +142,9 @@ async fn claiming_takes_one_package_per_device_then_falls_back_to_the_last_resor
     register_device(&app, &dave).await,
     register_device(&app, &dave).await,
   );
-  upload(
-    &app,
-    &dave,
-    &phone,
-    &packages("phone", 1),
-    Some("bGFzdC1waG9uZQ=="),
-  )
-  .await;
-  upload(&app, &dave, &laptop, &packages("laptop", 2), None).await;
+  let phone_last_resort = last_resort_key_package();
+  upload(&app, &dave, &phone, &packages(1), Some(&phone_last_resort)).await;
+  upload(&app, &dave, &laptop, &packages(2), None).await;
 
   let first = claim(&app, &carol, &dave_id, &channel).await;
   assert_eq!(first.status, StatusCode::OK, "{}", first.body);
@@ -162,7 +170,7 @@ async fn claiming_takes_one_package_per_device_then_falls_back_to_the_last_resor
   assert_eq!(by_device(&second, &phone).unwrap()["is_last_resort"], true);
   assert_eq!(
     by_device(&second, &phone).unwrap()["key_package"],
-    "bGFzdC1waG9uZQ=="
+    phone_last_resort.as_str()
   );
   assert!(by_device(&second, &laptop).is_some());
   let third = claim(&app, &carol, &dave_id, &channel).await;
@@ -194,7 +202,7 @@ async fn concurrent_claims_never_hand_out_the_same_package() {
   let channel = channel_with(&app, &[&carol, &dave]).await;
   let dave_id = user_id(&app, &dave).await;
   let device = register_device(&app, &dave).await;
-  upload(&app, &dave, &device, &packages("p", 20), None).await;
+  upload(&app, &dave, &device, &packages(20), None).await;
 
   let claims = (0..20).map(|_| {
     let (app, carol, channel, dave_id) = (&app, &carol, channel.clone(), dave_id.clone());
@@ -236,7 +244,7 @@ async fn only_members_claim_for_members() {
   let channel = channel_with(&app, &[&carol, &dave]).await;
   let (dave_id, erin_id) = (user_id(&app, &dave).await, user_id(&app, &erin).await);
   let device = register_device(&app, &dave).await;
-  upload(&app, &dave, &device, &packages("p", 2), None).await;
+  upload(&app, &dave, &device, &packages(2), None).await;
   let body = json!({"conversation_id": channel});
 
   // erin is no member: she can't even see the channel.
@@ -265,6 +273,42 @@ async fn only_members_claim_for_members() {
       .await
       .body["available"],
     2
+  );
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn invalid_or_nearly_expired_packages_are_refused() {
+  let app = app!();
+  let carol = member("carol");
+  let device = register_device(&app, &carol).await;
+  let path = format!("/devices/{device}/key-packages");
+  let day = 24 * 60 * 60;
+  let refused = [
+    json!({"key_packages": ["bm90IGEga2V5IHBhY2thZ2U="]}),
+    // Made 50 days ago: 33 days left, less than the 42 a served package must keep.
+    json!({"key_packages": [key_package_at(now_secs() - 50 * day, false)]}),
+    json!({"key_packages": [last_resort_key_package()]}),
+    json!({"last_resort": key_package()}),
+  ];
+  for body in refused {
+    let reply = app.post(&carol, &path, body).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    assert_eq!(reply.error_code(), "invalid_key_package");
+  }
+
+  // Made 30 days ago: still served, but expiring within the 56-day renewal window.
+  let status = upload(
+    &app,
+    &carol,
+    &device,
+    &[key_package_at(now_secs() - 30 * day, false)],
+    Some(&key_package_at(now_secs() - 30 * day, true)),
+  )
+  .await;
+  assert_eq!(
+    status,
+    json!({"available": 0, "expiring_soon": 1, "has_last_resort": false})
   );
   app.stop().await;
 }

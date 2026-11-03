@@ -2,14 +2,16 @@ use std::collections::{HashMap, HashSet};
 
 use teamcraft_proto::{
   CategoryId, ChannelModeration, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
-  HistoryPolicy, MessageId, NotificationLevel, Permission, SpaceId, UserId,
+  HistoryPolicy, IdempotencyKey, MessageId, NotificationLevel, Permission, ReactionsSeen, SpaceId, UserId,
 };
 
 use time::OffsetDateTime;
 
 use crate::database::Database;
 use crate::error::DbError;
+use crate::idempotency::{Created, IdempotentKind, claim_key};
 use crate::ids::{from_db, from_db_opt, to_db, to_db_all};
+use crate::space::{StoredSpaceImage, stored_image};
 use crate::user::User;
 
 #[derive(Debug, Clone)]
@@ -26,6 +28,21 @@ pub struct Conversation {
   pub is_archived: bool,
   pub moderation: ChannelModeration,
   pub is_integration: bool,
+  /// The channel's picture (channels in spaces only use it).
+  pub maybe_image: Option<StoredSpaceImage>,
+  /// The import account while it is a member of this DM or notes without being a participant.
+  pub maybe_importer: Option<UserId>,
+  /// The newest imported message once an import finished.
+  pub maybe_imported_through: Option<MessageId>,
+}
+
+/// What [`Database::set_conversation_image`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageChange {
+  /// Stored; the blob key of the previous picture, if there was a different one, can be deleted.
+  Set { maybe_replaced_key: Option<String> },
+  /// The channel doesn't exist (any more): nothing was stored.
+  ChannelGone,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +56,12 @@ pub struct Membership {
   pub is_notification_inherited: bool,
   /// Smallest message ID created after the member joined; history cut-off for `from_join`.
   pub joined_floor: MessageId,
+  /// The import account added the member while it imported: they see the history from before
+  /// they joined also as a guest (e2ee.md §4.10, "Guests in imported conversations").
+  pub sees_imported_history: bool,
+  /// The reactions to the member's own messages they saw (notifications.md, "Reactions to my
+  /// messages").
+  pub reactions_seen: ReactionsSeen,
 }
 
 /// A conversation and the viewer's membership (`None`: not a member).
@@ -57,6 +80,8 @@ pub struct ConversationFilter {
   pub only_joined: bool,
   /// Only public, unarchived channels the viewer is not in yet (channel browser).
   pub only_joinable: bool,
+  /// With `only_joinable`: private channels too, for workspace admins (admin.md §2.4).
+  pub includes_private: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -117,12 +142,25 @@ impl Database {
     &self,
     new: &NewConversation<'_>,
     creator: UserId,
-  ) -> Result<ConversationId, DbError> {
+    maybe_key: Option<&IdempotencyKey>,
+  ) -> Result<Created<ConversationId>, DbError> {
     let mut tx = self.pool().begin().await?;
+    if let Some(key) = maybe_key {
+      let maybe_existing = claim_key(&mut tx, creator, IdempotentKind::Channel, key, to_db(new.id)).await?;
+      if let Some(existing) = maybe_existing {
+        return Ok(Created {
+          id: from_db(existing)?,
+          is_new: false,
+        });
+      }
+    }
     insert_conversation(&mut tx, new).await?;
     insert_membership(&mut tx, new.id, creator, ChannelRole::Admin).await?;
     tx.commit().await?;
-    Ok(new.id)
+    Ok(Created {
+      id: new.id,
+      is_new: true,
+    })
   }
 
   /// Returns the existing DM / group DM of exactly these participants or creates it.
@@ -132,20 +170,48 @@ impl Database {
     new: &NewConversation<'_>,
     participants: &[UserId],
   ) -> Result<(ConversationId, bool), DbError> {
-    let mut tx = self.pool().begin().await?;
     let key = new.maybe_participants_key.as_deref();
-    let existing = sqlx::query_scalar!("SELECT id FROM conversations WHERE participants_key = $1", key)
-      .fetch_optional(&mut *tx)
-      .await?;
-    if let Some(id) = existing {
-      return Ok((from_db(id)?, false));
+    if let Some(id) = self.participants_conversation(key).await? {
+      return Ok((id, false));
     }
+    match self.insert_participants_conversation(new, participants).await {
+      Ok(()) => Ok((new.id, true)),
+      // Two requests for the same people at once (two devices making the notes to self, a retry
+      // after a lost response): the unique key lets one insert win; the other returns its
+      // conversation instead of failing (issue #643).
+      Err(DbError::Query(sqlx::Error::Database(error))) if error.is_unique_violation() => {
+        let maybe_winner = self.participants_conversation(key).await?;
+        maybe_winner
+          .map(|id| (id, false))
+          .ok_or_else(|| DbError::InvalidStoredValue("participants conversation vanished".to_owned()))
+      },
+      Err(error) => Err(error),
+    }
+  }
+
+  /// The DM / group DM that already exists for this [`participants_key`], if any.
+  pub async fn participants_conversation(
+    &self,
+    key: Option<&str>,
+  ) -> Result<Option<ConversationId>, DbError> {
+    let existing = sqlx::query_scalar!("SELECT id FROM conversations WHERE participants_key = $1", key)
+      .fetch_optional(self.pool())
+      .await?;
+    from_db_opt(existing)
+  }
+
+  async fn insert_participants_conversation(
+    &self,
+    new: &NewConversation<'_>,
+    participants: &[UserId],
+  ) -> Result<(), DbError> {
+    let mut tx = self.pool().begin().await?;
     insert_conversation(&mut tx, new).await?;
     for participant in participants {
       insert_membership(&mut tx, new.id, *participant, ChannelRole::Member).await?;
     }
     tx.commit().await?;
-    Ok((new.id, true))
+    Ok(())
   }
 
   pub async fn get_conversation(
@@ -168,23 +234,28 @@ impl Database {
     let rows = sqlx::query!(
       r#"SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,
                 c.category_id, c.archived_at IS NOT NULL AS "is_archived!", c.is_integration, c.member_denied, c.guest_denied,
+                c.image_key, c.image_version, c.image_size_bytes, c.importer_user_id, c.imported_through_message_id,
                 m.role AS "role?", m.notification_level AS "notification_level?",
                 m.is_favorite AS "is_favorite?", m.last_read_message_id, m.muted_until,
                 NOT m.notification_overridden AS "is_inherited?",
-                tc_snowflake_floor(m.joined_at) AS "joined_floor?"
+                tc_snowflake_floor(m.joined_at) AS "joined_floor?",
+                m.sees_imported_history AS "sees_imported_history?",
+                m.reactions_seen_through_message_id, m.reactions_seen_message_ids AS "reactions_seen_message_ids?"
          FROM conversations c
          LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1
-         WHERE ($2::bigint IS NULL OR c.id = $2)
+         WHERE c.deleted_at IS NULL
+           AND ($2::bigint IS NULL OR c.id = $2)
            AND ($3::bigint IS NULL OR c.space_id = $3)
            AND (NOT $4 OR m.user_id IS NOT NULL)
-           AND (NOT $5 OR (c.kind = 'channel' AND c.visibility = 'public' AND c.archived_at IS NULL
-                           AND m.user_id IS NULL))
+           AND (NOT $5 OR (c.kind = 'channel' AND (c.visibility = 'public' OR $6)
+                           AND c.archived_at IS NULL AND m.user_id IS NULL))
          ORDER BY c.id"#,
       to_db(viewer),
       filter.maybe_conversation.map(to_db),
       filter.maybe_space.map(to_db),
       filter.only_joined,
       filter.only_joinable,
+      filter.includes_private,
     )
     .fetch_all(self.pool())
     .await?;
@@ -206,6 +277,16 @@ impl Database {
             maybe_last_read_message_id: from_db_opt(row.last_read_message_id)?,
             maybe_muted_until: row.muted_until,
             joined_floor: from_db(floor)?,
+            sees_imported_history: row.sees_imported_history.unwrap_or(false),
+            reactions_seen: ReactionsSeen {
+              maybe_through: from_db_opt(row.reactions_seen_through_message_id)?,
+              message_ids: row
+                .reactions_seen_message_ids
+                .unwrap_or_default()
+                .into_iter()
+                .map(from_db)
+                .collect::<Result<_, _>>()?,
+            },
           }),
           _ => None,
         };
@@ -222,6 +303,9 @@ impl Database {
             maybe_category_id: from_db_opt(row.category_id)?,
             is_archived: row.is_archived,
             is_integration: row.is_integration,
+            maybe_image: stored_image(row.image_key, row.image_version, row.image_size_bytes)?,
+            maybe_importer: from_db_opt(row.importer_user_id)?,
+            maybe_imported_through: from_db_opt(row.imported_through_message_id)?,
             moderation: ChannelModeration {
               member_denied: permissions(row.member_denied),
               guest_denied: permissions(row.guest_denied),
@@ -231,6 +315,44 @@ impl Database {
         })
       })
       .collect()
+  }
+
+  /// Makes `image` the channel's picture (`None` removes it). Says which blob key it replaced,
+  /// which nothing refers to any more, or that the channel is gone (deleted while the picture was
+  /// uploading), so the caller deletes the object it stored.
+  pub async fn set_conversation_image(
+    &self,
+    conversation: ConversationId,
+    maybe_image: Option<&StoredSpaceImage>,
+  ) -> Result<ImageChange, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let maybe_previous = sqlx::query_scalar!(
+      "SELECT image_key FROM conversations WHERE id = $1 FOR UPDATE",
+      to_db(conversation),
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(maybe_previous) = maybe_previous else {
+      return Ok(ImageChange::ChannelGone);
+    };
+    let maybe_size = maybe_image
+      .map(|image| i64::try_from(image.size_bytes))
+      .transpose()
+      .map_err(|_| DbError::InvalidStoredValue("channel image size".into()))?;
+    sqlx::query!(
+      "UPDATE conversations SET image_key = $2, image_version = $3, image_size_bytes = $4 WHERE id = $1",
+      to_db(conversation),
+      maybe_image.map(|image| image.key.as_str()),
+      maybe_image.map(|image| image.version.as_str()),
+      maybe_size,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(ImageChange::Set {
+      maybe_replaced_key: maybe_previous
+        .filter(|previous| maybe_image.is_none_or(|image| image.key != *previous)),
+    })
   }
 
   pub async fn update_conversation(
@@ -287,7 +409,7 @@ impl Database {
   ) -> Result<Vec<ConversationMember>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
-                u.deactivated_at IS NOT NULL AS "is_deactivated!", m.role
+                u.deactivated_at IS NOT NULL AS "is_deactivated!", u.deleted_at IS NOT NULL AS "is_deleted!", m.role
          FROM memberships m JOIN users u ON u.id = m.user_id
          WHERE m.conversation_id = $1 ORDER BY u.display_name, u.id"#,
       to_db(conversation),
@@ -305,6 +427,7 @@ impl Database {
             kind: row.kind.into(),
             created_at: row.created_at,
             is_deactivated: row.is_deactivated,
+            is_deleted: row.is_deleted,
             maybe_organization: row.organization,
           },
           role: ChannelRole::from(row.role),
@@ -323,6 +446,33 @@ impl Database {
     ids.into_iter().map(from_db).collect()
   }
 
+  /// The members of every conversation in the space, by conversation; with `maybe_user` only that
+  /// user's conversations there. Conversations without members are left out.
+  pub async fn space_conversation_members(
+    &self,
+    space: SpaceId,
+    maybe_user: Option<UserId>,
+  ) -> Result<HashMap<ConversationId, Vec<UserId>>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT m.conversation_id, m.user_id
+         FROM memberships m
+         JOIN conversations c ON c.id = m.conversation_id
+         WHERE c.space_id = $1 AND ($2::bigint IS NULL OR m.user_id = $2)"#,
+      to_db(space),
+      maybe_user.map(to_db),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    let mut members: HashMap<ConversationId, Vec<UserId>> = HashMap::new();
+    for row in rows {
+      members
+        .entry(from_db(row.conversation_id)?)
+        .or_default()
+        .push(from_db(row.user_id)?);
+    }
+    Ok(members)
+  }
+
   /// Adds the user; keeps the existing membership if there is one. `true` if newly added.
   pub async fn add_conversation_member(
     &self,
@@ -331,7 +481,9 @@ impl Database {
     role: ChannelRole,
   ) -> Result<bool, DbError> {
     let result = sqlx::query!(
-      r#"INSERT INTO memberships (conversation_id, user_id, role) VALUES ($1, $2, $3)
+      // Waits for a deletion running now and then finds the conversation gone: nobody joins one.
+      r#"INSERT INTO memberships (conversation_id, user_id, role)
+         SELECT c.id, $2, $3 FROM conversations c WHERE c.id = $1 AND c.deleted_at IS NULL FOR SHARE
          ON CONFLICT DO NOTHING"#,
       to_db(conversation),
       to_db(user),
@@ -340,6 +492,22 @@ impl Database {
     .execute(self.pool())
     .await?;
     Ok(result.rows_affected() > 0)
+  }
+
+  /// Notes that the import account added the member ([`Membership::sees_imported_history`]).
+  pub async fn mark_imported_history_member(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE memberships SET sees_imported_history = true WHERE conversation_id = $1 AND user_id = $2",
+      to_db(conversation),
+      to_db(user),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
   }
 
   /// `true` if the user was a member.
@@ -432,17 +600,83 @@ impl Database {
     Ok(())
   }
 
-  /// Participants of DMs / group DMs, by conversation.
+  /// Adds reaction messages the member saw to their seen state ([`ReactionsSeen::add`], at most
+  /// `max_ids` kept one by one). `None` if they aren't a member. Two devices at once don't lose
+  /// each other's: the row is locked while it is merged.
+  pub async fn add_reactions_seen(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    messages: &[MessageId],
+    max_ids: usize,
+  ) -> Result<Option<ReactionsSeen>, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let Some(row) = sqlx::query!(
+      r#"SELECT reactions_seen_through_message_id, reactions_seen_message_ids FROM memberships
+         WHERE conversation_id = $1 AND user_id = $2 FOR UPDATE"#,
+      to_db(conversation),
+      to_db(user),
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+      return Ok(None);
+    };
+    let mut seen = ReactionsSeen {
+      maybe_through: from_db_opt(row.reactions_seen_through_message_id)?,
+      message_ids: row
+        .reactions_seen_message_ids
+        .into_iter()
+        .map(from_db)
+        .collect::<Result<_, _>>()?,
+    };
+    seen.add(messages.iter().copied(), max_ids);
+    sqlx::query!(
+      r#"UPDATE memberships SET reactions_seen_through_message_id = $3, reactions_seen_message_ids = $4
+         WHERE conversation_id = $1 AND user_id = $2"#,
+      to_db(conversation),
+      to_db(user),
+      seen.maybe_through.map(to_db),
+      &to_db_all(&seen.message_ids),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(seen))
+  }
+
+  /// How many of `messages` (distinct IDs) are messages of the conversation.
+  pub async fn count_messages_of(
+    &self,
+    conversation: ConversationId,
+    messages: &[MessageId],
+  ) -> Result<usize, DbError> {
+    let count = sqlx::query_scalar!(
+      r#"SELECT count(*) AS "count!" FROM messages WHERE conversation_id = $1 AND id = ANY($2)"#,
+      to_db(conversation),
+      &to_db_all(messages),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok(usize::try_from(count).unwrap_or(usize::MAX))
+  }
+
+  /// Participants of DMs / group DMs, by conversation. A DM's participants are the two people
+  /// (or the one, for notes to self) it was opened for, from its [`participants_key`]: a
+  /// deactivated user loses their memberships, yet the DM with them stays the DM with them and
+  /// never turns into a conversation of the user alone (issue #643). A group DM's are its members.
   pub async fn participants_of(
     &self,
     conversations: &[ConversationId],
   ) -> Result<HashMap<ConversationId, Vec<User>>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT m.conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
-                u.deactivated_at IS NOT NULL AS "is_deactivated!"
-         FROM memberships m JOIN users u ON u.id = m.user_id
-         JOIN conversations c ON c.id = m.conversation_id
-         WHERE m.conversation_id = ANY($1) AND c.kind IN ('dm', 'group')
+      r#"SELECT c.id AS conversation_id, u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
+                u.deactivated_at IS NOT NULL AS "is_deactivated!", u.deleted_at IS NOT NULL AS "is_deleted!"
+         FROM conversations c JOIN users u
+           ON (c.kind = 'dm' AND u.id = ANY(string_to_array(c.participants_key, '-')::bigint[]))
+           OR (c.kind = 'group'
+               AND EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.user_id = u.id))
+         WHERE c.id = ANY($1) AND c.kind IN ('dm', 'group')
          ORDER BY u.display_name, u.id"#,
       &to_db_all(conversations),
     )
@@ -460,6 +694,7 @@ impl Database {
           kind: row.kind.into(),
           created_at: row.created_at,
           is_deactivated: row.is_deactivated,
+          is_deleted: row.is_deleted,
           maybe_organization: row.organization,
         });
     }

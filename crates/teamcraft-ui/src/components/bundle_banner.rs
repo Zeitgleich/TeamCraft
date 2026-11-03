@@ -3,8 +3,10 @@
 
 use leptos::prelude::*;
 
-use crate::bundle::{Bundle, BundleState};
+use crate::bundle::{Bundle, BundleState, Release, ReleaseUpdate, apply_update};
 use crate::components::icons::{Icon, IconName};
+use crate::components::pending_button::PendingButton;
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 
 /// Shown above everything when the worker rejected a bundle or the release build is unsigned.
@@ -30,6 +32,37 @@ pub fn BundleBanner() -> impl IntoView {
           <span class="small mono" translate="no">{detail}</span>
         </div>
       }
+    })
+  }
+}
+
+/// "A new version is ready, reload" (browser): a new release never replaces the running page on its
+/// own, so the user decides when (docs/e2ee.md §9.3). While the new release takes over the button
+/// waits; if it doesn't, the banner says so and the button tries again (#1045).
+#[component]
+pub fn ReleaseBanner() -> impl IntoView {
+  let i18n = use_i18n();
+  let release = use_context::<Release>();
+  let switch = PendingAction::new();
+  move || {
+    let text = match release?.0.get() {
+      ReleaseUpdate::Current => return None,
+      ReleaseUpdate::Ready => i18n.t("release-ready"),
+      ReleaseUpdate::TooOld { minimum_version } => {
+        i18n.t_with("release-too-old", &[("version", &minimum_version)])
+      },
+    };
+    Some(view! {
+      <div class="update-banner" role="status">
+        <Icon name=IconName::Download />
+        <span>{text}</span>
+        <PendingButton pending=switch class="btn btn-primary btn-small" on_click=move |_| switch.spawn(apply_update())>
+          {move || i18n.t("release-reload")}
+        </PendingButton>
+        {move || switch.maybe_failure().map(|_| view! {
+          <span class="small update-banner-error" role="alert">{i18n.t("release-switch-failed")}</span>
+        })}
+      </div>
     })
   }
 }

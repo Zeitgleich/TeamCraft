@@ -6,25 +6,39 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 
+use crate::activity_place::ActivityFilter;
 use crate::admin::AdminSection;
+use crate::audio_player::AudioPlayer;
 use crate::backend::Backend;
 use crate::calls::CallState;
-use crate::model::{Conversation, ConversationId, MessageId, SpaceId, ThreadId, User, UserId, id_from_raw};
+use crate::lightbox::MediaKey;
+use crate::model::{
+  Conversation, ConversationId, MessageId, SpaceId, ThreadId, TimestampMs, User, UserId, id_from_raw,
+};
 use crate::navigation::{Step, divider_index, next_unread};
 use crate::prefs::SidebarSort;
-use crate::reactive::get_if_observed;
-use crate::sections::{apply_favorite_order, build_sections};
+use crate::reactive::{SetIfAlive, get_if_observed};
+use crate::route::{HistoryReach, Route};
+use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
 use crate::security::DeviceApproval;
-use crate::settings::Settings;
-use teamcraft_client_api::actions::{NewChannel, NewSpace};
+use crate::settings::{LastOpenPlace, Settings, last_open, remember_last_open};
+use crate::toast_timer::{Hold, ToastClock};
+use crate::unread_divider::{DividerEvent, next_divider};
+use crate::viewport::{CompactDepth, CompactPane, Layout, current_layout};
+use teamcraft_client_api::actions::{NewChannel, NewSpace, PermalinkTarget};
+use teamcraft_proto::{MeetingId, Role};
 
 /// How many of the newest messages are searched for the first unread one.
 const UNREAD_SCAN_LIMIT: usize = 500;
 
 /// How long a message opened from search or a link stays highlighted.
 const HIGHLIGHT_DURATION: Duration = Duration::from_millis(2_500);
+/// Toasts shown at once; a new one closes the oldest beyond this.
+const MAX_TOASTS: usize = 4;
 /// How long a deleted message can be restored before it is deleted for everyone.
 const UNDO_WINDOW: Duration = Duration::from_secs(6);
+/// How long a confirmation toast ("Link copied") stays.
+const BRIEF_TOAST: Duration = Duration::from_secs(4);
 
 /// A short message over the app, optionally with an Undo button.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +46,52 @@ pub struct Toast {
   pub id: u64,
   pub text: String,
   pub maybe_undo: Option<Undo>,
+  /// The next step a failure's toast offers.
+  pub maybe_action: Option<ToastAction>,
+  pub tone: ToastTone,
+}
+
+/// A button on a failure's toast that helps with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastAction {
+  /// Opens the camera choice of the call or the pre-join screen (#819).
+  ChooseCamera,
+  /// Opens macOS's Screen Recording settings for a share the system refused (#940).
+  OpenScreenSettings,
+  /// Switches the call to the microphone or speakers plugged in during it (#986).
+  UseAudioDevice,
+  /// Takes somebody the organizer's device let into a meeting by itself out again (#987 review).
+  RemoveFromMeeting {
+    conversation: ConversationId,
+    user: UserId,
+  },
+}
+
+impl ToastAction {
+  /// The i18n key of the button's label.
+  pub fn label_key(self) -> &'static str {
+    match self {
+      Self::ChooseCamera => "control-camera-choose",
+      Self::OpenScreenSettings => "call-screen-settings-open",
+      Self::UseAudioDevice => "call-audio-use",
+      Self::RemoveFromMeeting { .. } => "meetings-remove-joined",
+    }
+  }
+
+  /// Whether the toast stays after its button: the settings need the toast's steps (#940).
+  pub fn keeps_toast(self) -> bool {
+    matches!(self, Self::OpenScreenSettings)
+  }
+}
+
+/// How a toast looks and is announced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ToastTone {
+  Info,
+  /// A failed action (issue #322), with the technical detail behind a "Details" toggle.
+  Error {
+    detail: String,
+  },
 }
 
 /// What the Undo button of a toast reverts.
@@ -75,18 +135,37 @@ pub struct UnreadMarker {
   pub index: usize,
 }
 
+/// The entry of the space rail that is selected, and so which sidebar shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RailEntry {
+  /// Chats: the DMs and group DMs, which live outside spaces (Element's and Discord's home).
+  Chats,
+  /// The space in [`AppState::space`] (or all spaces, in the grouped sidebar).
+  Space,
+  /// Activity (#752): mentions, reactions and followed threads; the sidebar is its list.
+  Activity,
+}
+
+/// A place in the app: the rail's entry, its space and what the main column showed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Place {
+  rail: RailEntry,
+  space: SpaceId,
+  view: MainView,
+}
+
 /// What fills the main column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MainView {
   Conversation(ConversationId),
-  /// The threads inbox, optionally with one thread open in the side panel.
-  Threads,
   /// The administration console (admins only).
   Admin(AdminSection),
   /// Message search; the query lives in [`AppState::search_query`].
   Search,
   /// Messages the user saved for later.
   Saved,
+  /// Every file the user can see, across conversations.
+  Files,
   /// Mentions, reactions to the user's messages and replies in their threads.
   Activity,
   /// The user's calls: missed, incoming and outgoing.
@@ -97,6 +176,11 @@ pub enum MainView {
   Directory,
   /// First steps for an empty workspace or space: create a space or channel, invite colleagues.
   GettingStarted,
+  /// Home with no conversation open.
+  Home,
+  /// The space in [`AppState::space`] with nothing open: its channel list in the compact layout
+  /// (the wider layouts open its first channel instead).
+  Space,
 }
 
 /// What the right-hand panel shows.
@@ -110,8 +194,6 @@ pub enum SidePanel {
   Members,
   /// The pinned messages of the open conversation.
   Pins,
-  /// Files shared in the open conversation.
-  Files,
 }
 
 /// Modal and popover visibility.
@@ -120,6 +202,8 @@ pub enum Overlay {
   None,
   QuickSwitcher,
   StatusMenu,
+  /// The desktop app's recent downloads under their button in the top bar.
+  Downloads,
   CustomStatus,
   Settings,
   Shortcuts,
@@ -133,25 +217,79 @@ pub enum Overlay {
   VerifyContact(UserId),
   /// The dialog that schedules a meeting.
   ScheduleMeeting,
+  /// The same dialog filled with a meeting the user organizes.
+  EditMeeting(MeetingId),
+  /// Asks what to cancel of a meeting the user organizes: the occurrence starting then (server
+  /// time, Unix milliseconds), the following ones too, or the whole series.
+  CancelMeeting(MeetingId, i64),
+  /// The link of the meeting just scheduled or started (`MeetingsHub::maybe_created`), to copy.
+  MeetingCreated,
   /// Pick a conversation to forward a message to.
   Forward(ConversationId, MessageId),
+  /// The public links of one file of a message: new ones with options, the live ones with Revoke.
+  ShareFile(ConversationId, MessageId, teamcraft_proto::AttachmentId),
   NewSpace,
-  /// Open spaces to join, and the way to create a new one.
-  JoinSpace,
+  /// Pick one or several people to write to (a DM or a group DM).
+  NewMessage,
+  /// Open spaces to join and the user's own spaces, and the way to create a new one; a shared
+  /// space link puts its space first.
+  BrowseSpaces(Option<SpaceId>),
+  /// Invite people to a space: from the directory, by e-mail, or with the link of an open space.
+  InvitePeople(SpaceId),
+  /// Add people to a channel (through its encryption group).
+  AddToChannel(ConversationId),
+  /// Add people to the DM or group DM call of this conversation: the call moves into a meeting.
+  AddToCall(ConversationId),
   NewChannel(SpaceId),
   BrowseChannels(SpaceId),
   ChannelSettings(ConversationId),
   SpaceSettings(SpaceId),
-  /// The images of a conversation, starting at the one in this message.
-  Gallery(ConversationId, MessageId),
+  /// The image lightbox over a conversation, opened on this image.
+  Lightbox(ConversationId, MediaKey),
+  /// The preview of a Markdown, HTML, PDF or text file of a conversation.
+  FilePreview(ConversationId, MediaKey),
   /// The versions of an edited message.
   EditHistory(ConversationId, MessageId),
   /// Edit the bookmarks bar of a conversation.
   Bookmarks(ConversationId),
-  /// The signed-in user's profile form.
-  EditProfile,
   /// Another person's profile card.
   UserProfile(UserId),
+  /// Calls aren't available in this client (the browser, for now): where the apps are.
+  CallsUnavailable,
+  /// The admin console's "Delete account" confirmation for this user; the console renders it.
+  DeleteUser(UserId),
+}
+
+/// The sections of the settings dialog (PLAN.md §4 and §5, issue #327).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsTab {
+  Account,
+  Appearance,
+  Notifications,
+  Preferences,
+  Keyboard,
+  AudioVideo,
+  Devices,
+  Security,
+  About,
+}
+
+/// What the settings dialog shows: on phones the list of sections is a page of its own
+/// (`/settings`); wider layouts always show a section beside the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsPage {
+  Sections,
+  Section(SettingsTab),
+}
+
+/// What became of a route the app was asked to show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RouteOutcome {
+  Shown,
+  /// It names something that hasn't loaded yet; it opens once it does.
+  Waiting,
+  /// It names something that doesn't exist or the user can't open; Home shows instead.
+  Unavailable,
 }
 
 #[derive(Clone, Copy)]
@@ -160,22 +298,42 @@ pub struct AppState {
   /// Bumped after every backend mutation; reading data through [`AppState::read`] subscribes to it.
   revision: RwSignal<u64>,
   pub space: RwSignal<SpaceId>,
+  pub rail: RwSignal<RailEntry>,
   pub view: RwSignal<MainView>,
+  /// The open conversation that was unread when it was opened: the sidebar keeps it in its
+  /// "Unreads" section until the user opens another conversation (#890). Kept by the sidebar.
+  pub held_unread: RwSignal<Option<ConversationId>>,
+  /// How far the top bar's Back and Forward can go; kept by `history.rs` (#874).
+  pub history_reach: RwSignal<HistoryReach>,
   pub panel: RwSignal<SidePanel>,
   pub overlay: RwSignal<Overlay>,
+  /// The filter of the activity list; "Threads" is one of them (#752).
+  pub activity_filter: RwSignal<ActivityFilter>,
+  /// Where the user was when they went to Activity, restored when they go back to it.
+  before_activity: StoredValue<Option<Place>>,
+  /// The video playing inside its message row; one at a time (#483).
+  pub active_inline_video: RwSignal<Option<MediaKey>>,
+  /// The one audio player of the app; one attachment plays at a time (#802).
+  pub audio: AudioPlayer,
+  /// The layout the window's size calls for (`viewport.rs`).
+  pub layout: RwSignal<Layout>,
   /// Text of the search box, kept when leaving and re-entering the search page.
   pub search_query: RwSignal<String>,
+  /// What the top bar's search starts with when it opens (Ctrl/Cmd+F: the open conversation).
+  pub switcher_query: RwSignal<String>,
   pub call: CallState,
   /// The login waiting for the user's approval, shown while the overlay is `DeviceApproval`.
   pub device_prompt: RwSignal<Option<DeviceApproval>>,
   /// Bumped when the composer sent a message, so the feed scrolls to it.
   /// The message the composer quotes in its next message.
   pub reply_target: RwSignal<Option<ReplyTarget>>,
-  /// The person whose direct conversation was asked for and is not there yet.
-  pub pending_dm: RwSignal<Option<UserId>>,
+  /// The people of a DM or group DM that was asked for and is not there yet.
+  pub pending_dm: RwSignal<Option<Vec<UserId>>>,
   /// Short messages shown over the app until dismissed (reminders, undo).
   pub toasts: RwSignal<Vec<Toast>>,
   next_toast: StoredValue<u64>,
+  /// Countdowns of the toasts that close by themselves; they pause on hover and focus (#367).
+  toast_clock: StoredValue<ToastClock, LocalStorage>,
   /// Messages deleted with an undo window: hidden now, deleted when the window ends.
   pub hidden_messages: RwSignal<HashSet<MessageId>>,
   /// Channels left with an undo window: gone from the sidebar now, left when the window ends.
@@ -198,30 +356,111 @@ pub struct AppState {
   pub highlighted: RwSignal<Option<MessageId>>,
   /// A message the composer asked to edit (↑ in the empty composer); its row opens the editor.
   pub edit_request: RwSignal<Option<MessageId>>,
+  /// The page the settings dialog shows.
+  pub settings_page: RwSignal<SettingsPage>,
+  /// The message a link or jump opened in the current conversation: the URL names it until the
+  /// user goes somewhere else.
+  linked_message: RwSignal<Option<PermalinkTarget>>,
+  /// A route that names something which hasn't loaded yet.
+  pub pending_route: RwSignal<Option<Route>>,
+  /// The route being followed is the place the desktop app reopens (#721): if it is gone, the app
+  /// starts as usual without a notice.
+  is_restoring: StoredValue<bool>,
+  /// The message the user was reading in a conversation when the app closed; its feed starts there
+  /// (taken by the message list).
+  restored_reading: StoredValue<Option<crate::last_place::ReadingPosition>>,
+  /// A meeting link (`/meeting/{token}` or `/meeting/{id}`) the meetings screen has yet to open;
+  /// it takes it.
+  pub maybe_meeting_link: RwSignal<Option<crate::route::MeetingHandle>>,
+  /// Bumped when a route named something that doesn't exist or the user can't open.
+  pub unavailable_routes: RwSignal<u64>,
+  /// Set while the app follows a URL it was given or redirects on its own (the first conversation
+  /// once startup data arrived), so the address bar replaces its entry instead of adding one
+  /// (`history.rs` takes it).
+  follows_url: StoredValue<bool>,
   pub settings: Settings,
 }
 
+/// Where the app starts: the first conversation of a space, or Home with the welcome page when
+/// there is none yet (there is one Home: the rail's Home entry and its sidebar).
+fn start_position(start: Option<(SpaceId, ConversationId)>) -> (SpaceId, RailEntry, MainView) {
+  match start {
+    Some((space, conversation)) => (space, RailEntry::Space, MainView::Conversation(conversation)),
+    None => (id_from_raw(0), RailEntry::Chats, MainView::GettingStarted),
+  }
+}
+
+/// Home's page without any DM: the welcome page while the workspace is empty (create a space,
+/// find people), else Home's own start page.
+/// The remembered conversation if it is still among `candidates` (it may have been left or
+/// archived since); `None` otherwise, so the caller picks its own default.
+fn remembered_conversation(
+  candidates: impl IntoIterator<Item = ConversationId>,
+  remembered: Option<ConversationId>,
+) -> Option<ConversationId> {
+  let remembered = remembered?;
+  candidates
+    .into_iter()
+    .any(|id| id == remembered)
+    .then_some(remembered)
+}
+
+fn home_view_without_dms(has_spaces: bool) -> MainView {
+  if has_spaces {
+    MainView::Home
+  } else {
+    MainView::GettingStarted
+  }
+}
+
+/// Which pane a view fills in the compact layout: the lists of Home and of a space, a side panel
+/// over its conversation, and the main column for everything else.
+fn compact_depth_for(view: MainView, panel: SidePanel) -> CompactDepth {
+  match compact_pane_for(view, panel) {
+    CompactPane::Panel => CompactDepth::Panel,
+    CompactPane::List => CompactDepth::TopLevel,
+    CompactPane::Main if view == MainView::GettingStarted => CompactDepth::TopLevel,
+    CompactPane::Main => CompactDepth::Page,
+  }
+}
+
+fn compact_pane_for(view: MainView, panel: SidePanel) -> CompactPane {
+  match view {
+    // Activity's list is its sidebar, as for Home and a space.
+    MainView::Home | MainView::Space | MainView::Activity => CompactPane::List,
+    MainView::Conversation(_) if panel != SidePanel::Closed => CompactPane::Panel,
+    _ => CompactPane::Main,
+  }
+}
+
 impl AppState {
-  /// `start` is the first space and conversation; without one the threads inbox opens.
+  /// `start` is the first space and conversation; without one Home opens with the welcome page.
   pub fn new(backend: Rc<dyn Backend>, settings: Settings, start: Option<(SpaceId, ConversationId)>) -> Self {
-    let (space, view) = match start {
-      Some((space, conversation)) => (space, MainView::Conversation(conversation)),
-      None => (id_from_raw(0), MainView::GettingStarted),
-    };
+    let (space, rail, view) = start_position(start);
     Self {
       backend: StoredValue::new_local(backend),
       revision: RwSignal::new(0),
       space: RwSignal::new(space),
+      rail: RwSignal::new(rail),
       view: RwSignal::new(view),
+      held_unread: RwSignal::new(None),
+      history_reach: RwSignal::new(HistoryReach::default()),
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
+      activity_filter: RwSignal::new(ActivityFilter::default()),
+      before_activity: StoredValue::new(None),
+      active_inline_video: RwSignal::new(None),
+      audio: AudioPlayer::new(),
+      layout: RwSignal::new(current_layout()),
       search_query: RwSignal::new(String::new()),
+      switcher_query: RwSignal::new(String::new()),
       call: CallState::new(),
       device_prompt: RwSignal::new(None),
       reply_target: RwSignal::new(None),
       pending_dm: RwSignal::new(None),
       toasts: RwSignal::new(Vec::new()),
       next_toast: StoredValue::new(0),
+      toast_clock: StoredValue::new_local(ToastClock::default()),
       hidden_messages: RwSignal::new(HashSet::new()),
       hidden_conversations: RwSignal::new(HashSet::new()),
       pending_open: RwSignal::new(None),
@@ -233,6 +472,14 @@ impl AppState {
       edit_request: RwSignal::new(None),
       highlighted: RwSignal::new(None),
       scroll_anchors: StoredValue::new(HashMap::new()),
+      settings_page: RwSignal::new(SettingsPage::Section(SettingsTab::DEFAULT)),
+      linked_message: RwSignal::new(None),
+      pending_route: RwSignal::new(None),
+      is_restoring: StoredValue::new(false),
+      restored_reading: StoredValue::new(None),
+      maybe_meeting_link: RwSignal::new(None),
+      unavailable_routes: RwSignal::new(0),
+      follows_url: StoredValue::new(false),
       settings,
     }
   }
@@ -240,8 +487,15 @@ impl AppState {
   /// Tells every reader that the backend changed on its own (data arrived over the network or from
   /// the desktop shell), so views re-read.
   pub fn backend_changed(&self) {
-    self.revision.update(|revision| *revision += 1);
+    // Called by the backend from outside the reactive tree, possibly after this shell is gone
+    // (sign-out, a new session): then there is nothing to update (issue #322).
+    if self.revision.try_update(|revision| *revision += 1).is_none() {
+      return;
+    }
     self.open_pending_creation();
+    if let Some(route) = self.pending_route.get_untracked() {
+      self.follow_route(route);
+    }
     self.open_first_loaded_conversation();
     if let Some(conversation) = self.pending_open.get_untracked()
       && self.read(|backend| backend.conversation(conversation)).is_some()
@@ -249,12 +503,23 @@ impl AppState {
       self.pending_open.set(None);
       self.open_conversation(conversation);
     }
-    if let Some(user) = self.pending_dm.get_untracked()
-      && let Some(conversation) = self.direct_with(user)
+    if let Some(users) = self.pending_dm.get_untracked()
+      && let Some(conversation) = self.direct_with(&users)
     {
       self.pending_dm.set(None);
       self.open_conversation(conversation);
     }
+  }
+
+  /// Forgets that `conversation` opens once it shows up, after its join was refused: a later join
+  /// from elsewhere must not jump into it (issue #328). Called when the core answered, possibly
+  /// after the shell is gone.
+  pub fn forget_pending_open(&self, conversation: ConversationId) {
+    let _ = self.pending_open.try_update(|maybe_open| {
+      if *maybe_open == Some(conversation) {
+        *maybe_open = None;
+      }
+    });
   }
 
   /// Creates a space and switches to it once it exists.
@@ -299,6 +564,7 @@ impl AppState {
   fn open_first_loaded_conversation(&self) {
     if !self.awaits_first_conversation.get_untracked()
       || self.view.get_untracked() != MainView::GettingStarted
+      || self.pending_route.get_untracked().is_some()
     {
       return;
     }
@@ -310,7 +576,16 @@ impl AppState {
         .or_else(|| backend.direct_conversations().into_iter().next())
     });
     if let Some(conversation) = first {
-      self.open_conversation(conversation.id);
+      // Phones start on Home's list, like the mobile apps.
+      if self.is_compact() {
+        self.awaits_first_conversation.set(false);
+        self.open_chats();
+      } else {
+        self.open_conversation(conversation.id);
+      }
+      // It stands in for the start page the URL already shows, so Back doesn't return to a `/`
+      // that would just open it again.
+      self.follows_url.set_value(true);
     }
   }
 
@@ -348,12 +623,19 @@ impl AppState {
   }
 
   /// Opens the first channel of a space, or shows its getting-started page when it has none.
+  /// Opens the channel the space had open last (#498), else its first channel.
   pub fn open_first_conversation_of(&self, space: SpaceId) {
-    let first = self
-      .backend
-      .with_value(|backend| backend.space_conversations(space).into_iter().next());
+    let remembered = self
+      .reopen_setting()
+      .then(|| last_open(self.me().id).spaces.get(&space).copied())
+      .flatten();
+    let first = self.backend.with_value(|backend| {
+      let channels = backend.space_conversations(space);
+      remembered_conversation(channels.iter().map(|channel| channel.id), remembered)
+        .or_else(|| channels.first().map(|channel| channel.id))
+    });
     match first {
-      Some(conversation) => self.open_conversation(conversation.id),
+      Some(id) => self.open_conversation(id),
       None => {
         self.view.set(MainView::GettingStarted);
         self.panel.set(SidePanel::Closed);
@@ -363,29 +645,208 @@ impl AppState {
 
   /// Opens the direct conversation with a person, creating it first if there is none yet.
   pub fn open_direct(&self, user: UserId) {
-    if let Some(conversation) = self.direct_with(user) {
+    self.open_direct_with(vec![user]);
+  }
+
+  /// Opens the DM (one person) or group DM (several) with exactly these people, creating it first
+  /// if there is none yet. The user themself may be in `users`.
+  pub fn open_direct_with(&self, mut users: Vec<UserId>) {
+    let me = self.me().id;
+    users.retain(|user| *user != me);
+    users.sort();
+    users.dedup();
+    if users.is_empty() {
+      return;
+    }
+    if let Some(conversation) = self.direct_with(&users) {
       self.open_conversation(conversation);
-    } else {
-      self.pending_dm.set(Some(user));
-      self.write(|backend| backend.open_dm(user));
+      return;
+    }
+    // The surfaces don't offer this to a guest who may not start it; this catches the ones that
+    // take a typed name (`/msg`) or a picker.
+    if !crate::channel_access::can_start_direct(*self, &users) {
+      crate::feedback::report_failure(crate::feedback::ActionFailure::new(
+        crate::feedback::FailureKind::Server(teamcraft_proto::ErrorCode::GuestDmNotAllowed),
+        "guests may not start this conversation",
+      ));
+      return;
+    }
+    self.pending_dm.set(Some(users.clone()));
+    match users.as_slice() {
+      [user] => {
+        let user = *user;
+        self.write(|backend| backend.open_dm(user));
+      },
+      _ => self.write(|backend| backend.open_group_dm(users)),
     }
   }
 
-  fn direct_with(&self, user: UserId) -> Option<ConversationId> {
+  pub(crate) fn direct_with(&self, users: &[UserId]) -> Option<ConversationId> {
     let me = self.me().id;
+    let kind = if users.len() == 1 {
+      crate::model::ConversationKind::Direct
+    } else {
+      crate::model::ConversationKind::Group
+    };
     self.read(|backend| {
       backend
         .direct_conversations()
         .into_iter()
-        .find(|conversation| {
-          conversation.kind == crate::model::ConversationKind::Direct
-            && conversation.member_ids.contains(&user)
-            && conversation
-              .member_ids
-              .iter()
-              .all(|member| *member == user || *member == me)
-        })
+        .find(|conversation| conversation.kind == kind && has_exactly(&conversation.member_ids, users, me))
         .map(|conversation| conversation.id)
+    })
+  }
+
+  /// Switches the sidebar to a space (all spaces in the grouped sidebar). Lands in its first channel
+  /// unless the open page isn't tied to a space (threads, search, …) or already belongs to it.
+  pub fn open_space(&self, space: SpaceId) {
+    if self.return_from_activity(RailEntry::Space, Some(space)) {
+      return;
+    }
+    self.space.set(space);
+    self.rail.set(RailEntry::Space);
+    let is_grouped = self
+      .settings
+      .prefs
+      .with_untracked(|prefs| prefs.sidebar.is_grouped_by_space);
+    let belongs = match self.view.get_untracked() {
+      MainView::Conversation(current) => {
+        self
+          .read(|backend| backend.conversation(current))
+          .is_some_and(|conversation| {
+            conversation.maybe_space.is_some() && (is_grouped || conversation.maybe_space == Some(space))
+          })
+      },
+      MainView::Search
+      | MainView::Meetings
+      | MainView::Saved
+      | MainView::Files
+      | MainView::Calls
+      | MainView::Directory => true,
+      // Activity's main column is its own; the space's channel comes back.
+      MainView::Activity => false,
+      MainView::Admin(_) | MainView::GettingStarted | MainView::Home | MainView::Space => false,
+    };
+    if self.is_compact() {
+      self.show_space_list();
+    } else if !belongs {
+      self.open_first_conversation_of(space);
+    }
+  }
+
+  /// Shows Chats: the DM it had open last (#498), or the page's start when there is none.
+  pub fn open_chats(&self) {
+    if self.return_from_activity(RailEntry::Chats, None) {
+      return;
+    }
+    self.rail.set(RailEntry::Chats);
+    // Phones show the chat list (the welcome page while the workspace is empty); a conversation
+    // opens from there.
+    if self.is_compact() {
+      let is_empty =
+        self.read(|backend| backend.spaces().is_empty() && backend.direct_conversations().is_empty());
+      self.view.set(if is_empty {
+        MainView::GettingStarted
+      } else {
+        MainView::Home
+      });
+      self.panel.set(SidePanel::Closed);
+      return;
+    }
+    let is_direct_open = self
+      .current_conversation_id()
+      .and_then(|id| self.read(|backend| backend.conversation(id)))
+      .is_some_and(|conversation| conversation.kind.is_direct_like());
+    if is_direct_open {
+      return;
+    }
+    let direct = self.direct_list();
+    let remembered = self
+      .reopen_setting()
+      .then(|| last_open(self.me().id).home)
+      .flatten();
+    match remembered_conversation(direct.iter().map(|conversation| conversation.id), remembered) {
+      Some(id) => self.open_conversation(id),
+      None => {
+        let has_spaces = self.read(|backend| !backend.spaces().is_empty());
+        self.view.set(home_view_without_dms(has_spaces));
+        self.panel.set(SidePanel::Closed);
+      },
+    }
+  }
+
+  /// Going from Activity back to the place the user came from (#752) shows what was open there.
+  /// `true` when that is where `rail` (and `maybe_space`) lead and it was restored. Phones open
+  /// their lists instead, as from any tab.
+  fn return_from_activity(&self, rail: RailEntry, maybe_space: Option<SpaceId>) -> bool {
+    if self.rail.get_untracked() != RailEntry::Activity || self.is_compact() {
+      return false;
+    }
+    let Some(place) = self.before_activity.get_value() else {
+      return false;
+    };
+    let is_same_place = place.rail == rail && maybe_space.is_none_or(|space| space == place.space);
+    if !is_same_place {
+      return false;
+    }
+    self.before_activity.set_value(None);
+    self.space.set(place.space);
+    self.rail.set(place.rail);
+    match place.view {
+      MainView::Conversation(id) if self.read(|backend| backend.conversation(id)).is_some() => {
+        self.open_conversation(id)
+      },
+      // A conversation that is gone meanwhile: the place opens as it would anyway.
+      MainView::Conversation(_) | MainView::Activity => return false,
+      view => {
+        self.view.set(view);
+        self.panel.set(SidePanel::Closed);
+      },
+    }
+    true
+  }
+
+  /// Whether switching to Home or a space reopens what was open there (the sidebar setting).
+  fn reopen_setting(&self) -> bool {
+    self
+      .settings
+      .prefs
+      .with_untracked(|prefs| prefs.sidebar.reopen_last_conversation)
+  }
+
+  /// Keeps the conversation of Home or a space for the next visit to it.
+  fn remember_place(&self, conversation: &Conversation, id: ConversationId) {
+    let place = match conversation.maybe_space {
+      Some(space) => LastOpenPlace::Space(space, id),
+      None if conversation.kind.is_direct_like() => LastOpenPlace::Home(id),
+      None => return,
+    };
+    remember_last_open(self.me().id, place);
+  }
+
+  /// DMs and group DMs as Home lists them (favorites first, then by recency
+  /// or name), without the display limit.
+  pub fn direct_list(&self) -> Vec<Conversation> {
+    let sort = self.settings.prefs.with(|prefs| prefs.sidebar.dm_sort);
+    build_direct(self.direct_entries(), sort, 0, "", HomeFilter::All)
+      .sections
+      .into_iter()
+      .flat_map(|section| section.conversations)
+      .collect()
+  }
+
+  /// DMs and group DMs (without the ones being left, mutes applied), each with the time of its
+  /// newest message.
+  pub fn direct_entries(&self) -> Vec<(Conversation, Option<TimestampMs>)> {
+    let list = self.with_mutes(self.sidebar_list(self.read(|backend| backend.direct_conversations())));
+    self.read(|backend| {
+      list
+        .into_iter()
+        .map(|conversation| {
+          let at = backend.last_activity(conversation.id);
+          (conversation, at)
+        })
+        .collect()
     })
   }
 
@@ -395,6 +856,12 @@ impl AppState {
     self.backend.with_value(|backend| read(backend.as_ref()))
   }
 
+  /// Like [`AppState::read`] without tracking, for cleanups: `None` once the backend is gone
+  /// (the app torn down).
+  pub fn try_read<R>(&self, read: impl FnOnce(&dyn Backend) -> R) -> Option<R> {
+    self.backend.try_with_value(|backend| read(backend.as_ref()))
+  }
+
   /// Applies a mutation and notifies every reader.
   pub fn write<R>(&self, write: impl FnOnce(&dyn Backend) -> R) -> R {
     let result = self.backend.with_value(|backend| write(backend.as_ref()));
@@ -402,23 +869,101 @@ impl AppState {
     result
   }
 
+  /// Whether the shell that owns this state is still mounted. Timers and tasks that call several
+  /// methods check it once instead of guarding each (issue #322).
+  pub fn is_alive(&self) -> bool {
+    !self.revision.is_disposed()
+  }
+
+  /// [`Self::write`] for async tasks: nothing happens once the shell is gone (issue #322).
+  pub fn try_write<R>(&self, write: impl FnOnce(&dyn Backend) -> R) -> Option<R> {
+    let result = self.backend.try_with_value(|backend| write(backend.as_ref()))?;
+    let _ = self.revision.try_update(|revision| *revision += 1);
+    Some(result)
+  }
+
   pub fn me(&self) -> User {
     self.read(|backend| backend.me())
+  }
+
+  /// Whether the guest and "external people" markers show for the person looking: members, admins
+  /// and owners see them (somebody external reads along), a guest sees none, also none on other
+  /// guests. Every place that renders such a marker asks this (issue #911,
+  /// `scripts/check-guest-markers.py`).
+  pub fn shows_guest_markers(&self) -> bool {
+    !self.me().is_guest
   }
 
   pub fn current_conversation_id(&self) -> Option<ConversationId> {
     match self.view.get() {
       MainView::Conversation(id) => Some(id),
-      MainView::Threads
-      | MainView::Admin(_)
+      MainView::Admin(_)
       | MainView::Search
       | MainView::Meetings
       | MainView::Saved
+      | MainView::Files
       | MainView::Activity
       | MainView::Calls
       | MainView::Directory
-      | MainView::GettingStarted => None,
+      | MainView::GettingStarted
+      | MainView::Home
+      | MainView::Space => None,
     }
+  }
+
+  /// Follows an announced move of the call of `from` into the meeting room `to`: the core checks it
+  /// (announced in `from`'s group, nobody unexpected in `to`'s), then this device joins the room's
+  /// call with its microphone and camera as they were. A failed check stays in this call and says
+  /// why (a toast and `pending`).
+  pub fn follow_call_move(
+    &self,
+    from: ConversationId,
+    to: ConversationId,
+    pending: crate::feedback::PendingAction,
+  ) {
+    let state = *self;
+    pending.run_and_then(
+      || state.write(|backend| backend.accept_call_move(from, to)),
+      move || {
+        let call = state.call;
+        let is_still_in_it = call
+          .maybe_request
+          .try_get_untracked()
+          .flatten()
+          .is_some_and(|request| request.conversation == from);
+        if !is_still_in_it {
+          return;
+        }
+        let _ = call.move_offer.try_set(None);
+        if state.view.try_get_untracked() == Some(MainView::Conversation(from)) {
+          state.open_conversation(to);
+        }
+        // Joining leaves the DM's call first.
+        call.join(crate::calls::CallRequest {
+          conversation: to,
+          kind: crate::calls::CallKind::Group,
+        });
+      },
+    );
+  }
+
+  /// Answers a ringing call on this device: opens its conversation and joins. The in-app card and
+  /// the system notification's Accept share this.
+  pub fn accept_call(&self, incoming: crate::calls::IncomingCall, with_video: bool) {
+    let kind = match self
+      .read(|backend| backend.conversation(incoming.conversation))
+      .map(|conversation| conversation.kind)
+    {
+      Some(crate::model::ConversationKind::Direct) | None => crate::calls::CallKind::Direct,
+      Some(_) => crate::calls::CallKind::Group,
+    };
+    self.call.incoming.set(None);
+    self.call.is_camera_on.set(with_video);
+    self.open_conversation(incoming.conversation);
+    self.call.join(crate::calls::CallRequest {
+      conversation: incoming.conversation,
+      kind,
+    });
   }
 
   pub fn open_conversation(&self, id: ConversationId) {
@@ -428,6 +973,9 @@ impl AppState {
     };
     if let Some(space) = conversation.maybe_space {
       self.space.set(space);
+      self.rail.set(RailEntry::Space);
+    } else if conversation.kind.is_direct_like() {
+      self.rail.set(RailEntry::Chats);
     }
     if let SidePanel::Thread {
       conversation: open, ..
@@ -437,14 +985,54 @@ impl AppState {
       self.panel.set(SidePanel::Closed);
     }
     if self.view.get_untracked() != MainView::Conversation(id) {
+      // Leaving a conversation removes its divider; the new one is placed from its read marker.
+      if let MainView::Conversation(previous) = self.view.get_untracked() {
+        self.divider_event(previous, DividerEvent::Left);
+      }
       self.unread_marker.set(self.unread_marker_for(&conversation));
       self.settings.remember_conversation(id);
+      self.remember_place(&conversation, id);
+      self.linked_message.set(None);
     }
     self.view.set(MainView::Conversation(id));
     self.overlay.set(Overlay::None);
-    if conversation.unread_count > 0 || conversation.mention_count > 0 {
+    if conversation.is_catching_up {
+      // Only a catch-up has a use for it; settled switches cost no extra request.
+      self.read(|backend| backend.focus_conversation(id));
+    }
+    if conversation.has_unread() {
       self.write(|backend| backend.mark_read(id));
     }
+  }
+
+  /// Sending in a conversation reads everything before the sent message: the user answers what they
+  /// saw. The read marker goes to the newest message already in the store, before the send is
+  /// confirmed, so the sent message itself plays no part. Nothing to send when nothing is unread.
+  pub fn mark_read_on_send(&self, conversation: ConversationId) {
+    let has_unread = self
+      .read(|backend| backend.conversation(conversation))
+      .is_some_and(|conversation| conversation.has_unread());
+    if has_unread {
+      self.write(|backend| backend.mark_read(conversation));
+    }
+  }
+
+  /// Moves or removes the "New messages" divider after something happened in `conversation`.
+  pub fn divider_event(&self, conversation: ConversationId, event: DividerEvent) {
+    let Some(current) = self.unread_marker.try_get_untracked() else {
+      return;
+    };
+    let next = next_divider(current, conversation, event);
+    if next != current {
+      self.unread_marker.try_set(next);
+    }
+  }
+
+  /// Esc in a conversation: everything is read and the divider goes (#321). The read marker only
+  /// moves forward (the core's queue, #159).
+  pub fn mark_conversation_read(&self, conversation: ConversationId) {
+    self.write(|backend| backend.mark_read(conversation));
+    self.divider_event(conversation, DividerEvent::MarkedRead);
   }
 
   /// Where the "New messages" divider of a conversation goes, before opening marks it as read.
@@ -487,7 +1075,7 @@ impl AppState {
     }
   }
 
-  /// Marks every conversation of the current space (and the direct messages) as read.
+  /// Marks every conversation of the current list (the space's channels, or the DMs) as read.
   pub fn mark_all_read(&self) {
     let unread: Vec<ConversationId> = self
       .navigable_conversations()
@@ -510,8 +1098,160 @@ impl AppState {
     self.push_toast(text, None);
   }
 
+  /// Shows a toast with a button for the next step until the user closes it; a newer toast with
+  /// the same action replaces it (the action carries out the newest offer).
+  pub fn show_toast_with_action(&self, text: String, action: ToastAction) {
+    let id = self.next_toast.get_value();
+    self.next_toast.set_value(id + 1);
+    self.toasts.update(|list| {
+      list.retain(|shown| shown.maybe_action != Some(action));
+      push_capped(
+        list,
+        Toast {
+          id,
+          text,
+          maybe_undo: None,
+          maybe_action: Some(action),
+          tone: ToastTone::Info,
+        },
+      );
+    });
+  }
+
+  /// The user picked a microphone or speakers (an empty id: the system default), in the call or
+  /// before it: a running call switches at once (#986), and the choice is remembered like the
+  /// setting.
+  pub fn choose_audio_device(&self, kind: crate::calls::AudioKind, id: String) {
+    self.call.choose_audio(kind, id.clone());
+    self.settings.prefs.update(|prefs| match kind {
+      crate::calls::AudioKind::Microphone => prefs.calls.microphone_id = id,
+      crate::calls::AudioKind::Speakers => prefs.calls.speaker_id = id,
+    });
+  }
+
+  /// Shows a failed action until the user closes it. Called from outside the reactive tree (the
+  /// core answered), so it does nothing once the shell is gone. A repeat of any error still shown
+  /// adds no second toast; background failures are rate-limited before they get here (#344).
+  pub fn show_error(&self, text: String, detail: String) {
+    self.show_error_with(text, detail, None);
+  }
+
+  /// Shows a failed action with what to do about it (its message) and, where one helps, a button
+  /// for the next step: "Choose camera" for a camera that didn't open while a call or its
+  /// pre-join screen is up (#819).
+  pub fn show_failure(&self, i18n: crate::i18n::I18n, failure: &crate::feedback::ActionFailure) {
+    let is_in_call = self
+      .call
+      .phase
+      .try_get_untracked()
+      .is_some_and(|phase| phase != crate::calls::CallPhase::Idle);
+    let maybe_action = crate::feedback::failure_action(failure).filter(|_| is_in_call);
+    self.show_error_with(
+      crate::feedback::failure_message(i18n, failure),
+      failure.detail.clone(),
+      maybe_action,
+    );
+  }
+
+  /// Carries out a toast's action and closes the toast, unless its steps stay needed.
+  pub fn run_toast_action(&self, toast: u64, action: ToastAction) {
+    if !action.keeps_toast() {
+      self.dismiss_toast(toast);
+    }
+    match action {
+      ToastAction::ChooseCamera => self.call.is_camera_menu_open.set(true),
+      ToastAction::OpenScreenSettings => crate::external_links::open_screen_recording_settings(),
+      ToastAction::RemoveFromMeeting { conversation, user } => {
+        self.write(|backend| backend.remove_member(conversation, user));
+      },
+      ToastAction::UseAudioDevice => {
+        let Some(offer) = self.call.maybe_audio_offer.get_untracked() else {
+          return;
+        };
+        self.call.maybe_audio_offer.set(None);
+        let picks = [
+          (crate::calls::AudioKind::Microphone, offer.maybe_microphone),
+          (crate::calls::AudioKind::Speakers, offer.maybe_speakers),
+        ];
+        for (kind, maybe_id) in picks {
+          if let Some(id) = maybe_id {
+            self.choose_audio_device(kind, id);
+          }
+        }
+      },
+    }
+  }
+
+  fn show_error_with(&self, text: String, detail: String, maybe_action: Option<ToastAction>) {
+    let Some(id) = self.next_toast.try_get_value() else {
+      return;
+    };
+    let _ = self.toasts.try_update(|list| {
+      let is_shown = list.iter().any(|shown| {
+        shown.text == text && matches!(&shown.tone, ToastTone::Error { detail: shown } if *shown == detail)
+      });
+      if !is_shown {
+        self.next_toast.set_value(id + 1);
+        push_capped(
+          list,
+          Toast {
+            id,
+            text,
+            maybe_undo: None,
+            maybe_action,
+            tone: ToastTone::Error { detail },
+          },
+        );
+      }
+    });
+  }
+
+  /// Shows a confirmation that goes away by itself ("Link copied").
+  pub fn show_brief_toast(&self, text: String) {
+    let toast = self.push_toast(text, None);
+    self.close_toast_after(toast, BRIEF_TOAST, || {});
+  }
+
+  /// Closes a toast and runs what its end does (an Undo toast commits now). Also called by the
+  /// toast timer, which may fire after the shell is gone.
   pub fn dismiss_toast(&self, id: u64) {
-    self.toasts.update(|list| list.retain(|toast| toast.id != id));
+    let _ = self.toasts.try_update(|list| list.retain(|toast| toast.id != id));
+    // A hold from a toast that went away must not stall the others: nothing is left to point at,
+    // and a removed toast takes the focus with it without a `focusout`.
+    if self.toasts.try_with_untracked(Vec::is_empty) == Some(true) {
+      self.hold_toasts(Hold::Pointer, false);
+    }
+    if !is_focus_in_toasts() {
+      self.hold_toasts(Hold::Focus, false);
+    }
+    let maybe_end = self.toast_clock.try_update_value(|clock| clock.end(id)).flatten();
+    if let Some(end) = maybe_end {
+      end();
+    }
+  }
+
+  /// The page goes away (closed, navigated, frozen or discarded): what the Undo toasts hold back is
+  /// done now rather than never.
+  pub fn end_timed_toasts(&self) {
+    let pending: Vec<u64> = self
+      .toast_clock
+      .try_with_value(|clock| clock.on_end.keys().copied().collect())
+      .unwrap_or_default();
+    for toast in pending {
+      self.dismiss_toast(toast);
+    }
+  }
+
+  /// The pointer or focus is on the toasts, or the page is hidden: countdowns stand still (#367).
+  pub fn hold_toasts(&self, hold: Hold, is_on: bool) {
+    let now = crate::clock::now_ms();
+    if self
+      .toast_clock
+      .try_update_value(|clock| clock.timers.set_hold(hold, is_on, now))
+      .is_some()
+    {
+      self.schedule_toast_wake();
+    }
   }
 
   /// Hides an own message at once and deletes it after the undo window, unless Undo was pressed.
@@ -521,19 +1261,15 @@ impl AppState {
       hidden.insert(message);
     });
     let toast = self.push_toast(text, Some(Undo::RestoreMessage(message)));
-    set_timeout(
-      move || {
-        state.dismiss_toast(toast);
-        let mut is_still_deleted = false;
-        state
-          .hidden_messages
-          .update(|hidden| is_still_deleted = hidden.remove(&message));
-        if is_still_deleted {
-          state.write(|backend| backend.delete_message(conversation, message));
-        }
-      },
-      UNDO_WINDOW,
-    );
+    self.close_toast_after(toast, UNDO_WINDOW, move || {
+      let is_still_deleted = state
+        .hidden_messages
+        .try_update(|hidden| hidden.remove(&message))
+        .unwrap_or(false);
+      if is_still_deleted {
+        state.try_write(|backend| backend.delete_message(conversation, message));
+      }
+    });
   }
 
   /// Runs the Undo of a toast and closes it.
@@ -552,8 +1288,19 @@ impl AppState {
     self.dismiss_toast(toast);
   }
 
+  /// The server claimed many conversations deleted at once (e2ee.md §4.6): told once. Their messages
+  /// stay on this device for now.
+  pub fn tell_suspect_deletions(&self, i18n: crate::i18n::I18n) {
+    let count = self.read(|backend| backend.suspect_deletions());
+    if count > 0 {
+      let text = i18n.t_with("deletions-suspect", &[("count", &count.to_string())]);
+      self.push_toast(text, None);
+      self.try_write(|backend| backend.dismiss_suspect_deletions());
+    }
+  }
+
   /// Leaves a channel after the undo window; it disappears from the sidebar at once.
-  pub fn leave_with_undo(&self, conversation: ConversationId, text: String) {
+  pub fn leave_with_undo(&self, conversation: ConversationId, text: String, deletes_if_last: bool) {
     let state = *self;
     if self.current_conversation_id() == Some(conversation) {
       let next = self
@@ -569,19 +1316,15 @@ impl AppState {
       hidden.insert(conversation);
     });
     let toast = self.push_toast(text, Some(Undo::StayInChannel(conversation)));
-    set_timeout(
-      move || {
-        state.dismiss_toast(toast);
-        let mut is_still_leaving = false;
-        state
-          .hidden_conversations
-          .update(|hidden| is_still_leaving = hidden.remove(&conversation));
-        if is_still_leaving {
-          state.write(|backend| backend.leave_channel(conversation));
-        }
-      },
-      UNDO_WINDOW,
-    );
+    self.close_toast_after(toast, UNDO_WINDOW, move || {
+      let is_still_leaving = state
+        .hidden_conversations
+        .try_update(|hidden| hidden.remove(&conversation))
+        .unwrap_or(false);
+      if is_still_leaving {
+        state.try_write(|backend| backend.leave_channel(conversation, deletes_if_last));
+      }
+    });
   }
 
   /// Conversations as the sidebar shows them: without the ones being left, favorites in the user's
@@ -599,12 +1342,97 @@ impl AppState {
     list
   }
 
+  /// Conversations with the notification settings applied: one muted there (or through its space)
+  /// looks muted in the lists too.
+  pub fn with_mutes(&self, mut list: Vec<Conversation>) -> Vec<Conversation> {
+    self.settings.prefs.with(|prefs| {
+      for conversation in &mut list {
+        let maybe_space = conversation.maybe_space.map(|space| space.to_string());
+        conversation.is_muted |= prefs
+          .notifications
+          .is_muted_in(&conversation.id.to_string(), maybe_space.as_deref());
+      }
+    });
+    list
+  }
+
+  /// Closes `toast` after `duration` of countdown, which pauses while held; `on_end` runs when it
+  /// closes, by the countdown or earlier.
+  fn close_toast_after(&self, toast: u64, duration: Duration, on_end: impl FnOnce() + 'static) {
+    let now = crate::clock::now_ms();
+    let is_alive = self
+      .toast_clock
+      .try_update_value(|clock| {
+        clock.timers.start(toast, duration, now);
+        clock.on_end.insert(toast, Box::new(on_end));
+      })
+      .is_some();
+    if is_alive {
+      self.schedule_toast_wake();
+    }
+  }
+
+  /// One browser timer for the nearest deadline; none while the countdowns are held. Native builds
+  /// (tests) have no browser timer and drive the countdowns themselves.
+  fn schedule_toast_wake(&self) {
+    let state = *self;
+    let now = crate::clock::now_ms();
+    let _ = self.toast_clock.try_update_value(|clock| {
+      if let Some(wake) = clock.maybe_wake.take() {
+        wake.clear();
+      }
+      let Some(deadline) = clock.timers.next_deadline() else {
+        return;
+      };
+      let wait = Duration::from_millis(u64::try_from(deadline - now).unwrap_or(0));
+      #[cfg(target_arch = "wasm32")]
+      match leptos::leptos_dom::helpers::set_timeout_with_handle(move || state.wake_toasts(), wait) {
+        Ok(handle) => clock.maybe_wake = Some(handle),
+        // Without a timer the toast stays until closed: worse, but nothing is lost.
+        Err(_) => tracing::debug!("could not start the toast timer"),
+      }
+      #[cfg(not(target_arch = "wasm32"))]
+      let _ = (state, wait);
+    });
+  }
+
+  /// The toast timer fired: closes the toasts whose time ran out and waits for the next one.
+  #[cfg(target_arch = "wasm32")]
+  fn wake_toasts(&self) {
+    self.wake_toasts_at(crate::clock::now_ms());
+  }
+
+  /// Native builds have no toast timer; tests call this with their own clock.
+  #[cfg(any(target_arch = "wasm32", test))]
+  fn wake_toasts_at(&self, now: TimestampMs) {
+    let expired = self
+      .toast_clock
+      .try_update_value(|clock| {
+        clock.maybe_wake = None;
+        clock.timers.take_expired(now)
+      })
+      .unwrap_or_default();
+    for toast in expired {
+      self.dismiss_toast(toast);
+    }
+    self.schedule_toast_wake();
+  }
+
   fn push_toast(&self, text: String, maybe_undo: Option<Undo>) -> u64 {
     let id = self.next_toast.get_value();
     self.next_toast.set_value(id + 1);
-    self
-      .toasts
-      .update(|list| list.push(Toast { id, text, maybe_undo }));
+    self.toasts.update(|list| {
+      push_capped(
+        list,
+        Toast {
+          id,
+          text,
+          maybe_undo,
+          maybe_action: None,
+          tone: ToastTone::Info,
+        },
+      )
+    });
     id
   }
 
@@ -631,6 +1459,34 @@ impl AppState {
   }
 
   /// Opens the search page, optionally with a query already filled in.
+  /// Opens the top bar's search, the one search for people, threads, channels, spaces and
+  /// messages, starting with `query`.
+  pub fn open_switcher(&self, query: &str) {
+    self.switcher_query.set(query.to_owned());
+    self.overlay.set(Overlay::QuickSwitcher);
+  }
+
+  /// The `in:` token of the open conversation (`in:#channel`, `in:@person`); `None` when no
+  /// conversation is open. The search is scoped to it by default (issue #579).
+  pub fn conversation_scope(&self) -> Option<String> {
+    let id = self.current_conversation_id()?;
+    let conversation = self.read(|backend| backend.conversation(id))?;
+    Some(crate::search_scope::scope_token(
+      conversation.kind,
+      &conversation.name,
+    ))
+  }
+
+  /// Opens the search limited to the open conversation (a removable chip), or the plain search
+  /// when no conversation is open.
+  pub fn open_scoped_switcher(&self) {
+    let query = self
+      .conversation_scope()
+      .map(|token| format!("{token} "))
+      .unwrap_or_default();
+    self.open_switcher(&query);
+  }
+
   pub fn open_search(&self, maybe_query: Option<&str>) {
     if let Some(query) = maybe_query {
       self.search_query.set(query.to_owned());
@@ -652,10 +1508,46 @@ impl AppState {
     self.overlay.set(Overlay::None);
   }
 
+  pub fn open_files(&self) {
+    self.view.set(MainView::Files);
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
+  /// Activity as a place (#752): its list takes the sidebar's place, like Chats or a space; the
+  /// main column waits for an entry. The place the user came from stays as it was for going back.
   pub fn open_activity(&self) {
+    let rail = self.rail.get_untracked();
+    if rail != RailEntry::Activity {
+      self.before_activity.set_value(Some(Place {
+        rail,
+        space: self.space.get_untracked(),
+        view: self.view.get_untracked(),
+      }));
+    }
+    self.rail.set(RailEntry::Activity);
     self.view.set(MainView::Activity);
     self.panel.set(SidePanel::Closed);
     self.overlay.set(Overlay::None);
+  }
+
+  /// Opens what an activity entry points at beside the activity list, which stays: the rail keeps
+  /// Activity selected and the space the user came from stays the one to go back to.
+  pub fn open_from_activity(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    maybe_thread: Option<ThreadId>,
+  ) {
+    self.keeping_activity(|| self.open_message(conversation, message, maybe_thread));
+  }
+
+  /// Runs `open` (which may switch the rail to the conversation's place) and stays in Activity.
+  fn keeping_activity(&self, open: impl FnOnce()) {
+    let space = self.space.get_untracked();
+    open();
+    self.rail.set(RailEntry::Activity);
+    self.space.set(space);
   }
 
   pub fn open_calls(&self) {
@@ -676,6 +1568,13 @@ impl AppState {
     self.highlight(message);
     if let Some(thread) = maybe_thread {
       self.open_thread(conversation, thread);
+    }
+    self.linked_message.set(Some(PermalinkTarget {
+      conversation,
+      message,
+      maybe_thread,
+    }));
+    if maybe_thread.is_some() {
       return;
     }
     let index = self.read(|backend| {
@@ -691,13 +1590,13 @@ impl AppState {
   }
 
   /// Lights up a message for a moment so the eye finds it after a jump.
-  fn highlight(&self, message: MessageId) {
+  pub fn highlight(&self, message: MessageId) {
     let state = *self;
     self.highlighted.set(Some(message));
     set_timeout(
       move || {
-        if state.highlighted.get_untracked() == Some(message) {
-          state.highlighted.set(None);
+        if state.highlighted.try_get_untracked() == Some(Some(message)) {
+          state.highlighted.set_if_alive(None);
         }
       },
       HIGHLIGHT_DURATION,
@@ -710,28 +1609,124 @@ impl AppState {
     self.overlay.set(Overlay::None);
   }
 
+  /// The threads the user follows: Activity with its Threads filter (#752).
   pub fn open_threads(&self) {
-    self.view.set(MainView::Threads);
-    self.panel.set(SidePanel::Closed);
-    self.overlay.set(Overlay::None);
+    self.activity_filter.set(ActivityFilter::Threads);
+    self.open_activity();
   }
 
   pub fn open_thread(&self, conversation: ConversationId, thread: ThreadId) {
+    if self
+      .linked_message
+      .with_untracked(|linked| linked.is_some_and(|linked| linked.maybe_thread != Some(thread)))
+    {
+      self.linked_message.set(None);
+    }
     self.panel.set(SidePanel::Thread { conversation, thread });
+  }
+
+  /// Whether one pane shows at a time (phones).
+  pub fn is_compact(&self) -> bool {
+    get_if_observed(self.layout).is_compact()
+  }
+
+  /// How deep the page is in the compact layout (#368); the bottom navigation shows on top-level
+  /// pages only.
+  pub fn compact_depth(&self) -> CompactDepth {
+    compact_depth_for(self.view.get(), self.panel.get())
+  }
+
+  /// The pane that fills the window in the compact layout.
+  pub fn compact_pane(&self) -> CompactPane {
+    compact_pane_for(self.view.get(), self.panel.get())
+  }
+
+  /// One level up in the compact layout, where there is no history entry to go back to: from a
+  /// side panel to its conversation, from a conversation to the list it is in, from anything else
+  /// to Home.
+  pub fn go_up(&self) {
+    if self.panel.get_untracked() != SidePanel::Closed {
+      self.panel.set(SidePanel::Closed);
+      return;
+    }
+    // An entry opened from Activity goes back to its list.
+    if self.rail.get_untracked() == RailEntry::Activity {
+      self.open_activity();
+      return;
+    }
+    let maybe_space = match self.view.get_untracked() {
+      MainView::Conversation(id) => self
+        .read(|backend| backend.conversation(id))
+        .and_then(|conversation| conversation.maybe_space),
+      _ => None,
+    };
+    match maybe_space {
+      Some(space) => self.open_space(space),
+      None => self.open_chats(),
+    }
+  }
+
+  /// Follows a layout change: a space's list has no page of its own in the wider layouts.
+  pub fn layout_changed(&self, layout: Layout) {
+    if !layout.is_compact() && self.view.get_untracked() == MainView::Space {
+      self.open_first_conversation_of(self.space.get_untracked());
+    }
+  }
+
+  fn show_space_list(&self) {
+    self.view.set(MainView::Space);
+    self.panel.set(SidePanel::Closed);
+  }
+
+  /// Opens the settings dialog: on phones its list of sections, otherwise the first section.
+  pub fn open_settings(&self) {
+    self.show_settings(SettingsPage::Sections);
+  }
+
+  /// Opens the settings dialog on one section.
+  pub fn open_settings_at(&self, tab: SettingsTab) {
+    self.show_settings(SettingsPage::Section(tab));
+  }
+
+  /// The list of sections is a page of its own only on phones; elsewhere it stands beside the
+  /// first section.
+  fn show_settings(&self, page: SettingsPage) {
+    let page = match page {
+      SettingsPage::Sections if !self.layout.get_untracked().is_compact() => {
+        SettingsPage::Section(SettingsTab::DEFAULT)
+      },
+      other => other,
+    };
+    self.settings_page.set(page);
+    self.overlay.set(Overlay::Settings);
   }
 
   pub fn close_overlay(&self) {
     self.overlay.set(Overlay::None);
   }
 
-  /// All conversations listed in the sidebar of the current space, in sidebar order.
+  /// All conversations of the current sidebar in its order: the DMs on Home,
+  /// otherwise the channels of the current space (of every space in the grouped sidebar).
   pub fn navigable_conversations(&self) -> Vec<Conversation> {
+    if self.rail.get() == RailEntry::Chats {
+      return self.direct_list();
+    }
     let space = self.space.get();
-    let options = self.settings.sidebar_options(usize::MAX);
+    let is_grouped = self
+      .settings
+      .prefs
+      .with(|prefs| prefs.sidebar.is_grouped_by_space);
+    let options = self.settings.sidebar_options(self.held_unread.get_untracked());
     let all = self.sidebar_list(self.read(|backend| {
-      let mut list = backend.space_conversations(space);
-      list.extend(backend.direct_conversations());
-      list
+      if is_grouped {
+        backend
+          .spaces()
+          .into_iter()
+          .flat_map(|space| backend.space_conversations(space.id))
+          .collect()
+      } else {
+        backend.space_conversations(space)
+      }
     }));
     build_sections(&all, &options)
       .into_iter()
@@ -753,8 +1748,1251 @@ impl AppState {
       self.open_conversation(next.id);
     }
   }
+
+  /// The route of what the app shows now; the address bar follows it (`history.rs`).
+  pub fn route(&self) -> Route {
+    if self.overlay.get() == Overlay::Settings {
+      return Route::Settings(self.settings_page.get());
+    }
+    match self.view.get() {
+      MainView::Conversation(id) => self.conversation_route(id),
+      MainView::Admin(section) => Route::Admin(section),
+      MainView::Search => Route::Search,
+      MainView::Saved => Route::Saved,
+      MainView::Files => Route::Files,
+      MainView::Activity if self.activity_filter.get() == ActivityFilter::Threads => Route::Threads,
+      MainView::Activity => Route::Activity,
+      MainView::Calls => Route::Calls,
+      MainView::Meetings => Route::Meetings,
+      MainView::Directory => Route::People,
+      MainView::Home => Route::Home,
+      MainView::Space => Route::Space(self.space.get()),
+      MainView::GettingStarted => {
+        let space = self.space.get();
+        let is_known_space = self.rail.get() == RailEntry::Space
+          && self.read(|backend| backend.spaces().iter().any(|candidate| candidate.id == space));
+        if is_known_space {
+          Route::Space(space)
+        } else {
+          Route::Start
+        }
+      },
+    }
+  }
+
+  fn conversation_route(&self, id: ConversationId) -> Route {
+    let panel = self.panel.get();
+    if let Some(linked) = self.linked_message.get()
+      && linked.conversation == id
+      && linked.maybe_thread.is_none_or(|thread| {
+        panel
+          == SidePanel::Thread {
+            conversation: id,
+            thread,
+          }
+      })
+    {
+      return Route::Message {
+        conversation: id,
+        message: linked.message,
+        maybe_thread: linked.maybe_thread,
+      };
+    }
+    if let SidePanel::Thread { conversation, thread } = panel
+      && conversation == id
+    {
+      return Route::Thread { conversation, thread };
+    }
+    match self.read(|backend| backend.conversation(id)) {
+      Some(conversation) => match conversation.maybe_space {
+        Some(space) => Route::Channel { space, channel: id },
+        None if conversation.kind.is_direct_like() => Route::Direct(id),
+        None => Route::Conversation(id),
+      },
+      None => Route::Conversation(id),
+    }
+  }
+
+  /// Shows the place a URL names. Something that hasn't loaded yet is waited for while nothing has
+  /// loaded at all; anything else that can't be opened falls back to Home with a notice.
+  pub fn follow_route(&self, route: Route) -> RouteOutcome {
+    // Called from outside reactive scopes (start, popstate, data arriving), like event handlers.
+    let outcome = untrack(|| self.follow_route_now(route));
+    if outcome != RouteOutcome::Waiting {
+      self.is_restoring.set_value(false);
+    }
+    outcome
+  }
+
+  /// Reopens the place the desktop app was closed in (#721), and the message the user was reading
+  /// there. Like [`Self::follow_route`], except that a place that is gone or no longer allowed
+  /// falls back to the start without a notice.
+  pub fn restore_route(
+    &self,
+    route: Route,
+    maybe_reading: Option<crate::last_place::ReadingPosition>,
+  ) -> RouteOutcome {
+    self.is_restoring.set_value(true);
+    self.restored_reading.set_value(maybe_reading);
+    self.follow_route(route)
+  }
+
+  /// The index of the message the user was reading in `conversation` when the app closed, once:
+  /// its feed starts there. `None` if there was none or it isn't loaded.
+  pub fn take_restored_reading(&self, conversation: ConversationId) -> Option<usize> {
+    let reading = self
+      .restored_reading
+      .try_get_value()
+      .flatten()
+      .filter(|reading| reading.conversation == conversation)?;
+    self.restored_reading.set_value(None);
+    self.read(|backend| {
+      let count = backend.message_count(conversation);
+      backend
+        .messages(conversation, 0, count)
+        .iter()
+        .position(|message| message.id == reading.message)
+    })
+  }
+
+  fn follow_route_now(&self, route: Route) -> RouteOutcome {
+    let before = self.route_untracked();
+    let outcome = match self.open_route(route) {
+      RouteOutcome::Shown => RouteOutcome::Shown,
+      RouteOutcome::Waiting | RouteOutcome::Unavailable if self.has_loaded_data() => {
+        self.show_unavailable_route();
+        RouteOutcome::Unavailable
+      },
+      RouteOutcome::Waiting | RouteOutcome::Unavailable => RouteOutcome::Waiting,
+    };
+    let maybe_pending = (outcome == RouteOutcome::Waiting).then_some(route);
+    if self.pending_route.get_untracked() != maybe_pending {
+      self.pending_route.set(maybe_pending);
+    }
+    if self.route_untracked() != before {
+      self.follows_url.set_value(true);
+    }
+    outcome
+  }
+
+  /// Stops waiting for `route` if it never loaded: Home with a notice.
+  pub fn give_up_route(&self, route: Route) {
+    // Called by a timer, which may fire after the shell is gone.
+    if self.pending_route.try_get_untracked() != Some(Some(route)) {
+      return;
+    }
+    self.pending_route.set(None);
+    self.reject_route();
+  }
+
+  /// A URL that is no route at all, or one that can't be shown: Home with a notice.
+  pub fn reject_route(&self) {
+    self.show_unavailable_route();
+    self.follows_url.set_value(true);
+  }
+
+  /// Forgets a route that was still waiting, because the user went somewhere else meanwhile.
+  pub fn cancel_pending_route(&self) {
+    self.is_restoring.set_value(false);
+    if self.pending_route.get_untracked().is_some() {
+      self.pending_route.set(None);
+    }
+  }
+
+  /// Whether the last changes came from following a URL; reading it resets it.
+  pub fn take_follows_url(&self) -> bool {
+    let follows = self.follows_url.get_value();
+    self.follows_url.set_value(false);
+    follows
+  }
+
+  /// [`AppState::route`] without subscribing the caller.
+  pub fn route_untracked(&self) -> Route {
+    untrack(|| self.route())
+  }
+
+  /// Opens the place of a route. `Waiting` means it names something this device doesn't know (yet).
+  fn open_route(&self, route: Route) -> RouteOutcome {
+    if !matches!(route, Route::Settings(_)) && self.overlay.get_untracked() == Overlay::Settings {
+      self.overlay.set(Overlay::None);
+    }
+    match route {
+      Route::Start => self.open_start(),
+      Route::Home => self.open_chats(),
+      Route::Space(space) => {
+        if !self.read(|backend| backend.spaces().iter().any(|candidate| candidate.id == space)) {
+          // The link of an open space the user isn't in yet: offer to join it.
+          if self.read(|backend| {
+            backend
+              .joinable_spaces()
+              .iter()
+              .any(|candidate| candidate.id == space)
+          }) {
+            self.open_start();
+            self.overlay.set(Overlay::BrowseSpaces(Some(space)));
+            return RouteOutcome::Shown;
+          }
+          return RouteOutcome::Waiting;
+        }
+        self.space.set(space);
+        self.rail.set(RailEntry::Space);
+        if self.is_compact() {
+          self.show_space_list();
+        } else {
+          self.open_first_conversation_of(space);
+        }
+      },
+      Route::Channel { channel: id, .. } | Route::Conversation(id) | Route::Direct(id) => {
+        if !self.is_known_conversation(id) {
+          return RouteOutcome::Waiting;
+        }
+        self.open_conversation(id);
+        self.panel.set(SidePanel::Closed);
+      },
+      Route::Thread { conversation, thread } => {
+        if !self.is_known_conversation(conversation) {
+          return RouteOutcome::Waiting;
+        }
+        self.open_conversation(conversation);
+        self.open_thread(conversation, thread);
+      },
+      Route::Message {
+        conversation,
+        message,
+        maybe_thread,
+      } => {
+        if !self.is_known_conversation(conversation) {
+          return RouteOutcome::Waiting;
+        }
+        if maybe_thread.is_none() {
+          self.panel.set(SidePanel::Closed);
+        }
+        self.open_message(conversation, message, maybe_thread);
+      },
+      Route::Threads => self.open_threads(),
+      Route::Activity => {
+        // The address of Activity is the one of every filter but Threads, which has its own.
+        if self.activity_filter.get_untracked() == ActivityFilter::Threads {
+          self.activity_filter.set(ActivityFilter::All);
+        }
+        self.open_activity();
+      },
+      Route::Calls => self.open_calls(),
+      Route::Meetings => self.open_meetings(),
+      Route::Meeting(meeting) => {
+        self.open_meetings();
+        self.maybe_meeting_link.set(Some(meeting));
+      },
+      Route::People => self.open_directory(),
+      Route::Saved => self.open_saved(),
+      Route::Files => self.open_files(),
+      Route::Search => self.open_search(None),
+      Route::Settings(page) => self.show_settings(page),
+      Route::Admin(section) => {
+        if !self.read(|backend| backend.my_role()).includes(&Role::Admin) {
+          return RouteOutcome::Unavailable;
+        }
+        self.open_admin(section);
+      },
+    }
+    RouteOutcome::Shown
+  }
+
+  /// Where the app starts: the first channel, else Home with the welcome page (as
+  /// [`start_position`] does on startup).
+  fn open_start(&self) {
+    if self.is_compact() {
+      self.open_chats();
+      return;
+    }
+    let first = self.read(|backend| {
+      let space = backend.spaces().into_iter().next()?;
+      let conversation = backend.space_conversations(space.id).into_iter().next()?;
+      Some(conversation.id)
+    });
+    match first {
+      Some(conversation) => self.open_conversation(conversation),
+      None => {
+        let (_, rail, view) = start_position(None);
+        self.rail.set(rail);
+        self.view.set(view);
+        self.panel.set(SidePanel::Closed);
+      },
+    }
+  }
+
+  fn show_unavailable_route(&self) {
+    // A reopened place that is gone (left, deleted, no longer allowed): the usual start, quietly.
+    if self.is_restoring.get_value() {
+      self.is_restoring.set_value(false);
+      self.restored_reading.set_value(None);
+      self.open_start();
+      return;
+    }
+    self.open_chats();
+    self.unavailable_routes.update(|count| *count += 1);
+  }
+
+  fn is_known_conversation(&self, id: ConversationId) -> bool {
+    self.read(|backend| backend.conversation(id)).is_some()
+  }
+
+  /// Whether any spaces or DMs have arrived: from then on, a missing ID is not just late.
+  fn has_loaded_data(&self) -> bool {
+    self.read(|backend| !backend.spaces().is_empty() || !backend.direct_conversations().is_empty())
+  }
 }
 
 pub fn use_app_state() -> AppState {
   expect_context::<AppState>()
+}
+
+impl SettingsTab {
+  /// In the order of the section list.
+  pub const ALL: [SettingsTab; 9] = [
+    Self::Account,
+    Self::Appearance,
+    Self::Notifications,
+    Self::Preferences,
+    Self::Keyboard,
+    Self::AudioVideo,
+    Self::Devices,
+    Self::Security,
+    Self::About,
+  ];
+  /// The section the dialog opens with beside the list.
+  pub const DEFAULT: SettingsTab = Self::Account;
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Account => "account",
+      Self::Appearance => "appearance",
+      Self::Notifications => "notifications",
+      Self::Preferences => "preferences",
+      Self::Keyboard => "keyboard",
+      Self::AudioVideo => "audio-video",
+      Self::Devices => "devices",
+      Self::Security => "security",
+      Self::About => "about",
+    }
+  }
+
+  /// The section of a path segment, including the tabs before #327, so old links keep working.
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    let legacy = match slug {
+      "display" => Some(Self::Appearance),
+      "sidebar" | "language" => Some(Self::Preferences),
+      "privacy" => Some(Self::Security),
+      "calls" => Some(Self::AudioVideo),
+      "advanced" => Some(Self::About),
+      _ => None,
+    };
+    legacy.or_else(|| Self::ALL.into_iter().find(|tab| tab.slug() == slug))
+  }
+}
+
+/// Whether `members` are exactly `users` plus (optionally) `me`.
+fn has_exactly(members: &[UserId], users: &[UserId], me: UserId) -> bool {
+  users.iter().all(|user| members.contains(user))
+    && members
+      .iter()
+      .all(|member| *member == me || users.contains(member))
+}
+
+/// Whether the keyboard focus is on a toast (native builds have no focus).
+fn is_focus_in_toasts() -> bool {
+  #[cfg(target_arch = "wasm32")]
+  {
+    web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|document| document.active_element())
+      .and_then(|element| element.closest(".toasts").ok().flatten())
+      .is_some()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    false
+  }
+}
+
+/// Adds a toast and closes the oldest beyond [`MAX_TOASTS`]. Toasts with an Undo stay: closing
+/// one would take away the only way back.
+fn push_capped(list: &mut Vec<Toast>, toast: Toast) {
+  list.push(toast);
+  while list.len() > MAX_TOASTS {
+    let Some(oldest) = list.iter().position(|toast| toast.maybe_undo.is_none()) else {
+      break;
+    };
+    list.remove(oldest);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::mock::MockBackend;
+  use crate::model::thread_id_of;
+  use crate::route::HistoryStep;
+
+  const NOW: TimestampMs = 1_792_584_000_000;
+
+  #[test]
+  fn without_a_channel_the_app_starts_on_home_with_the_welcome_page() {
+    let (_, rail, view) = start_position(None);
+    assert_eq!(rail, RailEntry::Chats);
+    assert_eq!(view, MainView::GettingStarted);
+  }
+
+  #[test]
+  fn with_a_channel_the_app_starts_in_its_space() {
+    let space: SpaceId = id_from_raw(7);
+    let conversation: ConversationId = id_from_raw(9);
+    assert_eq!(
+      start_position(Some((space, conversation))),
+      (space, RailEntry::Space, MainView::Conversation(conversation))
+    );
+  }
+
+  #[test]
+  fn home_without_dms_welcomes_an_empty_workspace() {
+    assert_eq!(home_view_without_dms(false), MainView::GettingStarted);
+    assert_eq!(home_view_without_dms(true), MainView::Home);
+  }
+
+  #[test]
+  fn the_remembered_conversation_reopens_only_while_it_exists() {
+    let (kept, gone): (ConversationId, ConversationId) = (id_from_raw(1), id_from_raw(2));
+    assert_eq!(
+      remembered_conversation([kept, id_from_raw(3)], Some(kept)),
+      Some(kept)
+    );
+    assert_eq!(remembered_conversation([kept], Some(gone)), None);
+    assert_eq!(remembered_conversation([kept], None), None);
+  }
+
+  mod state_to_route {
+    use super::*;
+
+    #[test]
+    fn a_channel_is_named_with_its_space() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      assert_eq!(state.route(), Route::Channel { space, channel });
+    }
+
+    #[test]
+    fn a_dm_has_its_own_path() {
+      let state = test_state();
+      let dm = first_dm(&state);
+      state.open_conversation(dm);
+      assert_eq!(state.route(), Route::Direct(dm));
+    }
+
+    #[test]
+    fn an_open_thread_is_part_of_the_route() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      let thread = thread_id_of(id_from_raw(42));
+      state.open_conversation(channel);
+      state.open_thread(channel, thread);
+      assert_eq!(
+        state.route(),
+        Route::Thread {
+          conversation: channel,
+          thread
+        }
+      );
+      state.panel.set(SidePanel::Closed);
+      assert!(matches!(state.route(), Route::Channel { .. }));
+    }
+
+    #[test]
+    fn pages_and_the_settings_dialog_have_routes() {
+      let state = test_state();
+      state.open_directory();
+      assert_eq!(state.route(), Route::People);
+      state.open_admin(AdminSection::Audit);
+      assert_eq!(state.route(), Route::Admin(AdminSection::Audit));
+      state.open_settings();
+      assert_eq!(
+        state.route(),
+        Route::Settings(SettingsPage::Section(SettingsTab::DEFAULT))
+      );
+      state
+        .settings_page
+        .set(SettingsPage::Section(SettingsTab::AudioVideo));
+      assert_eq!(
+        state.route(),
+        Route::Settings(SettingsPage::Section(SettingsTab::AudioVideo))
+      );
+      state.close_overlay();
+      assert_eq!(state.route(), Route::Admin(AdminSection::Audit));
+    }
+
+    #[test]
+    fn the_search_route_never_carries_the_query() {
+      let state = test_state();
+      state.open_search(Some("in:#general secret plans"));
+      assert_eq!(state.route(), Route::Search);
+      assert_eq!(state.route().path(), "/search");
+    }
+  }
+
+  mod route_to_state {
+    use super::*;
+
+    #[test]
+    fn every_page_route_opens_its_page_and_reads_back() {
+      let state = test_state();
+      for route in [
+        Route::Threads,
+        Route::Activity,
+        Route::Calls,
+        Route::Meetings,
+        Route::People,
+        Route::Saved,
+        Route::Files,
+        Route::Search,
+        Route::Settings(SettingsPage::Section(SettingsTab::Security)),
+        Route::Admin(AdminSection::Users),
+      ] {
+        assert_eq!(state.follow_route(route), RouteOutcome::Shown, "{route:?}");
+        assert_eq!(state.route(), route);
+      }
+    }
+
+    #[test]
+    fn a_meeting_link_opens_the_meetings_screen_and_hands_the_meeting_over() {
+      let state = test_state();
+      let meeting: MeetingId = crate::model::id_from_raw(5_000_005);
+      let handle = crate::route::MeetingHandle::Id(meeting);
+      assert_eq!(state.follow_route(Route::Meeting(handle)), RouteOutcome::Shown);
+      assert_eq!(state.route(), Route::Meetings);
+      assert_eq!(state.maybe_meeting_link.get_untracked(), Some(handle));
+    }
+
+    #[test]
+    fn a_conversation_route_opens_it_in_its_canonical_spelling() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      state.open_threads();
+      assert_eq!(
+        state.follow_route(Route::Conversation(channel)),
+        RouteOutcome::Shown
+      );
+      assert_eq!(state.route(), Route::Channel { space, channel });
+      assert!(state.take_follows_url(), "the URL is replaced, not pushed");
+      assert!(!state.take_follows_url(), "taking it resets it");
+    }
+
+    #[test]
+    fn a_thread_route_opens_the_thread() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      let route = Route::Thread {
+        conversation: channel,
+        thread: thread_id_of(id_from_raw(42)),
+      };
+      assert_eq!(state.follow_route(route), RouteOutcome::Shown);
+      assert_eq!(state.route(), route);
+    }
+
+    #[test]
+    fn leaving_settings_by_route_closes_the_dialog() {
+      let state = test_state();
+      let dm = first_dm(&state);
+      state.follow_route(Route::Settings(SettingsPage::Section(SettingsTab::Appearance)));
+      assert_eq!(state.overlay.get(), Overlay::Settings);
+      state.follow_route(Route::Direct(dm));
+      assert_eq!(state.overlay.get(), Overlay::None);
+      assert_eq!(state.route(), Route::Direct(dm));
+    }
+
+    #[test]
+    fn the_link_of_an_open_space_offers_to_join_it() {
+      let state = test_state();
+      let open = state
+        .read(|backend| backend.joinable_spaces())
+        .first()
+        .map(|space| space.id)
+        .expect("demo data has an open space to join");
+      assert_eq!(state.follow_route(Route::Space(open)), RouteOutcome::Shown);
+      assert_eq!(state.overlay.get_untracked(), Overlay::BrowseSpaces(Some(open)));
+    }
+
+    #[test]
+    fn a_space_route_lands_in_its_first_channel() {
+      let state = test_state();
+      let spaces = state.read(|backend| backend.spaces());
+      let second = spaces
+        .get(1)
+        .map(|space| space.id)
+        .expect("demo data has two spaces");
+      let first_channel = state.read(|backend| backend.space_conversations(second))[0].id;
+      state.open_threads();
+      assert_eq!(state.follow_route(Route::Space(second)), RouteOutcome::Shown);
+      assert_eq!(
+        state.route(),
+        Route::Channel {
+          space: second,
+          channel: first_channel
+        }
+      );
+    }
+
+    #[test]
+    fn an_unknown_id_falls_back_to_home_with_a_notice() {
+      let state = test_state();
+      let unknown: ConversationId = id_from_raw(999_999_999);
+      for route in [
+        Route::Conversation(unknown),
+        Route::Direct(unknown),
+        Route::Space(id_from_raw(999_999_999)),
+        Route::Thread {
+          conversation: unknown,
+          thread: thread_id_of(id_from_raw(1)),
+        },
+      ] {
+        let before = state.unavailable_routes.get();
+        state.open_threads();
+        assert_eq!(state.follow_route(route), RouteOutcome::Unavailable, "{route:?}");
+        assert_eq!(state.unavailable_routes.get(), before + 1, "{route:?}");
+        assert_eq!(state.rail.get(), RailEntry::Chats, "{route:?}");
+        assert_eq!(
+          state.pending_route.get(),
+          None,
+          "loaded data: nothing to wait for"
+        );
+      }
+    }
+
+    #[test]
+    fn a_rejected_url_shows_home_with_a_notice() {
+      let state = test_state();
+      state.reject_route();
+      assert_eq!(state.unavailable_routes.get(), 1);
+      assert_eq!(state.rail.get(), RailEntry::Chats);
+      assert!(state.take_follows_url());
+    }
+
+    #[test]
+    fn giving_up_only_drops_the_route_still_waited_for() {
+      let state = test_state();
+      let waited: Route = Route::Direct(id_from_raw(5));
+      state.give_up_route(waited);
+      assert_eq!(state.unavailable_routes.get(), 0, "nothing was waiting");
+      state.pending_route.set(Some(waited));
+      state.give_up_route(Route::Threads);
+      assert_eq!(state.pending_route.get(), Some(waited));
+      state.give_up_route(waited);
+      assert_eq!(state.pending_route.get(), None);
+      assert_eq!(state.unavailable_routes.get(), 1);
+    }
+
+    #[test]
+    fn a_reopened_place_that_is_gone_starts_quietly() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      let unknown: ConversationId = id_from_raw(999_999_999);
+      state.open_threads();
+      assert_eq!(
+        state.restore_route(Route::Conversation(unknown), None),
+        RouteOutcome::Unavailable
+      );
+      assert_eq!(
+        state.unavailable_routes.get(),
+        0,
+        "no notice for a place that went"
+      );
+      assert_eq!(
+        state.route(),
+        Route::Channel { space, channel },
+        "the usual start"
+      );
+      // Only the reopened place is quiet: a link to something gone still says so.
+      state.follow_route(Route::Conversation(unknown));
+      assert_eq!(state.unavailable_routes.get(), 1);
+    }
+
+    #[test]
+    fn a_reopened_place_opens_with_its_reading_position() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      let messages = state.read(|backend| backend.messages(channel, 0, backend.message_count(channel)));
+      let reading = crate::last_place::ReadingPosition {
+        conversation: channel,
+        message: messages[0].id,
+      };
+      state.open_threads();
+      assert_eq!(
+        state.restore_route(Route::Channel { space, channel }, Some(reading)),
+        RouteOutcome::Shown
+      );
+      assert_eq!(state.route(), Route::Channel { space, channel });
+      assert_eq!(
+        state.take_restored_reading(id_from_raw(999_999_999)),
+        None,
+        "another feed"
+      );
+      assert_eq!(state.take_restored_reading(channel), Some(0));
+      assert_eq!(state.take_restored_reading(channel), None, "taken once");
+    }
+
+    #[test]
+    fn the_start_route_opens_the_first_channel() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      state.open_threads();
+      assert_eq!(state.follow_route(Route::Start), RouteOutcome::Shown);
+      assert_eq!(state.route(), Route::Channel { space, channel });
+    }
+
+    #[test]
+    fn the_start_route_without_a_channel_opens_home_with_the_welcome_page() {
+      let backend: Rc<dyn Backend> = Rc::new(MockBackend::empty_workspace(NOW));
+      let state = AppState::new(backend, Settings::for_tests(), None);
+      state.open_threads();
+      state.rail.set(RailEntry::Space);
+      assert_eq!(state.follow_route(Route::Start), RouteOutcome::Shown);
+      assert_eq!(state.rail.get(), RailEntry::Chats);
+      assert_eq!(state.view.get(), MainView::GettingStarted);
+      assert_eq!(state.route(), Route::Start);
+    }
+
+    #[test]
+    fn the_first_conversation_after_startup_data_replaces_the_start_entry() {
+      let backend: Rc<dyn Backend> = Rc::new(MockBackend::new(NOW));
+      // Started before any data had arrived: the getting-started page under `/`.
+      let state = AppState::new(backend, Settings::for_tests(), None);
+      assert_eq!(state.route(), Route::Start);
+      assert!(!state.take_follows_url());
+      state.backend_changed();
+      let (space, channel) = first_channel(&state);
+      let next = state.route();
+      assert_eq!(next, Route::Channel { space, channel });
+      let is_redirect = state.take_follows_url();
+      assert!(is_redirect, "the URL is replaced, not pushed");
+      assert_eq!(
+        HistoryStep::between(&Route::Start, &next, is_redirect),
+        HistoryStep::Replace
+      );
+    }
+
+    #[test]
+    fn data_arriving_later_leaves_the_history_alone() {
+      let state = test_state();
+      state.open_threads();
+      assert!(!state.take_follows_url());
+      state.backend_changed();
+      assert_eq!(state.route(), Route::Threads);
+      assert!(!state.take_follows_url(), "nothing was redirected");
+    }
+  }
+
+  /// Issue #322: the core answers, a timer fires or the backend reports a change after the shell
+  /// was unmounted (sign-out, a new session). Nothing may panic then.
+  mod activity_place {
+    use super::*;
+
+    #[test]
+    fn activity_is_a_place_of_its_own_in_the_rail() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      state.open_activity();
+      assert_eq!(state.rail.get(), RailEntry::Activity);
+      assert_eq!(state.view.get(), MainView::Activity);
+      assert_eq!(state.route(), Route::Activity);
+    }
+
+    #[test]
+    fn threads_are_activity_with_its_threads_filter() {
+      let state = test_state();
+      state.open_threads();
+      assert_eq!(state.rail.get(), RailEntry::Activity);
+      assert_eq!(state.activity_filter.get(), ActivityFilter::Threads);
+      assert_eq!(state.route(), Route::Threads);
+      state.activity_filter.set(ActivityFilter::Mentions);
+      assert_eq!(state.route(), Route::Activity);
+    }
+
+    #[test]
+    fn an_entry_opens_beside_the_list_without_leaving_activity() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      let other_space = state
+        .read(|backend| backend.spaces())
+        .into_iter()
+        .map(|candidate| candidate.id)
+        .find(|candidate| *candidate != space)
+        .expect("demo data has two spaces");
+      let elsewhere = state
+        .read(|backend| backend.space_conversations(other_space))
+        .first()
+        .map(|conversation| conversation.id)
+        .expect("the second space has a channel");
+      state.open_conversation(channel);
+      state.open_activity();
+      state.keeping_activity(|| state.open_conversation(elsewhere));
+      assert_eq!(state.rail.get(), RailEntry::Activity);
+      assert_eq!(state.view.get(), MainView::Conversation(elsewhere));
+      assert_eq!(state.space.get(), space, "the place to go back to stays");
+    }
+
+    #[test]
+    fn going_back_restores_what_was_open_before() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      let dm = first_dm(&state);
+      state.open_conversation(channel);
+      state.open_activity();
+      state.keeping_activity(|| state.open_conversation(dm));
+      state.open_space(space);
+      assert_eq!(state.rail.get(), RailEntry::Space);
+      assert_eq!(state.view.get(), MainView::Conversation(channel));
+    }
+
+    #[test]
+    fn another_place_than_the_previous_one_opens_as_usual() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      state.open_activity();
+      state.open_chats();
+      assert_eq!(state.rail.get(), RailEntry::Chats);
+      assert_ne!(state.view.get(), MainView::Conversation(channel));
+    }
+
+    #[test]
+    fn up_from_an_entry_goes_back_to_the_activity_list() {
+      let state = test_state();
+      let dm = first_dm(&state);
+      state.open_activity();
+      state.keeping_activity(|| state.open_conversation(dm));
+      state.go_up();
+      assert_eq!(state.view.get(), MainView::Activity);
+      assert_eq!(state.rail.get(), RailEntry::Activity);
+    }
+  }
+
+  mod after_the_shell_is_gone {
+    use super::*;
+
+    #[test]
+    fn callbacks_from_outside_the_reactive_tree_do_nothing() {
+      let owner = Owner::new();
+      let state = owner.with(test_state);
+      owner.cleanup();
+      state.backend_changed();
+      state.show_error("refused".into(), "detail".into());
+      state.dismiss_toast(0);
+      assert!(state.try_write(|backend| backend.spaces()).is_none());
+    }
+
+    #[test]
+    fn while_the_shell_lives_try_write_writes() {
+      let owner = Owner::new();
+      owner.with(|| {
+        let state = test_state();
+        assert!(state.try_write(|backend| backend.spaces()).is_some());
+      });
+    }
+  }
+
+  mod error_toasts {
+    use super::*;
+
+    #[test]
+    fn an_error_shows_with_its_detail_and_a_repeat_shows_once() {
+      let state = test_state();
+      state.show_error("refused".into(), "detail".into());
+      state.show_error("refused".into(), "detail".into());
+      let toasts = state.toasts.get_untracked();
+      assert_eq!(toasts.len(), 1);
+      assert_eq!(
+        toasts[0].tone,
+        ToastTone::Error {
+          detail: "detail".into()
+        }
+      );
+      state.show_error("refused".into(), "other detail".into());
+      assert_eq!(state.toasts.get_untracked().len(), 2);
+    }
+
+    #[test]
+    fn a_repeat_of_any_shown_error_shows_once() {
+      let state = test_state();
+      state.show_error("one".into(), "a".into());
+      state.show_error("two".into(), "b".into());
+      state.show_error("one".into(), "a".into());
+      assert_eq!(state.toasts.get_untracked().len(), 2);
+    }
+
+    /// #367: an Undo toast closed before its countdown ran out commits at once (the message leaves
+    /// the hidden set because its deletion went out).
+    #[test]
+    fn closing_an_undo_toast_commits_at_once() {
+      let state = test_state();
+      let (_, conversation) = first_channel(&state);
+      let message = id_from_raw(1);
+      state.delete_with_undo(conversation, message, "deleted".into());
+      assert!(state.hidden_messages.get_untracked().contains(&message));
+      state.dismiss_toast(state.toasts.get_untracked()[0].id);
+      assert!(state.toasts.get_untracked().is_empty());
+      assert!(!state.hidden_messages.get_untracked().contains(&message));
+    }
+
+    #[test]
+    fn toasts_close_when_their_countdown_ran_out_but_not_while_held() {
+      let state = test_state();
+      let (_, conversation) = first_channel(&state);
+      let message = id_from_raw(1);
+      let now = crate::clock::now_ms();
+      state.show_brief_toast("Link copied".into());
+      state.delete_with_undo(conversation, message, "deleted".into());
+      state.hold_toasts(Hold::Pointer, true);
+      state.wake_toasts_at(now + 60_000);
+      assert_eq!(state.toasts.get_untracked().len(), 2, "held under the pointer");
+      state.hold_toasts(Hold::Pointer, false);
+      state.wake_toasts_at(now + BRIEF_TOAST.as_millis() as i64);
+      assert_eq!(state.toasts.get_untracked().len(), 1, "the brief toast closed");
+      state.wake_toasts_at(now + UNDO_WINDOW.as_millis() as i64);
+      assert!(state.toasts.get_untracked().is_empty());
+      assert!(
+        !state.hidden_messages.get_untracked().contains(&message),
+        "the deletion went out"
+      );
+    }
+
+    /// Review of #387: closing the focused toast moves the focus away without a `focusout`; the
+    /// other toast's countdown must go on.
+    #[test]
+    fn closing_the_focused_toast_releases_the_focus_hold() {
+      let state = test_state();
+      let now = crate::clock::now_ms();
+      state.show_brief_toast("one".into());
+      state.show_brief_toast("two".into());
+      let first = state.toasts.get_untracked()[0].id;
+      state.hold_toasts(Hold::Focus, true);
+      state.dismiss_toast(first);
+      state.wake_toasts_at(now + BRIEF_TOAST.as_millis() as i64);
+      assert!(
+        state.toasts.get_untracked().is_empty(),
+        "the second toast closed on time"
+      );
+    }
+
+    #[test]
+    fn leaving_the_page_commits_what_undo_toasts_hold_back() {
+      let state = test_state();
+      let (_, conversation) = first_channel(&state);
+      let message = id_from_raw(1);
+      state.delete_with_undo(conversation, message, "deleted".into());
+      state.show_brief_toast("Link copied".into());
+      state.end_timed_toasts();
+      assert!(state.toasts.get_untracked().is_empty());
+      assert!(
+        !state.hidden_messages.get_untracked().contains(&message),
+        "the deletion went out"
+      );
+    }
+
+    #[test]
+    fn the_oldest_toast_closes_beyond_the_cap_but_undo_toasts_stay() {
+      let state = test_state();
+      state.push_toast("deleted".into(), Some(Undo::RestoreMessage(id_from_raw(1))));
+      for index in 0..10 {
+        state.show_error(format!("error {index}"), String::new());
+      }
+      let toasts = state.toasts.get_untracked();
+      assert_eq!(toasts.len(), MAX_TOASTS);
+      assert!(toasts[0].maybe_undo.is_some(), "the undo toast stays");
+      assert_eq!(toasts.last().map(|toast| toast.text.as_str()), Some("error 9"));
+    }
+  }
+
+  mod compact {
+    use super::*;
+
+    /// #368: what slides which way depends on how deep the page is.
+    #[test]
+    fn lists_and_activity_are_top_level_a_conversation_a_page_a_thread_a_panel() {
+      let state = compact_state();
+      let (space, conversation) = first_channel(&state);
+      state.open_space(space);
+      assert_eq!(state.compact_depth(), CompactDepth::TopLevel);
+      state.open_activity();
+      assert_eq!(state.compact_depth(), CompactDepth::TopLevel);
+      assert_eq!(
+        state.compact_pane(),
+        CompactPane::List,
+        "Activity's list is its sidebar"
+      );
+      state.open_conversation(conversation);
+      assert_eq!(state.compact_depth(), CompactDepth::Page);
+      state.panel.set(SidePanel::Pins);
+      assert_eq!(state.compact_depth(), CompactDepth::Panel);
+    }
+
+    #[test]
+    fn home_and_a_space_show_their_list_instead_of_a_conversation() {
+      let state = compact_state();
+      let (space, _) = first_channel(&state);
+      state.open_chats();
+      assert_eq!(state.view.get(), MainView::Home);
+      assert_eq!(state.compact_pane(), CompactPane::List);
+      assert_eq!(state.route(), Route::Home);
+      state.open_space(space);
+      assert_eq!(state.view.get(), MainView::Space);
+      assert_eq!(state.compact_pane(), CompactPane::List);
+      assert_eq!(state.route(), Route::Space(space));
+    }
+
+    #[test]
+    fn the_space_route_reads_back_as_the_spaces_list() {
+      let state = compact_state();
+      let (space, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      assert_eq!(state.follow_route(Route::Space(space)), RouteOutcome::Shown);
+      assert_eq!(state.view.get(), MainView::Space);
+      assert_eq!(state.route(), Route::Space(space));
+    }
+
+    #[test]
+    fn the_start_route_opens_homes_list() {
+      let state = compact_state();
+      assert_eq!(state.follow_route(Route::Start), RouteOutcome::Shown);
+      assert_eq!(state.route(), Route::Home);
+    }
+
+    #[test]
+    fn a_thread_fills_the_window_over_its_conversation() {
+      let state = compact_state();
+      let (_, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      assert_eq!(state.compact_pane(), CompactPane::Main);
+      state.open_thread(channel, thread_id_of(id_from_raw(42)));
+      assert_eq!(state.compact_pane(), CompactPane::Panel);
+    }
+
+    #[test]
+    fn up_goes_from_the_thread_to_the_conversation_to_its_list() {
+      let state = compact_state();
+      let (space, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      state.open_thread(channel, thread_id_of(id_from_raw(42)));
+      state.go_up();
+      assert_eq!(state.view.get(), MainView::Conversation(channel));
+      assert_eq!(state.panel.get(), SidePanel::Closed);
+      state.go_up();
+      assert_eq!(state.route(), Route::Space(space));
+      let dm = first_dm(&state);
+      state.open_conversation(dm);
+      state.go_up();
+      assert_eq!(state.route(), Route::Home);
+    }
+
+    #[test]
+    fn a_wider_window_opens_the_first_channel_of_the_listed_space() {
+      let state = compact_state();
+      let (space, channel) = first_channel(&state);
+      state.open_space(space);
+      state.layout.set(Layout::Medium);
+      state.layout_changed(Layout::Medium);
+      assert_eq!(state.route(), Route::Channel { space, channel });
+    }
+
+    #[test]
+    fn startup_data_lands_on_homes_list() {
+      let backend: Rc<dyn Backend> = Rc::new(MockBackend::new(NOW));
+      let state = AppState::new(backend, Settings::for_tests(), None);
+      state.layout.set(Layout::Compact);
+      state.backend_changed();
+      assert_eq!(state.route(), Route::Home);
+    }
+
+    #[test]
+    fn settings_open_on_their_section_list_on_phones_only() {
+      let state = compact_state();
+      state.open_settings();
+      assert_eq!(state.route(), Route::Settings(SettingsPage::Sections));
+      state.close_overlay();
+      state.layout.set(Layout::Medium);
+      state.open_settings();
+      assert_eq!(
+        state.route(),
+        Route::Settings(SettingsPage::Section(SettingsTab::DEFAULT))
+      );
+      state.follow_route(Route::Settings(SettingsPage::Sections));
+      assert_eq!(
+        state.settings_page.get(),
+        SettingsPage::Section(SettingsTab::DEFAULT)
+      );
+    }
+
+    fn compact_state() -> AppState {
+      let state = test_state();
+      state.layout.set(Layout::Compact);
+      state
+    }
+  }
+
+  mod unread_divider {
+    use super::*;
+
+    #[test]
+    fn sending_removes_the_divider() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      state.open_conversation(unread);
+      place_divider(&state, unread);
+      state.divider_event(unread, DividerEvent::Sent);
+      assert_eq!(state.unread_marker.get_untracked(), None);
+    }
+
+    #[test]
+    fn sending_reads_what_came_before() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      // Unread although open: a message that arrived while the user read along.
+      state.mark_read_on_send(unread);
+      let after = state
+        .read(|backend| backend.conversation(unread))
+        .expect("still there");
+      assert!(!after.has_unread());
+    }
+
+    #[test]
+    fn coming_back_with_nothing_new_shows_no_divider() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      state.open_conversation(unread);
+      place_divider(&state, unread);
+      state.open_conversation(first_dm(&state));
+      assert!(
+        state
+          .unread_marker
+          .get_untracked()
+          .is_none_or(|marker| marker.conversation != unread)
+      );
+      // Opening marked it read: nothing is new now.
+      state.open_conversation(unread);
+      assert_eq!(state.unread_marker.get_untracked(), None);
+    }
+
+    #[test]
+    fn esc_marks_read_and_removes_the_divider() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      place_divider(&state, unread);
+      state.mark_conversation_read(unread);
+      assert_eq!(state.unread_marker.get_untracked(), None);
+      let after = state
+        .read(|backend| backend.conversation(unread))
+        .expect("still there");
+      assert_eq!(after.unread_count, 0);
+    }
+
+    #[test]
+    fn only_a_real_conversation_change_counts_as_leaving() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      state.open_conversation(unread);
+      place_divider(&state, unread);
+      // Opening the same conversation again (a remount, a route written another way) keeps it.
+      state.open_conversation(unread);
+      assert_eq!(
+        state
+          .unread_marker
+          .get_untracked()
+          .map(|marker| marker.conversation),
+        Some(unread)
+      );
+      state.open_conversation(first_dm(&state));
+      assert!(
+        state
+          .unread_marker
+          .get_untracked()
+          .is_none_or(|marker| marker.conversation != unread)
+      );
+    }
+
+    #[test]
+    fn the_divider_never_moves_the_read_marker_back() {
+      let state = test_state();
+      let unread = unread_conversation(&state);
+      state.mark_conversation_read(unread);
+      // News while away places a divider; that is view state only, nothing becomes unread again.
+      state.divider_event(
+        unread,
+        DividerEvent::ArrivedWhileAway {
+          first_new: 2,
+          is_own: false,
+          has_seen_divider: true,
+        },
+      );
+      assert_eq!(
+        state.unread_marker.get_untracked().map(|marker| marker.index),
+        Some(2)
+      );
+      let after = state
+        .read(|backend| backend.conversation(unread))
+        .expect("still there");
+      assert_eq!(after.unread_count, 0);
+      state.divider_event(unread, DividerEvent::DwelledAtBottom);
+      assert_eq!(state.unread_marker.get_untracked(), None);
+    }
+
+    fn place_divider(state: &AppState, conversation: ConversationId) {
+      state.unread_marker.set(Some(UnreadMarker {
+        conversation,
+        index: 3,
+      }));
+    }
+
+    fn unread_conversation(state: &AppState) -> ConversationId {
+      state
+        .read(|backend| {
+          let mut all: Vec<Conversation> = backend
+            .spaces()
+            .into_iter()
+            .flat_map(|space| backend.space_conversations(space.id))
+            .collect();
+          all.extend(backend.direct_conversations());
+          all
+        })
+        .into_iter()
+        .find(|conversation| conversation.unread_count > 0)
+        .map(|conversation| conversation.id)
+        .expect("demo data has unread messages")
+    }
+  }
+
+  fn test_state() -> AppState {
+    let backend: Rc<dyn Backend> = Rc::new(MockBackend::new(NOW));
+    let start = first_of(backend.as_ref());
+    AppState::new(backend, Settings::for_tests(), start)
+  }
+
+  fn first_of(backend: &dyn Backend) -> Option<(SpaceId, ConversationId)> {
+    let space = backend.spaces().into_iter().next()?;
+    let conversation = backend.space_conversations(space.id).into_iter().next()?;
+    Some((space.id, conversation.id))
+  }
+
+  fn first_channel(state: &AppState) -> (SpaceId, ConversationId) {
+    state
+      .read(|backend| first_of(backend))
+      .expect("demo data has a channel")
+  }
+
+  fn first_dm(state: &AppState) -> ConversationId {
+    state
+      .read(|backend| backend.direct_conversations())
+      .into_iter()
+      .find(|conversation| conversation.kind == crate::model::ConversationKind::Direct)
+      .map(|conversation| conversation.id)
+      .expect("demo data has a DM")
+  }
 }

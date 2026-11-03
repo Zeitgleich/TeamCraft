@@ -72,6 +72,11 @@ pub fn parse_retention(days: &str, messages: &str) -> Result<RetentionSetting, R
   })
 }
 
+/// What is wrong with one retention field, if anything, so each field shows its own message.
+pub fn check_retention_field(text: &str) -> Option<RetentionInputError> {
+  parse_positive(text).err()
+}
+
 fn parse_positive(text: &str) -> Result<Option<u32>, RetentionInputError> {
   let text = text.trim();
   if text.is_empty() {
@@ -96,6 +101,14 @@ mod tests {
       (both.maybe_max_age_days, both.maybe_max_messages),
       (Some(30), Some(500))
     );
+  }
+
+  #[test]
+  fn each_field_is_checked_on_its_own() {
+    assert_eq!(check_retention_field(""), None);
+    assert_eq!(check_retention_field("30"), None);
+    assert_eq!(check_retention_field("0"), Some(RetentionInputError::NotPositive));
+    assert_eq!(check_retention_field("x"), Some(RetentionInputError::NotANumber));
   }
 
   #[test]

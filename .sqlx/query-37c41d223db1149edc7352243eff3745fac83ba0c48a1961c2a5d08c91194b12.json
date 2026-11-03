@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM attachments WHERE id = $1 AND uploader_user_id = $2 AND completed_at IS NULL\n       RETURNING s3_key, multipart_upload_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s3_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "s3_key"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "multipart_upload_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "multipart_upload_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "37c41d223db1149edc7352243eff3745fac83ba0c48a1961c2a5d08c91194b12"
+}

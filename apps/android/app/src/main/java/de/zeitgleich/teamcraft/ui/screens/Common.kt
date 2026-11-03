@@ -8,21 +8,59 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.delay
+import uniffi.teamcraft_ffi.FirstSyncItem
+import uniffi.teamcraft_ffi.FirstSyncStageItem
+import uniffi.teamcraft_ffi.NetworkInterception
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.ui.CONNECTION_GRACE_MS
+import de.zeitgleich.teamcraft.ui.ConnectionNotice
+import de.zeitgleich.teamcraft.ui.connectionNotice
+import de.zeitgleich.teamcraft.ui.isConnectionDown
 import de.zeitgleich.teamcraft.ui.rememberIsOnline
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
+import de.zeitgleich.teamcraft.ui.theme.darkStatusBarBackdrop
+
+/**
+ * What content stays clear of (#309): system bars, the display cutout (landscape) and the keyboard.
+ * Every screen's Scaffold takes it as `contentWindowInsets`, so nothing hard-codes a padding and
+ * the keyboard pushes content up with its own animation.
+ */
+val ScreenInsets: WindowInsets
+  @Composable get() = WindowInsets.safeDrawing
+
+/** Top bars reach behind the status bar but keep their content clear of it and of a side cutout. */
+val TopBarInsets: WindowInsets
+  @Composable get() = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
 
 /** The dark top bar of the desktop's chrome. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -57,6 +95,9 @@ fun ChromeTopBar(
       }
     },
     actions = actions,
+    windowInsets = TopBarInsets,
+    // Light status-bar icons over the dark chrome, also in light mode.
+    modifier = Modifier.darkStatusBarBackdrop(),
     colors = TopAppBarDefaults.topAppBarColors(
       containerColor = colors.chrome,
       titleContentColor = colors.chromeText,
@@ -66,19 +107,115 @@ fun ChromeTopBar(
   )
 }
 
-/** A thin bar while the device is offline: new messages wait, sent ones stay in the outbox. */
+/**
+ * A thin bar while the app can't reach the server: the device is offline, the server is
+ * unreachable although the device is online, or the session expired. Follows the core's connection
+ * state; new messages wait, sent ones stay in the outbox. A connection that comes back within the
+ * grace period ([CONNECTION_GRACE_MS], from going down or from the app's return) shows nothing: the
+ * cached state is on screen and syncs quietly (issue #700).
+ */
 @Composable
-fun OfflineBanner() {
-  if (rememberIsOnline()) return
+fun OfflineBanner(onSignInAgain: () -> Unit) {
+  val graph = TeamCraftApplication.graph(LocalContext.current)
+  val isOnline = rememberIsOnline()
+  val maybeConnection by graph.core.connectionState.collectAsState()
+  val unsettled by graph.connectionGrace.unsettled.collectAsState()
+  val isSyncStartFailing by graph.isSyncStartFailing.collectAsState()
+  // The clock only matters while the connection is down; a connected app doesn't wake every second.
+  val now by produceState(System.currentTimeMillis(), unsettled) {
+    value = System.currentTimeMillis()
+    while (unsettled.maybeSinceMs != null) {
+      delay(COUNTDOWN_MILLIS)
+      value = System.currentTimeMillis()
+    }
+  }
+  val notice = connectionNotice(isOnline, maybeConnection, unsettled, now, isSyncStartFailing) ?: return
+  val (text, maybeAction) = when (notice) {
+    ConnectionNotice.DeviceOffline -> stringResource(R.string.offline_banner) to null
+    ConnectionNotice.Connecting -> stringResource(R.string.connection_connecting) to null
+    ConnectionNotice.SyncNotStarted -> stringResource(R.string.connection_sync_not_started) to null
+    ConnectionNotice.Slow -> stringResource(R.string.connection_slow) to null
+    is ConnectionNotice.Unreachable -> {
+      val text = when (notice.maybeInterception) {
+        NetworkInterception.CAPTIVE_PORTAL -> R.string.connection_captive_portal
+        NetworkInterception.UNTRUSTED_CERTIFICATE -> R.string.connection_untrusted_certificate
+        null -> R.string.connection_unreachable
+      }
+      stringResource(text, notice.retryInSeconds.toInt()) to
+        (stringResource(R.string.connection_retry) to { graph.core.networkChanged() })
+    }
+    ConnectionNotice.SignInRequired ->
+      stringResource(R.string.connection_sign_in) to (stringResource(R.string.connection_sign_in_action) to onSignInAgain)
+  }
+  // Slow is no failure: the neutral colour, not the error one.
+  val isSlow = notice == ConnectionNotice.Slow
   Surface(
-    color = MaterialTheme.colorScheme.errorContainer,
+    color = if (isSlow) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.errorContainer,
     modifier = Modifier.fillMaxWidth(),
   ) {
-    Text(
-      stringResource(R.string.offline_banner),
-      style = MaterialTheme.typography.labelMedium,
-      color = MaterialTheme.colorScheme.onErrorContainer,
-      modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-    )
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      modifier = Modifier.padding(start = 16.dp, end = 4.dp),
+    ) {
+      Text(
+        text,
+        style = MaterialTheme.typography.labelMedium,
+        color = if (isSlow) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onErrorContainer,
+        modifier = Modifier.weight(1f).padding(vertical = 6.dp),
+      )
+      maybeAction?.let { (label, action) ->
+        TextButton(onClick = action) { Text(label) }
+      }
+    }
   }
 }
+
+/**
+ * A first sync's progress under the top bar: what is loading, how far in conversations, and the bar.
+ * Numbers from the core; indeterminate until it has one. Gone while the connection is down, where
+ * the banner above says why nothing moves.
+ */
+@Composable
+fun FirstSyncBar(progress: FirstSyncItem) {
+  val graph = TeamCraftApplication.graph(LocalContext.current)
+  val isOnline = rememberIsOnline()
+  val maybeConnection by graph.core.connectionState.collectAsState()
+  if (isConnectionDown(isOnline, maybeConnection)) return
+  val text = stringResource(
+    when (progress.stage) {
+      FirstSyncStageItem.NEWEST -> R.string.first_sync_newest
+      FirstSyncStageItem.OLDER -> R.string.first_sync_older
+    },
+  )
+  Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {}) {
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.SpaceBetween,
+      modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+    ) {
+      Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      if (progress.total > 0u) {
+        Text(
+          pluralStringResource(
+            R.plurals.first_sync_count,
+            progress.total.toInt(),
+            progress.done.toInt(),
+            progress.total.toInt(),
+          ),
+          style = MaterialTheme.typography.labelMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+    }
+    val maybeFraction = progress.maybeFraction
+    if (maybeFraction != null) {
+      val shown by animateFloatAsState(maybeFraction, label = "first sync progress")
+      LinearProgressIndicator(progress = { shown }, modifier = Modifier.fillMaxWidth())
+    } else {
+      LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+    }
+  }
+}
+
+/** How often the countdown to the next attempt (and the grace period) is checked. */
+private const val COUNTDOWN_MILLIS = 1_000L

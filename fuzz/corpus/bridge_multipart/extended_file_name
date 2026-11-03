@@ -1,0 +1,5 @@
+--XyZ
+Content-Disposition: form-data; name=file; filename="plain.txt"; filename*=UTF-8''%C3%BCber.txt
+
+data
+--XyZ--

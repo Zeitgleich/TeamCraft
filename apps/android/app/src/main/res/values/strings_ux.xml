@@ -18,12 +18,42 @@
     <item quantity="other">%d unread messages</item>
   </plurals>
   <string name="offline_banner">No connection. Messages are sent when you\'re back online.</string>
+  <!-- The language these strings are in, as a BCP 47 tag: the app's language for the identity provider's login page (issue #448). -->
+  <string name="app_language">en</string>
+  <string name="connection_slow">Slow connection. Messages still go out, but may take longer.</string>
+  <string name="connection_unreachable">The server can\'t be reached. Messages wait until it is back. Next attempt in %1$d s.</string>
+  <string name="connection_captive_portal">This network wants you to sign in first. Open a web page to sign in; messages wait. Next attempt in %1$d s.</string>
+  <string name="connection_untrusted_certificate">The server\'s certificate isn\'t trusted. On a network that inspects encrypted traffic, use another network or ask your IT; if it happens everywhere, tell your administrator. Next attempt in %1$d s.</string>
+  <string name="connection_retry">Try now</string>
+  <string name="connection_sign_in">Your session has expired. Messages wait until you sign in again.</string>
+  <string name="connection_sign_in_action">Sign in again</string>
+  <string name="connection_connecting">Connecting to the server…</string>
+  <string name="connection_sync_not_started">Syncing couldn\'t start. Trying again…</string>
+  <!-- Stands in for a link to a message inside message text -->
+  <string name="message_link_label">Message link</string>
+  <!-- Accessibility: an own message the server has accepted -->
+  <string name="message_sent">Sent</string>
+  <!-- Accessibility: an own message the other member of a DM has read -->
+  <string name="message_read">Read</string>
+  <plurals name="conversation_members">
+    <item quantity="one">%d member</item>
+    <item quantity="other">%d members</item>
+  </plurals>
 
   <!-- Conversation -->
   <string name="jump_down">Jump to the newest message</string>
   <plurals name="jump_down_new">
-    <item quantity="one">%d newer message, jump down</item>
-    <item quantity="other">%d newer messages, jump down</item>
+    <item quantity="one">%d new message, jump down</item>
+    <item quantity="other">%d new messages, jump down</item>
+  </plurals>
+  <!-- The pill over the conversation when messages arrived below; %s is the count (or "99+") -->
+  <plurals name="jump_down_unseen">
+    <item quantity="one">%s new</item>
+    <item quantity="other">%s new</item>
+  </plurals>
+  <plurals name="jump_to_reaction">
+    <item quantity="one">%d new reaction to your messages, jump to it</item>
+    <item quantity="other">%d new reactions to your messages, jump to the first</item>
   </plurals>
   <string name="day_today">Today</string>
   <string name="day_yesterday">Yesterday</string>
@@ -31,6 +61,7 @@
   <string name="react_quick">React with %1$s</string>
   <string name="file_open">Open</string>
   <string name="image_unreadable">This image can\'t be shown.</string>
+  <string name="image_open_with">Open with another app</string>
   <string name="close">Close</string>
   <string name="share">Share</string>
   <string name="delete_confirm_title">Delete this message?</string>
@@ -46,6 +77,14 @@
     <item quantity="one">%d file</item>
     <item quantity="other">%d files</item>
   </plurals>
+  <!-- The notes to self, as the web and desktop name them (notes-title). -->
+  <string name="notes_title">Notes</string>
+  <string name="share_recent">Recent</string>
+  <string name="share_no_match">No conversation matches.</string>
+  <string name="share_empty_title">Nowhere to share to yet</string>
+  <string name="share_empty">Conversations you can write in show up here once they have synced.</string>
+  <string name="share_load_failed_title">Conversations didn\'t load</string>
+  <string name="share_load_failed">Your shared content is kept. Try again in a moment.</string>
 
   <!-- App lock and composer settings -->
   <string name="app_lock">App lock (fingerprint, face or screen lock)</string>
@@ -76,6 +115,11 @@
   <string name="typing_two">%1$s and %2$s are typing…</string>
   <string name="typing_several">Several people are typing…</string>
   <string name="share_typing">Show others when I\'m typing</string>
+  <string name="call_status_sounds">Call status sounds</string>
+  <string name="call_status_sounds_hint">A soft tone repeats while your connection is lost; short tones tell when it is back or the call ended. Only you hear them, on the call\'s audio output.</string>
+  <string name="call_status_sounds_all">Mine and others\'</string>
+  <string name="call_status_sounds_own_only">Only mine</string>
+  <string name="call_status_sounds_off">Off</string>
   <string name="no_conversation_selected">Pick a conversation.</string>
   <string name="image_save">Save</string>
   <string name="image_saved">Saved to Pictures/TeamCraft</string>
@@ -94,4 +138,18 @@
     <item quantity="one">%d selected</item>
     <item quantity="other">%d selected</item>
   </plurals>
+  <!-- Main screen (#262): bottom navigation, global entries of Home, empty states. -->
+  <string name="nav_home">Home</string>
+  <string name="nav_activity">Activity</string>
+  <string name="nav_spaces">Spaces</string>
+  <string name="home_entry_threads">Threads</string>
+  <string name="home_entry_saved">Saved</string>
+  <string name="home_entry_meetings">Meetings</string>
+  <string name="home_entry_people">People</string>
+  <string name="account_menu">%1$s: account, status and settings</string>
+  <string name="dm_empty_title">No direct messages yet</string>
+  <string name="activity_empty_title">All caught up</string>
+  <string name="activity_empty">Mentions and unread messages from all your conversations show up here.</string>
+  <string name="spaces_empty_title">No channels yet</string>
+  <string name="spaces_empty">Browse the channels of your spaces to join one.</string>
 </resources>

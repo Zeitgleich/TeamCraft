@@ -4,10 +4,8 @@ import XCTest
 
 final class OidcTests: XCTestCase {
   private let environment = AppEnvironment(
-    serverURL: URL(string: "https://chat.example.com")!,
-    oidcIssuer: URL(string: "https://id.example.com/realms/team")!,
-    oidcClientId: "teamcraft", oidcRedirectScheme: "de.zeitgleich.teamcraft",
-    appGroupId: "group.de.zeitgleich.teamcraft", keychainAccessGroup: "")
+    oidcRedirectScheme: "de.zeitgleich.teamcraft", appGroupId: "group.de.zeitgleich.teamcraft",
+    keychainAccessGroup: "", clientVersion: "1.0.0")
 
   func testPkceMatchesTheRfcTestVector() {
     // RFC 7636 appendix B.
@@ -27,15 +25,60 @@ final class OidcTests: XCTestCase {
     let endpoints = OidcClient.Endpoints(
       authorizationEndpoint: URL(string: "https://id.example.com/auth")!,
       tokenEndpoint: URL(string: "https://id.example.com/token")!)
-    let url = WebLogin.authorizationURL(
-      endpoints: endpoints, environment: environment, pkce: Pkce(verifier: "v"), state: "s1")
+    let client = OidcClient(
+      issuer: URL(string: "https://id.example.com/realms/team")!, clientId: "teamcraft",
+      scopes: ["openid", "profile", "email", "offline_access"], redirectURI: environment.oidcRedirectURI)
+    let url = WebLogin.authorizationURL(endpoints: endpoints, client: client, pkce: Pkce(verifier: "v"), state: "s1")
     let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
     func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
     XCTAssertEqual(value("response_type"), "code")
     XCTAssertEqual(value("client_id"), "teamcraft")
     XCTAssertEqual(value("redirect_uri"), "de.zeitgleich.teamcraft:/oauth/callback")
+    // The scopes the server announced, not a fixed list.
+    XCTAssertEqual(value("scope"), "openid profile email offline_access")
     XCTAssertEqual(value("code_challenge_method"), "S256")
     XCTAssertEqual(value("state"), "s1")
+    // Without login parameters (a default call) none of them is sent.
+    XCTAssertNil(value("prompt"))
+    XCTAssertNil(value("login_hint"))
+  }
+
+  /// Issue #448: the server's profile and the app's language become the parameters.
+  func testLoginParametersComeFromTheServerAndTheAppLanguage() throws {
+    let address = ServerAddress(
+      origin: "https://team.example.com", host: "team.example.com", storageKey: "team.example.com",
+      serverInfoUrl: "https://team.example.com/api/v1/server-info")
+    let server = StoredServer(
+      address: address, issuer: "https://id.example.com/realms/team", clientId: "teamcraft",
+      scopes: ["openid"], displayName: "Example", serverVersion: "1.0.3",
+      isLoginPageAlwaysShown: true, maybeLoginHint: " alice ", profileJson: "{}")
+    XCTAssertEqual(
+      LoginParameters(server: server, isLoginPageShown: true, locale: "de_DE"),
+      LoginParameters(prompt: "login", loginHint: "alice", uiLocales: "de-DE"))
+    XCTAssertEqual(
+      LoginParameters(server: server, isLoginPageShown: false, locale: "not a tag!"),
+      LoginParameters(prompt: nil, loginHint: "alice", uiLocales: nil))
+    XCTAssertNil(LoginParameters.languageTag(""))
+    XCTAssertEqual(LoginParameters.languageTag("en"), "en")
+  }
+
+  /// Issue #448: the login page with the last account and the app's language.
+  @MainActor
+  func testAuthorizationURLAsksForTheLoginPageWithHintAndLanguage() throws {
+    let endpoints = OidcClient.Endpoints(
+      authorizationEndpoint: URL(string: "https://id.example.com/auth")!,
+      tokenEndpoint: URL(string: "https://id.example.com/token")!)
+    let client = OidcClient(
+      issuer: URL(string: "https://id.example.com/realms/team")!, clientId: "teamcraft",
+      scopes: ["openid"], redirectURI: environment.oidcRedirectURI)
+    let login = LoginParameters(prompt: "login", loginHint: "alice@example.com", uiLocales: "de")
+    let url = WebLogin.authorizationURL(
+      endpoints: endpoints, client: client, pkce: Pkce(verifier: "v"), state: "s1", login: login)
+    let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+    func value(_ name: String) -> String? { items.first { $0.name == name }?.value }
+    XCTAssertEqual(value("prompt"), "login")
+    XCTAssertEqual(value("login_hint"), "alice@example.com")
+    XCTAssertEqual(value("ui_locales"), "de")
   }
 
   @MainActor
@@ -47,8 +90,44 @@ final class OidcTests: XCTestCase {
     }
     let denied = URL(string: "de.zeitgleich.teamcraft:/oauth/callback?error=access_denied&state=s1")!
     XCTAssertThrowsError(try WebLogin.authorizationCode(from: denied, expectedState: "s1")) {
+      XCTAssertEqual($0 as? OidcError, .providerRefused(code: "access_denied"))
+    }
+    let crafted = URL(string: "de.zeitgleich.teamcraft:/oauth/callback?error=%3Cb%3E&state=s1")!
+    XCTAssertThrowsError(try WebLogin.authorizationCode(from: crafted, expectedState: "s1")) {
+      XCTAssertEqual($0 as? OidcError, .providerRefused(code: "unknown"))
+    }
+    let missing = URL(string: "de.zeitgleich.teamcraft:/oauth/callback?state=s1")!
+    XCTAssertThrowsError(try WebLogin.authorizationCode(from: missing, expectedState: "s1")) {
       XCTAssertEqual($0 as? OidcError, .invalidResponse)
     }
+  }
+
+  @MainActor
+  func testOnlyAlreadyLoggedInIsRetriedAndOnlyOnce() {
+    XCTAssertTrue(WebLogin.isRetried(code: "already_logged_in", retries: 0))
+    XCTAssertFalse(WebLogin.isRetried(code: "already_logged_in", retries: 1), "no loop")
+    XCTAssertFalse(WebLogin.isRetried(code: "access_denied", retries: 0))
+    var retries = 0
+    while WebLogin.isRetried(code: "already_logged_in", retries: retries) {
+      retries += 1
+      XCTAssertLessThanOrEqual(retries, WebLogin.maxRetries)
+    }
+    XCTAssertEqual(retries, 1)
+  }
+
+  @MainActor
+  func testProviderRefusalsHaveTheirMessage() {
+    XCTAssertNil(AppFailure.signIn(OidcError.cancelled))
+    XCTAssertEqual(AppFailure.signIn(OidcError.network("offline")), .network)
+    XCTAssertEqual(AppFailure.signIn(OidcError.providerRefused(code: "access_denied")), .providerDenied)
+    XCTAssertEqual(
+      AppFailure.signIn(OidcError.providerRefused(code: "already_logged_in")), .providerAlreadySignedIn)
+    XCTAssertEqual(
+      AppFailure.signIn(OidcError.providerRefused(code: "invalid_request")),
+      .providerMisconfigured(code: "invalid_request"))
+    XCTAssertEqual(
+      AppFailure.signIn(OidcError.providerRefused(code: "server_error")), .providerRefused(code: "server_error"))
+    XCTAssertEqual(AppFailure.signIn(OidcError.stateMismatch), .signInFailed)
   }
 
   func testIdTokenClaimsAreReadFromThePayload() {
@@ -59,6 +138,37 @@ final class OidcTests: XCTestCase {
     XCTAssertNil(IdTokenClaims(jwt: "not-a-jwt"))
   }
 
+  func testDiscoveryMustBeTheIssuersOwnAndHttps() throws {
+    let issuer = URL(string: "https://id.example.com/realms/team")!
+    let good = OidcClient.Endpoints(
+      issuer: issuer.absoluteString, authorizationEndpoint: URL(string: "https://id.example.com/auth")!,
+      tokenEndpoint: URL(string: "https://id.example.com/token")!)
+    XCTAssertTrue(good.isTrusted(for: issuer))
+    var otherIssuer = good
+    otherIssuer.issuer = "https://evil.example"
+    XCTAssertFalse(otherIssuer.isTrusted(for: issuer))
+    XCTAssertFalse(OidcClient.Endpoints.isSafe(URL(string: "file:///etc/passwd")!))
+    XCTAssertFalse(OidcClient.Endpoints.isSafe(URL(string: "https://user:pw@id.example.com/x")!))
+  }
+
+  func testIdTokensMustBeForThisIssuerAndClient() throws {
+    func jwt(_ claims: [String: Any]) -> String {
+      let payload = try! JSONSerialization.data(withJSONObject: claims)
+      let encoded = payload.base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+      return "e30.\(encoded).sig"
+    }
+    let issuer = "https://id.example.com/realms/team"
+    let good = IdTokenClaims(jwt: jwt(["sub": "u1", "iss": issuer, "aud": ["teamcraft", "other"]]))
+    XCTAssertEqual(good?.isIssued(by: issuer, to: "teamcraft"), true)
+    let single = IdTokenClaims(jwt: jwt(["sub": "u1", "iss": issuer, "aud": "teamcraft"]))
+    XCTAssertEqual(single?.isIssued(by: issuer, to: "teamcraft"), true)
+    let foreign = IdTokenClaims(jwt: jwt(["sub": "u1", "iss": "https://evil.example", "aud": "teamcraft"]))
+    XCTAssertEqual(foreign?.isIssued(by: issuer, to: "teamcraft"), false)
+    XCTAssertEqual(single?.isIssued(by: issuer, to: "another-client"), false)
+  }
+
   func testFormEncodingEscapesReservedCharacters() {
     XCTAssertEqual(OidcClient.formEncoded(["b": "x y&z", "a": "1"]), "a=1&b=x%20y%26z")
   }
@@ -67,8 +177,14 @@ final class OidcTests: XCTestCase {
     let now = Date()
     let session = OidcSession(
       accessToken: "t", refreshToken: nil, expiresAt: now.addingTimeInterval(20), subject: "s",
-      displayName: nil, tokenEndpoint: URL(string: "https://id.example.com/token")!)
+      displayName: nil, tokenEndpoint: URL(string: "https://id.example.com/token")!, clientId: "teamcraft")
     XCTAssertFalse(session.isFresh(leeway: 30, now: now))
     XCTAssertTrue(session.isFresh(leeway: 10, now: now))
+  }
+
+  func testOnlyARefusedGrantEndsTheSession() {
+    XCTAssertTrue(OidcClient.isInvalidGrant(Data(#"{"error":"invalid_grant"}"#.utf8)))
+    XCTAssertFalse(OidcClient.isInvalidGrant(Data(#"{"error":"temporarily_unavailable"}"#.utf8)))
+    XCTAssertFalse(OidcClient.isInvalidGrant(Data("<html>".utf8)))
   }
 }

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO message_client_ids (conversation_id, client_message_id, message_id)\n           VALUES ($1, $2, $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6c8c602a7037787f7a6190d059e70ebc8ee3df60b729f8aeaccc6912ce53cf91"
+}

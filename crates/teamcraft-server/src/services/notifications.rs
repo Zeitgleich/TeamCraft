@@ -1,4 +1,4 @@
-//! Notification preferences: per user (DND schedule, push mode, receipts, thread follow) and per
+//! Notification preferences: per user (DND schedule, push mode, receipts, thread follow, level) and per
 //! conversation (level, mute time). The push routing reads them (`push::routing`).
 
 use teamcraft_db::{Conversation, StoredSpaceNotifications, StoredUserSettings};
@@ -44,6 +44,9 @@ pub async fn put_settings(
   if let Some(schedule) = &request.maybe_dnd_schedule {
     validate_schedule(schedule)?;
   }
+  if matches!(request.maybe_level, Some(NotificationLevel::Unknown(_))) {
+    return Err(ApiError::InvalidRequest("unknown notification level".into()));
+  }
   let maybe_dnd_schedule = request
     .maybe_dnd_schedule
     .as_ref()
@@ -62,6 +65,8 @@ pub async fn put_settings(
     maybe_uses_desktop_attention: request
       .maybe_uses_desktop_attention
       .or(previous.maybe_uses_desktop_attention),
+    // Clients that don't know the level leave it out; that keeps the user's choice.
+    maybe_level: request.maybe_level.or(previous.maybe_level),
   };
   state
     .database
@@ -318,6 +323,8 @@ fn settings_response(
     send_read_receipts: receipts_enabled(state, stored),
     maybe_dnd_schedule,
     maybe_uses_desktop_attention: Some(uses_desktop_attention(state, stored.maybe_uses_desktop_attention)),
+    maybe_level: stored.maybe_level.clone(),
+    maybe_default_level: Some(state.settings.get().notifications.default_level.clone()),
   })
 }
 

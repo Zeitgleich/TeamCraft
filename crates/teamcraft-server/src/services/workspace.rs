@@ -7,12 +7,13 @@
 use serde_json::json;
 use teamcraft_db::{AppendOutcome, WorkspaceLogEntry};
 use teamcraft_proto::{
-  AppendWorkspaceLogRequest, Base64Bytes, ComplianceArchiveMode, GatewayEvent, ListWorkspaceLogQuery,
-  ListWorkspaceLogResponse, Permission, PolicyDocument, Target, WorkspaceLogEntryResponse, WorkspaceLogKind,
-  WorkspacePolicy, WorkspacePolicyResponse,
+  AppendWorkspaceLogRequest, Base64Bytes, ComplianceArchiveMode, GatewayEvent, GuestDmStart,
+  ListWorkspaceLogQuery, ListWorkspaceLogResponse, Permission, PolicyDocument, Target,
+  WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy, WorkspacePolicyResponse,
 };
 
 use super::access::require;
+use super::admin_join_requests;
 use super::audit::{self, Target as AuditTarget};
 use super::convert::unix_millis;
 use crate::auth::AuthenticatedUser;
@@ -33,6 +34,7 @@ const MAX_PRESET_TEXT_CHARS: usize = 100;
 pub const MAX_ORG_BACKGROUNDS: usize = 50;
 const MAX_ORG_BACKGROUND_NAME_CHARS: usize = 100;
 const SHA256_BYTES: usize = 32;
+const MAX_RECOMMENDED_OWNERS: u8 = 10;
 
 pub async fn append(
   state: &AppState,
@@ -54,9 +56,16 @@ pub async fn append(
   {
     return Err(ApiError::device_not_found());
   }
+  if kind == WorkspaceLogKind::Roster {
+    check_roster_payload(request.payload.as_slice())?;
+    if request.expected_version == 0 {
+      require_recoverable_root(state, caller).await?;
+    }
+  }
   let maybe_document = if kind == WorkspaceLogKind::Policy {
     let document = check_policy_payload(request.payload.as_slice(), request.expected_version + 1)?;
     check_org_backgrounds_exist(state, &document.policy.call_backgrounds).await?;
+    check_notetaker_bot(state, &document.policy.notetaker).await?;
     Some(document)
   } else {
     None
@@ -77,9 +86,11 @@ pub async fn append(
   }
 
   let version = request.expected_version + 1;
-  if let Some(document) = maybe_document {
+  let maybe_self_join = maybe_document.map(|document| {
+    let self_join = document.policy.admin_self_join.clone();
     state.policy.set(document.policy);
-  }
+    self_join
+  });
   audit::record(
     state,
     Some(caller.user.id),
@@ -95,12 +106,33 @@ pub async fn append(
     kind: kind.clone(),
     version,
   });
+  // Best effort after the entry is stored and announced: requests left open are moot under the
+  // new policy anyway (clients hide them) and expire.
+  if let Some(self_join) = maybe_self_join
+    && let Err(error) = admin_join_requests::close_all_after_policy_change(state, &self_join).await
+  {
+    tracing::warn!(%error, "could not close the admin join requests after a policy change");
+  }
 
   let entries = state.database.list_workspace_log(&kind, version - 1, 1).await?;
   entries
     .first()
     .map(entry_response)
     .ok_or_else(|| ApiError::Internal("appended entry missing".into()))
+}
+
+/// The genesis roster makes its signer the workspace root of trust (admin.md §2.3). Their identity
+/// must be recoverable: an identity key without a key bag (an enrollment interrupted by an older
+/// client) would pin a root whose owner can never sign again after losing the device.
+async fn require_recoverable_root(state: &AppState, caller: &AuthenticatedUser) -> Result<(), ApiError> {
+  let has_identity = state.database.get_identity_key(caller.user.id).await?.is_some();
+  let has_key_bag = state.database.get_key_bag(caller.user.id).await?.is_some();
+  if !has_identity || !has_key_bag {
+    return Err(ApiError::Conflict(
+      "the first owner needs an identity key and a key bag before signing the roster".into(),
+    ));
+  }
+  Ok(())
 }
 
 pub async fn list(
@@ -138,20 +170,13 @@ pub fn effective_guest_expiry_days(state: &AppState) -> u32 {
     .unwrap_or(state.settings.get().guests.default_expiry_days)
 }
 
-/// Whether guests may only open DMs with people they share a conversation with.
-pub fn effective_guest_dm_restriction(state: &AppState) -> bool {
+/// Whom guests may start a direct message with: the signed policy, else the server file.
+pub fn effective_guest_dm_start(state: &AppState) -> GuestDmStart {
   state
     .policy
     .get()
     .guests
-    .maybe_dm_only_with_shared_conversations
-    .unwrap_or(
-      state
-        .settings
-        .get()
-        .policy
-        .guests_dm_only_with_shared_conversations,
-    )
+    .effective_dm_start(state.settings.get().policy.effective_guests_dm_start())
 }
 
 /// Shortest password of a local account.
@@ -193,6 +218,42 @@ pub async fn get_policy(
     policy,
     maybe_entry: entry.as_ref().map(entry_response),
   })
+}
+
+/// The parts of a roster document the server looks at. Clients verify the rest (and the
+/// signatures); the server only refuses what no honest client sends.
+#[derive(serde::Deserialize)]
+struct RosterOutline {
+  members: Vec<RosterMemberOutline>,
+}
+
+#[derive(serde::Deserialize)]
+struct RosterMemberOutline {
+  role: RosterRoleOutline,
+}
+
+#[derive(serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum RosterRoleOutline {
+  Owner,
+  #[serde(other)]
+  Other,
+}
+
+/// A sanity check, not a trust decision (clients refuse a roster without an owner themselves):
+/// a roster nobody owns could never be changed again (admin.md §2.3).
+fn check_roster_payload(payload: &[u8]) -> Result<(), ApiError> {
+  let roster: RosterOutline = serde_json::from_slice(payload)
+    .map_err(|e| ApiError::InvalidRequest(format!("the payload is not a roster document: {e}")))?;
+  if roster
+    .members
+    .iter()
+    .any(|member| member.role == RosterRoleOutline::Owner)
+  {
+    Ok(())
+  } else {
+    Err(ApiError::LastOwner)
+  }
 }
 
 /// Parses and validates a policy document before it is appended.
@@ -238,7 +299,9 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
     ));
   }
   let presence = &policy.presence;
-  if presence.maybe_away_timeout_minutes == Some(0)
+  if presence
+    .maybe_away_timeout_minutes
+    .is_some_and(|minutes| minutes < teamcraft_proto::MIN_AWAY_TIMEOUT_MINUTES)
     || presence.presets.len() > MAX_STATUS_PRESETS
     || presence.presets.iter().any(|preset| {
       preset.text.trim().is_empty()
@@ -258,6 +321,15 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
     ));
   }
   check_guest_and_password_policy(policy)?;
+  policy
+    .notetaker
+    .check()
+    .map_err(|error| ApiError::InvalidRequest(format!("notetaker: {error}")))?;
+  if !(1..=MAX_RECOMMENDED_OWNERS).contains(&policy.owners.recommended_minimum) {
+    return Err(ApiError::InvalidRequest(format!(
+      "owners.recommended_minimum must be between 1 and {MAX_RECOMMENDED_OWNERS}"
+    )));
+  }
   if matches!(
     policy.notifications.push_content,
     teamcraft_proto::PushContentMode::Unknown(_)
@@ -361,6 +433,24 @@ async fn check_org_backgrounds_exist(
         image.id
       )));
     }
+  }
+  Ok(())
+}
+
+/// An enabled notetaker names an active bot account (e2ee.md §8.2). Clients trust only the
+/// signature; this keeps owners from publishing a notetaker that can't fetch its key.
+async fn check_notetaker_bot(
+  state: &AppState,
+  notetaker: &teamcraft_proto::NotetakerPolicy,
+) -> Result<(), ApiError> {
+  let Some(bot) = notetaker.active_bot() else {
+    return Ok(());
+  };
+  let maybe_user = state.database.get_user(bot).await?;
+  if !maybe_user.is_some_and(|user| user.kind == teamcraft_proto::UserKind::Bot && !user.is_deactivated) {
+    return Err(ApiError::InvalidRequest(
+      "notetaker: the account is not an active bot account".into(),
+    ));
   }
   Ok(())
 }
@@ -478,6 +568,24 @@ mod tests {
   }
 
   #[test]
+  fn the_away_timeout_has_a_minimum() {
+    for (minutes, is_valid) in [
+      (Some(0), false),
+      (Some(4), false),
+      (Some(5), true),
+      (Some(60), true),
+      (None, true),
+    ] {
+      let document = payload(1, |p| p.presence.maybe_away_timeout_minutes = minutes);
+      assert_eq!(
+        check_policy_payload(&document, 1).is_ok(),
+        is_valid,
+        "{minutes:?}"
+      );
+    }
+  }
+
+  #[test]
   fn a_valid_document_for_the_next_version_passes() {
     assert!(check_policy_payload(&payload(3, |_| {}), 3).is_ok());
     assert!(check_policy_payload(&payload(3, |p| p.admin_self_join = AdminSelfJoin::Disabled), 3).is_ok());
@@ -553,6 +661,44 @@ mod tests {
       "unlimited exceeds a limit"
     );
     assert!(check_policy_payload(&with(days(0), RetentionSetting::default()), 1).is_err());
+  }
+
+  #[test]
+  fn a_roster_without_an_owner_is_refused() {
+    let roster =
+      |members: serde_json::Value| serde_json::to_vec(&json!({"version": 2, "members": members})).unwrap();
+    let member = |role: &str| json!({"user_id": "1", "role": role, "identity_key": "AAAA"});
+    assert!(check_roster_payload(&roster(json!([member("owner"), member("admin")]))).is_ok());
+    for members in [json!([]), json!([member("admin")]), json!([member("auditor")])] {
+      assert!(matches!(
+        check_roster_payload(&roster(members)),
+        Err(ApiError::LastOwner)
+      ));
+    }
+    assert!(matches!(
+      check_roster_payload(b"not json"),
+      Err(ApiError::InvalidRequest(_))
+    ));
+    assert!(matches!(
+      check_roster_payload(b"{}"),
+      Err(ApiError::InvalidRequest(_))
+    ));
+  }
+
+  #[test]
+  fn the_recommended_number_of_owners_is_bounded() {
+    assert!(check_policy_payload(&payload(1, |p| p.owners.recommended_minimum = 1), 1).is_ok());
+    assert!(check_policy_payload(&payload(1, |p| p.owners.recommended_minimum = 0), 1).is_err());
+    assert!(check_policy_payload(&payload(1, |p| p.owners.recommended_minimum = 11), 1).is_err());
+    let without: serde_json::Value =
+      json!({"version": 1, "policy": serde_json::to_value(WorkspacePolicy::default()).unwrap()});
+    let mut older = without.clone();
+    older["policy"].as_object_mut().unwrap().remove("owners");
+    let parsed = check_policy_payload(&serde_json::to_vec(&older).unwrap(), 1).unwrap();
+    assert_eq!(
+      parsed.policy.owners.recommended_minimum, 2,
+      "older documents get the default"
+    );
   }
 
   #[test]

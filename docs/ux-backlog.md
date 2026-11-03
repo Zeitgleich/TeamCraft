@@ -68,6 +68,7 @@ exists).
 | No undo after leaving a channel                                                                   | done   |
 | Messages in the outbox look sent; now "Sending…", then "Not sent yet, retrying"                   | done   |
 | Thread replies can't also be sent to the channel ("Also send to #channel")                        | done   |
+| Desktop and web neither send nor show typing ("Alice is typing…"); only the phones did (#733)     | done   |
 
 ## General and desktop
 
@@ -113,7 +114,8 @@ exists).
 ## Already in place (checked)
 
 Draft per conversation and thread, Shift+Enter / configurable send key, @-mention, `:emoji:` and `/command`
-autocomplete with the keyboard, formatting toolbar, Alt+↑/↓ between conversations, Esc closes panels,
+autocomplete with the keyboard, formatting toolbar, Alt+↑/↓ between conversations (of the space, or of
+Home), Esc closes panels, direct messages on their own Home page (first rail entry),
 unread bold and mention badges in the sidebar, muted spaces greyed, collapsible sidebar sections,
 status menu with presets and expiry, copy link to a message, permalinks, image gallery, jump to date,
 dark / light / system theme, compact density, `prefers-reduced-motion`, focus rings, modal focus trap.

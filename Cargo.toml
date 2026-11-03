@@ -5,7 +5,7 @@ members = ["crates/*", "apps/desktop", "tests/e2e"]
 exclude = ["crates/vendor", "fuzz"]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.18"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Zeitgleich/TeamCraft"
@@ -45,16 +45,22 @@ expect_used = "warn"
 if_same_then_else = "allow"
 
 [workspace.dependencies]
+# The full Unicode emoji set with CLDR names, groups, skin tones and gemoji shortcodes: the
+# pickers' catalog (teamcraft-client-api) and the Synology importer's shortcodes.
+emojis = "0.9"
 # Internal crates
 teamcraft-proto = { path = "crates/teamcraft-proto" }
 teamcraft-db = { path = "crates/teamcraft-db" }
 teamcraft-crypto = { path = "crates/teamcraft-crypto" }
 teamcraft-ops = { path = "crates/teamcraft-ops" }
+teamcraft-net = { path = "crates/teamcraft-net" }
 
 # Serialization and schemas
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 utoipa = "6"
+# Routes register their OpenAPI paths and schemas where they are defined (#614).
+utoipa-axum = "0.3"
 
 # Errors, logging, secrets
 thiserror = "2"
@@ -67,7 +73,10 @@ secrecy = { version = "0.10", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.7", features = ["trace", "request-id", "fs"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "http2"] }
+# `system-proxy`: macOS and Windows proxy settings (environment variables are read anyway).
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls", "http2", "system-proxy"] }
+# `Retry-After` as an HTTP date (push services); already in the tree through hyper.
+httpdate = "1"
 
 # Database
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "migrate", "macros", "time"] }
@@ -86,8 +95,8 @@ aws-lc-rs = "1"
 # E-mail (iMIP meeting invitations); rustls with the aws-lc-rs provider like the rest of the tree
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls", "aws-lc-rs", "webpki-roots"] }
 
-# S3 presigned URLs (sans-IO, no SDK)
-rusty-s3 = { version = "0.10", default-features = false, features = ["aws-lc-rs"] }
+# S3 presigned URLs (sans-IO, no SDK); `xml` for the multipart upload requests and answers
+rusty-s3 = { version = "0.10", default-features = false, features = ["aws-lc-rs", "xml"] }
 url = "2"
 
 # Push tests (the payload crypto lives in teamcraft-crypto)
@@ -103,8 +112,11 @@ figment = { version = "0.10", features = ["toml", "env"] }
 
 # davey 0.1.5 ported to openmls 0.9, so chat and calls share one MLS stack (ARCHITECTURE.md §6.2)
 # without the libcrux advisories of the openmls 0.8 stack. See crates/vendor/davey/VENDORED.md.
+# wtransport 0.7.2 with a client Endpoint::rebind, so calls survive network changes (ARCHITECTURE.md
+# §6.5). See crates/vendor/wtransport/VENDORED.md.
 [patch.crates-io]
 davey = { path = "crates/vendor/davey" }
+wtransport = { path = "crates/vendor/wtransport" }
 
 # Keep target/ small: several worktrees build in parallel on one disk. Line tables are enough
 # for backtraces; dependencies carry no debug info.
@@ -125,3 +137,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# The browser's person segmentation (tract, only in the segmentation worker's module
+# teamcraft-web-segmentation, #439) runs every frame or two: its kernels are built for speed.
+# Chrome on the main thread: 11.5 ms instead of 19 ms a frame without SIMD, for 0.1 MB (gzip) more.
+[profile.web-release.package.tract-linalg]
+opt-level = 3

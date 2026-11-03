@@ -25,17 +25,18 @@ impl FakeCalls {
     Self {
       carol,
       snapshot: Mutex::new(CallSnapshot {
-        devices: MediaDevices {
-          cameras: Vec::new(),
-          microphones: vec![
+        // No camera: the pre-join screen's "no camera found" state.
+        devices: MediaDevices::listed(
+          Vec::new(),
+          vec![
             device("mic-1", "Built-in microphone"),
             device("mic-2", "USB headset"),
           ],
-          speakers: vec![
+          vec![
             device("spk-1", "Built-in speakers"),
             device("spk-2", "USB headset"),
           ],
-        },
+        ),
         ..CallSnapshot::default()
       }),
     }
@@ -56,6 +57,7 @@ impl FakeCalls {
     snapshot.running = vec![RunningCall {
       conversation,
       participants: vec![self.carol],
+      devices: Vec::new(),
       is_ringing: true,
     }];
   }
@@ -63,14 +65,24 @@ impl FakeCalls {
   pub fn act(&self, action: CallAction) {
     let mut snapshot = self.lock();
     match action {
-      CallAction::Join { request } => {
+      CallAction::Join {
+        request,
+        is_muted,
+        is_camera_on,
+        ..
+      } => {
         snapshot.incoming.clear();
         snapshot.running = vec![RunningCall {
           conversation: request.conversation,
           participants: vec![self.carol],
+          devices: Vec::new(),
           is_ringing: false,
         }];
-        snapshot.maybe_active = Some(active_call(request, self.carol));
+        snapshot.maybe_active = Some(ActiveCall {
+          is_muted,
+          is_camera_on,
+          ..active_call(request, self.carol)
+        });
       },
       CallAction::Leave => {
         snapshot.maybe_active = None;
@@ -89,6 +101,7 @@ impl FakeCalls {
           active.is_deafened = is_deafened;
         }
       },
+      CallAction::MoveHere => {},
       CallAction::SetCamera { is_on } => {
         if let Some(active) = &mut snapshot.maybe_active {
           active.is_camera_on = is_on;
@@ -99,7 +112,7 @@ impl FakeCalls {
           active.background = effect;
         }
       },
-      CallAction::StartScreenShare { has_sound } => {
+      CallAction::StartScreenShare { has_sound, .. } => {
         if let Some(active) = &mut snapshot.maybe_active {
           active.is_sharing_screen = true;
           active.screen_sound = if has_sound {
@@ -121,6 +134,13 @@ impl FakeCalls {
       | CallAction::SetPushToTalk { .. }
       | CallAction::SetTalking { .. }
       | CallAction::SelectCamera { .. }
+      | CallAction::SetStatusSounds { .. }
+      | CallAction::SetCameraQuality { .. }
+      | CallAction::SetVideoQuality { .. }
+      | CallAction::RefreshDevices
+      // No camera here, and nothing to measure.
+      | CallAction::SetPreview { .. }
+      | CallAction::TestSpeakers { .. }
       | CallAction::Unknown => {},
     }
   }
@@ -140,6 +160,9 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     is_muted: false,
     maybe_muted_by_host: None,
     screen_sound: ScreenShareSound::Off,
+    is_reconnecting: false,
+    reconnecting: Vec::new(),
+    maybe_moved_to: None,
     is_deafened: false,
     is_secured: true,
     maybe_privacy_code: Some("31 07 58".to_owned()),

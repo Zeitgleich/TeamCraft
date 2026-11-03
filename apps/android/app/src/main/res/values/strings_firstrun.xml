@@ -10,8 +10,6 @@
   <string name="passphrase_hide">Hide passphrase</string>
   <string name="restore_link_hint">Your account is already set up on another device. Link this phone from it: it\'s quickest, and your message history comes along.</string>
   <string name="restore_passphrase_hint">No other device at hand? Enter your recovery passphrase.</string>
-  <string name="link_steps_phone">On your other phone: open TeamCraft, Settings → Devices → Link a device, and scan this code.</string>
-  <string name="link_steps_computer">On a computer: Settings → Devices and security → Link a new device, and enter this code.</string>
   <string name="notification_prompt_title">Don\'t miss messages</string>
   <string name="notification_prompt_text">Allow notifications to hear about direct messages, mentions and calls while TeamCraft is closed. Message content stays encrypted until it reaches this phone.</string>
   <string name="notification_prompt_allow">Allow</string>
@@ -22,4 +20,23 @@
   <string name="browse_no_people">People you share a channel with appear here. Join a channel first, or ask a colleague to add you to one.</string>
   <string name="browse_no_channels">Nobody has created a channel you can join here yet. Create one with New channel.</string>
   <string name="browse_no_spaces">You aren\'t in a space yet. Ask your admin to add you to one.</string>
+  <string name="enroll_title">Set up this device</string>
+  <string name="enroll_new_hint">Choose a recovery passphrase. It protects your key backup; without it (or another device) your message history can\'t be restored.</string>
+  <string name="passphrase">Recovery passphrase</string>
+  <string name="passphrase_repeat">Repeat passphrase</string>
+  <string name="passphrase_too_short">Use at least 12 characters.</string>
+  <string name="passphrases_differ">The passphrases don\'t match.</string>
+  <string name="enroll_button">Create keys</string>
+  <string name="recover_button">Restore</string>
+  <string name="link_instead">Link from another device</string>
+  <string name="device_name">Android phone</string>
+  <string name="org_recovery_instead">Recover through my organization</string>
+  <string name="org_recovery_title">Recover through your organization</string>
+  <string name="org_recovery_hint">Read this code to an admin of your organization by phone or in person. Two admins approve the recovery.</string>
+  <string name="org_recovery_new_passphrase">Choose a new recovery passphrase for your key backup:</string>
+  <string name="org_recovery_finish">Finish recovery</string>
+  <string name="org_recovery_pending">The admins haven\'t approved yet. Try again in a moment.</string>
+  <string name="passphrase_missing">Enter a passphrase.</string>
+  <string name="passphrase_repeat_missing">Enter the passphrase again.</string>
+  <string name="passphrase_rule_short">At least 12 characters.</string>
 </resources>

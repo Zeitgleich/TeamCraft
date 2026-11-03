@@ -1,6 +1,6 @@
 //! Message actions through the UI adapter and the fake server: replies, priority and
 //! acknowledgements, edits with history, deletes, pins, forwards, "also send to channel",
-//! permalinks and marking unread.
+//! permalinks and their previews, and marking unread.
 #![cfg(feature = "ui")]
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
@@ -8,7 +8,7 @@
 use crate::common;
 
 use common::{Peer, backend_of, run_commands, settle};
-use teamcraft_client_api::actions::{MessagePriority, OutgoingMessage};
+use teamcraft_client_api::actions::{LinkedMessage, MessagePriority, OutgoingMessage};
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{Bookmark, BookmarkKind, Message, MessageId, MessageKind, thread_id_of};
 use teamcraft_core::api::fake::FakeServer;
@@ -211,6 +211,147 @@ async fn permalinks_resolve_for_members_and_unread_marks_sync() {
   bob_ui.mark_read(channel);
   run_commands(&mut bob, &bob_ui).await;
   assert_eq!(bob_ui.first_unread(channel), None);
+}
+
+#[tokio::test]
+async fn linked_messages_preview_for_members_and_follow_edits_and_deletes() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  let (alice_ui, bob_ui, carol_ui) = (backend_of(&alice), backend_of(&bob), backend_of(&carol));
+  alice_ui.post_message(channel, None, "the **plan**");
+  run_commands(&mut alice, &alice_ui).await;
+  let plan = last(&alice_ui, channel);
+  alice_ui.post_message(channel, Some(thread_id_of(plan.id)), "a detail");
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+  let link = alice_ui.permalink(channel, plan.id).unwrap();
+
+  let Some(LinkedMessage::Visible { target, message, .. }) = bob_ui.linked_message(&link) else {
+    panic!("a member sees the linked message");
+  };
+  assert_eq!((target.conversation, target.message), (channel, plan.id));
+  assert_eq!(
+    (message.body.as_str(), message.author),
+    ("the **plan**", alice.client.user_id())
+  );
+  assert_eq!(
+    carol_ui.linked_message(&link),
+    Some(LinkedMessage::Unavailable),
+    "not a member"
+  );
+  assert_eq!(
+    bob_ui.linked_message("teamcraft:/c/1/m/2"),
+    Some(LinkedMessage::Unavailable)
+  );
+  assert_eq!(
+    bob_ui.linked_message("https://example.com/"),
+    Some(LinkedMessage::Unavailable)
+  );
+  // A member whose device doesn't have the message gets a neutral notice, not "no access".
+  let missing = format!("teamcraft:/c/{channel}/m/999999999");
+  assert!(matches!(
+    bob_ui.linked_message(&missing),
+    Some(LinkedMessage::NotLoaded { .. })
+  ));
+
+  // A thread reply says where it lives.
+  let detail = alice_ui.thread(channel, thread_id_of(plan.id))[1].clone();
+  let reply_link = alice_ui.permalink(channel, detail.id).unwrap();
+  let Some(LinkedMessage::Visible { message, .. }) = bob_ui.linked_message(&reply_link) else {
+    panic!("a member sees the thread reply");
+  };
+  assert_eq!(message.maybe_thread, Some(thread_id_of(plan.id)));
+
+  alice_ui.edit_message(channel, plan.id, "the new plan");
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let Some(LinkedMessage::Visible { message, .. }) = bob_ui.linked_message(&link) else {
+    panic!("still visible after the edit");
+  };
+  assert_eq!(message.body, "the new plan");
+
+  alice_ui.delete_message(channel, plan.id);
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert!(matches!(
+    bob_ui.linked_message(&link),
+    Some(LinkedMessage::Deleted { .. })
+  ));
+}
+
+mod read_ticks {
+  use super::*;
+
+  #[tokio::test]
+  async fn own_dm_messages_turn_read_once_the_other_read_them() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
+    alice_ui.post_message(dm, None, "lunch at noon?");
+    run_commands(&mut alice, &alice_ui).await;
+    settle(&mut [&mut alice, &mut bob]).await;
+    let sent = last(&alice_ui, dm);
+    let alice_sees_read = || alice_ui.message_extras(dm, &[sent.id])[0].is_read;
+    assert!(!alice_sees_read(), "sent, not read yet");
+
+    bob_ui.mark_read(dm);
+    run_commands(&mut bob, &bob_ui).await;
+    // The fake server sends no receipt events: Alice hears of it as after being offline.
+    assert!(!alice_sees_read());
+    alice_ui.refresh_read_receipts(dm);
+    run_commands(&mut alice, &alice_ui).await;
+    assert!(alice_sees_read());
+    assert_eq!(alice_ui.seen_by(dm, sent.id), vec![bob.client.user_id()]);
+
+    // Ticks are for the sender: Bob's view of Alice's message has none.
+    bob_ui.refresh_read_receipts(dm);
+    run_commands(&mut bob, &bob_ui).await;
+    assert!(!bob_ui.message_extras(dm, &[sent.id])[0].is_read);
+  }
+
+  #[tokio::test]
+  async fn group_dms_name_their_readers_and_channels_have_no_receipts() {
+    let (server, mut alice, mut bob, channel) = channel_with_two().await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let group = alice
+      .client
+      .open_group_dm(&[bob.client.user_id(), carol.client.user_id()])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let (alice_ui, bob_ui, carol_ui) = (backend_of(&alice), backend_of(&bob), backend_of(&carol));
+    alice_ui.post_message(group, None, "agenda is up");
+    alice_ui.post_message(channel, None, "agenda is up");
+    run_commands(&mut alice, &alice_ui).await;
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let (in_group, in_channel) = (last(&alice_ui, group), last(&alice_ui, channel));
+    for (peer, ui) in [(&mut bob, &bob_ui), (&mut carol, &carol_ui)] {
+      ui.mark_read(group);
+      ui.mark_read(channel);
+      run_commands(peer, ui).await;
+    }
+
+    alice_ui.refresh_read_receipts(group);
+    alice_ui.refresh_read_receipts(channel);
+    assert_eq!(
+      alice_ui.drain_commands().len(),
+      1,
+      "a channel's receipts are never asked for"
+    );
+    alice_ui.refresh_read_receipts(group);
+    run_commands(&mut alice, &alice_ui).await;
+    // Everybody read it, yet a group DM says who in "Seen by" rather than with two ticks (#635).
+    let mut readers = alice_ui.seen_by(group, in_group.id);
+    readers.sort();
+    let mut others = vec![bob.client.user_id(), carol.client.user_id()];
+    others.sort();
+    assert_eq!(readers, others);
+    assert!(!alice_ui.message_extras(group, &[in_group.id])[0].is_read);
+    assert!(!alice_ui.message_extras(channel, &[in_channel.id])[0].is_read);
+  }
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {

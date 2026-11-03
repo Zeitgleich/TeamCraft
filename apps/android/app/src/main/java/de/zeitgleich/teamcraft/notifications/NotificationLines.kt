@@ -14,8 +14,10 @@ data class ConversationNotification(
   @SerialName("title") val maybeTitle: String? = null,
   /** Offer reply and mark read (the core verified the conversation of the newest message). */
   @SerialName("is_verified") val isVerified: Boolean = false,
-  /** The newest message was a mention or DM: it goes to the mentions channel. */
+  /** The newest message was a mention or urgent: it goes to the mentions channel. */
   @SerialName("is_mention") val isMention: Boolean = false,
+  /** A one-to-one or group DM: its messages go to the direct messages channel. */
+  @SerialName("is_direct") val isDirect: Boolean = false,
   val lines: List<NotificationLine> = emptyList(),
 )
 
@@ -30,6 +32,8 @@ data class NotificationLine(
   @SerialName("sender_name") val senderName: String = "",
   val text: String,
   @SerialName("sent_at_ms") val sentAtMs: Long,
+  /** Shown before its text could be read ("New message" under the sender): a retry fills it in. */
+  @SerialName("is_placeholder") val isPlaceholder: Boolean = false,
 ) {
   val isOwn: Boolean get() = maybeSenderKey == null
 }
@@ -57,6 +61,29 @@ object NotificationLines {
   fun merge(lines: List<NotificationLine>, line: NotificationLine): List<NotificationLine> {
     val others = line.maybeMessageId?.let { id -> lines.filterNot { it.maybeMessageId == id } } ?: lines
     return (others + line).sortedWith(LINE_ORDER).takeLast(MAX_LINES)
+  }
+
+  /**
+   * The lines after a wake-up's `line`. A second wake-up for a message already shown keeps what is
+   * shown (it may carry less), unless it reads a message that was shown as a placeholder.
+   */
+  fun withWakeUp(lines: List<NotificationLine>, line: NotificationLine, isDuplicate: Boolean): List<NotificationLine> {
+    val maybeShown = line.maybeMessageId?.let { id -> lines.firstOrNull { it.maybeMessageId == id } }
+    val keepsShown = isDuplicate && maybeShown != null && !(maybeShown.isPlaceholder && !line.isPlaceholder)
+    return if (keepsShown) lines else merge(lines, line)
+  }
+
+  /**
+   * The lines after a retry read the message of a placeholder line; `null` when there is nothing
+   * to update: the line is gone (read, swiped away), already filled in, or still not readable.
+   * A retry never brings a notification back.
+   */
+  fun filledIn(lines: List<NotificationLine>, line: NotificationLine): List<NotificationLine>? {
+    if (line.isPlaceholder) return null
+    val id = line.maybeMessageId ?: return null
+    val shown = lines.firstOrNull { it.maybeMessageId == id } ?: return null
+    if (!shown.isPlaceholder) return null
+    return merge(lines, line)
   }
 
   /**

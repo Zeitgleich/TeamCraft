@@ -1,0 +1,249 @@
+/* ---- Profile card (profile_views.rs) ----
+   The person first: picture, name, presence and status centred on one axis; then the actions;
+   then the quieter facts and what the user shares with them. Weight and size carry the
+   hierarchy, the facts step back in colour. A centred dialog on wide screens, a sheet that rises
+   from the bottom on a phone (below, compact layout). */
+.modal-profile {
+  position: relative;
+}
+
+.profile-close {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: 1;
+}
+
+.modal-profile .profile-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-8) var(--space-6) var(--space-6);
+  overflow-y: auto;
+}
+
+.profile-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  text-align: center;
+}
+
+/* The profile card's picture; the pre-join tile sizes .avatar-xl on its own (above). */
+.profile-hero .avatar-xl {
+  width: 88px;
+  height: 88px;
+  margin-bottom: var(--space-2);
+  font-size: var(--text-2xl);
+  border-radius: var(--radius-lg);
+}
+
+.profile-hero .avatar-xl .presence {
+  width: 16px;
+  height: 16px;
+  box-shadow: 0 0 0 3px var(--surface);
+}
+
+.profile-name {
+  margin: 0;
+  font-size: var(--text-2xl);
+  line-height: var(--leading-2xl);
+  letter-spacing: var(--tracking-2xl);
+  font-weight: var(--weight-bold);
+  overflow-wrap: anywhere;
+}
+
+.profile-handle {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-md);
+  letter-spacing: var(--tracking-xs);
+}
+
+.profile-presence {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.profile-presence > .presence {
+  position: static;
+}
+
+.profile-badges {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: var(--space-1) 0 0;
+}
+
+.custom-status-line {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0 6px;
+  margin: 0;
+  min-width: 0;
+}
+
+.custom-status-text {
+  overflow-wrap: anywhere;
+}
+
+.custom-status-until {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+/* The status is the one thing a person said about themselves right now: a quiet card of its own. */
+.profile-status {
+  justify-content: center;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  font-size: var(--text-md);
+  text-align: center;
+}
+
+.profile-status .custom-status-emoji {
+  font-size: var(--text-xl);
+}
+
+.profile-status .custom-status-until {
+  flex-basis: 100%;
+}
+
+.profile-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.modal-profile .profile-facts {
+  margin: 0;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-sm);
+}
+
+.profile-section-title {
+  margin: 0 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+}
+
+.profile-shared {
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.profile-chips,
+.profile-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  list-style: none;
+}
+
+.profile-chip {
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  font-size: var(--text-sm);
+}
+
+.profile-channel {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-standard), transform var(--dur-fast) var(--ease-standard);
+}
+
+.profile-channel:hover {
+  background: var(--surface-2);
+}
+
+.profile-channel:active {
+  transform: scale(var(--press-scale));
+}
+
+.profile-channel .icon {
+  color: var(--text-muted);
+}
+
+.profile-more {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+/* The person in the header of a direct conversation and in the member list opens their card. */
+.header-person,
+.member-person {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.header-person {
+  gap: 6px;
+}
+
+.member-person {
+  flex: 1;
+  gap: 10px;
+}
+
+.header-person:hover .header-name,
+.member-person:hover .member-name {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.header-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 16rem;
+  color: var(--text);
+}
+
+.header-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.header-local-time { color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
+

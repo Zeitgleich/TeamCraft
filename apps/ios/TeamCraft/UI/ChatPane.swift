@@ -5,12 +5,16 @@ import UniformTypeIdentifiers
 /// A conversation, or one thread of it (`threadId`): messages, reactions and the composer.
 struct ChatPane: View {
   @Environment(AppModel.self) private var model
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.scenePhase) private var scenePhase
   let conversation: ConversationItem
   let threadId: String?
   let account: Account
 
   @State private var messages: [MessageItem] = []
   @State private var draft = ""
+  /// The stored draft was read; saving before that would overwrite it with the empty field.
+  @State private var isDraftLoaded = false
   @State private var maybeEditing: MessageItem?
   @State private var maybeThread: ThreadTarget?
   @State private var extras: [String: MessageExtras] = [:]
@@ -18,6 +22,7 @@ struct ChatPane: View {
   @State private var attachmentError: AttachmentError?
   @State private var isPickingPhoto = false
   @State private var isPickingDocument = false
+  @State private var isTakingPhoto = false
   @State private var photoSelection: [PhotosPickerItem] = []
   @State private var isShowingFiles = false
   @State private var maybeReplying: MessageItem?
@@ -31,12 +36,30 @@ struct ChatPane: View {
   @State private var typingNames: [String] = []
   @State private var displayNames: [String: String] = [:]
   @State private var maybeForwarding: MessageTarget?
+  @State private var maybeViewing: PictureTarget?
   @State private var maybeShowingEdits: MessageTarget?
   @State private var maybeLastTypingNotified: Date?
+  @State private var maybeFeed: (conversationId: String, feed: PagedFeed)?
+  @State private var hasOlder = false
+  @State private var isLoadingOlder = false
+  /// Older history the store doesn't hold: asked for when the feed reaches the store's end.
+  @State private var serverHistory = OlderHistory.complete
+  @State private var maybeKeyCatchUp: KeyCatchUpItem?
+  /// The row at the top of the screen: SwiftUI keeps it in place when older rows are added above.
+  @State private var maybeTopRowId: String?
+  /// Others' reactions to the user's messages not seen yet: the heart button (issue #1009).
+  @State private var unseenReactions = UnseenReactions()
+  @State private var reactionMarks = ReactionMarks()
+  /// The message rows on screen, whose waiting reactions count as seen.
+  @State private var rowsOnScreen: Set<String> = []
+  /// The message the heart button goes to, until its row is loaded.
+  @State private var maybeReactionTarget: String?
   @AppStorage("share_typing") private var isSharingTyping = true
   @FocusState private var isComposerFocused: Bool
 
   private static let quickReactions = ["👍", "❤️", "😂", "🎉", "😮", "🙏"]
+  /// How long typing pauses before the draft is saved.
+  private static let draftSaveDelay = Duration.milliseconds(800)
   /// The reaction a double tap toggles, as in most chat apps.
   private static let quickReaction = "👍"
 
@@ -50,13 +73,38 @@ struct ChatPane: View {
       mentionNames = await model.mentionNames()
       displayNames = await model.displayNames()
     }
-    .sheet(item: $maybeForwarding) { target in
-      ForwardSheet(fromConversationId: conversation.id, message: target.message)
+    // The composer lives in the core's drafts, so text typed before the app was killed is back
+    // (issue #158), also from the user's other devices.
+    .task(id: draftKey) {
+      isDraftLoaded = false
+      let stored = await model.draft(conversationId: conversation.id, threadId: threadId)
+      if draft.isEmpty { draft = stored }
+      isDraftLoaded = true
     }
+    .task(id: draft) {
+      // Saved after a pause in typing; a new keystroke cancels the wait.
+      guard (try? await Task.sleep(for: Self.draftSaveDelay)) != nil else { return }
+      await saveDraft()
+    }
+    .onChange(of: scenePhase) { _, phase in
+      // Leaving the app saves at once: it may be suspended and killed before the pause is over.
+      if phase == .background { Task { await saveDraft() } }
+    }
+    .sheet(item: $maybeForwarding) { target in
+      ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
+    }
+    .fullScreenCover(item: $maybeViewing) { target in PictureViewer(target: target) }
     .sheet(item: $maybeShowingEdits) { target in
       EditHistorySheet(edits: extras[target.message.id]?.edits ?? [], current: target.message.body)
     }
     .task(id: model.changeCount) { await followTyping() }
+    // Receipts sent while this device was offline never arrive as events: they are read when the
+    // conversation opens and whenever the connection comes back (#769). Channels have none, so the
+    // core doesn't ask for theirs.
+    .task(id: model.connection?.isConnected == true) {
+      guard threadId == nil, model.connection?.isConnected == true else { return }
+      await model.perform(.refreshReadReceipts(conversationId: conversation.id))
+    }
     .onAppear { model.visibleConversationId = conversation.id }
     .onDisappear {
       if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
@@ -67,7 +115,24 @@ struct ChatPane: View {
   private var screen: some View {
     VStack(spacing: 0) {
       OfflineBanner()
+      // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
+      if threadId == nil { JoinRequestBanner(conversationId: conversation.id) }
+      // Messages here wait for their keys (a newly linked device, issue #888): they show as
+      // placeholders in the list; this says how far the waiting conversations have caught up.
+      if let progress = maybeKeyCatchUp, messages.contains(where: { $0.maybePlaceholder == .waiting }) {
+        Label {
+          Text("key_catch_up \(Int64(progress.caughtUp)) \(Int64(progress.total))")
+        } icon: {
+          Image(systemName: "key")
+        }
+        .font(.footnote)
+        .foregroundStyle(Theme.textMuted)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal)
+        .padding(.vertical, 6)
+      }
       messageList
+        .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
       if let line = typingText(typingNames) {
         Text(line)
           .font(.caption.italic())
@@ -77,13 +142,16 @@ struct ChatPane: View {
           .padding(.horizontal)
           .padding(.vertical, 2)
       }
-      Divider()
       composer
     }
     .background(Theme.background)
-    .navigationTitle(threadId == nil ? conversation.name : String(localized: "thread_title"))
+    .navigationTitle(threadId == nil ? conversation.listName : String(localized: "thread_title"))
     .navigationBarTitleDisplayMode(.inline)
     .toolbar { if threadId == nil { toolbarItems } }
+    .fullScreenCover(isPresented: $isTakingPhoto) {
+      CameraPicker { image in Task { await attach(photo: image) } }
+        .ignoresSafeArea()
+    }
     .navigationDestination(item: $maybeThread) { target in
       ChatPane(conversation: conversation, threadId: target.threadId, account: account)
     }
@@ -136,77 +204,181 @@ struct ChatPane: View {
   }
 
   private var messageList: some View {
-    ScrollViewReader { proxy in
-      ScrollView {
-        LazyVStack(alignment: .leading, spacing: 4) {
-          ForEach(feedItems(messages)) { item in
-            switch item {
-            case .day(let date):
-              DayChip(date: date)
-            case .entry(let message, let isContinuation):
-              entryRow(message, isContinuation: isContinuation)
+    GeometryReader { geometry in
+      let listWidth = max(geometry.size.width - Self.listPadding * 2, 0)
+      let look = BubbleLook(listWidth: listWidth, showsSenders: showsSenders(conversation.kind), names: names)
+      ScrollViewReader { proxy in
+        ScrollView {
+          // One section per day: its date pill stays at the top while the day scrolls by.
+          LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+            // Above the oldest row: seen only when the reader is faster than the core.
+            if (hasOlder && isLoadingOlder) || (!hasOlder && serverHistory == .loading) {
+              ProgressView()
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .accessibilityLabel(Text("loading_older_messages"))
             }
+            if !hasOlder && serverHistory == .failed {
+              HStack {
+                Text("older_history_failed")
+                  .font(.footnote)
+                  .foregroundStyle(.secondary)
+                Button("older_history_retry") { Task { await loadOlder() } }
+                  .font(.footnote)
+              }
+              .frame(maxWidth: .infinity)
+              .padding(.vertical, 8)
+            }
+            ForEach(feedSections(messages)) { section in
+              Section {
+                ForEach(section.entries) { entry in
+                  entryRow(entry, look: look, listWidth: listWidth)
+                    .onAppear {
+                      if entry.id == pageBackTriggerId { Task { await loadOlder() } }
+                      rowsOnScreen.insert(entry.id)
+                      reportSeenReactions()
+                    }
+                    .onDisappear { rowsOnScreen.remove(entry.id) }
+                }
+              } header: {
+                DayPill(date: section.day)
+              }
+            }
+            // Visible exactly while the user reads at the bottom.
+            Color.clear.frame(height: 1).id(Self.bottomId)
+              .onAppear {
+                isAtBottom = true
+                newBelowCount = 0
+              }
+              .onDisappear { isAtBottom = false }
           }
-          // Visible exactly while the user reads at the bottom.
-          Color.clear.frame(height: 1).id(Self.bottomId)
-            .onAppear {
-              isAtBottom = true
-              newBelowCount = 0
-            }
-            .onDisappear { isAtBottom = false }
+          .scrollTargetLayout()
+          .padding(.horizontal, Self.listPadding)
+          .padding(.bottom, 8)
         }
-        .padding()
-      }
-      .overlay(alignment: .bottomTrailing) {
-        if !isAtBottom {
-          JumpDownButton(count: newBelowCount) {
-            withAnimation { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+        .scrollPosition(id: $maybeTopRowId, anchor: .top)
+        // Opens at the newest message, offline too (the messages come from the local store).
+        .defaultScrollAnchor(.bottom)
+        .scrollDismissesKeyboard(.interactively)
+        .overlay(alignment: .bottomTrailing) {
+          VStack(alignment: .trailing, spacing: 12) {
+            if threadId == nil, unseenReactions.count > 0, !unseenReactions.messages.isEmpty {
+              ReactionJumpButton(count: unseenReactions.count) { jumpToReaction(proxy) }
+                .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
+            }
+            if !isAtBottom {
+              JumpDownButton(count: newBelowCount) {
+                withAnimation(scrollAnimation) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+              }
+            }
           }
           .padding()
+          .animation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0), value: unseenReactions.count > 0)
         }
-      }
-      // A message link opened this conversation, or points into it: show the message.
-      .onChange(of: messages.map(\.id)) { _, _ in focusLinkedMessage(proxy) }
-      .onChange(of: model.focusMessageId) { _, _ in focusLinkedMessage(proxy) }
-      .onChange(of: messages.last?.id) { _, last in
-        guard last != nil, model.focusMessageId == nil, maybeHighlighted == nil else { return }
-        // Own messages always come into view; others' only while reading at the bottom.
-        if isAtBottom || messages.last?.authorId == account.userId {
-          withAnimation { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
-        } else {
-          newBelowCount += 1
+        // A message link opened this conversation, or points into it: show the message.
+        .onChange(of: messages.map(\.id)) { _, _ in
+          focusLinkedMessage(proxy)
+          focusReactionTarget(proxy)
+        }
+        .onChange(of: model.focusMessageId) { _, _ in focusLinkedMessage(proxy) }
+        .onChange(of: messages.last?.id) { _, last in
+          guard last != nil, model.focusMessageId == nil, maybeHighlighted == nil else { return }
+          // Own messages always come into view; others' only while reading at the bottom.
+          if isAtBottom || messages.last?.authorId == account.userId {
+            withAnimation(scrollAnimation) { proxy.scrollTo(Self.bottomId, anchor: .bottom) }
+          } else {
+            newBelowCount += 1
+          }
         }
       }
     }
   }
 
+  private static let listPadding: CGFloat = 8
+  /// Rows below the oldest loaded one whose appearance loads the next older page: a few screens
+  /// ahead, so a reader scrolling back doesn't meet the end of what is loaded (issue #1058).
+  private static let olderAheadRows = 40
+
+  /// The row that pages back when it scrolls into view.
+  private var pageBackTriggerId: String? {
+    guard threadId == nil, canPageBack, !messages.isEmpty else { return nil }
+    return messages[min(Self.olderAheadRows, messages.count - 1)].id
+  }
+
+  private var canPageBack: Bool { hasOlder || serverHistory == .available }
+
+  /// Rows that arrive or a request that ended change no row on screen, so none appears to ask for
+  /// the next page: a reader still near the oldest row asks here.
+  private func pageBackIfNearOldest() {
+    guard threadId == nil, canPageBack, !isLoadingOlder else { return }
+    let isNear = messages.prefix(Self.olderAheadRows + 1).contains { rowsOnScreen.contains($0.id) }
+    if isNear { Task { await loadOlder() } }
+  }
+
+  private var names: MentionNames {
+    MentionNames(usernames: mentionNames.usernames, myUsername: mentionNames.me)
+  }
+
   private static let bottomId = "bottom"
 
-  /// One message with its gestures: double tap reacts, long press opens the menu.
-  private func entryRow(_ message: MessageItem, isContinuation: Bool) -> some View {
+  /// One message with its gestures: double tap reacts, long press opens the menu. Each only where
+  /// the user's rights allow it (issue #758). A placeholder of a message not readable yet (issue
+  /// #888) has none: there is nothing to reply to or act on until it is.
+  @ViewBuilder
+  private func entryRow(_ entry: FeedEntry, look: BubbleLook, listWidth: CGFloat) -> some View {
+    let message = entry.message
     let row = MessageRow(
-      message: message, maybeExtras: extras[message.id], isMine: message.authorId == account.userId,
-      isContinuation: isContinuation, showsThreadLink: threadId == nil,
+      entry: entry, maybeExtras: extras[message.id], isMine: message.authorId == account.userId, look: look,
+      listWidth: listWidth, showsThreadLink: threadId == nil,
       onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) },
-      mentionNames: mentionNames,
-      displayNames: displayNames
+      displayNames: displayNames,
+      canReact: conversation.canReact
     )
+    if message.maybePlaceholder != nil {
+      row
+        .padding(.top, entry.isContinuation ? 2 : 8)
+        .background(maybeHighlighted == message.id ? Theme.accentSoft : .clear)
+        .id(message.id)
+    } else {
+      actionableRow(row, entry: entry)
+    }
+  }
+
+  private func actionableRow(_ row: MessageRow, entry: FeedEntry) -> some View {
+    let message = entry.message
     let highlight: Color = maybeHighlighted == message.id ? Theme.accentSoft : .clear
-    return SwipeToReply(isEnabled: threadId == nil && !message.isPending) {
+    return SwipeToReply(isEnabled: threadId == nil && !message.isPending && conversation.canPost) {
       maybeReplying = message
       isComposerFocused = true
     } content: {
       row
     }
-      .padding(.top, isContinuation ? 0 : 8)
+      .padding(.top, entry.isContinuation ? 2 : 8)
       .background(highlight)
       .contentShape(Rectangle())
-      .onTapGesture(count: 2) { react(message, Self.quickReaction) }
+      // Without the right to react, a tap doesn't wait to tell a double tap apart either.
+      .gesture(
+        TapGesture(count: 2).onEnded { react(message, Self.quickReaction) },
+        including: conversation.canReact ? .all : .subviews
+      )
       .contextMenu { menu(for: message) }
-      .accessibilityAction(named: Text("react_quick \(Self.quickReaction)")) { react(message, Self.quickReaction) }
+      .accessibilityActions {
+        if conversation.canPost {
+          Button("reply") {
+            maybeReplying = message
+            isComposerFocused = true
+          }
+        }
+        if conversation.canReact {
+          Button("react_quick \(Self.quickReaction)") { react(message, Self.quickReaction) }
+        }
+      }
       .id(message.id)
   }
 
+  /// The message field as in the common messengers (#713): a rounded field with attach on the
+  /// leading side and the camera on the trailing side inside it, and a round send button beside
+  /// it, filled while there is something to send.
   @ViewBuilder
   private var composer: some View {
     if conversation.canPost {
@@ -215,36 +387,64 @@ struct ChatPane: View {
         EmojiSuggestionBar(text: draft) { emoji in draft = completeEmoji(in: draft, with: emoji) }
         if !attachments.isEmpty { attachmentChips }
         HStack(alignment: .bottom, spacing: 8) {
-          if maybeEditing != nil {
-            Button { cancelEditing() } label: { Image(systemName: "xmark.circle") }
-              .accessibilityLabel(Text("cancel"))
-          } else {
-            Menu {
-              Button("attach_photo", systemImage: "photo") { isPickingPhoto = true }
-              Button("attach_file", systemImage: "doc") { isPickingDocument = true }
-            } label: {
-              Image(systemName: "plus.circle").font(.title)
+          HStack(alignment: .bottom, spacing: 0) {
+            if maybeEditing != nil {
+              Button { cancelEditing() } label: { composerIcon("xmark") }
+                .accessibilityLabel(Text("cancel"))
+            } else {
+              Menu {
+                Button("attach_photo", systemImage: "photo.on.rectangle") { isPickingPhoto = true }
+                if CameraPicker.isAvailable {
+                  Button("attach_camera", systemImage: "camera") { isTakingPhoto = true }
+                }
+                Button("attach_file", systemImage: "doc") { isPickingDocument = true }
+              } label: {
+                composerIcon("paperclip")
+              }
+              .accessibilityLabel(Text("attach"))
             }
-            .accessibilityLabel(Text("attach"))
+            TextField("composer_hint", text: $draft, axis: .vertical)
+              .focused($isComposerFocused)
+              .onChange(of: draft) { _, text in announceTyping(text) }
+              .lineLimit(1...6)
+              .padding(.vertical, 10)
+            // While typing the field needs the room; the camera comes back when it is empty.
+            if draft.isEmpty && maybeEditing == nil && CameraPicker.isAvailable {
+              Button { isTakingPhoto = true } label: { composerIcon("camera") }
+                .accessibilityLabel(Text("attach_camera"))
+            }
           }
-          TextField("composer_hint", text: $draft, axis: .vertical)
-            .focused($isComposerFocused)
-            .onChange(of: draft) { _, text in announceTyping(text) }
-            .lineLimit(1...5)
-            .padding(10)
-            .background(Theme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
+          .padding(.horizontal, 4)
+          .background(Theme.surface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+          .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(Theme.border))
           Button { Task { await submit() } } label: {
-            Image(systemName: maybeEditing == nil ? "arrow.up.circle.fill" : "checkmark.circle.fill").font(.title)
+            Image(systemName: maybeEditing == nil ? "arrow.up" : "checkmark")
+              .font(.body.weight(.semibold))
+              .foregroundStyle(canSubmit ? Theme.onAccent : Theme.textMuted)
+              .frame(width: 44, height: 44)
+              .background(canSubmit ? Theme.accent : Theme.surface, in: Circle())
+              .overlay(Circle().stroke(canSubmit ? Color.clear : Theme.border))
           }
+          .buttonStyle(.plain)
           .disabled(!canSubmit)
           .accessibilityLabel(Text("send"))
         }
       }
-      .padding(10)
+      .padding(.horizontal, 10)
+      .padding(.vertical, 8)
+      .background(.bar)
     } else {
       Text("read_only_channel").font(.footnote).foregroundStyle(Theme.textMuted).padding()
     }
+  }
+
+  /// An icon button inside the composer field: 44 pt to tap, in the muted colour.
+  private func composerIcon(_ systemName: String) -> some View {
+    Image(systemName: systemName)
+      .font(.body)
+      .foregroundStyle(Theme.textMuted)
+      .frame(width: 40, height: 44)
+      .contentShape(Rectangle())
   }
 
   /// The message being answered, with a way out.
@@ -293,18 +493,14 @@ struct ChatPane: View {
     Binding(get: { attachmentError != nil }, set: { if !$0 { attachmentError = nil } })
   }
 
+  /// A calm header: the conversation's avatar (with the person's presence in a direct message),
+  /// the name and one status line; calls and a menu with the rest.
   @ToolbarContentBuilder
   private var toolbarItems: some ToolbarContent {
+    ToolbarItem(placement: .principal) {
+      ConversationHeader(conversation: conversation)
+    }
     ToolbarItemGroup(placement: .topBarTrailing) {
-      Button {
-        Task { await model.setFavorite(conversationId: conversation.id, isFavorite: !conversation.isFavorite) }
-      } label: {
-        Image(systemName: conversation.isFavorite ? "star.fill" : "star")
-      }
-      .accessibilityLabel(Text("favorite"))
-      ConversationMuteMenu(conversationId: conversation.id)
-      Button { isShowingFiles = true } label: { Image(systemName: "folder") }
-        .accessibilityLabel(Text("files_title"))
       if conversation.kind != .integration {
         Button {
           model.calls.startCall(conversationId: conversation.id, displayName: conversation.name)
@@ -319,17 +515,34 @@ struct ChatPane: View {
         }
         .accessibilityLabel(Text("call_start_video"))
       }
+      Menu {
+        Button(
+          LocalizedStringKey(conversation.isFavorite ? "favorite_remove" : "favorite_add"),
+          systemImage: conversation.isFavorite ? "star.slash" : "star"
+        ) {
+          Task { await model.setFavorite(conversationId: conversation.id, isFavorite: !conversation.isFavorite) }
+        }
+        ConversationMuteMenu(conversationId: conversation.id)
+        Button("files_title", systemImage: "folder") { isShowingFiles = true }
+      } label: {
+        Image(systemName: "ellipsis.circle")
+      }
+      .accessibilityLabel(Text("more"))
     }
   }
 
+  /// The long-press menu: only what the user's rights allow (issue #758). Replying, editing and
+  /// deleting are messages too, so they need posting.
   @ViewBuilder
   private func menu(for message: MessageItem) -> some View {
-    Menu("react") {
-      ForEach(Self.quickReactions, id: \.self) { emoji in
-        Button(emoji) { react(message, emoji) }
+    if conversation.canReact {
+      Menu("react") {
+        ForEach(Self.quickReactions, id: \.self) { emoji in
+          Button(emoji) { react(message, emoji) }
+        }
       }
     }
-    if threadId == nil {
+    if threadId == nil && conversation.canPost {
       Button("reply", systemImage: "arrowshape.turn.up.left") {
         maybeReplying = message
         isComposerFocused = true
@@ -340,7 +553,7 @@ struct ChatPane: View {
     }
     Button("copy", systemImage: "doc.on.doc") { UIPasteboard.general.string = message.body }
     if !message.isPending { sharedMessageActions(for: message) }
-    if message.authorId == account.userId && !message.isPending {
+    if message.authorId == account.userId && !message.isPending && conversation.canPost {
       Button("edit", systemImage: "pencil") {
         maybeEditing = message
         draft = message.body
@@ -382,16 +595,53 @@ struct ChatPane: View {
     }
   }
 
+  /// Scrolling to a message eases out and quickly; with Reduce Motion it jumps.
+  private var scrollAnimation: Animation? { reduceMotion ? nil : .easeOut(duration: 0.2) }
+
   /// Scrolls to the message a link pointed at, once it is loaded, and highlights it for a moment.
   private func focusLinkedMessage(_ proxy: ScrollViewProxy) {
     guard let focus = model.focusMessageId, messages.contains(where: { $0.id == focus }) else { return }
     model.focusMessageId = nil
     maybeHighlighted = focus
-    withAnimation { proxy.scrollTo(focus, anchor: .center) }
+    withAnimation(scrollAnimation) { proxy.scrollTo(focus, anchor: .center) }
     Task {
       try? await Task.sleep(for: .seconds(2.5))
       withAnimation { maybeHighlighted = nil }
     }
+  }
+
+  /// The heart button: the oldest message with an unseen reaction, seen from now on, loaded if it
+  /// isn't yet and then shown like a linked message.
+  private func jumpToReaction(_ proxy: ScrollViewProxy) {
+    guard let oldest = unseenReactions.messages.first else { return }
+    if reactionMarks.jumped(to: oldest) {
+      Task { await model.perform(.markReactionsSeen(conversationId: conversation.id, messageIds: [oldest])) }
+    }
+    maybeReactionTarget = oldest
+    focusReactionTarget(proxy)
+  }
+
+  private func focusReactionTarget(_ proxy: ScrollViewProxy) {
+    guard let target = maybeReactionTarget else { return }
+    guard messages.contains(where: { $0.id == target }) else {
+      // Older than what is loaded: page back until it is, or give up at the start.
+      if hasOlder { Task { await loadOlder() } } else { maybeReactionTarget = nil }
+      return
+    }
+    maybeReactionTarget = nil
+    maybeHighlighted = target
+    withAnimation(scrollAnimation) { proxy.scrollTo(target, anchor: .center) }
+    Task {
+      try? await Task.sleep(for: .seconds(2.5))
+      if maybeHighlighted == target { withAnimation { maybeHighlighted = nil } }
+    }
+  }
+
+  /// Rows on screen whose reactions wait unseen are seen now.
+  private func reportSeenReactions() {
+    let seen = reactionMarks.seen(onScreen: rowsOnScreen, unseen: unseenReactions)
+    guard !seen.isEmpty else { return }
+    Task { await model.perform(.markReactionsSeen(conversationId: conversation.id, messageIds: seen)) }
   }
 
   /// Forward, pin, save, link, unread from here and the edit history: what Android offers too.
@@ -401,9 +651,11 @@ struct ChatPane: View {
     let isPinned = maybeExtras?.isPinned == true
     let isSaved = maybeExtras?.isSaved == true
     Button("forward", systemImage: "arrowshape.turn.up.right") { maybeForwarding = MessageTarget(message: message) }
-    Button(LocalizedStringKey(isPinned ? "unpin" : "pin"), systemImage: isPinned ? "pin.slash" : "pin") {
-      Task {
-        await model.perform(.setPinned(conversationId: conversation.id, messageId: message.id, isPinned: !isPinned))
+    if conversation.canManageBookmarks {
+      Button(LocalizedStringKey(isPinned ? "unpin" : "pin"), systemImage: isPinned ? "pin.slash" : "pin") {
+        Task {
+          await model.perform(.setPinned(conversationId: conversation.id, messageId: message.id, isPinned: !isPinned))
+        }
       }
     }
     Button(LocalizedStringKey(isSaved ? "unsave" : "save_for_later"), systemImage: isSaved ? "bookmark.slash" : "bookmark") {
@@ -479,6 +731,26 @@ struct ChatPane: View {
     photoSelection = []
   }
 
+  /// A photo just taken: saved as a JPEG and attached like a picked one.
+  private func attach(photo image: UIImage) async {
+    guard let data = image.jpegData(compressionQuality: 0.85) else {
+      attachmentError = .unreadable
+      return
+    }
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let file = folder.appendingPathComponent("Photo-\(Int(Date().timeIntervalSince1970)).jpg")
+    do {
+      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+      try data.write(to: file)
+      let importer = await model.attachmentImporter()
+      attachments.append(try importer.importPickedMedia(PickedMedia(url: file)))
+    } catch let error as AttachmentError {
+      attachmentError = error
+    } catch {
+      attachmentError = .unreadable
+    }
+  }
+
   private func attach(documents result: Result<[URL], Error>) async {
     guard case .success(let urls) = result else { return }
     let importer = await model.attachmentImporter()
@@ -493,6 +765,14 @@ struct ChatPane: View {
     }
   }
 
+  private var draftKey: String { "\(conversation.id)/\(threadId ?? "")" }
+
+  /// Keeps the composer text in the core; an edit of a sent message is no draft.
+  private func saveDraft() async {
+    guard isDraftLoaded, maybeEditing == nil else { return }
+    await model.perform(.setDraft(conversationId: conversation.id, maybeThreadId: threadId, body: draft))
+  }
+
   private func cancelEditing() {
     maybeEditing = nil
     draft = ""
@@ -502,9 +782,51 @@ struct ChatPane: View {
     if let threadId {
       messages = await model.thread(conversationId: conversation.id, threadId: threadId)
     } else {
-      messages = await model.messages(conversationId: conversation.id)
+      // A failed read keeps what is shown; the next change reads again.
+      guard let page = await pagedFeed().reread() else { return }
+      messages = page.messages
+      hasOlder = page.hasOlder
+      if let history = await model.olderHistory(conversationId: conversation.id) { serverHistory = history }
+      pageBackIfNearOldest()
     }
     if conversation.unreadCount > 0 { await model.markRead(conversationId: conversation.id) }
+    maybeKeyCatchUp = await model.keyCatchUp()
+    if threadId == nil {
+      unseenReactions = await model.unseenReactions(conversationId: conversation.id)
+      reportSeenReactions()
+    }
+    await reloadExtras()
+  }
+
+  /// The window of this conversation the feed shows, read again when the pane shows another one.
+  private func pagedFeed() -> PagedFeed {
+    if let maybeFeed, maybeFeed.conversationId == conversation.id { return maybeFeed.feed }
+    let conversationId = conversation.id
+    let feed = PagedFeed { [model] maybeOldest, older in
+      await model.messages(conversationId: conversationId, from: maybeOldest, older: older)
+    }
+    maybeFeed = (conversationId, feed)
+    hasOlder = false
+    serverHistory = .complete
+    return feed
+  }
+
+  private func loadOlder() async {
+    guard threadId == nil, !isLoadingOlder else { return }
+    guard hasOlder else {
+      // The core answers in the store: the change that follows says how it went.
+      if serverHistory != .complete && serverHistory != .loading {
+        serverHistory = .loading
+        await model.perform(.loadOlderHistory(conversationId: conversation.id))
+      }
+      return
+    }
+    isLoadingOlder = true
+    defer { isLoadingOlder = false }
+    // A failed read keeps what is shown; the trigger row asks again when it scrolls back in.
+    guard let page = await pagedFeed().older() else { return }
+    messages = page.messages
+    hasOlder = page.hasOlder
     await reloadExtras()
   }
 
@@ -527,135 +849,26 @@ struct ThreadTarget: Hashable {
   let threadId: String
 }
 
-struct MessageRow: View {
-  @Environment(AppModel.self) private var model
-  let message: MessageItem
-  let maybeExtras: MessageExtras?
-  let isMine: Bool
-  var isContinuation = false
-  let showsThreadLink: Bool
-  let onOpenThread: () -> Void
-  var mentionNames: (usernames: Set<String>, me: String) = ([], "")
-  var displayNames: [String: String] = [:]
+/// To the oldest message with others' reactions the user hasn't seen: a heart with their count,
+/// above the way down.
+struct ReactionJumpButton: View {
+  let count: Int
+  let action: () -> Void
 
   var body: some View {
-    HStack(alignment: .top, spacing: 10) {
-      if isContinuation {
-        // Keeps follow-ups aligned under the first message of the block.
-        Color.clear.frame(width: 36, height: 1)
-      } else {
-        AvatarView(name: message.authorName)
-      }
-      VStack(alignment: .leading, spacing: 4) {
-        if !isContinuation || (message.isPending && !isSendFailed) || message.isEdited {
-          HStack(spacing: 6) {
-            if !isContinuation {
-              Text(isMine ? String(localized: "you") : message.authorName).font(.subheadline.weight(.semibold))
-              Text(message.sentDate, style: .time)
-                .font(.caption).foregroundStyle(Theme.textMuted)
-            }
-            if message.isEdited { Text("edited").font(.caption).foregroundStyle(Theme.textMuted) }
-            if maybeExtras?.isPinned == true {
-              Image(systemName: "pin.fill").font(.caption2).foregroundStyle(Theme.textMuted)
-                .accessibilityLabel(Text("pinned"))
-            }
-            if message.isPending && !isSendFailed {
-              Text("pending").font(.caption).foregroundStyle(Theme.textMuted)
-            }
-          }
+    Button(action: action) {
+      Image(systemName: "heart")
+        .font(.body.weight(.semibold))
+        // 44 pt: the smallest touch target the Human Interface Guidelines allow.
+        .frame(width: 44, height: 44)
+        .background(.regularMaterial)
+        .clipShape(Circle())
+        .overlay(alignment: .topTrailing) {
+          CountBadge(count: UInt32(min(count, 999)), tone: .unread).offset(x: 6, y: -6)
         }
-        if let reply = maybeExtras?.maybeReply {
-          ReplyQuote(author: displayNames[reply.author] ?? "", excerpt: reply.excerpt)
-        }
-        if !message.body.isEmpty || files.isEmpty {
-          Text(messageText(message.body, usernames: mentionNames.usernames, myUsername: mentionNames.me))
-            .textSelection(.enabled)
-            .padding(10)
-            .background(isMine ? Theme.ownBubble : Theme.surface)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.radius))
-        }
-        if isSendFailed { notSentLine }
-        if gridImages.count >= 2 { ImageGrid(images: gridImages) }
-        ForEach(files.filter { file in !gridImages.contains(file) }) { file in AttachmentView(file: file) }
-        if let preview = maybeExtras?.maybeLinkPreview { LinkPreviewCard(preview: preview) }
-        if !message.reactions.isEmpty { reactions }
-        if showsThreadLink && message.replyCount > 0 {
-          Button(action: onOpenThread) {
-            Text("replies_count \(Int(message.replyCount))").font(.footnote.weight(.semibold))
-          }
-        }
-      }
     }
-  }
-
-  private var files: [FileInfo] { maybeExtras?.files ?? [] }
-
-  /// Several pictures in one message show as a grid.
-  private var gridImages: [FileInfo] {
-    let images = files.filter { $0.isImage && $0.maybeThumbnailData != nil }
-    return images.count >= 2 ? images : []
-  }
-
-  private var isSendFailed: Bool { maybeExtras?.isSendFailed == true }
-
-  /// An own message the server rejected: say so, and offer to send it again or drop it.
-  private var notSentLine: some View {
-    HStack(spacing: 12) {
-      Label("not_sent", systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(Theme.danger)
-      Button("not_sent_retry") {
-        Task { await model.perform(.retrySend(conversationId: message.conversationId, messageId: message.id)) }
-      }
-      .font(.caption.weight(.semibold))
-      Button("not_sent_delete", role: .destructive) {
-        Task { await model.perform(.discardUnsent(conversationId: message.conversationId, messageId: message.id)) }
-      }
-      .font(.caption.weight(.semibold))
-    }
-  }
-
-  private var reactions: some View {
-    HStack(spacing: 6) {
-      ForEach(message.reactions, id: \.emoji) { reaction in
-        Button {
-          Task {
-            await model.perform(
-              .toggleReaction(
-                conversationId: message.conversationId, messageId: message.id, emoji: reaction.emoji))
-          }
-        } label: {
-          Text("\(reaction.emoji) \(reaction.count)")
-            .font(.caption)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(reaction.reactedByMe ? Theme.accentSoft : Theme.surface)
-            .overlay(Capsule().stroke(reaction.reactedByMe ? Theme.accent : Theme.controlBorder))
-            .clipShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(reaction.reactedByMe ? .isSelected : [])
-      }
-    }
-  }
-}
-
-/// A date above the first message of each day.
-struct DayChip: View {
-  let date: Date
-
-  var body: some View {
-    Text(label)
-      .font(.caption.weight(.medium))
-      .foregroundStyle(Theme.textMuted)
-      .padding(.horizontal, 12).padding(.vertical, 4)
-      .background(Theme.surface)
-      .clipShape(Capsule())
-      .frame(maxWidth: .infinity)
-      .padding(.vertical, 6)
-  }
-
-  private var label: String {
-    if Calendar.current.isDateInToday(date) { return String(localized: "day_today") }
-    if Calendar.current.isDateInYesterday(date) { return String(localized: "day_yesterday") }
-    return date.formatted(.dateTime.weekday(.wide).day().month(.wide))
+    .buttonStyle(.plain)
+    .accessibilityLabel(Text("jump_to_reaction \(count)"))
   }
 }
 
@@ -673,7 +886,7 @@ struct JumpDownButton: View {
         .background(.regularMaterial)
         .clipShape(Circle())
         .overlay(alignment: .topTrailing) {
-          if count > 0 { CountBadge(count: UInt32(min(count, 999))).offset(x: 6, y: -6) }
+          if count > 0 { CountBadge(count: UInt32(min(count, 999)), tone: .unread).offset(x: 6, y: -6) }
         }
     }
     .buttonStyle(.plain)
@@ -693,17 +906,17 @@ struct ForwardSheet: View {
   @Environment(AppModel.self) private var model
   @Environment(\.dismiss) private var dismiss
   let fromConversationId: String
-  let message: MessageItem
+  let messageId: String
 
   @State private var targets: [ConversationItem] = []
 
   var body: some View {
     NavigationStack {
       List(targets, id: \.id) { target in
-        Button(target.name) {
+        Button(target.listName) {
           Task {
             await model.perform(
-              .forward(fromConversationId: fromConversationId, messageId: message.id, toConversationId: target.id))
+              .forward(fromConversationId: fromConversationId, messageId: messageId, toConversationId: target.id))
             dismiss()
           }
         }
@@ -738,35 +951,6 @@ struct EditHistorySheet: View {
       .navigationBarTitleDisplayMode(.inline)
       .toolbar { ToolbarItem(placement: .confirmationAction) { Button("done") { dismiss() } } }
     }
-  }
-}
-
-/// The quoted message above a reply.
-struct ReplyQuote: View {
-  let author: String
-  let excerpt: String
-
-  var body: some View {
-    HStack(spacing: 8) {
-      Rectangle().fill(Theme.accent).frame(width: 3)
-      VStack(alignment: .leading, spacing: 2) {
-        Text(author).font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
-        Text(excerpt).font(.caption).foregroundStyle(Theme.textMuted).lineLimit(2)
-      }
-    }
-    .fixedSize(horizontal: false, vertical: true)
-  }
-}
-
-/// Square tiles, two per row; a tap opens the picture like a single one.
-struct ImageGrid: View {
-  let images: [FileInfo]
-
-  var body: some View {
-    LazyVGrid(columns: [GridItem(.flexible(), spacing: 4), GridItem(.flexible(), spacing: 4)], spacing: 4) {
-      ForEach(images) { image in AttachmentView(file: image, isTile: true) }
-    }
-    .frame(maxWidth: 260)
   }
 }
 

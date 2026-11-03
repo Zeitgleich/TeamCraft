@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE meeting_lobby SET knock_fingerprint = $3, device_announced_at = now()\n         WHERE meeting_id = $1 AND user_id = $2 AND state = 'waiting' AND device_announced_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2d9e349607d229c49cf9758c4fc311cb7404203af4cb39da2fa2265ad40ff982"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM meeting_cancelled_occurrences WHERE meeting_id = $1 AND starts_at = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6b0433ce3266b30cd29af1f6130ecd0dd5751e94802e024efa8224de450231e5"
+}

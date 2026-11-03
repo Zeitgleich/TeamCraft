@@ -1,24 +1,34 @@
 use std::time::Duration;
 
 use leptos::prelude::*;
-use teamcraft_client_api::actions::{MessagePriority, WorkspaceEvent};
+use teamcraft_client_api::actions::{FileTransfer, MessagePriority, WorkspaceEvent};
 use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_proto::HistoryPolicy;
 
-use crate::clock::{format_time, format_time_seconds, local_day, now_ms};
+use crate::channel_access::can_react_in;
+use crate::clock::{format_relative_short, format_time, format_time_seconds, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::components::emoji_picker::EmojiPicker;
+use crate::components::date_jump::DatePill;
 use crate::components::file_views::{LinkPreviewCard, MessageFiles};
 use crate::components::icons::{Icon, IconName};
-use crate::components::message_actions::MessageMenu;
+use crate::components::long_press::LongPress;
+use crate::components::message_actions::{MessageAction, run_message_action};
+use crate::components::message_link_card::MessageLinkPreviews;
+use crate::components::message_toolbar::{ActiveMessage, ToolbarHost};
 use crate::components::profile_views::UserHoverCard;
 use crate::components::rich_text::RichText;
-use crate::delivery::Delivery;
+use crate::delivery::{Delivery, ReadIndicator, is_read_by_all};
+use crate::feed_motion::{Entrance, RowMotion};
 use crate::i18n::use_i18n;
 use crate::markdown;
-use crate::model::{LogLevel, Message, MessageKind, SystemEvent, User, thread_id_of};
+use crate::message_links::{as_permalink, own_hosts};
+use crate::model::{
+  DeviceSetup, Id, ImportedAuthorView, ImportedFrom, ImportedMark, LogLevel, Message, MessageKind,
+  Placeholder, PresenceStatus, SystemEvent, User, UserId, is_pending, thread_id_of,
+};
 use crate::reactive::use_interval;
 use crate::state::{Overlay, use_app_state};
+use crate::viewport::is_touch_primary;
 
 /// Messages by the same author closer together than this share one header.
 const GROUP_WINDOW_MS: i64 = 5 * 60_000;
@@ -28,12 +38,13 @@ const HOVER_CARD_DELAY: Duration = Duration::from_millis(450);
 const HOVER_CARD_HEIGHT_PX: f64 = 130.0;
 /// How long the card stays after the pointer left, so it can move into the card.
 const HOVER_CARD_GRACE: Duration = Duration::from_millis(250);
+/// Avatars shown in the thread summary under a message.
+const MAX_THREAD_AVATARS: usize = 3;
 /// How often a message in the outbox re-checks whether it counts as delayed.
 const DELIVERY_TICK_MS: u64 = 2_000;
-/// Quick reactions on hover until the user has used emoji of their own.
-const DEFAULT_QUICK_REACTIONS: [&str; 3] = ["👍", "❤️", "😂"];
-/// How many quick reactions the hover toolbar shows.
-const QUICK_REACTION_COUNT: usize = 3;
+
+/// A line's i18n key and its arguments.
+type LineText = (&'static str, Vec<(&'static str, String)>);
 
 /// One message in the channel feed or in a thread. The caller recreates it when the message changes.
 #[component]
@@ -42,6 +53,9 @@ pub fn MessageRow(
   /// The message right before this one in the same list, used for grouping and date dividers.
   maybe_prev: Option<Message>,
   #[prop(default = false)] in_thread: bool,
+  /// How the row enters and which reactions pop (the feed decides, `feed_motion.rs`).
+  #[prop(optional)]
+  motion: RowMotion,
 ) -> impl IntoView {
   let i18n = use_i18n();
   let state = use_app_state();
@@ -52,10 +66,23 @@ pub fn MessageRow(
   let divider_view = divider.map(|label| {
     view! {
       <div class="date-divider" role="separator">
-        <span>{label}</span>
+        <DatePill label=label />
       </div>
     }
   });
+  // One line where the imported history ends and the conversation's own messages begin.
+  let imported_until = maybe_prev
+    .as_ref()
+    .and_then(|prev| prev.maybe_imported.as_ref())
+    .filter(|_| message.maybe_imported.is_none() && !in_thread)
+    .map(|mark| {
+      let source = imported_source_text(mark.source);
+      view! {
+        <div class="date-divider" role="separator">
+          <DatePill label=i18n.t_with("imported-until", &[("source", &source)]) />
+        </div>
+      }
+    });
 
   let body = match &message.kind {
     MessageKind::Log(level) => log_line(&message, *level, locale).into_any(),
@@ -63,14 +90,90 @@ pub fn MessageRow(
       let author = state.read(|backend| backend.user(message.author));
       system_line(&message, event, author, locale).into_any()
     },
+    // Decided by the kind, not the extras: a backend that loads them later (the desktop app's)
+    // shows the line as soon as they arrive.
+    MessageKind::Change => workspace_text_line(workspace_text(&message)).into_any(),
     MessageKind::User => {
       let is_grouped = is_grouped(&message, maybe_prev.as_ref());
-      user_message(message, is_grouped, in_thread).into_any()
+      match message.maybe_placeholder {
+        Some(placeholder) => placeholder_message(message, placeholder, is_grouped).into_any(),
+        None => user_message(message, is_grouped, in_thread, motion).into_any(),
+      }
     },
   };
   view! {
+    {imported_until}
     {divider_view}
     {body}
+  }
+}
+
+/// A message this device can't read (issue #888): a bubble at the message's place with its
+/// author and time and a line saying why, without actions. The core replaces it by the message
+/// once its key arrives; the row keeps its ID, so the list doesn't move.
+fn placeholder_message(message: Message, placeholder: Placeholder, is_grouped: bool) -> impl IntoView {
+  let i18n = use_i18n();
+  let state = use_app_state();
+  let locale = i18n.locale().tag();
+  let author = shown_author(Some(message.author), None);
+  let author_name = author
+    .as_ref()
+    .map(|user| user.display_name.clone())
+    .unwrap_or_default();
+  let time = format_time(message.sent_at, locale);
+  let message_id = message.id;
+  let is_mine = message.author == state.me().id;
+  let (text_key, maybe_icon) = match placeholder {
+    Placeholder::Waiting => ("message-placeholder-waiting", Some(IconName::Clock)),
+    Placeholder::NotAvailable | Placeholder::Unknown => {
+      ("message-placeholder-not-available", Some(IconName::Lock))
+    },
+    Placeholder::Failed => ("message-placeholder-failed", Some(IconName::Alert)),
+  };
+  let text = i18n.t(text_key);
+  let aria_label = format!("{author_name}, {time}, {text}");
+  let gutter = match (is_grouped, author) {
+    (false, Some(user)) => view! { <Avatar user=user size=AvatarSize::Large /> }.into_any(),
+    _ => {
+      let time = time.clone();
+      view! { <time class="hover-time">{time}</time> }.into_any()
+    },
+  };
+  let header = (!is_grouped).then(|| {
+    view! {
+      <div class="msg-header">
+        <span class="msg-author" translate="no">{author_name.clone()}</span>
+      </div>
+    }
+  });
+  view! {
+    <div
+      class="msg msg-user msg-placeholder"
+      class:msg-grouped=is_grouped
+      class:msg-mine=is_mine
+      class:msg-highlight=move || state.highlighted.get() == Some(message_id)
+      tabindex="-1"
+      data-nav="row"
+      data-msg-id=message_id.to_string()
+      aria-label=aria_label
+    >
+      <div class="msg-gutter">{gutter}</div>
+      <div class="msg-main">
+        <div class="msg-bubble">
+          {header} <div class="msg-body">
+            <span class="placeholder-text">
+              {maybe_icon.map(|icon| view! { <span class="placeholder-icon" aria-hidden="true"><Icon name=icon /></span> })}
+              {text}
+            </span>
+            <span class="bubble-meta">
+              <time class="bubble-time" datetime=message.sent_at.to_string()>
+                {time}
+              </time>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
   }
 }
 
@@ -151,33 +254,10 @@ fn system_line(
   let name = maybe_author.map(|user| user.display_name).unwrap_or_default();
   let event = event.clone();
   let time = format_time(message.sent_at, locale);
-  let (conversation, message_id) = (message.conversation, message.id);
-  // Archive, privacy and membership changes come from the core as workspace events.
-  let workspace_text = Memo::new(move |_| {
-    state.read(|backend| {
-      let extras = backend
-        .message_extras(conversation, &[message_id])
-        .into_iter()
-        .find(|extras| extras.message == message_id)?;
-      workspace_event_text(&extras.maybe_workspace_event?, |user| {
-        backend
-          .user(user)
-          .map(|user| user.display_name)
-          .unwrap_or_default()
-      })
-    })
-  });
+  // Membership changes by somebody else come from the core as workspace events too.
+  let workspace_text = workspace_text(message);
   view! {
-    {move || {
-      workspace_text.get().map(|(key, args)| {
-        let args: Vec<(&str, &str)> = args.iter().map(|(name, value)| (*name, value.as_str())).collect();
-        view! {
-          <div class="msg msg-system" tabindex="-1" data-nav="row">
-            <span class="system-text" translate="no">{i18n.t_with(key, &args)}</span>
-          </div>
-        }
-      })
-    }}
+    {workspace_text_line(workspace_text)}
     {move || {
       state
         .settings
@@ -209,19 +289,69 @@ fn system_line(
   }
 }
 
-fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl IntoView {
+/// The text of `message`'s workspace event (i18n key and arguments), with the names the backend
+/// knows; `None` without one.
+fn workspace_text(message: &Message) -> Memo<Option<LineText>> {
+  let state = use_app_state();
+  let (conversation, message_id) = (message.conversation, message.id);
+  Memo::new(move |_| {
+    state.read(|backend| {
+      let extras = backend
+        .message_extras(conversation, &[message_id])
+        .into_iter()
+        .find(|extras| extras.message == message_id)?;
+      workspace_event_text(&extras.maybe_workspace_event?, |user| {
+        backend
+          .user(user)
+          .map(|user| user.display_name)
+          .unwrap_or_default()
+      })
+    })
+  })
+}
+
+/// The line showing a workspace event's `text`, while there is one.
+fn workspace_text_line(text: Memo<Option<LineText>>) -> impl IntoView + use<> {
+  let i18n = use_i18n();
+  move || {
+    text.get().map(|(key, args)| {
+      let args: Vec<(&str, &str)> = args.iter().map(|(name, value)| (*name, value.as_str())).collect();
+      view! {
+        <div class="msg msg-system" tabindex="-1" data-nav="row">
+          <span class="system-text" translate="no">{i18n.t_with(key, &args)}</span>
+        </div>
+      }
+    })
+  }
+}
+
+fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: RowMotion) -> impl IntoView {
   let i18n = use_i18n();
   let state = use_app_state();
   let locale = i18n.locale().tag();
-  let author = state.read(|backend| backend.user(message.author));
+  // An imported message by somebody without an account here (or a bot of the old system) has a
+  // stand-in author: their old name, or "Deleted user" (e2ee.md §4.10).
+  let maybe_imported = message.maybe_imported.clone();
+  let author = shown_author(
+    Some(message.author),
+    maybe_imported.as_ref().map(|mark| &mark.author),
+  );
+  let has_profile = !matches!(
+    maybe_imported.as_ref().map(|mark| &mark.author),
+    Some(ImportedAuthorView::Deleted | ImportedAuthorView::Named { .. })
+  );
   let me = state.me();
   let time = format_time(message.sent_at, locale);
+  // Where an imported message comes from, on its time: the original author and time are the import
+  // account's statement (e2ee.md §4.10).
+  let imported_title = maybe_imported.as_ref().map(imported_origin_text);
   let thread_root = message.maybe_thread.unwrap_or_else(|| thread_id_of(message.id));
   let conversation = message.conversation;
   let message_id = message.id;
   let reply_count = message.reply_count;
   let reactions = message.reactions.clone();
-  let is_mine = message.author == me.id;
+  // Imported messages are the import account's: nobody edits them as their own.
+  let is_mine = message.author == me.id && maybe_imported.is_none();
   let author_id = message.author;
   let author_name = author
     .as_ref()
@@ -256,7 +386,8 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     (false, Some(user)) => view! { <Avatar user=user size=AvatarSize::Large /> }.into_any(),
     _ => {
       let time = time.clone();
-      view! { <time class="hover-time">{time}</time> }.into_any()
+      let title = imported_title.clone();
+      view! { <time class="hover-time" title=title>{time}</time> }.into_any()
     },
   };
 
@@ -313,7 +444,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
   let header = (!is_grouped).then(|| {
     let status = author.as_ref().and_then(|user| user.maybe_custom_status.clone());
     let badge_bot = author.as_ref().is_some_and(|user| user.is_bot);
-    let badge_guest = author.as_ref().is_some_and(|user| user.is_guest);
+    let badge_guest = state.shows_guest_markers() && author.as_ref().is_some_and(|user| user.is_guest);
     view! {
       <div class="msg-header">
         <button
@@ -321,11 +452,16 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
           class="msg-author"
           translate="no"
           aria-haspopup="dialog"
+          disabled=!has_profile
           on:click=move |_| {
             hide_card_now();
             state.overlay.set(Overlay::UserProfile(author_id));
           }
-          on:mouseenter=move |ev| show_card_soon(event_target::<web_sys::Element>(&ev))
+          on:mouseenter=move |ev| {
+            if has_profile {
+              show_card_soon(event_target::<web_sys::Element>(&ev));
+            }
+          }
           on:mouseleave=move |_| hide_card_soon()
         >
           {author_name.clone()}
@@ -342,7 +478,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
         {badge_bot.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
         {badge_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
         {status.filter(|_| state.settings.prefs.get_untracked().display.show_status_in_messages).map(|status| view! { <span class="msg-status" title=status.text>{status.emoji}</span> })}
-        <time class="msg-time" datetime=message.sent_at.to_string()>
+        <time class="msg-time" datetime=message.sent_at.to_string() title=imported_title.clone()>
           {time.clone()}
         </time>
       </div>
@@ -409,9 +545,22 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     extras.get().map(|extras| {
       view! {
         {(!extras.files.is_empty()).then(|| view! { <MessageFiles files=extras.files.clone() /> })}
-        {extras.maybe_link_preview.clone().map(|preview| view! { <LinkPreviewCard preview=preview /> })}
+        {extras
+          .maybe_link_preview
+          .clone()
+          // A link to a message of this server gets the message's own preview instead.
+          .filter(|preview| as_permalink(&preview.url, &own_hosts()).is_none())
+          .map(|preview| view! { <LinkPreviewCard preview=preview /> })}
       }
     })
+  };
+  // Links to other messages: each viewer's client resolves its own preview (#319).
+  let link_previews = {
+    let body = message.body.clone();
+    move || {
+      (!extras.get().is_some_and(|extras| extras.is_deleted))
+        .then(|| view! { <MessageLinkPreviews body=body.clone() /> })
+    }
   };
   let acknowledge = move || {
     extras
@@ -421,7 +570,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
         let has_acknowledged = extras.acknowledged_by.contains(&me.id);
         view! {
           <button
-            class="btn btn-small"
+            class="btn btn-small msg-ack"
             prop:disabled=has_acknowledged
             on:click=move |_| state.write(|backend| backend.acknowledge(conversation, message_id))
           >
@@ -432,17 +581,26 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
   };
 
   let reaction_chips = (!reactions.is_empty()).then(|| {
+    // The counts stay readable for everybody; adding to them takes `add_reaction` (issue #691).
+    let can_react = can_react_in(state, conversation);
     let chips: Vec<_> = reactions
       .into_iter()
       .map(|reaction| {
         let emoji = reaction.emoji.clone();
         let label_emoji = reaction.emoji.clone();
         let count = reaction.count;
+        // A count that changed again mid-pop continues the pop on this rebuilt chip (#371).
+        let maybe_pop = motion.pop_of(&reaction.emoji);
+        let is_popping = maybe_pop.is_some();
+        let pop_delay = maybe_pop.map(|pop| format!("-{}ms", pop.elapsed.as_millis())).unwrap_or_default();
         view! {
           <button
             class="reaction"
+            class:is-popping=is_popping
+            style:animation-delay=pop_delay
             class:reaction-mine=reaction.reacted_by_me
             aria-pressed=reaction.reacted_by_me.to_string()
+            prop:disabled=!can_react
             aria-label=move || i18n.t_with("reaction-label", &[("emoji", &label_emoji), ("count", &count.to_string())])
             on:click=move |_| state.write(|backend| backend.toggle_reaction(conversation, message_id, &emoji))
           >
@@ -455,84 +613,73 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     view! { <div class="reactions">{chips}</div> }
   });
 
+  // Thread summary under the root: who replied, how many replies, when the last one came (#300).
   let replies = (!in_thread && reply_count > 0).then(|| {
+    let summary = Memo::new(move |_| {
+      state.read(|backend| {
+        let replies: Vec<Message> = backend
+          .thread(conversation, thread_root)
+          .into_iter()
+          .filter(|reply| reply.maybe_thread.is_some())
+          .collect();
+        let maybe_last = replies.iter().map(|reply| reply.sent_at).max();
+        let mut participants: Vec<UserId> = Vec::new();
+        for reply in replies.iter().rev() {
+          if !participants.contains(&reply.author) {
+            participants.push(reply.author);
+          }
+        }
+        participants.truncate(MAX_THREAD_AVATARS);
+        let users: Vec<User> = participants.into_iter().filter_map(|id| backend.user(id)).collect();
+        (users, maybe_last)
+      })
+    });
     view! {
       <button class="reply-count" on:click=move |_| state.open_thread(conversation, thread_root)>
-        <Icon name=IconName::Threads />
+        <span class="reply-avatars">
+          {move || summary.get().0.into_iter().map(|user| view! { <Avatar user=user size=AvatarSize::Small /> }).collect_view()}
+        </span>
         <span>{move || i18n.t_count("thread-replies", reply_count as usize)}</span>
+        {move || summary.get().1.map(|last| view! {
+          <span class="reply-last">{i18n.t_with("thread-last-reply", &[("time", &format_relative_short(last, now_ms(), locale))])}</span>
+        })}
       </button>
     }
   });
 
-  let message_for_menu = message.clone();
-  let maybe_picker_anchor = RwSignal::new_local(None::<web_sys::Element>);
-  let react = move |emoji: &str| {
-    state.settings.remember_emoji(emoji);
-    state.write(|backend| backend.toggle_reaction(conversation, message_id, emoji));
-  };
-  let quick_reactions = move || {
-    let mut list = state.settings.recent_emoji.get();
-    for emoji in DEFAULT_QUICK_REACTIONS {
-      if !list.iter().any(|recent| recent == emoji) {
-        list.push(emoji.to_owned());
-      }
+  let maybe_host = ToolbarHost::use_nearest();
+  let active = StoredValue::new(ActiveMessage {
+    message: message.clone(),
+    in_thread,
+    is_mine,
+  });
+  // A recreated row (new reaction, edit) hands the toolbar its fresh message.
+  if let Some(host) = maybe_host {
+    host.refresh(active.get_value());
+  }
+  let show_toolbar = move || {
+    if let Some(host) = maybe_host {
+      host.show(active.get_value());
     }
-    list.truncate(QUICK_REACTION_COUNT);
-    list
   };
-  let actions = view! {
-    <div class="msg-actions" role="toolbar" aria-label=move || i18n.t("message-actions")>
-      <For each=quick_reactions key=|emoji| emoji.clone() let:emoji>
-        {
-          let emoji_for_label = emoji.clone();
-          let label = move || i18n.t_with("action-react-with", &[("emoji", &emoji_for_label)]);
-          let chosen = emoji.clone();
-          view! {
-            <button
-              class="icon-btn quick-reaction"
-              aria-label=label.clone()
-              title=label
-              on:click=move |_| react(&chosen)
-            >
-              {emoji}
-            </button>
-          }
-        }
-      </For>
-      <button
-        class="icon-btn"
-        aria-label=move || i18n.t("action-react")
-        title=move || i18n.t("action-react")
-        aria-haspopup="dialog"
-        aria-expanded=move || maybe_picker_anchor.with(Option::is_some).to_string()
-        on:click=move |ev| {
-          let maybe_button = event_target::<web_sys::Element>(&ev);
-          maybe_picker_anchor.set(Some(maybe_button));
-        }
-      >
-        <Icon name=IconName::Smile />
-      </button>
-      {(!in_thread).then(|| {
-        view! {
-          <button
-            class="icon-btn"
-            aria-label=move || i18n.t("action-reply")
-            title=move || i18n.t("action-reply")
-            on:click=move |_| state.open_thread(conversation, thread_root)
-          >
-            <Icon name=IconName::Reply />
-          </button>
-        }
-      })}
-      <MessageMenu
-        message=message_for_menu
-        extras=Signal::derive(move || extras.get())
-        is_mine=is_mine
-        in_thread=in_thread
-        on_edit=Callback::new(move |()| is_editing.set(true))
-      />
-    </div>
+  let hide_toolbar = move || {
+    if let Some(host) = maybe_host {
+      host.hide_soon();
+    }
   };
+  let is_toolbar_on = move || maybe_host.is_some_and(|host| host.is_active(message_id));
+  let long_press = LongPress::new(move |_, _| {
+    // A deleted message has nothing to act on, as on hover.
+    let is_deleted = extras
+      .try_with_untracked(|extras| extras.as_ref().is_some_and(|extras| extras.is_deleted))
+      .unwrap_or(true);
+    if is_deleted {
+      return;
+    }
+    if let Some(host) = maybe_host {
+      host.open_sheet(active.get_value());
+    }
+  });
 
   let body_text = message.body.clone();
   let edit_draft = RwSignal::new(String::new());
@@ -557,26 +704,127 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
       delivery.set(Delivery::of(message_id, sent_at, now_ms()))
     });
   }
-  let delivery_view = move || match delivery.get() {
-    Delivery::Sent => None,
-    Delivery::Sending => Some(
-      view! {
-        <span class="msg-delivery" role="status">
-          <Icon name=IconName::Clock />
-          {move || i18n.t("message-sending")}
-        </span>
-      }
-      .into_any(),
-    ),
-    Delivery::Delayed => Some(
-      view! {
-        <span class="msg-delivery msg-delayed" role="status">
-          <Icon name=IconName::Alert />
-          {move || i18n.t("message-not-sent")}
-        </span>
-      }
-      .into_any(),
-    ),
+  // A message waits for its files: just the clock while they go up, however long that takes. A
+  // file that stopped says so (with "Try again") on its own tile, not "retrying automatically".
+  let is_uploading = move || {
+    extras.with(|maybe_extras| {
+      maybe_extras.as_ref().is_some_and(|extras| {
+        extras.files.iter().any(|file| {
+          matches!(
+            file.transfer,
+            FileTransfer::Uploading { .. } | FileTransfer::UploadStalled { .. }
+          )
+        })
+      })
+    })
+  };
+  // Refused by the server for good (no permission, too large): only then is it an error.
+  let is_send_failed =
+    move || extras.with(|maybe_extras| maybe_extras.as_ref().is_some_and(|extras| extras.is_send_failed));
+  // Double ticks in DMs only; group DMs say who read it in "Seen by" (#635). Receipts are empty when
+  // either side turned them off, so it then stays at one tick.
+  let sent_time = time.clone();
+  let is_read = move || {
+    state.read(|backend| {
+      backend
+        .conversation(conversation)
+        .filter(|conv| ReadIndicator::of(conv.kind) == ReadIndicator::Ticks)
+        .is_some_and(|conv| {
+          is_read_by_all(
+            &backend.seen_by(conversation, message_id),
+            &conv.member_ids,
+            me.id,
+          )
+        })
+    })
+  };
+  let delivery_view = move || {
+    if is_send_failed() {
+      return Some(
+        view! {
+          <span class="msg-delivery msg-failed" role="alert">
+            <Icon name=IconName::Alert />
+            {move || i18n.t("message-send-failed")}
+            <button
+              class="link-btn"
+              on:click=move |_| state.write(|backend| backend.retry_send(conversation, message_id))
+            >
+              {move || i18n.t("message-send-retry")}
+            </button>
+            <button
+              class="link-btn"
+              on:click=move |_| state.write(|backend| backend.discard_unsent(conversation, message_id))
+            >
+              {move || i18n.t("message-send-discard")}
+            </button>
+          </span>
+        }
+        .into_any(),
+      );
+    }
+    match delivery.get() {
+      // Own messages on the server: one tick, two blue ones once the DM partner read it (#568, #635).
+      Delivery::Sent if is_mine => {
+        let is_read = is_read();
+        let sent_time = sent_time.clone();
+        let key = if is_read {
+          "message-status-read"
+        } else {
+          "message-status-sent"
+        };
+        let icon = if is_read {
+          IconName::CheckDouble
+        } else {
+          IconName::Check
+        };
+        Some(
+          view! {
+            <span
+              class="msg-delivery is-sent"
+              class:is-read=is_read
+              role="img"
+              aria-label=move || i18n.t(key)
+              data-tip=move || format!("{}, {}", i18n.t(key), sent_time)
+            >
+              <Icon name=icon />
+            </span>
+          }
+          .into_any(),
+        )
+      },
+      Delivery::Sent => None,
+      // Unconfirmed: a small clock, retried in the background (offline, reconnect, reload).
+      Delivery::Sending => Some(
+        view! {
+          <span
+            class="msg-delivery is-pending"
+            role="status"
+            aria-label=move || i18n.t("message-sending")
+            data-tip=move || i18n.t("message-sending")
+          >
+            <Icon name=IconName::Clock />
+          </span>
+        }
+        .into_any(),
+      ),
+      Delivery::Delayed if is_uploading() => Some(
+        view! {
+          <span class="msg-delivery is-pending" role="status" aria-label=move || i18n.t("message-sending")>
+            <Icon name=IconName::Clock />
+          </span>
+        }
+        .into_any(),
+      ),
+      Delivery::Delayed => Some(
+        view! {
+          <span class="msg-delivery is-pending msg-delayed" role="status">
+            <Icon name=IconName::Clock />
+            {move || i18n.t("message-not-sent")}
+          </span>
+        }
+        .into_any(),
+      ),
+    }
   };
   let is_long_body = markdown::is_long(&body_text);
   let is_expanded = RwSignal::new(false);
@@ -598,7 +846,11 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
               on:input=move |ev| edit_draft.set(event_target_value(&ev))
               on:keydown=move |ev| match ev.key().as_str() {
                 "Enter" if !ev.shift_key() => { ev.prevent_default(); save_edit(); },
-                "Escape" => is_editing.set(false),
+                "Escape" => {
+                  // Only the edit is cancelled; the feed doesn't take it as "mark read".
+                  ev.prevent_default();
+                  is_editing.set(false);
+                },
                 _ => {},
               }
             ></textarea>
@@ -629,9 +881,38 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
     }
   };
 
+  // Shortcuts of a focused message (shown in the toolbar's tooltips).
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
-    if ev.target() == ev.current_target() && ev.key() == "Enter" && !in_thread {
-      state.open_thread(conversation, thread_root);
+    if ev.target() != ev.current_target() || ev.ctrl_key() || ev.meta_key() || ev.alt_key() {
+      return;
+    }
+    let key = ev.key();
+    let maybe_action = match key.as_str() {
+      "Enter" | "t" | "T" if !in_thread => Some(MessageAction::Thread),
+      "r" | "R" => Some(MessageAction::Quote),
+      _ => None,
+    };
+    if let Some(action) = maybe_action {
+      ev.prevent_default();
+      active
+        .with_value(|active| run_message_action(action, &active.message, extras.get_untracked().as_ref()));
+      return;
+    }
+    let Some(host) = maybe_host else { return };
+    match key.as_str() {
+      "e" | "E" => {
+        ev.prevent_default();
+        host.open_picker(active.get_value());
+      },
+      "ContextMenu" => {
+        ev.prevent_default();
+        host.open_more(active.get_value());
+      },
+      "F10" if ev.shift_key() => {
+        ev.prevent_default();
+        host.open_more(active.get_value());
+      },
+      _ => {},
     }
   };
 
@@ -640,40 +921,91 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
       class="msg msg-user"
       class:msg-grouped=is_grouped
       class:msg-mine=is_mine
+      class:msg-pending=is_pending(message_id)
+      class:msg-arriving=motion.entrance == Entrance::Arriving
+      class:msg-settling=motion.entrance == Entrance::Settling
+      class:msg-active=is_toolbar_on
+      class:is-pressing=move || long_press.is_pressing.get()
       class:msg-highlight=move || state.highlighted.get() == Some(message_id)
       hidden=move || state.hidden_messages.with(|hidden| hidden.contains(&message_id))
       tabindex="-1"
       data-nav="row"
+      data-msg-id=message_id.to_string()
       aria-label=aria_label
       on:keydown=on_keydown
+      on:pointerenter=move |ev| {
+        // A finger has no hover (#364): tap does nothing, a long press opens the sheet.
+        let is_deleted = extras.with_untracked(|extras| extras.as_ref().is_some_and(|extras| extras.is_deleted));
+        if ev.pointer_type() != "touch" && !is_deleted {
+          show_toolbar();
+        }
+      }
+      on:mouseleave=move |_| hide_toolbar()
+      on:focusin=move |ev| {
+        // A tap focuses the row too; only the keyboard brings the toolbar then.
+        let is_keyboard = event_target::<web_sys::Element>(&ev)
+          .matches(":focus-visible")
+          .unwrap_or(true);
+        if let Some(host) = maybe_host
+          && (!long_press.was_touch() || is_keyboard)
+        {
+          host.focus(active.get_value());
+        }
+      }
+      on:focusout=move |_| hide_toolbar()
+      on:pointerdown=move |ev| {
+        // Pictures have their own long-press actions (the media toolbar).
+        let is_on_picture = event_target::<web_sys::Element>(&ev).closest(".media-tile").ok().flatten().is_some();
+        long_press.start(&ev, !is_on_picture);
+      }
+      on:pointermove=move |ev| long_press.track(&ev)
+      on:pointerup=move |_| long_press.cancel()
+      on:pointercancel=move |_| long_press.cancel()
+      on:contextmenu=move |ev: web_sys::MouseEvent| {
+        // The browser's own long-press menu would cover the action sheet.
+        if long_press.has_fired() || is_touch_primary() {
+          ev.prevent_default();
+          return;
+        }
+        // A right click in the desktop app shows the message's actions (#719); text keeps the text
+        // menu, links the link menu, files their own (they stop the event before it gets here).
+        let is_on_link = event_target::<web_sys::Element>(&ev).closest("a[href]").ok().flatten().is_some();
+        if !crate::auth::tauri::is_available()
+          || is_on_link
+          || crate::external_links::is_on_text(&ev)
+          || crate::external_links::wants_native_menu()
+        {
+          return;
+        }
+        let is_deleted = extras
+          .try_with_untracked(|extras| extras.as_ref().is_some_and(|extras| extras.is_deleted))
+          .unwrap_or(true);
+        if let Some(host) = maybe_host
+          && !is_deleted
+        {
+          ev.prevent_default();
+          host.open_more(active.get_value());
+        }
+      }
     >
       <div class="msg-gutter">{gutter}</div>
       <div class="msg-main">
-        {header} {forwarded} {quote} <div class="msg-body">
-          {rendered_body}
-          {edited}
-          {badges}
-          {delivery_view}
-        </div> {attachments} {acknowledge} {reaction_chips} {replies}
+        <div class="msg-bubble">
+          {header} {forwarded} {quote} <div class="msg-body">
+            {rendered_body}
+            {edited}
+            {badges}
+            // Time first, the ticks at the far end, as in messaging apps (#735).
+            <span class="bubble-meta">
+              <time class="bubble-time" datetime=message.sent_at.to_string()>
+                {time.clone()}
+              </time>
+              {delivery_view}
+            </span>
+          </div> {attachments} {link_previews} {acknowledge}
+        </div>
+        {reaction_chips} {replies}
       </div>
-      {actions}
-      // Outside the toolbar, which is only shown while the message is hovered or focused.
-      {move || {
-        maybe_picker_anchor
-          .get()
-          .map(|anchor| {
-            view! {
-              <EmojiPicker
-                anchor=anchor
-                on_pick=Callback::new(move |emoji: String| {
-                  maybe_picker_anchor.set(None);
-                  state.write(|backend| backend.toggle_reaction(conversation, message_id, &emoji));
-                })
-                on_close=Callback::new(move |()| maybe_picker_anchor.set(None))
-              />
-            }
-          })
-      }}
     </div>
   }
 }
@@ -682,7 +1014,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool) -> impl Int
 fn workspace_event_text(
   event: &WorkspaceEvent,
   name_of: impl Fn(crate::model::UserId) -> String,
-) -> Option<(&'static str, Vec<(&'static str, String)>)> {
+) -> Option<LineText> {
   Some(match event {
     WorkspaceEvent::MemberAdded { user, by, history } => (
       match history {
@@ -695,23 +1027,78 @@ fn workspace_event_text(
       "ws-member-removed",
       vec![("name", name_of(*user)), ("by", name_of(*by))],
     ),
-    WorkspaceEvent::Archived { by } => ("ws-archived", vec![("by", name_of(*by))]),
-    WorkspaceEvent::Unarchived { by } => ("ws-unarchived", vec![("by", name_of(*by))]),
-    WorkspaceEvent::MadePrivate { by } => ("ws-made-private", vec![("by", name_of(*by))]),
-    WorkspaceEvent::MadePublic { by } => ("ws-made-public", vec![("by", name_of(*by))]),
-    WorkspaceEvent::Pinned { by, .. } => ("ws-pinned", vec![("by", name_of(*by))]),
-    WorkspaceEvent::Moved { by, space } if space.is_empty() => {
-      ("ws-moved-unnamed", vec![("by", name_of(*by))])
+    // Changes the server reports (issue #818): who made them only when the line names somebody.
+    WorkspaceEvent::Archived { maybe_by } => {
+      by_or_server(*maybe_by, ("ws-archived", "ws-archived-unattributed"), &name_of)
     },
-    WorkspaceEvent::Moved { by, space } => ("ws-moved", vec![("by", name_of(*by)), ("space", space.clone())]),
+    WorkspaceEvent::Unarchived { maybe_by } => by_or_server(
+      *maybe_by,
+      ("ws-unarchived", "ws-unarchived-unattributed"),
+      &name_of,
+    ),
+    WorkspaceEvent::MadePrivate { maybe_by } => by_or_server(
+      *maybe_by,
+      ("ws-made-private", "ws-made-private-unattributed"),
+      &name_of,
+    ),
+    WorkspaceEvent::MadePublic { maybe_by } => by_or_server(
+      *maybe_by,
+      ("ws-made-public", "ws-made-public-unattributed"),
+      &name_of,
+    ),
+    WorkspaceEvent::Pinned { by, .. } => ("ws-pinned", vec![("by", name_of(*by))]),
+    WorkspaceEvent::AdminJoined {
+      user,
+      maybe_approved_by: Some(by),
+      ..
+    } => (
+      "ws-admin-joined-approved",
+      vec![("name", name_of(*user)), ("by", name_of(*by))],
+    ),
+    WorkspaceEvent::AdminJoined {
+      user,
+      maybe_added_by: Some(by),
+      ..
+    } => (
+      "ws-admin-joined-added",
+      vec![("name", name_of(*user)), ("by", name_of(*by))],
+    ),
+    WorkspaceEvent::AdminJoined { user, .. } => ("ws-admin-joined", vec![("name", name_of(*user))]),
+    WorkspaceEvent::Moved { maybe_by, space } if space.is_empty() => by_or_server(
+      *maybe_by,
+      ("ws-moved-unnamed", "ws-moved-unnamed-unattributed"),
+      &name_of,
+    ),
+    WorkspaceEvent::Moved { maybe_by, space } => {
+      let (key, mut args) = by_or_server(*maybe_by, ("ws-moved", "ws-moved-unattributed"), &name_of);
+      args.push(("space", space.clone()));
+      (key, args)
+    },
     WorkspaceEvent::Unknown => return None,
   })
 }
 
+/// A change's line: the first of `keys` with who made it when somebody is named (`maybe_by`), else
+/// the second, its wording as the server's statement ("This channel was archived", issue #818).
+fn by_or_server(
+  maybe_by: Option<crate::model::UserId>,
+  (named, unattributed): (&'static str, &'static str),
+  name_of: &impl Fn(crate::model::UserId) -> String,
+) -> LineText {
+  match maybe_by {
+    Some(by) => (named, vec![("by", name_of(by))]),
+    None => (unattributed, Vec::new()),
+  }
+}
+
+/// Whether `message` goes under the header of the one before: only a message people wrote has
+/// one (not a line of a change, [`MessageKind::Change`]).
 fn is_grouped(message: &Message, maybe_prev: Option<&Message>) -> bool {
   let Some(prev) = maybe_prev else { return false };
   matches!(prev.kind, MessageKind::User)
     && prev.author == message.author
+    // Imported messages of different people without an account share the import account's ID.
+    && prev.maybe_imported.as_ref().map(|mark| &mark.author) == message.maybe_imported.as_ref().map(|mark| &mark.author)
     && message.sent_at - prev.sent_at < GROUP_WINDOW_MS
     && local_day(prev.sent_at) == local_day(message.sent_at)
 }
@@ -721,6 +1108,61 @@ fn date_divider(message: &Message, maybe_prev: Option<&Message>) -> Option<i64> 
   match maybe_prev {
     Some(prev) if local_day(prev.sent_at) == local_day(message.sent_at) => None,
     _ => Some(message.sent_at),
+  }
+}
+
+/// "Imported from Synology Chat": where an imported message's author and time come from.
+fn imported_origin_text(mark: &ImportedMark) -> String {
+  use_i18n().t_with(
+    "imported-title",
+    &[("source", &imported_source_text(mark.source))],
+  )
+}
+
+fn imported_source_text(source: ImportedFrom) -> String {
+  let i18n = use_i18n();
+  match source {
+    ImportedFrom::SynologyChat => i18n.t("imported-from-synology"),
+    ImportedFrom::Other => i18n.t("imported-from-other"),
+  }
+}
+
+/// The author shown for an imported message by somebody without an account here: no picture, no
+/// profile (e2ee.md §4.10).
+/// The author a message is shown with, wherever it is named (the list, the lightbox): the account
+/// `maybe_author`, or for an imported message by somebody without an account here (or a bot of the
+/// old system) a stand-in, their old name or "Deleted user" (e2ee.md §4.10).
+pub(crate) fn shown_author(
+  maybe_author: Option<UserId>,
+  maybe_imported: Option<&ImportedAuthorView>,
+) -> Option<User> {
+  match maybe_imported {
+    Some(ImportedAuthorView::Deleted) => Some(imported_stand_in(use_i18n().t("user-deleted-name"), false)),
+    Some(ImportedAuthorView::Named { name }) => Some(imported_stand_in(name.clone(), true)),
+    Some(ImportedAuthorView::Person) | None => {
+      maybe_author.and_then(|author| use_app_state().read(|backend| backend.user(author)))
+    },
+  }
+}
+
+fn imported_stand_in(display_name: String, is_bot: bool) -> User {
+  let avatar_hue = display_name.bytes().fold(0_u16, |hue, byte| {
+    (hue.wrapping_mul(31).wrapping_add(u16::from(byte))) % 360
+  });
+  User {
+    id: UserId::from_snowflake(teamcraft_proto::Snowflake::ZERO),
+    username: String::new(),
+    display_name,
+    presence: PresenceStatus::Offline,
+    maybe_custom_status: None,
+    avatar_hue,
+    is_guest: false,
+    is_bot,
+    maybe_organization: None,
+    device_setup: DeviceSetup::Unknown,
+    is_deactivated: true,
+    is_deleted: !is_bot,
+    maybe_email: None,
   }
 }
 
@@ -736,6 +1178,64 @@ mod tests {
     assert!(!is_grouped(&message(3, 2, 60_000), Some(&first)));
     assert!(!is_grouped(&message(4, 1, GROUP_WINDOW_MS), Some(&first)));
     assert!(!is_grouped(&first, None));
+  }
+
+  /// The line of a change (archived, an admin who joined) has no header to go under; a message
+  /// without text (a deleted one) still has one.
+  #[test]
+  fn nothing_is_grouped_under_the_line_of_a_change() {
+    let line = Message {
+      kind: MessageKind::Change,
+      body: String::new(),
+      ..message(1, 1, 0)
+    };
+    assert!(!is_grouped(&message(2, 1, 60_000), Some(&line)));
+    let without_text = Message {
+      body: String::new(),
+      ..message(3, 1, 0)
+    };
+    assert!(is_grouped(&message(4, 1, 60_000), Some(&without_text)));
+  }
+
+  /// Review of #815 (M1): the desktop app's backend answers extras later than the message. The row
+  /// of a change is a line by its kind, and reads its text once the extras arrive.
+  #[test]
+  fn a_change_reads_its_line_once_the_extras_arrive() {
+    use std::rc::Rc;
+
+    use crate::backend::Backend;
+    use crate::mock::MockBackend;
+    use crate::settings::Settings;
+    use crate::state::AppState;
+
+    let mock = Rc::new(MockBackend::new(0));
+    let backend: Rc<dyn Backend> = mock.clone();
+    let state = AppState::new(backend, Settings::for_tests(), None);
+    let owner = Owner::new();
+    owner.with(|| {
+      provide_context(state);
+      let change = Message {
+        kind: MessageKind::Change,
+        body: String::new(),
+        ..message(77_001, 1, 0)
+      };
+      let text = workspace_text(&change);
+      assert_eq!(text.get_untracked(), None, "no extras yet");
+
+      mock.set_workspace_event(
+        change.id,
+        WorkspaceEvent::AdminJoined {
+          user: id_from_raw::<UserId>(2),
+          maybe_approved_by: None,
+          maybe_added_by: Some(id_from_raw::<UserId>(1)),
+        },
+      );
+      state.backend_changed();
+      assert_eq!(
+        text.get_untracked().map(|(key, _)| key),
+        Some("ws-admin-joined-added")
+      );
+    });
   }
 
   #[test]
@@ -770,6 +1270,107 @@ mod tests {
       ))
     );
     assert_eq!(workspace_event_text(&WorkspaceEvent::Unknown, name_of), None);
+    let approved = WorkspaceEvent::AdminJoined {
+      user,
+      maybe_approved_by: Some(by),
+      maybe_added_by: None,
+    };
+    assert_eq!(
+      workspace_event_text(&approved, name_of),
+      Some((
+        "ws-admin-joined-approved",
+        vec![("name", "Sam".to_owned()), ("by", "Ada".to_owned())]
+      ))
+    );
+    // Review of #815 (L2): no "approved" where nobody asked.
+    let added = WorkspaceEvent::AdminJoined {
+      user,
+      maybe_approved_by: None,
+      maybe_added_by: Some(by),
+    };
+    assert_eq!(
+      workspace_event_text(&added, name_of),
+      Some((
+        "ws-admin-joined-added",
+        vec![("name", "Sam".to_owned()), ("by", "Ada".to_owned())]
+      ))
+    );
+    let own = WorkspaceEvent::AdminJoined {
+      user,
+      maybe_approved_by: None,
+      maybe_added_by: None,
+    };
+    assert_eq!(
+      workspace_event_text(&own, name_of),
+      Some(("ws-admin-joined", vec![("name", "Sam".to_owned())]))
+    );
+  }
+
+  /// Issue #818: a change the server reports names who made it only when the line does; else it
+  /// is worded as the server's statement, with no name at all.
+  #[test]
+  fn server_changes_name_nobody_unless_the_line_does() {
+    let by = id_from_raw::<UserId>(1);
+    let name_of = |_: UserId| "Ada".to_owned();
+    let cases = [
+      (
+        WorkspaceEvent::Archived { maybe_by: None },
+        "ws-archived-unattributed",
+      ),
+      (
+        WorkspaceEvent::Unarchived { maybe_by: None },
+        "ws-unarchived-unattributed",
+      ),
+      (
+        WorkspaceEvent::MadePrivate { maybe_by: None },
+        "ws-made-private-unattributed",
+      ),
+      (
+        WorkspaceEvent::MadePublic { maybe_by: None },
+        "ws-made-public-unattributed",
+      ),
+      (
+        WorkspaceEvent::Moved {
+          maybe_by: None,
+          space: String::new(),
+        },
+        "ws-moved-unnamed-unattributed",
+      ),
+    ];
+    for (event, key) in cases {
+      assert_eq!(
+        workspace_event_text(&event, name_of),
+        Some((key, Vec::new())),
+        "{event:?}"
+      );
+    }
+    assert_eq!(
+      workspace_event_text(
+        &WorkspaceEvent::Moved {
+          maybe_by: None,
+          space: "Project B".into()
+        },
+        name_of
+      ),
+      Some(("ws-moved-unattributed", vec![("space", "Project B".to_owned())]))
+    );
+    assert_eq!(
+      workspace_event_text(&WorkspaceEvent::Archived { maybe_by: Some(by) }, name_of),
+      Some(("ws-archived", vec![("by", "Ada".to_owned())]))
+    );
+    assert_eq!(
+      workspace_event_text(
+        &WorkspaceEvent::Moved {
+          maybe_by: Some(by),
+          space: "Project B".into()
+        },
+        name_of
+      ),
+      Some((
+        "ws-moved",
+        vec![("by", "Ada".to_owned()), ("space", "Project B".to_owned())]
+      ))
+    );
   }
 
   fn message(id: u64, author: u64, sent_at: i64) -> Message {
@@ -779,11 +1380,13 @@ mod tests {
       author: id_from_raw::<UserId>(author),
       kind: MessageKind::User,
       sent_at,
-      body: String::new(),
+      body: format!("message {id}"),
       is_edited: false,
       reactions: Vec::new(),
       reply_count: 0,
       maybe_thread: None,
+      maybe_imported: None,
+      maybe_placeholder: None,
     }
   }
 }

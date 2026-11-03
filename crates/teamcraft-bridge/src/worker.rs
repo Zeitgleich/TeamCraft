@@ -1,19 +1,22 @@
 //! The task that owns the encrypted client: it keeps the gateway connection (so the bot receives
-//! welcomes, commits and content keys), batches log lines, sends the messages and publishes search
-//! index segments.
+//! welcomes, commits and content keys), batches log lines, sends the messages, uploads the files of
+//! webhooks ([`crate::file_jobs`]), publishes search index segments and keeps the sources announced
+//! in the app current (docs/bridge.md, "Sources").
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use teamcraft_core::Client;
 use teamcraft_core::api::{GatewayConnection, ServerApi};
-use teamcraft_core::store::LocalStore;
+use teamcraft_core::store::{AttachmentRef, LocalStore};
+use teamcraft_core::{Client, CoreError, HistoryScan};
 use teamcraft_proto::{ConversationId, GatewayClientMessage, UserId};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::batch::{BatchLimits, Batcher, LogLine, Mentions};
+use crate::file_jobs::{FileJobs, FilesFailure, UploadedMessage};
 use crate::http::Submission;
+use crate::sources::{Source, SourceRegistry};
 
 /// How often the worker looks at timers, the gateway and the outbox.
 const TICK: Duration = Duration::from_millis(200);
@@ -24,36 +27,47 @@ const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Messages for channels the bot has no group for yet wait here; the oldest are dropped beyond this.
 const MAX_WAITING_MESSAGES: usize = 1000;
 
-/// What the worker needs to know about a source.
-#[derive(Debug, Clone)]
-pub struct WorkerSource {
-  pub name: String,
-  pub conversation: ConversationId,
-  pub mentions: Mentions,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct WorkerSettings {
   pub batch: BatchLimits,
   /// `None` turns index publishing off.
   pub index_interval: Option<Duration>,
+  /// Whether sources announced in the app are served; `None` turns them off.
+  pub maybe_app_sources: Option<AppSourceSettings>,
+  /// Messages with files that may wait for their upload (`files.max_concurrent_requests`: the
+  /// endpoint lets no more run at once).
+  pub max_file_messages: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AppSourceSettings {
+  /// How many pages of older history the bridge reads once per channel, for announcements older
+  /// than its database (it was lost or is new).
+  pub history_pages: u32,
+}
+
+/// A message on its way to the client, or waiting for its channel.
 #[derive(Debug)]
-struct Waiting {
+struct Outgoing {
   conversation: ConversationId,
   text: String,
   mentions: Vec<UserId>,
+  /// Files that are up already.
+  attachments: Vec<AttachmentRef>,
 }
 
 pub struct Worker<A: ServerApi, S: LocalStore> {
   client: Client<A, S>,
-  sources: Vec<WorkerSource>,
+  sources: SourceRegistry,
+  /// Per channel: older history pages read so far, until the look back is done.
+  history_scans: BTreeMap<ConversationId, u32>,
+  scanned: HashSet<ConversationId>,
   receiver: mpsc::Receiver<Submission>,
   batcher: Batcher,
+  files: FileJobs,
   settings: WorkerSettings,
   gateway: Option<A::Gateway>,
-  waiting: VecDeque<Waiting>,
+  waiting: VecDeque<Outgoing>,
   next_connect: Instant,
   backoff: Duration,
   last_heartbeat: Instant,
@@ -64,7 +78,7 @@ pub struct Worker<A: ServerApi, S: LocalStore> {
 impl<A: ServerApi, S: LocalStore> Worker<A, S> {
   pub fn new(
     client: Client<A, S>,
-    sources: Vec<WorkerSource>,
+    sources: SourceRegistry,
     receiver: mpsc::Receiver<Submission>,
     settings: WorkerSettings,
   ) -> Self {
@@ -72,8 +86,11 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     Self {
       client,
       sources,
+      history_scans: BTreeMap::new(),
+      scanned: HashSet::new(),
       receiver,
       batcher: Batcher::new(settings.batch),
+      files: FileJobs::new(settings.max_file_messages),
       settings,
       gateway: None,
       waiting: VecDeque::new(),
@@ -86,9 +103,18 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
   }
 
   /// Runs until every sender of submissions is gone, then sends what is left.
-  pub async fn run(mut self) -> Client<A, S> {
+  pub async fn run(self) -> Client<A, S> {
+    self.run_until(std::future::pending()).await
+  }
+
+  /// Like [`Self::run`], but also stops once `stop` resolves (the drain timeout at shutdown ran
+  /// out): what is queued is sent, uploads under way are given up and their producers get `503`.
+  pub async fn run_until(mut self, stop: impl Future<Output = ()>) -> Client<A, S> {
+    // The store already holds what the bridge learned before a restart.
+    self.refresh_sources().await;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tokio::pin!(stop);
     loop {
       tokio::select! {
         submission = self.receiver.recv() => match submission {
@@ -96,8 +122,19 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
           None => break,
         },
         _ = tick.tick() => self.on_tick().await,
+        sent = self.files.sent() => {
+          if let Some(uploaded) = self.files.finish_step(&mut self.client, sent).await {
+            self.send_uploaded(uploaded).await;
+          }
+        },
+        () = &mut stop => {
+          info!("stopping before every request was answered");
+          break;
+        },
       }
+      self.files.advance(&mut self.client).await;
     }
+    self.files.abandon_all(&self.client).await;
     for batch in self.batcher.take_all() {
       self.send(batch.conversation, batch.text, batch.mentions).await;
     }
@@ -116,16 +153,10 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
         text,
         is_alert,
       } => {
-        let Some(source) = self.sources.get(source).cloned() else {
-          return;
-        };
         let (text, mentions) = alert_text(text, is_alert, &source.mentions);
         self.send(source.conversation, text, mentions).await;
       },
       Submission::Lines { source, lines } => {
-        let Some(source) = self.sources.get(source).cloned() else {
-          return;
-        };
         for line in lines {
           if let Some(batch) = self
             .batcher
@@ -135,10 +166,8 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
           }
         }
       },
+      Submission::Files(message) => self.files.push(message),
       Submission::Dropped { source, count } => {
-        let Some(source) = self.sources.get(source).cloned() else {
-          return;
-        };
         warn!(source = %source.name, count, "dropped lines over the rate limit");
         let notice = LogLine {
           text: format!("[bridge] dropped {count} lines from {} (rate limit)", source.name),
@@ -156,12 +185,14 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
 
   async fn on_tick(&mut self) {
     let now = Instant::now();
+    self.files.drop_abandoned();
     for batch in self.batcher.take_due(now) {
       self.send(batch.conversation, batch.text, batch.mentions).await;
     }
     self.keep_gateway(now).await;
     if now.saturating_duration_since(self.last_flush) >= Duration::from_secs(1) {
       self.last_flush = now;
+      self.refresh_sources().await;
       self.retry_waiting().await;
       if let Err(error) = self.client.flush_outbox().await {
         debug!(%error, "flushing the outbox failed");
@@ -176,6 +207,73 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
         Ok(count) => info!(count, "published search index segments"),
         Err(error) => warn!(%error, "publishing search index segments failed"),
       }
+    }
+  }
+
+  /// Brings the sources announced in the app up to date with the bot's store, which the gateway
+  /// keeps current (messages and the signed roster): looks back once through each channel's older
+  /// history, and swaps the endpoints' managed set when it changed. Runs once a second; it reads
+  /// the local store only, apart from the one-off history pages.
+  async fn refresh_sources(&mut self) {
+    let Some(app_sources) = self.settings.maybe_app_sources else {
+      return;
+    };
+    let conversations = match self.client.group_conversations() {
+      Ok(conversations) => conversations,
+      Err(error) => {
+        warn!(%error, "listing the bridge's channels failed");
+        return;
+      },
+    };
+    let mut active = Vec::new();
+    for conversation in conversations {
+      if self.gateway.is_some() {
+        self.scan_history(conversation, app_sources.history_pages).await;
+      }
+      match self.channel_sources(conversation) {
+        Ok(sources) => active.extend(sources),
+        Err(error) => warn!(%error, %conversation, "reading the channel's sources failed"),
+      }
+    }
+    if self.sources.has_managed(&active) {
+      return;
+    }
+    let change = self.sources.replace_managed(active);
+    for name in change.added {
+      info!(source = %name, "source added in the app");
+    }
+    for name in change.removed {
+      info!(source = %name, "source revoked or no longer allowed");
+    }
+  }
+
+  fn channel_sources(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Vec<Source>, teamcraft_core::CoreError> {
+    let active = self.client.integration_sources(conversation)?;
+    Ok(active.iter().filter_map(Source::from_managed).collect())
+  }
+
+  /// Reads one more page of the channel's older history until the look back is done.
+  async fn scan_history(&mut self, conversation: ConversationId, max_pages: u32) {
+    if self.scanned.contains(&conversation) {
+      return;
+    }
+    let pages = self.history_scans.get(&conversation).copied().unwrap_or(0);
+    match self
+      .client
+      .scan_history_for_sources(conversation, pages, max_pages)
+      .await
+    {
+      Ok(HistoryScan::Done) => {
+        self.scanned.insert(conversation);
+        self.history_scans.remove(&conversation);
+      },
+      Ok(HistoryScan::More) => {
+        self.history_scans.insert(conversation, pages + 1);
+      },
+      Err(error) => debug!(%error, %conversation, "reading older history failed; trying again"),
     }
   }
 
@@ -220,31 +318,82 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     }
   }
 
-  /// Hands a message to the client; if the bot has no group for the channel yet it waits.
-  async fn send(&mut self, conversation: ConversationId, text: String, mentions: Vec<UserId>) {
-    if !self.can_send(conversation) {
-      self.hold(Waiting {
-        conversation,
+  /// A message whose files are all up goes out like any webhook, and its producer gets its answer.
+  async fn send_uploaded(&mut self, uploaded: UploadedMessage) {
+    let UploadedMessage {
+      source,
+      text,
+      is_alert,
+      attachments,
+      reply,
+    } = uploaded;
+    let (text, mentions) = alert_text(text, is_alert, &source.mentions);
+    let delivered = self
+      .deliver(Outgoing {
+        conversation: source.conversation,
         text,
         mentions,
-      });
-      return;
+        attachments,
+      })
+      .await;
+    let answer = delivered.map_err(|error| {
+      warn!(%error, source = %source.name, "a message with files could not be stored");
+      FilesFailure::NotQueued
+    });
+    // A producer that hung up meanwhile gets no answer; the message is sent all the same.
+    let _ = reply.send(answer);
+  }
+
+  async fn send(&mut self, conversation: ConversationId, text: String, mentions: Vec<UserId>) {
+    let message = Outgoing {
+      conversation,
+      text,
+      mentions,
+      attachments: Vec::new(),
+    };
+    if let Err(error) = self.deliver(message).await {
+      warn!(%error, %conversation, "a message could not be stored");
     }
-    if let Err(error) = self
-      .client
-      .send_text_mentioning(conversation, None, &text, mentions)
-      .await
-    {
+  }
+
+  /// Hands a message to the client; if the bot has no group for the channel yet it waits. An
+  /// error means the message is lost: the outbox could not store it.
+  async fn deliver(&mut self, message: Outgoing) -> Result<(), CoreError> {
+    let conversation = message.conversation;
+    if !self.can_send(conversation) {
+      self.hold(message);
+      return Ok(());
+    }
+    let Outgoing {
+      text,
+      mentions,
+      attachments,
+      ..
+    } = message;
+    let sent = if attachments.is_empty() {
+      self
+        .client
+        .send_text_mentioning(conversation, None, &text, mentions)
+        .await
+        .map(drop)
+    } else {
+      self
+        .client
+        .queue_text_with_files(conversation, &text, mentions, attachments)?;
+      self.client.flush_outbox().await.map(drop)
+    };
+    if let Err(error) = sent {
       // The message is in the outbox already when sending fails; it goes out with the next flush.
       debug!(%error, %conversation, "sending is delayed");
     }
+    Ok(())
   }
 
   fn can_send(&mut self, conversation: ConversationId) -> bool {
     self.client.has_group(conversation).unwrap_or(false)
   }
 
-  fn hold(&mut self, message: Waiting) {
+  fn hold(&mut self, message: Outgoing) {
     if self.waiting.len() >= MAX_WAITING_MESSAGES {
       self.waiting.pop_front();
       warn!("dropped the oldest message: the bot is still no member of its channels");
@@ -258,9 +407,10 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
         break;
       };
       if self.can_send(message.conversation) {
-        self
-          .send(message.conversation, message.text, message.mentions)
-          .await;
+        let conversation = message.conversation;
+        if let Err(error) = self.deliver(message).await {
+          warn!(%error, %conversation, "a waiting message could not be stored");
+        }
       } else {
         self.waiting.push_back(message);
       }
@@ -269,7 +419,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
 }
 
 /// An alert gets the mentioned people's names in front and their IDs as metadata.
-fn alert_text(text: String, is_alert: bool, mentions: &Mentions) -> (String, Vec<UserId>) {
+pub(crate) fn alert_text(text: String, is_alert: bool, mentions: &Mentions) -> (String, Vec<UserId>) {
   if !is_alert || mentions.users.is_empty() {
     return (text, Vec::new());
   }

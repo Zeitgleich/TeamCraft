@@ -1,16 +1,14 @@
 //! Runs the requests the UI adapter queued ([`CoreCommand`]) against the server.
 
 use teamcraft_client_api::model::PresenceStatus;
-use teamcraft_proto::{
-  ManualPresence, SetPresenceRequest, SetReadPositionRequest, UnixMillis, UpdateConversationMemberRequest,
-};
+use teamcraft_proto::{ManualPresence, SetPresenceRequest, UnixMillis, UpdateConversationMemberRequest};
 
-use super::Client;
+use super::{Client, PendingAction};
 use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, MessageFilter, Table};
-use crate::ui_backend::{CoreCommand, history_jump_key};
+use crate::ui_backend::{CoreCommand, history_jump_key, newest_server_id, note_lines_read};
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn run_ui_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
@@ -29,22 +27,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         )?;
         loaded.map(|_| ())
       },
+      CoreCommand::LoadOlderHistory {
+        conversation,
+        request,
+      } => self.load_older_history(conversation, request).await,
       CoreCommand::MarkRead { conversation } => {
         self.update_account_data(|data, now| data.clear_unread_mark(conversation, now))?;
-        let maybe_latest = self
-          .store
-          .messages(conversation, MessageFilter::All)?
-          .into_iter()
-          .filter_map(|message| message.maybe_server_id)
-          .max();
-        if let Some(message_id) = maybe_latest {
-          self
-            .api
-            .set_read_position(conversation, &SetReadPositionRequest { message_id })
-            .await?;
-          self.refresh_conversation(conversation).await?;
+        // The badge clears now; the server's `unread_update` confirms it.
+        crate::read_state::note_unread(&self.store, conversation, 0, 0)?;
+        let messages = self.store.messages(conversation, MessageFilter::All)?;
+        note_lines_read(&self.store, conversation, &messages)?;
+        let maybe_latest = newest_server_id(&messages);
+        match maybe_latest {
+          // Queued: offline, it reaches the server (and the other devices) once back.
+          Some(message) => {
+            self
+              .queue_action(PendingAction::ReadPosition {
+                conversation,
+                message,
+              })
+              .await
+          },
+          None => Ok(()),
         }
-        Ok(())
       },
       CoreCommand::SetFavorite {
         conversation,
@@ -65,22 +70,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_until,
       } => {
         let manual = match presence {
-          PresenceStatus::Online | PresenceStatus::Away => ManualPresence::Auto,
+          PresenceStatus::Online => ManualPresence::Auto,
+          PresenceStatus::Away => ManualPresence::Away,
           PresenceStatus::DoNotDisturb => ManualPresence::DoNotDisturb,
           PresenceStatus::Offline => ManualPresence::Invisible,
         };
-        Ok(
-          self
-            .api
-            .set_presence(&SetPresenceRequest {
-              // Only do-not-disturb ends by itself.
-              maybe_until: maybe_until
-                .filter(|_| manual == ManualPresence::DoNotDisturb)
-                .map(UnixMillis),
-              manual,
-            })
-            .await?,
-        )
+        let request = SetPresenceRequest {
+          // Only do-not-disturb ends by itself.
+          maybe_until: maybe_until
+            .filter(|_| manual == ManualPresence::DoNotDisturb)
+            .map(UnixMillis),
+          manual,
+        };
+        self.queue_action(PendingAction::Presence { request }).await
       },
       #[cfg(not(target_arch = "wasm32"))]
       CoreCommand::FetchSearchHits { hits } => self.fetch_search_hits(&hits).await.map(|_| ()),
@@ -126,8 +128,45 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         message,
       } => self.acknowledge(conversation, message).await,
       CoreCommand::MarkUnread { conversation, from } => self.mark_unread(conversation, from),
-      CoreCommand::MarkActivityRead { up_to_ms } => self.mark_activity_read(up_to_ms),
+      CoreCommand::MarkReadThrough {
+        conversation,
+        message,
+      } => {
+        // Queued: offline, it reaches the server (and the other devices) once back.
+        self
+          .queue_action(PendingAction::ReadPosition {
+            conversation,
+            message,
+          })
+          .await
+      },
+      CoreCommand::MarkReactionsSeen {
+        conversation,
+        reactions,
+      } => {
+        self
+          .queue_action(PendingAction::ReactionsSeen {
+            conversation,
+            reactions,
+          })
+          .await
+      },
+      CoreCommand::MarkThreadRead {
+        conversation,
+        thread,
+        message,
+      } => {
+        self
+          .queue_action(PendingAction::ThreadReadPosition {
+            conversation,
+            thread,
+            message,
+          })
+          .await
+      },
       CoreCommand::RefreshPresence { users } => self.refresh_presence(&users).await,
+      CoreCommand::RefreshReadReceipts { conversation } => self.refresh_read_receipts(conversation).await,
+      CoreCommand::SearchDirectory { query } => self.search_directory(&query).await.map(|_| ()),
       CoreCommand::RefreshPrivacy => self.refresh_privacy().await.map(|_| ()),
       CoreCommand::SetLastSeenVisibility { visibility } => self.set_last_seen_visibility(visibility).await,
       CoreCommand::RefreshCallHistory => self.refresh_call_history().await,
@@ -136,6 +175,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.revoke_device(device).await?;
         self.refresh_own_devices().await
       },
+      CoreCommand::RenameOwnDevice { device, name } => self.rename_own_device(device, &name).await,
+      CoreCommand::TestPushOwnDevice { device } => self.test_push_own_device(device).await,
       CoreCommand::UploadFiles => self.upload_pending().await.map(|_| ()),
       CoreCommand::GeneratePreviews => self.generate_pending_previews().await.map(|_| ()),
       CoreCommand::DownloadFile {
@@ -145,24 +186,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .download_attachment_to_disk(conversation, attachment)
         .await
         .map(|_| ()),
+      // Downloads run inline here: there is no transfer in flight to control.
+      CoreCommand::ControlDownload { attachment, control } => {
+        tracing::debug!(attachment_id = %attachment, ?control, "no download list without a host");
+        Ok(())
+      },
       CoreCommand::CreateShareLink {
         conversation,
         attachment,
-        maybe_expires_at,
+        maybe_expires_in_seconds,
         maybe_max_downloads,
         maybe_password,
       } => {
         let settings = crate::client::files::ShareLinkSettings {
-          maybe_expires_at,
+          maybe_expires_in_seconds,
           maybe_max_downloads,
-          maybe_password: maybe_password
-            .map(|password| teamcraft_crypto::secret::SecretBytes::new(password.0.into_bytes())),
+          maybe_password: maybe_password.map(|mut password| {
+            // The text is wiped when `password` drops; the secret owns the bytes from here.
+            teamcraft_crypto::secret::SecretBytes::new(std::mem::take(&mut password.0).into_bytes())
+          }),
         };
         self
           .create_share_link(conversation, attachment, settings)
           .await
           .map(|_| ())
       },
+      CoreCommand::RevokeShareLink {
+        attachment, share_id, ..
+      } => self.revoke_share_link(attachment, &share_id).await,
+      CoreCommand::RefreshShareLinks { attachment } => self.refresh_share_links(attachment).await,
       CoreCommand::CreateSpace { request } => self.create_space(&request).await.map(|_| ()),
       CoreCommand::UpdateSpace { space, request } => self.update_space(space, &request).await.map(|_| ()),
       CoreCommand::CreateChannelWith { space, options } => {
@@ -178,8 +230,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       } => self.move_channel(conversation, &request).await,
       CoreCommand::RefreshChannelBrowser { space } => self.refresh_channel_browser(space).await.map(|_| ()),
       CoreCommand::JoinChannel { conversation } => self.join_channel(conversation).await,
+      CoreCommand::RequestAdminJoin { conversation } => self.request_admin_join(conversation).await,
+      CoreCommand::WithdrawAdminJoin { conversation } => self.withdraw_admin_join(conversation).await,
+      CoreCommand::ApproveAdminJoin {
+        conversation,
+        user,
+        history,
+      } => self.approve_admin_join_sharing(conversation, user, history).await,
+      CoreCommand::DeclineAdminJoin { conversation, user } => {
+        self.decline_admin_join(conversation, user).await
+      },
       CoreCommand::JoinSpace { space } => self.join_space(space).await,
-      CoreCommand::LeaveChannel { conversation } => self.leave_channel(conversation).await,
+      CoreCommand::LeaveChannel {
+        conversation,
+        deletes_if_last,
+      } => self.leave_channel(conversation, deletes_if_last).await,
+      CoreCommand::DismissSuspectDeletions => self.dismiss_suspect_deletions(),
+      CoreCommand::DeleteChannel { conversation } => self.delete_channel(conversation).await,
+      CoreCommand::DeleteSpace { space } => self.delete_space(space).await,
       CoreCommand::RefreshCategories { space } => self.refresh_categories(space).await.map(|_| ()),
       CoreCommand::CreateCategory { space, name } => self.create_category(space, &name).await,
       CoreCommand::RenameCategory {
@@ -198,21 +266,111 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .await
       },
       CoreCommand::RemoveMember { conversation, user } => self.remove_member(conversation, user).await,
+      CoreCommand::RetryRemoval { conversation, user } => self.retry_removal(conversation, user).await,
+      CoreCommand::RetryDmSetup { conversation } => self.retry_dm_setup(conversation).await,
+      CoreCommand::SetUpMeetingChat {
+        conversation,
+        invitees,
+      } => self
+        .set_up_meeting_chat(conversation, &invitees)
+        .await
+        .map(|_| ()),
+      CoreCommand::UpdateMeetingChatMembers {
+        conversation,
+        invitees,
+        removed,
+      } => self
+        .update_meeting_chat_members(conversation, &invitees, &removed)
+        .await
+        .map(|_| ()),
+      CoreCommand::AddPeopleToCall {
+        from,
+        in_call,
+        added,
+        maybe_title,
+        key,
+      } => self
+        .add_people_to_call(from, &in_call, &added, maybe_title, key)
+        .await
+        .map(|_| ()),
+      CoreCommand::AcceptCallMove { from, to } => self.accept_call_move(from, to).await,
+      CoreCommand::LetIntoMeetingChat { conversation, user } => {
+        self.let_into_meeting_chat(conversation, user).await
+      },
+      CoreCommand::PrepareGuestLink {
+        conversation,
+        meeting,
+      } => self.prepare_guest_link(conversation, meeting).await,
+      CoreCommand::LetGuestIntoMeetingChat {
+        conversation,
+        guest,
+        knock_fingerprint,
+        access_ends_at_ms,
+      } => {
+        self
+          .let_guest_into_meeting_chat(conversation, guest, &knock_fingerprint, access_ends_at_ms)
+          .await
+      },
+      CoreCommand::PrepareGuestKeyCode { guest } => self.prepare_guest_key_code(guest).await,
+      CoreCommand::NoteMeetingLobby { meeting, has_lobby } => self.note_meeting_lobby(meeting, has_lobby),
+      CoreCommand::DiscardRemoval { conversation, user } => self.discard_removal(conversation, user).await,
       CoreCommand::InviteToSpace {
         space,
         email,
         is_guest,
         channels,
         maybe_expires_at,
+        maybe_message,
       } => {
         self
-          .invite_to_space(space, &email, is_guest, channels, maybe_expires_at)
+          .invite_to_space(space, &email, is_guest, channels, maybe_expires_at, maybe_message)
           .await
       },
-      CoreCommand::SetCustomStatus { .. } => {
-        // The server has no custom status yet (crate README: server gaps).
-        tracing::debug!("custom status is not stored on the server yet");
-        Ok(())
+      CoreCommand::AddPeopleToChannel {
+        conversation,
+        people,
+        history,
+        joins_space,
+      } => {
+        self
+          .add_people_to_channel(conversation, &people, history, joins_space)
+          .await
+      },
+      CoreCommand::RefreshSpaceRoster { space } => {
+        self.refresh_space_roster(space).await?;
+        self.refresh_space_invites(space).await
+      },
+      CoreCommand::SetSpaceRole { space, user, role } => self.set_space_role(space, user, role).await,
+      CoreCommand::SetChannelRole {
+        conversation,
+        user,
+        role,
+      } => self.set_channel_role(conversation, user, role).await.map(|_| ()),
+      // Asked for explicitly: a role this user can't sign is a failure the user sees, not silence.
+      CoreCommand::ConfirmChannelRole { conversation, user } => {
+        match self.confirm_channel_role(conversation, user).await? {
+          super::RoleSigning::Signed => Ok(()),
+          super::RoleSigning::Unsigned => Err(CoreError::InvalidRequest(
+            "this role can't be signed in a way the channel's members accept".into(),
+          )),
+        }
+      },
+      CoreCommand::RefreshChannelRoles { conversation } => {
+        self.refresh_members(conversation).await?;
+        self.sync_channel_roles(conversation).await
+      },
+      CoreCommand::RemoveSpaceMember { space, user } => self.remove_space_member(space, user).await,
+      CoreCommand::RevokeSpaceInvite { space, invite } => self.revoke_space_invite(space, invite).await,
+      CoreCommand::AddSpaceMembers {
+        space,
+        users,
+        is_guest,
+      } => self.add_space_members(space, &users, is_guest).await,
+      CoreCommand::SetCustomStatus { maybe_status } => {
+        let now = self.now_ms();
+        self
+          .set_custom_status(maybe_status.and_then(|status| status.to_wire(now)))
+          .await
       },
     }
   }

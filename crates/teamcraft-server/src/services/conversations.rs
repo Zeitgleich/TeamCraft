@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 use teamcraft_db::{
@@ -7,13 +7,14 @@ use teamcraft_db::{
 };
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, ConvertChannelRequest,
-  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, GatewayEvent, HistoryPolicy,
-  ListConversationsQuery, ListConversationsResponse, MoveChannelRequest, Permission, SpaceId,
+  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, GatewayEvent, GuestDmStart, HistoryPolicy,
+  ListConversationsQuery, ListConversationsResponse, MoveChannelRequest, Permission, SpaceId, SpaceRole,
   SystemEventKind, Target, UpdateConversationRequest, UserId,
 };
 
 use super::access::{
-  ConversationAccess, is_guest, is_instance_admin, load_conversation, load_space, require, space_target,
+  ConversationAccess, channel_permissions, channel_target, is_guest, is_instance_admin, load_conversation,
+  load_space, require, space_target,
 };
 use super::audit::{self, Target as AuditTarget};
 use super::convert::{ConversationExtras, conversation_response};
@@ -22,6 +23,9 @@ use super::{validate_name, validate_text};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
+
+/// Channels and spaces cleared in one round of [`sweep_deleted`].
+const DELETED_SWEEP_BATCH: i64 = 20;
 
 /// Result of an operation that may create the conversation (DMs are created once per pair).
 pub struct Created<T> {
@@ -40,7 +44,8 @@ pub async fn list_conversations(
       .maybe_space_id
       .ok_or_else(|| ApiError::InvalidRequest("joinable needs space_id".into()))?;
     let access = load_space(state, caller, space).await?;
-    if is_guest(caller) || access.view.maybe_role.is_none() {
+    let is_admin = is_instance_admin(caller);
+    if is_guest(caller) || (access.view.maybe_role.is_none() && !is_admin) {
       return Err(ApiError::Forbidden(
         "the channel browser is for members of the space".into(),
       ));
@@ -48,6 +53,9 @@ pub async fn list_conversations(
     ConversationFilter {
       maybe_space: Some(space),
       only_joinable: true,
+      // Admins may join private channels by themselves (admin.md §2.4); members' clients decide by
+      // the signed policy and the signed roster whether that join is let in.
+      includes_private: is_admin,
       ..ConversationFilter::default()
     }
   } else {
@@ -58,8 +66,35 @@ pub async fn list_conversations(
     }
   };
   let views = state.database.list_conversations(caller.user.id, &filter).await?;
+  let mut conversations = respond_all(state, &views).await?;
+  let mut space_roles: HashMap<SpaceId, Option<SpaceRole>> = HashMap::new();
+  for (view, response) in views.iter().zip(conversations.iter_mut()) {
+    let maybe_space_role = match view.conversation.maybe_space_id {
+      Some(space) => match space_roles.get(&space) {
+        Some(role) => role.clone(),
+        None => {
+          let role = state.database.space_role(space, caller.user.id).await?;
+          space_roles.insert(space, role.clone());
+          role
+        },
+      },
+      None => None,
+    };
+    response.maybe_my_permissions = Some(channel_permissions(
+      state,
+      caller,
+      &channel_target(view, maybe_space_role),
+    ));
+  }
+  // Only with the user's own list: the channel browser lists other conversations.
+  let deleted_conversation_ids = if filter.only_joined {
+    state.database.deleted_conversations_of(caller.user.id).await?
+  } else {
+    Vec::new()
+  };
   Ok(ListConversationsResponse {
-    conversations: respond_all(state, &views).await?,
+    conversations,
+    deleted_conversation_ids,
   })
 }
 
@@ -69,8 +104,19 @@ pub async fn get_conversation(
   id: ConversationId,
 ) -> Result<ConversationResponse, ApiError> {
   let access = load_conversation(state, caller, id).await?;
-  respond(state, &access.view).await
+  let mut response = respond(state, &access.view).await?;
+  response.maybe_my_permissions = Some(channel_permissions(state, caller, &access.target()));
+  if response.kind == ConversationKind::Meeting {
+    response.maybe_organizer_user_id = state
+      .database
+      .get_meeting_by_conversation(id)
+      .await?
+      .map(|meeting| meeting.organizer);
+  }
+  Ok(response)
 }
+
+const INTEGRATION_STAYS_PRIVATE: &str = "integration channels carry machine output and stay private";
 
 pub async fn create_channel(
   state: &AppState,
@@ -99,6 +145,9 @@ pub async fn create_channel(
   if let ConversationVisibility::Unknown(_) = request.visibility {
     return Err(ApiError::InvalidRequest("unknown visibility".into()));
   }
+  if request.is_integration && request.visibility == ConversationVisibility::Public {
+    return Err(ApiError::Conflict(INTEGRATION_STAYS_PRIVATE.into()));
+  }
   if let Some(category) = request.maybe_category_id {
     let found = state.database.get_category(category).await?;
     if found.is_none_or(|c| c.space_id != space) {
@@ -107,7 +156,7 @@ pub async fn create_channel(
   }
 
   let id: ConversationId = state.next_id()?;
-  state
+  let created = state
     .database
     .create_channel(
       &NewConversation {
@@ -124,16 +173,20 @@ pub async fn create_channel(
         is_integration: request.is_integration,
       },
       caller.user.id,
+      request.maybe_idempotency_key.as_ref(),
     )
     .await?;
-  if request.is_integration {
-    apply_integration_defaults(state, id).await?;
+  // A retry of an earlier request: return that channel, nothing new to set up or announce.
+  if created.is_new {
+    if request.is_integration {
+      apply_integration_defaults(state, id).await?;
+    }
+    state.hub.publish(
+      [caller.user.id],
+      &GatewayEvent::ConversationUpdate { conversation_id: id },
+    );
   }
-  state.hub.publish(
-    [caller.user.id],
-    &GatewayEvent::ConversationUpdate { conversation_id: id },
-  );
-  get_conversation(state, caller, id).await
+  get_conversation(state, caller, created.id).await
 }
 
 pub async fn create_dm(
@@ -142,10 +195,14 @@ pub async fn create_dm(
   request: CreateDmRequest,
 ) -> Result<Created<ConversationResponse>, ApiError> {
   require(state, caller, Permission::CreateDm, &Target::Instance)?;
-  if request.user_id == caller.user.id {
-    return Err(ApiError::InvalidRequest("can't open a DM with yourself".into()));
-  }
-  open_participants_conversation(state, caller, ConversationKind::Dm, vec![request.user_id]).await
+  // A DM with oneself is the user's notes: its only participant is the caller, whose own devices
+  // make up its encryption group. Opening it again returns the same conversation.
+  let others = if request.user_id == caller.user.id {
+    Vec::new()
+  } else {
+    vec![request.user_id]
+  };
+  open_participants_conversation(state, caller, ConversationKind::Dm, others).await
 }
 
 pub async fn create_group_dm(
@@ -223,6 +280,21 @@ pub async fn update_conversation(
     let found = state.database.get_category(category).await?;
     if found.is_none_or(|c| c.space_id != space) {
       return Err(ApiError::category_not_found());
+    }
+  }
+
+  if request.maybe_is_integration == Some(true)
+    && access.view.conversation.visibility == ConversationVisibility::Public
+  {
+    return Err(ApiError::Conflict(INTEGRATION_STAYS_PRIVATE.into()));
+  }
+
+  // A restored channel needs somebody who can run it; roles are signed, so the server can't just make
+  // the restorer one. A workspace admin assigns an owner first (admin.md §3.1.1).
+  if request.maybe_is_archived == Some(false) && access.view.conversation.is_archived {
+    let members = state.database.conversation_member_ids(id).await?;
+    if !members.is_empty() && state.database.count_channel_admins(id).await? == 0 {
+      return Err(ApiError::ChannelNeedsAdmin);
     }
   }
 
@@ -389,9 +461,7 @@ pub async fn convert_channel_privacy(
     return Err(ApiError::Conflict("unarchive the channel first".into()));
   }
   if access.view.conversation.is_integration && request.visibility == ConversationVisibility::Public {
-    return Err(ApiError::Conflict(
-      "integration channels carry machine output and stay private".into(),
-    ));
+    return Err(ApiError::Conflict(INTEGRATION_STAYS_PRIVATE.into()));
   }
   let before = access.view.conversation.visibility.clone();
   state
@@ -511,30 +581,20 @@ async fn open_participants_conversation(
   if users.len() != others.len() || users.iter().any(|user| user.is_deactivated) {
     return Err(ApiError::user_not_found());
   }
-  // A DM involving a guest needs a conversation the guest already shares with every other
-  // participant (PLAN.md §12): in a group DM, two members who both know the guest still must not
-  // meet a guest who knows only one of them.
-  if super::workspace::effective_guest_dm_restriction(state) {
-    let guests: Vec<UserId> = users
-      .iter()
-      .filter(|user| user.kind == teamcraft_proto::UserKind::Guest)
-      .map(|user| user.id)
-      .chain(is_guest(caller).then_some(caller.user.id))
-      .collect();
-    for guest in guests {
-      let known = state.database.users_sharing_conversation(guest).await?;
-      let everybody = others.iter().copied().chain([caller.user.id]);
-      if everybody
-        .filter(|participant| *participant != guest)
-        .any(|participant| !known.contains(&participant))
-      {
-        return Err(ApiError::user_not_found());
-      }
-    }
-  }
-
   let mut participants = others;
   participants.push(caller.user.id);
+  let key = participants_key(&participants);
+  // Starting is what a guest may not do on their own (PLAN.md §12); an existing conversation is
+  // only opened again, which a retry or a second device of the guest may ask for.
+  if is_guest(caller)
+    && state
+      .database
+      .participants_conversation(Some(&key))
+      .await?
+      .is_none()
+  {
+    ensure_guest_may_start(state, caller, &participants).await?;
+  }
   let (id, is_new) = state
     .database
     .get_or_create_participants_conversation(
@@ -548,7 +608,7 @@ async fn open_participants_conversation(
         visibility: ConversationVisibility::Private,
         history_policy: HistoryPolicy::FromJoin,
         maybe_category: None,
-        maybe_participants_key: Some(participants_key(&participants)),
+        maybe_participants_key: Some(key),
         is_integration: false,
       },
       &participants,
@@ -560,11 +620,153 @@ async fn open_participants_conversation(
       &GatewayEvent::ConversationUpdate { conversation_id: id },
     );
   }
-  let access = load_conversation(state, caller, id).await?;
   Ok(Created {
-    value: respond(state, &access.view).await?,
+    value: get_conversation(state, caller, id).await?,
     is_new,
   })
+}
+
+/// A guest may start a conversation only with people `guest_dm_start` allows. Members, admins
+/// and owners are not checked at all: they can always message a guest.
+///
+/// The refusal names itself only for people the guest already sees (they share a conversation);
+/// for everybody else the answer stays `user_not_found`, so it can't be used to probe for accounts.
+async fn ensure_guest_may_start(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  participants: &[UserId],
+) -> Result<(), ApiError> {
+  let start = super::workspace::effective_guest_dm_start(state);
+  if start == GuestDmStart::Anyone {
+    return Ok(());
+  }
+  let known = state.database.users_sharing_conversation(caller.user.id).await?;
+  let mut is_refused = false;
+  for other in participants.iter().filter(|other| **other != caller.user.id) {
+    if start.allows(known.contains(other)) {
+      continue;
+    }
+    if !known.contains(other) {
+      return Err(ApiError::user_not_found());
+    }
+    is_refused = true;
+  }
+  if is_refused {
+    return Err(ApiError::GuestDmNotAllowed);
+  }
+  Ok(())
+}
+
+/// Deletes a channel for everybody, archived or not, also with members in it (`delete_channel`:
+/// channel admins, workspace admins and owners, and a space admin where they reach it; admin.md
+/// §3.1.1). Marks it, then background work clears it ([`sweep_deleted`]): a big channel would outlast
+/// the request. What this means on the members' devices: e2ee.md §4.6. Answers 404 once it is gone,
+/// which clients take as done, so a retry leaves no second audit row.
+pub async fn delete_channel(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: ConversationId,
+) -> Result<(), ApiError> {
+  let access = load_conversation(state, caller, id).await?;
+  if access.view.conversation.kind != ConversationKind::Channel {
+    return Err(ApiError::NotAChannel);
+  }
+  require(state, caller, Permission::DeleteChannel, &access.target())?;
+  let audit_target = AuditTarget::new("conversation", id);
+  let audit = audit::prepared(state, caller.user.id, "channel_deleted", &audit_target)?;
+  let maybe_members = state
+    .database
+    .delete_channel_locked(id, &audit, |facts| {
+      // docs/import-synology.md: an import running into it would lose its place.
+      if facts.maybe_importer.is_some() {
+        return Err(ApiError::ImportInProgress);
+      }
+      Ok(())
+    })
+    .await?;
+  let Some(members) = maybe_members else {
+    return Err(ApiError::conversation_not_found());
+  };
+  announce_deleted(state, id, &members).await;
+  Ok(())
+}
+
+/// Tells the people concerned that the conversation is gone, ends its calls, and starts clearing it.
+pub(crate) async fn announce_deleted(state: &AppState, conversation_id: ConversationId, users: &[UserId]) {
+  for user in users {
+    super::calls::evict_from_call(state, conversation_id, *user).await;
+  }
+  announce_deleted_direct(state, conversation_id, users);
+  wake_sweep(state);
+}
+
+/// Announces a deleted conversation without clearing anything more.
+pub(crate) fn announce_deleted_direct(state: &AppState, conversation_id: ConversationId, users: &[UserId]) {
+  state.hub.publish(
+    users.iter().copied(),
+    &GatewayEvent::ConversationDelete { conversation_id },
+  );
+  // Clients that don't know `conversation_delete` yet drop a conversation they were removed from.
+  for user in users {
+    state.hub.publish(
+      [*user],
+      &GatewayEvent::MembershipRemove {
+        conversation_id,
+        user_id: *user,
+      },
+    );
+  }
+}
+
+/// Starts clearing what is marked deleted now; the housekeeping does it after a restart or a failure.
+pub(crate) fn wake_sweep(state: &AppState) {
+  let state = state.clone();
+  tokio::spawn(async move {
+    if let Err(error) = sweep_deleted(&state).await {
+      tracing::warn!(%error, "clearing deleted channels failed; the housekeeping tries again");
+    }
+  });
+}
+
+/// Clears channels and spaces marked deleted: their objects in storage, then their rows, in bounded
+/// rounds. Survives a restart, since a mark stays until its rows go, and running twice is harmless:
+/// deleting what is gone succeeds. A failing storage leaves the mark for the next round. Returns how
+/// many channels went.
+pub async fn sweep_deleted(state: &AppState) -> Result<usize, ApiError> {
+  let mut cleared = 0;
+  loop {
+    let batch = state
+      .database
+      .marked_deleted_conversations(DELETED_SWEEP_BATCH)
+      .await?;
+    let batch_len = batch.len();
+    for (conversation, maybe_image) in batch {
+      delete_stored_objects(state, conversation).await?;
+      if let Some(image) = maybe_image {
+        super::retention::delete_object(state, &image).await?;
+      }
+      state.database.clear_deleted_conversation(conversation).await?;
+      cleared += 1;
+    }
+    if i64::try_from(batch_len).unwrap_or(i64::MAX) < DELETED_SWEEP_BATCH {
+      break;
+    }
+  }
+  for (space, maybe_image) in state.database.cleared_deleted_spaces(DELETED_SWEEP_BATCH).await? {
+    if let Some(image) = maybe_image {
+      super::retention::delete_object(state, &image).await?;
+    }
+    state.database.clear_deleted_space(space).await?;
+  }
+  Ok(cleared)
+}
+
+/// Deletes the conversation's attachments, stored ciphertext and search segments in storage.
+pub(crate) async fn delete_stored_objects(state: &AppState, id: ConversationId) -> Result<(), ApiError> {
+  for key in state.database.conversation_object_keys(id).await? {
+    super::retention::delete_object(state, &key).await?;
+  }
+  Ok(())
 }
 
 /// Checks the conversation is a channel that can still change (not a DM, not archived).

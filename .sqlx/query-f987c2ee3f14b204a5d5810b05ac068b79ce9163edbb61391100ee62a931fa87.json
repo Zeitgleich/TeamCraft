@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT reactions_seen_through_message_id, reactions_seen_message_ids FROM memberships\n         WHERE conversation_id = $1 AND user_id = $2 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reactions_seen_through_message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "reactions_seen_through_message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "reactions_seen_message_ids",
+        "type_info": "Int8Array",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "reactions_seen_message_ids"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "f987c2ee3f14b204a5d5810b05ac068b79ce9163edbb61391100ee62a931fa87"
+}

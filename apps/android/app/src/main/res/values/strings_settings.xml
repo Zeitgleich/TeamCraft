@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="presence_title">Status</string>
+  <string name="presence_online">Online</string>
+  <string name="presence_away">Away</string>
+  <string name="presence_dnd">Do not disturb</string>
+  <string name="presence_offline">Appear offline</string>
+  <string name="notifications_conversation">Notifications</string>
+  <string name="notify_all">All messages</string>
+  <string name="notify_mentions">Only mentions and direct messages</string>
+  <string name="notify_none">Nothing</string>
+  <string name="notify_mute">Mute</string>
+  <string name="read_receipts">Send read receipts</string>
+  <string name="auto_follow_threads">Follow threads I\'m mentioned in</string>
+  <string name="custom_status_title">Custom status</string>
+  <string name="custom_status_hint">What are you up to?</string>
+  <string name="custom_status_set">Set until tonight</string>
+  <string name="custom_status_clear">Clear</string>
+  <string name="custom_status_emoji">Emoji</string>
+  <string name="custom_status_text">Status</string>
+  <string name="custom_status_missing">Enter a status text.</string>
+  <string name="profile_name_change">Change name</string>
+  <string name="profile_name_label">Your name</string>
+  <string name="profile_name_save">Save name</string>
+  <string name="profile_name_reset">Use name from sign-in</string>
+  <string name="profile_name_empty">Enter a name, or use the name from your sign-in.</string>
+  <string name="profile_name_invalid">The name can\'t contain control characters.</string>
+  <string name="profile_name_rejected">The name was refused. It may be too long, or your organization no longer allows changing it.</string>
+  <string name="export_diagnostics">Export diagnostics</string>
+  <string name="export_diagnostics_summary">Share the app and system version and recent log lines with support. Nothing is sent until you pick an app.</string>
+  <string name="export_diagnostics_share_title">TeamCraft diagnostics</string>
+  <string name="export_diagnostics_failed">Could not export the diagnostics.</string>
+</resources>

@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO key_bags (user_id, version, encrypted_key_bag, wrapped_backup_keys)\n         VALUES ($1, 1, $2, $3)\n         ON CONFLICT (user_id) DO UPDATE SET version = key_bags.version + 1,\n           encrypted_key_bag = EXCLUDED.encrypted_key_bag,\n           wrapped_backup_keys = EXCLUDED.wrapped_backup_keys, updated_at = now()\n         RETURNING version",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "key_bags",
+            "name": "version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fc033bd977c8818a83240b6770efec38c1c90b82108c5c1a7c4b0f43f08642fa"
+}

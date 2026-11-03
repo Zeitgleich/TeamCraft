@@ -1,0 +1,84 @@
+/* A round button at the right edge of the feed, above the composer: it floats over the list and
+   never takes room from it. A count badge shows the messages that arrived below. */
+.jump-latest {
+  position: absolute;
+  right: var(--space-4);
+  bottom: var(--space-3);
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--accent-strong);
+  box-shadow: var(--shadow-card);
+  animation: jump-latest-in var(--dur-base) var(--ease-out);
+}
+
+.jump-latest-count {
+  position: absolute;
+  top: -0.375rem;
+  right: -0.375rem;
+  background: var(--accent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .jump-latest:hover {
+    background: var(--surface-3);
+  }
+}
+
+@keyframes jump-latest-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.9);
+  }
+}
+
+/* Reduced motion: it fades in, nothing moves. */
+@keyframes jump-latest-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jump-latest {
+    animation-name: jump-latest-fade;
+  }
+}
+
+/* "Jump to latest" and "jump to reaction" stack at the right edge, the newest-first one at the
+   bottom; the stack lets clicks on the feed between them through. */
+.jump-stack {
+  position: absolute;
+  right: var(--space-4);
+  bottom: var(--space-3);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  pointer-events: none;
+}
+
+.jump-stack > .jump-latest {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  pointer-events: auto;
+}
+
+.jump-stack > .jump-latest:active {
+  transform: scale(0.94);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.jump-reaction .badge-count {
+  position: absolute;
+  top: -0.375rem;
+  right: -0.375rem;
+}

@@ -41,17 +41,21 @@ async fn deactivating_a_user_ends_access_and_reactivating_restores_it() {
     matches!(refused.status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
     "{refused:?}"
   );
-  // Her devices are revoked, and nothing reaches her any more.
-  let devices = stack
-    .get(&alice.tokens, &format!("/admin/users/{carol_id}/devices"))
-    .await
-    .expect(StatusCode::OK);
-  let listed = devices.body["devices"].as_array().unwrap();
-  assert!(
-    !listed.is_empty() && listed.iter().all(|device| device["is_revoked"] == true),
-    "{}",
-    devices.body
-  );
+  // The account is suspended, not removed (#666): her devices stay, so a reactivation restores
+  // everything, but nothing reaches her any more.
+  let active_devices = || async {
+    let devices = stack
+      .get(&alice.tokens, &format!("/admin/users/{carol_id}/devices"))
+      .await
+      .expect(StatusCode::OK);
+    let listed = devices.body["devices"].as_array().unwrap();
+    assert!(!listed.is_empty(), "{}", devices.body);
+    listed
+      .iter()
+      .filter(|device| device["is_revoked"] != true)
+      .count()
+  };
+  assert_eq!(active_devices().await, 1);
   // The server closes her gateway connection...
   let deadline = Instant::now() + Duration::from_secs(10);
   while carol.client.pump(&mut carol.gateway).await.is_ok() {
@@ -82,6 +86,7 @@ async fn deactivating_a_user_ends_access_and_reactivating_restores_it() {
     .await
     .expect(StatusCode::NO_CONTENT);
   stack.get(&carol.tokens, "/me").await.expect(StatusCode::OK);
+  assert_eq!(active_devices().await, 1);
 
   stack.stop().await;
 }

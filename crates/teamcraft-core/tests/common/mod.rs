@@ -2,9 +2,12 @@
 #![allow(clippy::unwrap_used, dead_code)]
 
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeGateway, FakeServer, FakeServerApi};
+use teamcraft_core::clock::Clock;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
 use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
@@ -38,13 +41,24 @@ impl Peer {
     Self::enroll_with(server.add_user(name), name, settings).await
   }
 
-  async fn enroll_with(api: FakeServerApi, name: &str, client_settings: ClientSettings) -> Self {
+  /// Enrolls a device of the user behind `api` with other client settings.
+  pub async fn enroll_with(api: FakeServerApi, name: &str, client_settings: ClientSettings) -> Self {
+    Self::enroll_on_clock(api, name, client_settings, clock()).await
+  }
+
+  /// Like [`Self::enroll_with`], on a clock the test moves.
+  pub async fn enroll_on_clock(
+    api: FakeServerApi,
+    name: &str,
+    client_settings: ClientSettings,
+    clock: Box<dyn Clock>,
+  ) -> Self {
     let store = Arc::new(MemoryStore::new());
     let mut client = PendingEnrollment::new()
       .complete(
         api.clone(),
         store.clone(),
-        clock(),
+        clock,
         client_settings,
         options(PASSPHRASE),
       )
@@ -76,31 +90,68 @@ impl Peer {
       })
       .collect()
   }
+
+  /// The content key ID the server stored for the text message `text` this peer has.
+  pub async fn content_key_of(&self, conversation: ConversationId, text: &str) -> Vec<u8> {
+    let server_id = self
+      .store
+      .messages(conversation, MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .find(|message| matches!(&message.content, MessageContent::Text { body, .. } if body == text))
+      .and_then(|message| message.maybe_server_id)
+      .unwrap();
+    self
+      .api
+      .list_messages(conversation, &teamcraft_proto::ListMessagesQuery::default())
+      .await
+      .unwrap()
+      .messages
+      .into_iter()
+      .find(|message| message.id == server_id)
+      .unwrap()
+      .content_key_id
+      .as_slice()
+      .to_vec()
+  }
 }
 
 /// Links a second device of `owner` over the relay (e2ee.md §5) and enrolls it.
 pub async fn link_device(owner: &mut Peer) -> TestClient {
+  link_device_with(owner, settings()).await
+}
+
+/// Links a further device of `owner` with other client settings.
+pub async fn link_device_with(owner: &mut Peer, client_settings: ClientSettings) -> TestClient {
+  link_device_on_clock(owner, client_settings, clock()).await
+}
+
+/// Links a further device of `owner` with other client settings, on `device_clock`.
+pub async fn link_device_on_clock(
+  owner: &mut Peer,
+  client_settings: ClientSettings,
+  device_clock: Box<dyn teamcraft_core::clock::Clock>,
+) -> TestClient {
   let api = owner.api.clone();
   let offer = teamcraft_core::LinkOffer::generate();
   let code = offer.to_code();
-  let (new_side, owner_side) = tokio::join!(
+  // Not `tokio::join!`: this module is shared with the browser tests, which have no tokio.
+  let (new_side, owner_side) = futures_util::future::join(
     teamcraft_core::client::NewDeviceLink::connect(&api, &offer),
-    owner.client.start_link_approval(&code)
-  );
-  owner
-    .client
-    .complete_link_approval(owner_side.unwrap())
-    .await
-    .unwrap();
-  let link_options = linked_options(new_side.unwrap().receive_secrets().await.unwrap());
+    owner.client.start_link_approval(&code),
+  )
+  .await;
+  // The owner's device succeeds only once the new device confirmed the transfer.
+  let new_store = Arc::new(MemoryStore::new());
+  let (approved, received) = futures_util::future::join(
+    owner.client.complete_link_approval(owner_side.unwrap()),
+    new_side.unwrap().receive_secrets(&new_store, "Test device"),
+  )
+  .await;
+  approved.unwrap();
+  let link_options = linked_options(received.unwrap());
   PendingEnrollment::new()
-    .complete(
-      api,
-      Arc::new(MemoryStore::new()),
-      clock(),
-      settings(),
-      link_options,
-    )
+    .complete(api, new_store, device_clock, client_settings, link_options)
     .await
     .unwrap()
 }
@@ -168,5 +219,58 @@ pub fn linked_options(secrets: teamcraft_core::client::LinkedSecrets) -> Enrollm
   EnrollmentOptions {
     secret: EnrollmentSecret::Linked(secrets),
     ..options(PASSPHRASE)
+  }
+}
+
+// Native only: the browser tests have no tokio.
+#[cfg(not(target_arch = "wasm32"))]
+/// Wall-clock time that follows tokio's (paused) clock, so a runner's deadlines and its sleeps
+/// agree. The wall clock can also jump ahead on its own, as it does when a laptop wakes up (tokio's
+/// clock is monotonic and stands still during sleep). Clones share the jumps.
+#[derive(Clone)]
+pub struct TokioClock {
+  started: tokio::time::Instant,
+  jumped_ms: Arc<AtomicI64>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Moves a [`TokioClock`]'s wall clock ahead.
+#[derive(Clone)]
+pub struct ClockJump(Arc<AtomicI64>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TokioClock {
+  pub fn new() -> (Self, ClockJump) {
+    let jumped_ms = Arc::new(AtomicI64::new(0));
+    let clock = Self {
+      started: tokio::time::Instant::now(),
+      jumped_ms: jumped_ms.clone(),
+    };
+    (clock, ClockJump(jumped_ms))
+  }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Clock for TokioClock {
+  fn now_ms(&self) -> i64 {
+    1_800_000_000_000
+      + i64::try_from(self.started.elapsed().as_millis()).unwrap()
+      + self.jumped_ms.load(Ordering::SeqCst)
+  }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ClockJump {
+  pub fn forward(&self, duration: std::time::Duration) {
+    self
+      .0
+      .fetch_add(i64::try_from(duration.as_millis()).unwrap(), Ordering::SeqCst);
+  }
+
+  /// The wall clock set back (NTP after a drift, a user fixing the time).
+  pub fn backward(&self, duration: std::time::Duration) {
+    self
+      .0
+      .fetch_sub(i64::try_from(duration.as_millis()).unwrap(), Ordering::SeqCst);
   }
 }

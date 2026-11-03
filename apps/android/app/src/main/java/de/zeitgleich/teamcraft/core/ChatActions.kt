@@ -96,6 +96,18 @@ object ChatActions {
 
   fun markRead(conversation: String) = action("mark_read") { put("conversation", conversation) }
 
+  /** The reactions to these own messages were on screen (or jumped to): seen, on every device. */
+  fun markReactionsSeen(conversation: String, messages: List<String>) = action("mark_reactions_seen") {
+    put("conversation", conversation)
+    put("messages", JsonArray(messages.map(::JsonPrimitive)))
+  }
+
+  /** The reader came near the oldest row held: one more page from the server. */
+  fun loadOlderHistory(conversation: String) = action("load_older_history") { put("conversation", conversation) }
+
+  /** Reads again how far the others read: receipts sent while the app was offline never arrive. */
+  fun refreshReadReceipts(conversation: String) = action("refresh_read_receipts") { put("conversation", conversation) }
+
   fun markUnread(conversation: String, from: String) = action("mark_unread") {
     put("conversation", conversation)
     put("from", from)
@@ -119,6 +131,13 @@ object ChatActions {
     put("message", message)
   }
 
+  /** Stops one file of an own message that is still going up; the message goes without it. */
+  fun cancelUpload(conversation: String, message: String, fileId: String) = action("cancel_upload") {
+    put("conversation", conversation)
+    put("message", message)
+    put("file_id", fileId)
+  }
+
   fun acknowledge(conversation: String, message: String) = action("acknowledge") {
     put("conversation", conversation)
     put("message", message)
@@ -127,6 +146,13 @@ object ChatActions {
   fun download(conversation: String, message: String) = action("download_file") {
     put("conversation", conversation)
     put("message", message)
+  }
+
+  /** One file of a message: the image viewer fetches only the picture on screen. */
+  fun downloadAttachment(conversation: String, message: String, fileId: String) = action("download_attachment") {
+    put("conversation", conversation)
+    put("message", message)
+    put("file_id", fileId)
   }
 
   fun setFavorite(conversation: String, isFavorite: Boolean) = action("set_favorite") {
@@ -164,7 +190,15 @@ object ChatActions {
 
   fun joinChannel(conversation: String) = action("join_channel") { put("conversation", conversation) }
 
-  fun leaveChannel(conversation: String) = action("leave_channel") { put("conversation", conversation) }
+  /** [deletesIfLast]: the user confirmed that this deletes a channel nobody else is in. */
+  fun leaveChannel(conversation: String, deletesIfLast: Boolean = false) = action("leave_channel") {
+    put("conversation", conversation)
+    put("deletes_if_last", deletesIfLast)
+  }
+
+  fun deleteChannel(conversation: String) = action("delete_channel") { put("conversation", conversation) }
+
+  fun deleteSpace(space: String) = action("delete_space") { put("space", space) }
 
   /** `update_channel` with only `maybe_is_archived` set; the other changes stay absent. */
   fun archiveChannel(conversation: String, isArchived: Boolean = true) = action("update_channel") {
@@ -178,6 +212,8 @@ object ChatActions {
   }
 
   fun openDm(user: String) = action("open_dm") { put("user", user) }
+
+  fun openGroupDm(users: List<String>) = action("open_group_dm") { put("users", buildJsonArray { users.forEach { add(JsonPrimitive(it)) } }) }
 
   fun changePassphrase(passphrase: String) = action("change_passphrase") { put("passphrase", passphrase) }
 
@@ -223,6 +259,10 @@ object ChatQueries {
   fun typingUsers(conversation: String) = query("typing_users") { put("conversation", conversation) }
 
   fun firstUnread(conversation: String) = query("first_unread") { put("conversation", conversation) }
+
+  fun unseenReactions(conversation: String) = query("unseen_reactions") { put("conversation", conversation) }
+
+  fun olderHistory(conversation: String) = query("older_history") { put("conversation", conversation) }
 
   fun draft(conversation: String, maybeThread: String?) = query("draft") {
     put("conversation", conversation)

@@ -7,7 +7,8 @@
 //! Capture for screens and windows (both compile-checked only).
 //!
 //! A screen share's sound (the computer's playback without the call): PipeWire on Linux, WASAPI
-//! process loopback on Windows, ScreenCaptureKit on macOS.
+//! process loopback on Windows. On macOS the share's own ScreenCaptureKit stream captures the
+//! sound of what was picked, so it needs no Screen Recording permission (#914).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,19 +17,22 @@ use std::sync::mpsc as std_mpsc;
 use teamcraft_client_api::calls::{
   BackgroundEffect as UiBackgroundEffect, BackgroundPreset as UiBackgroundPreset,
 };
+use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
+use teamcraft_media::call_native::NativeCallError;
 use teamcraft_media::call_video::ReceivedVideoFrame;
+use teamcraft_media::camera_choice::CameraReport;
 use teamcraft_media::effects::{
   BackgroundEffect, BackgroundImage, BlurStrength, Compositor, EffectHandle, EffectsConfig, EffectsError,
   EffectsPipeline, PRESET_HEIGHT, PRESET_WIDTH, PhotoBackground, PresetBackground, SegmentationModel,
   TractSegmenter,
 };
 use teamcraft_media::system_audio::SystemAudioCapture;
-use teamcraft_media::video::{VideoResolution, simulcast_layers};
-use teamcraft_media::video_capture::{CameraInfo, CaptureFormat, VideoCapture};
+use teamcraft_media::video::{CAMERA_FRAMERATE, ScreenProfile, VideoResolution};
+use teamcraft_media::video_capture::{CameraInfo, CaptureError, CaptureFormat, VideoCapture};
 use teamcraft_media::video_codec::OpenH264Decoder;
 use teamcraft_media::video_jpeg::JpegTranscoder;
-use teamcraft_media::video_pipeline::FrameFilter;
-use teamcraft_proto::{VideoCodec, VideoLayerInfo};
+use teamcraft_media::video_pipeline::{BlackReport, FrameFilter};
+use teamcraft_proto::{MediaStreamId, VideoCodec, VideoLayerInfo, VideoTrackKind};
 use tracing::{debug, info, warn};
 
 use super::VideoSink;
@@ -38,22 +42,11 @@ use super::VideoSink;
 const MODEL_VARIABLE: &str = "TEAMCRAFT_SEGMENTATION_MODEL";
 /// The bundled model, relative to the app's resources (tauri.models.conf.json).
 pub(crate) const BUNDLED_MODEL: &str = "models/selfie_segmentation_landscape.onnx";
-const CAMERA_FORMAT: CaptureFormat = CaptureFormat {
-  resolution: VideoResolution {
-    width: 1280,
-    height: 720,
-  },
-  framerate: 30,
-};
-const SCREEN_FORMAT: CaptureFormat = CaptureFormat {
-  resolution: VideoResolution {
-    width: 1920,
-    height: 1080,
-  },
-  framerate: 15,
-};
-const CAMERA_BITRATE_BPS: u32 = 1_500_000;
-const SCREEN_BITRATE_BPS: u32 = 2_000_000;
+/// How long the portal's camera stream may take to its first frame before V4L2 is tried: well
+/// inside the call's first-picture check (`video_pipeline::FIRST_PICTURE_TIMEOUT`, 10 s), so the
+/// V4L2 camera still has time to deliver.
+#[cfg(target_os = "linux")]
+const PORTAL_CAMERA_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Cameras for the device picker.
 #[cfg(target_os = "linux")]
@@ -71,111 +64,334 @@ pub(super) fn list_cameras() -> Vec<CameraInfo> {
   Vec::new()
 }
 
+/// A camera error as the UI reads it (`call_<failure>: detail`), so the user gets a message in their
+/// language that fits the cause (#819: declined on the iPhone, in use, no usable mode, or a reason
+/// the system doesn't tell) instead of "close other apps" for all of them.
+pub(super) fn camera_failure_wire(error: &CaptureError) -> String {
+  match camera_failure(error) {
+    Some(failure) => ActionFailure::new(FailureKind::Call(failure), error.to_string()).to_wire(),
+    None => error.to_string(),
+  }
+}
+
+/// The cause of a camera error, as the UI words it.
+fn camera_failure(error: &CaptureError) -> Option<CallFailure> {
+  match error {
+    CaptureError::NoDevice(_) => Some(CallFailure::CameraMissing),
+    CaptureError::Denied(_) => Some(CallFailure::CameraDenied),
+    CaptureError::InUse(_) => Some(CallFailure::CameraInUse),
+    CaptureError::NotConnected(_) => Some(CallFailure::CameraNotConnected),
+    CaptureError::NoUsableMode(_) | CaptureError::UnsupportedFormat(_) => {
+      Some(CallFailure::CameraUnsupported)
+    },
+    // Only screens need Wayland; a camera never fails this way.
+    CaptureError::Device(_) | CaptureError::NeedsWayland => Some(CallFailure::CameraUnavailable),
+    CaptureError::Cancelled(_) | CaptureError::Frame(_) => None,
+  }
+}
+
+/// A failed start of an own video track as the UI reads it: the capture's own errors as for
+/// [`camera_failure_wire`] and [`screen_failure_wire`], a track that started but sends no picture
+/// (issue #683) as its own failure.
+pub(super) fn start_failure_wire(kind: &VideoTrackKind, error: &NativeCallError) -> String {
+  let is_screen = *kind == VideoTrackKind::Screen;
+  match error {
+    NativeCallError::VideoStart(start) => {
+      let failure = if is_screen {
+        CallFailure::ScreenNoPicture
+      } else {
+        CallFailure::CameraNoPicture
+      };
+      ActionFailure::new(FailureKind::Call(failure), start.to_string()).to_wire()
+    },
+    NativeCallError::Capture(capture) if is_screen => screen_failure_wire(capture),
+    NativeCallError::Capture(capture) => camera_failure_wire(capture),
+    other => other.to_string(),
+  }
+}
+
+/// A camera that stopped by itself mid-call (issue #920), as the UI reads it: the video is off.
+pub(super) fn camera_stopped_wire() -> String {
+  ActionFailure::new(
+    FailureKind::Call(CallFailure::CameraStopped),
+    "the camera ended by itself",
+  )
+  .to_wire()
+}
+
+/// An own track that sends nothing but black (issue #683), as the UI reads it: a hint, the track
+/// stays on.
+pub(super) fn black_pictures_wire(kind: &VideoTrackKind, report: BlackReport) -> String {
+  let failure = if *kind == VideoTrackKind::Screen {
+    CallFailure::ScreenBlack
+  } else {
+    CallFailure::CameraBlack
+  };
+  let detail = format!("{} black pictures in a row", report.frames);
+  ActionFailure::new(FailureKind::Call(failure), detail).to_wire()
+}
+
+/// A screen capture that couldn't start, as the UI reads it. A capture the system refused gets
+/// its own failure (#940): on macOS the UI then says how to renew the Screen Recording permission
+/// and offers its settings page.
+pub(super) fn screen_failure_wire(error: &CaptureError) -> String {
+  let failure = match error {
+    CaptureError::Denied(_) => CallFailure::ScreenDenied,
+    CaptureError::NeedsWayland => CallFailure::ScreenNeedsWayland,
+    _ => CallFailure::ScreenUnavailable,
+  };
+  let mut detail = error.to_string();
+  if let Some(permission) = screen_permission_note().filter(|_| failure == CallFailure::ScreenDenied) {
+    detail = format!("{detail} ({permission})");
+  }
+  ActionFailure::new(FailureKind::Call(failure), detail).to_wire()
+}
+
+/// What macOS says about the Screen Recording permission, for a refused share's details: refused
+/// although it applies points at a grant macOS no longer matches to this build (#940).
+#[cfg(target_os = "macos")]
+fn screen_permission_note() -> Option<&'static str> {
+  Some(
+    if teamcraft_media::capture_screencapturekit::has_screen_recording_permission() {
+      "Screen Recording permission: granted"
+    } else {
+      "Screen Recording permission: not granted"
+    },
+  )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn screen_permission_note() -> Option<&'static str> {
+  None
+}
+
+/// A screen or window the user picked, opened.
+pub(super) struct OpenedScreen {
+  pub(super) capture: Box<dyn VideoCapture>,
+  /// Restores the choice next time, where the platform has one.
+  pub(super) maybe_token: Option<String>,
+  /// The share's sound, when it was asked for.
+  pub(super) maybe_sound: Option<Box<dyn SystemAudioCapture>>,
+}
+
 /// Opens the camera (blocking: the portal may ask the user). A chosen device is a V4L2 path; the
-/// portal only offers "the camera", so it is tried for the default.
+/// portal only offers "the camera", so it is tried for the default (and for a chosen camera that
+/// is no longer listed). V4L2 tries the chosen or first camera and one fallback
+/// (`camera_choice`); the report says which one opened.
 #[cfg(target_os = "linux")]
-pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture>, String> {
+pub(super) fn open_camera(
+  maybe_id: Option<&str>,
+  limit: VideoResolution,
+) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
+  use teamcraft_media::camera_choice::{open_first, open_order};
+  use teamcraft_media::capture_fallback::FallbackCapture;
   use teamcraft_media::capture_portal::PortalCapture;
   use teamcraft_media::capture_v4l2::V4l2Camera;
 
-  if maybe_id.is_none() {
-    match PortalCapture::camera(CAMERA_FORMAT) {
-      Ok(capture) => return Ok(Box::new(capture)),
+  let format = camera_format(limit);
+  let cameras = list_cameras();
+  let maybe_listed = maybe_id.filter(|id| cameras.iter().any(|camera| camera.id == *id));
+  if maybe_listed.is_none() {
+    match PortalCapture::camera(format) {
+      Ok(capture) => {
+        info!("camera through the portal (PipeWire), V4L2 if it stays silent");
+        // The portal's stream can stay paused for good (#683): then the default camera directly.
+        let open_v4l2 = Box::new(move || {
+          V4l2Camera::open(None, format).map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
+        });
+        let capture =
+          FallbackCapture::new(Box::new(capture), "portal", open_v4l2, "V4L2", PORTAL_CAMERA_WAIT);
+        // The portal decides which camera; nothing to report.
+        return Ok((
+          Box::new(capture) as Box<dyn VideoCapture>,
+          CameraReport::default(),
+        ));
+      },
       Err(error) => info!(%error, "no camera through the portal; trying V4L2"),
     }
   }
-  V4l2Camera::open(maybe_id, CAMERA_FORMAT)
-    .map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
-    .map_err(|error| error.to_string())
+  info!(device = maybe_listed.unwrap_or("default"), "camera through V4L2");
+  let order = open_order(&cameras, maybe_listed);
+  let (camera, used) = open_first(&order, |camera| {
+    V4l2Camera::open(Some(camera.id.as_str()), format)
+  })
+  .map_err(|error| camera_failure_wire(&error))?;
+  let report = CameraReport::default();
+  report.set(used);
+  Ok((Box::new(camera) as Box<dyn VideoCapture>, report))
 }
 
+/// The camera opens when the capture starts (on its own thread); the report then says which one.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(super) fn open_camera(maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture>, String> {
-  teamcraft_media::capture_nokhwa::NokhwaCamera::open(maybe_id, CAMERA_FORMAT)
-    .map(|camera| Box::new(camera) as Box<dyn VideoCapture>)
-    .map_err(|error| error.to_string())
+pub(super) fn open_camera(
+  maybe_id: Option<&str>,
+  limit: VideoResolution,
+) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
+  let camera = teamcraft_media::capture_nokhwa::NokhwaCamera::open(maybe_id, camera_format(limit))
+    .map_err(|error| camera_failure_wire(&error))?;
+  let report = camera.report();
+  Ok((Box::new(camera) as Box<dyn VideoCapture>, report))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub(super) fn open_camera(_maybe_id: Option<&str>) -> Result<Box<dyn VideoCapture>, String> {
+pub(super) fn open_camera(
+  _maybe_id: Option<&str>,
+  _limit: VideoResolution,
+) -> Result<(Box<dyn VideoCapture>, CameraReport), String> {
   Err("cameras are not supported on this platform yet".into())
 }
 
-/// Asks for a screen or window (blocking: the portal shows its picker). Returns the capture and
-/// a token that restores the choice next time.
+/// Asks for a screen or window (blocking: the portal shows its picker), with a token that
+/// restores the choice next time. The sound is the computer's.
 #[cfg(target_os = "linux")]
 pub(super) fn open_screen(
   maybe_restore_token: Option<&str>,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
-  teamcraft_media::capture_portal::PortalCapture::screen(SCREEN_FORMAT, maybe_restore_token)
-    .map(|(capture, maybe_token)| (Box::new(capture) as Box<dyn VideoCapture>, maybe_token))
-    .map_err(|error| error.to_string())
+  profile: &ScreenProfile,
+  has_sound: bool,
+) -> Result<OpenedScreen, CaptureError> {
+  let (capture, maybe_token) =
+    teamcraft_media::capture_portal::PortalCapture::screen(screen_format(profile), maybe_restore_token)?;
+  Ok(OpenedScreen {
+    capture: Box::new(capture),
+    maybe_token,
+    maybe_sound: has_sound.then(open_system_audio),
+  })
 }
 
-/// The primary display, or the source a stored token names (`monitor:N`, `window:Title`).
+/// The primary display, or the source a stored token names (`monitor:N`, `window:Title`). The
+/// sound is the computer's.
 #[cfg(target_os = "windows")]
 pub(super) fn open_screen(
   maybe_restore_token: Option<&str>,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
+  profile: &ScreenProfile,
+  has_sound: bool,
+) -> Result<OpenedScreen, CaptureError> {
   use teamcraft_media::capture_windows::{ScreenSource, WindowsScreenCapture};
 
   let source = ScreenSource::from_token(maybe_restore_token);
   let maybe_token = source.to_token();
-  WindowsScreenCapture::open(source, SCREEN_FORMAT)
-    .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, maybe_token))
-    .map_err(|error| error.to_string())
+  let capture = WindowsScreenCapture::open(source, screen_format(profile))?;
+  Ok(OpenedScreen {
+    capture: Box::new(capture),
+    maybe_token,
+    maybe_sound: has_sound.then(open_system_audio),
+  })
 }
 
 /// What the user picks in the system's picker each time (a window, an application or a display;
-/// never TeamCraft's own windows). The first share asks for the Screen Recording permission. Runs on a blocking thread: the picker waits for the
-/// user.
+/// never TeamCraft's own windows, left out by the app's bundle id). The picker grants the capture
+/// of what was picked: no Screen Recording permission is asked for here (it applies only after an
+/// app restart, issue #683). The sound is the picked content's, captured by the same stream, so it
+/// needs no permission either (#914). Runs on a blocking thread: the picker waits for the user.
 #[cfg(target_os = "macos")]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
+  profile: &ScreenProfile,
+  has_sound: bool,
+) -> Result<OpenedScreen, CaptureError> {
+  use objc2_foundation::NSBundle;
   use teamcraft_media::capture_screencapturekit::ScreenCaptureKitScreen;
 
-  ScreenCaptureKitScreen::pick(SCREEN_FORMAT)
-    .map(|capture| (Box::new(capture) as Box<dyn VideoCapture>, None))
-    .map_err(|error| error.to_string())
+  // `None` when not run from the app bundle (development).
+  let maybe_bundle_id = NSBundle::mainBundle()
+    .bundleIdentifier()
+    .map(|bundle_id| bundle_id.to_string());
+  let mut screen = ScreenCaptureKitScreen::pick(screen_format(profile), maybe_bundle_id.as_deref())?;
+  let maybe_sound = has_sound.then(|| Box::new(screen.sound()) as Box<dyn SystemAudioCapture>);
+  Ok(OpenedScreen {
+    capture: Box::new(screen),
+    maybe_token: None,
+    maybe_sound,
+  })
 }
+
+/// Closes the system's screen picker of a share that was stopped while it was open. macOS hides
+/// ScreenCaptureKit's picker; the Linux portal's dialog stays until the user answers it, which
+/// then goes nowhere.
+#[cfg(target_os = "macos")]
+pub(super) fn close_screen_picker() {
+  teamcraft_media::capture_screencapturekit::ScreenCaptureKitScreen::close_picker();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn close_screen_picker() {}
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub(super) fn open_screen(
   _maybe_restore_token: Option<&str>,
-) -> Result<(Box<dyn VideoCapture>, Option<String>), String> {
-  Err("screen sharing is not supported on this platform yet".into())
+  _profile: &ScreenProfile,
+  _has_sound: bool,
+) -> Result<OpenedScreen, CaptureError> {
+  Err(CaptureError::NoDevice("screen capture on this platform"))
 }
 
 /// The computer's sound for a screen share, without this app's own playback.
 #[cfg(target_os = "linux")]
-pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
+fn open_system_audio() -> Box<dyn SystemAudioCapture> {
   Box::new(teamcraft_media::system_audio_pipewire::PipeWireSystemAudio::new())
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
+fn open_system_audio() -> Box<dyn SystemAudioCapture> {
   Box::new(teamcraft_media::system_audio_wasapi::WasapiSystemAudio::new())
 }
 
-#[cfg(target_os = "macos")]
-pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
-  Box::new(teamcraft_media::capture_screencapturekit::ScreenCaptureKitAudio::new())
+/// What the camera is asked for: the size it is sent at, at most (`video::camera_limit`: 1080p
+/// unless the user picked less, #967), at 30 fps. A camera without that mode opens in the closest
+/// one (`capture_negotiate`).
+fn camera_format(limit: VideoResolution) -> CaptureFormat {
+  CaptureFormat {
+    resolution: limit,
+    framerate: CAMERA_FRAMERATE,
+  }
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-pub(super) fn open_system_audio() -> Box<dyn SystemAudioCapture> {
-  Box::new(teamcraft_media::system_audio::UnsupportedSystemAudio)
+/// The simulcast layers for a camera that delivers `source`, sent within `limit`: 1080p, 720p,
+/// 360p and 180p from a 1080p camera (#978), 720p, 360p and 180p from a 720p one
+/// (`video::camera_layers`). The call keeps the top three where the SFU takes no more
+/// (`VideoSendConfig::within_layer_limit`). The camera may capture more (4K, 60 fps); what is sent
+/// stays within the limit, at 30 fps.
+pub(super) fn camera_layers(source: VideoResolution, limit: VideoResolution) -> Vec<VideoLayerInfo> {
+  teamcraft_media::video::camera_layers(source, CAMERA_FRAMERATE, limit)
 }
 
-/// Three simulcast layers for a camera.
-pub(super) fn camera_layers(format: CaptureFormat) -> Vec<VideoLayerInfo> {
-  simulcast_layers(format.resolution, format.framerate, CAMERA_BITRATE_BPS, 3)
+/// The largest picture a screen share of `profile` asks the capture for (#530; 4K for a 4K share,
+/// #565).
+fn screen_format(profile: &ScreenProfile) -> CaptureFormat {
+  let (resolution, framerate) = profile.limits();
+  CaptureFormat {
+    resolution,
+    framerate,
+  }
 }
 
-/// One layer for a screen (no simulcast: text must stay readable).
-pub(super) fn screen_layers(format: CaptureFormat) -> Vec<VideoLayerInfo> {
-  simulcast_layers(format.resolution, format.framerate, SCREEN_BITRATE_BPS, 1)
+/// The layers of a screen: the picture within the profile's limits, and a half-size one for weak
+/// links (and a quarter-size one above 1440p).
+pub(super) fn screen_layers(format: CaptureFormat, profile: &ScreenProfile) -> Vec<VideoLayerInfo> {
+  profile.layers(format.resolution, format.framerate)
+}
+
+/// The video codecs this desktop decodes, for the call's capabilities (#565): H.264 always (the
+/// shell turns it into images where its page can't decode it), and what else the page told it
+/// it decodes with WebCodecs (AV1); the shell can't turn those into images.
+pub(super) fn decodable_codecs(page: &[VideoCodec]) -> Vec<VideoCodec> {
+  let mut codecs: Vec<VideoCodec> = page
+    .iter()
+    .filter(|codec| **codec == VideoCodec::Av1)
+    .cloned()
+    .collect();
+  codecs.push(VideoCodec::H264);
+  codecs
+}
+
+/// The chosen camera, opened, with the effects that go in front of it: what the call sends and
+/// the pre-join check shows.
+pub(super) struct OpenedCamera {
+  pub(super) capture: Box<dyn VideoCapture>,
+  /// Which camera delivers, once the capture started (#819).
+  pub(super) report: CameraReport,
+  pub(super) maybe_filter: Option<FrameFilter>,
+  pub(super) maybe_handle: Option<EffectHandle>,
 }
 
 /// The effects filter for the camera, if a segmentation model and a GPU are available. The model
@@ -238,19 +454,28 @@ const JPEG_FLAG: u8 = 0x02;
 const CODEC_H264: u8 = 1;
 const CODEC_VP9: u8 = 2;
 const CODEC_JPEG: u8 = 3;
+const CODEC_AV1: u8 = 4;
 
 /// Sends a watched track's frames as they arrive, for the webview's WebCodecs decoder.
-pub(super) fn h264_sink(send: impl Fn(Vec<u8>) + Send + Sync + 'static) -> VideoSink {
-  Arc::new(move |frame| send(video_message(frame)))
+pub(super) fn h264_sink(send: impl Fn(Vec<u8>) -> bool + Send + Sync + 'static) -> VideoSink {
+  // An undelivered frame costs nothing further here: no thread runs for this sink.
+  Arc::new(move |frame| {
+    let _ = send(video_message(frame));
+  })
 }
 
 /// Decodes a watched track on a thread of its own and sends JPEG images at a reduced rate, for
-/// webviews without WebCodecs. The thread ends when the sink is dropped (unwatch, call end).
-pub(super) fn jpeg_sink(send: impl Fn(Vec<u8>) + Send + 'static) -> VideoSink {
+/// webviews without WebCodecs. The thread ends when the sink is dropped (unwatch, call end) or
+/// an image can't be delivered (the webview is gone). A frame that doesn't decode calls
+/// `keyframe_needed` (once until the next keyframe).
+pub(super) fn jpeg_sink(
+  send: impl Fn(Vec<u8>) -> bool + Send + 'static,
+  keyframe_needed: impl Fn() + Send + 'static,
+) -> VideoSink {
   let (frames, queue) = std_mpsc::channel::<ReceivedVideoFrame>();
   let spawned = std::thread::Builder::new()
     .name("teamcraft-video-jpeg".into())
-    .spawn(move || transcode_to_jpeg(&queue, &send));
+    .spawn(move || transcode_to_jpeg(&queue, &send, &keyframe_needed));
   if let Err(error) = spawned {
     warn!(%error, "no thread for JPEG video; the track stays blank");
   }
@@ -259,7 +484,11 @@ pub(super) fn jpeg_sink(send: impl Fn(Vec<u8>) + Send + 'static) -> VideoSink {
   Arc::new(move |frame| drop(frames.send(frame.clone())))
 }
 
-fn transcode_to_jpeg(queue: &std_mpsc::Receiver<ReceivedVideoFrame>, send: &dyn Fn(Vec<u8>)) {
+fn transcode_to_jpeg(
+  queue: &std_mpsc::Receiver<ReceivedVideoFrame>,
+  send: &dyn Fn(Vec<u8>) -> bool,
+  keyframe_needed: &dyn Fn(),
+) {
   let decoder = match OpenH264Decoder::new() {
     Ok(decoder) => decoder,
     Err(error) => {
@@ -268,41 +497,62 @@ fn transcode_to_jpeg(queue: &std_mpsc::Receiver<ReceivedVideoFrame>, send: &dyn 
     },
   };
   let mut transcoder = JpegTranscoder::new(Box::new(decoder));
+  let mut is_broken = false;
   while let Ok(frame) = queue.recv() {
     let timestamp_us = timestamp_us(&frame);
+    if frame.is_keyframe {
+      is_broken = false;
+    }
     match transcoder.push(&frame.data, timestamp_us) {
-      Ok(Some(jpeg)) => send(message(
-        KEYFRAME_FLAG | JPEG_FLAG,
-        CODEC_JPEG,
-        &frame,
-        timestamp_us,
-        &jpeg,
-      )),
+      Ok(Some(jpeg)) => {
+        if !send(jpeg_message(frame.stream_id, timestamp_us, &jpeg)) {
+          debug!("the webview takes no more images; JPEG video stops");
+          return;
+        }
+      },
       Ok(None) => {},
-      // A broken frame: later ones recover with the next keyframe.
-      Err(error) => debug!(%error, "frame not decodable"),
+      // A broken frame: later ones recover with the next keyframe, asked for once.
+      Err(error) => {
+        debug!(%error, "frame not decodable");
+        if !is_broken {
+          is_broken = true;
+          keyframe_needed();
+        }
+      },
     }
   }
 }
 
 /// One received frame for the webview, as a single binary channel message:
-/// `[version u8][flags u8: bit 0 keyframe, bit 1 JPEG][codec u8: 1 H.264, 2 VP9, 3 JPEG, 0 other]`
-/// `[reserved u8][stream id u32 BE][timestamp µs u64 BE]` and then the payload (H.264 in Annex B,
-/// or one complete JPEG image).
+/// `[version u8][flags u8: bit 0 keyframe, bit 1 JPEG][codec u8: 1 H.264, 2 VP9, 3 JPEG, 4 AV1,`
+/// `0 other][reserved u8][stream id u32 BE][timestamp µs u64 BE]` and then the payload (H.264 in
+/// Annex B, AV1 as OBUs (#565), or one complete JPEG image).
 pub(super) fn video_message(frame: &ReceivedVideoFrame) -> Vec<u8> {
   let codec = match frame.codec {
     VideoCodec::H264 => CODEC_H264,
     VideoCodec::Vp9 => CODEC_VP9,
-    _ => 0,
+    VideoCodec::Av1 => CODEC_AV1,
+    VideoCodec::Unknown(_) => 0,
   };
   let flags = if frame.is_keyframe { KEYFRAME_FLAG } else { 0 };
-  message(flags, codec, frame, timestamp_us(frame), &frame.data)
+  message(flags, codec, frame.stream_id, timestamp_us(frame), &frame.data)
 }
 
-fn message(flags: u8, codec: u8, frame: &ReceivedVideoFrame, timestamp_us: u64, payload: &[u8]) -> Vec<u8> {
+/// One complete JPEG image in the format of [`video_message`] (a keyframe: it stands alone).
+pub(super) fn jpeg_message(stream_id: MediaStreamId, timestamp_us: u64, jpeg: &[u8]) -> Vec<u8> {
+  message(
+    KEYFRAME_FLAG | JPEG_FLAG,
+    CODEC_JPEG,
+    stream_id,
+    timestamp_us,
+    jpeg,
+  )
+}
+
+fn message(flags: u8, codec: u8, stream_id: MediaStreamId, timestamp_us: u64, payload: &[u8]) -> Vec<u8> {
   let mut message = Vec::with_capacity(16 + payload.len());
   message.extend_from_slice(&[VIDEO_MESSAGE_VERSION, flags, codec, 0]);
-  message.extend_from_slice(&frame.stream_id.0.to_be_bytes());
+  message.extend_from_slice(&stream_id.0.to_be_bytes());
   message.extend_from_slice(&timestamp_us.to_be_bytes());
   message.extend_from_slice(payload);
   message
@@ -342,7 +592,8 @@ pub(super) fn media_effect(
 }
 
 /// A picture file of the user's (JPEG or PNG) ready for the compositor: decoded and scaled to the
-/// preset size (calls send at most 720p). Blocking: decoding takes a moment.
+/// preset size (720p; the compositor scales it to a larger camera picture). Blocking: decoding
+/// takes a moment.
 pub(crate) fn decode_background(picture: &[u8]) -> Result<Arc<BackgroundImage>, String> {
   BackgroundImage::decode(picture)
     .map(|image| Arc::new(image.fit_within(PRESET_WIDTH, PRESET_HEIGHT)))
@@ -400,14 +651,161 @@ fn illustration(preset: UiBackgroundPreset) -> PresetBackground {
 
 #[cfg(test)]
 mod tests {
+  use teamcraft_proto::ScreenContentMode;
+
   use super::*;
 
+  /// #819: every cause gets its own hint; "close other apps" only when another app holds it.
   #[test]
-  fn cameras_get_three_layers_and_screens_one() {
-    assert_eq!(camera_layers(CAMERA_FORMAT).len(), 3);
-    let screen = screen_layers(SCREEN_FORMAT);
-    assert_eq!(screen.len(), 1);
-    assert_eq!((screen[0].width, screen[0].height), (1920, 1080));
+  fn camera_errors_reach_the_user_as_call_failures() {
+    let wire = |error: CaptureError| camera_failure_wire(&error);
+    for (error, prefix) in [
+      (CaptureError::UnsupportedFormat("Bgra".into()), "call_camera_unsupported: "),
+      (
+        CaptureError::NoUsableMode(
+          "Could not set device property CameraFormat with value 640x480@15FPS, YUYV Format: Not Found/Rejected/Unsupported".into(),
+        ),
+        "call_camera_unsupported: ",
+      ),
+      (CaptureError::NoDevice("camera"), "call_camera_missing: "),
+      (CaptureError::Denied("camera"), "call_camera_denied: "),
+      (CaptureError::InUse("Already in use".into()), "call_camera_in_use: "),
+      (CaptureError::NotConnected("declined".into()), "call_camera_not_connected: "),
+      (CaptureError::Device("Failed to create input".into()), "call_camera_unavailable: "),
+    ] {
+      let text = wire(error);
+      assert!(text.starts_with(prefix), "{text}");
+    }
+    assert_eq!(
+      wire(CaptureError::Cancelled("camera")),
+      CaptureError::Cancelled("camera").to_string()
+    );
+  }
+
+  #[test]
+  fn video_that_starts_without_pictures_reaches_the_user_per_kind() {
+    use teamcraft_media::video_pipeline::VideoStartError;
+
+    let no_frames = NativeCallError::VideoStart(VideoStartError::NoFrames("camera"));
+    let wire = start_failure_wire(&VideoTrackKind::Camera, &no_frames);
+    assert!(wire.starts_with("call_camera_no_picture: "), "{wire}");
+    assert_eq!(
+      ActionFailure::from_wire(&wire).kind,
+      FailureKind::Call(CallFailure::CameraNoPicture)
+    );
+    let not_encoded = NativeCallError::VideoStart(VideoStartError::NotEncoded {
+      source_name: "screen capture",
+      captured: 3,
+      detail: "OpenH264 gave no picture".into(),
+    });
+    assert!(
+      start_failure_wire(&VideoTrackKind::Screen, &not_encoded).starts_with("call_screen_no_picture: ")
+    );
+    // A capture that didn't open keeps its own wording.
+    let busy = NativeCallError::Capture(CaptureError::InUse("busy".into()));
+    assert!(start_failure_wire(&VideoTrackKind::Camera, &busy).starts_with("call_camera_in_use: "));
+    assert!(start_failure_wire(&VideoTrackKind::Screen, &busy).starts_with("call_screen_unavailable: "));
+    // #940: a share the system refused says how to renew the permission.
+    let refused = NativeCallError::Capture(CaptureError::Denied("screen"));
+    let failure = ActionFailure::from_wire(&start_failure_wire(&VideoTrackKind::Screen, &refused));
+    assert_eq!(failure.kind, FailureKind::Call(CallFailure::ScreenDenied));
+    assert!(
+      failure
+        .detail
+        .starts_with("the user or the system denied access to the screen")
+    );
+    // Linux on X11: the share says to use a Wayland session.
+    let x11 = NativeCallError::Capture(CaptureError::NeedsWayland);
+    assert!(start_failure_wire(&VideoTrackKind::Screen, &x11).starts_with("call_screen_needs_wayland: "));
+    assert_eq!(
+      start_failure_wire(&VideoTrackKind::Camera, &NativeCallError::TaskEnded),
+      NativeCallError::TaskEnded.to_string()
+    );
+  }
+
+  /// Issue #683: a track that sends only black tells the user why it may be black, per kind.
+  #[test]
+  fn black_video_reaches_the_user_per_kind() {
+    let report = BlackReport { frames: 90 };
+    let screen = ActionFailure::from_wire(&black_pictures_wire(&VideoTrackKind::Screen, report));
+    assert_eq!(screen.kind, FailureKind::Call(CallFailure::ScreenBlack));
+    assert_eq!(screen.detail, "90 black pictures in a row");
+    let camera = ActionFailure::from_wire(&black_pictures_wire(&VideoTrackKind::Camera, report));
+    assert_eq!(camera.kind, FailureKind::Call(CallFailure::CameraBlack));
+    assert!(
+      CallFailure::CameraBlack.is_camera_failure(),
+      "offers another camera"
+    );
+  }
+
+  #[test]
+  fn a_4k_camera_is_sent_as_1080p_or_as_the_user_caps_it() {
+    use teamcraft_media::video::{CAMERA_HD_BITRATE_BPS, CAMERA_MAX_BITRATE_BPS, camera_limit};
+
+    let uhd = VideoResolution {
+      width: 3840,
+      height: 2160,
+    };
+    let layers = camera_layers(uhd, camera_limit(None));
+    assert_eq!(layers.len(), 4);
+    let top = layers.last().unwrap();
+    assert_eq!((top.width, top.height, top.max_framerate), (1920, 1080, 30));
+    assert_eq!(top.max_bitrate_bps, CAMERA_MAX_BITRATE_BPS);
+    // Capped at 720p: as before #967.
+    let capped = camera_layers(uhd, camera_limit(Some(720)));
+    let top = capped.last().unwrap();
+    assert_eq!((top.width, top.height), (1280, 720));
+    assert_eq!(top.max_bitrate_bps, CAMERA_HD_BITRATE_BPS);
+    assert_eq!(
+      camera_format(camera_limit(Some(720))).resolution,
+      top_size(&capped)
+    );
+  }
+
+  fn top_size(layers: &[VideoLayerInfo]) -> VideoResolution {
+    let top = layers.last().unwrap();
+    VideoResolution {
+      width: top.width,
+      height: top.height,
+    }
+  }
+
+  #[test]
+  fn cameras_get_four_layers_and_screens_two() {
+    let limit = teamcraft_media::video::camera_limit(None);
+    assert_eq!(camera_layers(camera_format(limit).resolution, limit).len(), 4);
+    let detail = ScreenProfile::default();
+    let screen = screen_layers(screen_format(&detail), &detail);
+    assert_eq!(screen.len(), 2);
+    assert_eq!(
+      (screen[1].width, screen[1].height, screen[1].max_framerate),
+      (2560, 1440, 30)
+    );
+    assert_eq!((screen[0].width, screen[0].height), (1280, 720));
+  }
+
+  /// A 4K share asks the capture for 4K (#565); the page's AV1 decoder joins H.264 (#565).
+  #[test]
+  fn uhd_screens_capture_4k_and_the_page_adds_its_decoders() {
+    let uhd = ScreenProfile {
+      mode: ScreenContentMode::Detail,
+      size: teamcraft_proto::ScreenShareResolution::Uhd,
+    };
+    let format = screen_format(&uhd);
+    assert_eq!(
+      (
+        format.resolution.width,
+        format.resolution.height,
+        format.framerate
+      ),
+      (3840, 2160, 30)
+    );
+    assert_eq!(screen_layers(format, &uhd).len(), 3);
+    assert_eq!(decodable_codecs(&[]), vec![VideoCodec::H264]);
+    assert_eq!(
+      decodable_codecs(&[VideoCodec::Av1, VideoCodec::H264, VideoCodec::Vp9]),
+      vec![VideoCodec::Av1, VideoCodec::H264]
+    );
   }
 
   #[test]
@@ -431,6 +829,15 @@ mod tests {
         1, 1, 1, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0, 0x0f, 0x42, 0x40, 0, 0, 0, 1, 0x65
       ]
     );
+    // AV1 screen shares (#565): code 4, the OBUs as they came.
+    let av1 = ReceivedVideoFrame {
+      codec: VideoCodec::Av1,
+      is_keyframe: false,
+      data: vec![0x12, 0x00, 0x32],
+      ..frame
+    };
+    assert_eq!(&video_message(&av1)[..4], &[1, 0, 4, 0]);
+    assert_eq!(&video_message(&av1)[16..], &[0x12, 0x00, 0x32]);
   }
 
   #[test]
@@ -443,20 +850,23 @@ mod tests {
     use teamcraft_media::video_codec::{OpenH264Encoder, VideoContent, VideoEncoder};
     use teamcraft_proto::{DeviceId, Id, MediaStreamId, Snowflake};
 
-    let layer = screen_layers(CaptureFormat {
-      resolution: VideoResolution {
-        width: 320,
-        height: 180,
+    let layer = screen_layers(
+      CaptureFormat {
+        resolution: VideoResolution {
+          width: 320,
+          height: 180,
+        },
+        framerate: 15,
       },
-      framerate: 15,
-    })[0];
+      &ScreenProfile::default(),
+    )[0];
     let mut encoder = OpenH264Encoder::new(&layer, VideoContent::Camera).unwrap();
     let picture = encoder
       .encode(&test_pattern(layer_resolution(&layer), 0, 0).unwrap(), true)
       .unwrap()
       .unwrap();
     let (images, received) = std_mpsc::channel();
-    let sink = jpeg_sink(move |message| drop(images.send(message)));
+    let sink = jpeg_sink(move |message| images.send(message).is_ok(), || {});
     sink(&ReceivedVideoFrame {
       sender: DeviceId::from_snowflake(Snowflake::new(2).unwrap()),
       stream_id: MediaStreamId(7),

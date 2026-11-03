@@ -19,6 +19,18 @@ pub struct CallJoinTokenResponse {
   /// WebTransport URL of the SFU, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
   pub expires_at: UnixMillis,
+  /// SHA-256s of the SFU's certificates (64 hex digits each) when they are short-lived self-signed
+  /// ones (test and development setups): browsers accept them through `serverCertificateHashes`.
+  /// Several while one certificate replaces another. Empty when the certificate chains to a trusted
+  /// root. The SFU only forwards end-to-end encrypted media, so this decides reachability, not
+  /// confidentiality.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub sfu_certificate_sha256: Vec<String>,
+  /// The call is a 1:1 direct message call that ends for both as soon as one side leaves (issue
+  /// #997, the instance setting `one_to_one_call_ends_for_both`): a device hanging up plays the
+  /// hang-up tone. Absent from older servers: such a call keeps running for the other side.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub ends_when_one_side_leaves: bool,
 }
 
 // Join tokens don't belong in logs.
@@ -29,15 +41,51 @@ impl std::fmt::Debug for CallJoinTokenResponse {
       .field("token", &"[redacted]")
       .field("sfu_url", &self.sfu_url)
       .field("expires_at", &self.expires_at)
+      .field("ends_when_one_side_leaves", &self.ends_when_one_side_leaves)
       .finish()
   }
 }
 
+/// Why a call ended (`call_end`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CallEndCause {
+  /// The last participant left, or the server lost the call (its SFU fell silent).
+  #[default]
+  LastLeft,
+  /// A 1:1 direct message call: one side left (hung up, closed the app, or was dropped after the
+  /// reconnect grace period), so the call ended for both (issue #997). Devices still in it leave by
+  /// themselves, with the hang-up tone and a short "Call ended".
+  OneSideLeft,
+  /// A cause of a newer server: taken as [`Self::LastLeft`].
+  #[serde(other)]
+  Unknown,
+}
+
+impl CallEndCause {
+  pub fn is_last_left(&self) -> bool {
+    *self == Self::LastLeft
+  }
+}
+
 /// One device in a call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 pub struct CallRosterEntry {
   pub user_id: UserId,
   pub device_id: DeviceId,
+}
+
+/// Body of `POST /api/v1/conversations/{conversation_id}/call/move`: a DM or group DM call moves
+/// into a meeting room because somebody added people to it (docs/meetings.md, "A call becomes a
+/// meeting"). The caller is in the call and organizes the meeting; everybody in the call is told to
+/// switch over (`call_move`), and the added people are rung in the meeting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MoveCallRequest {
+  /// The meeting chat the call moves into.
+  pub to_conversation_id: ConversationId,
+  /// The added people: they ring in the meeting chat (members of it only).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub ring_user_ids: Vec<UserId>,
 }
 
 /// `GET /api/v1/conversations/{id}/call`: the call that is running in the conversation.
@@ -50,6 +98,13 @@ pub struct CallStateResponse {
   /// DMs and group DMs ring until someone else joins or the ring timeout passes.
   pub is_ringing: bool,
   pub participants: Vec<CallRosterEntry>,
+}
+
+/// `GET /api/v1/calls`: the calls running in the caller's conversations, so a client can check the
+/// roster its call events built (issue #976): one it missed the end of is gone from this list.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
+pub struct ListRunningCallsResponse {
+  pub calls: Vec<CallStateResponse>,
 }
 
 /// `POST {sfu}/internal/v1/calls/control`: a meeting host's action, which the server has authorized,
@@ -79,6 +134,12 @@ pub enum SfuControlAction {
   Unlock,
   /// Disconnect everyone.
   End,
+  /// Disconnect all of the user's devices because the user left the call on all of them ("Leave on
+  /// all devices"); unlike [`Self::RemoveParticipant`] they may join again. Not a host control: the
+  /// server sends it for the user themselves.
+  DisconnectUser {
+    user_id: UserId,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -90,6 +151,36 @@ pub struct SfuParticipantReport {
   pub call_id: CallId,
   pub user_id: UserId,
   pub device_id: DeviceId,
+}
+
+/// Body of `POST /api/internal/v1/calls/roster`: every call the SFU runs and who is in it, sent when
+/// the SFU starts, periodically and after a call moved between a user's devices. The server
+/// reconciles its roster with it, so a lost or never sent leave can't keep a device in a call for
+/// good (#684). Internal: authenticated with the SFU's registration token. It travels in the same
+/// ordered queue as the join and leave reports, so it never overtakes one of them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SfuRosterReport {
+  /// How long the SFU has been running, in seconds. A freshly (re)started SFU has lost its rooms;
+  /// the server gives the devices that were in them time to rejoin before it drops them.
+  pub uptime_secs: u64,
+  pub calls: Vec<SfuCallRoster>,
+}
+
+/// One call on the SFU, with every device in it (also those reconnecting). Also the answer of the
+/// SFU's `GET {sfu}/internal/v1/calls/roster`, which a starting server reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SfuCallRoster {
+  pub call_id: CallId,
+  pub participants: Vec<CallRosterEntry>,
+  /// The call's conversation, from the server-signed join tokens: a server that restarted and lost
+  /// its calls takes this one over. Missing when the tokens came from an older server.
+  #[serde(rename = "conversation_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_conversation_id: Option<ConversationId>,
+  /// Who joined the room first, and when (the SFU's clock): the start a restarted server shows.
+  #[serde(rename = "started_by", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_started_by: Option<UserId>,
+  #[serde(rename = "started_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_started_at: Option<UnixMillis>,
 }
 
 #[cfg(test)]
@@ -114,5 +205,61 @@ mod tests {
     assert_eq!(serde_json::from_str::<SfuControlRequest>(&json).unwrap(), request);
     let unknown: SfuControlAction = serde_json::from_str(r#"{"action":"spotlight"}"#).unwrap();
     assert_eq!(unknown, SfuControlAction::Unknown);
+  }
+
+  #[test]
+  fn leaving_on_all_devices_has_a_stable_wire_format() {
+    let request = SfuControlRequest {
+      call_id: CallId::from_snowflake(Snowflake::new(7).unwrap()),
+      by_user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+      action: SfuControlAction::DisconnectUser {
+        user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+      },
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert_eq!(
+      json,
+      r#"{"call_id":"7","by_user_id":"2","action":"disconnect_user","user_id":"2"}"#
+    );
+    assert_eq!(serde_json::from_str::<SfuControlRequest>(&json).unwrap(), request);
+  }
+
+  #[test]
+  fn roster_reports_have_a_stable_wire_format() {
+    let report = SfuRosterReport {
+      uptime_secs: 90,
+      calls: vec![SfuCallRoster {
+        call_id: CallId::from_snowflake(Snowflake::new(7).unwrap()),
+        participants: vec![CallRosterEntry {
+          user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+          device_id: DeviceId::from_snowflake(Snowflake::new(3).unwrap()),
+        }],
+        maybe_conversation_id: Some(ConversationId::from_snowflake(Snowflake::new(9).unwrap())),
+        maybe_started_by: Some(UserId::from_snowflake(Snowflake::new(2).unwrap())),
+        maybe_started_at: Some(UnixMillis(1000)),
+      }],
+    };
+    let json = serde_json::to_string(&report).unwrap();
+    assert_eq!(
+      json,
+      r#"{"uptime_secs":90,"calls":[{"call_id":"7","participants":[{"user_id":"2","device_id":"3"}],"conversation_id":"9","started_by":"2","started_at":1000}]}"#
+    );
+    assert_eq!(serde_json::from_str::<SfuRosterReport>(&json).unwrap(), report);
+    let older: SfuRosterReport =
+      serde_json::from_str(r#"{"uptime_secs":1,"calls":[{"call_id":"7","participants":[]}]}"#).unwrap();
+    assert_eq!(older.calls[0].maybe_conversation_id, None);
+  }
+
+  #[test]
+  fn move_requests_have_a_stable_wire_format() {
+    let request = MoveCallRequest {
+      to_conversation_id: ConversationId::from_snowflake(Snowflake::new(3).unwrap()),
+      ring_user_ids: vec![UserId::from_snowflake(Snowflake::new(4).unwrap())],
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    assert_eq!(json, r#"{"to_conversation_id":"3","ring_user_ids":["4"]}"#);
+    assert_eq!(serde_json::from_str::<MoveCallRequest>(&json).unwrap(), request);
+    let nobody_rung: MoveCallRequest = serde_json::from_str(r#"{"to_conversation_id":"3"}"#).unwrap();
+    assert!(nobody_rung.ring_user_ids.is_empty());
   }
 }

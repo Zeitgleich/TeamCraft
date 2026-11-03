@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="meetings_title">Meetings</string>
+  <string name="meetings_empty">No upcoming meetings.</string>
+  <string name="meeting_join">Join</string>
+</resources>

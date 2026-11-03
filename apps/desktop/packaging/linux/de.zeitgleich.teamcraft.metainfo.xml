@@ -35,6 +35,96 @@
     <display_length compare="ge">720</display_length>
   </requires>
   <releases>
+    <release version="1.0.18" date="2026-11-03" type="stable">
+      <description>
+        <p>Regular update; see the release notes on GitHub for the changes.</p>
+      </description>
+    </release>
+    <release version="1.0.17" date="2026-11-02" type="stable">
+      <description>
+        <p>Regular update; see the release notes on GitHub for the changes.</p>
+      </description>
+    </release>
+    <release version="1.0.16" date="2026-11-02" type="stable">
+      <description>
+        <p>Regular update; see the release notes on GitHub for the changes.</p>
+      </description>
+    </release>
+    <release version="1.0.15" date="2026-10-31" type="stable">
+      <description>
+        <p>Regular update; see the release notes on GitHub for the changes.</p>
+      </description>
+    </release>
+    <release version="1.0.14" date="2026-10-31" type="stable">
+      <description>
+        <p>Regular update; see the release notes on GitHub for the changes.</p>
+      </description>
+    </release>
+    <release version="1.0.13" date="2026-10-31" type="stable">
+      <description>
+        <p>Regular update; see the release notes on GitHub for the changes.</p>
+      </description>
+    </release>
+    <release version="1.0.12" date="2026-10-30" type="stable">
+      <description>
+        <p>Regular update; see the release notes on GitHub for the changes.</p>
+      </description>
+    </release>
+    <release version="1.0.11" date="2026-10-29" type="stable">
+      <description>
+        <p>Regular update; see the release notes on GitHub for the changes.</p>
+      </description>
+    </release>
+    <release version="1.0.10" date="2026-10-28" type="stable">
+      <description>
+        <p>Regular update; see the release notes on GitHub for the changes.</p>
+      </description>
+    </release>
+    <release version="1.0.9" date="2026-10-27" type="stable">
+      <description>
+        <p>Owner approval for admins joining private channels, signed channel roles, typing indicators, notification sounds and pictures, a text and log viewer, device settings, and calls in Safari.</p>
+      </description>
+    </release>
+    <release version="1.0.8" date="2026-10-26" type="stable">
+      <description>
+        <p>Faster start and sync, sturdier calls and presence, file drop and paste on Linux, redesigned dialogs, Activity view, account deletion for admins, and better handling of storage outages.</p>
+      </description>
+    </release>
+    <release version="1.0.7" date="2026-10-26" type="stable">
+      <description>
+        <p>Devices stay signed in, calls open any common microphone format, deactivated users keep their chats, start at login on Linux and macOS, and many fixes to the message list, files and icons.</p>
+      </description>
+    </release>
+    <release version="1.0.6" date="2026-10-26" type="stable">
+      <description>
+        <p>Webhook and log sources for integration channels are created and revoked in the app; the bridge picks them up without any configuration.</p>
+      </description>
+    </release>
+    <release version="1.0.5" date="2026-10-26" type="stable">
+      <description>
+        <p>Everything in 1.0.4 (new message layouts with read ticks, redesigned home pages, search in a conversation, meeting guests in the browser, notifications on every platform, multi-device calls, resumable uploads, file previews and share links, integrations, QR device linking), with a fix that lets the server update its database.</p>
+      </description>
+    </release>
+    <release version="1.0.4" date="2026-10-26" type="stable">
+      <description>
+        <p>New message layouts with read ticks, redesigned home pages, search in a conversation, meeting guests in the browser, notifications on Linux, macOS, Android and iOS, multi-device calls with mute indicators, resumable uploads, file previews and share links, integrations, and QR device linking.</p>
+      </description>
+    </release>
+    <release version="1.0.3" date="2026-10-25" type="stable">
+      <description>
+        <p>Fixes a memory leak, adds calls in the browser and real video in desktop calls, reworked settings, smoother motion and phone layout, text size, new logo, a faster web app that loads in parts, more robust networking, calls and local storage.</p>
+      </description>
+    </release>
+    <release version="1.0.2" date="2026-10-25" type="stable">
+      <description>
+        <p>Fixes the Linux desktop app not starting, mobile web layout, richer composer, spaces and invitations, image crop and formats, never-silent errors, faster web app.</p>
+      </description>
+    </release>
+    <release version="1.0.1" date="2026-10-24" type="stable">
+      <description>
+        <p>Fixes desktop sign-in on a new device, faster web app on large workspaces, image lightbox.</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-10-23" type="stable">
       <description>
         <p>First release: end-to-end encrypted chat, threads, calls and meetings.</p>

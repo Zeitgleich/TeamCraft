@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO meeting_lobby (meeting_id, user_id) VALUES ($1, $2)\n         ON CONFLICT (meeting_id, user_id) DO UPDATE\n           SET state = 'waiting', requested_at = now(), decided_at = NULL, decided_by = NULL\n           WHERE meeting_lobby.state = 'admitted'\n         RETURNING state, requested_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "meeting_lobby",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "requested_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "meeting_lobby",
+            "name": "requested_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "80d7f999e96dc9e00a557c3045294488df23f8d45c7d5efc33fb71b8eb6e1e63"
+}

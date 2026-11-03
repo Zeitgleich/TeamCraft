@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- The system splash (Android 12+) plays the TeamCraft mark's assembly (drawable-v31/splash_mark.xml,
+       issue #463) on the app's background; the app's own loading screen takes over where it ends. -->
+  <style name="Theme.TeamCraft" parent="android:Theme.Material.Light.NoActionBar">
+    <item name="android:statusBarColor">#111926</item>
+    <item name="android:windowBackground">#F6F7F9</item>
+    <item name="android:windowSplashScreenBackground">#F6F7F9</item>
+    <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_mark</item>
+    <item name="android:windowSplashScreenAnimationDuration">1000</item>
+  </style>
+</resources>

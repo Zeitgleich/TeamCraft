@@ -21,13 +21,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.search.SegmentPrefetch
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.forms.confirmOverCount
+import de.zeitgleich.teamcraft.ui.forms.fieldError
+import de.zeitgleich.teamcraft.ui.forms.supportingText
 
 /** Mentions decided on this device, as on desktop: keywords, first name, `@channel`. */
 @Composable
@@ -53,17 +58,24 @@ fun MentionSettingsSection(viewModel: MainViewModel) {
       supportingText = { Text(stringResource(R.string.mention_keywords_hint)) },
       modifier = Modifier.fillMaxWidth(),
     )
+    // Saved as typed; an empty field keeps the last count and says what it takes.
+    val maybeCount = confirmOverCount(confirmOver)
+    val maybeError = if (maybeCount == null) R.string.mention_confirm_over_range else null
     OutlinedTextField(
       value = confirmOver,
       onValueChange = { text ->
         confirmOver = text.filter { it.isDigit() }.take(MAX_COUNT_DIGITS)
-        prefs.setConfirmChannelOver(confirmOver.toIntOrNull() ?: 0)
+        confirmOverCount(confirmOver)?.let(prefs::setConfirmChannelOver)
       },
       label = { Text(stringResource(R.string.mention_confirm_over)) },
-      supportingText = { Text(stringResource(R.string.mention_confirm_over_hint)) },
-      keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+      suffix = {
+        Text(pluralStringResource(R.plurals.mention_confirm_over_unit, maybeCount ?: prefs.confirmChannelOver))
+      },
+      isError = maybeError != null,
+      supportingText = supportingText(maybeError, R.string.mention_confirm_over_hint),
+      keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
       singleLine = true,
-      modifier = Modifier.fillMaxWidth(),
+      modifier = Modifier.fillMaxWidth().fieldError(maybeError),
     )
   }
 }

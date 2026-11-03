@@ -19,7 +19,7 @@ use crate::backend::ChatBackend;
 use crate::model::{
   Conversation, ConversationId, ConversationKind, CustomStatus, Message, MessageId, MessageKind,
   PresenceStatus, SidebarCategory, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
-  id_from_raw, raw_id,
+  hue_from_hex, id_from_raw, raw_id,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -159,6 +159,10 @@ pub fn build_snapshot(
     is_guest: summary.kind == UserKind::Guest,
     is_bot: false,
     maybe_organization: summary.maybe_organization.clone(),
+    is_deactivated: false,
+    is_deleted: false,
+    device_setup: crate::model::DeviceSetup::Unknown,
+    maybe_email: summary.maybe_email.clone(),
   };
 
   let me_user = User {
@@ -172,6 +176,10 @@ pub fn build_snapshot(
     is_guest: me.role == Role::Guest,
     is_bot: false,
     maybe_organization: None,
+    is_deactivated: false,
+    is_deleted: false,
+    device_setup: crate::model::DeviceSetup::Unknown,
+    maybe_email: None,
   };
 
   let mut users: Vec<User> = vec![me_user.clone()];
@@ -200,8 +208,20 @@ pub fn build_snapshot(
         .as_deref()
         .and_then(hue_from_hex)
         .unwrap_or_else(|| hue_from_seed(&space.name)),
+      maybe_color: space.maybe_color.clone(),
+      maybe_image_version: space.maybe_image.as_ref().map(|image| image.version.clone()),
       unread_count: 0,
       mention_count: 0,
+      maybe_description: space.maybe_description.clone(),
+      member_count: space.member_count,
+      join_policy: space.join_policy.clone(),
+      can_add_members: space.can_add_members,
+      can_invite_guests: space.can_invite_guests,
+      can_manage_space: space.can_manage_space,
+      can_delete_space: space.can_delete_space,
+      deleted_channel_count: space.deleted_channel_count,
+      can_create_channels: space.can_create_channels,
+      maybe_my_role: space.maybe_my_role.clone(),
     })
     .collect();
 
@@ -271,8 +291,19 @@ fn to_conversation(conversation: &ConversationResponse, member_ids: Vec<UserId>,
     is_favorite: membership.is_some_and(|membership| membership.is_favorite),
     is_muted: membership
       .is_some_and(|membership| membership.notification_level == teamcraft_proto::NotificationLevel::None),
-    can_post: !conversation.is_archived,
+    can_post: conversation.may_post(),
     bookmarks: Vec::new(),
+    is_catching_up: false,
+    is_notes_to_self: conversation.is_notes_to_self(me),
+    is_archived: conversation.is_archived,
+    is_imported: conversation.maybe_imported_through.is_some(),
+    maybe_permissions: conversation.maybe_my_permissions.clone(),
+    has_only_deactivated_others: conversation
+      .has_only_deactivated_others(me, |participant| participant.is_deactivated),
+    maybe_image_version: conversation
+      .maybe_image
+      .as_ref()
+      .map(|image| image.version.clone()),
   }
 }
 
@@ -282,29 +313,6 @@ pub(crate) fn hue_from_seed(seed: &str) -> u16 {
     acc.wrapping_mul(33).wrapping_add(u32::from(byte))
   });
   (hash % 360) as u16
-}
-
-/// Hue of a `#rrggbb` colour, or `None` for anything else (and for greys, which have no hue).
-fn hue_from_hex(color: &str) -> Option<u16> {
-  let hex = color.strip_prefix('#')?;
-  if hex.len() != 6 {
-    return None;
-  }
-  let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok().map(f32::from);
-  let (r, g, b) = (channel(0..2)?, channel(2..4)?, channel(4..6)?);
-  let (max, min) = (r.max(g).max(b), r.min(g).min(b));
-  if (max - min).abs() < f32::EPSILON {
-    return None;
-  }
-  let delta = max - min;
-  let hue = if (max - r).abs() < f32::EPSILON {
-    ((g - b) / delta).rem_euclid(6.0)
-  } else if (max - g).abs() < f32::EPSILON {
-    (b - r) / delta + 2.0
-  } else {
-    (r - g) / delta + 4.0
-  };
-  Some((hue * 60.0).round() as u16 % 360)
 }
 
 impl ChatBackend for RestChat {
@@ -412,6 +420,8 @@ impl ChatBackend for RestChat {
       reactions: Vec::new(),
       reply_count: 0,
       maybe_thread: None,
+      maybe_imported: None,
+      maybe_placeholder: None,
     };
     self
       .local_messages
@@ -550,10 +560,5 @@ mod tests {
   fn hues_are_stable_and_in_range() {
     assert_eq!(hue_from_seed("Project A"), hue_from_seed("Project A"));
     assert!(hue_from_seed("anything") < 360);
-    assert_eq!(hue_from_hex("#ff0000"), Some(0));
-    assert_eq!(hue_from_hex("#00ff00"), Some(120));
-    assert_eq!(hue_from_hex("#0000ff"), Some(240));
-    assert_eq!(hue_from_hex("#808080"), None);
-    assert_eq!(hue_from_hex("red"), None);
   }
 }

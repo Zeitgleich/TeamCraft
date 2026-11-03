@@ -1,9 +1,11 @@
+use std::collections::HashSet;
+
 use teamcraft_proto::{DeviceId, UserId};
 use time::OffsetDateTime;
 
 use crate::database::Database;
 use crate::error::DbError;
-use crate::ids::{from_db, to_db};
+use crate::ids::{from_db, to_db, to_db_all};
 
 #[derive(Debug, Clone)]
 pub struct Device {
@@ -75,6 +77,38 @@ impl Database {
       .collect()
   }
 
+  /// Renames one of the user's active devices; `None` if it doesn't exist, was revoked or belongs to
+  /// someone else.
+  pub async fn rename_device(
+    &self,
+    user: UserId,
+    device: DeviceId,
+    name: &str,
+  ) -> Result<Option<Device>, DbError> {
+    let row = sqlx::query!(
+      r#"UPDATE devices SET name = $3 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+         RETURNING id, user_id, name, public_key, cross_signature, push_provider, created_at"#,
+      to_db(device),
+      to_db(user),
+      name,
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    row
+      .map(|row| {
+        Ok(Device {
+          id: from_db(row.id)?,
+          user_id: from_db(row.user_id)?,
+          name: row.name,
+          public_key: row.public_key,
+          cross_signature: row.cross_signature,
+          maybe_push_provider: row.push_provider,
+          created_at: row.created_at,
+        })
+      })
+      .transpose()
+  }
+
   /// Revokes one of the user's devices; `false` if it doesn't exist or belongs to someone else.
   pub async fn revoke_device(&self, user: UserId, device: DeviceId) -> Result<bool, DbError> {
     let result = sqlx::query!(
@@ -97,6 +131,19 @@ impl Database {
     .fetch_one(self.pool())
     .await?;
     Ok(u64::try_from(count).unwrap_or(u64::MAX))
+  }
+
+  /// Of these users, the ones with at least one device that is not revoked (the directory shows
+  /// who hasn't set up the app yet).
+  pub async fn users_with_active_devices(&self, users: &[UserId]) -> Result<HashSet<UserId>, DbError> {
+    let rows = sqlx::query_scalar!(
+      r#"SELECT DISTINCT user_id AS "user_id!" FROM devices
+         WHERE user_id = ANY($1) AND revoked_at IS NULL"#,
+      &to_db_all(users),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows.into_iter().map(from_db).collect()
   }
 
   pub async fn is_active_device_of(&self, user: UserId, device: DeviceId) -> Result<bool, DbError> {
@@ -127,6 +174,48 @@ impl Database {
       provider,
       token,
       push_key,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
+  /// The push token and key of an active device registered with `provider`, for a request that
+  /// proves knowledge of the key instead of carrying an access token.
+  pub async fn push_registration_of(
+    &self,
+    device: DeviceId,
+    provider: &str,
+  ) -> Result<Option<(String, Vec<u8>)>, DbError> {
+    let row = sqlx::query!(
+      r#"SELECT d.push_token AS "push_token!", d.push_key AS "push_key!" FROM devices d
+         JOIN users u ON u.id = d.user_id AND u.deactivated_at IS NULL
+         WHERE d.id = $1 AND d.push_provider = $2 AND d.push_token IS NOT NULL AND d.push_key IS NOT NULL
+           AND d.revoked_at IS NULL"#,
+      to_db(device),
+      provider,
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(row.map(|row| (row.push_token, row.push_key)))
+  }
+
+  /// Swaps the push token of an active device if it still is `previous_token` (compare-and-swap;
+  /// provider and push key stay). `false` if the device registered something else meanwhile.
+  pub async fn replace_push_token(
+    &self,
+    device: DeviceId,
+    provider: &str,
+    previous_token: &str,
+    token: &str,
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"UPDATE devices SET push_token = $4
+         WHERE id = $1 AND push_provider = $2 AND push_token = $3 AND revoked_at IS NULL"#,
+      to_db(device),
+      provider,
+      previous_token,
+      token,
     )
     .execute(self.pool())
     .await?;

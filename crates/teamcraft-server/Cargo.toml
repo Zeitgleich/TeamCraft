@@ -24,6 +24,8 @@ teamcraft-crypto.workspace = true
 teamcraft-proto.workspace = true
 teamcraft-db.workspace = true
 teamcraft-ops.workspace = true
+# The retry policy shared with the clients (src/dependencies.rs).
+teamcraft-net.workspace = true
 anyhow.workspace = true
 aws-lc-rs.workspace = true
 time.workspace = true
@@ -31,6 +33,12 @@ chrono-tz.workspace = true
 chrono.workspace = true
 axum.workspace = true
 figment.workspace = true
+# Watches a request's body for progress (src/outage_gate.rs); already in the tree through axum.
+futures-util = "0.3"
+httpdate.workspace = true
+# Space pictures are decoded and re-encoded as PNG before they are stored (same version and pure
+# Rust decoders as teamcraft-core's thumbnails, already in the tree).
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "webp"] }
 jsonwebtoken.workspace = true
 lettre.workspace = true
 rand_core.workspace = true
@@ -48,6 +56,7 @@ tower-http.workspace = true
 tracing.workspace = true
 url.workspace = true
 utoipa.workspace = true
+utoipa-axum.workspace = true
 tracing-subscriber.workspace = true
 
 [features]
@@ -61,7 +70,8 @@ time = { workspace = true, features = ["macros"] }
 p256.workspace = true
 reqwest.workspace = true
 tokio-tungstenite = "0.30"
-futures-util = "0.3"
+# Fault-injection tests build a pool against a dead port (already in the tree through teamcraft-db).
+sqlx.workspace = true
 base64.workspace = true
 figment = { workspace = true, features = ["test"] }
 tokio = { workspace = true, features = ["test-util"] }

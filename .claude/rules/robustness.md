@@ -85,7 +85,52 @@ state of the codebase is recorded in [docs/robustness-audit.md](../../docs/robus
   expiry checks allow skew (leeway) and are done by the party whose clock is authoritative.
 - Displayed relative times tolerate a wrong local clock (no "in 3 hours" for a message just sent).
 
+### Performance and resources
+
+TeamCraft must stay light: people keep it open all day next to everything else, often on battery.
+Measure, don't guess: `tests/e2e` `perf.rs` (web, nightly with generous bounds), numbers and method
+in [docs/performance.md](../../docs/performance.md) ("Clients"). A change that touches a hot path
+(opening a channel, sending, sync, the message list, timers) states its effect on these budgets.
+
+| Budget                                                  | Desktop   | Web (Chrome)                | Mobile                                       |
+|---------------------------------------------------------|-----------|-----------------------------|----------------------------------------------|
+| Signed-in start until the channel list is usable        | ≤ 2 s     | ≤ 1.5 s (reload)            | ≤ 2 s                                        |
+| Channel switch, p95                                     | ≤ 100 ms  | ≤ 100 ms                    | ≤ 150 ms                                     |
+| Memory with a large workspace (300 channels, 100k msgs) | ≤ 400 MiB | ≤ 350 MiB above the browser | ≤ 250 MiB                                    |
+| Memory growth over 100 channel switches                 | ≤ 10 %    | ≤ 10 %                      | ≤ 10 %                                       |
+| Idle, connected, in the foreground: CPU                 | ≤ 0.5 %   | ≤ 1 %                       | ≤ 1 %                                        |
+| Network while idle besides the gateway heartbeat        | none      | none                        | none                                         |
+| In the background                                       | –         | –                           | no wakelocks, no polling; push wakes the app |
+| Download size, a guest in a meeting (compressed)        | –         | ≤ 10 MB wasm, gzip -9       | –                                            |
+| Download size, signed-in first visit (compressed)       | –         | ≤ 10 MB wasm, gzip -9       | –                                            |
+
+- Both download budgets are temporarily 10 MB (were 5.7 and 5.2 MB) until #1148 brings them back down.
+- The strict download budget is a guest's: somebody from outside who opens a meeting link, often
+  once and in a browser that never saw the app, waits for the lobby (the app and the service
+  worker), then the meeting's chunks (`guest`, `calls`) and the call module. The signed-in first
+  visit (the app, the signed-in app's chunks and the service worker) has a looser ceiling against
+  big regressions: a member loads it once, then from the service worker's cache. Both are measured
+  as gzip -9 (brotli, where the server offers it, is about 30 % smaller). CI checks them on every
+  change to the web client (`.github/workflows/web-size.yml`); see docs/performance.md, "Web bundle
+  size", for where they stand. Parts a guest or a first visit doesn't need are split off and load
+  when first used (`areas.rs`); nothing a guest's meeting uses goes into the signed-in app's chunks.
+- Lists that can grow (messages, members, channels, search hits) are virtualised or paged; nothing
+  renders or loads "all of them".
+- No work proportional to a conversation's or workspace's size on a hot path (send, switch, scroll,
+  tick). Reading the whole conversation to send one message is the kind of bug this rules out.
+- Timers only run while their result can be seen; push and gateway events, not polling, deliver
+  changes. Every periodic task states its interval and why.
+- Calls: hardware codecs where available, video effects on the GPU, and no work for streams nobody
+  watches; battery measurements per call type are tracked in docs/performance.md.
+
 ### User-visible status
 
 - The user can always tell whether they are connected, whether an action is pending or failed, and
   what to do about it. Errors go through i18n.
+- No silent failure (issue #322): a failed user action reaches the user, as an error toast through
+  `feedback::report_failure` (worded by the server's `error_code`) or inline. Buttons that start
+  async work use `PendingAction`/`PendingButton` and are disabled while it runs.
+- No dead app: async tasks, timers and shell-event callbacks can outlive their component. After an
+  `.await` they touch signals only with `set_if_alive`/`update_if_alive`/`try_*` and the app state
+  with `AppState::try_write` (CI: `scripts/check-async-signals.py`). A panic shows the reload
+  overlay (`panic_overlay.rs`), never a frozen page.

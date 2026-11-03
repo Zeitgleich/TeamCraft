@@ -5,8 +5,10 @@
 use leptos::prelude::*;
 use teamcraft_proto::WorkspacePolicy;
 
-use crate::admin::PolicyBlocker;
+use crate::admin::{PolicyBlocker, RosterEntry};
+use crate::components::admin_owners::RosterConfirm;
 use crate::components::icons::{Icon, IconName};
+use crate::form_errors::error_id;
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 
@@ -20,6 +22,9 @@ pub struct PolicyDraft {
   /// keeps the edits instead of snapping back to the old values.
   pending_after: RwSignal<Option<u64>>,
   saved_version: RwSignal<Option<u64>>,
+  /// The first roster waiting for the owner's confirmation before the first policy is signed
+  /// (#265); the save goes ahead only once it is confirmed.
+  confirming_genesis: RwSignal<Option<Vec<RosterEntry>>>,
 }
 
 pub fn use_policy_draft() -> PolicyDraft {
@@ -29,6 +34,7 @@ pub fn use_policy_draft() -> PolicyDraft {
   let blocker = Memo::new(move |_| state.read(|backend| backend.policy_edit_blocker()));
   let pending_after = RwSignal::new(None::<u64>);
   let saved_version = RwSignal::new(None::<u64>);
+  let confirming_genesis = RwSignal::new(None::<Vec<RosterEntry>>);
   // Follow the server while the form is untouched; keep the edits otherwise, except right after
   // our own save arrives.
   Effect::new(move |previous: Option<(u64, WorkspacePolicy)>| {
@@ -54,6 +60,7 @@ pub fn use_policy_draft() -> PolicyDraft {
     blocker,
     pending_after,
     saved_version,
+    confirming_genesis,
   }
 }
 
@@ -74,10 +81,36 @@ impl PolicyDraft {
     self.draft.update(change);
   }
 
+  /// Saves the draft; the first save in a workspace without a signed roster asks the owner to
+  /// confirm that roster first.
   pub fn save(&self) {
     let state = use_app_state();
+    match state.read(|backend| backend.admin_genesis_roster()) {
+      Some(genesis) => self.confirming_genesis.set(Some(genesis)),
+      None => self.sign(Vec::new()),
+    }
+  }
+
+  fn confirm_genesis(&self) {
+    if let Some(genesis) = self.confirming_genesis.get_untracked() {
+      self.confirming_genesis.set(None);
+      self.sign(genesis);
+    }
+  }
+
+  /// Signs the signer alone as the first owner; others are added later in the roster editor.
+  fn confirm_genesis_alone(&self) {
+    if self.confirming_genesis.get_untracked().is_some() {
+      self.confirming_genesis.set(None);
+      // The core always puts the signer first as owner; nobody else is signed.
+      self.sign(Vec::new());
+    }
+  }
+
+  fn sign(&self, genesis: Vec<RosterEntry>) {
+    let state = use_app_state();
     let before = self.stored.get_untracked().0;
-    state.write(|backend| backend.set_workspace_policy(self.draft.get_untracked()));
+    state.write(|backend| backend.set_workspace_policy(self.draft.get_untracked(), genesis));
     let saved = self.stored.get_untracked();
     if saved.0 == before {
       self.pending_after.set(Some(before));
@@ -133,6 +166,20 @@ pub fn PolicyFooter(policy: PolicyDraft) -> impl IntoView {
       <button type="submit" class="btn btn-primary" disabled=move || !policy.is_dirty() || policy.is_locked()>
         {move || i18n.t("policy-save")}
       </button>
+      {move || {
+        policy.confirming_genesis.get().map(|members| {
+          let has_others = members.len() > 1;
+          view! {
+            <RosterConfirm
+              signed=Vec::new()
+              members=members
+              on_cancel=Callback::new(move |()| policy.confirming_genesis.set(None))
+              on_confirm=Callback::new(move |()| policy.confirm_genesis())
+              maybe_on_sign_alone=has_others.then(|| Callback::new(move |()| policy.confirm_genesis_alone()))
+            />
+          }
+        })
+      }}
     </footer>
   }
 }
@@ -173,6 +220,9 @@ pub fn SelectRow(
   #[prop(into)] selected: Signal<String>,
   #[prop(into)] on_select: Callback<String>,
   #[prop(into, optional)] disabled: Signal<bool>,
+  /// What is wrong with the choice, shown below the row (forms.md).
+  #[prop(into, optional)]
+  error: Signal<Option<String>>,
 ) -> impl IntoView {
   view! {
     <div class="field inline">
@@ -180,6 +230,8 @@ pub fn SelectRow(
       <select
         id=id
         class="input"
+        aria-invalid=move || error.with(Option::is_some).then_some("true")
+        aria-describedby=move || error.with(Option::is_some).then(|| error_id(id))
         prop:disabled=move || disabled.get()
         prop:value=move || selected.get()
         on:change=move |ev| on_select.run(event_target_value(&ev))
@@ -197,5 +249,6 @@ pub fn SelectRow(
         }}
       </select>
     </div>
+    <p class="field-error" id=error_id(id)>{move || error.get()}</p>
   }
 }

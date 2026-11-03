@@ -70,6 +70,26 @@ impl TestDatabase {
       .unwrap()
   }
 
+  /// What Postgres sees when a server process is killed (`kill -9`): every other connection to
+  /// the database ends at once, and their open transactions roll back.
+  pub async fn terminate_connections(&self) {
+    sqlx::query(
+      "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+       WHERE datname = current_database() AND pid <> pg_backend_pid()",
+    )
+    .execute(&self.pool)
+    .await
+    .unwrap();
+  }
+
+  /// A new pool on the same database, as a restarted server process opens it.
+  pub async fn reconnect(&self) -> Database {
+    let (base, _) = self.admin_url.rsplit_once('/').unwrap();
+    Database::connect(&format!("{base}/{}", self.name), &DatabaseOptions::default())
+      .await
+      .unwrap()
+  }
+
   pub async fn drop_database(self) {
     self.pool.close().await;
     let mut admin = PgConnection::connect(&self.admin_url).await.unwrap();

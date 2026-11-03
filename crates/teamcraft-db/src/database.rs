@@ -83,3 +83,24 @@ impl Database {
     &self.pool
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use std::collections::BTreeSet;
+
+  // Two branches can each add "the next" migration; sqlx then fails at startup on the duplicate
+  // version, and no test without a database would notice.
+  #[test]
+  fn migration_versions_are_unique() {
+    let migrator = sqlx::migrate!("./migrations");
+    let mut seen = BTreeSet::new();
+    for migration in migrator.iter() {
+      assert!(
+        seen.insert(migration.version),
+        "migration version {} is used twice ({})",
+        migration.version,
+        migration.description
+      );
+    }
+  }
+}

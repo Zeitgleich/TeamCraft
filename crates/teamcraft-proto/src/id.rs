@@ -255,6 +255,10 @@ define_id!(
   /// A personal one-time join link of a meeting for somebody without an account.
   MeetingInviteId
 );
+define_id!(
+  /// A push wake-up waiting in the server's retry queue after a temporary failure.
+  PushRetryId
+);
 
 #[cfg(test)]
 mod tests {

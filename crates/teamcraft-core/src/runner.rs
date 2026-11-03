@@ -1,5 +1,8 @@
-//! Drives a [`Client`] for an app: keeps the gateway connected (with backoff), sends heartbeats,
-//! flushes the outbox, commits waiting membership changes and runs the UI's commands.
+//! Drives a [`Client`] for an app: keeps the gateway connected (through the
+//! [`ConnectionSupervisor`]), flushes the outbox, commits waiting membership changes and runs the
+//! UI's commands. File uploads and downloads run beside the loop, so a large file holds up neither
+//! sends nor the gateway. It reports the device's activity on every new connection, so a resumed
+//! session the server timed out comes back online (docs/gateway.md, "Presence").
 //!
 //! The runner is a plain future without `Send` bounds: native apps poll it on a tokio task, the
 //! browser with `wasm_bindgen_futures::spawn_local` (ARCHITECTURE.md §7, one engine for all shells).
@@ -9,51 +12,65 @@ use std::time::Duration;
 use futures_channel::mpsc;
 use futures_util::StreamExt;
 use futures_util::future::{Either, select};
-use teamcraft_proto::{GatewayClientMessage, GatewayServerMessage};
+use teamcraft_proto::{DeviceActivity, GatewayClientMessage, GatewayServerMessage};
 
-use crate::api::{ApiError, GatewayConnection, ServerApi};
+use crate::api::{ApiError, ServerApi};
 use crate::client::Client;
-use crate::error::CoreError;
+use crate::client::files::BlobUpload;
+use crate::client::notify_first_sync_during;
+use crate::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor, NetworkChanges};
+use crate::downloads::{Downloads, Finished};
+use crate::pending_work::PendingWork;
 use crate::platform;
 use crate::store::LocalStore;
 #[cfg(feature = "ui")]
+use crate::typing::TypingAnnouncer;
+#[cfg(feature = "ui")]
 use crate::ui_backend::CoreCommand;
+use crate::upkeep::{self, Upkeep, UploadMode};
 
 /// Runs a client until it is stopped; see the module docs.
 pub struct SyncRunner<A: ServerApi, S> {
   client: Client<A, S>,
   settings: RunnerSettings,
   commands: mpsc::UnboundedReceiver<RunnerCommand>,
-  on_change: Box<dyn Fn()>,
-  maybe_gateway: Option<A::Gateway>,
-  backoff: Duration,
-  reconnect_at_ms: i64,
+  on_change: std::rc::Rc<dyn Fn()>,
+  connection: ConnectionSupervisor<A::Gateway>,
+  /// Network changes and wake-ups the app reported; each one reconnects at once.
+  maybe_network: Option<mpsc::UnboundedReceiver<()>>,
   /// When the next tick is due. A deadline rather than a fresh sleep per wake-up, so a busy
   /// connection (a frame every few seconds) can't postpone heartbeats until the server drops it.
   next_tick_ms: i64,
-  last_heartbeat_ms: i64,
-  last_account_sync_ms: i64,
-  /// When the user's typing was last announced, to send at most one per [`TYPING_INTERVAL_MS`].
+  upkeep: Upkeep,
+  /// The user's own typing, sent at most once per [`crate::typing::TYPING_INTERVAL_MS`].
   #[cfg(feature = "ui")]
-  last_typing: Option<(teamcraft_proto::ConversationId, i64)>,
+  typing: TypingAnnouncer,
+  /// The file going up beside the loop.
+  maybe_upload: Option<BlobUpload>,
+  /// A file may be waiting for its upload: one was queued, a retry came due, or one finished.
+  is_upload_due: bool,
+  /// Files on their way down beside the loop.
+  downloads: Downloads,
+  /// The bytes the transfers in flight had moved when the app was last told.
+  maybe_reported_bytes: Option<u64>,
+  /// Told once nothing waits for the server any longer ([`RunnerCommand::Drain`]).
+  drained: Vec<futures_channel::oneshot::Sender<()>>,
 }
 
-/// The server forwards one typing frame per 3 s and conversation; sending more is wasted.
-#[cfg(feature = "ui")]
-const TYPING_INTERVAL_MS: i64 = 3_000;
+/// How often the app is told to read again while a file goes up or down, for its progress.
+const TRANSFER_PROGRESS: Duration = Duration::from_millis(500);
 
 /// Timing of the runner. Configurable; the defaults suit desktop and browser alike.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunnerSettings {
   /// How often the runner wakes up without other events (outbox retry, staggered commits).
   pub tick: Duration,
-  /// Gateway heartbeat interval (the server's `hello` suggests one; it allows some slack).
-  pub heartbeat: Duration,
-  pub reconnect_min: Duration,
-  pub reconnect_max: Duration,
-  /// How often account data (saved items, drafts, saved searches) is pulled from the user's other
-  /// devices; local changes are pushed on the next tick regardless.
-  pub account_sync: Duration,
+  /// Heartbeats, backoff and timeouts of the gateway connection.
+  pub connection: ConnectionSettings,
+  /// How long a failed account data sync waits before it is retried, and how often the roster's
+  /// age is checked locally ([`Upkeep`]). Account data is read after each gateway connection and on
+  /// `key_bag_update`, local changes are pushed on the next tick.
+  pub upkeep_interval: Duration,
 }
 
 /// Sends commands to a running [`SyncRunner`].
@@ -70,6 +87,13 @@ pub enum RunnerCommand {
   /// A request the UI adapter queued.
   #[cfg(feature = "ui")]
   Ui(CoreCommand),
+  /// The device became active or idle (the app came to the foreground or went to the background,
+  /// or the user touched it): told to the server now if connected, and on every new connection.
+  SetActivity(DeviceActivity),
+  /// Answers once the outbox, the uploads and the queued actions are empty ([`PendingWork`]): a
+  /// mobile app keeps its background time until then (issue #158). Whoever asks bounds the wait;
+  /// a dropped receiver costs nothing.
+  Drain(futures_channel::oneshot::Sender<()>),
   /// Ends [`SyncRunner::run`], which hands the client back.
   Stop,
 }
@@ -78,6 +102,10 @@ pub enum RunnerCommand {
 enum Wake {
   Command(Option<RunnerCommand>),
   Frame(Option<Result<GatewayServerMessage, ApiError>>),
+  NetworkChanged,
+  /// Storage answered the running blob upload.
+  Uploaded(Result<(), ApiError>),
+  Downloaded(Finished),
   Tick,
 }
 
@@ -85,10 +113,8 @@ impl Default for RunnerSettings {
   fn default() -> Self {
     Self {
       tick: Duration::from_secs(5),
-      heartbeat: Duration::from_secs(25),
-      reconnect_min: Duration::from_secs(1),
-      reconnect_max: Duration::from_secs(30),
-      account_sync: Duration::from_secs(60),
+      connection: ConnectionSettings::default(),
+      upkeep_interval: Duration::from_secs(60),
     }
   }
 }
@@ -101,91 +127,202 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     on_change: Box<dyn Fn()>,
   ) -> (Self, RunnerHandle) {
     let (sender, commands) = mpsc::unbounded();
-    let backoff = settings.reconnect_min;
+    let on_change: std::rc::Rc<dyn Fn()> = on_change.into();
+    let mut connection = ConnectionSupervisor::new(settings.connection.clone(), ConnectionStatus::new());
+    let notify = on_change.clone();
+    connection.set_observer(Box::new(move |_| notify()));
+    let upkeep = Upkeep::new(settings.upkeep_interval).with_uploads(UploadMode::Host);
     let runner = Self {
       client,
       settings,
       commands,
       on_change,
-      maybe_gateway: None,
-      backoff,
-      reconnect_at_ms: i64::MIN,
+      connection,
+      maybe_network: None,
       next_tick_ms: i64::MIN,
-      last_heartbeat_ms: i64::MIN,
-      last_account_sync_ms: i64::MIN,
+      upkeep,
       #[cfg(feature = "ui")]
-      last_typing: None,
+      typing: TypingAnnouncer::default(),
+      maybe_upload: None,
+      is_upload_due: true,
+      downloads: Downloads::default(),
+      maybe_reported_bytes: None,
+      drained: Vec::new(),
     };
     (runner, RunnerHandle { sender })
+  }
+
+  /// Reconnects at once whenever `changes` reports a network change or a wake-up.
+  pub fn watch_network(&mut self, changes: &NetworkChanges) {
+    self.maybe_network = Some(changes.subscribe());
+  }
+
+  /// Reports the connection's state to `status` (kept by the app across runner restarts).
+  pub fn share_connection_status(&mut self, status: ConnectionStatus) {
+    self.connection.share_status(status);
+  }
+
+  /// The gateway connection's state, readable while the runner runs.
+  pub fn connection_status(&self) -> ConnectionStatus {
+    self.connection.status()
   }
 
   /// Runs until [`RunnerCommand::Stop`] or until every handle is dropped; returns the client.
   pub async fn run(mut self) -> Client<A, S> {
     self.flush().await;
     loop {
-      if self.maybe_gateway.is_none() && self.client.now_ms() >= self.reconnect_at_ms {
-        self.connect().await;
+      // A first sync happens in here: the UI is told as the list and the progress grow.
+      let signal = self.client.first_sync_signal();
+      let notify = self.on_change.clone();
+      let connected = notify_first_sync_during(
+        &signal,
+        move || notify(),
+        self.connection.connect_if_due(&mut self.client),
+      )
+      .await;
+      if connected.is_some() {
+        // A resumed session keeps what the server last knew, which may be an away timeout.
+        self.report_activity().await;
+        // Back online: what waited goes out now, not on the next tick.
+        self.is_upload_due = true;
+        self.flush().await;
+        self.changed();
       }
+      self.start_upload().await;
+      self.start_downloads().await;
       match self.next_wake().await {
         Wake::Command(None | Some(RunnerCommand::Stop)) => return self.client,
         Wake::Command(Some(command)) => self.on_command(command).await,
         Wake::Frame(maybe_frame) => self.on_frame(maybe_frame).await,
-        Wake::Tick => self.on_tick().await,
+        Wake::NetworkChanged => {
+          let now = self.client.now_ms();
+          self.connection.network_changed(now).await;
+        },
+        Wake::Uploaded(sent) => self.on_uploaded(sent).await,
+        Wake::Downloaded(finished) => {
+          if Downloads::finish(&mut self.client, finished) {
+            self.changed();
+          }
+        },
+        Wake::Tick => {
+          self.on_tick().await;
+          self.load_older_history().await;
+        },
       }
+      self.report_progress();
+      self.answer_drained();
     }
   }
 
   async fn next_wake(&mut self) -> Wake {
-    let until_tick_ms = self.next_tick_ms.saturating_sub(self.client.now_ms()).max(0);
+    let now = self.client.now_ms();
+    let deadline = self
+      .connection
+      .next_deadline_ms()
+      .map_or(self.next_tick_ms, |deadline| deadline.min(self.next_tick_ms));
+    // While a file goes up or down, the app reads its progress again every so often.
+    let deadline = match self.maybe_reported_bytes {
+      Some(_) => deadline.min(now.saturating_add(millis(TRANSFER_PROGRESS))),
+      None => deadline,
+    };
+    // Never longer than a tick: after the wall clock went back, deadlines lie in the "future" by
+    // the jump, and the tick notices the jump and moves them (robustness.md, "Time").
+    let until_ms = deadline.saturating_sub(now).clamp(0, millis(self.settings.tick));
+    // Older history of a first sync: at once, but only after everything the select below looks at
+    // first (commands, frames, network changes, transfers).
+    let until_ms = if self.is_older_history_due() { 0 } else { until_ms };
     let Self {
       commands,
-      maybe_gateway,
+      connection,
+      maybe_network,
+      maybe_upload,
+      downloads,
       ..
     } = self;
-    let frame = Box::pin(async {
-      match maybe_gateway {
-        Some(connection) => connection.receive().await,
+    let frame = Box::pin(connection.receive());
+    let network = Box::pin(async {
+      match maybe_network {
+        Some(changes) => changes.next().await,
         None => std::future::pending().await,
       }
     });
-    let tick = Box::pin(platform::sleep(Duration::from_millis(
-      until_tick_ms.unsigned_abs(),
-    )));
-    match select(commands.next(), select(frame, tick)).await {
+    let uploaded = Box::pin(async {
+      match maybe_upload {
+        Some(upload) => upload.sent().await,
+        None => std::future::pending().await,
+      }
+    });
+    let downloaded = Box::pin(downloads.next_finished());
+    let tick = Box::pin(platform::sleep(Duration::from_millis(until_ms.unsigned_abs())));
+    let transfers = select(uploaded, downloaded);
+    match select(
+      commands.next(),
+      select(select(frame, network), select(transfers, tick)),
+    )
+    .await
+    {
       Either::Left((maybe_command, _)) => Wake::Command(maybe_command),
-      Either::Right((Either::Left((maybe_frame, _)), _)) => Wake::Frame(maybe_frame),
-      Either::Right((Either::Right(((), _)), _)) => Wake::Tick,
-    }
-  }
-
-  async fn connect(&mut self) {
-    match self.client.connect_gateway().await {
-      Ok((connection, outcome)) => {
-        tracing::info!(?outcome, "gateway connected");
-        self.maybe_gateway = Some(connection);
-        self.backoff = self.settings.reconnect_min;
-        self.last_heartbeat_ms = self.client.now_ms();
-        self.changed();
+      Either::Right((Either::Left((Either::Left((maybe_frame, _)), _)), _)) => Wake::Frame(maybe_frame),
+      Either::Right((Either::Left((Either::Right((Some(()), _)), _)), _)) => Wake::NetworkChanged,
+      // Whoever reported network changes is gone; carry on without them.
+      Either::Right((Either::Left((Either::Right((None, _)), _)), _)) => {
+        *maybe_network = None;
+        Wake::Tick
       },
-      Err(error) => {
-        tracing::warn!(%error, "gateway connection failed, retrying");
-        self.schedule_reconnect();
+      Either::Right((Either::Right((Either::Left((Either::Left((sent, _)), _)), _)), _)) => {
+        Wake::Uploaded(sent)
       },
+      Either::Right((Either::Right((Either::Left((Either::Right((finished, _)), _)), _)), _)) => {
+        Wake::Downloaded(finished)
+      },
+      Either::Right((Either::Right((Either::Right(((), _)), _)), _)) => Wake::Tick,
     }
   }
 
   async fn on_command(&mut self, command: RunnerCommand) {
     match command {
       RunnerCommand::Flush => {},
-      #[cfg(feature = "ui")]
-      RunnerCommand::Ui(CoreCommand::Typing { conversation }) => {
-        self.announce_typing(conversation).await;
-        // Nothing to flush: typing changes no stored state.
+      RunnerCommand::Drain(drained) => {
+        self.drained.push(drained);
+        // Something may still wait for its retry time: try now rather than on the next tick.
+        self.is_upload_due = true;
+      },
+      RunnerCommand::SetActivity(activity) => {
+        self.client.set_device_activity(activity);
+        self.report_activity().await;
+        // Nothing to flush: the activity changes no stored state.
         return;
       },
       #[cfg(feature = "ui")]
+      RunnerCommand::Ui(CoreCommand::Typing {
+        conversation,
+        maybe_thread,
+      }) => {
+        self.announce_typing(conversation, maybe_thread).await;
+        // Nothing to flush: typing changes no stored state.
+        return;
+      },
+      // Uploads and saves run beside the loop.
+      #[cfg(feature = "ui")]
+      RunnerCommand::Ui(CoreCommand::UploadFiles) => self.is_upload_due = true,
+      #[cfg(feature = "ui")]
+      RunnerCommand::Ui(CoreCommand::DownloadFile {
+        conversation,
+        attachment,
+      }) => self.downloads.save(conversation, attachment),
+      #[cfg(feature = "ui")]
+      RunnerCommand::Ui(CoreCommand::ControlDownload { attachment, control }) => {
+        self.downloads.control(attachment, control);
+      },
+      #[cfg(feature = "ui")]
       RunnerCommand::Ui(command) => {
-        if let Err(error) = self.client.run_ui_command(command).await {
+        let now = self.client.now_ms();
+        // A command can take long (an upload, a big history page); heartbeats go on meanwhile.
+        let result = self
+          .connection
+          .keep_alive(now, self.client.run_ui_command(command))
+          .await;
+        if let Err(error) = result {
           tracing::warn!(%error, "UI command failed");
         }
       },
@@ -196,105 +333,178 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   }
 
   async fn on_frame(&mut self, maybe_frame: Option<Result<GatewayServerMessage, ApiError>>) {
-    let outcome = match maybe_frame {
-      Some(Ok(frame)) => self.client.handle_frame(frame).await,
-      Some(Err(error)) => Err(CoreError::Api(error)),
-      None => Err(CoreError::Gateway("connection closed".into())),
-    };
-    match outcome {
-      Ok(()) => self.changed(),
-      Err(error) => {
-        tracing::warn!(%error, "gateway ended");
-        self.schedule_reconnect();
-      },
+    if self.connection.on_frame(&mut self.client, maybe_frame).await {
+      self.changed();
     }
   }
 
   async fn on_tick(&mut self) {
     let now = self.client.now_ms();
+    self.connection.on_tick(now).await;
+    if self.next_tick_ms.saturating_sub(now) > millis(self.settings.tick) {
+      // The clock went back: the upkeep runs now, not after the jump.
+      self.next_tick_ms = now;
+    }
+    if now < self.next_tick_ms {
+      // Woken for the connection only.
+      return;
+    }
     self.next_tick_ms = now.saturating_add(millis(self.settings.tick));
-    if let Some(connection) = self.maybe_gateway.as_mut()
-      && now.saturating_sub(self.last_heartbeat_ms) >= millis(self.settings.heartbeat)
-    {
-      self.last_heartbeat_ms = now;
-      if let Err(error) = connection.send(&GatewayClientMessage::Heartbeat).await {
-        tracing::warn!(%error, "heartbeat failed");
-        self.schedule_reconnect();
-      }
+    // Retries of failed uploads come due with time.
+    self.is_upload_due = true;
+    // The upkeep may resync many conversations; heartbeats go on meanwhile.
+    let is_changed = self
+      .connection
+      .keep_alive(now, self.upkeep.tick(&mut self.client))
+      .await;
+    if is_changed {
+      self.changed();
     }
-    if self.client.is_key_bag_dirty()
-      || now.saturating_sub(self.last_account_sync_ms) >= millis(self.settings.account_sync)
-    {
-      self.last_account_sync_ms = now;
-      match self.client.sync_account_data().await {
-        Ok(()) => self.changed(),
-        Err(error) => tracing::debug!(%error, "account data not synced yet"),
-      }
-      // Owners keep the signed roster fresh (a no-op for everyone else and while it is).
-      if let Err(error) = self.client.refresh_workspace_signatures().await {
-        tracing::debug!(%error, "roster not re-signed yet");
-      }
-      if let Err(error) = self.client.check_workspace_head().await {
-        tracing::debug!(%error, "workspace head not checked yet");
-      }
-      // A rotated org recovery key: wrap the backup key to the new one (security review B4).
-      if let Err(error) = self.client.rewrap_for_current_org_key().await {
-        tracing::debug!(%error, "backup key not wrapped to the new org key yet");
-      }
+  }
+
+  fn is_older_history_due(&self) -> bool {
+    self.connection.is_connected() && self.client.is_older_history_due()
+  }
+
+  /// One page of a first sync's older history, so whatever arrives next is answered after it.
+  async fn load_older_history(&mut self) {
+    if !self.is_older_history_due() {
+      return;
     }
-    // Last seen of people who went offline since the last tick, in one request.
-    match self.client.refresh_stale_last_seen().await {
-      Ok(true) => self.changed(),
-      Ok(false) => {},
-      Err(error) => tracing::debug!(%error, "reading last seen failed"),
+    let now = self.client.now_ms();
+    let is_changed = self
+      .connection
+      .keep_alive(now, self.client.load_older_history_page())
+      .await;
+    if is_changed {
+      self.changed();
     }
-    // Staggered commits (a colleague's new device) come due without a gateway event.
-    if let Err(error) = self.client.apply_pending_changes().await {
-      tracing::debug!(%error, "pending membership changes not applied yet");
-    }
-    self.flush().await;
   }
 
   async fn flush(&mut self) {
-    if let Err(error) = self.client.generate_pending_previews().await {
-      tracing::debug!(%error, "link previews not made");
-    }
-    match self.client.upload_pending().await {
-      Ok(uploaded) if uploaded > 0 => self.changed(),
-      Ok(_) => {},
-      Err(error) => tracing::debug!(%error, "uploads did not finish"),
-    }
-    match self.client.flush_outbox().await {
-      Ok(report) if report.sent > 0 => self.changed(),
-      Ok(_) => {},
-      Err(error) => tracing::debug!(%error, "outbox flush did not finish"),
+    let now = self.client.now_ms();
+    let is_changed = self
+      .connection
+      .keep_alive(now, upkeep::flush_sends(&mut self.client))
+      .await;
+    if is_changed {
+      self.changed();
     }
   }
 
-  /// Tells the other members that the user types, at most once per [`TYPING_INTERVAL_MS`] and
-  /// conversation; offline, it is dropped (a late indicator would be wrong).
+  /// Tells the other members that the user types (throttled; offline, it is dropped: a late
+  /// indicator would be wrong).
   #[cfg(feature = "ui")]
-  async fn announce_typing(&mut self, conversation: teamcraft_proto::ConversationId) {
+  async fn announce_typing(
+    &mut self,
+    conversation: teamcraft_proto::ConversationId,
+    maybe_thread: Option<teamcraft_proto::ThreadId>,
+  ) {
     let now = self.client.now_ms();
-    if self
-      .last_typing
-      .is_some_and(|(last, at)| last == conversation && now.saturating_sub(at) < TYPING_INTERVAL_MS)
-    {
+    self
+      .typing
+      .announce(&mut self.connection, conversation, maybe_thread, now)
+      .await;
+  }
+
+  /// Tells the server what the device last said about its activity; offline, the next connection
+  /// does. A failed send replaces the connection, which then reports it again.
+  async fn report_activity(&mut self) {
+    if !self.connection.is_connected() {
       return;
     }
-    let Some(connection) = self.maybe_gateway.as_mut() else {
+    let message = GatewayClientMessage::SetActivity {
+      activity: self.client.device_activity().clone(),
+    };
+    let now = self.client.now_ms();
+    if !self.connection.send(now, &message).await {
+      tracing::debug!("device activity not reported");
+    }
+  }
+
+  /// Starts the next due upload, if none runs; drops a running one whose file was cancelled (or its
+  /// message deleted), which stops it.
+  async fn start_upload(&mut self) {
+    if !self.is_upload_due {
+      return;
+    }
+    if let Some(upload) = &self.maybe_upload
+      && !self.client.is_upload_current(upload)
+    {
+      self.maybe_upload = None;
+      self.changed();
+    }
+    if self.maybe_upload.is_some() {
+      return;
+    }
+    self.is_upload_due = false;
+    let now = self.client.now_ms();
+    match self.connection.keep_alive(now, self.client.start_upload()).await {
+      Ok(Some(upload)) => {
+        self.maybe_upload = Some(upload);
+        // The pending message shows the file's thumbnail from now on.
+        self.changed();
+      },
+      Ok(None) => {},
+      Err(error) => tracing::debug!(%error, "upload not started"),
+    }
+  }
+
+  /// The running upload's blob is stored (or failed): the file goes into its message, which is sent
+  /// once all its files are up.
+  async fn on_uploaded(&mut self, sent: Result<(), ApiError>) {
+    let Some(upload) = self.maybe_upload.take() else {
       return;
     };
-    self.last_typing = Some((conversation, now));
-    if let Err(error) = connection.send(&Client::<A, S>::typing_frame(conversation)).await {
-      tracing::debug!(%error, "typing not announced");
+    let now = self.client.now_ms();
+    if let Err(error) = self
+      .connection
+      .keep_alive(now, self.client.finish_upload(upload, sent))
+      .await
+    {
+      tracing::debug!(%error, "upload not finished");
+    }
+    self.is_upload_due = true;
+    self.flush().await;
+    self.changed();
+  }
+
+  async fn start_downloads(&mut self) {
+    let now = self.client.now_ms();
+    if self
+      .connection
+      .keep_alive(now, self.downloads.start_due(&mut self.client))
+      .await
+    {
+      self.changed();
     }
   }
 
-  fn schedule_reconnect(&mut self) {
-    self.maybe_gateway = None;
-    self.reconnect_at_ms = self.client.now_ms().saturating_add(millis(self.backoff));
-    self.backoff = (self.backoff * 2).min(self.settings.reconnect_max);
+  /// Tells the app to read again when the transfers in flight moved on.
+  fn report_progress(&mut self) {
+    let moved = self.client.transfers().moved_bytes();
+    if moved != self.maybe_reported_bytes {
+      self.maybe_reported_bytes = moved;
+      self.changed();
+    }
+  }
+
+  /// Answers the [`RunnerCommand::Drain`] requests once nothing waits for the server.
+  fn answer_drained(&mut self) {
+    self.drained.retain(|drained| !drained.is_canceled());
+    if self.drained.is_empty() {
+      return;
+    }
+    match PendingWork::read(self.client.store()) {
+      Ok(pending) if pending.is_empty() => {
+        for drained in self.drained.drain(..) {
+          // The asker may have given up meanwhile; nothing to tell it then.
+          let _ = drained.send(());
+        }
+      },
+      Ok(_) => {},
+      Err(error) => tracing::debug!(%error, "pending work not read"),
+    }
   }
 
   fn changed(&self) {

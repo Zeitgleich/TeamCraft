@@ -2,7 +2,7 @@
 //!
 //! Configuration via environment (spike; moves to the TOML config later):
 //!
-//! - `TEAMCRAFT_SFU_BIND`: UDP address, default `[::]:4433` (dual-stack)
+//! - `TEAMCRAFT_SFU_BIND`: UDP address, default `[::]:3478` (dual-stack)
 //! - `TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY`: PEM file with the server's Ed25519 public key for join
 //!   tokens (`[calls] signing_key_path` on the server), and `TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER`: the
 //!   server's `[calls] issuer`
@@ -19,12 +19,25 @@
 //!   `web_call` example, served for the `/engine` test page
 //! - `TEAMCRAFT_SFU_CERT` / `TEAMCRAFT_SFU_KEY`: PEM files; without them a self-signed
 //!   certificate valid for 14 days is generated (browsers accept it via certificate hash)
+//! - `TEAMCRAFT_SFU_RECONNECT_GRACE_SECS`: how long a participant whose connection was lost keeps
+//!   its slot to rejoin, default 30
+//! - `TEAMCRAFT_SFU_IDLE_TIMEOUT_SECS`: a connection silent this long is lost, default 10
+//! - `TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS`: on SIGTERM every call connection is closed as "going
+//!   away" (clients rejoin, ARCHITECTURE.md §6.5); how long those closes get to reach the clients
+//!   before the process exits, default 2
+//! - `TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES`: the UDP socket's receive buffer, default 4 MiB (the
+//!   kernel caps it at `net.core.rmem_max`)
+//! - `TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL`: devices of one account in the same call at once,
+//!   default 3 (keep it equal to `calls.max_devices_per_user_per_call` of the server)
+//! - `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS`: how often the whole call roster is reported to the
+//!   server (also at start), which drops participants the SFU no longer has, default 30
 
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
@@ -79,6 +92,24 @@ async fn run() -> anyhow::Result<()> {
     config.bind_addr = bind;
   }
   config.maybe_dev_http_addr = env_addr("TEAMCRAFT_SFU_DEV_HTTP")?;
+  if let Some(grace) = env_duration_secs("TEAMCRAFT_SFU_RECONNECT_GRACE_SECS")? {
+    config.reconnect_grace = grace;
+  }
+  if let Some(timeout) = env_duration_secs("TEAMCRAFT_SFU_IDLE_TIMEOUT_SECS")? {
+    config.idle_timeout = timeout;
+  }
+  if let Some(drain) = env_duration_secs("TEAMCRAFT_SFU_SHUTDOWN_DRAIN_SECS")? {
+    config.shutdown_drain = drain;
+  }
+  if let Some(interval) = env_duration_secs("TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS")? {
+    config.roster_interval = interval;
+  }
+  if let Some(bytes) = env_count("TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES")? {
+    config.udp_receive_buffer_bytes = bytes;
+  }
+  if let Some(devices) = env_count("TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL")? {
+    config.max_devices_per_user_per_call = devices;
+  }
 
   let identity = load_identity().await?;
   let verifier = load_verifier(&config)?;
@@ -120,11 +151,11 @@ async fn run() -> anyhow::Result<()> {
       None => std::future::pending().await,
     }
   };
+  // SIGTERM (a restart, a rolling deploy): calls are told the SFU is going away and rejoin.
   tokio::select! {
-    () = sfu.run() => {},
+    () = sfu.run_until(shutdown_signal()) => {},
     result = dev_page => result.context("dev page")?,
     result = serve_health(health_addr()?, internal_routes) => result.context("health endpoint")?,
-    () = shutdown_signal() => {},
   }
   Ok(())
 }
@@ -203,6 +234,29 @@ fn env_addr(name: &str) -> anyhow::Result<Option<SocketAddr>> {
         .parse()
         .with_context(|| format!("{name} is not a socket address"))?,
     )),
+    Err(_) => Ok(None),
+  }
+}
+
+/// A count of at least one; zero would keep every device out of every call.
+fn env_count(name: &str) -> anyhow::Result<Option<usize>> {
+  match std::env::var(name) {
+    Ok(value) => {
+      let count: usize = value.parse().with_context(|| format!("{name} is not a number"))?;
+      anyhow::ensure!(count >= 1, "{name} must be at least 1");
+      Ok(Some(count))
+    },
+    Err(_) => Ok(None),
+  }
+}
+
+fn env_duration_secs(name: &str) -> anyhow::Result<Option<Duration>> {
+  match std::env::var(name) {
+    Ok(value) => Ok(Some(Duration::from_secs(
+      value
+        .parse()
+        .with_context(|| format!("{name} is not a number of seconds"))?,
+    ))),
     Err(_) => Ok(None),
   }
 }

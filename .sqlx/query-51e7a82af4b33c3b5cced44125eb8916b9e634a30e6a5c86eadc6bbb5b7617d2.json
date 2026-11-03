@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM push_retries WHERE expires_at <= now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "51e7a82af4b33c3b5cced44125eb8916b9e634a30e6a5c86eadc6bbb5b7617d2"
+}

@@ -1,0 +1,23 @@
+diff --git a/wtransport/src/endpoint.rs b/wtransport/src/endpoint.rs
+index 0e7d9e67..2b23d897 100644
+--- a/wtransport/src/endpoint.rs
++++ b/wtransport/src/endpoint.rs
+@@ -197,6 +197,18 @@ impl Endpoint<endpoint_side::Client> {
+         })
+     }
+ 
++    /// Switches the endpoint to a new UDP socket.
++    ///
++    /// All connections of this endpoint continue on the new socket: QUIC connection migration
++    /// moves them to the new local address, after the server validated the new path. This is
++    /// useful when the network changes (e.g., Wi-Fi to cellular) and the old socket can no longer
++    /// reach the server.
++    ///
++    /// On error, the old UDP socket is retained.
++    pub fn rebind(&self, socket: std::net::UdpSocket) -> std::io::Result<()> {
++        self.endpoint.rebind(socket)
++    }
++
+     /// Establishes a WebTransport connection to a specified URL.
+     ///
+     /// This method initiates a WebTransport connection to the specified URL.

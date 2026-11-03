@@ -4,20 +4,25 @@
 //! tens of thousands of entries costs no memory and proves the message list only renders what is visible.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use teamcraft_proto::BackgroundId;
+use teamcraft_proto::{BackgroundId, ErrorCode, HistoryPolicy};
 
+use teamcraft_client_api::actions::{
+  FileInfo, LinkedMessage, MessageExtras, PermalinkTarget, ShareLink, ShareLinkOptions, WorkspaceEvent,
+};
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
 use teamcraft_client_api::privacy::{LastSeenVisibility, PrivacySettings};
 
 use crate::backend::ChatBackend;
 use crate::calls::BackgroundImageInfo;
+use crate::feedback::{ActionFailure, FailureKind, report_failure};
 use crate::model::{
-  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, LogLevel, Message,
-  MessageId, MessageKind, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SystemEvent, ThreadId,
-  ThreadSummary, TimestampMs, User, UserId, id_from_raw, raw_id, root_message_of, thread_id_of,
+  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, InviteId, JoinPolicy,
+  JoinableSpace, LogLevel, Message, MessageId, MessageKind, PendingInvite, PresenceStatus, Reaction,
+  SidebarCategory, Space, SpaceId, SpaceMember, SpaceRole, SpaceRoster, SystemEvent, ThreadId, ThreadSummary,
+  TimestampMs, User, UserId, id_from_raw, raw_id, root_message_of, thread_id_of,
 };
 
 /// Number of lines in the large log channel.
@@ -161,6 +166,8 @@ impl Rng {
   }
 }
 
+#[path = "mock_files.rs"]
+pub mod files;
 #[path = "mock_ops.rs"]
 mod ops;
 #[path = "mock_search.rs"]
@@ -194,6 +201,23 @@ struct State {
   /// The user's own call backgrounds (only name and size; the mock keeps no pictures).
   backgrounds: Vec<BackgroundImageInfo>,
   next_background_id: u64,
+  /// Messages the user saved for later.
+  saved: HashSet<MessageId>,
+  /// Share links the user created, by file.
+  share_links: HashMap<String, ShareLink>,
+  /// Open spaces the user isn't in yet.
+  joinable: Vec<JoinableSpace>,
+  /// Space roles other than member, and people removed from a space (the demo has everyone in
+  /// every space otherwise).
+  space_roles: HashMap<(SpaceId, UserId), SpaceRole>,
+  channel_roles: HashMap<(ConversationId, UserId), teamcraft_client_api::model::ChannelRole>,
+  integration_sources: Vec<(ConversationId, teamcraft_client_api::model::IntegrationSource)>,
+  space_leavers: HashSet<(SpaceId, UserId)>,
+  invites: Vec<(SpaceId, PendingInvite)>,
+  /// Changes to a conversation (archived, an admin who joined) that messages report.
+  workspace_events: HashMap<MessageId, WorkspaceEvent>,
+  /// Who types where (tests set it; the demo has nobody typing).
+  typing: Vec<crate::model::TypingNow>,
 }
 
 impl MockBackend {
@@ -206,15 +230,39 @@ impl MockBackend {
           id: space_a(),
           name: "Project A".into(),
           hue: 215,
+          maybe_color: None,
+          maybe_image_version: None,
           unread_count: 0,
           mention_count: 0,
+          maybe_description: Some("Planning and delivery of Project A".into()),
+          member_count: 6,
+          join_policy: JoinPolicy::Open,
+          can_add_members: true,
+          can_invite_guests: true,
+          can_manage_space: true,
+          can_delete_space: true,
+          deleted_channel_count: 0,
+          can_create_channels: true,
+          maybe_my_role: Some(SpaceRole::SpaceAdmin),
         },
         Space {
           id: space_b(),
           name: "Project B".into(),
           hue: 28,
+          maybe_color: None,
+          maybe_image_version: None,
           unread_count: 0,
           mention_count: 0,
+          maybe_description: None,
+          member_count: 4,
+          join_policy: JoinPolicy::InviteOnly,
+          can_add_members: false,
+          can_invite_guests: false,
+          can_manage_space: false,
+          can_delete_space: false,
+          deleted_channel_count: 0,
+          can_create_channels: false,
+          maybe_my_role: Some(SpaceRole::Member),
         },
       ],
       conversations: demo_conversations(),
@@ -223,6 +271,30 @@ impl MockBackend {
       next_message_id: 1_000_000,
       backgrounds: Vec::new(),
       next_background_id: 1,
+      saved: HashSet::new(),
+      share_links: HashMap::new(),
+      joinable: vec![JoinableSpace {
+        id: id_from_raw(3),
+        name: "Sales team".into(),
+        maybe_description: Some("Offers, customers and the weekly pipeline".into()),
+        hue: 140,
+        maybe_image_version: None,
+        member_count: 12,
+      }],
+      space_roles: HashMap::new(),
+      channel_roles: HashMap::new(),
+      integration_sources: Vec::new(),
+      space_leavers: HashSet::new(),
+      invites: vec![(
+        space_a(),
+        PendingInvite {
+          id: id_from_raw(900),
+          email: "new.colleague@example.com".into(),
+          role: SpaceRole::Member,
+        },
+      )],
+      workspace_events: HashMap::new(),
+      typing: Vec::new(),
     };
     state.seed_messages(now);
     state.refresh_space_badges();
@@ -238,9 +310,89 @@ impl MockBackend {
       }),
     }
   }
+
+  /// A workspace without spaces, channels or DMs, as a new instance's first owner sees it.
+  #[cfg(test)]
+  pub fn empty_workspace(now: TimestampMs) -> Self {
+    let backend = Self::new(now);
+    {
+      let mut state = backend.state.borrow_mut();
+      state.spaces.clear();
+      state.conversations.clear();
+      state.messages.clear();
+      state.replies.clear();
+    }
+    backend
+  }
+
+  /// Lets `message` report `event` in its extras from now on, as a backend whose extras arrive
+  /// after the message does.
+  #[cfg(test)]
+  pub fn set_workspace_event(&self, message: MessageId, event: WorkspaceEvent) {
+    self.state.borrow_mut().workspace_events.insert(message, event);
+  }
+
+  /// Who types where from now on, as the core would answer after `typing_start` frames.
+  #[cfg(test)]
+  pub fn set_typing(&self, typing: Vec<crate::model::TypingNow>) {
+    self.state.borrow_mut().typing = typing;
+  }
+
+  /// A top-level message from someone else arrives in `conversation`, as the core counts it.
+  #[cfg(test)]
+  pub fn receive(&self, conversation: ConversationId, is_mention: bool) {
+    let mut state = self.state.borrow_mut();
+    if let Some(conv) = state
+      .conversations
+      .iter_mut()
+      .find(|conv| conv.id == conversation)
+    {
+      conv.unread_count += 1;
+      conv.mention_count += u32::from(is_mention);
+    }
+    state.refresh_space_badges();
+  }
 }
 
 impl ChatBackend for MockBackend {
+  fn typing_now(&self) -> Vec<crate::model::TypingNow> {
+    self.state.borrow().typing.clone()
+  }
+
+  /// Like the server: channel members must be in the channel's space (here: in one of its
+  /// conversations), or the add is refused with `not_space_member`.
+  fn add_member_with_history(&self, conversation: ConversationId, user: UserId, _history: HistoryPolicy) {
+    let mut state = self.state.borrow_mut();
+    let Some(space) = state
+      .conversations
+      .iter()
+      .find(|conv| conv.id == conversation)
+      .and_then(|conv| conv.maybe_space)
+    else {
+      return;
+    };
+    let is_in_space = state
+      .conversations
+      .iter()
+      .any(|conv| conv.maybe_space == Some(space) && conv.member_ids.contains(&user));
+    if !is_in_space {
+      drop(state);
+      report_failure(ActionFailure::new(
+        FailureKind::Server(ErrorCode::NotSpaceMember),
+        "server: server answered 400: the user is not a member of the space",
+      ));
+      return;
+    }
+    if let Some(conv) = state
+      .conversations
+      .iter_mut()
+      .find(|conv| conv.id == conversation)
+      && !conv.member_ids.contains(&user)
+    {
+      conv.member_ids.push(user);
+    }
+  }
+
   fn activity(&self) -> ActivityFeed {
     let is_read = self.people.borrow().is_activity_read;
     let count = self.message_count(ch_general());
@@ -263,6 +415,7 @@ impl ChatBackend for MockBackend {
         actor: message.author,
         at: message.sent_at,
         excerpt: message.body.chars().take(140).collect(),
+        maybe_read_through: None,
         is_unread: !is_read && index < 2,
       })
       .collect();
@@ -271,6 +424,53 @@ impl ChatBackend for MockBackend {
 
   fn mark_activity_read(&self) {
     self.people.borrow_mut().is_activity_read = true;
+  }
+
+  /// The space's public channels, plus one the demo user hasn't joined (for the preview).
+  fn browse_channels(&self, space: SpaceId) -> Vec<teamcraft_client_api::actions::BrowsableChannel> {
+    let state = self.state.borrow();
+    let mut list: Vec<_> = state
+      .conversations
+      .iter()
+      .filter(|conv| conv.maybe_space == Some(space) && conv.kind == ConversationKind::Public)
+      .map(|conv| teamcraft_client_api::actions::BrowsableChannel {
+        conversation: conv.id,
+        space,
+        name: conv.name.clone(),
+        topic: conv.topic.clone(),
+        is_member: true,
+        is_archived: false,
+        has_external_people: false,
+        maybe_category: None,
+        join: teamcraft_client_api::actions::BrowseJoin::Open,
+      })
+      .collect();
+    if space == space_a() {
+      list.push(teamcraft_client_api::actions::BrowsableChannel {
+        conversation: id_from_raw(90),
+        space,
+        name: "support".into(),
+        topic: "Questions from customers, triaged daily".into(),
+        is_member: false,
+        is_archived: false,
+        has_external_people: true,
+        maybe_category: None,
+        join: teamcraft_client_api::actions::BrowseJoin::Open,
+      });
+      // A private channel, as an admin's browser lists it (admin.md §2.4).
+      list.push(teamcraft_client_api::actions::BrowsableChannel {
+        conversation: id_from_raw(91),
+        space,
+        name: "leadership".into(),
+        topic: String::new(),
+        is_member: false,
+        is_archived: false,
+        has_external_people: false,
+        maybe_category: None,
+        join: teamcraft_client_api::actions::BrowseJoin::AsAdmin,
+      });
+    }
+    list
   }
 
   fn last_seen(&self, user: UserId) -> Option<TimestampMs> {
@@ -351,6 +551,156 @@ impl ChatBackend for MockBackend {
 
   fn spaces(&self) -> Vec<Space> {
     self.state.borrow().spaces.clone()
+  }
+
+  fn space_members(&self, space: SpaceId) -> SpaceRoster {
+    let state = self.state.borrow();
+    let mut members: Vec<SpaceMember> = state
+      .users
+      .iter()
+      .filter(|user| !user.is_bot && !state.space_leavers.contains(&(space, user.id)))
+      .map(|user| SpaceMember {
+        user: user.id,
+        display_name: user.display_name.clone(),
+        is_guest: user.is_guest,
+        is_bot: false,
+        role: state
+          .space_roles
+          .get(&(space, user.id))
+          .cloned()
+          .unwrap_or(if user.is_guest {
+            SpaceRole::Guest
+          } else {
+            SpaceRole::Member
+          }),
+      })
+      .collect();
+    members.sort_by_key(|member| member.display_name.to_lowercase());
+    SpaceRoster::Loaded(members)
+  }
+
+  fn space_invites(&self, space: SpaceId) -> Vec<PendingInvite> {
+    let state = self.state.borrow();
+    state
+      .invites
+      .iter()
+      .filter(|(of, _)| *of == space)
+      .map(|(_, invite)| invite.clone())
+      .collect()
+  }
+
+  fn integration_sources(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::IntegrationSource> {
+    self
+      .state
+      .borrow()
+      .integration_sources
+      .iter()
+      .filter(|(id, _)| *id == conversation)
+      .map(|(_, source)| source.clone())
+      .collect()
+  }
+
+  fn can_manage_integration_sources(&self) -> bool {
+    true
+  }
+
+  fn add_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_client_api::model::NewIntegrationSource,
+  ) {
+    let listed = teamcraft_client_api::model::IntegrationSource {
+      id: source.id,
+      name: source.name,
+      kind: source.kind,
+      created_by: me(),
+      created_at_ms: crate::clock::now_ms(),
+    };
+    self
+      .state
+      .borrow_mut()
+      .integration_sources
+      .push((conversation, listed));
+  }
+
+  fn revoke_integration_source(&self, conversation: ConversationId, source: teamcraft_proto::SourceId) {
+    self
+      .state
+      .borrow_mut()
+      .integration_sources
+      .retain(|(id, listed)| !(*id == conversation && listed.id == source));
+  }
+
+  fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
+    use teamcraft_client_api::model::{ChannelMember, ChannelRole};
+    let state = self.state.borrow();
+    let Some(found) = state.conversations.iter().find(|conv| conv.id == conversation) else {
+      return Vec::new();
+    };
+    found
+      .member_ids
+      .iter()
+      .map(|user| ChannelMember {
+        user: *user,
+        role: state
+          .channel_roles
+          .get(&(conversation, *user))
+          .cloned()
+          .unwrap_or(if *user == me() {
+            ChannelRole::Admin
+          } else {
+            ChannelRole::Member
+          }),
+        is_role_signed: true,
+      })
+      .collect()
+  }
+
+  fn set_channel_role(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    role: teamcraft_client_api::model::ChannelRole,
+  ) {
+    self
+      .state
+      .borrow_mut()
+      .channel_roles
+      .insert((conversation, user), role);
+  }
+
+  fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {
+    self.state.borrow_mut().space_roles.insert((space, user), role);
+  }
+
+  fn remove_space_member(&self, space: SpaceId, user: UserId) {
+    self.state.borrow_mut().space_leavers.insert((space, user));
+  }
+
+  fn revoke_space_invite(&self, space: SpaceId, invite: InviteId) {
+    self
+      .state
+      .borrow_mut()
+      .invites
+      .retain(|(of, candidate)| !(*of == space && candidate.id == invite));
+  }
+
+  fn joinable_spaces(&self) -> Vec<JoinableSpace> {
+    self.state.borrow().joinable.clone()
+  }
+
+  fn join_space(&self, space: SpaceId) {
+    let mut state = self.state.borrow_mut();
+    if let Some(index) = state.joinable.iter().position(|candidate| candidate.id == space) {
+      let joined = state.joinable.remove(index);
+      state.spaces.push(Space {
+        member_count: joined.member_count + 1,
+        ..joined.tile()
+      });
+    }
   }
 
   fn space_conversations(&self, space: SpaceId) -> Vec<Conversation> {
@@ -498,6 +848,8 @@ impl ChatBackend for MockBackend {
       reactions: Vec::new(),
       reply_count: 0,
       maybe_thread,
+      maybe_imported: None,
+      maybe_placeholder: None,
     };
     match maybe_thread {
       Some(thread) => {
@@ -583,12 +935,125 @@ impl ChatBackend for MockBackend {
     }
   }
 
+  fn message_extras(&self, conversation: ConversationId, messages: &[MessageId]) -> Vec<MessageExtras> {
+    let files = self.conversation_files(conversation);
+    let state = self.state.borrow();
+    messages
+      .iter()
+      .map(|&message| MessageExtras {
+        is_saved: state.saved.contains(&message),
+        files: files
+          .iter()
+          .filter(|file| file.message == message)
+          .cloned()
+          .collect(),
+        maybe_workspace_event: state.workspace_events.get(&message).cloned(),
+        ..MessageExtras::new(message)
+      })
+      .collect()
+  }
+
+  fn set_saved(&self, _conversation: ConversationId, message: MessageId, is_saved: bool) {
+    let mut state = self.state.borrow_mut();
+    match is_saved {
+      true => state.saved.insert(message),
+      false => state.saved.remove(&message),
+    };
+  }
+
+  fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
+    Some(format!("teamcraft:/c/{conversation}/m/{message}"))
+  }
+
+  fn resolve_permalink(&self, link: &str) -> Option<PermalinkTarget> {
+    self.state.borrow().find_linked(link).map(|(target, _)| target)
+  }
+
+  fn linked_message(&self, link: &str) -> Option<LinkedMessage> {
+    let Some((target, message)) = self.state.borrow().find_linked(link) else {
+      return Some(LinkedMessage::Unavailable);
+    };
+    let files = self
+      .conversation_files(target.conversation)
+      .into_iter()
+      .filter(|file| file.message == target.message)
+      .collect();
+    Some(LinkedMessage::Visible {
+      target,
+      message,
+      files,
+    })
+  }
+
+  fn conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
+    if conversation != ch_design() {
+      return Vec::new();
+    }
+    let state = self.state.borrow();
+    let messages = state.messages.get(&conversation).map_or(&[][..], Vec::as_slice);
+    files::demo_files(conversation, messages)
+  }
+
+  fn create_share_link(
+    &self,
+    _conversation: ConversationId,
+    _message: MessageId,
+    file_id: &str,
+    options: ShareLinkOptions,
+  ) {
+    let link = ShareLink {
+      file_id: file_id.to_owned(),
+      share_id: format!("demo{file_id}"),
+      download_count: 0,
+      url: format!("https://chat.example.com/s/demo{file_id}#demo-key"),
+      maybe_expires_at: options
+        .maybe_expires_in_seconds
+        .map(|seconds| crate::clock::now_ms() + seconds as i64 * 1000),
+      maybe_max_downloads: options.maybe_max_downloads,
+      has_password: options.maybe_password.is_some(),
+    };
+    self
+      .state
+      .borrow_mut()
+      .share_links
+      .insert(file_id.to_owned(), link);
+  }
+
+  fn revoke_share_link(
+    &self,
+    _conversation: ConversationId,
+    _message: MessageId,
+    file_id: &str,
+    share_id: &str,
+  ) {
+    let mut state = self.state.borrow_mut();
+    if state
+      .share_links
+      .get(file_id)
+      .is_some_and(|link| link.share_id == share_id)
+    {
+      state.share_links.remove(file_id);
+    }
+  }
+
+  fn share_links(&self, _conversation: ConversationId, _message: MessageId, file_id: &str) -> Vec<ShareLink> {
+    self
+      .state
+      .borrow()
+      .share_links
+      .get(file_id)
+      .cloned()
+      .into_iter()
+      .collect()
+  }
+
   fn set_presence(&self, presence: PresenceStatus) {
     self.state.borrow_mut().users[0].presence = presence;
   }
 
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
-    self.state.borrow_mut().users[0].maybe_custom_status = maybe_status;
+    self.state.borrow_mut().users[0].maybe_custom_status =
+      maybe_status.map(|status| crate::live::with_local_expiry(status, crate::clock::now_ms()));
   }
 }
 
@@ -610,6 +1075,79 @@ impl State {
     for dm in DM_FIRST + 1..DM_FIRST + 6 {
       self.generate_conversation(id_from_raw::<ConversationId>(dm), 12, now);
     }
+    self.seed_message_links();
+  }
+
+  /// A few recent messages in #general link to other messages: one in another channel, a thread
+  /// reply, and one in a conversation the user isn't in (its preview says so).
+  fn seed_message_links(&mut self) {
+    let Some(linked) = self
+      .messages
+      .get(&ch_design())
+      .and_then(|all| {
+        all
+          .iter()
+          .rev()
+          .find(|message| matches!(message.kind, MessageKind::User))
+      })
+      .map(|message| format!("teamcraft:/c/{}/m/{}", message.conversation, message.id))
+    else {
+      return;
+    };
+    let maybe_reply = self
+      .replies
+      .get(&ch_engineering())
+      .and_then(|replies| replies.last())
+      .and_then(|reply| {
+        reply
+          .maybe_thread
+          .map(|thread| format!("teamcraft:/c/{}/m/{}/t/{thread}", reply.conversation, reply.id))
+      });
+    let hidden = "teamcraft:/c/999/m/99900001".to_owned();
+    let bodies = [
+      Some(format!("Here is the mockup we talked about: {linked}")),
+      maybe_reply.map(|link| format!("Answered in the thread: {link}")),
+      Some(format!("Context from the other team: {hidden}")),
+    ];
+    let Some(general) = self.messages.get_mut(&ch_general()) else {
+      return;
+    };
+    let mut users = general
+      .iter_mut()
+      .rev()
+      .skip(1)
+      .filter(|message| matches!(message.kind, MessageKind::User));
+    for body in bodies.into_iter().flatten() {
+      if let Some(message) = users.nth(1) {
+        message.body = body;
+      }
+    }
+  }
+
+  /// The message a demo permalink points to, if the demo user can see it.
+  fn find_linked(&self, link: &str) -> Option<(PermalinkTarget, Message)> {
+    let Some(crate::route::Route::Message {
+      conversation,
+      message,
+      maybe_thread,
+    }) = crate::route::Route::from_permalink(link)
+    else {
+      return None;
+    };
+    let found = self
+      .messages
+      .get(&conversation)
+      .into_iter()
+      .chain(self.replies.get(&conversation))
+      .flatten()
+      .find(|candidate| candidate.id == message)?
+      .clone();
+    let target = PermalinkTarget {
+      conversation,
+      message,
+      maybe_thread: maybe_thread.or(found.maybe_thread),
+    };
+    Some((target, found))
   }
 
   fn generate_conversation(&mut self, conversation: ConversationId, count: usize, now: TimestampMs) {
@@ -658,6 +1196,8 @@ impl State {
         reactions: Vec::new(),
         reply_count: 0,
         maybe_thread: None,
+        maybe_imported: None,
+        maybe_placeholder: None,
       };
       if matches!(message.kind, MessageKind::User) {
         for _ in 0..rng.below(3) {
@@ -700,6 +1240,8 @@ impl State {
               reactions: Vec::new(),
               reply_count: 0,
               maybe_thread: Some(thread_id_of(id)),
+              maybe_imported: None,
+              maybe_placeholder: None,
             });
           }
         }
@@ -767,6 +1309,8 @@ fn log_line(conversation: ConversationId, index: usize, total: usize, now: Times
     reactions: Vec::new(),
     reply_count: 0,
     maybe_thread: None,
+    maybe_imported: None,
+    maybe_placeholder: None,
   }
 }
 
@@ -799,17 +1343,28 @@ fn demo_users() -> Vec<User> {
         5..=8 => Some("Brand B".to_owned()),
         _ => None,
       },
+      // The last colleague hasn't set up the app yet.
+      is_deactivated: false,
+      is_deleted: false,
+      device_setup: if id == 8 {
+        crate::model::DeviceSetup::NoDevices
+      } else {
+        crate::model::DeviceSetup::HasDevices
+      },
+      maybe_email: Some(format!("{username}@example.com")),
     })
     .collect();
   users[3].maybe_custom_status = Some(CustomStatus {
     emoji: "🎧".into(),
     text: "Focus time".into(),
     expiry: crate::model::StatusExpiry::Today,
+    maybe_expires_at: Some(crate::clock::end_of_local_day(crate::clock::now_ms())),
   });
   users[6].maybe_custom_status = Some(CustomStatus {
     emoji: "🌴".into(),
     text: "Vacation until Monday".into(),
     expiry: crate::model::StatusExpiry::ThisWeek,
+    maybe_expires_at: Some(crate::clock::end_of_local_week(crate::clock::now_ms())),
   });
   users.push(User {
     id: bot(),
@@ -821,6 +1376,10 @@ fn demo_users() -> Vec<User> {
     is_guest: false,
     is_bot: true,
     maybe_organization: None,
+    is_deactivated: false,
+    is_deleted: false,
+    device_setup: crate::model::DeviceSetup::HasDevices,
+    maybe_email: None,
   });
   users
 }
@@ -851,6 +1410,13 @@ fn demo_conversations() -> Vec<Conversation> {
     is_muted: false,
     can_post: true,
     bookmarks: Vec::new(),
+    is_catching_up: false,
+    is_notes_to_self: false,
+    is_archived: false,
+    is_imported: false,
+    maybe_permissions: None,
+    has_only_deactivated_others: false,
+    maybe_image_version: None,
   };
   use ConversationKind::{Integration, Private, Public};
   use SidebarCategory::{Channels, Integrations};
@@ -1025,6 +1591,13 @@ fn demo_conversations() -> Vec<Conversation> {
       is_muted: false,
       can_post: true,
       bookmarks: Vec::new(),
+      is_catching_up: false,
+      is_notes_to_self: false,
+      is_archived: false,
+      is_imported: false,
+      maybe_permissions: None,
+      has_only_deactivated_others: false,
+      maybe_image_version: None,
     });
   }
   list

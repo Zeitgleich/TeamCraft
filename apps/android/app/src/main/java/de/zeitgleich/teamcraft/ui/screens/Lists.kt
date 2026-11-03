@@ -50,7 +50,7 @@ fun ThreadsScreen(viewModel: MainViewModel, onOpenThread: (String, String) -> Un
     snapshot = viewModel.readChat { snapshot() }
     threads = viewModel.readChat { query(ChatQueries.followedThreads()).threads }
   }
-  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.threads_title), maybeOnBack = onBack) }) { padding ->
+  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.threads_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     LazyColumn(Modifier.fillMaxSize().padding(padding)) {
       val list = threads.orEmpty()
       if (threads != null && list.isEmpty()) item { EmptyText(R.string.threads_empty) }
@@ -88,7 +88,7 @@ fun SavedScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -
     saved = viewModel.readChat { query(ChatQueries.savedItems()).items } ?: emptyList()
     mentions = viewModel.readChat { query(ChatQueries.recentMentions()).hits } ?: emptyList()
   }
-  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.saved_title), maybeOnBack = onBack) }) { padding ->
+  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.saved_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
       PrimaryTabRow(selectedTabIndex = tab) {
         Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text(stringResource(R.string.saved_items)) })

@@ -7,6 +7,10 @@
 //! Depth is counted in packets instead of wall-clock time: callers pop once per frame interval
 //! (20 ms for Opus), which keeps the buffer free of clocks and deterministic to test. Adaptive
 //! depth (growing with measured jitter) is a later step.
+//!
+//! Network handovers: an outage empties the buffer, which re-buffers to the target depth before
+//! playing on. A backlog that arrives in one burst afterwards would add its length as latency for
+//! the rest of the call; when the buffer stays well above its target, it skips ahead instead.
 
 use std::collections::BTreeMap;
 
@@ -15,6 +19,9 @@ use crate::rtp::SequenceNumber;
 /// Sequence numbers more than this far away from the playout position are treated as a stream
 /// restart instead of reordering.
 const MAX_SEQUENCE_JUMP: u64 = 3000;
+/// Pops in a row (0.5 s of 20 ms frames) the buffer must stay above its excess bound before it
+/// skips ahead; a short burst of jitter drains by itself.
+const CATCH_UP_AFTER_POPS: u32 = 25;
 
 /// Reorders packets by sequence number and paces playout.
 #[derive(Debug)]
@@ -25,6 +32,8 @@ pub struct JitterBuffer<T> {
   /// Extended sequence number of the next slot after the last one played; older packets are late.
   maybe_played_until: Option<u64>,
   state: PlayoutState,
+  /// Pops in a row with more than `max_excess_packets` above the target.
+  excess_pops: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +42,9 @@ pub struct JitterBufferConfig {
   pub target_depth_packets: usize,
   /// Upper bound; on overflow the oldest packets are dropped.
   pub max_depth_packets: usize,
+  /// Packets above the target that are tolerated for a while; if more stay buffered, playout
+  /// skips ahead to the target depth (latency after a handover burst).
+  pub max_excess_packets: usize,
 }
 
 /// Result of inserting a packet.
@@ -73,6 +85,7 @@ impl Default for JitterBufferConfig {
     Self {
       target_depth_packets: 3,
       max_depth_packets: 50,
+      max_excess_packets: 10,
     }
   }
 }
@@ -85,6 +98,7 @@ impl<T> JitterBuffer<T> {
       maybe_highest: None,
       maybe_played_until: None,
       state: PlayoutState::Buffering,
+      excess_pops: 0,
     }
   }
 
@@ -117,7 +131,7 @@ impl<T> JitterBuffer<T> {
         }
         *self.packets.keys().next()?
       },
-      PlayoutState::Playing { next } => next,
+      PlayoutState::Playing { next } => self.catch_up(next),
     };
     if self.maybe_highest.is_none_or(|highest| next > highest) {
       // Underrun: re-buffer to rebuild the safety margin.
@@ -136,6 +150,15 @@ impl<T> JitterBuffer<T> {
     })
   }
 
+  /// The packet of the slot [`Self::pop`] returns next, if it has arrived: after a
+  /// [`Playout::Missing`] it carries the lost packet's in-band FEC data.
+  pub fn peek_next(&self) -> Option<&T> {
+    match self.state {
+      PlayoutState::Playing { next } => self.packets.get(&next),
+      PlayoutState::Buffering => None,
+    }
+  }
+
   /// Number of packets currently buffered.
   pub fn len(&self) -> usize {
     self.packets.len()
@@ -143,6 +166,27 @@ impl<T> JitterBuffer<T> {
 
   pub fn is_empty(&self) -> bool {
     self.packets.is_empty()
+  }
+
+  /// The slot to play: `next`, or further ahead when the buffer has stayed too deep for a while.
+  fn catch_up(&mut self, next: u64) -> u64 {
+    let Some(highest) = self.maybe_highest else {
+      return next;
+    };
+    let buffered_slots = (highest + 1).saturating_sub(next);
+    let excess_bound = (self.config.target_depth_packets + self.config.max_excess_packets) as u64;
+    if buffered_slots <= excess_bound {
+      self.excess_pops = 0;
+      return next;
+    }
+    self.excess_pops += 1;
+    if self.excess_pops < CATCH_UP_AFTER_POPS {
+      return next;
+    }
+    self.excess_pops = 0;
+    let caught_up = (highest + 1).saturating_sub(self.config.target_depth_packets as u64);
+    self.packets.retain(|seq, _| *seq >= caught_up);
+    caught_up
   }
 
   /// Maps a 16-bit sequence number onto a 64-bit counter that doesn't wrap, choosing the value
@@ -208,6 +252,7 @@ mod tests {
   const CONFIG: JitterBufferConfig = JitterBufferConfig {
     target_depth_packets: 3,
     max_depth_packets: 8,
+    max_excess_packets: 10,
   };
 
   mod playout {
@@ -282,6 +327,71 @@ mod tests {
         })
         .collect();
       assert_eq!(sequence_numbers, vec![65534, 65535, 0, 1]);
+    }
+  }
+
+  mod handover {
+    use super::*;
+
+    #[test]
+    fn next_packet_is_available_for_fec_after_a_gap() {
+      let mut buffer = JitterBuffer::new(CONFIG);
+      for seq in [1, 3, 4] {
+        buffer.push(SequenceNumber(seq), seq);
+      }
+      assert_eq!(buffer.peek_next(), None, "nothing before playout starts");
+      assert!(matches!(buffer.pop(), Some(Playout::Packet { item: 1, .. })));
+      assert!(matches!(buffer.pop(), Some(Playout::Missing { .. })));
+      assert_eq!(buffer.peek_next(), Some(&3));
+    }
+
+    #[test]
+    fn outage_rebuffers_and_a_burst_afterwards_is_skipped_down_to_the_target() {
+      let config = JitterBufferConfig {
+        target_depth_packets: 3,
+        max_depth_packets: 50,
+        max_excess_packets: 5,
+      };
+      let mut buffer = JitterBuffer::new(config);
+      let mut seq = 0u16;
+      let mut push = |buffer: &mut JitterBuffer<u16>, count: u16| {
+        for _ in 0..count {
+          buffer.push(SequenceNumber(seq), seq);
+          seq += 1;
+        }
+      };
+      push(&mut buffer, 3);
+      assert_eq!(drain(&mut buffer).len(), 3);
+      // Handover: one second of packets arrives at once.
+      push(&mut buffer, 50);
+      assert!(buffer.pop().is_some());
+      // Playing on in real time (one packet in, one out), the backlog stays at first...
+      for _ in 0..CATCH_UP_AFTER_POPS - 1 {
+        push(&mut buffer, 1);
+        buffer.pop();
+      }
+      assert!(buffer.len() > 40);
+      // ...and is dropped once it persisted: latency is back at the target.
+      push(&mut buffer, 1);
+      buffer.pop();
+      assert_eq!(buffer.len(), 2);
+      push(&mut buffer, 1);
+      assert!(matches!(buffer.pop(), Some(Playout::Packet { .. })));
+    }
+
+    #[test]
+    fn short_jitter_bursts_are_kept() {
+      let mut buffer = JitterBuffer::new(CONFIG);
+      for seq in 0..3 {
+        buffer.push(SequenceNumber(seq), seq);
+      }
+      buffer.pop();
+      // Six packets at once, within the excess bound: all of them play.
+      for seq in 3..9 {
+        buffer.push(SequenceNumber(seq), seq);
+      }
+      let played: Vec<_> = drain(&mut buffer).into_iter().flatten().collect();
+      assert_eq!(played, (1..9).collect::<Vec<_>>());
     }
   }
 

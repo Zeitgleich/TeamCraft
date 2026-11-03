@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE meeting_lobby SET is_by_link = $3 WHERE meeting_id = $1 AND user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f5487fd2cbc7074b8e2101476fb09018d2dca915844b2a88d1cbae51e14cffda"
+}

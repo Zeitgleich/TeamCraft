@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM deleted_conversations WHERE deleted_at < $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "03f1f46cf38abe39a884d89c34d7341c46f097f5f4f0b7f901bc9fd69b12c5cc"
+}

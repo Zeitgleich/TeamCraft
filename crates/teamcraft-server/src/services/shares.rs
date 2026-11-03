@@ -20,6 +20,7 @@ use crate::auth::AuthenticatedUser;
 use crate::brand::ResolvedBrand;
 use crate::error::ApiError;
 use crate::state::AppState;
+use crate::storage::BlobStore;
 
 /// Links shown in the caller's list.
 const LIST_LIMIT: i64 = 200;
@@ -40,8 +41,25 @@ pub async fn create_share(
 
   let now = OffsetDateTime::now_utc();
   let latest = now + Duration::days(i64::from(settings.max_expiry_days));
-  let expires_at = match request.maybe_expires_at {
-    Some(millis) => {
+  if request.maybe_expires_at.is_some() && request.maybe_expires_in_seconds.is_some() {
+    return Err(ApiError::InvalidRequest(
+      "send expires_at or expires_in_seconds, not both".into(),
+    ));
+  }
+  let expires_at = match (request.maybe_expires_at, request.maybe_expires_in_seconds) {
+    (None, Some(0)) => {
+      return Err(ApiError::InvalidRequest(
+        "expires_in_seconds must be positive".into(),
+      ));
+    },
+    // A relative choice is measured by the server's clock and shortened to the cap.
+    (None, Some(seconds)) => {
+      let seconds = i64::try_from(seconds).unwrap_or(i64::MAX);
+      now
+        .checked_add(Duration::seconds(seconds))
+        .map_or(latest, |at| at.min(latest))
+    },
+    (Some(millis), _) => {
       let at =
         offset_date_time(millis).ok_or_else(|| ApiError::InvalidRequest("invalid expires_at".into()))?;
       if at <= now {
@@ -57,7 +75,7 @@ pub async fn create_share(
       }
       at
     },
-    None => (now + Duration::days(i64::from(settings.default_expiry_days))).min(latest),
+    (None, None) => (now + Duration::days(i64::from(settings.default_expiry_days))).min(latest),
   };
   let cap = settings.max_downloads_cap;
   let maybe_max_downloads = match request.maybe_max_downloads {
@@ -161,29 +179,61 @@ pub async fn share_info(
   })
 }
 
-/// Public: counts one download and returns a short-lived URL of the ciphertext.
+/// Public: counts one download and returns a short-lived URL of the ciphertext, with a grant.
+/// A retry that presents the grant of a download counted within the retry window gets a fresh URL
+/// without counting again, so a transient failure on the way (the storage fetch, the connection)
+/// does not use up a link with a download limit. Only the grant's hash is stored.
 pub async fn download_share(
   state: &AppState,
   brand: &ResolvedBrand,
   id: &str,
+  maybe_grant: Option<&str>,
 ) -> Result<ShareDownloadResponse, ApiError> {
   let store = state
     .maybe_blob_store
     .as_ref()
     .ok_or_else(|| ApiError::Unavailable("storage is not configured".into()))?;
+  let now = OffsetDateTime::now_utc();
+  let retry_window = Duration::minutes(i64::from(state.settings.get().shares.download_retry_minutes));
+  if let Some(presented) = maybe_grant.filter(|_| !retry_window.is_zero())
+    && let Some((link, target)) = state
+      .database
+      .find_share_by_grant(id, &grant_hash(presented), now)
+      .await?
+    && state.settings.get().shares.is_enabled
+    && is_served_on(state, &link, brand)
+    && is_creator_active(state, &link).await?
+  {
+    return Ok(download_response(store, &target, presented.to_owned()));
+  }
+  // No grant, or one that ran out: a new download.
+  let grant = new_one_time_token(&mut OsRng);
   let (_, target) = usable_share(state, brand, id).await?;
   if !state
     .database
-    .count_share_download(id, OffsetDateTime::now_utc())
+    .count_share_download(id, now, &grant_hash(&grant), now + retry_window)
     .await?
   {
     return Err(ApiError::ShareUnavailable);
   }
-  Ok(ShareDownloadResponse {
+  Ok(download_response(store, &target, grant))
+}
+
+fn download_response(
+  store: &BlobStore,
+  target: &teamcraft_db::ShareTarget,
+  grant: String,
+) -> ShareDownloadResponse {
+  ShareDownloadResponse {
+    grant,
     download_url: store.presign_download(&target.s3_key).to_string(),
     size_bytes: target.size_bytes,
     expires_at: unix_millis(OffsetDateTime::now_utc() + store.expiry()),
-  })
+  }
+}
+
+fn grant_hash(grant: &str) -> [u8; 32] {
+  teamcraft_crypto::attachment::content_sha256(grant.as_bytes())
 }
 
 async fn usable_share(
@@ -199,10 +249,22 @@ async fn usable_share(
     .find_downloadable_share(id, OffsetDateTime::now_utc())
     .await?
     .ok_or(ApiError::ShareUnavailable)?;
-  if !is_served_on(state, &link, brand) {
+  if !is_served_on(state, &link, brand) || !is_creator_active(state, &link).await? {
     return Err(ApiError::ShareUnavailable);
   }
   Ok((link, target))
+}
+
+/// Links of a deactivated (suspended) user are paused, not revoked: they work again after a
+/// reactivation if they haven't expired meanwhile (admin.md §3.2.1).
+async fn is_creator_active(state: &AppState, link: &ShareLink) -> Result<bool, ApiError> {
+  Ok(
+    state
+      .database
+      .get_user(link.created_by)
+      .await?
+      .is_some_and(|creator| !creator.is_deactivated),
+  )
 }
 
 /// A link works only on the host names of the brand that made it (docs/branding.md §8), so that a

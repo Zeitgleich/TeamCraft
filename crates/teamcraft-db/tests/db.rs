@@ -8,14 +8,92 @@
 
 use teamcraft_db::testing::TestDatabase;
 use teamcraft_db::{
-  NewConversation, NewMessage, NewSpace, OidcIdentity, SnowflakeGenerator, participants_key,
+  ImageChange, KeyPackageCounts, NewConversation, NewDevice, NewKeyPackage, NewMessage, NewPushRetry,
+  NewSpace, OidcIdentity, PostOutcome, SnowflakeGenerator, StoredSpaceImage, participants_key,
 };
 use teamcraft_proto::{
   ClientMessageId, ConversationId, ConversationKind, ConversationVisibility, DeviceId, HistoryPolicy, Id,
-  JoinPolicy, MessageId, SpaceId, UserId, UserKind,
+  IdempotencyKey, JoinPolicy, MessageId, PushKind, PushWakeUp, SpaceId, UserId, UserKind,
 };
 
 const ISSUER: &str = "https://auth.example.com/realms/dev";
+
+#[tokio::test]
+async fn key_packages_are_served_only_while_valid_and_swept_after() {
+  let Some(test_db) = TestDatabase::create().await else {
+    return;
+  };
+  let db = &test_db.db;
+  let ids = SnowflakeGenerator::new(1).unwrap();
+  let user = db
+    .upsert_oidc_user(&identity("k", "Kim"), ids.next_id().unwrap())
+    .await
+    .unwrap();
+  let device = db
+    .register_device(&NewDevice {
+      id: ids.next_id().unwrap(),
+      user_id: user.id,
+      name: "laptop",
+      public_key: &[1; 32],
+      cross_signature: &[2; 64],
+    })
+    .await
+    .unwrap()
+    .id;
+  let now = time::OffsetDateTime::now_utc();
+  let day = time::Duration::days(1);
+  let package = |bytes: &'static [u8], expires_at| NewKeyPackage {
+    id: ids.next_id::<DeviceId>().unwrap().snowflake(),
+    bytes,
+    expires_at,
+  };
+  let regular = [package(b"soon", now + 5 * day), package(b"later", now + 70 * day)];
+  db.add_key_packages(device, &regular, Some(package(b"last", now + 20 * day)), 10, now)
+    .await
+    .unwrap();
+
+  // With a renewal window of 30 days: one available, one expiring soon, no fresh last resort.
+  let counts = db.key_package_counts(device, now, now + 30 * day).await.unwrap();
+  assert_eq!(
+    counts,
+    KeyPackageCounts {
+      available: 1,
+      expiring_soon: 1,
+      has_last_resort: false,
+    }
+  );
+  // 100 days on: nothing counts any more.
+  let later = now + 100 * day;
+  let counts = db
+    .key_package_counts(device, later, later + 30 * day)
+    .await
+    .unwrap();
+  assert_eq!(
+    (counts.available, counts.expiring_soon, counts.has_last_resort),
+    (0, 0, false)
+  );
+
+  // Only packages valid for 10 more days are served, the one expiring first; then the last resort.
+  let valid_until = now + 10 * day;
+  let first = db.claim_key_package(device, valid_until).await.unwrap().unwrap();
+  assert_eq!(
+    (first.key_package.as_slice(), first.is_last_resort),
+    (&b"later"[..], false)
+  );
+  let second = db.claim_key_package(device, valid_until).await.unwrap().unwrap();
+  assert_eq!(
+    (second.key_package.as_slice(), second.is_last_resort),
+    (&b"last"[..], true)
+  );
+  // At +100 days nothing at all is served.
+  assert!(db.claim_key_package(device, later).await.unwrap().is_none());
+
+  // The sweep deletes what can't be served any more; the rest stays.
+  assert_eq!(db.delete_expiring_key_packages(valid_until).await.unwrap(), 1);
+  assert!(db.claim_key_package(device, now).await.unwrap().is_some());
+  assert_eq!(db.delete_expiring_key_packages(later).await.unwrap(), 2);
+  test_db.drop_database().await;
+}
 
 #[tokio::test]
 async fn upsert_creates_then_updates_user() {
@@ -195,6 +273,280 @@ async fn direct_messages_are_created_once_per_pair() {
   test_db.drop_database().await;
 }
 
+/// A DM goes with a deleted participant even when an earlier removal from all chats took their
+/// membership (issue #1066); the import account, a member but no participant, takes no DM with it.
+#[tokio::test]
+async fn dms_go_with_their_deleted_participant_not_with_other_members() {
+  let Some(test_db) = TestDatabase::create().await else {
+    return;
+  };
+  let db = &test_db.db;
+  let ids = SnowflakeGenerator::new(1).unwrap();
+  let mut users = Vec::new();
+  for (subject, name) in [("a", "Alice"), ("b", "Bob"), ("i", "Importer")] {
+    let user = db
+      .upsert_oidc_user(&identity(subject, name), ids.next_id().unwrap())
+      .await
+      .unwrap();
+    users.push(user.id);
+  }
+  let [alice, bob, importer] = users[..] else {
+    unreachable!()
+  };
+  let participants = [alice, bob];
+  let new_dm = NewConversation {
+    id: ids.next_id().unwrap(),
+    maybe_space: None,
+    kind: ConversationKind::Dm,
+    maybe_name: None,
+    maybe_topic: None,
+    maybe_description: None,
+    visibility: ConversationVisibility::Private,
+    history_policy: HistoryPolicy::FromJoin,
+    maybe_category: None,
+    maybe_participants_key: Some(participants_key(&participants)),
+    is_integration: false,
+  };
+  let (dm, _) = db
+    .get_or_create_participants_conversation(&new_dm, &participants)
+    .await
+    .unwrap();
+  db.add_importer(dm, importer).await.unwrap();
+
+  assert!(
+    db.direct_conversations_deleted_with(importer)
+      .await
+      .unwrap()
+      .is_empty()
+  );
+  // Bob's deletion takes his memberships; the DM stays his, as deletions before #1066 left it.
+  db.delete_user(bob).await.unwrap();
+  assert_eq!(
+    db.deleted_users_with_direct_conversations(10).await.unwrap(),
+    vec![bob]
+  );
+  let leftover = db.direct_conversations_deleted_with(bob).await.unwrap();
+  assert_eq!(leftover.len(), 1);
+  assert_eq!(leftover[0].conversation, dm);
+  let mut remaining = leftover[0].remaining.clone();
+  remaining.sort_unstable();
+  assert_eq!(remaining, vec![alice, importer]);
+
+  // A wake-up queued for alice's phone in that DM goes with it (#1136).
+  let device = db
+    .register_device(&NewDevice {
+      id: ids.next_id().unwrap(),
+      user_id: alice,
+      name: "phone",
+      public_key: &[1; 32],
+      cross_signature: &[2; 64],
+    })
+    .await
+    .unwrap()
+    .id;
+  let retry = NewPushRetry {
+    id: ids.next_id().unwrap(),
+    user: alice,
+    device,
+    is_user_endpoint: false,
+    wake_up: PushWakeUp {
+      kind: PushKind::Message,
+      conversation_id: dm,
+      maybe_message_id: None,
+      maybe_sender_id: None,
+      is_urgent: false,
+      maybe_thread_id: None,
+      maybe_call_id: None,
+      maybe_badge: None,
+      maybe_sent_at: None,
+    },
+    attempts: 1,
+    delay: std::time::Duration::from_secs(60),
+    ttl: std::time::Duration::from_secs(600),
+  };
+  assert!(db.enqueue_push_retry(&retry, 10).await.unwrap());
+  assert_eq!(db.count_push_retries(device).await.unwrap(), 1);
+
+  db.delete_direct_conversation(dm, &leftover[0].remaining)
+    .await
+    .unwrap();
+  assert_eq!(db.count_push_retries(device).await.unwrap(), 0);
+  assert!(
+    db.deleted_users_with_direct_conversations(10)
+      .await
+      .unwrap()
+      .is_empty()
+  );
+  assert_eq!(db.deleted_conversations_of(alice).await.unwrap(), vec![dm]);
+  test_db.drop_database().await;
+}
+
+/// Two devices founding a group at once publish different information for epoch 0: the first stays
+/// (#504). Repeating it is fine, and later epochs replace each other.
+#[tokio::test]
+async fn the_first_group_information_of_epoch_zero_wins() {
+  let Some(test_db) = TestDatabase::create().await else {
+    return;
+  };
+  let db = &test_db.db;
+  let ids = SnowflakeGenerator::new(1).unwrap();
+  let alice = db
+    .upsert_oidc_user(&identity("a", "Alice"), ids.next_id().unwrap())
+    .await
+    .unwrap();
+  let bob = db
+    .upsert_oidc_user(&identity("b", "Bob"), ids.next_id().unwrap())
+    .await
+    .unwrap();
+  let participants = [alice.id, bob.id];
+  let new_dm = NewConversation {
+    id: ids.next_id().unwrap(),
+    maybe_space: None,
+    kind: ConversationKind::Dm,
+    maybe_name: None,
+    maybe_topic: None,
+    maybe_description: None,
+    visibility: ConversationVisibility::Private,
+    history_policy: HistoryPolicy::FromJoin,
+    maybe_category: None,
+    maybe_participants_key: Some(participants_key(&participants)),
+    is_integration: false,
+  };
+  let (chat, _) = db
+    .get_or_create_participants_conversation(&new_dm, &participants)
+    .await
+    .unwrap();
+
+  let accepted = |outcome| matches!(outcome, PostOutcome::Accepted);
+  assert!(accepted(
+    db.put_mls_group_info(chat, 0, b"first", false).await.unwrap()
+  ));
+  assert!(!accepted(
+    db.put_mls_group_info(chat, 0, b"second", false).await.unwrap()
+  ));
+  assert!(accepted(
+    db.put_mls_group_info(chat, 0, b"first", false).await.unwrap()
+  ));
+  assert_eq!(
+    db.current_mls_group_info(chat).await.unwrap(),
+    Some((0, b"first".to_vec()))
+  );
+  // The organizer may replace it while the group is in epoch 0 (the first one could not be joined).
+  assert!(accepted(
+    db.put_mls_group_info(chat, 0, b"replacement", true)
+      .await
+      .unwrap()
+  ));
+  assert_eq!(
+    db.current_mls_group_info(chat).await.unwrap(),
+    Some((0, b"replacement".to_vec()))
+  );
+  test_db.drop_database().await;
+}
+
+#[tokio::test]
+async fn a_channel_picture_is_set_replaced_and_removed_with_the_previous_key_returned() {
+  let Some(test_db) = TestDatabase::create().await else {
+    return;
+  };
+  let db = &test_db.db;
+  let ids = SnowflakeGenerator::new(1).unwrap();
+  let alice = db
+    .upsert_oidc_user(&identity("a", "Alice"), ids.next_id().unwrap())
+    .await
+    .unwrap();
+  let space: SpaceId = ids.next_id().unwrap();
+  db.create_space(&NewSpace {
+    id: space,
+    name: "S",
+    maybe_icon: None,
+    maybe_color: None,
+    maybe_description: None,
+    join_policy: JoinPolicy::Open,
+    creator: alice.id,
+    maybe_idempotency_key: None,
+  })
+  .await
+  .unwrap();
+  let channel: ConversationId = ids.next_id().unwrap();
+  db.create_channel(
+    &NewConversation {
+      id: channel,
+      maybe_space: Some(space),
+      kind: ConversationKind::Channel,
+      maybe_name: Some("general"),
+      maybe_topic: None,
+      maybe_description: None,
+      visibility: ConversationVisibility::Public,
+      history_policy: HistoryPolicy::FromJoin,
+      maybe_category: None,
+      maybe_participants_key: None,
+      is_integration: false,
+    },
+    alice.id,
+    None,
+  )
+  .await
+  .unwrap();
+  let image = |key: &str| StoredSpaceImage {
+    key: key.into(),
+    version: format!("v-{key}"),
+    size_bytes: 10,
+  };
+  let shown = |db: &teamcraft_db::Database| {
+    let db = db.clone();
+    async move {
+      db.get_conversation(channel, alice.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .conversation
+        .maybe_image
+    }
+  };
+
+  let replaced = |key: &str| ImageChange::Set {
+    maybe_replaced_key: Some(key.to_owned()),
+  };
+  let nothing_replaced = ImageChange::Set {
+    maybe_replaced_key: None,
+  };
+
+  assert_eq!(shown(db).await, None);
+  assert_eq!(
+    db.set_conversation_image(channel, Some(&image("a")))
+      .await
+      .unwrap(),
+    nothing_replaced
+  );
+  assert_eq!(shown(db).await, Some(image("a")));
+  // The replaced picture's object is returned for deletion; the same key is not.
+  assert_eq!(
+    db.set_conversation_image(channel, Some(&image("b")))
+      .await
+      .unwrap(),
+    replaced("a")
+  );
+  assert_eq!(
+    db.set_conversation_image(channel, Some(&image("b")))
+      .await
+      .unwrap(),
+    nothing_replaced
+  );
+  assert_eq!(
+    db.set_conversation_image(channel, None).await.unwrap(),
+    replaced("b")
+  );
+  assert_eq!(shown(db).await, None);
+  // A channel deleted while the picture uploaded: nothing is stored and the caller learns it.
+  let gone: ConversationId = ids.next_id().unwrap();
+  assert_eq!(
+    db.set_conversation_image(gone, Some(&image("c"))).await.unwrap(),
+    ImageChange::ChannelGone
+  );
+  test_db.drop_database().await;
+}
+
 #[tokio::test]
 async fn sending_the_same_client_message_id_twice_stores_one_message() {
   let Some(test_db) = TestDatabase::create().await else {
@@ -215,6 +567,7 @@ async fn sending_the_same_client_message_id_twice_stores_one_message() {
     maybe_description: None,
     join_policy: JoinPolicy::Open,
     creator: alice.id,
+    maybe_idempotency_key: None,
   })
   .await
   .unwrap();
@@ -234,6 +587,7 @@ async fn sending_the_same_client_message_id_twice_stores_one_message() {
       is_integration: false,
     },
     alice.id,
+    None,
   )
   .await
   .unwrap();
@@ -279,4 +633,91 @@ fn identity<'a>(subject: &'a str, display_name: &'a str) -> OidcIdentity<'a> {
     maybe_organization: None,
     should_sync_organization: false,
   }
+}
+
+#[tokio::test]
+async fn creating_a_space_or_channel_twice_with_one_key_creates_one() {
+  let Some(test_db) = TestDatabase::create().await else {
+    return;
+  };
+  let db = &test_db.db;
+  let ids = SnowflakeGenerator::new(1).unwrap();
+  let alice = db
+    .upsert_oidc_user(&identity("a", "Alice"), ids.next_id().unwrap())
+    .await
+    .unwrap();
+  let bob = db
+    .upsert_oidc_user(&identity("b", "Bob"), ids.next_id().unwrap())
+    .await
+    .unwrap();
+  let key = IdempotencyKey::from_bytes([9; 16]);
+  let new_space = |id: SpaceId, creator: UserId, maybe_key: Option<IdempotencyKey>| NewSpace {
+    id,
+    name: "S",
+    maybe_icon: None,
+    maybe_color: None,
+    maybe_description: None,
+    join_policy: JoinPolicy::Open,
+    creator,
+    maybe_idempotency_key: maybe_key,
+  };
+
+  let first = db
+    .create_space(&new_space(ids.next_id().unwrap(), alice.id, Some(key)))
+    .await
+    .unwrap();
+  let second = db
+    .create_space(&new_space(ids.next_id().unwrap(), alice.id, Some(key)))
+    .await
+    .unwrap();
+  // Keys are per user: another user's identical key is a different request.
+  let other_user = db
+    .create_space(&new_space(ids.next_id().unwrap(), bob.id, Some(key)))
+    .await
+    .unwrap();
+  // Without a key every call creates.
+  let keyless = db
+    .create_space(&new_space(ids.next_id().unwrap(), alice.id, None))
+    .await
+    .unwrap();
+
+  assert!(first.is_new && !second.is_new);
+  assert_eq!(first.id, second.id);
+  assert!(other_user.is_new && other_user.id != first.id);
+  assert!(keyless.is_new);
+  let spaces: i64 = sqlx::query_scalar("SELECT count(*) FROM spaces")
+    .fetch_one(&test_db.pool)
+    .await
+    .unwrap();
+  assert_eq!(spaces, 3);
+
+  // The same key for another kind of resource does not collide.
+  let channel = NewConversation {
+    id: ids.next_id().unwrap(),
+    maybe_space: Some(first.id),
+    kind: ConversationKind::Channel,
+    maybe_name: Some("general"),
+    maybe_topic: None,
+    maybe_description: None,
+    visibility: ConversationVisibility::Public,
+    history_policy: HistoryPolicy::FromJoin,
+    maybe_category: None,
+    maybe_participants_key: None,
+    is_integration: false,
+  };
+  let created = db.create_channel(&channel, alice.id, Some(&key)).await.unwrap();
+  let again = db
+    .create_channel(
+      &NewConversation {
+        id: ids.next_id().unwrap(),
+        ..channel
+      },
+      alice.id,
+      Some(&key),
+    )
+    .await
+    .unwrap();
+  assert!(created.is_new && !again.is_new);
+  assert_eq!(created.id, again.id);
+  test_db.drop_database().await;
 }

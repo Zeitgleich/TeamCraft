@@ -428,6 +428,11 @@ impl VerifiedDevice {
     &self.certificate.signing_key
   }
 
+  /// The identity key that vouched for the device.
+  pub fn identity_key(&self) -> &IdentityPublicKey {
+    &self.certificate.identity_key
+  }
+
   pub fn agreement_key(&self) -> &DeviceAgreementPublicKey {
     &self.certificate.agreement_key
   }

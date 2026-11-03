@@ -10,7 +10,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use teamcraft_client_api::model::ConversationKind;
-use teamcraft_client_api::remote::{ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, LinkStatus};
+use teamcraft_client_api::oidc_login::LoginRequest;
+use teamcraft_client_api::remote::{
+  ChatAction, ChatSnapshot, CoreStatus, EnrollRequest, EnrollSecret, LinkStatus,
+};
+use teamcraft_client_api::sign_in_look::SignInLook;
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_proto::{ConversationId, GetMeResponse, SpaceId, UserId};
 
@@ -135,10 +139,56 @@ async fn alice_and_carol_chat_in_a_channel_and_a_dm_through_the_core() {
   );
 }
 
-pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person {
-  let service = Arc::new(AuthService::new(config.clone(), SharedStore::default()).expect("auth service"));
+/// The app's order on a new device: sign in, then start the core at once, with nothing copied into
+/// the token cache by hand. The core must read the fresh session and offer enrollment.
+#[tokio::test]
+async fn a_core_started_right_after_login_reads_the_live_session() {
+  let config = DesktopConfig::from_env();
+  let service =
+    Arc::new(AuthService::new(Some(config.clone()), SharedStore::default()).expect("auth service"));
   service
-    .login(|url| spawn_fake_browser(url, name))
+    .login(&SignInLook::default(), &LoginRequest::default(), |url| {
+      spawn_fake_browser(url, "alice")
+    })
+    .await
+    .expect("login");
+  let me = service.api_get("/api/v1/me").await.expect("me");
+  let me: GetMeResponse = serde_json::from_str(&me.body).expect("me body");
+  let directory = std::env::temp_dir().join(format!("teamcraft-core-e2e-{}-live", std::process::id()));
+  let runtime = CoreRuntime::spawn(
+    CoreConfig {
+      server_url: config.server_url.clone(),
+      data_dir: directory.clone(),
+      keystore_scope: "test".into(),
+      maybe_download_dir: None,
+      argon2: Argon2Settings {
+        memory_kib: 1024,
+        iterations: 1,
+        parallelism: 1,
+      },
+    },
+    me.id,
+    KeyChoice::Fixed(vec![7; 32]),
+    TokenCache::live(service.clone()),
+    Arc::new(|| {}),
+    Arc::new(|_| {}),
+    Arc::new(|_| {}),
+  );
+
+  let status = runtime.status().await;
+
+  assert!(matches!(status, CoreStatus::NeedsEnrollment { .. }), "{status:?}");
+  drop(runtime);
+  drop(std::fs::remove_dir_all(&directory));
+}
+
+pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person {
+  let service =
+    Arc::new(AuthService::new(Some(config.clone()), SharedStore::default()).expect("auth service"));
+  service
+    .login(&SignInLook::default(), &LoginRequest::default(), |url| {
+      spawn_fake_browser(url, name)
+    })
     .await
     .expect("login");
   let me = service.api_get("/api/v1/me").await.expect("me");
@@ -146,14 +196,14 @@ pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person
     serde_json::from_str(&me.body).unwrap_or_else(|error| panic!("me body: {error}: {}", me.body));
   let token = service.bearer_token().await.expect("token");
   let tokens = TokenCache::default();
-  tokens.set(Some(token.clone()));
+  tokens.set(Some((config.server_url.clone(), token.clone())));
   // Access tokens live minutes; long-running users (the dev bridge) keep the cache fresh.
   tokio::spawn({
     let (service, tokens) = (service.clone(), tokens.clone());
     async move {
       loop {
         tokio::time::sleep(Duration::from_secs(20)).await;
-        tokens.set(service.bearer_token().await.ok());
+        tokens.set(service.server_bearer_token().await.ok());
       }
     }
   });
@@ -162,6 +212,7 @@ pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person
     server_url: config.server_url.clone(),
     data_dir: directory.clone(),
     keystore_scope: "test".into(),
+    maybe_download_dir: None,
     // Cheap Argon2 so the test is quick; real clients use the 128 MiB default.
     argon2: Argon2Settings {
       memory_kib: 1024,
@@ -175,6 +226,7 @@ pub(super) async fn person(name: &'static str, config: &DesktopConfig) -> Person
     KeyChoice::Fixed(vec![7; 32]),
     tokens.clone(),
     Arc::new(|| {}),
+    Arc::new(|_| {}),
     Arc::new(|_| {}),
   );
   Person {
@@ -194,6 +246,7 @@ fn second_device(person: &Person, config: &DesktopConfig) -> CoreRuntime {
     server_url: config.server_url.clone(),
     data_dir: person.directory.join("second-device"),
     keystore_scope: "test".into(),
+    maybe_download_dir: None,
     argon2: Argon2Settings {
       memory_kib: 1024,
       iterations: 1,
@@ -207,6 +260,7 @@ fn second_device(person: &Person, config: &DesktopConfig) -> CoreRuntime {
     person.tokens.clone(),
     Arc::new(|| {}),
     Arc::new(|_| {}),
+    Arc::new(|_| {}),
   )
 }
 
@@ -216,19 +270,28 @@ async fn a_second_device_is_linked_with_a_code_and_confirmed_on_the_first() {
   let first = person("alice", &config).await;
   match first.runtime.status().await {
     CoreStatus::NeedsEnrollment { .. } => enroll(&first).await,
-    CoreStatus::Ready { .. } | CoreStatus::NotStarted | CoreStatus::Failed { .. } => {},
+    CoreStatus::Ready { .. }
+    | CoreStatus::NotStarted
+    | CoreStatus::Failed { .. }
+    | CoreStatus::StoreUnreadable { .. }
+    | CoreStatus::Stopped => {},
   }
   let second = second_device(&first, &config);
   assert!(matches!(
     second.status().await,
     CoreStatus::NeedsEnrollment {
-      has_existing_identity: true
+      has_existing_identity: true,
+      ..
     }
   ));
 
   second.link_start("Laptop".into()).await.expect("link start");
   let code = wait_for_link(&second, |status| match status {
-    LinkStatus::WaitingForScan { code } => Some(code),
+    // Once joined: the server then names the code's lifetime, and a scan finds the new device.
+    LinkStatus::WaitingForScan {
+      code,
+      maybe_expires_at_ms: Some(_),
+    } => Some(code),
     _ => None,
   })
   .await;
@@ -276,7 +339,11 @@ async fn the_recovery_passphrase_can_be_changed_and_the_new_one_recovers() {
   let first = person("alice", &config).await;
   match first.runtime.status().await {
     CoreStatus::NeedsEnrollment { .. } => enroll(&first).await,
-    CoreStatus::Ready { .. } | CoreStatus::NotStarted | CoreStatus::Failed { .. } => {},
+    CoreStatus::Ready { .. }
+    | CoreStatus::NotStarted
+    | CoreStatus::Failed { .. }
+    | CoreStatus::StoreUnreadable { .. }
+    | CoreStatus::Stopped => {},
   }
   first
     .runtime
@@ -289,7 +356,9 @@ async fn the_recovery_passphrase_can_be_changed_and_the_new_one_recovers() {
   let second = second_device(&first, &config);
   let wrong = second
     .enroll(EnrollRequest {
-      passphrase: PASSPHRASE.to_owned(),
+      secret: EnrollSecret::Passphrase {
+        passphrase: PASSPHRASE.to_owned(),
+      },
       device_name: "Laptop".into(),
     })
     .await;
@@ -299,7 +368,9 @@ async fn the_recovery_passphrase_can_be_changed_and_the_new_one_recovers() {
   );
   second
     .enroll(EnrollRequest {
-      passphrase: NEW_PASSPHRASE.to_owned(),
+      secret: EnrollSecret::Passphrase {
+        passphrase: NEW_PASSPHRASE.to_owned(),
+      },
       device_name: "Laptop".into(),
     })
     .await
@@ -331,7 +402,9 @@ pub(super) async fn enroll(person: &Person) {
     other => panic!("{} should need enrollment, got {other:?}", person.name),
   }
   let request = EnrollRequest {
-    passphrase: PASSPHRASE.into(),
+    secret: EnrollSecret::Passphrase {
+      passphrase: PASSPHRASE.into(),
+    },
     device_name: format!("{} e2e", person.name),
   };
   person.runtime.enroll(request).await.expect("enroll");

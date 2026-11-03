@@ -94,3 +94,80 @@ async fn an_integration_channel_gets_log_retention_unless_it_has_its_own() {
   );
   app.stop().await;
 }
+
+#[tokio::test]
+async fn an_integration_channel_cannot_be_public() {
+  let app = app!();
+  let alice = owner();
+  let space = create_space(&app, &alice, "Ops", "invite_only").await;
+  let created = app
+    .post(
+      &alice,
+      &format!("/spaces/{space}/channels"),
+      json!({"name": "logs", "visibility": "public", "is_integration": true}),
+    )
+    .await;
+  assert_eq!(created.status, StatusCode::CONFLICT, "{}", created.body);
+
+  let public = create_channel(&app, &alice, &space, "open", "public").await;
+  let flagged = app
+    .patch(
+      &alice,
+      &format!("/conversations/{public}"),
+      json!({"is_integration": true}),
+    )
+    .await;
+  assert_eq!(flagged.status, StatusCode::CONFLICT, "{}", flagged.body);
+}
+
+#[tokio::test]
+async fn a_channel_admin_without_space_rights_cannot_bring_a_bot_into_the_space() {
+  let app = app!();
+  let alice = owner();
+  let bob = member("bob");
+  let bob_id = user_id(&app, &bob).await;
+  let space = create_space(&app, &alice, "Ops", "invite_only").await;
+  add_space_member(&app, &alice, &space, &bob_id, "member").await;
+  let channel = create_channel(&app, &alice, &space, "logs", "private").await;
+  add_channel_member(&app, &alice, &channel, &bob_id).await;
+  let promoted = app
+    .patch(
+      &alice,
+      &format!("/conversations/{channel}/members/{bob_id}"),
+      json!({"role": "admin"}),
+    )
+    .await;
+  assert_eq!(promoted.status, StatusCode::NO_CONTENT, "{}", promoted.body);
+  let bot = app
+    .post(&admin(), "/admin/bots", json!({"name": "Log bridge"}))
+    .await
+    .body["bot"]["id"]
+    .as_str()
+    .unwrap()
+    .to_owned();
+
+  // The channel add needs the bot in the space; the space add is the space admins' (or inviters') call.
+  let direct = app
+    .post(
+      &bob,
+      &format!("/conversations/{channel}/members"),
+      json!({"user_id": bot}),
+    )
+    .await;
+  assert!(!direct.status.is_success(), "{} {}", direct.status, direct.body);
+  let into_space = app
+    .post(
+      &bob,
+      &format!("/spaces/{space}/members"),
+      json!({"user_id": bot, "role": "guest"}),
+    )
+    .await;
+  assert_eq!(into_space.status, StatusCode::FORBIDDEN, "{}", into_space.body);
+  let members = app
+    .get(&alice, &format!("/conversations/{channel}/members"))
+    .await;
+  assert!(
+    !members.body.to_string().contains(&bot),
+    "the bot is not in the channel"
+  );
+}

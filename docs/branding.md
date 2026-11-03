@@ -47,10 +47,12 @@ icon = "brand-a/icon.png"              # square, app and notification icon
 icon_dark = "brand-a/icon-dark.png"
 favicon = "brand-a/favicon.png"
 favicon_dark = "brand-a/favicon-dark.png"
-support_url = "https://support.brand-a.example.com"
+support_url = "https://support.brand-a.example.com"   # also linked under Settings > Help & about
+documentation_url = "https://docs.brand-a.example.com" # Settings > Help & about; default: none
 privacy_url = "https://brand-a.example.com/privacy"
 terms_url = "https://brand-a.example.com/terms"
 imprint_url = "https://brand-a.example.com/imprint"
+download_url = "https://brand-a.example.com/apps"   # where the apps are; default: the project's download page
 connect_origins = []                   # extra CSP connect-src origins of this brand only
 # content_security_policy = "..."      # replaces [web].content_security_policy for this brand
 
@@ -149,7 +151,7 @@ of the request host:
   "colors": { "light": { "accent": "#0b7f78" }, "dark": { "accent": "#35c6ba" } },
   "login_title": { "en": "Welcome to Brand A", "de": "Willkommen bei Brand A" },
   "login_text": { "en": "..." },
-  "links": { "support": "...", "privacy": "...", "terms": "...", "imprint": "..." }
+  "links": { "support": "...", "documentation": "...", "privacy": "...", "terms": "...", "imprint": "...", "download": "..." }
 }
 ```
 
@@ -162,6 +164,11 @@ of the request host:
   `prefers-color-scheme` and `[data-theme]` like `main.css`). It exists because the CSP forbids inline
   styles: the web shell links it before the first paint, so there is no flash of the default colors.
   Only hex colors that passed validation are written; the CSS contains no other configured text.
+- `GET /api/v1/brand/manifest.webmanifest` is the web app manifest, so the web client can be
+  installed (add to home screen): the brand's display name, `display: standalone`, its `chrome` color
+  (light) as theme and splash color, and its `icon` (the PNG's own size, `any` for SVG). A brand
+  without an icon gets the client's own icons (`/icons/`, a maskable one among them). The manifest
+  contains no host name; start URL and scope are `/`.
 - The unauthenticated responses are the same for every caller of one host, `Vary: Host`, cacheable for
   five minutes. They count against the per-address request limit but not against the stricter limit of
   the credential-less endpoints, because one page load makes several of these requests.
@@ -192,20 +199,24 @@ validated like the global one.
 ## 5. Clients
 
 - **Web**: served from the brand host. `index.html` links `/api/v1/brand/theme.css` after the app's own
-  stylesheet, then the app fetches `/api/v1/brand` (same origin) to render logo, title, login text and
+  stylesheet and `/api/v1/brand/manifest.webmanifest` as its manifest; `<meta name="theme-color">`
+  follows the top bar's color of the current theme, then the app fetches `/api/v1/brand` (same origin) to render logo, title, login text and
   links; the answer is cached in `localStorage` keyed by server URL, so the next start paints
   immediately and refreshes in the background.
 - **Desktop, Android, iOS**: the app asks the server URL it is configured with (any host name of a
   brand) for `GET <url>/api/v1/brand` without credentials (the desktop shell has a `public_get`
   command for it), caches the answer per server URL and applies it. A cached brand is only used for that
-  exact URL. Brand data comes from the server the user chose; the app never changes the server URL
+  exact URL. The desktop webview has no configured URL, so it keys the cache by the origin of the
+  shell's active server (and by the confirmed origin right after the confirmation); its images come
+  through the shell (`public_asset`) as `data:` URLs. Brand data comes from the server the user chose; the app never changes the server URL
   based on brand data. `origin` is informational: a brand may have several host names, so it is not
   compared with the entered URL.
 - **Checking**: all platforms run the same checks (`teamcraft-client-api::brand`): only known color
   keys with `#rgb`/`#rrggbb` values, only asset paths of the brand endpoint (made absolute on the
   server URL), only https links (http for localhost), bounded text lengths.
 - **Applying**: CSS custom properties are set through the CSSOM (`style.setProperty`, allowed under the
-  CSP); images through `<img src>`; the document title and favicon follow the brand. The effective
+  CSP); images through `<img src>`; the document title follows the brand ("Brand – TeamCraft"); the favicon stays the product's mark, with
+  a red dot while something is unread, so the tab is recognisable. The effective
   theme (setting, else the system) picks the `*_dark` assets and the `dark` colors.
 
 ## 6. Things that use the brand of the recipient
@@ -322,8 +333,57 @@ An optional label per user, taken from the identity provider.
 - The space settings dialog has no brand picker; the tag is set through the API.
 - Push notification texts do not name a brand yet; when they do they take the recipient's home brand from
   `BrandRegistry::for_email`.
-- Android and iOS show the brand on the sign-in screen only (name, logo, login title and text, links;
+- Android and iOS show the brand on the sign-in screen only (tile, name, logo, login title and text, links;
   checked through the FFI's `login_brand`); colors and the in-app chrome don't follow it yet. The server
   URL is fixed per build; a server-URL screen needs a public way to learn the OIDC issuer. SVG logos
   aren't drawn on mobile (the name is shown instead).
 - One OIDC client for all brands (§10).
+
+## 14. The product mark
+
+Without a server brand the apps show TeamCraft's own mark: three people around a speech bubble,
+and the wordmark "TeamCraft". With a server brand the sign-in screen shows TeamCraft's tile and the
+brand's beside it, like two app icons (the brand's `icon`, else its initial on its accent). The web
+sign-in card names the brand once, in the line under the mark: the brand's `login_title`, else
+"Welcome to {brand}'s TeamCraft server" ("Welcome to TeamCraft" without a brand); no logo below
+the tiles. The server's built-in brand (no brand configured) counts as no brand.
+
+Loading screens always show the mark, animated (issue #463): the heads swirl in, the bodies rise,
+the speech bubble pops and types. The web (`index.html`, `style/loader.css`) animates the inlined
+mark in CSS before any script runs. It stays through the session check until the app's first view
+is there; then `loader.js` flies the mark into the sign-in card's tile, or the screen crossfades into
+the chat (no card in between). Android and iOS draw the same parts with
+the same timing on a canvas (`LoadingMark.kt`, `LoadingMarkView.swift`); on Android 12+ the system
+splash plays the assembly as an animated vector and the app takes over at its clock and place. iOS's
+launch screen is the background only, so the assembly starts there. Reduced motion: no movement,
+the mark fades in and its dots brighten in turn.
+
+| File                                 | What it is                                                         |
+|--------------------------------------|--------------------------------------------------------------------|
+| `assets/brand/reference/wordmark.png`| The supplied wordmark, the input of `wordmark.py`                  |
+| `assets/brand/mark.svg`              | The mark, constructed by `scripts/brand/mark.py`                   |
+| `assets/brand/wordmark.svg`, `-dark` | The wordmark for light and dark backgrounds (`wordmark.py`)        |
+| `assets/brand/icon.svg`              | The mark on its rounded backplate (desktop, web, Linux scalable)   |
+| `assets/brand/glyph.svg`             | The small-size icon: the bubble on the brand blue (below 40 px)    |
+
+`mark.py` builds the mark from exact geometry measured from the artwork (circles, edges on a 30°
+grid, tangent fillets, the same clear space of 15 units around every head), so every curve is a
+true arc. `wordmark.py` traces the letters and fits smooth Béziers, as the typeface isn't available
+as a font. `icons.py` renders every platform icon from them: Tauri's PNGs, `.ico`, `.icns` and tray
+icons; the web app's install icons, favicon and the image of the sign-in screen; the iOS icon
+(light, dark, tinted); Android's adaptive icon layers, themed icon and notification icon.
+`mark_parts.py` writes the mark's parts as code for the apps' loading screens and Android's splash
+icon (the web's loading screen inlines the mark in `index.html`; update it by hand). The generated files are committed because the builds use them; change a master
+or a script and run:
+
+```sh
+python3 scripts/brand/mark.py
+python3 scripts/brand/wordmark.py   # numpy, scipy, Pillow, potrace
+python3 scripts/brand/icons.py --contact-sheet /path/to/sheet.png   # rsvg-convert or ImageMagick 7
+python3 scripts/brand/mark_parts.py
+```
+
+The product's accent colour is the mark's blue: `#005dfc` in the light theme (5.3:1 with white
+text), `#5c9dff` with `#04122e` text in the dark theme (6.8:1). It is the default of `--accent`
+(`crates/teamcraft-ui/style/main/000-tokens.css`) and of the Android and iOS themes; a brand's own
+colours override it (§2).

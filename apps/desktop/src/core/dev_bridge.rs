@@ -333,6 +333,15 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
       bridge.alice.runtime.link_cancel();
       Ok(Value::Null)
     },
+    "core_phone_link_start" => bridge
+      .alice
+      .runtime
+      .phone_link_start()
+      .await
+      .map(|()| Value::Null),
+    "core_phone_link_status" => {
+      Ok(serde_json::to_value(bridge.alice.runtime.phone_link_status().await).expect("phone link status"))
+    },
     "core_approval_start" => bridge
       .alice
       .runtime
@@ -349,6 +358,22 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
       bridge.alice.runtime.approval_cancel();
       Ok(Value::Null)
     },
+    "core_link_announce" => bridge.alice.runtime.link_announce().await.map(|()| Value::Null),
+    "core_link_requests" => {
+      Ok(serde_json::to_value(bridge.alice.runtime.link_requests().await).expect("link requests"))
+    },
+    "core_link_request_review" => bridge
+      .alice
+      .runtime
+      .link_request_review(args["id"].as_str().unwrap_or("").to_owned())
+      .await
+      .map(|()| Value::Null),
+    "core_link_request_reject" => bridge
+      .alice
+      .runtime
+      .link_request_reject(args["id"].as_str().unwrap_or("").to_owned())
+      .await
+      .map(|()| Value::Null),
     "call_snapshot" => Ok(serde_json::to_value(bridge.calls.snapshot()).expect("call snapshot")),
     "call_media_devices" => Ok(serde_json::to_value(bridge.calls.snapshot().devices).expect("devices")),
     "call_action" => {
@@ -356,6 +381,8 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
       bridge.calls.act(action);
       Ok(Value::Null)
     },
+    // The scripted calls measure no microphone.
+    "call_watch_level" | "call_unwatch_level" | "core_retry_keychain" => Ok(Value::Null),
     "core_start" | "core_status" => {
       Ok(serde_json::to_value(bridge.alice.runtime.status().await).expect("status"))
     },
@@ -369,6 +396,20 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
       .snapshot()
       .await
       .map(|snapshot| serde_json::to_value(snapshot).expect("snapshot")),
+    "core_snapshot_changes" => {
+      let maybe_since = serde_json::from_value(args["since"].clone()).expect("since");
+      bridge
+        .alice
+        .runtime
+        .snapshot_changes(maybe_since)
+        .await
+        .map(|changes| serde_json::to_value(changes).expect("snapshot changes"))
+    },
+    "core_focus" => {
+      let conversation = serde_json::from_value(args["conversation"].clone()).expect("conversation");
+      bridge.alice.runtime.focus(conversation);
+      Ok(Value::Null)
+    },
     "core_messages" => {
       let conversation = serde_json::from_value(args["conversation"].clone()).expect("conversation");
       let (start, len) = (

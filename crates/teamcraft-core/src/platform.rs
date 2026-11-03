@@ -84,7 +84,7 @@ mod imp {
 
 /// A readable message for a JavaScript exception or rejection value.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn describe_js_error(error: &wasm_bindgen::JsValue) -> String {
+pub fn describe_js_error(error: &wasm_bindgen::JsValue) -> String {
   use wasm_bindgen::JsCast;
   error
     .dyn_ref::<js_sys::Error>()

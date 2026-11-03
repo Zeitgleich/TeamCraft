@@ -2,10 +2,17 @@
 //! user (a screen/window picker, or camera permission), then hands out a PipeWire remote with
 //! just that source. Works in Flatpak and on Wayland, where nothing else can capture the screen.
 //!
-//! The portal talk is D-Bus (async, on a small runtime the capture keeps for its session); the
-//! frames come from a PipeWire stream on a thread of its own, converted to I420 and queued.
+//! The portal talk is D-Bus, async on one runtime of its own that lives as long as the process;
+//! the frames come from a PipeWire stream on a thread of its own, converted to I420 and queued.
+//!
+//! One runtime for every portal request, not one per capture: the portal library keeps a single
+//! D-Bus connection for the whole process, and that connection reads its messages on a task of
+//! the runtime it was opened on. A runtime that is idle (or gone) after the first request leaves
+//! every later request, the next screen picker among them, waiting for an answer nobody reads
+//! (issue #683).
 
 use std::os::fd::OwnedFd;
+use std::sync::OnceLock;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -17,11 +24,12 @@ use pw::properties::properties;
 use pw::spa;
 use pw::spa::param::video::{VideoFormat, VideoInfoRaw};
 use pw::spa::pod::Pod;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::capture_convert::{PixelFormat, RawPicture};
 use crate::video::VideoResolution;
 use crate::video_capture::{CaptureError, CaptureFormat, FrameSender, VideoCapture};
+use crate::video_pipeline::RepeatedWarning;
 
 /// What to capture through the portal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,12 +39,32 @@ pub enum PortalSource {
   Screen,
 }
 
+/// The pixel formats a stream may deliver uncompressed, the first preferred.
+const RAW_FORMATS: [VideoFormat; 7] = [
+  VideoFormat::BGRx,
+  VideoFormat::RGBx,
+  VideoFormat::BGRA,
+  VideoFormat::RGBA,
+  VideoFormat::YUY2,
+  VideoFormat::I420,
+  VideoFormat::NV12,
+];
+/// Largest picture side a stream may deliver.
+const MAX_SIDE: u32 = 8192;
+/// Highest frame rate a stream may deliver.
+const MAX_FRAMERATE: u32 = 120;
+
+/// Worker threads of the portal runtime: D-Bus messages only, so one is plenty.
+const PORTAL_WORKER_THREADS: usize = 1;
+
+/// The runtime of all portal requests (see the module docs); built on first use.
+static PORTAL_RUNTIME: OnceLock<Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+
 /// A portal-granted camera or screen.
 pub struct PortalCapture {
   source: PortalSource,
   format: CaptureFormat,
-  /// Keeps the D-Bus connection (and with it the screencast session) alive.
-  runtime: tokio::runtime::Runtime,
+  /// Keeps the screencast session (and with it the share) open.
   maybe_session: Option<ScreencastSession>,
   maybe_remote: Option<Remote>,
   maybe_running: Option<(pw::channel::Sender<()>, JoinHandle<()>)>,
@@ -56,16 +84,34 @@ struct Remote {
 
 /// State of the PipeWire stream callbacks.
 struct StreamState {
+  source: PortalSource,
   format: VideoInfoRaw,
+  /// How the negotiated format's pictures are converted; `None` before the format is known, or
+  /// for one we can't convert.
+  maybe_pixel_format: Option<PixelFormat>,
   frames: FrameSender,
   start: Instant,
+  delivered: u64,
+  /// Pictures that can't be used, logged at most every few seconds.
+  warning: RepeatedWarning,
+}
+
+/// What a PipeWire buffer's chunk holds.
+#[derive(Debug, PartialEq, Eq)]
+enum ChunkContent {
+  /// The picture's bytes within the mapped data.
+  Picture(std::ops::Range<usize>),
+  /// No picture: a metadata-only buffer (some compositors send these when only the cursor moved)
+  /// or one the producer marked as damaged.
+  Empty,
+  /// The chunk claims bytes beyond the mapped data.
+  OutOfRange,
 }
 
 impl PortalCapture {
   /// Asks for camera access. `wanted` is a hint; the camera's offer decides.
   pub fn camera(wanted: CaptureFormat) -> Result<Self, CaptureError> {
-    let runtime = runtime()?;
-    let fd = runtime.block_on(async {
+    let fd = portal_runtime()?.block_on(async {
       let camera = Camera::new().await.map_err(portal_error)?;
       if !camera.is_present().await.map_err(portal_error)? {
         return Err(CaptureError::NoDevice("camera"));
@@ -81,10 +127,10 @@ impl PortalCapture {
         .await
         .map_err(portal_error)
     })?;
+    debug!("camera portal granted a PipeWire remote");
     Ok(Self {
       source: PortalSource::Camera,
       format: wanted,
-      runtime,
       maybe_session: None,
       maybe_remote: Some(Remote { fd, maybe_node: None }),
       maybe_running: None,
@@ -97,8 +143,20 @@ impl PortalCapture {
     wanted: CaptureFormat,
     maybe_restore_token: Option<&str>,
   ) -> Result<(Self, Option<String>), CaptureError> {
-    let runtime = runtime()?;
-    let (proxy, session, node, size, fd, maybe_token) = runtime.block_on(async {
+    Self::open_screen(wanted, maybe_restore_token).map_err(|error| {
+      let session = DesktopSession::from_env(
+        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+      );
+      screen_error_in(session, error)
+    })
+  }
+
+  fn open_screen(
+    wanted: CaptureFormat,
+    maybe_restore_token: Option<&str>,
+  ) -> Result<(Self, Option<String>), CaptureError> {
+    let (proxy, session, node, size, fd, maybe_token) = portal_runtime()?.block_on(async {
       let proxy = Screencast::new().await.map_err(portal_error)?;
       let session = proxy
         .create_session(Default::default())
@@ -117,13 +175,13 @@ impl PortalCapture {
         .await
         .map_err(portal_error)?
         .response()
-        .map_err(|_| CaptureError::Denied("screen"))?;
+        .map_err(picker_error)?;
       let streams = proxy
         .start(&session, None, Default::default())
         .await
         .map_err(portal_error)?
         .response()
-        .map_err(|_| CaptureError::Denied("screen"))?;
+        .map_err(picker_error)?;
       let stream = streams
         .streams()
         .first()
@@ -147,10 +205,10 @@ impl PortalCapture {
       },
       _ => wanted,
     };
+    debug!(node, ?size, "screencast portal granted a stream");
     let capture = Self {
       source: PortalSource::Screen,
       format,
-      runtime,
       maybe_session: Some(ScreencastSession {
         _proxy: proxy,
         session,
@@ -207,8 +265,13 @@ impl Drop for PortalCapture {
     self.stop();
     if let Some(screencast) = self.maybe_session.take() {
       // Ends the share in the desktop's indicator too; failure just leaves it to time out.
-      if let Err(error) = self.runtime.block_on(screencast.session.close()) {
-        debug!(%error, "screencast session not closed");
+      match portal_runtime() {
+        Ok(runtime) => {
+          if let Err(error) = runtime.block_on(screencast.session.close()) {
+            debug!(%error, "screencast session not closed");
+          }
+        },
+        Err(error) => debug!(%error, "screencast session not closed"),
       }
     }
   }
@@ -240,22 +303,56 @@ fn run_stream(
     },
   )?;
   let state = StreamState {
+    source,
     format: VideoInfoRaw::default(),
+    maybe_pixel_format: None,
     frames,
     start: Instant::now(),
+    delivered: 0,
+    warning: RepeatedWarning::default(),
   };
   let loop_for_quit = main_loop.clone();
+  let loop_for_error = main_loop.clone();
   let _listener = stream
     .add_local_listener_with_user_data(state)
-    .param_changed(|_, state, id, param| {
+    .state_changed(move |_, state, old, new| {
+      debug!(source = ?state.source, ?old, ?new, "PipeWire stream state");
+      if let pw::stream::StreamState::Error(error) = new {
+        // The encoder thread sees the queue close and reports the capture as ended.
+        warn!(source = ?state.source, %error, "PipeWire stream failed");
+        loop_for_error.quit();
+      }
+    })
+    .param_changed(|stream, state, id, param| {
       let Some(param) = param else {
         return;
       };
       if id != spa::param::ParamType::Format.as_raw() {
         return;
       }
-      if let Err(error) = state.format.parse(param) {
-        warn!(?error, "unreadable video format");
+      // The raw video info reads size and frame rate of compressed (MJPEG) formats too.
+      match (spa::param::format_utils::parse_format(param), state.format.parse(param)) {
+        (Ok((_, subtype)), Ok(_)) => {
+          let size = state.format.size();
+          let framerate = state.format.framerate();
+          state.maybe_pixel_format = pixel_format_of(subtype, state.format.format());
+          info!(
+            source = ?state.source,
+            ?subtype,
+            format = ?state.format.format(),
+            width = size.width,
+            height = size.height,
+            framerate = framerate.num,
+            "PipeWire stream format"
+          );
+          if state.maybe_pixel_format.is_none() {
+            warn!(?subtype, format = ?state.format.format(), "PipeWire offers a video format we can't convert");
+          }
+          if let Err(error) = announce_buffer_types(stream, state.source) {
+            warn!(%error, source = ?state.source, "PipeWire buffer types not announced");
+          }
+        },
+        (Err(error), _) | (_, Err(error)) => warn!(?error, "unreadable video format"),
       }
     })
     .process(move |stream, state| {
@@ -271,17 +368,37 @@ fn run_stream(
       let chunk = data.chunk();
       let (offset, size, stride) = (chunk.offset() as usize, chunk.size() as usize, chunk.stride());
       trace!(offset, size, stride, "buffer");
-      let Some(pixel_format) = pixel_format_of(state.format.format()) else {
-        trace!(format = ?state.format.format(), "buffer in an unconverted format");
+      let is_corrupted = chunk.flags().contains(spa::buffer::ChunkFlags::CORRUPTED);
+      let Some(pixel_format) = state.maybe_pixel_format else {
+        state.warning.warn(|suppressed| {
+          warn!(format = ?state.format.format(), suppressed, "PipeWire buffer in a format we can't convert");
+        });
         return;
       };
-      let Some(bytes) = data.data() else {
-        trace!("buffer not mapped");
+      let Some(mapped) = data.data() else {
+        // A DMA-BUF the stream can't map: no picture ever comes this way.
+        state
+          .warning
+          .warn(|suppressed| warn!(source = ?state.source, suppressed, "PipeWire buffer not mapped"));
         return;
       };
-      let Some(bytes) = bytes.get(offset..offset + size) else {
-        trace!(offset, size, mapped = bytes.len(), "buffer chunk out of range");
-        return;
+      let bytes = match picture_range(mapped.len(), offset, size, is_corrupted) {
+        ChunkContent::Picture(range) => &mapped[range],
+        // Metadata-only buffers (a cursor move, nothing new on screen) and damaged ones.
+        ChunkContent::Empty => return,
+        ChunkContent::OutOfRange => {
+          let mapped_len = mapped.len();
+          state.warning.warn(|suppressed| {
+            warn!(
+              offset,
+              size,
+              mapped = mapped_len,
+              suppressed,
+              "PipeWire buffer chunk out of range"
+            );
+          });
+          return;
+        },
       };
       let picture = RawPicture {
         format: pixel_format,
@@ -293,16 +410,28 @@ fn run_stream(
       let timestamp_us = u64::try_from(state.start.elapsed().as_micros()).unwrap_or(u64::MAX);
       match picture.to_i420(timestamp_us) {
         Ok(frame) => {
+          if state.delivered == 0 {
+            debug!(source = ?state.source, "first PipeWire frame");
+          }
+          state.delivered += 1;
           if !state.frames.send(frame) {
             loop_for_quit.quit();
           }
         },
-        Err(error) => debug!(%error, "captured frame dropped"),
+        Err(error) => {
+          let source = state.source;
+          state
+            .warning
+            .warn(|suppressed| warn!(%error, ?source, suppressed, "captured frame dropped"));
+        },
       }
     })
     .register()?;
-  let values = format_params(format)?;
-  let mut params = [Pod::from_bytes(&values).ok_or(pw::Error::CreationFailed)?];
+  let values = format_params(source, format)?;
+  let mut params = values
+    .iter()
+    .map(|value| Pod::from_bytes(value).ok_or(pw::Error::CreationFailed))
+    .collect::<Result<Vec<_>, _>>()?;
   stream.connect(
     spa::utils::Direction::Input,
     remote.maybe_node,
@@ -315,64 +444,150 @@ fn run_stream(
   Ok(())
 }
 
-/// The formats we convert, the wanted size (any size allowed) and frame rate.
-fn format_params(format: CaptureFormat) -> Result<Vec<u8>, pw::Error> {
+/// The formats the stream takes, best first: PipeWire links the first one the source offers.
+///
+/// Screens: any size, any rate, the wanted ones preferred. Cameras first in the wanted size, raw
+/// at the wanted frame rate or above, else MJPEG at the wanted rate, before anything they offer:
+/// a USB camera lists its large raw modes first, at a few frames a second (1080p YUYV at 5 fps,
+/// 720p at 8), and delivers the wanted size smoothly only as MJPEG. The V4L2 path picks the same
+/// way (`capture_negotiate::rank_modes`).
+fn format_params(source: PortalSource, wanted: CaptureFormat) -> Result<Vec<Vec<u8>>, pw::Error> {
   let size = spa::utils::Rectangle {
-    width: u32::from(format.resolution.width),
-    height: u32::from(format.resolution.height),
+    width: u32::from(wanted.resolution.width),
+    height: u32::from(wanted.resolution.height),
   };
-  let object = spa::pod::object!(
-    spa::utils::SpaTypes::ObjectParamFormat,
-    spa::param::ParamType::EnumFormat,
-    spa::pod::property!(
-      spa::param::format::FormatProperties::MediaType,
-      Id,
-      spa::param::format::MediaType::Video
-    ),
-    spa::pod::property!(
-      spa::param::format::FormatProperties::MediaSubtype,
-      Id,
-      spa::param::format::MediaSubtype::Raw
-    ),
-    spa::pod::property!(
-      spa::param::format::FormatProperties::VideoFormat,
-      Choice,
-      Enum,
-      Id,
-      VideoFormat::BGRx,
-      VideoFormat::BGRx,
-      VideoFormat::RGBx,
-      VideoFormat::BGRA,
-      VideoFormat::RGBA,
-      VideoFormat::YUY2,
-      VideoFormat::I420,
-      VideoFormat::NV12
-    ),
-    spa::pod::property!(
-      spa::param::format::FormatProperties::VideoSize,
-      Choice,
-      Range,
-      Rectangle,
-      size,
-      spa::utils::Rectangle { width: 2, height: 2 },
-      spa::utils::Rectangle {
-        width: 8192,
-        height: 8192
-      }
-    ),
-    spa::pod::property!(
-      spa::param::format::FormatProperties::VideoFramerate,
-      Choice,
-      Range,
-      Fraction,
-      spa::utils::Fraction {
-        num: u32::from(format.framerate.max(1)),
-        denom: 1
+  let rate = |num: u32| spa::utils::Fraction { num, denom: 1 };
+  let wanted_rate = u32::from(wanted.framerate.max(1));
+  let any_size = spa::pod::Value::Choice(spa::pod::ChoiceValue::Rectangle(spa::utils::Choice(
+    spa::utils::ChoiceFlags::empty(),
+    spa::utils::ChoiceEnum::Range {
+      default: size,
+      min: spa::utils::Rectangle { width: 2, height: 2 },
+      max: spa::utils::Rectangle {
+        width: MAX_SIDE,
+        height: MAX_SIDE,
       },
-      spa::utils::Fraction { num: 0, denom: 1 },
-      spa::utils::Fraction { num: 120, denom: 1 }
+    },
+  )));
+  let rate_from = |min: u32| {
+    spa::pod::Value::Choice(spa::pod::ChoiceValue::Fraction(spa::utils::Choice(
+      spa::utils::ChoiceFlags::empty(),
+      spa::utils::ChoiceEnum::Range {
+        default: rate(wanted_rate),
+        min: rate(min),
+        max: rate(MAX_FRAMERATE),
+      },
+    )))
+  };
+  let anything = format_object(Some(&RAW_FORMATS), any_size, rate_from(0));
+  let objects = match source {
+    PortalSource::Screen => vec![anything],
+    PortalSource::Camera => vec![
+      format_object(
+        Some(&RAW_FORMATS),
+        spa::pod::Value::Rectangle(size),
+        rate_from(wanted_rate),
+      ),
+      format_object(
+        None,
+        spa::pod::Value::Rectangle(size),
+        spa::pod::Value::Fraction(rate(wanted_rate)),
+      ),
+      anything,
+    ],
+  };
+  objects
+    .into_iter()
+    .map(|object| {
+      spa::pod::serialize::PodSerializer::serialize(
+        std::io::Cursor::new(Vec::new()),
+        &spa::pod::Value::Object(object),
+      )
+      .map(|(cursor, _)| cursor.into_inner())
+      .map_err(|_| pw::Error::CreationFailed)
+    })
+    .collect()
+}
+
+/// One video format: raw in one of `maybe_raw_formats`, or MJPEG when `None`.
+fn format_object(
+  maybe_raw_formats: Option<&[VideoFormat]>,
+  size: spa::pod::Value,
+  framerate: spa::pod::Value,
+) -> spa::pod::Object {
+  use spa::param::format::{FormatProperties, MediaSubtype, MediaType};
+
+  let property = |key: FormatProperties, value| spa::pod::Property {
+    key: key.as_raw(),
+    flags: spa::pod::PropertyFlags::empty(),
+    value,
+  };
+  let subtype = match maybe_raw_formats {
+    Some(_) => MediaSubtype::Raw,
+    None => MediaSubtype::Mjpg,
+  };
+  let mut properties = vec![
+    property(
+      FormatProperties::MediaType,
+      spa::pod::Value::Id(spa::utils::Id(MediaType::Video.as_raw())),
     ),
-  );
+    property(
+      FormatProperties::MediaSubtype,
+      spa::pod::Value::Id(spa::utils::Id(subtype.as_raw())),
+    ),
+  ];
+  if let Some(formats) = maybe_raw_formats {
+    let ids: Vec<_> = formats
+      .iter()
+      .map(|format| spa::utils::Id(format.as_raw()))
+      .collect();
+    properties.push(property(
+      FormatProperties::VideoFormat,
+      spa::pod::Value::Choice(spa::pod::ChoiceValue::Id(spa::utils::Choice(
+        spa::utils::ChoiceFlags::empty(),
+        spa::utils::ChoiceEnum::Enum {
+          default: ids[0],
+          alternatives: ids,
+        },
+      ))),
+    ));
+  }
+  properties.push(property(FormatProperties::VideoSize, size));
+  properties.push(property(FormatProperties::VideoFramerate, framerate));
+  spa::pod::Object {
+    type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
+    id: spa::param::ParamType::EnumFormat.as_raw(),
+    properties,
+  }
+}
+
+/// Tells PipeWire which buffers the stream takes, once the format is fixed. Without this a stream
+/// takes only plain memory, and a camera node that hands out its V4L2 buffers as DMA-BUFs (what
+/// PipeWire's V4L2 source does) can't be linked at all: "use input buffers: -22", not a single
+/// frame, and the others see the camera as black (issue #683).
+fn announce_buffer_types(stream: &pw::stream::Stream, source: PortalSource) -> Result<(), pw::Error> {
+  let values = buffers_param(source)?;
+  let mut params = [Pod::from_bytes(&values).ok_or(pw::Error::CreationFailed)?];
+  stream.update_params(&mut params)
+}
+
+/// The `Buffers` param: the buffer types of [`buffer_types`].
+fn buffers_param(source: PortalSource) -> Result<Vec<u8>, pw::Error> {
+  let object = spa::pod::Object {
+    type_: spa::utils::SpaTypes::ObjectParamBuffers.as_raw(),
+    id: spa::param::ParamType::Buffers.as_raw(),
+    properties: vec![spa::pod::Property {
+      key: spa::sys::SPA_PARAM_BUFFERS_dataType,
+      flags: spa::pod::PropertyFlags::empty(),
+      value: spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+        spa::utils::ChoiceFlags::empty(),
+        spa::utils::ChoiceEnum::Flags {
+          default: buffer_types(source),
+          flags: Vec::new(),
+        },
+      ))),
+    }],
+  };
   spa::pod::serialize::PodSerializer::serialize(
     std::io::Cursor::new(Vec::new()),
     &spa::pod::Value::Object(object),
@@ -381,7 +596,28 @@ fn format_params(format: CaptureFormat) -> Result<Vec<u8>, pw::Error> {
   .map_err(|_| pw::Error::CreationFailed)
 }
 
-fn pixel_format_of(format: VideoFormat) -> Option<PixelFormat> {
+/// The buffer types (a bit per `spa_data_type`) the stream maps and reads. Cameras add DMA-BUFs:
+/// V4L2 exports its capture buffers that way, in plain system memory the CPU reads like any other.
+/// Screens stay with shared memory: a compositor's DMA-BUF is GPU memory, often tiled, that reads
+/// back as garbage or very slowly; without a modifier in the format the compositors send shared
+/// memory anyway.
+fn buffer_types(source: PortalSource) -> i32 {
+  let bit = |data_type: spa::buffer::DataType| 1i32 << data_type.as_raw();
+  let shared_memory = bit(spa::buffer::DataType::MemPtr) | bit(spa::buffer::DataType::MemFd);
+  match source {
+    PortalSource::Camera => shared_memory | bit(spa::buffer::DataType::DmaBuf),
+    PortalSource::Screen => shared_memory,
+  }
+}
+
+/// How pictures of a negotiated format are converted; `None` for one we can't convert.
+fn pixel_format_of(subtype: spa::param::format::MediaSubtype, format: VideoFormat) -> Option<PixelFormat> {
+  if subtype == spa::param::format::MediaSubtype::Mjpg {
+    return Some(PixelFormat::Mjpeg);
+  }
+  if subtype != spa::param::format::MediaSubtype::Raw {
+    return None;
+  }
   match format {
     VideoFormat::BGRx | VideoFormat::BGRA => Some(PixelFormat::Bgrx),
     VideoFormat::RGBx | VideoFormat::RGBA => Some(PixelFormat::Rgbx),
@@ -392,11 +628,73 @@ fn pixel_format_of(format: VideoFormat) -> Option<PixelFormat> {
   }
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime, CaptureError> {
-  tokio::runtime::Builder::new_current_thread()
-    .enable_all()
-    .build()
-    .map_err(|error| CaptureError::Device(error.to_string()))
+/// Where the picture of a buffer is: `size` bytes from `offset` of `mapped_len` mapped bytes.
+fn picture_range(mapped_len: usize, offset: usize, size: usize, is_corrupted: bool) -> ChunkContent {
+  if size == 0 || is_corrupted {
+    return ChunkContent::Empty;
+  }
+  match offset.checked_add(size) {
+    Some(end) if end <= mapped_len => ChunkContent::Picture(offset..end),
+    _ => ChunkContent::OutOfRange,
+  }
+}
+
+/// The portal runtime. Its worker keeps reading the shared D-Bus connection between requests,
+/// so a request made from any thread later is answered. Callers block on it from plain threads
+/// (the capture's blocking task, the encoder thread), never from async code.
+fn portal_runtime() -> Result<&'static tokio::runtime::Runtime, CaptureError> {
+  PORTAL_RUNTIME
+    .get_or_init(|| {
+      tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(PORTAL_WORKER_THREADS)
+        .thread_name("xdg-portal")
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())
+    })
+    .as_ref()
+    .map_err(|error| CaptureError::Device(format!("portal runtime: {error}")))
+}
+
+/// The kind of graphical session the app runs in, as far as screen sharing cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopSession {
+  Wayland,
+  X11,
+  Unknown,
+}
+
+impl DesktopSession {
+  /// From `XDG_SESSION_TYPE` and whether `WAYLAND_DISPLAY` is set (a Wayland compositor started
+  /// without a login manager sets only that).
+  fn from_env(maybe_session_type: Option<&str>, has_wayland_display: bool) -> Self {
+    match maybe_session_type {
+      _ if has_wayland_display => Self::Wayland,
+      Some("wayland") => Self::Wayland,
+      Some("x11") => Self::X11,
+      _ => Self::Unknown,
+    }
+  }
+}
+
+/// A failed screen share as the user should hear it: on X11 the portal has no screens to offer
+/// (KDE's portal shares screens on Wayland only), so the answer is "use Wayland", not a portal
+/// error. The user's own answers in the picker stay what they are; the portal is tried first
+/// because some desktops (GNOME) share screens on X11 too.
+fn screen_error_in(session: DesktopSession, error: CaptureError) -> CaptureError {
+  match (session, error) {
+    (_, error @ (CaptureError::Cancelled(_) | CaptureError::Denied(_))) => error,
+    (DesktopSession::X11, _) => CaptureError::NeedsWayland,
+    (_, error) => error,
+  }
+}
+
+/// The screen picker's answer: closed without a choice, or refused.
+fn picker_error(error: ashpd::Error) -> CaptureError {
+  match error {
+    ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => CaptureError::Cancelled("screen"),
+    _ => CaptureError::Denied("screen"),
+  }
 }
 
 fn portal_error(error: ashpd::Error) -> CaptureError {
@@ -408,25 +706,207 @@ fn portal_error(error: ashpd::Error) -> CaptureError {
 
 #[cfg(test)]
 mod tests {
+  use spa::param::format::{FormatProperties, MediaSubtype};
+  use spa::pod::deserialize::PodDeserializer;
+  use spa::pod::{ChoiceValue, Value};
+  use spa::utils::{Choice, ChoiceEnum};
+
   use super::*;
 
+  const HD: CaptureFormat = CaptureFormat {
+    resolution: VideoResolution {
+      width: 1280,
+      height: 720,
+    },
+    framerate: 30,
+  };
+
   #[test]
-  fn format_params_serialize() {
-    let bytes = format_params(CaptureFormat {
-      resolution: VideoResolution {
-        width: 1280,
-        height: 720,
-      },
-      framerate: 30,
-    })
-    .unwrap();
-    assert!(Pod::from_bytes(&bytes).is_some());
+  fn screens_take_any_raw_format() {
+    let params = decoded_format_params(PortalSource::Screen);
+    assert_eq!(params.len(), 1);
+    assert_eq!(subtype(&params[0]), MediaSubtype::Raw);
+  }
+
+  /// Issue #683: a USB camera offers 1080p raw at 5 fps first; the wanted size at its rate, raw
+  /// or MJPEG, has to be asked for before it.
+  #[test]
+  fn cameras_ask_for_the_wanted_size_and_rate_before_anything() {
+    let params = decoded_format_params(PortalSource::Camera);
+    assert_eq!(params.len(), 3);
+    let wanted = spa::utils::Rectangle {
+      width: 1280,
+      height: 720,
+    };
+    assert_eq!(subtype(&params[0]), MediaSubtype::Raw);
+    assert_eq!(
+      value(&params[0], FormatProperties::VideoSize),
+      &Value::Rectangle(wanted)
+    );
+    assert!(matches!(
+      value(&params[0], FormatProperties::VideoFramerate),
+      Value::Choice(ChoiceValue::Fraction(Choice(_, ChoiceEnum::Range { min, .. }))) if min.num == 30
+    ));
+    assert_eq!(subtype(&params[1]), MediaSubtype::Mjpg);
+    assert_eq!(
+      value(&params[1], FormatProperties::VideoSize),
+      &Value::Rectangle(wanted)
+    );
+    assert_eq!(
+      value(&params[1], FormatProperties::VideoFramerate),
+      &Value::Fraction(spa::utils::Fraction { num: 30, denom: 1 })
+    );
+    assert_eq!(subtype(&params[2]), MediaSubtype::Raw);
+    assert!(matches!(
+      value(&params[2], FormatProperties::VideoSize),
+      Value::Choice(ChoiceValue::Rectangle(Choice(_, ChoiceEnum::Range { .. })))
+    ));
+  }
+
+  #[test]
+  fn cameras_take_dma_bufs_and_screens_shared_memory() {
+    let dma_buf = 1 << spa::buffer::DataType::DmaBuf.as_raw();
+    let mem_fd = 1 << spa::buffer::DataType::MemFd.as_raw();
+    // Issue #683: PipeWire's V4L2 camera hands out DMA-BUFs; refusing them fails the link.
+    assert_ne!(buffer_types(PortalSource::Camera) & dma_buf, 0);
+    assert_ne!(buffer_types(PortalSource::Camera) & mem_fd, 0);
+    assert_eq!(buffer_types(PortalSource::Screen) & dma_buf, 0);
+    assert_ne!(buffer_types(PortalSource::Screen) & mem_fd, 0);
+    for source in [PortalSource::Camera, PortalSource::Screen] {
+      let bytes = buffers_param(source).unwrap();
+      let (_, value) = PodDeserializer::deserialize_any_from(&bytes).unwrap();
+      let spa::pod::Value::Object(object) = value else {
+        panic!("not an object: {value:?}");
+      };
+      assert_eq!(object.id, spa::param::ParamType::Buffers.as_raw());
+      let property = &object.properties[0];
+      assert_eq!(property.key, spa::sys::SPA_PARAM_BUFFERS_dataType);
+      assert!(matches!(
+        &property.value,
+        spa::pod::Value::Choice(spa::pod::ChoiceValue::Int(spa::utils::Choice(
+          _,
+          spa::utils::ChoiceEnum::Flags { default, .. }
+        ))) if *default == buffer_types(source)
+      ));
+    }
   }
 
   #[test]
   fn pipewire_formats_map_to_converters() {
-    assert_eq!(pixel_format_of(VideoFormat::BGRx), Some(PixelFormat::Bgrx));
-    assert_eq!(pixel_format_of(VideoFormat::YUY2), Some(PixelFormat::Yuyv));
-    assert_eq!(pixel_format_of(VideoFormat::RGB), None);
+    let raw = MediaSubtype::Raw;
+    assert_eq!(pixel_format_of(raw, VideoFormat::BGRx), Some(PixelFormat::Bgrx));
+    assert_eq!(pixel_format_of(raw, VideoFormat::YUY2), Some(PixelFormat::Yuyv));
+    assert_eq!(pixel_format_of(raw, VideoFormat::RGB), None);
+    // MJPEG has no raw format.
+    assert_eq!(
+      pixel_format_of(MediaSubtype::Mjpg, VideoFormat::Unknown),
+      Some(PixelFormat::Mjpeg)
+    );
+    assert_eq!(pixel_format_of(MediaSubtype::H264, VideoFormat::Unknown), None);
+  }
+
+  #[test]
+  fn buffers_without_a_usable_picture_are_told_apart() {
+    assert_eq!(picture_range(100, 10, 50, false), ChunkContent::Picture(10..60));
+    assert_eq!(picture_range(100, 0, 100, false), ChunkContent::Picture(0..100));
+    // A cursor move only, and a damaged buffer: nothing to convert, nothing to warn about.
+    assert_eq!(picture_range(100, 0, 0, false), ChunkContent::Empty);
+    assert_eq!(picture_range(100, 0, 100, true), ChunkContent::Empty);
+    assert_eq!(picture_range(100, 60, 50, false), ChunkContent::OutOfRange);
+    assert_eq!(picture_range(100, usize::MAX, 2, false), ChunkContent::OutOfRange);
+  }
+
+  #[test]
+  fn a_failed_share_on_x11_asks_for_wayland() {
+    let x11 = DesktopSession::from_env(Some("x11"), false);
+    assert_eq!(x11, DesktopSession::X11);
+    assert!(matches!(
+      screen_error_in(x11, CaptureError::Device("portal: no ScreenCast".into())),
+      CaptureError::NeedsWayland
+    ));
+    assert!(matches!(
+      screen_error_in(x11, CaptureError::NoDevice("screen")),
+      CaptureError::NeedsWayland
+    ));
+    // What the user answered in the picker stays.
+    assert!(matches!(
+      screen_error_in(x11, CaptureError::Cancelled("screen")),
+      CaptureError::Cancelled("screen")
+    ));
+    assert!(matches!(
+      screen_error_in(x11, CaptureError::Denied("screen")),
+      CaptureError::Denied("screen")
+    ));
+    // On Wayland (also a compositor without a login manager) and unknown sessions, as it was.
+    for session in [
+      DesktopSession::from_env(Some("wayland"), false),
+      DesktopSession::from_env(Some("tty"), true),
+      DesktopSession::from_env(None, false),
+    ] {
+      assert!(matches!(
+        screen_error_in(session, CaptureError::Device("portal".into())),
+        CaptureError::Device(_)
+      ));
+    }
+  }
+
+  #[test]
+  fn a_closed_picker_is_a_cancel_and_anything_else_a_refusal() {
+    use ashpd::desktop::ResponseError;
+
+    assert!(matches!(
+      picker_error(ashpd::Error::Response(ResponseError::Cancelled)),
+      CaptureError::Cancelled("screen")
+    ));
+    assert!(matches!(
+      picker_error(ashpd::Error::Response(ResponseError::Other)),
+      CaptureError::Denied("screen")
+    ));
+  }
+
+  #[test]
+  fn the_portal_runtime_is_shared_and_keeps_running() {
+    let first = portal_runtime().unwrap();
+    let second = portal_runtime().unwrap();
+    assert!(std::ptr::eq(first, second), "one runtime for every request");
+    // A task spawned during one request still runs after it, while nobody blocks on the
+    // runtime: what the shared D-Bus connection's reader needs (issue #683).
+    let (sent, received) = std::sync::mpsc::channel();
+    first.block_on(async move {
+      tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        let _ = sent.send(());
+      });
+    });
+    assert!(received.recv_timeout(std::time::Duration::from_secs(10)).is_ok());
+  }
+
+  fn decoded_format_params(source: PortalSource) -> Vec<spa::pod::Object> {
+    format_params(source, HD)
+      .unwrap()
+      .iter()
+      .map(
+        |bytes| match PodDeserializer::deserialize_any_from(bytes).unwrap().1 {
+          Value::Object(object) => object,
+          other => panic!("not an object: {other:?}"),
+        },
+      )
+      .collect()
+  }
+
+  fn value(object: &spa::pod::Object, key: FormatProperties) -> &Value {
+    &object
+      .properties
+      .iter()
+      .find(|property| property.key == key.as_raw())
+      .unwrap()
+      .value
+  }
+
+  fn subtype(object: &spa::pod::Object) -> MediaSubtype {
+    match value(object, FormatProperties::MediaSubtype) {
+      Value::Id(id) => MediaSubtype::from_raw(id.0),
+      other => panic!("not an id: {other:?}"),
+    }
   }
 }

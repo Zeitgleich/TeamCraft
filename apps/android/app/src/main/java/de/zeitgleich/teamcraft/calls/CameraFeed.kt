@@ -55,8 +55,13 @@ fun CameraFeed(calls: CallController, isFrontCamera: Boolean, modifier: Modifier
       analysis.setAnalyzer(executor) { image ->
         image.use { if (throttle.isDue(it.imageInfo.timestamp)) send(calls, it) }
       }
-      val selector = if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+      val wanted = if (isFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+      val other = if (isFrontCamera) CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA
       provider.unbindAll()
+      // CameraX picks a supported size and the YUV_420_888 conversion itself; what can fail is the
+      // lens: a phone without the wanted one (many tablets have no back camera) uses the other.
+      val selector = listOf(wanted, other).firstOrNull { provider.hasCamera(it) }
+        ?: throw IllegalStateException("no camera")
       provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
       awaitCancellation()
     } finally {

@@ -9,7 +9,8 @@
 # Address of the HTTP listener. TLS is terminated by the reverse proxy. "[::]" is a dual-stack
 # socket (IPv4 and IPv6); use e.g. "127.0.0.1:8080" or "[::1]:8080" to bind a single address.
 listen_addr = "[::]:8080"
-# Number (0-1023) of this instance in generated IDs. Must be unique per running server instance.
+# Number (0-1022) of this instance in generated IDs. Must be unique per running server instance;
+# 1023 is reserved for imported messages.
 worker_id = 0
 # How many months of message partitions are created ahead of time (in addition to the current one).
 partitions_ahead_months = 3
@@ -19,6 +20,28 @@ partitions_ahead_months = 3
 url = "postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/teamcraft"
 max_connections = 10
 acquire_timeout_secs = 5
+# At startup the server waits this long for an unreachable database (retrying with backoff) instead
+# of exiting at once, so a restart policy does not turn a database restart into a crash loop.
+startup_wait_secs = 300
+
+[dependencies]
+# How the server treats a failing backend (database, object storage, identity provider, push
+# gateway, SFU), each with its own circuit breaker. After `failure_threshold` failures in a row the
+# backend counts as down: requests that need it are answered at once with 503 and Retry-After
+# instead of waiting for a timeout each, and /readyz lists it ("degraded"; the database makes it
+# 503). After `open_secs` one request probes it again; a success closes the breaker.
+failure_threshold = 3
+open_secs = 15
+# Extra attempts of an idempotent request that failed on the network or with a 5xx (timeouts are
+# not repeated), waiting `retry_initial_ms`, doubling up to `retry_max_ms`, with jitter.
+retries = 2
+retry_initial_ms = 200
+retry_max_ms = 2000
+# How long /readyz waits for the database; longer counts as a failure.
+readiness_timeout_ms = 2000
+# An API request that makes no progress this long (no answer, no new piece of its body) gets 503 and
+# Retry-After instead of hanging on a database connection that stopped answering. 0: no deadline.
+request_deadline_secs = 60
 
 [oidc]
 # Required. Issuer of the OIDC provider (reference setup: a Keycloak realm). Must equal the `iss`
@@ -27,6 +50,15 @@ issuer = "http://127.0.0.1:8080/realms/teamcraft-dev"
 # Public client the apps log in with; tokens must be issued to it (`azp` or `aud`). Its client
 # roles are read from `resource_access.<client_id>.roles`.
 client_id = "teamcraft"
+# Scopes the apps ask for at sign-in (announced in GET /api/v1/server-info; `openid` is always added).
+# `offline_access` gives each device a long-lived refresh token: without it a device's sign-in ends
+# with the provider's browser session (Keycloak: 8-10 hours by default) and people sign in daily.
+app_scopes = ["openid", "profile", "email", "offline_access"]
+# Optional: the redirect URIs registered for `client_id`. When set, an app whose redirect URI is not
+# listed tells its user the server is not set up for it. The released apps use
+# `http://127.0.0.1/callback` (desktop, any port) and `de.zeitgleich.teamcraft:/oauth/callback`
+# (Android, iOS); see docs/operations.md.
+# app_redirect_uris = ["http://127.0.0.1/callback", "de.zeitgleich.teamcraft:/oauth/callback"]
 # Confidential client with a service account (reserved for the admin API and back-channel logout).
 server_client = "teamcraft-server"
 # Optional: use this key set URL instead of the one in the discovery document, e.g. when the
@@ -79,10 +111,14 @@ filter = "info"
 format = "pretty"
 
 # Rules only the server enforces (PLAN.md §12, §13). Seed of Administration → Settings → server rules;
-# guest rules there and in the signed policy win over guests_dm_only_with_shared_conversations.
+# guest rules there and in the signed policy win over guests_dm_start.
 [policy]
-# Guests can only open DMs with people they share a conversation with (and vice versa).
-guests_dm_only_with_shared_conversations = true
+# Whom a guest may START a DM or group DM with: "nobody" (they only answer), "shared" (people they share a
+# conversation with) or "anyone". Members, admins and owners can always message guests.
+guests_dm_start = "nobody"
+# Deprecated, the 1.0.9 form of the above (true = "shared", false = "anyone"). Wins over guests_dm_start
+# where set; remove it and use guests_dm_start.
+# guests_dm_only_with_shared_conversations = true
 # Pending invites only apply to accounts whose provider verified the email address.
 invites_require_verified_email = true
 # IDs of spaces every new member joins on their first sign-in, and of public channels of those
@@ -90,6 +126,19 @@ invites_require_verified_email = true
 # guests and bots get none.
 default_spaces = []
 default_channels = []
+# Deactivated users stay in their chats (suspended) until an admin removes them. Set a number of
+# days to remove them from all chats automatically that long after the deactivation (their
+# devices leave every group, keys rotate). Unset (the default): never automatically.
+# remove_deactivated_after_days = 90
+# Days an admin's request to join a private channel waits for the channel's owners before it
+# expires (admin.md §2.4.1, `admin_self_join = owner_approval`), 1 to 90.
+admin_join_request_days = 7
+# A 1:1 direct message call ends for both as soon as one side leaves (hangs up, closes the app, or
+# is dropped after the reconnect grace period). false: it runs until the last person leaves.
+one_to_one_call_ends_for_both = true
+# Direct messages deleted with a deleted account are remembered this many days for the other
+# participants, so a device offline that long still drops them with their local history.
+deleted_conversations_kept_days = 180
 
 [limits]
 max_ciphertext_bytes = 1048576
@@ -102,6 +151,13 @@ max_page_size = 200
 max_directory_results = 50
 # Largest avatar image in bytes (PNG, JPEG or WebP).
 max_avatar_bytes = 1048576
+# Largest space or channel picture in bytes (one limit for both). Uploads (PNG, JPEG or WebP; no SVG) are re-encoded as PNG of at
+# most 512×512 pixels; the limit applies to the result.
+max_space_image_bytes = 1048576
+# Space pictures decoded at the same time (read at start; more uploads get 503 with Retry-After), and
+# how long one decode may take before the upload is answered 503.
+max_concurrent_image_decodes = 2
+image_decode_timeout_secs = 5
 # A user's own call background pictures: largest picture, and how many one user may keep.
 max_background_bytes = 8388608
 max_backgrounds_per_user = 24
@@ -111,15 +167,26 @@ org_recovery_request_ttl_secs = 86400
 max_recovery_blob_bytes = 8192
 # Longest title, department and similar profile text, in characters.
 max_profile_text_chars = 100
+# Longest display name a member may set instead of the one from the identity provider, in characters.
+max_display_name_chars = 80
 # Most members of one user group.
 max_user_group_members = 5000
 # Unread counts look at this many of the newest unread messages per conversation; a count equal to it
 # means "that many or more" (clients show "1000+"). Keeps the cost independent of huge unread backlogs.
 max_unread_counted = 1000
+# Reactions to a member's own messages remembered one by one as seen, per conversation; beyond it the
+# oldest count as seen together with everything before them.
+max_seen_reactions = 200
 # Unused MLS key packages per device, their size and the count per upload.
 max_key_packages_per_device = 200
 max_key_package_bytes = 16384
 max_key_packages_per_upload = 100
+# Key packages are valid for 83 days. One is handed out only while it stays valid at least
+# key_package_min_validity_secs (members processing the add later still accept it); below that it is
+# deleted. Packages within key_package_renewal_window_secs of expiry count as "expiring soon" and
+# devices upload replacements. Must be min_validity < renewal_window < 83 days.
+key_package_min_validity_secs = 3628800
+key_package_renewal_window_secs = 4838400
 # One MLS commit/welcome/proposal/application message, and welcomes per commit.
 max_mls_payload_bytes = 1048576
 max_welcomes_per_commit = 500
@@ -140,15 +207,22 @@ max_meeting_mails_per_user_per_hour = 200
 heartbeat_interval_secs = 30
 # A connection without any frame for this long is closed.
 heartbeat_timeout_secs = 90
-# How long a disconnected session can still be resumed, and how many events are kept for it.
+# How long a disconnected session can still be resumed, and how many events (and bytes of them) are
+# kept for it. Events are shared between sessions; a connection that falls further behind is dropped.
 resume_window_secs = 120
 resume_buffer_events = 1000
+resume_buffer_bytes = 16777216
+# Bytes all sessions' buffers may hold together. Beyond it the slowest sessions are dropped first
+# (those waiting to resume, then those furthest behind); their clients sync afresh.
+max_buffered_bytes = 536870912
 identify_timeout_secs = 10
 # Connections are closed after this long so a fresh token is checked; clients resume.
 connection_max_age_secs = 3600
 # A device that disconnected only counts as offline after this grace period.
 presence_offline_grace_secs = 5
 max_frame_bytes = 65536
+# On SIGTERM: how long to wait for open WebSockets to take their close frame (1012) before exiting.
+drain_timeout_secs = 10
 
 # Relay that connects two devices of one user while linking a new device (/api/v1/rendezvous).
 [rendezvous]
@@ -177,6 +251,9 @@ path_style = true
 presign_expiry_secs = 900
 # Largest attachment (as stored, i.e. ciphertext) a client may announce.
 max_attachment_bytes = 104857600
+# Large files go up in parts; an upload that gets no new part for this long is aborted. The storage
+# must expose the `ETag` header to browsers (CORS), see docs/operations.md.
+multipart_expiry_secs = 86400
 
 # Background job that enforces retention: deletes ciphertext, attachments and index segments older
 # than a channel's retention and drops emptied month partitions. The policy (signed by owners) holds
@@ -194,6 +271,10 @@ partitions_ahead_months = 3
 [notifications]
 # Users who never chose send read receipts in DMs and group DMs (receipts are reciprocal).
 read_receipts_default = true
+# Which messages notify people who never chose a level for a conversation, its space or in general:
+# "all" or "mentions" (mentions, keywords and direct messages). Integration channels notify only for
+# mentions either way. Also in the admin console.
+default_level = "all"
 urgent_repeat_interval_secs = 120
 urgent_max_pushes = 5
 urgent_scheduler_interval_secs = 15
@@ -207,6 +288,10 @@ is_desktop_attention_enabled = true
 # How long an "attentive" report counts; the session's gateway heartbeats renew it (keep it above
 # twice [gateway] heartbeat_interval_secs).
 attention_lease_secs = 75
+# The user's own activity on a desktop or web session (input, a message sent from it) holds phone
+# pushes back like attention for this long, also with the window in the background: the user is at
+# the computer. Keep it above 30 s (how often clients repeat "active" during input); 0: attention only.
+desktop_activity_secs = 120
 # Pushes held per user while a desktop is attentive; beyond that the oldest goes out at once.
 max_held_pushes_per_user = 100
 
@@ -278,11 +363,18 @@ auth_failures_per_minute = 30
 # from their sections) and connect_origins; the web client cannot send data anywhere else. For a
 # stricter policy add e.g. "require-trusted-types-for 'script'" after testing the web client with it.
 # connect_origins = ["https://other.example.com"]
-# The small static download page of share links (/f/<id>): download.html plus the files it uses, served
-# under /f-assets/. {{sri:<file>}} in download.html becomes that file's Subresource Integrity value.
-# Without it /f/<id> serves the app shell.
-# share_page_dir = "/srv/teamcraft/share-page"
-# share_page_content_security_policy = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; ..."
+
+# What the sign-in page offers; the admin console changes it at runtime (Settings -> Sign-in page).
+# The provider name and icon of the SSO button are brand settings (`sso_label`, `sso_icon`).
+[sign_in_page]
+# "sso" and "local" in display order; "local" only shows while local accounts are enabled.
+methods = ["sso", "local"]
+# Optional: help below the form per language, and an https help page.
+# help_text = { en = "Problems signing in? Call 1234.", de = "Probleme bei der Anmeldung? Ruf 1234 an." }
+# help_link = "https://help.example.com/sign-in"
+# Every sign-in shows the identity provider's login page (OIDC prompt=login), also with an existing
+# session there, so users see and can switch the account. false: silent single sign-on.
+is_login_page_always_shown = true
 
 # Brands (docs/branding.md): one server under several host names, each with its own name, logo, colors,
 # login text, links and e-mail identity. Without [[brands]] the server has one built-in brand "TeamCraft".
@@ -322,9 +414,13 @@ served_hostnames = []
 # icon = "brand-a/icon.png"
 # favicon = "brand-a/favicon.png"
 # support_url = "https://support.brand-a.example.com"
+# documentation_url = "https://docs.brand-a.example.com"   # Settings > Help & about; default: none
 # privacy_url = "https://brand-a.example.com/privacy"
 # terms_url = "https://brand-a.example.com/terms"
 # imprint_url = "https://brand-a.example.com/imprint"
+# Where the desktop and mobile apps are offered; the web app links it where it can't do something
+# itself yet (calls). Default: the TeamCraft project's download page.
+# download_url = "https://brand-a.example.com/apps"
 # connect_origins = []                        # extra connect-src origins for this brand only
 # content_security_policy = "..."             # replaces [web].content_security_policy for this brand
 # [brands.login_title]                        # language code -> text; "en" is the fallback
@@ -358,6 +454,12 @@ served_hostnames = []
 # guest_token_secret = "..."
 # Guests may use their link until this long after the meeting's end.
 # guest_grace_secs = 7200
+# Most guests one shared guest link of a meeting lets into the lobby; every one of them still waits
+# for a host.
+# max_shared_link_guests = 50
+# A call started in a scheduled meeting's chat rings its invitees (who haven't declined) when it
+# starts at most this long before an occurrence, or during it; 0 turns this off.
+# start_ring_lead_secs = 3600
 # Shared secret of the inbox handler that forwards RSVP e-mail (iMIP REPLY) to
 # POST /api/internal/v1/meetings/replies with `Authorization: Bearer <token>`. The handler vouches for
 # the sender (DKIM/SPF). Without it that endpoint answers 503. Prefer TEAMCRAFT_MEETINGS__INBOX_TOKEN.
@@ -413,9 +515,16 @@ ttl_secs = 86400
 call_ttl_secs = 0
 dismiss_ttl_secs = 86400
 test_ttl_secs = 300
-# Temporary failures (5xx, timeouts) are tried again this often, waiting 2 s, then 4 s, ...
-max_retries = 2
+# Temporary failures (5xx, 429, timeouts) are tried again until the wake-up's TTL ends, at most
+# max_retries times, waiting 2 s, then 4 s, ... (with jitter) up to retry_max_delay_secs, or longer
+# when the push service asks for it (Retry-After). Retries wait in the database and survive a
+# restart; each retry worker holds a database connection while it sends.
+max_retries = 200
 retry_initial_delay_ms = 2000
+retry_max_delay_secs = 600
+retry_workers = 2
+retry_max_queued_per_device = 200
+retry_poll_interval_ms = 1000
 # The shortest time between two test pushes to one device (notification diagnostics).
 test_interval_secs = 10
 # Calls one user may push to other people's phones per minute (further rings reach open apps only).
@@ -471,7 +580,7 @@ is_enabled = true
 #   openssl pkey -in call-signing.pem -pubout -out call-signing.pub.pem   # for the SFU
 # [calls]
 # WebTransport URL of the SFU that clients connect to.
-# sfu_url = "https://sfu.example.com:4433/call"
+# sfu_url = "https://sfu.example.com:3478/call"
 # `iss` of join tokens; the SFU is configured with the same value.
 # issuer = "https://chat.example.com"
 # signing_key_path = "/etc/teamcraft/call-signing.pem"
@@ -488,6 +597,18 @@ is_enabled = true
 # Where the SFU takes host controls (mute all, remove, lock, end for everyone) on its internal listener;
 # the registration token above authenticates this server. Without it those controls answer 503.
 # sfu_control_url = "http://sfu.internal:8081"
+# SHA-256 of the SFU's certificate (hex) when it is a short-lived self-signed one (tests, development):
+# join tokens carry it so browsers can connect. Leave unset with a certificate browsers trust.
+# sfu_certificate_sha256 = "ab:cd:..."
+# The SFU also reports its whole roster (at start and every TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS, default
+# 30) to /api/internal/v1/calls/roster; a device it no longer has leaves the call, a call with nobody left
+# ends. While the SFU is fresh from a restart, its devices get this long to rejoin first.
+# roster_grace_secs = 60
+# Once the SFU has sent a roster, none for this long ends every call (the SFU is gone or cut off).
+# roster_timeout_secs = 120
+# Devices of one account that may be in the same call at once; a further device gets no join token
+# (call_device_limit). Set the SFU to the same value (TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL).
+# max_devices_per_user_per_call = 3
 
 # E-mail the server sends on its own: invitations, activations, digests and meeting invitations. The mail
 # server and the texts are the seed of Administration → Mail and → Settings; what an admin sets there
@@ -496,6 +617,7 @@ is_enabled = true
 # public_base_url = "https://chat.example.com"
 # invite_subject = "{inviter} invited you to {space}"
 # invite_body = "{inviter} invited you to \"{space}\" as {role}.\n\nSign in with this e-mail address to join: {url}\n"
+# The body may place {message}, the inviter's optional personal note; otherwise it is quoted below.
 # [mail.smtp]
 # host = "smtp.example.com"
 # port = 587
@@ -526,6 +648,9 @@ max_downloads_cap = 0
 # Public URL of this server without trailing slash; shown as <base>/f/<id> in the API.
 public_base_url = ""
 max_links_per_user = 500
+# A download that failed after it was counted (storage hiccup, lost connection) can be retried this
+# long without counting again; 0 counts every request.
+download_retry_minutes = 10
 
 # The key that encrypts the passwords admins enter in the console (mail server, calendar) before they are
 # stored in the database (docs/admin.md §6.2). Without it those passwords can only be set in this file.

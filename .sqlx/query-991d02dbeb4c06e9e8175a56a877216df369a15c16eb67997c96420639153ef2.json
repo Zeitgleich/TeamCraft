@@ -1,0 +1,342 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,\n                c.category_id, c.archived_at IS NOT NULL AS \"is_archived!\", c.is_integration, c.member_denied, c.guest_denied,\n                c.image_key, c.image_version, c.image_size_bytes, c.importer_user_id, c.imported_through_message_id,\n                m.role AS \"role?\", m.notification_level AS \"notification_level?\",\n                m.is_favorite AS \"is_favorite?\", m.last_read_message_id, m.muted_until,\n                NOT m.notification_overridden AS \"is_inherited?\",\n                tc_snowflake_floor(m.joined_at) AS \"joined_floor?\",\n                m.sees_imported_history AS \"sees_imported_history?\",\n                m.reactions_seen_through_message_id, m.reactions_seen_message_ids AS \"reactions_seen_message_ids?\"\n         FROM conversations c\n         LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1\n         WHERE c.deleted_at IS NULL\n           AND ($2::bigint IS NULL OR c.id = $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND (NOT $4 OR m.user_id IS NOT NULL)\n           AND (NOT $5 OR (c.kind = 'channel' AND (c.visibility = 'public' OR $6)\n                           AND c.archived_at IS NULL AND m.user_id IS NULL))\n         ORDER BY c.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "space_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "space_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "topic",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "topic"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "description",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "description"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "visibility",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "visibility"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "history_policy",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "history_policy"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "category_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "category_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "is_archived!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "is_integration",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "is_integration"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "member_denied",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "member_denied"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "guest_denied",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "guest_denied"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "image_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "image_key"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "image_version",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "image_version"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "image_size_bytes",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "image_size_bytes"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "importer_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "importer_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "imported_through_message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "imported_through_message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "role?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "role"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "notification_level?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "notification_level"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "is_favorite?",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "is_favorite"
+          }
+        }
+      },
+      {
+        "ordinal": 21,
+        "name": "last_read_message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "last_read_message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 22,
+        "name": "muted_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "muted_until"
+          }
+        }
+      },
+      {
+        "ordinal": 23,
+        "name": "is_inherited?",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 24,
+        "name": "joined_floor?",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 25,
+        "name": "sees_imported_history?",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "sees_imported_history"
+          }
+        }
+      },
+      {
+        "ordinal": 26,
+        "name": "reactions_seen_through_message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "reactions_seen_through_message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 27,
+        "name": "reactions_seen_message_ids?",
+        "type_info": "Int8Array",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "reactions_seen_message_ids"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Bool",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      null,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      null,
+      null,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "991d02dbeb4c06e9e8175a56a877216df369a15c16eb67997c96420639153ef2"
+}

@@ -1,0 +1,17 @@
+/* ---- Section header with an action (mark all as read) ---- */
+
+.sb-section-row {
+  display: flex;
+  align-items: flex-end;
+}
+
+.sb-section-row .sb-section-head {
+  flex: 1;
+  min-width: 0;
+}
+
+.sb-section-action {
+  margin: 0 8px 2px 0;
+  color: var(--sb-muted);
+}
+

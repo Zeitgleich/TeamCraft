@@ -6,52 +6,70 @@
 //! app's sync task drains and runs against the server. After either, the sync task flushes.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges, SpaceInvite,
 };
 use teamcraft_client_api::actions::{
-  FileInfo, MessageExtras, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions,
+  FileInfo, LinkedMessage, MediaAnchor, MediaPage, MessageExtras, OutgoingMessage, PermalinkTarget,
+  SavedItem, ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::calls::{
   BackgroundImageInfo, OrgBackgroundInfo, OrgBackgroundRule, OrgBackgrounds,
 };
+use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
-  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, JoinableSpace,
-  Message, MessageKind, PENDING_ID_BIT, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId,
-  SystemEvent, ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
+  ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue, Message, MessageKind,
+  OlderHistory, PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction, SidebarCategory, Space,
+  SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow,
+  UnseenReactions, User, UserId, hue_from_hex,
 };
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
-  ConversationVisibility, Id, JoinPolicy, ListConversationMembersResponse, MessageId, NotificationLevel,
-  PresenceState, Snowflake, SpaceResponse, UserKind, UserSummary,
+  ConversationVisibility, Id, InviteId, JoinPolicy, ListConversationMembersResponse, ListInvitesResponse,
+  MessageId, NotificationLevel, PresenceState, Snowflake, SpaceResponse, SpaceRole, UserKind, UserSummary,
 };
 use teamcraft_proto::{BackgroundId, OrgBackgroundId};
 use teamcraft_proto::{
-  CategoryId, ConversationNotificationSettings, CreateSpaceRequest, HistoryPolicy, MoveChannelRequest,
-  UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
+  CategoryId, ConversationNotificationSettings, CreateSpaceRequest, EffectiveNotifications, HistoryPolicy,
+  MoveChannelRequest, UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
 };
 
+use teamcraft_client_api::notify::{MentionRules, is_mentioned};
+use teamcraft_client_api::receipts::{ReadIndicator, seen_by};
+
 use crate::client::bookmarks_key;
-use crate::client::workspace_admin::ChannelOptions;
+use crate::client::older_history::{is_failure_current, older_history_record};
+use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::clock::Clock;
+use crate::entry_tally::{self, EntryPass, EntryTally, TallyInputs};
 use crate::error::CoreError;
+use crate::imported::{Authorship, ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
+use crate::notify_rules::{MentionPreferences, load_mention_preferences};
+use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
-  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table,
+  BookmarkItem, ConversationEvent, FeedVersion, LocalStore, MessageContent, MessageEdge, MessageFilter,
+  MessageSlot, StoredMessage, Table, Unreadable, write_group,
 };
+
+/// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
+const ANCHOR_WALK_ROWS: usize = 64;
 
 /// Requests from the UI that need the server; the sync task drains and runs them.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoreCommand {
   /// New messages or reactions are in the outbox.
   FlushOutbox,
-  /// The user types in a conversation (sent on the gateway by the sync loop, throttled).
+  /// The user types in a conversation, or with `maybe_thread` a reply in that thread (sent on the
+  /// gateway by the sync loop, throttled).
   Typing {
     conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
   },
   MarkRead {
     conversation: ConversationId,
@@ -125,13 +143,34 @@ pub enum CoreCommand {
     conversation: ConversationId,
     from: MessageId,
   },
-  /// The activity feed was read up to the entry sent at this time.
-  MarkActivityRead {
-    up_to_ms: i64,
+  /// The conversation was read up to this message (an activity entry that was opened), not to its
+  /// end. The server keeps the position monotonic.
+  MarkReadThrough {
+    conversation: ConversationId,
+    message: MessageId,
+  },
+  /// The user saw these reactions to their own messages (already marked in the store).
+  MarkReactionsSeen {
+    conversation: ConversationId,
+    reactions: Vec<MessageId>,
+  },
+  /// The thread was read up to this reply.
+  MarkThreadRead {
+    conversation: ConversationId,
+    thread: ThreadId,
+    message: MessageId,
   },
   /// Presence and last seen of these people.
   RefreshPresence {
     users: Vec<UserId>,
+  },
+  /// How far the other members of a DM or group DM read.
+  RefreshReadReceipts {
+    conversation: ConversationId,
+  },
+  /// Ask the server's directory for people matching the query (people page, quick switcher).
+  SearchDirectory {
+    query: String,
   },
   RefreshPrivacy,
   SetLastSeenVisibility {
@@ -144,6 +183,15 @@ pub enum CoreCommand {
   RevokeOwnDevice {
     device: teamcraft_proto::DeviceId,
   },
+  /// Renames one of this user's devices.
+  RenameOwnDevice {
+    device: teamcraft_proto::DeviceId,
+    name: String,
+  },
+  /// A test push to one of this user's devices.
+  TestPushOwnDevice {
+    device: teamcraft_proto::DeviceId,
+  },
   /// Files of outbox messages are waiting for upload.
   UploadFiles,
   /// Outbox messages wait for their link previews.
@@ -152,12 +200,25 @@ pub enum CoreCommand {
     conversation: ConversationId,
     attachment: AttachmentId,
   },
+  /// The user paused, continued, cancelled, cleared, opened or showed a download in the list.
+  ControlDownload {
+    attachment: AttachmentId,
+    control: crate::downloads::DownloadControl,
+  },
   CreateShareLink {
     conversation: ConversationId,
     attachment: AttachmentId,
-    maybe_expires_at: Option<i64>,
+    maybe_expires_in_seconds: Option<u64>,
     maybe_max_downloads: Option<u32>,
     maybe_password: Option<RedactedText>,
+  },
+  RevokeShareLink {
+    conversation: ConversationId,
+    attachment: AttachmentId,
+    share_id: String,
+  },
+  RefreshShareLinks {
+    attachment: AttachmentId,
   },
   CreateSpace {
     request: Box<CreateSpaceRequest>,
@@ -184,11 +245,39 @@ pub enum CoreCommand {
   JoinChannel {
     conversation: ConversationId,
   },
+  /// An admin asks the owners of a private channel to let them in (admin.md §2.4).
+  RequestAdminJoin {
+    conversation: ConversationId,
+  },
+  WithdrawAdminJoin {
+    conversation: ConversationId,
+  },
+  /// A channel owner lets an admin in who asked: the server membership and the own MLS add, with
+  /// the history the owner chose.
+  ApproveAdminJoin {
+    conversation: ConversationId,
+    user: UserId,
+    history: HistoryPolicy,
+  },
+  DeclineAdminJoin {
+    conversation: ConversationId,
+    user: UserId,
+  },
   JoinSpace {
     space: SpaceId,
   },
   LeaveChannel {
     conversation: ConversationId,
+    deletes_if_last: bool,
+  },
+  DismissSuspectDeletions,
+  /// Deletes a channel for everybody, after the user confirmed it.
+  DeleteChannel {
+    conversation: ConversationId,
+  },
+  /// Deletes a space with its channels for everybody, after the user confirmed it.
+  DeleteSpace {
+    space: SpaceId,
   },
   RefreshCategories {
     space: SpaceId,
@@ -215,17 +304,132 @@ pub enum CoreCommand {
     conversation: ConversationId,
     user: UserId,
   },
+  /// "Retry" on a failed removal or leave, or "remove" on somebody left in the group.
+  RetryRemoval {
+    conversation: ConversationId,
+    user: UserId,
+  },
+  /// "Keep" on an unconfirmed or failed removal.
+  DiscardRemoval {
+    conversation: ConversationId,
+    user: UserId,
+  },
+  /// "Retry" on a DM whose encryption setup waits for a welcome or failed (#278).
+  RetryDmSetup {
+    conversation: ConversationId,
+  },
+  /// A meeting chat the user scheduled or started, with the users they invited.
+  SetUpMeetingChat {
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+  },
+  /// The organizer saved a changed invitee list of a meeting.
+  UpdateMeetingChatMembers {
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+    removed: Vec<UserId>,
+  },
+  /// The user added people to their DM call: it moves into the meeting chat they just started.
+  AddPeopleToCall {
+    from: ConversationId,
+    in_call: Vec<UserId>,
+    added: Vec<UserId>,
+    maybe_title: Option<String>,
+    key: teamcraft_proto::IdempotencyKey,
+  },
+  /// The user follows an announced move of their call into a meeting room.
+  AcceptCallMove {
+    from: ConversationId,
+    to: ConversationId,
+  },
+  /// A host admitted a user from a meeting's lobby.
+  LetIntoMeetingChat {
+    conversation: ConversationId,
+    user: UserId,
+  },
+  /// The app is about to hand out a meeting link: make its fragment (`guest_link_fragment`).
+  PrepareGuestLink {
+    conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
+  },
+  /// An organizer's device lets an admitted guest's device into the chat's group.
+  LetGuestIntoMeetingChat {
+    conversation: ConversationId,
+    guest: UserId,
+    knock_fingerprint: String,
+    access_ends_at_ms: i64,
+  },
+  /// Pin a waiting guest's key and make its key code (`guest_key_code`).
+  PrepareGuestKeyCode {
+    guest: UserId,
+  },
+  /// The lobby setting the organizer chose for a meeting on this device.
+  NoteMeetingLobby {
+    meeting: teamcraft_proto::MeetingId,
+    has_lobby: bool,
+  },
   InviteToSpace {
     space: SpaceId,
     email: String,
     is_guest: bool,
     channels: Vec<ConversationId>,
     maybe_expires_at: Option<i64>,
+    maybe_message: Option<String>,
+  },
+  /// People join a channel, first its space when asked (the add-people dialog).
+  AddPeopleToChannel {
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  },
+  /// The members and pending invitations of a space, for its settings.
+  RefreshSpaceRoster {
+    space: SpaceId,
+  },
+  SetSpaceRole {
+    space: SpaceId,
+    user: UserId,
+    role: SpaceRole,
+  },
+  SetChannelRole {
+    conversation: ConversationId,
+    user: UserId,
+    role: teamcraft_proto::ChannelRole,
+  },
+  /// Signs the role the server lists for a member (e2ee.md §4.6.1).
+  ConfirmChannelRole {
+    conversation: ConversationId,
+    user: UserId,
+  },
+  /// The channel's members and signed roles, for its settings.
+  RefreshChannelRoles {
+    conversation: ConversationId,
+  },
+  RemoveSpaceMember {
+    space: SpaceId,
+    user: UserId,
+  },
+  RevokeSpaceInvite {
+    space: SpaceId,
+    invite: InviteId,
+  },
+  /// People picked from the directory join a space (those already in it are skipped).
+  AddSpaceMembers {
+    space: SpaceId,
+    users: Vec<UserId>,
+    is_guest: bool,
   },
   /// "Jump to date": load the history from `at_ms` on and note that the request is answered.
   LoadHistoryAt {
     conversation: ConversationId,
     at_ms: i64,
+  },
+  /// The reader came near the oldest row held: one more page from the server. `request` tells the
+  /// answer in the store from those of earlier requests and earlier runs of the app.
+  LoadOlderHistory {
+    conversation: ConversationId,
+    request: u64,
   },
 }
 
@@ -234,9 +438,46 @@ pub(crate) fn history_jump_key(conversation: ConversationId) -> String {
   format!("history-jump/{conversation}")
 }
 
+/// How the reading back through `conversation` stands, given the last request of this run.
+fn older_history_of(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  maybe_request: Option<u64>,
+) -> Result<OlderHistory, CoreError> {
+  let maybe_record = older_history_record(store, conversation)?;
+  let is_beginning = maybe_record.is_some_and(|record| record.is_at_beginning());
+  let Some(request) = maybe_request else {
+    // Nothing is on its way, and how an earlier run's request ended is no matter now.
+    return Ok(if is_beginning {
+      OlderHistory::Complete
+    } else {
+      OlderHistory::Available
+    });
+  };
+  let Some(record) = maybe_record.filter(|record| record.answered == request) else {
+    return Ok(OlderHistory::Loading);
+  };
+  if let Some(failed_in) = record.maybe_failed_in
+    && is_failure_current(store, failed_in)?
+  {
+    return Ok(OlderHistory::Failed);
+  }
+  Ok(if is_beginning {
+    OlderHistory::Complete
+  } else {
+    OlderHistory::Available
+  })
+}
+
 /// Text that must not show up in logs (a share link password); `Debug` prints `[redacted]`.
 #[derive(Clone, PartialEq, Eq)]
 pub struct RedactedText(pub String);
+
+impl Drop for RedactedText {
+  fn drop(&mut self) {
+    zeroize::Zeroize::zeroize(&mut self.0);
+  }
+}
 
 impl std::fmt::Debug for RedactedText {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -251,10 +492,40 @@ pub struct CoreChatBackend<S> {
   commands: Rc<RefCell<Vec<CoreCommand>>>,
   /// Who types where; shared with the client when [`Self::with_typing`] was given its state.
   typing: crate::TypingState,
+  /// File transfers in flight; shared with the client when [`Self::with_transfers`] was given them.
+  transfers: crate::transfers::Transfers,
   /// When reads last asked the server for something, so the UI's repeated reads don't flood it.
   pub(crate) requests: RefCell<crate::ui_people::RequestLog>,
+  /// Whether a message mentions the user, per message and edit, under the rules it was decided by.
+  pub(crate) mentions: RefCell<MentionMemo>,
+  /// The activity feed's entries per conversation, kept while it doesn't change.
+  pub(crate) activity: RefCell<HashMap<ConversationId, crate::ui_activity::KeptActivity>>,
+  /// Tallies counted and not kept yet ([`Self::flush_entry_tallies`]).
+  entry_tallies: RefCell<BTreeMap<ConversationId, EntryTally>>,
+  /// The feed rows of the conversations read last, kept while their messages don't change.
+  feeds: RefCell<Vec<(ConversationId, FeedView)>>,
+  /// What paging an indexed feed needs of the conversations read last, kept likewise.
+  layouts: RefCell<Vec<(ConversationId, Rc<FeedLayout>)>>,
+  /// The last request for older history per conversation since this backend started.
+  older_requests: RefCell<HashMap<ConversationId, u64>>,
   #[cfg(not(target_arch = "wasm32"))]
   pub(crate) search: RefCell<crate::ui_search::UiSearchState>,
+}
+
+/// The oldest row a paging list holds, for [`CoreChatBackend::feed_tail`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeedAnchor {
+  pub id: MessageId,
+  /// Finds the place again when the row itself went away (deleted, hidden).
+  pub sent_at: TimestampMs,
+}
+
+/// The newest rows of a feed down to an anchor, oldest first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FeedTail {
+  pub messages: Vec<Message>,
+  /// Rows older than the first one exist: the list can page further back.
+  pub has_older: bool,
 }
 
 impl<S: LocalStore> CoreChatBackend<S> {
@@ -266,7 +537,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
       clock,
       commands: Rc::new(RefCell::new(Vec::new())),
       typing: crate::TypingState::default(),
+      transfers: crate::transfers::Transfers::new(),
       requests: RefCell::default(),
+      mentions: RefCell::default(),
+      activity: RefCell::default(),
+      entry_tallies: RefCell::default(),
+      feeds: RefCell::default(),
+      layouts: RefCell::default(),
+      older_requests: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
     }
@@ -279,9 +557,32 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self
   }
 
+  /// Reads the progress of file transfers from the client ([`crate::Client::transfers`]).
+  #[must_use]
+  pub fn with_transfers(mut self, transfers: crate::transfers::Transfers) -> Self {
+    self.transfers = transfers;
+    self
+  }
+
+  pub(crate) fn transfers(&self) -> &crate::transfers::Transfers {
+    &self.transfers
+  }
+
   /// Takes the queued commands (the sync task runs them).
   pub fn drain_commands(&self) -> Vec<CoreCommand> {
     std::mem::take(&mut *self.commands.borrow_mut())
+  }
+
+  /// The deactivated and deleted accounts this device knows: [`ChatBackend::users`] leaves them out
+  /// of lists and pickers (issue #654), but they still name their old messages. The mobile apps
+  /// read them next to the snapshot (issue #751).
+  pub fn former_users(&self) -> Vec<User> {
+    self
+      .summaries()
+      .values()
+      .filter(|summary| summary.is_deactivated)
+      .map(|summary| self.to_user(summary))
+      .collect()
   }
 
   pub(crate) fn me_id(&self) -> UserId {
@@ -290,6 +591,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
   pub(crate) fn now_ms(&self) -> i64 {
     self.clock.now_ms()
+  }
+
+  /// The import account of the verified workspace policy (e2ee.md §4.10).
+  pub(crate) fn importer(&self) -> Option<UserId> {
+    crate::imported::importer(self.store_ref())
   }
 
   pub(crate) fn store_ref(&self) -> &S {
@@ -326,7 +632,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.read(records::list_json(&self.store, Table::Conversations))
   }
 
-  fn members(&self, conversation: ConversationId) -> Vec<UserId> {
+  pub(crate) fn members(&self, conversation: ConversationId) -> Vec<UserId> {
     let maybe: Option<ListConversationMembersResponse> = self.read(records::get_json(
       &self.store,
       Table::Members,
@@ -337,7 +643,25 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .unwrap_or_default()
   }
 
-  fn to_user(&self, summary: &UserSummary) -> User {
+  /// The members of a conversation whose receipts show as ticks (a DM, #635); `None` elsewhere.
+  pub(crate) fn tick_members(&self, conversation: ConversationId) -> Option<Vec<UserId>> {
+    let response = self
+      .conversations_raw()
+      .into_iter()
+      .find(|response| response.id == conversation)?;
+    (ReadIndicator::of(view_kind(&response)) == ReadIndicator::Ticks).then(|| self.members(conversation))
+  }
+
+  /// How far each other member read, as far as this device heard (gateway events and
+  /// [`CoreCommand::RefreshReadReceipts`]).
+  pub(crate) fn read_receipts(&self, conversation: ConversationId) -> Vec<(UserId, MessageId)> {
+    self
+      .read(crate::read_state::read_receipts(&self.store, conversation))
+      .into_iter()
+      .collect()
+  }
+
+  pub(crate) fn to_user(&self, summary: &UserSummary) -> User {
     let maybe_presence: Option<PresenceState> = self.read(records::get_json(
       &self.store,
       Table::Presence,
@@ -346,29 +670,163 @@ impl<S: LocalStore> CoreChatBackend<S> {
     User {
       id: summary.id,
       username: summary.maybe_username.clone().unwrap_or_default(),
-      display_name: summary.display_name.clone(),
+      display_name: shown_name(summary),
       presence: maybe_presence.map_or(PresenceStatus::Offline, presence_status),
-      maybe_custom_status: None,
+      maybe_custom_status: self.custom_status_of(summary.id),
       avatar_hue: hue(summary.id),
       is_guest: summary.kind == UserKind::Guest,
-      is_bot: false,
+      is_bot: summary.kind == UserKind::Bot,
       maybe_organization: summary.maybe_organization.clone(),
+      is_deactivated: summary.is_deactivated,
+      is_deleted: summary.is_deleted,
+      device_setup: match summary.maybe_has_devices {
+        Some(true) => DeviceSetup::HasDevices,
+        Some(false) => DeviceSetup::NoDevices,
+        None => DeviceSetup::Unknown,
+      },
+      maybe_email: summary.maybe_email.clone(),
     }
+  }
+
+  /// The person's custom status from the presence log (what the server last announced, or the
+  /// user's own change while it waits for the server). It keeps its end: the UI stops showing it
+  /// once that passed, before the server's announcement that it ended arrives.
+  fn custom_status_of(&self, user: UserId) -> Option<CustomStatus> {
+    let maybe_entry: Option<teamcraft_proto::live::RevisedPresence> = self.read(records::get_json(
+      &self.store,
+      Table::AnnouncedPresence,
+      &user.to_string(),
+    ));
+    maybe_entry
+      .and_then(|entry| entry.presence.maybe_status)
+      .and_then(|status| CustomStatus::from_wire(&status))
   }
 
   pub(crate) fn to_conversation(
     &self,
     response: &ConversationResponse,
     users: &BTreeMap<UserId, UserSummary>,
+    preferences: &MentionPreferences,
   ) -> Conversation {
-    let member_ids = self.members(response.id);
-    let kind = match (&response.kind, &response.visibility) {
-      (ConversationKindProto::Dm, _) => ConversationKind::Direct,
-      (ConversationKindProto::Group, _) => ConversationKind::Group,
-      (_, _) if response.is_integration => ConversationKind::Integration,
-      (_, ConversationVisibility::Public) => ConversationKind::Public,
-      _ => ConversationKind::Private,
+    let maybe_mark = self
+      .read(crate::client::stored_account_data(&self.store))
+      .unread_mark(response.id);
+    let counts = self.entry_counts(response, maybe_mark, users.get(&self.me), preferences);
+    self.flush_entry_tallies();
+    self.conversation_view(response, users, counts.unread)
+  }
+
+  /// What a conversation's sidebar entry counts, from the kept tally and only the rows it doesn't
+  /// cover ([`crate::entry_tally`]). Run on every change of the conversation, so it neither copies
+  /// messages nor decides a message's mention twice (a log channel can hold thousands unread, issue
+  /// #1000). Callers [`Self::flush_entry_tallies`] when done.
+  pub(crate) fn entry_counts(
+    &self,
+    response: &ConversationResponse,
+    maybe_mark: Option<MessageId>,
+    maybe_me: Option<&UserSummary>,
+    preferences: &MentionPreferences,
+  ) -> EntryCounts {
+    let is_unread = self.unread_check(response, maybe_mark);
+    let maybe_importer = self.importer();
+    let rules = MentionRules {
+      username: maybe_me
+        .and_then(|me| me.maybe_username.as_deref())
+        .unwrap_or_default(),
+      display_name: maybe_me.map_or("", |me| me.display_name.as_str()),
+      first_name_is_mention: preferences.first_name_is_mention,
+      channel_mentions_notify: preferences.channel_mentions_notify,
+      keywords: &preferences.keywords,
     };
+    let mut memo = self.mentions.borrow_mut();
+    memo.follow(&rules);
+    let pass = EntryPass::new(self.me, &rules, &mut memo, &is_unread, maybe_importer);
+    let conversation = response.id;
+    let result = match self.kept_feed_version(conversation) {
+      Some(version) => {
+        let maybe_last_read = response
+          .maybe_my_membership
+          .as_ref()
+          .and_then(|membership| membership.maybe_last_read_message_id);
+        let maybe_lines_read = self.read(lines_read_through(&self.store, conversation));
+        let inputs = TallyInputs {
+          version,
+          maybe_importer,
+          unread_key: entry_tally::unread_key(
+            maybe_mark,
+            maybe_last_read,
+            maybe_lines_read,
+            maybe_importer,
+            &rules,
+          ),
+          maybe_boundary: entry_tally::read_boundary(maybe_mark, maybe_last_read),
+        };
+        let maybe_kept = entry_tally::kept_tally(&self.store, conversation);
+        entry_tally::counted(&self.store, conversation, &inputs, maybe_kept.clone(), pass).map(
+          |(counts, tally)| {
+            if maybe_kept.as_ref() != Some(&tally) {
+              self.entry_tallies.borrow_mut().insert(conversation, tally);
+            }
+            counts
+          },
+        )
+      },
+      None => entry_tally::counted_unkept(&self.store, conversation, pass),
+    };
+    result.unwrap_or_else(|error| {
+      tracing::error!(%error, "local store read failed");
+      EntryCounts::default()
+    })
+  }
+
+  /// The feed's version, where reads can use the store's feed index and a tally can be kept.
+  fn kept_feed_version(&self, conversation: ConversationId) -> Option<FeedVersion> {
+    if !self.store.indexes_feed() {
+      return None;
+    }
+    // One that doesn't read means counting every row, which reads what is damaged anyway.
+    self.store.feed_version(conversation).ok().flatten()
+  }
+
+  /// Keeps the tallies counted since the last call, in one group: a start counts many at once, and
+  /// each on its own would wait for the disk. They are a cache: one not kept is counted again.
+  pub(crate) fn flush_entry_tallies(&self) {
+    let tallies = std::mem::take(&mut *self.entry_tallies.borrow_mut());
+    if tallies.is_empty() {
+      return;
+    }
+    let result: Result<(), CoreError> = write_group(&self.store, || {
+      for (conversation, tally) in &tallies {
+        self
+          .store
+          .put(Table::EntryTallies, &conversation.to_string(), &tally.to_bytes())?;
+      }
+      Ok(())
+    });
+    if let Err(error) = result {
+      tracing::debug!(%error, "could not keep the sidebar counts");
+    }
+  }
+
+  /// A conversation's entry with its unread messages already picked.
+  pub(crate) fn conversation_view(
+    &self,
+    response: &ConversationResponse,
+    users: &BTreeMap<UserId, UserSummary>,
+    unread: UnreadCounts,
+  ) -> Conversation {
+    let mut member_ids = self.members(response.id);
+    let is_notes_to_self = response.is_notes_to_self(self.me);
+    // The import account is no person of a DM or the notes: the banner tells about it instead
+    // (e2ee.md §4.10).
+    if let Some(importer) = self.dm_importer(response) {
+      member_ids.retain(|user| *user != importer);
+    }
+    // Notes to self (a DM of one): known from the conversation itself before any member list.
+    if member_ids.is_empty() && is_notes_to_self {
+      member_ids = vec![self.me];
+    }
+    let kind = view_kind(response);
     let is_favorite = response
       .maybe_my_membership
       .as_ref()
@@ -385,8 +843,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
       let mut others: Vec<String> = member_ids
         .iter()
         .filter(|user| **user != self.me)
-        .filter_map(|user| users.get(user).map(|summary| summary.display_name.clone()))
+        .filter_map(|user| users.get(user).map(shown_name))
         .collect();
+      if others.is_empty() {
+        // The member list is not loaded yet (a sync catching up, issue #247): the conversation
+        // list names the other people too.
+        others = response
+          .participants
+          .iter()
+          .filter(|user| user.id != self.me)
+          .map(shown_name)
+          .collect();
+      }
       others.sort();
       others.join(", ")
     });
@@ -398,22 +866,107 @@ impl<S: LocalStore> CoreChatBackend<S> {
       name,
       topic: response.maybe_topic.clone().unwrap_or_default(),
       member_ids,
-      unread_count: self.unread_count(response),
-      mention_count: 0,
+      unread_count: shown_unread_messages(response, kind, unread.messages),
+      mention_count: unread.mentions,
       is_favorite,
       is_muted: self.is_muted(response),
-      can_post: true,
+      can_post: response.may_post(),
       bookmarks: self.bookmarks_of(response.id),
+      is_catching_up: self.read(crate::client::is_catching_up(&self.store, response.id)),
+      is_notes_to_self,
+      is_archived: response.is_archived,
+      is_imported: response.maybe_imported_through.is_some(),
+      maybe_permissions: response.maybe_my_permissions.clone(),
+      has_only_deactivated_others: response.has_only_deactivated_others(self.me, |participant| {
+        users
+          .get(&participant.id)
+          .map_or(participant.is_deactivated, |user| user.is_deactivated)
+      }),
+      maybe_image_version: response.maybe_image.as_ref().map(|image| image.version.clone()),
     }
+  }
+
+  /// The policy's import account when it is a member of this DM, group DM or notes without being a
+  /// participant (e2ee.md §4.10).
+  fn dm_importer(&self, response: &ConversationResponse) -> Option<UserId> {
+    if !matches!(
+      response.kind,
+      ConversationKindProto::Dm | ConversationKindProto::Group
+    ) {
+      return None;
+    }
+    let importer = self.importer()?;
+    let is_participant = response.participants.iter().any(|user| user.id == importer);
+    let is_member =
+      response.maybe_importer_user_id == Some(importer) || self.members(response.id).contains(&importer);
+    (is_member && !is_participant).then_some(importer)
+  }
+
+  /// Members of a DM, group DM or the notes who are no participants: the import account while it
+  /// imports, anybody else as a warning (e2ee.md §4.10).
+  fn outsider_issues(&self, conversation: ConversationId) -> Vec<MembershipIssue> {
+    let maybe_response: Option<ConversationResponse> = self.read(records::get_json(
+      &self.store,
+      Table::Conversations,
+      &conversation.to_string(),
+    ));
+    let Some(response) = maybe_response else {
+      return Vec::new();
+    };
+    if !matches!(
+      response.kind,
+      ConversationKindProto::Dm | ConversationKindProto::Group
+    ) || response.participants.is_empty()
+    {
+      return Vec::new();
+    }
+    let maybe_importer = self.importer();
+    let mut outsiders: Vec<UserId> = self.members(conversation);
+    if let Some(importer) = response.maybe_importer_user_id
+      && !outsiders.contains(&importer)
+    {
+      outsiders.push(importer);
+    }
+    outsiders
+      .into_iter()
+      .filter(|user| {
+        !response
+          .participants
+          .iter()
+          .any(|participant| participant.id == *user)
+      })
+      .map(|user| {
+        if Some(user) == maybe_importer {
+          MembershipIssue::ImportInProgress { importer: user }
+        } else {
+          MembershipIssue::ReadByOutsider { user }
+        }
+      })
+      .collect()
   }
 
   /// Whether notifications of the conversation are off now: its level is none or a mute time has
   /// not passed yet, with the space's setting standing in for a conversation the member never
   /// configured.
   fn is_muted(&self, response: &ConversationResponse) -> bool {
-    let Some(membership) = &response.maybe_my_membership else {
+    let Some(effective) = self.effective_notifications(response) else {
       return false;
     };
+    effective.level == NotificationLevel::None
+      || effective
+        .maybe_muted_until
+        .is_some_and(|until| until.0 > self.now_ms())
+  }
+
+  /// When a mute that is on now ends by itself (Unix milliseconds): the conversation's entry
+  /// changes then without any write (issue #246, the snapshot cache reads it again).
+  pub(crate) fn mute_end(&self, response: &ConversationResponse) -> Option<i64> {
+    let until = self.effective_notifications(response)?.maybe_muted_until?.0;
+    (until > self.now_ms()).then_some(until)
+  }
+
+  fn effective_notifications(&self, response: &ConversationResponse) -> Option<EffectiveNotifications> {
+    let membership = response.maybe_my_membership.as_ref()?;
     let own = ConversationNotificationSettings {
       level: membership.notification_level.clone(),
       maybe_muted_until: membership.maybe_muted_until,
@@ -422,16 +975,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let maybe_space: Option<SpaceResponse> = response
       .maybe_space_id
       .and_then(|space| self.read(records::get_json(&self.store, Table::Spaces, &space.to_string())));
-    let effective = effective_notifications(
+    Some(effective_notifications(
       &own,
       maybe_space
         .as_ref()
         .and_then(|space| space.maybe_my_notifications.as_ref()),
-    );
-    effective.level == NotificationLevel::None
-      || effective
-        .maybe_muted_until
-        .is_some_and(|until| until.0 > self.now_ms())
+    ))
   }
 
   /// The bookmarks bar of a conversation, as the newest applied `Bookmarks` message set it.
@@ -467,9 +1016,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  fn unread_count(&self, response: &ConversationResponse) -> u32 {
-    let unread = self.unread_messages(response).len();
-    u32::try_from(unread).unwrap_or(u32::MAX)
+  /// The saved mention preferences, read once per list of conversations.
+  pub(crate) fn mention_preferences(&self) -> MentionPreferences {
+    load_mention_preferences(&self.store).unwrap_or_else(|error| {
+      tracing::warn!(%error, "mention preferences unreadable, using defaults");
+      MentionPreferences::default()
+    })
   }
 
   /// Top-level messages the user hasn't read: others' messages after the server's read position,
@@ -478,42 +1030,96 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let maybe_mark = self
       .read(crate::client::stored_account_data(&self.store))
       .unread_mark(response.id);
+    self.unread_among(response, maybe_mark, self.top_level(response.id))
+  }
+
+  /// A conversation's top-level messages, deleted ones included.
+  pub(crate) fn top_level(&self, conversation: ConversationId) -> Vec<StoredMessage> {
+    self.read(
+      self
+        .store
+        .messages(conversation, MessageFilter::TopLevel)
+        .map_err(CoreError::from),
+    )
+  }
+
+  /// The unread ones of a conversation's top-level `messages`, given the user's "mark unread".
+  pub(crate) fn unread_among(
+    &self,
+    response: &ConversationResponse,
+    maybe_mark: Option<MessageId>,
+    messages: Vec<StoredMessage>,
+  ) -> Vec<StoredMessage> {
+    let is_unread = self.unread_check(response, maybe_mark);
+    let mut additions = ImportAdditions::new(self.importer());
+    messages
+      .into_iter()
+      .filter(|message| !additions.note(message) && is_unread(message))
+      .collect()
+  }
+
+  /// Whether a top-level message of `response`'s conversation is unread, given the user's "mark
+  /// unread" ([`Self::unread_among`] one message at a time).
+  pub(crate) fn unread_check(
+    &self,
+    response: &ConversationResponse,
+    maybe_mark: Option<MessageId>,
+  ) -> impl Fn(&StoredMessage) -> bool + use<S> {
+    let me = self.me;
     let maybe_last_read = response
       .maybe_my_membership
       .as_ref()
       .and_then(|membership| membership.maybe_last_read_message_id);
-    let messages = self.read(
-      self
-        .store
-        .messages(response.id, MessageFilter::TopLevel)
-        .map_err(CoreError::from),
-    );
-    messages
-      .into_iter()
-      .filter(
-        |message| match (message.maybe_server_id, maybe_mark, maybe_last_read) {
-          (Some(id), Some(mark), _) => id >= mark,
-          (Some(id), None, Some(last_read)) => message.sender_user_id != self.me && id > last_read,
-          (Some(_), None, None) => message.sender_user_id != self.me,
-          (None, _, _) => false,
-        },
-      )
-      .collect()
+    // A line this device derived (from a commit, issue #811, or from the server's record, issue
+    // #818) counts like a message at its place: the server's read position covers it once a later
+    // message was read; one newer than all of them is read once this device marked the
+    // conversation read after it arrived.
+    let maybe_lines_read = self.read(lines_read_through(&self.store, response.id));
+    // Imported history counts as read (e2ee.md §4.10), like on the server, and so do the lines of
+    // the import account adding people: they are part of the import.
+    let maybe_importer = self.importer();
+    move |message: &StoredMessage| {
+      // Not readable yet: it may turn out to be a reaction or an edit, so it counts once it is
+      // decrypted (issue #888).
+      if message.maybe_unreadable.is_some() {
+        return false;
+      }
+      if crate::imported::trusted_origin(message, maybe_importer).is_some()
+        || crate::imported::is_import_line(message, maybe_importer)
+      {
+        return false;
+      }
+      let is_read_line = message
+        .line_position()
+        .is_some_and(|at| maybe_lines_read.is_some_and(|read| at <= read));
+      match (unread_position(message), maybe_mark, maybe_last_read) {
+        (Some(id), Some(mark), _) => id >= mark,
+        (Some(id), None, Some(last_read)) => message.sender_user_id != me && id > last_read && !is_read_line,
+        (Some(_), None, None) => message.sender_user_id != me && !is_read_line,
+        (None, _, _) => false,
+      }
+    }
   }
 
   pub(crate) fn to_message(&self, stored: &StoredMessage, all: &[StoredMessage]) -> Message {
+    self.to_message_among(stored, &Relations::of(all, self.importer()))
+  }
+
+  /// [`Self::to_message`] for one of many rows of the same conversation, with its reactions and
+  /// replies gathered once for all of them.
+  fn to_message_among(&self, stored: &StoredMessage, relations: &Relations<'_>) -> Message {
     let id = ui_message_id(stored);
     let body = match &stored.content {
       // Text sent with files names them when it has no text of its own (search: `has:file`).
       MessageContent::Text { body, meta, .. } if body.is_empty() && !meta.attachments.is_empty() => meta
         .attachments
         .iter()
-        .map(|attachment| format!("📎 {}", attachment.file_name))
+        .map(|attachment| attachment.file_name.clone())
         .collect::<Vec<_>>()
         .join(" "),
       MessageContent::Text { body, .. } => body.clone(),
       // The UI recognizes files by their name in the body (search filter `has:file`).
-      MessageContent::File { attachment } => format!("📎 {}", attachment.file_name),
+      MessageContent::File { attachment } => attachment.file_name.clone(),
       MessageContent::Reaction { .. }
       | MessageContent::Edit { .. }
       | MessageContent::Delete { .. }
@@ -522,33 +1128,334 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::Event { .. }
       | MessageContent::Deleted
       | MessageContent::IndexSegment { .. }
+      | MessageContent::IntegrationSource { .. }
+      | MessageContent::Notetaker { .. }
       | MessageContent::Unknown => String::new(),
     };
+    // Shown with its original author and time only from the import account (e2ee.md §4.10).
+    let authorship = Authorship::of(stored, relations.maybe_importer);
     let (kind, author) = match &stored.content {
       MessageContent::Event { event } => system_view(event, stored.sender_user_id),
-      _ => (MessageKind::User, stored.sender_user_id),
+      _ => (MessageKind::User, authorship.author),
     };
+    let maybe_origin = authorship.maybe_origin;
+    let maybe_imported = maybe_origin.map(|origin| imported_mark(origin, stored.sender_user_id));
     let reply_count = stored.maybe_server_id.map_or(0, |server_id| {
-      let thread = ThreadId::from_snowflake(server_id.snowflake());
-      all
-        .iter()
-        .filter(|message| {
-          message.maybe_thread_id == Some(thread) && !message.is_hidden() && !is_deleted(message)
-        })
-        .count()
+      relations.reply_count(ThreadId::from_snowflake(server_id.snowflake()))
     });
     Message {
       id,
       conversation: stored.conversation_id,
       author,
       kind,
-      sent_at: stored.sent_at_ms,
+      sent_at: authorship.sent_at_ms,
       body,
-      is_edited: stored.is_edited,
-      reactions: reactions_of(stored.client_message_id, all, self.me),
+      is_edited: stored.is_edited || maybe_origin.is_some_and(|origin| origin.maybe_edited_at_ms.is_some()),
+      reactions: with_imported_reactions(
+        reactions_of(
+          stored.client_message_id,
+          relations.reactions_to(stored.client_message_id),
+          self.me,
+        ),
+        maybe_origin,
+        self.me,
+      ),
       reply_count: u32::try_from(reply_count).unwrap_or(u32::MAX),
       maybe_thread: stored.maybe_thread_id,
+      maybe_imported,
+      maybe_placeholder: stored.maybe_unreadable.map(placeholder_view),
     }
+  }
+
+  /// The newest rows of a conversation's feed down to `maybe_oldest` (the oldest row a list
+  /// holds), and `older` rows before it: what a list that pages back shows, reread on every change
+  /// without losing the rows it already paged to or jumping when new ones arrive (issue #1058).
+  /// Without an anchor, or when the anchor row went away and none sent at or after
+  /// `oldest_sent_at` remains, it is the newest `older` rows.
+  pub fn feed_tail(
+    &self,
+    conversation: ConversationId,
+    maybe_oldest: Option<FeedAnchor>,
+    older: usize,
+  ) -> FeedTail {
+    if self.store.indexes_feed() {
+      return self.indexed_feed_tail(conversation, maybe_oldest, older);
+    }
+    let mut tail = FeedTail::default();
+    let maybe_importer = self.importer();
+    self.with_feed(conversation, &mut |all, view| {
+      let feed: Vec<&StoredMessage> = view.rows.iter().map(|&at| &all[at]).collect();
+      let anchor_at = maybe_oldest
+        .and_then(|anchor| anchor.position_in(&feed))
+        .unwrap_or(feed.len());
+      let start = anchor_at.saturating_sub(older);
+      let rows = &view.rows[start..];
+      let relations = view.relations(all, rows, maybe_importer);
+      tail = FeedTail {
+        messages: rows
+          .iter()
+          .map(|&at| self.to_message_among(&all[at], &relations))
+          .collect(),
+        has_older: start > 0,
+      };
+    });
+    tail
+  }
+
+  /// [`Self::feed_tail`] from the store's feed index: reads the rows it returns, and those of
+  /// the anchor's place.
+  fn indexed_feed_tail(
+    &self,
+    conversation: ConversationId,
+    maybe_oldest: Option<FeedAnchor>,
+    older: usize,
+  ) -> FeedTail {
+    let layout = self.feed_layout(conversation);
+    let len = layout.len();
+    let anchor_at = maybe_oldest
+      .and_then(|anchor| self.anchor_position(conversation, &layout, anchor))
+      .unwrap_or(len);
+    let start = anchor_at.saturating_sub(older);
+    FeedTail {
+      messages: self.indexed_rows(conversation, &layout, start, len),
+      has_older: start > 0,
+    }
+  }
+
+  /// [`Self::message_page`] from the store's feed index.
+  fn indexed_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
+    let layout = self.feed_layout(conversation);
+    let end = start.saturating_add(len).min(layout.len());
+    let messages = self.indexed_rows(conversation, &layout, start.min(end), end);
+    (layout.len(), messages)
+  }
+
+  /// The rows `start..end` of the feed as the lists show them, with their reactions and replies.
+  fn indexed_rows(
+    &self,
+    conversation: ConversationId,
+    layout: &FeedLayout,
+    start: usize,
+    end: usize,
+  ) -> Vec<Message> {
+    let rows = self.layout_rows(conversation, layout, start, end);
+    let targets: Vec<ClientMessageId> = rows.iter().map(|row| row.client_message_id).collect();
+    let threads: Vec<ThreadId> = rows
+      .iter()
+      .filter_map(|row| row.maybe_server_id)
+      .map(|server_id| ThreadId::from_snowflake(server_id.snowflake()))
+      .collect();
+    let reactions = self.read(
+      self
+        .store
+        .reactions_to(conversation, &targets)
+        .map_err(CoreError::from),
+    );
+    let counts = self.read(
+      self
+        .store
+        .reply_counts(conversation, &threads)
+        .map_err(CoreError::from),
+    );
+    let relations = Relations::indexed(&reactions, &threads, &counts, layout.maybe_importer);
+    rows
+      .iter()
+      .map(|row| self.to_message_among(row, &relations))
+      .collect()
+  }
+
+  /// The stored messages of the rows `start..end` of the feed.
+  fn layout_rows(
+    &self,
+    conversation: ConversationId,
+    layout: &FeedLayout,
+    start: usize,
+    end: usize,
+  ) -> Vec<StoredMessage> {
+    let Some(last) = end.checked_sub(1).filter(|last| *last >= start) else {
+      return Vec::new();
+    };
+    let first = layout.index_position(start);
+    let len = layout.index_position(last) + 1 - first;
+    let mut rows = self.read(
+      self
+        .store
+        .feed_rows(conversation, first, len)
+        .map_err(CoreError::from),
+    );
+    rows.retain(|row| !layout.hidden.contains(&row.client_message_id));
+    rows
+  }
+
+  /// Where the anchor row is in the feed, or the row its time puts it at
+  /// ([`FeedAnchor::position_in`]).
+  fn anchor_position(
+    &self,
+    conversation: ConversationId,
+    layout: &FeedLayout,
+    anchor: FeedAnchor,
+  ) -> Option<usize> {
+    let slot = if anchor.id.snowflake().get() & PENDING_ID_BIT != 0 {
+      MessageSlot::Pending
+    } else {
+      MessageSlot::At(anchor.id)
+    };
+    let candidates = self.read(
+      self
+        .store
+        .messages_at(conversation, slot)
+        .map_err(CoreError::from),
+    );
+    let maybe_row = candidates.iter().find(|message| {
+      message.is_feed_row()
+        && ui_message_id(message) == anchor.id
+        && !layout.hidden.contains(&message.client_message_id)
+    });
+    match maybe_row {
+      Some(row) => {
+        let ranks = self.read(
+          self
+            .store
+            .feed_ranks(conversation, &[row.order()])
+            .map_err(CoreError::from),
+        );
+        ranks.first().map(|rank| layout.row_position(*rank))
+      },
+      None => self.position_by_time(conversation, layout, anchor.sent_at),
+    }
+  }
+
+  /// The anchor row went away (deleted, hidden): the oldest row of the run of rows from the newest
+  /// back that were sent at or after `sent_at`. Reads as far back as the list held rows, in steps;
+  /// a whole read would find the same row unless clocks put an older row after a newer one.
+  fn position_by_time(
+    &self,
+    conversation: ConversationId,
+    layout: &FeedLayout,
+    sent_at: TimestampMs,
+  ) -> Option<usize> {
+    let mut maybe_found = None;
+    let mut end = layout.len();
+    while end > 0 {
+      let start = end.saturating_sub(ANCHOR_WALK_ROWS);
+      let rows = self.layout_rows(conversation, layout, start, end);
+      for (offset, row) in rows.iter().enumerate().rev() {
+        if row.sent_at_ms < sent_at {
+          return maybe_found;
+        }
+        maybe_found = Some(start + offset);
+      }
+      if rows.is_empty() {
+        break;
+      }
+      end = start;
+    }
+    maybe_found
+  }
+
+  /// A conversation's [`FeedLayout`], derived again only when its messages changed since it was
+  /// kept (a store without revisions derives it every time).
+  fn feed_layout(&self, conversation: ConversationId) -> Rc<FeedLayout> {
+    let maybe_revision = self.store.message_revision(conversation);
+    let maybe_importer = self.importer();
+    let mut layouts = self.layouts.borrow_mut();
+    let maybe_kept = layouts
+      .iter()
+      .position(|(held, _)| *held == conversation)
+      .map(|at| layouts.remove(at).1);
+    let layout = match maybe_kept {
+      Some(layout) if layout.is_for(maybe_revision, maybe_importer) => layout,
+      _ => Rc::new(self.derive_layout(conversation, maybe_revision, maybe_importer)),
+    };
+    if layout.maybe_revision.is_some() {
+      if layouts.len() >= FeedView::MAX_KEPT {
+        layouts.remove(0);
+      }
+      layouts.push((conversation, Rc::clone(&layout)));
+    }
+    layout
+  }
+
+  /// Reads what [`FeedLayout`] holds: only with an import account the events are read, the only
+  /// messages its additions can be.
+  fn derive_layout(
+    &self,
+    conversation: ConversationId,
+    maybe_revision: Option<u64>,
+    maybe_importer: Option<UserId>,
+  ) -> FeedLayout {
+    #[cfg(test)]
+    tests::FEED_LAYOUTS_DERIVED.with(|derived| derived.set(derived.get() + 1));
+    let index_len = self.read(self.store.feed_len(conversation).map_err(CoreError::from));
+    let mut hidden = HashSet::new();
+    let mut hidden_positions = Vec::new();
+    if maybe_importer.is_some() {
+      let events = self.read(self.store.event_messages(conversation).map_err(CoreError::from));
+      let additions = ImportAdditions::of(&events, maybe_importer);
+      let left_out: Vec<&StoredMessage> = events
+        .iter()
+        .filter(|message| message.is_feed_row() && additions.hides(message))
+        .collect();
+      let orders: Vec<_> = left_out.iter().map(|message| message.order()).collect();
+      hidden_positions = self.read(
+        self
+          .store
+          .feed_ranks(conversation, &orders)
+          .map_err(CoreError::from),
+      );
+      hidden_positions.sort_unstable();
+      hidden = left_out.iter().map(|message| message.client_message_id).collect();
+    }
+    FeedLayout {
+      maybe_revision,
+      maybe_importer,
+      index_len,
+      hidden,
+      hidden_positions,
+    }
+  }
+
+  /// Hands `read` a conversation's messages and its [`FeedView`], derived again only when the
+  /// messages changed since it was kept (a store without revisions derives it every time).
+  fn with_feed(&self, conversation: ConversationId, read: &mut dyn FnMut(&[StoredMessage], &FeedView)) {
+    let maybe_revision = self.store.message_revision(conversation);
+    let maybe_importer = self.importer();
+    let mut maybe_kept = {
+      let mut feeds = self.feeds.borrow_mut();
+      feeds
+        .iter()
+        .position(|(held, _)| *held == conversation)
+        .map(|at| feeds.remove(at).1)
+    };
+    self.with_all_messages(conversation, &mut |all| {
+      let view = match maybe_kept.take() {
+        Some(view) if view.is_for(maybe_revision, maybe_importer, all) => view,
+        _ => FeedView::of(all, maybe_revision, maybe_importer),
+      };
+      read(all, &view);
+      maybe_kept = Some(view);
+    });
+    if let Some(view) = maybe_kept.filter(|view| view.maybe_revision.is_some()) {
+      let mut feeds = self.feeds.borrow_mut();
+      if feeds.len() >= FeedView::MAX_KEPT {
+        feeds.remove(0);
+      }
+      feeds.push((conversation, view));
+    }
+  }
+
+  /// A conversation's messages lent to `read` without a copy where the store holds them.
+  pub(crate) fn with_all_messages(
+    &self,
+    conversation: ConversationId,
+    read: &mut dyn FnMut(&[StoredMessage]),
+  ) {
+    self.read(
+      self
+        .store
+        .with_all_messages(conversation, read)
+        .map_err(CoreError::from),
+    );
   }
 
   pub(crate) fn all_messages(&self, conversation: ConversationId) -> Vec<StoredMessage> {
@@ -619,11 +1526,15 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         username: String::new(),
         display_name: String::new(),
         presence: PresenceStatus::Online,
-        maybe_custom_status: None,
+        maybe_custom_status: self.custom_status_of(self.me),
         avatar_hue: hue(self.me),
         is_guest: false,
         is_bot: false,
         maybe_organization: None,
+        is_deactivated: false,
+        is_deleted: false,
+        device_setup: DeviceSetup::HasDevices,
+        maybe_email: None,
       })
   }
 
@@ -635,8 +1546,13 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self
       .summaries()
       .values()
+      .filter(|summary| !summary.is_deactivated)
       .map(|summary| self.to_user(summary))
       .collect()
+  }
+
+  fn search_people(&self, query: &str) -> Vec<User> {
+    self.ui_search_people(query)
   }
 
   fn spaces(&self) -> Vec<Space> {
@@ -649,25 +1565,44 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .map(|space| Space {
         id: space.id,
         name: space.name,
-        hue: hue(space.id),
+        hue: space
+          .maybe_color
+          .as_deref()
+          .and_then(hue_from_hex)
+          .unwrap_or_else(|| hue(space.id)),
+        maybe_color: space.maybe_color,
+        maybe_image_version: space.maybe_image.map(|image| image.version),
         unread_count: 0,
         mention_count: 0,
+        maybe_description: space.maybe_description,
+        member_count: space.member_count,
+        join_policy: space.join_policy,
+        can_add_members: space.can_add_members,
+        can_invite_guests: space.can_invite_guests,
+        can_manage_space: space.can_manage_space,
+        can_delete_space: space.can_delete_space,
+        deleted_channel_count: space.deleted_channel_count,
+        // An older server leaves the hint out (taken as allowed); its guests still create nothing.
+        can_create_channels: space.can_create_channels && space.maybe_my_role != Some(SpaceRole::Guest),
+        maybe_my_role: space.maybe_my_role.clone(),
       })
       .collect()
   }
 
   fn space_conversations(&self, space: SpaceId) -> Vec<Conversation> {
     let users = self.summaries();
+    let preferences = self.mention_preferences();
     self
       .conversations_raw()
       .iter()
       .filter(|conversation| conversation.maybe_space_id == Some(space))
-      .map(|conversation| self.to_conversation(conversation, &users))
+      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
       .collect()
   }
 
   fn direct_conversations(&self) -> Vec<Conversation> {
     let users = self.summaries();
+    let preferences = self.mention_preferences();
     self
       .conversations_raw()
       .iter()
@@ -677,20 +1612,44 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
           ConversationKindProto::Dm | ConversationKindProto::Group
         )
       })
-      .map(|conversation| self.to_conversation(conversation, &users))
+      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
       .collect()
   }
 
   fn conversation(&self, id: ConversationId) -> Option<Conversation> {
     let users = self.summaries();
+    let preferences = self.mention_preferences();
     self
       .conversations_raw()
       .iter()
       .find(|conversation| conversation.id == id)
-      .map(|conversation| self.to_conversation(conversation, &users))
+      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
   }
 
+  fn undecrypted_count(&self, conversation: ConversationId) -> usize {
+    // Parked under "<conversation>/<client message ID>" (`client::messaging`); the keys suffice.
+    let prefix = format!("{conversation}/");
+    self
+      .read(
+        self
+          .store
+          .list_prefix(Table::Undecrypted, &prefix)
+          .map_err(CoreError::from),
+      )
+      .len()
+  }
+
+  /// The rows of the feed, as [`Self::message_page`] pages them.
   fn message_count(&self, conversation: ConversationId) -> usize {
+    if self.store.indexes_feed() {
+      return self.feed_layout(conversation).len();
+    }
+    let mut count = 0;
+    self.with_feed(conversation, &mut |_, view| count = view.rows.len());
+    count
+  }
+
+  fn last_activity(&self, conversation: ConversationId) -> Option<TimestampMs> {
     self
       .read(
         self
@@ -699,41 +1658,54 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
           .map_err(CoreError::from),
       )
       .iter()
-      .filter(|message| !is_deleted(message))
-      .count()
+      .filter(|message| !is_deleted(message) && message.maybe_unreadable.is_none())
+      .map(|message| message.sent_at_ms)
+      .max()
   }
 
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
-    let all = self.all_messages(conversation);
-    let top_level: Vec<&StoredMessage> = all
-      .iter()
-      .filter(|message| {
-        (message.maybe_thread_id.is_none() || message.is_also_in_channel())
-          && !message.is_hidden()
-          && !is_deleted(message)
-      })
-      .collect();
-    let end = start.saturating_add(len).min(top_level.len());
-    let start = start.min(end);
-    top_level[start..end]
-      .iter()
-      .map(|message| self.to_message(message, &all))
-      .collect()
+    self.message_page(conversation, start, len).1
+  }
+
+  /// One read of the conversation for the count and the page.
+  /// The conversation is lent, not copied: the feed asks again on every change of the open
+  /// conversation, and a log channel changes all the time (issue #1000).
+  fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
+    if self.store.indexes_feed() {
+      return self.indexed_page(conversation, start, len);
+    }
+    let mut answer = (0, Vec::new());
+    let maybe_importer = self.importer();
+    self.with_feed(conversation, &mut |all, view| {
+      let end = start.saturating_add(len).min(view.rows.len());
+      let rows = &view.rows[start.min(end)..end];
+      let relations = view.relations(all, rows, maybe_importer);
+      let page = rows
+        .iter()
+        .map(|&at| self.to_message_among(&all[at], &relations))
+        .collect();
+      answer = (view.rows.len(), page);
+    });
+    answer
   }
 
   fn thread(&self, conversation: ConversationId, thread: ThreadId) -> Vec<Message> {
-    let all = self.all_messages(conversation);
     let root_id = MessageId::from_snowflake(thread.snowflake());
-    let root = all
-      .iter()
-      .filter(|message| message.maybe_server_id == Some(root_id));
-    let replies = all.iter().filter(|message| {
-      message.maybe_thread_id == Some(thread) && !message.is_hidden() && !is_deleted(message)
+    let mut rows = Vec::new();
+    self.with_all_messages(conversation, &mut |all| {
+      let root = all
+        .iter()
+        .filter(|message| message.maybe_server_id == Some(root_id));
+      let replies = all.iter().filter(|message| {
+        message.maybe_thread_id == Some(thread) && !message.is_hidden() && !is_deleted(message)
+      });
+      let relations = Relations::of(all, self.importer());
+      rows = root
+        .chain(replies)
+        .map(|message| self.to_message_among(message, &relations))
+        .collect();
     });
-    root
-      .chain(replies)
-      .map(|message| self.to_message(message, &all))
-      .collect()
+    rows
   }
 
   fn followed_threads(&self) -> Vec<ThreadSummary> {
@@ -774,6 +1746,33 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::MarkRead { conversation });
   }
 
+  fn mark_read_through(&self, conversation: ConversationId, message: MessageId) {
+    self.command(CoreCommand::MarkReadThrough {
+      conversation,
+      message,
+    });
+  }
+
+  fn mark_thread_read(&self, conversation: ConversationId, thread: ThreadId) {
+    // The server takes a reply of the thread, not the root; the newest one stored is the furthest
+    // this device has seen.
+    let maybe_latest = self
+      .stored(conversation)
+      .into_iter()
+      .filter(|stored| {
+        stored.maybe_thread_id == Some(thread) && matches!(stored.content, MessageContent::Text { .. })
+      })
+      .filter_map(|stored| stored.maybe_server_id)
+      .max();
+    if let Some(message) = maybe_latest {
+      self.command(CoreCommand::MarkThreadRead {
+        conversation,
+        thread,
+        message,
+      });
+    }
+  }
+
   fn set_favorite(&self, conversation: ConversationId, is_favorite: bool) {
     self.command(CoreCommand::SetFavorite {
       conversation,
@@ -790,6 +1789,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       presence,
       maybe_until,
     });
+  }
+
+  fn presence_policy(&self) -> teamcraft_proto::PresencePolicy {
+    self.verified_policy().presence
+  }
+
+  fn screen_share_policy(&self) -> teamcraft_proto::ScreenSharePolicy {
+    self.verified_policy().screen_share
   }
 
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
@@ -918,6 +1925,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_resolve_permalink(link)
   }
 
+  fn linked_message(&self, link: &str) -> Option<LinkedMessage> {
+    Some(self.ui_linked_message(link))
+  }
+
   fn activity(&self) -> teamcraft_client_api::activity::ActivityFeed {
     self.ui_activity()
   }
@@ -946,6 +1957,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_refresh_call_history();
   }
 
+  fn is_loaded(&self, list: teamcraft_client_api::backend::LoadingList) -> bool {
+    self.ui_is_loaded(list)
+  }
+
   fn own_devices(&self) -> Vec<teamcraft_client_api::admin::DeviceInfo> {
     self.ui_own_devices()
   }
@@ -958,6 +1973,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::RevokeOwnDevice { device });
   }
 
+  fn rename_own_device(&self, device: teamcraft_proto::DeviceId, name: String) {
+    self.command(CoreCommand::RenameOwnDevice { device, name });
+  }
+
+  fn test_push_own_device(&self, device: teamcraft_proto::DeviceId) {
+    self.command(CoreCommand::TestPushOwnDevice { device });
+  }
+
   fn mark_unread(&self, conversation: ConversationId, from: MessageId) {
     self.command(CoreCommand::MarkUnread { conversation, from });
   }
@@ -966,12 +1989,286 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_first_unread(conversation)
   }
 
+  fn unseen_reactions(&self, conversation: ConversationId) -> UnseenReactions {
+    self.read(crate::unseen_reactions::unseen(self.store_ref(), conversation))
+  }
+
+  fn mark_reactions_seen(&self, conversation: ConversationId, messages: Vec<MessageId>) {
+    // Marked here at once, so the button counts down while the server is told.
+    let marked = crate::unseen_reactions::mark_seen(self.store_ref(), conversation, &messages);
+    match marked {
+      Ok(reactions) if reactions.is_empty() => {},
+      Ok(reactions) => self.command(CoreCommand::MarkReactionsSeen {
+        conversation,
+        reactions,
+      }),
+      Err(error) => tracing::warn!(conversation_id = %conversation, %error, "could not mark reactions seen"),
+    }
+  }
+
+  fn newest_message(&self, conversation: ConversationId) -> Option<MessageId> {
+    // The same message `CoreCommand::MarkRead` sends as the read position.
+    self.read(
+      self
+        .store
+        .edge_server_id(conversation, MessageEdge::Newest)
+        .map_err(CoreError::from),
+    )
+  }
+
+  fn is_waiting_for_device(&self, conversation: ConversationId) -> bool {
+    crate::client::is_waiting_for_device(&self.store, conversation).unwrap_or(false)
+  }
+
+  fn first_sync(&self) -> Option<teamcraft_client_api::model::FirstSync> {
+    self
+      .read(crate::client::first_sync_progress(&self.store))
+      .map(|progress| teamcraft_client_api::model::FirstSync {
+        stage: match progress.stage {
+          crate::client::FirstSyncStage::Newest => teamcraft_client_api::model::FirstSyncStage::Newest,
+          crate::client::FirstSyncStage::Older => teamcraft_client_api::model::FirstSyncStage::Older,
+        },
+        done: progress.done,
+        total: progress.total,
+        maybe_fraction: progress.maybe_fraction,
+      })
+  }
+
+  fn key_catch_up(&self) -> Option<teamcraft_client_api::model::KeyCatchUp> {
+    self
+      .read(crate::client::key_catch_up(&self.store))
+      .map(|progress| teamcraft_client_api::model::KeyCatchUp {
+        caught_up: progress.caught_up,
+        total: progress.total,
+        waiting: progress.waiting.into_iter().collect(),
+      })
+  }
+
+  fn membership_issues(&self, conversation: ConversationId) -> Vec<MembershipIssue> {
+    let mut issues: Vec<MembershipIssue> = self
+      .read(crate::client::pending_removals(&self.store, conversation))
+      .into_iter()
+      .map(|(user, status)| match status {
+        crate::client::RemovalStatus::Pending => MembershipIssue::RemovalPending { user },
+        crate::client::RemovalStatus::Failed => MembershipIssue::RemovalFailed { user },
+        crate::client::RemovalStatus::Unconfirmed => MembershipIssue::RemovalUnconfirmed { user },
+      })
+      .collect();
+    // Users left in the group are never shown here (#661): the admin console lists them.
+    if self.read(crate::client::is_queue_refused(&self.store, conversation)) {
+      issues.push(MembershipIssue::GroupRefused);
+    }
+    match self.read(crate::client::dm_setup_status(
+      &self.store,
+      conversation,
+      self.now_ms(),
+    )) {
+      Some(crate::client::DmSetupStatus::WaitingForWelcome { remaining }) => {
+        issues.push(MembershipIssue::EncryptionSetup {
+          remaining_ms: u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
+        });
+      },
+      Some(crate::client::DmSetupStatus::Failed) => issues.push(MembershipIssue::EncryptionSetupFailed),
+      None => {},
+    }
+    if self.read(crate::client::is_waiting_for_admission(&self.store, conversation)) {
+      issues.push(MembershipIssue::WaitingForAdmission);
+    }
+    issues.extend(self.outsider_issues(conversation));
+    issues.extend(
+      self
+        .read(crate::client::pending_user_additions(&self.store, conversation))
+        .into_iter()
+        .map(|(user, wait)| match wait {
+          crate::client::UserAddWait::NoDevice => MembershipIssue::WaitingForFirstDevice { user },
+          crate::client::UserAddWait::NoKeyPackage => MembershipIssue::NoKeyPackage { user },
+          crate::client::UserAddWait::Unverifiable => MembershipIssue::DevicesUnverified { user },
+          crate::client::UserAddWait::NeverSetUp => MembershipIssue::NeverSetUp { user },
+        }),
+    );
+    issues
+  }
+
+  fn retry_removal(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::RetryRemoval { conversation, user });
+  }
+
+  fn discard_removal(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::DiscardRemoval { conversation, user });
+  }
+
+  fn retry_dm_setup(&self, conversation: ConversationId) {
+    self.command(CoreCommand::RetryDmSetup { conversation });
+  }
+
+  fn set_up_meeting_chat(&self, conversation: ConversationId, invitees: Vec<UserId>) {
+    self.command(CoreCommand::SetUpMeetingChat {
+      conversation,
+      invitees,
+    });
+  }
+
+  fn update_meeting_chat_members(
+    &self,
+    conversation: ConversationId,
+    invitees: Vec<UserId>,
+    removed: Vec<UserId>,
+  ) {
+    self.command(CoreCommand::UpdateMeetingChatMembers {
+      conversation,
+      invitees,
+      removed,
+    });
+  }
+
+  fn add_people_to_call(
+    &self,
+    from: ConversationId,
+    in_call: Vec<UserId>,
+    added: Vec<UserId>,
+    maybe_title: Option<String>,
+    key: teamcraft_proto::IdempotencyKey,
+  ) {
+    self.command(CoreCommand::AddPeopleToCall {
+      from,
+      in_call,
+      added,
+      maybe_title,
+      key,
+    });
+  }
+
+  fn call_move_offer(
+    &self,
+    from: ConversationId,
+    to: ConversationId,
+  ) -> Option<teamcraft_client_api::calls::CallMoveOffer> {
+    self
+      .read(crate::client::call_move_announcement(&self.store, from, to))
+      .map(|record| teamcraft_client_api::calls::CallMoveOffer {
+        by: record.by,
+        added: record.added,
+        is_requested_here: record.is_requested_here,
+      })
+  }
+
+  fn accept_call_move(&self, from: ConversationId, to: ConversationId) {
+    self.command(CoreCommand::AcceptCallMove { from, to });
+  }
+
+  fn let_into_meeting_chat(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::LetIntoMeetingChat { conversation, user });
+  }
+
+  fn prepare_guest_link(&self, conversation: ConversationId, meeting: teamcraft_proto::MeetingId) {
+    self.command(CoreCommand::PrepareGuestLink {
+      conversation,
+      meeting,
+    });
+  }
+
+  fn guest_link_fragment(&self, meeting: teamcraft_proto::MeetingId) -> Option<String> {
+    crate::client::guest_link_fragment(self.store_ref(), meeting)
+  }
+
+  fn let_guest_into_meeting_chat(
+    &self,
+    conversation: ConversationId,
+    guest: UserId,
+    knock_fingerprint: String,
+    access_ends_at_ms: i64,
+  ) {
+    self.command(CoreCommand::LetGuestIntoMeetingChat {
+      conversation,
+      guest,
+      knock_fingerprint,
+      access_ends_at_ms,
+    });
+  }
+
+  fn prepare_guest_key_code(&self, guest: UserId) {
+    self.command(CoreCommand::PrepareGuestKeyCode { guest });
+  }
+
+  fn guest_key_code(&self, guest: UserId) -> Option<String> {
+    crate::client::guest_key_code(self.store_ref(), guest)
+  }
+
+  fn note_meeting_lobby(&self, meeting: teamcraft_proto::MeetingId, has_lobby: bool) {
+    self.command(CoreCommand::NoteMeetingLobby { meeting, has_lobby });
+  }
+
+  fn is_open_by_own_record(&self, meeting: teamcraft_proto::MeetingId) -> bool {
+    crate::client::is_open_by_own_record(self.store_ref(), meeting)
+  }
+
+  fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {
+    self.read(crate::client::unconfirmed_removals(&self.store))
+  }
+
+  fn group_leftovers(&self) -> Vec<(ConversationId, UserId)> {
+    self.read(crate::client::all_group_leftovers(&self.store))
+  }
+
   fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
     self.typing.users(conversation, self.me, self.clock.now_ms())
   }
 
-  fn notify_typing(&self, conversation: ConversationId) {
-    self.command(CoreCommand::Typing { conversation });
+  fn typing_now(&self) -> Vec<TypingNow> {
+    self
+      .typing
+      .everywhere(self.me, self.clock.now_ms())
+      .into_iter()
+      .map(|((conversation, maybe_thread), users)| TypingNow {
+        conversation,
+        maybe_thread,
+        users,
+      })
+      .collect()
+  }
+
+  fn seen_by(&self, conversation: ConversationId, message: MessageId) -> Vec<UserId> {
+    seen_by(&self.read_receipts(conversation), message)
+  }
+
+  fn refresh_read_receipts(&self, conversation: ConversationId) {
+    // Receipts exist only in DMs and group DMs: a channel's answer would always be empty.
+    let has_receipts = self.conversations_raw().iter().any(|response| {
+      response.id == conversation
+        && matches!(
+          response.kind,
+          ConversationKindProto::Dm | ConversationKindProto::Group
+        )
+    });
+    if has_receipts {
+      self.command(CoreCommand::RefreshReadReceipts { conversation });
+    }
+  }
+
+  fn live_snapshot(&self) -> Option<LiveSnapshot> {
+    // Each part is one record, except the receipts (one per member of each DM).
+    Some(LiveSnapshot {
+      maybe_unread: self.read(crate::read_state::unread(&self.store)),
+      threads: self.read(crate::read_state::threads(&self.store)),
+      presence: self.read(crate::read_state::announced_presence(&self.store)),
+      receipts: self.read(crate::read_state::all_read_receipts(&self.store)),
+      marks: self.read(crate::read_state::marks(&self.store)),
+    })
+  }
+
+  fn meetings_revision(&self) -> u64 {
+    self.read(crate::read_state::marks(&self.store)).meetings
+  }
+
+  fn link_request_mark(&self) -> u64 {
+    self.read(crate::read_state::marks(&self.store)).link_requests
+  }
+
+  fn notify_typing(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
+    self.command(CoreCommand::Typing {
+      conversation,
+      maybe_thread,
+    });
   }
 
   fn retry_send(&self, conversation: ConversationId, message: MessageId) {
@@ -980,6 +2277,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn discard_unsent(&self, conversation: ConversationId, message: MessageId) {
     self.ui_discard_unsent(conversation, message);
+  }
+
+  fn cancel_upload(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    self.ui_cancel_upload(conversation, message, file_id);
   }
 
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
@@ -992,16 +2293,57 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_conversation_files(conversation)
   }
 
+  fn conversation_media(
+    &self,
+    conversation: ConversationId,
+    anchor: MediaAnchor,
+    max_messages: usize,
+  ) -> Option<MediaPage> {
+    Some(self.ui_conversation_media(conversation, anchor, max_messages))
+  }
+
   fn download_file(&self, conversation: ConversationId, message: MessageId) {
     self.ui_download_file(conversation, message);
   }
 
-  fn create_share_link(&self, conversation: ConversationId, message: MessageId, options: ShareLinkOptions) {
-    self.ui_create_share_link(conversation, message, options);
+  fn download_attachment(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    self.ui_download_attachment(conversation, message, file_id);
   }
 
-  fn share_links(&self, conversation: ConversationId, message: MessageId) -> Vec<ShareLink> {
-    self.ui_share_links(conversation, message)
+  fn create_share_link(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    options: ShareLinkOptions,
+  ) {
+    self.ui_create_share_link(conversation, message, file_id, options);
+  }
+
+  fn share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) -> Vec<ShareLink> {
+    self.ui_share_links(conversation, message, file_id)
+  }
+  fn revoke_share_link(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    share_id: &str,
+  ) {
+    self.ui_revoke_share_link(conversation, message, file_id, share_id);
+  }
+  fn refresh_share_links(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
+    self.ui_refresh_share_links(conversation, message, file_id);
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn downloads(&self) -> Option<Vec<teamcraft_client_api::actions::DownloadEntry>> {
+    self.ui_downloads()
+  }
+
+  #[cfg(not(target_arch = "wasm32"))]
+  fn control_download(&self, file_id: &str, control: teamcraft_client_api::actions::DownloadControl) {
+    self.ui_control_download(file_id, control);
   }
 
   fn max_upload_bytes(&self) -> Option<u64> {
@@ -1041,8 +2383,57 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     answered == Some(at)
   }
 
+  fn older_history(&self, conversation: ConversationId) -> OlderHistory {
+    let maybe_request = self.older_requests.borrow().get(&conversation).copied();
+    self.read(older_history_of(&self.store, conversation, maybe_request))
+  }
+
+  fn load_older_history(&self, conversation: ConversationId) {
+    if !matches!(
+      self.older_history(conversation),
+      OlderHistory::Available | OlderHistory::Failed
+    ) {
+      return;
+    }
+    let now = u64::try_from(self.clock.now_ms()).unwrap_or(0);
+    let request = {
+      let mut requests = self.older_requests.borrow_mut();
+      let last = requests.entry(conversation).or_default();
+      *last = now.max(*last + 1);
+      *last
+    };
+    self.command(CoreCommand::LoadOlderHistory {
+      conversation,
+      request,
+    });
+  }
+
   fn join_channel(&self, conversation: ConversationId) {
     self.command(CoreCommand::JoinChannel { conversation });
+  }
+
+  fn join_requests(&self) -> Vec<teamcraft_client_api::activity::JoinRequest> {
+    self.ui_join_requests()
+  }
+
+  fn request_admin_join(&self, conversation: ConversationId) {
+    self.command(CoreCommand::RequestAdminJoin { conversation });
+  }
+
+  fn withdraw_admin_join(&self, conversation: ConversationId) {
+    self.command(CoreCommand::WithdrawAdminJoin { conversation });
+  }
+
+  fn approve_admin_join(&self, conversation: ConversationId, user: UserId, history: HistoryPolicy) {
+    self.command(CoreCommand::ApproveAdminJoin {
+      conversation,
+      user,
+      history,
+    });
+  }
+
+  fn decline_admin_join(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::DeclineAdminJoin { conversation, user });
   }
 
   fn joinable_spaces(&self) -> Vec<JoinableSpace> {
@@ -1058,8 +2449,15 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       })
       .map(|space| JoinableSpace {
         id: space.id,
+        hue: space
+          .maybe_color
+          .as_deref()
+          .and_then(hue_from_hex)
+          .unwrap_or_else(|| hue(space.id)),
         name: space.name,
         maybe_description: space.maybe_description,
+        maybe_image_version: space.maybe_image.map(|image| image.version),
+        member_count: space.member_count,
       })
       .collect()
   }
@@ -1068,8 +2466,35 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::JoinSpace { space });
   }
 
-  fn leave_channel(&self, conversation: ConversationId) {
-    self.command(CoreCommand::LeaveChannel { conversation });
+  fn leave_channel(&self, conversation: ConversationId, deletes_if_last: bool) {
+    self.command(CoreCommand::LeaveChannel {
+      conversation,
+      deletes_if_last,
+    });
+  }
+
+  fn suspect_deletions(&self) -> u32 {
+    self
+      .read(records::get_json::<
+        crate::client::server_deletions::SuspectDeletions,
+      >(
+        &self.store,
+        Table::AppliedChanges,
+        crate::client::server_deletions::SUSPECT_DELETIONS_KEY,
+      ))
+      .map_or(0, |found| found.count)
+  }
+
+  fn dismiss_suspect_deletions(&self) {
+    self.command(CoreCommand::DismissSuspectDeletions);
+  }
+
+  fn delete_channel(&self, conversation: ConversationId) {
+    self.command(CoreCommand::DeleteChannel { conversation });
+  }
+
+  fn delete_space(&self, space: SpaceId) {
+    self.command(CoreCommand::DeleteSpace { space });
   }
 
   fn categories(&self, space: SpaceId) -> Vec<CategoryInfo> {
@@ -1118,6 +2543,172 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       is_guest: invite.is_guest,
       channels: invite.channels,
       maybe_expires_at: invite.maybe_expires_at,
+      maybe_message: invite.maybe_message,
+    });
+  }
+
+  fn space_members(&self, space: SpaceId) -> SpaceRoster {
+    let stored: Option<StoredRoster> = self.read(records::get_json(
+      &self.store,
+      Table::SpaceRosters,
+      &space.to_string(),
+    ));
+    let roster = match stored {
+      None => return SpaceRoster::Loading,
+      Some(StoredRoster::Hidden) => return SpaceRoster::Hidden,
+      Some(StoredRoster::Visible(roster)) => roster,
+    };
+    let mut members: Vec<SpaceMember> = roster
+      .members
+      .into_iter()
+      .map(|member| SpaceMember {
+        user: member.user.id,
+        is_guest: member.user.kind == UserKind::Guest,
+        is_bot: member.user.kind == UserKind::Bot,
+        display_name: shown_name(&member.user),
+        role: member.role,
+      })
+      .collect();
+    members.sort_by_key(|member| member.display_name.to_lowercase());
+    SpaceRoster::Loaded(members)
+  }
+
+  fn space_invites(&self, space: SpaceId) -> Vec<PendingInvite> {
+    let invites: Option<ListInvitesResponse> = self.read(records::get_json(
+      &self.store,
+      Table::SpaceInvites,
+      &space.to_string(),
+    ));
+    invites
+      .map(|list| list.invites)
+      .unwrap_or_default()
+      .into_iter()
+      .map(|invite| PendingInvite {
+        id: invite.id,
+        email: invite.email,
+        role: invite.role,
+      })
+      .collect()
+  }
+
+  fn add_people_to_channel(
+    &self,
+    conversation: ConversationId,
+    people: Vec<(UserId, bool)>,
+    history: HistoryPolicy,
+    joins_space: bool,
+  ) {
+    self.command(CoreCommand::AddPeopleToChannel {
+      conversation,
+      people,
+      history,
+      joins_space,
+    });
+  }
+
+  fn refresh_space_roster(&self, space: SpaceId) {
+    self.command(CoreCommand::RefreshSpaceRoster { space });
+  }
+
+  fn integration_sources(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::IntegrationSource> {
+    self.ui_integration_sources(conversation)
+  }
+
+  fn can_manage_integration_sources(&self) -> bool {
+    self.ui_can_manage_integration_sources()
+  }
+
+  fn add_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_client_api::model::NewIntegrationSource,
+  ) {
+    self.ui_add_integration_source(conversation, source);
+  }
+
+  fn revoke_integration_source(&self, conversation: ConversationId, source: teamcraft_proto::SourceId) {
+    self.ui_revoke_integration_source(conversation, source);
+  }
+
+  fn notetaker_policy(&self) -> Option<teamcraft_proto::NotetakerPolicy> {
+    crate::notetaker::notetaker_policy(&self.store)
+  }
+
+  fn request_notetaker(&self, conversation: ConversationId, request: teamcraft_proto::NotetakerRequest) {
+    self.ui_request_notetaker(conversation, request);
+  }
+
+  fn channel_roles(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::ChannelMember> {
+    let stored: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
+      &self.store,
+      Table::Members,
+      &conversation.to_string(),
+    ));
+    let signed: crate::channel_roles::ChannelRoleState = self.read(
+      records::get_json(
+        &self.store,
+        Table::Workspace,
+        &crate::client::channel_roles_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    stored
+      .into_iter()
+      .flat_map(|list| list.members)
+      .map(|member| {
+        let is_guest = member.user.kind == teamcraft_proto::UserKind::Guest;
+        // The server's role, marked when no signed assignment backs it (e2ee.md §4.6.1).
+        let verified = signed.role_of(member.user.id);
+        let effective = crate::channel_roles::effective_role(&verified, &member.role, is_guest);
+        teamcraft_client_api::model::ChannelMember {
+          user: member.user.id,
+          is_role_signed: member.role == teamcraft_proto::ChannelRole::Member || effective == member.role,
+          role: member.role,
+        }
+      })
+      .collect()
+  }
+
+  fn set_channel_role(&self, conversation: ConversationId, user: UserId, role: teamcraft_proto::ChannelRole) {
+    self.command(CoreCommand::SetChannelRole {
+      conversation,
+      user,
+      role,
+    });
+  }
+
+  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
+    self.command(CoreCommand::ConfirmChannelRole { conversation, user });
+  }
+
+  fn refresh_channel_roles(&self, conversation: ConversationId) {
+    self.command(CoreCommand::RefreshChannelRoles { conversation });
+  }
+
+  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
+    self.ui_can_sign_channel_roles(conversation)
+  }
+
+  fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {
+    self.command(CoreCommand::SetSpaceRole { space, user, role });
+  }
+
+  fn remove_space_member(&self, space: SpaceId, user: UserId) {
+    self.command(CoreCommand::RemoveSpaceMember { space, user });
+  }
+
+  fn revoke_space_invite(&self, space: SpaceId, invite: InviteId) {
+    self.command(CoreCommand::RevokeSpaceInvite { space, invite });
+  }
+
+  fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {
+    self.command(CoreCommand::AddSpaceMembers {
+      space,
+      users,
+      is_guest,
     });
   }
 
@@ -1130,8 +2721,8 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 }
 
 /// How a conversation event shows: the UI's system events where one fits ("X joined" with the added
-/// person as author); other events stay user messages without text, and the UI reads them from
-/// `MessageExtras::maybe_workspace_event`.
+/// person as author); other changes are [`MessageKind::Change`] without text, whose line the UI
+/// reads from `MessageExtras::maybe_workspace_event`. An event of a newer version stays a message.
 fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserId) {
   match event {
     ConversationEvent::Joined => (MessageKind::System(SystemEvent::Joined), sender),
@@ -1146,12 +2737,40 @@ fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserI
       MessageKind::System(SystemEvent::TopicChanged { topic: topic.clone() }),
       sender,
     ),
+    // Lines the UI reads from the extras' workspace event; the kind says so before they arrive.
     ConversationEvent::Archived
     | ConversationEvent::Unarchived
     | ConversationEvent::MadePrivate
     | ConversationEvent::MadePublic
     | ConversationEvent::Moved { .. }
-    | ConversationEvent::Unknown => (MessageKind::User, sender),
+    | ConversationEvent::AdminJoined { .. } => (MessageKind::Change, sender),
+    ConversationEvent::CallMoved { .. } | ConversationEvent::Unknown => (MessageKind::User, sender),
+  }
+}
+
+/// The UI's kind of a conversation.
+fn view_kind(response: &ConversationResponse) -> ConversationKind {
+  match (&response.kind, &response.visibility) {
+    (ConversationKindProto::Dm, _) => ConversationKind::Direct,
+    (ConversationKindProto::Group, _) => ConversationKind::Group,
+    (_, _) if response.is_integration => ConversationKind::Integration,
+    (_, ConversationVisibility::Public) => ConversationKind::Public,
+    _ => ConversationKind::Private,
+  }
+}
+
+/// The unread messages a sidebar entry shows. A log (integration) channel is quiet by default
+/// (issue #943): its lines never pile up as an unread number, mentions still count. Only a member
+/// who set the channel's level to "all" themselves gets the count, so the per-channel notification
+/// setting is the switch and a channel that follows its space or the default stays quiet.
+fn shown_unread_messages(response: &ConversationResponse, kind: ConversationKind, messages: u32) -> u32 {
+  let wants_every_message = response.maybe_my_membership.as_ref().is_some_and(|membership| {
+    !membership.is_notification_inherited && membership.notification_level == NotificationLevel::All
+  });
+  if kind == ConversationKind::Integration && !wants_every_message {
+    0
+  } else {
+    messages
   }
 }
 
@@ -1162,14 +2781,298 @@ fn has_channel_in(conversations: &[ConversationResponse], space: SpaceId) -> boo
   })
 }
 
-fn is_deleted(message: &StoredMessage) -> bool {
+pub(crate) fn is_deleted(message: &StoredMessage) -> bool {
   matches!(message.content, MessageContent::Deleted)
 }
 
+/// What a sidebar entry counts of a conversation ([`CoreChatBackend::entry_counts`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct EntryCounts {
+  /// Top-level messages, deleted ones not counted.
+  pub(crate) messages: usize,
+  pub(crate) maybe_last_activity: Option<TimestampMs>,
+  pub(crate) unread: UnreadCounts,
+}
+
+/// The unread top-level messages of a conversation, and how many of them mention the user: an
+/// explicit mention, or, decided on the decrypted text, `@username`, `@channel`/`@here`/`@all`,
+/// the first name or a keyword (docs/notifications.md). Derived from the unread set, so a read
+/// marker resets it and a replayed event can't raise it twice. Muted conversations count too.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct UnreadCounts {
+  pub(crate) messages: u32,
+  pub(crate) mentions: u32,
+}
+
+/// Mention decisions kept per message (and its number of edits, which change the text) while the
+/// rules stay the same: reading the text of every unread message again on each change of a busy
+/// conversation was most of what the core did there.
+#[derive(Debug, Default)]
+pub(crate) struct MentionMemo {
+  maybe_rules: Option<(String, String, bool, bool, Vec<String>)>,
+  decided: HashMap<(ClientMessageId, usize), bool>,
+}
+
+impl FeedAnchor {
+  /// Where the anchor row is in `feed`, or the first row sent at or after it.
+  fn position_in(self, feed: &[&StoredMessage]) -> Option<usize> {
+    feed
+      .iter()
+      .position(|message| ui_message_id(message) == self.id)
+      .or_else(|| feed.iter().position(|message| message.sent_at_ms >= self.sent_at))
+  }
+}
+
+impl MentionMemo {
+  /// Decisions kept at most; past it they are made again (a bound, not a working size).
+  const MAX_DECIDED: usize = 200_000;
+
+  /// Forgets every decision if `rules` differ from the ones they were made by.
+  fn follow(&mut self, rules: &MentionRules<'_>) {
+    let key = (
+      rules.username.to_owned(),
+      rules.display_name.to_owned(),
+      rules.first_name_is_mention,
+      rules.channel_mentions_notify,
+      rules.keywords.to_vec(),
+    );
+    if self.maybe_rules.as_ref() != Some(&key) || self.decided.len() > Self::MAX_DECIDED {
+      self.decided.clear();
+      self.maybe_rules = Some(key);
+    }
+  }
+
+  pub(crate) fn is_mention(&mut self, message: &StoredMessage, me: UserId, rules: &MentionRules<'_>) -> bool {
+    if message.sender_user_id == me {
+      return false;
+    }
+    let MessageContent::Text { body, mentions, .. } = &message.content else {
+      return false;
+    };
+    if mentions.contains(&me) {
+      return true;
+    }
+    *self
+      .decided
+      .entry((message.client_message_id, message.edits.len()))
+      .or_insert_with(|| is_mentioned(body, rules))
+  }
+}
+
+/// What the messages of a conversation say about each other, gathered in one pass: a page of rows
+/// would otherwise scan the whole conversation once per row for its reactions and replies.
+struct Relations<'a> {
+  /// Reaction messages by the message they react to, in conversation order (the latest counts).
+  reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>>,
+  /// Shown replies per thread.
+  replies: HashMap<ThreadId, usize>,
+  /// The import account of the verified policy, whose imported messages show their origin.
+  maybe_importer: Option<UserId>,
+}
+
+/// A conversation's feed as the lists page it (issue #155): which messages are rows, and where
+/// each one's reactions and replies are. Derived once per change of the conversation's messages:
+/// a list asks for its rows a few at a time (a row for its neighbour, a window per scroll), and
+/// each ask walked the whole conversation.
+struct FeedView {
+  /// The store's revision of the messages it was derived from; `None` (a store without revisions)
+  /// is never kept.
+  maybe_revision: Option<u64>,
+  maybe_importer: Option<UserId>,
+  /// How many messages the conversation had, a check that positions still point where they did.
+  messages: usize,
+  /// Positions of the rows among the conversation's messages, in display order.
+  rows: Vec<usize>,
+  /// Positions of the reactions to each message, in conversation order (the latest counts).
+  reactions: HashMap<ClientMessageId, Vec<usize>>,
+  /// Shown replies per thread.
+  replies: HashMap<ThreadId, usize>,
+}
+
+/// What paging a store's feed index ([`LocalStore::indexes_feed`]) takes besides the index (issue
+/// #155): which of its rows the lists leave out, the import account's additions
+/// ([`ImportAdditions`]). They depend on the verified policy, so the store can't leave them out
+/// itself. A list asks a position among the rows it shows; the index counts all of its own.
+struct FeedLayout {
+  /// As [`FeedView::maybe_revision`].
+  maybe_revision: Option<u64>,
+  maybe_importer: Option<UserId>,
+  /// Rows of the store's feed index.
+  index_len: usize,
+  /// The rows left out, by the message.
+  hidden: HashSet<ClientMessageId>,
+  /// Where they are among the index's rows, ascending.
+  hidden_positions: Vec<usize>,
+}
+
+impl FeedLayout {
+  /// The rows of the feed as the lists page them.
+  fn len(&self) -> usize {
+    self.index_len.saturating_sub(self.hidden_positions.len())
+  }
+
+  fn is_for(&self, maybe_revision: Option<u64>, maybe_importer: Option<UserId>) -> bool {
+    maybe_revision.is_some() && self.maybe_revision == maybe_revision && self.maybe_importer == maybe_importer
+  }
+
+  /// Where the feed's row at `position` is in the store's index.
+  fn index_position(&self, position: usize) -> usize {
+    let mut at = position;
+    for hidden in &self.hidden_positions {
+      if *hidden > at {
+        break;
+      }
+      at += 1;
+    }
+    at
+  }
+
+  /// Where the index's row at `index_position` is in the feed.
+  fn row_position(&self, index_position: usize) -> usize {
+    index_position
+      - self
+        .hidden_positions
+        .partition_point(|hidden| *hidden < index_position)
+  }
+}
+
+impl FeedView {
+  /// Conversations whose views are kept (the open one, a thread or call beside it, a few recent).
+  const MAX_KEPT: usize = 4;
+
+  fn of(all: &[StoredMessage], maybe_revision: Option<u64>, maybe_importer: Option<UserId>) -> Self {
+    #[cfg(test)]
+    tests::FEED_VIEWS_DERIVED.with(|derived| derived.set(derived.get() + 1));
+    let additions = ImportAdditions::of(all, maybe_importer);
+    let mut rows = Vec::new();
+    let mut reactions: HashMap<ClientMessageId, Vec<usize>> = HashMap::new();
+    let mut replies: HashMap<ThreadId, usize> = HashMap::new();
+    for (at, message) in all.iter().enumerate() {
+      if message.is_feed_row() && !additions.hides(message) {
+        rows.push(at);
+      }
+      if let MessageContent::Reaction { target, .. } = &message.content {
+        reactions.entry(*target).or_default().push(at);
+      }
+      if message.counts_as_reply()
+        && let Some(thread) = message.maybe_thread_id
+      {
+        *replies.entry(thread).or_default() += 1;
+      }
+    }
+    Self {
+      maybe_revision,
+      maybe_importer,
+      messages: all.len(),
+      rows,
+      reactions,
+      replies,
+    }
+  }
+
+  fn is_for(
+    &self,
+    maybe_revision: Option<u64>,
+    maybe_importer: Option<UserId>,
+    all: &[StoredMessage],
+  ) -> bool {
+    maybe_revision.is_some()
+      && self.maybe_revision == maybe_revision
+      && self.maybe_importer == maybe_importer
+      && self.messages == all.len()
+  }
+
+  /// The reactions and replies of the messages at `rows`, for showing them.
+  fn relations<'a>(
+    &self,
+    all: &'a [StoredMessage],
+    rows: &[usize],
+    maybe_importer: Option<UserId>,
+  ) -> Relations<'a> {
+    let mut reactions = HashMap::new();
+    let mut replies = HashMap::new();
+    for &at in rows {
+      let message = &all[at];
+      if let Some(positions) = self.reactions.get(&message.client_message_id) {
+        reactions.insert(
+          message.client_message_id,
+          positions.iter().map(|&position| &all[position]).collect(),
+        );
+      }
+      if let Some(server_id) = message.maybe_server_id {
+        let thread = ThreadId::from_snowflake(server_id.snowflake());
+        if let Some(count) = self.replies.get(&thread) {
+          replies.insert(thread, *count);
+        }
+      }
+    }
+    Relations {
+      reactions,
+      replies,
+      maybe_importer,
+    }
+  }
+}
+
+impl<'a> Relations<'a> {
+  fn of(all: &'a [StoredMessage], maybe_importer: Option<UserId>) -> Self {
+    let mut reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>> = HashMap::new();
+    let mut replies: HashMap<ThreadId, usize> = HashMap::new();
+    for message in all {
+      if let MessageContent::Reaction { target, .. } = &message.content {
+        reactions.entry(*target).or_default().push(message);
+      }
+      if message.counts_as_reply()
+        && let Some(thread) = message.maybe_thread_id
+      {
+        *replies.entry(thread).or_default() += 1;
+      }
+    }
+    Self {
+      reactions,
+      replies,
+      maybe_importer,
+    }
+  }
+
+  /// From what the store's indexes say of a page's rows: `reactions` in display order, and the
+  /// replies of each of `threads`.
+  fn indexed(
+    reactions: &'a [StoredMessage],
+    threads: &[ThreadId],
+    counts: &[usize],
+    maybe_importer: Option<UserId>,
+  ) -> Self {
+    let mut by_target: HashMap<ClientMessageId, Vec<&'a StoredMessage>> = HashMap::new();
+    for message in reactions {
+      if let Some(target) = message.reaction_target() {
+        by_target.entry(target).or_default().push(message);
+      }
+    }
+    Self {
+      reactions: by_target,
+      replies: threads.iter().copied().zip(counts.iter().copied()).collect(),
+      maybe_importer,
+    }
+  }
+
+  fn reactions_to(&self, target: ClientMessageId) -> impl Iterator<Item = &'a StoredMessage> + '_ {
+    self.reactions.get(&target).into_iter().flatten().copied()
+  }
+
+  fn reply_count(&self, thread: ThreadId) -> usize {
+    self.replies.get(&thread).copied().unwrap_or(0)
+  }
+}
+
 /// Aggregates reaction messages: the latest add/remove per (user, emoji) wins.
-fn reactions_of(target: ClientMessageId, all: &[StoredMessage], me: UserId) -> Vec<Reaction> {
+fn reactions_of<'a>(
+  target: ClientMessageId,
+  messages: impl IntoIterator<Item = &'a StoredMessage>,
+  me: UserId,
+) -> Vec<Reaction> {
   let mut latest: HashMap<(UserId, String), bool> = HashMap::new();
-  for message in all {
+  for message in messages {
     if let MessageContent::Reaction {
       target: reacted,
       emoji,
@@ -1196,10 +3099,118 @@ fn reactions_of(target: ClientMessageId, all: &[StoredMessage], me: UserId) -> V
   by_emoji.into_values().collect()
 }
 
-/// The ID the UI uses: the server's, or a stable stand-in for outbox messages.
+/// How the list shows where an imported message came from; `importer` is its sender.
+fn imported_mark(origin: &ImportedOrigin, importer: UserId) -> ImportedMark {
+  ImportedMark {
+    source: match origin.source {
+      ImportSource::Synology => ImportedFrom::SynologyChat,
+      ImportSource::Unknown => ImportedFrom::Other,
+    },
+    author: imported_author_view(&origin.author),
+    importer,
+  }
+}
+
+/// Who wrote an imported message, as the views show it.
+pub(crate) fn imported_author_view(author: &ImportedAuthor) -> ImportedAuthorView {
+  match author {
+    ImportedAuthor::User { .. } => ImportedAuthorView::Person,
+    ImportedAuthor::Named { name } => ImportedAuthorView::Named { name: name.clone() },
+    ImportedAuthor::Deleted | ImportedAuthor::Unknown => ImportedAuthorView::Deleted,
+  }
+}
+
+/// Adds the reactions an imported message brought (e2ee.md §4.10) to the live ones: each author
+/// counts once per emoji, also one who reacted again here.
+fn with_imported_reactions(
+  mut reactions: Vec<Reaction>,
+  maybe_origin: Option<&ImportedOrigin>,
+  me: UserId,
+) -> Vec<Reaction> {
+  let Some(origin) = maybe_origin else {
+    return reactions;
+  };
+  for imported in &origin.reactions {
+    let mine = ImportedAuthor::User { user_id: me };
+    let has_mine = imported.authors.contains(&mine);
+    let count = u32::try_from(imported.authors.len()).unwrap_or(u32::MAX);
+    match reactions
+      .iter_mut()
+      .find(|reaction| reaction.emoji == imported.emoji)
+    {
+      Some(live) => {
+        // My live reaction and my imported one are the same person.
+        let overlap = u32::from(has_mine && live.reacted_by_me);
+        live.count = live.count.saturating_add(count).saturating_sub(overlap);
+        live.reacted_by_me |= has_mine;
+      },
+      None if count > 0 => reactions.push(Reaction {
+        emoji: imported.emoji.clone(),
+        count,
+        reacted_by_me: has_mine,
+      }),
+      None => {},
+    }
+  }
+  reactions.sort_by(|left, right| left.emoji.cmp(&right.emoji));
+  reactions
+}
+
+/// The newest of `messages` the server stored (outbox messages have no server ID yet): the read
+/// position that covers everything, reactions included.
+pub(crate) fn newest_server_id(messages: &[StoredMessage]) -> Option<MessageId> {
+  messages
+    .iter()
+    .filter_map(|message| message.maybe_server_id)
+    .max()
+}
+
+/// The place of the newest line this device derived ([`StoredMessage::line_position`]) that the
+/// user read in `conversation` (issues #811, #818). The server's read position names messages
+/// only, so a line newer than all of them is read when the user marks the conversation read on
+/// this device. Kept as the commit's ID before #818: the same time-ordered number.
+fn lines_read_through(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<Option<MessageId>, CoreError> {
+  records::get_json(store, Table::SyncState, &lines_read_key(conversation))
+}
+
+/// The user read `conversation`: its derived lines up to the newest of `messages` count as read
+/// here. Never moves back.
+pub(crate) fn note_lines_read(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  messages: &[StoredMessage],
+) -> Result<(), CoreError> {
+  let Some(newest) = messages.iter().filter_map(StoredMessage::line_position).max() else {
+    return Ok(());
+  };
+  if lines_read_through(store, conversation)?.is_some_and(|read| read >= newest) {
+    return Ok(());
+  }
+  records::put_json(store, Table::SyncState, &lines_read_key(conversation), &newest)
+}
+
+fn lines_read_key(conversation: ConversationId) -> String {
+  format!("lines_read/{conversation}")
+}
+
+/// Where a message stands for unread counting: the server's ID, a line this device derived at
+/// its place (the same clock); an outbox message not at all.
+fn unread_position(message: &StoredMessage) -> Option<MessageId> {
+  message.maybe_server_id.or_else(|| message.line_position())
+}
+
+/// The ID the UI uses: the server's, for a line this device derived its place (a commit's ID, or
+/// where a line about a change the server reports sits; time-ordered like the messages', and no
+/// outbox message's), or a stable stand-in for outbox messages.
 pub(crate) fn ui_message_id(message: &StoredMessage) -> MessageId {
   if let Some(id) = message.maybe_server_id {
     return id;
+  }
+  if let Some(at) = message.line_position() {
+    return at;
   }
   let mut bytes = [0u8; 8];
   bytes.copy_from_slice(&message.client_message_id.as_bytes()[..8]);
@@ -1208,6 +3219,16 @@ pub(crate) fn ui_message_id(message: &StoredMessage) -> MessageId {
   Snowflake::new(raw)
     .map(MessageId::from_snowflake)
     .unwrap_or_else(|_| unreachable!("positive by construction"))
+}
+
+/// What the apps show for a message this device can't read (issue #888).
+fn placeholder_view(unreadable: Unreadable) -> Placeholder {
+  match unreadable {
+    Unreadable::Waiting { .. } => Placeholder::Waiting,
+    Unreadable::Failed => Placeholder::Failed,
+    // A state of a newer version: not shown as a wait without end.
+    Unreadable::NotAvailable | Unreadable::Unknown => Placeholder::NotAvailable,
+  }
 }
 
 fn presence_status(state: PresenceState) -> PresenceStatus {
@@ -1231,6 +3252,268 @@ mod tests {
   use super::*;
   use crate::clock::ManualClock;
   use crate::store::MemoryStore;
+
+  #[test]
+  fn the_viewer_cap_the_ui_checks_is_the_one_the_core_enforces() {
+    assert_eq!(
+      teamcraft_client_api::actions::MAX_VIEWER_BYTES,
+      crate::MAX_VIEWER_BYTES
+    );
+  }
+
+  #[test]
+  fn a_reaction_is_the_newest_message_though_not_a_row() {
+    let store = std::sync::Arc::new(MemoryStore::new());
+    let conversation = id::<ConversationId>(10);
+    let backend = CoreChatBackend::new(store.clone(), id(1), Box::new(ManualClock::new(1_000)));
+    assert_eq!(backend.newest_message(conversation), None);
+    let text = ClientMessageId::from_bytes([1; 16]);
+    let stored = |client_message_id, server_id, content| StoredMessage {
+      conversation_id: conversation,
+      client_message_id,
+      maybe_server_id: Some(id(server_id)),
+      sender_user_id: id(2),
+      maybe_thread_id: None,
+      sent_at_ms: 1_000,
+      content,
+      is_edited: false,
+      edits: Vec::new(),
+      maybe_edit_id: None,
+      is_pinned: false,
+      maybe_verified_commit: None,
+      maybe_server_change: None,
+      maybe_unreadable: None,
+    };
+    let body = MessageContent::Text {
+      body: "hello".into(),
+      mentions: Vec::new(),
+      meta: Default::default(),
+    };
+    store.upsert_message(&stored(text, 101, body)).unwrap();
+    let reaction = MessageContent::Reaction {
+      target: text,
+      emoji: "+1".into(),
+      is_added: true,
+    };
+    store
+      .upsert_message(&stored(ClientMessageId::from_bytes([2; 16]), 102, reaction))
+      .unwrap();
+
+    // #641: the reaction raises the unread count, so the open conversation must see it to read it.
+    assert_eq!(backend.messages(conversation, 0, 10).len(), 1);
+    assert_eq!(backend.newest_message(conversation), Some(id(102)));
+  }
+
+  thread_local! {
+    /// How often a [`FeedView`] was derived on this thread.
+    pub(super) static FEED_VIEWS_DERIVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How often a [`FeedLayout`] was derived on this thread.
+    pub(super) static FEED_LAYOUTS_DERIVED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+  }
+
+  /// Issue #155: a list asking for its rows one at a time walks the conversation once per change.
+  #[test]
+  fn rows_asked_one_by_one_derive_the_feed_once_per_change() {
+    let store =
+      crate::store::TrackedStore::with_message_cache(std::sync::Arc::new(MemoryStore::new()), 1_000);
+    let conversation = id::<ConversationId>(10);
+    let backend = CoreChatBackend::new(store.clone(), id(1), Box::new(ManualClock::new(1_000)));
+    let text = |client: u8, server_id: i64| plain(conversation, client, server_id, "hello");
+    store.upsert_message(&text(1, 101)).unwrap();
+    let mut reaction = plain(conversation, 2, 102, "");
+    reaction.content = MessageContent::Reaction {
+      target: ClientMessageId::from_bytes([1; 16]),
+      emoji: "+1".into(),
+      is_added: true,
+    };
+    store.upsert_message(&reaction).unwrap();
+    store.upsert_message(&text(3, 103)).unwrap();
+
+    let before = FEED_VIEWS_DERIVED.with(std::cell::Cell::get);
+    assert_eq!(backend.message_count(conversation), 2);
+    let first = backend.messages(conversation, 0, 1);
+    let second = backend.messages(conversation, 1, 1);
+    assert_eq!(
+      first[0].reactions.len(),
+      1,
+      "a row's reaction is found without the rest"
+    );
+    assert!(second[0].reactions.is_empty());
+    assert_eq!(FEED_VIEWS_DERIVED.with(std::cell::Cell::get) - before, 1);
+
+    store.upsert_message(&text(4, 104)).unwrap();
+    assert_eq!(backend.message_count(conversation), 3);
+    assert_eq!(FEED_VIEWS_DERIVED.with(std::cell::Cell::get) - before, 2);
+  }
+
+  fn plain(conversation: ConversationId, client: u8, server_id: i64, body: &str) -> StoredMessage {
+    StoredMessage {
+      conversation_id: conversation,
+      client_message_id: ClientMessageId::from_bytes([client; 16]),
+      maybe_server_id: Some(id(server_id)),
+      sender_user_id: id(2),
+      maybe_thread_id: None,
+      sent_at_ms: 1_000,
+      content: MessageContent::Text {
+        body: body.into(),
+        mentions: Vec::new(),
+        meta: Default::default(),
+      },
+      is_edited: false,
+      edits: Vec::new(),
+      maybe_edit_id: None,
+      is_pinned: false,
+      maybe_verified_commit: None,
+      maybe_server_change: None,
+      maybe_unreadable: None,
+    }
+  }
+
+  mod feed_tail {
+    use super::*;
+
+    #[test]
+    fn without_an_anchor_it_is_the_newest_rows() {
+      let (backend, conversation) = feed_of(5);
+      let tail = backend.feed_tail(conversation, None, 2);
+      assert_eq!(server_ids(&tail), [104, 105]);
+      assert!(tail.has_older);
+    }
+
+    #[test]
+    fn it_keeps_the_rows_paged_to_and_adds_older_ones() {
+      let (backend, conversation) = feed_of(5);
+      let tail = backend.feed_tail(conversation, Some(anchor(103, 3_000)), 1);
+      assert_eq!(server_ids(&tail), [102, 103, 104, 105]);
+      assert!(tail.has_older);
+      let all = backend.feed_tail(conversation, Some(anchor(102, 2_000)), 10);
+      assert_eq!(server_ids(&all), [101, 102, 103, 104, 105]);
+      assert!(!all.has_older);
+    }
+
+    #[test]
+    fn a_gone_anchor_is_found_again_by_its_time() {
+      let (backend, conversation) = feed_of(5);
+      let tail = backend.feed_tail(conversation, Some(anchor(999, 2_500)), 0);
+      assert_eq!(server_ids(&tail), [103, 104, 105]);
+    }
+
+    #[test]
+    fn hidden_rows_and_thread_replies_are_left_out_and_replies_sent_to_the_channel_kept() {
+      let (backend, conversation, store) = feed_with_store(3);
+      let reply = |n: i64, is_also_in_channel: bool| StoredMessage {
+        maybe_thread_id: Some(ThreadId::from_snowflake(id::<MessageId>(101).snowflake())),
+        content: MessageContent::Text {
+          body: format!("reply {n}"),
+          mentions: Vec::new(),
+          meta: crate::store::MessageMeta {
+            is_also_in_channel,
+            ..Default::default()
+          },
+        },
+        ..stored(conversation, n)
+      };
+      store.upsert_message(&reply(4, true)).unwrap();
+      store.upsert_message(&reply(5, false)).unwrap();
+      let reaction = StoredMessage {
+        content: MessageContent::Reaction {
+          target: stored(conversation, 3).client_message_id,
+          emoji: "+1".to_string(),
+          is_added: true,
+        },
+        ..stored(conversation, 6)
+      };
+      store.upsert_message(&reaction).unwrap();
+
+      assert_eq!(backend.message_count(conversation), 4);
+      let tail = backend.feed_tail(conversation, None, 2);
+      assert_eq!(server_ids(&tail), [103, 104], "the newest two feed rows");
+      let count = backend.message_count(conversation);
+      let page = backend.messages(conversation, count - 2, 2);
+      let paged: Vec<i64> = page.iter().map(|message| message.id.snowflake().get()).collect();
+      assert_eq!(paged, [103, 104], "count and page agree");
+    }
+
+    fn feed_of(count: i64) -> (CoreChatBackend<std::sync::Arc<MemoryStore>>, ConversationId) {
+      let (backend, conversation, _) = feed_with_store(count);
+      (backend, conversation)
+    }
+
+    /// Issue #888: a placeholder in a thread shows there, but the root's reply count leaves it out
+    /// until it is decrypted (it may turn out to be a reaction or an edit).
+    #[test]
+    fn thread_reply_counts_leave_placeholders_out() {
+      let (backend, conversation, store) = feed_with_store(1);
+      let thread = ThreadId::from_snowflake(id::<MessageId>(101).snowflake());
+      let mut reply = stored(conversation, 2);
+      reply.maybe_thread_id = Some(thread);
+      let mut placeholder = stored(conversation, 3);
+      placeholder.maybe_thread_id = Some(thread);
+      placeholder.content = MessageContent::Unknown;
+      placeholder.maybe_unreadable = Some(Unreadable::Waiting { since_ms: 0 });
+      store.upsert_message(&reply).unwrap();
+      store.upsert_message(&placeholder).unwrap();
+
+      assert_eq!(backend.messages(conversation, 0, 10)[0].reply_count, 1);
+      let rows = backend.thread(conversation, thread);
+      assert_eq!(rows.len(), 3, "root, reply and the placeholder");
+      assert_eq!(rows[2].maybe_placeholder, Some(Placeholder::Waiting));
+    }
+
+    fn feed_with_store(
+      count: i64,
+    ) -> (
+      CoreChatBackend<std::sync::Arc<MemoryStore>>,
+      ConversationId,
+      std::sync::Arc<MemoryStore>,
+    ) {
+      let store = std::sync::Arc::new(MemoryStore::new());
+      let conversation = id::<ConversationId>(10);
+      for n in 1..=count {
+        store.upsert_message(&stored(conversation, n)).unwrap();
+      }
+      let backend = CoreChatBackend::new(store.clone(), id(1), Box::new(ManualClock::new(10_000)));
+      (backend, conversation, store)
+    }
+
+    fn stored(conversation: ConversationId, n: i64) -> StoredMessage {
+      StoredMessage {
+        conversation_id: conversation,
+        client_message_id: ClientMessageId::from_bytes([u8::try_from(n).unwrap(); 16]),
+        maybe_server_id: Some(id(100 + n)),
+        sender_user_id: id(2),
+        maybe_thread_id: None,
+        sent_at_ms: n * 1_000,
+        content: MessageContent::Text {
+          body: format!("message {n}"),
+          mentions: Vec::new(),
+          meta: Default::default(),
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: None,
+        maybe_server_change: None,
+        maybe_unreadable: None,
+      }
+    }
+
+    fn anchor(server_id: i64, sent_at: TimestampMs) -> FeedAnchor {
+      FeedAnchor {
+        id: id(server_id),
+        sent_at,
+      }
+    }
+
+    fn server_ids(tail: &FeedTail) -> Vec<i64> {
+      tail
+        .messages
+        .iter()
+        .map(|message| message.id.snowflake().get())
+        .collect()
+    }
+  }
 
   #[test]
   fn posting_and_reacting_go_through_the_outbox() {
@@ -1275,6 +3558,204 @@ mod tests {
   }
 
   #[test]
+  fn guests_of_a_space_create_no_channels_whatever_an_older_server_says() {
+    let store = std::sync::Arc::new(MemoryStore::new());
+    let backend = CoreChatBackend::new(store.clone(), id(1), Box::new(ManualClock::new(0)));
+    for (raw, role, can_create_channels) in [
+      (7, SpaceRole::Member, true),
+      (8, SpaceRole::Guest, true),
+      (9, SpaceRole::Member, false),
+    ] {
+      let space = SpaceResponse {
+        id: id(raw),
+        name: format!("Project {raw}"),
+        maybe_icon: None,
+        maybe_color: None,
+        maybe_description: None,
+        maybe_image: None,
+        join_policy: JoinPolicy::InviteOnly,
+        is_archived: false,
+        maybe_brand_id: None,
+        maybe_my_role: Some(role),
+        maybe_my_notifications: None,
+        member_count: 2,
+        can_add_members: false,
+        can_invite_guests: false,
+        can_manage_space: false,
+        can_delete_space: false,
+        deleted_channel_count: 0,
+        // `true` is also what a server that doesn't send it is taken to mean.
+        can_create_channels,
+      };
+      records::put_json(store.as_ref(), Table::Spaces, &space.id.to_string(), &space).unwrap();
+    }
+    let offered: Vec<(SpaceId, bool)> = backend
+      .spaces()
+      .into_iter()
+      .map(|space| (space.id, space.can_create_channels))
+      .collect();
+    assert_eq!(offered, [(id(7), true), (id(8), false), (id(9), false)]);
+  }
+
+  #[test]
+  fn a_roster_admin_adds_and_revokes_sources_and_the_announcements_stay_out_of_the_feed() {
+    use teamcraft_client_api::model::NewIntegrationSource;
+    use teamcraft_proto::{SourceChange, SourceId, SourceKind, SourceOptions, SourceTokenHash};
+
+    use crate::workspace::{RosterMember, RosterRole, WorkspaceState};
+
+    let store = std::sync::Arc::new(MemoryStore::new());
+    let (me, colleague) = (id::<UserId>(1), id::<UserId>(2));
+    let conversation = id::<ConversationId>(10);
+    let backend = CoreChatBackend::new(store.clone(), me, Box::new(ManualClock::new(1_000)));
+    assert!(!backend.can_manage_integration_sources(), "no roster, no sources");
+    let mut workspace = WorkspaceState::default();
+    workspace.roster.members.push(RosterMember {
+      user_id: me,
+      role: RosterRole::Admin,
+      identity_key: teamcraft_proto::Base64Bytes::new(vec![0; 32]),
+    });
+    records::put_json(
+      &*store,
+      Table::Workspace,
+      crate::client::WORKSPACE_KEY,
+      &workspace,
+    )
+    .unwrap();
+    assert!(backend.can_manage_integration_sources());
+
+    let source = SourceId::random();
+    backend.add_integration_source(
+      conversation,
+      NewIntegrationSource {
+        id: source,
+        name: "ci".into(),
+        kind: SourceKind::Webhook,
+        token_sha256: SourceTokenHash::from_bytes([3; 32]),
+        options: SourceOptions::default(),
+      },
+    );
+    let listed = backend.integration_sources(conversation);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+      (
+        listed[0].name.as_str(),
+        listed[0].created_by,
+        listed[0].created_at_ms
+      ),
+      ("ci", me, 1_000)
+    );
+    assert_eq!(backend.message_count(conversation), 0, "hidden from the feed");
+    assert_eq!(
+      records::outbox(&store).unwrap().len(),
+      1,
+      "on its way to the members"
+    );
+
+    // A member outside the roster announces one and revokes the admin's: neither counts.
+    for change in [
+      SourceChange::Created {
+        source: SourceId::random(),
+        name: "sneaky".into(),
+        kind: SourceKind::Log,
+        token_sha256: SourceTokenHash::from_bytes([4; 32]),
+        options: SourceOptions::default(),
+      },
+      SourceChange::Revoked { source },
+    ] {
+      crate::integration_sources::apply_source_change(&*store, conversation, colleague, &change, 2_000, None)
+        .unwrap();
+    }
+    assert_eq!(backend.integration_sources(conversation).len(), 1);
+
+    backend.revoke_integration_source(conversation, source);
+    assert!(backend.integration_sources(conversation).is_empty());
+    assert_eq!(records::outbox(&store).unwrap().len(), 2);
+  }
+
+  #[test]
+  fn messages_waiting_for_keys_are_counted_per_conversation() {
+    let store = MemoryStore::new();
+    let conversation: ConversationId = id(7);
+    for key in [
+      format!("{conversation}/aa"),
+      format!("{conversation}/bb"),
+      "70/cc".to_string(),
+    ] {
+      store.put(Table::Undecrypted, &key, b"{}").unwrap();
+    }
+    let backend = CoreChatBackend::new(store, id(1), Box::new(ManualClock::new(0)));
+    assert_eq!(backend.undecrypted_count(conversation), 2);
+    assert_eq!(backend.undecrypted_count(id(70)), 1);
+    assert_eq!(backend.undecrypted_count(id(8)), 0);
+    // Not part of the feed, but the window says they exist (an otherwise empty conversation).
+    let window = teamcraft_client_api::remote::MessageWindow::read(&backend, conversation, 0, 50);
+    assert_eq!((window.total, window.undecrypted), (0, 2));
+  }
+
+  #[test]
+  fn a_direct_message_is_named_after_its_participants_before_its_members_are_loaded() {
+    let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
+    let participant = |raw: i64, name: &str| UserSummary {
+      id: id(raw),
+      maybe_username: None,
+      display_name: name.into(),
+      kind: teamcraft_proto::UserKind::Member,
+      maybe_email: None,
+      maybe_organization: None,
+      maybe_has_devices: None,
+      is_deactivated: false,
+      is_deleted: false,
+    };
+    let direct = ConversationResponse {
+      id: id(10),
+      maybe_space_id: None,
+      kind: ConversationKindProto::Dm,
+      maybe_name: None,
+      maybe_topic: None,
+      maybe_description: None,
+      visibility: ConversationVisibility::Private,
+      history_policy: teamcraft_proto::HistoryPolicy::Full,
+      maybe_category_id: None,
+      is_archived: false,
+      moderation: Default::default(),
+      is_integration: false,
+      contains_guests: false,
+      maybe_organizer_user_id: None,
+      maybe_my_permissions: None,
+      maybe_importer_user_id: None,
+      maybe_imported_through: None,
+      maybe_my_membership: None,
+      participants: vec![participant(1, "Alice Example"), participant(2, "Bob Example")],
+      maybe_image: None,
+    };
+    let conversation = backend.to_conversation(&direct, &BTreeMap::new(), &MentionPreferences::default());
+    assert_eq!(conversation.name, "Bob Example");
+
+    // A deleted account is named in the user's language, not by the server's placeholder (#1066).
+    crate::people_names::set_deleted_user_name(crate::people_names::TEST_DELETED_NAME.into());
+    let deleted = UserSummary {
+      is_deactivated: true,
+      is_deleted: true,
+      ..participant(3, "Deleted user")
+    };
+    let with_deleted = ConversationResponse {
+      id: id(11),
+      kind: ConversationKindProto::Group,
+      participants: vec![
+        participant(1, "Alice Example"),
+        participant(2, "Bob Example"),
+        deleted.clone(),
+      ],
+      ..direct
+    };
+    let conversation =
+      backend.to_conversation(&with_deleted, &BTreeMap::new(), &MentionPreferences::default());
+    assert_eq!(conversation.name, "Account removed, Bob Example");
+    assert_eq!(backend.to_user(&deleted).display_name, "Account removed");
+  }
+
+  #[test]
   fn typing_is_read_from_the_shared_state_and_announced_as_a_command() {
     let me = id::<UserId>(1);
     let colleague = id::<UserId>(2);
@@ -1284,24 +3765,59 @@ mod tests {
       .with_typing(typing.clone());
 
     // What the client records from the gateway; the backend shares the same state.
-    typing.note(conversation, colleague, 9_000);
-    typing.note(conversation, me, 9_000);
+    typing.note(conversation, None, colleague, 9_000);
+    typing.note(conversation, None, me, 9_000);
     assert_eq!(
       backend.typing_users(conversation),
       vec![colleague],
       "never the user themself"
     );
     assert!(backend.typing_users(id::<ConversationId>(11)).is_empty());
-    typing.note(conversation, colleague, 10_000 - crate::client::TYPING_TIMEOUT_MS);
+    // A reply in a thread: in the answer for everywhere, under its thread only.
+    let thread = id::<ThreadId>(70);
+    let reader = id::<UserId>(3);
+    typing.note(conversation, Some(thread), reader, 9_500);
+    assert_eq!(backend.typing_users(conversation), vec![colleague]);
+    assert_eq!(
+      backend.typing_now(),
+      vec![
+        TypingNow {
+          conversation,
+          maybe_thread: None,
+          users: vec![colleague],
+        },
+        TypingNow {
+          conversation,
+          maybe_thread: Some(thread),
+          users: vec![reader],
+        },
+      ]
+    );
+    typing.note(
+      conversation,
+      None,
+      colleague,
+      10_000 - crate::typing::TYPING_TIMEOUT_MS,
+    );
     assert!(
       backend.typing_users(conversation).is_empty(),
       "indicators run out"
     );
 
-    backend.notify_typing(conversation);
+    backend.notify_typing(conversation, None);
+    backend.notify_typing(conversation, Some(thread));
     assert_eq!(
       backend.drain_commands(),
-      vec![CoreCommand::Typing { conversation }]
+      vec![
+        CoreCommand::Typing {
+          conversation,
+          maybe_thread: None,
+        },
+        CoreCommand::Typing {
+          conversation,
+          maybe_thread: Some(thread),
+        },
+      ]
     );
   }
 
@@ -1333,9 +3849,13 @@ mod tests {
     records::put_json(store.as_ref(), Table::Outbox, &key, &entry).unwrap();
     backend.discard_unsent(conversation, posted.id);
     assert!(records::outbox(&store).unwrap().is_empty());
-    assert!(backend.message_extras(conversation, &[posted.id])[0].is_deleted);
+    assert!(
+      backend.messages(conversation, 0, 10).is_empty(),
+      "never sent, so nothing of it is left"
+    );
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   #[tokio::test]
   async fn commands_reach_the_server() {
     use crate::api::ServerApi;
@@ -1390,6 +3910,1048 @@ mod tests {
   fn out_of_range_pages_are_clipped() {
     let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
     assert!(backend.messages(id(10), 5, 10).is_empty());
+  }
+
+  /// Issue #155: a store's feed index shows what a whole read of the conversation shows.
+  #[cfg(all(
+    any(feature = "sqlcipher", feature = "sealed-sqlite"),
+    not(target_arch = "wasm32")
+  ))]
+  mod indexed_feed {
+    use rand_core::OsRng;
+    use teamcraft_crypto::secret::SymmetricKey;
+
+    use super::*;
+    use crate::store::StaticKeySource;
+    use crate::workspace::WorkspaceState;
+
+    const IMPORTER: i64 = 9;
+    const ADDED: i64 = 3;
+    const OTHER: i64 = 4;
+    const CONVERSATION: i64 = 10;
+
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn sqlcipher_pages_the_feed_like_a_whole_read() {
+      for maybe_importer in [None, Some(IMPORTER)] {
+        let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+        let store = crate::store::SqlCipherStore::open_in_memory(&key).unwrap();
+        pages_like_a_whole_read(store, maybe_importer);
+      }
+    }
+
+    #[cfg(feature = "sealed-sqlite")]
+    #[test]
+    fn the_sealed_store_pages_the_feed_like_a_whole_read() {
+      for maybe_importer in [None, Some(IMPORTER)] {
+        let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+        let store = crate::store::SealedSqliteStore::open_in_memory(&key).unwrap();
+        pages_like_a_whole_read(store, maybe_importer);
+      }
+    }
+
+    /// A layout is kept while the conversation doesn't change, so a list asking row by row reads
+    /// it once.
+    #[cfg(feature = "sealed-sqlite")]
+    #[test]
+    fn rows_asked_one_by_one_derive_the_layout_once_per_change() {
+      let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+      let store = crate::store::SealedSqliteStore::open_in_memory(&key).unwrap();
+      let backend = with_policy(store, Some(IMPORTER));
+      fill(&backend.store);
+
+      let before = FEED_LAYOUTS_DERIVED.with(std::cell::Cell::get);
+      let count = backend.message_count(id(CONVERSATION));
+      for row in 0..count {
+        assert_eq!(backend.messages(id(CONVERSATION), row, 1).len(), 1);
+      }
+      assert_eq!(FEED_LAYOUTS_DERIVED.with(std::cell::Cell::get) - before, 1);
+
+      backend
+        .store
+        .upsert_message(&text(100, Some(2_000), 2_000, None))
+        .unwrap();
+      assert_eq!(backend.message_count(id(CONVERSATION)), count + 1);
+      assert_eq!(FEED_LAYOUTS_DERIVED.with(std::cell::Cell::get) - before, 2);
+    }
+
+    fn pages_like_a_whole_read<S: LocalStore>(store: S, maybe_importer: Option<i64>) {
+      let whole = with_policy(MemoryStore::new(), maybe_importer);
+      let indexed = with_policy(store, maybe_importer);
+      assert!(indexed.store.indexes_feed());
+      assert!(!whole.store.indexes_feed());
+      fill(&whole.store);
+      fill(&indexed.store);
+      let conversation = id(CONVERSATION);
+
+      let count = whole.message_count(conversation);
+      assert!(count > 10, "{count} rows");
+      assert_eq!(indexed.message_count(conversation), count);
+      for start in 0..=count + 1 {
+        for len in [0, 1, 3, count, usize::MAX] {
+          assert_eq!(
+            indexed.message_page(conversation, start, len),
+            whole.message_page(conversation, start, len),
+            "page {start}+{len}"
+          );
+        }
+      }
+
+      let rows = whole.messages(conversation, 0, count);
+      let mut anchors: Vec<Option<FeedAnchor>> = rows
+        .iter()
+        .map(|row| {
+          Some(FeedAnchor {
+            id: row.id,
+            sent_at: row.sent_at,
+          })
+        })
+        .collect();
+      anchors.push(None);
+      // Rows that went away: the row sent at or after the time takes the anchor's place.
+      anchors.push(Some(FeedAnchor {
+        id: id(1_055),
+        sent_at: 1_060,
+      }));
+      anchors.push(Some(FeedAnchor {
+        id: id(777_777),
+        sent_at: 999_999,
+      }));
+      for anchor in anchors {
+        for older in [0, 1, 4, count] {
+          assert_eq!(
+            indexed.feed_tail(conversation, anchor, older),
+            whole.feed_tail(conversation, anchor, older),
+            "from {anchor:?}, {older} older"
+          );
+        }
+      }
+    }
+
+    fn with_policy<S: LocalStore>(store: S, maybe_importer: Option<i64>) -> CoreChatBackend<S> {
+      let backend = CoreChatBackend::new(store, id(1), Box::new(ManualClock::new(0)));
+      let mut state = WorkspaceState::default();
+      state.policy.import.maybe_importer = maybe_importer.map(id);
+      records::put_json(
+        &backend.store,
+        Table::Workspace,
+        crate::client::WORKSPACE_KEY,
+        &state,
+      )
+      .unwrap();
+      backend
+    }
+
+    /// Rows with reactions and replies, the import account's additions among them, some deleted,
+    /// a line at a message's place and two messages not sent yet.
+    fn fill(store: &impl LocalStore) {
+      let added = |client: u8, sender: i64, server: i64, user: i64| {
+        let mut line = text(client, Some(server), server, None);
+        line.sender_user_id = id(sender);
+        line.content = MessageContent::Event {
+          event: ConversationEvent::MemberAdded {
+            user: id(user),
+            history: teamcraft_proto::HistoryPolicy::Full,
+          },
+        };
+        line
+      };
+      let joined = |client: u8, sender: i64, server: i64| {
+        let mut line = text(client, Some(server), server, None);
+        line.sender_user_id = id(sender);
+        line.content = MessageContent::Event {
+          event: ConversationEvent::Joined,
+        };
+        line
+      };
+      let mut messages = vec![
+        joined(1, IMPORTER, 1_000),
+        added(2, IMPORTER, 1_010, ADDED),
+        added(3, OTHER, 1_020, ADDED),
+        joined(4, ADDED, 1_030),
+        joined(5, OTHER, 1_040),
+      ];
+      for n in 0..40u8 {
+        let server = 1_100 + i64::from(n) * 10;
+        messages.push(text(10 + n, Some(server), server, None));
+      }
+      let target = ClientMessageId::from_bytes([10; 16]);
+      let reaction = |client: u8, sender: i64, server: i64, is_added: bool| {
+        let mut message = text(client, Some(server), server, None);
+        message.sender_user_id = id(sender);
+        message.content = MessageContent::Reaction {
+          target,
+          emoji: "+1".into(),
+          is_added,
+        };
+        message
+      };
+      messages.push(reaction(60, 2, 1_500, true));
+      messages.push(reaction(61, 1, 1_510, true));
+      messages.push(reaction(62, 2, 1_520, false));
+      messages.push(reaction(63, OTHER, 1_530, true));
+      messages.push(text(64, Some(1_540), 1_540, Some(1_100)));
+      messages.push(text(65, Some(1_550), 1_550, Some(1_100)));
+      let mut also_in_channel = text(66, Some(1_560), 1_560, Some(1_110));
+      if let MessageContent::Text { meta, .. } = &mut also_in_channel.content {
+        meta.is_also_in_channel = true;
+      }
+      messages.push(also_in_channel);
+      let mut deleted_reply = text(67, Some(1_570), 1_570, Some(1_100));
+      deleted_reply.content = MessageContent::Deleted;
+      messages.push(deleted_reply);
+      let mut deleted = text(68, Some(1_580), 1_580, None);
+      deleted.content = MessageContent::Deleted;
+      messages.push(deleted);
+      let mut waiting_reply = text(69, Some(1_590), 1_590, Some(1_100));
+      waiting_reply.maybe_unreadable = Some(Unreadable::Waiting { since_ms: 1 });
+      messages.push(waiting_reply);
+      messages.push(added(70, IMPORTER, 1_600, OTHER));
+      // A line sitting at the place of a message.
+      let mut line = joined(71, IMPORTER, 1_200);
+      line.maybe_server_id = None;
+      line.maybe_verified_commit = Some(id(1_200));
+      messages.push(line);
+      messages.push(text(72, None, 3_000, None));
+      messages.push(text(73, None, 3_100, None));
+      for message in &messages {
+        store.upsert_message(message).unwrap();
+      }
+    }
+
+    fn text(
+      client: u8,
+      maybe_server: Option<i64>,
+      sent_at_ms: i64,
+      maybe_thread: Option<i64>,
+    ) -> StoredMessage {
+      StoredMessage {
+        conversation_id: id(CONVERSATION),
+        client_message_id: ClientMessageId::from_bytes([client; 16]),
+        maybe_server_id: maybe_server.map(id),
+        sender_user_id: id(2),
+        maybe_thread_id: maybe_thread.map(id),
+        sent_at_ms,
+        content: MessageContent::Text {
+          body: format!("message {client}"),
+          mentions: Vec::new(),
+          meta: Default::default(),
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: None,
+        maybe_server_change: None,
+        maybe_unreadable: None,
+      }
+    }
+  }
+
+  mod imported {
+    use super::*;
+    use crate::imported::{ImportSource, ImportedReaction};
+    use crate::store::MessageMeta;
+    use crate::workspace::WorkspaceState;
+
+    const IMPORTER: i64 = 9;
+
+    #[test]
+    fn the_import_accounts_message_shows_its_original_author_and_time() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let stored = imported_message(IMPORTER, ImportedAuthor::User { user_id: id(2) }, Vec::new());
+      let row = backend.to_message(&stored, std::slice::from_ref(&stored));
+      assert_eq!(row.author, id(2));
+      assert_eq!(row.sent_at, 1_600_000_000_000);
+      let mark = row.maybe_imported.unwrap();
+      assert_eq!(mark.author, ImportedAuthorView::Person);
+      assert_eq!(mark.importer, id(IMPORTER));
+      assert_eq!(mark.source, ImportedFrom::SynologyChat);
+    }
+
+    #[test]
+    fn anybody_elses_claimed_origin_is_ignored() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let forged = imported_message(3, ImportedAuthor::User { user_id: id(2) }, Vec::new());
+      let row = backend.to_message(&forged, std::slice::from_ref(&forged));
+      assert_eq!(row.author, id(3));
+      assert!(row.maybe_imported.is_none());
+      let without_policy = backend_with_importer(None);
+      let stored = imported_message(IMPORTER, ImportedAuthor::Deleted, Vec::new());
+      assert!(
+        without_policy
+          .to_message(&stored, std::slice::from_ref(&stored))
+          .maybe_imported
+          .is_none()
+      );
+    }
+
+    #[test]
+    fn people_without_an_account_and_bots_keep_their_kind() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let deleted = imported_message(IMPORTER, ImportedAuthor::Deleted, Vec::new());
+      let row = backend.to_message(&deleted, std::slice::from_ref(&deleted));
+      assert_eq!(row.maybe_imported.unwrap().author, ImportedAuthorView::Deleted);
+      let bot = imported_message(
+        IMPORTER,
+        ImportedAuthor::Named {
+          name: "Monitor".into(),
+        },
+        Vec::new(),
+      );
+      let row = backend.to_message(&bot, std::slice::from_ref(&bot));
+      assert_eq!(
+        row.maybe_imported.unwrap().author,
+        ImportedAuthorView::Named {
+          name: "Monitor".into()
+        }
+      );
+    }
+
+    #[test]
+    fn imported_reactions_join_the_live_ones_once_per_person() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let stored = imported_message(
+        IMPORTER,
+        ImportedAuthor::Deleted,
+        vec![
+          ImportedReaction {
+            emoji: "\u{1f44d}".into(),
+            authors: vec![ImportedAuthor::User { user_id: id(1) }, ImportedAuthor::Deleted],
+          },
+          ImportedReaction {
+            emoji: "\u{1f389}".into(),
+            authors: vec![ImportedAuthor::Named {
+              name: "Monitor".into(),
+            }],
+          },
+        ],
+      );
+      // Alice (the user) also reacted with the thumb here.
+      let live = StoredMessage {
+        client_message_id: ClientMessageId::from_bytes([2; 16]),
+        sender_user_id: id(1),
+        content: MessageContent::Reaction {
+          target: stored.client_message_id,
+          emoji: "\u{1f44d}".into(),
+          is_added: true,
+        },
+        ..stored.clone()
+      };
+      let all = [stored.clone(), live];
+      let row = backend.to_message(&stored, &all);
+      let thumb = row.reactions.iter().find(|r| r.emoji == "\u{1f44d}").unwrap();
+      assert_eq!(thumb.count, 2);
+      assert!(thumb.reacted_by_me);
+      let party = row.reactions.iter().find(|r| r.emoji == "\u{1f389}").unwrap();
+      assert_eq!(party.count, 1);
+      assert!(!party.reacted_by_me);
+    }
+
+    #[test]
+    fn imported_history_is_never_unread() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let stored = imported_message(IMPORTER, ImportedAuthor::Deleted, Vec::new());
+      let conversation = ConversationResponse {
+        id: id(10),
+        maybe_space_id: None,
+        kind: ConversationKindProto::Channel,
+        maybe_name: Some("general".into()),
+        maybe_topic: None,
+        maybe_description: None,
+        visibility: ConversationVisibility::Public,
+        history_policy: teamcraft_proto::HistoryPolicy::Full,
+        maybe_category_id: None,
+        is_archived: false,
+        moderation: Default::default(),
+        is_integration: false,
+        contains_guests: false,
+        maybe_organizer_user_id: None,
+        maybe_my_permissions: None,
+        maybe_importer_user_id: None,
+        maybe_imported_through: None,
+        maybe_my_membership: None,
+        participants: Vec::new(),
+        maybe_image: None,
+      };
+      assert!(!backend.unread_check(&conversation, None)(&stored));
+      let live = StoredMessage {
+        content: MessageContent::Text {
+          body: "live".into(),
+          mentions: Vec::new(),
+          meta: MessageMeta::default(),
+        },
+        sender_user_id: id(3),
+        ..stored
+      };
+      assert!(backend.unread_check(&conversation, None)(&live));
+      // The import account adding somebody, as an event and as a line: part of the import.
+      let import_event = StoredMessage {
+        sender_user_id: id(IMPORTER),
+        content: MessageContent::Event {
+          event: ConversationEvent::MemberAdded {
+            user: id(3),
+            history: teamcraft_proto::HistoryPolicy::Full,
+          },
+        },
+        ..live.clone()
+      };
+      assert!(!backend.unread_check(&conversation, None)(&import_event));
+      let import_line = StoredMessage {
+        sender_user_id: id(IMPORTER),
+        maybe_verified_commit: Some(id(9)),
+        ..live
+      };
+      assert!(!backend.unread_check(&conversation, None)(&import_line));
+    }
+
+    /// Issue #1079: the feed (desktop, web and the mobile apps alike) shows no line of the import
+    /// account adding a workspace admin or leaving, only its own joining and the history.
+    #[test]
+    fn the_feed_leaves_out_the_import_account_s_lines_but_its_own_joining() {
+      let backend = backend_with_importer(Some(IMPORTER));
+      let history = imported_message(IMPORTER, ImportedAuthor::Deleted, Vec::new());
+      let line = |n: u8, user: i64| StoredMessage {
+        client_message_id: ClientMessageId::from_bytes([n; 16]),
+        maybe_server_id: None,
+        content: MessageContent::Event {
+          event: ConversationEvent::AdminJoined {
+            user: id(user),
+            is_approved: false,
+          },
+        },
+        maybe_verified_commit: Some(id(100 + i64::from(n))),
+        ..history.clone()
+      };
+      let left = StoredMessage {
+        client_message_id: ClientMessageId::from_bytes([5; 16]),
+        maybe_server_id: Some(id(105)),
+        content: MessageContent::Event {
+          event: ConversationEvent::Left,
+        },
+        ..history.clone()
+      };
+      for message in [&history, &line(2, IMPORTER), &line(3, 3), &left] {
+        backend.store.upsert_message(message).unwrap();
+      }
+      let rows = backend.messages(id(10), 0, 10);
+      assert_eq!(
+        rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![id::<MessageId>(101), id(102)],
+        "the history and the import account's own joining"
+      );
+      assert_eq!(backend.message_count(id(10)), 2);
+    }
+
+    mod outside_the_list {
+      use teamcraft_client_api::model::ImportedAuthorView;
+      use teamcraft_proto::{AttachmentId, Base64Bytes};
+
+      use super::*;
+      use crate::client::{forward_content, imported_author_name, reply_ref};
+      use crate::imported::Authorship;
+      use crate::store::AttachmentRef;
+
+      #[test]
+      fn the_lightbox_and_files_show_the_original_author_and_time() {
+        let backend = backend_with_importer(Some(IMPORTER));
+        let stored = with_picture(imported_message(
+          IMPORTER,
+          ImportedAuthor::User { user_id: id(2) },
+          Vec::new(),
+        ));
+        let files = backend.files_of(&stored, backend.importer());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].maybe_sender, Some(id(2)));
+        assert_eq!(files[0].maybe_sent_at, Some(1_600_000_000_000));
+        assert_eq!(files[0].maybe_imported_author, Some(ImportedAuthorView::Person));
+      }
+
+      #[test]
+      fn a_bots_file_names_no_account() {
+        let backend = backend_with_importer(Some(IMPORTER));
+        let stored = with_picture(imported_message(
+          IMPORTER,
+          ImportedAuthor::Named {
+            name: "Monitor".into(),
+          },
+          Vec::new(),
+        ));
+        let file = backend.files_of(&stored, backend.importer()).remove(0);
+        assert_eq!(file.maybe_sender, None);
+        assert_eq!(
+          file.maybe_imported_author,
+          Some(ImportedAuthorView::Named {
+            name: "Monitor".into()
+          })
+        );
+      }
+
+      #[test]
+      fn a_forged_origin_keeps_the_sender_and_its_time() {
+        let backend = backend_with_importer(Some(IMPORTER));
+        let forged = with_picture(imported_message(
+          3,
+          ImportedAuthor::User { user_id: id(2) },
+          Vec::new(),
+        ));
+        let file = backend.files_of(&forged, backend.importer()).remove(0);
+        assert_eq!(
+          (file.maybe_sender, file.maybe_sent_at),
+          (Some(id(3)), Some(5_000))
+        );
+        assert_eq!(file.maybe_imported_author, None);
+      }
+
+      #[test]
+      fn replies_and_forwards_quote_the_original_author_and_time() {
+        let stored = imported_message(IMPORTER, ImportedAuthor::User { user_id: id(2) }, Vec::new());
+        assert_eq!(reply_ref(&stored, Some(id(IMPORTER))).author, id(2));
+        let authorship = Authorship::of(&stored, Some(id(IMPORTER)));
+        let Some(MessageContent::Text { meta, .. }) =
+          forward_content(&authorship, &stored, "Original".into(), None, "")
+        else {
+          panic!("a forward");
+        };
+        assert_eq!(meta.maybe_forwarded.unwrap().sent_at_ms, 1_600_000_000_000);
+        let bot = imported_message(
+          IMPORTER,
+          ImportedAuthor::Named {
+            name: "Monitor".into(),
+          },
+          Vec::new(),
+        );
+        assert_eq!(
+          imported_author_name(&Authorship::of(&bot, Some(id(IMPORTER)))),
+          "Monitor"
+        );
+      }
+
+      fn with_picture(mut stored: StoredMessage) -> StoredMessage {
+        if let MessageContent::Text { meta, .. } = &mut stored.content {
+          meta.attachments.push(AttachmentRef {
+            attachment_id: AttachmentId::from_snowflake(Snowflake::new(7).unwrap()),
+            key: Base64Bytes::new(Vec::new()),
+            ciphertext_sha256: Base64Bytes::new(Vec::new()),
+            file_name: "screenshot.png".into(),
+            media_type: "image/png".into(),
+            size_bytes: 1,
+            maybe_thumbnail: None,
+            maybe_dimensions: None,
+            maybe_duration_ms: None,
+          });
+        }
+        stored
+      }
+    }
+
+    fn backend_with_importer(maybe_importer: Option<i64>) -> CoreChatBackend<MemoryStore> {
+      let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
+      let mut state = WorkspaceState::default();
+      state.policy.import.maybe_importer = maybe_importer.map(id);
+      records::put_json(
+        &backend.store,
+        Table::Workspace,
+        crate::client::WORKSPACE_KEY,
+        &state,
+      )
+      .unwrap();
+      backend
+    }
+
+    fn imported_message(
+      sender: i64,
+      author: ImportedAuthor,
+      reactions: Vec<ImportedReaction>,
+    ) -> StoredMessage {
+      StoredMessage {
+        conversation_id: id(10),
+        client_message_id: ClientMessageId::from_bytes([1; 16]),
+        maybe_server_id: Some(id(101)),
+        sender_user_id: id(sender),
+        maybe_thread_id: None,
+        sent_at_ms: 5_000,
+        content: MessageContent::Text {
+          body: "old news".into(),
+          mentions: Vec::new(),
+          meta: crate::store::MessageMeta {
+            maybe_imported: Some(Box::new(ImportedOrigin {
+              source: ImportSource::Synology,
+              source_id: "1".into(),
+              author,
+              sent_at_ms: 1_600_000_000_000,
+              maybe_edited_at_ms: None,
+              reactions,
+              missing_files: Vec::new(),
+            })),
+            ..MessageMeta::default()
+          },
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: None,
+        maybe_server_change: None,
+        maybe_unreadable: None,
+      }
+    }
+  }
+
+  mod mention_counts {
+    use super::*;
+
+    #[test]
+    fn counts_explicit_mentions_channel_words_and_keywords_but_not_own_or_plain_messages() {
+      let (backend, conversation, users) = mention_fixture(&[
+        (2, "hello everyone", &[]),
+        (2, "ping @alice", &[]),
+        (2, "@here standup", &[]),
+        (2, "no text match", &[1]),
+        (1, "@alice my own message", &[1]),
+      ]);
+      let counted = backend.to_conversation(&conversation, &users, &backend.mention_preferences());
+      assert_eq!(counted.unread_count, 4);
+      assert_eq!(counted.mention_count, 3);
+    }
+
+    #[test]
+    fn keywords_count_and_replayed_messages_do_not_raise_the_count() {
+      let (backend, conversation, users) = mention_fixture(&[(2, "deploy failed", &[])]);
+      let preferences = MentionPreferences {
+        keywords: vec!["deploy".into()],
+        ..MentionPreferences::default()
+      };
+      crate::notify_rules::save_mention_preferences(&backend.store, &preferences).unwrap();
+      assert_eq!(
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count,
+        1
+      );
+      // The same event arriving again is the same stored message.
+      store_message(&backend, &conversation, 0, 2, "deploy failed", &[]);
+      assert_eq!(
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count,
+        1
+      );
+    }
+
+    #[test]
+    fn messages_at_or_before_the_read_position_do_not_count() {
+      let (backend, mut conversation, users) =
+        mention_fixture(&[(2, "@alice one", &[]), (2, "@alice two", &[])]);
+      assert_eq!(
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count,
+        2
+      );
+      let mut membership = test_membership();
+      membership.maybe_last_read_message_id = Some(id(101));
+      conversation.maybe_my_membership = Some(membership);
+      assert_eq!(
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count,
+        1
+      );
+      conversation
+        .maybe_my_membership
+        .as_mut()
+        .unwrap()
+        .maybe_last_read_message_id = Some(id(102));
+      assert_eq!(
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count,
+        0
+      );
+    }
+
+    /// Decisions are kept per message (issue #1000), but new rules and an edited text decide again.
+    #[test]
+    fn new_rules_and_an_edit_decide_again() {
+      let (backend, conversation, users) = mention_fixture(&[(2, "deploy failed", &[])]);
+      let count = || {
+        backend
+          .to_conversation(&conversation, &users, &backend.mention_preferences())
+          .mention_count
+      };
+      assert_eq!(count(), 0);
+      let preferences = MentionPreferences {
+        keywords: vec!["deploy".into()],
+        ..MentionPreferences::default()
+      };
+      crate::notify_rules::save_mention_preferences(&backend.store, &preferences).unwrap();
+      assert_eq!(count(), 1, "a new keyword");
+
+      let mut edited = backend
+        .store
+        .message(conversation.id, ClientMessageId::from_bytes([1; 16]))
+        .unwrap()
+        .unwrap();
+      edited.edits.push(crate::store::EditRecord {
+        body: "deploy failed".into(),
+        replaced_at_ms: 5_000,
+      });
+      edited.content = MessageContent::Text {
+        body: "all green".into(),
+        mentions: Vec::new(),
+        meta: Default::default(),
+      };
+      backend.store.upsert_message(&edited).unwrap();
+      assert_eq!(count(), 0, "the edited text");
+    }
+
+    #[test]
+    fn muted_conversations_still_show_mentions() {
+      let (backend, mut conversation, users) = mention_fixture(&[(2, "@alice look", &[])]);
+      let mut membership = test_membership();
+      membership.notification_level = teamcraft_proto::NotificationLevel::None;
+      conversation.maybe_my_membership = Some(membership);
+      let counted = backend.to_conversation(&conversation, &users, &backend.mention_preferences());
+      assert!(counted.is_muted);
+      assert_eq!(counted.mention_count, 1);
+    }
+
+    #[test]
+    fn log_channels_are_quiet_unless_the_level_is_set_to_all() {
+      let (backend, mut conversation, users) = mention_fixture(&[
+        (2, "line one", &[]),
+        (2, "line two", &[]),
+        (2, "ping @alice", &[]),
+      ]);
+      conversation.is_integration = true;
+      let counted = |conversation: &ConversationResponse| {
+        backend.to_conversation(conversation, &users, &backend.mention_preferences())
+      };
+      // Never configured (follows the space or the default): quiet, the mention still counts.
+      let mut membership = test_membership();
+      membership.is_notification_inherited = true;
+      conversation.maybe_my_membership = Some(membership);
+      let quiet = counted(&conversation);
+      assert_eq!(quiet.kind, ConversationKind::Integration);
+      assert_eq!(quiet.unread_count, 0);
+      assert_eq!(quiet.mention_count, 1);
+      // Set to mentions on purpose: still quiet.
+      let mut membership = test_membership();
+      membership.notification_level = teamcraft_proto::NotificationLevel::Mentions;
+      conversation.maybe_my_membership = Some(membership);
+      assert_eq!(counted(&conversation).unread_count, 0);
+      // Explicitly "all": counts like any channel.
+      conversation.maybe_my_membership = Some(test_membership());
+      assert_eq!(counted(&conversation).unread_count, 3);
+      // A normal channel is unaffected.
+      conversation.is_integration = false;
+      let mut membership = test_membership();
+      membership.is_notification_inherited = true;
+      conversation.maybe_my_membership = Some(membership);
+      assert_eq!(counted(&conversation).unread_count, 3);
+    }
+
+    fn test_membership() -> teamcraft_proto::MyMembership {
+      teamcraft_proto::MyMembership {
+        role: teamcraft_proto::ChannelRole::Member,
+        notification_level: teamcraft_proto::NotificationLevel::All,
+        is_favorite: false,
+        maybe_last_read_message_id: None,
+        maybe_muted_until: None,
+        is_notification_inherited: false,
+        reactions_seen: Default::default(),
+      }
+    }
+
+    /// Alice (1) is the user; messages are `(sender, body, explicit mentions)` with server IDs 101...
+    fn mention_fixture(
+      messages: &[(i64, &str, &[i64])],
+    ) -> (
+      CoreChatBackend<MemoryStore>,
+      ConversationResponse,
+      BTreeMap<UserId, UserSummary>,
+    ) {
+      let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
+      let channel = id::<ConversationId>(10);
+      let conversation = ConversationResponse {
+        id: channel,
+        maybe_space_id: None,
+        kind: ConversationKindProto::Channel,
+        maybe_name: Some("general".into()),
+        maybe_topic: None,
+        maybe_description: None,
+        visibility: ConversationVisibility::Public,
+        history_policy: teamcraft_proto::HistoryPolicy::Full,
+        maybe_category_id: None,
+        is_archived: false,
+        moderation: Default::default(),
+        is_integration: false,
+        contains_guests: false,
+        maybe_organizer_user_id: None,
+        maybe_my_permissions: None,
+        maybe_importer_user_id: None,
+        maybe_imported_through: None,
+        maybe_my_membership: None,
+        participants: Vec::new(),
+        maybe_image: None,
+      };
+      for (index, (sender, body, mentions)) in messages.iter().enumerate() {
+        store_message(&backend, &conversation, index, *sender, body, mentions);
+      }
+      let me = UserSummary {
+        id: id(1),
+        maybe_username: Some("alice".into()),
+        display_name: "Alice Example".into(),
+        kind: teamcraft_proto::UserKind::Member,
+        maybe_email: None,
+        maybe_organization: None,
+        maybe_has_devices: None,
+        is_deactivated: false,
+        is_deleted: false,
+      };
+      (backend, conversation, BTreeMap::from([(me.id, me)]))
+    }
+
+    fn store_message(
+      backend: &CoreChatBackend<MemoryStore>,
+      conversation: &ConversationResponse,
+      index: usize,
+      sender: i64,
+      body: &str,
+      mentions: &[i64],
+    ) {
+      let number = u8::try_from(index).unwrap() + 1;
+      backend
+        .store
+        .upsert_message(&StoredMessage {
+          conversation_id: conversation.id,
+          client_message_id: ClientMessageId::from_bytes([number; 16]),
+          maybe_server_id: Some(id(100 + i64::from(number))),
+          sender_user_id: id(sender),
+          maybe_thread_id: None,
+          sent_at_ms: 1_000 * i64::from(number),
+          content: MessageContent::Text {
+            body: body.into(),
+            mentions: mentions.iter().map(|raw| id(*raw)).collect(),
+            meta: Default::default(),
+          },
+          is_edited: false,
+          edits: Vec::new(),
+          maybe_edit_id: None,
+          is_pinned: false,
+          maybe_verified_commit: None,
+          maybe_server_change: None,
+          maybe_unreadable: None,
+        })
+        .unwrap();
+    }
+
+    /// Issue #811: a line derived from a commit is a change row at the commit's place, and
+    /// counts as unread like a message there (review of #815, L1).
+    mod admin_lines {
+      use super::*;
+
+      #[test]
+      fn a_line_is_a_change_row_with_the_commits_id() {
+        let (backend, conversation, _) = mention_fixture(&[]);
+        store_line(&backend, &conversation, 150, 2);
+        let all = backend.all_messages(conversation.id);
+        let row = backend.to_message(&all[0], &all);
+        assert_eq!(row.kind, MessageKind::Change);
+        assert_eq!(row.id, id::<MessageId>(150), "not shown as sending");
+      }
+
+      #[test]
+      fn a_line_after_the_read_position_is_unread_until_read_here() {
+        let (backend, mut conversation, users) = mention_fixture(&[(2, "before", &[])]);
+        let mut membership = test_membership();
+        membership.maybe_last_read_message_id = Some(id(101));
+        conversation.maybe_my_membership = Some(membership);
+        store_line(&backend, &conversation, 90, 2);
+        let unread = |backend: &CoreChatBackend<MemoryStore>| {
+          backend
+            .to_conversation(&conversation, &users, &backend.mention_preferences())
+            .unread_count
+        };
+        assert_eq!(unread(&backend), 0, "older than what was read");
+
+        store_line(&backend, &conversation, 150, 2);
+        assert_eq!(unread(&backend), 1, "newer than everything read");
+        records::put_json(
+          &backend.store,
+          Table::Conversations,
+          &conversation.id.to_string(),
+          &conversation,
+        )
+        .unwrap();
+        assert_eq!(backend.ui_first_unread(conversation.id), Some(id(150)));
+
+        let messages = backend.all_messages(conversation.id);
+        note_lines_read(&backend.store, conversation.id, &messages).unwrap();
+        assert_eq!(unread(&backend), 0, "read on this device");
+      }
+
+      #[test]
+      fn the_users_own_approval_is_not_unread() {
+        let (backend, conversation, users) = mention_fixture(&[]);
+        store_line(&backend, &conversation, 150, 1);
+        assert_eq!(
+          backend
+            .to_conversation(&conversation, &users, &backend.mention_preferences())
+            .unread_count,
+          0
+        );
+      }
+
+      /// The line of commit `commit` about user 3, written as `sender`'s.
+      fn store_line(
+        backend: &CoreChatBackend<MemoryStore>,
+        conversation: &ConversationResponse,
+        commit: i64,
+        sender: i64,
+      ) {
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&commit.to_be_bytes());
+        backend
+          .store
+          .upsert_message(&StoredMessage {
+            conversation_id: conversation.id,
+            client_message_id: ClientMessageId::from_bytes(bytes),
+            maybe_server_id: None,
+            sender_user_id: id(sender),
+            maybe_thread_id: None,
+            sent_at_ms: 0,
+            content: MessageContent::Event {
+              event: ConversationEvent::AdminJoined {
+                user: id(3),
+                is_approved: true,
+              },
+            },
+            is_edited: false,
+            edits: Vec::new(),
+            maybe_edit_id: None,
+            is_pinned: false,
+            maybe_verified_commit: Some(id(commit)),
+            maybe_server_change: None,
+            maybe_unreadable: None,
+          })
+          .unwrap();
+      }
+    }
+
+    /// Issue #818: a line about a change the server reports is a change row at its place, counts
+    /// as unread like a message there unless it names the user, and names nobody unless an
+    /// announcement matched it.
+    mod server_change_lines {
+      use teamcraft_client_api::actions::WorkspaceEvent;
+
+      use crate::store::{ChangeActor, ServerChange, nobody};
+
+      use super::*;
+
+      #[test]
+      fn a_line_is_a_change_row_at_its_place_naming_whom_it_names() {
+        let (backend, conversation, _) = mention_fixture(&[]);
+        store_line(&backend, &conversation, 150, ChangeActor::Nobody, nobody());
+        let all = backend.all_messages(conversation.id);
+        let row = backend.to_message(&all[0], &all);
+        assert_eq!(row.kind, MessageKind::Change);
+        assert_eq!(row.id, id::<MessageId>(150), "not shown as sending");
+        let extras = backend.ui_message_extras(conversation.id, &[row.id]);
+        assert_eq!(
+          extras[0].maybe_workspace_event,
+          Some(WorkspaceEvent::Archived { maybe_by: None })
+        );
+
+        let announcement = ClientMessageId::from_bytes([9; 16]);
+        store_line(
+          &backend,
+          &conversation,
+          150,
+          ChangeActor::Announced { announcement },
+          id(2),
+        );
+        let extras = backend.ui_message_extras(conversation.id, &[row.id]);
+        assert_eq!(
+          extras[0].maybe_workspace_event,
+          Some(WorkspaceEvent::Archived {
+            maybe_by: Some(id(2))
+          })
+        );
+      }
+
+      #[test]
+      fn a_line_after_the_read_position_is_unread_until_read_here() {
+        let (backend, mut conversation, users) = mention_fixture(&[(2, "before", &[])]);
+        let mut membership = test_membership();
+        membership.maybe_last_read_message_id = Some(id(101));
+        conversation.maybe_my_membership = Some(membership);
+        let unread = |backend: &CoreChatBackend<MemoryStore>| {
+          backend
+            .to_conversation(&conversation, &users, &backend.mention_preferences())
+            .unread_count
+        };
+        store_line(&backend, &conversation, 90, ChangeActor::Nobody, nobody());
+        assert_eq!(unread(&backend), 0, "older than what was read");
+
+        store_line(&backend, &conversation, 150, ChangeActor::Nobody, nobody());
+        assert_eq!(unread(&backend), 1, "newer than everything read, by nobody named");
+        let messages = backend.all_messages(conversation.id);
+        note_lines_read(&backend.store, conversation.id, &messages).unwrap();
+        assert_eq!(unread(&backend), 0, "read on this device");
+      }
+
+      #[test]
+      fn the_users_own_change_is_not_unread() {
+        let (backend, conversation, users) = mention_fixture(&[]);
+        store_line(&backend, &conversation, 150, ChangeActor::ThisDevice, id(1));
+        assert_eq!(
+          backend
+            .to_conversation(&conversation, &users, &backend.mention_preferences())
+            .unread_count,
+          0
+        );
+      }
+
+      /// The line "This channel was archived" at `at`, naming `actor` (sent as `sender`).
+      fn store_line(
+        backend: &CoreChatBackend<MemoryStore>,
+        conversation: &ConversationResponse,
+        at: i64,
+        actor: ChangeActor,
+        sender: UserId,
+      ) {
+        let mut bytes = [0xff_u8; 16];
+        bytes[..8].copy_from_slice(&at.to_be_bytes());
+        backend
+          .store
+          .upsert_message(&StoredMessage {
+            conversation_id: conversation.id,
+            client_message_id: ClientMessageId::from_bytes(bytes),
+            maybe_server_id: None,
+            sender_user_id: sender,
+            maybe_thread_id: None,
+            sent_at_ms: 0,
+            content: MessageContent::Event {
+              event: ConversationEvent::Archived,
+            },
+            is_edited: false,
+            edits: Vec::new(),
+            maybe_edit_id: None,
+            is_pinned: false,
+            maybe_verified_commit: None,
+            maybe_server_change: Some(ServerChange {
+              at: id(at),
+              seen_after: id(at - 1),
+              seen_until: id(at - 1),
+              actor,
+            }),
+            maybe_unreadable: None,
+          })
+          .unwrap();
+      }
+    }
   }
 
   fn id<T: Id>(raw: i64) -> T {

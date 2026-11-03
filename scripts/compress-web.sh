@@ -24,5 +24,5 @@ while IFS= read -r -d '' file; do
   gzip -9 -n -k -f "$file"
   brotli -q 11 -k -f "$file"
   count=$((count + 1))
-done < <(find "$dist" -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' -o -name '*.json' -o -name '*.svg' \) -print0)
+done < <(find "$dist" -type f \( -name '*.wasm' -o -name '*.js' -o -name '*.css' -o -name '*.json' -o -name '*.svg' -o -name '*.onnx' \) -print0)
 echo "compressed $count files in $dist"

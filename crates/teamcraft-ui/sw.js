@@ -6,9 +6,18 @@
 // below. This worker then
 //   - on install and on every update fetches release.json, checks the signature, fetches every listed
 //     file, checks the hashes and only then stores them in a versioned cache and activates;
+//   - except the parts of the app that load when first used (`lazy` in release.json, #334): those are
+//     fetched and checked against the signed hash when a page first asks for one, and in the
+//     background a little after a page (not a guest's meeting page) asked for the status, so they
+//     work offline too; the ones only some people use (`on_demand`: the background effects'
+//     segmentation, #439) only when a page asks for them;
 //   - serves the app from that cache, never from the network;
 //   - keeps running the previous verified version if a new one does not verify, and tells the pages.
 // A build without a pinned key (development) skips all of this and says so.
+//
+// Updates. A verified update waits until the user reloads (the page offers it) or every tab closed;
+// it never takes over a page on its own. Each page is served from the release it was loaded with, and
+// a release's cache is kept while a page still uses it, so a page never mixes two releases.
 //
 // Push. The Rust half of the worker (teamcraft-web-sw: opens the sealed wake-up, builds the
 // notification) is built by trunk; scripts/finish-sw.sh inlines its JS glue at the end of this file and
@@ -24,12 +33,32 @@ const SIGNATURE_LABEL = 'teamcraft-web-release-v1\n';
 const CACHE_PREFIX = 'teamcraft-release-';
 // Files fetched at the same time while a release is installed.
 const PARALLEL_DOWNLOADS = 4;
+// Where a release's cache keeps its verified file list, for the files fetched later (no file of a
+// release has this path).
+const FILES_KEY = '/.release-files';
+// And the files it fetches only when a page asks for them (`on_demand`), never in the background.
+const ON_DEMAND_KEY = '/.release-on-demand';
+// The lazily loaded files are fetched this long after a page loaded, so they don't compete with what
+// the page itself loads first.
+const WARM_DELAY_MS = 15 * 1000;
+// Guests' meeting pages (`/meeting/<id>`, meetings.rs) and share-link download pages (`/f/<id>`,
+// share_link.rs) never use the signed-in app: no background
+// fetch for them. A member who opens one gets the files with the next other page.
+const GUEST_PATH_PREFIXES = ['/meeting/', '/f/'];
 
 const STATE_CACHE = 'teamcraft-sw-state';
+// The verified status of a release that is installed but not active yet; it becomes `/state` on
+// activation, so the running worker, restarted meanwhile, keeps serving its own release.
+const PENDING_STATE = '/pending';
 const PUSH_CONFIG_CACHE = 'teamcraft-push-config';
 const PUSH_WASM = '__PUSH_WASM__';
 
 let status = { state: IS_PINNED ? 'pending' : 'unsigned', version: '', key_fingerprint: '', reason: '' };
+// Which release each page was loaded with (client ID -> { version, at }), and releases that were
+// active once.
+let releases = { clients: {}, retired: [] };
+// A page is listed before the browser reports it as a client; until then it counts as alive.
+const NEW_CLIENT_GRACE_MS = 60 * 1000;
 // A worker the browser stopped and started again has forgotten what it verified; the result is kept
 // in a cache and read back before the first request is answered.
 const restored = restoreStatus();
@@ -42,10 +71,22 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
       await restored;
-      const keep = status.version ? CACHE_PREFIX + status.version : null;
-      for (const name of await caches.keys()) {
-        if (name.startsWith(CACHE_PREFIX) && name !== keep) await caches.delete(name);
+      // The previous worker kept recording pages while this one waited.
+      await restoreReleases();
+      const previous = status.version;
+      await adoptPendingStatus();
+      if (previous && previous !== status.version && !releases.retired.includes(previous)) {
+        releases.retired.push(previous);
       }
+      // Caches of releases that were never active (a failed install) go now; retired ones only once
+      // no page uses them.
+      for (const name of await caches.keys()) {
+        const version = name.slice(CACHE_PREFIX.length);
+        if (name.startsWith(CACHE_PREFIX) && version !== status.version && !releases.retired.includes(version)) {
+          await caches.delete(name);
+        }
+      }
+      await pruneReleases();
       await self.clients.claim();
       await broadcast();
     })(),
@@ -56,8 +97,13 @@ self.addEventListener('message', (event) => {
   // Only pages of this origin talk to the worker; anything else is ignored.
   if (event.origin !== self.location.origin || !event.source) return;
   const data = event.data || {};
-  if (data.type === 'status') {
+  if (data.type === 'skip_waiting') {
+    // The user chose to reload into the new release (sent to the waiting worker).
+    event.waitUntil(self.skipWaiting());
+  } else if (data.type === 'status') {
+    // Every page asks once when it loaded: the moment to fetch the lazily loaded files.
     event.waitUntil(restored.then(() => event.source.postMessage(statusMessage())));
+    if (IS_PINNED && !isGuestPage(event.source)) event.waitUntil(restored.then(() => warmLazyFiles(status.version)));
   } else if (data.type === 'push_probe') {
     // Whether the push code loads (tests, diagnostics): answers { type: 'push', ready, reason }.
     event.waitUntil(
@@ -66,7 +112,7 @@ self.addEventListener('message', (event) => {
         .catch((error) => event.source.postMessage({ type: 'push', ready: false, reason: reasonOf(error) })),
     );
   } else if (data.type === 'push_database' && typeof data.name === 'string') {
-    event.waitUntil(rememberDatabase(data.name));
+    event.waitUntil(rememberDatabase(data.name, typeof data.labels === 'string' ? data.labels : ''));
   }
 });
 
@@ -77,32 +123,165 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET' || url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/') || url.pathname === '/sw.js' || url.pathname === '/release.json') return;
   event.respondWith(
-    restored.then(() => (status.state === 'verified' ? fromVerifiedCache(request, url) : fetch(request))),
+    restored.then(() => (status.state === 'verified' ? fromVerifiedCache(event, url) : fetch(request))),
   );
 });
 
 async function restoreStatus() {
   if (!IS_PINNED) return;
   try {
-    const hit = await (await caches.open(STATE_CACHE)).match('/state');
+    const state = await caches.open(STATE_CACHE);
+    const hit = await state.match('/state');
     if (hit) status = await hit.json();
+    await restoreReleases();
   } catch (error) {
     // No stored state: the worker serves from the network until the next verified install.
   }
 }
 
-async function saveStatus() {
-  await (await caches.open(STATE_CACHE)).put('/state', new Response(JSON.stringify(status)));
+async function restoreReleases() {
+  try {
+    const known = await (await caches.open(STATE_CACHE)).match('/releases');
+    if (known) releases = await known.json();
+  } catch (error) {
+    // Unknown pages only keep old releases longer.
+  }
 }
 
-async function fromVerifiedCache(request, url) {
-  const cache = await caches.open(CACHE_PREFIX + status.version);
-  // Every page route (/, /meeting/<id>, /f/<id>) is the same app shell.
-  const target = request.mode === 'navigate' ? '/index.html' : url.pathname;
-  const hit = await cache.match(target);
-  if (hit) return hit;
-  // Not part of the signed release: nothing the app needs. Let it fail instead of trusting the network.
+async function saveState(path, value) {
+  await (await caches.open(STATE_CACHE)).put(path, new Response(JSON.stringify(value)));
+}
+
+// On activation: the release this worker installed becomes the one it serves.
+async function adoptPendingStatus() {
+  const state = await caches.open(STATE_CACHE);
+  const pending = await state.match(PENDING_STATE);
+  if (!pending) return;
+  status = await pending.json();
+  await saveState('/state', status);
+  await state.delete(PENDING_STATE);
+}
+
+async function fromVerifiedCache(event, url) {
+  const request = event.request;
+  // Every page route (/, /meeting/<id>, /f/<id>) is the same app shell, of the current release.
+  if (request.mode === 'navigate') {
+    if (event.resultingClientId) event.waitUntil(rememberClient(event.resultingClientId));
+    const shell = await (await caches.open(CACHE_PREFIX + status.version)).match('/index.html');
+    return shell || notInRelease();
+  }
+  // Everything else from the release the page was loaded with; a page from before this worker
+  // tracked releases may find its file in a retired release.
+  const known = releases.clients[event.clientId];
+  const versions = known ? [known.version] : [status.version, ...releases.retired.slice().reverse()];
+  for (const candidate of versions) {
+    const cache = await caches.open(CACHE_PREFIX + candidate);
+    const hit = (await cache.match(url.pathname)) || (await fetchLazyFile(cache, url.pathname));
+    if (hit) return hit;
+  }
+  return notInRelease();
+}
+
+// A file of the release that is fetched when first used (#334): downloaded and checked against the
+// release's signed hash, then kept like the others. Null when the release doesn't list it.
+async function fetchLazyFile(cache, pathname) {
+  const files = await (await cache.match(FILES_KEY))?.json();
+  const path = pathname.slice(1);
+  if (!files || !Object.hasOwn(files, path)) return null;
+  try {
+    await storeVerified(cache, [cache], path, files[path]);
+  } catch (error) {
+    // Not what was signed: the pages warn like for a release that doesn't verify (the release
+    // itself stays verified and keeps running; the part just doesn't load).
+    if (error instanceof HashMismatch) await broadcast({ ...statusMessage(), state: 'rejected', reason: reasonOf(error) });
+    throw error;
+  }
+  return cache.match(pathname);
+}
+
+function isGuestPage(client) {
+  try {
+    const { pathname } = new URL(client.url);
+    return GUEST_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix));
+  } catch (error) {
+    return false;
+  }
+}
+
+// Fetches the release's lazily loaded files that aren't cached yet, one at a time, after a delay.
+// Failures are left for the page's own request (it retries, and says so when it can't).
+// It stops as soon as a newer release waits (#1045): the browser activates a waiting worker only
+// once this one has no event left running, so a warm-up kept the user's "Reload" from switching for
+// as long as it ran.
+let warming = null;
+function warmLazyFiles(version) {
+  if (status.state !== 'verified' || !version || newerReleaseWaits()) return Promise.resolve();
+  if (!warming) {
+    warming = (async () => {
+      await Promise.race([new Promise((resolve) => setTimeout(resolve, WARM_DELAY_MS)), newerReleaseInstalled()]);
+      const cache = await caches.open(CACHE_PREFIX + version);
+      const files = await (await cache.match(FILES_KEY))?.json();
+      const onDemand = new Set((await (await cache.match(ON_DEMAND_KEY))?.json()) || []);
+      for (const path of Object.keys(files || {})) {
+        if (newerReleaseWaits()) return;
+        if (onDemand.has(path)) continue;
+        if (!(await cache.match('/' + path))) await storeVerified(cache, [cache], path, files[path]);
+      }
+    })()
+      .catch(() => {})
+      .finally(() => {
+        warming = null;
+      });
+  }
+  return warming;
+}
+
+function newerReleaseWaits() {
+  return !!self.registration.waiting;
+}
+
+// Resolves once a newer release finished installing (it then waits for the user's reload).
+let onNewerRelease = [];
+function newerReleaseInstalled() {
+  return new Promise((resolve) => (newerReleaseWaits() ? resolve() : onNewerRelease.push(resolve)));
+}
+
+self.registration.addEventListener('updatefound', () => {
+  const worker = self.registration.installing;
+  if (!worker) return;
+  worker.addEventListener('statechange', () => {
+    if (worker.state === 'installed') for (const resolve of onNewerRelease.splice(0)) resolve();
+  });
+});
+
+// Not part of the signed release: nothing the app needs. Let it fail instead of trusting the network.
+function notInRelease() {
   return new Response('not part of the signed release', { status: 404 });
+}
+
+async function rememberClient(clientId) {
+  releases.clients[clientId] = { version: status.version, at: Date.now() };
+  await pruneReleases();
+}
+
+// Forgets pages that are gone and deletes retired releases no page uses any more. Pages whose release
+// is unknown (loaded before this worker tracked releases) keep every retired release alive.
+async function pruneReleases() {
+  const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  const live = new Set(windows.map((client) => client.id));
+  const now = Date.now();
+  for (const [id, known] of Object.entries(releases.clients)) {
+    if (!live.has(id) && now - known.at > NEW_CLIENT_GRACE_MS) delete releases.clients[id];
+  }
+  const hasUnknown = windows.some((client) => !(client.id in releases.clients));
+  const used = new Set(Object.values(releases.clients).map((known) => known.version));
+  if (!hasUnknown) {
+    for (const version of releases.retired.filter((retired) => !used.has(retired))) {
+      await caches.delete(CACHE_PREFIX + version);
+    }
+    releases.retired = releases.retired.filter((retired) => used.has(retired));
+  }
+  await saveState('/releases', releases);
 }
 
 async function installVerified() {
@@ -116,19 +295,29 @@ async function installVerified() {
     if (status.state === 'verified' && status.version && status.version !== manifest.version) {
       sources.push(await caches.open(CACHE_PREFIX + status.version));
     }
-    const queue = Object.entries(manifest.files);
+    // Kept first: an install that stops halfway resumes with it, and later fetches check against it.
+    await cache.put(FILES_KEY, new Response(JSON.stringify(manifest.files)));
+    await cache.put(ON_DEMAND_KEY, new Response(JSON.stringify([...manifest.onDemand])));
+    const queue = Object.entries(manifest.files).filter(([path]) => !manifest.lazy.has(path));
     const worker = async () => {
       for (let next = queue.shift(); next; next = queue.shift()) await storeVerified(cache, sources, ...next);
     };
     await Promise.all(Array.from({ length: PARALLEL_DOWNLOADS }, worker));
-    status = {
+    const verified = {
       state: 'verified',
       version: manifest.version,
       key_fingerprint: await keyFingerprint(),
       reason: '',
     };
-    await saveStatus();
-    await self.skipWaiting();
+    if (self.registration.active) {
+      // An update: it waits until the user reloads or every tab closed, and serves nothing before.
+      await saveState(PENDING_STATE, verified);
+    } else {
+      // The first install: nothing runs yet.
+      status = verified;
+      await saveState('/state', status);
+      await self.skipWaiting();
+    }
   } catch (error) {
     const unsupported = error && error.name === 'NotSupportedError';
     status = { ...status, state: unsupported ? 'unsupported' : 'rejected', reason: reasonOf(error) };
@@ -160,8 +349,10 @@ async function storeVerified(cache, sources, path, expected) {
       return;
     }
   }
-  throw new Error('hash mismatch for ' + path);
+  throw new HashMismatch('hash mismatch for ' + path);
 }
+
+class HashMismatch extends Error {}
 
 async function verifiedManifest() {
   const response = await fetch('/release.json', { cache: 'no-store' });
@@ -176,7 +367,11 @@ async function verifiedManifest() {
     throw new Error('the release manifest is not signed by the release key');
   }
   if (!manifest.files['index.html']) throw new Error('the release has no index.html');
-  return { version: String(manifest.version), files };
+  // Which files wait until they are used is a hint outside the signature: every file is still checked
+  // against its signed hash, whenever it is fetched.
+  const onDemand = new Set((Array.isArray(manifest.on_demand) ? manifest.on_demand : []).filter((path) => path !== 'index.html'));
+  const lazy = new Set([...(Array.isArray(manifest.lazy) ? manifest.lazy : []), ...onDemand].filter((path) => path !== 'index.html'));
+  return { version: String(manifest.version), files, lazy, onDemand };
 }
 
 async function sha256Hex(bytes) {
@@ -202,8 +397,8 @@ function statusMessage() {
   return { type: 'bundle', ...status };
 }
 
-async function broadcast() {
-  for (const client of await self.clients.matchAll({ includeUncontrolled: true })) client.postMessage(statusMessage());
+async function broadcast(message = statusMessage()) {
+  for (const client of await self.clients.matchAll({ includeUncontrolled: true })) client.postMessage(message);
 }
 
 // ---- Push wake-ups ---------------------------------------------------------------------------------
@@ -237,8 +432,28 @@ function loadPush() {
   return pushReady;
 }
 
-async function rememberDatabase(name) {
-  await (await caches.open(PUSH_CONFIG_CACHE)).put('/push-database', new Response(name));
+// The page also leaves the notification texts in the user's language (JSON, `NotificationLabels` in
+// teamcraft-core): this worker has no translations, and no page may be open when a push arrives.
+async function rememberDatabase(name, labels) {
+  const cache = await caches.open(PUSH_CONFIG_CACHE);
+  await cache.put('/push-database', new Response(name));
+  await cache.put('/push-labels', new Response(labels));
+}
+
+async function notificationLabels() {
+  const hit = await (await caches.open(PUSH_CONFIG_CACHE)).match('/push-labels');
+  return hit ? (await hit.text()) || null : null;
+}
+
+// "New message" in the user's language for the fallback below; English without the page's labels.
+async function newMessageText() {
+  try {
+    const labels = JSON.parse((await notificationLabels()) || '{}');
+    if (typeof labels.new_message === 'string' && labels.new_message.trim()) return labels.new_message;
+  } catch (error) {
+    console.warn('notification labels unreadable', error);
+  }
+  return 'New message';
 }
 
 async function databaseName() {
@@ -257,19 +472,52 @@ async function showPush(event) {
       if (name) {
         await loadPush();
         const payload = event.data ? new Uint8Array(await event.data.arrayBuffer()) : new Uint8Array();
-        await wasm_bindgen.handlePush(name, payload);
+        await wasm_bindgen.handlePush(name, payload, await notificationLabels());
         return;
       }
     } catch (error) {
       console.warn('push could not be opened', error);
     }
   }
-  // Browsers require a notification for every push.
+  // Browsers require a notification for every push; it says at least that a message came.
   await self.registration.showNotification('TeamCraft', {
-    body: 'New activity',
+    body: await newMessageText(),
     tag: 'teamcraft-wake-up',
     renotify: false,
   });
+}
+
+// The browser rotated or dropped the subscription. Where it handed no new one, subscribe again with
+// the old one's key, then tell the server about the current subscription (the push code proves it
+// with the device's push key, e2ee.md §7), so pushes don't go to the old one while no page is open.
+// Open pages are told too; the page that owns the store registers it as usual.
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(renewSubscription(event));
+});
+
+async function renewSubscription(event) {
+  try {
+    const manager = self.registration.pushManager;
+    const key = event.oldSubscription && event.oldSubscription.options.applicationServerKey;
+    if (!event.newSubscription && !(await manager.getSubscription()) && key) {
+      await manager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+    }
+  } catch (error) {
+    console.warn('push subscription not renewed', error);
+  }
+  try {
+    const name = await databaseName();
+    if (name && hasPushCode()) {
+      await loadPush();
+      const old = event.oldSubscription ? JSON.stringify(event.oldSubscription.toJSON()) : null;
+      await wasm_bindgen.handleSubscriptionChange(name, old);
+    }
+  } catch (error) {
+    console.warn('renewed push subscription not sent to the server', error);
+  }
+  for (const client of await self.clients.matchAll({ type: 'window', includeUncontrolled: true })) {
+    client.postMessage({ type: 'push_subscription_changed' });
+  }
 }
 
 self.addEventListener('notificationclick', (event) => {
@@ -280,7 +528,7 @@ async function clickNotification(event) {
   if (hasPushCode()) {
     try {
       await loadPush();
-      await wasm_bindgen.handleNotificationClick(event);
+      await wasm_bindgen.handleNotificationClick(event, await databaseName());
       return;
     } catch (error) {
       console.warn('notification click not handled by the push code', error);

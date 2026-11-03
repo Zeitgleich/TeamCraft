@@ -1,48 +1,105 @@
 //! Virtualized message feed. Only the rows near the viewport are in the DOM; the rest is represented
 //! by two spacer heights. Row heights are estimated first and corrected by measuring rendered rows.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::ops::Range;
+use std::time::Duration;
 
 use leptos::ev;
 use leptos::html;
+use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
-use crate::clock::format_date;
+use crate::channel_access::ChannelAccess;
+use crate::clock::{format_date, local_day, now_ms};
+use crate::components::date_jump::{DateJumpMenu, DateJumpPopover, DatePill};
+use crate::components::empty_state::{EmptyAction, EmptyState};
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
-use crate::i18n::use_i18n;
-use crate::model::{ConversationId, ConversationKind, Message, as_chat_message};
-use crate::state::{Overlay, use_app_state};
+use crate::components::message_toolbar::{MessageToolbar, ToolbarHost};
+use crate::components::reaction_jump::ReactionJump;
+use crate::components::skeleton::MessageSkeleton;
+use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
+use crate::i18n::{I18n, use_i18n};
+use crate::model::{ConversationId, ConversationKind, Message, OlderHistory, TimestampMs, as_chat_message};
+use crate::reactive::SetIfAlive;
+use crate::state::{AppState, Overlay, use_app_state};
+use crate::unread_divider::{DividerEvent, DwellClock, ReadMarkerGate};
 
 /// Extra pixels rendered above and below the viewport.
 const OVERSCAN_PX: f64 = 700.0;
+/// How far beyond the rendered rows messages are loaded ahead, in viewport heights. A page is
+/// asked for when its first rows are this far away instead of when they come into view, so at a
+/// brisk wheel speed it has arrived before it is reached (issue #1050).
+const PREFETCH_VIEWPORTS: f64 = 4.0;
 /// Distance from the bottom that still counts as "following the latest message".
 const STICK_THRESHOLD_PX: f64 = 8.0;
 const ESTIMATED_MESSAGE_HEIGHT: f32 = 68.0;
 const ESTIMATED_LOG_HEIGHT: f32 = 22.0;
+/// New messages looked at for the first one from somebody else (the divider goes there).
+const MAX_NEW_SCAN: usize = 50;
+/// How long after a scrolling key its scroll events count as the user's.
+const KEY_SCROLL_MS: i64 = 1_000;
 /// Measure passes after a jump that keep the target row in place while heights settle.
 const ALIGN_PASSES: u8 = 6;
+/// How long the floating day stays after scrolling stops.
+const FLOATING_DAY_LINGER: Duration = Duration::from_millis(1_000);
+/// Where the pinned day's pill sits below the top of the feed (`.floating-day`, top padding).
+const PINNED_DAY_TOP_PX: f64 = 8.0;
+/// Where a day divider's pill sits in its row (`.date-divider`, top padding).
+const DIVIDER_PILL_TOP_PX: f64 = 14.0;
+/// The pinned pill's height until it was measured.
+const ESTIMATED_PILL_HEIGHT_PX: f64 = 22.0;
 /// Space kept above the "New messages" divider when a conversation opens there.
 const DIVIDER_CONTEXT_PX: f64 = 48.0;
 /// Heights differing by less than this are treated as equal, which ends the measure loop.
 const MEASURE_EPSILON: f32 = 0.5;
+/// Rows above the first one on screen at which the list asks for older history: a few screens
+/// ahead, so a reader scrolling back doesn't meet the end of what is here.
+const OLDER_AHEAD_ROWS: usize = 40;
+/// Rows above the first one on screen at which the state of that request shows.
+const OLDER_STATUS_ROWS: usize = 2;
 
 thread_local! {
-  /// ID of the list that is currently mounted; 0 when none is.
-  static ACTIVE_LIST: Cell<u64> = const { Cell::new(0) };
+  /// IDs of the lists that are mounted: usually one, two while a call's chat panel (#936) shows
+  /// next to the conversation below the call screen.
+  static LIVE_LISTS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
   static NEXT_LIST: Cell<u64> = const { Cell::new(1) };
 }
+
+/// Whether the list `list_id` is still mounted.
+fn is_live(list_id: u64) -> bool {
+  LIVE_LISTS.with_borrow(|lists| lists.contains(&list_id))
+}
+
+/// Placed in the context of a feed that is shown next to a call, not below its screen (#936).
+#[derive(Clone, Copy, Debug)]
+pub struct BesideCall;
 
 /// Runs `callback` on the next animation frame unless the list that asked for it was unmounted in
 /// the meantime. Touching signals of a disposed list would panic.
 fn defer_while_alive(list_id: u64, callback: impl FnOnce() + 'static) {
   request_animation_frame(move || {
-    if ACTIVE_LIST.get() == list_id {
+    if is_live(list_id) {
       callback();
     }
   });
+}
+
+/// Runs `callback` in a task of its own, between two frames, unless the list was unmounted. What it
+/// renders is measured by the next frame's callback, before that frame is painted; from inside a
+/// frame's callback it would be painted first, unmeasured.
+fn defer_between_frames_while_alive(list_id: u64, callback: impl FnOnce() + 'static) {
+  set_timeout(
+    move || {
+      if is_live(list_id) {
+        callback();
+      }
+    },
+    Duration::ZERO,
+  );
 }
 
 /// The slice of rows to render plus the spacer sizes around it.
@@ -93,6 +150,71 @@ pub fn compute_window(heights: &[f32], scroll_top: f64, viewport: f64) -> Window
   }
 }
 
+/// The rows that intersect the viewport (not the overscan around it). Walks only the window.
+pub fn visible_rows(heights: &[f32], window: &Window, scroll_top: f64, viewport: f64) -> Range<usize> {
+  let bottom_edge = scroll_top + viewport;
+  let mut offset = window.pad_top;
+  let mut maybe_start = None;
+  let end = window.end.min(heights.len());
+  for (index, height) in heights.iter().enumerate().take(end).skip(window.first) {
+    if offset >= bottom_edge {
+      return maybe_start.map_or(index..index, |start| start..index);
+    }
+    let bottom = offset + f64::from(*height);
+    if maybe_start.is_none() && bottom > scroll_top {
+      maybe_start = Some(index);
+    }
+    offset = bottom;
+  }
+  maybe_start.map_or(end..end, |start| start..end)
+}
+
+/// A day that begins among the rows around the viewport: the top of its row in the feed and the
+/// time of its first message.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DayStart {
+  pub top: f64,
+  pub sent_at: TimestampMs,
+}
+
+/// The day pinned over the feed at `scroll_top` and how far up the next day's divider pushes it
+/// (#1046), like the section headers of iOS. A day becomes the pinned one once its divider's pill
+/// has reached the pinned pill's place, so the two never show side by side; the divider below it
+/// keeps a gap of [`PINNED_DAY_TOP_PX`] while it pushes the old one out. `None` above the first
+/// day, whose own divider is still in view. `days` are in feed order and start with the day of
+/// the row above the viewport.
+pub fn pinned_day(days: &[DayStart], scroll_top: f64, pill_height: f64) -> Option<(TimestampMs, f64)> {
+  // A divider row starting above this line has its pill at or above the pinned one.
+  let slot = scroll_top + PINNED_DAY_TOP_PX - DIVIDER_PILL_TOP_PX;
+  let current = days.iter().take_while(|day| day.top <= slot).last()?;
+  let push = days.iter().find(|day| day.top > slot).map_or(0.0, |next| {
+    let divider_pill = next.top + DIVIDER_PILL_TOP_PX - scroll_top;
+    (divider_pill - 2.0 * PINNED_DAY_TOP_PX - pill_height).min(0.0)
+  });
+  Some((current.sent_at, push))
+}
+
+/// The rows to have loaded around `window`: [`PREFETCH_VIEWPORTS`] viewport heights above its first
+/// and below its last rendered row. Walks only those rows.
+pub fn prefetch_range(heights: &[f32], window: &Window, viewport: f64) -> Range<usize> {
+  let distance = viewport.max(1.0) * PREFETCH_VIEWPORTS;
+  let first = window.first.min(heights.len());
+  let end = window.end.clamp(first, heights.len());
+  let mut start = first;
+  let mut above = 0.0_f64;
+  while start > 0 && above < distance {
+    start -= 1;
+    above += f64::from(heights[start]);
+  }
+  let mut stop = end;
+  let mut below = 0.0_f64;
+  while stop < heights.len() && below < distance {
+    below += f64::from(heights[stop]);
+    stop += 1;
+  }
+  start..stop
+}
+
 #[component]
 pub fn MessageList(
   conversation: ConversationId,
@@ -104,14 +226,12 @@ pub fn MessageList(
   let i18n = use_i18n();
   let list_id = NEXT_LIST.get();
   NEXT_LIST.set(list_id + 1);
-  ACTIVE_LIST.set(list_id);
-  on_cleanup(move || {
-    if ACTIVE_LIST.get() == list_id {
-      ACTIVE_LIST.set(0);
-    }
-  });
+  LIVE_LISTS.with_borrow_mut(|lists| lists.push(list_id));
+  on_cleanup(move || LIVE_LISTS.with_borrow_mut(|lists| lists.retain(|live| *live != list_id)));
   let container = NodeRef::<html::Div>::new();
   let rows = NodeRef::<html::Div>::new();
+  let top_spacer = NodeRef::<html::Div>::new();
+  let toolbar = ToolbarHost::provide(container);
 
   let is_log = state
     .read(|backend| backend.conversation(conversation))
@@ -124,26 +244,44 @@ pub fn MessageList(
   };
 
   let count = Memo::new(move |_| state.read(|backend| backend.message_count(conversation)));
+  let motion = StoredValue::new_local(FeedMotion::new(newest_confirmed_of(state, conversation)));
+  // A conversation that opened empty (still loading): its first messages are history, not news.
+  Effect::new(move |_| {
+    if count.get() > 0
+      && let Some(newest) = newest_confirmed_of(state, conversation)
+    {
+      motion.update_value(|motion| motion.set_baseline_if_unset(newest));
+    }
+  });
   let heights = StoredValue::new_local(vec![estimate; count.get_untracked()]);
   let scroll_top = RwSignal::new(0.0_f64);
   let viewport = RwSignal::new(800.0_f64);
   // Bumped whenever `heights` changed, so the window is recomputed.
   let layout_rev = RwSignal::new(0_u64);
-  // Opened with unread messages: start at the "New messages" divider instead of the bottom.
-  let maybe_marker = state
-    .unread_marker
-    .get_untracked()
-    .filter(|marker| marker.conversation == conversation)
-    .map(|marker| marker.index);
+  // Opened with unread messages: start at the "New messages" divider instead of the bottom. A log
+  // opens at its newest line instead (#943), however much is unread.
+  let maybe_marker = opening_marker(
+    state
+      .unread_marker
+      .get_untracked()
+      .filter(|marker| marker.conversation == conversation)
+      .map(|marker| marker.index),
+    is_log,
+  );
   // A jump to a message (search, link, activity) asked before this feed existed wins over both.
   let maybe_jump = state
     .jump_to_index
     .get_untracked()
     .filter(|(target, _)| *target == conversation)
     .map(|(_, index)| index);
+  // The desktop app reopened where the reader was when it closed (#721).
+  if let Some(index) = state.take_restored_reading(conversation) {
+    state.scroll_anchors.update_value(|anchors| {
+      anchors.insert(conversation, index);
+    });
+  }
   // Otherwise return to where the reader was when they left this conversation scrolled up.
-  let maybe_saved_anchor = maybe_marker
-    .is_none()
+  let maybe_saved_anchor = (maybe_marker.is_none() && !is_log)
     .then(|| {
       state
         .scroll_anchors
@@ -153,18 +291,44 @@ pub fn MessageList(
   let stick_to_bottom =
     RwSignal::new(maybe_jump.is_none() && maybe_marker.is_none() && maybe_saved_anchor.is_none());
   let last_top = StoredValue::new(0.0_f64);
+  // Scrollbar drags and scrolling keys; wheel and touch leave the bottom on their own.
+  let intent = StoredValue::new(ScrollIntent::default());
   // Row to keep at the top while heights settle after a jump: (index, measure passes left).
   let pending_align = StoredValue::new(maybe_jump.map(|index| (index, ALIGN_PASSES)));
   // The message count when the reader left the bottom (or where the unread ones began): what is
   // newer is announced on the "Jump to latest" bar.
   let away_from = RwSignal::new(maybe_marker);
 
+  // Older history arrives before what the list shows while it is open (#1132): every row's index
+  // grows. The rows stay as they are, with their messages and heights, and the position follows,
+  // before the next frame is painted (WebKit has no scroll anchoring).
+  let prepended = Memo::new(move |_| state.read(|backend| backend.rows_prepended(conversation)));
+  let prepended_in_heights = StoredValue::new(prepended.get_untracked());
+  // What the top spacer grew by and the scroll position has not followed yet.
+  let unfollowed_px = StoredValue::new(0.0_f64);
+
   let window = Memo::new(move |_| {
     layout_rev.track();
     let count = count.get();
+    let shift = prepended.get().saturating_sub(prepended_in_heights.get_value());
+    if shift > 0 {
+      prepended_in_heights.update_value(|applied| *applied += shift);
+      heights.update_value(|heights| {
+        heights.splice(0..0, std::iter::repeat_n(estimate, shift));
+      });
+      unfollowed_px.update_value(|unfollowed| *unfollowed += shift as f64 * f64::from(estimate));
+    }
     heights.update_value(|heights| heights.resize(count, estimate));
-    heights.with_value(|heights| compute_window(heights, scroll_top.get(), viewport.get()))
+    let top = scroll_top.get() + unfollowed_px.get_value();
+    heights.with_value(|heights| compute_window(heights, top, viewport.get()))
   });
+
+  // After a programmatic scroll: the window follows, and the next scroll event compares against it.
+  let note_position = move |element: &web_sys::Element| {
+    let top = exact_scroll_top(element);
+    scroll_top.set(top);
+    last_top.set_value(top);
+  };
 
   // Jump to a message (date, search, link): it goes near the top, with a little context above.
   Effect::new(move |_| {
@@ -179,18 +343,18 @@ pub fn MessageList(
       pending_align.set_value(Some((index, ALIGN_PASSES)));
       stick_to_bottom.set(false);
       element.set_scroll_top((f64::from(top) - DIVIDER_CONTEXT_PX).max(0.0) as i32);
-      scroll_top.set(f64::from(element.scroll_top()));
-      last_top.set_value(f64::from(element.scroll_top()));
+      note_position(&element);
       layout_rev.update(|rev| *rev += 1);
     }
     state.jump_to_index.set(None);
   });
 
   let scroll_to_bottom = move || {
+    // At the bottom, a jump's target no longer needs to stay at the top.
+    pending_align.set_value(None);
     if let Some(element) = container.get_untracked() {
       element.set_scroll_top(element.scroll_height());
-      scroll_top.set(f64::from(element.scroll_top()));
-      last_top.set_value(f64::from(element.scroll_top()));
+      note_position(&element);
     }
   };
 
@@ -215,12 +379,8 @@ pub fn MessageList(
         else {
           continue;
         };
-        let Some(measured) = child
-          .dyn_ref::<web_sys::HtmlElement>()
-          .map(|el| el.offset_height() as f32)
-        else {
-          continue;
-        };
+        // The exact height: `offset_height` rounds, and the rounding adds up in the corrections.
+        let measured = child.get_bounding_client_rect().height() as f32;
         // A row whose message is still loading is empty; keep its estimate so it stays in the window.
         if measured <= 0.0 {
           continue;
@@ -228,7 +388,9 @@ pub fn MessageList(
         if let Some(slot) = heights.get_mut(index)
           && (*slot - measured).abs() > MEASURE_EPSILON
         {
-          if index < anchor {
+          // The row at the top too: it loses its header when older rows of its author arrive, and
+          // what follows it stays where it is.
+          if index <= anchor {
             shift_above_anchor += f64::from(measured - *slot);
           }
           *slot = measured;
@@ -239,14 +401,25 @@ pub fn MessageList(
     if !changed {
       return;
     }
+    toolbar.reposition();
     if stick_to_bottom.get_untracked() {
       layout_rev.update(|rev| *rev += 1);
       defer_while_alive(list_id, scroll_to_bottom);
     } else {
-      let corrected = container_element.scroll_top() as f64 + shift_above_anchor;
-      container_element.set_scroll_top(corrected as i32);
-      scroll_top.set(f64::from(container_element.scroll_top()));
-      layout_rev.update(|rev| *rev += 1);
+      // Relative, so the fraction of the position survives (#642): rows above the one at the top
+      // changed height, the rows on screen stay where they are.
+      if shift_above_anchor != 0.0 {
+        container_element.scroll_by_with_x_and_y(0.0, shift_above_anchor);
+      }
+      // The next scroll event compares with this at once; the window follows between frames, so
+      // the rows it adds are measured and corrected before they are painted.
+      last_top.set_value(exact_scroll_top(&container_element));
+      defer_between_frames_while_alive(list_id, move || {
+        if let Some(element) = container.get_untracked() {
+          note_position(&element);
+        }
+        layout_rev.update(|rev| *rev += 1);
+      });
     }
   };
   // After a jump the target row's real height and the rows above it are only known once rendered:
@@ -266,10 +439,8 @@ pub fn MessageList(
     let offset = row.get_bounding_client_rect().top() - container_element.get_bounding_client_rect().top();
     let delta = offset - DIVIDER_CONTEXT_PX;
     if delta.abs() > 1.0 {
-      let corrected = f64::from(container_element.scroll_top()) + delta;
-      container_element.set_scroll_top(corrected.max(0.0) as i32);
-      scroll_top.set(f64::from(container_element.scroll_top()));
-      last_top.set_value(f64::from(container_element.scroll_top()));
+      container_element.scroll_by_with_x_and_y(0.0, delta);
+      note_position(&container_element);
     }
   };
   let schedule_measure = move || {
@@ -282,7 +453,75 @@ pub fn MessageList(
   // Re-measure whenever the rendered range changes.
   Effect::new(move |_| {
     window.track();
+    let unfollowed = unfollowed_px.get_value();
+    if unfollowed != 0.0 {
+      unfollowed_px.set_value(0.0);
+      scroll_top.update(|top| *top += unfollowed);
+      // Together, before anything can be painted: the spacer's own effect may run after this one.
+      if let (Some(element), Some(spacer)) = (container.get_untracked(), top_spacer.get_untracked()) {
+        let height = format!("{}px", window.get_untracked().pad_top);
+        // Refused only for a malformed property; the spacer's effect sets it anyway.
+        let _ = web_sys::HtmlElement::style(&spacer).set_property("height", &height);
+        element.scroll_by_with_x_and_y(0.0, unfollowed);
+        note_position(&element);
+      }
+    }
     schedule_measure();
+  });
+  // What is kept by index moves along with the rows.
+  Effect::new(move |previous: Option<usize>| {
+    let now = prepended.get();
+    let shift = now.saturating_sub(previous.unwrap_or(now));
+    if shift > 0 {
+      pending_align.update_value(|align| {
+        if let Some((index, _)) = align {
+          *index += shift;
+        }
+      });
+      if away_from.get_untracked().is_some() {
+        away_from.update(|from| *from = from.map(|from| from + shift));
+      }
+      let is_marker_here = state
+        .unread_marker
+        .get_untracked()
+        .is_some_and(|marker| marker.conversation == conversation);
+      if is_marker_here {
+        state.unread_marker.update(|maybe_marker| {
+          if let Some(marker) = maybe_marker {
+            marker.index += shift;
+          }
+        });
+      }
+    }
+    now
+  });
+  // Near the oldest row, older history comes from the server. Nothing is asked for at the bottom of
+  // a list that scrolls, so opening a conversation costs no extra request; a list too short to
+  // scroll could never get there. Read again when a request ends, so a page without a visible row
+  // (or the next connection after a failure) goes on by itself.
+  let older_history = Memo::new(move |_| state.read(|backend| backend.older_history(conversation)));
+  // Until the list took its opening position it stands at the top, whatever the reader will see.
+  let is_positioned = RwSignal::new(false);
+  Effect::new(move |_| {
+    if !is_positioned.get() || older_history.get() != OlderHistory::Available {
+      return;
+    }
+    let first_visible = window.get().first_visible;
+    let fits = heights.with_value(|heights| f64::from(heights.iter().sum::<f32>())) <= viewport.get();
+    if asks_for_older(first_visible, stick_to_bottom.get(), fits) {
+      state.write(|backend| backend.load_older_history(conversation));
+    }
+  });
+  let older_status = move || {
+    let is_near = window.get().first_visible < OLDER_STATUS_ROWS;
+    is_near.then(|| older_history.get())
+  };
+  // The pages beyond the rendered rows load ahead, so scrolling into them doesn't wait (#1050).
+  // Asked again after every change too, like the rows read theirs: a backend keeps what is read.
+  Effect::new(move |_| {
+    let window = window.get();
+    let range = heights.with_value(|heights| prefetch_range(heights, &window, viewport.get_untracked()));
+    state.read(|backend| backend.prefetch_messages(conversation, range.start, range.len()));
   });
   // The side panel changes the width, hence the wrapping and heights.
   Effect::new(move |_| {
@@ -340,14 +579,14 @@ pub fn MessageList(
         Some(top) => {
           let top = (top - DIVIDER_CONTEXT_PX).max(0.0);
           element.set_scroll_top(top as i32);
-          scroll_top.set(f64::from(element.scroll_top()));
-          last_top.set_value(f64::from(element.scroll_top()));
+          note_position(&element);
         },
         None => {
           stick_to_bottom.set(true);
           defer_while_alive(list_id, scroll_to_bottom);
         },
       }
+      is_positioned.set(true);
     }
   });
   // Remember where the reader left the bottom; back at the bottom, everything counts as seen.
@@ -372,58 +611,160 @@ pub fn MessageList(
       }
     });
   });
-  // While reading older messages, the day of the top message floats over the feed.
-  let floating_day = Memo::new(move |_| {
-    if stick_to_bottom.get() || is_log {
+  // While reading older messages, the day at the top stays pinned over the feed (#1046). Its
+  // place comes from the row heights the window was computed from: no layout reads per frame.
+  let days = Memo::new(move |_| {
+    layout_rev.track();
+    let window = window.get();
+    let start = window.first_visible.saturating_sub(1);
+    let messages =
+      state.read(|backend| backend.messages(conversation, start, window.end.saturating_sub(start)));
+    heights.with_value(|heights| day_starts(&messages, start, heights, &window))
+  });
+  let pill_height = RwSignal::new(ESTIMATED_PILL_HEIGHT_PX);
+  let pinned = Memo::new(move |_| {
+    if stick_to_bottom.get() {
       return None;
     }
-    let first = window.get().first_visible;
-    let locale = i18n.locale().tag();
-    state
-      .read(|backend| backend.messages(conversation, first, 1))
-      .first()
-      .map(|message| format_date(message.sent_at, locale))
+    days.with(|days| pinned_day(days, scroll_top.get(), pill_height.get()))
   });
+  // Separate, so the label is only formatted again when the day changes, not on every push.
+  let pinned_at = Memo::new(move |_| pinned.get().map(|(sent_at, _)| sent_at));
+  let pinned_label = Memo::new(move |_| {
+    pinned_at
+      .get()
+      .map(|sent_at| format_date(sent_at, i18n.locale().tag()))
+  });
+  let pinned_push = move || pinned.get().map_or(0.0, |(_, push)| push);
+  let pinned_pill = NodeRef::<html::Div>::new();
+  // Measured once per day, after the new label was rendered (it wraps differently per language).
+  Effect::new(move |_| {
+    pinned_label.track();
+    if let Some(element) = pinned_pill.get_untracked() {
+      let height = element.get_bounding_client_rect().height();
+      if height > 0.0 && (height - pill_height.get_untracked()).abs() > f64::from(MEASURE_EPSILON) {
+        pill_height.set(height);
+      }
+    }
+  });
+  // The day pills open one menu per feed; the floating one fades out while the feed rests.
+  let date_menu = DateJumpMenu(RwSignal::new(None));
+  provide_context(date_menu);
+  let is_scrolling = RwSignal::new(false);
+  let scroll_generation = StoredValue::new(0_u32);
   let new_below = move || away_from.get().map_or(0, |from| count.get().saturating_sub(from));
   // Rows grow after they were measured (reactions, edits, late-loading content). While following,
-  // stay at the bottom so the newest line is never cut off.
-  observe_row_growth(list_id, rows, move || {
+  // stay at the bottom so the newest line is never cut off. Corrected in the same frame, before it
+  // is painted: a frame later the rows would visibly jump and jump back (#642).
+  // The list itself shrinks or grows when the composer does (it grows with its text, and with the
+  // window): the viewport height follows, and a following reader stays at the newest line instead
+  // of having it slide behind the composer.
+  observe_size_changes(list_id, [rows, container], move || {
+    if let Some(element) = container.get_untracked() {
+      viewport.set(f64::from(element.client_height()));
+    }
     if stick_to_bottom.get_untracked() {
       scroll_to_bottom();
     }
-    schedule_measure();
+    measure();
+    align_row();
   });
-  let _ = window_event_listener(ev::resize, move |_| {
+  let listener = window_event_listener(ev::resize, move |_| {
     if let Some(element) = container.get_untracked() {
       viewport.set(f64::from(element.client_height()));
       schedule_measure();
     }
   });
+  // Removed with the component: a late event must not reach its disposed signals.
+  on_cleanup(move || listener.remove());
 
   let on_scroll = move |_| {
     let Some(element) = container.get_untracked() else {
       return;
     };
-    let top = f64::from(element.scroll_top());
+    let top = exact_scroll_top(&element);
     let bottom_gap = f64::from(element.scroll_height()) - top - f64::from(element.client_height());
     scroll_top.set(top);
     viewport.set(f64::from(element.client_height()));
-    // Only an upward move counts as the user leaving the bottom; programmatic scrolls to the bottom
-    // can fire late scroll events while row heights are still settling.
-    if bottom_gap <= STICK_THRESHOLD_PX {
-      stick_to_bottom.set(true);
-    } else if top < last_top.get_value() - 1.0 {
-      stick_to_bottom.set(false);
+    // Fades the floating day out 1 s after the last scroll event (opacity only). A position the
+    // list set itself (`note_position`) is no scrolling to show the day for.
+    if (top - last_top.get_value()).abs() > f64::from(MEASURE_EPSILON) {
+      is_scrolling.set(true);
+    }
+    let generation = scroll_generation.try_update_value(|generation| {
+      *generation += 1;
+      *generation
+    });
+    set_timeout(
+      move || {
+        if scroll_generation.try_get_value() == generation {
+          is_scrolling.set_if_alive(false);
+          remember_reading(state, conversation, stick_to_bottom, window);
+        }
+      },
+      FLOATING_DAY_LINGER,
+    );
+    let is_user_scrolling = intent.with_value(|intent| intent.is_user_scrolling(now_ms()));
+    let maybe_follow = follow_after_scroll(bottom_gap, top, last_top.get_value(), is_user_scrolling);
+    if let Some(is_following) = maybe_follow
+      && stick_to_bottom.get_untracked() != is_following
+    {
+      stick_to_bottom.set(is_following);
     }
     last_top.set_value(top);
   };
 
-  let indices = move || {
+  // The user's own scrolling up leaves the bottom at once, before the scroll event: a row that
+  // grows meanwhile must not pin the list back down against them (#642). It also ends the
+  // alignment after a jump: the user took over.
+  let leave_bottom = move || {
+    let can_scroll_up = container
+      .get_untracked()
+      .is_some_and(|element| exact_scroll_top(&element) > 0.0);
+    pending_align.set_value(None);
+    if can_scroll_up && stick_to_bottom.get_untracked() {
+      stick_to_bottom.set(false);
+    }
+  };
+  listen_to_user_scrolls(list_id, container, intent, leave_bottom);
+
+  // A row is known by its place apart from the older history that arrived, which that history
+  // doesn't change, so it keeps its DOM when its index moves (#1132).
+  let positions = move || {
     let window = window.get();
-    (window.first..window.end).collect::<Vec<usize>>()
+    let opened_at = prepended_in_heights.get_value() as i64;
+    (window.first..window.end)
+      .map(|index| index as i64 - opened_at)
+      .collect::<Vec<i64>>()
   };
 
-  let on_keydown = move |ev: web_sys::KeyboardEvent| handle_list_keys(&ev, container, rows);
+  let is_watched = track_unread_divider(conversation, count, prepended, stick_to_bottom);
+  let visible = Memo::new(move |_| {
+    let window = window.get();
+    heights.with_value(|heights| visible_rows(heights, &window, scroll_top.get(), viewport.get()))
+  });
+  let on_keydown = move |ev: web_sys::KeyboardEvent| {
+    // Esc marks everything read and removes the "New messages" divider (#321), unless it is used
+    // for something else (an editor, a menu, closing the side panel or a dialog).
+    if ev.key() == "Escape" {
+      if is_escape_free(&ev) {
+        state.mark_conversation_read(conversation);
+      }
+      return;
+    }
+    if is_scroll_key(&ev) {
+      intent.update_value(|intent| intent.key_pressed(now_ms()));
+    }
+    handle_list_keys(&ev, container, rows);
+  };
+  // Bubbles show no avatars in a conversation of two (#576).
+  let is_dm = move || {
+    state
+      .read(|backend| backend.conversation(conversation))
+      .is_some_and(|conv| conv.kind == ConversationKind::Direct)
+  };
+  // Offered to people who may add members only.
+  let access = ChannelAccess::new(state, conversation);
   let is_alone_in_channel = move || {
     state
       .read(|backend| backend.conversation(conversation))
@@ -431,74 +772,502 @@ pub fn MessageList(
         matches!(conv.kind, ConversationKind::Public | ConversationKind::Private)
           && conv.member_ids.len() <= 1
       })
+      && access.can_add_members()
   };
 
   view! {
     <div class="message-list-wrap">
-      {move || floating_day.get().map(|label| view! { <div class="floating-day" aria-hidden="true">{label}</div> })}
+      {move || {
+        pinned_label.get().map(|label| {
+          view! {
+            <div class="floating-day" class:is-idle=move || !is_scrolling.get() && date_menu.0.get().is_none()>
+              <div
+                class="floating-day-pill"
+                node_ref=pinned_pill
+                style:transform=move || format!("translateY({}px)", pinned_push())
+              >
+                <DatePill label=label />
+              </div>
+            </div>
+          }
+        })
+      }}
+      <DateJumpPopover conversation=conversation menu=date_menu />
+      // Over the list, not in it: a row that comes and goes would move what the reader looks at.
+      {move || match older_status() {
+        Some(OlderHistory::Loading) => Some(view! {
+          <div class="older-history" role="status">
+            <span class="spinner" aria-hidden="true"></span>
+            <span>{move || i18n.t("older-history-loading")}</span>
+          </div>
+        }.into_any()),
+        Some(OlderHistory::Failed) => Some(view! {
+          <div class="older-history" role="alert">
+            <span>{move || i18n.t("older-history-failed")}</span>
+            <button
+              class="older-history-retry"
+              on:click=move |_| state.write(|backend| backend.load_older_history(conversation))
+            >
+              {move || i18n.t("older-history-retry")}
+            </button>
+          </div>
+        }.into_any()),
+        _ => None,
+      }}
       <div
         class="message-list"
         class:log-view=is_log
+        class:is-dm=is_dm
         role="log"
         tabindex="0"
         aria-label=move || i18n.t("messages-label")
         node_ref=container
         on:scroll=on_scroll
+        on:pointerdown=move |ev: web_sys::PointerEvent| {
+          // A press on the list itself, not on a row: its scrollbar.
+          let is_on_list = ev.target().zip(container.get_untracked()).is_some_and(|(target, element)| {
+            target.dyn_ref::<web_sys::Element>().is_some_and(|target| target.is_same_node(Some(&element)))
+          });
+          if is_on_list {
+            intent.update_value(|intent| intent.is_dragging = true);
+          }
+        }
         on:keydown=on_keydown
       >
         <Show when=move || count.get() == 0 fallback=|| ()>
-          <div class="empty-state">
-            <p>{move || i18n.t("channel-empty")}</p>
-            // Alone in a new channel: the obvious next step is bringing the team in.
-            <Show when=is_alone_in_channel fallback=|| ()>
-              <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::ChannelSettings(conversation))>
-                {move || i18n.t("channel-add-people")}
-              </button>
-            </Show>
-          </div>
+          // Alone in a new channel: the obvious next step is bringing the team in.
+          {move || {
+            let maybe_action = is_alone_in_channel().then_some(EmptyAction {
+              label_key: "channel-add-people",
+              on_click: Callback::new(move |()| state.overlay.set(Overlay::AddToChannel(conversation))),
+            });
+            // The notes to self have nobody to greet (#699).
+            let is_notes = state
+              .read(|backend| backend.conversation(conversation))
+              .is_some_and(|conv| conv.is_notes_to_self);
+            let (icon, title_key, body_key) = if is_notes {
+              (IconName::Compose, "notes-empty-title", "notes-empty")
+            } else {
+              (IconName::Smile, "channel-empty-title", "channel-empty")
+            };
+            view! { <EmptyState icon=icon title_key=title_key body_key=body_key maybe_action=maybe_action /> }
+          }}
         </Show>
-        <div class="spacer" style:height=move || format!("{}px", window.get().pad_top)></div>
+        <div class="spacer" node_ref=top_spacer style:height=move || format!("{}px", window.get().pad_top)></div>
         <div class="rows" node_ref=rows>
-          <For each=indices key=|index| *index let:index>
-            <RowSlot conversation=conversation index=index is_chat=is_chat />
+          <For each=positions key=|position| *position let:position>
+            <RowSlot conversation=conversation position=position prepended=prepended is_chat=is_chat motion=motion />
           </For>
         </div>
         <div class="spacer" style:height=move || format!("{}px", window.get().pad_bottom)></div>
+        <MessageToolbar host=toolbar />
       </div>
+      <div class="jump-stack">
+      <ReactionJump conversation=conversation visible=visible is_watched=is_watched />
       <Show when=move || !stick_to_bottom.get() fallback=|| ()>
         <button
           class="jump-latest"
+          aria-label=move || jump_latest_label(i18n, new_below())
+          title=move || jump_latest_label(i18n, new_below())
           on:click=move |_| {
             stick_to_bottom.set(true);
             scroll_to_bottom();
           }
         >
           <Icon name=IconName::ArrowDown />
-          <span>
-            {move || match new_below() {
-              0 => i18n.t("jump-to-latest"),
-              count => i18n.t_count("jump-to-latest-new", count),
-            }}
-          </span>
+          {move || match new_below() {
+            0 => None,
+            count => Some(view! { <span class="badge-count jump-latest-count">{count}</span> }),
+          }}
         </button>
       </Show>
+      </div>
     </div>
   }
 }
 
-/// Calls `on_change` (on the next frame) whenever the rendered rows change size.
-fn observe_row_growth(list_id: u64, rows: NodeRef<html::Div>, on_change: impl Fn() + Copy + 'static) {
-  let callback = Closure::<dyn FnMut()>::new(move || defer_while_alive(list_id, on_change));
+/// The name of the round "jump to latest" button, which has no text of its own.
+/// Whether the list asks for older history with `first_visible` as the first row on screen.
+fn asks_for_older(first_visible: usize, is_following: bool, fits_on_screen: bool) -> bool {
+  first_visible < OLDER_AHEAD_ROWS && (!is_following || fits_on_screen)
+}
+
+fn jump_latest_label(i18n: I18n, new_below: usize) -> String {
+  match new_below {
+    0 => i18n.t("jump-to-latest"),
+    count => i18n.t_count("jump-to-latest-new", count),
+  }
+}
+
+/// Moves or removes the "New messages" divider as the user reads (#321, `unread_divider`):
+/// staying at the bottom of the focused window for the dwell time removes it, and messages that
+/// arrive while the window is blurred or hidden move it to the first one from somebody else.
+/// Leaving the conversation is handled where it happens (`AppState::open_conversation`), so a
+/// remount of this list (layout change, thread pane) keeps it. One timer, only while the user sits
+/// at the bottom with a divider shown; it is cancelled when that ends or the list goes away. The
+/// read marker doesn't wait for the divider: see [`mark_read_while_watched`].
+/// The desktop app reopens at this position (#721): the top message while the reader is scrolled
+/// up, nothing while they follow the newest. Saved once scrolling has settled.
+fn remember_reading(
+  state: AppState,
+  conversation: ConversationId,
+  stick_to_bottom: RwSignal<bool>,
+  window: Memo<Window>,
+) {
+  if !crate::auth::tauri::is_available() {
+    return;
+  }
+  let (Some(is_following), Some(window)) = (stick_to_bottom.try_get_untracked(), window.try_get_untracked())
+  else {
+    return;
+  };
+  let maybe_message = match is_following {
+    true => None,
+    // async-ok: the app state outlives every feed.
+    false => state
+      .read(|backend| backend.messages(conversation, window.first_visible, 1))
+      .first()
+      .map(|message| message.id),
+  };
+  // async-ok: the app state outlives every feed.
+  let user = state.me().id;
+  crate::last_place::remember_reading(user, conversation, maybe_message);
+}
+
+/// Returns whether the user watches the feed: the window is focused and no call screen covers it.
+fn track_unread_divider(
+  conversation: ConversationId,
+  count: Memo<usize>,
+  prepended: Memo<usize>,
+  is_at_bottom: RwSignal<bool>,
+) -> Signal<bool> {
+  let state = use_app_state();
+  let is_focused = RwSignal::new(is_window_focused());
+  // A call screen over the app hides the feed below it; the feed next to the call stays in sight.
+  let is_beside_call = use_context::<BesideCall>().is_some();
+  let is_watched = Signal::derive(move || is_focused.get() && (is_beside_call || !state.call.covers_app()));
+  mark_read_while_watched(conversation, is_at_bottom, is_watched);
+  // Whether the user was at the bottom (had seen the divider) when they looked away.
+  let was_at_bottom_when_away = StoredValue::new(false);
+  let on_focus_change = move || {
+    let focused = is_window_focused();
+    if !focused && is_focused.try_get_untracked() == Some(true) {
+      was_at_bottom_when_away.try_set_value(is_at_bottom.try_get_untracked().unwrap_or(false));
+    }
+    is_focused.try_set(focused);
+  };
+  let listeners = [
+    window_event_listener(ev::focus, move |_| on_focus_change()),
+    window_event_listener(ev::blur, move |_| on_focus_change()),
+    window_event_listener(ev::visibilitychange, move |_| on_focus_change()),
+  ];
+  // Removed with the list: dropping a handle keeps the listener, so every list shown left three
+  // listeners behind with all they hold (docs/performance.md, "Desktop on Linux: memory").
+  on_cleanup(move || listeners.into_iter().for_each(|listener| listener.remove()));
+
+  // News while the user looks elsewhere.
+  Effect::new(move |previous: Option<(usize, usize)>| {
+    let total = count.get();
+    let older = prepended.get();
+    // Older history is no news: only what came after the rows the list had.
+    if let Some(previous) = previous.map(|(total, was_older)| total + older - was_older)
+      && total > previous
+      && !is_watched.get_untracked()
+    {
+      let me = state.me().id;
+      let len = (total - previous).min(MAX_NEW_SCAN);
+      let maybe_first_foreign = state
+        .read(|backend| backend.messages(conversation, previous, len))
+        .iter()
+        .position(|message| message.author != me);
+      state.divider_event(
+        conversation,
+        DividerEvent::ArrivedWhileAway {
+          first_new: previous + maybe_first_foreign.unwrap_or(0),
+          is_own: maybe_first_foreign.is_none(),
+          has_seen_divider: was_at_bottom_when_away.get_value(),
+        },
+      );
+    }
+    (total, older)
+  });
+
+  let maybe_dwell = Memo::new(move |_| {
+    state
+      .settings
+      .prefs
+      .with(|prefs| prefs.display.maybe_divider_dwell_secs)
+      .map(|secs| Duration::from_secs(u64::from(secs)))
+  });
+  let clock = StoredValue::new(DwellClock::default());
+  let timer = StoredValue::new(None::<TimeoutHandle>);
+  let cancel_timer = move || {
+    if let Some(Some(handle)) = timer.try_update_value(Option::take) {
+      handle.clear();
+    }
+  };
+  on_cleanup(cancel_timer);
+  Effect::new(move |_| {
+    let has_divider = state
+      .unread_marker
+      .get()
+      .is_some_and(|marker| marker.conversation == conversation);
+    let is_reading = has_divider && is_at_bottom.get() && is_watched.get();
+    let maybe_dwell = maybe_dwell.get();
+    cancel_timer();
+    let now = now_ms();
+    clock.update_value(|clock| clock.update(is_reading && maybe_dwell.is_some(), now));
+    let Some(dwell) = maybe_dwell else { return };
+    let Some(remaining) = clock.with_value(|clock| clock.remaining(now, dwell)) else {
+      return;
+    };
+    let fire = move || {
+      timer.try_set_value(None);
+      let is_due = clock
+        .try_with_value(|clock| clock.remaining(now_ms(), dwell))
+        .flatten()
+        .is_some_and(|left| left.is_zero());
+      if is_due {
+        state.divider_event(conversation, DividerEvent::DwelledAtBottom);
+      }
+    };
+    match set_timeout_with_handle(fire, remaining) {
+      Ok(handle) => timer.set_value(Some(handle)),
+      Err(error) => tracing::debug!(?error, "no timer for the divider"),
+    }
+  });
+  is_watched
+}
+
+/// Marks the conversation read whenever something in it is unread while the user watches its newest
+/// message: at the bottom of the focused, visible window, and not below a call screen (`is_watched`,
+/// #936). Covers messages that arrive while it is open, coming back to the window and scrolling
+/// down to the end; opening it marks it read in `AppState::open_conversation`. Each newest message is sent once ([`ReadMarkerGate`]):
+/// an `unread_update` the server sent before it applied the new position raises the count again,
+/// and that must not queue another read position for the same message. A new message does.
+fn mark_read_while_watched(
+  conversation: ConversationId,
+  is_at_bottom: RwSignal<bool>,
+  is_watched: Signal<bool>,
+) {
+  let state = use_app_state();
+  // The newest message the server stored while something is unread; looked up only then. A
+  // reaction is no row but counts as unread, so the newest row alone would never read it (#641).
+  let maybe_unread_through = Memo::new(move |_| {
+    let has_unread = state
+      .read(|backend| backend.conversation(conversation))
+      .is_some_and(|conversation| conversation.has_unread());
+    has_unread
+      .then(|| {
+        state
+          .read(|backend| backend.newest_message(conversation))
+          .or_else(|| newest_confirmed_of(state, conversation))
+      })
+      .flatten()
+  });
+  let gate = StoredValue::new(ReadMarkerGate::default());
+  Effect::new(move |_| {
+    let (maybe_through, at_bottom, focused) =
+      (maybe_unread_through.get(), is_at_bottom.get(), is_watched.get());
+    let should_mark = gate
+      .try_update_value(|gate| gate.should_mark(maybe_through, at_bottom, focused))
+      .unwrap_or(false);
+    if should_mark {
+      state.write(|backend| backend.mark_read(conversation));
+    }
+  });
+}
+
+/// Whether an Esc that reached the feed has no other job: nothing handled it yet, it doesn't come
+/// from a text field, and there is no dialog or side panel for it to close.
+fn is_escape_free(ev: &web_sys::KeyboardEvent) -> bool {
+  let state = use_app_state();
+  let is_from_text_field = ev
+    .target()
+    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    .is_some_and(|element| {
+      element
+        .closest("input, textarea, select, [contenteditable]")
+        .ok()
+        .flatten()
+        .is_some()
+    });
+  !ev.default_prevented()
+    && !is_from_text_field
+    && state.overlay.get_untracked() == Overlay::None
+    && state.panel.get_untracked() == crate::state::SidePanel::Closed
+}
+
+/// Who moves the list. Only the user's own scrolling leaves the bottom (#640, #642): programmatic
+/// scrolls, late scroll events and rows that change height move it too, but never unpin it, or a
+/// message sent right then would land below the visible area.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScrollIntent {
+  /// The scrollbar is held.
+  pub is_dragging: bool,
+  /// When a scrolling key (Page Up, arrows, Home, space) was pressed last, in ms.
+  maybe_key_at: Option<i64>,
+}
+
+impl ScrollIntent {
+  pub fn key_pressed(&mut self, now: i64) {
+    self.maybe_key_at = Some(now);
+  }
+
+  /// Whether a scroll event now comes from the user's scrollbar or keys. Wheel and touch don't
+  /// need this: they leave the bottom themselves, before the list moves.
+  pub fn is_user_scrolling(&self, now: i64) -> bool {
+    self.is_dragging
+      || self
+        .maybe_key_at
+        .is_some_and(|at| (0..KEY_SCROLL_MS).contains(&now.saturating_sub(at)))
+  }
+}
+
+/// Where a feed starts at its unread divider: never in a log, which opens at its newest line (#943).
+fn opening_marker(maybe_marker: Option<usize>, is_log: bool) -> Option<usize> {
+  maybe_marker.filter(|_| !is_log)
+}
+
+/// What a scroll event means for following the newest message: back at the bottom follows it
+/// again, the user's own upward move stops following, anything else changes nothing. Any upward
+/// move counts: a slow touchpad scroll moves less than a pixel per event.
+pub fn follow_after_scroll(
+  bottom_gap: f64,
+  top: f64,
+  last_top: f64,
+  is_user_scrolling: bool,
+) -> Option<bool> {
+  if bottom_gap <= STICK_THRESHOLD_PX {
+    Some(true)
+  } else if is_user_scrolling && top < last_top {
+    Some(false)
+  } else {
+    None
+  }
+}
+
+/// Keys that scroll the list up or down.
+fn is_scroll_key(ev: &web_sys::KeyboardEvent) -> bool {
+  matches!(
+    ev.key().as_str(),
+    "PageUp" | "PageDown" | "ArrowUp" | "ArrowDown" | "Home" | "End" | " "
+  )
+}
+
+/// Wheel and touch input that scrolls the list up calls `on_scroll_up`. Passive listeners: an
+/// active one would make the browser wait for it before every scroll step. A released scrollbar
+/// ends the drag of `intent`.
+fn listen_to_user_scrolls(
+  list_id: u64,
+  container: NodeRef<html::Div>,
+  intent: StoredValue<ScrollIntent>,
+  on_scroll_up: impl Fn() + Copy + 'static,
+) {
+  let touch_y = StoredValue::new(None::<i32>);
+  let on_wheel = Closure::<dyn FnMut(web_sys::WheelEvent)>::new(move |ev: web_sys::WheelEvent| {
+    if is_live(list_id) && ev.delta_y() < 0.0 && !ev.ctrl_key() {
+      on_scroll_up();
+    }
+  });
+  let on_touch_start = Closure::<dyn FnMut(web_sys::TouchEvent)>::new(move |ev: web_sys::TouchEvent| {
+    touch_y.try_set_value(ev.touches().get(0).map(|touch| touch.client_y()));
+  });
+  // The finger moving down scrolls the list up.
+  let on_touch_move = Closure::<dyn FnMut(web_sys::TouchEvent)>::new(move |ev: web_sys::TouchEvent| {
+    let (Some(Some(start)), Some(touch)) = (touch_y.try_get_value(), ev.touches().get(0)) else {
+      return;
+    };
+    if is_live(list_id) && touch.client_y() > start {
+      on_scroll_up();
+    }
+  });
+  let listeners = StoredValue::new_local([
+    ("wheel", on_wheel.into_js_value()),
+    ("touchstart", on_touch_start.into_js_value()),
+    ("touchmove", on_touch_move.into_js_value()),
+  ]);
+  Effect::new(move |_| {
+    let Some(element) = container.get() else { return };
+    let options = web_sys::AddEventListenerOptions::new();
+    options.set_passive(true);
+    listeners.with_value(|listeners| {
+      for (name, listener) in listeners {
+        let added = element.add_event_listener_with_callback_and_add_event_listener_options(
+          name,
+          listener.unchecked_ref(),
+          &options,
+        );
+        if added.is_err() {
+          tracing::debug!(name, "could not listen to scroll input");
+        }
+      }
+    });
+  });
+  let released = [
+    window_event_listener(ev::pointerup, move |_| {
+      intent.try_update_value(|intent| intent.is_dragging = false);
+    }),
+    window_event_listener(ev::pointercancel, move |_| {
+      intent.try_update_value(|intent| intent.is_dragging = false);
+    }),
+  ];
+  on_cleanup(move || {
+    released.into_iter().for_each(|listener| listener.remove());
+    let Some(element) = container.get_untracked() else {
+      return;
+    };
+    listeners.try_with_value(|listeners| {
+      for (name, listener) in listeners {
+        // Removing a listener that was never added is a no-op; nothing to report.
+        drop(element.remove_event_listener_with_callback(name, listener.unchecked_ref()));
+      }
+    });
+  });
+}
+
+/// The exact scroll position. `Element::scroll_top` truncates to whole pixels, which loses the
+/// fraction on scaled displays: corrections drift by a pixel each, and a slow upward scroll looks
+/// like no move at all (#642).
+fn exact_scroll_top(element: &web_sys::Element) -> f64 {
+  js_sys::Reflect::get(element, &wasm_bindgen::JsValue::from_str("scrollTop"))
+    .ok()
+    .and_then(|value| value.as_f64())
+    .unwrap_or_else(|| f64::from(element.scroll_top()))
+}
+
+/// Whether the window has the focus and the page is visible.
+fn is_window_focused() -> bool {
+  web_sys::window()
+    .and_then(|window| window.document())
+    .is_some_and(|document| !document.hidden() && document.has_focus().unwrap_or(true))
+}
+
+/// Calls `on_change` whenever one of the `targets` changes size (the rendered rows, the scrolling
+/// list around them): after layout, before the frame is painted, unless the list that asked for it
+/// was unmounted in the meantime.
+fn observe_size_changes<const N: usize>(
+  list_id: u64,
+  targets: [NodeRef<html::Div>; N],
+  on_change: impl Fn() + Copy + 'static,
+) {
+  let callback = Closure::<dyn FnMut()>::new(move || {
+    if is_live(list_id) {
+      on_change();
+    }
+  });
   let Ok(observer) = web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()) else {
     tracing::debug!("ResizeObserver unavailable");
     return;
   };
   let handle = StoredValue::new_local((observer, callback));
-  Effect::new(move |_| {
-    if let Some(element) = rows.get() {
-      handle.with_value(|(observer, _)| observer.observe(&element));
-    }
-  });
+  for target in targets {
+    Effect::new(move |_| {
+      if let Some(element) = target.get() {
+        handle.with_value(|(observer, _)| observer.observe(&element));
+      }
+    });
+  }
   on_cleanup(move || {
     handle.try_with_value(|(observer, _)| observer.disconnect());
   });
@@ -506,55 +1275,131 @@ fn observe_row_growth(list_id: u64, rows: NodeRef<html::Div>, on_change: impl Fn
 
 /// Wrapper that carries the row index for measuring and re-renders only when its own data changes.
 #[component]
-fn RowSlot(conversation: ConversationId, index: usize, is_chat: bool) -> impl IntoView {
+fn RowSlot(
+  conversation: ConversationId,
+  /// Its place in the feed apart from older history that arrives ([`ChatBackend::rows_prepended`]).
+  position: i64,
+  prepended: Memo<usize>,
+  is_chat: bool,
+  motion: StoredValue<FeedMotion, LocalStorage>,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  // Invariant: the rows rendered start at index 0 or later, and `prepended` only grows.
+  let index = move || (position + prepended.get() as i64).max(0) as usize;
   let has_divider = move || {
     state
       .unread_marker
       .get()
-      .is_some_and(|marker| marker.conversation == conversation && marker.index == index)
+      .is_some_and(|marker| marker.conversation == conversation && marker.index == index())
   };
-  let data = Memo::new(move |_| -> Option<(Message, Option<Message>)> {
+  // Compared by value: a row whose index moved with its message doesn't render again.
+  let data = Memo::new(move |previous: Option<&Option<(Message, Option<Message>)>>| {
+    let index = index();
     let start = index.saturating_sub(1);
     let mut messages = state.read(|backend| backend.messages(conversation, start, 2));
     if is_chat {
       messages.iter_mut().for_each(as_chat_message);
     }
-    if index == 0 {
-      let message = messages.into_iter().next()?;
-      return Some((message, None));
+    // Not all read yet. A row that shows its message keeps it: older rows arrived and the one before
+    // it is still on its way, and a placeholder here would move what the reader looks at.
+    let is_complete = if index == 0 {
+      !messages.is_empty()
+    } else {
+      messages.len() == 2
+    };
+    if !is_complete {
+      return previous.cloned().flatten();
     }
-    if messages.len() < 2 {
-      return None;
+    if index == 0 {
+      return messages.into_iter().next().map(|message| (message, None));
     }
     let message = messages.remove(1);
     Some((message, messages.into_iter().next()))
   });
+  // What this row showed last, so a re-render knows what changed (feed_motion.rs).
+  let shown = StoredValue::new(None::<Shown>);
   view! {
-    <div class="row" data-idx=index.to_string()>
+    <div class="row" data-idx=move || index().to_string()>
       <Show when=has_divider fallback=|| ()>
         <div class="new-divider" role="separator">
           <span>{move || i18n.t("new-messages")}</span>
         </div>
       </Show>
       {move || match data.get() {
-        Some((message, maybe_prev)) => view! { <MessageRow message=message maybe_prev=maybe_prev /> }.into_any(),
+        Some((message, maybe_prev)) => {
+          let row_motion = motion
+            .try_update_value(|motion| shown.with_value(|shown| motion.row_motion(shown.as_ref(), &message, crate::motion::now())))
+            .unwrap_or_default();
+          shown.set_value(Some(Shown::of(&message)));
+          view! { <MessageRow message=message maybe_prev=maybe_prev motion=row_motion /> }.into_any()
+        },
         // Still loading (or decrypting): a placeholder instead of a gap.
-        None => view! {
-          <div class="msg-skeleton" aria-hidden="true">
-            <span class="skeleton-avatar"></span>
-            <span class="skeleton-lines"><span></span><span></span></span>
-          </div>
-        }
-          .into_any(),
+        None => view! { <MessageSkeleton /> }.into_any(),
       }}
     </div>
   }
 }
 
+/// The days that begin among `messages` (rows from `start` on), each with the top of its row, for
+/// [`pinned_day`]. The first message always opens one: the day carried in from above.
+fn day_starts(messages: &[Message], start: usize, heights: &[f32], window: &Window) -> Vec<DayStart> {
+  let mut days = Vec::new();
+  let mut maybe_prev_day = None;
+  for (offset, message) in messages.iter().enumerate() {
+    let day = local_day(message.sent_at);
+    if maybe_prev_day != Some(day) {
+      days.push(DayStart {
+        top: row_top(heights, window, start + offset),
+        sent_at: message.sent_at,
+      });
+    }
+    maybe_prev_day = Some(day);
+  }
+  days
+}
+
+/// The top of row `index` in the feed, counted from the window's first row; the rows around the
+/// viewport are few, so this walks only a handful of heights.
+fn row_top(heights: &[f32], window: &Window, index: usize) -> f64 {
+  let first = window.first.min(heights.len());
+  let index = index.min(heights.len());
+  if index >= first {
+    window.pad_top
+      + heights[first..index]
+        .iter()
+        .map(|height| f64::from(*height))
+        .sum::<f64>()
+  } else {
+    window.pad_top
+      - heights[index..first]
+        .iter()
+        .map(|height| f64::from(*height))
+        .sum::<f64>()
+  }
+}
+
+/// The newest message the server confirmed, from the end of the conversation.
+fn newest_confirmed_of(
+  state: crate::state::AppState,
+  conversation: ConversationId,
+) -> Option<crate::model::MessageId> {
+  /// The user's own unsent messages are at the end; a few are enough to look past them.
+  const LOOK_BACK: usize = 8;
+  state.read(|backend| {
+    let count = backend.message_count(conversation);
+    let start = count.saturating_sub(LOOK_BACK);
+    let tail = backend.messages(conversation, start, count - start);
+    newest_confirmed(tail.iter().rev())
+  })
+}
+
 /// Arrow keys move between rendered rows; Home/End jump to the oldest/newest loaded row.
-fn handle_list_keys(ev: &web_sys::KeyboardEvent, container: NodeRef<html::Div>, rows: NodeRef<html::Div>) {
+pub(crate) fn handle_list_keys(
+  ev: &web_sys::KeyboardEvent,
+  container: NodeRef<html::Div>,
+  rows: NodeRef<html::Div>,
+) {
   let key = ev.key();
   if !matches!(key.as_str(), "ArrowUp" | "ArrowDown") {
     return;
@@ -596,6 +1441,33 @@ mod tests {
   use super::*;
 
   #[test]
+  fn older_history_is_asked_for_near_the_oldest_row_once_the_reader_left_the_bottom() {
+    assert!(asks_for_older(OLDER_AHEAD_ROWS - 1, false, false));
+    assert!(!asks_for_older(OLDER_AHEAD_ROWS, false, false));
+    assert!(
+      !asks_for_older(10, true, false),
+      "opening a conversation at its bottom costs no request"
+    );
+    assert!(
+      asks_for_older(0, true, true),
+      "a list too short to scroll can't get any nearer"
+    );
+  }
+
+  #[test]
+  fn a_log_opens_at_the_newest_line_not_at_the_unread_divider() {
+    assert_eq!(opening_marker(Some(40), false), Some(40));
+    assert_eq!(opening_marker(Some(40), true), None);
+    assert_eq!(opening_marker(None, true), None);
+  }
+
+  #[test]
+  fn following_a_log_pauses_on_scrolling_up_and_resumes_at_the_bottom() {
+    assert_eq!(follow_after_scroll(60.0, 900.0, 950.0, true), Some(false));
+    assert_eq!(follow_after_scroll(0.0, 960.0, 900.0, false), Some(true));
+  }
+
+  #[test]
   fn window_covers_viewport_plus_overscan() {
     let heights = vec![50.0_f32; 1000];
     let window = compute_window(&heights, 10_000.0, 600.0);
@@ -615,6 +1487,146 @@ mod tests {
     assert_eq!(window.pad_bottom, 0.0);
     let empty = compute_window(&[], 0.0, 600.0);
     assert_eq!((empty.first, empty.end, empty.total), (0, 0, 0.0));
+  }
+
+  #[test]
+  fn visible_rows_are_those_in_the_viewport_without_the_overscan() {
+    let heights = vec![50.0_f32; 1000];
+    let window = compute_window(&heights, 10_025.0, 600.0);
+    // Row 200 is partly in view at the top, row 212 partly at the bottom.
+    assert_eq!(visible_rows(&heights, &window, 10_025.0, 600.0), 200..213);
+    let window = compute_window(&heights, 49_400.0, 600.0);
+    assert_eq!(visible_rows(&heights, &window, 49_400.0, 600.0), 988..1000);
+    let empty = compute_window(&[], 0.0, 600.0);
+    assert!(visible_rows(&[], &empty, 0.0, 600.0).is_empty());
+  }
+
+  mod following {
+    use super::*;
+
+    #[test]
+    fn reaching_the_bottom_follows_again() {
+      assert_eq!(follow_after_scroll(0.0, 900.0, 950.0, false), Some(true));
+      assert_eq!(
+        follow_after_scroll(STICK_THRESHOLD_PX, 900.0, 950.0, true),
+        Some(true)
+      );
+    }
+
+    #[test]
+    fn only_the_user_scrolling_up_stops_following() {
+      // #640: a programmatic scroll or a late scroll event while rows settle moves the list up,
+      // and a message sent right then must still scroll into view.
+      assert_eq!(follow_after_scroll(60.0, 900.0, 950.0, false), None);
+      assert_eq!(follow_after_scroll(60.0, 900.0, 950.0, true), Some(false));
+      assert_eq!(
+        follow_after_scroll(60.0, 950.0, 900.0, true),
+        None,
+        "down is no leaving"
+      );
+    }
+
+    #[test]
+    fn a_sub_pixel_step_up_counts() {
+      // #642: a slow touchpad scroll; pinning it back down made the list jump.
+      assert_eq!(follow_after_scroll(20.0, 999.6, 1_000.0, true), Some(false));
+    }
+
+    #[test]
+    fn keys_count_for_a_moment_and_the_scrollbar_while_held() {
+      let mut intent = ScrollIntent::default();
+      assert!(!intent.is_user_scrolling(5_000));
+      intent.key_pressed(5_000);
+      assert!(intent.is_user_scrolling(5_000 + KEY_SCROLL_MS - 1));
+      assert!(!intent.is_user_scrolling(5_000 + KEY_SCROLL_MS));
+      assert!(!intent.is_user_scrolling(4_000), "a clock that went back");
+      intent.is_dragging = true;
+      assert!(intent.is_user_scrolling(60_000));
+    }
+  }
+
+  mod prefetch {
+    use super::*;
+
+    #[test]
+    fn reaches_a_few_viewports_beyond_the_rendered_rows() {
+      let heights = vec![50.0_f32; 1000];
+      let window = compute_window(&heights, 25_000.0, 600.0);
+      let range = prefetch_range(&heights, &window, 600.0);
+      let rows = (600.0 * PREFETCH_VIEWPORTS / 50.0) as usize;
+      assert_eq!(range, window.first - rows..window.end + rows);
+    }
+
+    #[test]
+    fn stops_at_both_ends() {
+      let heights = vec![50.0_f32; 100];
+      let window = compute_window(&heights, 0.0, 600.0);
+      assert_eq!(prefetch_range(&heights, &window, 600.0).start, 0);
+      let window = compute_window(&heights, 4_400.0, 600.0);
+      assert_eq!(prefetch_range(&heights, &window, 600.0).end, 100);
+      let empty = compute_window(&[], 0.0, 600.0);
+      assert_eq!(prefetch_range(&[], &empty, 600.0), 0..0);
+    }
+
+    #[test]
+    fn log_lines_reach_further_in_rows() {
+      // Short rows: the distance is in pixels, so a log channel asks for more rows ahead.
+      let heights = vec![ESTIMATED_LOG_HEIGHT; 10_000];
+      let window = compute_window(&heights, 100_000.0, 800.0);
+      let range = prefetch_range(&heights, &window, 800.0);
+      assert!(window.first - range.start > 140, "{range:?} for {window:?}");
+    }
+  }
+
+  mod pinned {
+    use super::*;
+
+    const PILL: f64 = 22.0;
+    const FIRST: DayStart = DayStart { top: 0.0, sent_at: 1 };
+    const SECOND: DayStart = DayStart {
+      top: 1_000.0,
+      sent_at: 2,
+    };
+
+    #[test]
+    fn the_day_at_the_top_stays_in_place() {
+      assert_eq!(pinned_day(&[FIRST, SECOND], 500.0, PILL), Some((1, 0.0)));
+    }
+
+    #[test]
+    fn the_next_divider_pushes_it_up() {
+      // The divider's pill is 34 px below the top: 4 px into the pinned pill's place and gap.
+      assert_eq!(pinned_day(&[FIRST, SECOND], 980.0, PILL), Some((1, -4.0)));
+    }
+
+    #[test]
+    fn it_is_out_of_sight_when_the_next_day_takes_over() {
+      let swap = SECOND.top + DIVIDER_PILL_TOP_PX - PINNED_DAY_TOP_PX;
+      let (day, push) = pinned_day(&[FIRST, SECOND], swap - 0.1, PILL).expect("a day");
+      assert_eq!(day, 1);
+      assert!(PINNED_DAY_TOP_PX + push + PILL < 0.2, "still shows {push}");
+      assert_eq!(pinned_day(&[FIRST, SECOND], swap, PILL), Some((2, 0.0)));
+    }
+
+    #[test]
+    fn nothing_is_pinned_above_the_first_day() {
+      assert_eq!(pinned_day(&[FIRST], 0.0, PILL), None);
+      assert_eq!(pinned_day(&[], 300.0, PILL), None);
+    }
+
+    #[test]
+    fn row_tops_count_from_the_window_both_ways() {
+      let heights = vec![50.0_f32; 100];
+      let window = compute_window(&heights, 2_000.0, 600.0);
+      for index in [
+        0,
+        window.first.saturating_sub(1),
+        window.first,
+        window.first_visible + 3,
+      ] {
+        assert_eq!(row_top(&heights, &window, index), index as f64 * 50.0);
+      }
+    }
   }
 
   #[test]

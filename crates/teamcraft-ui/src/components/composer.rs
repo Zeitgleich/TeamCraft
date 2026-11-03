@@ -6,47 +6,94 @@ use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, O
 use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::audio::AudioFormat;
+use crate::clock::now_ms;
 use crate::components::avatar::{Avatar, AvatarSize};
-use crate::components::channel_view::DroppedFiles;
-use crate::components::composer_commands::{self, Notice, Outcome};
+use crate::components::composer_commands::{self, CommandButton, Notice, NoticeEvent, Outcome};
+use crate::components::composer_editor;
+use crate::components::composer_toolbar::{
+  ActiveFormats, FormatAction, FormatToolbar, SendOptionsMenu, format_action_for, move_focus_vertical,
+};
 use crate::components::emoji_picker::EmojiPicker;
+use crate::components::file_drop::{DropContent, DroppedFiles, take_drop, transfer_files};
+use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
-use crate::components::rich_text::RichText;
+use crate::components::sheet::MenuSurface;
+use crate::components::typing_indicator::should_notify_typing;
+use crate::composer_focus::{self, FocusSituation};
+use crate::editor_doc::{BlockFormat, InlineStyle};
+use crate::emoji_catalog::{self, SkinTone};
+use crate::emoji_support;
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
 use crate::keys::t_with_shortcuts;
+use crate::large_files;
+use crate::markdown;
+use crate::media_formats::{displayable_type, essence, is_svg, media_type_for, needs_app_thumbnail};
+use crate::media_layout::{APP_THUMBNAIL_SIDE, thumbnail_type};
 use crate::mention::{self, TriggerKind};
 use crate::model::{ConversationId, ThreadId};
-use crate::model::{ConversationKind, MessageKind, User};
+use crate::model::{MessageKind, User};
 use crate::notifier::needs_channel_confirmation;
+use crate::paste::{PasteKind, paste_from_shell};
+use crate::raster;
+use crate::reactive::SetIfAlive;
 use crate::settings::SendMode;
 use crate::slash::{self, Parsed};
-use crate::state::use_app_state;
+use crate::state::{Overlay, SidePanel, use_app_state};
+use crate::tab_handover::PERSIST_DRAFTS_EVENT;
+use crate::unread_divider::DividerEvent;
+use crate::viewport::is_touch_primary;
 
 /// How long typing pauses before the draft is stored.
 const DRAFT_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
 
-/// Tallest the input grows before it scrolls.
-const MAX_INPUT_HEIGHT_PX: i32 = 220;
 /// How many of the newest messages ↑ searches for the user's last one.
 const EDIT_LAST_SCAN: usize = 50;
 /// The newest messages that are certainly rendered while the feed follows the bottom.
 const ON_SCREEN_ROWS: usize = 3;
 
-/// A file chosen, dropped or pasted that is read into memory and waits for the send.
+/// `keyCode` of a key press the input method handles (all browsers report it while composing).
+const IME_KEY_CODE: u32 = 229;
+
+/// Inline styles the toolbar shows a pressed state for.
+const INLINE_STYLES: [InlineStyle; 5] = [
+  InlineStyle::Bold,
+  InlineStyle::Italic,
+  InlineStyle::Underline,
+  InlineStyle::Strike,
+  InlineStyle::Code,
+];
+
+/// A file chosen, dropped or pasted that waits for the send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingFile {
   name: String,
   media_type: String,
-  bytes: Vec<u8>,
+  content: FileContent,
   /// Object URL of an image for the thumbnail in the chip; revoked when the file leaves the list.
   maybe_preview_url: Option<String>,
+  /// A thumbnail the browser drew for a format the core can't decode (`OutgoingFile`).
+  maybe_thumbnail: Option<Vec<u8>>,
+  /// How long a video plays, read by the browser along with its poster frame.
+  maybe_duration_ms: Option<u64>,
 }
+
+/// A small file is read into memory at once; a large one stays the browser's `File` until it is sent
+/// (`large_files`), so it never sits in memory whole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum FileContent {
+  Read(Vec<u8>),
+  Large(web_sys::File),
+}
+
+/// Largest picture read whole only for the chip's thumbnail; bigger ones go without.
+const MAX_THUMBNAIL_READ_BYTES: u64 = 32 * 1024 * 1024;
 
 /// One line in the picker under the input.
 #[derive(Clone, Debug, PartialEq)]
 struct Suggestion {
-  /// What replaces the typed word (after the `@` or `/`).
+  /// What replaces the typed word: after the `@` or `/`, or the whole `:word` for an emoji.
   insert: String,
   label: String,
   detail: String,
@@ -56,6 +103,38 @@ struct Suggestion {
 }
 
 const MAX_SUGGESTIONS: usize = 8;
+
+/// Whether `list` shows the same entries as `shown`, so the selected one stays selected.
+fn is_same_list(shown: &[Suggestion], list: &[Suggestion]) -> bool {
+  shown.len() == list.len() && shown.iter().zip(list).all(|(a, b)| a.label == b.label)
+}
+
+/// Emoji whose shortcode or name starts with what was typed after `:`, best first, in the user's
+/// skin tone; only those the device's font draws.
+fn emoji_suggestions(query: &str, tone: SkinTone) -> Vec<Suggestion> {
+  let maybe_newest = emoji_support::newest_drawable();
+  emoji_catalog::search(query)
+    .into_iter()
+    .filter(|entry| emoji_support::can_draw(entry, maybe_newest))
+    .take(MAX_SUGGESTIONS)
+    .map(|entry| {
+      let emoji = if emoji_support::can_draw_skin_tones(entry, maybe_newest) {
+        entry.with_skin_tone(tone)
+      } else {
+        entry.emoji
+      };
+      Suggestion {
+        insert: emoji.to_owned(),
+        label: entry
+          .shortcode()
+          .map_or_else(|| emoji.to_owned(), |code| format!("{emoji} :{code}:")),
+        detail: String::new(),
+        person: None,
+        is_exact: false,
+      }
+    })
+    .collect()
+}
 
 /// People and groups whose name starts with, or contains, what was typed after `@`.
 fn mention_suggestions(
@@ -133,6 +212,9 @@ fn mention_suggestions(
 }
 
 /// Message composer for a channel or, with `maybe_thread`, for a thread reply.
+///
+/// The input is a rich-text editor ([`composer_editor`]): formatting shows as it will in the message
+/// and is stored as the Markdown subset. Toolbar, shortcuts and typed Markdown all format the same way.
 #[component]
 pub fn Composer(
   conversation: ConversationId,
@@ -148,22 +230,27 @@ pub fn Composer(
   let state = use_app_state();
   // Thread replies can also be posted to the conversation itself.
   let also_send_to_channel = RwSignal::new(false);
-  let channel_name = move || {
+  // Only a channel's thread reply can also go to the channel: in a direct or group conversation
+  // everybody already sees the thread, so the choice would mean nothing.
+  let maybe_channel_name = move || {
     state
       .read(|backend| backend.conversation(conversation))
-      .map(|conv| match conv.kind {
-        ConversationKind::Direct | ConversationKind::Group => conv.name,
-        _ => format!("#{}", conv.name),
-      })
-      .unwrap_or_default()
+      .filter(|conv| conv.has_channel_settings())
+      .map(|conv| format!("#{}", conv.name))
   };
-  let input = NodeRef::<html::Textarea>::new();
+  let editor = NodeRef::<html::Div>::new();
   let file_input = NodeRef::<html::Input>::new();
+  let media_input = NodeRef::<html::Input>::new();
+  let camera_input = NodeRef::<html::Input>::new();
   let is_empty = RwSignal::new(true);
   let attachments = RwSignal::new(Vec::<PendingFile>::new());
   let upload_error = RwSignal::new(None::<String>);
-  let is_drag_over = RwSignal::new(false);
   let notice = RwSignal::new(None::<Notice>);
+  let close_notice = move |event: NoticeEvent| {
+    if notice.with_untracked(|shown| shown.as_ref().is_some_and(|shown| shown.closes_on(event))) {
+      notice.set(None);
+    }
+  };
   let suggestions = RwSignal::new(Vec::<Suggestion>::new());
   let selected_suggestion = RwSignal::new(0_usize);
   let indexed_suggestions = Memo::new(move |_| {
@@ -173,8 +260,40 @@ pub fn Composer(
       .enumerate()
       .collect::<Vec<(usize, Suggestion)>>()
   });
-  let live_text = RwSignal::new(String::new());
+  let has_just_composed = StoredValue::new(false);
+  let on_composition_end = move |_| {
+    has_just_composed.set_value(true);
+    // Cleared once the task that ended the composition is over.
+    set_timeout(
+      move || {
+        has_just_composed.try_set_value(false);
+      },
+      std::time::Duration::ZERO,
+    );
+  };
   let show_formatting = Memo::new(move |_| state.settings.prefs.get().composer.show_formatting);
+  let active_formats = RwSignal::new(ActiveFormats::default());
+  // The editor's selection while a dialog, menu or picker has the focus.
+  let saved_selection = StoredValue::new_local(None::<web_sys::Range>);
+  // The link dialog: what was selected when it opened, and its fields.
+  let is_link_open = RwSignal::new(false);
+  let link_original = StoredValue::new(String::new());
+  let link_label = RwSignal::new(String::new());
+  let link_url = RwSignal::new(String::new());
+  let is_link_invalid = RwSignal::new(false);
+  let link_url_input = NodeRef::<html::Input>::new();
+  let attach_menu = NodeRef::<html::Div>::new();
+  let is_attach_menu_open = RwSignal::new(false);
+  let is_send_menu_open = RwSignal::new(false);
+  let priority = RwSignal::new(MessagePriority::Normal);
+  let is_silent = RwSignal::new(false);
+  let wants_acknowledgement = RwSignal::new(false);
+  let editor_id = format!(
+    "composer-{conversation}-{}",
+    maybe_thread.map_or_else(String::new, |thread| thread.to_string())
+  );
+  let suggestions_id = StoredValue::new(format!("{editor_id}-suggestions"));
+  let editor_id = StoredValue::new(editor_id);
 
   let attachment_list = move || {
     attachments
@@ -202,57 +321,124 @@ pub fn Composer(
     current
   });
 
-  // Drafts sync across devices: restore once the stored one arrives, store while typing.
-  let is_draft_restored = RwSignal::new(false);
-  let draft_generation = RwSignal::new(0_u32);
+  // Opening a conversation (or a thread) lets the user type at once, with mouse and keyboard only
+  // (#722). Once, when the editor is in the page; nothing reactive is tracked.
+  let has_tried_focus = StoredValue::new(false);
   Effect::new(move |_| {
-    let stored = state.read(|backend| backend.draft(conversation, maybe_thread));
-    if is_draft_restored.get_untracked() {
+    let Some(element) = editor.get() else { return };
+    if has_tried_focus.get_value() {
       return;
     }
-    let Some(element) = input.get() else { return };
-    if let Some(text) = stored.filter(|text| !text.is_empty()) {
-      is_draft_restored.set(true);
-      if element.value().is_empty() {
-        element.set_value(&text);
-        is_empty.set(false);
+    has_tried_focus.set_value(true);
+    let situation = untrack(|| FocusSituation {
+      is_fine_pointer: composer_focus::is_fine_pointer(),
+      can_post,
+      is_overlay_open: state.overlay.get_untracked() != Overlay::None,
+      is_focus_taken: composer_focus::is_focus_taken(),
+      is_thread_composer: maybe_thread.is_some(),
+      is_thread_open: matches!(state.panel.get_untracked(), SidePanel::Thread { .. }),
+    });
+    if composer_focus::should_focus(situation) {
+      drop(element.focus());
+    }
+  });
+
+  // Drafts sync across devices: restore once the stored one arrives, store while typing. A draft
+  // that arrives after the user typed, sent or cleared here is older than the editor (#977).
+  let draft_restore = StoredValue::new(DraftRestore::Waiting);
+  let draft_generation = RwSignal::new(0_u32);
+  // Once per editor: the editing commands make the browser lay out the page, so not on every change
+  // of the backend (#1050, each page of messages scrolled to was one).
+  Effect::new(move |_| {
+    if editor.get().is_some() {
+      composer_editor::prepare();
+    }
+  });
+  Effect::new(move |_| {
+    let stored = state.read(|backend| backend.draft(conversation, maybe_thread));
+    if draft_restore.get_value() == DraftRestore::Settled {
+      return;
+    }
+    let Some(element) = editor.get() else { return };
+    if let Some(text) = draft_restore.get_value().take(stored) {
+      draft_restore.set_value(DraftRestore::Settled);
+      if composer_editor::is_blank(&element) {
+        composer_editor::set_markdown(&element, &text);
+        is_empty.set(composer_editor::is_blank(&element));
       }
     }
   });
+  // Reads the whole draft, so only after typing pauses.
+  let store_draft_now = move || {
+    let text = editor
+      .try_get_untracked()
+      .flatten()
+      .map(|element| composer_editor::markdown(&element))
+      .unwrap_or_default();
+    state.try_write(|backend| backend.set_draft(conversation, maybe_thread, &text));
+  };
   let save_draft = move || {
+    draft_restore.set_value(DraftRestore::Settled);
     draft_generation.update(|generation| *generation += 1);
     let generation = draft_generation.get_untracked();
     set_timeout(
       move || {
-        if draft_generation.get_untracked() != generation {
+        // The composer may be gone by then (another channel opened); `try_*` then skips the save.
+        if draft_generation.try_get_untracked() != Some(generation) {
           return;
         }
-        let text = input
-          .get_untracked()
-          .map(|element| element.value())
-          .unwrap_or_default();
-        state.write(|backend| backend.set_draft(conversation, maybe_thread, &text));
+        store_draft_now();
       },
       DRAFT_SAVE_DELAY,
     );
   };
-
-  let resize = move || {
-    if let Some(element) = input.get_untracked() {
-      let style = web_sys::HtmlElement::style(&element);
-      drop(style.set_property("height", "auto"));
-      let height = element.scroll_height().min(MAX_INPUT_HEIGHT_PX);
-      drop(style.set_property("height", &format!("{height}px")));
+  // Another tab takes the app over (#744): a draft still waiting for the typing pause is stored
+  // now, before this composer goes away with the app.
+  let on_persist = window_event_listener_untyped(PERSIST_DRAFTS_EVENT, move |_| {
+    if draft_generation
+      .try_update(|generation| *generation += 1)
+      .is_some()
+    {
+      store_draft_now();
     }
+  });
+  on_cleanup(move || on_persist.remove());
+  let refresh_formats = move || {
+    if !show_formatting.get_untracked() {
+      return;
+    }
+    let Some(element) = editor.get_untracked() else {
+      return;
+    };
+    let mut formats = ActiveFormats {
+      block: composer_editor::block_format(&element),
+      ..ActiveFormats::default()
+    };
+    for style in INLINE_STYLES {
+      formats.set(style, composer_editor::is_inline_active(&element, style));
+    }
+    active_formats.set(formats);
+  };
+
+  let clear_editor = move || {
+    if let Some(element) = editor.get_untracked() {
+      composer_editor::clear(&element);
+    }
+    suggestions.set(Vec::new());
+    is_empty.set(true);
+    active_formats.set(ActiveFormats::default());
+    draft_restore.set_value(DraftRestore::Settled);
+    draft_generation.update(|generation| *generation += 1);
+    state.write(|backend| backend.set_draft(conversation, maybe_thread, ""));
   };
 
   // A message with @channel in a large conversation waits here until the user confirms.
   let pending_confirm = RwSignal::new(None::<usize>);
   let send_checked = move |is_confirmed: bool| {
-    let Some(element) = input.get_untracked() else {
+    let Some(element) = editor.get_untracked() else {
       return;
     };
-    let mut text = element.value();
+    let mut text = composer_editor::markdown(&element);
     if text.trim().is_empty() && attachments.with_untracked(Vec::is_empty) {
       return;
     }
@@ -281,12 +467,7 @@ pub fn Composer(
             },
           };
           if !sends {
-            element.set_value("");
-            suggestions.set(Vec::new());
-            live_text.set(String::new());
-            is_empty.set(true);
-            state.write(|backend| backend.set_draft(conversation, maybe_thread, ""));
-            resize();
+            clear_editor();
             return;
           }
         },
@@ -312,15 +493,26 @@ pub fn Composer(
       }
     }
     pending_confirm.set(None);
-    let files: Vec<OutgoingFile> = attachments
-      .get_untracked()
-      .into_iter()
-      .map(|file| OutgoingFile {
-        file_name: file.name,
-        media_type: file.media_type,
-        source: FileSource::Bytes { bytes: file.bytes },
-      })
-      .collect();
+    let mut files = Vec::new();
+    let mut large = Vec::new();
+    for file in attachments.get_untracked() {
+      match file.content {
+        FileContent::Read(bytes) => files.push(OutgoingFile {
+          file_name: file.name,
+          media_type: file.media_type,
+          source: FileSource::Bytes { bytes },
+          maybe_thumbnail: file.maybe_thumbnail,
+          maybe_duration_ms: file.maybe_duration_ms,
+        }),
+        FileContent::Large(picked) => large.push((
+          file.name,
+          file.media_type,
+          picked,
+          file.maybe_thumbnail,
+          file.maybe_duration_ms,
+        )),
+      }
+    }
     let body = text;
     let maybe_reply_to = state
       .reply_target
@@ -328,99 +520,237 @@ pub fn Composer(
       .filter(|target| target.conversation == conversation)
       .map(|target| target.message);
     state.reply_target.set(None);
-    state.write(|backend| {
-      backend.send_message(OutgoingMessage {
-        conversation,
-        maybe_thread,
-        body,
-        maybe_reply_to,
-        priority: MessagePriority::Normal,
-        wants_acknowledgement: false,
-        is_silent: false,
-        also_send_to_channel: maybe_thread.is_some() && also_send_to_channel.get_untracked(),
-        files,
+    let mut message = OutgoingMessage {
+      conversation,
+      maybe_thread,
+      body,
+      maybe_reply_to,
+      priority: priority.get_untracked(),
+      wants_acknowledgement: wants_acknowledgement.get_untracked(),
+      is_silent: is_silent.get_untracked(),
+      also_send_to_channel: maybe_thread.is_some()
+        && maybe_channel_name().is_some()
+        && also_send_to_channel.get_untracked(),
+      files,
+    };
+    if large.is_empty() {
+      state.write(|backend| backend.send_message(message));
+    } else {
+      // Large files are handed to the core first (staged or registered); the message follows.
+      leptos::task::spawn_local(async move {
+        for (file_name, media_type, picked, maybe_thumbnail, maybe_duration_ms) in large {
+          match large_files::source_of(&picked).await {
+            Ok(source) => message.files.push(OutgoingFile {
+              file_name,
+              media_type,
+              source,
+              maybe_thumbnail,
+              maybe_duration_ms,
+            }),
+            Err(error) => {
+              tracing::warn!(%error, "a large file could not be handed to the core");
+              let text = i18n.t_with("composer-file-unstaged", &[("name", &file_name)]);
+              upload_error.set_if_alive(Some(text));
+            },
+          }
+        }
+        if !message.files.is_empty() || !message.body.trim().is_empty() {
+          state.try_write(|backend| backend.send_message(message));
+        }
       });
-    });
-    element.set_value("");
+    }
+    clear_editor();
+    close_notice(NoticeEvent::Sent);
     also_send_to_channel.set(false);
-    draft_generation.update(|generation| *generation += 1);
-    state.write(|backend| backend.set_draft(conversation, maybe_thread, ""));
-    suggestions.set(Vec::new());
-    live_text.set(String::new());
+    priority.set(MessagePriority::Normal);
+    is_silent.set(false);
+    wants_acknowledgement.set(false);
     attachments.set(Vec::new());
-    is_empty.set(true);
-    resize();
     if maybe_thread.is_none() {
       state.jump_to_latest.update(|value| *value += 1);
+      // A thread reply reads the thread (thread_panel.rs), not the conversation's feed.
+      state.mark_read_on_send(conversation);
     }
+    state.divider_event(conversation, DividerEvent::Sent);
   };
   let send = move || send_checked(false);
 
-  // The picker under the input: people and user groups after `@`, commands after a leading `/`.
+  // The picker under the input: people and user groups after `@`, commands after a leading `/`. It
+  // looks at the text node at the caret only.
   let groups = use_groups();
   let refresh_suggestions = move || {
-    let Some(element) = input.get_untracked() else {
+    let Some(element) = editor.get_untracked() else {
       return;
     };
-    let cursor = element.selection_start().ok().flatten().unwrap_or(0) as usize;
-    let Some(found) = mention::trigger(&element.value(), cursor) else {
+    let Some(caret) = composer_editor::caret_text(&element) else {
+      suggestions.set(Vec::new());
+      return;
+    };
+    // A command only at the very start of the message.
+    let found = mention::trigger(&caret.before, caret.before.encode_utf16().count()).filter(|found| {
+      found.kind != TriggerKind::Command
+        || (caret.window_start == 0 && composer_editor::is_first_text(&element, &caret.node))
+    });
+    let Some(found) = found else {
       suggestions.set(Vec::new());
       return;
     };
     let list = match found.kind {
-      TriggerKind::Command => slash::matching_commands(&found.query)
-        .into_iter()
-        .map(|(name, usage)| Suggestion {
-          insert: name.to_owned(),
-          label: format!("/{name} {usage}").trim_end().to_owned(),
-          detail: String::new(),
-          person: None,
-          is_exact: name == found.query.to_lowercase(),
-        })
-        .collect(),
+      TriggerKind::Command => {
+        slash::matching_commands(&found.query, composer_commands::context(state, conversation))
+          .into_iter()
+          .map(|(name, usage)| Suggestion {
+            insert: name.to_owned(),
+            label: format!("/{name} {usage}").trim_end().to_owned(),
+            detail: String::new(),
+            person: None,
+            is_exact: name == found.query.to_lowercase(),
+          })
+          .collect()
+      },
       TriggerKind::Mention => {
         let people = state.read(|backend| backend.users());
         let groups = groups.map(|hub| hub.groups()).unwrap_or_default();
         mention_suggestions(&found.query, &people, &groups, &i18n.t("mention-channel"))
       },
+      TriggerKind::Emoji => emoji_suggestions(&found.query, state.settings.emoji_skin_tone.get_untracked()),
     };
-    selected_suggestion.set(0);
+    // The caret moving inside the same query (arrow keys, a click) keeps the selection (#690); a
+    // new list starts at its first entry.
+    if !suggestions.with_untracked(|shown| is_same_list(shown, &list)) {
+      selected_suggestion.set(0);
+    }
     suggestions.set(list);
+  };
+  // The others see that the user writes (#733), unless they turned that off (Settings > Privacy);
+  // not in the notes to self, where nobody else is.
+  let is_notes_to_self = untrack(|| {
+    state
+      .read(|backend| backend.conversation(conversation))
+      .is_some_and(|conv| conv.is_notes_to_self)
+  });
+  let last_typing_ms = StoredValue::new(None::<i64>);
+  let announce_typing = move || {
+    if is_notes_to_self
+      || !state
+        .settings
+        .prefs
+        .with_untracked(|prefs| prefs.privacy.share_typing)
+    {
+      return;
+    }
+    let now = now_ms();
+    if !should_notify_typing(is_empty.get_untracked(), now, last_typing_ms.get_value()) {
+      return;
+    }
+    last_typing_ms.set_value(Some(now));
+    // Changes nothing to read: no revision bump, as for the activity reports.
+    state.read(|backend| backend.notify_typing(conversation, maybe_thread));
+  };
+  let after_edit = move || {
+    if let Some(element) = editor.get_untracked() {
+      is_empty.set(composer_editor::is_blank(&element));
+    }
+    announce_typing();
+    save_draft();
+    refresh_formats();
   };
   let accept_suggestion = move |index: usize| {
     let Some(chosen) = suggestions.with_untracked(|list| list.get(index).cloned()) else {
       return;
     };
-    let Some(element) = input.get_untracked() else {
+    let Some(element) = editor.get_untracked() else {
       return;
     };
-    let value = element.value();
-    let cursor = element.selection_start().ok().flatten().unwrap_or(0) as usize;
-    if let Some(found) = mention::trigger(&value, cursor) {
-      let (text, at) = mention::complete(&value, &found, cursor, &chosen.insert);
-      element.set_value(&text);
-      drop(element.set_selection_range(at as u32, at as u32));
-      is_empty.set(text.trim().is_empty());
-      save_draft();
+    drop(element.focus());
+    if let Some(caret) = composer_editor::caret_text(&element)
+      && let Some(found) = mention::trigger(&caret.before, caret.before.encode_utf16().count())
+    {
+      let replacement = match found.kind {
+        TriggerKind::Mention => format!("@{} ", chosen.insert),
+        TriggerKind::Command => format!("/{} ", chosen.insert),
+        TriggerKind::Emoji => {
+          state.settings.remember_emoji(&chosen.insert);
+          format!("{} ", chosen.insert)
+        },
+      };
+      let start = caret.window_start + found.start;
+      composer_editor::replace_in_text(&caret.node, start, caret.offset, &replacement);
+      after_edit();
     }
     suggestions.set(Vec::new());
-    drop(element.focus());
   };
-  // Formatting buttons wrap the selection in Markdown markers.
-  let wrap = move |left: &'static str, right: &'static str| {
-    let Some(element) = input.get_untracked() else {
+
+  // Toolbar buttons and shortcuts. A button that took the focus gives it back with the selection.
+  let focus_editor = move || {
+    let element = editor.get_untracked()?;
+    let is_focused = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|document| document.active_element())
+      .is_some_and(|active| active == **element);
+    if !is_focused {
+      saved_selection.with_value(|range| composer_editor::restore_selection(&element, range.as_ref()));
+    }
+    Some(element)
+  };
+  let open_link_dialog = move || {
+    let Some(element) = focus_editor() else {
       return;
     };
-    let start = element.selection_start().ok().flatten().unwrap_or(0) as usize;
-    let end = element.selection_end().ok().flatten().unwrap_or(0) as usize;
-    let (text, from, to) = mention::wrap_selection(&element.value(), start, end, left, right);
-    element.set_value(&text);
-    drop(element.set_selection_range(from as u32, to as u32));
-    drop(element.focus());
-    is_empty.set(text.trim().is_empty());
-    live_text.set(text);
-    resize();
-    save_draft();
+    saved_selection.set_value(composer_editor::save_selection(&element));
+    let selected = composer_editor::selected_text();
+    let maybe_url = markdown::is_allowed_link(selected.trim()).then(|| selected.trim().to_owned());
+    link_original.set_value(selected.clone());
+    link_label.set(if maybe_url.is_some() {
+      String::new()
+    } else {
+      selected
+    });
+    link_url.set(maybe_url.unwrap_or_default());
+    is_link_invalid.set(false);
+    is_link_open.set(true);
+    request_animation_frame(move || {
+      if let Some(input) = link_url_input.try_get_untracked().flatten() {
+        drop(input.focus());
+      }
+    });
+  };
+  let run_format = move |action: FormatAction| {
+    let Some(element) = focus_editor() else {
+      return;
+    };
+    match action {
+      FormatAction::Inline(style) => composer_editor::toggle_inline(&element, style),
+      FormatAction::Block(format) => composer_editor::set_block_format(&element, format),
+      FormatAction::Link => {
+        open_link_dialog();
+        return;
+      },
+    }
+    after_edit();
+  };
+  let save_link = move || {
+    let url = with_scheme(link_url.get_untracked().trim());
+    if !markdown::is_allowed_link(&url) {
+      is_link_invalid.set(true);
+      return;
+    }
+    is_link_open.set(false);
+    let Some(element) = editor.get_untracked() else {
+      return;
+    };
+    saved_selection.with_value(|range| composer_editor::restore_selection(&element, range.as_ref()));
+    // An unchanged label keeps the selection's own formatting.
+    let label = link_label.get_untracked();
+    let keeps_selection = link_original.with_value(|original| !original.is_empty() && label == *original);
+    composer_editor::insert_link(&url, if keeps_selection { "" } else { &label });
+    after_edit();
+  };
+  let close_link_dialog = move || {
+    is_link_open.set(false);
+    if let Some(element) = editor.get_untracked() {
+      saved_selection.with_value(|range| composer_editor::restore_selection(&element, range.as_ref()));
+    }
   };
 
   // ↑ in the empty composer edits the user's newest message here (Slack, Teams, Mattermost).
@@ -464,7 +794,16 @@ pub fn Composer(
   };
 
   let on_keydown = move |ev: web_sys::KeyboardEvent| {
-    if ev.is_composing() {
+    // An input method owns the key while composing. WebKit (Safari, the macOS app, iOS) ends the
+    // composition before the Enter that confirms it arrives, with `isComposing` already false: that
+    // Enter has key code 229, or comes in the same task as `compositionend`. It must not send.
+    if ev.is_composing() || ev.key_code() == IME_KEY_CODE {
+      return;
+    }
+    if has_just_composed.get_value() {
+      if ev.key() == "Enter" {
+        ev.prevent_default();
+      }
       return;
     }
     let listed = suggestions.with_untracked(Vec::len);
@@ -501,11 +840,14 @@ pub fn Composer(
         _ => {},
       }
     }
+    if let Some(action) = format_action_for(&ev) {
+      ev.prevent_default();
+      run_format(action);
+      return;
+    }
+    let has_modifier = ev.shift_key() || ev.alt_key() || ev.ctrl_key() || ev.meta_key();
     if ev.key() == "ArrowUp"
-      && !ev.shift_key()
-      && !ev.alt_key()
-      && !ev.ctrl_key()
-      && !ev.meta_key()
+      && !has_modifier
       && is_empty.get_untracked()
       && attachments.with_untracked(Vec::is_empty)
       && edit_last_message()
@@ -513,44 +855,81 @@ pub fn Composer(
       ev.prevent_default();
       return;
     }
+    // Esc closes a notice first.
+    if ev.key() == "Escape" && !has_modifier && notice.with_untracked(Option::is_some) {
+      close_notice(NoticeEvent::Escape);
+      return;
+    }
+    // Esc in the empty composer of a conversation marks it read, as in the feed (#321); a reply
+    // being quoted is cancelled first.
+    if ev.key() == "Escape" && !has_modifier && maybe_thread.is_none() && is_empty.get_untracked() {
+      if state.reply_target.get_untracked().is_some() {
+        state.reply_target.set(None);
+        return;
+      }
+      state.mark_conversation_read(conversation);
+      return;
+    }
+    if ev.key() == "ArrowDown"
+      && !has_modifier
+      && let Some(element) = editor.get_untracked()
+      && composer_editor::leave_last_block(&element)
+    {
+      ev.prevent_default();
+      after_edit();
+      return;
+    }
+    if ev.key() == "Backspace"
+      && !has_modifier
+      && let Some(element) = editor.get_untracked()
+      && composer_editor::leave_block_at_start(&element)
+    {
+      ev.prevent_default();
+      after_edit();
+      return;
+    }
     if ev.key() != "Enter" {
       return;
     }
+    ev.prevent_default();
     let modifier = ev.ctrl_key() || ev.meta_key();
+    // On touch screens Enter is a newline and the send button sends, as in the phones' messengers.
     let should_send = match state.settings.send_mode.get_untracked() {
+      _ if is_touch_primary() => modifier,
       SendMode::Enter => !ev.shift_key() && !modifier,
       SendMode::CtrlEnter => modifier,
     };
-    if should_send {
-      ev.prevent_default();
+    // Ctrl/Cmd+Enter in Enter-sends mode would otherwise do nothing; treat it as send as well.
+    if should_send || modifier {
       send();
-    } else if modifier {
-      // Ctrl/Cmd+Enter in Enter-sends mode would otherwise do nothing; treat it as send as well.
-      ev.prevent_default();
-      send();
+    } else if let Some(element) = editor.get_untracked() {
+      composer_editor::new_line(&element);
+      after_edit();
     }
   };
 
-  let on_input = move |_| {
-    is_empty.set(
-      input
-        .get_untracked()
-        .is_none_or(|element| element.value().trim().is_empty()),
-    );
-    resize();
+  let on_input = move |ev: web_sys::Event| {
+    let Some(element) = editor.get_untracked() else {
+      return;
+    };
+    // Typed Markdown formats as it's typed; pastes and autocorrect insert text as it is.
+    if let Some(input) = ev.dyn_ref::<web_sys::InputEvent>()
+      && input.input_type() == "insertText"
+      && let Some(typed) = input.data().and_then(|data| data.chars().last())
+    {
+      composer_editor::apply_typing_shortcut(&element, typed.encode_utf8(&mut [0; 4]));
+    }
+    is_empty.set(composer_editor::is_blank(&element));
+    if notice.with_untracked(|shown| matches!(shown, Some(Notice::Help))) {
+      close_notice(NoticeEvent::Edited(&composer_editor::markdown(&element)));
+    }
+    announce_typing();
     save_draft();
     refresh_suggestions();
-    if show_formatting.get_untracked() {
-      live_text.set(
-        input
-          .get_untracked()
-          .map(|element| element.value())
-          .unwrap_or_default(),
-      );
-    }
+    refresh_formats();
   };
 
-  // Reads the files into memory; the core encrypts and uploads them when the message is sent.
+  // Reads small files into memory; large ones stay `File`s until the send (`large_files`).
   let add_files = move |files: Vec<web_sys::File>| {
     let limit = state.read(|backend| backend.max_upload_bytes());
     for file in files {
@@ -567,120 +946,258 @@ pub fn Composer(
       }
       upload_error.set(None);
       leptos::task::spawn_local(async move {
-        match JsFuture::from(file.array_buffer()).await {
-          Ok(buffer) => {
-            let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-            let media_type = if file.type_().is_empty() {
-              "application/octet-stream".to_owned()
-            } else {
-              file.type_()
+        let media_type = media_type_for(&file.name(), &file.type_());
+        // SVG, AVIF, HEIC: the browser draws the thumbnail the core in the page can't make.
+        // Other pictures get one too: the message shows it while the picture goes up (the
+        // core makes the one the message carries).
+        let wants_thumbnail = needs_app_thumbnail(&media_type)
+          || displayable_type(&media_type).is_some_and(|shown| shown.starts_with("image/"));
+        let is_large = size > large_files::READ_WHOLE_MAX_BYTES;
+        let is_read = !is_large || (wants_thumbnail && size <= MAX_THUMBNAIL_READ_BYTES);
+        let read = match is_read {
+          true => JsFuture::from(file.array_buffer())
+            .await
+            .map(|buffer| Some(js_sys::Uint8Array::new(&buffer).to_vec())),
+          false => Ok(None),
+        };
+        match read {
+          Ok(maybe_bytes) => {
+            // A video's poster frame and length, read by the browser from the file itself (never
+            // read into memory whole): the message shows them before the video is played.
+            let maybe_poster = match media_type.starts_with("video/") {
+              true => raster::video_poster(&file, APP_THUMBNAIL_SIDE).await,
+              false => None,
             };
-            let maybe_preview_url = media_type
-              .starts_with("image/")
-              .then(|| web_sys::Url::create_object_url_with_blob(&file).ok())
-              .flatten();
-            attachments.update(|list| {
-              list.push(PendingFile {
-                name: file.name(),
-                media_type,
-                bytes,
-                maybe_preview_url,
-              })
-            });
+            // An audio file's length, likewise, for its card (#802).
+            let maybe_duration_ms = match AudioFormat::of(&media_type, &file.name()) {
+              Some(_) => raster::audio_duration_ms(&file).await,
+              None => maybe_poster.as_ref().and_then(|poster| poster.maybe_duration_ms),
+            };
+            let maybe_thumbnail = match (&maybe_bytes, wants_thumbnail) {
+              _ if maybe_poster.is_some() => maybe_poster.map(|poster| poster.jpeg),
+              (Some(bytes), true) => raster::app_thumbnail(bytes, &media_type, APP_THUMBNAIL_SIDE).await,
+              _ => None,
+            };
+            let maybe_preview_url = chip_preview_url(&file, &media_type, maybe_thumbnail.as_deref());
+            let content = match (is_large, maybe_bytes) {
+              (false, Some(bytes)) => FileContent::Read(bytes),
+              _ => FileContent::Large(file.clone()),
+            };
+            let read = PendingFile {
+              name: file.name(),
+              media_type,
+              content,
+              maybe_preview_url,
+              maybe_thumbnail,
+              maybe_duration_ms,
+            };
+            if let Some(PendingFile {
+              maybe_preview_url: Some(url),
+              ..
+            }) = add_read_file(attachments, read)
+            {
+              drop(web_sys::Url::revoke_object_url(&url));
+            }
           },
-          Err(_) => upload_error.set(Some(
-            i18n.t_with("composer-file-unreadable", &[("name", &file.name())]),
-          )),
+          Err(_) => {
+            let text = i18n.t_with("composer-file-unreadable", &[("name", &file.name())]);
+            // The composer may be gone by now; see `add_read_file`.
+            upload_error.set_if_alive(Some(text));
+          },
         }
       });
     }
   };
 
-  let on_files = move |_| {
-    let Some(files) = file_input.get_untracked().and_then(|element| element.files()) else {
+  let take_files = move |input: NodeRef<html::Input>| {
+    let Some(element) = input.get_untracked() else {
       return;
     };
-    add_files((0..files.length()).filter_map(|i| files.item(i)).collect());
-    if let Some(element) = file_input.get_untracked() {
-      element.set_value("");
+    if let Some(files) = element.files() {
+      add_files((0..files.length()).filter_map(|i| files.item(i)).collect());
+    }
+    element.set_value("");
+  };
+  let pick_files = move |input: NodeRef<html::Input>| {
+    is_attach_menu_open.set(false);
+    if let Some(element) = input.get_untracked() {
+      let element: &web_sys::HtmlElement = element.unchecked_ref();
+      element.click();
     }
   };
-  // Drops anywhere on the conversation arrive through the channel view (main composer only).
-  if maybe_thread.is_none()
-    && let Some(DroppedFiles(dropped)) = use_context::<DroppedFiles>()
-  {
-    Effect::new(move |_| {
-      let files = dropped.get();
-      if !files.is_empty() {
-        dropped.set(Vec::new());
-        add_files(files);
-      }
-    });
-  }
+  // Drops anywhere on the conversation or thread arrive through its drop zone (`FileDrop`). A
+  // composer outside one has its own, for the files the desktop shell reads after a drop.
+  let drop_zone =
+    use_context::<DroppedFiles>().unwrap_or_else(|| DroppedFiles(RwSignal::new_local(Vec::new())));
+  let DroppedFiles(dropped) = drop_zone;
+  Effect::new(move |_| {
+    let files = dropped.get();
+    if !files.is_empty() {
+      dropped.set(Vec::new());
+      add_files(files);
+    }
+  });
+  // Files are attached; dropped text goes in as plain text, never as the HTML that came with it.
   let on_drop = move |ev: web_sys::DragEvent| {
     // Marks the drop as handled, so the conversation around doesn't attach the files a second time.
     ev.prevent_default();
-    is_drag_over.set(false);
-    if let Some(files) = ev.data_transfer().and_then(|transfer| transfer.files()) {
-      add_files((0..files.length()).filter_map(|i| files.item(i)).collect());
+    let Some(transfer) = ev.data_transfer() else {
+      return;
+    };
+    // Files the webview handed over as addresses only come from the desktop shell, or an error says
+    // why not; they are never pasted in as text.
+    match take_drop(&transfer, Some(drop_zone), state, i18n) {
+      DropContent::Files(files) => add_files(files),
+      DropContent::FromShell | DropContent::Unreadable => {},
+      DropContent::NoFiles => {
+        if let (Ok(text), Some(element)) = (transfer.get_data("text/plain"), editor.get_untracked())
+          && !text.is_empty()
+        {
+          drop(element.focus());
+          composer_editor::insert_text(&text);
+          after_edit();
+        }
+      },
     }
   };
+  // Pasted images are attached. Rich text is reduced to the subset; a URL pasted over selected text
+  // links it; in a code block everything is plain text.
   let on_paste = move |ev: web_sys::ClipboardEvent| {
     let Some(data) = ev.clipboard_data() else {
       return;
     };
-    if let Some(files) = data.files()
-      && files.length() > 0
-    {
-      ev.prevent_default();
-      add_files((0..files.length()).filter_map(|i| files.item(i)).collect());
-      return;
+    ev.prevent_default();
+    let files = transfer_files(&data);
+    let plain = data.get_data("text/plain").unwrap_or_default();
+    let maybe_uri_list = data
+      .get_data("text/uri-list")
+      .ok()
+      .filter(|list| !list.is_empty());
+    let maybe_html = data.get_data("text/html").ok().filter(|html| !html.is_empty());
+    // What the event didn't carry (a screenshot, copied files) the desktop shell reads (#761).
+    match PasteKind::classify(
+      !files.is_empty(),
+      crate::auth::tauri::is_available(),
+      maybe_uri_list.as_deref(),
+      &plain,
+      maybe_html.as_deref(),
+    ) {
+      PasteKind::Files => {
+        add_files(files);
+        return;
+      },
+      kind @ (PasteKind::CopiedFiles | PasteKind::Picture) => {
+        paste_from_shell(kind, drop_zone, state, i18n);
+        return;
+      },
+      PasteKind::Text => {},
     }
-    // A URL pasted over selected text links the text instead of replacing it.
-    let (Ok(pasted), Some(element)) = (data.get_data("text/plain"), input.get_untracked()) else {
+    let Some(element) = editor.get_untracked() else {
       return;
     };
-    let start = element.selection_start().ok().flatten().unwrap_or(0) as usize;
-    let end = element.selection_end().ok().flatten().unwrap_or(0) as usize;
-    if let Some((text, cursor)) = mention::link_over_selection(&element.value(), start, end, &pasted) {
-      ev.prevent_default();
-      element.set_value(&text);
-      drop(element.set_selection_range(cursor as u32, cursor as u32));
-      is_empty.set(false);
-      resize();
-      save_draft();
+    let url = plain.trim();
+    let has_selection = !composer_editor::selected_text().is_empty();
+    if composer_editor::block_format(&element) == BlockFormat::CodeBlock {
+      composer_editor::insert_text(&plain);
+    } else if has_selection && markdown::is_allowed_link(url) {
+      composer_editor::insert_link(url, "");
+    } else {
+      let maybe_html = data.get_data("text/html").ok();
+      composer_editor::insert_blocks(&composer_editor::pasted_blocks(maybe_html.as_deref(), &plain));
     }
+    after_edit();
+    refresh_suggestions();
   };
 
   let maybe_emoji_anchor = RwSignal::new_local(None::<web_sys::Element>);
-  // The picker takes the focus; the textarea keeps its selection, so the emoji lands at the cursor.
+  // The picker takes the focus; the saved selection puts the emoji where the caret was.
   let insert_emoji = move |emoji: String| {
     maybe_emoji_anchor.set(None);
-    let Some(element) = input.get_untracked() else {
+    let Some(element) = editor.get_untracked() else {
       return;
     };
-    let value = element.value();
-    let start = element.selection_start().ok().flatten().unwrap_or(0) as usize;
-    let end = element.selection_end().ok().flatten().unwrap_or(0) as usize;
-    let (text, cursor) = mention::replace_selection(&value, start, end, &emoji);
-    element.set_value(&text);
-    drop(element.focus());
-    drop(element.set_selection_range(cursor as u32, cursor as u32));
-    is_empty.set(false);
-    resize();
-    save_draft();
+    saved_selection.with_value(|range| composer_editor::restore_selection(&element, range.as_ref()));
+    composer_editor::insert_text(&emoji);
+    after_edit();
   };
+  let is_command_list_open =
+    move || suggestions.with(|list| list.first().is_some_and(|item| item.label.starts_with('/')));
+  // `@` and `/` buttons type the marker and open the picker, as typing it would.
+  let start_mention = move || {
+    let Some(element) = focus_editor() else {
+      return;
+    };
+    composer_editor::collapse_to_end();
+    let needs_space = composer_editor::caret_text(&element)
+      .is_some_and(|caret| caret.before.chars().last().is_some_and(|ch| !ch.is_whitespace()));
+    composer_editor::insert_text(if needs_space { " @" } else { "@" });
+    after_edit();
+    refresh_suggestions();
+  };
+  // The `/` button types the slash, and the suggestion list that opens is the help; pressed
+  // again it closes the list (and takes back its slash).
+  // A press outside the composer closes its notice. Removed with the composer: a late event must
+  // not reach its disposed signals.
+  let composer_root = NodeRef::<html::Div>::new();
+  let outside_listener = window_event_listener(leptos::ev::pointerdown, move |ev| {
+    let is_inside = composer_root.try_get_untracked().flatten().is_some_and(|root| {
+      ev.target()
+        .and_then(|target| target.dyn_into::<web_sys::Node>().ok())
+        .is_some_and(|node| root.contains(Some(&node)))
+    });
+    if !is_inside && notice.try_with_untracked(Option::is_some).unwrap_or(false) {
+      close_notice(NoticeEvent::PointerOutside);
+    }
+  });
+  on_cleanup(move || outside_listener.remove());
+  let start_command = move || {
+    let Some(element) = focus_editor() else {
+      return;
+    };
+    match CommandButton::of(composer_editor::is_blank(&element), is_command_list_open()) {
+      CommandButton::Open => {
+        composer_editor::insert_text("/");
+        after_edit();
+        refresh_suggestions();
+      },
+      CommandButton::Close => {
+        suggestions.set(Vec::new());
+        if composer_editor::markdown(&element).trim() == "/" {
+          composer_editor::clear(&element);
+          after_edit();
+        }
+      },
+      CommandButton::Unavailable => {},
+    }
+  };
+  let send_flags = move || {
+    let mut flags = Vec::new();
+    match priority.get() {
+      MessagePriority::Important => flags.push(i18n.t("priority-important")),
+      MessagePriority::Urgent => flags.push(i18n.t("priority-urgent")),
+      _ => {},
+    }
+    if is_silent.get() {
+      flags.push(i18n.t("composer-flag-silent"));
+    }
+    if wants_acknowledgement.get() {
+      flags.push(i18n.t("composer-flag-ack"));
+    }
+    flags
+  };
+  let is_coarse_pointer = web_sys::window()
+    .and_then(|window| window.match_media("(pointer: coarse)").ok().flatten())
+    .is_some_and(|query| query.matches());
 
+  // The link dialog's error, unique per composer (a thread's and the channel's can both be open).
+  let link_error_id = move || format!("{}-link-error", editor_id.get_value());
   view! {
     <div
       class="composer"
+      node_ref=composer_root
       class:composer-disabled=!can_post
-      class:composer-drop=move || is_drag_over.get()
-      on:dragover=move |ev| {
-        ev.prevent_default();
-        is_drag_over.set(true);
-      }
-      on:dragleave=move |_| is_drag_over.set(false)
+      // The drop zone around (`FileDrop`) shows where files go; this only accepts the drop.
+      on:dragover=move |ev: web_sys::DragEvent| ev.prevent_default()
       on:drop=on_drop
     >
       <Show
@@ -694,13 +1211,12 @@ pub fn Composer(
             <For each=attachment_list key=|(i, name, _)| (*i, name.clone()) let:item>
               {
                 let (index, name, maybe_preview_url) = item;
-                let leading_is_image = maybe_preview_url.is_some();
                 let leading = match maybe_preview_url {
                   Some(url) => view! { <img class="chip-thumb" src=url alt="" /> }.into_any(),
                   None => view! { <Icon name=IconName::File /> }.into_any(),
                 };
                 view! {
-                  <li class="chip" class:chip-image=leading_is_image>
+                  <li class="chip">
                     {leading}
                     <span class="chip-name">{name}</span>
                     <button
@@ -757,10 +1273,20 @@ pub fn Composer(
             Notice::Text(message) => view! { <p class="composer-notice" role="status">{message}</p> }.into_any(),
             Notice::Help => view! {
               <div class="composer-notice composer-help" role="status">
-                <p>{move || i18n.t("slash-help-title")}</p>
+                <div class="composer-help-head">
+                  <p>{move || i18n.t("slash-help-title")}</p>
+                  <button
+                    type="button"
+                    class="icon-btn icon-btn-small"
+                    aria-label=move || i18n.t("close")
+                    on:mousedown=|ev| ev.prevent_default()
+                    on:click=move |_| close_notice(NoticeEvent::CloseButton)
+                  >
+                    <Icon name=IconName::Close />
+                  </button>
+                </div>
                 <ul>
-                  {slash::COMMANDS
-                    .iter()
+                  {slash::commands(composer_commands::context(state, conversation))
                     .map(|(name, usage)| view! { <li><code>{format!("/{name} {usage}").trim_end().to_owned()}</code></li> })
                     .collect_view()}
                 </ul>
@@ -770,7 +1296,7 @@ pub fn Composer(
           })
         }}
         <Show when=move || !suggestions.with(Vec::is_empty) fallback=|| ()>
-          <ul class="suggestions" role="listbox" aria-label=move || i18n.t("composer-suggestions")>
+          <ul class="suggestions" role="listbox" id=suggestions_id.get_value() aria-label=move || i18n.t("composer-suggestions")>
             <For each=move || indexed_suggestions.get() key=|(index, item)| (*index, item.label.clone()) let:entry>
               {
                 let (index, item) = entry;
@@ -792,63 +1318,194 @@ pub fn Composer(
             </For>
           </ul>
         </Show>
-        <Show when=move || show_formatting.get() fallback=|| ()>
-          <div class="format-toolbar" role="toolbar" aria-label=move || i18n.t("composer-format")>
-            <button type="button" class="icon-btn" title=move || i18n.t("format-bold") aria-label=move || i18n.t("format-bold") on:click=move |_| wrap("**", "**")><strong>"B"</strong></button>
-            <button type="button" class="icon-btn" title=move || i18n.t("format-italic") aria-label=move || i18n.t("format-italic") on:click=move |_| wrap("_", "_")><em>"I"</em></button>
-            <button type="button" class="icon-btn" title=move || i18n.t("format-strike") aria-label=move || i18n.t("format-strike") on:click=move |_| wrap("~~", "~~")><s>"S"</s></button>
-            <button type="button" class="icon-btn" title=move || i18n.t("format-code") aria-label=move || i18n.t("format-code") on:click=move |_| wrap("`", "`")><code>"<>"</code></button>
-            <button type="button" class="icon-btn" title=move || i18n.t("format-code-block") aria-label=move || i18n.t("format-code-block") on:click=move |_| wrap("```\n", "\n```")><code>"{}"</code></button>
-          </div>
-        </Show>
         <div class="composer-box">
-          <label class="visually-hidden" for=format!("composer-{conversation}-{}", maybe_thread.map_or_else(String::new, |thread| thread.to_string()))>
-            {move || i18n.t("composer-label")}
-          </label>
-          <textarea
-            id=format!("composer-{conversation}-{}", maybe_thread.map_or_else(String::new, |thread| thread.to_string()))
-            class="composer-input"
-            rows="1"
-            name="message"
-            autocomplete="off"
-            placeholder=move || {
+          <Show when=move || show_formatting.get() fallback=|| ()>
+            <FormatToolbar active=active_formats on_action=Callback::new(run_format) />
+          </Show>
+          {move || {
+            is_link_open.get().then(|| {
+              view! {
+                <form
+                  class="link-dialog"
+                  novalidate
+                  role="dialog"
+                  aria-label=move || i18n.t("format-link")
+                  on:submit=move |ev| {
+                    ev.prevent_default();
+                    save_link();
+                  }
+                  on:keydown=move |ev: web_sys::KeyboardEvent| {
+                    if ev.key() == "Escape" {
+                      ev.prevent_default();
+                      close_link_dialog();
+                    }
+                  }
+                >
+                  <label>
+                    <span>{move || i18n.t("composer-link-text")}</span>
+                    <input
+                      type="text"
+                      class="input"
+                      prop:value=move || link_label.get()
+                      on:input=move |ev| link_label.set(event_target_value(&ev))
+                    />
+                  </label>
+                  <label>
+                    <span>{move || i18n.t("composer-link-url")}</span>
+                    <input
+                      type="text"
+                      class="input"
+                      autocomplete="url"
+                      inputmode="url"
+                      placeholder="https://"
+                      node_ref=link_url_input
+                      prop:value=move || link_url.get()
+                      aria-invalid=move || is_link_invalid.get().then_some("true")
+                      aria-describedby=move || is_link_invalid.get().then(link_error_id)
+                      on:input=move |ev| {
+                        link_url.set(event_target_value(&ev));
+                        is_link_invalid.set(false);
+                      }
+                    />
+                  </label>
+                  {move || is_link_invalid.get().then(|| view! { <p id=link_error_id() class="composer-error small" role="alert">{move || i18n.t("composer-link-invalid")}</p> })}
+                  <div class="link-dialog-actions">
+                    <button type="button" class="btn btn-small" on:click=move |_| close_link_dialog()>{move || i18n.t("cancel")}</button>
+                    <button type="submit" class="btn btn-small btn-primary">{move || i18n.t("save")}</button>
+                  </div>
+                </form>
+              }
+            })
+          }}
+          <div
+            id=editor_id.get_value()
+            class="composer-input composer-editor"
+            class:is-empty=move || is_empty.get()
+            contenteditable="true"
+            role="textbox"
+            aria-multiline="true"
+            aria-label=move || i18n.t("composer-label")
+            aria-autocomplete="list"
+            aria-controls=suggestions_id.get_value()
+            aria-expanded=move || (!suggestions.with(Vec::is_empty)).to_string()
+            spellcheck="true"
+            translate="no"
+            data-placeholder=move || {
               let name = conversation_name.get_value();
-              if name.is_empty() { i18n.t(placeholder_key) } else { i18n.t_with(placeholder_key, &[("name", &name)]) }
+              // Always with the argument: Fluent shows a missing one as "{$name}" (#699).
+              if name.is_empty() && placeholder_key == "composer-placeholder" {
+                i18n.t("composer-placeholder-untitled")
+              } else {
+                i18n.t_with(placeholder_key, &[("name", &name)])
+              }
             }
-            node_ref=input
+            node_ref=editor
             on:keydown=on_keydown
+            on:compositionend=on_composition_end
             on:input=on_input
-            on:click=move |_| refresh_suggestions()
+            on:click=move |_| {
+              refresh_suggestions();
+              refresh_formats();
+            }
             on:keyup=move |ev| {
-              if matches!(ev.key().as_str(), "ArrowLeft" | "ArrowRight" | "Home" | "End") {
+              if matches!(ev.key().as_str(), "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown" | "Home" | "End") {
                 refresh_suggestions();
+                refresh_formats();
+              }
+            }
+            on:focus=move |_| refresh_formats()
+            on:blur=move |_| {
+              // Also runs when the focused editor is removed with its view (#378): the composer may
+              // already be disposed.
+              if let Some(element) = editor.try_get_untracked().flatten() {
+                saved_selection.try_set_value(composer_editor::save_selection(&element));
               }
             }
             on:paste=on_paste
             data-composer=if maybe_thread.is_some() { "thread" } else { "channel" }
-          ></textarea>
+          ></div>
           <div class="composer-toolbar">
-            <input type="file" multiple hidden node_ref=file_input on:change=on_files tabindex="-1" />
-            <button
-              class="icon-btn"
-              aria-label=move || i18n.t("composer-attach")
-              title=move || i18n.t("composer-attach")
-              on:click=move |_| {
-                if let Some(element) = file_input.get_untracked() {
-                  let element: &web_sys::HtmlElement = element.unchecked_ref();
-                  element.click();
+            <input type="file" multiple hidden node_ref=file_input on:change=move |_| take_files(file_input) tabindex="-1" />
+            <input type="file" multiple hidden accept="image/*,video/*" node_ref=media_input on:change=move |_| take_files(media_input) tabindex="-1" />
+            <input type="file" hidden accept="image/*" capture="environment" node_ref=camera_input on:change=move |_| take_files(camera_input) tabindex="-1" />
+            <div class="composer-menu-wrap">
+              <button
+                type="button"
+                class="icon-btn composer-add"
+                aria-label=move || i18n.t("composer-attach")
+                title=move || i18n.t("composer-attach")
+                aria-haspopup="menu"
+                aria-expanded=move || is_attach_menu_open.get().to_string()
+                on:click=move |_| {
+                  is_attach_menu_open.update(|open| *open = !*open);
+                  request_animation_frame(move || focus_first_item(attach_menu));
                 }
+              >
+                <Icon name=IconName::Plus />
+              </button>
+              <Show when=move || is_attach_menu_open.get() fallback=|| ()>
+                <MenuSurface
+                  class="composer-attach-menu opens-up align-start"
+                  label=Signal::derive(move || i18n.t("composer-attach"))
+                  on_close=Callback::new(move |()| is_attach_menu_open.set(false))
+                  node_ref=attach_menu
+                  on_keydown=Callback::new(move |ev: web_sys::KeyboardEvent| match ev.key().as_str() {
+                    "Escape" => {
+                      ev.prevent_default();
+                      is_attach_menu_open.set(false);
+                    },
+                    "ArrowDown" | "ArrowUp" => {
+                      ev.prevent_default();
+                      move_focus_vertical(&ev, attach_menu);
+                    },
+                    _ => {},
+                  })
+                >
+                  <button type="button" class="menu-item" role="menuitem" on:click=move |_| pick_files(file_input)>
+                    <Icon name=IconName::File />
+                    <span class="menu-label">{move || i18n.t("composer-attach-file")}</span>
+                  </button>
+                  <button type="button" class="menu-item" role="menuitem" on:click=move |_| pick_files(media_input)>
+                    <Icon name=IconName::Image />
+                    <span class="menu-label">{move || i18n.t("composer-attach-media")}</span>
+                  </button>
+                  {is_coarse_pointer.then(|| view! {
+                    <button type="button" class="menu-item" role="menuitem" on:click=move |_| pick_files(camera_input)>
+                      <Icon name=IconName::Camera />
+                      <span class="menu-label">{move || i18n.t("composer-attach-camera")}</span>
+                    </button>
+                  })}
+                </MenuSurface>
+              </Show>
+            </div>
+            <button
+              type="button"
+              class="icon-btn composer-format-toggle"
+              aria-pressed=move || show_formatting.get().to_string()
+              aria-label=move || i18n.t("composer-format-toggle")
+              title=move || i18n.t("composer-format-toggle")
+              on:mousedown=|ev| ev.prevent_default()
+              on:click=move |_| {
+                state.settings.prefs.update(|prefs| prefs.composer.show_formatting = !prefs.composer.show_formatting);
+                refresh_formats();
               }
             >
-              <Icon name=IconName::Paperclip />
+              <span aria-hidden="true">"Aa"</span>
             </button>
             <button
+              type="button"
               class="icon-btn"
               aria-label=move || i18n.t("composer-emoji")
               title=move || i18n.t("composer-emoji")
               aria-haspopup="dialog"
               aria-expanded=move || maybe_emoji_anchor.with(Option::is_some).to_string()
-              on:click=move |ev| maybe_emoji_anchor.set(Some(event_target::<web_sys::Element>(&ev)))
+              on:mousedown=|ev| ev.prevent_default()
+              on:click=move |ev| {
+                if let Some(element) = editor.get_untracked() {
+                  saved_selection.set_value(composer_editor::save_selection(&element));
+                }
+                maybe_emoji_anchor.set(Some(event_target::<web_sys::Element>(&ev)));
+              }
             >
               <Icon name=IconName::Smile />
             </button>
@@ -863,8 +1520,8 @@ pub fn Composer(
                       on_pick=Callback::new(insert_emoji)
                       on_close=Callback::new(move |()| {
                         maybe_emoji_anchor.set(None);
-                        if let Some(element) = input.get_untracked() {
-                          drop(element.focus());
+                        if let Some(element) = editor.get_untracked() {
+                          saved_selection.with_value(|range| composer_editor::restore_selection(&element, range.as_ref()));
                         }
                       })
                     />
@@ -874,58 +1531,247 @@ pub fn Composer(
             <button
               type="button"
               class="icon-btn"
-              aria-pressed=move || show_formatting.get().to_string()
-              aria-label=move || i18n.t("composer-format-toggle")
-              title=move || i18n.t("composer-format-toggle")
-              on:click=move |_| {
-                state.settings.prefs.update(|prefs| prefs.composer.show_formatting = !prefs.composer.show_formatting);
-                live_text.set(input.get_untracked().map(|element| element.value()).unwrap_or_default());
-              }
+              aria-label=move || i18n.t("composer-mention")
+              title=move || i18n.t("composer-mention")
+              on:mousedown=|ev| ev.prevent_default()
+              on:click=move |_| start_mention()
             >
-              <span aria-hidden="true">"Aa"</span>
+              <Icon name=IconName::AtSign />
             </button>
-            {if maybe_thread.is_some() {
-              // In a thread the hint makes room for "Also send to #channel" (Slack, Mattermost).
-              view! {
-                <label class="composer-hint also-send">
-                  <input
-                    type="checkbox"
-                    prop:checked=move || also_send_to_channel.get()
-                    on:change=move |ev| also_send_to_channel.set(event_target_checked(&ev))
-                  />
-                  <span>{move || i18n.t_with("composer-also-send", &[("name", &channel_name())])}</span>
-                </label>
-              }
-                .into_any()
-            } else {
-              view! {
-                <span class="composer-hint">
-                  {move || match state.settings.send_mode.get() {
-                    SendMode::Enter => t_with_shortcuts(i18n, "composer-hint-enter"),
-                    SendMode::CtrlEnter => t_with_shortcuts(i18n, "composer-hint-ctrl-enter"),
-                  }}
-                </span>
-              }
-                .into_any()
-            }}
             <button
-              class="send-btn"
-              disabled=move || is_empty.get() && attachments.with(Vec::is_empty)
-              aria-label=move || i18n.t("composer-send")
-              title=move || i18n.t("composer-send")
-              on:click=move |_| send()
+              type="button"
+              class="icon-btn"
+              aria-label=move || i18n.t("composer-commands")
+              title=move || i18n.t("composer-commands")
+              aria-expanded=move || is_command_list_open().to_string()
+              prop:disabled=move || CommandButton::of(is_empty.get(), is_command_list_open()) == CommandButton::Unavailable
+              on:mousedown=|ev| ev.prevent_default()
+              on:click=move |_| start_command()
             >
-              <Icon name=IconName::Send />
+              <Icon name=IconName::Slash />
             </button>
+            // A thread has no room for the hint; "Also send to" sits below the box instead.
+            {maybe_thread.is_none().then(|| view! {
+              <span class="composer-hint">
+                {move || match state.settings.send_mode.get() {
+                  SendMode::Enter => t_with_shortcuts(i18n, "composer-hint-enter"),
+                  SendMode::CtrlEnter => t_with_shortcuts(i18n, "composer-hint-ctrl-enter"),
+                }}
+              </span>
+            })}
+            {maybe_thread.is_some().then(|| view! { <span class="grow"></span> })}
+            <span class="send-flags" aria-live="polite">
+              {move || send_flags().into_iter().map(|flag| view! { <span class="send-flag">{flag}</span> }).collect_view()}
+            </span>
+            <div class="send-group composer-menu-wrap">
+              <button
+                class="send-btn"
+                disabled=move || is_empty.get() && attachments.with(Vec::is_empty)
+                aria-label=move || i18n.t("composer-send")
+                title=move || i18n.t("composer-send")
+                on:click=move |_| send()
+              >
+                <Icon name=IconName::Send />
+              </button>
+              <button
+                type="button"
+                class="send-menu-btn"
+                aria-label=move || i18n.t("composer-send-options")
+                title=move || i18n.t("composer-send-options")
+                aria-haspopup="menu"
+                aria-expanded=move || is_send_menu_open.get().to_string()
+                on:click=move |_| is_send_menu_open.update(|open| *open = !*open)
+              >
+                <Icon name=IconName::ChevronDown />
+              </button>
+              <Show when=move || is_send_menu_open.get() fallback=|| ()>
+                <SendOptionsMenu
+                  priority=priority
+                  is_silent=is_silent
+                  wants_acknowledgement=wants_acknowledgement
+                  on_close=Callback::new(move |()| {
+                    is_send_menu_open.set(false);
+                    if let Some(element) = editor.get_untracked() {
+                      saved_selection.with_value(|range| composer_editor::restore_selection(&element, range.as_ref()));
+                    }
+                  })
+                />
+              </Show>
+            </div>
           </div>
         </div>
-        <Show when=move || show_formatting.get() && !live_text.with(|text| text.trim().is_empty()) fallback=|| ()>
-          <div class="composer-preview" aria-label=move || i18n.t("composer-preview")>
-            {move || view! { <RichText body=live_text.get() me=state.me().username /> }}
-          </div>
-        </Show>
-        <p class="markdown-hint">{move || i18n.t("composer-markdown-hint")}</p>
+        // Slack and Mattermost: a thread reply can also go to the conversation.
+        {move || maybe_thread.and_then(|_| maybe_channel_name()).map(|name| view! {
+          <label class="also-send">
+            <input
+              type="checkbox"
+              prop:checked=move || also_send_to_channel.get()
+              on:change=move |ev| also_send_to_channel.set(event_target_checked(&ev))
+            />
+            <span>{move || i18n.t_with("composer-also-send", &[("name", &name)])}</span>
+          </label>
+        })}
       </Show>
     </div>
+  }
+}
+
+/// Whether a stored draft may still fill this composer. The stored draft is restored once, when it
+/// arrives; after that, or once the user typed, sent or cleared here, the editor is newer than any
+/// draft that arrives later (a slow sync echo, another device), so it never refills (#977).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DraftRestore {
+  Waiting,
+  Settled,
+}
+
+impl DraftRestore {
+  /// The draft to put into the editor, if this composer still waits for one.
+  fn take(self, maybe_stored: Option<String>) -> Option<String> {
+    match self {
+      Self::Waiting => maybe_stored.filter(|text| !text.is_empty()),
+      Self::Settled => None,
+    }
+  }
+}
+
+/// The chip's preview of a picked picture. An SVG shows its drawn thumbnail, never itself: a `blob:`
+/// URL of an SVG would run its scripts if opened in a tab (see `crate::raster`).
+fn chip_preview_url(
+  file: &web_sys::File,
+  media_type: &str,
+  maybe_thumbnail: Option<&[u8]>,
+) -> Option<String> {
+  if let Some(thumbnail) = maybe_thumbnail {
+    return blob_url(thumbnail, thumbnail_type(thumbnail));
+  }
+  // The blob URL of the picked file carries the file's own type: that one must be allowlisted.
+  let is_shown_as_is = essence(media_type).starts_with("image/")
+    && !is_svg(media_type)
+    && displayable_type(&file.type_()).is_some_and(|shown| shown.starts_with("image/"));
+  is_shown_as_is
+    .then(|| web_sys::Url::create_object_url_with_blob(file).ok())
+    .flatten()
+}
+
+fn focus_first_item(menu: NodeRef<html::Div>) {
+  if let Some(item) = menu
+    .try_get_untracked()
+    .flatten()
+    .and_then(|menu| menu.query_selector("[role=menuitem]").ok().flatten())
+    .and_then(|item| item.dyn_into::<web_sys::HtmlElement>().ok())
+  {
+    drop(item.focus());
+  }
+}
+
+/// `example.com` means `https://example.com`.
+fn with_scheme(url: &str) -> String {
+  if url.contains("://") || url.starts_with(markdown::PERMALINK_PREFIX) {
+    url.to_owned()
+  } else {
+    format!("https://{url}")
+  }
+}
+
+/// Adds a file that was read in the background. The composer may be gone by then (another
+/// conversation was opened while a big file was read): its signals are disposed, and writing them
+/// would panic and abort the whole wasm app (issue #316). Returns the file when nobody took it.
+fn add_read_file(attachments: RwSignal<Vec<PendingFile>>, file: PendingFile) -> Option<PendingFile> {
+  let mut maybe_file = Some(file);
+  attachments.try_update(|list| list.extend(maybe_file.take()));
+  maybe_file
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn emoji_suggestions_insert_the_emoji_in_the_skin_tone() {
+    let found = emoji_suggestions("poo", SkinTone::Default);
+    assert_eq!(found.first().map(|item| item.insert.as_str()), Some("💩"));
+    assert_eq!(found.first().map(|item| item.label.as_str()), Some("💩 :hankey:"));
+    assert!(found.len() <= MAX_SUGGESTIONS);
+    let waves = emoji_suggestions("wave", SkinTone::Medium);
+    assert_eq!(waves.first().map(|item| item.insert.as_str()), Some("👋🏽"));
+    assert!(emoji_suggestions("nothing_like_this", SkinTone::Default).is_empty());
+  }
+
+  #[test]
+  fn a_file_read_after_the_composer_closed_is_handed_back_without_a_panic() {
+    let owner = Owner::new();
+    let attachments = owner.with(|| RwSignal::new(Vec::<PendingFile>::new()));
+    assert_eq!(add_read_file(attachments, file("open.txt")), None);
+    assert_eq!(attachments.get_untracked().len(), 1);
+
+    owner.cleanup();
+    assert_eq!(
+      add_read_file(attachments, file("late.txt")),
+      Some(file("late.txt")),
+      "a disposed list is not written"
+    );
+  }
+
+  #[test]
+  fn the_selection_stays_while_the_list_is_unchanged() {
+    let shown = vec![suggestion("/shrug [text]"), suggestion("/shortcuts")];
+    assert!(
+      is_same_list(&shown, &shown.clone()),
+      "arrow keys refresh the same list"
+    );
+    assert!(
+      !is_same_list(&shown, &shown[..1]),
+      "a narrower query starts at the top"
+    );
+    assert!(!is_same_list(
+      &shown,
+      &[suggestion("/settings"), suggestion("/shortcuts")]
+    ));
+    assert!(!is_same_list(&[], &shown));
+  }
+
+  mod draft_restore {
+    use super::*;
+
+    #[test]
+    fn the_stored_draft_fills_a_fresh_composer_once_it_arrives() {
+      assert_eq!(DraftRestore::Waiting.take(None), None, "not synced yet");
+      assert_eq!(DraftRestore::Waiting.take(Some(String::new())), None);
+      assert_eq!(
+        DraftRestore::Waiting.take(Some("half a thought".into())),
+        Some("half a thought".into())
+      );
+    }
+
+    #[test]
+    fn a_late_draft_never_refills_a_settled_composer() {
+      // #977: the user typed (the draft was stored), then sent or deleted the text, and only then
+      // the slow echo of the stored draft arrives. Typing, clearing and a restore all settle the
+      // composer; a draft from another device does not overwrite the editor either.
+      assert_eq!(DraftRestore::Settled.take(Some("sent already".into())), None);
+      assert_eq!(DraftRestore::Settled.take(None), None);
+    }
+  }
+
+  fn suggestion(label: &str) -> Suggestion {
+    Suggestion {
+      insert: label.trim_start_matches('/').into(),
+      label: label.into(),
+      detail: String::new(),
+      person: None,
+      is_exact: false,
+    }
+  }
+
+  fn file(name: &str) -> PendingFile {
+    PendingFile {
+      name: name.into(),
+      media_type: "text/plain".into(),
+      content: FileContent::Read(b"x".to_vec()),
+      maybe_preview_url: None,
+      maybe_thumbnail: None,
+      maybe_duration_ms: None,
+    }
   }
 }

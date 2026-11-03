@@ -1,0 +1,55 @@
+/* Placeholders for content that is still loading (components/skeleton.rs). */
+.list-skeleton {
+  display: block;
+}
+
+.msg-skeleton {
+  display: flex;
+  gap: 12px;
+  padding: 8px 16px;
+}
+
+.skeleton-avatar,
+.skeleton-lines span {
+  background: var(--surface-3);
+  border-radius: var(--radius-sm);
+  /* A few pulses, then still: a placeholder left in the overscan must not keep the page busy. */
+  animation: skeleton-pulse 1.4s ease-in-out 6;
+}
+
+.skeleton-avatar {
+  flex: none;
+  width: 36px;
+  height: 36px;
+}
+
+.skeleton-lines {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.skeleton-lines span {
+  height: 10px;
+  width: 30%;
+}
+
+.skeleton-lines span + span {
+  width: 65%;
+}
+
+@keyframes skeleton-pulse {
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-avatar,
+  .skeleton-lines span {
+    animation: none;
+  }
+}
+

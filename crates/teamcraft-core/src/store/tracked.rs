@@ -1,0 +1,921 @@
+//! A store that notes which parts of the UI's snapshot its writes may have changed, so the snapshot
+//! is rebuilt per conversation instead of reading the whole workspace on every change (issue #246).
+//!
+//! The engine and the UI adapter share one [`TrackedStore`]; the host takes the [`StoreChanges`]
+//! when the UI asks what changed ([`crate::ui_snapshot::SnapshotCache`]). Writes are classified by
+//! table and key: what one conversation's sidebar entry or feed reads, what one person's entry
+//! reads, the live state (counts, threads, presence log, receipts), the security part, or what
+//! every conversation may depend on (names, spaces, preferences). Tables the snapshot doesn't read
+//! (MLS state, sync cursors, search segments, …) are not noted at all.
+//!
+//! With [`TrackedStore::with_message_cache`] it keeps the decoded messages of the conversations
+//! read last and a revision per conversation ([`MessageCache`], issue #1000).
+//!
+//! It also notes the image attachments whose message went away – deleted, withdrawn by its sender,
+//! or its conversation no longer listed for this user – so the host drops their renditions from the
+//! persistent media cache (#749, [`TrackedStore::take_removed_renditions`]).
+
+use std::collections::{BTreeSet, VecDeque};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
+
+use super::message_cache::MessageCache;
+use super::{
+  AttachmentRef, FeedVersion, LocalStore, MediaRange, MessageContent, MessageEdge, MessageFilter,
+  MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally,
+};
+
+/// What the UI's message cache may hold by default (issue #1125): about 60,000 messages at the
+/// 1 KB a message of ordinary length takes decoded (docs/performance.md, "Local store"), but
+/// counted in bytes, so a channel of long messages doesn't hold more. Within the mobile budget of
+/// 250 MiB together with the store's own caches ([`super::SealedStoreLimits`]).
+pub const DEFAULT_MESSAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Records of [`Table::Account`] every conversation entry reads (unread marks, mention rules).
+const SHARED_ACCOUNT_RECORDS: [&str; 2] = [
+  crate::client::ACCOUNT_DATA_KEY,
+  crate::notify_rules::MENTION_PREFERENCES_RECORD,
+];
+/// The key prefix of a conversation's bookmarks in [`Table::Account`].
+const BOOKMARKS_PREFIX: &str = "bookmarks/";
+/// Removed renditions kept until the host takes them; a host that never does (one without a media
+/// cache) doesn't make them grow, the oldest go (the cache's age limit covers what is lost).
+const MAX_REMOVED_RENDITIONS: usize = 4096;
+/// Messages read per page when a conversation goes away.
+const REMOVED_CONVERSATION_PAGE: usize = 256;
+
+/// A [`LocalStore`] that notes what its writes changed. Clones share the notes.
+#[derive(Clone)]
+pub struct TrackedStore<S> {
+  inner: S,
+  changes: Arc<Mutex<StoreChanges>>,
+  removed_renditions: Arc<Mutex<VecDeque<RemovedRendition>>>,
+  messages: Arc<Mutex<MessageCache>>,
+}
+
+/// An image attachment whose message went away: its cached rendition goes too. Identifies the entry
+/// like `teamcraft_client_api::media::MediaKey::Rendition`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemovedRendition {
+  pub conversation: ConversationId,
+  pub message: MessageId,
+  pub attachment: AttachmentId,
+  pub content_sha256: [u8; 32],
+}
+
+/// What changed since the changes were last taken.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoreChanges {
+  /// Conversations whose entry or feed may differ: messages, members, bookmarks, acknowledgements.
+  pub conversations: BTreeSet<ConversationId>,
+  /// People whose entry may differ (their presence state or custom status).
+  pub users: BTreeSet<UserId>,
+  /// People whose record in the presence log was written or dropped (also counts as live), so a
+  /// reader's index of the log follows without reading all of it (issue #259).
+  pub announced: BTreeSet<UserId>,
+  /// Unread counts, threads, the presence log, receipts or the connection marks.
+  pub is_live: bool,
+  /// Pinned identity keys or the verified workspace.
+  pub is_security: bool,
+  /// Something every entry may depend on: people's names, spaces, the conversation list,
+  /// categories, the workspace, account data, mention rules.
+  pub is_everything: bool,
+}
+
+/// What one write changed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Change {
+  Conversation(ConversationId),
+  User(UserId),
+  /// A person's record in the presence log.
+  Announced(UserId),
+  Live,
+  Security,
+  Everything,
+  /// Workspace: both the security part and everything else.
+  Workspace,
+  Nothing,
+}
+
+impl<S: LocalStore> TrackedStore<S> {
+  pub fn new(inner: S) -> Self {
+    Self::with_message_cache(inner, 0)
+  }
+
+  /// Also keeps the decoded messages of the conversations read last, up to `max_size_bytes` of
+  /// memory in all ([`DEFAULT_MESSAGE_CACHE_BYTES`] is the usual figure), for a store whose reads
+  /// are expensive (SQLCipher decrypts and checks every page it reads). Stores that already hold
+  /// everything in memory gain nothing from it. A conversation larger than the whole budget is
+  /// never kept; `0` keeps none.
+  pub fn with_message_cache(inner: S, max_size_bytes: usize) -> Self {
+    Self {
+      inner,
+      changes: Arc::default(),
+      removed_renditions: Arc::default(),
+      messages: Arc::new(Mutex::new(MessageCache::new(max_size_bytes))),
+    }
+  }
+
+  /// The image attachments whose message went away since the last call.
+  pub fn take_removed_renditions(&self) -> Vec<RemovedRendition> {
+    let mut removed = self
+      .removed_renditions
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
+    removed.drain(..).collect()
+  }
+
+  /// The wrapped store (for what only it offers, like flushing to disk).
+  pub fn inner(&self) -> &S {
+    &self.inner
+  }
+
+  /// Everything noted since the last call; starts noting afresh.
+  pub fn take_changes(&self) -> StoreChanges {
+    std::mem::take(&mut *self.lock())
+  }
+
+  fn note(&self, change: Change) {
+    let mut changes = self.lock();
+    match change {
+      Change::Conversation(conversation) => {
+        changes.conversations.insert(conversation);
+      },
+      Change::User(user) => {
+        changes.users.insert(user);
+      },
+      Change::Announced(user) => {
+        changes.announced.insert(user);
+        // The person's entry shows the custom status the log carries.
+        changes.users.insert(user);
+        changes.is_live = true;
+      },
+      Change::Live => changes.is_live = true,
+      Change::Security => changes.is_security = true,
+      Change::Everything => changes.is_everything = true,
+      Change::Workspace => {
+        changes.is_security = true;
+        changes.is_everything = true;
+      },
+      Change::Nothing => {},
+    }
+  }
+
+  /// Notes the image attachments of `messages`, which are going away.
+  fn note_removed(&self, messages: impl IntoIterator<Item = StoredMessage>) {
+    let mut removed = self
+      .removed_renditions
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
+    for message in messages {
+      let Some(server_id) = message.maybe_server_id else {
+        continue;
+      };
+      for attachment in attachments(&message.content) {
+        let Ok(content_sha256) = <[u8; 32]>::try_from(attachment.ciphertext_sha256.as_slice()) else {
+          continue;
+        };
+        if !attachment.media_type.starts_with("image/") {
+          continue;
+        }
+        if removed.len() >= MAX_REMOVED_RENDITIONS {
+          removed.pop_front();
+        }
+        removed.push_back(RemovedRendition {
+          conversation: message.conversation_id,
+          message: server_id,
+          attachment: attachment.attachment_id,
+          content_sha256,
+        });
+      }
+    }
+  }
+
+  /// The messages with media of `conversation`, which went away for this user.
+  fn note_removed_conversation(&self, conversation: ConversationId) -> Result<(), StoreError> {
+    let mut range = MediaRange::Older(None);
+    loop {
+      let page = self
+        .inner
+        .media_messages(conversation, range, REMOVED_CONVERSATION_PAGE)?;
+      let is_last = page.len() < REMOVED_CONVERSATION_PAGE;
+      let Some(oldest) = page.last().and_then(|message| message.maybe_server_id) else {
+        return Ok(());
+      };
+      self.note_removed(page);
+      if is_last {
+        return Ok(());
+      }
+      range = MediaRange::Older(Some(oldest));
+    }
+  }
+
+  /// Before the cache is read or patched: drops it if another process committed to the database.
+  /// One `write_tally` look, which does not grow with the conversation (a `data_version` read).
+  fn follow_disk(&self) {
+    let maybe_tally = self.inner.write_tally();
+    self.cache().follow_disk(maybe_tally);
+  }
+
+  fn cache(&self) -> std::sync::MutexGuard<'_, MessageCache> {
+    // Invariant-free data: at worst a conversation is read from the disk again.
+    self.messages.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
+  fn lock(&self) -> std::sync::MutexGuard<'_, StoreChanges> {
+    // Invariant-free data: a panic elsewhere leaves a usable (at worst incomplete) set of notes.
+    self.changes.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+}
+
+impl<S: LocalStore> LocalStore for TrackedStore<S> {
+  fn get(&self, table: Table, key: &str) -> Result<Option<Vec<u8>>, StoreError> {
+    self.inner.get(table, key)
+  }
+
+  /// Rewriting a record the snapshot reads with the same bytes (a member list fetched again, say)
+  /// is neither written nor noted.
+  fn put(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
+    let change = classify(table, key);
+    if change != Change::Nothing && self.inner.get(table, key)?.as_deref() == Some(value) {
+      return Ok(());
+    }
+    self.inner.put(table, key, value)?;
+    self.note(change);
+    Ok(())
+  }
+
+  fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
+    if table == Table::Conversations
+      && let Ok(conversation) = key.parse::<ConversationId>()
+      && let Err(error) = self.note_removed_conversation(conversation)
+    {
+      // Only the cache's cleanup is lost; its age limit still ends the renditions.
+      tracing::debug!(%error, "could not list the pictures of a conversation that went away");
+    }
+    if table == Table::Conversations {
+      self.inner.delete(Table::EntryTallies, key)?;
+    }
+    self.inner.delete(table, key)?;
+    self.note(classify(table, key));
+    Ok(())
+  }
+
+  fn list(&self, table: Table) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+    self.inner.list(table)
+  }
+
+  fn list_prefix(&self, table: Table, prefix: &str) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+    self.inner.list_prefix(table, prefix)
+  }
+
+  fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
+    // Only a deletion takes files away (an edit changes the text); only then is the old one read.
+    if matches!(message.content, MessageContent::Deleted)
+      && let Some(old) = self
+        .inner
+        .message(message.conversation_id, message.client_message_id)?
+    {
+      self.note_removed([old]);
+    }
+    self.inner.upsert_message(message)?;
+    // After the write: a commit of another process before it is counted by now.
+    self.follow_disk();
+    self.cache().upsert(message);
+    self.note(Change::Conversation(message.conversation_id));
+    Ok(())
+  }
+
+  fn message(
+    &self,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+  ) -> Result<Option<StoredMessage>, StoreError> {
+    self.inner.message(conversation, client_message_id)
+  }
+
+  fn message_by_server_id(
+    &self,
+    conversation: ConversationId,
+    server_id: MessageId,
+  ) -> Result<Option<StoredMessage>, StoreError> {
+    self.inner.message_by_server_id(conversation, server_id)
+  }
+
+  fn edge_server_id(
+    &self,
+    conversation: ConversationId,
+    edge: MessageEdge,
+  ) -> Result<Option<MessageId>, StoreError> {
+    self.inner.edge_server_id(conversation, edge)
+  }
+
+  /// From the cache when it holds the conversation; otherwise read whole and kept, unless a write
+  /// to it came in between (the read may predate it).
+  fn messages(
+    &self,
+    conversation: ConversationId,
+    filter: MessageFilter,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    if !self.cache().is_enabled() {
+      return self.inner.messages(conversation, filter);
+    }
+    let mut matching = Vec::new();
+    self.with_all_messages(conversation, &mut |messages| {
+      matching = messages
+        .iter()
+        .filter(|message| message.matches(filter))
+        .cloned()
+        .collect();
+    })?;
+    Ok(matching)
+  }
+
+  fn messages_at(
+    &self,
+    conversation: ConversationId,
+    slot: MessageSlot,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.messages_at(conversation, slot)
+  }
+
+  fn message_revision(&self, conversation: ConversationId) -> Option<u64> {
+    self.follow_disk();
+    Some(self.cache().revision(conversation))
+  }
+
+  fn visit_messages(
+    &self,
+    conversation: ConversationId,
+    filter: MessageFilter,
+    visit: &mut dyn FnMut(&StoredMessage),
+  ) -> Result<(), StoreError> {
+    self.with_all_messages(conversation, &mut |messages| {
+      for message in messages.iter().filter(|message| message.matches(filter)) {
+        visit(message);
+      }
+    })
+  }
+
+  /// Without copies when the cache holds the conversation (the cache's lock is not held while
+  /// `read` runs); otherwise read from the store and kept, as by [`Self::messages`].
+  fn with_all_messages(
+    &self,
+    conversation: ConversationId,
+    read: &mut dyn FnMut(&[StoredMessage]),
+  ) -> Result<(), StoreError> {
+    self.follow_disk();
+    let revision = {
+      let mut cache = self.cache();
+      if let Some(messages) = cache.shared(conversation) {
+        drop(cache);
+        read(&messages);
+        return Ok(());
+      }
+      if !cache.is_enabled() {
+        drop(cache);
+        read(&self.inner.messages(conversation, MessageFilter::All)?);
+        return Ok(());
+      }
+      cache.revision(conversation)
+    };
+    let all = self.inner.messages(conversation, MessageFilter::All)?;
+    read(&all);
+    self.cache().fill(conversation, revision, all);
+    Ok(())
+  }
+
+  fn media_messages(
+    &self,
+    conversation: ConversationId,
+    range: MediaRange,
+    limit: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.media_messages(conversation, range, limit)
+  }
+
+  fn indexes_feed(&self) -> bool {
+    self.inner.indexes_feed()
+  }
+
+  fn feed_len(&self, conversation: ConversationId) -> Result<usize, StoreError> {
+    self.inner.feed_len(conversation)
+  }
+
+  fn feed_rows(
+    &self,
+    conversation: ConversationId,
+    start: usize,
+    len: usize,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.feed_rows(conversation, start, len)
+  }
+
+  fn feed_ranks(
+    &self,
+    conversation: ConversationId,
+    orders: &[MessageOrder],
+  ) -> Result<Vec<usize>, StoreError> {
+    self.inner.feed_ranks(conversation, orders)
+  }
+
+  fn event_messages(&self, conversation: ConversationId) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.event_messages(conversation)
+  }
+
+  fn reactions_to(
+    &self,
+    conversation: ConversationId,
+    targets: &[ClientMessageId],
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.reactions_to(conversation, targets)
+  }
+
+  fn reply_counts(
+    &self,
+    conversation: ConversationId,
+    threads: &[ThreadId],
+  ) -> Result<Vec<usize>, StoreError> {
+    self.inner.reply_counts(conversation, threads)
+  }
+
+  fn feed_version(&self, conversation: ConversationId) -> Result<Option<FeedVersion>, StoreError> {
+    self.inner.feed_version(conversation)
+  }
+
+  fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
+    self.note_removed(self.inner.messages(conversation, MessageFilter::All)?);
+    self.inner.delete_messages(conversation)?;
+    self
+      .inner
+      .delete(Table::EntryTallies, &conversation.to_string())?;
+    // After the write: a commit of another process before it is counted by now.
+    self.follow_disk();
+    self.cache().remove_conversation(conversation);
+    self.note(Change::Conversation(conversation));
+    Ok(())
+  }
+
+  fn delete_message(
+    &self,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+  ) -> Result<(), StoreError> {
+    if let Some(old) = self.inner.message(conversation, client_message_id)? {
+      self.note_removed([old]);
+    }
+    self.inner.delete_message(conversation, client_message_id)?;
+    // After the write: a commit of another process before it is counted by now.
+    self.follow_disk();
+    self.cache().remove(conversation, client_message_id);
+    self.note(Change::Conversation(conversation));
+    Ok(())
+  }
+
+  fn purge_freed(&self) -> Result<(), StoreError> {
+    self.inner.purge_freed()
+  }
+
+  fn purge_freed_soon(&self) {
+    self.inner.purge_freed_soon();
+  }
+
+  fn begin_writes(&self) -> Result<(), StoreError> {
+    self.inner.begin_writes()
+  }
+
+  fn end_writes(&self) -> Result<(), StoreError> {
+    let ended = self.inner.end_writes();
+    if ended.is_err() {
+      // The group may have been rolled back: the cache may hold writes the disk doesn't.
+      self.cache().forget_all();
+    }
+    ended
+  }
+
+  fn write_soon(&self) {
+    self.inner.write_soon();
+  }
+
+  fn write_tally(&self) -> Option<WriteTally> {
+    self.inner.write_tally()
+  }
+
+  fn lost_deletes(&self, table: Table) -> Vec<String> {
+    self.inner.lost_deletes(table)
+  }
+}
+
+/// What a write to `table` under `key` may change in the snapshot.
+/// The files a message carries.
+fn attachments(content: &MessageContent) -> &[AttachmentRef] {
+  match content {
+    MessageContent::File { attachment } => std::slice::from_ref(attachment),
+    MessageContent::Text { meta, .. } => &meta.attachments,
+    _ => &[],
+  }
+}
+
+fn classify(table: Table, key: &str) -> Change {
+  match table {
+    Table::Spaces | Table::Conversations | Table::Users | Table::Categories => Change::Everything,
+    // The space settings read them; written when they open and after each change.
+    Table::SpaceRosters | Table::SpaceInvites => Change::Everything,
+    Table::Workspace => Change::Workspace,
+    Table::Members => conversation_of(key),
+    // Keyed `conversation/…`: shown with the conversation's messages.
+    Table::MessageAcks | Table::Outbox | Table::PendingUploads | Table::PendingPreviews => {
+      conversation_of(key)
+    },
+    Table::Account if SHARED_ACCOUNT_RECORDS.contains(&key) => Change::Everything,
+    Table::Account => key
+      .strip_prefix(BOOKMARKS_PREFIX)
+      .map_or(Change::Nothing, conversation_of),
+    // The presence log's head, a person's state, or their last seen (read by queries only).
+    Table::Presence if key == crate::read_state::ANNOUNCED_PRESENCE_KEY => Change::Live,
+    Table::Presence => key.parse().map_or(Change::Nothing, Change::User),
+    Table::AnnouncedPresence => key.parse().map_or(Change::Live, Change::Announced),
+    Table::Unread | Table::Threads | Table::ReadReceipts => Change::Live,
+    Table::PinnedIdentities => Change::Security,
+    // The "catching up" marks and the unseen reactions; the rest are sync cursors.
+    Table::SyncState => key
+      .strip_prefix(crate::client::CATCHING_UP_PREFIX)
+      .or_else(|| key.strip_prefix(crate::unseen_reactions::INDEX_PREFIX))
+      .map_or(Change::Nothing, conversation_of),
+    Table::ContentKeys
+    | Table::MlsStorage
+    | Table::AppliedChanges
+    | Table::Undecrypted
+    | Table::PendingChanges
+    | Table::SearchSegments
+    | Table::SavedSearches
+    | Table::FileTransfers
+    | Table::Downloads
+    | Table::EntryTallies
+    | Table::ShareLinks
+    | Table::ChannelBrowser
+    | Table::DeviceLists
+    | Table::DeviceKeys
+    | Table::RemovedSenders
+    // Queued actions are applied to the shown state when queued; the queue itself is not shown.
+    | Table::PendingActions => Change::Nothing,
+  }
+}
+
+/// The conversation a key starts with (`conversation` or `conversation/…`).
+fn conversation_of(key: &str) -> Change {
+  let head = key.split_once('/').map_or(key, |(head, _)| head);
+  head.parse().map_or(Change::Nothing, Change::Conversation)
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::{Id, Snowflake};
+
+  use super::*;
+  use crate::store::MemoryStore;
+  use crate::store::tests::exercise_store;
+
+  #[test]
+  fn it_is_a_store() {
+    exercise_store(&TrackedStore::new(MemoryStore::new()));
+  }
+
+  #[test]
+  fn writes_are_noted_by_what_they_change() {
+    let store = TrackedStore::new(MemoryStore::new());
+    store.put(Table::Members, "7", b"[]").unwrap();
+    store.put(Table::Account, "bookmarks/8", b"[]").unwrap();
+    store.put(Table::SyncState, "catching_up/9", b"true").unwrap();
+    store.put(Table::Presence, "3", b"\"online\"").unwrap();
+    store.put(Table::Presence, "announced", b"{}").unwrap();
+    store.put(Table::AnnouncedPresence, "4", b"{}").unwrap();
+    store.put(Table::MlsStorage, "x", b"1").unwrap();
+    assert_eq!(
+      store.take_changes(),
+      StoreChanges {
+        conversations: [id(7), id(8), id(9)].into(),
+        users: [id(3), id(4)].into(),
+        announced: [id(4)].into(),
+        is_live: true,
+        ..StoreChanges::default()
+      }
+    );
+    assert_eq!(store.take_changes(), StoreChanges::default(), "taken");
+
+    store.put(Table::Users, "3", b"{}").unwrap();
+    store.put(Table::Workspace, "state", b"{}").unwrap();
+    let changes = store.take_changes();
+    assert!(changes.is_everything && changes.is_security);
+  }
+
+  #[test]
+  fn the_same_bytes_again_are_no_change() {
+    let store = TrackedStore::new(MemoryStore::new());
+    store.put(Table::Members, "7", b"[1]").unwrap();
+    store.take_changes();
+    store.put(Table::Members, "7", b"[1]").unwrap();
+    assert_eq!(store.take_changes(), StoreChanges::default());
+    store.put(Table::Members, "7", b"[2]").unwrap();
+    assert_eq!(store.take_changes().conversations, [id(7)].into());
+  }
+
+  #[test]
+  fn records_the_snapshot_does_not_read_change_nothing() {
+    let store = TrackedStore::new(MemoryStore::new());
+    store.put(Table::Presence, "last_seen:3", b"{}").unwrap();
+    store.put(Table::Account, "push_session", b"{}").unwrap();
+    store.put(Table::SyncState, "sync", b"{}").unwrap();
+    assert_eq!(store.take_changes(), StoreChanges::default());
+  }
+
+  mod removed_renditions {
+    use base64::Engine;
+
+    use super::*;
+
+    #[test]
+    fn a_deleted_message_gives_up_its_pictures() {
+      let store = TrackedStore::new(MemoryStore::new());
+      let picture = file_message(1, Some(10), "image/png");
+      store.upsert_message(&picture).unwrap();
+      store
+        .upsert_message(&file_message(2, Some(11), "application/pdf"))
+        .unwrap();
+      assert!(
+        store.take_removed_renditions().is_empty(),
+        "nothing went away yet"
+      );
+      store
+        .upsert_message(&StoredMessage {
+          content: MessageContent::Deleted,
+          ..picture
+        })
+        .unwrap();
+      assert_eq!(store.take_removed_renditions(), vec![removed(10)]);
+      assert!(store.take_removed_renditions().is_empty(), "taken");
+    }
+
+    #[test]
+    fn a_message_or_a_conversation_that_goes_away_gives_up_its_pictures() {
+      let store = TrackedStore::new(MemoryStore::new());
+      store
+        .upsert_message(&file_message(1, Some(10), "image/png"))
+        .unwrap();
+      store
+        .upsert_message(&file_message(2, Some(11), "image/jpeg"))
+        .unwrap();
+      // An outbox message has no rendition in the cache (it has no server ID yet).
+      store.upsert_message(&file_message(3, None, "image/png")).unwrap();
+      store
+        .delete_message(id(7), ClientMessageId::from_bytes([1; 16]))
+        .unwrap();
+      assert_eq!(store.take_removed_renditions(), vec![removed(10)]);
+      store.put(Table::Conversations, "7", b"{}").unwrap();
+      store.delete(Table::Conversations, "7").unwrap();
+      assert_eq!(
+        store.take_removed_renditions(),
+        vec![removed(11)],
+        "no longer listed"
+      );
+    }
+
+    #[test]
+    fn notes_nobody_takes_stay_bounded() {
+      let store = TrackedStore::new(MemoryStore::new());
+      let extra = 10;
+      store.note_removed(
+        (0..MAX_REMOVED_RENDITIONS + extra).map(|n| file_message(1, Some(1_000 + n as i64), "image/png")),
+      );
+      let kept = store.take_removed_renditions();
+      assert_eq!(kept.len(), MAX_REMOVED_RENDITIONS);
+      assert_eq!(kept[0].message, id(1_000 + extra as i64), "the oldest went");
+    }
+
+    fn removed(message: i64) -> RemovedRendition {
+      RemovedRendition {
+        conversation: id(7),
+        message: id(message),
+        attachment: id(message),
+        content_sha256: [9; 32],
+      }
+    }
+
+    fn file_message(client: u8, maybe_server: Option<i64>, media_type: &str) -> StoredMessage {
+      let attachment = serde_json::json!({
+        "attachment_id": id::<AttachmentId>(maybe_server.unwrap_or(1)),
+        "key": "",
+        "ciphertext_sha256": base64::engine::general_purpose::STANDARD.encode([9u8; 32]),
+        "file_name": "f",
+        "media_type": media_type,
+        "size_bytes": 1,
+      });
+      StoredMessage {
+        conversation_id: id(7),
+        client_message_id: ClientMessageId::from_bytes([client; 16]),
+        maybe_server_id: maybe_server.map(id),
+        sender_user_id: id(1),
+        maybe_thread_id: None,
+        sent_at_ms: maybe_server.unwrap_or(0),
+        content: MessageContent::File {
+          attachment: serde_json::from_value(attachment).unwrap(),
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: None,
+        maybe_server_change: None,
+        maybe_unreadable: None,
+      }
+    }
+  }
+
+  mod message_cache {
+    use super::*;
+
+    /// Room for every message these tests write.
+    const ROOM_BYTES: usize = 1 << 20;
+
+    #[test]
+    fn it_is_a_store_with_a_cache() {
+      exercise_store(&TrackedStore::with_message_cache(MemoryStore::new(), ROOM_BYTES));
+    }
+
+    #[test]
+    fn reads_after_writes_through_it_see_them_in_order() {
+      let store = TrackedStore::with_message_cache(MemoryStore::new(), ROOM_BYTES);
+      store.upsert_message(&text(1, Some(300), None)).unwrap();
+      store.upsert_message(&text(2, Some(100), None)).unwrap();
+      assert_eq!(clients(&store, MessageFilter::All), [2, 1], "read and kept");
+
+      store.upsert_message(&text(3, Some(200), None)).unwrap();
+      store.upsert_message(&text(4, None, None)).unwrap();
+      store.upsert_message(&text(5, Some(400), Some(100))).unwrap();
+      assert_eq!(clients(&store, MessageFilter::All), [2, 3, 1, 5, 4]);
+      assert_eq!(clients(&store, MessageFilter::TopLevel), [2, 3, 1, 4]);
+      assert_eq!(clients(&store, MessageFilter::Thread(id(100))), [5]);
+
+      // An outbox message that was sent moves to its place.
+      store.upsert_message(&text(4, Some(250), None)).unwrap();
+      store
+        .delete_message(id(7), ClientMessageId::from_bytes([2; 16]))
+        .unwrap();
+      assert_eq!(clients(&store, MessageFilter::All), [3, 4, 1, 5]);
+      assert_eq!(
+        clients(&store, MessageFilter::All),
+        clients_of(store.inner().messages(id(7), MessageFilter::All).unwrap()),
+        "the cache says what the store says"
+      );
+    }
+
+    #[test]
+    fn a_conversation_larger_than_the_cache_is_read_from_the_store_each_time() {
+      let store =
+        TrackedStore::with_message_cache(MemoryStore::new(), 2 * text(1, None, None).footprint_bytes());
+      store.upsert_message(&text(1, Some(100), None)).unwrap();
+      store.upsert_message(&text(2, Some(200), None)).unwrap();
+      assert_eq!(clients(&store, MessageFilter::All), [1, 2]);
+      store.upsert_message(&text(3, Some(300), None)).unwrap();
+      assert_eq!(clients(&store, MessageFilter::All), [1, 2, 3]);
+    }
+
+    #[test]
+    fn the_revision_moves_with_each_write_to_the_conversation_only() {
+      let store = TrackedStore::with_message_cache(MemoryStore::new(), ROOM_BYTES);
+      let before = store.message_revision(id(7));
+      store.upsert_message(&text(1, Some(100), None)).unwrap();
+      let after = store.message_revision(id(7));
+      assert_ne!(before, after);
+      store.put(Table::Members, "7", b"[]").unwrap();
+      assert_eq!(store.message_revision(id(7)), after);
+      assert_eq!(store.message_revision(id(8)), before);
+    }
+
+    /// Issue #1124: another process (the iOS extension) committed to the same file; the cache
+    /// must not keep serving the conversation as it was.
+    #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+    mod other_connections {
+      use teamcraft_crypto::secret::SymmetricKey;
+
+      use super::*;
+      use crate::store::{SealedSqliteStore, StaticKeySource};
+
+      #[test]
+      fn another_connections_commit_drops_the_cached_conversation() {
+        let (directory, ours, theirs) = two_connections();
+        ours.upsert_message(&text(1, Some(100), None)).unwrap();
+        ours.upsert_message(&text(2, Some(200), None)).unwrap();
+        let before = ours.message_revision(id(7));
+        assert_eq!(clients(&ours, MessageFilter::All), [1, 2], "read and kept");
+
+        theirs.upsert_message(&text(3, Some(300), None)).unwrap();
+        theirs
+          .delete_message(id(7), ClientMessageId::from_bytes([1; 16]))
+          .unwrap();
+
+        assert_ne!(ours.message_revision(id(7)), before, "derived data is stale too");
+        assert_eq!(clients(&ours, MessageFilter::All), [2, 3]);
+        drop((ours, theirs));
+        std::fs::remove_dir_all(&directory).unwrap();
+      }
+
+      #[test]
+      fn a_write_after_another_connections_commit_does_not_patch_a_stale_conversation() {
+        let (directory, ours, theirs) = two_connections();
+        ours.upsert_message(&text(1, Some(100), None)).unwrap();
+        assert_eq!(clients(&ours, MessageFilter::All), [1]);
+
+        theirs.upsert_message(&text(2, Some(200), None)).unwrap();
+        ours.upsert_message(&text(3, Some(300), None)).unwrap();
+
+        assert_eq!(clients(&ours, MessageFilter::All), [1, 2, 3]);
+        drop((ours, theirs));
+        std::fs::remove_dir_all(&directory).unwrap();
+      }
+
+      #[test]
+      fn our_own_commits_keep_the_cache() {
+        let (directory, ours, theirs) = two_connections();
+        ours.upsert_message(&text(1, Some(100), None)).unwrap();
+        assert_eq!(clients(&ours, MessageFilter::All), [1]);
+        let revision = ours.message_revision(id(7));
+        // A drop moves the revision, so it stays while the cache is kept.
+        assert_eq!(ours.message_revision(id(7)), revision);
+        assert_eq!(clients(&ours, MessageFilter::All), [1]);
+        assert_eq!(ours.message_revision(id(7)), revision);
+        drop((ours, theirs));
+        std::fs::remove_dir_all(&directory).unwrap();
+      }
+
+      fn two_connections() -> (
+        std::path::PathBuf,
+        TrackedStore<SealedSqliteStore>,
+        SealedSqliteStore,
+      ) {
+        let directory = std::env::temp_dir().join(format!(
+          "teamcraft-tracked-{}",
+          rand_core::RngCore::next_u64(&mut rand_core::OsRng)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.db");
+        let key = SymmetricKey::generate(&mut rand_core::OsRng);
+        let ours = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+        let theirs = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+        (
+          directory,
+          TrackedStore::with_message_cache(ours, ROOM_BYTES),
+          theirs,
+        )
+      }
+
+      fn clients(store: &TrackedStore<SealedSqliteStore>, filter: MessageFilter) -> Vec<u8> {
+        store
+          .messages(id(7), filter)
+          .unwrap()
+          .iter()
+          .map(|message| message.client_message_id.as_bytes()[0])
+          .collect()
+      }
+    }
+
+    fn text(client: u8, maybe_server: Option<i64>, maybe_thread: Option<i64>) -> StoredMessage {
+      StoredMessage {
+        conversation_id: id(7),
+        client_message_id: ClientMessageId::from_bytes([client; 16]),
+        maybe_server_id: maybe_server.map(id),
+        sender_user_id: id(1),
+        maybe_thread_id: maybe_thread.map(id),
+        sent_at_ms: i64::from(client),
+        content: MessageContent::Text {
+          body: format!("message {client}"),
+          mentions: Vec::new(),
+          meta: Default::default(),
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: None,
+        maybe_server_change: None,
+        maybe_unreadable: None,
+      }
+    }
+
+    fn clients(store: &TrackedStore<MemoryStore>, filter: MessageFilter) -> Vec<u8> {
+      clients_of(store.messages(id(7), filter).unwrap())
+    }
+
+    fn clients_of(messages: Vec<StoredMessage>) -> Vec<u8> {
+      messages
+        .iter()
+        .map(|message| message.client_message_id.as_bytes()[0])
+        .collect()
+    }
+  }
+
+  fn id<T: Id>(raw: i64) -> T {
+    T::from_snowflake(Snowflake::new(raw).unwrap())
+  }
+}

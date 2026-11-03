@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM org_recovery_approvals WHERE admin_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3e7752fc6a68f9c8bf0988244abdab706685bc7d6e46972c72d5d44356eece03"
+}

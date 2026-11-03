@@ -4,7 +4,7 @@
 use crate::model::PresenceStatus;
 
 /// Every command with its arguments, for `/help` and the autocomplete list.
-pub const COMMANDS: [(&str, &str); 24] = [
+pub const COMMANDS: [(&str, &str); 23] = [
   ("away", ""),
   ("online", ""),
   ("dnd", ""),
@@ -24,12 +24,49 @@ pub const COMMANDS: [(&str, &str); 24] = [
   ("me", "text"),
   ("shrug", "[text]"),
   ("code", "text"),
-  ("search", "text"),
   ("settings", ""),
   ("shortcuts", ""),
   ("remind", "in 10m|at 14:30 text"),
   ("meet", ""),
 ];
+
+/// Where a command is typed and what the user may do there. Decides which commands are offered,
+/// listed by `/help` and run: the server refuses the others (#648, #692), so the client neither
+/// offers nor sends them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommandContext {
+  /// A channel of a space: DMs, group DMs, notes to self and meeting chats are not.
+  pub is_channel: bool,
+  /// May change the channel's topic, purpose and name.
+  pub can_change_channel: bool,
+  /// May add people to the channel and remove them.
+  pub can_manage_members: bool,
+  /// Guests don't start meetings.
+  pub is_guest: bool,
+}
+
+/// What a command needs to work where it is typed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Requirement {
+  None,
+  /// Only a channel (leaving): the server refuses it elsewhere.
+  Channel,
+  /// A channel and the right to change its properties.
+  ChannelProperties,
+  /// A channel and the right to manage its members.
+  ChannelMembers,
+  /// A full account, not a guest.
+  MemberAccount,
+}
+
+/// Why a command doesn't work here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Unavailable {
+  /// Only channels have it.
+  NotAChannel,
+  /// The user lacks the right.
+  NotAllowed,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SlashCommand {
@@ -53,7 +90,6 @@ pub enum SlashCommand {
   Me(String),
   Shrug(String),
   Code(String),
-  Search(String),
   Settings,
   Shortcuts,
   Help,
@@ -62,6 +98,56 @@ pub enum SlashCommand {
     text: String,
   },
   Meet,
+}
+
+impl SlashCommand {
+  /// The name it is typed with, without the slash.
+  pub fn name(&self) -> &'static str {
+    match self {
+      Self::Presence(PresenceStatus::Away) => "away",
+      Self::Presence(PresenceStatus::DoNotDisturb) => "dnd",
+      Self::Presence(PresenceStatus::Offline) => "offline",
+      Self::Presence(PresenceStatus::Online) => "online",
+      Self::Status(_) => "status",
+      Self::Topic(_) => "topic",
+      Self::Purpose(_) => "purpose",
+      Self::Rename(_) => "rename",
+      Self::Join(_) => "join",
+      Self::Open(_) => "open",
+      Self::Leave => "leave",
+      Self::Kick(_) => "kick",
+      Self::Invite(_) => "invite",
+      Self::Msg { .. } => "msg",
+      Self::GroupMsg(_) => "groupmsg",
+      Self::Mute => "mute",
+      Self::Me(_) => "me",
+      Self::Shrug(_) => "shrug",
+      Self::Code(_) => "code",
+      Self::Settings => "settings",
+      Self::Shortcuts => "shortcuts",
+      Self::Help => "help",
+      Self::Remind { .. } => "remind",
+      Self::Meet => "meet",
+    }
+  }
+
+  /// Whether it works in `context`, and if not, why.
+  pub fn check(&self, context: CommandContext) -> Result<(), Unavailable> {
+    check(self.name(), context)
+  }
+}
+
+impl Requirement {
+  /// What the command typed as `name` needs: what the server checks before it acts.
+  pub fn of(name: &str) -> Self {
+    match name {
+      "topic" | "purpose" | "rename" => Self::ChannelProperties,
+      "kick" | "invite" => Self::ChannelMembers,
+      "leave" => Self::Channel,
+      "meet" => Self::MemberAccount,
+      _ => Self::None,
+    }
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,7 +252,6 @@ pub fn parse(input: &str) -> Parsed {
     "me" => return wrap(need("text"), SlashCommand::Me),
     "shrug" => SlashCommand::Shrug(args.to_owned()),
     "code" => return wrap(need("text"), SlashCommand::Code),
-    "search" => return wrap(need("text"), SlashCommand::Search),
     "settings" => SlashCommand::Settings,
     "shortcuts" => SlashCommand::Shortcuts,
     "help" => SlashCommand::Help,
@@ -259,19 +344,154 @@ fn reminder(args: &str) -> Result<(ReminderTime, String), SlashError> {
   Ok((when, text))
 }
 
-/// Commands whose name starts with `prefix`, for the autocomplete list.
-pub fn matching_commands(prefix: &str) -> Vec<(&'static str, &'static str)> {
+/// Commands whose name starts with `prefix` and that work in `context`, for the autocomplete list.
+pub fn matching_commands(prefix: &str, context: CommandContext) -> Vec<(&'static str, &'static str)> {
   let prefix = prefix.to_lowercase();
+  commands(context)
+    .filter(|(name, _)| name.starts_with(&prefix))
+    .collect()
+}
+
+/// The commands that work in `context`, for `/help`.
+pub fn commands(context: CommandContext) -> impl Iterator<Item = (&'static str, &'static str)> {
   COMMANDS
     .iter()
     .copied()
-    .filter(|(name, _)| name.starts_with(&prefix))
-    .collect()
+    .filter(move |(name, _)| check(name, context).is_ok())
+}
+
+fn check(name: &str, context: CommandContext) -> Result<(), Unavailable> {
+  let in_channel = |is_allowed: bool| match (context.is_channel, is_allowed) {
+    (false, _) => Err(Unavailable::NotAChannel),
+    (true, false) => Err(Unavailable::NotAllowed),
+    (true, true) => Ok(()),
+  };
+  match Requirement::of(name) {
+    Requirement::None => Ok(()),
+    Requirement::Channel => in_channel(true),
+    Requirement::ChannelProperties => in_channel(context.can_change_channel),
+    Requirement::ChannelMembers => in_channel(context.can_manage_members),
+    Requirement::MemberAccount if context.is_guest => Err(Unavailable::NotAllowed),
+    Requirement::MemberAccount => Ok(()),
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod context {
+    use super::*;
+
+    const CHANNEL_MEMBER: CommandContext = CommandContext {
+      is_channel: true,
+      can_change_channel: false,
+      can_manage_members: false,
+      is_guest: false,
+    };
+    const CHANNEL_ADMIN: CommandContext = CommandContext {
+      is_channel: true,
+      can_change_channel: true,
+      can_manage_members: true,
+      is_guest: false,
+    };
+    /// A DM, group DM, the notes to self or a meeting chat: no channel, whatever the rights.
+    const DIRECT: CommandContext = CommandContext {
+      is_channel: false,
+      can_change_channel: true,
+      can_manage_members: true,
+      is_guest: false,
+    };
+    const CHANNEL_CONTEXT_ONLY: [&str; 6] = ["topic", "purpose", "rename", "kick", "invite", "leave"];
+
+    #[test]
+    fn a_channel_admin_gets_every_command() {
+      assert_eq!(names(CHANNEL_ADMIN).len(), COMMANDS.len());
+    }
+
+    #[test]
+    fn outside_channels_only_channel_free_commands_are_offered() {
+      let offered = names(DIRECT);
+      for name in CHANNEL_CONTEXT_ONLY {
+        assert!(!offered.contains(&name), "{name}");
+      }
+      for name in ["mute", "meet", "msg", "shrug", "remind", "join", "open"] {
+        assert!(offered.contains(&name), "{name}");
+      }
+      assert_eq!(
+        commands(DIRECT).count(),
+        COMMANDS.len() - CHANNEL_CONTEXT_ONLY.len()
+      );
+    }
+
+    #[test]
+    fn a_plain_member_may_leave_but_not_manage() {
+      let offered = names(CHANNEL_MEMBER);
+      assert!(offered.contains(&"leave"));
+      for name in ["topic", "purpose", "rename", "kick", "invite"] {
+        assert!(!offered.contains(&name), "{name}");
+      }
+    }
+
+    #[test]
+    fn guests_do_not_start_meetings() {
+      let guest = CommandContext {
+        is_guest: true,
+        ..CHANNEL_MEMBER
+      };
+      assert!(!names(guest).contains(&"meet"));
+      assert_eq!(command("/meet").check(guest), Err(Unavailable::NotAllowed));
+      assert_eq!(command("/meet").check(CHANNEL_MEMBER), Ok(()));
+    }
+
+    #[test]
+    fn typed_commands_say_why_they_do_not_work() {
+      for input in [
+        "/topic Release week",
+        "/purpose Plans",
+        "/rename plans",
+        "/kick @sam",
+        "/leave",
+      ] {
+        assert_eq!(
+          command(input).check(DIRECT),
+          Err(Unavailable::NotAChannel),
+          "{input}"
+        );
+      }
+      for input in ["/topic Release week", "/invite @sam", "/kick @sam"] {
+        assert_eq!(
+          command(input).check(CHANNEL_MEMBER),
+          Err(Unavailable::NotAllowed),
+          "{input}"
+        );
+        assert_eq!(command(input).check(CHANNEL_ADMIN), Ok(()), "{input}");
+      }
+      assert_eq!(command("/mute").check(DIRECT), Ok(()));
+    }
+
+    #[test]
+    fn every_listed_command_parses_to_its_own_name() {
+      for (name, _) in COMMANDS {
+        let args = if name == "remind" { "in 10m x" } else { "@a @b" };
+        assert_eq!(command(&format!("/{name} {args}")).name(), name);
+      }
+    }
+
+    fn names(context: CommandContext) -> Vec<&'static str> {
+      matching_commands("", context)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+    }
+
+    fn command(input: &str) -> SlashCommand {
+      match parse(input) {
+        Parsed::Command(command) => command,
+        other => panic!("{input} is a command, not {other:?}"),
+      }
+    }
+  }
 
   #[test]
   fn plain_text_and_escaped_slashes_are_messages() {
@@ -373,6 +593,10 @@ mod tests {
       parse("/groupmsg @a @b"),
       Parsed::Command(SlashCommand::GroupMsg(vec!["a".into(), "b".into()]))
     );
-    assert!(matching_commands("sh").iter().any(|(name, _)| *name == "shrug"));
+    assert!(
+      matching_commands("sh", CommandContext::default())
+        .iter()
+        .any(|(name, _)| *name == "shrug")
+    );
   }
 }

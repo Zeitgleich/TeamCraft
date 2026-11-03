@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM conversations WHERE id = $1 AND kind IN ('dm', 'group')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bc9b220e1908afe862e9ce84c89c4ca6e3929b50fe7f13a567489a84a040eece"
+}

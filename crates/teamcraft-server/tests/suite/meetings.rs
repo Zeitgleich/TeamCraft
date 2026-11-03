@@ -11,6 +11,7 @@ use std::time::Duration;
 use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use teamcraft_db::testing::sqlx;
 use teamcraft_server::config::{MailTexts, MeetingsConfig};
 use teamcraft_server::testing::{FakeCalendar, FakeMailer, Reply, TestApp, TestUser};
 
@@ -29,6 +30,8 @@ fn config() -> MeetingsConfig {
     max_invitees: 5,
     guest_token_secret: GUEST_SECRET.to_owned().into(),
     guest_grace_secs: 7200,
+    max_shared_link_guests: 50,
+    start_ring_lead_secs: 3600,
     maybe_inbox_token: Some(INBOX_TOKEN.to_owned().into()),
     smtp: None,
     mail_texts: MailTexts::default(),
@@ -106,7 +109,9 @@ mod scheduling {
     );
     assert_eq!(meeting["has_lobby"], true);
     assert_eq!(meeting["organizer_user_id"], alice_id.as_str());
-    assert_eq!(meeting["join_url"], format!("{BASE_URL}/meeting/{id}").as_str());
+    // The link names an unguessable token, not the meeting's ID (#987).
+    let token = link_token(meeting);
+    assert_ne!(token, id);
     let attendees = meeting["attendees"].as_array().unwrap();
     assert_eq!(attendees.len(), 2);
     assert!(attendees.iter().all(|a| a["rsvp"] == "needs_action"));
@@ -135,7 +140,7 @@ mod scheduling {
     assert!(ics.contains(&format!("UID:{id}@chat.example.com")), "{ics}");
     assert!(ics.contains("DTSTART:20300101T090000Z") && ics.contains("DTEND:20300101T100000Z"));
     assert!(ics.contains("SUMMARY:Sprint review"));
-    assert!(ics.contains(&format!("URL:{BASE_URL}/meeting/{id}")));
+    assert!(ics.contains(&format!("URL:{BASE_URL}/meeting/{token}")), "{ics}");
     assert!(ics.contains("mailto:gus@example.org") && ics.contains("mailto:bob@example.com"));
     assert!(
       ics.contains("ORGANIZER;CN=\"alice\":mailto:alice@example.com"),
@@ -476,6 +481,259 @@ mod changes {
   }
 }
 
+mod series {
+  use teamcraft_server::meetings::ical::Method;
+
+  use super::*;
+
+  const DAY: i64 = 86_400_000;
+
+  async fn daily(app: &TestApp, organizer: &TestUser, recurrence: Value) -> String {
+    let reply = app
+      .post(
+        organizer,
+        "/meetings",
+        json!({
+          "title": "Standup", "starts_at": STARTS_AT, "ends_at": ENDS_AT,
+          "invitees": [{"kind": "external", "email": "gus@example.org"}],
+          "recurrence": recurrence,
+        }),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    reply.id()
+  }
+
+  /// The listed occurrences of the first `days` days: start and whether only it is cancelled.
+  async fn listed(app: &TestApp, user: &TestUser, days: i64) -> Vec<(i64, String, bool)> {
+    let path = format!("/meetings?from={}&to={}", STARTS_AT - 1, STARTS_AT + days * DAY);
+    app.get(user, &path).await.body["meetings"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .map(|m| {
+        (
+          m["starts_at"].as_i64().unwrap(),
+          m["status"].as_str().unwrap().to_owned(),
+          m["is_occurrence_cancelled"].as_bool().unwrap_or(false),
+        )
+      })
+      .collect()
+  }
+
+  #[tokio::test]
+  async fn one_occurrence_is_cancelled_and_restored_without_the_series() {
+    let Some((app, calendar, mailer)) = start_with_mail().await else {
+      return;
+    };
+    let alice = owner();
+    let id = daily(
+      &app,
+      &alice,
+      json!({"frequency": "daily", "interval": 1, "count": 5}),
+    )
+    .await;
+    let second = STARTS_AT + DAY;
+    let before = mailer.sent().len();
+
+    let cancelled = app
+      .delete(
+        &alice,
+        &format!("/meetings/{id}?scope=occurrence&occurrence={second}"),
+      )
+      .await;
+
+    assert_eq!(cancelled.status, StatusCode::OK, "{}", cancelled.body);
+    assert_eq!(cancelled.body["starts_at"], second);
+    assert_eq!(cancelled.body["is_occurrence_cancelled"], true);
+    let list = listed(&app, &alice, 10).await;
+    assert_eq!(list.len(), 5, "the series goes on");
+    assert_eq!(list[1], (second, "cancelled".to_owned(), true));
+    assert!(
+      list
+        .iter()
+        .enumerate()
+        .all(|(i, entry)| i == 1 || entry.1 == "scheduled")
+    );
+    let ics = unfolded(&calendar.event(&id).unwrap());
+    assert!(ics.contains("EXDATE:20300102T090000Z"), "{ics}");
+    let mails = &mailer.sent()[before..];
+    assert_eq!(mails.len(), 1);
+    assert_eq!(mails[0].method, Method::Cancel);
+    let mail_ics = unfolded(&mails[0].ics);
+    assert!(mail_ics.contains("RECURRENCE-ID:20300102T090000Z"), "{mail_ics}");
+    assert!(!mail_ics.contains("RRULE"));
+
+    let again = app
+      .delete(
+        &alice,
+        &format!("/meetings/{id}?scope=occurrence&occurrence={second}"),
+      )
+      .await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    let off = app
+      .delete(
+        &alice,
+        &format!("/meetings/{id}?scope=occurrence&occurrence={}", second + 1),
+      )
+      .await;
+    assert_eq!(off.status, StatusCode::BAD_REQUEST);
+
+    let restored = app
+      .post(
+        &alice,
+        &format!("/meetings/{id}/restore"),
+        json!({"occurrence": second}),
+      )
+      .await;
+    assert_eq!(restored.status, StatusCode::OK, "{}", restored.body);
+    assert!(
+      listed(&app, &alice, 10)
+        .await
+        .iter()
+        .all(|entry| entry.1 == "scheduled")
+    );
+    assert!(!unfolded(&calendar.event(&id).unwrap()).contains("EXDATE"));
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn cancelling_the_following_occurrences_ends_the_series_before_them() {
+    let (app, calendar) = app!();
+    let alice = owner();
+    let id = daily(
+      &app,
+      &alice,
+      json!({"frequency": "daily", "interval": 1, "count": 10}),
+    )
+    .await;
+
+    let ended = app
+      .delete(
+        &alice,
+        &format!(
+          "/meetings/{id}?scope=following&occurrence={}",
+          STARTS_AT + 3 * DAY
+        ),
+      )
+      .await;
+
+    assert_eq!(ended.status, StatusCode::OK, "{}", ended.body);
+    assert_eq!(ended.body["status"], "scheduled");
+    assert!(ended.body["recurrence"]["count"].is_null());
+    assert_eq!(listed(&app, &alice, 20).await.len(), 3);
+    let ics = unfolded(&calendar.event(&id).unwrap());
+    assert!(ics.contains("UNTIL=20300104T085959Z"), "{ics}");
+
+    // From the first occurrence on, that is the whole series.
+    let all = app
+      .delete(
+        &alice,
+        &format!("/meetings/{id}?scope=following&occurrence={STARTS_AT}"),
+      )
+      .await;
+    assert_eq!(all.body["status"], "cancelled", "{}", all.body);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_cancelled_series_is_listed_once_and_can_be_restored_or_removed() {
+    let (app, calendar) = app!();
+    let (alice, bob) = (owner(), member("bob"));
+    let bob_id = user_id(&app, &bob).await;
+    let reply = app
+      .post(
+        &alice,
+        "/meetings",
+        json!({
+          "title": "Standup", "starts_at": STARTS_AT, "ends_at": ENDS_AT,
+          "invitees": [{"kind": "user", "user_id": bob_id}],
+          "recurrence": {"frequency": "daily", "interval": 1},
+        }),
+      )
+      .await;
+    let (id, chat) = (
+      reply.id(),
+      reply.body["conversation_id"].as_str().unwrap().to_owned(),
+    );
+
+    app.delete(&alice, &format!("/meetings/{id}")).await;
+
+    // Not a dead entry every day: once, at the occurrence that was next.
+    assert_eq!(
+      listed(&app, &bob, 10).await,
+      vec![(STARTS_AT, "cancelled".to_owned(), false)]
+    );
+    let restored = app
+      .post(&alice, &format!("/meetings/{id}/restore"), json!({}))
+      .await;
+    assert_eq!(restored.status, StatusCode::OK, "{}", restored.body);
+    assert_eq!(listed(&app, &bob, 10).await.len(), 10);
+    assert!(calendar.event(&id).is_some(), "the event is back in the calendar");
+    let conversation = app.get(&bob, &format!("/conversations/{chat}")).await;
+    assert_eq!(conversation.body["is_archived"], false, "{}", conversation.body);
+    assert_eq!(
+      app
+        .post(&alice, &format!("/meetings/{id}/hide"), json!({}))
+        .await
+        .status,
+      StatusCode::CONFLICT,
+      "only a cancelled meeting is removed"
+    );
+
+    app.delete(&alice, &format!("/meetings/{id}")).await;
+    assert_eq!(
+      app
+        .post(&bob, &format!("/meetings/{id}/hide"), json!({}))
+        .await
+        .status,
+      StatusCode::FORBIDDEN
+    );
+    let hidden = app.post(&alice, &format!("/meetings/{id}/hide"), json!({})).await;
+    assert_eq!(hidden.status, StatusCode::NO_CONTENT, "{}", hidden.body);
+    assert!(listed(&app, &alice, 10).await.is_empty());
+    assert!(listed(&app, &bob, 10).await.is_empty());
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_work_day_series_skips_the_weekend() {
+    let (app, calendar) = app!();
+    let alice = owner();
+    // 2030-01-01 is a Tuesday.
+    let id = daily(
+      &app,
+      &alice,
+      json!({"frequency": "daily", "interval": 1, "weekdays": ["mon", "tue", "wed", "thu", "fri"]}),
+    )
+    .await;
+
+    let starts: Vec<i64> = listed(&app, &alice, 7)
+      .await
+      .iter()
+      .map(|entry| entry.0)
+      .collect();
+
+    let days: Vec<i64> = starts.iter().map(|start| (start - STARTS_AT) / DAY).collect();
+    assert_eq!(days, vec![0, 1, 2, 3, 6]);
+    assert!(
+      unfolded(&calendar.event(&id).unwrap()).contains("RRULE:FREQ=DAILY;INTERVAL=1;BYDAY=MO,TU,WE,TH,FR")
+    );
+    let monthly = app
+      .post(
+        &alice,
+        "/meetings",
+        json!({
+          "title": "x", "starts_at": STARTS_AT, "ends_at": ENDS_AT,
+          "recurrence": {"frequency": "monthly", "interval": 1, "weekdays": ["mon"]},
+        }),
+      )
+      .await;
+    assert_eq!(monthly.status, StatusCode::BAD_REQUEST);
+    app.stop().await;
+  }
+}
+
 mod answers {
   use super::*;
 
@@ -557,7 +815,7 @@ mod invitations {
   }
 
   #[tokio::test]
-  async fn invitees_get_an_imip_request_and_externals_a_personal_link() {
+  async fn invitees_get_an_imip_request_with_the_meeting_link() {
     let (app, _, mailer) = mail_app!();
     let (alice, bob) = (owner(), member("bob"));
     let bob_id = user_id(&app, &bob).await;
@@ -595,18 +853,12 @@ mod invitations {
         mail.ics.contains("METHOD:REQUEST") && mail.ics.contains(&format!("UID:{id}@chat.example.com"))
       );
     }
-    // Members join with their account, externals with a personal link that carries a token.
-    assert!(
-      to_bob.text.contains(&format!("Join: {BASE_URL}/meeting/{id}\n")),
-      "{}",
-      to_bob.text
-    );
-    assert!(
-      to_gus.text.contains(&format!("{BASE_URL}/meeting/{id}#invite=")),
-      "{}",
-      to_gus.text
-    );
-    assert!(!to_bob.text.contains("#invite="));
+    // Everyone gets the meeting's one link (#987): members sign in on it, externals knock.
+    let join = format!("Join: {BASE_URL}/meeting/{}", link_token(&reply.body));
+    for mail in [to_bob, to_gus] {
+      assert!(mail.text.contains(&join), "{}", mail.text);
+      assert!(!mail.text.contains("#invite="), "{}", mail.text);
+    }
     app.stop().await;
   }
 
@@ -673,14 +925,15 @@ mod invitations {
     let link = |mail: &teamcraft_server::meetings::mailer::OutgoingMail| {
       mail
         .text
-        .split("#invite=")
-        .nth(1)
-        .map(|t| t.lines().next().unwrap().to_owned())
+        .lines()
+        .find_map(|line| line.strip_prefix("Join: "))
+        .map(str::to_owned)
     };
     let first_link = sent[..before]
       .iter()
       .find(|m| m.to_address == "keep@example.org")
       .and_then(link);
+    assert!(first_link.is_some(), "the invitation names the link");
     assert_eq!(first_link, link(find("keep@example.org")));
 
     let before_cancel = mailer.sent().len();
@@ -952,6 +1205,57 @@ mod instant {
     assert_eq!(named.body["title"], "Quick sync");
     app.stop().await;
   }
+}
+
+mod retried_creation {
+  use super::*;
+
+  const KEY: &str = "ffeeddccbbaa99887766554433221100";
+
+  #[tokio::test]
+  async fn a_repeated_meeting_request_creates_one_meeting_and_one_invitation() {
+    let (app, calendar) = app!();
+    let alice = owner();
+    let body = json!({
+      "title": "Retried", "starts_at": 4_102_444_800_000_i64, "ends_at": 4_102_448_400_000_i64,
+      "idempotency_key": KEY,
+    });
+
+    let first = app.post(&alice, "/meetings", body.clone()).await;
+    let second = app.post(&alice, "/meetings", body).await;
+
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    assert_eq!(first.body["id"], second.body["id"]);
+    assert_eq!(calendar.names().len(), 1);
+    let meetings: i64 = sqlx::query_scalar("SELECT count(*) FROM meetings")
+      .fetch_one(app.sql_pool())
+      .await
+      .unwrap();
+    assert_eq!(meetings, 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_repeated_meet_now_request_returns_the_same_meeting() {
+    let (app, _calendar) = app!();
+    let alice = owner();
+    let body = json!({"idempotency_key": KEY});
+
+    let first = app.post(&alice, "/meetings/instant", body.clone()).await;
+    let second = app.post(&alice, "/meetings/instant", body).await;
+
+    assert_eq!(first.body["id"], second.body["id"]);
+    app.stop().await;
+  }
+}
+
+/// The token of a meeting response's `join_url` (`<base>/meeting/<token>#v=<fingerprint>`).
+fn link_token(meeting: &Value) -> String {
+  let url = meeting["join_url"].as_str().expect("a join link");
+  let rest = url
+    .strip_prefix(&format!("{BASE_URL}/meeting/"))
+    .unwrap_or_else(|| panic!("a meeting link on the base: {url}"));
+  rest.split('#').next().unwrap_or_default().to_owned()
 }
 
 fn meeting_updates(events: &[teamcraft_proto::GatewayEvent]) -> Vec<String> {

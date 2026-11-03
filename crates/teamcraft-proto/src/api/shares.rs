@@ -17,6 +17,15 @@ pub struct CreateShareLinkRequest {
   /// The link stops working after this many downloads.
   #[serde(rename = "max_downloads", default, skip_serializing_if = "Option::is_none")]
   pub maybe_max_downloads: Option<u32>,
+  /// Alternative to `expires_at` that does not depend on the client's clock: the link lasts this
+  /// long from the moment the server gets the request, at most the instance maximum (longer
+  /// durations are shortened to it; the response says when the link ends). Not both.
+  #[serde(
+    rename = "expires_in_seconds",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_expires_in_seconds: Option<u64>,
   /// The client wrapped the file key with a password; the download page asks for it. The server
   /// never sees the password, it only tells the page to ask.
   #[serde(default)]
@@ -59,10 +68,21 @@ pub struct ShareInfoResponse {
   pub expires_at: UnixMillis,
 }
 
-/// `POST /api/v1/shares/{id}/download` (public): counts one download and returns where the
-/// ciphertext is.
+/// `POST /api/v1/shares/{id}/download` (public).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ShareDownloadRequest {
+  /// The grant of an earlier answer, to retry that download (the storage fetch failed) without
+  /// counting it again. Valid for a short window, see `shares.download_retry_minutes`.
+  #[serde(rename = "grant", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_grant: Option<String>,
+}
+
+/// Counts one download (unless the request carries the grant of one counted a moment ago) and
+/// returns where the ciphertext is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ShareDownloadResponse {
+  /// Send back with a retry of this download so it is not counted twice.
+  pub grant: String,
   pub download_url: String,
   pub size_bytes: u64,
   pub expires_at: UnixMillis,

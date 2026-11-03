@@ -1,10 +1,14 @@
 //! Per-device user preferences, persisted in `localStorage`. They will move to the synced, encrypted
 //! user settings of the client core later; the UI only depends on the signals here.
 
-use leptos::prelude::*;
+use std::collections::HashMap;
 
+use leptos::prelude::*;
+use serde::{Deserialize, Serialize};
+
+use crate::emoji_catalog::SkinTone;
 use crate::i18n::Locale;
-use crate::model::ConversationId;
+use crate::model::{ConversationId, SpaceId, UserId};
 use crate::navigation::push_recent;
 use crate::prefs::Preferences;
 use crate::sections::SidebarOptions;
@@ -12,16 +16,58 @@ use crate::sections::SidebarOptions;
 const KEY_THEME: &str = "teamcraft.theme";
 const KEY_LOCALE: &str = "teamcraft.locale";
 const KEY_SEND_MODE: &str = "teamcraft.send_mode";
-const KEY_UNREADS_GROUP: &str = "teamcraft.unreads_group";
 const KEY_SHOW_JOIN_LEAVE: &str = "teamcraft.show_join_leave";
 #[cfg(feature = "demo")]
 const KEY_BACKEND: &str = "teamcraft.backend";
 const KEY_PREFS: &str = "teamcraft.prefs";
 const KEY_RECENT_CONVERSATIONS: &str = "teamcraft.recent_conversations";
 const KEY_RECENT_EMOJI: &str = "teamcraft.recent_emoji";
+const KEY_EMOJI_SKIN_TONE: &str = "teamcraft.emoji_skin_tone";
 const KEY_FAVORITE_ORDER: &str = "teamcraft.favorite_order";
+const KEY_MEDIA_CACHE_LIMIT: &str = "teamcraft.media_cache_limit";
+const KEY_MEDIA_CACHE_MAX_AGE: &str = "teamcraft.media_cache_max_age";
+const KEY_PREVIEW_LIMIT: &str = "teamcraft.preview_limit";
+const KEY_AUDIO_LIMIT: &str = "teamcraft.audio_limit";
+/// Per account: `teamcraft.last_open.<user id>`, a [`LastOpen`].
+const KEY_LAST_OPEN_PREFIX: &str = "teamcraft.last_open.";
 /// Conversations the quick switcher remembers as recently visited.
 const MAX_RECENT_CONVERSATIONS: usize = 20;
+/// Where the last open conversation of an account was: Home, or a space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LastOpenPlace {
+  Home(ConversationId),
+  Space(SpaceId, ConversationId),
+}
+
+/// The conversation each place of one account had open last, so switching back reopens it (#498).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LastOpen {
+  pub home: Option<ConversationId>,
+  pub spaces: HashMap<SpaceId, ConversationId>,
+}
+
+/// What an account had open last on this device.
+pub fn last_open(user: UserId) -> LastOpen {
+  load_json(&last_open_key(user)).unwrap_or_default()
+}
+
+/// Remembers the conversation of a place for an account; the next visit to the place reopens it.
+pub fn remember_last_open(user: UserId, place: LastOpenPlace) {
+  let mut last = last_open(user);
+  match place {
+    LastOpenPlace::Home(conversation) => last.home = Some(conversation),
+    LastOpenPlace::Space(space, conversation) => {
+      last.spaces.insert(space, conversation);
+    },
+  }
+  store_json(&last_open_key(user), &last);
+}
+
+fn last_open_key(user: UserId) -> String {
+  format!("{KEY_LAST_OPEN_PREFIX}{user}")
+}
+
 /// Emoji the pickers offer as recently used.
 pub const MAX_RECENT_EMOJI: usize = 16;
 
@@ -69,6 +115,214 @@ impl SendMode {
 
   pub fn from_slug(slug: &str) -> Option<Self> {
     Self::ALL.into_iter().find(|mode| mode.slug() == slug)
+  }
+}
+
+/// How much the persistent media cache (#749: avatars, space and channel pictures, inline
+/// pictures) may keep on this device. Read when a picture is stored, so a lower limit takes effect
+/// with the next one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaCacheLimit {
+  Mib100,
+  Mib200,
+  Mib500,
+  Gib1,
+}
+
+impl MediaCacheLimit {
+  pub const ALL: [MediaCacheLimit; 4] = [Self::Mib100, Self::Mib200, Self::Mib500, Self::Gib1];
+  pub const DEFAULT: MediaCacheLimit = Self::Mib200;
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Mib100 => "100mb",
+      Self::Mib200 => "200mb",
+      Self::Mib500 => "500mb",
+      Self::Gib1 => "1gb",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|limit| limit.slug() == slug)
+  }
+
+  pub fn bytes(self) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    match self {
+      Self::Mib100 => 100 * MIB,
+      Self::Mib200 => teamcraft_client_api::media::DEFAULT_MEDIA_CACHE_BYTES,
+      Self::Mib500 => 500 * MIB,
+      Self::Gib1 => teamcraft_client_api::media::MAX_MEDIA_CACHE_BYTES,
+    }
+  }
+
+  /// The stored choice, else the default.
+  pub fn load() -> Self {
+    load(KEY_MEDIA_CACHE_LIMIT, Self::from_slug).unwrap_or(Self::DEFAULT)
+  }
+
+  pub fn save(self) {
+    store_string(KEY_MEDIA_CACHE_LIMIT, self.slug());
+  }
+}
+
+/// How long the persistent media cache keeps a picture after it was stored (#749): a backstop, so
+/// nothing stays on the device for good once nobody shows it (or its message went away).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaCacheMaxAge {
+  Days7,
+  Days30,
+  Days90,
+}
+
+impl MediaCacheMaxAge {
+  pub const ALL: [MediaCacheMaxAge; 3] = [Self::Days7, Self::Days30, Self::Days90];
+  pub const DEFAULT: MediaCacheMaxAge = Self::Days30;
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Days7 => "7d",
+      Self::Days30 => "30d",
+      Self::Days90 => "90d",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|age| age.slug() == slug)
+  }
+
+  pub fn duration(self) -> std::time::Duration {
+    const DAY: u64 = 24 * 60 * 60;
+    match self {
+      Self::Days7 => std::time::Duration::from_secs(7 * DAY),
+      Self::Days30 => teamcraft_client_api::media::DEFAULT_MEDIA_MAX_AGE,
+      Self::Days90 => std::time::Duration::from_secs(90 * DAY),
+    }
+  }
+
+  /// The stored choice, else the default.
+  pub fn load() -> Self {
+    load(KEY_MEDIA_CACHE_MAX_AGE, Self::from_slug).unwrap_or(Self::DEFAULT)
+  }
+
+  pub fn save(self) {
+    store_string(KEY_MEDIA_CACHE_MAX_AGE, self.slug());
+  }
+}
+
+/// Up to which size a file opens as a preview in the app (#557, #821); a larger one says how large
+/// it is and offers the download. A preview keeps the decrypted file, and for text its lines, in
+/// memory while it is open. Read when a preview opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewLimit {
+  Mib2,
+  Mib5,
+  Mib10,
+  Mib25,
+  Mib50,
+}
+
+impl PreviewLimit {
+  pub const ALL: [PreviewLimit; 5] = [Self::Mib2, Self::Mib5, Self::Mib10, Self::Mib25, Self::Mib50];
+  pub const DEFAULT: PreviewLimit = Self::Mib10;
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Mib2 => "2mb",
+      Self::Mib5 => "5mb",
+      Self::Mib10 => "10mb",
+      Self::Mib25 => "25mb",
+      Self::Mib50 => "50mb",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|limit| limit.slug() == slug)
+  }
+
+  pub fn bytes(self) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    match self {
+      Self::Mib2 => 2 * MIB,
+      Self::Mib5 => 5 * MIB,
+      Self::Mib10 => 10 * MIB,
+      Self::Mib25 => 25 * MIB,
+      Self::Mib50 => 50 * MIB,
+    }
+  }
+
+  /// The limit as the settings name it ("10 MB"), in whole MiB like `format_bytes`'s "MB".
+  pub fn label(self) -> String {
+    format!("{} MB", self.bytes() / (1024 * 1024))
+  }
+
+  /// Whether a file of `size_bytes` opens as a preview; the limit itself does.
+  pub fn allows(self, size_bytes: u64) -> bool {
+    size_bytes <= self.bytes()
+  }
+
+  /// The stored choice, else the default.
+  pub fn load() -> Self {
+    load(KEY_PREVIEW_LIMIT, Self::from_slug).unwrap_or(Self::DEFAULT)
+  }
+
+  pub fn save(self) {
+    store_string(KEY_PREVIEW_LIMIT, self.slug());
+  }
+}
+
+/// Up to which size an audio attachment plays in the conversation (#802); a larger one offers the
+/// download only. The player holds the whole decrypted file in memory while it has it (the core has
+/// no streaming read for the page), like a video playing in its row (`MAX_INLINE_VIDEO_BYTES`). Read
+/// when a card is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioLimit {
+  Mib16,
+  Mib32,
+  Mib64,
+  Mib128,
+}
+
+impl AudioLimit {
+  pub const ALL: [AudioLimit; 4] = [Self::Mib16, Self::Mib32, Self::Mib64, Self::Mib128];
+  /// As large as a video that plays in its row.
+  pub const DEFAULT: AudioLimit = Self::Mib64;
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Mib16 => "16mb",
+      Self::Mib32 => "32mb",
+      Self::Mib64 => "64mb",
+      Self::Mib128 => "128mb",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|limit| limit.slug() == slug)
+  }
+
+  pub fn bytes(self) -> u64 {
+    const MIB: u64 = 1024 * 1024;
+    match self {
+      Self::Mib16 => 16 * MIB,
+      Self::Mib32 => 32 * MIB,
+      Self::Mib64 => 64 * MIB,
+      Self::Mib128 => 128 * MIB,
+    }
+  }
+
+  /// Whether a file of `size_bytes` plays in the conversation; the limit itself does.
+  pub fn allows(self, size_bytes: u64) -> bool {
+    size_bytes <= self.bytes()
+  }
+
+  /// The stored choice, else the default.
+  pub fn load() -> Self {
+    load(KEY_AUDIO_LIMIT, Self::from_slug).unwrap_or(Self::DEFAULT)
+  }
+
+  pub fn save(self) {
+    store_string(KEY_AUDIO_LIMIT, self.slug());
   }
 }
 
@@ -129,8 +383,6 @@ pub struct Settings {
   pub theme: RwSignal<Theme>,
   pub locale: RwSignal<Locale>,
   pub send_mode: RwSignal<SendMode>,
-  /// Show conversations with unread messages in a separate "Unreads" group at the top.
-  pub show_unreads_group: RwSignal<bool>,
   pub show_join_leave: RwSignal<bool>,
   /// Notifications, privacy, calls, display and sidebar options (one JSON document).
   pub prefs: RwSignal<Preferences>,
@@ -138,6 +390,8 @@ pub struct Settings {
   pub recent_conversations: RwSignal<Vec<ConversationId>>,
   /// Recently used emoji, newest first (reactions and the composer's picker).
   pub recent_emoji: RwSignal<Vec<String>>,
+  /// The skin tone the emoji picker puts on emoji that have one.
+  pub emoji_skin_tone: RwSignal<SkinTone>,
   /// The user's own order of favorites in the sidebar (this device).
   pub favorite_order: RwSignal<Vec<ConversationId>>,
 }
@@ -145,12 +399,12 @@ pub struct Settings {
 impl Settings {
   /// Sidebar grouping from the current preferences. `usize::MAX` as limit shows every DM (keyboard
   /// navigation must reach conversations that the list currently hides).
-  pub fn sidebar_options(&self, dm_limit: usize) -> SidebarOptions {
-    let prefs = self.prefs.get();
+  /// `maybe_held_open` is the conversation that stays in the "Unreads" section while it is open.
+  pub fn sidebar_options(&self, maybe_held_open: Option<ConversationId>) -> SidebarOptions {
     SidebarOptions {
-      show_unreads_group: self.show_unreads_group.get(),
-      sort: prefs.sidebar.sort,
-      dm_limit: if dm_limit == usize::MAX { 0 } else { dm_limit },
+      show_unreads_group: self.prefs.with(|prefs| prefs.sidebar.shows_unreads_section),
+      sort: self.prefs.with(|prefs| prefs.sidebar.sort),
+      maybe_held_open,
     }
   }
 
@@ -172,19 +426,16 @@ impl Settings {
       theme: RwSignal::new(load(KEY_THEME, Theme::from_slug).unwrap_or(Theme::System)),
       locale: RwSignal::new(load(KEY_LOCALE, Locale::from_tag).unwrap_or_else(browser_locale)),
       send_mode: RwSignal::new(load(KEY_SEND_MODE, SendMode::from_slug).unwrap_or(SendMode::Enter)),
-      show_unreads_group: RwSignal::new(load(KEY_UNREADS_GROUP, parse_bool).unwrap_or(true)),
       show_join_leave: RwSignal::new(load(KEY_SHOW_JOIN_LEAVE, parse_bool).unwrap_or(true)),
       prefs: RwSignal::new(load(KEY_PREFS, |text| Some(Preferences::from_json(text))).unwrap_or_default()),
       recent_conversations: RwSignal::new(load(KEY_RECENT_CONVERSATIONS, from_json).unwrap_or_default()),
       recent_emoji: RwSignal::new(load(KEY_RECENT_EMOJI, from_json).unwrap_or_default()),
+      emoji_skin_tone: RwSignal::new(load(KEY_EMOJI_SKIN_TONE, SkinTone::from_slug).unwrap_or_default()),
       favorite_order: RwSignal::new(load(KEY_FAVORITE_ORDER, from_json).unwrap_or_default()),
     };
     persist(KEY_THEME, settings.theme, |theme| theme.slug().to_owned());
     persist(KEY_LOCALE, settings.locale, |locale| locale.tag().to_owned());
     persist(KEY_SEND_MODE, settings.send_mode, |mode| mode.slug().to_owned());
-    persist(KEY_UNREADS_GROUP, settings.show_unreads_group, |value| {
-      value.to_string()
-    });
     persist(KEY_SHOW_JOIN_LEAVE, settings.show_join_leave, |value| {
       value.to_string()
     });
@@ -193,8 +444,29 @@ impl Settings {
       to_json(&list)
     });
     persist(KEY_RECENT_EMOJI, settings.recent_emoji, |list| to_json(&list));
+    persist(KEY_EMOJI_SKIN_TONE, settings.emoji_skin_tone, |tone| {
+      tone.slug().to_owned()
+    });
     persist(KEY_FAVORITE_ORDER, settings.favorite_order, |list| to_json(&list));
     settings
+  }
+}
+
+#[cfg(test)]
+impl Settings {
+  /// Defaults without `localStorage`, for tests outside a browser.
+  pub fn for_tests() -> Self {
+    Self {
+      theme: RwSignal::new(Theme::System),
+      locale: RwSignal::new(Locale::En),
+      send_mode: RwSignal::new(SendMode::Enter),
+      show_join_leave: RwSignal::new(true),
+      prefs: RwSignal::new(Preferences::default()),
+      recent_conversations: RwSignal::new(Vec::new()),
+      recent_emoji: RwSignal::new(Vec::new()),
+      emoji_skin_tone: RwSignal::new(SkinTone::Default),
+      favorite_order: RwSignal::new(Vec::new()),
+    }
   }
 }
 
@@ -209,6 +481,12 @@ fn to_json<T: serde::Serialize>(value: &T) -> String {
 
 fn parse_bool(value: &str) -> Option<bool> {
   value.parse().ok()
+}
+
+/// The language the app starts in: the saved choice, else the browser's. For code that runs before
+/// (or without) the settings, like the notification button labels the service worker keeps.
+pub fn stored_locale() -> Locale {
+  load(KEY_LOCALE, Locale::from_tag).unwrap_or_else(browser_locale)
 }
 
 fn browser_locale() -> Locale {
@@ -271,5 +549,69 @@ pub fn store_string(key: &str, value: &str) {
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
+  // Native unit tests have no browser: web-sys would panic, so they run without storage.
+  if cfg!(not(target_arch = "wasm32")) {
+    return None;
+  }
   web_sys::window()?.local_storage().ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  mod audio_limit {
+    use super::*;
+
+    #[test]
+    fn the_default_matches_inline_video_and_the_limit_itself_plays() {
+      let limit = AudioLimit::DEFAULT;
+      assert_eq!(limit.bytes(), crate::media_layout::MAX_INLINE_VIDEO_BYTES);
+      assert!(limit.allows(limit.bytes()));
+      assert!(!limit.allows(limit.bytes() + 1));
+    }
+
+    #[test]
+    fn slugs_round_trip_and_limits_grow() {
+      for limit in AudioLimit::ALL {
+        assert_eq!(AudioLimit::from_slug(limit.slug()), Some(limit));
+      }
+      assert!(
+        AudioLimit::ALL
+          .windows(2)
+          .all(|pair| pair[0].bytes() < pair[1].bytes())
+      );
+      assert_eq!(AudioLimit::from_slug("512mb"), None);
+      // Outside a browser nothing is stored: the default.
+      assert_eq!(AudioLimit::load(), AudioLimit::DEFAULT);
+    }
+  }
+
+  mod preview_limit {
+    use super::*;
+
+    #[test]
+    fn the_limit_itself_is_allowed() {
+      let limit = PreviewLimit::DEFAULT;
+      assert_eq!(limit.bytes(), 10 * 1024 * 1024);
+      assert!(limit.allows(limit.bytes()));
+      assert_eq!(limit.label(), "10 MB");
+      assert!(!limit.allows(limit.bytes() + 1));
+    }
+
+    #[test]
+    fn slugs_round_trip_and_limits_grow() {
+      for limit in PreviewLimit::ALL {
+        assert_eq!(PreviewLimit::from_slug(limit.slug()), Some(limit));
+      }
+      assert!(
+        PreviewLimit::ALL
+          .windows(2)
+          .all(|pair| pair[0].bytes() < pair[1].bytes())
+      );
+      assert_eq!(PreviewLimit::from_slug("1tb"), None);
+      // Outside a browser nothing is stored: the default.
+      assert_eq!(PreviewLimit::load(), PreviewLimit::DEFAULT);
+    }
+  }
 }

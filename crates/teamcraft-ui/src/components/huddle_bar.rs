@@ -1,8 +1,11 @@
 use leptos::prelude::*;
 
+use crate::areas::{self, Place, lazy_area};
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
+use crate::components::pending_button::PendingButton;
+use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::ConversationId;
 use crate::state::use_app_state;
@@ -10,6 +13,22 @@ use crate::state::use_app_state;
 /// Strip under the channel header: a running huddle to join, or the controls of the user's own call.
 #[component]
 pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let call = state.call;
+  let is_shown = Memo::new(move |_| {
+    call.is_in_call_for(conversation) || state.read(|backend| backend.huddle(conversation)).is_some()
+  });
+  // The bar loads with the first call it shows (`areas::huddle_bar`), next to the call screens.
+  move || {
+    is_shown
+      .get()
+      .then(|| lazy_area(Place::Inline, move || areas::huddle_bar(conversation)))
+  }
+}
+
+/// The bar itself, while a call goes on in the conversation or this account is in it.
+#[component]
+pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let call = state.call;
@@ -29,6 +48,26 @@ pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
       })
       .unwrap_or_default()
   });
+  // Only for another device of the user (issue #976): this device's own entry, still listed for a
+  // moment after it left, is none.
+  let is_on_other_device = Memo::new(move |_| {
+    let me = state.me().id;
+    !is_in_call.get() && huddle.get().is_some_and(|info| info.is_on_other_device(me))
+  });
+  let join_alongside = move |_| {
+    call.is_camera_on.set(false);
+    call.join_alongside(CallRequest {
+      conversation,
+      kind: CallKind::Huddle,
+    });
+  };
+  let take_over = move |_| {
+    call.is_camera_on.set(false);
+    call.join_and_take_over(CallRequest {
+      conversation,
+      kind: CallKind::Huddle,
+    });
+  };
   let join = move |_| {
     call.is_camera_on.set(false);
     call.join(CallRequest {
@@ -36,13 +75,25 @@ pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
       kind: CallKind::Huddle,
     });
   };
+  // Also clears an entry only the server still lists (a device that left without it hearing).
+  let leaving_everywhere = PendingAction::new();
+  let leave_everywhere = move |_| {
+    leaving_everywhere.run(|| state.write(|backend| backend.leave_call_everywhere(conversation)));
+  };
 
   view! {
     <Show when=move || is_in_call.get() || huddle.get().is_some() fallback=|| ()>
-      <div class="huddle-bar" role="region" aria-label=move || i18n.t("huddle-bar-label")>
+      <div
+        class="huddle-bar"
+        class:huddle-bar-choices=move || is_on_other_device.get()
+        role="region"
+        aria-label=move || i18n.t("huddle-bar-label")
+      >
         <Icon name=IconName::Headphones class="huddle-icon" />
         <div class="huddle-info">
-          <strong>{move || i18n.t("huddle-in-progress")}</strong>
+          <strong>
+            {move || if is_on_other_device.get() { i18n.t("huddle-on-other-device") } else { i18n.t("huddle-in-progress") }}
+          </strong>
           <span class="avatar-stack">
             {move || {
               members.get().into_iter().map(|user| view! { <Avatar user=user size=AvatarSize::Small /> }).collect_view()
@@ -56,9 +107,28 @@ pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
           when=move || is_in_call.get()
           fallback=move || {
             view! {
-              <button class="btn btn-primary btn-small" on:click=join>
-                {move || i18n.t("huddle-join")}
-              </button>
+              <Show
+                when=move || is_on_other_device.get()
+                fallback=move || {
+                  view! {
+                    <button class="btn btn-primary btn-small" on:click=join>
+                      {move || i18n.t("huddle-join")}
+                    </button>
+                  }
+                }
+              >
+                <div class="huddle-controls" role="group" aria-label=move || i18n.t("huddle-on-other-device")>
+                  <PendingButton pending=leaving_everywhere class="btn btn-small btn-quiet" on_click=leave_everywhere>
+                    {move || i18n.t("huddle-leave-everywhere")}
+                  </PendingButton>
+                  <button class="btn btn-small" on:click=join_alongside>
+                    {move || i18n.t("huddle-join-here")}
+                  </button>
+                  <button class="btn btn-primary btn-small" on:click=take_over>
+                    {move || i18n.t("huddle-move-here")}
+                  </button>
+                </div>
+              </Show>
             }
           }
         >
@@ -119,7 +189,9 @@ pub fn CallPill() -> impl IntoView {
           }
           title=move || i18n.t("call-open")
         >
-          <span class="small">{move || i18n.t("call-in-progress")}</span>
+          <span class="small" role="status">
+            {move || if call.has_ended.get() { i18n.t("call-ended") } else { i18n.t("call-in-progress") }}
+          </span>
           <span translate="no">{move || format!("# {}", name.get())}</span>
         </button>
         <button

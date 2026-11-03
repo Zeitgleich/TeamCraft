@@ -2,11 +2,17 @@
 
 The workspace policy is **signed by an owner** and stored by the server verbatim; clients verify the
 signature and refuse entries not signed by an owner. A compromised server therefore cannot change
-policy. Edit it under Administration > **Security** (read-only for admins and in the browser).
+policy. Edit it under Administration > **Security** (read-only for admins).
 
-**Saving a policy needs an owner on the desktop app**: the client core signs the new version with the
-owner's device key. The first save also founds the signed roster of owners and admins from the
+**Saving a policy needs an owner** (desktop app or browser): the client core signs the new version
+with the owner's device key. The first save also founds the signed roster of owners and admins from the
 identity provider's roles. Policy versions are append-only; each save is a new version.
+
+**Keep at least two owners.** Only an owner can sign the roster and the policy. If every owner is
+lost there is no recovery: the workspace has to be set up again from scratch. When an owner leaves,
+add the successor first and remove the old owner afterwards. See
+[Owner lifecycle](../../admin.md#231-owner-lifecycle) and
+[Setting up again](../../operations.md#setting-up-again).
 
 ## Settings
 
@@ -21,7 +27,7 @@ identity provider's roles. Policy versions are append-only; each save is a new v
 | Sessions              | require a second factor; maximum age; idle timeout                        | Server, at every request                                                                    |
 | Passwords             | shortest password of local accounts (8 to 128)                            | Server                                                                                      |
 | Guests                | allowed e-mail domains; DM scope; default expiry                          | Server                                                                                      |
-| Directory             | display name format; show full name; show e-mail to members               | Server, in every response that names a person                                               |
+| Directory             | display name format; full name; e-mail; own name allowed                  | Server, in every response that names a person                                               |
 | Statuses              | statuses on or off; custom statuses; away timeout; presets                | Server                                                                                      |
 | Threads               | threaded view on or off; follow threads people are mentioned in           | Server (threads off: replies are refused); the follow default is for people who never chose |
 | Push content          | generic, sender or full (default full)                                    | The receiving device, after opening the sealed payload                                      |
@@ -36,11 +42,19 @@ and **Instance** (below).
 
 ### admin_self_join
 
-- `visible`: allowed. Members see "Admin joined" with an admin badge that users cannot hide.
+- `visible`: allowed. Members see "… joined this channel as a workspace admin", which users cannot
+  hide; their apps work it out from the membership change itself.
 - `disabled`: refused by member clients.
-- `owner_approval`: **not implemented**; clients refuse self-joins because there is no approval flow.
+- `owner_approval`: members' clients refuse the admin's own self-join; the admin asks, and a channel
+  owner lets them in. Members see "… joined this channel as a workspace admin, approved by …".
 
 Member clients enforce this themselves, so the server cannot bypass it.
+
+The setting also covers admins bringing each other in: an admin who isn't a member of a private
+channel can't add another admin there under `owner_approval` or `disabled` either, from version
+1.0.9 on. Members can still add admins (that is how an owner approves). As long as a member of the
+channel uses an older version, that member's app can still let such an addition through; update
+all apps for the setting to hold.
 
 ### Organization recovery
 
@@ -81,3 +95,11 @@ These are edited through the admin API by admins (not only owners) and are audit
 - **Instance:** read-only status of the media server (last contact, running calls), the push
   providers (Web Push, FCM, UnifiedPush, APNs: active, not configured, or not delivering yet) and
   storage (attachments and search index segments). Telephony is a placeholder.
+
+## Display names
+
+The name comes from the identity provider. With "Let members change their name" on (the default), a
+member can replace it in their profile (Settings, Account, "Change name"). The sign-in sync never
+overwrites that name, and "Use name from sign-in" gives the provider's current name back. Switching
+the setting off stops new names (`display_name_override_not_allowed`), but names already chosen stay until their owners clear them. The
+longest name is `limits.max_display_name_chars` (default 80).

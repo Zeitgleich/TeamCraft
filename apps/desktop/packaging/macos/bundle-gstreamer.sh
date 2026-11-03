@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Prepares the part of GStreamer.framework (the official universal runtime from
 # gstreamer.freedesktop.org) that travels inside the app, for hardware H.264 through VideoToolbox
-# (`vtenc_h264`) on both slices.
+# (`vtenc_h264`).
 #
 #   bundle-gstreamer.sh patch  <executable>   build a slim framework in target/gstreamer-framework,
-#                                              point it and the executable at the app's Frameworks
-#                                              directory, strip, re-sign ad hoc, check every reference
+#                                              thinned to the executable's architectures, point it
+#                                              and the executable at the app's Frameworks directory,
+#                                              strip, re-sign ad hoc, check every reference
 #
 # Only what the encoder pipeline needs is bundled (crates/teamcraft-media/src/video_gstreamer.rs:
 # appsrc ! vtenc_h264 ! capsfilter ! h264parse ! appsink): the plugins in PLUGINS, the plugin
@@ -112,7 +113,23 @@ retarget_rpaths() {
   done < <(otool -l "$file" | awk -v source="$SOURCE" '$1 == "path" && index($2, source) == 1 { print $2 }' | sort -u)
 }
 
+# The framework is universal, the app is built per architecture: a slice the executable can't load
+# would be dead weight in every download and update.
+executable_archs="$(lipo -archs "$executable")"
+
+# Keeps only the executable's slice of a fat file (a universal executable keeps fat files as they are).
+thin() {
+  local file="$1"
+  case "$executable_archs" in *' '*) return 0 ;; esac
+  [ "$(lipo -archs "$file")" != "$executable_archs" ] || return 0
+  lipo "$file" -thin "$executable_archs" -output "$file.thin"
+  # Through cat, so the file keeps its mode (the plugin scanner is executable).
+  cat "$file.thin" > "$file"
+  rm "$file.thin"
+}
+
 while IFS= read -r -d '' file; do
+  thin "$file"
   # Local symbols only matter for debugging; the dynamic symbol table stays intact.
   strip -x "$file"
   id="$(otool -D "$file" | tail -n +2 | head -n 1)"

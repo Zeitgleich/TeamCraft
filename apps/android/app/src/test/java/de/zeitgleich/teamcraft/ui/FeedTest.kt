@@ -35,6 +35,26 @@ class FeedTest {
   }
 
   @Test
+  fun onlyTheLastMessageOfAGroupEndsIt() {
+    val items = entries(
+      message("1", "a", DAY_ONE),
+      message("2", "a", DAY_ONE + MINUTE),
+      message("3", "a", DAY_ONE + 2 * MINUTE),
+      message("4", "b", DAY_ONE + 3 * MINUTE),
+    )
+    assertEquals(listOf(false, false, true, true), items.map { it.isGroupEnd })
+  }
+
+  @Test
+  fun aDayChipEndsTheGroupBeforeIt() {
+    // DAY_ONE is 08:00 UTC: one minute before and at midnight.
+    val midnight = DAY_ONE + 16 * HOUR
+    val items = entries(message("1", "a", midnight - MINUTE), message("2", "a", midnight))
+    assertEquals(listOf(true, true), items.map { it.isGroupEnd })
+    assertEquals(listOf(false, false), items.map { it.isContinuation })
+  }
+
+  @Test
   fun unreadLineBreaksAGroup() {
     val items = feedItems(
       listOf(message("1", "a", DAY_ONE), message("2", "a", DAY_ONE + MINUTE)),
@@ -58,8 +78,51 @@ class FeedTest {
     assertEquals(listOf("day-2026-10-21", "1"), items.map { it.key })
   }
 
+  @Test
+  fun rowsOfOneLayoutShareAContentType() {
+    val joined = message("3", "a", DAY_ONE + 2 * MINUTE, kind = JsonObject(mapOf("System" to JsonPrimitive("Joined"))))
+    val items = feedItems(
+      listOf(message("1", "a", DAY_ONE), message("2", "a", DAY_ONE + MINUTE), joined),
+      maybeFirstUnread = "2",
+      zone = ZoneOffset.UTC,
+    )
+    assertEquals(
+      listOf(FeedContentType.Day, FeedContentType.Message, FeedContentType.Unread, FeedContentType.Message, FeedContentType.Event),
+      items.map { it.contentType },
+    )
+    val grouped = feedItems(listOf(message("1", "a", DAY_ONE), message("2", "a", DAY_ONE + MINUTE)), null, ZoneOffset.UTC)
+    assertEquals(FeedContentType.FollowUp, grouped.last().contentType)
+  }
+
+  @Test
+  fun onlyDaysOutsideTheCurrentYearShowTheirYear() {
+    val today = LocalDate.of(2026, 10, 22)
+    assertEquals(false, dayShowsYear(LocalDate.of(2026, 1, 1), today))
+    assertEquals(true, dayShowsYear(LocalDate.of(2025, 12, 31), today))
+    assertEquals(true, dayShowsYear(LocalDate.of(2027, 1, 1), today))
+    // New Year's Eve: the same day gains its year once the next year has begun.
+    val eve = LocalDate.of(2026, 12, 31)
+    assertEquals(false, dayShowsYear(eve, eve))
+    assertEquals(true, dayShowsYear(eve, eve.plusDays(1)))
+  }
+
   private fun entries(vararg messages: Message): List<FeedItem.Entry> =
     feedItems(messages.toList(), maybeFirstUnread = null, zone = ZoneOffset.UTC).filterIsInstance<FeedItem.Entry>()
+
+  @Test
+  fun reactionsAreSeenOnlyForWaitingMessagesOnScreenAndOnce() {
+    val items = entries(message("1", "a", DAY_ONE), message("2", "a", DAY_ONE + MINUTE), message("3", "b", DAY_ONE + 2 * MINUTE))
+    assertEquals(listOf("2"), reactionsInView(items, visible = listOf(1, 2), waiting = listOf("1", "2"), reported = emptySet()))
+    assertEquals(emptyList<String>(), reactionsInView(items, visible = listOf(1, 2), waiting = listOf("2"), reported = setOf("2")))
+    assertEquals(emptyList<String>(), reactionsInView(items, visible = listOf(7), waiting = listOf("2"), reported = emptySet()))
+  }
+
+  @Test
+  fun theJumpFindsTheMessageRowOrWaitsForIt() {
+    val items = feedItems(listOf(message("1", "a", DAY_ONE), message("2", "a", DAY_TWO)), maybeFirstUnread = null, zone = ZoneOffset.UTC)
+    assertEquals(3, rowOf(items, "2"))
+    assertEquals(null, rowOf(items, "9"))
+  }
 
   private fun message(id: String, author: String, sentAt: Long, kind: kotlinx.serialization.json.JsonElement = JsonPrimitive("User")) =
     Message(id = id, conversation = "c", author = author, kind = kind, sentAt = sentAt, body = "text $id")

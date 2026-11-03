@@ -4,6 +4,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::{ListUserGroupsResponse, UserGroupResponse};
 
+use crate::reactive::SetIfAlive;
 use crate::rest::RestClient;
 
 #[derive(Clone, Copy)]
@@ -36,7 +37,7 @@ impl GroupsHub {
         .get::<ListUserGroupsResponse>("/api/v1/user-groups")
         .await
       {
-        Ok(list) => hub.groups.set(list.groups),
+        Ok(list) => hub.groups.set_if_alive(list.groups),
         Err(error) => tracing::debug!(%error, "user groups not loaded"),
       }
     });

@@ -1,0 +1,1 @@
+{"service":"reports","version":3,"limits":{"rows":50000,"timeout_ms":2500,"retry":[1,5,30]},"owners":["Team A","Team B"],"enabled":true,"note":null}

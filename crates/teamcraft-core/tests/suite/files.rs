@@ -6,20 +6,31 @@
 
 use crate::common;
 
+use std::cell::RefCell;
 use std::io::Cursor;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
 
 use common::{Peer, backend_of, run_commands, settle};
 use image::{ImageBuffer, ImageFormat, Rgb};
 use teamcraft_client_api::actions::{
-  FileFailure, FileSource, FileTransfer, MessagePriority, OutgoingFile, OutgoingMessage, ShareLinkOptions,
+  FileFailure, FileSource, FileTransfer, MediaAnchor, MessagePriority, OutgoingFile, OutgoingMessage,
+  PixelSize, ShareLinkOptions,
 };
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::Message;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::client::files::{UploadRetrySettings, UploadStep};
+use teamcraft_core::clock::ManualClock;
+use teamcraft_core::downloads::{DownloadPriority, Downloads};
+use teamcraft_core::ui_backend::CoreCommand;
+use teamcraft_core::upkeep::{Upkeep, UploadMode};
+use teamcraft_core::{ClientSettings, MAX_VIEWER_BYTES};
 use teamcraft_crypto::attachment::decrypt_attachment;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_crypto::share_link::open_fragment;
-use teamcraft_proto::ConversationId;
+use teamcraft_proto::{AttachmentId, ConversationId, MessageId};
 
 #[tokio::test]
 async fn text_with_files_arrives_with_thumbnails_and_downloads() {
@@ -52,6 +63,17 @@ async fn text_with_files_arrives_with_thumbnails_and_downloads() {
   assert!(files[1].maybe_thumbnail_png.is_none());
   assert_eq!(files[1].transfer, FileTransfer::Remote);
   assert_eq!(bob_ui.conversation_files(channel).len(), 2);
+  // The viewer's window holds this message's files; a window of zero messages holds none.
+  let page = bob_ui
+    .conversation_media(channel, MediaAnchor::Around(received.id), 10)
+    .expect("the core answers at once");
+  assert_eq!(page.files.len(), 2);
+  assert!(!page.has_older && !page.has_newer);
+  assert!(
+    bob_ui
+      .conversation_media(channel, MediaAnchor::Around(received.id), 0)
+      .is_some_and(|page| page.files.is_empty())
+  );
 
   let directory = std::env::temp_dir().join(format!("teamcraft-downloads-{}", std::process::id()));
   bob.client.set_download_dir(Some(directory.clone()));
@@ -62,6 +84,53 @@ async fn text_with_files_arrives_with_thumbnails_and_downloads() {
     panic!("not downloaded: {:?}", files[1].transfer);
   };
   assert_eq!(std::fs::read(path).unwrap(), b"sand");
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// The image viewer opens one file of an album in memory, and saves only that one.
+#[tokio::test]
+async fn one_file_of_an_album_opens_in_memory_and_downloads_alone() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![
+      file("first.jpg", "image/jpeg", jpeg()),
+      file("second.txt", "text/plain", b"waves".to_vec()),
+    ],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  assert_eq!(files[1].maybe_sender, Some(alice.client.user_id()));
+  assert_eq!(files[1].maybe_sent_at, Some(received.sent_at));
+
+  let reference = bob_ui
+    .attachment_ref(channel, received.id, &files[1].file_id)
+    .expect("the file of the message");
+  let opened = bob.client.open_attachment(&reference).await.unwrap();
+  assert_eq!(opened.expose_secret(), b"waves");
+  let mut too_big = reference.clone();
+  too_big.size_bytes = MAX_VIEWER_BYTES + 1;
+  assert!(
+    bob.client.open_attachment(&too_big).await.is_err(),
+    "the viewer refuses files above its cap on every platform"
+  );
+  assert!(bob_ui.attachment_ref(channel, received.id, "pending-0").is_none());
+
+  let directory = std::env::temp_dir().join(format!("teamcraft-one-download-{}", std::process::id()));
+  bob.client.set_download_dir(Some(directory.clone()));
+  bob_ui.download_attachment(channel, received.id, &files[1].file_id);
+  run_commands(&mut bob, &bob_ui).await;
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  assert_eq!(
+    files[0].transfer,
+    FileTransfer::Remote,
+    "the other file stays remote"
+  );
+  assert!(matches!(files[1].transfer, FileTransfer::Local { .. }));
   std::fs::remove_dir_all(&directory).unwrap();
 }
 
@@ -98,7 +167,7 @@ async fn uploads_resume_after_network_loss_and_respect_the_size_limit() {
   let received = last(&bob_ui, channel);
   let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
   assert_eq!(files.len(), 1, "only the file within the limit went out");
-  assert_eq!(received.body, "📎 small.txt");
+  assert_eq!(received.body, "small.txt");
   // The sender still sees which file didn't make it, and why.
   let sent = last(&alice_ui, channel);
   let mine = alice_ui.message_extras(channel, &[sent.id])[0].files.clone();
@@ -106,10 +175,414 @@ async fn uploads_resume_after_network_loss_and_respect_the_size_limit() {
   assert_eq!(mine[1].file_name, "big.bin");
   assert_eq!(
     mine[1].transfer,
-    FileTransfer::Failed {
+    FileTransfer::UploadFailed {
       reason: FileFailure::TooLarge
     }
   );
+}
+
+/// Every app's loop retries through the same upkeep (the desktop app once skipped uploads).
+#[tokio::test]
+async fn the_periodic_upkeep_uploads_and_sends_what_waited_for_the_network() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  server.set_offline(alice.client.user_id(), true);
+  alice_ui.send_message(with_files(
+    channel,
+    "written on the train",
+    vec![file("notes.txt", "text/plain", b"sand".to_vec())],
+  ));
+  for command in alice_ui.drain_commands() {
+    let _ = alice.client.run_ui_command(command).await;
+  }
+
+  server.set_offline(alice.client.user_id(), false);
+  let mut upkeep = Upkeep::new(std::time::Duration::from_secs(60));
+  assert!(upkeep.tick(&mut alice.client).await);
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  assert_eq!(received.body, "written on the train");
+  assert_eq!(bob_ui.message_extras(channel, &[received.id])[0].files.len(), 1);
+}
+
+/// The web and desktop cores drive the blob upload beside their loop (the UI reads meanwhile): the
+/// pending message shows the picture's thumbnail at its final size until the file is up, and the
+/// upkeep leaves the upload to the host.
+#[tokio::test]
+async fn a_host_driven_upload_shows_the_pending_picture_until_it_is_sent() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("camera.jpg", "image/jpeg", jpeg())],
+  ));
+  let commands = alice_ui.drain_commands();
+  assert!(commands.contains(&CoreCommand::UploadFiles));
+  let pending = last(&alice_ui, channel);
+  let shown = alice_ui.message_extras(channel, &[pending.id])[0].files[0].clone();
+  assert_eq!(
+    shown.maybe_dimensions,
+    Some(PixelSize {
+      width: 64,
+      height: 48
+    }),
+    "the space is reserved from the header at once"
+  );
+  assert!(matches!(
+    shown.transfer,
+    FileTransfer::Uploading { done_bytes: 0, .. }
+  ));
+
+  let mut upkeep = Upkeep::new(Duration::from_secs(60)).with_uploads(UploadMode::Host);
+  upkeep.tick(&mut alice.client).await;
+  assert!(
+    alice.client.flush_outbox().await.unwrap().sent == 0,
+    "the upkeep leaves the upload to the host"
+  );
+
+  let mut upload = alice.client.start_upload().await.unwrap().expect("a due file");
+  let uploading = alice_ui.message_extras(channel, &[pending.id])[0].files[0].clone();
+  assert!(
+    uploading.maybe_thumbnail_png.is_some(),
+    "the pending message shows the thumbnail while the file goes up"
+  );
+  let sent = upload.sent().await;
+  assert_eq!(
+    alice.client.finish_upload(upload, sent).await.unwrap(),
+    UploadStep::Uploaded
+  );
+  assert!(alice.client.start_upload().await.unwrap().is_none());
+  alice.client.flush_outbox().await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  assert_eq!(files[0].maybe_dimensions, shown.maybe_dimensions);
+  assert!(files[0].maybe_thumbnail_png.is_some());
+}
+
+/// The web and desktop cores download beside their loop, a few at a time (issue #491): files for
+/// the viewer are handed over, files to save end up on disk with their state recorded.
+#[tokio::test]
+async fn downloads_beside_the_loop_open_and_save_files() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![
+      file("a.txt", "text/plain", b"first".to_vec()),
+      file("b.txt", "text/plain", b"second".to_vec()),
+    ],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  let directory = std::env::temp_dir().join(format!("teamcraft-beside-{}", std::process::id()));
+  bob.client.set_download_dir(Some(directory.clone()));
+
+  let mut downloads = Downloads::new(1);
+  let opened = Rc::new(RefCell::new(None));
+  let sink = opened.clone();
+  let reference = bob_ui
+    .attachment_ref(channel, received.id, &files[0].file_id)
+    .unwrap();
+  downloads.view(
+    reference,
+    DownloadPriority::Background,
+    Box::new(move |result| *sink.borrow_mut() = Some(result.map(|bytes| bytes.expose_secret().to_vec()))),
+  );
+  let saved: AttachmentId = files[1].file_id.parse().unwrap();
+  downloads.save(channel, saved);
+
+  // One at a time: the save waits for the view.
+  assert!(!downloads.start_due(&mut bob.client).await);
+  let finished = downloads.next_finished().await;
+  assert!(!Downloads::finish(&mut bob.client, finished));
+  assert_eq!(opened.borrow_mut().take().unwrap().unwrap(), b"first");
+  assert!(
+    downloads.start_due(&mut bob.client).await,
+    "marked as downloading"
+  );
+  let finished = downloads.next_finished().await;
+  assert!(Downloads::finish(&mut bob.client, finished));
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  let FileTransfer::Local { path } = &files[1].transfer else {
+    panic!("not saved: {:?}", files[1].transfer);
+  };
+  assert_eq!(std::fs::read(path).unwrap(), b"second");
+  assert!(!downloads.is_running());
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// "Save…" in the desktop app (#719): the file goes exactly where the user picked it in the save
+/// dialog, replacing a file of that name (the dialog asked), without a download directory.
+#[tokio::test]
+async fn a_file_saved_through_the_dialog_goes_to_the_picked_path() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("notes.txt", "text/plain", b"tide".to_vec())],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  let directory = std::env::temp_dir().join(format!("teamcraft-save-as-{}", std::process::id()));
+  std::fs::create_dir_all(&directory).unwrap();
+  let target = directory.join("picked name.txt");
+  std::fs::write(&target, b"old").unwrap();
+
+  let mut downloads = Downloads::new(1);
+  downloads.save_to(channel, files[0].file_id.parse().unwrap(), target.clone());
+  assert!(
+    downloads.start_due(&mut bob.client).await,
+    "marked as downloading"
+  );
+  let finished = downloads.next_finished().await;
+  assert!(Downloads::finish(&mut bob.client, finished));
+
+  assert_eq!(std::fs::read(&target).unwrap(), b"tide");
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  assert_eq!(
+    files[0].transfer,
+    FileTransfer::Local {
+      path: target.to_string_lossy().into_owned()
+    }
+  );
+  assert_eq!(
+    std::fs::read_dir(&directory).unwrap().count(),
+    1,
+    "no second copy"
+  );
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// "Download all" in the desktop app (#1014): every file of the message goes into the one folder
+/// the user picked, running side by side; files of the same name each get their own, and a file
+/// that was there before stays.
+#[tokio::test]
+async fn download_all_saves_every_file_into_the_picked_folder() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![
+      file("image.jpg", "image/jpeg", b"one".to_vec()),
+      file("image.jpg", "image/jpeg", b"two".to_vec()),
+      file("notes.txt", "text/plain", b"three".to_vec()),
+    ],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  let folder = std::env::temp_dir().join(format!("teamcraft-download-all-{}", std::process::id()));
+  std::fs::create_dir_all(&folder).unwrap();
+  std::fs::write(folder.join("notes.txt"), b"old").unwrap();
+
+  let mut downloads = Downloads::new(3);
+  for file in &files {
+    downloads.save_into(channel, file.file_id.parse().unwrap(), folder.clone());
+  }
+  assert!(downloads.start_due(&mut bob.client).await);
+  for _ in 0..files.len() {
+    let finished = downloads.next_finished().await;
+    assert!(Downloads::finish(&mut bob.client, finished));
+  }
+
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  let mut saved: Vec<Vec<u8>> = files
+    .iter()
+    .map(|file| match &file.transfer {
+      FileTransfer::Local { path } => {
+        assert_eq!(std::path::Path::new(path).parent(), Some(folder.as_path()));
+        std::fs::read(path).unwrap()
+      },
+      other => panic!("not saved: {other:?}"),
+    })
+    .collect();
+  saved.sort();
+  assert_eq!(saved, vec![b"one".to_vec(), b"three".to_vec(), b"two".to_vec()]);
+  assert_eq!(std::fs::read(folder.join("notes.txt")).unwrap(), b"old");
+  assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 4);
+  std::fs::remove_dir_all(&folder).unwrap();
+}
+
+/// A save target that can't be written (its folder went away, no permission to write there) leaves
+/// the file failed with that reason, not a bare "Transfer failed" (#807).
+#[tokio::test]
+async fn a_save_target_that_cannot_be_written_fails_with_that_reason() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (id, received) = one_file_for_bob(&mut alice, &mut bob, channel, b"RIFF").await;
+  let bob_ui = backend_of(&bob);
+  let target = std::env::temp_dir()
+    .join(format!("teamcraft-no-such-folder-{}", std::process::id()))
+    .join("recording.wav");
+
+  let mut downloads = Downloads::new(1);
+  downloads.save_to(channel, id, target.clone());
+  assert!(downloads.start_due(&mut bob.client).await);
+  let finished = downloads.next_finished().await;
+  assert!(Downloads::finish(&mut bob.client, finished));
+
+  let files = bob_ui.message_extras(channel, &[received])[0].files.clone();
+  assert_eq!(
+    files[0].transfer,
+    FileTransfer::Failed {
+      reason: FileFailure::LocalFile
+    }
+  );
+  assert!(!target.exists());
+}
+
+/// While the file storage is down, saving a file says so on its card; "Try again" gets the file
+/// once the storage is back (#807).
+#[tokio::test]
+async fn a_save_while_the_storage_is_down_says_so_and_a_retry_gets_the_file() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (id, received) = one_file_for_bob(&mut alice, &mut bob, channel, b"RIFF").await;
+  let bob_ui = backend_of(&bob);
+  let directory = std::env::temp_dir().join(format!("teamcraft-storage-down-{}", std::process::id()));
+  std::fs::create_dir_all(&directory).unwrap();
+  let target = directory.join("recording.wav");
+
+  server.set_unavailable(bob.client.user_id(), Duration::from_secs(30));
+  let mut downloads = Downloads::new(1);
+  downloads.save_to(channel, id, target.clone());
+  assert!(downloads.start_due(&mut bob.client).await, "marked as failed");
+  assert!(!downloads.is_running());
+  let files = bob_ui.message_extras(channel, &[received])[0].files.clone();
+  assert_eq!(
+    files[0].transfer,
+    FileTransfer::Failed {
+      reason: FileFailure::StorageUnavailable
+    }
+  );
+
+  server.clear_unavailable(bob.client.user_id());
+  downloads.save_to(channel, id, target.clone());
+  assert!(downloads.start_due(&mut bob.client).await);
+  let finished = downloads.next_finished().await;
+  assert!(Downloads::finish(&mut bob.client, finished));
+  assert_eq!(std::fs::read(&target).unwrap(), b"RIFF");
+  let files = bob_ui.message_extras(channel, &[received])[0].files.clone();
+  assert!(matches!(files[0].transfer, FileTransfer::Local { .. }));
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// A refused blob upload (a browser's CSP, a proxy) goes into the same announced attachment on every
+/// retry, so unfinished uploads don't pile up into 409 Conflict. Retries back off, stop after the cap
+/// with a visible state, and the user's "Retry" sends the message once the network allows.
+#[tokio::test]
+async fn refused_uploads_reuse_their_slot_back_off_and_stall_until_retried() {
+  let server = FakeServer::new();
+  let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+  let retry = UploadRetrySettings {
+    retry_after: Duration::from_secs(2),
+    retry_max: Duration::from_secs(10),
+    max_attempts: 3,
+  };
+  let client_settings = ClientSettings {
+    upload_retry: retry.clone(),
+    ..common::settings()
+  };
+  let mut alice = Peer::enroll_on_clock(
+    server.add_user("Alice"),
+    "Alice",
+    client_settings,
+    Box::new(clock.clone()),
+  )
+  .await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "files")
+    .await
+    .unwrap();
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  let alice_ui = backend_of(&alice);
+  server.refuse_blob_uploads(alice.client.user_id(), true);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("photo.jpg", "image/jpeg", jpeg())],
+  ));
+  for command in alice_ui.drain_commands() {
+    // The blob upload is refused: the command fails and the file waits.
+    let _ = alice.client.run_ui_command(command).await;
+  }
+  assert_eq!(server.attachment_count(), 1);
+
+  // Within the backoff nothing is tried; after it, the same slot is used again.
+  assert!(alice.client.upload_pending().await.is_ok());
+  clock.advance(2_000);
+  assert!(alice.client.upload_pending().await.is_err());
+  assert_eq!(
+    server.attachment_count(),
+    1,
+    "a retry reuses the announced attachment"
+  );
+  let message = last(&alice_ui, channel);
+  let transfer = || {
+    alice_ui.message_extras(channel, &[message.id])[0].files[0]
+      .transfer
+      .clone()
+  };
+  assert!(matches!(transfer(), FileTransfer::Uploading { .. }));
+
+  // Offline in between: nothing reaches the server, so no attempt counts, however long it lasts.
+  server.set_offline(alice.client.user_id(), true);
+  for _ in 0..20 {
+    clock.advance(60_000);
+    assert!(alice.client.upload_pending().await.is_err());
+  }
+  server.set_offline(alice.client.user_id(), false);
+  server.refuse_blob_uploads(alice.client.user_id(), true);
+  assert!(
+    matches!(transfer(), FileTransfer::Uploading { .. }),
+    "offline doesn't stall"
+  );
+
+  clock.advance(4_000);
+  assert!(alice.client.upload_pending().await.is_err());
+  assert_eq!(
+    transfer(),
+    FileTransfer::UploadStalled {
+      reason: FileFailure::Network
+    },
+    "after the cap the file waits for the user"
+  );
+  clock.advance(60 * 60 * 1000);
+  assert_eq!(
+    alice.client.upload_pending().await.unwrap(),
+    0,
+    "no retry on its own"
+  );
+
+  server.refuse_blob_uploads(alice.client.user_id(), false);
+  alice_ui.retry_send(channel, message.id);
+  run_commands(&mut alice, &alice_ui).await;
+  alice.client.flush_outbox().await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(server.attachment_count(), 1);
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  assert_eq!(bob_ui.message_extras(channel, &[received.id])[0].files.len(), 1);
 }
 
 #[tokio::test]
@@ -124,9 +597,13 @@ async fn share_links_carry_the_key_only_in_the_fragment() {
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
   let message = last(&alice_ui, channel);
+  let file_id = alice_ui.message_extras(channel, &[message.id])[0].files[0]
+    .file_id
+    .clone();
   alice_ui.create_share_link(
     channel,
     message.id,
+    &file_id,
     ShareLinkOptions {
       maybe_password: Some("open sesame".into()),
       maybe_max_downloads: Some(3),
@@ -135,7 +612,7 @@ async fn share_links_carry_the_key_only_in_the_fragment() {
   );
   run_commands(&mut alice, &alice_ui).await;
 
-  let link = alice_ui.share_links(channel, message.id).remove(0);
+  let link = alice_ui.share_links(channel, message.id, &file_id).remove(0);
   assert!(link.has_password);
   let (page, fragment) = link.url.split_once('#').unwrap();
   let share_id = page.rsplit('/').next().unwrap();
@@ -150,6 +627,102 @@ async fn share_links_carry_the_key_only_in_the_fragment() {
     b"%PDF signed"
   );
   assert!(!format!("{link:?}").contains(fragment), "Debug hides the key");
+}
+
+#[tokio::test]
+async fn a_revoked_share_link_stops_working_and_is_forgotten() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("plan.txt", "text/plain", b"the plan".to_vec())],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let message = last(&alice_ui, channel);
+  let file_id = alice_ui.message_extras(channel, &[message.id])[0].files[0]
+    .file_id
+    .clone();
+  for _ in 0..2 {
+    alice_ui.create_share_link(channel, message.id, &file_id, ShareLinkOptions::default());
+    run_commands(&mut alice, &alice_ui).await;
+  }
+  let links = alice_ui.share_links(channel, message.id, &file_id);
+  assert_eq!(links.len(), 2);
+  let revoked = links[0].share_id.clone();
+  let kept = links[1].share_id.clone();
+  assert!(server.shared_blob(&revoked).is_some());
+
+  alice_ui.revoke_share_link(channel, message.id, &file_id, &revoked);
+  run_commands(&mut alice, &alice_ui).await;
+  assert!(
+    server.shared_blob(&revoked).is_none(),
+    "the server stopped serving it"
+  );
+  let remaining = alice_ui.share_links(channel, message.id, &file_id);
+  assert_eq!(remaining.len(), 1);
+  assert_eq!(remaining[0].share_id, kept);
+
+  // Revoking it again (another device did it first) is not an error and changes nothing.
+  alice_ui.revoke_share_link(channel, message.id, &file_id, &revoked);
+  run_commands(&mut alice, &alice_ui).await;
+  assert_eq!(alice_ui.share_links(channel, message.id, &file_id).len(), 1);
+
+  // A link revoked elsewhere drops out of the list when the counts are refreshed.
+  server.revoke_shared_link(&kept);
+  alice_ui.refresh_share_links(channel, message.id, &file_id);
+  run_commands(&mut alice, &alice_ui).await;
+  assert!(alice_ui.share_links(channel, message.id, &file_id).is_empty());
+}
+
+#[tokio::test]
+async fn each_file_of_a_message_has_its_own_share_link() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![
+      file("first.txt", "text/plain", b"first".to_vec()),
+      file("second.txt", "text/plain", b"second".to_vec()),
+    ],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let message = last(&alice_ui, channel);
+  let files = alice_ui.message_extras(channel, &[message.id])[0].files.clone();
+  let (first, second) = (&files[0], &files[1]);
+  assert_eq!(second.file_name, "second.txt");
+
+  alice_ui.create_share_link(channel, message.id, &second.file_id, ShareLinkOptions::default());
+  run_commands(&mut alice, &alice_ui).await;
+
+  assert!(
+    alice_ui
+      .share_links(channel, message.id, &first.file_id)
+      .is_empty(),
+    "the first file was not shared"
+  );
+  let link = alice_ui
+    .share_links(channel, message.id, &second.file_id)
+    .remove(0);
+  assert_eq!(link.file_id, second.file_id);
+  let (page, fragment) = link.url.split_once('#').unwrap();
+  let ciphertext = server.shared_blob(page.rsplit('/').next().unwrap()).unwrap();
+  let opened = open_fragment(fragment, None).unwrap();
+  assert_eq!(opened.file_name, "second.txt");
+  assert_eq!(
+    decrypt_attachment(&opened.key, &ciphertext)
+      .unwrap()
+      .expose_secret(),
+    b"second"
+  );
+  assert!(
+    alice_ui
+      .share_links(channel, message.id, "no-such-file")
+      .is_empty()
+  );
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
@@ -168,6 +741,27 @@ async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
     .unwrap();
   settle(&mut [&mut alice, &mut bob]).await;
   (server, alice, bob, channel)
+}
+
+/// Alice sends one audio file; returns its ID and the message as Bob has it.
+async fn one_file_for_bob(
+  alice: &mut Peer,
+  bob: &mut Peer,
+  channel: ConversationId,
+  bytes: &[u8],
+) -> (AttachmentId, MessageId) {
+  let alice_ui = backend_of(alice);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("recording.wav", "audio/wav", bytes.to_vec())],
+  ));
+  run_commands(alice, &alice_ui).await;
+  settle(&mut [&mut *alice, &mut *bob]).await;
+  let bob_ui = backend_of(bob);
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  (files[0].file_id.parse().unwrap(), received.id)
 }
 
 fn with_files(conversation: ConversationId, body: &str, files: Vec<OutgoingFile>) -> OutgoingMessage {
@@ -189,6 +783,8 @@ fn file(name: &str, media_type: &str, bytes: Vec<u8>) -> OutgoingFile {
     file_name: name.into(),
     media_type: media_type.into(),
     source: FileSource::Bytes { bytes },
+    maybe_thumbnail: None,
+    maybe_duration_ms: None,
   }
 }
 

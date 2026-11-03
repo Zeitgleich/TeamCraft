@@ -1,0 +1,31 @@
+name: Auto-merge
+
+# Turns on auto-merge (squash) for pull requests of people with write access, so a finished PR
+# merges as soon as `ci-gate`, the required check of `main`, passes (ci.yml). Turn it off on a PR
+# that must wait: `gh pr merge --disable-auto <number>`.
+#
+# `pull_request_target` runs with this repository's token even for forks, so the job never checks
+# out or runs code of the pull request: it only calls the GitHub API, and the PR's data reaches the
+# shell through the environment, never through the script text.
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-merge:
+    name: Enable auto-merge
+    # Drafts are not ready; bots (Dependabot) and outside contributors are merged by hand.
+    if: >-
+      github.event.pull_request.draft == false &&
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge (squash)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --squash "$PR_URL"

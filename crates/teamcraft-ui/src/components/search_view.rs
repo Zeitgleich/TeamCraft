@@ -2,6 +2,7 @@ use leptos::html;
 use leptos::prelude::*;
 
 use crate::clock::format_date_time;
+use crate::components::compact_back::CompactBack;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::model::ConversationKind;
@@ -76,6 +77,7 @@ pub fn SearchView() -> impl IntoView {
   let status = move || match pane.get() {
     Pane::Mentions => i18n.t_count("search-count", mentions.get().len()),
     Pane::Results if parsed.get().is_empty() => i18n.t("search-start"),
+    Pane::Results if results.get().is_pending => i18n.t("search-pending"),
     Pane::Results => {
       let total = results.get().total;
       if total == 0 {
@@ -147,6 +149,7 @@ pub fn SearchView() -> impl IntoView {
           }
         >
           <div class="search-box">
+            <CompactBack />
             <Icon name=IconName::Search />
             <label class="visually-hidden" for="search-input">{move || i18n.t("search-input-label")}</label>
             <input
