@@ -1473,6 +1473,7 @@ mod tests {
 
     use super::*;
 
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     fn prover() -> Arc<DpopProver> {
       Arc::new(DpopProver::new(Arc::new(SoftwareDpopSigner::new(
         DpopSigningKey::generate(),

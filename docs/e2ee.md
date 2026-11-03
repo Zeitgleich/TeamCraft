@@ -304,9 +304,10 @@ desktop: `apps/desktop/src/auth`).
   (`Interception::ProofRefused`). `dpop_required` asks for a sign-in, with its own wording.
 - **Start.** The cached start (§9.8) is unchanged: nothing is signed before the account is confirmed,
   and the request that confirms it is the first signed one. It normally has its nonce already: from
-  `server-info` next to the refresh on the desktop and before it in the browser. A challenge costs
-  **one extra round trip** when that nonce is too old (after a server restart, a stale cached
-  `server-info`, or more than two rotations of idle time), per concurrent request. Numbers:
+  `server-info` next to the refresh on the desktop and before it in the browser, past the browser's
+  cache. A challenge costs **one extra round trip** when that nonce is too old (after a server restart,
+  an old `server-info` from a cache on the way, or more than two rotations of idle time), per concurrent
+  request. Numbers:
   performance.md, "DPoP".
 
 **Not done yet** (the next steps of issue #120):
