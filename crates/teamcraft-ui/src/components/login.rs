@@ -437,7 +437,7 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
   // Signing in again with the same account won't help: offer another one.
   let is_role_problem = matches!(
     problem,
-    Some(LoginProblem::NoTeamcraftRole | LoginProblem::AccountDeactivated)
+    Some(LoginProblem::NoTeamcraftRole | LoginProblem::AccountDeactivated | LoginProblem::AccountDeleted)
   );
   let is_core_problem = matches!(
     problem,
@@ -476,11 +476,28 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
       Some("login-session-expired-title"),
       Some("login-session-expired-body"),
     ),
+    Some(LoginProblem::SessionEnded) => (
+      Some("login-session-ended-title"),
+      Some("login-session-ended-body"),
+    ),
+    Some(LoginProblem::SessionTimedOut) => (
+      Some("login-session-timed-out-title"),
+      Some("login-session-timed-out-body"),
+    ),
+    Some(LoginProblem::AccountDeleted) => (
+      Some("login-account-deleted-title"),
+      Some("login-account-deleted-body"),
+    ),
     None => (None, None),
   };
   let tone = if matches!(
     problem,
-    Some(LoginProblem::Cancelled | LoginProblem::SessionExpired)
+    Some(
+      LoginProblem::Cancelled
+        | LoginProblem::SessionExpired
+        | LoginProblem::SessionEnded
+        | LoginProblem::SessionTimedOut
+    )
   ) {
     ProblemTone::Notice
   } else {

@@ -3175,6 +3175,61 @@ What it costs, and what it gains:
   gives the file's key and not the tokens: the file is in the app's private data directory, which
   another Flatpak's sandbox can't reach. The database and backup key entries stay readable as before.
 
+
+### 9.8 Starting from the cached account (issue #778, implemented)
+
+The web and desktop apps open the local data before the network has answered: the core starts for the
+account the server confirmed last on this device, and the token refresh and `GET /me` run beside it.
+
+**What it is.** `GetMeResponse` (user ID, name, role), written when the core is ready for an account the
+server confirmed. It is sealed next to the session and bound to it, so one account's record can't open
+for another account's tokens, even if forgetting it failed:
+
+- **Web:** in the IndexedDB vault of the tokens, with their issuer, client and subject (`sub`). It counts
+  only next to saved tokens of the same three. Reading it changes nothing: a stale record says nothing
+  against the tokens. A sign-in forgets it before the new tokens are saved. The server isn't trusted
+  about the provider: when it names another issuer or client than the saved one, the tokens stay away
+  from it, and the start goes through that provider like a new sign-in.
+- **Web, local account:** in the tab's session storage, inside its session.
+- **Desktop:** in the sealed file of §9.7, per server, with the subject it was confirmed for. Next to the
+  refresh token the file holds whose it is. A sign-in clears that before it saves the new token, and a
+  failure stops the sign-in, so the record of the previous person can't match. A local session counts by
+  a fingerprint of its token. A confirmation is kept only for the user `GET /me` named last for this
+  session, so one that arrives after a new sign-in is dropped. Tokens that name nobody (opaque, without
+  an ID token) get no cached start.
+
+**What it grants: nothing.** It picks which local data opens, on a device where that data and its key
+are there anyway (the store's key handling is unchanged). Nothing is decrypted that couldn't be before.
+The role only shapes the UI until the answer is in. Until the session is checked, the local data is
+readable offline with a session the server may have ended already, which is what the feature is; it
+can't be told from being offline.
+
+**Nothing goes out until the server confirmed the account.** Local reads open at once, but the session's
+user may not be the cached one (the server was reset), and what the cached user queued must not go out
+under that user's token. So `GET /me` is the only request with the session's token, and the core has no
+token: it opens the store, reads, queues, and connects after the answer. The token is held back in one
+place per shell (`auth/account_gate.rs` for the UI and the page's core, `AuthService` for the desktop
+core). Other requests of the UI wait for the answer for up to 10 s after the start, then fail as without
+a network; when the answer doesn't confirm the account, what waited fails too and never goes out under
+the other user's token. A request that hangs doesn't hold this up: the check asks again after 10 s (up to
+60 s), and at once when the network returns. A device with no network loses nothing: the queue is persisted. To the core this is a network
+problem, as during a refresh after a suspend: it shows offline and never reads as signed out.
+
+**What the answers mean**, in `session.rs` (`restore_verdict`, `account_verdict`):
+
+| Answer                                                                                                                                         | What happens                                                                                                                                                                                                                                                                                                                                                                                   |
+|------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| No answer, a 5xx or 429, a page of a proxy or captive portal, also with status 401 or 403                                                      | Nothing, and nothing is deleted. The check tries again (2 s to 30 s, jitter; at once when the network or page returns). The user sees the connection line after 1.5 s.                                                                                                                                                                                                                         |
+| The provider answers a refresh with anything but `invalid_grant` (`temporarily_unavailable`, `server_error`)                                   | The same: it says nothing about the session (issue #667).                                                                                                                                                                                                                                                                                                                                      |
+| The refresh token is refused (`invalid_grant`)                                                                                                 | Signed out as if the session had ended while the app ran: core stopped, pictures and tokens removed, the sign-in screen says why. On the web, one silent round trip through the provider first, as before, after saving what was just typed. A refusal in its redirect also removes the pictures. The same when the token runs out while waiting for the server's answer and its refresh is refused.                                                                                              |
+| `401` with the server's error body, and a new token could help                                                                                 | One new token, one more try; then as the next line.                                                                                                                                                                                                                                                                                                                                            |
+| `401`/`403` with the server's error body (`session_ended`, `session_timed_out`, `account_deleted`, `account_deactivated`, `no_teamcraft_role`) | Core stopped, the account's pictures and the cached account removed, the sign-in screen says why in plain words and offers to sign in or out. Tokens: on the web a `401` of the server deletes the saved ones (so no reload brings them back) and a `403` keeps them; on the desktop they stay, as they did at such a start before, and the next start asks the provider and the server again. |
+| `200` with the same user                                                                                                                       | Kept for the next start, and the core gets its token and connects. A changed name or role rebuilds the shell, once.                                                                                                                                                                                                                                                                            |
+| `200` with another user (server reset, provider maps people differently)                                                                       | The shell goes first, then the core stops, the pictures and the cached account go, and the start continues as a sign-in of that user. Nothing of the cached user's queue has gone out, and never is one account's data shown under another name.                                                                                                                                               |
+
+**The local data can't carry the start** (not set up here any more, unreadable): the check stops, the
+cached account is forgotten, and the start goes the long way, as without one.
+
 ## 10. Search
 
 Users expect search to be fast and complete on every device right after login – a common weak point

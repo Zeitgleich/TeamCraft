@@ -63,7 +63,7 @@ pub use sealed::SealedStoreLimits;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
 pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
-pub use secret_vault::{Keystore, OsKeystore, SecretVault, TokenKind};
+pub use secret_vault::{Keystore, OsKeystore, SecretVault, SessionNote, TokenKind};
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 pub use sqlite::SqlCipherStore;
 pub use tracked::{DEFAULT_MESSAGE_CACHE_BYTES, RemovedRendition, StoreChanges, TrackedStore};

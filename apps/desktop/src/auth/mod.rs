@@ -24,7 +24,8 @@ mod test_dir;
 pub(crate) mod integration_tests;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use base64::Engine;
@@ -39,7 +40,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
 
 use teamcraft_client_api::oidc_login::{
-  AuthorizationErrorKind, LoginRequest, OidcClient, OidcTokenResponse, authorization_url, oidc_client,
+  AuthorizationErrorKind, LoginRequest, OidcClient, OidcTokenResponse, answer_subject, authorization_url,
+  oidc_client,
 };
 use teamcraft_client_api::remote::ApiMethod;
 use teamcraft_client_api::server_entry::{
@@ -47,6 +49,8 @@ use teamcraft_client_api::server_entry::{
   check_discovery, is_provider_endpoint,
 };
 use teamcraft_client_api::sign_in_look::SignInLook;
+use teamcraft_core::store::SessionNote;
+use teamcraft_proto::{GetMeResponse, UserId};
 
 use callback_page::CallbackOutcome;
 use local::{LOCAL_LOGIN_PATH, LOCAL_LOGOUT_PATH, LocalRefusal, LocalSession};
@@ -54,6 +58,9 @@ use local::{LOCAL_LOGIN_PATH, LOCAL_LOGOUT_PATH, LocalRefusal, LocalSession};
 pub(crate) use store::MemoryStore;
 pub use store::{TokenStore, VaultStore};
 
+/// The one request that goes out before the server confirmed a cached account, and the answer that
+/// confirms it.
+const ME_PATH: &str = "/api/v1/me";
 /// How long the browser may take to come back.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Refresh this long before the access token expires.
@@ -253,6 +260,22 @@ pub enum TokenPeek {
   Busy,
 }
 
+/// Where a token answer comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TokenOrigin {
+  /// A sign-in: whoever it is, nothing stored about the session before it counts any more.
+  NewSignIn,
+  /// A refresh of the session there is.
+  SameSession,
+}
+
+/// The account for the next start and the session it was confirmed for.
+#[derive(Deserialize, Serialize)]
+struct CachedAccountRecord {
+  subject: String,
+  account: GetMeResponse,
+}
+
 struct Tokens {
   access: SecretString,
   refresh: Option<SecretString>,
@@ -302,6 +325,12 @@ pub struct AuthService<S: TokenStore> {
   http: RwLock<reqwest::Client>,
   store: S,
   session: Mutex<Session>,
+  /// The app started from the cached account and the server hasn't confirmed it: nothing goes out
+  /// and the core has no token, which reads as a wait, not as nobody being signed in (issue #778).
+  is_unconfirmed: AtomicBool,
+  /// The user the server named last for this session (`GET /me`). A confirmation that arrives later
+  /// than a new sign-in doesn't name this user, and isn't kept.
+  maybe_confirmed_user: StdMutex<Option<UserId>>,
   cancel: Notify,
   now_ms: WallClock,
 }
@@ -313,6 +342,8 @@ impl<S: TokenStore> AuthService<S> {
       http: RwLock::new(http_client()?),
       store,
       session: Mutex::new(Session::default()),
+      is_unconfirmed: AtomicBool::new(false),
+      maybe_confirmed_user: StdMutex::new(None),
       cancel: Notify::new(),
       now_ms: Arc::new(local::now_ms),
     })
@@ -345,6 +376,8 @@ impl<S: TokenStore> AuthService<S> {
   pub async fn set_server(&self, maybe_server: Option<DesktopConfig>) {
     let mut session = self.session.lock().await;
     *session = Session::default();
+    self.is_unconfirmed.store(false, Ordering::Release);
+    *self.confirmed_user() = None;
     *self.server.write().unwrap_or_else(PoisonError::into_inner) = maybe_server;
     self.cancel.notify_waiters();
   }
@@ -393,6 +426,123 @@ impl<S: TokenStore> AuthService<S> {
   /// "sign in" (also when no server is chosen yet); [`AuthError::Denied`] means the provider
   /// refused the stored token, so the sign-in screen says the session expired.
   pub async fn restore(&self) -> Result<bool, AuthError> {
+    let outcome = self.restore_session().await;
+    // Without a verdict (no answer, an answer that makes no sense) the session stays as it is and
+    // the UI asks again. A session that is over takes the account along. One that is fine still
+    // waits for the server to confirm the account.
+    if matches!(
+      outcome,
+      Ok(false) | Err(AuthError::Denied(_) | AuthError::NotSignedIn)
+    ) {
+      self.forget_cached_account().await;
+    }
+    outcome
+  }
+
+  /// The account the UI can start from at once, without the network, while [`Self::restore`] runs
+  /// beside it (issue #778): the one confirmed last on the active server, if it was confirmed for the
+  /// session stored now. It shows local data and proves nothing, and nothing goes out until the server
+  /// confirmed it ([`Self::remember_account`]). Reads the same sealed file as the tokens: no keychain
+  /// access beyond the one of the start.
+  pub async fn cached_account(&self) -> Option<GetMeResponse> {
+    let server = self.active_server()?;
+    let subject = self.stored_session_subject(&server).await?;
+    let found = self
+      .store
+      .load_note(SessionNote::CachedAccount, &server.server_url)
+      .await;
+    let json = found
+      .inspect_err(|error| tracing::debug!(%error, "could not read the cached account"))
+      .ok()??;
+    let record: CachedAccountRecord = serde_json::from_str(&json).ok()?;
+    if record.subject != subject {
+      return None;
+    }
+    self.is_unconfirmed.store(true, Ordering::Release);
+    Some(record.account)
+  }
+
+  /// The server confirmed `account`: the core gets its token, and the next start can begin with it,
+  /// bound to the session it was confirmed for. Not kept when it isn't who the server named last for
+  /// this session (a sign-out or a new sign-in while the answer was on its way), or when the session
+  /// names nobody.
+  pub async fn remember_account(&self, account: &GetMeResponse) {
+    self.is_unconfirmed.store(false, Ordering::Release);
+    let Some(server) = self.active_server() else {
+      return;
+    };
+    if *self.confirmed_user() != Some(account.id) {
+      tracing::info!("not keeping an account the server didn't name for this session");
+      return;
+    }
+    let Some(subject) = self.stored_session_subject(&server).await else {
+      return;
+    };
+    let record = CachedAccountRecord {
+      subject,
+      account: account.clone(),
+    };
+    let saved = match serde_json::to_string(&record) {
+      Ok(json) => {
+        self
+          .store
+          .save_note(SessionNote::CachedAccount, &server.server_url, &json)
+          .await
+      },
+      Err(error) => Err(AuthError::InvalidResponse(error.to_string())),
+    };
+    if let Err(error) = saved {
+      // The app works; the next start only waits for the server again.
+      tracing::warn!(%error, "could not keep the account for the next start");
+    }
+  }
+
+  /// Forgets the cached account of the active server: the next start waits for the server again.
+  pub async fn forget_cached_account(&self) {
+    self.is_unconfirmed.store(false, Ordering::Release);
+    let Some(server) = self.active_server() else {
+      return;
+    };
+    if let Err(error) = self
+      .store
+      .clear_note(SessionNote::CachedAccount, &server.server_url)
+      .await
+    {
+      tracing::warn!(%error, "could not forget the cached account");
+    }
+  }
+
+  /// Whether the app started from the cached account and the server hasn't confirmed it yet.
+  pub fn is_unconfirmed(&self) -> bool {
+    self.is_unconfirmed.load(Ordering::Acquire)
+  }
+
+  /// Who the stored session of `server` belongs to: its live local session, or the account at the
+  /// identity provider its refresh token was issued to. `None` without a session, or for one that
+  /// names nobody (opaque tokens without an ID token): that one gets no cached start.
+  async fn stored_session_subject(&self, server: &DesktopConfig) -> Option<String> {
+    let local = self.store.load_local_session(&server.server_url).await;
+    if let Ok(Some(stored)) = local
+      && let Some(session) = LocalSession::decode(&stored).filter(|session| session.is_live(local::now_ms()))
+    {
+      return Some(format!(
+        "local:{:016x}",
+        token_fingerprint(session.token().expose_secret())
+      ));
+    }
+    let key = server.token_key();
+    self.store.load(&key).await.ok()??;
+    self.store.load_note(SessionNote::TokenSubject, &key).await.ok()?
+  }
+
+  fn confirmed_user(&self) -> std::sync::MutexGuard<'_, Option<UserId>> {
+    self
+      .maybe_confirmed_user
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+  }
+
+  async fn restore_session(&self) -> Result<bool, AuthError> {
     let Some(server) = self.active_server() else {
       return Ok(false);
     };
@@ -428,6 +578,9 @@ impl<S: TokenStore> AuthService<S> {
     open_browser: impl FnOnce(&str) -> Result<(), String>,
   ) -> Result<SignedIn, AuthError> {
     let server = self.server()?;
+    // Whoever signs in now, the tokens saved below are not the cached account's any more.
+    *self.confirmed_user() = None;
+    self.forget_cached_account().await;
     let discovery = self.discovery(&server).await?;
     let (mut listener, mut attempt) = self.authorization(&discovery, &server, request).await?;
     open_browser(attempt.url.as_str())
@@ -519,7 +672,9 @@ impl<S: TokenStore> AuthService<S> {
       .map_err(map_token_error)?;
     let mut session = self.session.lock().await;
     session.maybe_local = None;
-    self.adopt(&mut session, server, &response).await?;
+    self
+      .adopt(&mut session, server, &response, TokenOrigin::NewSignIn)
+      .await?;
     Ok(SignedIn {
       maybe_login_hint: response.extra_fields().login_hint(),
     })
@@ -534,6 +689,8 @@ impl<S: TokenStore> AuthService<S> {
     maybe_totp_code: Option<&str>,
   ) -> Result<(), AuthError> {
     let server = self.server()?;
+    *self.confirmed_user() = None;
+    self.forget_cached_account().await;
     let body = local::login_body(login, password, maybe_totp_code)?;
     let url = format!("{}{LOCAL_LOGIN_PATH}", server.server_url.trim_end_matches('/'));
     let response = self
@@ -595,6 +752,8 @@ impl<S: TokenStore> AuthService<S> {
     // Whatever happens to the local copy, the provider still hears of the sign-out: the token was
     // taken above, and a retry couldn't end the session any more.
     let cleared = self.store.clear(&server.token_key()).await;
+    *self.confirmed_user() = None;
+    self.forget_cached_account().await;
     if let (Some(refresh), Some(endpoint)) = (refresh, discovery.and_then(|found| found.end_session_endpoint))
     {
       let form = [
@@ -704,6 +863,7 @@ impl<S: TokenStore> AuthService<S> {
     maybe_body: Option<String>,
   ) -> Result<ApiResponse, AuthError> {
     validate_api_path(path)?;
+    self.refuse_before_confirmation(path)?;
     // One read of the server: the token and the URL always belong to the same one.
     let server = self.server()?;
     let token = self.access_token(&server).await?;
@@ -727,6 +887,12 @@ impl<S: TokenStore> AuthService<S> {
       .text()
       .await
       .map_err(|error| AuthError::Network(error.to_string()))?;
+    if path == ME_PATH
+      && status == 200
+      && let Ok(me) = serde_json::from_str::<GetMeResponse>(&body)
+    {
+      *self.confirmed_user() = Some(me.id);
+    }
     Ok(ApiResponse { status, body })
   }
 
@@ -739,6 +905,7 @@ impl<S: TokenStore> AuthService<S> {
     maybe_body: Option<(String, Vec<u8>)>,
   ) -> Result<ApiBytesResponse, AuthError> {
     validate_api_path(path)?;
+    self.refuse_before_confirmation(path)?;
     let server = self.server()?;
     let token = self.access_token(&server).await?;
     let url = format!("{}{path}", server.server_url.trim_end_matches('/'));
@@ -779,8 +946,20 @@ impl<S: TokenStore> AuthService<S> {
     Ok(self.server_bearer_token().await?.1)
   }
 
+  /// Nothing but the question goes out before the server confirmed the cached account (the UI waits
+  /// a moment before it gets here, `auth/account_gate.rs`).
+  fn refuse_before_confirmation(&self, path: &str) -> Result<(), AuthError> {
+    if self.is_unconfirmed() && path != ME_PATH {
+      return Err(AuthError::Network(
+        "waiting for the server to confirm the account".to_owned(),
+      ));
+    }
+    Ok(())
+  }
+
   /// `(server origin, access token)`: the token with the server it is for.
   pub async fn server_bearer_token(&self) -> Result<(String, String), AuthError> {
+    self.refuse_before_confirmation("")?;
     let server = self.server()?;
     let token = self.access_token(&server).await?;
     Ok((server.server_url, token.expose_secret().to_owned()))
@@ -793,6 +972,11 @@ impl<S: TokenStore> AuthService<S> {
     let Some(server) = self.active_server() else {
       return TokenPeek::Unavailable;
     };
+    // Started from the cached account: the core waits for the server to confirm it, whatever the
+    // session holds by now. A wait, not a sign-out.
+    if self.is_unconfirmed() {
+      return TokenPeek::Refreshing;
+    }
     let Ok(session) = self.session.try_lock() else {
       return TokenPeek::Busy;
     };
@@ -840,6 +1024,10 @@ impl<S: TokenStore> AuthService<S> {
   /// Deletes the stored refresh token and local session of `server` (leaving it, or its sign-in
   /// settings changed).
   pub async fn forget_tokens(&self, server: &DesktopConfig) -> Result<(), AuthError> {
+    self
+      .store
+      .clear_note(SessionNote::CachedAccount, &server.server_url)
+      .await?;
     self.store.clear(&server.token_key()).await?;
     self.store.clear_local_session(&server.server_url).await?;
     self
@@ -867,6 +1055,10 @@ impl<S: TokenStore> AuthService<S> {
       return Err(AuthError::NotSignedIn);
     }
     let needs_refresh = match &session.maybe_tokens {
+      // A refused refresh token is no wait: the session is over, and the next look says so.
+      None if self.is_unconfirmed() && !session.is_expired => {
+        return Err(AuthError::Network("waiting for the stored sign-in".to_owned()));
+      },
       None => return Err(AuthError::NotSignedIn),
       Some(tokens) => (self.now_ms)() >= tokens.refresh_at_ms,
     };
@@ -936,6 +1128,13 @@ impl<S: TokenStore> AuthService<S> {
         if let Err(error) = self.store.clear(&server.token_key()).await {
           tracing::warn!(%error, "could not forget the refused refresh token");
         }
+        if let Err(error) = self
+          .store
+          .clear_note(SessionNote::CachedAccount, &server.server_url)
+          .await
+        {
+          tracing::warn!(%error, "could not forget the cached account");
+        }
       }
     }
     result
@@ -956,7 +1155,42 @@ impl<S: TokenStore> AuthService<S> {
       .request_async(&http)
       .await
       .map_err(map_token_error)?;
-    self.adopt(session, server, &response).await
+    self
+      .adopt(session, server, &response, TokenOrigin::SameSession)
+      .await
+  }
+
+  /// Who the tokens of `response` belong to, to be saved once they are in. What is stored about the
+  /// previous ones goes first, and a failure stops the sign-in like a failure to save the token: a
+  /// cached account of somebody else can't match the new tokens, whatever else fails from here on.
+  async fn prepare_subject(
+    &self,
+    server: &DesktopConfig,
+    response: &OidcTokenResponse,
+    origin: TokenOrigin,
+  ) -> Result<Option<String>, AuthError> {
+    let key = server.token_key();
+    let maybe_answered = answer_subject(
+      response.extra_fields().maybe_id_token.as_deref(),
+      response.access_token().secret(),
+    );
+    let is_stale = match (origin, &maybe_answered) {
+      (TokenOrigin::NewSignIn, _) => true,
+      // A refresh answer that names nobody says nothing against who the session belongs to.
+      (TokenOrigin::SameSession, None) => false,
+      (TokenOrigin::SameSession, Some(answered)) => {
+        self
+          .store
+          .load_note(SessionNote::TokenSubject, &key)
+          .await?
+          .as_ref()
+          != Some(answered)
+      },
+    };
+    if is_stale {
+      self.store.clear_note(SessionNote::TokenSubject, &key).await?;
+    }
+    Ok(maybe_answered)
   }
 
   /// Takes over a token response of `server`: keeps the access token in memory and persists the
@@ -966,10 +1200,12 @@ impl<S: TokenStore> AuthService<S> {
     session: &mut Session,
     server: &DesktopConfig,
     response: &OidcTokenResponse,
+    origin: TokenOrigin,
   ) -> Result<(), AuthError> {
     if self.active_server().as_ref() != Some(server) {
       return Err(AuthError::Cancelled);
     }
+    let maybe_subject = self.prepare_subject(server, response, origin).await?;
     let previous = session.maybe_tokens.as_ref().and_then(|tokens| {
       tokens
         .refresh
@@ -982,6 +1218,19 @@ impl<S: TokenStore> AuthService<S> {
       .or(previous);
     if let Some(refresh) = &refresh {
       self.store.save(&server.token_key(), refresh).await?;
+    }
+    if let Some(subject) = maybe_subject {
+      // Not saved: no cached start until a refresh saves it. It was cleared before the token went in.
+      if let Err(error) = self
+        .store
+        .save_note(SessionNote::TokenSubject, &server.token_key(), &subject)
+        .await
+      {
+        tracing::warn!(%error, "could not keep who the sign-in belongs to");
+      }
+    }
+    if origin == TokenOrigin::NewSignIn {
+      self.is_unconfirmed.store(false, Ordering::Release);
     }
     let lifetime = response.expires_in().unwrap_or(Duration::from_secs(60));
     let now_ms = (self.now_ms)();
@@ -1034,6 +1283,7 @@ impl<S: TokenStore> AuthService<S> {
     let mut session = self.session.lock().await;
     session.maybe_tokens = None;
     session.is_expired = false;
+    self.is_unconfirmed.store(false, Ordering::Release);
     session.maybe_local = Some(granted);
     Ok(())
   }
@@ -1653,6 +1903,9 @@ mod tests {
     const PROVIDER_DOWN: u8 = 0;
     const PROVIDER_UP: u8 = 1;
     const PROVIDER_REFUSES: u8 = 2;
+    /// Whom the fake provider's tokens name, and who the fake server says that is.
+    const TOKEN_SUBJECT: &str = "subject-of-the-provider";
+    const ME_ANSWER: &str = r#"{"id":"42","display_name":"Alice","role":"owner"}"#;
 
     /// The computer is off for 12 hours, 3 days or 30 days; it wakes up without network. The access
     /// token is long expired: the app waits (offline, never "sign in again") until the provider can
@@ -1812,6 +2065,349 @@ mod tests {
       assert!(service.logout().await.is_err());
 
       assert_eq!(provider.logout_requests.load(Ordering::SeqCst), 1);
+    }
+
+    mod cached_account {
+      use super::*;
+
+      const SUBJECT_A: &str = "subject-a";
+
+      fn account() -> GetMeResponse {
+        serde_json::from_str(r#"{"id":"42","display_name":"Alice","role":"owner"}"#).unwrap()
+      }
+
+      /// A service that holds a refresh token and the account confirmed last, like at a start.
+      async fn starting(provider: &FakeProvider) -> AuthService<MemoryStore> {
+        let store = MemoryStore::default();
+        let config = provider.config();
+        store.save(&config.token_key(), "refresh").await.unwrap();
+        store
+          .save_note(SessionNote::TokenSubject, &config.token_key(), SUBJECT_A)
+          .await
+          .unwrap();
+        let record = CachedAccountRecord {
+          subject: SUBJECT_A.to_owned(),
+          account: account(),
+        };
+        store
+          .save_note(
+            SessionNote::CachedAccount,
+            &config.server_url,
+            &serde_json::to_string(&record).unwrap(),
+          )
+          .await
+          .unwrap();
+        AuthService::new(Some(config), store).unwrap()
+      }
+
+      async fn stored_record(service: &AuthService<MemoryStore>, provider: &FakeProvider) -> Option<String> {
+        service
+          .store
+          .load_note(SessionNote::CachedAccount, &provider.config().server_url)
+          .await
+          .unwrap()
+      }
+
+      /// A token answer naming `subject`, or nobody.
+      fn token_answer(maybe_subject: Option<&str>) -> OidcTokenResponse {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let access = match maybe_subject {
+          Some(subject) => {
+            let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"{subject}"}}"#));
+            format!("eyJhbGciOiJub25lIn0.{payload}.signature")
+          },
+          None => "opaque".to_owned(),
+        };
+        serde_json::from_value(serde_json::json!({
+          "access_token": access,
+          "token_type": "bearer",
+          "expires_in": 300,
+          "refresh_token": "new-refresh",
+        }))
+        .unwrap()
+      }
+
+      async fn adopt(
+        service: &AuthService<MemoryStore>,
+        provider: &FakeProvider,
+        maybe_subject: Option<&str>,
+        origin: TokenOrigin,
+      ) {
+        let mut session = service.session.lock().await;
+        service
+          .adopt(
+            &mut session,
+            &provider.config(),
+            &token_answer(maybe_subject),
+            origin,
+          )
+          .await
+          .unwrap();
+      }
+
+      #[tokio::test]
+      async fn it_needs_no_network_and_tells_the_core_to_wait() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_DOWN);
+        let service = starting(&provider).await;
+
+        assert_eq!(service.cached_account().await, Some(account()));
+        assert_eq!(provider.token_requests.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+          service.peek_server_bearer_token(),
+          TokenPeek::Refreshing
+        ));
+        // A request the UI makes meanwhile hears "no network", not "signed out".
+        assert!(matches!(service.bearer_token().await, Err(AuthError::Network(_))));
+      }
+
+      #[tokio::test]
+      async fn a_session_that_is_gone_takes_it_along() {
+        let provider = FakeProvider::start().await;
+        let service = starting(&provider).await;
+        service.store.clear(&provider.config().token_key()).await.unwrap();
+        assert_eq!(service.cached_account().await, None);
+        assert!(!service.is_unconfirmed());
+      }
+
+      #[tokio::test]
+      async fn no_answer_from_the_provider_keeps_it() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_DOWN);
+        let service = starting(&provider).await;
+        service.cached_account().await.unwrap();
+
+        assert!(service.restore().await.is_err());
+
+        assert!(service.is_unconfirmed());
+        assert_eq!(service.cached_account().await, Some(account()));
+      }
+
+      #[tokio::test]
+      async fn a_refused_refresh_token_forgets_it_and_ends_the_wait() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_REFUSES);
+        let service = starting(&provider).await;
+        service.cached_account().await.unwrap();
+
+        assert!(matches!(service.restore().await, Err(AuthError::Denied(_))));
+
+        assert!(!service.is_unconfirmed());
+        assert_eq!(stored_record(&service, &provider).await, None);
+      }
+
+      /// The session being fine says nothing about whose it is: the core has no token, and nothing
+      /// goes out but the question, until the server confirmed the account.
+      #[tokio::test]
+      async fn only_the_confirmation_gives_the_core_its_token() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_UP);
+        let service = starting(&provider).await;
+        service.cached_account().await.unwrap();
+
+        assert!(service.restore().await.unwrap());
+
+        assert!(service.is_unconfirmed());
+        assert!(matches!(
+          service.peek_server_bearer_token(),
+          TokenPeek::Refreshing
+        ));
+        assert!(matches!(
+          service
+            .api_request(ApiMethod::Get, "/api/v1/conversations", None)
+            .await,
+          Err(AuthError::Network(_))
+        ));
+        assert!(matches!(service.bearer_token().await, Err(AuthError::Network(_))));
+
+        *service.confirmed_user() = Some(account().id);
+        service.remember_account(&account()).await;
+
+        assert!(!service.is_unconfirmed());
+        assert!(matches!(
+          service.peek_server_bearer_token(),
+          TokenPeek::Ready { .. }
+        ));
+      }
+
+      #[tokio::test]
+      async fn signing_out_forgets_it_and_a_late_answer_brings_nothing_back() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_UP);
+        let service = starting(&provider).await;
+        service.cached_account().await.unwrap();
+        *service.confirmed_user() = Some(account().id);
+
+        service.logout().await.unwrap();
+
+        assert!(!service.is_unconfirmed());
+        assert_eq!(service.cached_account().await, None);
+        service.remember_account(&account()).await;
+        assert_eq!(stored_record(&service, &provider).await, None);
+      }
+
+      /// The fake provider's config, with the fake server at the same address.
+      fn config_with_server(provider: &FakeProvider) -> DesktopConfig {
+        DesktopConfig {
+          server_url: provider.base.clone(),
+          ..provider.config()
+        }
+      }
+
+      /// The whole way: a start without a cached account, the UI's `GET /me`, the UI hands the account
+      /// over; the next start begins from it. Without anything set by hand.
+      #[tokio::test]
+      async fn the_next_start_begins_from_what_the_server_confirmed() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_UP);
+        let config = config_with_server(&provider);
+        let store = MemoryStore::default();
+        store.save(&config.token_key(), "refresh").await.unwrap();
+        let service = AuthService::new(Some(config), store).unwrap();
+        assert_eq!(service.cached_account().await, None);
+
+        assert!(service.restore().await.unwrap());
+        let answer = service.api_get(ME_PATH).await.unwrap();
+        let me: GetMeResponse = serde_json::from_str(&answer.body).unwrap();
+        service.remember_account(&me).await;
+
+        assert_eq!(service.cached_account().await, Some(me));
+        assert!(service.is_unconfirmed());
+      }
+
+      /// The UI hands over somebody the server didn't name: not kept.
+      #[tokio::test]
+      async fn only_who_the_server_named_is_kept() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_UP);
+        let config = config_with_server(&provider);
+        let store = MemoryStore::default();
+        store.save(&config.token_key(), "refresh").await.unwrap();
+        let service = AuthService::new(Some(config), store).unwrap();
+        assert!(service.restore().await.unwrap());
+        service.api_get(ME_PATH).await.unwrap();
+
+        let mut someone_else = account();
+        someone_else.id = serde_json::from_str(r#""43""#).unwrap();
+        service.remember_account(&someone_else).await;
+
+        assert_eq!(service.cached_account().await, None);
+      }
+
+      /// Restored, then no answer from the server, then the token needs a refresh and the provider
+      /// refuses it. The UI hears that, and a look after that doesn't read as a network problem.
+      #[tokio::test]
+      async fn a_refresh_refused_while_unconfirmed_says_so() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_UP);
+        let config = config_with_server(&provider);
+        let store = MemoryStore::default();
+        store.save(&config.token_key(), "refresh").await.unwrap();
+        let clock = Arc::new(AtomicI64::new(START_MS));
+        let reading = Arc::clone(&clock);
+        let service = AuthService::with_clock(
+          Some(config.clone()),
+          store,
+          Arc::new(move || reading.load(Ordering::SeqCst)),
+        );
+        assert!(service.restore().await.unwrap());
+        service.is_unconfirmed.store(true, Ordering::Release);
+
+        clock.store(START_MS + HOUR_MS, Ordering::SeqCst);
+        provider.set(PROVIDER_REFUSES);
+
+        assert!(matches!(
+          service.api_get(ME_PATH).await,
+          Err(AuthError::Denied(_))
+        ));
+        assert!(matches!(
+          service.api_get(ME_PATH).await,
+          Err(AuthError::NotSignedIn)
+        ));
+        assert!(service.store.load(&config.token_key()).await.unwrap().is_none());
+      }
+
+      /// Somebody else signed in, and writing could not even forget the old record: it still can't
+      /// open for the new tokens.
+      #[tokio::test]
+      async fn a_record_of_another_subject_does_not_open() {
+        let provider = FakeProvider::start().await;
+        let service = starting(&provider).await;
+        adopt(&service, &provider, Some("subject-b"), TokenOrigin::NewSignIn).await;
+
+        assert!(
+          stored_record(&service, &provider).await.is_some(),
+          "the old record is still there"
+        );
+        assert_eq!(service.cached_account().await, None);
+        assert!(!service.is_unconfirmed());
+      }
+
+      /// The answer for the previous account arrives after somebody else signed in.
+      #[tokio::test]
+      async fn a_late_confirmation_is_not_kept_for_the_new_session() {
+        let provider = FakeProvider::start().await;
+        let service = starting(&provider).await;
+        *service.confirmed_user() = Some(account().id);
+        // What `login` does before the browser opens.
+        *service.confirmed_user() = None;
+        service.forget_cached_account().await;
+        adopt(&service, &provider, Some("subject-b"), TokenOrigin::NewSignIn).await;
+
+        service.remember_account(&account()).await;
+
+        assert_eq!(stored_record(&service, &provider).await, None);
+      }
+
+      #[tokio::test]
+      async fn a_sign_in_that_names_nobody_gets_no_cached_start() {
+        let provider = FakeProvider::start().await;
+        let service = starting(&provider).await;
+        adopt(&service, &provider, None, TokenOrigin::NewSignIn).await;
+        assert_eq!(service.cached_account().await, None);
+      }
+
+      /// A refresh keeps who the session belongs to, also when its answer names nobody.
+      #[tokio::test]
+      async fn a_refresh_keeps_it_unless_it_names_somebody_else() {
+        let provider = FakeProvider::start().await;
+        let service = starting(&provider).await;
+        adopt(&service, &provider, None, TokenOrigin::SameSession).await;
+        assert_eq!(service.cached_account().await, Some(account()));
+        adopt(&service, &provider, Some(SUBJECT_A), TokenOrigin::SameSession).await;
+        assert_eq!(service.cached_account().await, Some(account()));
+        adopt(&service, &provider, Some("subject-b"), TokenOrigin::SameSession).await;
+        assert_eq!(service.cached_account().await, None);
+      }
+
+      /// A new sign-in goes first: a failure to write stops it rather than leave the old subject.
+      #[tokio::test]
+      async fn a_new_sign_in_forgets_it_first() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_DOWN);
+        let service = starting(&provider).await;
+
+        let outcome = service
+          .login_local("someone@example.com", &SecretString::from("password"), None)
+          .await;
+
+        assert!(outcome.is_err());
+        assert_eq!(stored_record(&service, &provider).await, None);
+      }
+
+      #[tokio::test]
+      async fn accounts_of_different_servers_stay_apart() {
+        let provider = FakeProvider::start().await;
+        let service = starting(&provider).await;
+        assert_eq!(
+          service
+            .store
+            .load_note(SessionNote::CachedAccount, "https://other.example.com")
+            .await
+            .unwrap(),
+          None
+        );
+      }
     }
 
     #[tokio::test]
@@ -2046,6 +2642,12 @@ mod tests {
       }
     }
 
+    fn id_token_of(subject: &str) -> String {
+      use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+      let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"{subject}"}}"#));
+      format!("eyJhbGciOiJub25lIn0.{payload}.signature")
+    }
+
     async fn serve(
       mut socket: TcpStream,
       base: &str,
@@ -2062,7 +2664,13 @@ mod tests {
         }
       }
       let head = String::from_utf8_lossy(&request).into_owned();
-      let (status, body) = if head.starts_with("POST /logout") {
+      let (status, body) = if head.starts_with("GET /api/v1/me") {
+        // The server's answer, at the same address in the tests that ask it.
+        if mode.load(Ordering::SeqCst) == PROVIDER_DOWN {
+          return;
+        }
+        ("200 OK", ME_ANSWER.to_owned())
+      } else if head.starts_with("POST /logout") {
         logouts.fetch_add(1, Ordering::SeqCst);
         ("200 OK", String::new())
       } else if head.starts_with("GET /.well-known/openid-configuration") {
@@ -2088,6 +2696,7 @@ mod tests {
               "token_type": "Bearer",
               "expires_in": 300,
               "refresh_token": "rotated-refresh",
+              "id_token": id_token_of(TOKEN_SUBJECT),
             })
             .to_string(),
           ),
@@ -2110,6 +2719,18 @@ mod tests {
     struct RefusesClear(MemoryStore);
 
     impl TokenStore for RefusesClear {
+      async fn load_note(&self, kind: SessionNote, server: &str) -> Result<Option<String>, AuthError> {
+        self.0.load_note(kind, server).await
+      }
+
+      async fn save_note(&self, kind: SessionNote, server: &str, note: &str) -> Result<(), AuthError> {
+        self.0.save_note(kind, server, note).await
+      }
+
+      async fn clear_note(&self, kind: SessionNote, server: &str) -> Result<(), AuthError> {
+        self.0.clear_note(kind, server).await
+      }
+
       async fn load(&self, server: &str) -> Result<Option<SecretString>, AuthError> {
         self.0.load(server).await
       }

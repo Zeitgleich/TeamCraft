@@ -15,14 +15,14 @@ use oauth2::{
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::oidc_login::{
-  AuthorizationErrorKind, LoginRequest, OidcClient, OidcTokenResponse, authorization_url, oidc_client,
-  shown_error_code,
+  AuthorizationErrorKind, LoginRequest, OidcClient, OidcTokenResponse, answer_subject, authorization_url,
+  oidc_client, shown_error_code,
 };
 use teamcraft_client_api::server_entry::{HttpPolicy, SERVER_INFO_PATH, check_discovery};
-use teamcraft_proto::{SERVER_INFO_PRODUCT, ServerInfoResponse};
+use teamcraft_proto::{GetMeResponse, SERVER_INFO_PRODUCT, ServerInfoResponse};
 
 use super::fetch::fetch;
-use super::token_vault::{self, RefreshPlan, Tokens};
+use super::token_vault::{self, CachedAccount, RefreshPlan, Tokens};
 use super::{
   ApiBytes, ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator, BinaryBody, LocalFuture, SignInLook,
 };
@@ -49,6 +49,10 @@ pub struct BrowserAuth {
   tokens: RefCell<Option<Tokens>>,
   sign_in: RefCell<Option<SignIn>>,
   discovery: RefCell<Option<Discovery>>,
+  /// The issuer and client the tokens in memory were saved for, while they come from the cached start
+  /// and the server hasn't been asked yet. The server is not trusted: its answer may name another
+  /// provider, and a refresh token only ever goes to the provider it came from.
+  maybe_cached_provider: RefCell<Option<(String, String)>>,
 }
 
 /// How to sign in: the server's settings, or the development overrides of [`AppConfig`].
@@ -75,6 +79,9 @@ struct StoredLoginHint {
 struct LocalSession {
   token: String,
   expires_at_ms: i64,
+  /// The account the server confirmed for this session, for the next start of the tab (issue #778).
+  #[serde(default, rename = "account", skip_serializing_if = "Option::is_none")]
+  maybe_account: Option<GetMeResponse>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -118,14 +125,74 @@ impl BrowserAuth {
       tokens: RefCell::new(None),
       sign_in: RefCell::new(None),
       discovery: RefCell::new(None),
+      maybe_cached_provider: RefCell::new(None),
     }
   }
 
+  /// The cached account with its session in memory, without the network. Tokens that ran out are
+  /// taken too: asking for the access token then refreshes them when it can.
+  async fn cached_start(&self) -> Option<GetMeResponse> {
+    let params = location_params();
+    if params.contains_key("code") || params.contains_key("error") {
+      return None;
+    }
+    if let Some(session) = stored_local_session() {
+      let account = session.maybe_account.clone()?;
+      *self.local.borrow_mut() = Some(session);
+      return Some(account);
+    }
+    local_get(SIGNED_IN_HINT_KEY)?;
+    let cached = token_vault::load_account().await?;
+    // Read only: a stale record says nothing about the tokens, which stay for the long way.
+    let tokens = token_vault::peek(&cached.issuer, &cached.client_id).await?;
+    if tokens.maybe_subject.as_deref() != Some(cached.subject.as_str()) {
+      return None;
+    }
+    self.tokens.replace(Some(tokens));
+    self
+      .maybe_cached_provider
+      .replace(Some((cached.issuer, cached.client_id)));
+    Some(cached.account)
+  }
+
+  /// Saves `account` next to the session it was confirmed for: a local account's in this tab's
+  /// session, else in the vault, unless the user signed out meanwhile.
+  async fn keep_account(&self, account: &GetMeResponse) {
+    if let Some(session) = self.local.borrow_mut().as_mut() {
+      session.maybe_account = Some(account.clone());
+      if let Ok(text) = serde_json::to_string(session) {
+        session_set(LOCAL_SESSION_KEY, &text);
+      }
+      return;
+    }
+    let maybe_subject = self
+      .tokens
+      .borrow()
+      .as_ref()
+      .and_then(|tokens| tokens.maybe_subject.clone());
+    let Some(subject) = maybe_subject else {
+      return;
+    };
+    let Ok(sign_in) = self.sign_in().await else {
+      return;
+    };
+    // Under the refresh lock, like the tokens: a sign-out in another tab either sees this record
+    // and removes it, or removed the hint before this looks at it.
+    let _turn = token_vault::refresh_turn().await;
+    if local_get(SIGNED_IN_HINT_KEY).is_none() {
+      return;
+    }
+    token_vault::save_account(&CachedAccount {
+      issuer: sign_in.issuer,
+      client_id: sign_in.client_id,
+      subject,
+      account: account.clone(),
+    })
+    .await;
+  }
+
   async fn restore_inner(&self) -> Result<bool, AuthError> {
-    if let Some(stored) = session_get(LOCAL_SESSION_KEY)
-      && let Ok(session) = serde_json::from_str::<LocalSession>(&stored)
-      && session.expires_at_ms > now_ms()
-    {
+    if let Some(session) = stored_local_session() {
       *self.local.borrow_mut() = Some(session);
       return Ok(true);
     }
@@ -159,6 +226,9 @@ impl BrowserAuth {
     // stays signed in as long as the provider's session lasts).
     if session_get(AUTOLOGIN_TRIED_KEY).is_none() {
       session_set(AUTOLOGIN_TRIED_KEY, "1");
+      // Started from the cached account, the app is on screen and may be in use.
+      #[cfg(target_arch = "wasm32")]
+      crate::web_core::save_before_leaving().await;
       self.begin_login(None).await?;
       std::future::pending::<()>().await;
     }
@@ -265,6 +335,8 @@ impl BrowserAuth {
     local_set(SIGNED_IN_HINT_KEY, "1");
     session_remove(AUTOLOGIN_TRIED_KEY);
     let _turn = token_vault::refresh_turn().await;
+    // Whoever signed in now: the cached account no longer stands, before the new tokens are saved.
+    token_vault::forget_account().await;
     self.share_tokens(&sign_in).await;
     Ok(pending.maybe_return_path.filter(|path| is_return_path(path)))
   }
@@ -274,6 +346,7 @@ impl BrowserAuth {
   /// with or the provider refused it (expired or revoked).
   async fn refresh(&self) -> Result<(), AuthError> {
     let sign_in = self.sign_in().await?;
+    self.drop_tokens_of_another_provider(&sign_in);
     let _turn = token_vault::refresh_turn().await;
     let maybe_saved = token_vault::load(&sign_in.issuer, &sign_in.client_id).await;
     let plan = token_vault::plan_refresh(self.tokens.borrow().as_ref(), maybe_saved, now_ms());
@@ -316,8 +389,23 @@ impl BrowserAuth {
           }
           return Err(AuthError::NotSignedIn);
         }
-        Err(map_token_error(error))
+        Err(map_refresh_error(error))
       },
+    }
+  }
+
+  /// The server names another provider than the one the cached start's tokens came from: they are
+  /// no use there, and must not reach it.
+  fn drop_tokens_of_another_provider(&self, sign_in: &SignIn) {
+    let is_other = is_other_provider(
+      self.maybe_cached_provider.borrow().as_ref(),
+      &sign_in.issuer,
+      &sign_in.client_id,
+    );
+    self.maybe_cached_provider.replace(None);
+    if is_other {
+      tracing::warn!("the server names another identity provider than the saved sign-in's");
+      self.tokens.replace(None);
     }
   }
 
@@ -380,6 +468,7 @@ impl BrowserAuth {
     let session = LocalSession {
       token: granted.access_token.clone(),
       expires_at_ms: granted.expires_at.0,
+      maybe_account: None,
     };
     if let Ok(text) = serde_json::to_string(&session) {
       session_set(LOCAL_SESSION_KEY, &text);
@@ -523,6 +612,28 @@ impl Authenticator for BrowserAuth {
     Box::pin(self.restore_inner())
   }
 
+  fn cached_account(&self) -> LocalFuture<'_, Option<GetMeResponse>> {
+    Box::pin(self.cached_start())
+  }
+
+  fn remember_account<'a>(&'a self, account: &'a GetMeResponse) -> LocalFuture<'a, ()> {
+    Box::pin(self.keep_account(account))
+  }
+
+  fn forget_account(&self) -> LocalFuture<'_, ()> {
+    Box::pin(async move {
+      if let Some(session) = self.local.borrow_mut().as_mut() {
+        session.maybe_account = None;
+        if let Ok(text) = serde_json::to_string(session) {
+          session_set(LOCAL_SESSION_KEY, &text);
+        }
+        return;
+      }
+      let _turn = token_vault::refresh_turn().await;
+      token_vault::forget_account().await;
+    })
+  }
+
   fn access_token(&self) -> LocalFuture<'_, Result<String, AuthError>> {
     Box::pin(BrowserAuth::access_token(self))
   }
@@ -563,6 +674,7 @@ impl Authenticator for BrowserAuth {
         return Ok(());
       }
       let maybe_refresh = self.tokens.replace(None).and_then(|tokens| tokens.maybe_refresh);
+      let maybe_cached_provider = self.maybe_cached_provider.take();
       local_remove(SIGNED_IN_HINT_KEY);
       session_remove(AUTOLOGIN_TRIED_KEY);
       // Under the refresh lock: a refresh another tab runs right now saves its tokens before this
@@ -575,6 +687,11 @@ impl Authenticator for BrowserAuth {
       // machines. A direct request with the refresh token does it without a confirmation page.
       if let (Some(refresh), Ok(discovery), Ok(sign_in)) =
         (maybe_refresh, self.discovery().await, self.sign_in().await)
+        && !is_other_provider(
+          maybe_cached_provider.as_ref(),
+          &sign_in.issuer,
+          &sign_in.client_id,
+        )
         && let Some(endpoint) = discovery.maybe_end_session_endpoint
       {
         let body = format!(
@@ -620,7 +737,7 @@ impl Authenticator for BrowserAuth {
       )
       .await
       .map_err(AuthError::Network)?;
-      if response.status == UNAUTHORIZED {
+      if is_refused_token(response.status, &response.body) {
         self.on_unauthorized().await;
       }
       Ok(ApiResponse {
@@ -646,7 +763,7 @@ impl Authenticator for BrowserAuth {
       let response = fetch(method.as_str(), &url, &headers, maybe_body.map(|body| body.bytes))
         .await
         .map_err(AuthError::Network)?;
-      if response.status == UNAUTHORIZED {
+      if is_refused_token(response.status, &response.body) {
         self.on_unauthorized().await;
       }
       Ok(ApiBytes {
@@ -673,8 +790,8 @@ fn tokens_from(
     .map(|token| SecretString::from(token.secret().clone()))
     .or(maybe_previous_refresh);
   let access = response.access_token().secret();
-  let maybe_subject = token_vault::answer_subject(response.extra_fields().maybe_id_token.as_deref(), access)
-    .or(maybe_previous_subject);
+  let maybe_subject =
+    answer_subject(response.extra_fields().maybe_id_token.as_deref(), access).or(maybe_previous_subject);
   Tokens::new(
     SecretString::from(access.clone()),
     maybe_refresh,
@@ -721,6 +838,22 @@ fn is_session_over(error: &TokenError) -> bool {
   )
 }
 
+/// A failed refresh that isn't `invalid_grant` (handled before this): the provider said something
+/// (`temporarily_unavailable`, `server_error`, a misconfigured client) that says nothing about the
+/// session, which stays for the next try (issue #667). Not a refusal, so nobody is signed out.
+fn map_refresh_error(error: TokenError) -> AuthError {
+  match map_token_error(error) {
+    AuthError::Denied(description) => AuthError::InvalidResponse(description),
+    other => other,
+  }
+}
+
+/// A 401 of the server itself, with its error body. A proxy's or captive portal's page with that
+/// status says nothing about the token (robustness.md, "Hostile networks").
+fn is_refused_token(status: u16, body: &[u8]) -> bool {
+  status == UNAUTHORIZED && serde_json::from_slice::<teamcraft_proto::ErrorBody>(body).is_ok()
+}
+
 fn map_token_error(error: TokenError) -> AuthError {
   match error {
     RequestTokenError::ServerResponse(response) => {
@@ -756,6 +889,21 @@ fn encode(value: &str) -> String {
 }
 
 /// Query parameters of the current page as pairs.
+/// Whether tokens saved for the provider `maybe_saved_for` must stay away from this one. Tokens with
+/// no such note came from a sign-in of this page, through this provider.
+fn is_other_provider(maybe_saved_for: Option<&(String, String)>, issuer: &str, client_id: &str) -> bool {
+  maybe_saved_for
+    .is_some_and(|(saved_issuer, saved_client)| saved_issuer != issuer || saved_client != client_id)
+}
+
+/// The local account's session this tab holds, as long as it lasts.
+fn stored_local_session() -> Option<LocalSession> {
+  let stored = session_get(LOCAL_SESSION_KEY)?;
+  serde_json::from_str::<LocalSession>(&stored)
+    .ok()
+    .filter(|session| session.expires_at_ms > now_ms())
+}
+
 fn location_params() -> std::collections::HashMap<String, String> {
   let search = web_sys::window()
     .and_then(|window| window.location().search().ok())
@@ -905,6 +1053,78 @@ fn local_remove(key: &str) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod refresh_errors {
+    use oauth2::StandardErrorResponse;
+    use oauth2::basic::BasicErrorResponseType;
+
+    use super::*;
+
+    fn provider_says(code: &str) -> TokenError {
+      RequestTokenError::ServerResponse(StandardErrorResponse::new(
+        BasicErrorResponseType::Extension(code.to_owned()),
+        None,
+        None,
+      ))
+    }
+
+    #[test]
+    fn only_invalid_grant_is_a_refusal() {
+      let refused = RequestTokenError::ServerResponse(StandardErrorResponse::new(
+        BasicErrorResponseType::InvalidGrant,
+        None,
+        None,
+      ));
+      assert!(is_session_over(&refused));
+      for code in ["server_error", "temporarily_unavailable"] {
+        let error = provider_says(code);
+        assert!(!is_session_over(&error), "{code}");
+        assert!(
+          matches!(map_refresh_error(error), AuthError::InvalidResponse(_)),
+          "{code}"
+        );
+      }
+    }
+
+    /// A refresh token only ever goes to the provider it came from, whatever the server says.
+    #[test]
+    fn tokens_stay_away_from_another_provider() {
+      let saved_for = ("https://id.example.com".to_owned(), "teamcraft".to_owned());
+      assert!(!is_other_provider(
+        Some(&saved_for),
+        "https://id.example.com",
+        "teamcraft"
+      ));
+      assert!(is_other_provider(
+        Some(&saved_for),
+        "https://evil.example.com",
+        "teamcraft"
+      ));
+      assert!(is_other_provider(
+        Some(&saved_for),
+        "https://id.example.com",
+        "another-client"
+      ));
+      assert!(!is_other_provider(None, "https://id.example.com", "teamcraft"));
+    }
+
+    #[test]
+    fn a_401_counts_only_with_the_servers_body() {
+      assert!(is_refused_token(
+        401,
+        br#"{"error_code":"invalid_token","message":"no"}"#
+      ));
+      assert!(!is_refused_token(
+        401,
+        b"<html>Proxy authentication required</html>"
+      ));
+      assert!(!is_refused_token(401, b""));
+      assert!(!is_refused_token(
+        403,
+        br#"{"error_code":"invalid_token","message":"no"}"#
+      ));
+    }
+  }
 
   #[test]
   fn only_route_paths_come_back_after_sign_in() {

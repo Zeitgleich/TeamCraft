@@ -11,7 +11,7 @@ use teamcraft_client_api::remote::ApiMethod;
 use teamcraft_client_api::server_entry::{ServerOrigin, ServerProfile, is_provider_endpoint};
 use teamcraft_client_api::sign_in_look::SignInLook;
 use teamcraft_core::store::SecretVault;
-use teamcraft_proto::{AvatarContentType, BrandResponse, UserId};
+use teamcraft_proto::{AvatarContentType, BrandResponse, GetMeResponse, UserId};
 
 use base64::Engine;
 
@@ -262,6 +262,33 @@ pub async fn server_forget(
 #[tauri::command(rename_all = "snake_case")]
 pub async fn auth_restore(service: State<'_, Arc<Service>>) -> Result<bool, CommandError> {
   Ok(service.restore().await?)
+}
+
+/// The account the app can start from at once while [`auth_restore`] runs beside it (issue #778).
+/// `None` means wait for the server, as after a first sign-in: nothing cached, no stored session,
+/// or a record this version can't read.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn auth_cached_account(
+  service: State<'_, Arc<Service>>,
+) -> Result<Option<GetMeResponse>, CommandError> {
+  Ok(service.cached_account().await)
+}
+
+/// The server confirmed this account: the core gets its token, and the next start can begin with it.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn auth_remember_account(
+  account: GetMeResponse,
+  service: State<'_, Arc<Service>>,
+) -> Result<(), CommandError> {
+  service.remember_account(&account).await;
+  Ok(())
+}
+
+/// The cached account doesn't stand: the next start waits for the server again.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn auth_forget_account(service: State<'_, Arc<Service>>) -> Result<(), CommandError> {
+  service.forget_cached_account().await;
+  Ok(())
 }
 
 #[tauri::command(rename_all = "snake_case")]

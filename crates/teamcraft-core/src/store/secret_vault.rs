@@ -92,6 +92,25 @@ pub enum TokenKind {
   LocalSession,
 }
 
+/// What is kept about a server's session besides its tokens, for the start from the cached account
+/// (e2ee.md §9.8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionNote {
+  /// The account the server confirmed last, with the subject it was confirmed for.
+  CachedAccount,
+  /// The account at the identity provider that the stored refresh token belongs to.
+  TokenSubject,
+}
+
+impl SessionNote {
+  fn name(self) -> &'static str {
+    match self {
+      Self::CachedAccount => "cached-account",
+      Self::TokenSubject => "token-subject",
+    }
+  }
+}
+
 #[derive(Default)]
 struct State {
   maybe_directory: Option<PathBuf>,
@@ -204,6 +223,46 @@ impl SecretVault {
     let had_secret = forget_secret(contents, &name);
     let was_new = contents.moved.insert(name);
     state.is_dirty |= had_secret || was_new;
+    flush(&mut state)
+  }
+
+  /// What the sign-in service keeps about a server's session for the next start. Lives in the file
+  /// only: it never had a keychain entry to move and never gets one.
+  pub fn load_session_note(
+    &self,
+    kind: SessionNote,
+    server: &str,
+  ) -> Result<Option<Zeroizing<String>>, KeySourceError> {
+    let mut state = self.lock();
+    self.ensure_open(&mut state)?;
+    Ok(
+      contents_of(&mut state)?
+        .secrets
+        .get(&item_name(kind.name(), server))
+        .map(|note| Zeroizing::new(note.clone())),
+    )
+  }
+
+  /// Keeps a note. Writes the file only, and only when the note changed.
+  pub fn save_session_note(&self, kind: SessionNote, server: &str, note: &str) -> Result<(), KeySourceError> {
+    let mut state = self.lock();
+    self.ensure_open(&mut state)?;
+    let name = item_name(kind.name(), server);
+    let contents = contents_of(&mut state)?;
+    if contents.secrets.get(&name).map(String::as_str) != Some(note) {
+      replace_secret(contents, &name, note.to_owned());
+      state.is_dirty = true;
+    }
+    flush(&mut state)
+  }
+
+  /// Forgets a note. A failure to write says so: the caller relies on it being gone.
+  pub fn clear_session_note(&self, kind: SessionNote, server: &str) -> Result<(), KeySourceError> {
+    let mut state = self.lock();
+    self.ensure_open(&mut state)?;
+    let name = item_name(kind.name(), server);
+    let had_note = forget_secret(contents_of(&mut state)?, &name);
+    state.is_dirty |= had_note;
     flush(&mut state)
   }
 
@@ -772,6 +831,34 @@ mod tests {
           deletes: 0
         }
       );
+    }
+
+    /// What a start reads for the cached account comes from the file that is open anyway (issue
+    /// #778).
+    #[test]
+    fn session_notes_do_not_touch_the_keychain() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      fake.reset_counts();
+      let (account, subject) = (SessionNote::CachedAccount, SessionNote::TokenSubject);
+
+      vault.save_session_note(account, SERVER_A, "account-a").unwrap();
+      vault.save_session_note(subject, SERVER_A, "subject-a").unwrap();
+      let read = |kind, server| {
+        vault
+          .load_session_note(kind, server)
+          .unwrap()
+          .map(|note| note.to_string())
+      };
+      assert_eq!(read(account, SERVER_A).as_deref(), Some("account-a"));
+      assert_eq!(read(subject, SERVER_A).as_deref(), Some("subject-a"));
+      assert_eq!(read(account, SERVER_B), None);
+      vault.clear_session_note(account, SERVER_A).unwrap();
+      assert_eq!(read(account, SERVER_A), None);
+      assert_eq!(read(subject, SERVER_A).as_deref(), Some("subject-a"));
+
+      assert_eq!(fake.counts(), Counts::default());
     }
 
     #[test]

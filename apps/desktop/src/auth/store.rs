@@ -1,7 +1,7 @@
 use secrecy::{ExposeSecret, SecretString};
 use std::future::Future;
 use std::sync::Arc;
-use teamcraft_core::store::{KeySourceError, SecretVault, TokenKind};
+use teamcraft_core::store::{KeySourceError, SecretVault, SessionNote, TokenKind};
 
 use super::AuthError;
 
@@ -21,6 +21,21 @@ pub trait TokenStore: Send + Sync + 'static {
     session: &SecretString,
   ) -> impl Future<Output = Result<(), AuthError>> + Send;
   fn clear_local_session(&self, server: &str) -> impl Future<Output = Result<(), AuthError>> + Send;
+  /// What is kept about a session besides its tokens; see
+  /// [`AuthService::cached_account`](super::AuthService::cached_account).
+  fn load_note(
+    &self,
+    kind: SessionNote,
+    server: &str,
+  ) -> impl Future<Output = Result<Option<String>, AuthError>> + Send;
+  fn save_note(
+    &self,
+    kind: SessionNote,
+    server: &str,
+    note: &str,
+  ) -> impl Future<Output = Result<(), AuthError>> + Send;
+  fn clear_note(&self, kind: SessionNote, server: &str)
+  -> impl Future<Output = Result<(), AuthError>> + Send;
   /// The user signed out or left: deletes what a normal start doesn't look at, such as secrets an
   /// older version of the app wrote or a damaged file set aside. `token_key` and `server` name the
   /// server's refresh token and local session.
@@ -104,6 +119,28 @@ impl TokenStore for VaultStore {
     self.clear_token(TokenKind::LocalSession, server).await
   }
 
+  async fn load_note(&self, kind: SessionNote, server: &str) -> Result<Option<String>, AuthError> {
+    let server = server.to_owned();
+    let found = self
+      .run(move |vault| vault.load_session_note(kind, &server))
+      .await?;
+    Ok(found.map(|note| note.as_str().to_owned()))
+  }
+
+  async fn save_note(&self, kind: SessionNote, server: &str, note: &str) -> Result<(), AuthError> {
+    let (server, note) = (server.to_owned(), note.to_owned());
+    self
+      .run(move |vault| vault.save_session_note(kind, &server, &note))
+      .await
+  }
+
+  async fn clear_note(&self, kind: SessionNote, server: &str) -> Result<(), AuthError> {
+    let server = server.to_owned();
+    self
+      .run(move |vault| vault.clear_session_note(kind, &server))
+      .await
+  }
+
   async fn purge_after_sign_out(&self, token_key: &str, server: &str) -> Result<(), AuthError> {
     let (token_key, server) = (token_key.to_owned(), server.to_owned());
     self
@@ -122,6 +159,12 @@ impl TokenStore for VaultStore {
 #[cfg(test)]
 fn local_session_name(server: &str) -> String {
   format!("local-session@{server}")
+}
+
+/// The in-memory store's name of a session note.
+#[cfg(test)]
+fn note_name(kind: SessionNote, server: &str) -> String {
+  format!("{kind:?}@{server}")
 }
 
 /// In-memory store for tests.
@@ -170,6 +213,19 @@ impl TokenStore for MemoryStore {
 
   async fn clear_local_session(&self, server: &str) -> Result<(), AuthError> {
     self.clear(&local_session_name(server)).await
+  }
+
+  async fn load_note(&self, kind: SessionNote, server: &str) -> Result<Option<String>, AuthError> {
+    let found = self.load(&note_name(kind, server)).await?;
+    Ok(found.map(|note| note.expose_secret().to_owned()))
+  }
+
+  async fn save_note(&self, kind: SessionNote, server: &str, note: &str) -> Result<(), AuthError> {
+    self.save(&note_name(kind, server), note).await
+  }
+
+  async fn clear_note(&self, kind: SessionNote, server: &str) -> Result<(), AuthError> {
+    self.clear(&note_name(kind, server)).await
   }
 }
 
