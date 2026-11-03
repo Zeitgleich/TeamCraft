@@ -9,8 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  ConversationId, ConversationKind, ConversationResponse, DeleteConversationRequest, DeleteSpaceRequest,
-  MAX_SIGNED_DELETIONS, SignedChannelDeletion, SpaceId,
+  ConversationId, ConversationKind, ConversationResponse, DeleteConversationRequest, SignedChannelDeletion,
 };
 
 use super::Client;
@@ -19,13 +18,17 @@ use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
 use crate::records;
 use crate::signed_deletion::{
-  DeletionVerifier, GroupFacts, can_sign_deletion, sign_channel_deletion, verify_signed_deletion,
+  DeletionVerifier, GroupFacts, can_sign_deletion, is_told_epoch_plausible, sign_channel_deletion,
+  verify_signed_deletion,
 };
 use crate::store::{LocalStore, MessageFilter, Table};
 
 const QUARANTINE_PREFIX: &str = "quarantine/";
 const OWN_DELETION_PREFIX: &str = "own_deletion/";
 const NOTES_PREFIX: &str = "notes_to_self/";
+const DIRECT_PREFIX: &str = "direct/";
+/// When deletions verified here purged, within `suspect_deletion_window`: they leave no other mark.
+const SIGNED_PURGES_KEY: &str = "signed_purges";
 pub(crate) const SUSPECT_DELETIONS_KEY: &str = "suspect_deletions";
 /// Tries with fresh epochs of a signed deletion: a commit may come in between, and an admin outside
 /// a group learns its epoch from the first refusal.
@@ -86,9 +89,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       && !self.has_own_deletion(conversation)?
     {
       match self.verifies_signed_deletion(conversation, signed).await {
-        // The same mark as the user's own deletion: a purge cut off is finished by the next claim,
-        // though the group that made it verifiable is gone by then.
-        Ok(true) => self.note_own_deletion(conversation)?,
+        Ok(true) => {
+          self.note_signed_purge()?;
+          // The same mark as the user's own deletion: a purge cut off is finished by the next claim,
+          // though the group that made it verifiable is gone by then.
+          self.note_own_deletion(conversation)?;
+          self.note_server_deletion(conversation)?;
+          // A real signature on many channels at once is worth telling too.
+          return self.note_suspect_deletions();
+        },
         Ok(false) => {},
         // A group this device can't read decides nothing, and doesn't stop the sync.
         Err(error) => {
@@ -109,10 +118,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     signed: &SignedChannelDeletion,
   ) -> Result<bool, CoreError> {
     if !self.has_group(conversation)?
-      || self
-        .store
-        .get(Table::AppliedChanges, &notes_key(conversation))?
-        .is_some()
+      || self.is_pinned(&notes_key(conversation))?
+      || self.is_pinned(&direct_key(conversation))?
     {
       return Ok(false);
     }
@@ -135,23 +142,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       roles: &roles,
       workspace: &workspace,
       roster_max_age_ms: self.roster_max_age_ms(),
+      max_age_ms: i64::try_from(self.settings.signed_deletion_max_age.as_millis()).unwrap_or(i64::MAX),
+      clock_skew_ms: i64::try_from(self.settings.signed_deletion_clock_skew.as_millis()).unwrap_or(i64::MAX),
       now_ms: self.now_ms(),
     };
-    match verify_signed_deletion(signed, &verifier) {
-      Ok(verified) => {
-        tracing::info!(
-          conversation_id = %conversation,
-          signer = %verified.signer,
-          is_workspace_admin = verified.is_workspace_admin,
-          "a signed deletion holds; the history goes at once"
-        );
-        Ok(true)
-      },
+    let verified = match verify_signed_deletion(signed, &verifier) {
+      Ok(verified) => verified,
       Err(error) => {
         tracing::warn!(conversation_id = %conversation, %error, "a signed deletion doesn't hold; it stays the server's word");
-        Ok(false)
+        return Ok(false);
       },
+    };
+    // The certificate alone outlives a removal of the device: its user's signed list decides. No
+    // list, or none readable, refuses (e2ee.md §4.6).
+    let maybe_list = self.fetch_device_list(verified.signer, &verified.identity).await;
+    if !matches!(&maybe_list, Ok(Some(list)) if list.is_active(&verified.device)) {
+      tracing::warn!(conversation_id = %conversation, signer = %verified.signer, "a signed deletion comes from a device its user's list doesn't name; it stays the server's word");
+      return Ok(false);
     }
+    tracing::info!(
+      conversation_id = %conversation,
+      signer = %verified.signer,
+      is_workspace_admin = verified.is_workspace_admin,
+      "a signed deletion holds; the history goes at once"
+    );
+    Ok(true)
   }
 
   /// Asks the server to delete the channel, signed if this user can sign in a way members accept. The
@@ -163,20 +178,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
   ) -> Result<(), ApiError> {
     // An admin outside the channel knows it only from the server; the members' devices check.
-    let is_channel = self.is_known_channel(conversation)
-      || self
-        .api
-        .conversation(conversation)
-        .await
-        .is_ok_and(|response| response.kind == ConversationKind::Channel);
+    let is_channel = !self.is_pinned(&direct_key(conversation)).unwrap_or(true)
+      && (self.is_known_channel(conversation)
+        || self
+          .api
+          .conversation(conversation)
+          .await
+          .is_ok_and(|response| response.kind == ConversationKind::Channel));
     if is_channel {
       self.refresh_deletion_authority(conversation).await;
     }
-    let mut epoch = self.known_group_epoch(conversation);
+    let maybe_own_epoch = self.group_epoch(conversation).ok().flatten();
+    let mut epoch = maybe_own_epoch.unwrap_or_default();
+    let mut may_sign = is_channel;
     let mut attempts = 1;
     loop {
       let request = DeleteConversationRequest {
-        maybe_signed_deletion: if is_channel {
+        maybe_signed_deletion: if may_sign {
           self.signed_deletion_if_allowed(conversation, epoch)
         } else {
           None
@@ -185,70 +203,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let answer = self.api.delete_conversation(conversation, &request).await;
       match answer {
         Err(error) if error.is_epoch_conflict() && attempts < DELETION_ATTEMPTS => {
-          let Some(current) = current_epoch_of(&error) else {
+          let Some(told) = current_epoch_of(&error) else {
             return Err(error);
           };
-          epoch = current;
-          attempts += 1;
-        },
-        answer => return answer,
-      }
-    }
-  }
-
-  /// [`Self::request_channel_deletion`] for a space. `channels`: those this device knows in it. Only
-  /// they are signed, never what the server names: it could name any channel of the workspace, or a
-  /// direct message, to a workspace admin. Others go as the server's word.
-  pub(crate) async fn request_space_deletion(
-    &mut self,
-    space: SpaceId,
-    channels: &[ConversationId],
-  ) -> Result<(), ApiError> {
-    let mut epochs = Vec::with_capacity(channels.len());
-    for channel in channels {
-      if !self.is_known_channel(*channel) {
-        continue;
-      }
-      self.refresh_deletion_authority(*channel).await;
-      epochs.push((*channel, self.known_group_epoch(*channel)));
-    }
-    self.read_space_epochs(space, &mut epochs).await;
-    let mut attempts = 1;
-    loop {
-      let signed_deletions = epochs
-        .iter()
-        .filter_map(|(channel, epoch)| self.signed_deletion_if_allowed(*channel, *epoch))
-        .take(MAX_SIGNED_DELETIONS)
-        .collect();
-      let request = DeleteSpaceRequest { signed_deletions };
-      let answer = self.api.delete_space(space, &request).await;
-      match answer {
-        Err(error) if error.is_epoch_conflict() && attempts < DELETION_ATTEMPTS => {
-          self.read_space_epochs(space, &mut epochs).await;
-          attempts += 1;
-        },
-        answer => return answer,
-      }
-    }
-  }
-
-  /// The groups' epochs as the server says, for the channels to sign. An older server has no such
-  /// read, and takes no signatures either; a failed read shows in the request that follows.
-  async fn read_space_epochs(&self, space: SpaceId, epochs: &mut [(ConversationId, u64)]) {
-    match self.api.space_channel_epochs(space).await {
-      Ok(response) => {
-        for told in response.channels {
-          if let Some((_, epoch)) = epochs
-            .iter_mut()
-            .find(|(channel, _)| *channel == told.conversation_id)
-          {
-            *epoch = told.epoch;
+          // A member knows about where its group is, and signs nothing far from it: the signature
+          // would be good until the group got there. Unsigned, the deletion takes the retention.
+          if maybe_own_epoch.is_some_and(|own| !is_told_epoch_plausible(own, told)) {
+            tracing::warn!(conversation_id = %conversation, told, "the server names an epoch far from this device's group; the deletion stays unsigned");
+            may_sign = false;
           }
-        }
-      },
-      Err(error) => {
-        tracing::debug!(space_id = %space, %error, "could not read the groups' epochs before deleting a space");
-      },
+          epoch = told;
+          attempts += 1;
+        },
+        answer => return answer,
+      }
     }
   }
 
@@ -324,11 +292,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     can_sign_deletion(&authorities)
   }
 
-  /// The group's epoch as this device knows it; 0 without a group, and the server's refusal says.
-  fn known_group_epoch(&mut self, conversation: ConversationId) -> u64 {
-    self.group_epoch(conversation).ok().flatten().unwrap_or_default()
-  }
-
   /// The epoch of this device's group of the conversation, if it has one.
   pub fn group_epoch(&mut self, conversation: ConversationId) -> Result<Option<u64>, CoreError> {
     Ok(self.group(conversation)?.map(|group| group.epoch()))
@@ -392,10 +355,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// The server lists these conversations: a quarantine of them was wrong, or is over.
+  /// The server lists these conversations: a quarantine of them was wrong, or is over. So is a mark
+  /// a purge cut off left: it must not make a later claim purge at once.
   pub(crate) fn lift_quarantines(&mut self, listed: &[ConversationResponse]) -> Result<(), CoreError> {
     for (key, _) in self.store.list(Table::AppliedChanges)? {
-      let Some(id) = key.strip_prefix(QUARANTINE_PREFIX) else {
+      let Some(id) = key
+        .strip_prefix(QUARANTINE_PREFIX)
+        .or_else(|| key.strip_prefix(OWN_DELETION_PREFIX))
+      else {
         continue;
       };
       if listed
@@ -431,6 +398,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// Keeps that a conversation is direct (anything but a channel) from the first time this device
+  /// sees it so: `kind` is the server's word and may change later, and no signature purges one.
+  pub(crate) fn pin_if_direct(&self, conversation: &ConversationResponse) -> Result<(), CoreError> {
+    if conversation.kind == ConversationKind::Channel {
+      return Ok(());
+    }
+    let key = direct_key(conversation.id);
+    if !self.is_pinned(&key)? {
+      self.store.put(Table::AppliedChanges, &key, b"1")?;
+    }
+    Ok(())
+  }
+
+  fn is_pinned(&self, key: &str) -> Result<bool, CoreError> {
+    Ok(self.store.get(Table::AppliedChanges, key)?.is_some())
+  }
+
   pub fn dismiss_suspect_deletions(&mut self) -> Result<(), CoreError> {
     Ok(self.store.delete(Table::AppliedChanges, SUSPECT_DELETIONS_KEY)?)
   }
@@ -447,7 +431,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(found)
   }
 
-  /// Counts over a window, not per sync, so claims one by one on the gateway add up too.
+  /// A verified purge leaves nothing behind that [`Self::note_suspect_deletions`] could count.
+  fn note_signed_purge(&mut self) -> Result<(), CoreError> {
+    let mut purges = self.recent_signed_purges()?;
+    purges.push(self.now_ms());
+    records::put_json(&self.store, Table::AppliedChanges, SIGNED_PURGES_KEY, &purges)
+  }
+
+  /// Bounded by the window: older ones are dropped with each write.
+  fn recent_signed_purges(&self) -> Result<Vec<i64>, CoreError> {
+    let window_ms = i64::try_from(self.settings.suspect_deletion_window.as_millis()).unwrap_or(i64::MAX);
+    let now = self.now_ms();
+    let mut purges: Vec<i64> =
+      records::get_json(&self.store, Table::AppliedChanges, SIGNED_PURGES_KEY)?.unwrap_or_default();
+    purges.retain(|at_ms| now.saturating_sub(*at_ms) <= window_ms);
+    Ok(purges)
+  }
+
+  /// Counts over a window, not per sync, so claims one by one on the gateway add up too, and signed
+  /// purges with them.
   fn note_suspect_deletions(&mut self) -> Result<(), CoreError> {
     let window_ms = i64::try_from(self.settings.suspect_deletion_window.as_millis()).unwrap_or(i64::MAX);
     let now = self.now_ms();
@@ -455,7 +457,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .quarantined()?
       .iter()
       .filter(|entry| now.saturating_sub(entry.since_ms) <= window_ms)
-      .count();
+      .count()
+      .saturating_add(self.recent_signed_purges()?.len());
     let total = self
       .store
       .list(Table::Conversations)?
@@ -496,7 +499,15 @@ fn notes_key(conversation: ConversationId) -> String {
   format!("{NOTES_PREFIX}{conversation}")
 }
 
+fn direct_key(conversation: ConversationId) -> String {
+  format!("{DIRECT_PREFIX}{conversation}")
+}
+
 /// The markers a purge removes with the conversation.
-pub(crate) fn purge_markers(conversation: ConversationId) -> [String; 2] {
-  [quarantine_key(conversation), own_deletion_key(conversation)]
+pub(crate) fn purge_markers(conversation: ConversationId) -> [String; 3] {
+  [
+    quarantine_key(conversation),
+    own_deletion_key(conversation),
+    direct_key(conversation),
+  ]
 }

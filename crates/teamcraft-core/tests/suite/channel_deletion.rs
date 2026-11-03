@@ -186,9 +186,9 @@ mod deleting {
       alice.client.delete_channel(channel).await.unwrap();
       settle(&mut [&mut alice, &mut bob]).await;
 
-      // Alice confirmed it here; Bob verifies her signature.
+      // Alice confirmed it here. Her role goes back only to her founding claim: Bob keeps the history.
       assert_purged(&alice, channel);
-      assert_purged(&bob, channel);
+      assert_hidden_with_history(&bob, channel);
     }
   }
 
@@ -626,9 +626,9 @@ mod deleting_a_space {
         .is_none()
     );
 
-    // Bob's device doesn't read its gateway: only the sync, and the admin's signature holds.
+    // Bob's device doesn't read its gateway: only the sync. A space's deletion is never signed.
     bob.client.full_sync().await.unwrap();
-    assert_purged(&bob, channel);
+    assert_hidden_with_history(&bob, channel);
     assert!(
       bob
         .store

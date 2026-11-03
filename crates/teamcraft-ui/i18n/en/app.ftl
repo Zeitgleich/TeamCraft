@@ -229,4 +229,4 @@ error-import-in-progress = An import is running into this channel. Delete it onc
 error-space-has-hidden-channels = This space holds private channels you aren't in. Ask a workspace admin to delete it.
 error-channel-needs-admin = This channel has no admin. A workspace admin assigns one before it can be restored.
 error-not-a-channel = This only works for channels, not for direct messages.
-deletions-suspect = The server says { $count } of your conversations were deleted at once. They are hidden, and their messages stay on this device for now. Tell your administrator.
+deletions-suspect = The server says { $count } of your conversations were deleted at once. Those an administrator signed for are gone from this device; the others are hidden, and their messages stay here for now. Tell your administrator.

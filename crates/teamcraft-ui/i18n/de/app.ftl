@@ -229,4 +229,4 @@ error-import-in-progress = In diesen Kanal läuft gerade ein Import. Lösche ihn
 error-space-has-hidden-channels = Dieser Space enthält private Kanäle, in denen du nicht bist. Bitte einen Workspace-Admin, ihn zu löschen.
 error-channel-needs-admin = Dieser Kanal hat keinen Admin. Ein Workspace-Admin muss einen bestimmen, bevor er wiederhergestellt werden kann.
 error-not-a-channel = Das geht nur bei Kanälen, nicht bei Direktnachrichten.
-deletions-suspect = Der Server meldet { $count } deiner Unterhaltungen auf einmal als gelöscht. Sie sind ausgeblendet, ihre Nachrichten bleiben vorerst auf diesem Gerät. Informiere deine Administration.
+deletions-suspect = Der Server meldet { $count } deiner Unterhaltungen auf einmal als gelöscht. Die von einem Administrator signierten sind von diesem Gerät entfernt, die übrigen sind ausgeblendet, ihre Nachrichten bleiben vorerst hier. Informiere deine Administration.

@@ -10,6 +10,7 @@ use std::time::Duration;
 use reqwest::{Method, RequestBuilder, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use teamcraft_proto::DeleteConversationRequest;
 use teamcraft_proto::RendezvousClientMessage;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse,
@@ -52,7 +53,6 @@ use teamcraft_proto::{
   UpdateSpaceRequest,
 };
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingId, MeetingResponse};
-use teamcraft_proto::{DeleteConversationRequest, DeleteSpaceRequest, ListSpaceChannelEpochsResponse};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentResponse};
 use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
@@ -583,14 +583,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
-  async fn delete_space(&self, space: SpaceId, request: &DeleteSpaceRequest) -> Result<(), ApiError> {
+  async fn delete_space(&self, space: SpaceId) -> Result<(), ApiError> {
     self
-      .send_without_response(Method::DELETE, &format!("/spaces/{space}"), Some(request))
+      .send_without_response::<()>(Method::DELETE, &format!("/spaces/{space}"), None)
       .await
-  }
-
-  async fn space_channel_epochs(&self, space: SpaceId) -> Result<ListSpaceChannelEpochsResponse, ApiError> {
-    self.get(&format!("/spaces/{space}/channel-epochs")).await
   }
 
   async fn delete_conversation(

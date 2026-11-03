@@ -29,6 +29,7 @@ pub use connect::black_hole;
 pub use http::{
   AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken, change_web_push_subscription,
 };
+use teamcraft_proto::DeleteConversationRequest;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, AdminJoinRequestResponse, ClaimKeyPackagesRequest,
   ClaimKeyPackagesResponse, ConversationId, ConversationMemberResponse, ConversationResponse,
@@ -69,7 +70,6 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest};
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingId, MeetingResponse};
-use teamcraft_proto::{DeleteConversationRequest, DeleteSpaceRequest, ListSpaceChannelEpochsResponse};
 use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
 use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
@@ -311,17 +311,7 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<ListConversationsResponse, ApiError>>;
   /// Deletes a space with its channels for everybody (`DELETE /spaces/{id}`, `delete_space`); not
   /// found once it is gone.
-  fn delete_space(
-    &self,
-    space: SpaceId,
-    request: &DeleteSpaceRequest,
-  ) -> impl Future<Output = Result<(), ApiError>>;
-  /// The group epochs of a space's channels, to sign its deletion
-  /// (`GET /spaces/{id}/channel-epochs`). An older server answers 404.
-  fn space_channel_epochs(
-    &self,
-    space: SpaceId,
-  ) -> impl Future<Output = Result<ListSpaceChannelEpochsResponse, ApiError>>;
+  fn delete_space(&self, space: SpaceId) -> impl Future<Output = Result<(), ApiError>>;
   fn create_space(
     &self,
     request: &CreateSpaceRequest,

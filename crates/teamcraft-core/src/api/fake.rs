@@ -53,8 +53,8 @@ use teamcraft_proto::{
   UpdateSpaceRequest,
 };
 use teamcraft_proto::{
-  ChannelDeletionDocument, ChannelRoleLogEntryResponse, ConversationEpoch, DeleteConversationRequest,
-  DeleteSpaceRequest, DeletedConversationSignature, ListSpaceChannelEpochsResponse, SignedChannelDeletion,
+  ChannelDeletionDocument, ChannelRoleLogEntryResponse, DeleteConversationRequest,
+  DeletedConversationSignature, SignedChannelDeletion,
 };
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkClosedReason, DeviceLinkRequest};
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingKind, MeetingResponse, MeetingStatus};
@@ -1322,6 +1322,13 @@ impl FakeServer {
   /// [`Self::hide_from`] name the conversation.
   pub fn claim_signed_deletion(&self, conversation: ConversationId, signed: SignedChannelDeletion) {
     self.lock().deletion_signatures.insert(conversation, signed);
+  }
+
+  /// The server says from now on that the conversation is a channel, or anything else.
+  pub fn relabel_conversation(&self, conversation: ConversationId, kind: ConversationKind) {
+    if let Some(entry) = self.lock().conversations.get_mut(&conversation) {
+      entry.response.kind = kind;
+    }
   }
 
   /// The signature kept with a conversation's deletion.
@@ -2688,7 +2695,7 @@ impl ServerApi for FakeServerApi {
     })
   }
 
-  async fn delete_space(&self, space: SpaceId, request: &DeleteSpaceRequest) -> Result<(), ApiError> {
+  async fn delete_space(&self, space: SpaceId) -> Result<(), ApiError> {
     self.with(|state, me| {
       let is_space_admin = state.space_roles.get(&(space, me)) == Some(&SpaceRole::SpaceAdmin);
       if !is_space_admin && !state.admins.contains(&me) {
@@ -2704,30 +2711,6 @@ impl ServerApi for FakeServerApi {
         .filter(|(_, entry)| entry.response.maybe_space_id == Some(space))
         .map(|(id, entry)| (*id, entry.members.keys().copied().collect()))
         .collect();
-      let mut signatures = HashMap::new();
-      for signed in &request.signed_deletions {
-        let document = fake_deletion_document(signed)?;
-        let channel = document.conversation_id;
-        let Some(entry) = state
-          .conversations
-          .get(&channel)
-          .filter(|entry| entry.response.maybe_space_id == Some(space))
-        else {
-          return Err(ApiError::status(
-            400,
-            ErrorCode::InvalidRequest,
-            "a signed deletion is for a channel of another space",
-          ));
-        };
-        if document.epoch != entry.epoch {
-          return Err(ApiError::status(
-            409,
-            ErrorCode::EpochConflict,
-            format!("the group is in epoch {}", entry.epoch),
-          ));
-        }
-        signatures.insert(channel, signed.clone());
-      }
       let mut told: Vec<UserId> = state
         .space_roles
         .keys()
@@ -2736,8 +2719,7 @@ impl ServerApi for FakeServerApi {
         .collect();
       for (channel, members) in channels {
         told.extend(members.iter().copied());
-        let maybe_signed = signatures.remove(&channel);
-        state.delete_channel(channel, members, maybe_signed);
+        state.delete_channel(channel, members, None);
       }
       if state.spaces.remove(&space).is_none() {
         return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
@@ -2746,23 +2728,6 @@ impl ServerApi for FakeServerApi {
       state.space_roles.retain(|(of, _), _| *of != space);
       state.publish(told, &GatewayEvent::SpaceUpdate { space_id: space });
       Ok(())
-    })
-  }
-
-  async fn space_channel_epochs(&self, space: SpaceId) -> Result<ListSpaceChannelEpochsResponse, ApiError> {
-    self.with(|state, me| {
-      let sees_all = state.admins.contains(&me);
-      let channels = state
-        .conversations
-        .iter()
-        .filter(|(_, entry)| entry.response.maybe_space_id == Some(space))
-        .filter(|(_, entry)| sees_all || entry.members.contains_key(&me))
-        .map(|(id, entry)| ConversationEpoch {
-          conversation_id: *id,
-          epoch: entry.epoch,
-        })
-        .collect();
-      Ok(ListSpaceChannelEpochsResponse { channels })
     })
   }
 

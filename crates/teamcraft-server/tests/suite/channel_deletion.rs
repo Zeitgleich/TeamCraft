@@ -117,70 +117,29 @@ mod signed_deletions {
     );
   }
 
-  /// A space's deletion takes one signature per channel, for its group's current epoch, and goes with
-  /// the rest unsigned. The epochs to sign for can be read by those who may delete it.
+  /// A space's deletion is never signed: what its channels are is the server's word, so a signature
+  /// for them could be had for anything. Its channels stay claims.
   #[tokio::test]
-  async fn a_space_names_what_to_sign_again_and_keeps_each_channels_signature() {
+  async fn a_space_keeps_no_signature() {
     let app = app!();
     let (server_owner, ann) = (owner(), member("ann"));
     let ann_id = user_id(&app, &ann).await;
     let space = create_space(&app, &server_owner, "Project A", "invite_only").await;
     add_space_member(&app, &server_owner, &space, &ann_id, "member").await;
-    let signed = create_channel(&app, &ann, &space, "signed", "private").await;
-    let unsigned = create_channel(&app, &ann, &space, "unsigned", "private").await;
-    let elsewhere = channel_of(&app, &ann, &[], "private").await;
-    let path = format!("/spaces/{space}");
-
-    let other_space = app
-      .delete_json(
-        &server_owner,
-        &path,
-        &json!({"signed_deletions": [signed_deletion(&elsewhere, 0)]}),
-      )
-      .await;
-    assert_eq!(
-      other_space.status,
-      StatusCode::BAD_REQUEST,
-      "{}",
-      other_space.body
-    );
-
-    let old = app
-      .delete_json(
-        &server_owner,
-        &path,
-        &json!({"signed_deletions": [signed_deletion(&signed, 5)]}),
-      )
-      .await;
-    assert_eq!(old.status, StatusCode::CONFLICT, "{}", old.body);
-    assert_eq!(old.body["error_code"], json!("epoch_conflict"));
-    let epochs = app.get(&server_owner, &format!("{path}/channel-epochs")).await;
-    assert_eq!(epochs.status, StatusCode::OK, "{}", epochs.body);
-    assert!(
-      epochs.body["channels"]
-        .as_array()
-        .unwrap()
-        .contains(&json!({"conversation_id": signed, "epoch": 0}))
-    );
-    let not_for_members = app.get(&ann, &format!("{path}/channel-epochs")).await;
-    assert_eq!(not_for_members.status, StatusCode::FORBIDDEN);
+    let channel = create_channel(&app, &ann, &space, "general", "private").await;
 
     let done = app
       .delete_json(
         &server_owner,
-        &path,
-        &json!({"signed_deletions": [signed_deletion(&signed, 0)]}),
+        &format!("/spaces/{space}"),
+        &json!({"signed_deletions": [signed_deletion(&channel, 0)]}),
       )
       .await;
     assert_eq!(done.status, StatusCode::NO_CONTENT, "{}", done.body);
+
     let listed = app.get(&ann, "/conversations").await;
-    assert_eq!(listed.body["signed_deletions"].as_array().unwrap().len(), 1);
-    assert_eq!(
-      listed.body["signed_deletions"][0]["conversation_id"],
-      json!(signed)
-    );
-    let ids = listed.body["deleted_conversation_ids"].as_array().unwrap();
-    assert!(ids.contains(&json!(unsigned)), "{ids:?}");
+    assert_eq!(listed.body["deleted_conversation_ids"], json!([channel]));
+    assert!(listed.body.get("signed_deletions").is_none(), "{}", listed.body);
   }
 
   /// Signature and log go with the last tombstone, and nothing reads them after.

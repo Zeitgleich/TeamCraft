@@ -247,7 +247,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     for channel in &channels {
       self.note_own_deletion(*channel)?;
     }
-    if let Err(error) = self.request_space_deletion(space, &channels).await
+    if let Err(error) = self.api.delete_space(space).await
       && error.error_code() != Some(&ErrorCode::SpaceNotFound)
     {
       for channel in &channels {

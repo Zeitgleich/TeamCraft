@@ -3,8 +3,6 @@
 //! the same moment see each other. Deleting only marks the row, removes the memberships and records the
 //! deletion for the members' devices, in one transaction; background work then clears storage and rows in batches, because a big channel would outlast the request.
 
-use std::collections::HashMap;
-
 use sqlx::{Postgres, Transaction};
 use teamcraft_proto::{ChannelRole, ConversationId, SpaceId, UserId};
 
@@ -65,9 +63,6 @@ pub struct RemovalDone {
 /// A channel of a space being deleted.
 #[derive(Debug, Clone)]
 pub struct SpaceChannelFacts {
-  pub id: ConversationId,
-  /// The MLS group's epoch, held still by the lock.
-  pub epoch: u64,
   pub is_private: bool,
   pub maybe_importer: Option<UserId>,
   pub members: Vec<UserId>,
@@ -169,10 +164,12 @@ impl Database {
     decide: impl FnOnce(&ChannelFacts, u64) -> Result<(), E>,
   ) -> Result<Option<Vec<UserId>>, E> {
     let mut tx = self.pool().begin().await.map_err(DbError::from)?;
+    // The epoch first, in the order of a commit: it holds this row and then needs a share lock on the
+    // conversation for its foreign keys, so the other order could deadlock.
+    let epoch = lock_epoch(&mut tx, conversation).await?;
     let Some(facts) = lock_facts(&mut tx, conversation, true).await? else {
       return Ok(None);
     };
-    let epoch = lock_epoch(&mut tx, conversation).await?;
     decide(&facts, epoch)?;
     let members: Vec<UserId> = facts.members.iter().map(|(member, _)| *member).collect();
     mark_deleted(&mut tx, conversation, &members, maybe_signature).await?;
@@ -181,13 +178,12 @@ impl Database {
     Ok(Some(members))
   }
 
-  /// Marks a space and all of its conversations deleted if `decide` allows it, with one audit row and
-  /// the signatures they came with. `None` when it is gone.
+  /// Marks a space and all of its conversations deleted if `decide` allows it, with one audit row.
+  /// `None` when it is gone.
   pub async fn delete_space_locked<E: From<DbError>>(
     &self,
     space: SpaceId,
     audit: &NewAuditEntry<'_>,
-    signatures: &HashMap<ConversationId, DeletionSignature>,
     decide: impl FnOnce(&[SpaceChannelFacts]) -> Result<(), E>,
   ) -> Result<Option<SpaceDeletion>, E> {
     let mut tx = self.pool().begin().await.map_err(DbError::from)?;
@@ -213,19 +209,16 @@ impl Database {
     let mut facts = Vec::with_capacity(rows.len());
     for row in rows {
       let members = member_ids(&mut tx, row.id).await?;
-      let id: ConversationId = from_db(row.id)?;
       facts.push(SpaceChannelFacts {
-        id,
-        epoch: lock_epoch(&mut tx, id).await?,
         is_private: row.visibility == "private",
         maybe_importer: from_db_opt(row.importer_user_id)?,
         members: members.clone(),
       });
-      deletion.channels.push((id, members));
+      deletion.channels.push((from_db(row.id)?, members));
     }
     decide(&facts)?;
     for (channel, members) in &deletion.channels {
-      mark_deleted(&mut tx, *channel, members, signatures.get(channel)).await?;
+      mark_deleted(&mut tx, *channel, members, None).await?;
     }
     let space_members = sqlx::query_scalar!(
       "DELETE FROM space_members WHERE space_id = $1 RETURNING user_id",
@@ -277,36 +270,6 @@ impl Database {
           },
         ))
       })
-      .collect()
-  }
-
-  /// The channels of a space that `viewer` sees (all of them with `sees_all`), with their groups'
-  /// epochs (0 before a group's first commit), at most `limit`.
-  pub async fn space_channel_epochs(
-    &self,
-    space: SpaceId,
-    viewer: UserId,
-    sees_all: bool,
-    limit: i64,
-  ) -> Result<Vec<(ConversationId, u64)>, DbError> {
-    let rows = sqlx::query!(
-      r#"SELECT c.id, COALESCE(h.epoch, 0) AS "epoch!"
-         FROM conversations c
-         LEFT JOIN mls_epoch_heads h ON h.conversation_id = c.id
-         LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $2
-         WHERE c.space_id = $1 AND c.deleted_at IS NULL
-           AND ($3 OR c.visibility <> 'private' OR m.user_id IS NOT NULL)
-         ORDER BY c.id LIMIT $4"#,
-      to_db(space),
-      to_db(viewer),
-      sees_all,
-      limit,
-    )
-    .fetch_all(self.pool())
-    .await?;
-    rows
-      .into_iter()
-      .map(|row| Ok((from_db(row.id)?, u64::try_from(row.epoch).unwrap_or(u64::MAX))))
       .collect()
   }
 

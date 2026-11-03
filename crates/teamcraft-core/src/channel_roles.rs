@@ -67,6 +67,11 @@ pub struct ChannelRoleState {
   /// A member's head newer than ours, to check after the next sync.
   #[serde(rename = "ahead", default, skip_serializing_if = "Option::is_none")]
   pub maybe_ahead: Option<ChannelRolesHead>,
+  /// Whether the accepted snapshot goes back to a workspace admin's entry, not only to a founder's
+  /// claim, which is trust on first use: a member and the server together can make one up. Only a
+  /// decision that destroys history asks this (e2ee.md §4.6, "A signed deletion purges at once").
+  #[serde(default)]
+  pub is_workspace_anchored: bool,
 }
 
 /// The accepted head of a channel's role log; sent along inside the channel's encrypted messages.
@@ -323,9 +328,17 @@ impl ChannelRoleState {
     // The first authority the signature holds under and the document passes with decides; a
     // workspace admin founding a channel signs as its founder, for example.
     let mut outcome = Err(ChannelRoleError::Unauthorized { version });
-    for (signer, authority) in self.verify_signer(entry, &document, verifier) {
+    let mut maybe_authority = None;
+    let signers = self.verify_signer(entry, &document, verifier);
+    // A workspace admin founding a channel passes as its founder (nobody changes their own role
+    // otherwise), and it is a workspace admin's word all the same.
+    let is_by_workspace_admin = signers
+      .iter()
+      .any(|(_, authority)| matches!(authority, SignerAuthority::Workspace { .. }));
+    for (signer, authority) in signers {
       outcome = self.check_document(&document, verifier.conversation, signer, authority);
       if outcome.is_ok() {
+        maybe_authority = Some(authority);
         break;
       }
     }
@@ -343,6 +356,12 @@ impl ChannelRoleState {
     self.version = version;
     self.maybe_head_hash = Some(Base64Bytes::new(hash.to_vec()));
     self.assignments = document.assignments;
+    if is_by_workspace_admin {
+      self.is_workspace_anchored = true;
+    } else if maybe_authority == Some(SignerAuthority::Founder) {
+      self.is_workspace_anchored = false;
+    }
+    // A channel admin carries on what the snapshot they build on was.
     Ok(())
   }
 
@@ -665,6 +684,31 @@ mod tests {
       let founding = admin.entry(&state, &[(&admin, ChannelRole::Admin)]);
       assert!(world.apply(&mut state, founding).is_empty());
       assert_eq!(state.role_of(admin.user_id), ChannelRole::Admin);
+      assert!(state.is_workspace_anchored, "a roster admin's word, not a claim");
+    }
+
+    #[test]
+    fn a_founders_claim_is_anchored_only_by_a_workspace_admins_entry_and_stays_so() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(&world, &alice, &[]);
+      assert!(!state.is_workspace_anchored);
+      let promote = alice.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, promote).is_empty());
+      assert!(!state.is_workspace_anchored, "a founded admin adds no trust");
+
+      let checkpoint = admin.entry(&state, &[(&bob, ChannelRole::Admin)]);
+      assert!(world.apply(&mut state, checkpoint).is_empty());
+      assert!(state.is_workspace_anchored);
+      let next = bob.entry(
+        &state,
+        &[(&bob, ChannelRole::Admin), (&alice, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, next).is_empty());
+      assert!(state.is_workspace_anchored, "a channel admin carries it on");
     }
   }
 

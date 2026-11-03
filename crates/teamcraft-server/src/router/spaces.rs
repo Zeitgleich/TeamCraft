@@ -17,7 +17,6 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
       handlers::update_space_handler,
       handlers::delete_space_handler
     ))
-    .routes(routes!(handlers::list_space_channel_epochs_handler))
     .routes(routes!(
       handlers::list_categories_handler,
       handlers::create_category_handler

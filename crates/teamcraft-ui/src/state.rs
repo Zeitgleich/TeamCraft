@@ -1288,7 +1288,7 @@ impl AppState {
     self.dismiss_toast(toast);
   }
 
-  /// The server claimed many conversations deleted at once (e2ee.md §4.6): told once. Their messages
+  /// Many conversations went at once (e2ee.md §4.6): told once. Those without a signature that held
   /// stay on this device for now.
   pub fn tell_suspect_deletions(&self, i18n: crate::i18n::I18n) {
     let count = self.read(|backend| backend.suspect_deletions());

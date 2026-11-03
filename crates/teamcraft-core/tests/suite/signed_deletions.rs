@@ -13,7 +13,8 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::store::{LocalStore, MessageFilter, Table};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::{
-  ChannelDeletionDocument, ChannelRole, ConversationId, DeleteConversationRequest, GatewayEvent, SpaceRole,
+  ChannelDeletionDocument, ChannelRole, ConversationId, ConversationKind, DeleteConversationRequest,
+  GatewayEvent,
 };
 
 mod real_deletions {
@@ -129,6 +130,40 @@ mod real_deletions {
     assert_purged(&bob, channel);
   }
 
+  /// Real signatures on several channels at once are worth telling, whoever signed them.
+  #[tokio::test]
+  async fn a_mass_purge_raises_the_notice() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob) = two(&server).await;
+    let first = channel_with_history(&mut alice, &mut bob).await;
+    let second = founder_rooted_channel(&mut alice, &mut bob).await;
+    bob.client.sync_channel_roles(second).await.unwrap();
+
+    alice.client.delete_channel(first).await.unwrap();
+    alice.client.delete_channel(second).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    assert_purged(&bob, first);
+    assert_purged(&bob, second);
+    assert!(suspect_notice(&bob));
+  }
+
+  /// A member's device doesn't sign for an epoch far from its own group's: the signature would hold
+  /// until the group got there. The deletion goes, unsigned.
+  #[tokio::test]
+  async fn a_member_signs_no_epoch_far_from_its_own() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob) = two(&server).await;
+    let channel = channel_with_history(&mut alice, &mut bob).await;
+    server.bump_epoch(channel, 1_000);
+
+    alice.client.delete_channel(channel).await.unwrap();
+
+    assert!(server.deletion_signature(channel).is_none());
+    bob.client.full_sync().await.unwrap();
+    assert_hidden_with_history(&bob, channel);
+  }
+
   /// A commit landed between what the admin's device knew and the request.
   #[tokio::test]
   async fn an_epoch_conflict_is_signed_again() {
@@ -150,6 +185,118 @@ mod real_deletions {
 
 mod false_claims {
   use super::*;
+
+  /// The attack: a channel from before signed roles, a member, and the server. Mallory's founding
+  /// entry is accepted, for roles; her signature on the deletion costs Bob nothing at once.
+  #[tokio::test]
+  async fn a_forged_founding_entry_purges_nothing() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob) = two(&server).await;
+    let mut mallory = Peer::enroll(&server, "Mallory").await;
+    server.set_role_log_lacking(true);
+    let channel = founder_rooted_channel(&mut alice, &mut bob).await;
+    add(&mut alice, &mut bob, &mut mallory, channel).await;
+    server.set_role_log_lacking(false);
+    let mallory_id = mallory.client.user_id();
+    // The server plays along.
+    server.set_channel_role_unsigned(channel, mallory_id, ChannelRole::Admin);
+
+    mallory
+      .client
+      .sign_channel_roles(channel, &[(mallory_id, ChannelRole::Admin)], true)
+      .await
+      .unwrap();
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    assert_eq!(
+      bob.client.verified_channel_role(channel, mallory_id).unwrap(),
+      ChannelRole::Admin
+    );
+    let epoch = epoch_of(&mut bob, channel);
+    let forged = mallory.client.sign_channel_deletion(channel, epoch).unwrap();
+    server.claim_signed_deletion(channel, forged);
+    server.hide_from(bob.client.user_id(), channel);
+    bob.client.full_sync().await.unwrap();
+
+    assert_hidden_with_history(&bob, channel);
+  }
+
+  /// The price of the above: a real admin of a channel nothing but a founder vouches for.
+  #[tokio::test]
+  async fn a_founded_admins_real_deletion_takes_the_retention() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob) = two(&server).await;
+    let channel = founder_rooted_channel(&mut alice, &mut bob).await;
+
+    alice.client.delete_channel(channel).await.unwrap();
+    assert!(
+      server.deletion_signature(channel).is_some(),
+      "signed all the same"
+    );
+    bob.client.full_sync().await.unwrap();
+
+    assert_hidden_with_history(&bob, channel);
+  }
+
+  /// The server calls a direct message a channel, after this device knew better.
+  #[tokio::test]
+  async fn a_relabelled_direct_message_purges_nothing() {
+    let server = FakeServer::new();
+    let (mut owner, mut bob) = two(&server).await;
+    let mut admin = Peer::enroll(&server, "Admin").await;
+    make_workspace_admin(&server, &mut owner, &mut admin).await;
+    bob.client.full_sync().await.unwrap();
+    let owner_id = owner.client.user_id();
+    let direct = bob.client.open_dm(owner_id).await.unwrap();
+    bob.client.send_text(direct, None, "just us").await.unwrap();
+    settle(&mut [&mut bob, &mut owner]).await;
+    bob.client.full_sync().await.unwrap();
+
+    server.relabel_conversation(direct, ConversationKind::Channel);
+    bob.client.full_sync().await.unwrap();
+    let epoch = epoch_of(&mut bob, direct);
+    let signed = admin.client.sign_channel_deletion(direct, epoch).unwrap();
+    server.claim_signed_deletion(direct, signed);
+    server.hide_from(bob.client.user_id(), direct);
+    bob.client.full_sync().await.unwrap();
+
+    assert_hidden_with_history(&bob, direct);
+  }
+
+  /// A device its user removed still has a good certificate; the user's signed list decides.
+  #[tokio::test]
+  async fn a_device_its_owner_removed_purges_nothing() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob) = two(&server).await;
+    let channel = channel_with_history(&mut alice, &mut bob).await;
+    let phone = common::link_device(&mut alice).await;
+    let epoch = epoch_of(&mut bob, channel);
+    let signed = phone.sign_channel_deletion(channel, epoch).unwrap();
+    alice.client.revoke_device(phone.device_id()).await.unwrap();
+
+    server.claim_signed_deletion(channel, signed);
+    server.hide_from(bob.client.user_id(), channel);
+    bob.client.full_sync().await.unwrap();
+
+    assert_hidden_with_history(&bob, channel);
+  }
+
+  /// A mark a purge cut off doesn't outlive the server listing the conversation again.
+  #[tokio::test]
+  async fn being_listed_again_lifts_the_mark_of_a_purge_cut_off() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob) = two(&server).await;
+    let channel = channel_with_history(&mut alice, &mut bob).await;
+    bob
+      .store
+      .put(Table::AppliedChanges, &format!("own_deletion/{channel}"), b"1")
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    server.hide_from(bob.client.user_id(), channel);
+    bob.client.full_sync().await.unwrap();
+
+    assert_hidden_with_history(&bob, channel);
+  }
 
   /// On the gateway too: a forged signature on the event hides, and nothing more.
   #[tokio::test]
@@ -358,40 +505,21 @@ async fn a_verified_purge_that_was_cut_off_is_finished() {
 mod deleting_a_space {
   use super::*;
 
-  /// A workspace admin signs each channel; the server's first answer names the epochs of those their
-  /// device isn't in.
+  /// `maybe_space_id` is the server's word, so a signature for "the channels of this space" could be
+  /// had for any conversation: nothing is signed, also by a workspace admin.
   #[tokio::test]
-  async fn a_workspace_admin_signs_every_channel_their_device_knows() {
+  async fn it_is_never_signed_so_the_history_stays_for_the_retention() {
     let server = FakeServer::new();
     let (mut owner, mut bob) = two(&server).await;
     let channel = channel_with_history(&mut owner, &mut bob).await;
     let space = owner.space().await;
     server.set_admin(owner.client.user_id());
+
     owner.client.delete_space(space).await.unwrap();
 
-    assert!(server.deletion_signature(channel).is_some());
-    bob.client.full_sync().await.unwrap();
-    assert_purged(&bob, channel);
-  }
-
-  /// A space admin whose role isn't a signed fact: the deletion goes, unsigned, so the history stays.
-  #[tokio::test]
-  async fn a_space_admin_without_a_signed_authority_leaves_a_claim() {
-    let server = FakeServer::new();
-    let (mut alice, mut bob) = two(&server).await;
-    let channel = channel_with_history(&mut alice, &mut bob).await;
-    let space = alice.space().await;
-    alice
-      .client
-      .set_space_role(space, bob.client.user_id(), SpaceRole::SpaceAdmin)
-      .await
-      .unwrap();
-
-    bob.client.delete_space(space).await.unwrap();
     assert!(server.deletion_signature(channel).is_none());
-    alice.client.full_sync().await.unwrap();
-
-    assert_hidden_with_history(&alice, channel);
+    bob.client.full_sync().await.unwrap();
+    assert_hidden_with_history(&bob, channel);
   }
 }
 
@@ -402,9 +530,23 @@ async fn two(server: &FakeServer) -> (Peer, Peer) {
   )
 }
 
-/// Alice's channel with Bob in it and a message both hold; her founding entry signs her admin, and
-/// Bob verified it.
+/// Alice's channel with Bob in it and a message both hold. She is the workspace's owner, so her
+/// founding entry counts as a workspace admin's and the roles are anchored; Bob verified them.
 async fn channel_with_history(alice: &mut Peer, bob: &mut Peer) -> ConversationId {
+  let alice_id = alice.client.user_id();
+  alice
+    .client
+    .publish_roster(&[(alice_id, RosterRole::Owner)])
+    .await
+    .unwrap();
+  bob.client.full_sync().await.unwrap();
+  let channel = founder_rooted_channel(alice, bob).await;
+  bob.client.sync_channel_roles(channel).await.unwrap();
+  channel
+}
+
+/// [`channel_with_history`] without any roster: the roles go back to Alice's claim alone.
+async fn founder_rooted_channel(alice: &mut Peer, bob: &mut Peer) -> ConversationId {
   let space = alice.space().await;
   let channel = alice.client.create_channel(space, "general").await.unwrap();
   alice
@@ -412,10 +554,10 @@ async fn channel_with_history(alice: &mut Peer, bob: &mut Peer) -> ConversationI
     .add_member(channel, bob.client.user_id())
     .await
     .unwrap();
-  settle(&mut [alice, bob]).await;
+  settle(&mut [&mut *alice, &mut *bob]).await;
   bob.client.sync_channel_roles(channel).await.unwrap();
   alice.client.send_text(channel, None, "hello").await.unwrap();
-  settle(&mut [alice, bob]).await;
+  settle(&mut [&mut *alice, &mut *bob]).await;
   channel
 }
 

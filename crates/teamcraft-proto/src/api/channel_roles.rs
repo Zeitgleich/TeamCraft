@@ -17,10 +17,6 @@ use crate::{Base64Bytes, ChannelRole, ConversationId, DeviceId, UnixMillis, User
 /// Privileged roles one snapshot may hold; members are implicit and never listed.
 pub const MAX_CHANNEL_ROLE_ASSIGNMENTS: usize = 500;
 
-/// Signed deletions one request to delete a space may carry; well inside the request size limit. The
-/// channels past it are deleted too, as the server's word on the members' devices.
-pub const MAX_SIGNED_DELETIONS: usize = 2_000;
-
 /// The document a channel role log entry signs (JSON, the entry's payload).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ChannelRolesDocument {
@@ -79,33 +75,11 @@ pub struct DeleteConversationRequest {
   pub maybe_signed_deletion: Option<SignedChannelDeletion>,
 }
 
-/// The optional body of `DELETE /api/v1/spaces/{id}`: a signed deletion for each channel of the
-/// space the caller could sign one for.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct DeleteSpaceRequest {
-  #[serde(default, skip_serializing_if = "Vec::is_empty")]
-  pub signed_deletions: Vec<SignedChannelDeletion>,
-}
-
 /// A deleted conversation's signed deletion, for a device that was away.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct DeletedConversationSignature {
   pub conversation_id: ConversationId,
   pub signed_deletion: SignedChannelDeletion,
-}
-
-/// A group's current epoch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct ConversationEpoch {
-  pub conversation_id: ConversationId,
-  pub epoch: u64,
-}
-
-/// `GET /api/v1/spaces/{id}/channel-epochs`: what somebody deleting the space signs for, without
-/// being in every group: its channels the caller may see, at most [`MAX_SIGNED_DELETIONS`].
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct ListSpaceChannelEpochsResponse {
-  pub channels: Vec<ConversationEpoch>,
 }
 
 /// `POST /api/v1/conversations/{id}/role-log`: appends an entry signed by the caller's device.
@@ -195,7 +169,7 @@ mod signed_deletion_tests {
   use crate::{Id, Snowflake};
 
   #[test]
-  fn the_document_and_requests_keep_their_wire_format() {
+  fn the_document_and_request_keep_their_wire_format() {
     let document = ChannelDeletionDocument {
       conversation_id: conversation(7),
       epoch: 12,
@@ -212,25 +186,14 @@ mod signed_deletion_tests {
       serde_json::to_string(&request).unwrap(),
       r#"{"signed_deletion":{"payload":"AQ==","signature":"Ag=="}}"#
     );
-    let space = DeleteSpaceRequest {
-      signed_deletions: vec![signed()],
-    };
-    assert_eq!(
-      serde_json::to_string(&space).unwrap(),
-      r#"{"signed_deletions":[{"payload":"AQ==","signature":"Ag=="}]}"#
-    );
   }
 
   /// An unsigned deletion is what clients before signed deletions send, and all an admin without a
-  /// signed authority has: both requests stay empty on the wire and read from nothing.
+  /// signed authority has: the request stays empty on the wire and reads from nothing.
   #[test]
   fn an_unsigned_deletion_is_an_empty_body() {
     assert_eq!(
       serde_json::to_string(&DeleteConversationRequest::default()).unwrap(),
-      "{}"
-    );
-    assert_eq!(
-      serde_json::to_string(&DeleteSpaceRequest::default()).unwrap(),
       "{}"
     );
     let parsed: DeleteConversationRequest = serde_json::from_str("{}").unwrap();

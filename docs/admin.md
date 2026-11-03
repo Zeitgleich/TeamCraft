@@ -383,10 +383,10 @@ sign it yet (a follow-up of issue #380), so until then the new owner's role show
 
 #### 3.1.1 Leaving and deleting channels and spaces (issue #1130)
 
-Whoever holds a signed authority (channel admin of the signed roles, workspace admin or owner of the
-roster) signs a deletion, and members' devices that verify it drop the history at once. Any other
-deletion, a space admin's for example, is the server's word there: hidden, its history kept for a
-retention (e2ee.md §4.6).
+A workspace admin or owner of the roster, or a channel admin whose signed roles go back to one, signs a
+channel's deletion, and members' devices that verify it drop the history at once. Any other deletion,
+every space's deletion among them, is the server's word there: hidden, its history kept for a retention
+(e2ee.md §4.6).
 
 | Case                                              | Who                                                                                                             | What happens                                                                                                                         |
 |---------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|

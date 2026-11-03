@@ -911,31 +911,56 @@ The last member's leave deletes a private channel that wasn't imported, and only
 can't delete anything. Public and imported channels stay without members: anyone could join a public one
 and leave to delete it, and imported history can't come back.
 
-**A signed deletion purges at once** (issue #1135). An admin's device signs the deletion, and each member's
-device verifies it against what the device itself verified: `ChannelDeletionDocument` (the channel, the
-group's epoch, the signing time), signed by a device key under its own log kind
+**A signed deletion purges at once** (issue #1135). An admin's device signs the deletion of one channel,
+and each member's device verifies it against what the device itself verified: `ChannelDeletionDocument`
+(the channel, the group's epoch, the signing time), signed by a device key under its own log kind
 (`WorkspaceLog::ChannelDeletion`), so it can't be moved to another channel or pass for a role entry. It
-travels in the body of `DELETE /conversations/{id}` (one per channel with `DELETE /spaces/{id}`), the
-server keeps it with the deletion and hands it out with the gateway's `conversation_delete` and a sync's
-`signed_deletions`. It doesn't go through the group's queue with `post_admin_change`, as the follow-up
-first thought: the queue goes with the channel, and a device that was away no longer has a membership to
-read it with. A device purges at once only if all of this holds:
+travels in the body of `DELETE /conversations/{id}`, the server keeps it with the deletion and hands it out
+with the gateway's `conversation_delete` and a sync's `signed_deletions`. It doesn't go through the group's
+queue with `post_admin_change`, as the follow-up first thought: the queue goes with the channel, and a
+device that was away no longer has a membership to read it. A device purges at once only if all of this
+holds:
 
-- **The signer may.** Either an owner or admin of the verified workspace roster, fresh at this device's
-  time and at the signing time (the later one counts, so a wrong clock can only refuse), or an `admin` of
-  the signed snapshot this device accepted last (§4.6.1), verified against the key that snapshot names,
-  who is in this device's group. Moderators, members, space admins and custom schemes aren't signed facts
-  and sign nothing that counts; nor does a founder's claim: a channel nothing was signed for has no admin
-  yet, and an admin who could only found it there and then signs nothing.
+- **The signer may.** One of:
+  - an owner or admin of the verified workspace roster. The newest roster must carry a signing time and be
+    fresh (`workspace_max_age`) at this device's time and at the signing time; the later one counts, so a
+    wrong clock can only refuse. Such a person needs no place in the group.
+  - an `admin` of the signed snapshot this device accepted last (§4.6.1), verified against the key that
+    snapshot names, who is in this device's group, **if that snapshot goes back to a workspace admin's
+    entry** (`is_workspace_anchored`): one of theirs was accepted since the last founding, and channel
+    admins building on it carry it on. Moderators, members, space admins and custom schemes aren't signed
+    facts and sign nothing that counts.
+
+  *Awaiting the owner's confirmation.* A snapshot that goes back only to a founder's claim doesn't count.
+  That claim is trust on first use (§4.6.1): a member and the server together can make one up for a channel
+  from before signed roles, or for a device with no role state, which would otherwise purge every member at
+  once. The cost: every channel created by somebody who isn't a workspace admin is founder-rooted, so its
+  channel admin's real deletion takes the retention on the members' devices, until a workspace admin signs a
+  role entry in that channel. Their device still signs, in case a verifying device has that entry by then.
+- **The device is its user's.** The signing device must be on the signer's signed device list, read then
+  from the server (the newer of it and the stored one), failing closed: no list, or none readable, refuses.
+  A certificate alone has no expiry and outlives a device's removal. A removal the server withholds from this
+  device isn't seen, as anywhere else lists are used.
 - **It is for this channel.** The document names the channel, and this device knows the conversation as a
-  channel: no signature purges a direct message or the notes to self, which have no signed roles.
-- **It isn't old.** The server takes a signed deletion only for the group's current epoch, under the lock
-  a commit needs too (`409 epoch_conflict`; the client signs again, at most three times; an admin outside
-  the group learns the epoch from that answer, as in `post_admin_change`, or for a space's channels from
-  `GET /spaces/{id}/channel-epochs`, which only who may delete the space can read). A
-  device whose group is at a later epoch refuses it: a signature held back and replayed after the group
-  moved on, also one for a deletion the server refused then. A device without the group can't tell, and
-  judges nothing.
+  channel. `kind` is the server's word and can change, so a device pins a conversation as direct the first
+  time it sees it as anything but a channel, like the notes to self: no signature purges a direct message, a
+  meeting chat or the notes, once it has seen them so. A device told "channel" from the very first look has
+  nothing to compare with (residual, below).
+- **It isn't old.**
+  - The server takes a signed deletion only for the group's current epoch, under the lock a commit needs too
+    (`409 epoch_conflict`; the client signs again, at most three times). A device whose group is at a later
+    epoch refuses it: a signature held back and replayed after the group moved on, also one for a deletion the
+    server refused then. A device without the group can't tell, and judges nothing.
+  - The signature is good for `signed_deletion_max_age` (client, 14 days) from `signed_at_ms`, and may be dated
+    up to `signed_deletion_clock_skew` (client, an hour) ahead of this device's clock. Past that a real deletion
+    takes the retention: a device away for longer loses only the speed, and the limit is what ends the use of a
+    signature the server held on to.
+  - A member told an epoch by the server signs only for one from its own group's epoch to
+    `MAX_CHANGE_AGE_EPOCHS` (32) ahead. Otherwise it sends the deletion unsigned. An admin outside the group has
+    nothing to compare with and takes what it is told, as in `post_admin_change`, so for them only the age
+    limit bounds it.
+- **Nothing looks wrong.** A channel's role state or the workspace state with an alarm or a member's unexplained
+  head (a sign of being shown different logs) purges nothing.
 - **The server doesn't list it.** A claim about what the server still lists changes nothing, signed or not.
 
 A device reads the channel's role log first, since the signer's role may be newer than its copy. The
@@ -944,31 +969,37 @@ tombstones go (`deleted_conversations_kept_days`), so a device that slept throug
 too. If the read fails, the device judges on what it has, which can only refuse. A device whose copy is too
 old for that, or that verifies nothing for another reason, treats the deletion as a claim (below): a real
 deletion takes the retention, a false claim purges nothing. Verifying is idempotent: the mark that lets the
-purge finish after a crash is the same as for the user's own deletion, and a replay finds nothing left,
-without asking the server anything.
+purge finish after a crash is the same as for the user's own deletion, the server listing the conversation
+again lifts it, and a replay finds nothing left, without asking the server anything. Verified purges count
+towards the mass notice below, since a real signature on many channels is worth telling too.
 
-When there is no signature: the client signs only with an authority every member can check, and only
-channels it knows in that space (the server could otherwise name any channel of the workspace, or a direct
-message, to a workspace admin signing a space's deletion). So these stay claims: a space admin's deletion,
-one under a custom permission scheme, the last member's leave with `delete_if_last`, a channel without
-signed roles deleted by its channel admin, the channels past `MAX_SIGNED_DELETIONS` or unknown to the signer
-in a space, a direct message deleted with an account, and a deletion from a client or against a server from
-before signed deletions. Within 1.x neither side needs the other: a client before this version sends no body
-and gets the old deletion from a new server; a new client's body is ignored by an old server (and
-`signed_deletions` doesn't come), so the members' devices keep the history for the retention; an old client
-ignores the new field of the event and the new list, and treats a signed deletion as a claim. Requiring a
-signature can't come before those deleters can sign (a follow-up of #380), so unsigned claims still hide a
-conversation.
+When there is no signature: **a space's deletion is never signed.** Which channels are in a space is
+`maybe_space_id`, the server's word, so a server could relabel any conversation into the space being deleted
+and collect a workspace admin's signature for all of them. So its channels stay claims, however the admin
+signs in. Other deletions that stay claims: a space admin's, one under a custom permission scheme, the last
+member's leave with `delete_if_last`, a channel without signed roles deleted by its channel admin, a direct
+message deleted with an account, and a deletion from a client or against a server from before signed
+deletions. Within 1.x neither side needs the other: a client before this version sends no body and gets the
+old deletion from a new server; a new client's body is ignored by an old server (and `signed_deletions` doesn't
+come), so the members' devices keep the history for the retention; an old client ignores the new field of the
+event and the new list, and treats a signed deletion as a claim. Requiring a signature can't come before those
+deleters can sign (a follow-up of #380), so unsigned claims still hide a conversation.
 
-Residual risks. A channel whose founding entry was forged (§4.6.1: a hostile server together with a member,
-in a channel from before signed roles) has a signed admin who can delete it. A demotion the server withholds
-counts only once the demoted admin is out of the group, or through the heads members exchange. An admin who
-asked for a deletion has given the server a signature it may use while the group stays at that epoch, also
-after answering with a refusal, and the epoch it tells a signer is the server's word, so a hostile server
-can name a higher one to make the signature last until the group gets there. This takes a real admin's real
-request for that very channel. A server can also trick a workspace admin into signing a channel it says is in
-the space being deleted, if the admin's device believes it. The server can withhold a signature at any time,
-which only makes a real deletion take the retention.
+Residual risks:
+
+- A workspace admin whose demotion the server withholds still counts until the roster they know gets too old
+  (`workspace_max_age`, 30 days), without being in the group, wherever the demotion is held back. Heads members
+  exchange raise the alarm that refuses a purge, if somebody has seen it. A demoted channel admin needs the same
+  withholding and to be still in the group.
+- A workspace admin's routine role entry anchors the whole snapshot it re-signs, so a founder's forged admin it
+  carries along counts from then on.
+- An admin who asked for a deletion has given the server a signature it may use while the group stays at that
+  epoch and within the age limit, also after answering with a refusal. An admin outside the group can be told a
+  high epoch, which leaves only the age limit. Both take a real admin's real request for that very channel,
+  which their device believed to be a channel.
+- A conversation the server calls a channel from a device's first look is one to that device: pinning works
+  only from what it has seen. It still takes a real signature on that conversation.
+- The server can withhold a signature at any time, which only makes a real deletion take the retention.
 
 **Without a signature that holds, a deletion is the server's statement.** The server can claim one for **any
 conversation, all at once**: a channel, a direct message deleted with an account, by the gateway's
@@ -985,7 +1016,7 @@ local copy may be the last copy there is, a claim is not enough to destroy it:
   asked again after a gateway event, is forged or replayed and changes nothing; a claim for something
   the device doesn't know does nothing; a replay doesn't move the retention. The server listing the
   conversation again lifts the mark.
-- **Mass claims.** More than `suspect_deletion_count` (5) conversations within `suspect_deletion_window` (an
+- **Mass deletions.** More than `suspect_deletion_count` (5) conversations, claimed or purged on a signature, within `suspect_deletion_window` (an
   hour), or more than `suspect_deletion_percent` (50 %) of the user's conversations from two on, are
   logged as suspect and the user is told once. No purge comes earlier for it: what protects the history
   is the retention; the notice is what makes people react within it. What a single claim shows is the
