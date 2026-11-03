@@ -18,6 +18,8 @@ pub const MEDIUM_BELOW_PX: u32 = 1100;
 /// A visual viewport at least this much shorter than the layout has the keyboard below it; less is
 /// browser chrome or the home indicator (#663).
 const KEYBOARD_MIN_HEIGHT_PX: f64 = 120.0;
+/// A page scale above this is pinch-zoomed.
+const ZOOMED_ABOVE: f64 = 1.01;
 
 /// The layouts the shell switches between, mirrored into `data-layout` on `<html>` for the CSS.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -231,10 +233,15 @@ pub fn rem_px() -> f64 {
 /// index.html); Safari only reports the visual viewport.
 ///
 /// Without the keyboard the properties are removed and the shell is pinned to the window's edges
-/// (#663, #709; iOS also computes `100dvh` short in an installed web app): iOS reports
-/// a visual viewport shorter than the screen in an installed web app and under Safari's floating
+/// (#663, #709): iOS reports a visual viewport shorter than the screen under Safari's floating
 /// toolbar, and keeps a shrunken one after the keyboard closed. The shell then ended above the
 /// screen's bottom, and the page showed through below the tab bar.
+///
+/// An iOS home screen app is the exception to "pinned to the edges" (#1222): its window is the
+/// whole screen, but the layout viewport (`innerHeight`, `100dvh`, and the `bottom: 0` of a fixed
+/// element with it) can come out shorter than the screen by up to the safe areas, on launch and
+/// after a rotation. There the shell gets the screen's height as `--vv-height`, so it reaches the
+/// bottom whatever the layout viewport says.
 pub fn track_visual_viewport() {
   thread_local! {
     static IS_TRACKING: Cell<bool> = const { Cell::new(false) };
@@ -261,13 +268,37 @@ pub fn track_visual_viewport() {
         .and_then(|window| window.inner_height().ok())
         .and_then(|height| height.as_f64())
         .unwrap_or_else(|| viewport.height());
+      let layout_width = web_sys::window()
+        .and_then(|window| window.inner_width().ok())
+        .and_then(|width| width.as_f64())
+        .unwrap_or_else(|| viewport.width());
       let maybe_area = keyboard_free_area(
         layout_height,
         viewport.height(),
         viewport.offset_top(),
         viewport.scale(),
         is_text_field_focused(),
-      );
+      )
+      .or_else(|| {
+        let (screen_width, screen_height) = screen_size()?;
+        installed_screen_height(
+          layout_width,
+          layout_height,
+          screen_width,
+          screen_height,
+          viewport.scale(),
+          is_ios_home_screen_app(),
+        )
+        .map(|height| (height, 0.0))
+      });
+      // iOS keeps the page scrolled up after the keyboard closed; the fixed shell moves with it.
+      if maybe_area.is_none()
+        && viewport.offset_top() > 1.0
+        && viewport.scale() <= ZOOMED_ABOVE
+        && let Some(window) = web_sys::window()
+      {
+        window.scroll_to_with_x_and_y(0.0, 0.0);
+      }
       let is_applied = match maybe_area {
         Some((height, top)) => {
           style
@@ -292,6 +323,18 @@ pub fn track_visual_viewport() {
       .is_err()
     {
       tracing::debug!(event, "could not watch the visual viewport");
+    }
+  }
+  // The layout viewport of a home screen app changes with the window, not always with the visual
+  // viewport (rotation, coming back from the background).
+  if let Some(window) = web_sys::window() {
+    for event in ["resize", "orientationchange", "pageshow"] {
+      if window
+        .add_event_listener_with_callback(event, handler.as_ref().unchecked_ref())
+        .is_err()
+      {
+        tracing::debug!(event, "could not watch the window for the visual viewport");
+      }
     }
   }
   // A keyboard that closes without a resize (iOS) still gives the full height back. Focus moving
@@ -321,9 +364,57 @@ fn keyboard_free_area(
   scale: f64,
   is_text_field_focused: bool,
 ) -> Option<(f64, f64)> {
-  let is_zoomed = scale > 1.01;
+  let is_zoomed = scale > ZOOMED_ABOVE;
   let is_covered = layout_height - visible_height > KEYBOARD_MIN_HEIGHT_PX;
   (is_text_field_focused && !is_zoomed && is_covered).then_some((visible_height, visible_top.max(0.0)))
+}
+
+/// The screen's height for a home screen app whose layout viewport is shorter than it, or `None`
+/// when the layout viewport is the screen (or not a screen-sized window at all). Only for iOS home
+/// screen apps, whose window is the whole screen (status bar and home indicator are drawn over
+/// it): `screen.width/height` there are the device's portrait points whatever the orientation, so
+/// the side matching the window's width is picked. A shortfall of more than a keyboard's minimum
+/// is no safe area, and a width that doesn't match is a window that isn't the screen (iPad
+/// multitasking).
+fn installed_screen_height(
+  layout_width: f64,
+  layout_height: f64,
+  screen_width: f64,
+  screen_height: f64,
+  scale: f64,
+  is_ios_home_screen_app: bool,
+) -> Option<f64> {
+  let (long, short) = (screen_width.max(screen_height), screen_width.min(screen_height));
+  let (width, height) = if layout_width < layout_height {
+    (short, long)
+  } else {
+    (long, short)
+  };
+  let shortfall = height - layout_height;
+  let is_screen_wide = (layout_width - width).abs() <= 1.0;
+  (is_ios_home_screen_app
+    && is_screen_wide
+    && scale <= ZOOMED_ABOVE
+    && shortfall > 1.0
+    && shortfall <= KEYBOARD_MIN_HEIGHT_PX)
+    .then_some(height)
+}
+
+/// `screen.width` and `screen.height` in CSS pixels.
+fn screen_size() -> Option<(f64, f64)> {
+  let window: wasm_bindgen::JsValue = web_sys::window()?.into();
+  let screen = js_sys::Reflect::get(&window, &"screen".into()).ok()?;
+  let size = |name: &str| js_sys::Reflect::get(&screen, &name.into()).ok()?.as_f64();
+  Some((size("width")?, size("height")?))
+}
+
+/// Whether this is a web app added to the iOS home screen: only there Safari defines
+/// `navigator.standalone` (true). Installed apps on other platforms size their window themselves.
+fn is_ios_home_screen_app() -> bool {
+  web_sys::window()
+    .and_then(|window| js_sys::Reflect::get(&window.navigator(), &"standalone".into()).ok())
+    .and_then(|value| value.as_bool())
+    .unwrap_or(false)
 }
 
 /// Whether the focus is in something the on-screen keyboard types into.
@@ -415,6 +506,58 @@ mod tests {
     #[test]
     fn ignores_a_pinch_zoomed_page() {
       assert_eq!(keyboard_free_area(844.0, 422.0, 200.0, 2.0, true), None);
+    }
+  }
+
+  mod installed_screen_height {
+    use super::*;
+
+    #[test]
+    fn a_short_layout_viewport_gets_the_screen_height() {
+      // iPhone 15 portrait: 393x852, the layout viewport came out about the safe areas short.
+      assert_eq!(
+        installed_screen_height(393.0, 759.0, 393.0, 852.0, 1.0, true),
+        Some(852.0)
+      );
+      // Rotated: iOS keeps reporting portrait screen points.
+      assert_eq!(
+        installed_screen_height(852.0, 325.0, 393.0, 852.0, 1.0, true),
+        Some(393.0)
+      );
+    }
+
+    #[test]
+    fn a_full_layout_viewport_needs_nothing() {
+      assert_eq!(
+        installed_screen_height(393.0, 852.0, 393.0, 852.0, 1.0, true),
+        None
+      );
+    }
+
+    #[test]
+    fn only_ios_home_screen_apps() {
+      // An installed Android app has system bars outside its window.
+      assert_eq!(
+        installed_screen_height(393.0, 759.0, 393.0, 852.0, 1.0, false),
+        None
+      );
+    }
+
+    #[test]
+    fn windows_that_are_not_the_screen_are_left_alone() {
+      // iPad multitasking window, pinch zoom, the keyboard.
+      assert_eq!(
+        installed_screen_height(320.0, 700.0, 820.0, 1180.0, 1.0, true),
+        None
+      );
+      assert_eq!(
+        installed_screen_height(393.0, 759.0, 393.0, 852.0, 2.0, true),
+        None
+      );
+      assert_eq!(
+        installed_screen_height(393.0, 508.0, 393.0, 852.0, 1.0, true),
+        None
+      );
     }
   }
 

@@ -142,5 +142,41 @@ class LayerHintsTest(unittest.TestCase):
         self.assertEqual(findings(css), [])
 
 
+SHELL = (
+    ':root[data-layout="compact"] .app { position: fixed; top: var(--vv-top, 0px); bottom: 0; height: var(--vv-height, auto); '
+    "padding: env(safe-area-inset-top) 0 0 0; }\n"
+    ':root[data-layout="compact"] .bottom-nav { padding-bottom: env(safe-area-inset-bottom); }\n'
+)
+
+
+class CompactShellTest(unittest.TestCase):
+    def test_the_pinned_shell_with_one_bottom_safe_area_passes(self):
+        self.assertEqual(findings(SHELL), [])
+
+    def test_sheets_without_the_shell_are_not_checked(self):
+        self.assertEqual(findings(".x { height: 100dvh; }"), [])
+
+    def test_a_viewport_unit_height_is_found(self):
+        css = SHELL.replace("var(--vv-height, auto)", "100dvh")
+        self.assertEqual(len(findings(css)), 1)
+        self.assertIn("computes it short", findings(css)[0])
+
+    def test_a_fixed_height_is_found(self):
+        self.assertEqual(len(findings(SHELL.replace("var(--vv-height, auto)", "calc(100% - 20px)"))), 1)
+
+    def test_an_unpinned_shell_is_found(self):
+        self.assertIn("pinned", findings(SHELL.replace("bottom: 0;", ""))[0])
+
+    def test_the_bottom_safe_area_on_the_shell_is_found(self):
+        css = SHELL.replace("padding: env(safe-area-inset-top) 0 0 0", "padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) 0")
+        self.assertIn("tab bar alone", findings(css)[0])
+
+    def test_the_bottom_safe_area_on_the_page_is_found(self):
+        self.assertIn("on the page itself", findings(SHELL + "body { padding-bottom: env(safe-area-inset-bottom); }")[0])
+
+    def test_a_tab_bar_without_the_safe_area_is_found(self):
+        self.assertIn("exactly once", findings(SHELL.replace("padding-bottom: env(safe-area-inset-bottom)", "padding-bottom: 0"))[0])
+
+
 if __name__ == "__main__":
     unittest.main()
