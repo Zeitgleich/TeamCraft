@@ -301,3 +301,5 @@ mod tests {
     assert!(dev_tokens_allowed(addr("127.0.0.1:4433"), None, true).is_err());
   }
 }
+
+fn  broken_format_for_proof ( ) { }
