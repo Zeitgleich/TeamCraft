@@ -35,7 +35,6 @@ final class JoinRequestsTests: XCTestCase {
     XCTAssertEqual(JoinRequests.note(after: .ask, outcome: .tooSoon), .tooSoon)
     XCTAssertEqual(JoinRequests.note(after: .approve, outcome: .notApprovable), .notApprovable)
     XCTAssertEqual(JoinRequests.note(after: .approve, outcome: .ownerRoleNotSigned), .ownerRoleNotSigned)
-    XCTAssertEqual(JoinRequests.note(after: .approve, outcome: .ownerRoleNotSigned), .ownerRoleNotSigned)
   }
 
   func testAChannelShowsOnlyItsOwnRequestsEachKeyedByAdminAndChannel() {
