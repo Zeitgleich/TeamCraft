@@ -507,6 +507,108 @@ Through the real SFU (`screen_layer_bitrate` in the SFU suite, release build wit
 | 720p  | 360p  |    500 | 6428 (1286 %)     | 314 (63 %)       | 480–585 (8 frames)     |
 |       | 720p  |   2000 | 269 (13 %)        | 259 (13 %)       | 334–351                |
 
+### Short bitrate peaks of the encoders (issue #1005)
+
+The encoders get an average (VideoToolbox for screens, WebCodecs, OpenH264), and a whole new
+picture can send far more than that for a moment. The question was whether those peaks hurt on a
+capped uplink, and so whether a cap is worth what it costs. Measured with what runs here (Linux,
+Chrome 156 and OpenH264). **Never run: VideoToolbox's peaks, Chrome on a Mac, Safari, Firefox,
+the hardware encoders of Windows and Android**; the tools below run on them unchanged.
+
+**How.** Bytes per picture from the encoder, as a multiple of what the target bitrate sends in
+the same time: the largest picture (a frame's share of the target), the busiest 100 ms and the
+busiest 1 s after the first second. A model link drains at 1.25 times the layer's target and
+queues 250 ms of itself before it drops a picture (a router's buffer); the report gives the
+longest wait and the pictures dropped. It is a model, not a measured network: what the receiver
+does after a drop (a keyframe request, a freeze) is not in it. Scenes: *typing* (a line being
+typed), *slides* (the whole page changes every 2 s), *scroll* (a fast steady scroll), *camera*
+(a swaying person, sensor noise) and *camera-cut* (the whole scene changes every 3 s).
+
+- Browser: `dev/screen-codec-bench/` (`make_peaks.py`, `server.py`, `peaks_table.py`; Linux with
+  `BENCH_CHROME=/usr/bin/google-chrome`), WebCodecs H.264 as the call configures it, 240 to 300
+  frames at 30 fps.
+- Desktop: `screen_bench` (`--scene slides`; the report ends with the peaks), OpenH264 through
+  the call's `SimulcastEncoder`, 12 s, `--frames every`. It runs the preferred hardware encoder
+  too, on a Mac or with VA-API, by leaving `--encoder` out.
+
+```sh
+cd dev/screen-codec-bench && python3 make_peaks.py
+BENCH_CHROME=/usr/bin/google-chrome python3 server.py chrome peaks.json peaks.jsonl
+python3 peaks_table.py peaks.jsonl
+cargo run --release -p teamcraft-media --features gstreamer,openh264-source --example screen_bench -- \
+  --profile detail --source 2560x1440 --scene slides --seconds 12 --encoder software
+```
+
+Chrome 156 on Linux (software H.264, `bitrateMode` unset; the layer's own target):
+
+| Scene, layer             |       Target | Largest picture | Busiest 100 ms | Busiest 1 s | Model link: longest wait, dropped |
+|--------------------------|-------------:|----------------:|---------------:|------------:|----------------------------------:|
+| typing, 1440p            |  6636 kbit/s |           < 0.1 |           0.01 |        0.09 |                           0 ms, 0 |
+| slides, 1440p            |  6636 kbit/s |            10.2 |           3.39 |        0.34 |                         250 ms, 3 |
+| scroll, 1440p            |  6636 kbit/s |             2.1 |           1.34 |        1.00 |                          55 ms, 0 |
+| slides, 720p (half size) |  1659 kbit/s |            17.3 |           5.77 |        0.58 |                           0 ms, 4 |
+| scroll, 720p (half size) |  1659 kbit/s |             2.3 |           1.24 |        0.94 |                          62 ms, 0 |
+| slides, 4K               | 14930 kbit/s |             7.9 |           2.64 |        0.27 |                         211 ms, 0 |
+| camera, 720p             |  1500 kbit/s |             0.8 |           0.80 |        0.73 |                          23 ms, 0 |
+| camera, 360p             |   375 kbit/s |             1.3 |           1.15 |        1.02 |                          34 ms, 0 |
+| camera-cut, 720p         |  1500 kbit/s |             7.0 |           3.41 |        0.92 |                         215 ms, 0 |
+| camera-cut, 360p         |   375 kbit/s |             3.3 |           1.76 |        1.08 |                          88 ms, 0 |
+
+OpenH264 through the call's encoder (`screen_bench`, detail profile, a 1440p display, every frame
+encoded, release build):
+
+| Scene, layer             |      Target | Largest picture | Busiest 100 ms | Busiest 1 s | Model link: longest wait, dropped |
+|--------------------------|------------:|----------------:|---------------:|------------:|----------------------------------:|
+| slides, 720p (half size) | 1659 kbit/s |            26.4 |           8.81 |        0.88 |                    0 ms, 3 of 165 |
+| slides, 1440p            | 6636 kbit/s |            14.1 |           4.72 |        0.47 |                  225 ms, 1 of 168 |
+| scroll, 720p (half size) | 1659 kbit/s |            25.5 |           8.49 |        1.38 |                    25 ms, 9 of 18 |
+| scroll, 1440p            | 6636 kbit/s |             0.2 |           0.10 |        0.07 |                    4 ms, 0 of 177 |
+| typing (both layers)     |           – |           < 0.1 |           0.04 |        0.01 |                           0 ms, 0 |
+
+What it shows:
+
+- **The peaks are the new picture, not the rate control.** A slide change, a cut or the half-size
+  layer of a scroll (which re-keys when it can't follow the motion) sends a picture of 7 to 26 times
+  a frame's share, 2.6 to 8.8 times the target in 100 ms, and at most 1.4 times in a second. The
+  picture is what it takes to draw the new content; steady content (a typed line, a calm camera,
+  a scroll at the top layer) stays at or just above the target in every window (camera 360p: 1.15 times
+  in 100 ms, the encoder's own overshoot).
+- **On a link with a quarter of headroom and a 250 ms queue** a slide change waits 210 to 250 ms
+  in the queue and drops up to four pictures (the 720p layer's picture, 17 times a frame's share, does
+  not fit the queue at all); a camera cut waits 90 to 215 ms. Nothing else drops anything. A viewer
+  sees the slide late by a quarter second, or gets a keyframe request; the window is short and the
+  next picture repairs it. The model does not tell what a real network does after a drop.
+- **A cap would spend sharpness for this.** The bytes of a new slide are the bytes of its sharp
+  text: a 1440p slide is about 10 times a frame's share of the layer (6636 kbit/s / 30 fps = 27.7 kB,
+  so about 280 kB). A cap at 1.5 times the target per second (the issue's figure) would hold that
+  back for roughly a second, and the text stays blurred for as long as the picture is spread out.
+  The call also reacts to a congested uplink another way already: the layers' allocation
+  (`uplink_layers`) and the estimator's probing margin are sized so that a keyframe's queue
+  doesn't push a layer off (#939).
+- **`bitrateMode` made no difference in Chrome's software encoder.** The runs with it unset, with
+  `"variable"` and with `"constant"` sent the same rate (within 0.6 %) and the same peaks (within
+  0.3 in the ratios, the 720p scroll the only one that moved at all). Hardware encoders may honour the mode (#967 saw no
+  change from it in Chrome's VideoToolbox encoder either, in `"realtime"`), which can only be measured on
+  them; Safari and Firefox are not measured. The call leaves `bitrateMode` unset. Were it
+  set, a browser that refuses it must fall back through `VideoEncoder.isConfigSupported` rather than fail the call
+  (the bench does: a refused config is reported as unsupported).
+- **Keyframes** cost the same sharpness as the pictures after them: no cap, so nothing to
+  turn blurry. The bench's PSNR column is not comparable on Linux (a constant 22.4 dB in every
+  run, a colour-range offset of the software decoder's output), so sharpness is judged from
+  `screen_sharpness` and the tables above, which this change does not touch.
+- **VideoToolbox's data rate limits** (`data-rate-limits`, `kVTCompressionPropertyKey_DataRateLimits`)
+  are a property of the `vtenc_h264` element and need no native call, but #979 set and
+  measured them: accepted, no effect at an average bitrate. Cameras use a constant
+  bitrate already (they hold 100 to 101 % of the target, #967) and screens have the quality governor. Peaks of the Mac
+  encoder are for a Mac to measure with `screen_bench`; nothing is wired here.
+
+So there is **no cap**: the peaks are one picture long, at most a quarter second on a link that is barely
+above the layer's target, and the encoders' average over a second stays at or near the target.
+A cap would blur the slide it is meant to deliver, for a problem the uplink allocation already
+handles.
+
+Cost on the call's hot path: none, no runtime code changed (the bench and its examples only).
+
 ### Each picture with its own frame (issue #990)
 
 The first VideoToolbox session of a process takes 55 to 71 ms for its first picture (a 1440p or

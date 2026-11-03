@@ -21,8 +21,8 @@ const COLORS = ['#1f1f1f', '#0000c0', '#795e26', '#267f99', '#a31515', '#008000'
 
 function rng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
 
-function makeDocument(lines) {
-  const r = rng(7);
+function makeDocument(lines, seed = 7) {
+  const r = rng(seed);
   const doc = [];
   for (let i = 0; i < lines; i++) {
     const indent = Math.floor(r() * 5) * 2;
@@ -35,6 +35,37 @@ function makeDocument(lines) {
 }
 
 // Draws the editor-like screen: a side bar, a tab strip, line numbers and code; `scroll` in px.
+// A synthetic camera picture (issue #1005): a gradient room, a person who sways and waves, faint
+// sensor noise on every frame; `camera-cut` changes the whole scene every 3 s (a cut, a light
+// switched on), the case that makes a keyframe-sized burst.
+function drawCamera(ctx, w, h, frame, scenario, noise) {
+  const scene = scenario === 'camera-cut' ? Math.floor(frame / 90) : 0;
+  const hue = (scene * 67) % 360;
+  const gradient = ctx.createLinearGradient(0, 0, w, h);
+  gradient.addColorStop(0, `hsl(${hue}, 25%, 45%)`);
+  gradient.addColorStop(1, `hsl(${(hue + 40) % 360}, 30%, 25%)`);
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = `hsl(${(hue + 180) % 360}, 20%, 60%)`;
+  ctx.fillRect(w * (0.08 + 0.05 * (scene % 3)), h * 0.15, w * 0.18, h * 0.4);
+  const sway = Math.sin(frame / 20) * w * 0.02 + (scene % 2) * w * 0.1;
+  const cx = w * 0.5 + sway, cy = h * 0.78;
+  ctx.fillStyle = '#3b4a6b';
+  ctx.beginPath(); ctx.ellipse(cx, cy, w * 0.2, h * 0.32, 0, 0, 2 * Math.PI); ctx.fill();
+  ctx.fillStyle = '#d9a98a';
+  ctx.beginPath(); ctx.ellipse(cx, h * 0.38 + Math.sin(frame / 15) * h * 0.01, w * 0.075, h * 0.14, 0, 0, 2 * Math.PI); ctx.fill();
+  ctx.save();
+  ctx.translate(cx + w * 0.17, h * 0.6);
+  ctx.rotate(Math.sin(frame / 6) * 0.5 - 0.6);
+  ctx.fillRect(-w * 0.012, -h * 0.2, w * 0.024, h * 0.2);
+  ctx.restore();
+  for (let i = 0; i < noise.length; i += 3) {
+    const x = (noise[i] * 7919 + frame * 104729) % w, y = (noise[i + 1] * 15485863 + frame * 7727) % h;
+    ctx.fillStyle = noise[i + 2] > 0.5 ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.07)';
+    ctx.fillRect(x, y, 2, 2);
+  }
+}
+
 function drawScreen(ctx, w, h, scale, doc, scroll, frame, scenario) {
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, w, h);
@@ -88,6 +119,20 @@ function drawScreen(ctx, w, h, scale, doc, scroll, frame, scenario) {
   ctx.restore();
 }
 
+// A slide change every 2 s (`slides`: another page of text, the whole picture changes), a camera,
+// or the screen of `drawScreen` (`typing`, `scroll`).
+const SLIDE_FRAMES = 60;
+const slideDocs = new Map();
+function drawFrame(ctx, w, h, scale, doc, scroll, frame, scenario, fps, noise) {
+  if (scenario === 'camera' || scenario === 'camera-cut') return drawCamera(ctx, w, h, frame, scenario, noise);
+  if (scenario === 'slides') {
+    const slide = Math.floor(frame / SLIDE_FRAMES);
+    if (!slideDocs.has(slide)) { slideDocs.set(slide, makeDocument(400, 7 + slide)); }
+    return drawScreen(ctx, w, h, scale, slideDocs.get(slide), 0, frame, 'typing-off');
+  }
+  return drawScreen(ctx, w, h, scale, doc, scroll, frame, scenario);
+}
+
 async function supports(kind, config) {
   try {
     const result = kind === 'encode' ? await VideoEncoder.isConfigSupported(config) : await VideoDecoder.isConfigSupported(config);
@@ -137,6 +182,53 @@ async function baseline(run, docScale) {
   return { ...run, supported: true, wallMs: performance.now() - t0 };
 }
 
+// How bursty the encoder's output is (issue #1005). Sizes are per frame index; the window rates are
+// compared with the target bitrate. The link model: a leaky bucket that drains at `linkFactor` times
+// the target, fed by each frame at its capture time, with a buffer of BUFFER_MS of link time (a
+// router queue); a frame that would overflow it is lost, one that waits more than STALL_MS arrives
+// late enough to freeze a viewer's picture. The first second (the first keyframe, the rate control
+// settling) is left out of the peaks and reported on its own as `firstSecondRatio`.
+const BUFFER_MS = 250;
+const STALL_MS = 250;
+function burstStats(frameBytes, fps, bitrate, warmup, linkFactor) {
+  const targetPerSecond = bitrate / 8;
+  const targetPerFrame = targetPerSecond / fps;
+  const window = (frames) => {
+    let best = 0, sum = 0;
+    for (let i = 0; i < frameBytes.length; i++) {
+      sum += frameBytes[i];
+      if (i >= frames) sum -= frameBytes[i - frames];
+      if (i >= warmup && i >= frames - 1) best = Math.max(best, sum);
+    }
+    return best / (targetPerSecond * frames / fps);
+  };
+  const steady = frameBytes.slice(warmup);
+  const first = frameBytes.slice(0, warmup).reduce((a, b) => a + b, 0) / targetPerSecond;
+  const linkPerSecond = targetPerSecond * linkFactor;
+  let queue = 0, maxDelay = 0, stalls = 0, lostFrames = 0, delayedFrames = 0;
+  for (let i = 0; i < frameBytes.length; i++) {
+    queue = Math.max(0, queue - linkPerSecond / fps);
+    const bytes = frameBytes[i];
+    if (queue + bytes > linkPerSecond * BUFFER_MS / 1000) { if (i >= warmup) lostFrames++; continue; }
+    queue += bytes;
+    const delay = queue / linkPerSecond * 1000;
+    if (i >= warmup) { maxDelay = Math.max(maxDelay, delay); if (delay > STALL_MS) stalls++; if (delay > 100) delayedFrames++; }
+  }
+  const sortedSteady = [...steady].sort((a, b) => a - b);
+  return {
+    peakFrameRatio: +(Math.max(...steady) / targetPerFrame).toFixed(1),
+    p95FrameRatio: +(sortedSteady[Math.floor(sortedSteady.length * 0.95)] / targetPerFrame).toFixed(2),
+    peak100msRatio: +window(Math.max(1, Math.round(fps / 10))).toFixed(2),
+    peak1sRatio: +window(fps).toFixed(2),
+    firstSecondRatio: +first.toFixed(2),
+    linkFactor,
+    linkMaxDelayMs: Math.round(maxDelay),
+    linkFramesOver100ms: delayedFrames,
+    linkStalls: stalls,
+    linkLostFrames: lostFrames,
+  };
+}
+
 async function runOne(run) {
   const { codec, width, height, fps, bitrate, hint, frames, scenario, latency, accel } = run;
   const docScale = height >= 2160 ? 2 : (height >= 1440 ? 1.25 : 1);
@@ -144,6 +236,7 @@ async function runOne(run) {
   if (codec === 'none') return baseline(run, docScale);
   const config = { ...CODECS[codec](width, height, fps), width, height, bitrate, framerate: fps, latencyMode: latency || 'realtime' };
   if (hint) config.contentHint = hint;
+  if (run.bitrateMode) config.bitrateMode = run.bitrateMode;
   if (accel) config.hardwareAcceleration = accel;
   if (!(await supports('encode', config))) return { ...run, supported: false };
   const canvas = new OffscreenCanvas(width, height);
@@ -151,7 +244,7 @@ async function runOne(run) {
   const doc = makeDocument(400);
   const references = new Map();
   const sent = new Map();
-  const result = { ...run, supported: true, bytes: 0, steadyBytes: 0, keyframes: 0, keyframeBytes: [], psnr: [], latencies: [] };
+  const result = { ...run, supported: true, bytes: 0, steadyBytes: 0, keyframes: 0, keyframeBytes: [], psnr: [], psnrKey: [], psnrDelta: [], latencies: [] };
   const warmup = Math.round(fps); // first second left out
   let pendingDecodes = [];
   const decoder = new VideoDecoder({
@@ -177,7 +270,9 @@ async function runOne(run) {
             }
           }
           const mse = sse / (width * height);
-          result.psnr.push(mse === 0 ? 99 : 10 * Math.log10(255 * 255 / mse));
+          const value = mse === 0 ? 99 : 10 * Math.log10(255 * 255 / mse);
+          result.psnr.push(value);
+          (chunkTypes.get(ts) === 'key' ? result.psnrKey : result.psnrDelta).push(value);
         }).finally(() => frame.close());
         pendingDecodes.push(copied);
         return;
@@ -189,6 +284,8 @@ async function runOne(run) {
   const decoderBase = { codec: DECODE[codec] };
   if (run.decoderColorSpace) decoderBase.colorSpace = run.decoderColorSpace;
   decoder.configure(decoderBase);
+  const frameBytes = new Array(frames).fill(0);
+  const chunkTypes = new Map();
   let resolveOut = null;
   const encoder = new VideoEncoder({
     output: (chunk, metadata) => {
@@ -201,6 +298,8 @@ async function runOne(run) {
       result.bytes += chunk.byteLength;
       const index = Math.round(ts * fps / 1e6);
       if (index >= warmup) result.steadyBytes += chunk.byteLength;
+      frameBytes[index] = (frameBytes[index] || 0) + chunk.byteLength;
+      chunkTypes.set(ts, chunk.type);
       if (chunk.type === 'key') { result.keyframes++; result.keyframeBytes.push(chunk.byteLength); }
       if (measure) decoder.decode(chunk);
       if (resolveOut) { const r = resolveOut; resolveOut = null; r(); }
@@ -209,14 +308,18 @@ async function runOne(run) {
   });
   encoder.configure(config);
   const speed = scenario === 'scroll' ? 6 * docScale : 0;
+  const noise = Array.from({ length: 3 * 1500 }, rng(11));
+  let keyNext = false;
   const t0 = performance.now();
   for (let i = 0; i < frames; i++) {
-    drawScreen(ctx, width, height, docScale, doc, Math.round(i * speed), i, scenario);
+    drawFrame(ctx, width, height, docScale, doc, Math.round(i * speed), i, scenario, fps, noise);
     const ts = Math.round(i * 1e6 / fps);
-    if (measure && i >= warmup && i % 10 === 5) references.set(ts, ctx.getImageData(0, 0, width, height).data);
+    if (run.keyEvery && i > 0 && i % run.keyEvery === 0) keyNext = true;
+    if (measure && i >= warmup && (i % 10 === 5 || (run.keyEvery && i % run.keyEvery === 0))) references.set(ts, ctx.getImageData(0, 0, width, height).data);
     const frame = new VideoFrame(canvas, { timestamp: ts });
     sent.set(ts, performance.now());
-    encoder.encode(frame, { keyFrame: i === 0 });
+    encoder.encode(frame, { keyFrame: i === 0 || keyNext });
+    keyNext = false;
     frame.close();
     // Keep at most two frames queued, like the call's encoder (MAX_ENCODE_QUEUE).
     while (encoder.encodeQueueSize > 1) {
@@ -236,6 +339,11 @@ async function runOne(run) {
   result.latencyP95 = +(sorted[Math.floor(sorted.length * 0.95)] || 0).toFixed(1);
   result.psnrAvg = +(result.psnr.reduce((a, b) => a + b, 0) / Math.max(1, result.psnr.length)).toFixed(2);
   result.psnrMin = +Math.min(...result.psnr).toFixed(2);
+  Object.assign(result, burstStats(frameBytes, fps, bitrate, warmup, run.linkFactor || 1.25));
+  const mean = (values) => values.length ? +(values.reduce((a, b) => a + b, 0) / values.length).toFixed(2) : null;
+  result.psnrKeyAvg = mean(result.psnrKey);
+  result.psnrDeltaAvg = mean(result.psnrDelta);
+  delete result.psnrKey; delete result.psnrDelta;
   result.firstKeyframeKB = result.keyframeBytes.length ? Math.round(result.keyframeBytes[0] / 1024) : 0;
   delete result.latencies; delete result.psnr; delete result.keyframeBytes;
   return result;
