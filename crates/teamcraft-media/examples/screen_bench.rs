@@ -22,7 +22,8 @@
 //! The report also gives each layer's peaks against its target (issue #1005): its largest picture
 //! and its busiest 100 ms and 1 s window, as a multiple of what the target bitrate sends in that
 //! time, from the pictures' sizes by capture time. A multiple of 1 is a layer that never sends more
-//! than its bitrate in the window; the keyframe a layer starts with is left out (the warm-up).
+//! than its bitrate in the window; the keyframe a layer starts with is left out (the warm-up). The
+//! code is `common/peaks.rs`, shared with `camera_bitrate`.
 //!
 //! The report gives the encoding's cost per frame (the process's CPU time over all threads, the
 //! hardware encoder's included, and the wall time), each layer's bitrate against its target and
@@ -41,14 +42,12 @@ use teamcraft_media::video_pipeline::{
 use teamcraft_proto::{ScreenContentMode, ScreenShareResolution, VideoLayerInfo};
 use tracing::info;
 
+#[path = "common/peaks.rs"]
+mod peaks;
+use peaks::peaks_report;
+
 /// Left out of the rates and costs: the first keyframes and the rate control settling.
 const WARM_UP: Duration = Duration::from_secs(1);
-/// The windows the peaks are measured over.
-const PEAK_WINDOWS: [Duration; 2] = [Duration::from_millis(100), Duration::from_secs(1)];
-/// The model link of the peaks report: it drains at this multiple of the layer's target and
-/// queues [`LINK_BUFFER`] of its own time before it drops (a router's buffer).
-const LINK_FACTOR: f64 = 1.25;
-const LINK_BUFFER: Duration = Duration::from_millis(250);
 /// Frames of a slide in the `slides` scene.
 const SLIDE_FRAMES: usize = 60;
 /// Every this many pictures of a layer is compared with its source (PSNR).
@@ -406,64 +405,6 @@ fn report(encoding: &Encoding, framerate: u8) {
       peaks,
     );
   }
-}
-
-/// The largest picture and the busiest windows of [`PEAK_WINDOWS`], each as a multiple of what
-/// the target sends in the same time (a picture: in one frame time).
-fn peaks_report(sizes: &[(u64, usize)], target_bps: u32, framerate: u8) -> String {
-  let bytes_per_second = f64::from(target_bps) / 8.0;
-  let largest = sizes.iter().map(|(_, bytes)| *bytes).max().unwrap_or(0) as f64;
-  let mut report = format!(
-    "peak picture {:.1}x",
-    largest / (bytes_per_second / f64::from(framerate.max(1)))
-  );
-  let (longest_wait, dropped) = link_waits(sizes, bytes_per_second * LINK_FACTOR);
-  report += &format!(
-    "; link {LINK_FACTOR}x: longest wait {} ms, {dropped} of {} pictures dropped",
-    longest_wait.as_millis(),
-    sizes.len()
-  );
-  for window in PEAK_WINDOWS {
-    report += &format!(
-      ", {} ms {:.2}x",
-      window.as_millis(),
-      busiest_window(sizes, window) / (bytes_per_second * window.as_secs_f64())
-    );
-  }
-  report
-}
-
-/// How long the longest-waiting picture queues on a link draining `link_bytes_per_second`, and
-/// how many pictures it drops because the queue is full ([`LINK_BUFFER`]).
-fn link_waits(sizes: &[(u64, usize)], link_bytes_per_second: f64) -> (Duration, usize) {
-  let (mut queue, mut previous_us, mut longest, mut dropped) = (0.0f64, 0u64, 0.0f64, 0usize);
-  for (at, bytes) in sizes {
-    let elapsed = at.saturating_sub(previous_us) as f64 / 1e6;
-    previous_us = *at;
-    queue = (queue - link_bytes_per_second * elapsed).max(0.0);
-    if queue + *bytes as f64 > link_bytes_per_second * LINK_BUFFER.as_secs_f64() {
-      dropped += 1;
-      continue;
-    }
-    queue += *bytes as f64;
-    longest = longest.max(queue / link_bytes_per_second);
-  }
-  (Duration::from_secs_f64(longest), dropped)
-}
-
-/// The most bytes pictures captured within one `window` add up to.
-fn busiest_window(sizes: &[(u64, usize)], window: Duration) -> f64 {
-  let window_us = window.as_micros() as u64;
-  let (mut start, mut sum, mut best) = (0usize, 0usize, 0usize);
-  for (at, bytes) in sizes {
-    sum += bytes;
-    while sizes[start].0 + window_us <= *at {
-      sum -= sizes[start].1;
-      start += 1;
-    }
-    best = best.max(sum);
-  }
-  best as f64
 }
 
 /// The process's CPU time so far, over all threads.

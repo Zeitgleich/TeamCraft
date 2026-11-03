@@ -694,6 +694,11 @@ impl Encoding {
   }
 
   /// `VideoEncoderConfig` of a layer of `info`'s size.
+  ///
+  /// `bitrateMode` stays unset, the browsers' `"variable"` (#1005, #1205): `"constant"` caps no
+  /// peak. Chrome's hardware H.264 encoder on a Mac and Firefox on a Mac sent the very same bytes
+  /// in every mode, Chrome's software encoder on Linux within 0.6 % (docs/performance.md, "Short
+  /// bitrate peaks of the encoders").
   fn config(&self, info: &VideoLayerInfo) -> Result<js_sys::Object, JsValue> {
     let mut entries = vec![
       ("width", JsValue::from(info.width)),

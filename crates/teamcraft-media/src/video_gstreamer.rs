@@ -433,6 +433,15 @@ const HARDWARE_ELEMENTS: &[HardwareElement] = &[
 /// bitrate and the data rate limits (#979): scrolling text sent 9 Mbit/s in a 720p layer meant for
 /// 1.7, and as much with the bitrate set to 100 kbit/s. So a [`QualityGovernor`] picks a screen
 /// layer's quality for its bitrate.
+///
+/// Short peaks (#1005, #1205): no cap through this element. `data-rate-limits`
+/// (`kVTCompressionPropertyKey_DataRateLimits`) reaches VideoToolbox only at an average bitrate,
+/// where it changed nothing for a screen layer (set and accepted, as in #979); at a constant
+/// bitrate GStreamer leaves it out. Cameras need none: no second sends more than 1.25 times the
+/// layer's bitrate. A screen's keyframe or slide change is 5 to 28 times a frame's share of it,
+/// the price of sharp text; through a limited uplink that costs the time to send it (0.1 s at
+/// 12 Mbit/s for a 1440p share) and no loss (`screen_uplink_bursts` in the SFU's tests;
+/// docs/performance.md, "Short bitrate peaks of the encoders").
 #[cfg(target_os = "macos")]
 const HARDWARE_ELEMENTS: &[HardwareElement] = &[HardwareElement {
   name: "vtenc_h264",

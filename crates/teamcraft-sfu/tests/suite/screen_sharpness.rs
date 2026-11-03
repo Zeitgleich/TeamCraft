@@ -48,7 +48,7 @@ use crate::common::relay::{
 
 /// A 14" Retina display (3024×1964) fitted into the detail mode's 1440p, as ScreenCaptureKit
 /// captures it.
-const SHARED: VideoResolution = VideoResolution {
+pub(crate) const SHARED: VideoResolution = VideoResolution {
   width: 2216,
   height: 1440,
 };
@@ -193,11 +193,11 @@ impl Received {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Encoded {
-  at: Duration,
-  width: u16,
-  bytes: usize,
-  is_keyframe: bool,
+pub(crate) struct Encoded {
+  pub(crate) at: Duration,
+  pub(crate) width: u16,
+  pub(crate) bytes: usize,
+  pub(crate) is_keyframe: bool,
 }
 
 /// Runs `scenario` and records `duration` from the share's start.
@@ -412,7 +412,11 @@ impl Timeline {
 }
 
 /// `encoders`, recording every picture's size per layer.
-fn counting(encoders: EncoderFactory, start: Instant, log: Arc<Mutex<Vec<Encoded>>>) -> EncoderFactory {
+pub(crate) fn counting(
+  encoders: EncoderFactory,
+  start: Instant,
+  log: Arc<Mutex<Vec<Encoded>>>,
+) -> EncoderFactory {
   Arc::new(move |layer, content| {
     Ok(Box::new(CountingEncoder {
       inner: encoders(layer, content)?,
@@ -586,14 +590,19 @@ fn draw_page(state: usize) -> Vec<u8> {
   page.into_iter().flat_map(|[r, g, b]| [b, g, r, 255]).collect()
 }
 
-fn fill(page: &mut [[u8; 3]], width: usize, (x0, y0, x1, y1): (usize, usize, usize, usize), color: [u8; 3]) {
+pub(crate) fn fill(
+  page: &mut [[u8; 3]],
+  width: usize,
+  (x0, y0, x1, y1): (usize, usize, usize, usize),
+  color: [u8; 3],
+) {
   for y in y0..y1 {
     page[y * width + x0..y * width + x1].fill(color);
   }
 }
 
 /// `count` pseudo-random 5×7 glyphs (with word gaps) at `scale`, from `seed`.
-fn text(
+pub(crate) fn text(
   page: &mut [[u8; 3]],
   width: usize,
   (x, y): (usize, usize),
@@ -632,7 +641,7 @@ fn text(
 
 /// The picture shown at `timestamp_us`: the last one delivered up to then (a refresh of a still
 /// screen repeats it with a later timestamp; RTP's 90 kHz clock rounds).
-fn shown_at(shown: &BTreeMap<u64, usize>, timestamp_us: u64) -> usize {
+pub(crate) fn shown_at(shown: &BTreeMap<u64, usize>, timestamp_us: u64) -> usize {
   shown
     .range(..=timestamp_us + 100)
     .next_back()
@@ -658,7 +667,7 @@ fn luma_psnr(source: &VideoFrame, decoded: &VideoFrame) -> f64 {
 }
 
 /// Reads both calls' events (they must be read for the calls to go on) for `duration`.
-async fn pump_for(presenter: &mut NativeCall, viewer: &mut NativeCall, duration: Duration) {
+pub(crate) async fn pump_for(presenter: &mut NativeCall, viewer: &mut NativeCall, duration: Duration) {
   let end = tokio::time::Instant::now() + duration;
   while tokio::time::Instant::now() < end {
     let _ = tokio::time::timeout(Duration::from_millis(5), presenter.next_event()).await;
@@ -723,7 +732,7 @@ impl Relay {
   }
 }
 
-async fn wait_until_secured(call: &mut NativeCall) {
+pub(crate) async fn wait_until_secured(call: &mut NativeCall) {
   let deadline = tokio::time::Instant::now() + STEP_DEADLINE;
   loop {
     assert!(
@@ -738,7 +747,7 @@ async fn wait_until_secured(call: &mut NativeCall) {
   }
 }
 
-async fn join(sfu: SocketAddr, certificate_hash: [u8; 32], device: i64, other: i64) -> NativeCall {
+pub(crate) async fn join(sfu: SocketAddr, certificate_hash: [u8; 32], device: i64, other: i64) -> NativeCall {
   let engine = CallEngineConfig {
     user_id: id(device),
     device_id: id(device),
@@ -763,7 +772,7 @@ async fn join(sfu: SocketAddr, certificate_hash: [u8; 32], device: i64, other: i
   NativeCall::join(config).await.unwrap()
 }
 
-async fn start_sfu() -> (u16, [u8; 32]) {
+pub(crate) async fn start_sfu() -> (u16, [u8; 32]) {
   let config = SfuConfig {
     bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
     ..SfuConfig::default()
