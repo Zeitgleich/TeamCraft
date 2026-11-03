@@ -22,10 +22,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use teamcraft_client_api::emoji_catalog::SkinTone;
 use teamcraft_client_api::failure::{ActionFailure, FailureKind};
-use teamcraft_client_api::settings_sync::{SettingBases, SyncedValues, hold_inherited, reconcile};
+use teamcraft_client_api::settings_sync::{
+  SettingBases, SyncedValues, hold_inherited, keep_on_device, reconcile,
+};
 use teamcraft_proto::ErrorCode;
 use teamcraft_proto::synced_settings::SyncedSettings;
 
+use crate::calls::CallPhase;
 use crate::components::background_picker::{effect_from_slug, effect_slug};
 use crate::feedback::report_failure;
 use crate::i18n::Locale;
@@ -55,6 +58,17 @@ const KEY_SHOW_JOIN_LEAVE: &str = "show_join_leave";
 const KEY_SKIN_TONE: &str = "emoji_skin_tone";
 const KEY_FAVORITE_ORDER: &str = "favorite_order";
 const KEY_BACKGROUND: &str = "calls.background";
+/// Settings that say something about a person: what they watch for, and their conversations. They
+/// are lists, so an upload of an edited one carries everything in it.
+const PRIVATE_KEYS: [&str; 3] = [
+  "notifications.keywords",
+  "notifications.highlight_keywords",
+  KEY_FAVORITE_ORDER,
+];
+/// Settings the call session reads. While a call or its pre-join screen is open the account's stay
+/// out of the preferences (`LocalValues::is_call_open`), so another device can't change the running
+/// call; a change in Settings here applies as usual.
+const CALL_KEY_PREFIX: &str = "calls.";
 /// Synced settings outside [`Preferences`], which have signals of their own.
 const SYNCED_TOP_LEVEL: [&str; 6] = [
   KEY_THEME,
@@ -192,6 +206,9 @@ struct LocalValues {
   skin_tone: SkinTone,
   favorite_order: Vec<ConversationId>,
   prefs: Preferences,
+  /// A call or its pre-join screen is open: the call settings sit this round out, and nothing about
+  /// them is decided, so they catch up when the call is over.
+  is_call_open: bool,
 }
 
 /// Keeps the account's copy and this device's settings in step until the shell goes away.
@@ -228,6 +245,15 @@ pub fn start(state: AppState, settings: Settings) {
     if mark.get() > 0 {
       reader.read_account();
     }
+  });
+  // What waited for the end of a call applies once it is over.
+  let after_call = sync.clone();
+  Effect::new(move |previous: Option<CallPhase>| {
+    let phase = state.call.phase.get();
+    if previous.is_some_and(|previous| previous != phase) && phase == CallPhase::Idle {
+      after_call.reconcile_now();
+    }
+    phase
   });
   Effect::new(move |_| {
     settings.theme.track();
@@ -305,9 +331,13 @@ impl SettingsSync {
     let Some(account) = account_guard.as_ref() else {
       return;
     };
+    let Some(phase) = self.state.call.phase.try_get_untracked() else {
+      return;
+    };
     let Some(mut local) = LocalValues::capture(self.settings) else {
       return;
     };
+    local.is_call_open = phase != CallPhase::Idle;
     let before = local.clone();
     let mut sync_state_guard = self.maybe_sync_state.borrow_mut();
     let sync_state =
@@ -346,10 +376,13 @@ pub fn prepare_account(settings: Settings, user: UserId) {
 /// Another account's settings don't carry over: its synced values go back to the defaults, and this
 /// account's come from the account, as on a new install.
 ///
-/// With no owner on record (the first run after the update, or a new install), settings found on
-/// the device are only offered to this account if it is the only one known to have used the device.
-/// Otherwise they might be somebody else's keywords, on their way into this account's key bag; they
-/// stay on the device as they are, as before the update, until the user changes them.
+/// With no owner on record (the first run after the update, or a new install), nothing proves whose
+/// the settings found on the device are: the old build recorded no owner, and a "last open" record
+/// only exists after opening a DM or a conversation in a space.
+/// - [`PRIVATE_KEYS`] never go to this account's key bag from there. With another account known,
+///   they go back to the defaults; otherwise they stay active, device-only, so someone alone on
+///   the device doesn't silently lose their keywords.
+/// - The rest is offered if this account is the only one known; otherwise held on the device.
 fn begin_account(
   local: &mut LocalValues,
   sync_state: &mut SyncState,
@@ -362,7 +395,13 @@ fn begin_account(
       sync_state.bases.clear();
     },
     None => {
-      if accounts_seen != [user.to_string()] {
+      let me = user.to_string();
+      if accounts_seen.iter().any(|account| *account != me) {
+        local.reset_keys(&PRIVATE_KEYS);
+      } else {
+        keep_on_device(local, &PRIVATE_KEYS, &mut sync_state.bases);
+      }
+      if accounts_seen != [me] {
         hold_inherited(local, &mut sync_state.bases);
       }
     },
@@ -411,6 +450,7 @@ impl LocalValues {
       skin_tone: settings.emoji_skin_tone.try_get_untracked()?,
       favorite_order: settings.favorite_order.try_get_untracked()?,
       prefs: settings.prefs.try_get_untracked()?,
+      is_call_open: false,
     })
   }
 
@@ -441,8 +481,12 @@ impl LocalValues {
 
   /// Back to what a new install has, for every synced setting. The rest stays.
   fn reset(&mut self) {
+    self.reset_keys(&self.keys());
+  }
+
+  fn reset_keys(&mut self, keys: &[&str]) {
     let defaults = Self::defaults(self.default_locale);
-    for key in self.keys() {
+    for key in keys {
       if let Some(value) = defaults.read(key) {
         self.adopt(key, &value);
       }
@@ -459,13 +503,19 @@ impl LocalValues {
       skin_tone: SkinTone::default(),
       favorite_order: Vec::new(),
       prefs: Preferences::default(),
+      is_call_open: false,
     }
   }
 }
 
 impl SyncedValues for LocalValues {
   fn keys(&self) -> Vec<&'static str> {
-    SYNCED_TOP_LEVEL.iter().chain(SYNCED_PREFS).copied().collect()
+    SYNCED_TOP_LEVEL
+      .iter()
+      .chain(SYNCED_PREFS)
+      .copied()
+      .filter(|key| !(self.is_call_open && key.starts_with(CALL_KEY_PREFIX)))
+      .collect()
   }
 
   fn read(&self, key: &str) -> Option<Value> {
@@ -682,6 +732,41 @@ mod tests {
     }
   }
 
+  mod during_a_call {
+    use super::*;
+
+    /// #945: another device can't change a running call, and its change isn't lost either.
+    #[test]
+    fn the_account_waits_and_applies_when_the_call_is_over() {
+      let account = entry(KEY_BACKGROUND, json!("none"));
+      let mut local = values();
+      local.prefs.calls.background = "blur-light".to_owned();
+      local.prefs.display.density = Density::Comfortable;
+      let mut bases = SettingBases::new();
+      let first = entry(KEY_BACKGROUND, json!("blur-light"));
+      reconcile(&mut local, &first, &mut bases);
+
+      local.is_call_open = true;
+      assert!(reconcile(&mut local, &account, &mut bases).is_empty());
+      assert_eq!(local.prefs.calls.background, "blur-light");
+
+      local.is_call_open = false;
+      let mut later = account.clone();
+      later.get_mut(KEY_BACKGROUND).unwrap().version = 2;
+      assert!(reconcile(&mut local, &later, &mut bases).is_empty());
+      assert_eq!(local.prefs.calls.background, "none");
+    }
+
+    #[test]
+    fn other_settings_go_on_during_a_call() {
+      let mut local = values();
+      local.is_call_open = true;
+      let mut bases = SettingBases::new();
+      reconcile(&mut local, &entry(KEY_THEME, json!("dark")), &mut bases);
+      assert_eq!(local.theme, Theme::Dark);
+    }
+  }
+
   mod another_account {
     use super::*;
 
@@ -712,39 +797,59 @@ mod tests {
       /// The old build recorded no owner: somebody else used this browser, and this account comes
       /// first after the update.
       #[test]
-      fn with_another_account_seen_nothing_is_seeded_and_the_device_stays() {
+      fn with_another_account_seen_nothing_is_seeded_and_private_values_go() {
         let mut local = customized();
         let mut state = SyncState::default();
         begin_account(&mut local, &mut state, user(2), &["1".to_owned()]);
-        assert_eq!(local.theme, Theme::Dark);
+        assert_eq!(local.theme, Theme::Dark, "the look stays on the device");
+        assert!(local.prefs.notifications.keywords.is_empty());
         assert!(reconcile(&mut local, &SyncedSettings::new(), &mut state.bases).is_empty());
-        assert_eq!(local.prefs.notifications.keywords, ["private"]);
       }
 
+      /// Adding one keyword must not upload the keywords of whoever used the device before.
       #[test]
-      fn with_several_accounts_seen_nothing_is_seeded() {
+      fn on_a_shared_device_a_new_keyword_uploads_only_that_one() {
         let mut local = customized();
         let mut state = SyncState::default();
         begin_account(&mut local, &mut state, user(2), &["1".to_owned(), "2".to_owned()]);
-        assert!(reconcile(&mut local, &SyncedSettings::new(), &mut state.bases).is_empty());
+        reconcile(&mut local, &SyncedSettings::new(), &mut state.bases);
+        local.prefs.notifications.keywords.push("mine".to_owned());
+        let writes = reconcile(&mut local, &SyncedSettings::new(), &mut state.bases);
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert_eq!(writes[0].value, json!(["mine"]));
       }
 
       #[test]
-      fn with_nobody_seen_nothing_is_seeded() {
+      fn with_nobody_seen_nothing_is_seeded_and_keywords_stay_active() {
         let mut local = customized();
         let mut state = SyncState::default();
         begin_account(&mut local, &mut state, user(2), &[]);
         assert!(reconcile(&mut local, &SyncedSettings::new(), &mut state.bases).is_empty());
+        assert_eq!(local.prefs.notifications.keywords, ["private"]);
       }
 
-      /// The issue's case: the only account of this browser takes its setup along.
+      /// Someone who only used channels outside a space leaves no record, so being the only one on
+      /// record proves nothing for private values.
       #[test]
-      fn with_only_this_account_seen_its_settings_are_offered() {
+      fn with_only_this_account_seen_the_look_is_offered_but_private_values_never_are() {
         let mut local = customized();
         let mut state = SyncState::default();
         begin_account(&mut local, &mut state, user(2), &["2".to_owned()]);
         let writes = reconcile(&mut local, &SyncedSettings::new(), &mut state.bases);
-        assert_eq!(writes.len(), 2, "{writes:?}");
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert_eq!(writes[0].key, KEY_THEME);
+        assert_eq!(
+          local.prefs.notifications.keywords,
+          ["private"],
+          "still active here"
+        );
+
+        local.prefs.notifications.keywords.push("mine".to_owned());
+        let writes = reconcile(&mut local, &SyncedSettings::new(), &mut state.bases);
+        assert!(
+          writes.iter().all(|write| write.key != "notifications.keywords"),
+          "{writes:?}"
+        );
       }
 
       #[test]
@@ -754,7 +859,7 @@ mod tests {
         begin_account(&mut local, &mut state, user(2), &["1".to_owned()]);
         local.theme = Theme::Light;
         let writes = reconcile(&mut local, &SyncedSettings::new(), &mut state.bases);
-        assert_eq!(writes.len(), 1, "the keywords stay back: {writes:?}");
+        assert_eq!(writes.len(), 1, "{writes:?}");
         assert_eq!(writes[0].key, KEY_THEME);
       }
     }
@@ -775,6 +880,7 @@ mod tests {
             value: json!("dark"),
             maybe_stamp: None,
             is_held: false,
+            is_device_only: false,
           },
         )]
         .into(),

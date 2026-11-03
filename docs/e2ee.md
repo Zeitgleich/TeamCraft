@@ -2313,12 +2313,16 @@ restored together with them on a new device.
     account from one it hasn't heard of.
   - *Whose settings:* the device records which account its settings belong to. When another account
     opens, before anything shows or applies a setting, the synced ones go back to the defaults. On
-    a device with no owner on record (the first run after the update) a customized value is only
-    offered to the account if that account is the only one known to have used the device, by the
-    per-account "last open" records. Otherwise it may be somebody else's, and keywords are private:
-    it stays on the device, held, and doesn't enter the key bag unless the user changes it.
-  - *Running calls:* a synced default (start muted, camera off, background, mirror, status sounds)
-    never changes a call or pre-join screen that is open. It applies once the call is over.
+    a device with no owner on record (the first run after the update) nothing proves whose the
+    values are, since "last open" records only exist for DMs and conversations in a space. So
+    private ones (keywords, highlights, favorite order) never enter the key bag from there: with
+    another account on record they go back to the defaults, otherwise they stay active but
+    device-only, edits included, until a change on purpose in the account replaces them or the user
+    empties them. Other customized values are offered if this account is the only one on record,
+    otherwise they stay on the device until the user changes them.
+  - *Running calls:* the account's call settings aren't taken over while a call or pre-join screen
+    is open, so another device can't change the running call. They apply once it is over. A
+    background or mirror changed in Settings on this device applies at once.
   - *On the device:* the client keeps, next to the settings, what it last agreed on with the account
     per setting (value and stamp), in the same place as the settings themselves. A value
     that differs from that is a local change; so one made offline, or before a restart, goes out

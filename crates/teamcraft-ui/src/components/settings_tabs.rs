@@ -698,11 +698,11 @@ fn DeviceRow(
 /// a call (a camera picked in the call, the share options) must not reset the microphone, the
 /// camera or the device the call uses now.
 ///
-/// The defaults for the next call wait while a call or its pre-join screen is open: they can change
-/// from another device (issue #945), and a running call must not lose its background blur or show
-/// a microphone state it doesn't have. Returns what was applied, to pass as `maybe_previous` next
-/// time, so a default that waited applies once the call is over. The caller re-runs on
-/// `call.phase`.
+/// "Start muted" and "start with the camera off" are about the next call, so they wait while a call
+/// or its pre-join screen is open: setting the signals alone would show a state the media layer
+/// doesn't have. Returns what was applied, to pass as `maybe_previous` next time, so they apply once
+/// the call is over; the caller re-runs on `call.phase`. A background or mirror chosen in Settings
+/// applies at once. Other devices' changes don't get here during a call (`settings_sync`).
 pub fn apply_call_prefs(
   call: crate::calls::CallState,
   maybe_previous: Option<&CallPrefs>,
@@ -715,8 +715,6 @@ pub fn apply_call_prefs(
     Some(previous) if call.phase.get_untracked() != crate::calls::CallPhase::Idle => {
       applied.start_muted = previous.start_muted;
       applied.start_camera_off = previous.start_camera_off;
-      applied.mirror_self_view = previous.mirror_self_view;
-      applied.background = previous.background.clone();
     },
     _ => {
       if is_new(|a, b| a.start_muted == b.start_muted) {
@@ -725,13 +723,13 @@ pub fn apply_call_prefs(
       if is_new(|a, b| a.start_camera_off == b.start_camera_off) {
         call.is_camera_on.set(!calls.start_camera_off);
       }
-      if is_new(|a, b| a.mirror_self_view == b.mirror_self_view) {
-        call.mirror_self_view.set(calls.mirror_self_view);
-      }
-      if is_new(|a, b| a.background == b.background) {
-        call.effect.set(effect_from_slug(&calls.background));
-      }
     },
+  }
+  if is_new(|a, b| a.mirror_self_view == b.mirror_self_view) {
+    call.mirror_self_view.set(calls.mirror_self_view);
+  }
+  if is_new(|a, b| a.background == b.background) {
+    call.effect.set(effect_from_slug(&calls.background));
   }
   if is_new(|a, b| a.camera_id == b.camera_id) {
     call.camera_id.set(calls.camera_id.clone());
@@ -1040,45 +1038,27 @@ mod tests {
     });
   }
 
-  /// #945: the default background changed on another device must not strip the blur of a running
-  /// call, and the media layer must not hear of it.
+  /// Chosen in Settings during a call: the running call shows it at once, as it always did.
   #[test]
-  fn a_new_default_background_waits_for_the_end_of_the_call() {
+  fn a_background_or_mirror_changed_here_applies_in_the_call() {
     let owner = leptos::prelude::Owner::new();
     owner.with(|| {
       let call = crate::calls::CallState::new();
-      let blurred = CallPrefs {
-        background: "blur-light".into(),
-        ..CallPrefs::default()
-      };
-      let applied = apply_call_prefs(call, None, &blurred);
-      let shown = call.effect.get_untracked();
+      let saved = CallPrefs::default();
+      let applied = apply_call_prefs(call, None, &saved);
       call.phase.set(crate::calls::CallPhase::Active);
-      let none = CallPrefs {
-        background: "none".into(),
-        ..blurred.clone()
+      let changed = CallPrefs {
+        background: "blur-light".into(),
+        mirror_self_view: !saved.mirror_self_view,
+        ..saved.clone()
       };
-      let applied = apply_call_prefs(call, Some(&applied), &none);
-      assert_eq!(
-        call.effect.get_untracked(),
-        shown,
-        "the running call keeps its blur"
-      );
-      let applied = apply_call_prefs(call, Some(&applied), &none);
-      assert_eq!(call.effect.get_untracked(), shown, "and on another run as well");
-
-      call.phase.set(crate::calls::CallPhase::Idle);
-      apply_call_prefs(call, Some(&applied), &none);
-      assert_eq!(
-        call.effect.get_untracked(),
-        effect_from_slug("none"),
-        "the next call has it"
-      );
+      apply_call_prefs(call, Some(&applied), &changed);
+      assert_eq!(call.effect.get_untracked(), effect_from_slug("blur-light"));
+      assert_eq!(call.mirror_self_view.get_untracked(), changed.mirror_self_view);
     });
   }
 
-  /// #945: "start muted" from another device must not show the button as muted while the
-  /// microphone keeps sending.
+  /// "Start muted" must not show the button as muted while the microphone keeps sending.
   #[test]
   fn new_start_defaults_leave_the_running_call_as_it_is() {
     for phase in [crate::calls::CallPhase::Active, crate::calls::CallPhase::PreJoin] {
@@ -1094,13 +1074,11 @@ mod tests {
         let changed = CallPrefs {
           start_muted: true,
           start_camera_off: true,
-          mirror_self_view: !saved.mirror_self_view,
           ..saved.clone()
         };
         let applied = apply_call_prefs(call, Some(&applied), &changed);
         assert!(call.is_mic_on.get_untracked(), "{phase:?}");
         assert!(call.is_camera_on.get_untracked(), "{phase:?}");
-        assert_eq!(call.mirror_self_view.get_untracked(), saved.mirror_self_view);
         assert_eq!(events.get(), 0, "nothing reaches the media layer");
 
         call.phase.set(crate::calls::CallPhase::Idle);

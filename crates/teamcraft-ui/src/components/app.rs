@@ -1184,15 +1184,9 @@ pub(crate) fn connect_calls(state: AppState) {
     });
   });
   // The status sounds setting reaches the call backend at start and on every change (not on
-  // every settings write: the same value again is no change). It can change from another device
-  // (issue #945), so a running call keeps what it started with.
+  // every settings write: the same value again is no change).
   Effect::new(move |previous: Option<CallStatusSounds>| {
     let sounds = state.settings.prefs.with(|prefs| prefs.calls.status_sounds);
-    if let Some(previous) = previous
-      && call.phase.get() == CallPhase::Active
-    {
-      return previous;
-    }
     if previous != Some(sounds) {
       call.emit(CallEvent::StatusSounds(sounds));
     }
