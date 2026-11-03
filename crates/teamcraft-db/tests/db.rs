@@ -8,12 +8,12 @@
 
 use teamcraft_db::testing::TestDatabase;
 use teamcraft_db::{
-  ImageChange, KeyPackageCounts, NewConversation, NewDevice, NewKeyPackage, NewMessage, NewSpace,
-  OidcIdentity, PostOutcome, SnowflakeGenerator, StoredSpaceImage, participants_key,
+  ImageChange, KeyPackageCounts, NewConversation, NewDevice, NewKeyPackage, NewMessage, NewPushRetry,
+  NewSpace, OidcIdentity, PostOutcome, SnowflakeGenerator, StoredSpaceImage, participants_key,
 };
 use teamcraft_proto::{
   ClientMessageId, ConversationId, ConversationKind, ConversationVisibility, DeviceId, HistoryPolicy, Id,
-  IdempotencyKey, JoinPolicy, MessageId, SpaceId, UserId, UserKind,
+  IdempotencyKey, JoinPolicy, MessageId, PushKind, PushWakeUp, SpaceId, UserId, UserKind,
 };
 
 const ISSUER: &str = "https://auth.example.com/realms/dev";
@@ -332,9 +332,45 @@ async fn dms_go_with_their_deleted_participant_not_with_other_members() {
   remaining.sort_unstable();
   assert_eq!(remaining, vec![alice, importer]);
 
+  // A wake-up queued for alice's phone in that DM goes with it (#1136).
+  let device = db
+    .register_device(&NewDevice {
+      id: ids.next_id().unwrap(),
+      user_id: alice,
+      name: "phone",
+      public_key: &[1; 32],
+      cross_signature: &[2; 64],
+    })
+    .await
+    .unwrap()
+    .id;
+  let retry = NewPushRetry {
+    id: ids.next_id().unwrap(),
+    user: alice,
+    device,
+    is_user_endpoint: false,
+    wake_up: PushWakeUp {
+      kind: PushKind::Message,
+      conversation_id: dm,
+      maybe_message_id: None,
+      maybe_sender_id: None,
+      is_urgent: false,
+      maybe_thread_id: None,
+      maybe_call_id: None,
+      maybe_badge: None,
+      maybe_sent_at: None,
+    },
+    attempts: 1,
+    delay: std::time::Duration::from_secs(60),
+    ttl: std::time::Duration::from_secs(600),
+  };
+  assert!(db.enqueue_push_retry(&retry, 10).await.unwrap());
+  assert_eq!(db.count_push_retries(device).await.unwrap(), 1);
+
   db.delete_direct_conversation(dm, &leftover[0].remaining)
     .await
     .unwrap();
+  assert_eq!(db.count_push_retries(device).await.unwrap(), 0);
   assert!(
     db.deleted_users_with_direct_conversations(10)
       .await

@@ -18,6 +18,7 @@ use teamcraft_crypto::push_gateway::seal_bound_token;
 use teamcraft_proto::{BOUND_TOKEN_PREFIX, DeviceId, PushKind, PushProvider};
 use teamcraft_server::push::crypto::open_wakeup;
 use teamcraft_server::push::{GatewayClient, GatewaySettings, PushDispatcher, parse_gateway_key};
+use teamcraft_server::services::conversations::sweep_deleted;
 use teamcraft_server::state::Settings;
 use teamcraft_server::testing::{TestApp, TestUser};
 
@@ -339,6 +340,108 @@ where
       return;
     }
     tokio::time::sleep(Duration::from_millis(25)).await;
+  }
+}
+
+/// Wake-ups queued for a conversation go with its deletion (issue #1136).
+mod deletion {
+  use teamcraft_db::NewPushRetry;
+  use teamcraft_db::testing::sqlx;
+  use teamcraft_proto::{ConversationId, PushWakeUp, UserId};
+
+  use super::*;
+
+  #[tokio::test]
+  async fn deleting_a_channel_drops_its_queued_wake_ups() {
+    let Some(scene) = waiting_scene().await else {
+      return;
+    };
+    let reply = scene
+      .app
+      .delete(&scene.alice, &format!("/conversations/{}", scene.channel))
+      .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    assert_eq!(scene.queued().await, 0);
+    scene.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn deleting_a_space_drops_the_wake_ups_of_its_channels() {
+    let Some(scene) = waiting_scene().await else {
+      return;
+    };
+    let space: i64 = sqlx::query_scalar("SELECT space_id FROM conversations WHERE id = $1")
+      .bind(scene.channel.parse::<i64>().unwrap())
+      .fetch_one(scene.app.sql_pool())
+      .await
+      .unwrap();
+    let reply = scene.app.delete(&scene.alice, &format!("/spaces/{space}")).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    assert_eq!(scene.queued().await, 0);
+    scene.app.stop().await;
+  }
+
+  /// A wake-up written after the marking (a send racing the deletion) is not claimed, and the
+  /// sweep that clears the conversation removes it.
+  #[tokio::test]
+  async fn a_wake_up_of_a_deleted_conversation_is_never_sent() {
+    let Some(scene) = waiting_scene().await else {
+      return;
+    };
+    // Marked by hand, so no sweep clears the conversation before the check.
+    sqlx::query("UPDATE conversations SET deleted_at = now() WHERE id = $1")
+      .bind(scene.channel.parse::<i64>().unwrap())
+      .execute(scene.app.sql_pool())
+      .await
+      .unwrap();
+    let state = &scene.app.state;
+    let carol: UserId = user_id(&scene.app, &scene.carol).await.parse().unwrap();
+    let retry = NewPushRetry {
+      id: state.next_id().unwrap(),
+      user: carol,
+      device: scene.carol_device.parse().unwrap(),
+      is_user_endpoint: false,
+      wake_up: PushWakeUp {
+        kind: PushKind::Message,
+        conversation_id: scene.channel.parse::<ConversationId>().unwrap(),
+        maybe_message_id: Some("9".parse().unwrap()),
+        maybe_sender_id: None,
+        is_urgent: false,
+        maybe_thread_id: None,
+        maybe_call_id: None,
+        maybe_badge: None,
+        maybe_sent_at: None,
+      },
+      attempts: 1,
+      delay: Duration::ZERO,
+      ttl: Duration::from_secs(60),
+    };
+    assert!(state.database.enqueue_push_retry(&retry, 10).await.unwrap());
+    scene.fake.set_reply(None);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(
+      scene.fake.pushes().is_empty(),
+      "nothing is sent for a deleted channel"
+    );
+    assert_eq!(scene.queued().await, 2, "left alone, not claimed");
+
+    // The sweep that clears the conversation removes both.
+    sweep_deleted(state).await.unwrap();
+    assert_eq!(scene.queued().await, 0);
+    scene.app.stop().await;
+  }
+
+  /// A scene whose provider is down for long, with one wake-up of carol's waiting in the queue.
+  async fn waiting_scene() -> Option<Scene> {
+    let scene = Scene::start(|settings| {
+      settings.push.retry.initial_delay = Duration::from_secs(60);
+      settings.push.retry.max_delay = Duration::from_secs(60);
+    })
+    .await?;
+    scene.fake.set_reply(Some(outage()));
+    send(&scene.app, &scene.alice, &scene.channel, &scene.alice_device, 1).await;
+    wait_until(|| async { scene.queued().await == 1 }).await;
+    Some(scene)
   }
 }
 
