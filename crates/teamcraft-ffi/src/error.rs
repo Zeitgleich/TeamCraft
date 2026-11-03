@@ -74,6 +74,10 @@ pub enum TeamCraftError {
   /// or the room holds somebody unnamed): stay in the call.
   #[error("call move refused: {0}")]
   CallMoveRefused(String),
+  /// This device isn't in the conversation's encryption group yet (the welcome hasn't come), so it
+  /// can't join the call: try again shortly (issue #1174).
+  #[error("call encryption pending: {0}")]
+  CallEncryptionPending(String),
   /// The account is already in the call on as many devices as the call allows
   /// (`call_device_limit`, HTTP 409 on the join token): leave on one of them first.
   #[error("call device limit reached: {0}")]
@@ -98,6 +102,7 @@ impl From<CoreError> for TeamCraftError {
       CoreError::KeyBag(key_bag) => key_bag.into(),
       CoreError::Store(store) => store.into(),
       refused @ CoreError::CallMoveRefused { .. } => Self::CallMoveRefused(refused.to_string()),
+      pending @ CoreError::CallEncryptionPending(_) => Self::CallEncryptionPending(pending.to_string()),
       CoreError::LinkCodeInvalid => Self::LinkCodeInvalid,
       CoreError::LinkCodeForNewDevice => Self::LinkCodeForNewDevice,
       CoreError::LinkCodeForSignedInDevice => Self::LinkCodeForSignedInDevice,
@@ -174,6 +179,15 @@ mod tests {
     assert!(matches!(
       TeamCraftError::from(CoreError::Gateway("closed".into())),
       TeamCraftError::Core(_)
+    ));
+  }
+
+  #[test]
+  fn a_call_before_the_encryption_group_has_its_own_error() {
+    let pending = CoreError::CallEncryptionPending(teamcraft_client_api::model::id_from_raw(7));
+    assert!(matches!(
+      TeamCraftError::from(pending),
+      TeamCraftError::CallEncryptionPending(_)
     ));
   }
 

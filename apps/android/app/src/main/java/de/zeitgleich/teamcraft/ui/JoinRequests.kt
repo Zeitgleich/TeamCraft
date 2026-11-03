@@ -118,6 +118,7 @@ fun joinOutcomeMessage(step: JoinStep, outcome: JoinRequestOutcome): Int? = when
   JoinRequestOutcome.NOT_AN_ADMIN -> if (step == JoinStep.Ask) R.string.join_ask_not_admin else R.string.join_request_not_admin
   JoinRequestOutcome.TOO_SOON -> R.string.join_ask_too_soon
   JoinRequestOutcome.NOT_APPROVABLE -> R.string.join_request_not_approvable
+  JoinRequestOutcome.OWNER_ROLE_NOT_SIGNED -> R.string.join_request_owner_not_signed
 }
 
 /** The requests for one channel, for its conversation screen. */

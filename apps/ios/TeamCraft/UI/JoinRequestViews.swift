@@ -94,6 +94,7 @@ struct JoinRequestCard: View {
   }
 
   private var note: LocalizedStringKey {
+    if request.standing == .ownerRoleNotSigned { return "join_request_owner_not_signed" }
     if !isApprovable { return "join_request_not_admin" }
     return sharesHistory ? "join_request_hint_history" : "join_request_hint"
   }

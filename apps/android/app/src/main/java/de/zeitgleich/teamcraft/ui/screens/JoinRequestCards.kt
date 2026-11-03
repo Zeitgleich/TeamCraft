@@ -108,6 +108,7 @@ private fun JoinRequestCard(
   }
   val note = stringResource(
     when {
+      request.standing == JoinRequestStanding.OWNER_ROLE_NOT_SIGNED -> R.string.join_request_owner_not_signed
       !isApprovable -> R.string.join_request_not_admin
       sharesHistory -> R.string.join_request_hint_history
       else -> R.string.join_request_hint

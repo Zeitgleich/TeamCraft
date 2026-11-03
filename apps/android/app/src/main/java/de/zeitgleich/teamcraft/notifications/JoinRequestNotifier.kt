@@ -56,6 +56,8 @@ class JoinRequestNotifier(
       maybeProblem != null -> context.getString(maybeProblem)
       !spec.showsNames -> publicText
       request.standing == JoinRequestStanding.APPROVABLE -> context.getString(R.string.join_request_notification_text)
+      request.standing == JoinRequestStanding.OWNER_ROLE_NOT_SIGNED ->
+        context.getString(R.string.join_request_owner_not_signed)
       else -> context.getString(R.string.join_request_not_admin)
     }
     val builder = NotificationCompat.Builder(context, NotificationChannels.JOIN_REQUESTS)

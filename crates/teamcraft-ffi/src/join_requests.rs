@@ -16,8 +16,8 @@ use teamcraft_client_api::activity::{JoinRequest, JoinRequestStanding as Standin
 use teamcraft_client_api::backend::ChatBackend as _;
 use teamcraft_client_api::join_request_alerts::{self, JoinRequestAlerts};
 use teamcraft_client_api::model::{ConversationId, UserId};
-use teamcraft_core::CoreError;
 use teamcraft_core::store::{LocalStore, Table};
+use teamcraft_core::{CoreError, JoinRequestRefusal};
 use teamcraft_proto::{ErrorCode, HistoryPolicy};
 
 use crate::TeamCraft;
@@ -59,6 +59,9 @@ pub enum JoinRequestStanding {
   Approvable,
   /// Only the server calls the person an admin, or the roster is too old to trust: Decline only.
   NotAnAdmin,
+  /// The person is an admin, but the owner's own role in the channel is not signed yet, so members
+  /// would refuse the add: a signed admin or a workspace admin signs it first. Decline only.
+  OwnerRoleNotSigned,
 }
 
 /// What approving shares with the admin (e2ee.md §4.7).
@@ -95,6 +98,9 @@ pub enum JoinRequestOutcome {
   /// Approving: this device's own state disagrees with the request (the verified policy no longer
   /// asks for approval, or it isn't a private channel this device knows).
   NotApprovable,
+  /// Approving: the owner's own role in the channel is not signed, so members would refuse the
+  /// add. Someone has to sign it first (issue #880).
+  OwnerRoleNotSigned,
 }
 
 /// One action on a request, run on the client.
@@ -286,9 +292,8 @@ fn join_request_item(
     expires_at_ms: request.expires_at,
     standing: match request.standing {
       Standing::Approvable => JoinRequestStanding::Approvable,
-      // The apps decline-only both; a text of its own for the unsigned owner role comes with
-      // their next release (no new variant for the shells to switch over yet).
-      Standing::NotAnAdmin | Standing::OwnerRoleNotSigned => JoinRequestStanding::NotAnAdmin,
+      Standing::NotAnAdmin => JoinRequestStanding::NotAnAdmin,
+      Standing::OwnerRoleNotSigned => JoinRequestStanding::OwnerRoleNotSigned,
     },
     notification_tag: join_request_alerts::tag(request).as_str().to_owned(),
   }
@@ -313,6 +318,9 @@ fn join_outcome(result: Result<(), CoreError>) -> Result<JoinRequestOutcome, Cor
   match result {
     Ok(()) => Ok(JoinRequestOutcome::Done),
     Err(CoreError::NotAnAdmin(_)) => Ok(JoinRequestOutcome::NotAnAdmin),
+    Err(CoreError::JoinRequestNotApprovable(JoinRequestRefusal::OwnerRoleNotSigned)) => {
+      Ok(JoinRequestOutcome::OwnerRoleNotSigned)
+    },
     Err(CoreError::JoinRequestNotApprovable(_)) => Ok(JoinRequestOutcome::NotApprovable),
     Err(CoreError::Api(api)) => match api.error_code() {
       Some(ErrorCode::AdminJoinRequestNotFound) => Ok(JoinRequestOutcome::Gone),
@@ -326,7 +334,6 @@ fn join_outcome(result: Result<(), CoreError>) -> Result<JoinRequestOutcome, Cor
 #[cfg(test)]
 mod tests {
   use teamcraft_client_api::model::id_from_raw;
-  use teamcraft_core::JoinRequestRefusal;
   use teamcraft_core::api::ApiError;
   use teamcraft_proto::ErrorBody;
 
@@ -342,10 +349,11 @@ mod tests {
       &[
         request(ADMIN, 100, Standing::Approvable),
         request(STRANGER, 200, Standing::NotAnAdmin),
+        request(ADMIN, 300, Standing::OwnerRoleNotSigned),
       ],
       named,
     );
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 3);
     assert_eq!(items[0].conversation_id, CHANNEL.to_string());
     assert_eq!(items[0].conversation_name, "planning");
     assert_eq!(items[0].user_id, ADMIN.to_string());
@@ -357,6 +365,8 @@ mod tests {
     assert_eq!(items[0].standing, JoinRequestStanding::Approvable);
     assert_eq!(items[0].notification_tag, format!("admin-join:{CHANNEL}:{ADMIN}"));
     assert_eq!(items[1].standing, JoinRequestStanding::NotAnAdmin);
+    // Told apart from the server-only admin: the fix is another one (issue #880).
+    assert_eq!(items[2].standing, JoinRequestStanding::OwnerRoleNotSigned);
     // An older server sends no username; a channel this device doesn't name stays unnamed.
     let older = JoinRequest {
       maybe_username: None,
@@ -409,6 +419,13 @@ mod tests {
         JoinRequestOutcome::NotApprovable
       );
     }
+    assert_eq!(
+      join_outcome(Err(CoreError::JoinRequestNotApprovable(
+        JoinRequestRefusal::OwnerRoleNotSigned
+      )))
+      .unwrap(),
+      JoinRequestOutcome::OwnerRoleNotSigned
+    );
     assert!(join_outcome(Err(refused(ErrorCode::Forbidden))).is_err());
     assert!(join_outcome(Err(CoreError::Api(ApiError::Network("offline".into())))).is_err());
     assert!(join_outcome(Err(CoreError::NoGroup(id_from_raw(CHANNEL)))).is_err());
