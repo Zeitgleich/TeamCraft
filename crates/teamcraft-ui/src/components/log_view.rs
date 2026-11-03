@@ -190,7 +190,9 @@ fn FilteredLog(
   let count = Memo::new(move |_| state.read(|backend| backend.message_count(conversation)));
   let scan = Memo::new(move |_| {
     let filter = filter.get();
-    count.track();
+    // `get`, not `track`: a memo nobody reads is never computed, so it would not subscribe to the
+    // backend and its change would never reach this memo (#1203).
+    let _ = count.get();
     state.read(|backend| scan_entries(backend, conversation, &filter))
   });
   Effect::new(move |_| {
