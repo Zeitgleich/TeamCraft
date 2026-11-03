@@ -10935,6 +10935,7 @@ dependencies = [
  "objc2-user-notifications",
  "thiserror 2.0.21",
  "tracing",
+ "webkit2gtk-sys",
  "windows",
 ]
 

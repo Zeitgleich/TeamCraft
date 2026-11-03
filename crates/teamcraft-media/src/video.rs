@@ -147,10 +147,12 @@ impl VideoFrame {
 
 /// Bilinear resampling of one 8-bit plane, appended to `out`.
 ///
-/// It runs per frame on the sender (a 4K or 1080p camera shrunk to 720p, and every encoder's lower
-/// simulcast layers), so the source positions are worked out once per column and row, the weights
+/// It runs per frame on the sender (a 4K camera shrunk to 1080p or 720p, a 1080p one to 720p, and
+/// every encoder's lower simulcast layers), so the source positions are worked out once per column and row, the weights
 /// are 8-bit so the sums stay in `u32`, and halving, the simulcast step, averages 2x2 blocks
-/// (which is what bilinear gives there). docs/performance.md has the numbers (#537).
+/// (which is what bilinear gives there). Shrinking to two thirds (1080p to 720p: a 1080p camera's
+/// 720p layer, or the whole picture when the user caps the camera at 720p) has its fixed weights
+/// too ([`shrink_to_two_thirds`]). docs/performance.md has the numbers (#537).
 fn scale_plane(
   plane: &[u8],
   width: usize,
@@ -182,6 +184,22 @@ fn scale_plane(
     }
     return;
   }
+  if width * 2 == target_width * 3 && height * 2 == target_height * 3 {
+    shrink_to_two_thirds(plane, width, target_width, target);
+    return;
+  }
+  bilinear(plane, width, height, target_width, target_height, target);
+}
+
+/// Bilinear resampling of `plane` into `target` (`target_width` x `target_height`), any ratio.
+fn bilinear(
+  plane: &[u8],
+  width: usize,
+  height: usize,
+  target_width: usize,
+  target_height: usize,
+  target: &mut [u8],
+) {
   let columns = sample_positions(width, target_width);
   let mut top = vec![0u32; target_width];
   let mut bottom = vec![0u32; target_width];
@@ -214,6 +232,48 @@ fn scale_plane(
     for ((value, top), bottom) in target_row.iter_mut().zip(&top).zip(&bottom) {
       // Each input is a pixel times 256, so the blend is a pixel times 65536.
       *value = ((top * (256 - fraction_y) + bottom * fraction_y + (1 << 15)) >> 16) as u8;
+    }
+  }
+}
+
+/// [`bilinear`] for a target two thirds of the source's size on both sides, with the same result:
+/// there every three source pixels give two target pixels, the first a quarter of the way from the
+/// first source pixel to the second (weights 3:1), the other three quarters of the way from the
+/// second to the third (1:3). Rows go the same way, so no positions are looked up, the sums stay
+/// in `u16` and the loops vectorize.
+fn shrink_to_two_thirds(plane: &[u8], width: usize, target_width: usize, target: &mut [u8]) {
+  // A source row shrunk horizontally, as pixel values times 4.
+  let mut rows = [
+    vec![0u16; target_width],
+    vec![0u16; target_width],
+    vec![0u16; target_width],
+  ];
+  for (target_rows, source_rows) in target
+    .chunks_exact_mut(target_width * 2)
+    .zip(plane.chunks_exact(width * 3))
+  {
+    for (source_row, row) in source_rows.chunks_exact(width).zip(&mut rows) {
+      for (pair, triple) in row
+        .as_chunks_mut::<2>()
+        .0
+        .iter_mut()
+        .zip(source_row.as_chunks::<3>().0)
+      {
+        let [a, b, c] = triple.map(u16::from);
+        *pair = [3 * a + b, b + 3 * c];
+      }
+    }
+    let (upper, lower) = target_rows.split_at_mut(target_width);
+    let [first, middle, last] = &rows;
+    for (((upper, lower), first), (middle, last)) in upper
+      .iter_mut()
+      .zip(lower.iter_mut())
+      .zip(first)
+      .zip(middle.iter().zip(last))
+    {
+      // Weights of 16 in all: the rounded quotient is bilinear's exactly.
+      *upper = ((3 * first + middle + 8) >> 4) as u8;
+      *lower = ((middle + 3 * last + 8) >> 4) as u8;
     }
   }
 }
@@ -1076,6 +1136,39 @@ mod tests {
           worst <= 1,
           "{width}x{height} -> {target_width}x{target_height}: off by {worst}"
         );
+      }
+    }
+
+    #[test]
+    fn two_thirds_is_exactly_bilinear() {
+      let mut seed = 0x9e37_79b9_u32;
+      let mut noise = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed as u8
+      };
+      // 1080p to 720p (luma and chroma), and small and extreme pictures.
+      for ((width, height), (target_width, target_height)) in [
+        ((1920, 1080), (1280, 720)),
+        ((960, 540), (640, 360)),
+        ((3, 3), (2, 2)),
+        ((6, 9), (4, 6)),
+      ] {
+        for plane in [
+          (0..width * height).map(|_| noise()).collect::<Vec<u8>>(),
+          vec![255; width * height],
+          vec![0; width * height],
+        ] {
+          let mut fast = Vec::new();
+          scale_plane(&plane, width, height, target_width, target_height, &mut fast);
+          let mut general = vec![0; target_width * target_height];
+          bilinear(&plane, width, height, target_width, target_height, &mut general);
+          assert!(
+            fast == general,
+            "{width}x{height} -> {target_width}x{target_height} differs from bilinear"
+          );
+        }
       }
     }
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-webview-codec-probe-begin"
+description = "Enables the webview_codec_probe_begin command without any pre-configured scope."
+commands.allow = ["webview_codec_probe_begin"]
+
+[[permission]]
+identifier = "deny-webview-codec-probe-begin"
+description = "Denies the webview_codec_probe_begin command without any pre-configured scope."
+commands.deny = ["webview_codec_probe_begin"]

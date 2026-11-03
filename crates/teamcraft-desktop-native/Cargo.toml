@@ -58,6 +58,10 @@ objc2-user-notifications = { version = "0.3.2", default-features = false, featur
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSError", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL"] }
 
+# Linux: the WebKitGTK version at run time (MIT; the version wry uses, so already in the tree).
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk-sys = "2.0.2"
+
 # Windows: PowerRegisterSuspendResumeNotification and NotifyNetworkConnectivityHintChange
 # (MIT/Apache-2.0; the version the shell uses).
 [target.'cfg(windows)'.dependencies]

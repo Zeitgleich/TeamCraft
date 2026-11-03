@@ -528,6 +528,25 @@ impl CallState {
     self.emit(CallEvent::MoveHere);
   }
 
+  /// Shows a call the media layer is already in: this page is new (the desktop shell keeps the call
+  /// when the page reloads, or when its web process died, #824). Nothing goes to the media layer: it
+  /// keeps the call as it is, and this state follows it.
+  pub fn resume(&self, active: &ActiveCall) {
+    self.maybe_request.set(Some(CallRequest {
+      conversation: active.conversation,
+      kind: active.kind,
+    }));
+    self.is_minimized.set(active.kind == CallKind::Huddle);
+    self.is_mic_on.set(!active.is_muted);
+    self.is_deafened.set(active.is_deafened);
+    self.is_camera_on.set(active.is_camera_on);
+    self.is_sharing_screen.set(active.is_sharing_screen);
+    self.effect.set(active.background);
+    self.has_ended.set(false);
+    self.incoming.set(None);
+    self.phase.set(CallPhase::Active);
+  }
+
   /// Leaves the pre-join screen and enters the call.
   pub fn enter(&self) {
     let is_huddle = self
@@ -775,6 +794,52 @@ mod tests {
           .with_untracked(|qualities| qualities.is_empty())
       );
       assert_eq!(call.maybe_quality_menu.get_untracked(), None);
+    });
+  }
+
+  /// #824: a new page shows the call the shell kept: as it is, and without joining it again.
+  #[test]
+  fn resuming_shows_the_running_call_without_asking_the_media_layer() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let call = CallState::new();
+      let events = Rc::new(RefCell::new(Vec::new()));
+      let seen = events.clone();
+      call.set_handler(move |event| seen.borrow_mut().push(event));
+      let active = ActiveCall {
+        conversation: id_from_raw(7),
+        kind: CallKind::Direct,
+        is_muted: true,
+        is_deafened: true,
+        is_secured: true,
+        maybe_privacy_code: None,
+        participants: Vec::new(),
+        active_speakers: Vec::new(),
+        is_camera_on: false,
+        is_sharing_screen: true,
+        background: BackgroundEffect::BlurLight,
+        maybe_muted_by_host: None,
+        screen_sound: ScreenShareSound::Off,
+        is_reconnecting: false,
+        reconnecting: Vec::new(),
+        maybe_moved_to: None,
+      };
+      call.resume(&active);
+      assert_eq!(call.phase.get_untracked(), CallPhase::Active);
+      assert_eq!(
+        call.maybe_request.get_untracked(),
+        Some(CallRequest {
+          conversation: id_from_raw(7),
+          kind: CallKind::Direct,
+        })
+      );
+      assert!(!call.is_mic_on.get_untracked());
+      assert!(call.is_deafened.get_untracked());
+      assert!(!call.is_camera_on.get_untracked());
+      assert!(call.is_sharing_screen.get_untracked());
+      assert_eq!(call.effect.get_untracked(), BackgroundEffect::BlurLight);
+      assert!(!call.is_minimized.get_untracked());
+      assert!(events.borrow().is_empty());
     });
   }
 

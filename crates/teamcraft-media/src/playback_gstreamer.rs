@@ -10,6 +10,11 @@ const MP4_CAPS: &str = "video/quicktime";
 const H264_CAPS: &str = "video/x-h264";
 const HEVC_CAPS: &str = "video/x-h265";
 
+/// The version of the system's GStreamer, which WebKitGTK's video decoders are made of.
+pub fn gstreamer_version() -> String {
+  gst::version_string().to_string()
+}
+
 /// What the registry can autoplug for an MP4/MOV with H.264 or HEVC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlaybackDecoders {

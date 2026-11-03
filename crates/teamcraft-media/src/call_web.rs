@@ -1583,6 +1583,14 @@ impl CallState<'_> {
                 sender.set_needed_layers(layers);
               }
             },
+            CallEngineEvent::LayerBitrates { stream_id, bitrates } => {
+              if let Some(sender) = self.sender_of(*stream_id)
+                && let Err(gave_up) = sender.set_layer_bitrates(bitrates)
+              {
+                let kind = sender.publication.kind.clone();
+                self.on_encoders_gave_up(engine, &kind, gave_up);
+              }
+            },
             CallEngineEvent::UplinkEstimate { loss_percent, .. } => {
               self.encoder.set_measured_loss_percent(*loss_percent)?;
               if let Some(sound) = &mut self.maybe_screen_sound
@@ -1965,7 +1973,8 @@ impl CallState<'_> {
     let max_layers = engine.simulcast_layer_limit();
     let sender =
       TrackSender::start(stream, plan, codec.clone(), max_layers, publication, self.inputs).await?;
-    engine.publish_video(publication, kind, codec, sender.layers());
+    // The encoders are ours: a camera follows the uplink with its layers' bitrates (#939).
+    engine.publish_adaptive_video(publication, kind, codec, sender.layers());
     self.senders.push(sender);
     // What the others decode may have changed while the capture started.
     self.follow_codecs(engine);
@@ -1990,7 +1999,7 @@ impl CallState<'_> {
           self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
           debug!(kind = ?sender.publication.kind, codec = %wanted, "video track goes out in another codec");
           engine.withdraw_video(withdrawn);
-          engine.publish_video(
+          engine.publish_adaptive_video(
             publication,
             sender.publication.kind.clone(),
             wanted,

@@ -18,7 +18,7 @@ mod loopback;
 pub mod servers;
 mod store;
 #[cfg(test)]
-mod test_dir;
+pub(crate) mod test_dir;
 
 #[cfg(all(test, feature = "integration"))]
 pub(crate) mod integration_tests;
