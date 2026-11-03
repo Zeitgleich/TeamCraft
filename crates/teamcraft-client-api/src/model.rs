@@ -744,6 +744,30 @@ pub enum OlderHistory {
   Complete,
 }
 
+/// History this device never read between two rows it holds (#1156): a jump to a date read a page
+/// of rows older than those held, and the feed shows them next to each other. A reader near it gets
+/// its rows from the server ([`crate::backend::ChatBackend::fill_history_gap`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryGap {
+  /// The newest message before it: what a request names it by.
+  pub after: MessageId,
+  /// Where it is in the feed: how many rows come before it.
+  pub index: usize,
+  /// How the conversation's last request for a hole stands: `Available`, `Loading` or `Failed`.
+  pub status: OlderHistory,
+}
+
+/// Which side of a [`HistoryGap`] a page is read from: the reader's, so its rows arrive next to
+/// what the reader looks at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GapEdge {
+  /// Its oldest messages, after the row before it: the reader reads down towards it.
+  Older,
+  /// Its newest messages, before the row after it: the reader reads up towards it.
+  Newer,
+}
+
 /// How far the first sync of a newly set up device is, for the bar under the top bar. The core's
 /// numbers: conversations, the only total known up front.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

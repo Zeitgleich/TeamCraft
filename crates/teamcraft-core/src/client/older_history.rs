@@ -111,7 +111,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// history this user may see can differ then.
   pub(super) fn forget_older_history(&self, conversation: ConversationId) -> Result<(), CoreError> {
     self.store.delete(Table::SyncState, &record_key(conversation))?;
-    Ok(())
+    self.forget_history_gaps(conversation)
   }
 }
 
@@ -137,7 +137,7 @@ fn next_position(maybe_page_oldest: Option<MessageId>, has_more: bool) -> Paging
   }
 }
 
-fn read_connections(store: &impl LocalStore) -> Result<u64, CoreError> {
+pub(super) fn read_connections(store: &impl LocalStore) -> Result<u64, CoreError> {
   Ok(records::get_json::<u64>(store, Table::SyncState, CONNECTIONS_KEY)?.unwrap_or(0))
 }
 

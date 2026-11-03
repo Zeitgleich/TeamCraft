@@ -47,6 +47,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         request,
       } => self.load_older_history(conversation, request).await,
+      CoreCommand::FillHistoryGap {
+        conversation,
+        after,
+        edge,
+        request,
+      } => self.fill_history_gap(conversation, after, edge, request).await,
       CoreCommand::MarkRead { conversation } => {
         self.update_account_data(|data, now| data.clear_unread_mark(conversation, now))?;
         // The badge clears now; the server's `unread_update` confirms it.

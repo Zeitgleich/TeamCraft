@@ -22,11 +22,11 @@ use teamcraft_client_api::calls::{
 };
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
-  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup,
-  ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue, Message, MessageKind,
-  OlderHistory, PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction, SidebarCategory, Space,
-  SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow,
-  UnseenReactions, User, UserId, hue_from_hex,
+  Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup, GapEdge,
+  HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue, Message,
+  MessageKind, OlderHistory, PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction,
+  SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary,
+  TimestampMs, TypingNow, UnseenReactions, User, UserId, hue_from_hex,
 };
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
@@ -44,6 +44,7 @@ use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::receipts::{ReadIndicator, seen_by};
 
 use crate::client::bookmarks_key;
+use crate::client::history_gaps::{Gap, read_record as read_gaps_record};
 use crate::client::older_history::{is_failure_current, older_history_record};
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::clock::Clock;
@@ -55,7 +56,7 @@ use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, FeedVersion, LocalStore, MessageContent, MessageEdge, MessageFilter,
-  MessageSlot, StoredMessage, Table, Unreadable, write_group,
+  MessageOrder, MessageSlot, StoredMessage, Table, Unreadable, write_group,
 };
 
 /// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
@@ -440,11 +441,52 @@ pub enum CoreCommand {
     conversation: ConversationId,
     request: u64,
   },
+  /// The reader came near a hole a jump to a date left: one page of it, from `edge`. `request` as
+  /// for [`Self::LoadOlderHistory`].
+  FillHistoryGap {
+    conversation: ConversationId,
+    after: MessageId,
+    edge: GapEdge,
+    request: u64,
+  },
 }
 
 /// Where the engine notes (in the sync state) which "jump to date" request it answered last.
 pub(crate) fn history_jump_key(conversation: ConversationId) -> String {
   format!("history-jump/{conversation}")
+}
+
+/// The holes of `conversation` and how the last request for one stands, given that of this run.
+fn history_gaps_of(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  maybe_request: Option<u64>,
+) -> Result<(Vec<Gap>, OlderHistory), CoreError> {
+  let Some(record) = read_gaps_record(store, conversation)? else {
+    return Ok((Vec::new(), OlderHistory::Available));
+  };
+  let status = match maybe_request {
+    None => OlderHistory::Available,
+    Some(request) if record.answered != request => OlderHistory::Loading,
+    Some(_) => match record.maybe_failed_in {
+      Some(failed_in) if is_failure_current(store, failed_in)? => OlderHistory::Failed,
+      _ => OlderHistory::Available,
+    },
+  };
+  Ok((record.gaps, status))
+}
+
+/// The next request number of a conversation: past the last one, and past the clock's milliseconds
+/// so that it differs from those of earlier runs, whose answers are in the store.
+fn next_request(
+  requests: &RefCell<HashMap<ConversationId, u64>>,
+  conversation: ConversationId,
+  now: u64,
+) -> u64 {
+  let mut requests = requests.borrow_mut();
+  let last = requests.entry(conversation).or_default();
+  *last = now.max(*last + 1);
+  *last
 }
 
 /// How the reading back through `conversation` stands, given the last request of this run.
@@ -517,6 +559,8 @@ pub struct CoreChatBackend<S> {
   layouts: RefCell<Vec<(ConversationId, Rc<FeedLayout>)>>,
   /// The last request for older history per conversation since this backend started.
   older_requests: RefCell<HashMap<ConversationId, u64>>,
+  /// The last request for a hole's history per conversation since this backend started.
+  gap_requests: RefCell<HashMap<ConversationId, u64>>,
   #[cfg(not(target_arch = "wasm32"))]
   pub(crate) search: RefCell<crate::ui_search::UiSearchState>,
 }
@@ -554,6 +598,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       feeds: RefCell::default(),
       layouts: RefCell::default(),
       older_requests: RefCell::default(),
+      gap_requests: RefCell::default(),
       #[cfg(not(target_arch = "wasm32"))]
       search: RefCell::new(Default::default()),
     }
@@ -1422,6 +1467,32 @@ impl<S: LocalStore> CoreChatBackend<S> {
       hidden,
       hidden_positions,
     }
+  }
+
+  /// How many rows of the feed sort at or before the server message `after`: where a hole after
+  /// it shows ([`ChatBackend::history_gaps`]).
+  fn rows_through(&self, conversation: ConversationId, after: MessageId) -> usize {
+    let value = teamcraft_proto::Id::snowflake(after).get();
+    if self.store.indexes_feed() {
+      let layout = self.feed_layout(conversation);
+      let past = MessageOrder {
+        group: 0,
+        value,
+        client_message_id: [u8::MAX; 16],
+      };
+      let ranks = self.read(
+        self
+          .store
+          .feed_ranks(conversation, &[past])
+          .map_err(CoreError::from),
+      );
+      return ranks.first().map_or(0, |rank| layout.row_position(*rank));
+    }
+    let mut rows = 0;
+    self.with_feed(conversation, &mut |all, view| {
+      rows = view.rows.partition_point(|at| all[*at].sort_key() <= (0, value));
+    });
+    rows
   }
 
   /// Hands `read` a conversation's messages and its [`FeedView`], derived again only when the
@@ -2431,14 +2502,38 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       return;
     }
     let now = u64::try_from(self.clock.now_ms()).unwrap_or(0);
-    let request = {
-      let mut requests = self.older_requests.borrow_mut();
-      let last = requests.entry(conversation).or_default();
-      *last = now.max(*last + 1);
-      *last
-    };
+    let request = next_request(&self.older_requests, conversation, now);
     self.command(CoreCommand::LoadOlderHistory {
       conversation,
+      request,
+    });
+  }
+
+  fn history_gaps(&self, conversation: ConversationId) -> Vec<HistoryGap> {
+    let maybe_request = self.gap_requests.borrow().get(&conversation).copied();
+    let (gaps, status) = self.read(history_gaps_of(&self.store, conversation, maybe_request));
+    gaps
+      .into_iter()
+      .map(|gap| HistoryGap {
+        after: gap.after,
+        index: self.rows_through(conversation, gap.after),
+        status,
+      })
+      .collect()
+  }
+
+  fn fill_history_gap(&self, conversation: ConversationId, gap: HistoryGap, edge: GapEdge) {
+    let maybe_request = self.gap_requests.borrow().get(&conversation).copied();
+    let (_, status) = self.read(history_gaps_of(&self.store, conversation, maybe_request));
+    if status == OlderHistory::Loading {
+      return;
+    }
+    let now = u64::try_from(self.clock.now_ms()).unwrap_or(0);
+    let request = next_request(&self.gap_requests, conversation, now);
+    self.command(CoreCommand::FillHistoryGap {
+      conversation,
+      after: gap.after,
+      edge,
       request,
     });
   }
@@ -4033,6 +4128,19 @@ mod tests {
       }
 
       let rows = whole.messages(conversation, 0, count);
+      // Where a hole after a message shows (#1156): after the same rows either way.
+      let afters = rows
+        .iter()
+        .map(|row| row.id)
+        .chain([id(1), id(1_055), id(777_777)]);
+      for after in afters {
+        assert_eq!(
+          indexed.rows_through(conversation, after),
+          whole.rows_through(conversation, after),
+          "after {after}"
+        );
+      }
+      assert_eq!(whole.rows_through(conversation, rows[0].id), 1);
       let mut anchors: Vec<Option<FeedAnchor>> = rows
         .iter()
         .map(|row| {

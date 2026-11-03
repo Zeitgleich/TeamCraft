@@ -26,6 +26,7 @@ mod group_health;
 mod groups;
 mod guest;
 mod heads;
+pub(crate) mod history_gaps;
 pub mod import;
 mod imported_history;
 mod join_requests;

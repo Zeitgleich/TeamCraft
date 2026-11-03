@@ -704,6 +704,21 @@ pub trait ChatBackend {
   /// or there is no more. It arrives like any store update, before the rows held
   /// ([`Self::rows_prepended`]); [`Self::older_history`] tells how the request stands.
   fn load_older_history(&self, _conversation: ConversationId) {}
+  /// The holes between the rows held that a jump to a date left (#1156), oldest first. Backends
+  /// that hold the whole history have none.
+  fn history_gaps(&self, _conversation: ConversationId) -> Vec<crate::model::HistoryGap> {
+    Vec::new()
+  }
+  /// The reader came near a hole: one page of it from the server, from the reader's side, unless a
+  /// request is on its way. It arrives like any store update, among the rows held; a page read from
+  /// the newer side lands before the reader and counts in [`Self::rows_prepended`].
+  fn fill_history_gap(
+    &self,
+    _conversation: ConversationId,
+    _gap: crate::model::HistoryGap,
+    _edge: crate::model::GapEdge,
+  ) {
+  }
   /// The conversation includes people from outside the organization (the "external" badge).
   fn has_external_people(&self, _conversation: ConversationId) -> bool {
     false
