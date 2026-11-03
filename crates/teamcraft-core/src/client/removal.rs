@@ -222,10 +222,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Deletes a channel for everybody (e2ee.md §4.6, "Deleting a channel"), then drops it here with
   /// its local history: the user confirmed this here. Not queued while offline: a deletion can't be
   /// undone, so it happens when the user asks or fails visibly. Done also when the channel is gone
-  /// already (a lost answer, a second admin); any other 404 is a refusal like the rest.
+  /// already (a lost answer, a second admin); any other 404 is a refusal like the rest. Signed if this
+  /// user can, so the members' devices purge at once too (`server_deletions`).
   pub async fn delete_channel(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     self.note_own_deletion(conversation)?;
-    if let Err(error) = self.api.delete_conversation(conversation).await
+    if let Err(error) = self.request_channel_deletion(conversation).await
       && error.error_code() != Some(&ErrorCode::ChannelNotFound)
     {
       self.forget_own_deletion(conversation)?;
@@ -246,7 +247,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     for channel in &channels {
       self.note_own_deletion(*channel)?;
     }
-    if let Err(error) = self.api.delete_space(space).await
+    if let Err(error) = self.request_space_deletion(space, &channels).await
       && error.error_code() != Some(&ErrorCode::SpaceNotFound)
     {
       for channel in &channels {

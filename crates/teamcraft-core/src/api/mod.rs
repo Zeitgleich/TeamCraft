@@ -69,6 +69,7 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest};
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingId, MeetingResponse};
+use teamcraft_proto::{DeleteConversationRequest, DeleteSpaceRequest, ListSpaceChannelEpochsResponse};
 use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
 use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
@@ -266,7 +267,11 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<(), ApiError>>;
   /// Deletes a channel for everybody (`DELETE /conversations/{id}`, `delete_channel`); not found
   /// once it is gone (e2ee.md §4.6).
-  fn delete_conversation(&self, conversation: ConversationId) -> impl Future<Output = Result<(), ApiError>>;
+  fn delete_conversation(
+    &self,
+    conversation: ConversationId,
+    request: &DeleteConversationRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
   /// Every channel `user` is a member of (`GET /admin/conversations?user_id=`, all pages; instance
   /// admins): the admin's client signs a removal from each (admin.md §3.2.1).
   fn admin_channels_of(&self, user: UserId) -> impl Future<Output = Result<Vec<ConversationId>, ApiError>>;
@@ -306,7 +311,17 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<ListConversationsResponse, ApiError>>;
   /// Deletes a space with its channels for everybody (`DELETE /spaces/{id}`, `delete_space`); not
   /// found once it is gone.
-  fn delete_space(&self, space: SpaceId) -> impl Future<Output = Result<(), ApiError>>;
+  fn delete_space(
+    &self,
+    space: SpaceId,
+    request: &DeleteSpaceRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// The group epochs of a space's channels, to sign its deletion
+  /// (`GET /spaces/{id}/channel-epochs`). An older server answers 404.
+  fn space_channel_epochs(
+    &self,
+    space: SpaceId,
+  ) -> impl Future<Output = Result<ListSpaceChannelEpochsResponse, ApiError>>;
   fn create_space(
     &self,
     request: &CreateSpaceRequest,

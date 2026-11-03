@@ -70,7 +70,8 @@ pub use background::UserBackground;
 pub use bot::{BOT_ISSUER, StoredBot};
 pub use call_history::{MissedCall, StoredCall};
 pub use channel_deletion::{
-  ChannelFacts, RemovalDone, RemovalStep, SpaceChannelCounts, SpaceChannelFacts, SpaceDeletion, SpaceLeft,
+  ChannelFacts, DeletionSignature, RemovalDone, RemovalStep, SpaceChannelCounts, SpaceChannelFacts,
+  SpaceDeletion, SpaceLeft, StoredDeletionSignature,
 };
 pub use channel_role_log::ChannelRoleLogEntry;
 pub use conversation::{

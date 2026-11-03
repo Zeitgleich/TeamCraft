@@ -7,9 +7,10 @@ use teamcraft_db::{
 };
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, ConvertChannelRequest,
-  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, GatewayEvent, GuestDmStart, HistoryPolicy,
-  ListConversationsQuery, ListConversationsResponse, MoveChannelRequest, Permission, SpaceId, SpaceRole,
-  SystemEventKind, Target, UpdateConversationRequest, UserId,
+  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeleteConversationRequest, GatewayEvent,
+  GuestDmStart, HistoryPolicy, ListConversationsQuery, ListConversationsResponse, MoveChannelRequest,
+  Permission, SignedChannelDeletion, SpaceId, SpaceRole, SystemEventKind, Target, UpdateConversationRequest,
+  UserId,
 };
 
 use super::access::{
@@ -87,14 +88,24 @@ pub async fn list_conversations(
     ));
   }
   // Only with the user's own list: the channel browser lists other conversations.
-  let deleted_conversation_ids = if filter.only_joined {
-    state.database.deleted_conversations_of(caller.user.id).await?
+  let (deleted_conversation_ids, signed_deletions) = if filter.only_joined {
+    (
+      state.database.deleted_conversations_of(caller.user.id).await?,
+      state
+        .database
+        .deletion_signatures_of(caller.user.id)
+        .await?
+        .into_iter()
+        .map(super::channel_roles::deletion_signature_response)
+        .collect(),
+    )
   } else {
-    Vec::new()
+    (Vec::new(), Vec::new())
   };
   Ok(ListConversationsResponse {
     conversations,
     deleted_conversation_ids,
+    signed_deletions,
   })
 }
 
@@ -661,12 +672,20 @@ async fn ensure_guest_may_start(
 /// channel admins, workspace admins and owners, and a space admin where they reach it; admin.md
 /// §3.1.1). Marks it, then background work clears it ([`sweep_deleted`]): a big channel would outlast
 /// the request. What this means on the members' devices: e2ee.md §4.6. Answers 404 once it is gone,
-/// which clients take as done, so a retry leaves no second audit row.
+/// which clients take as done, so a retry leaves no second audit row. A signed deletion must name the
+/// group's epoch at this moment (under the lock), so that a commit since refuses it on the devices.
 pub async fn delete_channel(
   state: &AppState,
   caller: &AuthenticatedUser,
   id: ConversationId,
+  request: DeleteConversationRequest,
 ) -> Result<(), ApiError> {
+  let maybe_signature = request
+    .maybe_signed_deletion
+    .as_ref()
+    .map(|signed| super::channel_roles::check_signed_deletion(signed, Some(id)))
+    .transpose()?
+    .map(|(_, signature)| signature);
   let access = load_conversation(state, caller, id).await?;
   if access.view.conversation.kind != ConversationKind::Channel {
     return Err(ApiError::NotAChannel);
@@ -676,10 +695,16 @@ pub async fn delete_channel(
   let audit = audit::prepared(state, caller.user.id, "channel_deleted", &audit_target)?;
   let maybe_members = state
     .database
-    .delete_channel_locked(id, &audit, |facts| {
+    .delete_channel_locked(id, &audit, maybe_signature.as_ref(), |facts, epoch| {
       // docs/import-synology.md: an import running into it would lose its place.
       if facts.maybe_importer.is_some() {
         return Err(ApiError::ImportInProgress);
+      }
+      if maybe_signature
+        .as_ref()
+        .is_some_and(|signature| signature.epoch != epoch)
+      {
+        return Err(ApiError::EpochConflict { current_epoch: epoch });
       }
       Ok(())
     })
@@ -687,24 +712,37 @@ pub async fn delete_channel(
   let Some(members) = maybe_members else {
     return Err(ApiError::conversation_not_found());
   };
-  announce_deleted(state, id, &members).await;
+  announce_deleted(state, id, &members, request.maybe_signed_deletion).await;
   Ok(())
 }
 
 /// Tells the people concerned that the conversation is gone, ends its calls, and starts clearing it.
-pub(crate) async fn announce_deleted(state: &AppState, conversation_id: ConversationId, users: &[UserId]) {
+pub(crate) async fn announce_deleted(
+  state: &AppState,
+  conversation_id: ConversationId,
+  users: &[UserId],
+  maybe_signed_deletion: Option<SignedChannelDeletion>,
+) {
   for user in users {
     super::calls::evict_from_call(state, conversation_id, *user).await;
   }
-  announce_deleted_direct(state, conversation_id, users);
+  announce_deleted_direct(state, conversation_id, users, maybe_signed_deletion);
   wake_sweep(state);
 }
 
 /// Announces a deleted conversation without clearing anything more.
-pub(crate) fn announce_deleted_direct(state: &AppState, conversation_id: ConversationId, users: &[UserId]) {
+pub(crate) fn announce_deleted_direct(
+  state: &AppState,
+  conversation_id: ConversationId,
+  users: &[UserId],
+  maybe_signed_deletion: Option<SignedChannelDeletion>,
+) {
   state.hub.publish(
     users.iter().copied(),
-    &GatewayEvent::ConversationDelete { conversation_id },
+    &GatewayEvent::ConversationDelete {
+      conversation_id,
+      maybe_signed_deletion,
+    },
   );
   // Clients that don't know `conversation_delete` yet drop a conversation they were removed from.
   for user in users {

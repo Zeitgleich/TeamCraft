@@ -52,6 +52,10 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
+use teamcraft_proto::{
+  ChannelDeletionDocument, ChannelRoleLogEntryResponse, ConversationEpoch, DeleteConversationRequest,
+  DeleteSpaceRequest, DeletedConversationSignature, ListSpaceChannelEpochsResponse, SignedChannelDeletion,
+};
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkClosedReason, DeviceLinkRequest};
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingKind, MeetingResponse, MeetingStatus};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
@@ -201,6 +205,10 @@ struct State {
   admins: HashSet<UserId>,
   /// Direct messages deleted with a deleted account, per remaining participant.
   deleted_conversations: HashMap<UserId, Vec<ConversationId>>,
+  /// The signatures deletions came with, or that the server claims they did.
+  deletion_signatures: HashMap<ConversationId, SignedChannelDeletion>,
+  /// The role logs of deleted channels, for devices verifying a signed deletion later.
+  deleted_role_logs: HashMap<ConversationId, Vec<ChannelRoleLogEntryResponse>>,
   maybe_delete_answer: Option<(u16, ErrorCode)>,
   /// Deleted spaces; the default one isn't made again.
   deleted_spaces: HashSet<SpaceId>,
@@ -1310,6 +1318,17 @@ impl FakeServer {
       .push(conversation);
   }
 
+  /// A sync's `signed_deletions` shows this for the conversation, true or not; `claim_deleted` or
+  /// [`Self::hide_from`] name the conversation.
+  pub fn claim_signed_deletion(&self, conversation: ConversationId, signed: SignedChannelDeletion) {
+    self.lock().deletion_signatures.insert(conversation, signed);
+  }
+
+  /// The signature kept with a conversation's deletion.
+  pub fn deletion_signature(&self, conversation: ConversationId) -> Option<SignedChannelDeletion> {
+    self.lock().deletion_signatures.get(&conversation).cloned()
+  }
+
   /// The server stops listing the conversation for `user` and claims it was deleted: returns their
   /// membership for [`Self::restore_for`].
   pub fn hide_from(&self, user: UserId, conversation: ConversationId) -> Option<(ChannelRole, i64)> {
@@ -2337,15 +2356,35 @@ impl ServerApi for FakeServerApi {
         .filter(|conversation| conversation.members.contains_key(&me))
         .map(|conversation| conversation.view(me))
         .collect();
+      let deleted_conversation_ids = state.deleted_conversations.get(&me).cloned().unwrap_or_default();
+      let signed_deletions = deleted_conversation_ids
+        .iter()
+        .filter_map(|id| {
+          state
+            .deletion_signatures
+            .get(id)
+            .map(|signed| DeletedConversationSignature {
+              conversation_id: *id,
+              signed_deletion: signed.clone(),
+            })
+        })
+        .collect();
       Ok(ListConversationsResponse {
         conversations,
-        deleted_conversation_ids: state.deleted_conversations.get(&me).cloned().unwrap_or_default(),
+        deleted_conversation_ids,
+        signed_deletions,
       })
     })
   }
 
   async fn conversation(&self, conversation: ConversationId) -> Result<ConversationResponse, ApiError> {
-    self.with(|state, me| Ok(state.member_conversation(conversation, me)?.view(me)))
+    self.with(|state, me| {
+      // Like the server: instance admins see channels they aren't in.
+      if state.admins.contains(&me) {
+        return Ok(state.conversation(conversation)?.view(me));
+      }
+      Ok(state.member_conversation(conversation, me)?.view(me))
+    })
   }
 
   async fn list_members(
@@ -2629,7 +2668,7 @@ impl ServerApi for FakeServerApi {
         if !deletes_if_last {
           return Err(last_member_refusal());
         }
-        state.delete_channel(conversation, vec![me]);
+        state.delete_channel(conversation, vec![me], None);
         return Ok(());
       }
       let mut recipients: Vec<UserId> = entry.members.keys().copied().collect();
@@ -2649,7 +2688,7 @@ impl ServerApi for FakeServerApi {
     })
   }
 
-  async fn delete_space(&self, space: SpaceId) -> Result<(), ApiError> {
+  async fn delete_space(&self, space: SpaceId, request: &DeleteSpaceRequest) -> Result<(), ApiError> {
     self.with(|state, me| {
       let is_space_admin = state.space_roles.get(&(space, me)) == Some(&SpaceRole::SpaceAdmin);
       if !is_space_admin && !state.admins.contains(&me) {
@@ -2665,6 +2704,30 @@ impl ServerApi for FakeServerApi {
         .filter(|(_, entry)| entry.response.maybe_space_id == Some(space))
         .map(|(id, entry)| (*id, entry.members.keys().copied().collect()))
         .collect();
+      let mut signatures = HashMap::new();
+      for signed in &request.signed_deletions {
+        let document = fake_deletion_document(signed)?;
+        let channel = document.conversation_id;
+        let Some(entry) = state
+          .conversations
+          .get(&channel)
+          .filter(|entry| entry.response.maybe_space_id == Some(space))
+        else {
+          return Err(ApiError::status(
+            400,
+            ErrorCode::InvalidRequest,
+            "a signed deletion is for a channel of another space",
+          ));
+        };
+        if document.epoch != entry.epoch {
+          return Err(ApiError::status(
+            409,
+            ErrorCode::EpochConflict,
+            format!("the group is in epoch {}", entry.epoch),
+          ));
+        }
+        signatures.insert(channel, signed.clone());
+      }
       let mut told: Vec<UserId> = state
         .space_roles
         .keys()
@@ -2673,7 +2736,8 @@ impl ServerApi for FakeServerApi {
         .collect();
       for (channel, members) in channels {
         told.extend(members.iter().copied());
-        state.delete_channel(channel, members);
+        let maybe_signed = signatures.remove(&channel);
+        state.delete_channel(channel, members, maybe_signed);
       }
       if state.spaces.remove(&space).is_none() {
         return Err(ApiError::status(404, ErrorCode::SpaceNotFound, "no such space"));
@@ -2685,7 +2749,28 @@ impl ServerApi for FakeServerApi {
     })
   }
 
-  async fn delete_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
+  async fn space_channel_epochs(&self, space: SpaceId) -> Result<ListSpaceChannelEpochsResponse, ApiError> {
+    self.with(|state, me| {
+      let sees_all = state.admins.contains(&me);
+      let channels = state
+        .conversations
+        .iter()
+        .filter(|(_, entry)| entry.response.maybe_space_id == Some(space))
+        .filter(|(_, entry)| sees_all || entry.members.contains_key(&me))
+        .map(|(id, entry)| ConversationEpoch {
+          conversation_id: *id,
+          epoch: entry.epoch,
+        })
+        .collect();
+      Ok(ListSpaceChannelEpochsResponse { channels })
+    })
+  }
+
+  async fn delete_conversation(
+    &self,
+    conversation: ConversationId,
+    request: &DeleteConversationRequest,
+  ) -> Result<(), ApiError> {
     self.with(|state, me| {
       if let Some((status, code)) = state.maybe_delete_answer.take() {
         return Err(ApiError::status(status, code, "refused"));
@@ -2717,8 +2802,25 @@ impl ServerApi for FakeServerApi {
           "an import account holds this channel",
         ));
       }
+      if let Some(signed) = &request.maybe_signed_deletion {
+        let document = fake_deletion_document(signed)?;
+        if document.conversation_id != conversation {
+          return Err(ApiError::status(
+            400,
+            ErrorCode::InvalidRequest,
+            "the signed deletion is for another channel",
+          ));
+        }
+        if document.epoch != entry.epoch {
+          return Err(ApiError::status(
+            409,
+            ErrorCode::EpochConflict,
+            format!("the group is in epoch {}", entry.epoch),
+          ));
+        }
+      }
       let members = entry.members.keys().copied().collect();
-      state.delete_channel(conversation, members);
+      state.delete_channel(conversation, members, request.maybe_signed_deletion.clone());
       Ok(())
     })
   }
@@ -3904,6 +4006,7 @@ impl ServerApi for FakeServerApi {
       Ok(ListConversationsResponse {
         conversations,
         deleted_conversation_ids: Vec::new(),
+        signed_deletions: Vec::new(),
       })
     })
   }
@@ -4408,8 +4511,26 @@ impl ServerApi for FakeServerApi {
           maybe_retry_after: None,
         });
       }
-      let entry = state.actor_conversation_mut(conversation, me)?;
       let after = query.maybe_after.unwrap_or(0);
+      // A device that was away verifies a signed deletion against what it missed.
+      let is_told_of_deletion = state
+        .deleted_conversations
+        .get(&me)
+        .is_some_and(|claims| claims.contains(&conversation));
+      if !state.conversations.contains_key(&conversation)
+        && is_told_of_deletion
+        && let Some(log) = state.deleted_role_logs.get(&conversation)
+      {
+        return Ok(teamcraft_proto::ListChannelRoleLogResponse {
+          entries: log
+            .iter()
+            .filter(|entry| entry.version > after)
+            .cloned()
+            .collect(),
+          has_more: false,
+        });
+      }
+      let entry = state.actor_conversation_mut(conversation, me)?;
       let limit = query
         .maybe_limit
         .map_or(PAGE_SIZE, |limit| limit as usize)
@@ -5807,8 +5928,20 @@ impl State {
   /// The conversation `me` may remove somebody from: as a member, or as a server admin (also in
   /// conversations they aren't in).
   /// Like the server's `purge_channel`: gone for everybody, and recorded for devices that are away.
-  fn delete_channel(&mut self, conversation: ConversationId, members: Vec<UserId>) {
-    self.conversations.remove(&conversation);
+  fn delete_channel(
+    &mut self,
+    conversation: ConversationId,
+    members: Vec<UserId>,
+    maybe_signed_deletion: Option<SignedChannelDeletion>,
+  ) {
+    if let Some(removed) = self.conversations.remove(&conversation)
+      && maybe_signed_deletion.is_some()
+    {
+      self.deleted_role_logs.insert(conversation, removed.role_log);
+    }
+    if let Some(signed) = &maybe_signed_deletion {
+      self.deletion_signatures.insert(conversation, signed.clone());
+    }
     for member in &members {
       self
         .deleted_conversations
@@ -5820,6 +5953,7 @@ impl State {
       members,
       &GatewayEvent::ConversationDelete {
         conversation_id: conversation,
+        maybe_signed_deletion,
       },
     );
   }
@@ -5965,6 +6099,7 @@ impl State {
           remaining,
           &GatewayEvent::ConversationDelete {
             conversation_id: conversation,
+            maybe_signed_deletion: None,
           },
         );
       } else {
@@ -6507,4 +6642,10 @@ fn last_member_step(entry: &Conversation, me: UserId) -> LastMemberStep {
 
 fn last_member_refusal() -> ApiError {
   ApiError::status(409, ErrorCode::LastMember, "leaving deletes this channel")
+}
+
+/// What the server reads of a signed deletion.
+fn fake_deletion_document(signed: &SignedChannelDeletion) -> Result<ChannelDeletionDocument, ApiError> {
+  serde_json::from_slice(signed.payload.as_slice())
+    .map_err(|_| ApiError::status(400, ErrorCode::InvalidRequest, "not a deletion document"))
 }

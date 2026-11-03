@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT 1 AS \"found!\" FROM deleted_conversations d\n         JOIN conversation_deletion_signatures s ON s.conversation_id = d.conversation_id\n         WHERE d.user_id = $1 AND d.conversation_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "found!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0ca087072d2cf6a3977eea8d1809c5ef3661b5e1088064164f2975ccfee6033b"
+}

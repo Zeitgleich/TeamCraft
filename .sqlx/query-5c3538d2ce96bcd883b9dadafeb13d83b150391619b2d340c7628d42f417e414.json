@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM channel_role_log l WHERE l.conversation_id = ANY($1) AND NOT EXISTS\n           (SELECT 1 FROM conversations c WHERE c.id = l.conversation_id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5c3538d2ce96bcd883b9dadafeb13d83b150391619b2d340c7628d42f417e414"
+}

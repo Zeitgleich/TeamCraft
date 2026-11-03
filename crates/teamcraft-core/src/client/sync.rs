@@ -102,15 +102,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.trace_lap("unlisted people");
     let listing = conversations?;
     // Channels deleted, and direct messages deleted with a deleted account, while this device was
-    // away. The server's word, so they are hidden and their history stays for a while. A claim
-    // about what it lists all the same is forged or replayed. `server_deletions`.
+    // away. The server's word, so they are hidden and their history stays for a while, unless a
+    // signature this device verifies says otherwise. A claim about what it lists all the same is
+    // forged or replayed. `server_deletions`.
     self.lift_quarantines(&listing.conversations)?;
     for deleted in &listing.deleted_conversation_ids {
       if listing.conversations.iter().any(|listed| listed.id == *deleted) {
         tracing::warn!(conversation_id = %deleted, "the server claims a deletion of a conversation it still lists; ignored");
         continue;
       }
-      self.note_server_deletion(*deleted)?;
+      let maybe_signed = listing
+        .signed_deletions
+        .iter()
+        .find(|signature| signature.conversation_id == *deleted)
+        .map(|signature| &signature.signed_deletion);
+      self.note_claimed_deletion(*deleted, maybe_signed).await?;
     }
     self.purge_expired_quarantines()?;
     let conversations = listing.conversations;

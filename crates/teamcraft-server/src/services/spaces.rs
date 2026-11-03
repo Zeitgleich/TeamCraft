@@ -2,14 +2,16 @@ use std::collections::HashMap;
 
 use serde_json::json;
 use teamcraft_db::{
-  ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceChannelCounts, SpaceLeft, SpaceListing,
-  SpaceMember, SpaceView,
+  DeletionSignature, ExpiryChange, NewSpace, NewSpaceMember, SpaceChanges, SpaceChannelCounts,
+  SpaceChannelFacts, SpaceLeft, SpaceListing, SpaceMember, SpaceView,
 };
 use teamcraft_proto::{
-  AddSpaceMemberRequest, CategoryId, CategoryResponse, CreateCategoryRequest, CreateSpaceRequest,
-  GatewayEvent, JoinPolicy, ListCategoriesResponse, ListSpaceMembersResponse, ListSpacesResponse, Permission,
-  RemoveMemberQuery, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis,
-  UpdateCategoryRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest, UserId, UserKind,
+  AddSpaceMemberRequest, CategoryId, CategoryResponse, ConversationEpoch, ConversationId,
+  CreateCategoryRequest, CreateSpaceRequest, DeleteSpaceRequest, GatewayEvent, JoinPolicy,
+  ListCategoriesResponse, ListSpaceChannelEpochsResponse, ListSpaceMembersResponse, ListSpacesResponse,
+  MAX_SIGNED_DELETIONS, Permission, RemoveMemberQuery, SignedChannelDeletion, SpaceId, SpaceMemberResponse,
+  SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest,
+  UserId, UserKind,
 };
 use time::OffsetDateTime;
 
@@ -230,8 +232,24 @@ pub async fn update_space(
 /// (`delete_space`: workspace admins and owners, and the admins of the space unless it holds a
 /// private channel they aren't in; admin.md §3.1.1). Marks it and its channels in one transaction,
 /// then background work clears them ([`super::conversations::sweep_deleted`]). Answers 404 once it is
-/// gone, which clients take as done.
-pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: SpaceId) -> Result<(), ApiError> {
+/// gone, which clients take as done. Signed deletions must each name a channel of this space and its
+/// group's epoch at this moment; channels without one go as the server's word (e2ee.md §4.6).
+pub async fn delete_space(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: SpaceId,
+  request: DeleteSpaceRequest,
+) -> Result<(), ApiError> {
+  if request.signed_deletions.len() > MAX_SIGNED_DELETIONS {
+    return Err(ApiError::InvalidRequest("too many signed deletions".into()));
+  }
+  let mut signatures: HashMap<ConversationId, DeletionSignature> = HashMap::new();
+  let mut signed_deletions: HashMap<ConversationId, SignedChannelDeletion> = HashMap::new();
+  for signed in request.signed_deletions {
+    let (channel, signature) = super::channel_roles::check_signed_deletion(&signed, None)?;
+    signatures.insert(channel, signature);
+    signed_deletions.insert(channel, signed);
+  }
   let access = load_space(state, caller, id).await?;
   require(state, caller, Permission::DeleteSpace, &access.target())?;
   let audit_target = AuditTarget::new("space", id);
@@ -239,7 +257,7 @@ pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: Spac
   let sees_all = is_instance_admin(caller);
   let maybe_deletion = state
     .database
-    .delete_space_locked(id, &audit, |channels| {
+    .delete_space_locked(id, &audit, &signatures, |channels| {
       if channels.iter().any(|channel| channel.maybe_importer.is_some()) {
         return Err(ApiError::ImportInProgress);
       }
@@ -249,7 +267,7 @@ pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: Spac
       if has_hidden && !sees_all {
         return Err(ApiError::SpaceHasHiddenChannels);
       }
-      Ok(())
+      check_signed_epochs(channels, &signatures)
     })
     .await?;
   let Some(deletion) = maybe_deletion else {
@@ -259,7 +277,7 @@ pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: Spac
     for member in members {
       super::calls::evict_from_call(state, *channel, *member).await;
     }
-    announce_deleted_direct(state, *channel, members);
+    announce_deleted_direct(state, *channel, members, signed_deletions.remove(channel));
   }
   // A device asks for the spaces again and finds this one gone; one that is away does at its next
   // sync.
@@ -269,6 +287,54 @@ pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: Spac
   );
   wake_sweep(state);
   Ok(())
+}
+
+/// Each signed deletion is for a channel of the space, for its group's epoch now. The client reads
+/// the epochs again on a conflict ([`channel_epochs`]).
+fn check_signed_epochs(
+  channels: &[SpaceChannelFacts],
+  signatures: &HashMap<ConversationId, DeletionSignature>,
+) -> Result<(), ApiError> {
+  for (signed, signature) in signatures {
+    let Some(channel) = channels.iter().find(|channel| channel.id == *signed) else {
+      return Err(ApiError::InvalidRequest(
+        "a signed deletion is for a channel of another space".into(),
+      ));
+    };
+    if signature.epoch != channel.epoch {
+      return Err(ApiError::EpochConflict {
+        current_epoch: channel.epoch,
+      });
+    }
+  }
+  Ok(())
+}
+
+/// What somebody deleting the space signs for: its channels' group epochs, among those the caller
+/// sees. Only for those who may delete it; no more than a request can carry signatures for.
+pub async fn channel_epochs(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: SpaceId,
+) -> Result<ListSpaceChannelEpochsResponse, ApiError> {
+  let access = load_space(state, caller, id).await?;
+  require(state, caller, Permission::DeleteSpace, &access.target())?;
+  let channels = state
+    .database
+    .space_channel_epochs(
+      id,
+      caller.user.id,
+      is_instance_admin(caller),
+      i64::try_from(MAX_SIGNED_DELETIONS).unwrap_or(i64::MAX),
+    )
+    .await?
+    .into_iter()
+    .map(|(conversation_id, epoch)| ConversationEpoch {
+      conversation_id,
+      epoch,
+    })
+    .collect();
+  Ok(ListSpaceChannelEpochsResponse { channels })
 }
 
 /// Joins an open space as a member. Guests are never self-joining; they are invited.
@@ -499,7 +565,7 @@ pub async fn remove_everywhere(
     let channel = *channel;
     super::calls::evict_from_call(state, channel, user_id).await;
     if left.deleted.contains(&channel) {
-      announce_deleted_direct(state, channel, &[user_id]);
+      announce_deleted_direct(state, channel, &[user_id], None);
       continue;
     }
     let members = state.database.conversation_member_ids(channel).await?;

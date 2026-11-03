@@ -52,6 +52,7 @@ use teamcraft_proto::{
   UpdateSpaceRequest,
 };
 use teamcraft_proto::{CreateInstantMeetingRequest, MeetingId, MeetingResponse};
+use teamcraft_proto::{DeleteConversationRequest, DeleteSpaceRequest, ListSpaceChannelEpochsResponse};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentResponse};
 use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
@@ -582,15 +583,27 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
-  async fn delete_space(&self, space: SpaceId) -> Result<(), ApiError> {
+  async fn delete_space(&self, space: SpaceId, request: &DeleteSpaceRequest) -> Result<(), ApiError> {
     self
-      .send_without_response::<()>(Method::DELETE, &format!("/spaces/{space}"), None)
+      .send_without_response(Method::DELETE, &format!("/spaces/{space}"), Some(request))
       .await
   }
 
-  async fn delete_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
+  async fn space_channel_epochs(&self, space: SpaceId) -> Result<ListSpaceChannelEpochsResponse, ApiError> {
+    self.get(&format!("/spaces/{space}/channel-epochs")).await
+  }
+
+  async fn delete_conversation(
+    &self,
+    conversation: ConversationId,
+    request: &DeleteConversationRequest,
+  ) -> Result<(), ApiError> {
     self
-      .send_without_response::<()>(Method::DELETE, &format!("/conversations/{conversation}"), None)
+      .send_without_response(
+        Method::DELETE,
+        &format!("/conversations/{conversation}"),
+        Some(request),
+      )
       .await
   }
 

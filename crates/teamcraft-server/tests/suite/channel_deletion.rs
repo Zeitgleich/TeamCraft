@@ -25,6 +25,214 @@ macro_rules! app {
   };
 }
 
+mod signed_deletions {
+  use super::*;
+
+  /// The server keeps and hands out what it can't verify, for the group's current epoch only, and a
+  /// signed-deleted channel's role log stays for those told of the deletion.
+  #[tokio::test]
+  async fn a_signature_for_the_current_epoch_is_kept_and_listed_and_the_log_stays() {
+    let app = app!();
+    let (ann, bob, eve) = (member("ann"), member("bob"), member("eve"));
+    let channel = channel_of(&app, &ann, &[&bob], "private").await;
+    let _ = user_id(&app, &eve).await;
+    let reply = app
+      .delete_json(
+        &ann,
+        &format!("/conversations/{channel}"),
+        &signed_body(&channel, 0),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+
+    let listed = app.get(&bob, "/conversations").await;
+    assert_eq!(listed.status, StatusCode::OK);
+    assert_eq!(listed.body["deleted_conversation_ids"], json!([channel]));
+    assert_eq!(
+      listed.body["signed_deletions"][0]["conversation_id"],
+      json!(channel)
+    );
+    assert_eq!(
+      listed.body["signed_deletions"][0]["signed_deletion"]["signature"],
+      json!("AQID")
+    );
+
+    sweep_deleted(&app.state).await.unwrap();
+    let log = app.get(&bob, &format!("/conversations/{channel}/role-log")).await;
+    assert_eq!(log.status, StatusCode::OK, "the deletion's verifiers read on");
+    let refused = app.get(&eve, &format!("/conversations/{channel}/role-log")).await;
+    assert_eq!(refused.status, StatusCode::NOT_FOUND, "nobody else does");
+  }
+
+  /// A signature for another epoch, or another channel, is refused and nothing happens.
+  #[tokio::test]
+  async fn a_signature_for_another_epoch_or_channel_is_refused() {
+    let app = app!();
+    let (ann, bob) = (member("ann"), member("bob"));
+    let channel = channel_of(&app, &ann, &[&bob], "private").await;
+    let other = channel_of(&app, &ann, &[], "private").await;
+
+    let stale = app
+      .delete_json(
+        &ann,
+        &format!("/conversations/{channel}"),
+        &signed_body(&channel, 3),
+      )
+      .await;
+    assert_eq!(stale.status, StatusCode::CONFLICT);
+    assert_eq!(stale.body["error_code"], json!("epoch_conflict"));
+    assert_eq!(stale.body["current_epoch"], json!(0));
+
+    let elsewhere = app
+      .delete_json(
+        &ann,
+        &format!("/conversations/{channel}"),
+        &signed_body(&other, 0),
+      )
+      .await;
+    assert_eq!(elsewhere.status, StatusCode::BAD_REQUEST);
+
+    let still_there = app.get(&bob, &format!("/conversations/{channel}")).await;
+    assert_eq!(still_there.status, StatusCode::OK);
+  }
+
+  /// Compatibility within 1.x: what a client from before signed deletions sends works as before.
+  #[tokio::test]
+  async fn no_body_is_an_unsigned_deletion() {
+    let app = app!();
+    let (ann, bob) = (member("ann"), member("bob"));
+    let channel = channel_of(&app, &ann, &[&bob], "private").await;
+    let reply = app.delete(&ann, &format!("/conversations/{channel}")).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+
+    let listed = app.get(&bob, "/conversations").await;
+    assert_eq!(listed.body["deleted_conversation_ids"], json!([channel]));
+    assert!(listed.body.get("signed_deletions").is_none());
+    sweep_deleted(&app.state).await.unwrap();
+    let log = app.get(&bob, &format!("/conversations/{channel}/role-log")).await;
+    assert_eq!(
+      log.status,
+      StatusCode::NOT_FOUND,
+      "nothing to verify, so no log stays"
+    );
+  }
+
+  /// A space's deletion takes one signature per channel, for its group's current epoch, and goes with
+  /// the rest unsigned. The epochs to sign for can be read by those who may delete it.
+  #[tokio::test]
+  async fn a_space_names_what_to_sign_again_and_keeps_each_channels_signature() {
+    let app = app!();
+    let (server_owner, ann) = (owner(), member("ann"));
+    let ann_id = user_id(&app, &ann).await;
+    let space = create_space(&app, &server_owner, "Project A", "invite_only").await;
+    add_space_member(&app, &server_owner, &space, &ann_id, "member").await;
+    let signed = create_channel(&app, &ann, &space, "signed", "private").await;
+    let unsigned = create_channel(&app, &ann, &space, "unsigned", "private").await;
+    let elsewhere = channel_of(&app, &ann, &[], "private").await;
+    let path = format!("/spaces/{space}");
+
+    let other_space = app
+      .delete_json(
+        &server_owner,
+        &path,
+        &json!({"signed_deletions": [signed_deletion(&elsewhere, 0)]}),
+      )
+      .await;
+    assert_eq!(
+      other_space.status,
+      StatusCode::BAD_REQUEST,
+      "{}",
+      other_space.body
+    );
+
+    let old = app
+      .delete_json(
+        &server_owner,
+        &path,
+        &json!({"signed_deletions": [signed_deletion(&signed, 5)]}),
+      )
+      .await;
+    assert_eq!(old.status, StatusCode::CONFLICT, "{}", old.body);
+    assert_eq!(old.body["error_code"], json!("epoch_conflict"));
+    let epochs = app.get(&server_owner, &format!("{path}/channel-epochs")).await;
+    assert_eq!(epochs.status, StatusCode::OK, "{}", epochs.body);
+    assert!(
+      epochs.body["channels"]
+        .as_array()
+        .unwrap()
+        .contains(&json!({"conversation_id": signed, "epoch": 0}))
+    );
+    let not_for_members = app.get(&ann, &format!("{path}/channel-epochs")).await;
+    assert_eq!(not_for_members.status, StatusCode::FORBIDDEN);
+
+    let done = app
+      .delete_json(
+        &server_owner,
+        &path,
+        &json!({"signed_deletions": [signed_deletion(&signed, 0)]}),
+      )
+      .await;
+    assert_eq!(done.status, StatusCode::NO_CONTENT, "{}", done.body);
+    let listed = app.get(&ann, "/conversations").await;
+    assert_eq!(listed.body["signed_deletions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+      listed.body["signed_deletions"][0]["conversation_id"],
+      json!(signed)
+    );
+    let ids = listed.body["deleted_conversation_ids"].as_array().unwrap();
+    assert!(ids.contains(&json!(unsigned)), "{ids:?}");
+  }
+
+  /// Signature and log go with the last tombstone, and nothing reads them after.
+  #[tokio::test]
+  async fn the_signature_and_the_log_go_with_the_tombstones() {
+    let app = app!();
+    let (ann, bob) = (member("ann"), member("bob"));
+    let channel = channel_of(&app, &ann, &[&bob], "private").await;
+    app
+      .delete_json(
+        &ann,
+        &format!("/conversations/{channel}"),
+        &signed_body(&channel, 0),
+      )
+      .await;
+    sweep_deleted(&app.state).await.unwrap();
+
+    let later = time::OffsetDateTime::now_utc() + time::Duration::days(1);
+    app
+      .state
+      .database
+      .prune_deleted_conversations(later)
+      .await
+      .unwrap();
+
+    let listed = app.get(&bob, "/conversations").await;
+    assert!(listed.body.get("signed_deletions").is_none(), "{}", listed.body);
+    let log = app.get(&bob, &format!("/conversations/{channel}/role-log")).await;
+    assert_eq!(log.status, StatusCode::NOT_FOUND);
+  }
+
+  fn signed_body(channel: &str, epoch: u64) -> serde_json::Value {
+    json!({"signed_deletion": signed_deletion(channel, epoch)})
+  }
+
+  fn signed_deletion(channel: &str, epoch: u64) -> serde_json::Value {
+    let document = json!({"conversation_id": channel, "epoch": epoch, "signed_at_ms": 1});
+    json!({
+      "payload": base64_of(document.to_string().as_bytes()),
+      "signature": "AQID",
+    })
+  }
+
+  fn base64_of(bytes: &[u8]) -> String {
+    serde_json::to_value(teamcraft_proto::Base64Bytes::new(bytes.to_vec()))
+      .unwrap()
+      .as_str()
+      .unwrap()
+      .to_owned()
+  }
+}
+
 mod leaving {
   use super::*;
 

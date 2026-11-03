@@ -533,7 +533,7 @@ fn check_snapshot(version: u64, assignments: &[ChannelRoleAssignment]) -> Result
 }
 
 /// Identity keys of the roster's owners and admins: they may sign any channel's roles.
-fn roster_admin_keys(workspace: &WorkspaceState) -> BTreeMap<crypto::UserId, IdentityPublicKey> {
+pub(crate) fn roster_admin_keys(workspace: &WorkspaceState) -> BTreeMap<crypto::UserId, IdentityPublicKey> {
   workspace
     .roster
     .members
@@ -569,14 +569,14 @@ fn workspace_authority(
 }
 
 /// Identity keys as an [`IdentityDirectory`], for one verification attempt.
-struct KeyDirectory(BTreeMap<crypto::UserId, IdentityPublicKey>);
+pub(crate) struct KeyDirectory(BTreeMap<crypto::UserId, IdentityPublicKey>);
 
 impl KeyDirectory {
-  fn from_keys(keys: BTreeMap<crypto::UserId, IdentityPublicKey>) -> Self {
+  pub(crate) fn from_keys(keys: BTreeMap<crypto::UserId, IdentityPublicKey>) -> Self {
     Self(keys)
   }
 
-  fn from_assignments<'a>(assignments: impl Iterator<Item = &'a ChannelRoleAssignment>) -> Self {
+  pub(crate) fn from_assignments<'a>(assignments: impl Iterator<Item = &'a ChannelRoleAssignment>) -> Self {
     Self(
       assignments
         .filter_map(|assignment| {

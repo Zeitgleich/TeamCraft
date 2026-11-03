@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
   AdminJoinRequestChange, CallEndCause, CallId, CallRosterEntry, ConversationId, CustomStatus,
   DeviceActivity, DeviceId, DeviceLinkClosedReason, DeviceLinkRequest, ErrorBody, LobbyState, MeetingId,
-  MessageId, MessageResponse, MlsMessageResponse, PresenceState, RecoveryRequestId, SpaceId,
-  SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId, UserSummary, WorkspaceLogKind,
+  MessageId, MessageResponse, MlsMessageResponse, PresenceState, RecoveryRequestId, SignedChannelDeletion,
+  SpaceId, SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId, UserSummary, WorkspaceLogKind,
 };
 
 /// How long a client waits before it reports that the user stopped being attentive, so the server
@@ -113,10 +113,14 @@ pub enum GatewayEvent {
     conversation_id: ConversationId,
     user_id: UserId,
   },
-  /// A direct message was deleted with a deleted account (admin.md §3.2.1): the conversation is
-  /// gone on the server; devices drop it with its local history.
+  /// A conversation is gone on the server: a channel was deleted (e2ee.md §4.6), or a direct message
+  /// with a deleted account (admin.md §3.2.1). Alone this is the server's word: devices hide it and
+  /// keep its history for a while. With a signature they verify, they drop the history at once.
+  /// Clients before signed deletions ignore the field.
   ConversationDelete {
     conversation_id: ConversationId,
+    #[serde(rename = "signed_deletion", default, skip_serializing_if = "Option::is_none")]
+    maybe_signed_deletion: Option<SignedChannelDeletion>,
   },
   /// The signed roster or policy log has a new entry; fetch entries after the known version.
   WorkspaceUpdate {
@@ -432,10 +436,39 @@ mod tests {
   fn conversation_delete_has_a_stable_wire_format() {
     let event = GatewayEvent::ConversationDelete {
       conversation_id: conversation(),
+      maybe_signed_deletion: None,
     };
     let json = serde_json::to_string(&event).unwrap();
     assert_eq!(json, r#"{"type":"conversation_delete","conversation_id":"7"}"#);
     assert_eq!(serde_json::from_str::<GatewayEvent>(&json).unwrap(), event);
+  }
+
+  /// The signature is one more field: older clients, whose event has only the conversation, read
+  /// the event as an unsigned deletion, and an older server's event reads as one here.
+  #[test]
+  fn a_signed_conversation_delete_stays_readable_for_older_clients() {
+    use crate::Base64Bytes;
+
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum OlderEvent {
+      ConversationDelete { conversation_id: ConversationId },
+    }
+    let event = GatewayEvent::ConversationDelete {
+      conversation_id: conversation(),
+      maybe_signed_deletion: Some(SignedChannelDeletion {
+        payload: Base64Bytes::new(vec![1]),
+        signature: Base64Bytes::new(vec![2]),
+      }),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"conversation_delete","conversation_id":"7","signed_deletion":{"payload":"AQ==","signature":"Ag=="}}"#
+    );
+    assert_eq!(serde_json::from_str::<GatewayEvent>(&json).unwrap(), event);
+    let OlderEvent::ConversationDelete { conversation_id } = serde_json::from_str(&json).unwrap();
+    assert_eq!(conversation_id, conversation());
   }
 
   #[test]
