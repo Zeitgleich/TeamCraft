@@ -66,6 +66,13 @@ pub struct Rooms {
   is_going_away: AtomicBool,
 }
 
+/// The rooms in numbers, for the metrics endpoint.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoomStats {
+  pub rooms: usize,
+  pub participants: usize,
+}
+
 #[derive(Default)]
 struct ControlState {
   locked: HashSet<CallId>,
@@ -345,6 +352,17 @@ impl Rooms {
         maybe_started_at: Some(room.started_at),
       })
       .collect()
+  }
+
+  /// How many calls run here and how many devices are in them, reconnecting ones included. One pass
+  /// over the rooms, for a scrape; nothing that forwards media calls this.
+  pub fn stats(&self) -> RoomStats {
+    // Lock order: rooms, then room state; the rooms lock is released first.
+    let rooms: Vec<Arc<Room>> = lock(&self.rooms).values().cloned().collect();
+    RoomStats {
+      rooms: rooms.len(),
+      participants: rooms.iter().map(|room| room.participant_count()).sum(),
+    }
   }
 
   /// Adds a participant to a call, creating the room on first join. A device that is already in
@@ -839,6 +857,10 @@ impl Room {
       .collect()
   }
 
+  fn participant_count(&self) -> usize {
+    lock(&self.state).participants.len()
+  }
+
   fn has_participant(&self, participant_id: DeviceId) -> bool {
     lock(&self.state).participants.contains_key(&participant_id)
   }
@@ -1315,6 +1337,16 @@ mod tests {
     let mut participants = roster[0].participants.clone();
     participants.sort_by_key(|entry| entry.device_id);
     assert_eq!(participants, vec![entry(1, 10), entry(2, 20)]);
+  }
+
+  #[test]
+  fn the_stats_count_rooms_and_devices() {
+    let rooms = Rooms::new(SfuConfig::default());
+    assert_eq!(rooms.stats(), RoomStats::default());
+    let (_alice_rx, _) = join(&rooms, 1, 10);
+    let (_bob_rx, _) = join(&rooms, 2, 20);
+    let stats = rooms.stats();
+    assert_eq!((stats.rooms, stats.participants), (1, 2));
   }
 
   mod one_room_per_conversation {

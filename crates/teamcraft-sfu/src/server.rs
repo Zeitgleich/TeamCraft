@@ -45,7 +45,7 @@ use crate::{
   config::SfuConfig,
   prejoin::PreJoinLimiter,
   reporting::{NoReporter, ParticipantReporter},
-  room::{JoinOutcome, ParticipantHandle, Room, RoomError, Rooms, SessionId},
+  room::{JoinOutcome, ParticipantHandle, Room, RoomError, RoomStats, Rooms, SessionId},
   signaling::{EventSequence, Outgoing, SignalingError, read_message, write_message},
 };
 
@@ -408,6 +408,11 @@ impl SfuControl {
   /// Every call on this SFU and who is in it, for a server that starts and takes them over.
   pub fn roster(&self) -> SfuRosterReport {
     self.shared.roster()
+  }
+
+  /// The rooms in numbers, for a scrape of the metrics.
+  pub fn room_stats(&self) -> RoomStats {
+    self.shared.rooms.stats()
   }
 
   pub fn apply(&self, request: &SfuControlRequest) -> Result<(), RoomError> {

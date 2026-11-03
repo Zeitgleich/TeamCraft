@@ -45,6 +45,7 @@ mod meeting_guests;
 mod meeting_mail;
 mod meetings;
 mod messages;
+mod metrics;
 mod mls;
 mod notetaker;
 mod notification_settings;

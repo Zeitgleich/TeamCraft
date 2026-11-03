@@ -31,6 +31,9 @@
 //!   default 3 (keep it equal to `calls.max_devices_per_user_per_call` of the server)
 //! - `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS`: how often the whole call roster is reported to the
 //!   server (also at start), which drops participants the SFU no longer has, default 30
+//! - `TEAMCRAFT_SFU_METRICS_ENABLED=1`: serve `GET /metrics` on a listener of its own (off by
+//!   default, docs/operations.md, "Metrics"), and `TEAMCRAFT_SFU_METRICS_ADDRS`: its addresses,
+//!   comma-separated, default `127.0.0.1:9465,[::1]:9465` (`[::]:9465` is dual stack)
 
 use std::io::Write;
 use std::net::SocketAddr;
@@ -40,6 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use teamcraft_ops::metrics::{bind_metrics, spawn_metrics_endpoint};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
 use teamcraft_sfu::{
   auth::{DevTokenVerifier, JoinTokenVerifier, JwtJoinTokenConfig, JwtJoinTokenVerifier, RejectAllVerifier},
@@ -47,6 +51,7 @@ use teamcraft_sfu::{
   control::control_router,
   dev_page::serve_dev_page,
   health::{DEFAULT_HEALTH_ADDR, serve_health},
+  metrics::{SfuMetrics, metrics_addrs},
   reporting::HttpReporter,
   server::Sfu,
 };
@@ -134,6 +139,7 @@ async fn run() -> anyhow::Result<()> {
       axum::Router::new()
     },
   };
+  serve_metrics(&sfu).context("metrics endpoint")?;
   let local_addr = sfu.local_addr()?;
   let certificate_hash = sfu.certificate_hash();
   info!(
@@ -157,6 +163,22 @@ async fn run() -> anyhow::Result<()> {
     result = dev_page => result.context("dev page")?,
     result = serve_health(health_addr()?, internal_routes) => result.context("health endpoint")?,
   }
+  Ok(())
+}
+
+/// Starts the metrics listener when `TEAMCRAFT_SFU_METRICS_ENABLED` asks for it.
+fn serve_metrics(sfu: &Sfu) -> anyhow::Result<()> {
+  let maybe_addrs = metrics_addrs(
+    std::env::var("TEAMCRAFT_SFU_METRICS_ENABLED").ok().as_deref(),
+    std::env::var("TEAMCRAFT_SFU_METRICS_ADDRS").ok().as_deref(),
+  )?;
+  let Some(addrs) = maybe_addrs else {
+    return Ok(());
+  };
+  let listeners = bind_metrics(&addrs)?;
+  let metrics = SfuMetrics::new()?;
+  let control = sfu.control();
+  spawn_metrics_endpoint(listeners, move || metrics.render(control.room_stats()));
   Ok(())
 }
 

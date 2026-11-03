@@ -105,6 +105,66 @@ exists; clients can still read what they have stored locally.
 - Watch: 5xx rate, 429 rate (rate limits, `docs/performance.md`), database connection saturation
   (`[database] max_connections`), disk of Postgres (message partitions), gateway connections.
 
+## Metrics
+
+The server, the SFU and the bridge can serve `GET /metrics` in Prometheus text format (issue #213).
+It runs on a listener of its own that serves nothing else, so the reverse proxy doesn't publish it.
+It is **off by default**, binds **loopback by default** (IPv4 and IPv6), and has no authentication:
+to scrape from another host, use `[::]:<port>` (dual stack) with a firewall that only lets the scraper
+in; the binary warns at start about any address that isn't loopback. A port that can't be bound stops
+the start; only an IPv6 address that fails after another one worked is skipped (hosts without IPv6).
+
+| Binary | Setting                                                             | Default addresses              |
+|--------|---------------------------------------------------------------------|--------------------------------|
+| server | `[metrics] enabled`, `listen_addrs`, `database_check_interval_secs` | `127.0.0.1:9464`, `[::1]:9464` |
+| SFU    | `TEAMCRAFT_SFU_METRICS_ENABLED=1`, `TEAMCRAFT_SFU_METRICS_ADDRS`    | `127.0.0.1:9465`, `[::1]:9465` |
+| bridge | `[metrics] enabled`, `listen_addrs`                                 | `127.0.0.1:9466`, `[::1]:9466` |
+
+| Metric                                         | Type      | Labels                    | Binary         | Meaning                                                                           |
+|------------------------------------------------|-----------|---------------------------|----------------|-----------------------------------------------------------------------------------|
+| `teamcraft_build_info`                         | gauge     | `service`, `version`      | all            | Always 1                                                                          |
+| `teamcraft_http_requests_total`                | counter   | `route_class`, `status`   | server, bridge | Requests answered; the rate limit's refusals included                             |
+| `teamcraft_http_request_duration_seconds`      | histogram | `route_class`             | server, bridge | Time until the response's head (5 ms to 10 s); WebSockets until the upgrade       |
+| `teamcraft_gateway_sessions`                   | gauge     |                           | server         | Gateway sessions, also those waiting to be resumed                                |
+| `teamcraft_gateway_connections`                | gauge     |                           | server         | Sessions with a live connection                                                   |
+| `teamcraft_gateway_resume_buffer_bytes`        | gauge     |                           | server         | Events buffered for resuming; compare `[gateway] max_buffered_bytes`              |
+| `teamcraft_db_pool_connections`                | gauge     | `state`: `idle`, `in_use` | server         | The database pool                                                                 |
+| `teamcraft_db_pool_max_connections`            | gauge     |                           | server         | `[database] max_connections`; saturation is `in_use` over this                    |
+| `teamcraft_db_size_bytes`                      | gauge     |                           | server         | `pg_database_size`, from the periodic check                                       |
+| `teamcraft_push_sends_total`                   | counter   | `provider`                | server         | Wake-ups the push service took or answered with a dead registration               |
+| `teamcraft_push_failures_total`                | counter   | `provider`                | server         | Sends that failed at the push service                                             |
+| `teamcraft_push_endpoint_failures_total`       | counter   | `provider`                | server         | Sends that failed at an endpoint a user registered: never makes it "failing"      |
+| `teamcraft_push_provider_failing`              | gauge     | `provider`                | server         | 1 while the last attempt that says anything about the push service failed         |
+| `teamcraft_push_retries_pending`               | gauge     |                           | server         | Wake-ups in the retry queue (`push_retries`), from the periodic check             |
+| `teamcraft_dependency_state`                   | gauge     | `dependency`, `state`     | server         | 1 for the state the circuit breaker is in (`[dependencies]`), else 0              |
+| `teamcraft_job_last_success_timestamp_seconds` | gauge     | `job`                     | server         | Unix time of the last success; 0: not since the start, or the job is switched off |
+| `teamcraft_sfu_rooms`                          | gauge     |                           | SFU            | Calls running                                                                     |
+| `teamcraft_sfu_participants`                   | gauge     |                           | SFU            | Devices in those calls, reconnecting ones included                                |
+| `teamcraft_bridge_queue_depth`                 | gauge     |                           | bridge         | Submissions waiting for the worker (it holds 4096)                                |
+
+Label values come from fixed lists, so the number of series is bounded, and each binary's tests check
+its whole output against an allow-list. **No user, conversation or device IDs, no content, no tokens,
+no error texts.**
+
+- `route_class`, server: `admin`, `attachments`, `auth`, `calls`, `conversations`, `devices`, `e2ee`,
+  `gateway`, `health`, `internal`, `meetings`, `messages`, `other`, `public`, `spaces`, `sync`, `users`,
+  `web` (everything outside `/api/`). Bridge: `health`, `hooks`, `ingest`, `other`.
+- `status`: `1xx` (WebSocket upgrades), `2xx`, `3xx`, `4xx` without 429, `429`, `5xx`.
+- `provider`: `apns`, `fcm`, `unifiedpush`, `webpush`.
+- `dependency`: `database`, `object_storage`, `identity_provider`, `push_gateway`, `sfu`, once in use.
+  `state`: `ok`, `down`, `recovering`.
+- `job`: `database_check`, `email_digest`, `guest_expiry`, `key_package_pruning`, `oidc_sync`,
+  `partition_maintenance`, `retention`, `urgent_scheduler`.
+
+**Cost.** With the listener off, requests pay nothing for it. With it on, one request costs a look at
+the path's first segments, two label lookups and two atomic updates, whatever the size of the
+instance. A scrape takes one pass over the gateway sessions in memory and no query. The database size
+and the retry queue are read by a timer (`database_check_interval_secs`, default 60); while that fails
+the last values stay, and the timestamp of `database_check` shows how old they are. Counters restart
+at 0 with the process, which Prometheus handles, and everything is per instance.
+
+The endpoint can't tell you that the server is down: probe `/readyz` from outside as well.
+
 ## Reverse proxy and network
 
 - TLS terminates at the proxy. It must pass WebSocket upgrades on `/api/v1/gateway` and

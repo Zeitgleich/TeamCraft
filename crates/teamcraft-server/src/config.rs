@@ -80,6 +80,9 @@ pub struct Config {
   /// Circuit breakers and retries of the backends (issue #743).
   #[serde(default)]
   pub dependencies: crate::dependencies::DependenciesConfig,
+  /// The optional `GET /metrics` listener (issue #213).
+  #[serde(default)]
+  pub metrics: crate::metrics::MetricsConfig,
 }
 
 /// Where the settings key comes from: inline (base64, 32 bytes) or a file the server creates on
