@@ -20,8 +20,7 @@ on:
       - "Cargo.lock"
       - ".github/workflows/android.yml"
   pull_request:
-    # No `labeled`: ci-label.yml re-runs this when the `ci` label comes after opening.
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - "apps/android/**"
       - "crates/teamcraft-ffi/**"
@@ -47,8 +46,8 @@ jobs:
   build-and-test:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases. A re-run keeps the first attempt's payload, so it counts as asked for.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci') || github.run_attempt > 1
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
