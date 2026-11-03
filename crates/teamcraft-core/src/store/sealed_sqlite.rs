@@ -348,6 +348,16 @@ mod tests {
   use crate::store::tests::{exercise_store, id, message};
   use crate::store::{LocalStore, StaticKeySource, Table};
 
+  /// The helper test of the killed-build test, as the test binary names it.
+  const KILLED_BUILD_HELPER: &str = "store::sealed_sqlite::tests::killed_build_helper";
+  const HELPER_PATH: &str = "TEAMCRAFT_TEST_KILLED_BUILD_DATABASE";
+  const HELPER_MARKER: &str = "TEAMCRAFT_TEST_KILLED_BUILD_MARKER";
+  const HELPER_BATCH: &str = "TEAMCRAFT_TEST_KILLED_BUILD_BATCH";
+  /// Entries and messages of the store the build is killed on: with the catalog's own records
+  /// more than two batches.
+  const ENTRIES: usize = 1100;
+  const MESSAGES: u8 = 60;
+
   #[test]
   fn sealed_sqlite_behaves_like_a_store() {
     let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
@@ -1051,6 +1061,74 @@ mod tests {
     std::fs::remove_dir_all(&directory).unwrap();
   }
 
+  /// Issue #1128: a process killed while a catalog build batch is written but not yet committed
+  /// (the helper process dies at that point), however far the build had got, loses no record: the
+  /// batch is rolled back, the next open goes on after the last committed batch, and the catalog
+  /// is complete and agrees with the records.
+  #[cfg(unix)]
+  #[test]
+  fn a_build_killed_before_a_batch_commits_loses_nothing() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    // Batches of 512 records: the build needs three, and dies in the first or the second.
+    for dies_in_batch in [1, 2] {
+      let directory = scratch_dir();
+      let path = directory.join("store.db");
+      write_store_without_catalog(&path);
+      let marker = directory.join("died-at-the-marker");
+
+      let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([KILLED_BUILD_HELPER, "--exact", "--nocapture", "--test-threads=1"])
+        .env(HELPER_PATH, &path)
+        .env(HELPER_MARKER, &marker)
+        .env(HELPER_BATCH, dies_in_batch.to_string())
+        .status()
+        .unwrap();
+      assert_eq!(
+        status.signal(),
+        Some(6),
+        "the helper was aborted at its marked point: {status:?}"
+      );
+      assert!(marker.exists(), "it was the marked point that ended it");
+
+      // Never a half batch: either nothing of the killed one is there, or all.
+      let source = StaticKeySource::new(helper_key());
+      let reopened = SealedSqliteStore::open(&path, &source).unwrap();
+      assert_store_content(&reopened);
+      drop(reopened);
+      let again = SealedSqliteStore::open(&path, &source).unwrap();
+      assert_store_content(&again);
+      drop(again);
+      std::fs::remove_dir_all(&directory).unwrap();
+    }
+  }
+
+  /// The helper process of [`a_build_killed_before_a_batch_commits_loses_nothing`]: does nothing in
+  /// an ordinary run. Run by that test, it builds the catalog and aborts the process when the
+  /// numbered batch has written its records and is about to commit.
+  #[test]
+  fn killed_build_helper() {
+    let Some(path) = std::env::var_os(HELPER_PATH) else {
+      return;
+    };
+    let marker = std::env::var_os(HELPER_MARKER).unwrap();
+    let batch: usize = std::env::var(HELPER_BATCH).unwrap().parse().unwrap();
+    let records = SealedSqliteStore::backend_of(Connection::open(path).unwrap()).unwrap();
+    let store = SealedStore::open_backend_to_build(
+      Dying {
+        records,
+        commits_left: std::cell::Cell::new(batch),
+        marker: marker.into(),
+      },
+      &helper_key(),
+      SealedStoreLimits::default(),
+    )
+    .unwrap();
+    let mut build = store.start_catalog_build().unwrap().unwrap();
+    while store.step_catalog_build(&mut build).unwrap() != crate::store::sealed::BuildStep::Complete {}
+    unreachable!("the build has more batches than the helper lives for");
+  }
+
   /// Records on SQLite, running `on_begin` before the next group takes the write lock: what another
   /// process commits while this one waits for it.
   struct Waiting<'a> {
@@ -1105,6 +1183,116 @@ mod tests {
     fn write_tally(&self) -> Option<WriteTally> {
       self.records.write_tally()
     }
+  }
+
+  /// Records on SQLite that abort the process when the numbered commit is about to happen, after
+  /// its writes: a kill in the middle of a transaction, at a point the test knows.
+  struct Dying {
+    records: SqliteRecords,
+    commits_left: std::cell::Cell<usize>,
+    marker: std::path::PathBuf,
+  }
+
+  impl RecordBackend for Dying {
+    fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
+      self.records.put_record(id, sealed)
+    }
+
+    fn delete_record(&self, id: &LookupId) -> Result<(), StoreError> {
+      self.records.delete_record(id)
+    }
+
+    fn get_record(&self, id: &LookupId) -> Result<Option<Vec<u8>>, StoreError> {
+      self.records.get_record(id)
+    }
+
+    fn records_after(
+      &self,
+      maybe_after: Option<&LookupId>,
+      limit: usize,
+    ) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
+      self.records.records_after(maybe_after, limit)
+    }
+
+    fn begin_read(&self) -> Result<(), StoreError> {
+      self.records.begin_read()
+    }
+
+    fn end_read(&self) {
+      self.records.end_read();
+    }
+
+    fn begin_writes(&self) -> Result<(), StoreError> {
+      self.records.begin_writes()
+    }
+
+    fn end_writes(&self) -> Result<(), StoreError> {
+      self.commits_left.set(self.commits_left.get() - 1);
+      if self.commits_left.get() == 0 {
+        std::fs::write(&self.marker, b"died").unwrap();
+        // The point of this helper process: gone with the transaction open.
+        std::process::abort();
+      }
+      self.records.end_writes()
+    }
+
+    fn fail_group(&self) {
+      self.records.fail_group();
+    }
+
+    fn write_tally(&self) -> Option<WriteTally> {
+      self.records.write_tally()
+    }
+  }
+
+  /// The records every killed build starts from: entries and messages, written the way a version
+  /// before the catalog wrote them (no catalog yet), enough for three batches.
+  fn write_store_without_catalog(path: &std::path::Path) {
+    let store = SealedSqliteStore::open_without_building(
+      path,
+      &StaticKeySource::new(helper_key()),
+      SealedStoreLimits::default(),
+    )
+    .unwrap();
+    store.begin_writes().unwrap();
+    for index in 0..ENTRIES {
+      store
+        .put(
+          Table::Users,
+          &format!("user {index}"),
+          format!("value {index}").as_bytes(),
+        )
+        .unwrap();
+    }
+    for client in 1..=MESSAGES {
+      store
+        .upsert_message(&message(
+          id(7),
+          client,
+          Some(10 * i64::from(client)),
+          None,
+          i64::from(client),
+        ))
+        .unwrap();
+    }
+    store.end_writes().unwrap();
+  }
+
+  /// Every record `write_store_without_catalog` wrote is there, listed and read.
+  fn assert_store_content(store: &SealedSqliteStore) {
+    let users = store.list(Table::Users).unwrap();
+    assert_eq!(users.len(), ENTRIES);
+    for index in 0..ENTRIES {
+      assert!(
+        users.contains(&(format!("user {index}"), format!("value {index}").into_bytes())),
+        "user {index}"
+      );
+    }
+    assert_eq!(listed(store, id(7)), (1..=MESSAGES).collect::<Vec<u8>>());
+  }
+
+  fn helper_key() -> SymmetricKey {
+    SymmetricKey::from_bytes([0x5a; 32])
   }
 
   fn listed(store: &impl LocalStore, conversation: teamcraft_proto::ConversationId) -> Vec<u8> {
