@@ -10,7 +10,6 @@ use crate::components::avatar::PresenceDot;
 use crate::components::channel_glyph::ChannelGlyph;
 use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::entry_menu::EntryMenuTrigger;
-use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::space_tile::SpaceTile;
 use crate::components::typing_indicator::{TypingDots, typing_text};
@@ -216,7 +215,6 @@ pub fn Sidebar() -> impl IntoView {
           }
         }}
       </div>
-      <CallPill />
     </nav>
   }
 }

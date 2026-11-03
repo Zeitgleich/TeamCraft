@@ -624,14 +624,27 @@ pub fn attending_users(meeting: &MeetingResponse) -> Vec<UserId> {
 /// else: the notetaker added during one of its calls (e2ee.md §8.2). The invitees go as a whole
 /// list, as the meeting has them now.
 pub fn adding_invitee(meeting: &MeetingResponse, me: UserId, user: UserId) -> UpdateMeetingRequest {
+  adding_invitees(meeting, me, &[user])
+}
+
+/// The edit that adds `users` to the invitees of the meeting `me` organizes, as the people the
+/// organizer adds during its call (#1141); the organizer and people invited already are no
+/// additions.
+pub fn adding_invitees(meeting: &MeetingResponse, me: UserId, users: &[UserId]) -> UpdateMeetingRequest {
   let form = ScheduleForm::from_meeting(meeting, me);
   let mut invitees: Vec<MeetingInvitee> = form
     .members
     .into_iter()
-    .filter(|member| *member != user)
+    .filter(|member| !users.contains(member))
     .map(|user_id| MeetingInvitee::User { user_id })
     .collect();
-  invitees.push(MeetingInvitee::User { user_id: user });
+  let mut added: Vec<UserId> = Vec::new();
+  for user in users {
+    if *user != me && !added.contains(user) {
+      added.push(*user);
+    }
+  }
+  invitees.extend(added.into_iter().map(|user_id| MeetingInvitee::User { user_id }));
   invitees.extend(
     form
       .externals
@@ -1840,6 +1853,28 @@ mod tests {
       );
       assert_eq!(request.maybe_title, None, "nothing else changes");
       assert_eq!(request.maybe_starts_at, None);
+    }
+
+    /// #1141: the organizer adds people during the meeting's call; those invited already, the
+    /// organizer and a second pick of the same person are no additions.
+    #[test]
+    fn adding_people_during_a_call_keeps_the_list_and_adds_each_once() {
+      let me = UserId::from_snowflake(teamcraft_proto::Snowflake::new(1).unwrap());
+      let alice = UserId::from_snowflake(teamcraft_proto::Snowflake::new(5).unwrap());
+      let bob = UserId::from_snowflake(teamcraft_proto::Snowflake::new(6).unwrap());
+      let carol = UserId::from_snowflake(teamcraft_proto::Snowflake::new(7).unwrap());
+      let mut meeting = fixture_meeting(me);
+      meeting.attendees = vec![attendee(Some(me), None), attendee(Some(alice), None)];
+      let request = adding_invitees(&meeting, me, &[bob, alice, me, carol, bob]);
+      assert_eq!(
+        request.maybe_invitees,
+        Some(vec![
+          MeetingInvitee::User { user_id: bob },
+          MeetingInvitee::User { user_id: alice },
+          MeetingInvitee::User { user_id: carol },
+        ])
+      );
+      assert_eq!(request.maybe_title, None, "nothing else changes");
     }
 
     #[test]

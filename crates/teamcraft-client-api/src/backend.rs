@@ -76,6 +76,12 @@ pub trait ChatBackend {
   fn space_conversations(&self, space: SpaceId) -> Vec<Conversation>;
   /// DMs and group DMs; they live outside spaces.
   fn direct_conversations(&self) -> Vec<Conversation>;
+  /// Meeting chats the user is in (docs/meetings.md): outside spaces and the sidebar's lists, but
+  /// reachable by ID for the meeting's call and its chat (#1141). Backends without meetings have
+  /// none.
+  fn meeting_conversations(&self) -> Vec<Conversation> {
+    Vec::new()
+  }
   fn conversation(&self, id: ConversationId) -> Option<Conversation>;
 
   /// Number of rows of the feed, as [`Self::messages`] pages them: top-level messages and replies

@@ -480,7 +480,8 @@ fn part_of<S: LocalStore>(
 }
 
 /// The conversations in the order the snapshot lists them: each space's channels, then direct and
-/// group messages (like [`ChatSnapshot::read`]).
+/// group messages, then meeting chats (like [`ChatSnapshot::read`]). Without the meeting chats a
+/// shell's UI could not show the chat of a meeting's call (#1141).
 fn order_of(spaces: &[Space], responses: &[ConversationResponse]) -> Vec<ConversationId> {
   let in_space = |space: SpaceId| {
     responses
@@ -493,10 +494,14 @@ fn order_of(spaces: &[Space], responses: &[ConversationResponse]) -> Vec<Convers
       ConversationKindProto::Dm | ConversationKindProto::Group
     )
   });
+  let meetings = responses
+    .iter()
+    .filter(|response| response.kind == ConversationKindProto::Meeting);
   spaces
     .iter()
     .flat_map(|space| in_space(space.id))
     .chain(direct)
+    .chain(meetings)
     .map(|response| response.id)
     .collect()
 }

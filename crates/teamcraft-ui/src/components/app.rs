@@ -275,6 +275,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     >
       // One grid row for all banners, so the top bar and the body keep their own rows.
       <div class="app-banners" node_ref=banners>
+        // A minimized call stays in reach in every view (#1141).
+        <crate::components::huddle_bar::MinimizedCallBar />
         <OpenInAppButton />
         <BundleBanner />
         <ReleaseBanner />

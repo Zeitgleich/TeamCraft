@@ -188,6 +188,48 @@ async fn a_new_conversation_comes_with_the_new_order() {
   carol.assert_up_to_date();
 }
 
+/// A meeting chat is in no space and in no sidebar list, but the UI reads it by ID: the chat of a
+/// meeting's call shows its messages (#1141).
+#[tokio::test]
+async fn a_meeting_chat_and_its_messages_reach_the_ui() {
+  let (mut alice, mut carol, _) = workspace().await;
+  let carol_id = carol.client.user_id();
+  let chat = carol
+    .api
+    .server()
+    .create_meeting_chat(alice.client.user_id(), &[carol_id]);
+  assert!(alice.client.set_up_meeting_chat(chat, &[carol_id]).await.unwrap());
+  carol.client.full_sync().await.unwrap();
+  carol.catch_up(&mut alice).await;
+  let changes = carol.changes();
+  carol.held.apply(changes);
+  carol.assert_up_to_date();
+  assert!(
+    carol.held.conversation(chat).is_some(),
+    "the chat is in the snapshot"
+  );
+  assert!(
+    carol
+      .backend
+      .direct_conversations()
+      .iter()
+      .all(|found| found.id != chat)
+  );
+
+  alice.client.send_text(chat, None, "hello").await.unwrap();
+  carol.catch_up(&mut alice).await;
+  let changes = carol.changes();
+  assert!(
+    changes
+      .conversations
+      .iter()
+      .any(|change| change.conversation.id == chat)
+  );
+  carol.held.apply(changes);
+  carol.assert_up_to_date();
+  assert_eq!(carol.held.message_count(chat), Some(1));
+}
+
 #[tokio::test]
 async fn another_cache_answers_with_everything() {
   let (_alice, mut carol, _) = workspace().await;

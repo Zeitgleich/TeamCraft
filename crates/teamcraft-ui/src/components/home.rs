@@ -8,7 +8,6 @@ use crate::channel_access::{can_invite_to, can_start_any_direct};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::channel_view::shown_name;
 use crate::components::entry_menu::EntryMenuTrigger;
-use crate::components::huddle_bar::CallPill;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::setup_checklist::SetupChecklist;
@@ -115,7 +114,6 @@ pub fn HomeSidebar() -> impl IntoView {
         }}
       </div>
       <InviteFooter />
-      <CallPill />
     </nav>
   }
 }
