@@ -24,6 +24,7 @@ mod test_dir;
 pub(crate) mod integration_tests;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -302,6 +303,9 @@ pub struct AuthService<S: TokenStore> {
   http: RwLock<reqwest::Client>,
   store: S,
   session: Mutex<Session>,
+  /// The app started from the cached account and [`AuthService::restore`] has no verdict yet: the
+  /// core is told to wait, not that nobody is signed in (issue #778).
+  is_restoring: AtomicBool,
   cancel: Notify,
   now_ms: WallClock,
 }
@@ -313,6 +317,7 @@ impl<S: TokenStore> AuthService<S> {
       http: RwLock::new(http_client()?),
       store,
       session: Mutex::new(Session::default()),
+      is_restoring: AtomicBool::new(false),
       cancel: Notify::new(),
       now_ms: Arc::new(local::now_ms),
     })
@@ -345,6 +350,7 @@ impl<S: TokenStore> AuthService<S> {
   pub async fn set_server(&self, maybe_server: Option<DesktopConfig>) {
     let mut session = self.session.lock().await;
     *session = Session::default();
+    self.is_restoring.store(false, Ordering::Release);
     *self.server.write().unwrap_or_else(PoisonError::into_inner) = maybe_server;
     self.cancel.notify_waiters();
   }
@@ -393,6 +399,79 @@ impl<S: TokenStore> AuthService<S> {
   /// "sign in" (also when no server is chosen yet); [`AuthError::Denied`] means the provider
   /// refused the stored token, so the sign-in screen says the session expired.
   pub async fn restore(&self) -> Result<bool, AuthError> {
+    let outcome = self.restore_session().await;
+    // Without a verdict (no answer, an answer that makes no sense) the session stays as it is and
+    // the UI asks again. A verdict ends the wait, and a session that is over takes the account along.
+    if matches!(
+      outcome,
+      Ok(_) | Err(AuthError::Denied(_) | AuthError::NotSignedIn)
+    ) {
+      self.is_restoring.store(false, Ordering::Release);
+      if !matches!(outcome, Ok(true)) {
+        self.forget_cached_account().await;
+      }
+    }
+    outcome
+  }
+
+  /// The account the UI can start from at once, without the network, while [`Self::restore`] runs
+  /// beside it (issue #778): the one confirmed last on the active server, as long as its session is
+  /// still stored. It shows local data and proves nothing; the server decides what comes after.
+  /// Reads the same sealed file as the tokens: no keychain access beyond the one of the start.
+  pub async fn cached_account(&self) -> Option<String> {
+    let server = self.active_server()?;
+    if !self.has_stored_session(&server).await {
+      return None;
+    }
+    let found = self.store.load_account(&server.server_url).await;
+    let account = found
+      .inspect_err(|error| tracing::debug!(%error, "could not read the cached account"))
+      .ok()??;
+    self.is_restoring.store(true, Ordering::Release);
+    Some(account)
+  }
+
+  /// Keeps the account the server just confirmed, unless its session is gone meanwhile (a sign-out
+  /// while the answer was on its way).
+  pub async fn remember_account(&self, account: &str) {
+    let Some(server) = self.active_server() else {
+      return;
+    };
+    if !self.has_stored_session(&server).await {
+      return;
+    }
+    if let Err(error) = self.store.save_account(&server.server_url, account).await {
+      // The app works; the next start only waits for the server again.
+      tracing::warn!(%error, "could not keep the account for the next start");
+    }
+  }
+
+  /// Forgets the cached account of the active server: the next start waits for the server again.
+  pub async fn forget_cached_account(&self) {
+    let Some(server) = self.active_server() else {
+      return;
+    };
+    if let Err(error) = self.store.clear_account(&server.server_url).await {
+      tracing::warn!(%error, "could not forget the cached account");
+    }
+  }
+
+  /// Whether the app started from the cached account and the session has no verdict yet.
+  pub fn is_restoring(&self) -> bool {
+    self.is_restoring.load(Ordering::Acquire)
+  }
+
+  /// A live local session or a refresh token of `server` is stored.
+  async fn has_stored_session(&self, server: &DesktopConfig) -> bool {
+    let local = self.store.load_local_session(&server.server_url).await;
+    let has_live_local = matches!(
+      local,
+      Ok(Some(stored)) if LocalSession::decode(&stored).is_some_and(|session| session.is_live(local::now_ms()))
+    );
+    has_live_local || matches!(self.store.load(&server.token_key()).await, Ok(Some(_)))
+  }
+
+  async fn restore_session(&self) -> Result<bool, AuthError> {
     let Some(server) = self.active_server() else {
       return Ok(false);
     };
@@ -428,6 +507,8 @@ impl<S: TokenStore> AuthService<S> {
     open_browser: impl FnOnce(&str) -> Result<(), String>,
   ) -> Result<SignedIn, AuthError> {
     let server = self.server()?;
+    // Whoever signs in now, the tokens saved below are not the cached account's any more.
+    self.forget_cached_account().await;
     let discovery = self.discovery(&server).await?;
     let (mut listener, mut attempt) = self.authorization(&discovery, &server, request).await?;
     open_browser(attempt.url.as_str())
@@ -534,6 +615,7 @@ impl<S: TokenStore> AuthService<S> {
     maybe_totp_code: Option<&str>,
   ) -> Result<(), AuthError> {
     let server = self.server()?;
+    self.forget_cached_account().await;
     let body = local::login_body(login, password, maybe_totp_code)?;
     let url = format!("{}{LOCAL_LOGIN_PATH}", server.server_url.trim_end_matches('/'));
     let response = self
@@ -595,6 +677,8 @@ impl<S: TokenStore> AuthService<S> {
     // Whatever happens to the local copy, the provider still hears of the sign-out: the token was
     // taken above, and a retry couldn't end the session any more.
     let cleared = self.store.clear(&server.token_key()).await;
+    self.is_restoring.store(false, Ordering::Release);
+    self.forget_cached_account().await;
     if let (Some(refresh), Some(endpoint)) = (refresh, discovery.and_then(|found| found.end_session_endpoint))
     {
       let form = [
@@ -793,8 +877,14 @@ impl<S: TokenStore> AuthService<S> {
     let Some(server) = self.active_server() else {
       return TokenPeek::Unavailable;
     };
+    // Started from the cached account: nothing was seen yet, and that is a wait, not a sign-out.
+    let is_restoring = self.is_restoring();
     let Ok(session) = self.session.try_lock() else {
-      return TokenPeek::Busy;
+      return if is_restoring {
+        TokenPeek::Refreshing
+      } else {
+        TokenPeek::Busy
+      };
     };
     let maybe_token = match (&session.maybe_local, &session.maybe_tokens) {
       (Some(local), _) => local
@@ -813,6 +903,7 @@ impl<S: TokenStore> AuthService<S> {
         })
       },
       (None, None) if session.is_expired => return TokenPeek::Expired,
+      (None, None) if is_restoring => return TokenPeek::Refreshing,
       (None, None) => None,
     };
     match maybe_token {
@@ -840,6 +931,7 @@ impl<S: TokenStore> AuthService<S> {
   /// Deletes the stored refresh token and local session of `server` (leaving it, or its sign-in
   /// settings changed).
   pub async fn forget_tokens(&self, server: &DesktopConfig) -> Result<(), AuthError> {
+    self.store.clear_account(&server.server_url).await?;
     self.store.clear(&server.token_key()).await?;
     self.store.clear_local_session(&server.server_url).await?;
     self
@@ -867,6 +959,9 @@ impl<S: TokenStore> AuthService<S> {
       return Err(AuthError::NotSignedIn);
     }
     let needs_refresh = match &session.maybe_tokens {
+      None if self.is_restoring() => {
+        return Err(AuthError::Network("waiting for the stored sign-in".to_owned()));
+      },
       None => return Err(AuthError::NotSignedIn),
       Some(tokens) => (self.now_ms)() >= tokens.refresh_at_ms,
     };
@@ -936,6 +1031,9 @@ impl<S: TokenStore> AuthService<S> {
         if let Err(error) = self.store.clear(&server.token_key()).await {
           tracing::warn!(%error, "could not forget the refused refresh token");
         }
+        if let Err(error) = self.store.clear_account(&server.server_url).await {
+          tracing::warn!(%error, "could not forget the cached account");
+        }
       }
     }
     result
@@ -988,6 +1086,7 @@ impl<S: TokenStore> AuthService<S> {
     let ms = |duration: Duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX);
     let expires_at_ms = now_ms.saturating_add(ms(lifetime));
     session.is_expired = false;
+    self.is_restoring.store(false, Ordering::Release);
     session.maybe_tokens = Some(Tokens {
       access: SecretString::from(response.access_token().secret().clone()),
       refresh: refresh.map(SecretString::from),
@@ -1034,6 +1133,7 @@ impl<S: TokenStore> AuthService<S> {
     let mut session = self.session.lock().await;
     session.maybe_tokens = None;
     session.is_expired = false;
+    self.is_restoring.store(false, Ordering::Release);
     session.maybe_local = Some(granted);
     Ok(())
   }
@@ -1814,6 +1914,160 @@ mod tests {
       assert_eq!(provider.logout_requests.load(Ordering::SeqCst), 1);
     }
 
+    mod cached_account {
+      use super::*;
+
+      const ACCOUNT: &str = r#"{"id":"42","display_name":"Alice","role":"owner"}"#;
+
+      /// A service that holds a refresh token and the account confirmed last, like at a start.
+      async fn starting(provider: &FakeProvider) -> AuthService<MemoryStore> {
+        let store = MemoryStore::default();
+        let config = provider.config();
+        store.save(&config.token_key(), "refresh").await.unwrap();
+        store.save_account(&config.server_url, ACCOUNT).await.unwrap();
+        AuthService::new(Some(config), store).unwrap()
+      }
+
+      #[tokio::test]
+      async fn it_needs_no_network_and_tells_the_core_to_wait() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_DOWN);
+        let service = starting(&provider).await;
+
+        assert_eq!(service.cached_account().await.as_deref(), Some(ACCOUNT));
+        assert_eq!(provider.token_requests.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+          service.peek_server_bearer_token(),
+          TokenPeek::Refreshing
+        ));
+        // A request the UI makes meanwhile hears "no network", not "signed out".
+        assert!(matches!(service.bearer_token().await, Err(AuthError::Network(_))));
+      }
+
+      #[tokio::test]
+      async fn a_session_that_is_gone_takes_it_along() {
+        let provider = FakeProvider::start().await;
+        let store = MemoryStore::default();
+        store
+          .save_account(&provider.config().server_url, ACCOUNT)
+          .await
+          .unwrap();
+        let service = AuthService::new(Some(provider.config()), store).unwrap();
+        assert_eq!(service.cached_account().await, None);
+        assert!(!service.is_restoring());
+      }
+
+      #[tokio::test]
+      async fn no_answer_from_the_provider_keeps_it() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_DOWN);
+        let service = starting(&provider).await;
+        service.cached_account().await.unwrap();
+
+        assert!(service.restore().await.is_err());
+
+        assert!(service.is_restoring());
+        assert_eq!(service.cached_account().await.as_deref(), Some(ACCOUNT));
+      }
+
+      #[tokio::test]
+      async fn a_refused_refresh_token_forgets_it_and_ends_the_wait() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_REFUSES);
+        let service = starting(&provider).await;
+        service.cached_account().await.unwrap();
+
+        assert!(matches!(service.restore().await, Err(AuthError::Denied(_))));
+
+        assert!(!service.is_restoring());
+        assert!(
+          service
+            .store
+            .load_account(&provider.config().server_url)
+            .await
+            .unwrap()
+            .is_none()
+        );
+      }
+
+      #[tokio::test]
+      async fn a_restored_session_keeps_it_and_serves_the_token() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_UP);
+        let service = starting(&provider).await;
+        service.cached_account().await.unwrap();
+
+        assert!(service.restore().await.unwrap());
+
+        assert!(!service.is_restoring());
+        assert!(matches!(
+          service.peek_server_bearer_token(),
+          TokenPeek::Ready { .. }
+        ));
+        assert_eq!(service.cached_account().await.as_deref(), Some(ACCOUNT));
+      }
+
+      #[tokio::test]
+      async fn signing_out_forgets_it_and_nothing_brings_it_back() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_UP);
+        let service = starting(&provider).await;
+        service.cached_account().await.unwrap();
+
+        service.logout().await.unwrap();
+
+        assert!(!service.is_restoring());
+        assert_eq!(service.cached_account().await, None);
+        // An answer that was on its way when the user signed out.
+        service.remember_account(ACCOUNT).await;
+        assert!(
+          service
+            .store
+            .load_account(&provider.config().server_url)
+            .await
+            .unwrap()
+            .is_none()
+        );
+      }
+
+      /// Signing in as somebody else must not start the next time from the previous account, even
+      /// if the app stops before the server answers.
+      #[tokio::test]
+      async fn a_new_sign_in_forgets_it_first() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_DOWN);
+        let service = starting(&provider).await;
+
+        let outcome = service
+          .login_local("someone@example.com", &SecretString::from("password"), None)
+          .await;
+
+        assert!(outcome.is_err());
+        assert!(
+          service
+            .store
+            .load_account(&provider.config().server_url)
+            .await
+            .unwrap()
+            .is_none()
+        );
+      }
+
+      #[tokio::test]
+      async fn accounts_of_different_servers_stay_apart() {
+        let provider = FakeProvider::start().await;
+        let service = starting(&provider).await;
+        assert!(
+          service
+            .store
+            .load_account("https://other.example.com")
+            .await
+            .unwrap()
+            .is_none()
+        );
+      }
+    }
+
     #[tokio::test]
     async fn a_refused_stored_token_at_start_says_the_session_expired() {
       let provider = FakeProvider::start().await;
@@ -2110,6 +2364,18 @@ mod tests {
     struct RefusesClear(MemoryStore);
 
     impl TokenStore for RefusesClear {
+      async fn load_account(&self, server: &str) -> Result<Option<String>, AuthError> {
+        self.0.load_account(server).await
+      }
+
+      async fn save_account(&self, server: &str, account: &str) -> Result<(), AuthError> {
+        self.0.save_account(server, account).await
+      }
+
+      async fn clear_account(&self, server: &str) -> Result<(), AuthError> {
+        self.0.clear_account(server).await
+      }
+
       async fn load(&self, server: &str) -> Result<Option<SecretString>, AuthError> {
         self.0.load(server).await
       }

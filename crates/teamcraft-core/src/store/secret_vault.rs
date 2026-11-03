@@ -47,6 +47,7 @@ const TEMPORARY_FILE: &str = "secrets.sealed.tmp";
 const SET_ASIDE_FILE: &str = "secrets.sealed.damaged";
 const DATABASE_KEY_KIND: &str = "database-key";
 const BACKUP_KEY_KIND: &str = "backup-key";
+const CACHED_ACCOUNT_KIND: &str = "cached-account";
 /// How long a failed keychain call stands before the keychain is asked again. Long enough that
 /// polling raises no stream of dialogs, short enough that "try again" works after a mistaken "deny".
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(60);
@@ -204,6 +205,42 @@ impl SecretVault {
     let had_secret = forget_secret(contents, &name);
     let was_new = contents.moved.insert(name);
     state.is_dirty |= had_secret || was_new;
+    flush(&mut state)
+  }
+
+  /// The account confirmed last on `server`, as the sign-in service keeps it for the next start.
+  /// Lives in the file only: it never had a keychain entry to move and never gets one.
+  pub fn load_cached_account(&self, server: &str) -> Result<Option<Zeroizing<String>>, KeySourceError> {
+    let mut state = self.lock();
+    self.ensure_open(&mut state)?;
+    Ok(
+      contents_of(&mut state)?
+        .secrets
+        .get(&item_name(CACHED_ACCOUNT_KIND, server))
+        .map(|account| Zeroizing::new(account.clone())),
+    )
+  }
+
+  /// Keeps the account of `server`. Writes the file only, and only when the account changed.
+  pub fn save_cached_account(&self, server: &str, account: &str) -> Result<(), KeySourceError> {
+    let mut state = self.lock();
+    self.ensure_open(&mut state)?;
+    let name = item_name(CACHED_ACCOUNT_KIND, server);
+    let contents = contents_of(&mut state)?;
+    if contents.secrets.get(&name).map(String::as_str) != Some(account) {
+      replace_secret(contents, &name, account.to_owned());
+      state.is_dirty = true;
+    }
+    flush(&mut state)
+  }
+
+  /// Forgets the account of `server`.
+  pub fn clear_cached_account(&self, server: &str) -> Result<(), KeySourceError> {
+    let mut state = self.lock();
+    self.ensure_open(&mut state)?;
+    let name = item_name(CACHED_ACCOUNT_KIND, server);
+    let had_account = forget_secret(contents_of(&mut state)?, &name);
+    state.is_dirty |= had_account;
     flush(&mut state)
   }
 
@@ -772,6 +809,30 @@ mod tests {
           deletes: 0
         }
       );
+    }
+
+    /// The account read at a start comes from the file that is open anyway (issue #778).
+    #[test]
+    fn the_cached_account_does_not_touch_the_keychain() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      fake.reset_counts();
+
+      vault.save_cached_account(SERVER_A, "account-a").unwrap();
+      assert_eq!(
+        vault
+          .load_cached_account(SERVER_A)
+          .unwrap()
+          .as_deref()
+          .map(String::as_str),
+        Some("account-a")
+      );
+      assert_eq!(vault.load_cached_account(SERVER_B).unwrap(), None);
+      vault.clear_cached_account(SERVER_A).unwrap();
+      assert_eq!(vault.load_cached_account(SERVER_A).unwrap(), None);
+
+      assert_eq!(fake.counts(), Counts::default());
     }
 
     #[test]

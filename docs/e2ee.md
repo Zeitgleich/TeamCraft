@@ -3175,6 +3175,42 @@ What it costs, and what it gains:
   gives the file's key and not the tokens: the file is in the app's private data directory, which
   another Flatpak's sandbox can't reach. The database and backup key entries stay readable as before.
 
+
+### 9.8 Starting from the cached account (issue #778, implemented)
+
+The web and desktop apps open the local data before the network has answered: the core starts for the
+account the server confirmed last on this device, and the token refresh and `GET /me` run beside it.
+
+**What it is.** `GetMeResponse` (user ID, name, role), written when the core is ready for an account the
+server confirmed. It is kept with the session and sealed like it: on the web in the IndexedDB vault of
+the tokens, with the issuer, client and subject of those tokens (it only counts next to saved tokens of
+the same three); for a local account in the tab's session storage next to its token; on the desktop in
+the sealed file of §9.7, per server, used only while a refresh token or a live local session of that
+server is stored. A new sign-in forgets it before any new token is saved.
+
+**What it grants: nothing.** It picks which local data opens, on a device where that data and its key
+are there anyway (the store's key handling is unchanged). Nothing is decrypted that couldn't be before.
+Every request carries the session's own token and the server decides it. The role only shapes the UI
+until the answer is in. Until the session is checked, the local data is readable offline with a session
+the server may have ended already, which is what the feature is; it can't be told from being offline.
+
+**No token yet.** The core is told to wait, as during a refresh after a suspend: a network problem, so
+it shows offline and retries. It never reads as signed out.
+
+**What the answers mean**, in `session.rs` (`restore_verdict`, `account_verdict`):
+
+| Answer                                                                                                                         | What happens                                                                                                                                                                                               |
+|--------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| No answer, a 5xx or 429, a page of a proxy or captive portal                                                                   | Nothing. The check tries again (2 s to 60 s, jitter; at once when the network or page returns or the gateway connects). The user sees the connection line after 1.5 s.                                     |
+| The refresh token is refused (`invalid_grant`)                                                                                 | Signed out as if the session had ended while the app ran: core stopped, pictures and tokens removed, the sign-in screen says why. On the web, one silent round trip through the provider first, as before. |
+| `401` with the server's error body, and a new token could help                                                                 | One new token, one more try; then as the next line.                                                                                                                                                        |
+| `401`/`403` with the server's error body (`account_deleted`, `account_deactivated`, `no_teamcraft_role`, `session_ended`, ...) | Core stopped, the account's pictures and the cached account removed, the sign-in screen says why. The tokens stay, as they did at such a start before: the screen offers to sign out or in.                |
+| `200` with the same user                                                                                                       | Kept for the next start. A changed name or role rebuilds the shell, once.                                                                                                                                  |
+| `200` with another user (server reset, provider maps people differently)                                                       | The shell goes first, then the core stops, the pictures and the cached account go, and the start continues as a sign-in of that user. Never one account's data under another name.                         |
+
+**The local data can't carry the start** (not set up here any more, unreadable): the check stops, the
+cached account is forgotten, and the start goes the long way, as without one.
+
 ## 10. Search
 
 Users expect search to be fast and complete on every device right after login – a common weak point

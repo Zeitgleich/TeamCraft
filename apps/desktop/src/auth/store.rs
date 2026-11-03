@@ -21,6 +21,11 @@ pub trait TokenStore: Send + Sync + 'static {
     session: &SecretString,
   ) -> impl Future<Output = Result<(), AuthError>> + Send;
   fn clear_local_session(&self, server: &str) -> impl Future<Output = Result<(), AuthError>> + Send;
+  /// The account confirmed last on this server, as the UI handed it over; see
+  /// [`AuthService::cached_account`](super::AuthService::cached_account).
+  fn load_account(&self, server: &str) -> impl Future<Output = Result<Option<String>, AuthError>> + Send;
+  fn save_account(&self, server: &str, account: &str) -> impl Future<Output = Result<(), AuthError>> + Send;
+  fn clear_account(&self, server: &str) -> impl Future<Output = Result<(), AuthError>> + Send;
   /// The user signed out or left: deletes what a normal start doesn't look at, such as secrets an
   /// older version of the app wrote or a damaged file set aside. `token_key` and `server` name the
   /// server's refresh token and local session.
@@ -104,6 +109,24 @@ impl TokenStore for VaultStore {
     self.clear_token(TokenKind::LocalSession, server).await
   }
 
+  async fn load_account(&self, server: &str) -> Result<Option<String>, AuthError> {
+    let server = server.to_owned();
+    let found = self.run(move |vault| vault.load_cached_account(&server)).await?;
+    Ok(found.map(|account| account.as_str().to_owned()))
+  }
+
+  async fn save_account(&self, server: &str, account: &str) -> Result<(), AuthError> {
+    let (server, account) = (server.to_owned(), account.to_owned());
+    self
+      .run(move |vault| vault.save_cached_account(&server, &account))
+      .await
+  }
+
+  async fn clear_account(&self, server: &str) -> Result<(), AuthError> {
+    let server = server.to_owned();
+    self.run(move |vault| vault.clear_cached_account(&server)).await
+  }
+
   async fn purge_after_sign_out(&self, token_key: &str, server: &str) -> Result<(), AuthError> {
     let (token_key, server) = (token_key.to_owned(), server.to_owned());
     self
@@ -122,6 +145,12 @@ impl TokenStore for VaultStore {
 #[cfg(test)]
 fn local_session_name(server: &str) -> String {
   format!("local-session@{server}")
+}
+
+/// The in-memory store's name of a cached account.
+#[cfg(test)]
+fn cached_account_name(server: &str) -> String {
+  format!("cached-account@{server}")
 }
 
 /// In-memory store for tests.
@@ -170,6 +199,19 @@ impl TokenStore for MemoryStore {
 
   async fn clear_local_session(&self, server: &str) -> Result<(), AuthError> {
     self.clear(&local_session_name(server)).await
+  }
+
+  async fn load_account(&self, server: &str) -> Result<Option<String>, AuthError> {
+    let found = self.load(&cached_account_name(server)).await?;
+    Ok(found.map(|account| account.expose_secret().to_owned()))
+  }
+
+  async fn save_account(&self, server: &str, account: &str) -> Result<(), AuthError> {
+    self.save(&cached_account_name(server), account).await
+  }
+
+  async fn clear_account(&self, server: &str) -> Result<(), AuthError> {
+    self.clear(&cached_account_name(server)).await
   }
 }
 

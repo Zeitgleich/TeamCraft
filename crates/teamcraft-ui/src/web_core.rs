@@ -93,6 +93,11 @@ const TRANSFER_PROGRESS: Duration = Duration::from_millis(500);
 const UPKEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// How often the core's copy of the access token is renewed from the page's session.
 const TOKEN_REFRESH: Duration = Duration::from_secs(20);
+/// How long to wait before asking for the first access token again, while the app started from the
+/// cached account and the session has none (offline, most of the time). Doubles up to the maximum;
+/// the network coming back ends the wait ([`WebTokens::wake`]).
+const FIRST_TOKEN_RETRY: Duration = Duration::from_secs(1);
+const FIRST_TOKEN_RETRY_MAX: Duration = Duration::from_secs(30);
 /// How long the access token stored for the service worker is used. Tokens are renewed every
 /// [`TOKEN_REFRESH`]; the stored one only has to outlive a push that arrives while no page is open.
 const PUSH_SESSION_LIFETIME_MS: i64 = 4 * 60 * 1000;
@@ -170,16 +175,62 @@ impl Running {
 }
 
 /// The access token the core reads synchronously; renewed by [`keep_token_fresh`].
-#[derive(Clone, Default)]
-struct WebTokens(Rc<RefCell<Option<String>>>);
+#[derive(Clone)]
+struct WebTokens {
+  slot: Rc<RefCell<TokenSlot>>,
+  /// Cuts the wait of [`keep_token_fresh`] for a first token short: the network may be back.
+  maybe_wake: Rc<RefCell<Option<oneshot::Sender<()>>>>,
+}
+
+/// What the core gets when it asks for the token.
+enum TokenSlot {
+  /// Started from the cached account (issue #778) and the session has no token to give yet. A network
+  /// problem for the core, like a refresh after a suspend on the desktop: the app is offline for now,
+  /// and nothing says the session is over.
+  Waiting,
+  Ready(String),
+}
+
+impl WebTokens {
+  fn new(slot: TokenSlot) -> Self {
+    Self {
+      slot: Rc::new(RefCell::new(slot)),
+      maybe_wake: Rc::default(),
+    }
+  }
+
+  fn is_waiting(&self) -> bool {
+    matches!(*self.slot.borrow(), TokenSlot::Waiting)
+  }
+
+  /// Takes a new token; answers whether it is the first.
+  fn set(&self, token: String) -> bool {
+    let was_waiting = self.is_waiting();
+    *self.slot.borrow_mut() = TokenSlot::Ready(token);
+    was_waiting
+  }
+
+  /// Sleeps for `duration`, or until [`Self::wake`].
+  async fn sleep_until_woken(&self, duration: Duration) {
+    let (wake, woken) = oneshot::channel();
+    *self.maybe_wake.borrow_mut() = Some(wake);
+    select(woken, Box::pin(platform::sleep(duration))).await;
+  }
+
+  fn wake(&self) {
+    if let Some(wake) = self.maybe_wake.borrow_mut().take() {
+      // The sleep may have ended already.
+      let _ = wake.send(());
+    }
+  }
+}
 
 impl AccessTokenSource for WebTokens {
   fn access_token(&self) -> Result<String, ApiError> {
-    self
-      .0
-      .borrow()
-      .clone()
-      .ok_or_else(|| ApiError::Token("not signed in".to_owned()))
+    match &*self.slot.borrow() {
+      TokenSlot::Waiting => Err(ApiError::Network("waiting for a fresh access token".to_owned())),
+      TokenSlot::Ready(token) => Ok(token.clone()),
+    }
   }
 }
 
@@ -648,13 +699,18 @@ async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), 
           .map(|setup| (setup.auth.clone(), setup.server_url.clone()))
       })
       .ok_or("the web client is not configured")?;
-    let tokens = WebTokens::default();
-    // The first token must be there before the core makes its first request.
-    let first = auth
-      .access_token()
-      .await
-      .map_err(|error: AuthError| error.to_string())?;
-    *tokens.0.borrow_mut() = Some(first);
+    // The first token must be there before the core makes its first request, unless the app started
+    // from the cached account: then the core opens the local data at once and connects when the
+    // token comes (issue #778).
+    let tokens = if auth.is_restoring() {
+      WebTokens::new(TokenSlot::Waiting)
+    } else {
+      let first = auth
+        .access_token()
+        .await
+        .map_err(|error: AuthError| error.to_string())?;
+      WebTokens::new(TokenSlot::Ready(first))
+    };
     let (sender, receiver) = mpsc::unbounded();
     let maybe_channel = match maybe_lock.is_some() {
       true => Some(OwnerChannel::open(user, serve_follower, on_takeover_request)?),
@@ -904,14 +960,32 @@ fn stopped() -> String {
 /// Renews the core's token copy from the page's session until the core stops.
 fn keep_token_fresh(auth: Rc<dyn Authenticator>, tokens: WebTokens, alive: std::rc::Weak<()>) {
   wasm_bindgen_futures::spawn_local(async move {
+    let mut first_token_wait = FIRST_TOKEN_RETRY;
     loop {
-      platform::sleep(TOKEN_REFRESH).await;
-      if alive.upgrade().is_none() {
-        return;
+      if !tokens.is_waiting() {
+        platform::sleep(TOKEN_REFRESH).await;
+        if alive.upgrade().is_none() {
+          return;
+        }
       }
       match auth.access_token().await {
-        Ok(token) => *tokens.0.borrow_mut() = Some(token),
+        Ok(token) => {
+          // async-ok: the core's copy of the token, not a signal.
+          if tokens.set(token)
+            && let Err(error) = send(Request::NetworkChanged)
+          {
+            tracing::debug!(%error, "the core is gone before its first token");
+          }
+        },
+        Err(error) if tokens.is_waiting() => tracing::debug!(%error, "no access token yet"),
         Err(error) => tracing::warn!(%error, "could not renew the access token"),
+      }
+      if tokens.is_waiting() {
+        tokens.sleep_until_woken(first_token_wait).await;
+        first_token_wait = (first_token_wait * 2).min(FIRST_TOKEN_RETRY_MAX);
+      }
+      if alive.upgrade().is_none() {
+        return;
       }
     }
   });
@@ -1366,16 +1440,23 @@ impl Core {
     let name = format!("teamcraft-{}", self.user);
     announce_database(&name);
     request_persistent_storage();
-    let key = browser_database_key(&name)
-      .await
-      .map_err(|error| error.to_string())?;
-    let opened = match IndexedDbStore::open(&name, &key).await {
-      Ok(opened) => opened,
-      Err(error) => return unreadable_status(error.into()),
+    let store = match &self.store {
+      // Opened before, when the token wasn't there yet.
+      Some(store) => store.clone(),
+      None => {
+        let key = browser_database_key(&name)
+          .await
+          .map_err(|error| error.to_string())?;
+        let opened = match IndexedDbStore::open(&name, &key).await {
+          Ok(opened) => opened,
+          Err(error) => return unreadable_status(error.into()),
+        };
+        let store = TrackedStore::with_message_cache(Rc::new(opened), MESSAGE_CACHE_MESSAGES);
+        self.store = Some(store.clone());
+        watch_page_lifecycle(store.inner());
+        store
+      },
     };
-    let store = TrackedStore::with_message_cache(Rc::new(opened), MESSAGE_CACHE_MESSAGES);
-    self.store = Some(store.clone());
-    watch_page_lifecycle(store.inner());
     let maybe_client = match Client::open(
       self.api(),
       store.clone(),
@@ -1387,6 +1468,9 @@ impl Core {
     };
     match maybe_client {
       Some(client) => Ok(self.adopt(client)),
+      // Not set up on this device, whatever the cached account says, and what comes next asks the
+      // server. Without a token that would fail for good: asking for the status opens it again.
+      None if self.tokens.is_waiting() => Ok(CoreStatus::NotStarted),
       None => {
         if let Some(client) = self.resume_link(store).await? {
           return Ok(self.adopt(client));
@@ -1541,6 +1625,9 @@ impl Core {
   async fn handle(&mut self, request: Request) {
     match request {
       Request::Status(reply) => {
+        if self.status == CoreStatus::NotStarted && !self.tokens.is_waiting() {
+          self.open().await;
+        }
         self.refresh_enrollment_hint().await;
         drop(reply.send(self.status.clone()));
       },
@@ -1641,7 +1728,10 @@ impl Core {
       Request::LinkRequests(reply) => drop(reply.send(self.link_requests())),
       Request::LinkRequestReview { id, reply } => drop(reply.send(self.link_request_review(&id).await)),
       Request::LinkRequestReject { id, reply } => drop(reply.send(self.link_request_reject(&id).await)),
-      Request::NetworkChanged => self.connection.network_changed(now_ms()).await,
+      Request::NetworkChanged => {
+        self.tokens.wake();
+        self.connection.network_changed(now_ms()).await;
+      },
       Request::PrepareCall(conversation, reply) => {
         let result = match self.client.as_mut() {
           Some(client) => client.prepare_call(conversation).await.map_err(describe_failure),

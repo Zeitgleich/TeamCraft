@@ -14,6 +14,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use teamcraft_proto::GetMeResponse;
 
 /// Refresh this long before the access token expires.
 pub(super) const REFRESH_MARGIN_MS: i64 = 30_000;
@@ -21,6 +22,8 @@ pub(super) const REFRESH_MARGIN_MS: i64 = 30_000;
 const VAULT_DATABASE: &str = "teamcraft-session";
 #[cfg(target_arch = "wasm32")]
 const TOKENS_SLOT: &str = "oidc_tokens";
+#[cfg(target_arch = "wasm32")]
+const ACCOUNT_SLOT: &str = "cached_account";
 /// The Web Lock every tab takes to refresh.
 #[cfg(target_arch = "wasm32")]
 const REFRESH_LOCK: &str = "teamcraft-auth-refresh";
@@ -36,6 +39,17 @@ pub(super) struct Tokens {
   pub expires_at_ms: i64,
   /// The account's `sub` at the provider, to tell whether saved tokens are this tab's account.
   pub maybe_subject: Option<String>,
+}
+
+/// The account the server confirmed last, for the next start (issue #778), with the sign-in it
+/// belongs to: it only counts next to saved tokens of the same provider, client and subject, so
+/// one account's record never starts the app for another account's tokens.
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct CachedAccount {
+  pub issuer: String,
+  pub client_id: String,
+  pub subject: String,
+  pub account: GetMeResponse,
 }
 
 /// What a refresh does, decided under the lock.
@@ -174,7 +188,7 @@ pub(super) async fn refresh_turn() -> RefreshTurn {
 
 /// The saved tokens, if they belong to this provider and client.
 pub(super) async fn load(issuer: &str, client_id: &str) -> Option<Tokens> {
-  let bytes = vault_read().await?;
+  let bytes = vault_read(TOKENS_SLOT).await?;
   let saved = decode(&bytes)?;
   if saved.issuer != issuer || saved.client_id != client_id {
     // The server switched providers: these tokens are of no use any more.
@@ -206,14 +220,36 @@ pub(super) async fn save(issuer: &str, client_id: &str, tokens: &Tokens) {
     expires_at_ms: tokens.expires_at_ms,
   };
   match serde_json::to_vec(&saved) {
-    Ok(bytes) => vault_write(&Zeroizing::new(bytes)).await,
+    Ok(bytes) => vault_write(TOKENS_SLOT, &Zeroizing::new(bytes)).await,
     Err(error) => tracing::warn!(%error, "could not encode the sign-in tokens"),
   }
 }
 
-/// Removes the saved tokens (sign-out, revoked session).
+/// Removes the saved tokens and the account they stand for (sign-out, revoked session).
 pub(super) async fn forget() {
-  vault_clear().await;
+  vault_clear(TOKENS_SLOT).await;
+  forget_account().await;
+}
+
+/// The account saved for the next start, if it reads.
+pub(super) async fn load_account() -> Option<CachedAccount> {
+  let bytes = vault_read(ACCOUNT_SLOT).await?;
+  serde_json::from_slice(&bytes)
+    .inspect_err(|_| tracing::debug!("the cached account does not read"))
+    .ok()
+}
+
+/// Saves the account for the next start.
+pub(super) async fn save_account(account: &CachedAccount) {
+  match serde_json::to_vec(account) {
+    Ok(bytes) => vault_write(ACCOUNT_SLOT, &Zeroizing::new(bytes)).await,
+    Err(error) => tracing::warn!(%error, "could not encode the account for the next start"),
+  }
+}
+
+/// The next start waits for the server again.
+pub(super) async fn forget_account() {
+  vault_clear(ACCOUNT_SLOT).await;
 }
 
 fn decode(bytes: &[u8]) -> Option<Saved> {
@@ -230,8 +266,8 @@ fn token_subject(access: &str) -> Option<String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn vault_read() -> Option<Zeroizing<Vec<u8>>> {
-  teamcraft_core::store::vault_get(VAULT_DATABASE, TOKENS_SLOT)
+async fn vault_read(slot: &str) -> Option<Zeroizing<Vec<u8>>> {
+  teamcraft_core::store::vault_get(VAULT_DATABASE, slot)
     .await
     .inspect_err(|error| tracing::warn!(%error, "could not read the saved sign-in"))
     .ok()
@@ -239,31 +275,36 @@ async fn vault_read() -> Option<Zeroizing<Vec<u8>>> {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn vault_write(bytes: &[u8]) {
-  if let Err(error) = teamcraft_core::store::vault_put(VAULT_DATABASE, TOKENS_SLOT, bytes).await {
+async fn vault_write(slot: &str, bytes: &[u8]) {
+  if let Err(error) = teamcraft_core::store::vault_put(VAULT_DATABASE, slot, bytes).await {
     // The session still works; only the next reload goes through the provider again.
     tracing::warn!(%error, "could not save the sign-in");
   }
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn vault_clear() {
-  if let Err(error) = teamcraft_core::store::vault_delete(VAULT_DATABASE, TOKENS_SLOT).await {
+async fn vault_clear(slot: &str) {
+  if let Err(error) = teamcraft_core::store::vault_delete(VAULT_DATABASE, slot).await {
     tracing::warn!(%error, "could not remove the saved sign-in");
   }
 }
 
 // Native builds (tests, desktop) have no browser vault: BrowserAuth only runs in the page.
 #[cfg(not(target_arch = "wasm32"))]
-async fn vault_read() -> Option<Zeroizing<Vec<u8>>> {
+const TOKENS_SLOT: &str = "";
+#[cfg(not(target_arch = "wasm32"))]
+const ACCOUNT_SLOT: &str = "";
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn vault_read(_slot: &str) -> Option<Zeroizing<Vec<u8>>> {
   None
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn vault_write(_bytes: &[u8]) {}
+async fn vault_write(_slot: &str, _bytes: &[u8]) {}
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn vault_clear() {}
+async fn vault_clear(_slot: &str) {}
 
 #[cfg(test)]
 mod tests {

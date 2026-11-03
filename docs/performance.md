@@ -901,9 +901,8 @@ What changed and what the numbers say:
 
 Left open (see the PR of #714/#717):
 
-- The web and desktop shells still restore the sign-in (token refresh at the identity provider) and read
-  `GET /me` before they start the core; offline the web app shows the sign-in page instead of the
-  stored chats. The cached account should start the core at once and the sign-in be checked beside it.
+- The web and desktop shells restored the sign-in and read `GET /me` before they started the core.
+  Fixed since, see "Starting from the cached account" below.
 - The web core decrypts the whole IndexedDB store into memory before it answers the first read.
 - The MLS state was still one record (#424); a catch-up of many changed groups rewrote it per group.
   Fixed since, see the next section.
@@ -911,6 +910,47 @@ Left open (see the PR of #714/#717):
 The desktop and Android apps are measured against the same harness (`PERF_MOBILE_USER`) in a local
 session. Slack, Teams and Element were not measured: that needs their apps installed and accounts
 on their services.
+
+#### Starting from the cached account (issue #778)
+
+Both shells waited for the token refresh and `GET /me` before they started the core, so every start
+paid for the network, and offline the web app showed the sign-in page instead of the stored chats. Now
+the core opens the local data of the account the server confirmed last, and the session is checked
+beside it. What decides what happens to the session is in [e2ee.md](e2ee.md) §9.8.
+
+Signed-in start of the web client until the channel list shows, a small workspace, debug server, the
+web client's release build, local machine, November 2026, median of 5. Every start has an access
+token that has run out, as after a night: the page's clock moves on by an hour per load. "Late" holds
+every request to the server's API and the identity provider back for a second (DevTools), "no
+answer" fails them.
+
+```sh
+CACHED_START_RUNS=5 E2E_REQUIRED=1 cargo test -p teamcraft-e2e --features browser --test suite -- \
+  --nocapture cached_start::
+```
+
+| Network                | Before               | After             | Budget (web) |
+|------------------------|----------------------|-------------------|--------------|
+| Good                   | 617 ms               | 568 ms            | ≤ 1.5 s      |
+| Every request 1 s late | 5617 ms              | 1581 ms           | ≤ 1.5 s      |
+| No answer              | sign-in page, 419 ms | 573 ms, the chats | ≤ 1.5 s      |
+
+- **The second that is left when requests are late** is one stylesheet: `index.html` links
+  `/api/v1/brand/theme.css`, which holds back the first paint and the app's scripts until it is there
+  (the service worker leaves `/api/` alone). On a link that swallows packets instead of refusing them
+  this wait lasts until the browser gives up. Not changed here: without it, a branded instance
+  starts in the default colors. To decide separately.
+- **The service worker serves the app's files offline only in release builds with a signed bundle**
+  (e2ee.md §9.3). Other builds need the server for the page itself, so "no answer" above means the API
+  and the identity provider, not the page.
+- **Desktop:** the same start, through `auth_cached_account`. It reads the sealed file the tokens are
+  in, so a start stays at one keychain read (e2ee.md §9.7). `CoreHost::start` doesn't wait for a token
+  while the session is being restored. Covered by tests (`token_expiry::cached_account`), not measured
+  in the app.
+- **Left of #778:** a pending message reaches the UI mirror after one answer of the core, not in the
+  same frame (it needs an ID the UI picks and the core keeps), and live events don't move the
+  remembered sync heads (a head moved by an event says nothing about what came before it, so it needs
+  proof that the connection had no gap). Both on their own: they don't touch the sign-in.
 
 #### Coming back to 300 channels: no work per conversation (issue #714)
 

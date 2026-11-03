@@ -65,8 +65,11 @@ impl CoreHost {
     spawn: impl FnOnce(TokenCache) -> CoreRuntime,
   ) -> Result<CoreStatus, String> {
     // Refreshes a token that is about to run out before the core asks for it; without one the
-    // core waits for it on its own.
-    if let Err(error) = service.server_bearer_token().await {
+    // core waits for it on its own. Not while the app starts from the cached account: this would
+    // wait for the identity provider, which is what that start is there to avoid (issue #778).
+    if !service.is_restoring()
+      && let Err(error) = service.server_bearer_token().await
+    {
       tracing::debug!(%error, "no fresh access token before starting the core");
     }
     if let Some(runtime) = self.running_for(server_url, user)? {

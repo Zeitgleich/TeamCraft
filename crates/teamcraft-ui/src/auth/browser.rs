@@ -6,7 +6,7 @@
 //! refresh-token grant; only without saved tokens, or when the provider refuses them, does it sign
 //! in again through the provider's session (a redirect round trip without a password prompt).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use oauth2::{
   AuthUrl, AuthorizationCode, ClientId, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, RefreshToken,
@@ -19,15 +19,16 @@ use teamcraft_client_api::oidc_login::{
   shown_error_code,
 };
 use teamcraft_client_api::server_entry::{HttpPolicy, SERVER_INFO_PATH, check_discovery};
-use teamcraft_proto::{SERVER_INFO_PRODUCT, ServerInfoResponse};
+use teamcraft_proto::{GetMeResponse, SERVER_INFO_PRODUCT, ServerInfoResponse};
 
 use super::fetch::fetch;
-use super::token_vault::{self, RefreshPlan, Tokens};
+use super::token_vault::{self, CachedAccount, RefreshPlan, Tokens};
 use super::{
   ApiBytes, ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator, BinaryBody, LocalFuture, SignInLook,
 };
 use crate::clock::now_ms;
 use crate::route::Route;
+use crate::tab_handover::PERSIST_DRAFTS_EVENT;
 
 const PENDING_KEY: &str = "teamcraft.oidc.pending";
 const SIGNED_IN_HINT_KEY: &str = "teamcraft.signed_in";
@@ -49,6 +50,8 @@ pub struct BrowserAuth {
   tokens: RefCell<Option<Tokens>>,
   sign_in: RefCell<Option<SignIn>>,
   discovery: RefCell<Option<Discovery>>,
+  /// Started from the cached account, and [`Authenticator::restore`] has no verdict yet.
+  is_restoring: Cell<bool>,
 }
 
 /// How to sign in: the server's settings, or the development overrides of [`AppConfig`].
@@ -75,6 +78,9 @@ struct StoredLoginHint {
 struct LocalSession {
   token: String,
   expires_at_ms: i64,
+  /// The account the server confirmed for this session, for the next start of the tab (issue #778).
+  #[serde(default, rename = "account", skip_serializing_if = "Option::is_none")]
+  maybe_account: Option<GetMeResponse>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -118,14 +124,73 @@ impl BrowserAuth {
       tokens: RefCell::new(None),
       sign_in: RefCell::new(None),
       discovery: RefCell::new(None),
+      is_restoring: Cell::new(false),
     }
   }
 
+  /// The cached account with its session in memory, without the network. Tokens that ran out are
+  /// taken too: asking for the access token then refreshes them when it can.
+  async fn cached_start(&self) -> Option<GetMeResponse> {
+    let params = location_params();
+    if params.contains_key("code") || params.contains_key("error") {
+      return None;
+    }
+    if let Some(session) = stored_local_session() {
+      let account = session.maybe_account.clone()?;
+      *self.local.borrow_mut() = Some(session);
+      self.is_restoring.set(true);
+      return Some(account);
+    }
+    local_get(SIGNED_IN_HINT_KEY)?;
+    let cached = token_vault::load_account().await?;
+    let tokens = token_vault::load(&cached.issuer, &cached.client_id).await?;
+    if tokens.maybe_subject.as_deref() != Some(cached.subject.as_str()) {
+      return None;
+    }
+    self.tokens.replace(Some(tokens));
+    // async-ok: a cell of the sign-in, not a signal.
+    self.is_restoring.set(true);
+    Some(cached.account)
+  }
+
+  /// Saves `account` next to the session it was confirmed for: a local account's in this tab's
+  /// session, else in the vault, unless the user signed out meanwhile.
+  async fn keep_account(&self, account: &GetMeResponse) {
+    if let Some(session) = self.local.borrow_mut().as_mut() {
+      session.maybe_account = Some(account.clone());
+      if let Ok(text) = serde_json::to_string(session) {
+        session_set(LOCAL_SESSION_KEY, &text);
+      }
+      return;
+    }
+    let maybe_subject = self
+      .tokens
+      .borrow()
+      .as_ref()
+      .and_then(|tokens| tokens.maybe_subject.clone());
+    let Some(subject) = maybe_subject else {
+      return;
+    };
+    let Ok(sign_in) = self.sign_in().await else {
+      return;
+    };
+    // Under the refresh lock, like the tokens: a sign-out in another tab either sees this record
+    // and removes it, or removed the hint before this looks at it.
+    let _turn = token_vault::refresh_turn().await;
+    if local_get(SIGNED_IN_HINT_KEY).is_none() {
+      return;
+    }
+    token_vault::save_account(&CachedAccount {
+      issuer: sign_in.issuer,
+      client_id: sign_in.client_id,
+      subject,
+      account: account.clone(),
+    })
+    .await;
+  }
+
   async fn restore_inner(&self) -> Result<bool, AuthError> {
-    if let Some(stored) = session_get(LOCAL_SESSION_KEY)
-      && let Ok(session) = serde_json::from_str::<LocalSession>(&stored)
-      && session.expires_at_ms > now_ms()
-    {
+    if let Some(session) = stored_local_session() {
       *self.local.borrow_mut() = Some(session);
       return Ok(true);
     }
@@ -159,6 +224,8 @@ impl BrowserAuth {
     // stays signed in as long as the provider's session lasts).
     if session_get(AUTOLOGIN_TRIED_KEY).is_none() {
       session_set(AUTOLOGIN_TRIED_KEY, "1");
+      // Started from the cached account, the app is on screen and may be in use.
+      persist_drafts();
       self.begin_login(None).await?;
       std::future::pending::<()>().await;
     }
@@ -380,11 +447,14 @@ impl BrowserAuth {
     let session = LocalSession {
       token: granted.access_token.clone(),
       expires_at_ms: granted.expires_at.0,
+      maybe_account: None,
     };
     if let Ok(text) = serde_json::to_string(&session) {
       session_set(LOCAL_SESSION_KEY, &text);
     }
     *self.local.borrow_mut() = Some(session);
+    // async-ok: a cell of the sign-in, not a signal.
+    self.is_restoring.set(false);
     Ok(())
   }
 
@@ -520,7 +590,43 @@ impl BrowserAuth {
 
 impl Authenticator for BrowserAuth {
   fn restore(&self) -> LocalFuture<'_, Result<bool, AuthError>> {
-    Box::pin(self.restore_inner())
+    Box::pin(async move {
+      let outcome = self.restore_inner().await;
+      // No verdict (no answer, an answer that makes no sense): the UI asks again.
+      if matches!(
+        outcome,
+        Ok(_) | Err(AuthError::Denied(_) | AuthError::NotSignedIn)
+      ) {
+        self.is_restoring.set(false);
+      }
+      outcome
+    })
+  }
+
+  fn cached_account(&self) -> LocalFuture<'_, Option<GetMeResponse>> {
+    Box::pin(self.cached_start())
+  }
+
+  fn remember_account<'a>(&'a self, account: &'a GetMeResponse) -> LocalFuture<'a, ()> {
+    Box::pin(self.keep_account(account))
+  }
+
+  fn forget_account(&self) -> LocalFuture<'_, ()> {
+    Box::pin(async move {
+      if let Some(session) = self.local.borrow_mut().as_mut() {
+        session.maybe_account = None;
+        if let Ok(text) = serde_json::to_string(session) {
+          session_set(LOCAL_SESSION_KEY, &text);
+        }
+        return;
+      }
+      let _turn = token_vault::refresh_turn().await;
+      token_vault::forget_account().await;
+    })
+  }
+
+  fn is_restoring(&self) -> bool {
+    self.is_restoring.get()
   }
 
   fn access_token(&self) -> LocalFuture<'_, Result<String, AuthError>> {
@@ -562,6 +668,7 @@ impl Authenticator for BrowserAuth {
         }
         return Ok(());
       }
+      self.is_restoring.set(false);
       let maybe_refresh = self.tokens.replace(None).and_then(|tokens| tokens.maybe_refresh);
       local_remove(SIGNED_IN_HINT_KEY);
       session_remove(AUTOLOGIN_TRIED_KEY);
@@ -756,6 +863,22 @@ fn encode(value: &str) -> String {
 }
 
 /// Query parameters of the current page as pairs.
+/// A draft still waiting for the typing pause is stored before the page goes.
+fn persist_drafts() {
+  if let (Some(window), Ok(event)) = (web_sys::window(), web_sys::Event::new(PERSIST_DRAFTS_EVENT)) {
+    // Nobody listening (no composer open) is not an error.
+    let _ = window.dispatch_event(&event);
+  }
+}
+
+/// The local account's session this tab holds, as long as it lasts.
+fn stored_local_session() -> Option<LocalSession> {
+  let stored = session_get(LOCAL_SESSION_KEY)?;
+  serde_json::from_str::<LocalSession>(&stored)
+    .ok()
+    .filter(|session| session.expires_at_ms > now_ms())
+}
+
 fn location_params() -> std::collections::HashMap<String, String> {
   let search = web_sys::window()
     .and_then(|window| window.location().search().ok())

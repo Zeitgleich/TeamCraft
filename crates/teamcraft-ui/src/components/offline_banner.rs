@@ -36,6 +36,10 @@ const COUNTDOWN_MS: u64 = 1_000;
 /// A connection that stays down this long (counted like the grace period) becomes a notice; an
 /// unreachable server's has "Try now".
 const ESCALATE_AFTER_MS: i64 = 60_000;
+/// While the app runs from the cached account and the server hasn't answered yet (issue #778) the
+/// grace period is this short: the chats are on screen, and the user should soon see that they may
+/// be out of date. Long enough for a normal start not to flash the hint.
+const UNCONFIRMED_GRACE_MS: i64 = 1_500;
 
 /// What the banner says.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +102,12 @@ pub fn OfflineBanner() -> impl IntoView {
         .is_some_and(|shown| shown != Some(state))
       {
         connection.set_if_alive(Some(state));
+        // The gateway took the token: a good moment to hear what the server says about the account.
+        if state == CoreConnection::Connected
+          && let Some(control) = maybe_session
+        {
+          control.check_account_now();
+        }
         // The identity provider refused the sign-in for good: back to the sign-in screen, which
         // says why (issue #883). Nothing the user could do here would help.
         if state
@@ -125,9 +135,21 @@ pub fn OfflineBanner() -> impl IntoView {
     },
     move || now.set(now_ms()),
   );
-  report_network_changes(is_online, unsettled);
+  report_network_changes(is_online, unsettled, maybe_session);
 
-  let notice = Memo::new(move |_| notice_for(is_online.get(), connection.get(), unsettled.get(), now.get()));
+  let notice = Memo::new(move |_| {
+    let grace_ms = match maybe_session.is_some_and(|control| control.is_account_unconfirmed.get()) {
+      true => UNCONFIRMED_GRACE_MS,
+      false => CONNECTING_GRACE_MS,
+    };
+    notice_for(
+      is_online.get(),
+      connection.get(),
+      unsettled.get(),
+      now.get(),
+      grace_ms,
+    )
+  });
   let prominence = Memo::new(move |_| {
     notice
       .get()
@@ -230,11 +252,18 @@ fn ConnectionNotice(notice: Notice, maybe_session: Option<SessionControl>) -> im
 
 /// The browser (or the desktop webview) saw the network come back, the page become visible again
 /// or resume after being frozen or restored from the back/forward cache.
-fn report_network_changes(is_online: RwSignal<bool>, unsettled: RwSignal<Unsettled>) {
+fn report_network_changes(
+  is_online: RwSignal<bool>,
+  unsettled: RwSignal<Unsettled>,
+  maybe_session: Option<SessionControl>,
+) {
   let returned = move || {
     // The listeners live as long as the page; the banner may be gone (signed out).
     unsettled.try_update(|current| *current = current.page_returned(now_ms()));
     network_changed();
+    if let Some(control) = maybe_session {
+      control.check_account_now();
+    }
   };
   let listener = window_event_listener(ev::online, move |_| {
     is_online.set(true);
@@ -287,10 +316,10 @@ impl Unsettled {
   }
 
   /// Down for longer than the grace period. A clock that went back counts as just now.
-  fn is_past_grace(self, now_ms: i64) -> bool {
+  fn is_past_grace(self, now_ms: i64, grace_ms: i64) -> bool {
     self
       .maybe_since_ms
-      .is_some_and(|since| now_ms.saturating_sub(since) >= CONNECTING_GRACE_MS)
+      .is_some_and(|since| now_ms.saturating_sub(since) >= grace_ms)
   }
 }
 
@@ -300,6 +329,7 @@ fn notice_for(
   maybe_connection: Option<CoreConnection>,
   unsettled: Unsettled,
   now: i64,
+  grace_ms: i64,
 ) -> Option<Notice> {
   if !is_online {
     return Some(Notice::DeviceOffline);
@@ -308,7 +338,11 @@ fn notice_for(
     CoreConnection::Connected => None,
     // Still connected: a quiet hint, no grace period needed (the core doesn't flip it back and forth).
     CoreConnection::Slow => Some(Notice::Slow),
-    CoreConnection::Connecting | CoreConnection::Offline { .. } if !unsettled.is_past_grace(now) => None,
+    CoreConnection::Connecting | CoreConnection::Offline { .. }
+      if !unsettled.is_past_grace(now, grace_ms) =>
+    {
+      None
+    },
     CoreConnection::Connecting => Some(Notice::Connecting),
     // The attempt is due but hasn't started (the loop finishes other work first): "next attempt in
     // 0 s" would read as stuck.
@@ -359,6 +393,39 @@ mod tests {
     retry_at_ms: 17_500,
     maybe_interception: None,
   };
+
+  /// The usual grace period; see [`a_start_from_the_cached_account_says_so_sooner`].
+  fn notice_for(
+    is_online: bool,
+    maybe_connection: Option<CoreConnection>,
+    unsettled: Unsettled,
+    now: i64,
+  ) -> Option<Notice> {
+    super::notice_for(is_online, maybe_connection, unsettled, now, CONNECTING_GRACE_MS)
+  }
+
+  /// The chats are on screen before the server answered (issue #778): the user soon sees that they
+  /// may be out of date, but a normal start doesn't flash the hint.
+  #[test]
+  fn a_start_from_the_cached_account_says_so_sooner() {
+    let unsettled = Unsettled::default().observe(CoreConnection::Connecting, 1_000);
+    let notice = |now| {
+      super::notice_for(
+        true,
+        Some(CoreConnection::Connecting),
+        unsettled,
+        now,
+        UNCONFIRMED_GRACE_MS,
+      )
+    };
+    assert_eq!(notice(1_000 + UNCONFIRMED_GRACE_MS - 1), None);
+    let shown = notice(1_000 + UNCONFIRMED_GRACE_MS);
+    assert_eq!(shown, Some(Notice::Connecting));
+    assert_eq!(
+      shown.map(|shown| prominence_of(shown, unsettled, 1_000 + UNCONFIRMED_GRACE_MS)),
+      Some(Prominence::Hint)
+    );
+  }
 
   #[test]
   fn being_offline_wins_over_the_connection_state() {

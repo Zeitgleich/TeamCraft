@@ -18,6 +18,7 @@ use super::{
 };
 use teamcraft_client_api::call_window::CallWindow;
 use teamcraft_client_api::os_notify::{NotificationSound, NotificationTag, OsNotification, TagTarget};
+use teamcraft_proto::GetMeResponse;
 
 use crate::clock::now_ms;
 use crate::feedback::{ActionFailure, FailureKind, NotificationFailure};
@@ -55,6 +56,36 @@ impl Authenticator for TauriAuth {
       value
         .as_bool()
         .ok_or_else(|| AuthError::InvalidResponse("auth_restore did not return a boolean".to_owned()))
+    })
+  }
+
+  fn cached_account(&self) -> LocalFuture<'_, Option<GetMeResponse>> {
+    Box::pin(async {
+      let value = invoke("auth_cached_account", JsValue::UNDEFINED)
+        .await
+        .inspect_err(|error| tracing::debug!(%error, "could not read the cached account"))
+        .ok()?;
+      // `null` when there is none.
+      serde_wasm_json(&value).ok().flatten()
+    })
+  }
+
+  fn remember_account<'a>(&'a self, account: &'a GetMeResponse) -> LocalFuture<'a, ()> {
+    Box::pin(async move {
+      let Ok(args) = js_sys::JSON::parse(&serde_json::json!({ "account": account }).to_string()) else {
+        return;
+      };
+      if let Err(error) = invoke("auth_remember_account", args).await {
+        tracing::debug!(%error, "could not keep the account for the next start");
+      }
+    })
+  }
+
+  fn forget_account(&self) -> LocalFuture<'_, ()> {
+    Box::pin(async {
+      if let Err(error) = invoke("auth_forget_account", JsValue::UNDEFINED).await {
+        tracing::debug!(%error, "could not forget the cached account");
+      }
     })
   }
 

@@ -19,6 +19,7 @@ use std::rc::Rc;
 pub use config::AppConfig;
 pub use teamcraft_client_api::remote::ApiMethod;
 pub use teamcraft_client_api::sign_in_look::SignInLook;
+use teamcraft_proto::GetMeResponse;
 
 /// A boxed future that does not need to be `Send`; everything here runs on the UI thread.
 pub type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -81,6 +82,28 @@ pub struct ApiBytes {
 pub trait Authenticator {
   /// Completes a redirect that is in progress or loads a stored session. `Ok(true)` when signed in.
   fn restore(&self) -> LocalFuture<'_, Result<bool, AuthError>>;
+  /// The account the server confirmed last on this device, if its session is still stored, read
+  /// without the network: the app starts from it at once while [`Self::restore`] and `GET /me` run
+  /// beside it (issue #778). It only shows local data; every request still carries the session's
+  /// own token, and the server's answer decides what happens next. Prepares the session for the
+  /// core, so [`Self::is_restoring`] is true after a `Some`. Not during a redirect back from the
+  /// identity provider, which must finish first.
+  fn cached_account(&self) -> LocalFuture<'_, Option<GetMeResponse>> {
+    Box::pin(async { None })
+  }
+  /// The server confirmed `account`: the next start can begin with it.
+  fn remember_account<'a>(&'a self, _account: &'a GetMeResponse) -> LocalFuture<'a, ()> {
+    Box::pin(async {})
+  }
+  /// The next start waits for the server again.
+  fn forget_account(&self) -> LocalFuture<'_, ()> {
+    Box::pin(async {})
+  }
+  /// The app started from the cached account and [`Self::restore`] has no verdict yet. Only the
+  /// browser build asks: its core reads the token here, the desktop shell's core in the shell.
+  fn is_restoring(&self) -> bool {
+    false
+  }
   /// Starts a login. In the browser this navigates away and never resolves; on desktop it resolves when
   /// the system browser has returned.
   fn login(&self, look: SignInLook) -> LocalFuture<'_, Result<(), AuthError>>;
