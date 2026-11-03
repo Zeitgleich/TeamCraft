@@ -15,7 +15,7 @@
 # links ALSA's libasound through cpal; the notetaker opens no audio device, but the library must be
 # there for the binary to start, so the build stage copies it into the image.
 
-FROM docker.io/library/rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS build
+FROM docker.io/library/rust:1.99.1-trixie@sha256:09027f873d45b8ecd1dc86f1fa13b7a62b875c961f017a0e331267b350430137 AS build
 ENV CARGO_INCREMENTAL=0 \
     CARGO_PROFILE_RELEASE_STRIP=symbols
 RUN apt-get update \
@@ -34,7 +34,7 @@ RUN --mount=type=cache,id=teamcraft-cargo-registry,target=/usr/local/cargo/regis
  && install -D -m 0644 "$(readlink -f "/usr/lib/${multiarch}/libasound.so.2")" "/out/lib/${multiarch}/libasound.so.2" \
  && mkdir -p /out/data
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:83b9b50586253821cf63ffcec87d3d94265a093ad30da232039af962dd8f4edf
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:08476c244888bfb425bae1ae4dd7c17f093e972aab8426883d97f3c6f280f7c1
 LABEL org.opencontainers.image.title="teamcraft-notetaker" \
       org.opencontainers.image.description="TeamCraft notetaker: a call participant that transcribes calls through OpenRouter and posts a summary" \
       org.opencontainers.image.source="https://github.com/Zeitgleich/TeamCraft" \

@@ -12,7 +12,7 @@
 # The encrypted local database (SQLCipher) links the system libcrypto; distroless "cc" ships it
 # (OpenSSL 3 from the same Debian release as the build stage) along with libgcc_s.
 
-FROM docker.io/library/rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS build
+FROM docker.io/library/rust:1.99.1-trixie@sha256:09027f873d45b8ecd1dc86f1fa13b7a62b875c961f017a0e331267b350430137 AS build
 ENV CARGO_INCREMENTAL=0 \
     CARGO_PROFILE_RELEASE_STRIP=symbols
 WORKDIR /src
@@ -26,7 +26,7 @@ RUN --mount=type=cache,id=teamcraft-cargo-registry,target=/usr/local/cargo/regis
  && install -D target/release/teamcraft-bridge /out/teamcraft-bridge \
  && mkdir -p /out/data
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:08476c244888bfb425bae1ae4dd7c17f093e972aab8426883d97f3c6f280f7c1
 LABEL org.opencontainers.image.title="teamcraft-bridge" \
       org.opencontainers.image.description="TeamCraft integration bridge: webhooks and logs into encrypted channels" \
       org.opencontainers.image.source="https://github.com/Zeitgleich/TeamCraft" \
