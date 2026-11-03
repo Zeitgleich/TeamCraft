@@ -176,11 +176,24 @@ signature (freshness above).
 - **Keep an owner's app in use.** An owner's client signs the roster again by itself when half of
   the 30 days have passed. The console warns a week before the window runs out (a client setting,
   `workspace_expiry_warning`) and once it has: then an owner only needs to open TeamCraft.
-- **All owners lost** (every owner left, or lost all devices and the recovery kit): nobody can
-  sign a roster or policy again, and a new genesis is refused by every client that pinned the root of
-  trust (`RootChanged`). Admins keep their authority until the freshness window runs out; after that
-  the workspace can't be administered. A recovery path is still open (issue #188); until it exists,
-  the only way out is setting the workspace up from scratch (operations.md, "Owners").
+- **All owners lost** (every owner left, or lost all devices and the recovery kit): there is **no
+  recovery path**, by decision (issue #188). A recovery by key shares or by re-rooting the trust
+  would be one more way to take over a workspace, so there is none. What happens:
+  - Nobody can sign a roster or a policy again: only an owner of the verified roster can
+    (`not_an_owner`), and an owner needs a device with the identity key.
+  - Admins keep their authority on a client until the newest roster it holds is older than the
+    freshness window (30 days by default, the client setting `workspace_max_age`). After that,
+    every client treats admins as members and the console shows the banner above; nobody can sign
+    the unchanged roster again to extend it. Chat itself keeps working.
+  - A new genesis roster is refused by every client that pinned the root of trust
+    (`WorkspaceError::RootChanged`), also when the server offers it. A new device of a member takes
+    the root another of their devices pinned, so it does not help either.
+  - Restoring a backup brings back the same locked state.
+
+  The only way out is to set the workspace up from scratch: new database, new enrollment of
+  everybody, and the history of the old one stays behind. The steps and what is kept are in
+  operations.md, "Setting up again". Avoid it: keep two owners (above) and keep an owner's app in
+  use.
 
 ### 2.4 Admins joining private channels
 
