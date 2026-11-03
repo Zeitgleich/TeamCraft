@@ -1,6 +1,7 @@
 //! Wiring: open (or enroll) the client, start the endpoints and the worker, stop on a signal.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -11,6 +12,7 @@ use teamcraft_core::records;
 use teamcraft_core::store::{LocalStore, SqlCipherStore, StaticKeySource};
 use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::secret::SecretBytes;
+use teamcraft_ops::metrics::{HttpMetrics, bind_metrics, spawn_metrics_endpoint, with_http_metrics};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -21,6 +23,7 @@ use crate::file_hooks::FileSettings;
 use crate::http::{HttpState, Submission, router};
 use crate::idempotency::IdempotencyStore;
 use crate::ingest::IngestSettings;
+use crate::metrics::BridgeMetrics;
 use crate::sources::SourceRegistry;
 use crate::worker::{AppSourceSettings, Worker, WorkerSettings};
 
@@ -141,11 +144,12 @@ pub async fn shut_down(endpoints: Endpoints, worker: &WorkerStop, drain_timeout:
 
 /// Binds every configured address and serves the endpoints on them. Failing to bind an IPv6 address
 /// is tolerated if another one worked (hosts without IPv6). Files an earlier run left in the spool
-/// directory are deleted first.
+/// directory are deleted first. With `maybe_metrics`, requests are counted.
 pub async fn start_endpoints(
   config: &BridgeConfig,
   sources: SourceRegistry,
   sender: mpsc::Sender<Submission>,
+  maybe_metrics: Option<Arc<HttpMetrics>>,
 ) -> anyhow::Result<Endpoints> {
   let files = FileSettings::from_config(config);
   // A spool others can read would expose the files; refuse to start rather than serve with it.
@@ -176,7 +180,10 @@ pub async fn start_endpoints(
   let mut tasks = Vec::new();
   for listener in listeners {
     addrs.push(listener.local_addr()?);
-    let app = router(state.clone(), config.listen.max_body_bytes);
+    let mut app = router(state.clone(), config.listen.max_body_bytes);
+    if let Some(metrics) = &maybe_metrics {
+      app = with_http_metrics(app, metrics.clone());
+    }
     let mut stopped = stopped.clone();
     tasks.push(tokio::spawn(async move {
       let shutdown = async move {
@@ -188,6 +195,31 @@ pub async fn start_endpoints(
     }));
   }
   Ok(Endpoints { addrs, stop, tasks })
+}
+
+/// Starts the metrics listener if `[metrics]` is on; what the endpoints count their requests with.
+/// It watches the worker's queue without keeping it open: the worker finishes once the endpoints
+/// are gone.
+fn serve_metrics(
+  config: &BridgeConfig,
+  sender: &mpsc::Sender<Submission>,
+) -> anyhow::Result<Option<Arc<HttpMetrics>>> {
+  if !config.metrics.is_enabled {
+    return Ok(None);
+  }
+  let listeners = bind_metrics(&config.metrics.listen_addrs).context("[metrics]")?;
+  let metrics = BridgeMetrics::new().context("setting up the metrics")?;
+  let http = metrics.http();
+  let queue = sender.downgrade();
+  spawn_metrics_endpoint(listeners, move || metrics.render(queue_depth(&queue)));
+  Ok(Some(http))
+}
+
+/// Submissions waiting for the worker; none once the endpoints are gone.
+fn queue_depth(queue: &mpsc::WeakSender<Submission>) -> usize {
+  queue.upgrade().map_or(0, |sender| {
+    sender.max_capacity().saturating_sub(sender.capacity())
+  })
 }
 
 /// What the worker takes from the configuration.
@@ -214,7 +246,8 @@ where
 {
   let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
   let sources = SourceRegistry::new(config);
-  let endpoints = start_endpoints(config, sources.clone(), sender).await?;
+  let maybe_metrics = serve_metrics(config, &sender)?;
+  let endpoints = start_endpoints(config, sources.clone(), sender, maybe_metrics).await?;
   info!(
     addrs = ?endpoints.addrs,
     static_sources = config.sources.len(),
@@ -233,4 +266,68 @@ where
   let drain_timeout = Duration::from_secs(config.listen.drain_timeout_secs);
   let ((), client) = tokio::join!(shut_down(endpoints, &stop, drain_timeout), work);
   Ok(client)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+  use super::*;
+
+  const TOKEN: &str = "metrics-source-token-1234";
+
+  #[tokio::test]
+  async fn a_counted_webhook_shows_in_the_metrics_without_its_token() {
+    let spool = std::env::temp_dir().join(format!("teamcraft-bridge-metrics-{}", std::process::id()));
+    let config = BridgeConfig::from_toml(&format!(
+      r#"
+      [server]
+      url = "http://localhost"
+      [store]
+      path = "x.db"
+      [listen]
+      addrs = ["127.0.0.1:0"]
+      [files]
+      spool_dir = "{spool}"
+      [app_sources]
+      enabled = false
+      [[sources]]
+      name = "ci"
+      token = "{TOKEN}"
+      conversation_id = "1"
+      "#,
+      spool = spool.display()
+    ))
+    .unwrap();
+    assert!(!config.metrics.is_enabled, "off unless asked for");
+    let metrics = BridgeMetrics::new().unwrap();
+    let (sender, receiver) = mpsc::channel(QUEUE_CAPACITY);
+    let queue = sender.downgrade();
+    let endpoints = start_endpoints(
+      &config,
+      SourceRegistry::new(&config),
+      sender,
+      Some(metrics.http()),
+    )
+    .await
+    .unwrap();
+
+    let reply = reqwest::Client::new()
+      .post(format!("http://{}/hooks/{TOKEN}", endpoints.addrs[0]))
+      .json(&serde_json::json!({"text": "hello"}))
+      .send()
+      .await
+      .unwrap();
+    assert!(reply.status().is_success(), "{}", reply.status());
+
+    assert_eq!(queue_depth(&queue), 1);
+    let output = metrics.render(queue_depth(&queue)).unwrap();
+    assert!(output.contains(r#"teamcraft_http_requests_total{route_class="hooks",status="2xx"} 1"#));
+    assert!(output.contains("teamcraft_bridge_queue_depth 1"));
+    assert!(!output.contains(TOKEN), "{output}");
+
+    endpoints.shutdown().await;
+    drop(receiver);
+    assert_eq!(queue_depth(&queue), 0, "the metrics don't keep the queue open");
+    let _ = std::fs::remove_dir_all(spool);
+  }
 }
