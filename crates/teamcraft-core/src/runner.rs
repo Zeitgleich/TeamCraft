@@ -325,6 +325,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         if let Err(error) = result {
           tracing::warn!(%error, "UI command failed");
         }
+        // It may have answered a read, also as failed (a list's status): read again.
+        self.changed();
       },
       // Handled by `run`.
       RunnerCommand::Stop => return,

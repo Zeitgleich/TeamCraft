@@ -42,6 +42,13 @@ data-failed-title = Your data could not be loaded
 data-failed-body = The server answered, but your spaces and conversations could not be read. Try again.
 data-retry = Try again
 
+## Lists that could not be read
+list-failed-title = This list could not be loaded
+list-failed-network = The server could not be reached. Check your connection and try again.
+list-failed-server = The server could not answer right now. Try again in a moment.
+list-failed-timed-out = No answer came in time. Check your connection and try again.
+list-failed-other = Something went wrong while reading it. Try again.
+
 ## Settings: display, sidebar, language, privacy, devices, calls
 language-en = English
 language-de = Deutsch

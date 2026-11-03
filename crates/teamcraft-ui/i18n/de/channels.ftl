@@ -20,6 +20,9 @@ members-button-label = { $count ->
    *[other] Mitglieder anzeigen, { $count } Mitglieder
   }
 members-title = Mitglieder
+members-loading = Mitglieder werden geladen
+members-empty-title = Noch keine Mitglieder
+members-empty = Personen, die dieser Unterhaltung hinzugefügt werden, erscheinen hier.
 members-panel-label = Kanalmitglieder
 members-count = { $count ->
     [one] { $count } Mitglied
