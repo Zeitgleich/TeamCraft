@@ -79,5 +79,9 @@ rm -rf "${TMPDIR:-/tmp}"/teamcraft-e2e-*
 rm -rf target/e2e-artifacts
 drop_test_databases
 # E2E_REQUIRED=1: a missing service or browser fails a test instead of skipping it.
-E2E_REQUIRED=1 SQLX_OFFLINE=true \
+# RUST_MIN_STACK: the test thread polls the whole test body, and in a debug build the futures of the
+# core's sync and gateway code have frames of 100-200 KiB each, which the 2 MiB default of a test
+# thread no longer held (web::a_second_tab_takes_over aborted the suite with a stack overflow,
+# #1203). Memory is only reserved, not used.
+RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}" E2E_REQUIRED=1 SQLX_OFFLINE=true \
   cargo test -p teamcraft-e2e --features "$features" --test suite -- ${test_args[@]+"${test_args[@]}"}
