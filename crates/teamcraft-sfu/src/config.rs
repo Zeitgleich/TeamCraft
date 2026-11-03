@@ -5,6 +5,8 @@ use std::{
   time::Duration,
 };
 
+use teamcraft_media::fallback_queue::MediaQueueConfig;
+
 use crate::forwarding::ForwardingConfig;
 
 #[derive(Debug, Clone)]
@@ -58,6 +60,49 @@ pub struct SfuConfig {
   /// socket with the system's default buffer loses part of it while the SFU is busy, and with it
   /// the whole picture, for everyone watching.
   pub udp_receive_buffer_bytes: usize,
+  /// The WebSocket fallback for networks that block UDP (ARCHITECTURE.md §6.6).
+  pub fallback: FallbackConfig,
+}
+
+/// The fallback's listener and what one connection may cost.
+#[derive(Debug, Clone)]
+pub struct FallbackConfig {
+  /// TCP address of the listener, plain HTTP behind the reverse proxy. IPv6 addresses are bound
+  /// dual-stack. `None`: no fallback, the SFU speaks QUIC only (the default of this type, for tests;
+  /// `main` opens it unless told not to).
+  pub maybe_bind_addr: Option<SocketAddr>,
+  /// Connections at once, joined or not; one more is closed at once.
+  pub max_connections: usize,
+  /// What waits for one slow connection. Media beyond it, or older, is dropped.
+  pub queue: MediaQueueConfig,
+  /// The socket's send buffer. What is in it can't be dropped any more and has to go through, so a
+  /// big one is seconds of latency on a narrow link; the kernel's auto-tuning grows it to megabytes.
+  pub socket_send_buffer_bytes: usize,
+  /// How often a connection is pinged: keeps proxies from closing a quiet call, and the answers
+  /// prove the path alive. Under a second would be noise, over a few seconds too slow to notice a
+  /// dead path by.
+  pub ping_interval: Duration,
+  /// A single write may take this long; after it the peer counts as gone. Bounds how long a slow
+  /// peer can hold a connection, and all that belongs to it.
+  pub write_timeout: Duration,
+  /// Behind a reverse proxy: use the last address in `X-Forwarded-For` for the per-address limits.
+  /// Without it every client has the proxy's address and shares its limit. Never turn it on without
+  /// a proxy that sets the header: clients could then choose their own address.
+  pub trust_forwarded_for: bool,
+}
+
+impl Default for FallbackConfig {
+  fn default() -> Self {
+    Self {
+      maybe_bind_addr: None,
+      max_connections: 1024,
+      queue: MediaQueueConfig::default(),
+      socket_send_buffer_bytes: 128 * 1024,
+      ping_interval: Duration::from_secs(1),
+      write_timeout: Duration::from_secs(5),
+      trust_forwarded_for: false,
+    }
+  }
 }
 
 impl Default for SfuConfig {
@@ -81,6 +126,7 @@ impl Default for SfuConfig {
       shutdown_drain: Duration::from_secs(2),
       roster_interval: Duration::from_secs(30),
       udp_receive_buffer_bytes: 4 * 1024 * 1024,
+      fallback: FallbackConfig::default(),
     }
   }
 }

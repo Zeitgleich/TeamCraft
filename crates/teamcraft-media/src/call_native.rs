@@ -19,7 +19,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::ops::RangeInclusive;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread::JoinHandle as ThreadHandle;
 use std::time::{Duration, Instant};
@@ -33,10 +33,10 @@ use teamcraft_proto::{
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio_tungstenite::tungstenite::Bytes;
 use tracing::{debug, info, warn};
 use wtransport::config::ClientConfigBuilder;
 use wtransport::config::states::{WantsRootStore, WantsTransportConfigClient};
-use wtransport::datagram::Datagram;
 use wtransport::endpoint::endpoint_side::Client;
 use wtransport::error::{ConnectionError, StreamReadExactError};
 use wtransport::tls::Sha256Digest;
@@ -54,8 +54,15 @@ use crate::call_engine::{
   OwnPublication, OwnVideoEnd, VideoSendOutcome, VideoStats,
 };
 use crate::call_resilience::{
-  JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig, rejoin_attempt,
+  CallTransport, JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig,
+  connect_preferring_quic, fallback_delay, rejoin_attempt,
 };
+use crate::fallback_link::{
+  FallbackOpener, LoopbackOpener, SignalFrames, SocketEnd, SocketInput, is_allowed_url, is_going_away,
+  read_socket,
+};
+use crate::fallback_queue::MediaQueueConfig;
+use crate::fallback_socket::{FallbackSender, WriterConfig, run_writer};
 use crate::jitter::JitterBufferConfig;
 use crate::sfu_address::{PinnedResolver, sfu_addresses};
 use crate::system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioReceiver, system_audio_queue};
@@ -85,6 +92,8 @@ const H3_ERROR_CODES: RangeInclusive<u64> = 0x101..=0x3ff;
 const STREAM_CLOSE_WAIT: Duration = Duration::from_millis(200);
 /// How often the route toward the SFU is looked up (see [`RouteWatch`]).
 const ROUTE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// A write on the call socket may take this long before the path counts as lost.
+const FALLBACK_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often the video counters are logged (debug) while own or others' video flows.
 const VIDEO_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -104,6 +113,11 @@ pub struct NativeCall {
 pub struct NativeCallConfig {
   /// WebTransport URL from the join token response, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
+  /// WebSocket URL of the SFU's fallback for networks that block UDP, from the join token response;
+  /// used only when QUIC doesn't connect (ARCHITECTURE.md §6.6).
+  pub maybe_fallback_url: Option<String>,
+  /// Opens that socket. Without one only plain sockets to this machine work (development tools).
+  pub maybe_fallback_opener: Option<Arc<dyn FallbackOpener>>,
   /// SHA-256s of the SFU's self-signed certificates, from the join token response; every rejoin
   /// uses its own fresh ticket's instead ([`JoinTicket::certificate_hashes`]).
   pub certificate_hashes: Vec<[u8; 32]>,
@@ -353,6 +367,8 @@ impl NativeCallConfig {
   pub fn new(sfu_url: String, token: String, engine: CallEngineConfig) -> Self {
     Self {
       sfu_url,
+      maybe_fallback_url: None,
+      maybe_fallback_opener: None,
       certificate_hashes: Vec::new(),
       maybe_certificate_hash: None,
       token,
@@ -395,8 +411,20 @@ impl NativeCallConfig {
 impl NativeCall {
   /// Connects, joins and starts sending and playing in the background.
   pub async fn join(config: NativeCallConfig) -> Result<Self, NativeCallError> {
-    let hashes = accepted_hashes(config.maybe_certificate_hash, &config.certificate_hashes);
-    let link = Link::open(&config.sfu_url, &hashes, &config.resilience).await?;
+    let target = LinkTarget {
+      maybe_pinned_hash: config.maybe_certificate_hash,
+      resilience: config.resilience,
+      maybe_opener: config.maybe_fallback_opener.clone(),
+      current: CallTransport::Quic,
+    };
+    let link = target
+      .connect(JoinTicket {
+        sfu_url: config.sfu_url.clone(),
+        token: config.token.clone(),
+        certificate_hashes: config.certificate_hashes.clone(),
+        maybe_fallback_url: config.maybe_fallback_url.clone(),
+      })
+      .await?;
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (event_tx, events) = mpsc::unbounded_channel();
     let microphone_level = SharedLevel::default();
@@ -706,6 +734,8 @@ async fn run_call(
     },
     cues: CuePlayer::new(config.status_cues),
   };
+  let quic_jitter = config.jitter;
+  sinks.use_transport(link.transport(), quic_jitter);
   let mut connection = CallConnection::new(&config, link, start);
 
   let mut tone_position = 0u64;
@@ -727,7 +757,7 @@ async fn run_call(
           }
         },
         ConnectionEvent::Input(LinkInput::Datagram(datagram)) => {
-          engine.handle_datagram(&datagram.payload(), Instant::now());
+          engine.handle_datagram(&datagram, Instant::now());
         },
         ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Closed)) => break Ok(()),
         ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Lost)) => connection.lose(&mut engine, Instant::now()),
@@ -736,6 +766,7 @@ async fn run_call(
         },
         ConnectionEvent::AttemptDue => connection.start_attempt(),
         ConnectionEvent::AttemptFinished(Ok((link, ticket))) => {
+          sinks.use_transport(link.transport(), quic_jitter);
           connection.resume(&mut engine, link, ticket, Instant::now());
         },
         ConnectionEvent::AttemptFinished(Err(error)) => connection.on_failed_attempt(&error, Instant::now()),
@@ -864,7 +895,8 @@ async fn run_call(
             report.maybe_rtt_ms = connection
               .maybe_link
               .as_ref()
-              .map(|link| u32::try_from(link.connection.rtt().as_millis()).unwrap_or(u32::MAX));
+              .and_then(Link::rtt)
+              .map(|rtt| u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX));
             sinks.video.add_sender_stats(&mut report);
             // The caller may have given up waiting.
             let _ = done.send(report);
@@ -934,6 +966,19 @@ struct CallConnection {
   maybe_pinned_hash: Option<[u8; 32]>,
   resilience: ResilienceConfig,
   maybe_ticket_source: Option<Arc<dyn JoinTicketSource>>,
+  maybe_fallback_opener: Option<Arc<dyn FallbackOpener>>,
+  /// What the current (or last) link went over: a rejoin needn't wait for QUIC if that was the
+  /// fallback.
+  transport: CallTransport,
+}
+
+/// What a new link needs besides its ticket.
+#[derive(Clone)]
+struct LinkTarget {
+  maybe_pinned_hash: Option<[u8; 32]>,
+  resilience: ResilienceConfig,
+  maybe_opener: Option<Arc<dyn FallbackOpener>>,
+  current: CallTransport,
 }
 
 /// Notices when the local address the system would send from toward the SFU changes (another
@@ -945,14 +990,28 @@ struct RouteWatch {
   maybe_checked_at: Option<Instant>,
 }
 
-/// One QUIC connection with its signaling stream; reader tasks feed [`LinkInput`]s.
+/// One connection with its signaling; reader tasks feed [`LinkInput`]s.
 struct Link {
-  /// The connection's own endpoint, for moving it to a new socket.
-  endpoint: Endpoint<Client>,
-  connection: Connection,
+  path: LinkPath,
   signal_out: mpsc::UnboundedSender<CallClientMessage>,
   inputs: mpsc::UnboundedReceiver<LinkInput>,
   tasks: Vec<JoinHandle<()>>,
+}
+
+/// What a link runs over.
+enum LinkPath {
+  Quic {
+    /// The connection's own endpoint, for moving it to a new socket.
+    endpoint: Endpoint<Client>,
+    connection: Connection,
+  },
+  /// The WebSocket fallback. Its writer task isn't among the link's tasks: it stays to send the
+  /// close, and ends with the socket.
+  Fallback {
+    sender: FallbackSender,
+    /// Frames read so far: the path's sign of life.
+    received: Arc<AtomicU64>,
+  },
 }
 
 /// What happened to the call's connection.
@@ -966,7 +1025,7 @@ enum ConnectionEvent {
 /// What arrives on a link.
 enum LinkInput {
   Signal(CallServerMessage),
-  Datagram(Datagram),
+  Datagram(Bytes),
   Ended(LinkEnd),
 }
 
@@ -984,6 +1043,7 @@ enum LinkEnd {
 
 impl CallConnection {
   fn new(config: &NativeCallConfig, link: Link, now: Instant) -> Self {
+    let transport = link.transport();
     Self {
       maybe_link: Some(link),
       lost_links: Vec::new(),
@@ -995,10 +1055,13 @@ impl CallConnection {
         sfu_url: config.sfu_url.clone(),
         token: config.token.clone(),
         certificate_hashes: config.certificate_hashes.clone(),
+        maybe_fallback_url: config.maybe_fallback_url.clone(),
       },
       maybe_pinned_hash: config.maybe_certificate_hash,
       resilience: config.resilience,
       maybe_ticket_source: config.maybe_ticket_source.clone(),
+      maybe_fallback_opener: config.maybe_fallback_opener.clone(),
+      transport,
     }
   }
 
@@ -1059,10 +1122,12 @@ impl CallConnection {
     let Some(link) = &self.maybe_link else {
       return;
     };
-    let received = link.connection.quic_connection().stats().udp_rx.datagrams;
-    self.monitor.on_received_packets(received, now);
-    if self.route.is_due(now) {
-      let maybe_local_ip = local_route_to(link.connection.remote_address());
+    self.monitor.on_received_packets(link.received_packets(), now);
+    // A TCP connection can't move: on another route it goes silent, and the check below sees that.
+    if let Some(remote) = link.maybe_quic_remote()
+      && self.route.is_due(now)
+    {
+      let maybe_local_ip = local_route_to(remote);
       if self.route.on_route(maybe_local_ip, now) {
         debug!("the route to the SFU changed");
         self.migrate(now);
@@ -1093,7 +1158,8 @@ impl CallConnection {
   fn migrate(&mut self, now: Instant) {
     if let Some(link) = &self.maybe_link {
       match link.rebind() {
-        Ok(local_addr) => debug!(%local_addr, "moved the call connection to a new socket"),
+        Ok(Some(local_addr)) => debug!(%local_addr, "moved the call connection to a new socket"),
+        Ok(None) => {},
         Err(error) => warn!(%error, "could not move the call connection to a new socket"),
       }
     }
@@ -1103,21 +1169,23 @@ impl CallConnection {
   fn start_attempt(&mut self) {
     let maybe_fetch = self.maybe_ticket_source.as_ref().map(|source| source.fetch());
     let fallback = self.ticket.clone();
-    let maybe_pinned_hash = self.maybe_pinned_hash;
-    let resilience = self.resilience;
+    let target = LinkTarget {
+      maybe_pinned_hash: self.maybe_pinned_hash,
+      resilience: self.resilience,
+      maybe_opener: self.maybe_fallback_opener.clone(),
+      current: self.transport,
+    };
     self.maybe_attempt = Some(tokio::spawn(rejoin_attempt(
       maybe_fetch,
       fallback,
-      move |ticket: JoinTicket| async move {
-        let hashes = accepted_hashes(maybe_pinned_hash, &ticket.certificate_hashes);
-        Link::open(&ticket.sfu_url, &hashes, &resilience).await
-      },
+      move |ticket: JoinTicket| async move { target.connect(ticket).await },
     )));
   }
 
   /// A new connection is up: rejoin on it.
   fn resume(&mut self, engine: &mut CallEngine, link: Link, ticket: JoinTicket, now: Instant) {
     info!(attempts = self.attempts(), "connected again, rejoining the call");
+    self.transport = link.transport();
     self.maybe_link = Some(link);
     self.monitor = PathMonitor::new(now);
     self.route = RouteWatch::new();
@@ -1164,7 +1232,7 @@ impl CallConnection {
     }
     for link in self.maybe_link.into_iter().chain(self.lost_links) {
       link.stop_reading();
-      link.connection.close(LEAVE.into(), b"leave");
+      link.close_as_leave();
     }
   }
 }
@@ -1208,7 +1276,77 @@ fn local_route_to(remote: SocketAddr) -> Option<IpAddr> {
   Some(socket.local_addr().ok()?.ip())
 }
 
+impl Drop for Link {
+  /// A QUIC connection goes with its last handle. A socket's writer runs on by itself, so a link
+  /// that lost the race for the connection, or isn't needed any more, says so; a close frame the
+  /// peer never reads is no harm.
+  fn drop(&mut self) {
+    if let LinkPath::Fallback { sender, .. } = &self.path {
+      sender.close(LEAVE, b"leave");
+      self.stop_reading();
+    }
+  }
+}
+
+impl LinkTarget {
+  /// A link to the ticket's SFU: QUIC, and the fallback next to it if the ticket offers one and QUIC
+  /// is late or fails. Without one, exactly what QUIC does.
+  async fn connect(&self, ticket: JoinTicket) -> Result<Link, NativeCallError> {
+    let hashes = accepted_hashes(self.maybe_pinned_hash, &ticket.certificate_hashes);
+    let quic = Link::open(&ticket.sfu_url, &hashes, &self.resilience);
+    let Some(fallback_url) = &ticket.maybe_fallback_url else {
+      return quic.await;
+    };
+    let starts = tokio::time::sleep(fallback_delay(self.current, &self.resilience));
+    let fallback = Link::open_fallback(fallback_url, self.maybe_opener.as_ref(), &self.resilience);
+    let (link, transport) = connect_preferring_quic(quic, starts, fallback).await?;
+    if transport == CallTransport::Fallback {
+      info!("QUIC didn't connect, the call runs on the fallback");
+    }
+    Ok(link)
+  }
+}
+
 impl Link {
+  /// Opens the WebSocket fallback. Nothing goes over it before the call joins, as on QUIC.
+  async fn open_fallback(
+    url: &str,
+    maybe_opener: Option<&Arc<dyn FallbackOpener>>,
+    resilience: &ResilienceConfig,
+  ) -> Result<Self, NativeCallError> {
+    if !is_allowed_url(url) {
+      return Err(NativeCallError::Connect(
+        "the call socket's address must use TLS".into(),
+      ));
+    }
+    let opening = match maybe_opener {
+      Some(opener) => opener.open(url),
+      None => LoopbackOpener.open(url),
+    };
+    let socket = opening.await.map_err(NativeCallError::Connect)?;
+    let sender = FallbackSender::new(MediaQueueConfig::default());
+    let received = Arc::new(AtomicU64::new(0));
+    let (signal_out, signal_out_rx) = mpsc::unbounded_channel::<CallClientMessage>();
+    let (input_tx, inputs) = mpsc::unbounded_channel();
+    let writer_config = WriterConfig {
+      ping_interval: resilience.echo_interval,
+      write_timeout: FALLBACK_WRITE_TIMEOUT,
+    };
+    tokio::spawn(run_writer(
+      socket.sink,
+      SignalFrames(signal_out_rx),
+      sender.clone(),
+      writer_config,
+    ));
+    let reader = tokio::spawn(read_fallback(socket.stream, Arc::clone(&received), input_tx));
+    Ok(Self {
+      path: LinkPath::Fallback { sender, received },
+      signal_out,
+      inputs,
+      tasks: vec![reader],
+    })
+  }
+
   /// Connects to the SFU and opens the signaling stream.
   async fn open(
     sfu_url: &str,
@@ -1230,8 +1368,7 @@ impl Link {
       tokio::spawn(read_datagrams(connection.clone(), input_tx)),
     ];
     Ok(Self {
-      endpoint,
-      connection,
+      path: LinkPath::Quic { endpoint, connection },
       signal_out,
       inputs,
       tasks,
@@ -1240,12 +1377,67 @@ impl Link {
 
   /// Switches the connection to a fresh wildcard socket of the current one's family (dual-stack
   /// for IPv6, as the first one); returns its local address.
-  fn rebind(&self) -> std::io::Result<SocketAddr> {
-    let current = self.endpoint.local_addr()?;
+  ///
+  /// `None` on the fallback, whose TCP connection can't move.
+  fn rebind(&self) -> std::io::Result<Option<SocketAddr>> {
+    let LinkPath::Quic { endpoint, .. } = &self.path else {
+      return Ok(None);
+    };
+    let current = endpoint.local_addr()?;
     let socket = bind_wildcard(current.is_ipv6())?;
     let local_addr = socket.local_addr()?;
-    self.endpoint.rebind(socket)?;
-    Ok(local_addr)
+    endpoint.rebind(socket)?;
+    Ok(Some(local_addr))
+  }
+
+  fn transport(&self) -> CallTransport {
+    match &self.path {
+      LinkPath::Quic { .. } => CallTransport::Quic,
+      LinkPath::Fallback { .. } => CallTransport::Fallback,
+    }
+  }
+
+  /// Packets (QUIC) or frames (the fallback) received so far.
+  fn received_packets(&self) -> u64 {
+    match &self.path {
+      LinkPath::Quic { connection, .. } => connection.quic_connection().stats().udp_rx.datagrams,
+      LinkPath::Fallback { received, .. } => received.load(Ordering::Relaxed),
+    }
+  }
+
+  fn maybe_quic_remote(&self) -> Option<SocketAddr> {
+    match &self.path {
+      LinkPath::Quic { connection, .. } => Some(connection.remote_address()),
+      LinkPath::Fallback { .. } => None,
+    }
+  }
+
+  /// QUIC measures it; a WebSocket can't tell.
+  #[cfg(feature = "call-view")]
+  fn rtt(&self) -> Option<Duration> {
+    match &self.path {
+      LinkPath::Quic { connection, .. } => Some(connection.rtt()),
+      LinkPath::Fallback { .. } => None,
+    }
+  }
+
+  /// Unreliable by design: a full send buffer or queue drops the datagram.
+  fn send_datagram(&self, bytes: &[u8]) {
+    match &self.path {
+      LinkPath::Quic { connection, .. } => {
+        if let Err(error) = connection.send_datagram(bytes) {
+          debug!(%error, "datagram dropped");
+        }
+      },
+      LinkPath::Fallback { sender, .. } => sender.send_datagram(bytes),
+    }
+  }
+
+  fn close_as_leave(&self) {
+    match &self.path {
+      LinkPath::Quic { connection, .. } => connection.close(LEAVE.into(), b"leave"),
+      LinkPath::Fallback { sender, .. } => sender.close(LEAVE, b"leave"),
+    }
   }
 
   fn stop_reading(&self) {
@@ -1498,6 +1690,16 @@ struct Sinks {
 }
 
 impl Sinks {
+  /// The call runs over this now: the UI hears of it, and the jitter buffers suit its timing.
+  fn use_transport(&mut self, transport: CallTransport, quic_jitter: JitterBufferConfig) {
+    self.mixer.set_jitter_config(match transport {
+      CallTransport::Quic => quic_jitter,
+      CallTransport::Fallback => JitterBufferConfig::for_fallback(),
+    });
+    // The app went away when the receiver is gone; the call ends with it.
+    let _ = self.events.send(CallEngineEvent::TransportChanged(transport));
+  }
+
   /// The next 20 ms for the speakers: the call's mix with the status sounds on top. The sounds
   /// play even when deafened (they are status, not call audio) and reach the echo canceller as
   /// far-end signal, so the microphone doesn't send them.
@@ -1554,10 +1756,8 @@ impl Sinks {
         },
         EngineOutput::Datagram(bytes) => {
           // Unreliable by design: a full send buffer drops the frame.
-          if let Some(link) = maybe_link
-            && let Err(error) = link.connection.send_datagram(&bytes)
-          {
-            debug!(%error, "datagram dropped");
+          if let Some(link) = maybe_link {
+            link.send_datagram(&bytes);
           }
         },
         EngineOutput::Event(CallEngineEvent::AudioFrame {
@@ -2182,11 +2382,41 @@ async fn stream_end(error: &StreamReadExactError, connection: &Connection) -> Li
   }
 }
 
+/// Reads the WebSocket fallback; closes end the link as on QUIC.
+async fn read_fallback(
+  stream: std::pin::Pin<
+    Box<
+      dyn futures_util::Stream<
+          Item = Result<tokio_tungstenite::tungstenite::Message, tokio_tungstenite::tungstenite::Error>,
+        > + Send,
+    >,
+  >,
+  received: Arc<AtomicU64>,
+  inputs: mpsc::UnboundedSender<LinkInput>,
+) {
+  let delivering = inputs.clone();
+  let end = read_socket(stream, received, move |input| {
+    let input = match input {
+      SocketInput::Signal(message) => LinkInput::Signal(message),
+      SocketInput::Datagram(bytes) => LinkInput::Datagram(bytes),
+    };
+    delivering.send(input).is_ok()
+  })
+  .await;
+  let end = match end {
+    SocketEnd::Closed(code) if is_going_away(code) => LinkEnd::GoingAway,
+    SocketEnd::Closed(code) => application_close_end(u64::from(code)),
+    SocketEnd::Lost => LinkEnd::Lost,
+  };
+  // The call task may be gone.
+  let _ = inputs.send(LinkInput::Ended(end));
+}
+
 async fn read_datagrams(connection: Connection, inputs: mpsc::UnboundedSender<LinkInput>) {
   loop {
     match connection.receive_datagram().await {
       Ok(datagram) => {
-        if inputs.send(LinkInput::Datagram(datagram)).is_err() {
+        if inputs.send(LinkInput::Datagram(datagram.payload())).is_err() {
           return;
         }
       },

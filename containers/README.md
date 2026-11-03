@@ -3,12 +3,12 @@
 OCI images of the server binaries, the integration bridge and the notetaker, built from the workspace
 root:
 
-| Image                 | Containerfile                       | Listens on                             | Health check                      |
-|-----------------------|-------------------------------------|----------------------------------------|-----------------------------------|
-| `teamcraft-server`    | `teamcraft-server.Containerfile`    | `8080/tcp` (HTTP, `[::]` dual stack)   | `teamcraft-server healthcheck`    |
-| `teamcraft-sfu`       | `teamcraft-sfu.Containerfile`       | `4433/udp` (QUIC), `8081/tcp` (health) | `teamcraft-sfu healthcheck`       |
-| `teamcraft-bridge`    | `teamcraft-bridge.Containerfile`    | `8088/tcp` (webhooks, logs)            | `teamcraft-bridge healthcheck`    |
-| `teamcraft-notetaker` | `teamcraft-notetaker.Containerfile` | nothing (connects out)                 | `teamcraft-notetaker healthcheck` |
+| Image                 | Containerfile                       | Listens on                                                                           | Health check                      |
+|-----------------------|-------------------------------------|--------------------------------------------------------------------------------------|-----------------------------------|
+| `teamcraft-server`    | `teamcraft-server.Containerfile`    | `8080/tcp` (HTTP, `[::]` dual stack)                                                 | `teamcraft-server healthcheck`    |
+| `teamcraft-sfu`       | `teamcraft-sfu.Containerfile`       | `4433/udp` (QUIC), `8081/tcp` (health), `8082/tcp` (call fallback, behind the proxy) | `teamcraft-sfu healthcheck`       |
+| `teamcraft-bridge`    | `teamcraft-bridge.Containerfile`    | `8088/tcp` (webhooks, logs)                                                          | `teamcraft-bridge healthcheck`    |
+| `teamcraft-notetaker` | `teamcraft-notetaker.Containerfile` | nothing (connects out)                                                               | `teamcraft-notetaker healthcheck` |
 
 ```sh
 podman build --format docker -f containers/teamcraft-server.Containerfile    -t teamcraft-server .

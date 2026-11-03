@@ -32,6 +32,7 @@
 //! once instead of the others seeing "reconnecting" until the grace period ends.
 
 mod cadence;
+mod fallback;
 #[cfg(feature = "effects")]
 mod gl_compositor;
 mod meter;
@@ -100,7 +101,8 @@ use crate::call_engine::{
   OwnVideoEnd,
 };
 use crate::call_resilience::{
-  Jitter, JoinTicket, JoinTicketError, ReconnectSchedule, ResilienceConfig, rejoin_attempt,
+  CallTransport, Jitter, JoinTicket, JoinTicketError, ReconnectSchedule, ResilienceConfig,
+  connect_preferring_quic, fallback_delay, rejoin_attempt,
 };
 use crate::call_video::ReceivedVideoFrame;
 use crate::datagram::SimulcastLayer;
@@ -162,6 +164,9 @@ pub struct WebCall {
 pub struct WebCallConfig {
   /// WebTransport URL from the join token response, e.g. `https://sfu.example.com:4433/call`.
   pub sfu_url: String,
+  /// WebSocket URL of the SFU's fallback for networks that block UDP, from the join token response;
+  /// used only when QUIC doesn't connect (ARCHITECTURE.md §6.6).
+  pub maybe_fallback_url: Option<String>,
   /// Accept self-signed SFU certificates by their SHA-256 hashes (`serverCertificateHashes`,
   /// development and tests); empty uses the browser's trusted roots. For the first session: every
   /// rejoin uses its fresh ticket's ([`JoinTicket::certificate_hashes`]).
@@ -451,7 +456,21 @@ enum SessionEnd {
 /// one tells the SFU this device left; it keeps the slot only for lost connections) and one still
 /// connecting. Shared with [`PageExit`], which closes them all when the page goes away.
 #[derive(Clone, Default)]
-struct OpenSessions(Rc<RefCell<Vec<WebTransport>>>);
+struct OpenSessions(Rc<RefCell<Vec<SessionHandle>>>);
+
+/// A session as it is closed or asked about, whatever carries it.
+#[derive(Clone, PartialEq)]
+enum SessionHandle {
+  Quic(WebTransport),
+  Fallback(web_sys::WebSocket),
+}
+
+/// Closes a session that didn't finish opening, also when the race for the connection drops it.
+struct OpeningSession<'a> {
+  sessions: &'a OpenSessions,
+  session: SessionHandle,
+  is_open: bool,
+}
 
 /// Leaves the call from the page's `pagehide` handler, while the page can still send.
 struct PageExit {
@@ -461,9 +480,17 @@ struct PageExit {
 
 /// The connection to the SFU.
 struct Transport {
-  transport: WebTransport,
-  signaling: WritableStreamDefaultWriter,
-  datagrams: WritableStreamDefaultWriter,
+  session: SessionHandle,
+  writers: Writers,
+}
+
+/// Where a session's signals and datagrams go.
+enum Writers {
+  Quic {
+    signaling: WritableStreamDefaultWriter,
+    datagrams: WritableStreamDefaultWriter,
+  },
+  Fallback(fallback::FallbackSession),
 }
 
 /// Web Audio graph: microphone capture (if any) and the playback worklet (if any).
@@ -574,8 +601,21 @@ impl WebCall {
     )
     .await?;
     let sessions = OpenSessions::default();
-    let transport =
-      Transport::connect(&config.sfu_url, &config.certificate_hashes, &sessions, &inputs, 0).await?;
+    let ticket = JoinTicket {
+      sfu_url: config.sfu_url.clone(),
+      token: config.token.clone(),
+      certificate_hashes: config.certificate_hashes.clone(),
+      maybe_fallback_url: config.maybe_fallback_url.clone(),
+    };
+    let transport = Transport::connect_preferring_quic(
+      &ticket,
+      CallTransport::Quic,
+      &config.resilience,
+      &sessions,
+      &inputs,
+      0,
+    )
+    .await?;
     let (event_tx, events) = mpsc::unbounded();
     let (finished_tx, finished) = oneshot::channel();
     let task_inputs = inputs.clone();
@@ -996,6 +1036,7 @@ async fn run_call(
     engine.set_muted(true);
   }
   let _page_exit = PageExit::watch(&sessions, &inputs);
+  let transport_kind = transport.kind();
   let mut state = CallState {
     maybe_transport: Some(transport),
     lost_transports: Vec::new(),
@@ -1008,7 +1049,10 @@ async fn run_call(
       sfu_url: config.sfu_url.clone(),
       token: config.token.clone(),
       certificate_hashes: config.certificate_hashes.clone(),
+      maybe_fallback_url: config.maybe_fallback_url.clone(),
     },
+    call_transport: transport_kind,
+    quic_jitter: config.jitter,
     resilience: config.resilience,
     maybe_ticket_source: config.maybe_ticket_source.clone(),
     cues: CuePlayer::new(config.status_cues),
@@ -1044,6 +1088,7 @@ async fn run_call(
     #[cfg(feature = "call-view")]
     maybe_rtt_ms: None,
   };
+  state.use_transport(transport_kind);
   let _audio_clock = AudioClock::start(&audio.context, state.pulses.clone())
     .inspect_err(|error| warn!(%error, "no audio clock; video and timers slow down in a hidden tab"))
     .ok();
@@ -1131,7 +1176,13 @@ struct CallState<'a> {
   is_hanging_up: bool,
   inputs: &'a mpsc::UnboundedSender<Input>,
   events: &'a mpsc::UnboundedSender<CallEngineEvent>,
+  /// For the remote streams of the current session's path.
   jitter: JitterBufferConfig,
+  /// What the call's configuration says, for QUIC.
+  quic_jitter: JitterBufferConfig,
+  /// What the current (or last) session went over: a rejoin needn't wait for QUIC if that was the
+  /// fallback.
+  call_transport: CallTransport,
   encoder: OpusEncoder,
   /// The running screen share's sound, while it is sent.
   maybe_screen_sound: Option<ScreenSound>,
@@ -1213,6 +1264,7 @@ impl CallState<'_> {
       } => {
         info!("connected again, rejoining the call");
         let now = Instant::now();
+        self.use_transport(transport.kind());
         // Tracked in `OpenSessions` since it started connecting.
         self.maybe_transport = Some(transport);
         self.watch.relinked(generation, now);
@@ -1377,7 +1429,7 @@ impl CallState<'_> {
       sent.maybe_frames_captured = Some(sender.frames_captured());
     }
     if let Some(transport) = &self.maybe_transport {
-      let session = transport.transport.clone();
+      let session = transport.session.clone();
       let inputs = self.inputs.clone();
       spawn_local(async move {
         let maybe_rtt_ms = round_trip_ms(&session).await;
@@ -1657,7 +1709,7 @@ impl CallState<'_> {
     let Some(transport) = &self.maybe_transport else {
       return;
     };
-    let session = transport.transport.clone();
+    let session = transport.session.clone();
     let inputs = self.inputs.clone();
     spawn_local(async move {
       let count = received_packets(&session).await;
@@ -1666,10 +1718,26 @@ impl CallState<'_> {
     });
   }
 
+  /// The call runs over this now: the UI hears of it, and the jitter buffers suit its timing.
+  fn use_transport(&mut self, transport: CallTransport) {
+    self.call_transport = transport;
+    self.jitter = match transport {
+      CallTransport::Quic => self.quic_jitter,
+      CallTransport::Fallback => JitterBufferConfig::for_fallback(),
+    };
+    for remote in self.remotes.values_mut() {
+      remote.jitter.set_config(self.jitter);
+    }
+    // The app dropped the call if nobody reads the events.
+    let _ = self
+      .events
+      .unbounded_send(CallEngineEvent::TransportChanged(transport));
+  }
+
   /// Back in the call on a new session: the lost ones can go.
   fn close_lost_sessions(&mut self) {
     for transport in self.lost_transports.drain(..) {
-      self.sessions.close(&transport.transport);
+      self.sessions.close(&transport.session);
     }
   }
 
@@ -1685,6 +1753,7 @@ impl CallState<'_> {
     let maybe_source = self.maybe_ticket_source.clone();
     let fallback = self.ticket.clone();
     let resilience = self.resilience;
+    let current = self.call_transport;
     spawn_local(async move {
       let mut maybe_last_failure_at = None;
       // The call ended meanwhile when nobody reads the inputs any more.
@@ -1712,13 +1781,13 @@ impl CallState<'_> {
         let attempt = rejoin_attempt(maybe_fetch, fallback.clone(), |ticket: JoinTicket| {
           let (inputs, sessions) = (inputs.clone(), sessions.clone());
           async move {
-            let hashes = &ticket.certificate_hashes;
-            Transport::connect(&ticket.sfu_url, hashes, &sessions, &inputs, generation).await
+            Transport::connect_preferring_quic(&ticket, current, &resilience, &sessions, &inputs, generation)
+              .await
           }
         });
         match attempt.await {
           Ok((transport, ticket)) => {
-            let session = transport.transport.clone();
+            let session = transport.session.clone();
             let relinked = Input::Relinked {
               transport,
               ticket,
@@ -2102,6 +2171,62 @@ impl CallState<'_> {
 }
 
 impl Transport {
+  /// A session to the ticket's SFU: QUIC, and the fallback next to it if the ticket offers one and
+  /// QUIC is late or fails. Without one, exactly what QUIC does.
+  async fn connect_preferring_quic(
+    ticket: &JoinTicket,
+    current: CallTransport,
+    resilience: &ResilienceConfig,
+    sessions: &OpenSessions,
+    inputs: &mpsc::UnboundedSender<Input>,
+    generation: u64,
+  ) -> Result<Self, WebCallError> {
+    let quic = Self::connect(
+      &ticket.sfu_url,
+      &ticket.certificate_hashes,
+      sessions,
+      inputs,
+      generation,
+    );
+    let Some(fallback_url) = &ticket.maybe_fallback_url else {
+      return quic.await;
+    };
+    let starts = sleep(fallback_delay(current, resilience));
+    let fallback = Self::connect_fallback(fallback_url, sessions, inputs, generation);
+    let (transport, kind) = connect_preferring_quic(quic, starts, fallback).await?;
+    if kind == CallTransport::Fallback {
+      info!("QUIC didn't connect, the call runs on the fallback");
+    }
+    Ok(transport)
+  }
+
+  fn kind(&self) -> CallTransport {
+    match &self.writers {
+      Writers::Quic { .. } => CallTransport::Quic,
+      Writers::Fallback(_) => CallTransport::Fallback,
+    }
+  }
+
+  /// Opens the WebSocket fallback, tracked as [`Self::connect`]'s session is.
+  async fn connect_fallback(
+    url: &str,
+    sessions: &OpenSessions,
+    inputs: &mpsc::UnboundedSender<Input>,
+    generation: u64,
+  ) -> Result<Self, WebCallError> {
+    let socket = web_sys::WebSocket::new(url).map_err(browser("call socket"))?;
+    let session = SessionHandle::Fallback(socket.clone());
+    sessions.track(&session);
+    let mut opening = OpeningSession {
+      sessions,
+      session: session.clone(),
+      is_open: false,
+    };
+    let writers = Writers::Fallback(fallback::FallbackSession::open(socket, inputs, generation).await?);
+    opening.is_open = true;
+    Ok(Self { session, writers })
+  }
+
   /// Opens a session, tracked in `sessions` from the start (the page may go away while it
   /// connects); a session that fails to open is closed again. Its signals and datagrams arrive
   /// tagged with `generation`, its end as [`Input::SessionEnded`].
@@ -2127,12 +2252,16 @@ impl Transport {
         .map_err(browser("WebTransport options"))?;
     }
     let transport = WebTransport::new(sfu_url, &options).map_err(browser("WebTransport"))?;
-    sessions.track(&transport);
-    let opened = Self::open(transport.clone(), inputs, generation).await;
-    if opened.is_err() {
-      sessions.close(&transport);
-    }
-    opened
+    let session = SessionHandle::Quic(transport.clone());
+    sessions.track(&session);
+    let mut opening = OpeningSession {
+      sessions,
+      session,
+      is_open: false,
+    };
+    let opened = Self::open(transport, inputs, generation).await?;
+    opening.is_open = true;
+    Ok(opened)
   }
 
   async fn open(
@@ -2167,9 +2296,8 @@ impl Transport {
       generation,
     ));
     Ok(Self {
-      transport,
-      signaling,
-      datagrams,
+      session: SessionHandle::Quic(transport),
+      writers: Writers::Quic { signaling, datagrams },
     })
   }
 
@@ -2182,28 +2310,44 @@ impl Transport {
       context: "encoding a signaling message",
       message: "too large".into(),
     })?;
-    let mut framed = length.to_be_bytes().to_vec();
-    framed.extend_from_slice(&body);
-    // Writes queue in order; a failed write surfaces as the stream closing.
-    let _ = self
-      .signaling
-      .write_with_chunk(&Uint8Array::from(framed.as_slice()));
+    match &self.writers {
+      Writers::Quic { signaling, .. } => {
+        let mut framed = length.to_be_bytes().to_vec();
+        framed.extend_from_slice(&body);
+        // Writes queue in order; a failed write surfaces as the stream closing.
+        let _ = signaling.write_with_chunk(&Uint8Array::from(framed.as_slice()));
+      },
+      Writers::Fallback(session) => session.send_signal(&body),
+    }
     Ok(())
   }
 
   fn send_datagram(&self, bytes: &[u8]) {
-    // Unreliable by design: the browser drops datagrams when its queue is full.
-    let _ = self.datagrams.write_with_chunk(&Uint8Array::from(bytes));
+    match &self.writers {
+      // Unreliable by design: the browser drops datagrams when its queue is full.
+      Writers::Quic { datagrams, .. } => {
+        let _ = datagrams.write_with_chunk(&Uint8Array::from(bytes));
+      },
+      Writers::Fallback(session) => session.send_datagram(bytes),
+    }
+  }
+}
+
+impl Drop for OpeningSession<'_> {
+  fn drop(&mut self) {
+    if !self.is_open {
+      self.sessions.close(&self.session);
+    }
   }
 }
 
 impl OpenSessions {
-  fn track(&self, session: &WebTransport) {
+  fn track(&self, session: &SessionHandle) {
     self.0.borrow_mut().push(session.clone());
   }
 
   /// Closes one session as a leave.
-  fn close(&self, session: &WebTransport) {
+  fn close(&self, session: &SessionHandle) {
     self.0.borrow_mut().retain(|open| open != session);
     close_session(session);
   }
@@ -2246,7 +2390,14 @@ impl Drop for PageExit {
 }
 
 /// Closes a session as a leave; a closed one stays closed.
-fn close_session(session: &WebTransport) {
+fn close_session(session: &SessionHandle) {
+  let session = match session {
+    SessionHandle::Quic(session) => session,
+    SessionHandle::Fallback(socket) => {
+      fallback::close_as_leave(socket);
+      return;
+    },
+  };
   let info = dictionary(&[
     ("closeCode", JsValue::from(LEAVE_CLOSE_CODE)),
     ("reason", JsValue::from_str("leave")),
@@ -2258,7 +2409,11 @@ fn close_session(session: &WebTransport) {
 }
 
 /// The packets the session received so far (`getStats().packetsReceived`).
-async fn received_packets(session: &WebTransport) -> PacketCount {
+async fn received_packets(session: &SessionHandle) -> PacketCount {
+  // A page can't see the WebSocket's frames below its messages: those count anyway.
+  let SessionHandle::Quic(session) = session else {
+    return PacketCount::Unsupported;
+  };
   let Ok(promise) = session.get_stats() else {
     return PacketCount::Unsupported;
   };
@@ -2275,7 +2430,10 @@ async fn received_packets(session: &WebTransport) -> PacketCount {
 /// The session's smoothed round trip in milliseconds (`getStats().smoothedRtt`); `None` where the
 /// browser has no such statistic.
 #[cfg(feature = "call-view")]
-async fn round_trip_ms(session: &WebTransport) -> Option<u32> {
+async fn round_trip_ms(session: &SessionHandle) -> Option<u32> {
+  let SessionHandle::Quic(session) = session else {
+    return None;
+  };
   let stats = JsFuture::from(session.get_stats().ok()?).await.ok()?;
   let rtt = Reflect::get(&stats, &JsValue::from_str("smoothedRtt"))
     .ok()?

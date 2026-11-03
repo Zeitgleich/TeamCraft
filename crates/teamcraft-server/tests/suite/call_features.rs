@@ -29,6 +29,8 @@ const QUIET: Duration = Duration::from_millis(400);
 fn calls_config(ring_timeout_secs: u64, maybe_control_url: Option<String>) -> CallsConfig {
   CallsConfig {
     sfu_url: "https://sfu.example.com:4433/call".into(),
+    sfu_fallback_enabled: true,
+    maybe_sfu_fallback_url: None,
     issuer: teamcraft_server::testing::TEST_ISSUER.into(),
     signing_key_path: PathBuf::from("unused.pem"),
     join_token_ttl_secs: 60,

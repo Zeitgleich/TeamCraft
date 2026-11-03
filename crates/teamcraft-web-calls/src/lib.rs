@@ -519,6 +519,7 @@ impl Host {
     let is_muted_at_start = is_muted || self.state.borrow().push_to_talk.is_enabled;
     let config = WebCallConfig {
       sfu_url: prepared.sfu_url,
+      maybe_fallback_url: prepared.maybe_fallback_url,
       certificate_hashes: certificate_hashes_from_hex(&prepared.certificate_sha256),
       token: prepared.token,
       engine: CallEngineConfig {
@@ -1562,6 +1563,7 @@ impl WebJoinTicketSource for PageTickets {
         certificate_hashes: certificate_hashes_from_hex(&prepared.certificate_sha256),
         sfu_url: prepared.sfu_url,
         token: prepared.token,
+        maybe_fallback_url: prepared.maybe_fallback_url,
       })
     })
   }

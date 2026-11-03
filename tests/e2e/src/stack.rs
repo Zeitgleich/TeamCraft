@@ -72,6 +72,8 @@ pub struct SfuHandle {
 #[derive(Clone, Default)]
 pub struct StackBuilder {
   has_calls: bool,
+  /// The SFU opens its WebSocket fallback, and the server offers it to clients.
+  has_call_fallback: bool,
   has_meetings: bool,
   has_mail: bool,
   has_local_accounts: bool,
@@ -90,6 +92,13 @@ impl StackBuilder {
   /// Starts an SFU and configures calls on the server.
   pub fn with_calls(mut self) -> Self {
     self.has_calls = true;
+    self
+  }
+
+  /// Calls with the SFU's WebSocket fallback for networks that block UDP, on a local port.
+  pub fn with_call_fallback(mut self) -> Self {
+    self.has_calls = true;
+    self.has_call_fallback = true;
     self
   }
 
@@ -475,6 +484,13 @@ impl Stack {
         ),
       ]);
     }
+    let maybe_fallback_port = settings.has_call_fallback.then(free_tcp_port);
+    if let Some(port) = maybe_fallback_port {
+      envs.push((
+        "TEAMCRAFT_CALLS__SFU_FALLBACK_URL".into(),
+        format!("ws://127.0.0.1:{port}/call/fallback"),
+      ));
+    }
     if settings.has_calls {
       let key_path = dir.join("call-signing.pem");
       std::fs::write(&key_path, CALL_SIGNING_KEY_PEM)?;
@@ -512,7 +528,16 @@ impl Stack {
       .await?;
 
     let maybe_sfu = if settings.has_calls {
-      Some(start_sfu(&dir, &base_url, sfu_port, settings.maybe_sfu_identity.as_ref()).await?)
+      Some(
+        start_sfu(
+          &dir,
+          &base_url,
+          sfu_port,
+          maybe_fallback_port,
+          settings.maybe_sfu_identity.as_ref(),
+        )
+        .await?,
+      )
     } else {
       None
     };
@@ -537,12 +562,20 @@ async fn start_sfu(
   dir: &std::path::Path,
   server_url: &str,
   port: u16,
+  maybe_fallback_port: Option<u16>,
   maybe_identity: Option<&(String, String)>,
 ) -> anyhow::Result<SfuHandle> {
   let public_key_path = dir.join("call-signing.pub.pem");
   std::fs::write(&public_key_path, CALL_PUBLIC_KEY_PEM)?;
   let mut envs = vec![
     ("TEAMCRAFT_SFU_BIND".into(), format!("[::]:{port}")),
+    match maybe_fallback_port {
+      Some(fallback_port) => (
+        "TEAMCRAFT_SFU_FALLBACK_BIND".into(),
+        format!("[::]:{fallback_port}"),
+      ),
+      None => ("TEAMCRAFT_SFU_FALLBACK_ENABLED".into(), "0".into()),
+    },
     (
       "TEAMCRAFT_SFU_HEALTH_BIND".into(),
       format!("[::]:{}", free_tcp_port()),

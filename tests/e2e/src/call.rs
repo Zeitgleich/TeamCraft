@@ -11,6 +11,7 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, CallStats};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
+use teamcraft_media::fallback_link::{FallbackSocket, fallback_opener};
 use teamcraft_proto::{ConversationId, DeviceId, Id, MediaCapabilities, Snowflake};
 
 use crate::peer::Peer;
@@ -63,7 +64,16 @@ pub async fn join_call(
     capabilities: MediaCapabilities::default(),
     bwe: BweConfig::default(),
   };
+  let maybe_fallback_url = join.maybe_sfu_fallback_url;
   let mut config = NativeCallConfig::new(join.sfu_url, join.token, engine);
+  config.maybe_fallback_url = maybe_fallback_url;
+  // As the apps open it: the core's HTTP stack, with its proxy handling.
+  config.maybe_fallback_opener = Some(fallback_opener(|url| async move {
+    let socket = teamcraft_core::api::open_call_socket(&url)
+      .await
+      .map_err(|error| error.to_string())?;
+    Ok(FallbackSocket::new(socket))
+  }));
   config.maybe_certificate_hash = Some(certificate_hash);
   config.source = AudioSource::Tone {
     frequency_hz,

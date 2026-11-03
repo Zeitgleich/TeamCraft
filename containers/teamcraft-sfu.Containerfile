@@ -35,7 +35,7 @@ COPY --from=build /out/teamcraft-sfu /usr/local/bin/teamcraft-sfu
 USER 65532:65532
 ENV TEAMCRAFT_SFU_BIND=[::]:4433 \
     TEAMCRAFT_SFU_HEALTH_BIND=[::]:8081
-EXPOSE 4433/udp 8081/tcp
+EXPOSE 4433/udp 8081/tcp 8082/tcp
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["/usr/local/bin/teamcraft-sfu", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/teamcraft-sfu"]

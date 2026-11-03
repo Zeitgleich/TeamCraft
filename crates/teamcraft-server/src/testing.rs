@@ -295,6 +295,8 @@ impl TestApp {
   pub async fn start_with_calls(signing_key_pem: &str, sfu_url: &str) -> Option<Self> {
     let config = CallsConfig {
       sfu_url: sfu_url.into(),
+      sfu_fallback_enabled: true,
+      maybe_sfu_fallback_url: None,
       issuer: TEST_ISSUER.into(),
       signing_key_path: "unused.pem".into(),
       join_token_ttl_secs: 60,

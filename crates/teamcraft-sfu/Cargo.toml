@@ -11,7 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-teamcraft-media = { path = "../teamcraft-media" }
+teamcraft-media = { path = "../teamcraft-media", features = ["fallback-socket"] }
 teamcraft-ops = { workspace = true, features = ["metrics"] }
 teamcraft-proto.workspace = true
 anyhow.workspace = true
@@ -19,6 +19,9 @@ jsonwebtoken.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # Room in the UDP socket's receive buffer, which wtransport's own binding has no setting for.
 socket2.workspace = true
+# The WebSocket fallback for networks that block UDP (ARCHITECTURE.md §6.6); both already in the tree.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # Reports call participants to teamcraft-server.
 reqwest.workspace = true
 # Constant-time comparison of the registration token on the control endpoint.
@@ -39,6 +42,8 @@ portal-e2e = ["teamcraft-media/pipewire"]
 [dev-dependencies]
 # The native call client (engine, Opus, driver) for end-to-end tests against this SFU.
 teamcraft-media = { path = "../teamcraft-media", features = ["native", "openh264-source"] }
+# Raw sockets for what a hostile client sends to the fallback's listener.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
 # Device identities for the clients' call key bindings.
 teamcraft-crypto.workspace = true
 rand_core.workspace = true

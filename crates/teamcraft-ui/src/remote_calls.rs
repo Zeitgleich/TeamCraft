@@ -614,6 +614,7 @@ mod tests {
         screen_sound: Default::default(),
         is_reconnecting: false,
         reconnecting: Vec::new(),
+        is_on_limited_network: false,
         maybe_moved_to: None,
       }),
       incoming: Vec::new(),

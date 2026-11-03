@@ -8,6 +8,7 @@ mod camera_start;
 #[path = "../common/mod.rs"]
 mod common;
 mod dave_call;
+mod fallback;
 mod handover;
 mod handshake_frames;
 mod host_controls;

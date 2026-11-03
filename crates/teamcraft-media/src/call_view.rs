@@ -11,6 +11,7 @@ use teamcraft_proto::{DeviceId, MediaStreamId, UserId, VideoTrackKind};
 
 use crate::call_cues::StatusCues;
 use crate::call_engine::CallEngineEvent;
+use crate::call_resilience::CallTransport;
 
 /// Who is who in the active call: the engine reports devices, the UI shows people.
 #[derive(Debug, Default)]
@@ -85,6 +86,10 @@ impl CallRoster {
       },
       CallEngineEvent::Reconnected => {
         active.is_reconnecting = false;
+        return true;
+      },
+      CallEngineEvent::TransportChanged(transport) => {
+        active.is_on_limited_network = transport == CallTransport::Fallback;
         return true;
       },
       CallEngineEvent::ParticipantReconnecting(device_id) => {
@@ -292,6 +297,38 @@ pub fn started_screen_sound(is_asked: bool, is_sent: bool) -> ScreenShareSound {
     (false, _) => ScreenShareSound::Off,
     (true, true) => ScreenShareSound::Shared,
     (true, false) => ScreenShareSound::Unavailable,
+  }
+}
+
+#[cfg(test)]
+mod transport_tests {
+  use teamcraft_client_api::call_view::CallView;
+  use teamcraft_client_api::calls::{BackgroundEffect, CallKind, CallRequest};
+  use teamcraft_proto::{ConversationId, Id, Snowflake};
+
+  use super::*;
+
+  #[test]
+  fn the_fallback_shows_as_a_limited_network_until_a_rejoin_gets_quic_back() {
+    let device = DeviceId::from_snowflake(Snowflake::new(1).unwrap());
+    let mut roster = CallRoster::new(device);
+    let mut view = CallView::default();
+    view.start_active(
+      CallRequest {
+        conversation: ConversationId::from_snowflake(Snowflake::new(2).unwrap()),
+        kind: CallKind::Group,
+      },
+      BackgroundEffect::default(),
+    );
+    let is_limited = |view: &CallView| view.maybe_active.as_ref().unwrap().is_on_limited_network;
+    assert!(!is_limited(&view));
+    assert!(roster.apply(
+      &mut view,
+      CallEngineEvent::TransportChanged(CallTransport::Fallback)
+    ));
+    assert!(is_limited(&view));
+    assert!(roster.apply(&mut view, CallEngineEvent::TransportChanged(CallTransport::Quic)));
+    assert!(!is_limited(&view));
   }
 }
 

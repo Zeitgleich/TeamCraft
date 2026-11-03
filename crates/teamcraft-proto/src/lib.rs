@@ -5,6 +5,7 @@
 
 mod api;
 mod bytes;
+mod call_fallback;
 mod call_media;
 mod calls;
 mod conversation;
@@ -24,6 +25,10 @@ mod wire_enum;
 
 pub use api::*;
 pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, IdempotencyKey, UnixMillis};
+pub use call_fallback::{
+  CALL_FALLBACK_PATH, FallbackFrame, FallbackFrameError, MAX_FALLBACK_CLOSE_REASON_BYTES,
+  MAX_FALLBACK_DATAGRAM_BYTES,
+};
 pub use call_media::{
   AudioCodec, KNOWN_VIDEO_CODECS, LEGACY_SIMULCAST_LAYERS, MAX_SIMULCAST_LAYERS, MAX_VIDEO_FRAME_FRAGMENTS,
   MediaCapabilities, SHORT_VIDEO_FRAME_FRAGMENTS, ScreenShareResolution, TransportFeedback, VideoCodec,

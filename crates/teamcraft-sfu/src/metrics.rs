@@ -16,6 +16,7 @@ pub struct SfuMetrics {
   metrics: Metrics,
   rooms: IntGauge,
   participants: IntGauge,
+  fallback_connections: IntGauge,
 }
 
 /// Why the metrics settings can't be used.
@@ -36,12 +37,19 @@ impl SfuMetrics {
         "teamcraft_sfu_participants",
         "Devices in those calls, reconnecting ones included.",
       )?,
+      fallback_connections: metrics.int_gauge(
+        "teamcraft_sfu_fallback_connections",
+        "Open connections on the WebSocket fallback, for networks that block UDP.",
+      )?,
       metrics,
     })
   }
 
   /// The output of `GET /metrics`.
-  pub fn render(&self, stats: RoomStats) -> Result<String, MetricsError> {
+  pub fn render(&self, stats: RoomStats, fallback_connections: usize) -> Result<String, MetricsError> {
+    self
+      .fallback_connections
+      .set(i64::try_from(fallback_connections).unwrap_or(i64::MAX));
     self.rooms.set(i64::try_from(stats.rooms).unwrap_or(i64::MAX));
     self
       .participants
@@ -92,16 +100,21 @@ mod tests {
     fn it_holds_the_counts_and_nothing_else() {
       let output = SfuMetrics::new()
         .unwrap()
-        .render(RoomStats {
-          rooms: 2,
-          participants: 5,
-        })
+        .render(
+          RoomStats {
+            rooms: 2,
+            participants: 5,
+          },
+          3,
+        )
         .unwrap();
       assert!(output.contains("teamcraft_sfu_rooms 2"));
+      assert!(output.contains("teamcraft_sfu_fallback_connections 3"));
       assert!(output.contains("teamcraft_sfu_participants 5"));
       let allowed = AllowList {
         metrics: BTreeSet::from([
           "teamcraft_build_info",
+          "teamcraft_sfu_fallback_connections",
           "teamcraft_sfu_participants",
           "teamcraft_sfu_rooms",
         ]),

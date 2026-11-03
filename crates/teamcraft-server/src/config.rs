@@ -1229,6 +1229,16 @@ impl Default for PresenceConfig {
 pub struct CallsConfig {
   /// WebTransport URL of the SFU that clients connect to.
   pub sfu_url: String,
+  /// Offers clients the SFU's WebSocket fallback, which they use only when QUIC doesn't connect
+  /// (networks that block UDP, ARCHITECTURE.md §6.6). It needs a reverse proxy passing the URL below
+  /// to the SFU; a client on such a network without one just fails as it would without a fallback.
+  #[serde(default = "default_sfu_fallback_enabled")]
+  pub sfu_fallback_enabled: bool,
+  /// WebSocket URL of that fallback. Without one: `sfu_url`'s host on port 443, path
+  /// `/call/fallback`. A self-signed SFU certificate (`sfu_certificate_sha256`) offers no default:
+  /// a WebSocket can't accept it by its hash.
+  #[serde(rename = "sfu_fallback_url", default)]
+  pub maybe_sfu_fallback_url: Option<String>,
   /// `iss` of join tokens, usually the server's public base URL; the SFU expects the same value.
   pub issuer: String,
   /// PEM file with the Ed25519 private key that signs join tokens (`openssl genpkey -algorithm
@@ -1274,6 +1284,25 @@ pub struct CallsConfig {
   /// Configure the SFU with the same value (`TEAMCRAFT_SFU_MAX_DEVICES_PER_USER_PER_CALL`).
   #[serde(default = "default_max_devices_per_user_per_call")]
   pub max_devices_per_user_per_call: usize,
+}
+
+impl CallsConfig {
+  /// The URL to offer clients for the WebSocket fallback, if any.
+  pub fn sfu_fallback_url(&self) -> Option<String> {
+    if !self.sfu_fallback_enabled {
+      return None;
+    }
+    if let Some(url) = &self.maybe_sfu_fallback_url {
+      return Some(url.clone());
+    }
+    if self.maybe_sfu_certificate_sha256.is_some() {
+      return None;
+    }
+    let sfu_url = url::Url::parse(&self.sfu_url).ok()?;
+    // With its brackets, if it is an IPv6 address.
+    let host = sfu_url.host_str()?;
+    Some(format!("wss://{host}{}", teamcraft_proto::CALL_FALLBACK_PATH))
+  }
 }
 
 /// Device-linking relay at /api/v1/rendezvous.
@@ -1650,6 +1679,10 @@ fn default_roster_timeout_secs() -> u64 {
   120
 }
 
+fn default_sfu_fallback_enabled() -> bool {
+  true
+}
+
 fn default_max_devices_per_user_per_call() -> usize {
   3
 }
@@ -1725,6 +1758,80 @@ fn default_jwks_min_refresh_interval_secs() -> u64 {
 
 fn default_http_timeout_secs() -> u64 {
   10
+}
+
+#[cfg(test)]
+mod call_fallback_url {
+  use super::*;
+
+  fn calls(sfu_url: &str) -> CallsConfig {
+    CallsConfig {
+      sfu_url: sfu_url.into(),
+      sfu_fallback_enabled: true,
+      maybe_sfu_fallback_url: None,
+      issuer: "https://chat.example.com".into(),
+      signing_key_path: PathBuf::from("unused.pem"),
+      join_token_ttl_secs: 60,
+      call_idle_secs: 3600,
+      maybe_sfu_registration_token: None,
+      ring_timeout_secs: 30,
+      maybe_sfu_control_url: None,
+      maybe_sfu_certificate_sha256: None,
+      roster_grace_secs: 60,
+      roster_timeout_secs: 120,
+      max_devices_per_user_per_call: 3,
+    }
+  }
+
+  #[test]
+  fn the_default_is_the_sfus_host_on_443() {
+    let url = calls("https://sfu.example.com:3478/call").sfu_fallback_url();
+    assert_eq!(url.as_deref(), Some("wss://sfu.example.com/call/fallback"));
+    let url = calls("https://[2001:db8::1]:3478/call").sfu_fallback_url();
+    assert_eq!(url.as_deref(), Some("wss://[2001:db8::1]/call/fallback"));
+  }
+
+  #[test]
+  fn an_explicit_url_wins() {
+    let mut config = calls("https://sfu.example.com:3478/call");
+    config.maybe_sfu_fallback_url = Some("wss://other.example.com:8443/x".into());
+    assert_eq!(
+      config.sfu_fallback_url().as_deref(),
+      Some("wss://other.example.com:8443/x")
+    );
+  }
+
+  #[test]
+  fn it_can_be_turned_off() {
+    let mut config = calls("https://sfu.example.com:3478/call");
+    config.sfu_fallback_enabled = false;
+    config.maybe_sfu_fallback_url = Some("wss://other.example.com/x".into());
+    assert_eq!(config.sfu_fallback_url(), None);
+  }
+
+  #[test]
+  fn a_self_signed_sfu_offers_no_default() {
+    let mut config = calls("https://sfu.example.com:3478/call");
+    config.maybe_sfu_certificate_sha256 = Some("ab".repeat(32));
+    assert_eq!(config.sfu_fallback_url(), None);
+    config.maybe_sfu_fallback_url = Some("ws://127.0.0.1:8082/call/fallback".into());
+    assert!(config.sfu_fallback_url().is_some());
+  }
+
+  #[test]
+  fn what_is_no_url_offers_nothing() {
+    assert_eq!(calls("not a url").sfu_fallback_url(), None);
+  }
+
+  #[test]
+  fn the_web_clients_policy_allows_the_fallback() {
+    let mut web = WebConfig::default();
+    let url = calls("https://sfu.example.com:3478/call")
+      .sfu_fallback_url()
+      .unwrap();
+    web.allow_connections_to(&[&url]);
+    assert!(web.connect_origins.contains(&"wss://sfu.example.com".to_owned()));
+  }
 }
 
 #[cfg(test)]

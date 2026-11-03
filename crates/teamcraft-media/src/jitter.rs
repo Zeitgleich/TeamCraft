@@ -90,6 +90,21 @@ impl Default for JitterBufferConfig {
   }
 }
 
+impl JitterBufferConfig {
+  /// For a call on the WebSocket fallback (ARCHITECTURE.md §6.6). TCP loses nothing but delays
+  /// everything behind a lost packet, then delivers it in one burst: a stall of a retransmission
+  /// (100 to 200 ms on a poor link) has to fit into the buffer, and the burst after it must not count
+  /// as a backlog to skip at once. So about three times the depth, at the price of that much
+  /// latency, and only on this path.
+  pub fn for_fallback() -> Self {
+    Self {
+      target_depth_packets: 8,
+      max_depth_packets: 50,
+      max_excess_packets: 17,
+    }
+  }
+}
+
 impl<T> JitterBuffer<T> {
   pub fn new(config: JitterBufferConfig) -> Self {
     Self {
@@ -100,6 +115,12 @@ impl<T> JitterBuffer<T> {
       state: PlayoutState::Buffering,
       excess_pops: 0,
     }
+  }
+
+  /// Another path with other timing: what is buffered stays, and later pops follow the new depths.
+  pub fn set_config(&mut self, config: JitterBufferConfig) {
+    self.config = config;
+    self.excess_pops = 0;
   }
 
   pub fn push(&mut self, sequence_number: SequenceNumber, item: T) -> PushOutcome {
@@ -243,6 +264,57 @@ impl<T> JitterBuffer<T> {
 fn truncate(extended: u64) -> SequenceNumber {
   // Invariant: masking to 16 bits makes the cast lossless.
   SequenceNumber((extended & 0xFFFF) as u16)
+}
+
+#[cfg(test)]
+mod fallback_timing {
+  use super::*;
+
+  /// One retransmission on a TCP path: packets due every 20 ms stop for `stall_pops` slots, then all
+  /// arrive at once. How many slots stay empty, and how deep the buffer ends up.
+  fn play_through_stall(config: JitterBufferConfig, stall_pops: u16) -> (usize, usize) {
+    let mut buffer = JitterBuffer::new(config);
+    let mut next = 0u16;
+    let mut waiting = 0u16;
+    let mut missing = 0;
+    for slot in 0u16..300 {
+      if (100..100 + stall_pops).contains(&slot) {
+        waiting += 1;
+      } else {
+        for _ in 0..=waiting {
+          buffer.push(SequenceNumber(next), next);
+          next += 1;
+        }
+        waiting = 0;
+      }
+      // From the stall on, a slot without its packet is a gap (buffering again is one too).
+      let has_packet = matches!(buffer.pop(), Some(Playout::Packet { .. }));
+      if slot >= 100 && !has_packet {
+        missing += 1;
+      }
+    }
+    (missing, buffer.packets.len())
+  }
+
+  #[test]
+  fn a_tcp_stall_that_breaks_the_normal_buffer_plays_through_the_fallbacks() {
+    // 140 ms: what a retransmission holds things up on a poor link.
+    let (missing_normal, _) = play_through_stall(JitterBufferConfig::default(), 7);
+    let (missing_fallback, depth) = play_through_stall(JitterBufferConfig::for_fallback(), 7);
+    assert!(missing_normal > 0, "the default depth can't ride this out");
+    assert_eq!(missing_fallback, 0);
+    assert!(
+      depth <= JitterBufferConfig::for_fallback().target_depth_packets,
+      "{depth}"
+    );
+  }
+
+  #[test]
+  fn a_call_that_moves_to_the_fallback_buffers_more_from_then_on() {
+    let mut buffer = JitterBuffer::<u16>::new(JitterBufferConfig::default());
+    buffer.set_config(JitterBufferConfig::for_fallback());
+    assert_eq!(buffer.config, JitterBufferConfig::for_fallback());
+  }
 }
 
 #[cfg(test)]

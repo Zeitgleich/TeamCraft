@@ -31,6 +31,8 @@ pub use http::{
   AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, ProvenToken, StaticToken,
   change_web_push_subscription,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use http::{NativeSocket, open_call_socket};
 use teamcraft_proto::DeleteConversationRequest;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, AdminJoinRequestResponse, ClaimKeyPackagesRequest,

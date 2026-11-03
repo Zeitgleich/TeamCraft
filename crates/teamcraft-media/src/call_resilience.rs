@@ -24,8 +24,10 @@
 
 use std::collections::hash_map::RandomState;
 use std::fmt;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::hash::{BuildHasher, Hasher};
+use std::pin::pin;
+use std::task::Poll;
 use std::time::Duration;
 
 use teamcraft_proto::CallJoinTokenResponse;
@@ -58,6 +60,21 @@ pub struct ResilienceConfig {
   /// After the SFU announced it is going away, the first rejoin attempt waits a random part of
   /// this, so the restarted SFU isn't hit by every client of every call at the same moment.
   pub going_away_spread: Duration,
+  /// QUIC hasn't connected after this long: the WebSocket fallback starts next to it, if the
+  /// instance offers one (ARCHITECTURE.md §6.6). Long enough for a slow handshake with a lost packet
+  /// or two: a network where QUIC works never gets this far, and whichever connects first wins.
+  pub fallback_after: Duration,
+}
+
+/// What carries a call to the SFU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CallTransport {
+  /// QUIC datagrams and a stream: the normal case.
+  #[default]
+  Quic,
+  /// The WebSocket fallback, on a network that doesn't let QUIC through (ARCHITECTURE.md §6.6).
+  /// TCP's head-of-line blocking makes it the worse path, so it is never the first choice.
+  Fallback,
 }
 
 /// Watches whether the connection's path is alive, from the count of received UDP packets.
@@ -104,6 +121,8 @@ pub struct JoinTicket {
   /// SHA-256s of the SFU's self-signed certificates the connection accepts (development and test
   /// setups, `[calls] sfu_certificate_sha256`); empty uses the trusted roots.
   pub certificate_hashes: Vec<[u8; 32]>,
+  /// WebSocket URL of the SFU's fallback, if the instance offers one.
+  pub maybe_fallback_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -124,6 +143,7 @@ impl Default for ResilienceConfig {
       first_retry_interval: Duration::from_millis(250),
       max_retry_interval: Duration::from_secs(2),
       going_away_spread: Duration::from_secs(1),
+      fallback_after: Duration::from_secs(3),
     }
   }
 }
@@ -299,6 +319,7 @@ impl From<CallJoinTokenResponse> for JoinTicket {
       certificate_hashes: certificate_hashes_from_hex(&response.sfu_certificate_sha256),
       sfu_url: response.sfu_url,
       token: response.token,
+      maybe_fallback_url: response.maybe_sfu_fallback_url,
     }
   }
 }
@@ -336,6 +357,60 @@ where
   Ok((connection, ticket))
 }
 
+/// When the fallback starts next to QUIC, given what the call is on: a call on the fallback (QUIC
+/// didn't connect a moment ago) doesn't wait for QUIC again when it rejoins, a new call always does.
+pub fn fallback_delay(current: CallTransport, config: &ResilienceConfig) -> Duration {
+  match current {
+    CallTransport::Quic => config.fallback_after,
+    CallTransport::Fallback => Duration::ZERO,
+  }
+}
+
+/// Connects over QUIC, and over the fallback too once `fallback_starts` resolves or QUIC failed:
+/// the first to connect wins, the other is dropped. Nothing is sent on either before that, so the
+/// loser costs the SFU a connection, not a join. QUIC's error when both fail, as without a fallback.
+///
+/// The fallback's future isn't polled before its time: on a network where QUIC connects in time,
+/// no socket is ever opened for it, and joining takes exactly as long as without it.
+pub async fn connect_preferring_quic<T, E>(
+  quic: impl Future<Output = Result<T, E>>,
+  fallback_starts: impl Future<Output = ()>,
+  fallback: impl Future<Output = Result<T, E>>,
+) -> Result<(T, CallTransport), E> {
+  let mut quic = pin!(quic);
+  let mut fallback_starts = pin!(fallback_starts);
+  let mut fallback = pin!(fallback);
+  let mut maybe_quic_error = None;
+  let mut has_fallback_failed = false;
+  let mut is_fallback_due = false;
+  poll_fn(|cx| {
+    if maybe_quic_error.is_none()
+      && let Poll::Ready(result) = quic.as_mut().poll(cx)
+    {
+      match result {
+        Ok(connection) => return Poll::Ready(Ok((connection, CallTransport::Quic))),
+        Err(error) => maybe_quic_error = Some(error),
+      }
+    }
+    is_fallback_due =
+      is_fallback_due || maybe_quic_error.is_some() || fallback_starts.as_mut().poll(cx).is_ready();
+    if is_fallback_due
+      && !has_fallback_failed
+      && let Poll::Ready(result) = fallback.as_mut().poll(cx)
+    {
+      match result {
+        Ok(connection) => return Poll::Ready(Ok((connection, CallTransport::Fallback))),
+        Err(_) => has_fallback_failed = true,
+      }
+    }
+    if has_fallback_failed && let Some(error) = maybe_quic_error.take() {
+      return Poll::Ready(Err(error));
+    }
+    Poll::Pending
+  })
+  .await
+}
+
 /// [`certificate_hash_from_hex`] for every entry; malformed ones are left out.
 pub fn certificate_hashes_from_hex(texts: &[String]) -> Vec<[u8; 32]> {
   texts
@@ -356,6 +431,113 @@ pub fn certificate_hash_from_hex(text: &str) -> Option<[u8; 32]> {
     *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
   }
   Some(hash)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod connection_race {
+  use std::cell::Cell;
+  use std::future::pending;
+  use std::rc::Rc;
+
+  use tokio::time::{Instant as TokioInstant, sleep};
+
+  use super::*;
+
+  const FALLBACK_AFTER: Duration = Duration::from_secs(3);
+
+  #[tokio::test(start_paused = true)]
+  async fn quic_in_time_never_opens_a_socket_and_adds_no_delay() {
+    let started_at = TokioInstant::now();
+    let opened = Rc::new(Cell::new(false));
+    let result = connect_preferring_quic(
+      after(Duration::from_millis(50), Ok::<_, &str>("quic")),
+      sleep(FALLBACK_AFTER),
+      noting(&opened, Ok("fallback")),
+    )
+    .await;
+    assert_eq!(result, Ok(("quic", CallTransport::Quic)));
+    assert!(!opened.get(), "the fallback must not even start");
+    assert_eq!(started_at.elapsed(), Duration::from_millis(50));
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_swallowed_handshake_moves_on_after_the_short_timeout() {
+    let started_at = TokioInstant::now();
+    let result = connect_preferring_quic(
+      pending::<Result<&str, &str>>(),
+      sleep(FALLBACK_AFTER),
+      std::future::ready(Ok("fallback")),
+    )
+    .await;
+    assert_eq!(result, Ok(("fallback", CallTransport::Fallback)));
+    assert_eq!(started_at.elapsed(), FALLBACK_AFTER);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_refused_quic_moves_on_at_once() {
+    let started_at = TokioInstant::now();
+    let result = connect_preferring_quic(
+      std::future::ready(Err::<&str, &str>("refused")),
+      sleep(FALLBACK_AFTER),
+      std::future::ready(Ok("fallback")),
+    )
+    .await;
+    assert_eq!(result, Ok(("fallback", CallTransport::Fallback)));
+    assert_eq!(started_at.elapsed(), Duration::ZERO);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_slow_quic_still_wins_over_a_slower_fallback() {
+    let result = connect_preferring_quic(
+      after(Duration::from_secs(4), Ok::<_, &str>("quic")),
+      sleep(FALLBACK_AFTER),
+      after(Duration::from_secs(5), Ok("fallback")),
+    )
+    .await;
+    assert_eq!(result, Ok(("quic", CallTransport::Quic)));
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_slow_quic_goes_on_when_the_fallback_fails() {
+    let result = connect_preferring_quic(
+      after(Duration::from_secs(4), Ok::<_, &str>("quic")),
+      sleep(FALLBACK_AFTER),
+      std::future::ready(Err("no proxy rule")),
+    )
+    .await;
+    assert_eq!(result, Ok(("quic", CallTransport::Quic)));
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn both_failing_reports_quics_error() {
+    let result = connect_preferring_quic(
+      after(Duration::from_secs(1), Err::<&str, &str>("quic failed")),
+      sleep(FALLBACK_AFTER),
+      after(Duration::from_secs(2), Err("fallback failed")),
+    )
+    .await;
+    assert_eq!(result, Err("quic failed"));
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_call_on_the_fallback_rejoins_on_both_at_once_and_a_new_call_waits_for_quic() {
+    let config = ResilienceConfig::default();
+    assert_eq!(
+      fallback_delay(CallTransport::Quic, &config),
+      config.fallback_after
+    );
+    assert_eq!(fallback_delay(CallTransport::Fallback, &config), Duration::ZERO);
+  }
+
+  async fn after<T>(delay: Duration, value: T) -> T {
+    sleep(delay).await;
+    value
+  }
+
+  async fn noting<T>(opened: &Rc<Cell<bool>>, value: T) -> T {
+    opened.set(true);
+    value
+  }
 }
 
 #[cfg(test)]
@@ -583,6 +765,7 @@ mod tests {
         call_id: CallId::from_snowflake(Snowflake::ZERO),
         token: "token".into(),
         sfu_url: "https://sfu.example.com:4433/call".into(),
+        maybe_sfu_fallback_url: Some("wss://sfu.example.com/call/fallback".into()),
         expires_at: UnixMillis(0),
         sfu_certificate_sha256: vec!["ab".repeat(32), "not hex".into(), vec!["CD"; 32].join(":")],
         ends_when_one_side_leaves: false,
@@ -650,6 +833,7 @@ mod tests {
       sfu_url: "https://sfu.example.com:4433/call".into(),
       token: token.into(),
       certificate_hashes: vec![hash],
+      maybe_fallback_url: None,
     }
   }
 

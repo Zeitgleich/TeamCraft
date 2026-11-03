@@ -47,6 +47,9 @@ either, the app says so: allow it with the icon in the address bar and try again
   once; the photo scenes are only in the apps.
 - **Not in the browser yet:** sharing your computer's sound with the screen.
 - **Older browsers** without WebTransport can't call; the call buttons explain this.
+- **Networks that block UDP** (some companies, hotels and guest networks): the call still connects,
+  over a slower path, if your administrator has set it up. It says "Limited network, call quality may
+  be lower".
 If calls fail to start with *service unavailable*, the admin has not configured the call service
 ([Admin: calls and SFU](../admin/calls-sfu.md)).
 

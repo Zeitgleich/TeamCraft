@@ -641,6 +641,8 @@ MC4CAQAwBQYDK2VwBCIEIAxxS2yuWa9SUUAfZhI0772UQ48VXZLz45+L2A5IfcWA
   fn calls_config() -> CallsConfig {
     CallsConfig {
       sfu_url: "https://sfu.example.com:4433/call".into(),
+      sfu_fallback_enabled: true,
+      maybe_sfu_fallback_url: None,
       issuer: teamcraft_server::testing::TEST_ISSUER.into(),
       signing_key_path: PathBuf::from("unused.pem"),
       join_token_ttl_secs: 60,

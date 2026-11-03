@@ -65,6 +65,7 @@ pub struct CallService {
   signing_key: EncodingKey,
   issuer: String,
   sfu_url: String,
+  maybe_sfu_fallback_url: Option<String>,
   /// The SFU certificates' SHA-256s (lowercase hex) for browsers, when they are self-signed.
   sfu_certificate_sha256: Vec<String>,
   token_ttl: Duration,
@@ -260,6 +261,7 @@ impl CallService {
       signing_key: EncodingKey::from_ed_pem(signing_key_pem)?,
       issuer: config.issuer.clone(),
       sfu_url: config.sfu_url.clone(),
+      maybe_sfu_fallback_url: config.sfu_fallback_url(),
       sfu_certificate_sha256: config
         .maybe_sfu_certificate_sha256
         .as_deref()
@@ -1098,6 +1100,7 @@ pub async fn create_join_token(
     call_id,
     token: calls.sign(&claims)?,
     sfu_url: calls.sfu_url.clone(),
+    maybe_sfu_fallback_url: calls.maybe_sfu_fallback_url.clone(),
     expires_at: UnixMillis(i64::try_from(claims.exp).unwrap_or(i64::MAX).saturating_mul(1000)),
     sfu_certificate_sha256: calls.sfu_certificate_sha256.clone(),
     ends_when_one_side_leaves,
@@ -2901,6 +2904,8 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
   fn config() -> CallsConfig {
     CallsConfig {
       sfu_url: "https://sfu.example.com:4433/call".into(),
+      sfu_fallback_enabled: true,
+      maybe_sfu_fallback_url: None,
       issuer: "https://chat.example.com".into(),
       signing_key_path: PathBuf::from("unused.pem"),
       join_token_ttl_secs: 60,

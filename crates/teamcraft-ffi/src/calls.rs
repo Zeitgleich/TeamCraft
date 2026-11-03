@@ -25,8 +25,9 @@ use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnPublica
 use teamcraft_media::call_native::{
   JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture, TrustFuture, TrustSource,
 };
-use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError};
+use teamcraft_media::call_resilience::{CallTransport, JoinTicket, JoinTicketError};
 use teamcraft_media::datagram::SimulcastLayer;
+use teamcraft_media::fallback_link::{FallbackSocket, fallback_opener};
 use teamcraft_media::openh264_library;
 use teamcraft_media::rtp::RtpTimestamp;
 use teamcraft_media::video::{EncodedVideoFrame, VideoResolution, simulcast_layers};
@@ -173,6 +174,10 @@ pub struct CallStateInfo {
   pub reconnecting_count: u32,
   /// The users all of whose devices are rejoining.
   pub reconnecting_user_ids: Vec<String>,
+  /// The call runs on the fallback for networks that block UDP (ARCHITECTURE.md §6.6): the app says
+  /// quality may be lower.
+  #[uniffi(default = false)]
+  pub is_on_limited_network: bool,
   /// The code participants compare to rule out a man in the middle (once secured).
   pub maybe_privacy_code: Option<String>,
   /// Why the call ended (with [`CallPhase::Ended`]).
@@ -503,6 +508,7 @@ pub(crate) async fn join(
     muted_user_ids: Vec::new(),
     reconnecting_count: 0,
     reconnecting_user_ids: Vec::new(),
+    is_on_limited_network: false,
     maybe_privacy_code: None,
     maybe_end_reason: None,
   };
@@ -945,6 +951,9 @@ fn apply_event(
       muted.clear();
     },
     CallEngineEvent::Reconnected => state.phase = CallPhase::Connected,
+    CallEngineEvent::TransportChanged(transport) => {
+      state.is_on_limited_network = transport == CallTransport::Fallback;
+    },
     CallEngineEvent::ParticipantReconnecting(device_id) => {
       reconnecting.insert(device_id);
     },
@@ -1037,6 +1046,7 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     muted_user_ids: Vec::new(),
     reconnecting_count: 0,
     reconnecting_user_ids: Vec::new(),
+    is_on_limited_network: false,
     maybe_privacy_code: None,
     maybe_end_reason: Some(reason),
   }
@@ -1078,6 +1088,13 @@ fn native_config(
   }));
   // A development SFU's self-signed certificates; rejoins use their fresh token's.
   config.certificate_hashes = ticket.certificate_hashes;
+  config.maybe_fallback_url = ticket.maybe_fallback_url;
+  config.maybe_fallback_opener = Some(fallback_opener(|url| async move {
+    let socket = teamcraft_core::api::open_call_socket(&url)
+      .await
+      .map_err(|error| error.to_string())?;
+    Ok(FallbackSocket::new(socket))
+  }));
   config.source = AudioSource::Microphone(AudioDeviceChoice::Default);
   config.sink = AudioSink::Speakers(AudioDeviceChoice::Default);
   config.maybe_processing = Some(AudioProcessingConfig::default());

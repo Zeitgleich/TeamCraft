@@ -14,6 +14,11 @@ pub mod audio_level;
 pub mod bwe;
 pub mod call_resilience;
 pub mod datagram;
+#[cfg(feature = "native")]
+pub mod fallback_link;
+pub mod fallback_queue;
+#[cfg(feature = "fallback-socket")]
+pub mod fallback_socket;
 pub mod fragment;
 pub mod jitter;
 #[cfg(feature = "message-sounds")]

@@ -38,6 +38,7 @@ use web_time::Instant;
 use crate::audio_frame::EncodedAudioFrame;
 use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
 use crate::call_auth::{CallKeyAuthenticator, CallKeyError};
+use crate::call_resilience::CallTransport;
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame};
 use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId};
 use crate::dave::{DaveCallId, DaveError, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind};
@@ -166,6 +167,9 @@ pub enum CallEngineEvent {
   Reconnecting,
   /// Back in the call on a new connection; changes while away came as the usual events.
   Reconnected,
+  /// Not from the engine but from the media driver: what carries the call to the SFU, at the start
+  /// and after a rejoin. The UI says when it is the fallback (ARCHITECTURE.md §6.6).
+  TransportChanged(CallTransport),
   /// Another device's connection was lost; it keeps its place while it reconnects.
   ParticipantReconnecting(DeviceId),
   ParticipantReconnected(DeviceId),

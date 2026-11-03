@@ -138,6 +138,15 @@ impl PlaybackMixer {
     self
   }
 
+  /// The call moved to a path with other timing (ARCHITECTURE.md §6.6): every stream's buffer
+  /// follows, also the ones of people who start talking later.
+  pub fn set_jitter_config(&mut self, jitter_config: JitterBufferConfig) {
+    self.jitter_config = jitter_config;
+    for stream in self.streams.values_mut() {
+      stream.jitter.set_config(jitter_config);
+    }
+  }
+
   /// While deafened, received audio is dropped and silence is played.
   pub fn set_deafened(&mut self, is_deafened: bool) {
     self.is_deafened = is_deafened;

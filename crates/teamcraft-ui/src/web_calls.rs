@@ -431,6 +431,7 @@ impl WebCallHost {
     });
     Ok(PreparedCall {
       sfu_url: preparation.join.sfu_url,
+      maybe_fallback_url: preparation.join.maybe_sfu_fallback_url,
       token: preparation.join.token,
       user_id: preparation.user_id,
       device_id: own_device,

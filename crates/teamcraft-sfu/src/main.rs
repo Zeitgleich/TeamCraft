@@ -31,6 +31,15 @@
 //!   default 3 (keep it equal to `calls.max_devices_per_user_per_call` of the server)
 //! - `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS`: how often the whole call roster is reported to the
 //!   server (also at start), which drops participants the SFU no longer has, default 30
+//! - `TEAMCRAFT_SFU_FALLBACK_ENABLED`: `0` turns off the WebSocket fallback for networks that block
+//!   UDP, default `1` (ARCHITECTURE.md §6.6); `TEAMCRAFT_SFU_FALLBACK_BIND`: its TCP address, plain
+//!   HTTP behind the reverse proxy, default `[::]:8082`
+//! - `TEAMCRAFT_SFU_FALLBACK_TRUST_FORWARDED_FOR=1`: behind that proxy, use the last address in
+//!   `X-Forwarded-For` for the per-address limits; only when the proxy sets the header
+//! - `TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS` (default 1024), `TEAMCRAFT_SFU_FALLBACK_QUEUE_BYTES`
+//!   (media waiting for one connection, default 1 MiB), `TEAMCRAFT_SFU_FALLBACK_QUEUE_MAX_AGE_MILLIS`
+//!   (older media is dropped, default 300) and `TEAMCRAFT_SFU_FALLBACK_SEND_BUFFER_BYTES` (a
+//!   connection's socket buffer, default 128 KiB)
 //! - `TEAMCRAFT_SFU_METRICS_ENABLED=1`: serve `GET /metrics` on a listener of its own (off by
 //!   default, docs/operations.md, "Metrics"), and `TEAMCRAFT_SFU_METRICS_ADDRS`: its addresses,
 //!   comma-separated, default `127.0.0.1:9465,[::1]:9465` (`[::]:9465` is dual stack)
@@ -47,7 +56,7 @@ use teamcraft_ops::metrics::{bind_metrics, spawn_metrics_endpoint};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
 use teamcraft_sfu::{
   auth::{DevTokenVerifier, JoinTokenVerifier, JwtJoinTokenConfig, JwtJoinTokenVerifier, RejectAllVerifier},
-  config::SfuConfig,
+  config::{FallbackConfig, SfuConfig},
   control::control_router,
   dev_page::serve_dev_page,
   health::{DEFAULT_HEALTH_ADDR, serve_health},
@@ -58,6 +67,9 @@ use teamcraft_sfu::{
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use wtransport::Identity;
+
+/// Where the fallback listens unless `TEAMCRAFT_SFU_FALLBACK_BIND` says otherwise.
+const DEFAULT_FALLBACK_ADDR: &str = "[::]:8082";
 
 fn main() -> ExitCode {
   if std::env::args().nth(1).as_deref() == Some("healthcheck") {
@@ -116,6 +128,8 @@ async fn run() -> anyhow::Result<()> {
     config.max_devices_per_user_per_call = devices;
   }
 
+  apply_fallback_env(&mut config.fallback)?;
+
   let identity = load_identity().await?;
   let verifier = load_verifier(&config)?;
 
@@ -166,6 +180,33 @@ async fn run() -> anyhow::Result<()> {
   Ok(())
 }
 
+/// The fallback is on unless turned off here: an instance that offers no URL for it never sends a
+/// client to it, and an idle listener costs nothing.
+fn apply_fallback_env(fallback: &mut FallbackConfig) -> anyhow::Result<()> {
+  fallback.maybe_bind_addr = match std::env::var("TEAMCRAFT_SFU_FALLBACK_ENABLED").as_deref() {
+    Err(_) | Ok("1") => {
+      Some(env_addr("TEAMCRAFT_SFU_FALLBACK_BIND")?.unwrap_or(DEFAULT_FALLBACK_ADDR.parse()?))
+    },
+    Ok("0") => None,
+    Ok(other) => anyhow::bail!("TEAMCRAFT_SFU_FALLBACK_ENABLED must be 0 or 1, not {other:?}"),
+  };
+  fallback.trust_forwarded_for =
+    std::env::var("TEAMCRAFT_SFU_FALLBACK_TRUST_FORWARDED_FOR").as_deref() == Ok("1");
+  if let Some(connections) = env_count("TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS")? {
+    fallback.max_connections = connections;
+  }
+  if let Some(bytes) = env_count("TEAMCRAFT_SFU_FALLBACK_QUEUE_BYTES")? {
+    fallback.queue.max_bytes = bytes;
+  }
+  if let Some(millis) = env_count("TEAMCRAFT_SFU_FALLBACK_QUEUE_MAX_AGE_MILLIS")? {
+    fallback.queue.max_age = Duration::from_millis(u64::try_from(millis)?);
+  }
+  if let Some(bytes) = env_count("TEAMCRAFT_SFU_FALLBACK_SEND_BUFFER_BYTES")? {
+    fallback.socket_send_buffer_bytes = bytes;
+  }
+  Ok(())
+}
+
 /// Starts the metrics listener when `TEAMCRAFT_SFU_METRICS_ENABLED` asks for it.
 fn serve_metrics(sfu: &Sfu) -> anyhow::Result<()> {
   let maybe_addrs = metrics_addrs(
@@ -178,7 +219,9 @@ fn serve_metrics(sfu: &Sfu) -> anyhow::Result<()> {
   let listeners = bind_metrics(&addrs)?;
   let metrics = SfuMetrics::new()?;
   let control = sfu.control();
-  spawn_metrics_endpoint(listeners, move || metrics.render(control.room_stats()));
+  spawn_metrics_endpoint(listeners, move || {
+    metrics.render(control.room_stats(), control.fallback_connections())
+  });
   Ok(())
 }
 

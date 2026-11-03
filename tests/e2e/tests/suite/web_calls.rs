@@ -16,7 +16,9 @@ use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use teamcraft_e2e::browser::artifact_dir;
 use teamcraft_e2e::call::join_call;
+use teamcraft_e2e::netem::{Condition, PortConditions};
 use teamcraft_media::call_engine::CallEngineEvent;
+use teamcraft_media::call_resilience::CallTransport;
 use teamcraft_proto::VideoTrackKind;
 
 use crate::web::{Rig, WEB_ORIGIN, sign_in_as_alice, wait_for_element, wait_for_text};
@@ -112,6 +114,127 @@ async fn the_web_client_and_a_native_client_share_a_call() {
   rig.finish().await;
 }
 
+/// A network that drops all UDP (#123), with the real browser: its WebTransport never connects, it
+/// moves to the WebSocket fallback, says so, and media flows with a native client on the same
+/// network. Everything of the call stays as above: the same DAVE group, the same privacy code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the network namespace: scripts/e2e-network.sh"]
+async fn the_web_client_falls_back_on_a_network_without_udp() {
+  let Some(mut rig) = start_rig_with_fallback().await else {
+    return;
+  };
+  let Some(conditions) = PortConditions::take(1) else {
+    rig.finish().await;
+    return;
+  };
+  conditions.set(Condition::NoUdp);
+  let channel = rig.channel;
+  let certificate_hash = rig.stack.maybe_sfu.as_ref().unwrap().certificate_hash;
+  let page = rig.browser.page.clone();
+  let console = console_log(&page).await;
+  sign_in_and_join_the_channel(&mut rig, &page).await;
+  rig
+    .browser
+    .screenshot_on_failure("web-call-no-udp", |page| async move {
+      crate::web::click_text(&page, "browser-channel").await;
+      click_selector(&page, "button[aria-label='Start video call']").await;
+      wait_for_element(&page, ".prejoin").await;
+      click_selector(&page, ".prejoin-actions .btn-primary").await;
+      wait_for_element(&page, ".call-screen").await;
+      wait_for_text(&page, "Limited network, call quality may be lower").await;
+    })
+    .await;
+
+  let mut carol_call = join_call(&mut rig.carol, channel, certificate_hash, 550.0).await;
+  let (mut is_secured, mut has_browser_video, mut maybe_transport) = (false, false, None);
+  let deadline = tokio::time::Instant::now() + CALL_DURATION;
+  while let Ok(Some(event)) = tokio::time::timeout_at(deadline, carol_call.next_event()).await {
+    is_secured |= matches!(event, CallEngineEvent::Secured { .. });
+    has_browser_video |=
+      matches!(&event, CallEngineEvent::VideoPublished(track) if track.kind == VideoTrackKind::Camera);
+    if let CallEngineEvent::TransportChanged(transport) = event {
+      maybe_transport = Some(transport);
+    }
+  }
+  let browser_code = privacy_code_on(&page).await;
+  let stats = carol_call.leave().await.expect("leaving the call");
+  for line in console
+    .lock()
+    .unwrap()
+    .iter()
+    .filter(|line| line.contains("fallback"))
+  {
+    eprintln!("console: {line}");
+  }
+  eprintln!("the native client on the same network: {stats:?}");
+  assert_eq!(maybe_transport, Some(CallTransport::Fallback));
+  assert!(
+    is_secured,
+    "the DAVE group with the browser was never established"
+  );
+  assert!(has_browser_video, "the browser's camera never reached the call");
+  assert!(stats.frames_received > 50, "{stats:?}");
+  let carol_code = stats.maybe_privacy_code.clone().expect("Carol's privacy code");
+  assert!(
+    browser_code.contains(&carol_code),
+    "the browser shows {browser_code:?}, Carol has {carol_code:?}"
+  );
+  drop(conditions);
+  rig.finish().await;
+}
+
+/// The other way round: with UDP working and the fallback on offer, the browser and the native client
+/// stay on QUIC and nothing says the network is limited (#123).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_web_client_stays_on_quic_when_udp_works() {
+  let Some(mut rig) = start_rig_with_fallback().await else {
+    return;
+  };
+  let channel = rig.channel;
+  let certificate_hash = rig.stack.maybe_sfu.as_ref().unwrap().certificate_hash;
+  let page = rig.browser.page.clone();
+  let console = console_log(&page).await;
+  sign_in_and_join_the_channel(&mut rig, &page).await;
+  rig
+    .browser
+    .screenshot_on_failure("web-call-quic-preferred", |page| async move {
+      crate::web::click_text(&page, "browser-channel").await;
+      click_selector(&page, "button[aria-label='Start video call']").await;
+      wait_for_element(&page, ".prejoin").await;
+      click_selector(&page, ".prejoin-actions .btn-primary").await;
+      wait_for_element(&page, ".call-screen").await;
+    })
+    .await;
+  let mut carol_call = join_call(&mut rig.carol, channel, certificate_hash, 550.0).await;
+  let mut maybe_transport = None;
+  let mut has_browser_video = false;
+  let deadline = tokio::time::Instant::now() + CALL_DURATION;
+  while let Ok(Some(event)) = tokio::time::timeout_at(deadline, carol_call.next_event()).await {
+    has_browser_video |=
+      matches!(&event, CallEngineEvent::VideoPublished(track) if track.kind == VideoTrackKind::Camera);
+    if let CallEngineEvent::TransportChanged(transport) = event {
+      maybe_transport = Some(transport);
+    }
+  }
+  let stats = carol_call.leave().await.expect("leaving the call");
+  assert_eq!(maybe_transport, Some(CallTransport::Quic));
+  assert!(has_browser_video, "the browser's camera never reached the call");
+  assert!(stats.frames_received > 50, "{stats:?}");
+  assert!(
+    !crate::web::body_text(&page).await.contains("Limited network"),
+    "the browser says the network is limited"
+  );
+  assert!(
+    !console
+      .lock()
+      .unwrap()
+      .iter()
+      .any(|line| line.contains("runs on the fallback")),
+    "the browser moved to the fallback"
+  );
+  rig.finish().await;
+}
+
 /// The person sharing sees what goes out (#1175): small, live, from the capture, and gone with the
 /// share or when collapsed. Chromium's fake capture stands in for the screen.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -201,6 +324,25 @@ async fn start_rig() -> Option<Rig> {
   let (certificate, key) = (identity.cert.pem(), identity.signing_key.serialize_pem());
   Rig::start_with(
     |builder| builder.with_calls().with_sfu_identity(certificate, key, sha256),
+    &MEDIA_ARGS,
+  )
+  .await
+}
+
+/// [`start_rig`] with the SFU's WebSocket fallback on offer.
+async fn start_rig_with_fallback() -> Option<Rig> {
+  let identity = sfu_identity();
+  let sha256: String = Sha256::digest(identity.cert.der())
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect();
+  let (certificate, key) = (identity.cert.pem(), identity.signing_key.serialize_pem());
+  Rig::start_with(
+    |builder| {
+      builder
+        .with_call_fallback()
+        .with_sfu_identity(certificate, key, sha256)
+    },
     &MEDIA_ARGS,
   )
   .await

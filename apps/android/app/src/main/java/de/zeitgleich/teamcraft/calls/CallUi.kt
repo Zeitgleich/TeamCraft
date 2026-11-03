@@ -479,12 +479,13 @@ private fun subtitle(ui: CallUiState): String {
   }
 }
 
-/** The hints that matter while talking: reconnecting, and that nobody hears you. */
+/** The hints that matter while talking: reconnecting, that nobody hears you, and a limited network. */
 @Composable
 private fun StatusHint(maybeState: CallStateInfo?) {
   val textRes = when {
     maybeState?.phase == CallPhase.RECONNECTING -> R.string.call_reconnecting
     maybeState?.isMuted == true && maybeState.phase == CallPhase.CONNECTED -> R.string.call_you_muted
+    maybeState?.isOnLimitedNetwork == true && maybeState.phase == CallPhase.CONNECTED -> R.string.call_limited_network
     else -> null
   } ?: return
   Surface(

@@ -48,7 +48,7 @@ use crate::{
 /// How long a closing participant has to receive the host's event before the connection drops.
 const CLOSE_GRACE: Duration = Duration::from_millis(250);
 /// How long a close waits for the peer to confirm the WebTransport session close.
-const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+pub(crate) const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 /// QUIC application close code for connections a meeting host ended.
 const CLOSED_BY_HOST: u32 = 0x4801;
 const SIGNALING_OVERFLOW: u32 = 0x4802;

@@ -128,6 +128,13 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   let is_reconnecting = Memo::new(move |_| {
     state.read(|backend| backend.active_call().is_some_and(|active| active.is_reconnecting))
   });
+  let is_on_limited_network = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .active_call()
+        .is_some_and(|active| active.is_on_limited_network && !active.is_reconnecting)
+    })
+  });
   let reconnecting = Memo::new(move |_| {
     state.read(|backend| {
       backend
@@ -499,6 +506,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         </Show>
         <Show when=move || is_reconnecting.get() fallback=|| ()>
           <span class="muted-text" role="status">{move || i18n.t("call-reconnecting")}</span>
+        </Show>
+        <Show when=move || is_on_limited_network.get() fallback=|| ()>
+          <span class="muted-text" role="status">{move || i18n.t("call-limited-network")}</span>
         </Show>
       </header>
       {move || {

@@ -261,6 +261,7 @@ calls-background-hint = Applied on your device before your video is sent.
 # ---- Meetings ----
 call-connecting = Connecting…
 call-reconnecting = Connection lost, reconnecting…
+call-limited-network = Limited network, call quality may be lower
 call-ended = Call ended
 control-deafen = Mute the call audio
 control-undeafen = Unmute the call audio

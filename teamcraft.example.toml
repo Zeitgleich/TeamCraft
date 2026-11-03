@@ -596,6 +596,12 @@ is_enabled = true
 # [calls]
 # WebTransport URL of the SFU that clients connect to.
 # sfu_url = "https://sfu.example.com:3478/call"
+# Offers clients the SFU's WebSocket fallback, used only when QUIC doesn't connect (networks that
+# block UDP). Needs the reverse proxy to pass this URL to the SFU's fallback listener
+# (TEAMCRAFT_SFU_FALLBACK_BIND, default [::]:8082, see docs/operations.md).
+# sfu_fallback_enabled = true
+# Its URL; the default is sfu_url's host on port 443.
+# sfu_fallback_url = "wss://sfu.example.com/call/fallback"
 # `iss` of join tokens; the SFU is configured with the same value.
 # issuer = "https://chat.example.com"
 # signing_key_path = "/etc/teamcraft/call-signing.pem"

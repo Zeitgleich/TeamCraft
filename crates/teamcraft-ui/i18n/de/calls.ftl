@@ -261,6 +261,7 @@ calls-background-hint = Wird auf deinem Gerät angewendet, bevor dein Video gese
 # ---- Meetings ----
 call-connecting = Verbindung wird hergestellt …
 call-reconnecting = Verbindung unterbrochen, wird wiederhergestellt …
+call-limited-network = Eingeschränktes Netzwerk, die Gesprächsqualität kann geringer sein
 call-ended = Anruf beendet
 control-deafen = Anrufton stummschalten
 control-undeafen = Anrufton einschalten
