@@ -21,6 +21,7 @@ pub mod entry_rules;
 pub mod failure;
 pub mod join_request_alerts;
 pub mod links;
+pub mod list_load;
 pub mod live;
 pub mod log;
 pub mod markdown;

@@ -32,6 +32,8 @@ mod join_requests;
 mod key_history;
 mod key_packages;
 mod linking;
+#[cfg(feature = "ui")]
+pub(crate) mod list_outcomes;
 mod member_device;
 mod messaging;
 mod missing_keys;

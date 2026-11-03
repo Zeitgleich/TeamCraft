@@ -107,6 +107,7 @@ hover-card-profile = View profile
 # Home pages (issue #585)
 directory-you = You
 directory-empty-title = Nobody found
+directory-loading = Looking for people
 groups-empty-title = No user groups yet
 groups-error-handle = Use 2 to 32 lower-case letters, digits, - or _.
 groups-error-handle-taken = This handle is already used by a group or a person.

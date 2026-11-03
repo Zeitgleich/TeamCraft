@@ -1,13 +1,19 @@
 use leptos::prelude::*;
+use teamcraft_client_api::list_load::{LoadingList, REQUEST_DEADLINE_MS};
 
 use crate::channel_access::ChannelAccess;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
+use crate::components::list_status::{ListPlaceholder, ListStatus};
 use crate::components::org_badge::OrgBadge;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationId, ConversationKind, User};
 use crate::reactive::{items_by_key, keyed_item};
 use crate::state::{Overlay, SidePanel, use_app_state};
+
+/// Placeholder rows while the members load.
+const SKELETON_ROWS: usize = 5;
 
 #[component]
 pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
@@ -26,6 +32,20 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
     })
   });
   let by_id = items_by_key(members.into(), |user: &User| user.id);
+  let list = LoadingList::Members { conversation };
+  let status = ListStatus::new(
+    move || members.with(Vec::is_empty),
+    {
+      let list = list.clone();
+      move || state.read(|backend| backend.list_load(&list))
+    },
+    Signal::stored(String::new()),
+    REQUEST_DEADLINE_MS,
+  );
+  let on_retry = Callback::new(move |()| {
+    status.restart();
+    state.write(|backend| backend.retry_list(&list));
+  });
 
   // Channels add people here, for people who may add members; direct messages start a new group
   // instead.
@@ -90,6 +110,15 @@ pub fn MembersPanel(conversation: ConversationId) -> impl IntoView {
             }
           }
         </For>
+        <ListPlaceholder
+          phase=status.phase
+          rows=SKELETON_ROWS
+          label=Signal::derive(move || i18n.t("members-loading"))
+          on_retry=on_retry
+          as_item=true
+        >
+          <EmptyState icon=IconName::Users title_key="members-empty-title" body_key="members-empty" as_item=true />
+        </ListPlaceholder>
       </ul>
     </aside>
   }

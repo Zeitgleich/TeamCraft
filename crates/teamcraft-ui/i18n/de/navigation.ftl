@@ -117,6 +117,7 @@ activity-all = Alle
 activity-unread = Ungelesen
 activity-mentions = Erwähnungen
 activity-threads = Threads
+activity-loading = Aktivität wird geladen
 activity-empty-title = Alles erledigt
 activity-mark-read = Alle als gelesen markieren
 activity-empty = Erwähnungen, Reaktionen auf deine Nachrichten und Antworten in deinen Threads erscheinen hier.

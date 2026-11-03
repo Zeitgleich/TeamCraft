@@ -33,6 +33,7 @@ use crate::calls::{
 use crate::calls::{
   CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
 };
+use crate::list_load::{ListLoad, LoadingList};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, FirstSync, KeyCatchUp, MembershipIssue, Message,
   MessageId, PresenceStatus, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
@@ -40,13 +41,6 @@ use crate::model::{
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use crate::video_stats::VideoStatsJson;
-
-/// A list that depends on a server round trip, so it can be "not loaded yet" as well as empty.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LoadingList {
-  CallHistory,
-}
 
 pub trait ChatBackend {
   /// Gives backends that load data in the background (over IPC or the network) a way to tell the UI
@@ -728,11 +722,13 @@ pub trait ChatBackend {
   }
   /// Asks for the newest calls again (the call list opened).
   fn refresh_call_history(&self) {}
-  /// Whether the list has had its first answer. Until then the UI shows placeholders, not the
-  /// empty state; a backend that reads everything locally is always loaded.
-  fn is_loaded(&self, _list: LoadingList) -> bool {
-    true
+  /// How far the list is. Until its first answer the UI shows placeholders, not the empty state; a
+  /// backend that reads everything locally is always ready.
+  fn list_load(&self, _list: &LoadingList) -> ListLoad {
+    ListLoad::Ready
   }
+  /// The user asks for a list that could not be read once more.
+  fn retry_list(&self, _list: &LoadingList) {}
 
   /// This user's devices as the server last listed them; empty until the first answer.
   fn own_devices(&self) -> Vec<crate::admin::DeviceInfo> {

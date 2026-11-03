@@ -77,6 +77,29 @@ async fn nothing_finished_yet_means_an_indeterminate_bar() {
   assert_eq!(cut.maybe_fraction, None);
 }
 
+/// The activity feed and the threads inbox wait for the newest messages: no "all caught up" on a
+/// device that hasn't read anything yet (issue #297).
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn the_activity_lists_load_until_the_newest_messages_are_here() {
+  use teamcraft_client_api::backend::ChatBackend;
+  use teamcraft_client_api::list_load::{ListLoad, LoadingList};
+  use teamcraft_core::ui_backend::CoreChatBackend;
+
+  let (server, mut carol, _channels) = busy_workspace(3).await;
+  let mut laptop = link_device_with(&mut carol, backfilling(ALL)).await;
+  server.cut_network_after(laptop.user_id(), 20, NetworkCut::BeforeRequest);
+  assert!(laptop.connect_gateway().await.is_err());
+  assert_eq!(progress(&laptop).stage, FirstSyncStage::Newest);
+  let ui = CoreChatBackend::new(laptop.store().clone(), laptop.user_id(), clock());
+  assert_eq!(ui.list_load(&LoadingList::Activity), ListLoad::Loading);
+
+  server.set_offline(laptop.user_id(), false);
+  laptop.connect_gateway().await.unwrap();
+  assert_eq!(progress(&laptop).stage, FirstSyncStage::Older);
+  assert_eq!(ui.list_load(&LoadingList::Activity), ListLoad::Ready);
+}
+
 #[tokio::test]
 async fn a_catch_up_cut_short_goes_on_with_the_conversations_left() {
   let (server, mut carol, channels) = busy_workspace(4).await;

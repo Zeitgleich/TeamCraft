@@ -1,6 +1,7 @@
 //! The people directory (everyone in the workspace, with profile facts) and user groups.
 
 use leptos::prelude::*;
+use teamcraft_client_api::list_load::{ListLoad, LoadingList, REQUEST_DEADLINE_MS};
 use teamcraft_proto::{
   CreateUserGroupRequest, ErrorCode, ListUserGroupsResponse, Permission, UserGroupDetailResponse,
   UserGroupId, UserGroupResponse,
@@ -13,6 +14,7 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
+use crate::components::list_status::{ListPlaceholder, ListStatus};
 use crate::components::skeleton::ListSkeleton;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
@@ -28,6 +30,8 @@ use crate::state::{Overlay, use_app_state};
 
 /// People shown at once; the filter narrows a larger workspace down.
 const MAX_ROWS: usize = 200;
+/// Placeholder rows while the server's directory answers.
+const PEOPLE_SKELETON_ROWS: usize = 5;
 /// Placeholder rows while the user groups load.
 const GROUP_SKELETON_ROWS: usize = 3;
 /// The directory on the server is asked once typing paused this long.
@@ -162,6 +166,25 @@ fn PeopleList() -> impl IntoView {
       .take(MAX_ROWS)
       .collect::<Vec<_>>()
   });
+  // Nobody matching is only news once the server's directory had its say; the typing that hasn't
+  // reached it yet counts as waiting too.
+  let status = ListStatus::new(
+    move || people.with(Vec::is_empty),
+    move || {
+      let query = directory_query.get();
+      if filter.with(|typed| typed.trim() != query.trim()) {
+        return ListLoad::Loading;
+      }
+      state.read(|backend| backend.list_load(&LoadingList::directory(&query)))
+    },
+    directory_query.into(),
+    REQUEST_DEADLINE_MS,
+  );
+  let on_retry = Callback::new(move |()| {
+    status.restart();
+    let list = LoadingList::directory(&directory_query.get_untracked());
+    state.write(|backend| backend.retry_list(&list));
+  });
   view! {
     <div class="page-tools">
       <label class="page-search">
@@ -191,9 +214,15 @@ fn PeopleList() -> impl IntoView {
       <For each=move || people.get() key=|user| (user.id, user.presence) let:user>
         <PersonRow user=user />
       </For>
-      <Show when=move || people.get().is_empty() fallback=|| ()>
+      <ListPlaceholder
+        phase=status.phase
+        rows=PEOPLE_SKELETON_ROWS
+        label=Signal::derive(move || i18n.t("directory-loading"))
+        on_retry=on_retry
+        as_item=true
+      >
         <EmptyState icon=IconName::Users title_key="directory-empty-title" body_key="directory-empty" as_item=true />
-      </Show>
+      </ListPlaceholder>
     </ul>
   }
 }

@@ -15,13 +15,14 @@ use crate::actions::{
 };
 use crate::activity::ActivityFeed;
 use crate::admin::DeviceInfo;
-use crate::backend::{ChatBackend, LoadingList, SearchBackend};
+use crate::backend::{ChatBackend, SearchBackend};
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
   CallPreview, CallRequest, CallStatusSounds, CameraFallback, IncomingCall, JoinMedia, MediaDevices,
   OrgBackgroundRule, OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall,
   ScreenContentMode, ScreenShareResolution, VideoQuality,
 };
+use crate::list_load::{ListLoad, LoadingList};
 use crate::live::LiveSnapshot;
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, MembershipIssue, Message, MessageId, PresenceStatus,
@@ -622,6 +623,10 @@ pub enum ChatAction {
     visibility: LastSeenVisibility,
   },
   RefreshCallHistory,
+  /// Ask once more for a list that could not be read ([`ChatBackend::retry_list`]).
+  RetryList {
+    list: LoadingList,
+  },
   /// Fetch this user's device list again (the devices settings were opened).
   RefreshOwnDevices,
   /// Read again how far the other members read (a DM was opened, or the connection came back
@@ -1118,6 +1123,7 @@ impl ChatAction {
       Self::DeclineAdminJoin { conversation, user } => backend.decline_admin_join(conversation, user),
       Self::SetLastSeenVisibility { visibility } => backend.set_last_seen_visibility(visibility),
       Self::RefreshCallHistory => backend.refresh_call_history(),
+      Self::RetryList { list } => backend.retry_list(&list),
       Self::RefreshOwnDevices => backend.refresh_own_devices(),
       Self::RefreshReadReceipts { conversation } => backend.refresh_read_receipts(conversation),
       Self::RevokeOwnDevice { device } => backend.revoke_own_device(device),
@@ -1461,8 +1467,8 @@ pub enum ChatQuery {
   },
   Privacy,
   CallHistory,
-  /// Whether a list has had its first answer ([`ChatBackend::is_loaded`]).
-  ListLoaded {
+  /// How far a list is ([`ChatBackend::list_load`]).
+  ListLoad {
     list: LoadingList,
   },
   OwnDevices,
@@ -1608,8 +1614,8 @@ pub enum ChatAnswer {
   CallHistory {
     calls: Vec<CallHistoryItem>,
   },
-  ListLoaded {
-    is_loaded: bool,
+  ListLoad {
+    load: ListLoad,
   },
   Devices {
     devices: Vec<DeviceInfo>,
@@ -1814,8 +1820,8 @@ impl ChatQuery {
       Self::CallHistory => ChatAnswer::CallHistory {
         calls: backend.call_history(),
       },
-      Self::ListLoaded { list } => ChatAnswer::ListLoaded {
-        is_loaded: backend.is_loaded(list),
+      Self::ListLoad { list } => ChatAnswer::ListLoad {
+        load: backend.list_load(&list),
       },
       Self::OwnDevices => ChatAnswer::Devices {
         devices: backend.own_devices(),

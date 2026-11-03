@@ -20,6 +20,9 @@ members-button-label = { $count ->
    *[other] Show members, { $count } members
   }
 members-title = Members
+members-loading = Loading members
+members-empty-title = No members yet
+members-empty = People added to this conversation show up here.
 members-panel-label = Channel members
 members-count = { $count ->
     [one] { $count } member
