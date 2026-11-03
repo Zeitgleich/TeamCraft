@@ -30,9 +30,11 @@
 //! issue in the middle of it, and the size limit waits until the group ended.
 //!
 //! A write that fails (quota exceeded, the database closed for a newer version) is kept and written
-//! again on the next flush, so the database catches up with the cache once space is free again
-//! instead of silently rolling back on the next reload (e2ee.md §9.4). The flush reports the
-//! failure; the app shows it to the user.
+//! again, so the database catches up with the cache once space is free again instead of silently
+//! rolling back on the next reload (e2ee.md §9.4). The flush reports the failure; the app shows it to
+//! the user. Retries back off (`write_queue`): a full disk isn't sent every failed write on every
+//! flush. Past a limit of records waiting for the disk ([`IndexedDbStore::is_backlogged`]) the
+//! owner pauses what it can fetch again later (the web core's sync), until a batch went through.
 //!
 //! A first catalog build ([`IndexedDbStore::open_reporting`]) takes one batch per task: each is
 //! committed before the next starts. Waiting for the commit gives the page its thread back; no timer
@@ -53,6 +55,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
 use super::idb::{self, OpenMode, RECORDS};
+use crate::clock::{Clock, SystemClock};
 use crate::store::sealed::{BuildStep, LazySeal, RecordBackend, SealedStore, format_id, parse_id};
 use crate::store::write_queue::{Issue, OpenValue, RecordValue, WriteFailure, Writes};
 use crate::store::{SealedStoreLimits, StoreError};
@@ -84,6 +87,8 @@ struct Inner {
   on_complete: Closure<dyn FnMut(web_sys::Event)>,
   on_abort: Closure<dyn FnMut(web_sys::Event)>,
   _on_version_change: Closure<dyn FnMut(web_sys::Event)>,
+  /// This `Inner` itself, for the timer that issues the writes a retry backoff held back.
+  own: Weak<Inner>,
 }
 
 impl SealedStore<IndexedDbRecords> {
@@ -136,11 +141,11 @@ impl SealedStore<IndexedDbRecords> {
   }
 
   /// Issues what is queued and waits until every write issued so far is committed. Writes that
-  /// failed are issued again, and the flush fails with the reason, until they went through.
+  /// failed are issued again once their retry backoff ran out (until then the flush doesn't wait
+  /// for them), and the flush fails with the reason until they went through.
   pub async fn flush(&self) -> Result<(), StoreError> {
     let inner = &self.backend().inner;
-    inner.writes.borrow_mut().retry_failed();
-    inner.issue_queued();
+    inner.issue_batch(true);
     let maybe_due = inner.writes.borrow().last_batch_due();
     while !inner.writes.borrow().is_closed {
       if inner.writes.borrow().group_depth > 0 {
@@ -185,6 +190,26 @@ impl SealedStore<IndexedDbRecords> {
   /// looked without comparing contents.
   pub fn write_revision(&self) -> u32 {
     self.backend().inner.writes.borrow().next_sequence
+  }
+
+  /// Whether so many records wait for a disk that keeps failing that the owner should stop writing
+  /// what it can fetch again later (issue #1201): nothing is dropped or refused, so they would
+  /// pile up in memory. Ends once a batch committed.
+  pub fn is_backlogged(&self) -> bool {
+    self.backend().inner.writes.borrow().is_backlogged()
+  }
+
+  /// How many records may wait for a failing disk before [`Self::is_backlogged`] says so; the
+  /// default is 2,000 (`write_queue::DEFAULT_MAX_UNSAVED`).
+  pub fn set_max_unsaved_writes(&self, max_unsaved: usize) {
+    self.backend().inner.writes.borrow_mut().max_unsaved = max_unsaved;
+  }
+
+  /// How long writes wait after a batch failed before they are issued again: `first`, doubled with
+  /// every batch that fails after it, up to `longest` (1 s and 30 s by default). Zero sends them
+  /// again with every batch and flush.
+  pub fn set_retry_backoff(&self, first: Duration, longest: Duration) {
+    self.backend().inner.writes.borrow_mut().retry_backoff = (first, longest);
   }
 }
 
@@ -351,8 +376,9 @@ impl Inner {
         if let Some(batch) = batch_of(&event) {
           writes.borrow_mut().aborted(batch, failure);
         }
-        // What waits for this batch goes now, with this batch's writes. If nothing waits they stay
-        // failed until the next write or flush, so a full disk doesn't retry in a loop.
+        // What waits for this batch goes with this batch's writes once the retry backoff ran out
+        // (the next write, flush or batch timer after it). If nothing waits they stay failed until
+        // the next write or flush, so a full disk doesn't retry in a loop.
         if let Some(inner) = own.upgrade() {
           inner.issue_queued();
         }
@@ -377,23 +403,37 @@ impl Inner {
       on_complete,
       on_abort,
       _on_version_change: on_version_change,
+      own: own.clone(),
     }
   }
 
   /// Issues every queued write in one transaction, unless a batch runs: then this happens when it
-  /// ended. A write that can't even start counts as failed. What may go out, and what fails a batch,
-  /// is `Writes`'s to decide (and tested natively); this only talks to the browser.
+  /// ended.
   fn issue_queued(&self) {
-    let Some(keys) = self.writes.borrow_mut().take_next_batch() else {
+    self.issue_batch(false);
+  }
+
+  /// [`Self::issue_queued`]; a flush (`is_flush`) issues failed writes also when nothing new is
+  /// queued. Writes wait while a failed batch's retry backoff runs. A write that can't even start
+  /// counts as failed. What may go out, and what fails a batch, is `Writes`'s to decide (and tested
+  /// natively); this only talks to the browser.
+  fn issue_batch(&self, is_flush: bool) {
+    let now_ms = SystemClock.now_ms();
+    let maybe_keys = self.writes.borrow_mut().take_next_batch(now_ms, is_flush);
+    let Some(keys) = maybe_keys else {
+      // New writes wait for the backoff: they go when it ran out, without waiting for a flush.
+      let mut writes = self.writes.borrow_mut();
+      if writes.needs_retry_timer()
+        && let Some(retry_in) = writes.retry_in(now_ms)
+      {
+        schedule(self.own.clone(), retry_in, false);
+      }
       return;
     };
     let (transaction, records) = match self.transaction() {
       Ok(opened) => opened,
       Err(failure) => {
-        let mut writes = self.writes.borrow_mut();
-        for key in &keys {
-          writes.fail_queued(key, failure);
-        }
+        self.writes.borrow_mut().fail_unsent(&keys, failure);
         return;
       },
     };

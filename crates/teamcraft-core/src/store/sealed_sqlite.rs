@@ -983,6 +983,57 @@ mod tests {
     assert_eq!(store.get(Table::Spaces, "after").unwrap(), Some(b"3".to_vec()));
   }
 
+  /// Issue #1201: the panic of the catalog flush went past the tracked store's message cache, which
+  /// kept the messages of the rolled-back group; a client reopened on the same store (the slot
+  /// reopens it after a panic) showed them until a catch-up wrote them again.
+  #[test]
+  fn a_panic_while_the_catalog_flushes_leaves_no_rolled_back_message_in_the_cache() {
+    use crate::store::{MessageFilter, TrackedStore};
+
+    let connection = Connection::open_in_memory().unwrap();
+    let backend = PanicsOnPut {
+      records: SealedSqliteStore::backend_of(connection).unwrap(),
+      is_armed: std::cell::Cell::new(false),
+    };
+    let key = SymmetricKey::generate(&mut OsRng);
+    let sealed = SealedStore::open_backend(backend, &key, SealedStoreLimits::default()).unwrap();
+    let store = TrackedStore::with_message_cache(std::rc::Rc::new(sealed), 1 << 20);
+    let conversation = id(7);
+    store
+      .upsert_message(&message(conversation, 1, Some(100), None, 1))
+      .unwrap();
+    let clients = |store: &TrackedStore<_>| -> Vec<u8> {
+      store
+        .messages(conversation, MessageFilter::All)
+        .unwrap()
+        .iter()
+        .map(|message| message.client_message_id.as_bytes()[0])
+        .collect()
+    };
+    assert_eq!(clients(&store), [1], "read and kept");
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      crate::store::write_group(&store, || -> Result<(), StoreError> {
+        store.upsert_message(&message(conversation, 2, Some(200), None, 2))?;
+        store.inner().backend().is_armed.set(true);
+        Ok(())
+      })
+    }));
+    assert!(panicked.is_err(), "the panic goes on");
+    assert!(
+      !store.inner().backend().is_armed.get(),
+      "it was the catalog's write that panicked"
+    );
+
+    let reopened = store.clone();
+    assert_eq!(clients(&reopened), [1], "the rolled-back message is gone");
+    assert_eq!(
+      clients(&reopened),
+      clients(&TrackedStore::new(store.inner().clone())),
+      "the cache says what the disk says"
+    );
+  }
+
   #[test]
   fn a_panic_undoes_its_group() {
     let store =
