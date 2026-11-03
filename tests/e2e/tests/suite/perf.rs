@@ -32,7 +32,7 @@ use chromiumoxide::cdp::js_protocol::profiler::{
   StopParams as ProfilerStopParams,
 };
 use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, EventConsoleApiCalled};
-use chromiumoxide::page::Page;
+use chromiumoxide::page::{Page, ScreenshotParams};
 use futures_util::StreamExt;
 use teamcraft_core::client::OutgoingFile;
 use teamcraft_crypto::local_store::LocalStoreKeys;
@@ -113,9 +113,10 @@ const READ_DATABASE_KEY: &str = "(async () => {
     { name: 'AES-GCM', iv: wrapped.slice(0, 12) }, wrapping, wrapped.slice(12));
   return JSON.stringify([name, Array.from(new Uint8Array(raw), byte => byte.toString(16).padStart(2, '0')).join('')]);
 })()";
-/// How far the catalog build's progress bar is, or -1 while it doesn't show.
+/// How far the catalog build's progress bar is, or -1 while it doesn't show (or the page is the one
+/// a reload is about to replace).
 const BUILD_PROGRESS: &str = "(() => {
-  const bar = document.querySelector('.store-build[role=progressbar]');
+  const bar = !window.__isBeingReloaded && document.querySelector('.store-build[role=progressbar]');
   return bar ? Number(bar.getAttribute('aria-valuenow')) : -1;
 })()";
 
@@ -806,22 +807,34 @@ async fn measure_catalog_build(page: &Page, seeded: &Seeded, report: &mut Report
     .evaluate(format!("location.href = '{WEB_ORIGIN}/?backend=server'"))
     .await
     .unwrap();
-  let Some(at_reload) = wait_for_build_percent(page, 30.0).await else {
+  let Some(at_reload) = wait_for_build_percent(page, 30.0, channel).await else {
     wait_long_for_text(page, channel).await;
     return;
   };
   report.catalog_resume_percent_at_reload = at_reload;
+  let screenshot = artifact_dir().join("perf-store-build.png");
+  let _ = std::fs::create_dir_all(artifact_dir());
+  if let Err(error) = page
+    .save_screenshot(ScreenshotParams::builder().build(), &screenshot)
+    .await
+  {
+    eprintln!("could not take a screenshot of the build: {error}");
+  }
   let started = Instant::now();
-  page.evaluate("location.reload()").await.unwrap();
-  // The new document has to show the bar first; the old one's value isn't this build's.
-  tokio::time::sleep(Duration::from_millis(100)).await;
-  report.catalog_resume_first_percent_after = wait_for_build_percent(page, 0.0).await.unwrap_or(-1.0);
+  page
+    .evaluate("window.__isBeingReloaded = true; location.reload()")
+    .await
+    .unwrap();
+  // A build that ended within the moment before its bar shows has nothing to say.
+  if let Some(first) = wait_for_build_percent(page, 0.0, channel).await {
+    report.catalog_resume_first_percent_after = first;
+    assert!(
+      first >= at_reload - 5.0,
+      "the build started over after the reload: {report:#?}"
+    );
+  }
   wait_long_for_text(page, channel).await;
   report.seconds_catalog_resume_to_channel_list = started.elapsed().as_secs_f64();
-  assert!(
-    report.catalog_resume_first_percent_after >= at_reload - 5.0,
-    "the build started over after the reload: {report:#?}"
-  );
 }
 
 /// Leaves the app (its core holds the store), deletes the record of the catalog's state.
@@ -886,24 +899,28 @@ async fn wait_long_while_watching_build(
   }
 }
 
-/// The build's percentage once it has reached `at_least`; `None` when it ended before.
-async fn wait_for_build_percent(page: &Page, at_least: f64) -> Option<f64> {
+/// The build's percentage once it has reached `at_least`; `None` when `needle` showed first: the
+/// app is there, so the build ended.
+async fn wait_for_build_percent(page: &Page, at_least: f64, needle: &str) -> Option<f64> {
   let deadline = Instant::now() + LONG_WAIT;
-  let mut has_shown = false;
   while Instant::now() < deadline {
-    let percent = page
-      .evaluate(BUILD_PROGRESS)
+    let script = format!("JSON.stringify([{BUILD_PROGRESS}, document.body ? document.body.innerText : ''])");
+    let answer = page
+      .evaluate(script)
       .await
       .ok()
-      .and_then(|result| result.into_value::<f64>().ok())
-      .unwrap_or(-1.0);
-    if percent >= at_least && percent >= 0.0 {
-      return Some(percent);
+      .and_then(|result| result.into_value::<String>().ok())
+      .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    if let Some(answer) = answer {
+      if let Some(percent) = answer[0].as_f64().filter(|percent| *percent >= at_least.max(0.0)) {
+        return Some(percent);
+      }
+      if answer[0].as_f64().is_none_or(|percent| percent < 0.0)
+        && answer[1].as_str().is_some_and(|text| text.contains(needle))
+      {
+        return None;
+      }
     }
-    if has_shown && percent < 0.0 {
-      return None;
-    }
-    has_shown |= percent >= 0.0;
     tokio::time::sleep(Duration::from_millis(20)).await;
   }
   None
