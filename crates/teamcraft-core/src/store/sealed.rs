@@ -927,6 +927,25 @@ impl<B: RecordBackend> SealedStore<B> {
     Ok(Some(*message))
   }
 
+  /// The version a write replaces or removes. One that doesn't read counts as absent, so the write
+  /// puts a good record in its place; failing here would fail the whole group of writes around it
+  /// (a catch-up batch) on every retry.
+  fn earlier_message(
+    &self,
+    state: &mut State<B>,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+  ) -> Result<Option<StoredMessage>, StoreError> {
+    match self.cached_message(state, conversation, client_message_id) {
+      Err(StoreError::Corrupt(reason)) => {
+        // Only the reason is logged, never the record's content.
+        tracing::warn!(%conversation, %reason, "an earlier version of a message doesn't read; replacing it");
+        Ok(None)
+      },
+      other => other,
+    }
+  }
+
   fn cached_value(
     &self,
     state: &mut State<B>,
@@ -1190,7 +1209,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
     let conversation = message.conversation_id;
     self.grouped(|state| {
-      let maybe_earlier = self.cached_message(state, conversation, message.client_message_id)?;
+      let maybe_earlier = self.earlier_message(state, conversation, message.client_message_id)?;
       // A message that moved in the order (sent, so now at its server ID) leaves its old place.
       if let Some(earlier) = &maybe_earlier
         && MessageKey::of(earlier) != MessageKey::of(message)
@@ -1497,7 +1516,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     client_message_id: ClientMessageId,
   ) -> Result<(), StoreError> {
     self.grouped(
-      |state| match self.cached_message(state, conversation, client_message_id)? {
+      |state| match self.earlier_message(state, conversation, client_message_id)? {
         Some(message) => self.remove_message(state, &message),
         None => self
           .backend
@@ -2140,6 +2159,55 @@ mod tests {
         store.messages(id(CHANNEL), MessageFilter::All).unwrap().len(),
         usize::try_from(MESSAGES - 1).unwrap()
       );
+    }
+
+    /// Issue #1126: a catch-up writes its messages as one group; one message whose earlier
+    /// version doesn't read must not fail the group again on every retry.
+    #[test]
+    fn a_damaged_earlier_version_does_not_fail_a_group_of_writes() {
+      let (records, key) = filled();
+      let store = open(&records, &key);
+      let damaged = store.message_id(id(CHANNEL), client_id(CHANNEL, 5));
+      drop(store);
+      records.map.lock().unwrap().insert(damaged, vec![1; 64]);
+
+      let store = open(&records, &key);
+      let mut fresh = numbered(CHANNEL, 5);
+      fresh.maybe_server_id = Some(id(server_id(CHANNEL, 5)));
+      let catch_up = [
+        numbered(CHANNEL, MESSAGES),
+        fresh.clone(),
+        numbered(CHANNEL, MESSAGES + 1),
+      ];
+      crate::store::write_group(&store, || {
+        for message in &catch_up {
+          store.upsert_message(message)?;
+        }
+        Ok::<_, StoreError>(())
+      })
+      .unwrap();
+
+      assert_eq!(
+        store.message(id(CHANNEL), client_id(CHANNEL, 5)).unwrap(),
+        Some(fresh)
+      );
+      assert_eq!(
+        store.messages(id(CHANNEL), MessageFilter::All).unwrap().len(),
+        usize::try_from(MESSAGES + 2).unwrap()
+      );
+    }
+
+    #[test]
+    fn a_damaged_message_can_be_deleted() {
+      let (records, key) = filled();
+      let store = open(&records, &key);
+      let damaged = store.message_id(id(CHANNEL), client_id(CHANNEL, 5));
+      drop(store);
+      records.map.lock().unwrap().insert(damaged, vec![1; 64]);
+
+      let store = open(&records, &key);
+      store.delete_message(id(CHANNEL), client_id(CHANNEL, 5)).unwrap();
+      assert!(!records.map.lock().unwrap().contains_key(&damaged));
     }
 
     #[test]
