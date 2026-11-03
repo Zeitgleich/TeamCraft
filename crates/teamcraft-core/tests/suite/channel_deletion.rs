@@ -15,7 +15,7 @@ use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
 use teamcraft_core::store::{LocalStore, MessageFilter, Table};
 use teamcraft_proto::{
-  ChannelRole, ConversationId, ConversationVisibility, ErrorCode, GatewayEvent,
+  ChannelRole, ConversationId, ConversationVisibility, DeleteConversationRequest, ErrorCode, GatewayEvent,
   UpdateConversationMemberRequest, UpdateConversationRequest,
 };
 
@@ -186,7 +186,7 @@ mod deleting {
       alice.client.delete_channel(channel).await.unwrap();
       settle(&mut [&mut alice, &mut bob]).await;
 
-      // Alice confirmed it here; Bob has only the server's word.
+      // Alice confirmed it here. Her role goes back only to her founding claim: Bob keeps the history.
       assert_purged(&alice, channel);
       assert_hidden_with_history(&bob, channel);
     }
@@ -300,6 +300,9 @@ mod deleting {
 mod server_claims {
   use super::*;
 
+  // These are about claims: deletions without a signature (`signed_deletions.rs` has the signed
+  // ones), as an older client's, or a space admin's whose authority isn't signed.
+
   /// Offline when it happened: the next full sync hides it, the messages stay.
   #[tokio::test]
   async fn a_device_that_was_offline_converges_and_keeps_the_history_for_now() {
@@ -309,7 +312,7 @@ mod server_claims {
     alice.client.send_text(channel, None, "hello").await.unwrap();
     settle(&mut [&mut alice, &mut bob]).await;
 
-    alice.client.delete_channel(channel).await.unwrap();
+    delete_unsigned(&alice, channel).await;
 
     // Bob's device doesn't read its gateway (offline beyond the resume window): only the sync.
     bob.client.full_sync().await.unwrap();
@@ -327,7 +330,7 @@ mod server_claims {
     let channel = channel_with(&mut alice, &mut bob).await;
     alice.client.send_text(channel, None, "hello").await.unwrap();
     settle(&mut [&mut alice, &mut bob]).await;
-    alice.client.delete_channel(channel).await.unwrap();
+    delete_unsigned(&alice, channel).await;
     bob.client.full_sync().await.unwrap();
 
     clock.advance(RETENTION / 2);
@@ -356,6 +359,7 @@ mod server_claims {
       &[bob.client.user_id()],
       &GatewayEvent::ConversationDelete {
         conversation_id: channel,
+        maybe_signed_deletion: None,
       },
     );
     settle(&mut [&mut bob]).await;
@@ -495,7 +499,7 @@ mod server_claims {
     let server = FakeServer::new();
     let (mut alice, mut bob) = two(&server).await;
     let channel = channel_with(&mut alice, &mut bob).await;
-    alice.client.delete_channel(channel).await.unwrap();
+    delete_unsigned(&alice, channel).await;
     bob.client.full_sync().await.unwrap();
     assert!(!suspect_notice(&bob));
   }
@@ -509,7 +513,7 @@ mod server_claims {
     alice.client.send_text(channel, None, "hello").await.unwrap();
     settle(&mut [&mut alice, &mut bob]).await;
 
-    alice.client.delete_channel(channel).await.unwrap();
+    delete_unsigned(&alice, channel).await;
     // As `refresh_conversation` does on a 404, before any sync heard of the deletion.
     bob
       .store
@@ -538,7 +542,7 @@ mod server_claims {
     let channel = channel_with(&mut alice, &mut bob).await;
     alice.client.send_text(channel, None, "hello").await.unwrap();
     settle(&mut [&mut alice, &mut bob]).await;
-    alice.client.delete_channel(channel).await.unwrap();
+    delete_unsigned(&alice, channel).await;
     bob.client.full_sync().await.unwrap();
 
     // What a crash in the middle of older versions' purge left: outbox and search gone, the rest not.
@@ -622,7 +626,7 @@ mod deleting_a_space {
         .is_none()
     );
 
-    // Bob's device doesn't read its gateway: only the sync.
+    // Bob's device doesn't read its gateway: only the sync. A space's deletion is never signed.
     bob.client.full_sync().await.unwrap();
     assert_hidden_with_history(&bob, channel);
     assert!(
@@ -645,6 +649,15 @@ mod deleting_a_space {
     assert!(!error.is_transient(), "{error}");
     assert!(is_cached(&bob, channel));
   }
+}
+
+/// A deletion without a signature: what an older client asks for.
+async fn delete_unsigned(peer: &Peer, channel: ConversationId) {
+  peer
+    .api
+    .delete_conversation(channel, &DeleteConversationRequest::default())
+    .await
+    .unwrap();
 }
 
 async fn two(server: &FakeServer) -> (Peer, Peer) {

@@ -15,6 +15,23 @@ use crate::push_retry::delete_push_retries_of;
 /// Messages removed in one statement while a channel's rows are cleared.
 const MESSAGE_BATCH: i64 = 5_000;
 
+/// A channel's signed deletion to keep with its mark (e2ee.md §4.6): bytes the server never verifies.
+#[derive(Debug, Clone)]
+pub struct DeletionSignature {
+  /// The epoch the document names; the deletion only goes through for the group's current one.
+  pub epoch: u64,
+  pub payload: Vec<u8>,
+  pub signature: Vec<u8>,
+}
+
+/// A deleted conversation's kept signature.
+#[derive(Debug, Clone)]
+pub struct StoredDeletionSignature {
+  pub conversation: ConversationId,
+  pub payload: Vec<u8>,
+  pub signature: Vec<u8>,
+}
+
 /// What a removal is decided on, read under the conversation's lock.
 #[derive(Debug, Clone)]
 pub struct ChannelFacts {
@@ -125,7 +142,7 @@ impl Database {
         .map_err(DbError::from)?;
       },
       RemovalStep::DeleteChannel => {
-        mark_deleted(&mut tx, conversation, &members).await?;
+        mark_deleted(&mut tx, conversation, &members, None).await?;
         Self::record_audit_in(&mut tx, audit).await?;
       },
     }
@@ -137,20 +154,26 @@ impl Database {
     })
   }
 
-  /// Marks a channel deleted if `decide` allows it, with one audit row. `None` when it is gone.
+  /// Marks a channel deleted if `decide` allows it, given the facts and the group's epoch (both held
+  /// still by locks), with one audit row and the signature it came with, if any. `None` when it is
+  /// gone.
   pub async fn delete_channel_locked<E: From<DbError>>(
     &self,
     conversation: ConversationId,
     audit: &NewAuditEntry<'_>,
-    decide: impl FnOnce(&ChannelFacts) -> Result<(), E>,
+    maybe_signature: Option<&DeletionSignature>,
+    decide: impl FnOnce(&ChannelFacts, u64) -> Result<(), E>,
   ) -> Result<Option<Vec<UserId>>, E> {
     let mut tx = self.pool().begin().await.map_err(DbError::from)?;
+    // The epoch first, in the order of a commit: it holds this row and then needs a share lock on the
+    // conversation for its foreign keys, so the other order could deadlock.
+    let epoch = lock_epoch(&mut tx, conversation).await?;
     let Some(facts) = lock_facts(&mut tx, conversation, true).await? else {
       return Ok(None);
     };
-    decide(&facts)?;
+    decide(&facts, epoch)?;
     let members: Vec<UserId> = facts.members.iter().map(|(member, _)| *member).collect();
-    mark_deleted(&mut tx, conversation, &members).await?;
+    mark_deleted(&mut tx, conversation, &members, maybe_signature).await?;
     Self::record_audit_in(&mut tx, audit).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(Some(members))
@@ -196,7 +219,7 @@ impl Database {
     }
     decide(&facts)?;
     for (channel, members) in &deletion.channels {
-      mark_deleted(&mut tx, *channel, members).await?;
+      mark_deleted(&mut tx, *channel, members, None).await?;
     }
     let space_members = sqlx::query_scalar!(
       "DELETE FROM space_members WHERE space_id = $1 RETURNING user_id",
@@ -301,6 +324,14 @@ impl Database {
       }
     }
     let mut tx = self.pool().begin().await?;
+    // A signed deletion's log stays for the devices that were away, until the signature goes.
+    sqlx::query!(
+      r#"DELETE FROM channel_role_log WHERE conversation_id = $1 AND NOT EXISTS
+           (SELECT 1 FROM conversation_deletion_signatures s WHERE s.conversation_id = $1)"#,
+      to_db(conversation),
+    )
+    .execute(&mut *tx)
+    .await?;
     sqlx::query!(
       "DELETE FROM attachments WHERE conversation_id = $1 AND completed_at IS NOT NULL",
       to_db(conversation),
@@ -317,6 +348,49 @@ impl Database {
     .await?;
     tx.commit().await?;
     Ok(())
+  }
+
+  /// The signatures of the deletions this user's devices are told about
+  /// ([`Self::deleted_conversations_of`]).
+  pub async fn deletion_signatures_of(&self, user: UserId) -> Result<Vec<StoredDeletionSignature>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT s.conversation_id, s.payload, s.signature
+         FROM deleted_conversations d
+         JOIN conversation_deletion_signatures s ON s.conversation_id = d.conversation_id
+         WHERE d.user_id = $1 ORDER BY s.conversation_id"#,
+      to_db(user),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(StoredDeletionSignature {
+          conversation: from_db(row.conversation_id)?,
+          payload: row.payload,
+          signature: row.signature,
+        })
+      })
+      .collect()
+  }
+
+  /// Whether `user` may still read the role log of a deleted conversation: they were told of its
+  /// signed deletion, and verifying it may take entries their device missed.
+  pub async fn can_read_deleted_role_log(
+    &self,
+    user: UserId,
+    conversation: ConversationId,
+  ) -> Result<bool, DbError> {
+    let found = sqlx::query_scalar!(
+      r#"SELECT 1 AS "found!" FROM deleted_conversations d
+         JOIN conversation_deletion_signatures s ON s.conversation_id = d.conversation_id
+         WHERE d.user_id = $1 AND d.conversation_id = $2"#,
+      to_db(user),
+      to_db(conversation),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(found.is_some())
   }
 
   /// Spaces marked deleted whose conversations are cleared, with their pictures' keys.
@@ -392,6 +466,21 @@ async fn lock_facts(
   }))
 }
 
+/// The group's epoch (0 before its first commit), locked: a commit racing the deletion waits, and
+/// then finds the memberships gone or a higher epoch, which a verifying device takes as stale.
+async fn lock_epoch(
+  tx: &mut Transaction<'_, Postgres>,
+  conversation: ConversationId,
+) -> Result<u64, DbError> {
+  let epoch = sqlx::query_scalar!(
+    "SELECT epoch FROM mls_epoch_heads WHERE conversation_id = $1 FOR UPDATE",
+    to_db(conversation),
+  )
+  .fetch_optional(&mut **tx)
+  .await?;
+  Ok(epoch.map_or(0, |epoch| u64::try_from(epoch).unwrap_or(u64::MAX)))
+}
+
 async fn member_ids(tx: &mut Transaction<'_, Postgres>, conversation: i64) -> Result<Vec<UserId>, DbError> {
   let ids = sqlx::query_scalar!(
     "SELECT user_id FROM memberships WHERE conversation_id = $1",
@@ -406,7 +495,19 @@ async fn mark_deleted(
   tx: &mut Transaction<'_, Postgres>,
   conversation: ConversationId,
   members: &[UserId],
+  maybe_signature: Option<&DeletionSignature>,
 ) -> Result<(), DbError> {
+  if let Some(signed) = maybe_signature {
+    sqlx::query!(
+      r#"INSERT INTO conversation_deletion_signatures (conversation_id, payload, signature)
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"#,
+      to_db(conversation),
+      &signed.payload,
+      &signed.signature,
+    )
+    .execute(&mut **tx)
+    .await?;
+  }
   sqlx::query!(
     "UPDATE conversations SET deleted_at = now() WHERE id = $1",
     to_db(conversation),

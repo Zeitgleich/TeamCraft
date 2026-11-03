@@ -5,6 +5,9 @@
 //! server checks who may append (`manage_channel_roles`) and the ordering, stores the bytes
 //! verbatim and serves them. Clients verify the signature, the signer's authority and the chain;
 //! the server's own member list is never trusted for a role.
+//!
+//! A channel's signed deletion lives here too (e2ee.md §4.6, issue #1135): verified against these
+//! roles and the workspace roster by each device, carried and stored by the server.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -39,6 +42,44 @@ pub struct ChannelRoleAssignment {
   /// The person's identity public key as the signer's device pinned it: later entries this person
   /// signs as a channel admin are verified against it, not against the server's directory.
   pub identity_key: Base64Bytes,
+}
+
+/// What a signed deletion of a channel signs (JSON, the signed deletion's payload).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ChannelDeletionDocument {
+  /// A document signed for one channel is refused for every other.
+  pub conversation_id: ConversationId,
+  /// The epoch of the channel's group the signer was told is the current one. The server takes the
+  /// deletion only for that epoch, so a device whose group has moved past it refuses it as old.
+  pub epoch: u64,
+  /// When the signer's device signed it (its own clock): the workspace roster has to be fresh at
+  /// this time as well as at the verifying device's.
+  pub signed_at_ms: i64,
+}
+
+/// A channel's deletion, signed by a device of somebody allowed to delete it. `signature` is a
+/// signed log entry of the crypto crate's `WorkspaceLog::ChannelDeletion`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SignedChannelDeletion {
+  /// A [`ChannelDeletionDocument`] as JSON, verbatim as signed.
+  pub payload: Base64Bytes,
+  pub signature: Base64Bytes,
+}
+
+/// The optional body of `DELETE /api/v1/conversations/{id}`. Clients before signed deletions send
+/// none, and neither does somebody whose authority isn't signed (a space admin, a custom scheme):
+/// the deletion then stays the server's word on the members' devices (e2ee.md §4.6).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DeleteConversationRequest {
+  #[serde(rename = "signed_deletion", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_signed_deletion: Option<SignedChannelDeletion>,
+}
+
+/// A deleted conversation's signed deletion, for a device that was away.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DeletedConversationSignature {
+  pub conversation_id: ConversationId,
+  pub signed_deletion: SignedChannelDeletion,
 }
 
 /// `POST /api/v1/conversations/{id}/role-log`: appends an entry signed by the caller's device.
@@ -119,5 +160,54 @@ mod tests {
       serde_json::from_value(serde_json::json!({"user_id": "9", "role": "owner", "identity_key": ""}))
         .unwrap();
     assert!(matches!(assignment.role, ChannelRole::Unknown(_)));
+  }
+}
+
+#[cfg(test)]
+mod signed_deletion_tests {
+  use super::*;
+  use crate::{Id, Snowflake};
+
+  #[test]
+  fn the_document_and_request_keep_their_wire_format() {
+    let document = ChannelDeletionDocument {
+      conversation_id: conversation(7),
+      epoch: 12,
+      signed_at_ms: 1_000,
+    };
+    assert_eq!(
+      serde_json::to_string(&document).unwrap(),
+      r#"{"conversation_id":"7","epoch":12,"signed_at_ms":1000}"#
+    );
+    let request = DeleteConversationRequest {
+      maybe_signed_deletion: Some(signed()),
+    };
+    assert_eq!(
+      serde_json::to_string(&request).unwrap(),
+      r#"{"signed_deletion":{"payload":"AQ==","signature":"Ag=="}}"#
+    );
+  }
+
+  /// An unsigned deletion is what clients before signed deletions send, and all an admin without a
+  /// signed authority has: the request stays empty on the wire and reads from nothing.
+  #[test]
+  fn an_unsigned_deletion_is_an_empty_body() {
+    assert_eq!(
+      serde_json::to_string(&DeleteConversationRequest::default()).unwrap(),
+      "{}"
+    );
+    let parsed: DeleteConversationRequest = serde_json::from_str("{}").unwrap();
+    assert!(parsed.maybe_signed_deletion.is_none());
+  }
+
+  fn signed() -> SignedChannelDeletion {
+    SignedChannelDeletion {
+      payload: Base64Bytes::new(vec![1]),
+      signature: Base64Bytes::new(vec![2]),
+    }
+  }
+
+  fn conversation(id: i64) -> ConversationId {
+    ConversationId::from_snowflake(Snowflake::new(id).unwrap())
   }
 }

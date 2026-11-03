@@ -5,6 +5,9 @@
 /// The commands of the shell, in the order of `main.rs`.
 const COMMANDS: &[&str] = &[
   "auth_restore",
+  "auth_cached_account",
+  "auth_remember_account",
+  "auth_forget_account",
   "auth_login",
   "auth_login_local",
   "auth_cancel",

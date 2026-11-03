@@ -77,7 +77,7 @@
   <string name="space_mute_title">%1$s stummschalten</string>
   <string name="space_leave_title">%1$s verlassen?</string>
   <string name="space_leave_text">Du verlässt damit auch alle Kanäle darin. Kanäle, in denen nur du bist, werden gelöscht.</string>
-  <string name="deletions_suspect">Der Server meldet %1$d deiner Unterhaltungen auf einmal als gelöscht. Sie sind ausgeblendet, ihre Nachrichten bleiben vorerst auf diesem Gerät. Informiere deine Administration.</string>
+  <string name="deletions_suspect">Der Server meldet %1$d deiner Unterhaltungen auf einmal als gelöscht. Die von einem Administrator signierten sind von diesem Gerät entfernt, die übrigen sind ausgeblendet, ihre Nachrichten bleiben vorerst hier. Informiere deine Administration.</string>
   <string name="space_delete">Space löschen</string>
   <string name="space_delete_title">%1$s für alle löschen?</string>
   <string name="space_delete_text">Kanäle, die mit verschwinden: %1$d, mit ihren Nachrichten und Dateien für alle ihre Mitglieder. Das lässt sich nicht rückgängig machen.</string>

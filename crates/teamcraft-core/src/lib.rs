@@ -17,6 +17,7 @@ pub mod error;
 pub mod imported;
 pub mod integration_sources;
 pub mod link_preview;
+pub mod signed_deletion;
 // The keys come from the UI contract (client-api), which the hosts of a UI build in; the service
 // worker reads pictures for its notifications.
 #[cfg(any(feature = "ui", feature = "service-worker"))]

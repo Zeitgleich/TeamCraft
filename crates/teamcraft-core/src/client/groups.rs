@@ -282,6 +282,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     others: &[UserId],
   ) -> Result<ConversationId, CoreError> {
     let id = conversation.id;
+    self.pin_if_direct(&conversation)?;
     records::put_json(&self.store, Table::Conversations, &id.to_string(), &conversation)?;
     let maybe_setup = records::get_json::<DmSetupRecord>(&self.store, Table::SyncState, &dm_setup_key(id))?;
     if self.has_group(id)? && maybe_setup.is_none() {
@@ -318,6 +319,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.store.delete(Table::SyncState, &dm_setup_key(id))?;
       return Err(CoreError::NotAMeetingChat(id));
     }
+    self.pin_if_direct(&conversation)?;
     records::put_json(&self.store, Table::Conversations, &id.to_string(), &conversation)?;
     if !self.has_group(id)? && !had_setup && self.server_has_group_info(id).await? {
       // Founded already (by this user's other device): this device joins it, never founds.
@@ -722,6 +724,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // right away): asked once more instead of dropped.
         None => match self.api.conversation(id).await {
           Ok(response) => {
+            self.pin_if_direct(&response)?;
             records::put_json(&self.store, Table::Conversations, &id.to_string(), &response)?;
             (response.maybe_my_membership.is_some(), response.kind)
           },

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-auth-cached-account"
+description = "Enables the auth_cached_account command without any pre-configured scope."
+commands.allow = ["auth_cached_account"]
+
+[[permission]]
+identifier = "deny-auth-cached-account"
+description = "Denies the auth_cached_account command without any pre-configured scope."
+commands.deny = ["auth_cached_account"]

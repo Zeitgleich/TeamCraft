@@ -10126,13 +10126,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "The server says %lld of your conversations were deleted at once. They are hidden, and their messages stay on this device for now. Tell your administrator."
+            "value": "The server says %lld of your conversations were deleted at once. Those an administrator signed for are gone from this device; the others are hidden, and their messages stay here for now. Tell your administrator."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Der Server meldet %lld deiner Unterhaltungen auf einmal als gelöscht. Sie sind ausgeblendet, ihre Nachrichten bleiben vorerst auf diesem Gerät. Informiere deine Administration."
+            "value": "Der Server meldet %lld deiner Unterhaltungen auf einmal als gelöscht. Die von einem Administrator signierten sind von diesem Gerät entfernt, die übrigen sind ausgeblendet, ihre Nachrichten bleiben vorerst hier. Informiere deine Administration."
           }
         }
       }

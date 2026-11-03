@@ -9,11 +9,10 @@
 #[cfg(target_arch = "wasm32")]
 use std::time::Duration;
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use teamcraft_proto::GetMeResponse;
 
 /// Refresh this long before the access token expires.
 pub(super) const REFRESH_MARGIN_MS: i64 = 30_000;
@@ -21,6 +20,8 @@ pub(super) const REFRESH_MARGIN_MS: i64 = 30_000;
 const VAULT_DATABASE: &str = "teamcraft-session";
 #[cfg(target_arch = "wasm32")]
 const TOKENS_SLOT: &str = "oidc_tokens";
+#[cfg(target_arch = "wasm32")]
+const ACCOUNT_SLOT: &str = "cached_account";
 /// The Web Lock every tab takes to refresh.
 #[cfg(target_arch = "wasm32")]
 const REFRESH_LOCK: &str = "teamcraft-auth-refresh";
@@ -36,6 +37,17 @@ pub(super) struct Tokens {
   pub expires_at_ms: i64,
   /// The account's `sub` at the provider, to tell whether saved tokens are this tab's account.
   pub maybe_subject: Option<String>,
+}
+
+/// The account the server confirmed last, for the next start (issue #778), with the sign-in it
+/// belongs to: it only counts next to saved tokens of the same provider, client and subject, so
+/// one account's record never starts the app for another account's tokens.
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct CachedAccount {
+  pub issuer: String,
+  pub client_id: String,
+  pub subject: String,
+  pub account: GetMeResponse,
 }
 
 /// What a refresh does, decided under the lock.
@@ -98,15 +110,6 @@ impl Tokens {
   pub fn is_fresh(&self, now_ms: i64) -> bool {
     self.expires_at_ms - REFRESH_MARGIN_MS > now_ms
   }
-}
-
-/// The account a token answer names: the ID token's `sub`, else a JWT access token's. Read
-/// without checking signatures: it came from the token endpoint over TLS and only tells the
-/// accounts of this browser apart.
-pub(super) fn answer_subject(maybe_id_token: Option<&str>, access: &str) -> Option<String> {
-  maybe_id_token
-    .and_then(token_subject)
-    .or_else(|| token_subject(access))
 }
 
 /// Decides a refresh: saved tokens of the same account win over this tab's own (another tab may
@@ -172,21 +175,36 @@ pub(super) async fn refresh_turn() -> RefreshTurn {
   RefreshTurn {}
 }
 
-/// The saved tokens, if they belong to this provider and client.
+/// The saved tokens, if they belong to this provider and client. `issuer` and `client_id` come from
+/// the server, under the refresh lock: tokens of another provider are of no use any more.
 pub(super) async fn load(issuer: &str, client_id: &str) -> Option<Tokens> {
-  let bytes = vault_read().await?;
-  let saved = decode(&bytes)?;
+  let saved = read_saved().await?;
   if saved.issuer != issuer || saved.client_id != client_id {
-    // The server switched providers: these tokens are of no use any more.
     forget().await;
     return None;
   }
-  Some(Tokens::new(
+  Some(tokens_of(saved))
+}
+
+/// [`load`] that changes nothing, for what a cached record claims: without the lock, and a record
+/// that doesn't match says nothing against the tokens.
+pub(super) async fn peek(issuer: &str, client_id: &str) -> Option<Tokens> {
+  let saved = read_saved().await?;
+  (saved.issuer == issuer && saved.client_id == client_id).then(|| tokens_of(saved))
+}
+
+async fn read_saved() -> Option<Saved> {
+  let bytes = vault_read(TOKENS_SLOT).await?;
+  decode(&bytes)
+}
+
+fn tokens_of(saved: Saved) -> Tokens {
+  Tokens::new(
     saved.access,
     Some(saved.refresh),
     saved.expires_at_ms,
     Some(saved.subject),
-  ))
+  )
 }
 
 /// Saves `tokens` for the next page load and the other tabs. Tokens without a refresh token can't
@@ -206,14 +224,36 @@ pub(super) async fn save(issuer: &str, client_id: &str, tokens: &Tokens) {
     expires_at_ms: tokens.expires_at_ms,
   };
   match serde_json::to_vec(&saved) {
-    Ok(bytes) => vault_write(&Zeroizing::new(bytes)).await,
+    Ok(bytes) => vault_write(TOKENS_SLOT, &Zeroizing::new(bytes)).await,
     Err(error) => tracing::warn!(%error, "could not encode the sign-in tokens"),
   }
 }
 
-/// Removes the saved tokens (sign-out, revoked session).
+/// Removes the saved tokens and the account they stand for (sign-out, revoked session).
 pub(super) async fn forget() {
-  vault_clear().await;
+  vault_clear(TOKENS_SLOT).await;
+  forget_account().await;
+}
+
+/// The account saved for the next start, if it reads.
+pub(super) async fn load_account() -> Option<CachedAccount> {
+  let bytes = vault_read(ACCOUNT_SLOT).await?;
+  serde_json::from_slice(&bytes)
+    .inspect_err(|_| tracing::debug!("the cached account does not read"))
+    .ok()
+}
+
+/// Saves the account for the next start.
+pub(super) async fn save_account(account: &CachedAccount) {
+  match serde_json::to_vec(account) {
+    Ok(bytes) => vault_write(ACCOUNT_SLOT, &Zeroizing::new(bytes)).await,
+    Err(error) => tracing::warn!(%error, "could not encode the account for the next start"),
+  }
+}
+
+/// The next start waits for the server again.
+pub(super) async fn forget_account() {
+  vault_clear(ACCOUNT_SLOT).await;
 }
 
 fn decode(bytes: &[u8]) -> Option<Saved> {
@@ -222,16 +262,9 @@ fn decode(bytes: &[u8]) -> Option<Saved> {
     .ok()
 }
 
-/// The `sub` claim of a JWT. Opaque tokens have none.
-fn token_subject(access: &str) -> Option<String> {
-  let payload = URL_SAFE_NO_PAD.decode(access.split('.').nth(1)?).ok()?;
-  let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-  claims.get("sub")?.as_str().map(str::to_owned)
-}
-
 #[cfg(target_arch = "wasm32")]
-async fn vault_read() -> Option<Zeroizing<Vec<u8>>> {
-  teamcraft_core::store::vault_get(VAULT_DATABASE, TOKENS_SLOT)
+async fn vault_read(slot: &str) -> Option<Zeroizing<Vec<u8>>> {
+  teamcraft_core::store::vault_get(VAULT_DATABASE, slot)
     .await
     .inspect_err(|error| tracing::warn!(%error, "could not read the saved sign-in"))
     .ok()
@@ -239,31 +272,36 @@ async fn vault_read() -> Option<Zeroizing<Vec<u8>>> {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn vault_write(bytes: &[u8]) {
-  if let Err(error) = teamcraft_core::store::vault_put(VAULT_DATABASE, TOKENS_SLOT, bytes).await {
+async fn vault_write(slot: &str, bytes: &[u8]) {
+  if let Err(error) = teamcraft_core::store::vault_put(VAULT_DATABASE, slot, bytes).await {
     // The session still works; only the next reload goes through the provider again.
     tracing::warn!(%error, "could not save the sign-in");
   }
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn vault_clear() {
-  if let Err(error) = teamcraft_core::store::vault_delete(VAULT_DATABASE, TOKENS_SLOT).await {
+async fn vault_clear(slot: &str) {
+  if let Err(error) = teamcraft_core::store::vault_delete(VAULT_DATABASE, slot).await {
     tracing::warn!(%error, "could not remove the saved sign-in");
   }
 }
 
 // Native builds (tests, desktop) have no browser vault: BrowserAuth only runs in the page.
 #[cfg(not(target_arch = "wasm32"))]
-async fn vault_read() -> Option<Zeroizing<Vec<u8>>> {
+const TOKENS_SLOT: &str = "";
+#[cfg(not(target_arch = "wasm32"))]
+const ACCOUNT_SLOT: &str = "";
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn vault_read(_slot: &str) -> Option<Zeroizing<Vec<u8>>> {
   None
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn vault_write(_bytes: &[u8]) {}
+async fn vault_write(_slot: &str, _bytes: &[u8]) {}
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn vault_clear() {}
+async fn vault_clear(_slot: &str) {}
 
 #[cfg(test)]
 mod tests {
@@ -341,18 +379,6 @@ mod tests {
   }
 
   #[test]
-  fn the_subject_comes_from_a_jwt_and_opaque_tokens_have_none() {
-    let token = jwt("alice");
-    assert_eq!(token_subject(&token).as_deref(), Some("alice"));
-    assert_eq!(answer_subject(Some(&jwt("bob")), &token).as_deref(), Some("bob"));
-    assert_eq!(answer_subject(None, &token).as_deref(), Some("alice"));
-    assert_eq!(answer_subject(Some("opaque"), "opaque"), None);
-    assert_eq!(token_subject("opaque-token"), None);
-    assert_eq!(token_subject("a.!!!.c"), None);
-    assert_eq!(token_subject(""), None);
-  }
-
-  #[test]
   fn saved_tokens_round_trip_and_garbage_does_not_read() {
     let bytes = serde_json::to_vec(&SavedRef {
       issuer: "https://auth.example.com/realms/a",
@@ -386,10 +412,5 @@ mod tests {
       expires_at_ms,
       maybe_subject: Some(subject.to_owned()),
     }
-  }
-
-  fn jwt(subject: &str) -> String {
-    let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"{subject}"}}"#));
-    format!("eyJhbGciOiJub25lIn0.{payload}.signature")
   }
 }

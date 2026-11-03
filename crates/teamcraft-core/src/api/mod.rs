@@ -29,6 +29,7 @@ pub use connect::black_hole;
 pub use http::{
   AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken, change_web_push_subscription,
 };
+use teamcraft_proto::DeleteConversationRequest;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, AdminJoinRequestResponse, ClaimKeyPackagesRequest,
   ClaimKeyPackagesResponse, ConversationId, ConversationMemberResponse, ConversationResponse,
@@ -266,7 +267,11 @@ pub trait ServerApi {
   ) -> impl Future<Output = Result<(), ApiError>>;
   /// Deletes a channel for everybody (`DELETE /conversations/{id}`, `delete_channel`); not found
   /// once it is gone (e2ee.md §4.6).
-  fn delete_conversation(&self, conversation: ConversationId) -> impl Future<Output = Result<(), ApiError>>;
+  fn delete_conversation(
+    &self,
+    conversation: ConversationId,
+    request: &DeleteConversationRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
   /// Every channel `user` is a member of (`GET /admin/conversations?user_id=`, all pages; instance
   /// admins): the admin's client signs a removal from each (admin.md §3.2.1).
   fn admin_channels_of(&self, user: UserId) -> impl Future<Output = Result<Vec<ConversationId>, ApiError>>;

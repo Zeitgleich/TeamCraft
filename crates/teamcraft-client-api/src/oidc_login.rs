@@ -204,6 +204,22 @@ impl IdTokenFields {
   }
 }
 
+/// The account a token answer names: the ID token's `sub`, else a JWT access token's. Read without
+/// checking signatures: it came from the token endpoint over TLS and only tells the accounts of this
+/// device apart. Opaque tokens name nobody.
+pub fn answer_subject(maybe_id_token: Option<&str>, access: &str) -> Option<String> {
+  maybe_id_token
+    .and_then(token_subject)
+    .or_else(|| token_subject(access))
+}
+
+/// The `sub` claim of a JWT.
+fn token_subject(token: &str) -> Option<String> {
+  let payload = URL_SAFE_NO_PAD.decode(token.split('.').nth(1)?).ok()?;
+  let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+  claims.get("sub")?.as_str().map(str::to_owned)
+}
+
 impl std::fmt::Debug for IdTokenFields {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("IdTokenFields")
@@ -232,6 +248,22 @@ fn is_language_tag(tag: &str) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn the_subject_comes_from_a_jwt_and_opaque_tokens_have_none() {
+    let jwt = |subject: &str| {
+      let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"{subject}"}}"#));
+      format!("eyJhbGciOiJub25lIn0.{payload}.signature")
+    };
+    let token = jwt("alice");
+    assert_eq!(token_subject(&token).as_deref(), Some("alice"));
+    assert_eq!(answer_subject(Some(&jwt("bob")), &token).as_deref(), Some("bob"));
+    assert_eq!(answer_subject(None, &token).as_deref(), Some("alice"));
+    assert_eq!(answer_subject(Some("opaque"), "opaque"), None);
+    assert_eq!(token_subject("opaque-token"), None);
+    assert_eq!(token_subject("a.!!!.c"), None);
+    assert_eq!(token_subject(""), None);
+  }
 
   #[test]
   fn an_interactive_sign_in_asks_for_the_login_page_with_hint_and_language() {

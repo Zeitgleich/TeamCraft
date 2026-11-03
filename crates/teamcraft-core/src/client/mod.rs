@@ -233,6 +233,11 @@ pub struct ClientSettings {
   /// How long the messages of a conversation the server says was deleted stay on this device,
   /// hidden, before they go (e2ee.md §4.6, "Deleting a channel"): the local copy may be the last.
   pub deleted_conversation_retention: std::time::Duration,
+  /// A signed deletion older than this no longer purges at once (e2ee.md §4.6): it is a claim, with
+  /// the retention. Bounds how long a signature the server held back stays good for anything.
+  pub signed_deletion_max_age: std::time::Duration,
+  /// How far ahead of this device's clock a signed deletion may say it was signed.
+  pub signed_deletion_clock_skew: std::time::Duration,
   /// More conversations than this claimed deleted within `suspect_deletion_window` are suspect,
   /// and the user is told once.
   pub suspect_deletion_count: usize,
@@ -421,6 +426,8 @@ impl Default for ClientSettings {
       max_pending_revocation_checks: 16,
       removal_watch: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       deleted_conversation_retention: std::time::Duration::from_secs(30 * 24 * 60 * 60),
+      signed_deletion_max_age: std::time::Duration::from_secs(14 * 24 * 60 * 60),
+      signed_deletion_clock_skew: std::time::Duration::from_secs(60 * 60),
       suspect_deletion_count: 5,
       suspect_deletion_percent: 50,
       suspect_deletion_window: std::time::Duration::from_secs(60 * 60),

@@ -169,11 +169,31 @@ impl Database {
     ids.into_iter().map(from_db).collect()
   }
 
-  /// Forgets deleted conversations recorded before `before`. Returns how many rows went.
+  /// Forgets deleted conversations recorded before `before`, and the signatures and role logs kept
+  /// for them once nobody is left to tell. Returns how many rows of the first kind went.
   pub async fn prune_deleted_conversations(&self, before: OffsetDateTime) -> Result<u64, DbError> {
+    let mut tx = self.pool().begin().await?;
     let result = sqlx::query!("DELETE FROM deleted_conversations WHERE deleted_at < $1", before)
-      .execute(self.pool())
+      .execute(&mut *tx)
       .await?;
+    let signatures_gone = sqlx::query_scalar!(
+      r#"DELETE FROM conversation_deletion_signatures s
+         WHERE s.created_at < $1 AND NOT EXISTS
+           (SELECT 1 FROM deleted_conversations d WHERE d.conversation_id = s.conversation_id)
+         RETURNING s.conversation_id"#,
+      before,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    // A conversation still being cleared keeps its row until then; its sweep takes the log.
+    sqlx::query!(
+      r#"DELETE FROM channel_role_log l WHERE l.conversation_id = ANY($1) AND NOT EXISTS
+           (SELECT 1 FROM conversations c WHERE c.id = l.conversation_id)"#,
+      &signatures_gone,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(result.rows_affected())
   }
 

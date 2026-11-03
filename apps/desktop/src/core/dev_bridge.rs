@@ -303,7 +303,13 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
   let args = &request["args"];
   let result = match request["cmd"].as_str().unwrap_or("") {
     "auth_restore" => Ok(json!(true)),
-    "auth_login" | "auth_cancel" | "auth_logout" | "core_stop" => Ok(Value::Null),
+    "auth_cached_account" => Ok(Value::Null),
+    "auth_login"
+    | "auth_cancel"
+    | "auth_logout"
+    | "auth_remember_account"
+    | "auth_forget_account"
+    | "core_stop" => Ok(Value::Null),
     "api_get" => {
       let path = args["path"].as_str().unwrap_or("");
       match bridge.alice.service.api_get(path).await {

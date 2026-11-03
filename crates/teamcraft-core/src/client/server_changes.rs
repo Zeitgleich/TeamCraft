@@ -111,6 +111,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if after.is_notes_to_self(self.account.user_id) {
       self.remember_notes_to_self(after.id)?;
     }
+    // Before what the server says now replaces what this device knew.
+    self.pin_if_direct(after)?;
+    if let Some(before) = maybe_before {
+      self.pin_if_direct(before)?;
+    }
     // A full sync lists every conversation; one that stayed as it was costs no write (issue #714).
     if maybe_before == Some(after) {
       return Ok(());

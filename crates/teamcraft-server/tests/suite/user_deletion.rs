@@ -443,7 +443,7 @@ async fn events(socket: &mut Socket) -> (Vec<String>, bool) {
             GatewayEvent::MembershipRemove { user_id, .. } => {
               seen.push(format!("membership_remove {user_id}"))
             },
-            GatewayEvent::ConversationDelete { conversation_id } => {
+            GatewayEvent::ConversationDelete { conversation_id, .. } => {
               seen.push(format!("conversation_delete {conversation_id}"))
             },
             GatewayEvent::DeviceRemove { user_id, device_id } => {

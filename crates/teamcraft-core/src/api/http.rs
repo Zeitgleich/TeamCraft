@@ -10,6 +10,7 @@ use std::time::Duration;
 use reqwest::{Method, RequestBuilder, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use teamcraft_proto::DeleteConversationRequest;
 use teamcraft_proto::RendezvousClientMessage;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse,
@@ -588,9 +589,17 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
-  async fn delete_conversation(&self, conversation: ConversationId) -> Result<(), ApiError> {
+  async fn delete_conversation(
+    &self,
+    conversation: ConversationId,
+    request: &DeleteConversationRequest,
+  ) -> Result<(), ApiError> {
     self
-      .send_without_response::<()>(Method::DELETE, &format!("/conversations/{conversation}"), None)
+      .send_without_response(
+        Method::DELETE,
+        &format!("/conversations/{conversation}"),
+        Some(request),
+      )
       .await
   }
 

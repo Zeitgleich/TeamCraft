@@ -212,7 +212,7 @@ pub async fn remove_member(
   match done.step {
     RemovalStep::Nothing => return Ok(()),
     RemovalStep::DeleteChannel => {
-      super::conversations::announce_deleted(state, id, &done.members).await;
+      super::conversations::announce_deleted(state, id, &done.members, None).await;
       return Ok(());
     },
     RemovalStep::Remove => {},

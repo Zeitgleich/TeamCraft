@@ -386,7 +386,7 @@ impl Rig {
 }
 
 /// Signs in through Keycloak and unlocks the account's keys with the recovery passphrase.
-async fn sign_in_and_unlock(page: &Page, user: &str) {
+pub(crate) async fn sign_in_and_unlock(page: &Page, user: &str) {
   page.goto(format!("{WEB_ORIGIN}/healthz")).await.unwrap();
   page
     .evaluate("localStorage.setItem('teamcraft.locale', 'en')")
@@ -1194,7 +1194,7 @@ async fn come_back(page: &Page, needle: &str) -> bool {
 }
 
 /// Fills in Keycloak's login form.
-async fn sign_in_at_keycloak(page: &Page, user: &str) {
+pub(crate) async fn sign_in_at_keycloak(page: &Page, user: &str) {
   let username = wait_for_element(page, "input[name=username]").await;
   username.click().await.unwrap().type_str(user).await.unwrap();
   let password = page.find_element("input[name=password]").await.unwrap();
