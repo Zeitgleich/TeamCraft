@@ -275,6 +275,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     >
       // One grid row for all banners, so the top bar and the body keep their own rows.
       <div class="app-banners" node_ref=banners>
+        // A minimized call stays in reach in every view (#1141).
+        <crate::components::huddle_bar::MinimizedCallBar />
         <OpenInAppButton />
         <BundleBanner />
         <ReleaseBanner />
@@ -1315,10 +1317,32 @@ pub(crate) fn connect_calls(state: AppState) {
     }
   });
   follow_moved_calls(state);
+  resume_running_call(state);
   Effect::new(move |_| {
     let ringing = state.read(|backend| backend.incoming_calls().first().copied());
     if call.phase.get_untracked() == CallPhase::Idle && call.incoming.get_untracked() != ringing {
       call.incoming.set(ringing);
+    }
+  });
+}
+
+/// A new page finds the call the shell kept running (#824) and shows it again. Only a new page: once
+/// this page has had a call screen, an active call without one is a call being left, which its
+/// next snapshot ends.
+fn resume_running_call(state: AppState) {
+  let call = state.call;
+  let is_new_page = Cell::new(true);
+  Effect::new(move |_| {
+    if !is_new_page.get() {
+      return;
+    }
+    if call.phase.get() != CallPhase::Idle {
+      is_new_page.set(false);
+      return;
+    }
+    if let Some(active) = state.read(|backend| backend.active_call()) {
+      is_new_page.set(false);
+      call.resume(&active);
     }
   });
 }

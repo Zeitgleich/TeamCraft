@@ -576,6 +576,37 @@ impl CallHost {
     }
   }
 
+  /// The page that watched is gone (reloaded, or its web process died): nothing reads its channels
+  /// any more, and frames sent to them would pile up in the shell. Its next page watches again.
+  /// Everything else of the call goes on (#824).
+  pub fn forget_page_watchers(self: &Arc<Self>) {
+    let streams: Vec<MediaStreamId> = lock(&self.video_sinks)
+      .drain()
+      .map(|(stream_id, _)| stream_id)
+      .collect();
+    self.self_view.unwatch_any();
+    self.screen_view.unwatch_any();
+    self.levels.unwatch_any();
+    if streams.is_empty() {
+      return;
+    }
+    let host = Arc::clone(self);
+    tauri::async_runtime::spawn(async move {
+      for stream_id in streams {
+        // The next page may have asked for this track already.
+        if lock(&host.video_sinks).contains_key(&stream_id) {
+          continue;
+        }
+        host
+          .control(Control::Subscribe {
+            stream_id,
+            maybe_max_layer: None,
+          })
+          .await;
+      }
+    });
+  }
+
   /// Stops ringing on this device; the call goes on for the others.
   pub fn decline(&self, conversation: ConversationId) {
     lock(&self.state).view.decline(conversation);
@@ -2326,6 +2357,31 @@ mod tests {
     {
       raw.to_string().parse().unwrap()
     }
+  }
+
+  /// #824: what a page watched goes with the page; the call isn't touched, and the next page's
+  /// watch isn't forgotten.
+  #[tokio::test]
+  async fn a_new_page_starts_without_the_watchers_of_the_last_one() {
+    let host = Arc::new(host());
+    let (stream, sink): (MediaStreamId, VideoSink) = (MediaStreamId(3), Arc::new(|_| {}));
+    host
+      .watch_video(stream, ChannelId(1), None, Arc::clone(&sink))
+      .await;
+    let levels = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = Arc::clone(&levels);
+    host.watch_level(ChannelId(2), move |_| {
+      counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+      true
+    });
+
+    host.forget_page_watchers();
+
+    assert!(lock(&host.video_sinks).is_empty());
+    host.levels.publish(0.5);
+    assert_eq!(levels.load(std::sync::atomic::Ordering::Relaxed), 0);
+    host.watch_video(stream, ChannelId(3), None, sink).await;
+    assert!(lock(&host.video_sinks).contains_key(&stream));
   }
 
   fn host() -> CallHost {

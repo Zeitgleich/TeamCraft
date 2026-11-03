@@ -220,22 +220,26 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Loads the first page of history sent at or after `from_ms` (Unix milliseconds), for "jump to
   /// date" in channels too big to hold locally. Message IDs are snowflakes, so the time is a cursor
-  /// and no scan is needed. The page is merged into the store next to what is already there; the
-  /// messages between this window and the newest ones stay unloaded until the user scrolls to them.
-  /// Returns how many messages arrived.
+  /// and no scan is needed. The page is merged into the store next to what is already there; what
+  /// lies between it and the messages held after it is noted as a hole (`history_gaps.rs`), read
+  /// when the user scrolls there. Returns how many messages arrived.
   pub async fn load_messages_from(
     &mut self,
     conversation: ConversationId,
     from_ms: i64,
   ) -> Result<usize, CoreError> {
+    let cursor = MessageId::from_snowflake(Snowflake::cursor_before(from_ms));
     let query = ListMessagesQuery {
       maybe_before: None,
-      maybe_after: Some(MessageId::from_snowflake(Snowflake::cursor_before(from_ms))),
+      maybe_after: Some(cursor),
       maybe_limit: Some(self.settings.history_page_size),
     };
     let page = self.api.list_messages(conversation, &query).await?;
     let count = page.messages.len();
+    let maybe_oldest = self.oldest_held(conversation)?;
+    let (has_more, maybe_bounds) = (page.has_more, super::history_gaps::bounds(&page.messages));
     self.receive_page(page.messages)?;
+    self.note_jump_page(conversation, cursor, maybe_bounds, has_more, maybe_oldest)?;
     Ok(count)
   }
 

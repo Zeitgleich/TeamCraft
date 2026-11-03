@@ -260,6 +260,27 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.load_older_history(conversation);
   }
 
+  fn request_history_at(&self, conversation: ConversationId, at: i64) {
+    self.chat.request_history_at(conversation, at);
+  }
+
+  fn is_history_loaded(&self, conversation: ConversationId, at: i64) -> bool {
+    self.chat.is_history_loaded(conversation, at)
+  }
+
+  fn history_gaps(&self, conversation: ConversationId) -> Vec<teamcraft_client_api::model::HistoryGap> {
+    self.chat.history_gaps(conversation)
+  }
+
+  fn fill_history_gap(
+    &self,
+    conversation: ConversationId,
+    gap: teamcraft_client_api::model::HistoryGap,
+    edge: teamcraft_client_api::model::GapEdge,
+  ) {
+    self.chat.fill_history_gap(conversation, gap, edge);
+  }
+
   fn prefetch_messages(&self, conversation: ConversationId, start: usize, len: usize) {
     self.chat.prefetch_messages(conversation, start, len);
   }
@@ -1786,4 +1807,155 @@ impl<C: ChatBackend> SecurityBackend for Hybrid<C> {
 
 fn verified_key(user: UserId) -> String {
   format!("teamcraft.verified.{user}")
+}
+
+#[cfg(test)]
+mod tests {
+  use std::cell::RefCell;
+
+  use teamcraft_client_api::model::{GapEdge, HistoryGap, OlderHistory, id_from_raw};
+
+  use super::*;
+  use crate::mock::MockBackend;
+
+  /// Jump to date and the holes it leaves reach the chat backend: web and desktop only find what
+  /// the core reads from the server through them (#1156).
+  #[test]
+  fn history_requests_reach_the_chat() {
+    let hybrid = Hybrid {
+      chat: Rc::new(Recorder::default()),
+      role: Role::Member,
+      maybe_live: None,
+      maybe_admin: None,
+      maybe_calls: None,
+      calls_unavailable: CallsUnavailableReason::NotInThisApp,
+    };
+    let conversation = id_from_raw(7);
+
+    hybrid.request_history_at(conversation, 1_000);
+    assert!(hybrid.is_history_loaded(conversation, 1_000));
+    assert!(!hybrid.is_history_loaded(conversation, 2_000));
+    let gaps = hybrid.history_gaps(conversation);
+    assert_eq!(gaps, vec![Recorder::gap()]);
+    hybrid.fill_history_gap(conversation, gaps[0], GapEdge::Newer);
+
+    assert_eq!(
+      *hybrid.chat.calls.borrow(),
+      ["history at 1000", "fill after 5 from Newer"]
+    );
+  }
+
+  /// A chat that notes the history requests and answers the rest from the mock.
+  struct Recorder {
+    inner: MockBackend,
+    calls: RefCell<Vec<String>>,
+  }
+
+  impl Recorder {
+    fn gap() -> HistoryGap {
+      HistoryGap {
+        after: id_from_raw(5),
+        index: 3,
+        status: OlderHistory::Available,
+      }
+    }
+  }
+
+  impl Default for Recorder {
+    fn default() -> Self {
+      Self {
+        inner: MockBackend::new(0),
+        calls: RefCell::default(),
+      }
+    }
+  }
+
+  impl ChatBackend for Recorder {
+    fn request_history_at(&self, _conversation: ConversationId, at: i64) {
+      self.calls.borrow_mut().push(format!("history at {at}"));
+    }
+
+    fn is_history_loaded(&self, _conversation: ConversationId, at: i64) -> bool {
+      at == 1_000
+    }
+
+    fn history_gaps(&self, _conversation: ConversationId) -> Vec<HistoryGap> {
+      vec![Self::gap()]
+    }
+
+    fn fill_history_gap(&self, _conversation: ConversationId, gap: HistoryGap, edge: GapEdge) {
+      self
+        .calls
+        .borrow_mut()
+        .push(format!("fill after {} from {edge:?}", gap.after));
+    }
+
+    fn me(&self) -> User {
+      self.inner.me()
+    }
+
+    fn user(&self, id: UserId) -> Option<User> {
+      self.inner.user(id)
+    }
+
+    fn users(&self) -> Vec<User> {
+      self.inner.users()
+    }
+
+    fn spaces(&self) -> Vec<Space> {
+      self.inner.spaces()
+    }
+
+    fn space_conversations(&self, space: SpaceId) -> Vec<Conversation> {
+      self.inner.space_conversations(space)
+    }
+
+    fn direct_conversations(&self) -> Vec<Conversation> {
+      self.inner.direct_conversations()
+    }
+
+    fn conversation(&self, id: ConversationId) -> Option<Conversation> {
+      self.inner.conversation(id)
+    }
+
+    fn message_count(&self, conversation: ConversationId) -> usize {
+      self.inner.message_count(conversation)
+    }
+
+    fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
+      self.inner.messages(conversation, start, len)
+    }
+
+    fn thread(&self, conversation: ConversationId, thread: ThreadId) -> Vec<Message> {
+      self.inner.thread(conversation, thread)
+    }
+
+    fn followed_threads(&self) -> Vec<ThreadSummary> {
+      self.inner.followed_threads()
+    }
+
+    fn post_message(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
+      self.inner.post_message(conversation, maybe_thread, body);
+    }
+
+    fn toggle_reaction(&self, conversation: ConversationId, message: MessageId, emoji: &str) {
+      self.inner.toggle_reaction(conversation, message, emoji);
+    }
+
+    fn mark_read(&self, conversation: ConversationId) {
+      self.inner.mark_read(conversation);
+    }
+
+    fn set_favorite(&self, conversation: ConversationId, is_favorite: bool) {
+      self.inner.set_favorite(conversation, is_favorite);
+    }
+
+    fn set_presence(&self, presence: PresenceStatus) {
+      self.inner.set_presence(presence);
+    }
+
+    fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
+      self.inner.set_custom_status(maybe_status);
+    }
+  }
 }

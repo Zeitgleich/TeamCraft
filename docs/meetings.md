@@ -148,6 +148,13 @@ the change, and people taken off the list are removed from the group.
    | A forged or redirected move | The server's `call_move` without a matching announcement shows nothing; a room holding somebody the announcement didn't name is refused.                                                                                     |
    | Two people add at once      | The second move into another room gets 409; that user's app says so and both follow the first room.                                                                                                                          |
    | Server restart mid-move     | Calls and rings live in memory: the ring of the added people is lost, they find the running call in the meeting room.                                                                                                        |
+8. **Adding people in a meeting's call** (#1141): only the organizer changes who is invited, so
+   "Add people" in a meeting's call invites the picked people to the meeting when the organizer
+   presses it (the edit path of the meeting dialog: the invitee list as a whole, then the chat's
+   encryption group from that list, e2ee.md §4.6). They get the meeting's update (and its mail),
+   its chat, and join the running call from Meetings; nothing rings them yet. Anybody else in the
+   call gets the meeting's link to hand out instead: a member who opens it knocks and waits for the
+   organizer (see 6).
 
 ## Repeating meetings
 

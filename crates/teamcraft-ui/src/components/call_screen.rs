@@ -8,6 +8,7 @@ use crate::calls::{
   CallEvent, CallKind, CallLayout, CallRequest, MediaDevice, Participant, ScreenContentMode,
   ScreenShareResolution, ScreenShareSound, selected_camera_is_rear,
 };
+use crate::components::add_to_call::AddPeople;
 use crate::components::call_audio_menu::AudioMenu;
 use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
 use crate::components::call_notetaker::{NotetakerBanner, use_notetaker_in_call};
@@ -71,14 +72,14 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       .find(|tile| tile.participant.as_ref().is_some_and(|p| p.is_sharing_screen))
   });
   let host_open = RwSignal::new(false);
-  let has_meetings = use_context::<crate::meetings::MeetingsHub>().is_some();
+  let maybe_hub = use_context::<crate::meetings::MeetingsHub>();
+  // A DM's call moves into a meeting room with the added people; a meeting's organizer invites
+  // them, anybody else in it hands out its link (#1141).
   let can_add_people = Memo::new(move |_| {
-    has_meetings
+    maybe_hub.is_some()
       && request.kind != CallKind::Huddle
-      && conversation
-        .get()
-        .is_some_and(|conversation| conversation.kind.is_direct_like())
       && state.read(|backend| !backend.has_simulated_calls())
+      && AddPeople::for_call(state, maybe_hub, request.conversation).is_some()
   });
 
   // Real calls report who is speaking; the demo rotates the active speaker among people who are not

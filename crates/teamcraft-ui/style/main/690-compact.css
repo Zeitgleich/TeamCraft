@@ -29,7 +29,10 @@
 /* The visible part of the window: it ends at the on-screen keyboard (viewport.rs). Without the
    keyboard it is pinned to all four edges, not given a height (#709): in an installed web app iOS
    computes `100dvh` (and `100vh`) shorter than the screen, which left an empty band under the tab
-   bar; the edges of the fixed containing block are the screen's in Safari and standalone alike. */
+   bar; the edges of the fixed containing block are the screen's in Safari. An installed iOS app
+   whose layout viewport is still short gets the screen's height in `--vv-height` (viewport.rs,
+   #1222). No `vh` unit here: scripts/check-css.py keeps the shell off them, and the bottom safe
+   area is the tab bar's padding alone. */
 :root[data-layout="compact"] .app {
   position: fixed;
   top: var(--vv-top, 0px);

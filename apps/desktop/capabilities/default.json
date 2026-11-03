@@ -116,6 +116,9 @@
     "allow-update-dismiss",
     "allow-video-playback",
     "allow-open-video-externally",
+    "allow-webview-video-mode",
+    "allow-webview-codec-probe-begin",
+    "allow-webview-codec-probe-end",
     "allow-window-chrome",
     "allow-window-action"
   ]

@@ -157,10 +157,13 @@ together stay below the 33 ms frame budget on average.
 
 ### Cameras larger than the send size (issue #537)
 
-The desktop sender shrinks a camera's frames to the 1280x720 send target on the CPU before the
-effects and encoders (`VideoFrame::scaled`), and each encoder shrinks the lower simulcast layers
-from that the same way. `capture_negotiate` picks the smallest mode at or above 720p, so only
-cameras without one (4K-only, or 1080p-only) pay for it. What that costs, from
+The desktop sender shrinks a camera's frames to the send size on the CPU before the effects and
+encoders (`VideoFrame::scaled`), and each encoder shrinks the lower simulcast layers from that
+the same way. Since #967 the send size is 1080p in Auto quality and 720p when the user caps the
+camera there (`camera_limit`): never more than the camera preset, whatever the camera delivers
+(screen shares have their own limits). `capture_negotiate` picks the smallest mode at or above
+the send size, so only cameras without one pay for the shrink: a 4K-only camera always, a 1080p
+camera when capped at 720p. What that costs, and whether the GPU would do it for less, from
 `crates/teamcraft-media/examples/camera_scaling_bench.rs` (synthetic frames: the moving test
 pattern with sensor noise, as packed YUV like AVFoundation delivers it; no camera needed):
 
@@ -171,71 +174,105 @@ TEAMCRAFT_SEGMENTATION_MODEL=crates/teamcraft-media/models/selfie_segmentation_l
   --features openh264-source,segmentation,gstreamer
 ```
 
-macOS only so far: an Apple M4 Max (10 performance + 4 efficiency cores), macOS 26.6, with other
-work on the machine (load average 3 to 4). 300 frames per row. "CPU" is the process's CPU time
-per frame over all threads (encoder threads, GPU driver), "% core" that time against the 33 ms a
-frame has at 30 fps. Linux and Windows are still to be measured.
+macOS only: an Apple M4 Max (10 performance + 4 efficiency cores), macOS 26.6, GStreamer 1.28,
+with other work on the machine (load average 3.5 to 5.5). 300 frames per row. "CPU" is the
+process's CPU time per frame over all threads (encoder threads, GPU driver), "% core" that time
+against the 33 ms a frame has at 30 fps. **Linux and Windows were not measured**: the scaler and
+the decision below are the same code there, the encoders and GPU drivers are not.
 
-Per stage, before and after the faster scaler and YUYV conversion of #537:
+The GPU column is a wgpu prototype in the bench, what scaling in the effects pipeline would cost:
+the camera's I420 picture uploaded, one compute pass (an area filter, so 4K → 720p wouldn't alias
+like bilinear's one tap in nine; 41 to 57 dB luma PSNR against the CPU's picture) and the
+send-size picture read back for the encoders.
 
-| Stage (CPU per frame)                                    | Before  | After   | After, % core |
-|----------------------------------------------------------|---------|---------|---------------|
-| 4K: copy out of the camera's buffer                      | 0.21 ms | 0.21 ms | 0.6 %         |
-| 4K: YUYV → I420                                          | 2.84 ms | 1.18 ms | 3.5 %         |
-| 4K → 720p, `VideoFrame::scaled`                          | 2.13 ms | 0.85 ms | 2.6 %         |
-| 1080p: YUYV → I420                                       | 0.70 ms | 0.29 ms | 0.9 %         |
-| 1080p → 720p, `VideoFrame::scaled`                       | 2.07 ms | 1.05 ms | 3.1 %         |
-| 720p: YUYV → I420                                        | 0.31 ms | 0.13 ms | 0.4 %         |
-| 720p: the encoders' own layer scaling (720p, 360p, 180p) | 0.68 ms | 0.15 ms | 0.5 %         |
-| Light blur, compositor only (GPU; 0.6 ms latency)        | 0.25 ms | 0.23 ms | 0.7 %         |
-| Segmentation (tract, CPU)                                | 3.07 ms | 3.06 ms | 9.2 %         |
+| Stage                                                      | CPU per frame  | GPU: CPU per frame (latency) |
+|------------------------------------------------------------|----------------|------------------------------|
+| 4K: copy out of the camera's buffer                        | 0.23 ms        |                              |
+| 4K: YUYV → I420                                            | 1.26 ms        |                              |
+| 1080p: YUYV → I420                                         | 0.29 ms        |                              |
+| 720p: YUYV → I420                                          | 0.14 ms        |                              |
+| 4K → 1080p (Auto)                                          | 0.19 ms        | 1.38 ms (2.7 ms)             |
+| 4K → 720p (capped at 720p)                                 | 0.86 ms        | 1.23 ms (1.8 ms)             |
+| 1080p → 720p (capped at 720p), before → after this change  | 1.21 → 0.31 ms | 0.38 ms (0.6 ms)             |
+| 1080p: the encoders' layers (720p, 360p, 180p), before → after | 1.23 → 0.35 ms |                          |
+| 720p: the encoders' layers (360p, 180p)                    | 0.02 ms        |                              |
+| Light blur, compositor only (GPU), 1080p                   | 0.44–0.57 ms   |                              |
+| Light blur, compositor only (GPU), 720p                    | 0.25–0.32 ms   |                              |
+| Segmentation (tract, CPU)                                  | 3.1–3.2 ms     |                              |
 
-The whole send path at 30 fps (copy, YUYV → I420, scaling, the effect with segmentation,
-three-layer simulcast), after the change; latency is the wall time from the camera's buffer to the
-last layer's picture:
+Everything before the encoders (copy, YUYV → I420, the shrink) back to back and paced at 30 fps
+like a camera, where idle cores clock down between frames: 4K in Auto 1.69 ms, 4K capped at 720p
+2.32 ms, 1080p in Auto 0.39 ms, 1080p capped at 720p 0.72 ms, 720p 0.20 ms.
 
-| Camera | Effect | Encoder             | CPU per frame (before) | % core | Latency, average / worst |
-|--------|--------|---------------------|------------------------|--------|--------------------------|
-| 4K     | none   | OpenH264            | 8.2 ms (10.5 ms)       | 24 %   | 8.2 / 25.7 ms            |
-| 4K     | blur   | OpenH264            | 11.4 ms (14.4 ms)      | 34 %   | 12.6 / 15.9 ms           |
-| 4K     | none   | VideoToolbox        | 7.5 ms (8.6 ms)        | 23 %   | 14.8 / 19.9 ms           |
-| 4K     | blur   | VideoToolbox        | 8.9 ms (11.3 ms)       | 27 %   | 16.7 / 22.2 ms           |
-| 1080p  | none   | OpenH264            | 8.0 ms (9.0 ms)        | 24 %   | 8.0 / 16.0 ms            |
-| 1080p  | blur   | OpenH264            | 10.7 ms (11.9 ms)      | 32 %   | 11.8 / 15.5 ms           |
-| 1080p  | none   | VideoToolbox        | 6.3 ms (8.0 ms)        | 19 %   | 14.5 / 37.2 ms           |
-| 1080p  | blur   | VideoToolbox        | 8.4 ms (9.8 ms)        | 25 %   | 16.2 / 21.7 ms           |
-| 720p   | none   | OpenH264            | 7.4 ms (7.8 ms)        | 22 %   | 7.4 / 14.5 ms            |
-| 720p   | blur   | OpenH264            | 10.0 ms (10.3 ms)      | 30 %   | 11.2 / 16.4 ms           |
-| 720p   | none   | VideoToolbox        | 3.5 ms (5.5 ms)        | 11 %   | 12.4 / 28.1 ms           |
-| 720p   | blur   | VideoToolbox        | 8.0 ms (8.6 ms)        | 24 %   | 16.1 / 21.2 ms           |
+The whole send path at 30 fps (copy, YUYV → I420, the shrink, the effect with segmentation, the
+simulcast layers of `camera_layers`: four from 1080p, three from 720p); latency is the wall time
+from the camera's buffer to the last layer's picture. Where the camera is shrunk: CPU scaling,
+then the GPU prototype instead.
 
-What it shows:
+| Camera | Quality | Effect | Encoder      | CPU per frame (CPU / GPU scaling) | % core    | Latency, average (CPU / GPU) |
+|--------|---------|--------|--------------|-----------------------------------|-----------|------------------------------|
+| 4K     | Auto    | none   | OpenH264     | 11.9 / 14.0 ms                    | 36 / 42 % | 11.9 / 15.5 ms               |
+| 4K     | Auto    | blur   | OpenH264     | 14.6 / 15.6 ms                    | 44 / 47 % | 16.4 / 18.9 ms               |
+| 4K     | Auto    | none   | VideoToolbox | 6.6 / 7.8 ms                      | 20 / 23 % | 16.4 / 17.3 ms               |
+| 4K     | Auto    | blur   | VideoToolbox | 7.5 / 7.7 ms                      | 22 / 23 % | 13.9 / 15.2 ms               |
+| 4K     | 720p    | none   | OpenH264     | 5.3 / 9.2 ms                      | 16 / 28 % | 5.3 / 10.7 ms                |
+| 4K     | 720p    | blur   | OpenH264     | 11.4 / 12.7 ms                    | 34 / 38 % | 12.4 / 15.2 ms               |
+| 4K     | 720p    | none   | VideoToolbox | 6.1 / 7.0 ms                      | 18 / 21 % | 10.8 / 13.6 ms               |
+| 4K     | 720p    | blur   | VideoToolbox | 9.5 / 10.6 ms                     | 29 / 32 % | 15.1 / 17.1 ms               |
+| 1080p  | Auto    | none   | OpenH264     | 11.1 ms                           | 33 %      | 11.1 ms                      |
+| 1080p  | Auto    | blur   | OpenH264     | 12.5 ms                           | 38 %      | 14.4 ms                      |
+| 1080p  | Auto    | none   | VideoToolbox | 1.6 ms                            | 5 %       | 5.6 ms                       |
+| 1080p  | Auto    | blur   | VideoToolbox | 5.7 ms                            | 17 %      | 11.3 ms                      |
+| 1080p  | 720p    | none   | OpenH264     | 3.9 / 4.7 ms                      | 12 / 14 % | 3.8 / 5.4 ms                 |
+| 1080p  | 720p    | blur   | OpenH264     | 7.7 / 8.1 ms                      | 23 / 24 % | 8.7 / 9.9 ms                 |
+| 1080p  | 720p    | none   | VideoToolbox | 1.4 / 1.6 ms                      | 4 / 5 %   | 3.4 / 5.0 ms                 |
+| 1080p  | 720p    | blur   | VideoToolbox | 5.2 / 5.6 ms                      | 16 / 17 % | 8.9 / 9.5 ms                 |
+| 720p   | Auto    | none   | OpenH264     | 3.3 ms                            | 10 %      | 3.3 ms                       |
+| 720p   | Auto    | blur   | OpenH264     | 7.5 ms                            | 23 %      | 8.6 ms                       |
+| 720p   | Auto    | none   | VideoToolbox | 0.8 ms                            | 3 %       | 3.5 ms                       |
+| 720p   | Auto    | blur   | VideoToolbox | 4.6 ms                            | 14 %      | 7.8 ms                       |
 
-- Before, the stages a 4K camera adds over a 720p one (the larger copy and conversion, the
-  scaling) cost about 4.9 ms of CPU per frame (15 % of a core), a 1080p camera's about 2.5 ms
-  (7 %). In the whole chain the difference is smaller (2.8 to 4 ms at 4K), since the encoders
-  spend less on a shrunk picture, whose sensor noise the scaling partly averages out. The
-  scaler worked pixel by pixel in 64-bit arithmetic; it now works out the source positions once
-  per row and column, uses 8-bit weights (within one level of the old output, tested), averages
-  2x2 blocks for the halving the simulcast layers do, and reuses source rows neighbouring target
-  rows share. The YUYV conversion goes through whole rows the compiler vectorizes. Now those
-  stages cost about 2.1 ms at 4K (6 % of a core) and 1.2 ms at 1080p (4 %), and every camera,
-  720p included, saves about 0.7 ms on the encoders' layer scaling and the conversion.
-- Scaling adds no noticeable latency (about 1 ms at 4K). The latency is the encoders': OpenH264
-  encodes the three layers in about 7 ms; VideoToolbox waits for each layer's picture in turn
-  (12 to 15 ms) while the CPU idles, as on Linux with VA-API above. Since #990 the layers
-  encode at once.
-- Segmentation (3 ms) is the largest single cost of an effect, the GPU compositor itself is
-  below 1 ms.
-- The hardware rows' CPU time varies by 1 to 2 ms between runs (GStreamer's and VideoToolbox's
-  threads); the OpenH264 rows within a few tenths of a millisecond.
+The VideoToolbox rows vary by up to a factor of two between runs on this machine (GStreamer's and
+VideoToolbox's threads, the other load: two more runs of the no-effect rows gave 1.6 to 4.4 ms for
+1080p in Auto and 3.0 to 5.0 ms for 4K in Auto); the OpenH264 rows stay within a few tenths of a
+millisecond. GPU scaling cost more CPU than CPU scaling in every chain of all three runs.
 
-Not done, since the CPU scaling now costs about 1 ms: asking AVFoundation for the send size
-(`AVCaptureVideoDataOutput`'s `videoSettings` width and height let the hardware scale) needs
-calls nokhwa's bindings don't offer and `unsafe` the workspace forbids; scaling on the GPU in the
-effects pipeline would first upload the full 4K picture (12 MB per frame) and only helps when an
-effect is on. Bilinear shrinking by 3 (4K → 720p) samples one source pixel of nine and can
-alias fine patterns; an area filter would look better at about the same cost, if it shows.
+What it shows, and what was decided:
+
+- **The shrink is not worth moving to the GPU.** On the CPU it costs 0.2 to 0.9 ms per frame (at
+  most 3 % of a core), against 0.4 to 1.4 ms of CPU for the GPU's upload, dispatch and read-back,
+  plus 0.6 to 2.7 ms of latency. The upload is the problem: a 4K picture is 12 MB per frame,
+  written by the CPU whatever the GPU does with it afterwards, while halving it on the CPU (4K →
+  1080p, the Auto case) is a 2x2 average at memory speed. Folding the shrink into the effects
+  pipeline would save the read-back only while an effect is on, and add a GPU round trip to every
+  frame while none is (the usual case). So the shrink stays on the CPU. The camera's own hardware
+  (AVFoundation's `videoSettings` width and height) remains the only cheaper place: nokhwa's
+  bindings don't offer it and the workspace forbids `unsafe`.
+- **What did matter was 1080p → 720p.** It is not a halving, so it went through the general
+  bilinear path at 1.2 ms per frame, and it runs for every 1080p camera: for the encoders' 720p
+  layer in Auto (#967, #978), and as the shrink when capped at 720p. It now has fixed weights like
+  the halving (every three source pixels give two, weighted 3:1 and 1:3; the same pictures to the
+  bit, tested): 1.21 → 0.31 ms, and the 1080p plan's layers 1.23 → 0.35 ms. About 0.9 ms (3 % of a
+  core) less for every 1080p camera in every call, on every platform, and less than the GPU
+  prototype costs.
+- **A 4K camera costs about 1.3 ms of CPU per frame (4 % of a core) more than a 1080p one** before
+  the encoders (paced: 1.69 against 0.39 ms), most of it the YUYV → I420 conversion of 8 million
+  pixels (1.26 ms), not the shrink. In the whole chain it is about 0.8 ms with OpenH264, within
+  the noise with VideoToolbox.
+- Scaling adds no noticeable latency on the CPU (at most 0.9 ms); the latency is the encoders'.
+- Segmentation (3 ms) is still the largest single cost of an effect; the GPU compositor stays
+  below 1 ms of CPU.
+- Where a call's CPU (and battery) goes is the encoder: OpenH264 at 1080p takes 11 ms per frame (a
+  third of a core), VideoToolbox 1.6 to 4.4 ms. Not the shrink.
+
+The first round of #537 (#963), when the send size was still 720p, made the scaler work out the
+source positions once per row and column with 8-bit weights, average 2x2 blocks for halving and
+reuse shared source rows, and made the YUYV conversion go through whole rows: 4K → 720p went from
+2.13 to 0.85 ms, 1080p → 720p from 2.07 to 1.05 ms, 4K YUYV → I420 from 2.84 to 1.18 ms.
+
+Bilinear shrinking by 3 (4K → 720p: only a 4K-only camera capped at 720p) samples one source pixel
+of nine and can alias fine patterns; an area filter (as in the GPU prototype) would look better on
+the CPU at about the same cost, if it shows.
 
 ### What each camera layer sends (issue #967)
 
@@ -506,6 +543,179 @@ Through the real SFU (`screen_layer_bitrate` in the SFU suite, release build wit
 |       | 1440p |   6635 | 537 (8 %)         | 575 (9 %)        | –                      |
 | 720p  | 360p  |    500 | 6428 (1286 %)     | 314 (63 %)       | 480–585 (8 frames)     |
 |       | 720p  |   2000 | 269 (13 %)        | 259 (13 %)       | 334–351                |
+
+### Short bitrate peaks of the encoders (issues #1005, #1205)
+
+The encoders get an average (VideoToolbox for screens, WebCodecs, OpenH264), and a whole new
+picture can send far more than that for a moment. The question was whether those peaks hurt on a
+capped uplink, and so whether a cap is worth what it costs. Measured on Linux (Chrome 156 and
+OpenH264, #1005) and on a Mac (#1205: VideoToolbox, Chrome 156 and Firefox 159 on an Apple M4
+Max, macOS 26.6, GStreamer 1.28.8). **Never run: Safari, the hardware encoders of Windows and
+Android**; the tools below run on them unchanged.
+
+**How.** Bytes per picture from the encoder, as a multiple of what the target bitrate sends in
+the same time: the largest picture (a frame's share of the target), the busiest 100 ms and the
+busiest 1 s after the first second. A model link drains at 1.25 times the layer's target and
+queues 250 ms of itself before it drops a picture (a router's buffer); the report gives the
+longest wait and the pictures dropped. It is a model, not a measured network: what the receiver
+does after a drop (a keyframe request, a freeze) is not in it. Scenes: *typing* (a line being
+typed), *slides* (the whole page changes every 2 s), *scroll* (a fast steady scroll), *camera*
+(a swaying person, sensor noise) and *camera-cut* (the whole scene changes every 3 s).
+
+- Browser: `dev/screen-codec-bench/` (`make_peaks.py`, `server.py`, `peaks_table.py`; Linux with
+  `BENCH_CHROME=/usr/bin/google-chrome`), WebCodecs H.264 as the call configures it, 240 to 300
+  frames at 30 fps.
+- Desktop: `screen_bench` (`--scene slides`; the report ends with the peaks), OpenH264 through
+  the call's `SimulcastEncoder`, 12 s, `--frames every`. It runs the preferred hardware encoder
+  too, on a Mac or with VA-API, by leaving `--encoder` out. `camera_bitrate` reports the same
+  peaks for the camera layers (`examples/common/peaks.rs`).
+- Through the call: `screen_uplink_bursts` in the SFU's tests sends slides through a presenter
+  uplink limited like a bottleneck (250 ms queue), with the real SFU and estimator in between,
+  and times each slide until the viewer shows it.
+
+```sh
+cd dev/screen-codec-bench && python3 make_peaks.py
+BENCH_CHROME=/usr/bin/google-chrome python3 server.py chrome peaks.json peaks.jsonl
+python3 peaks_table.py peaks.jsonl
+cargo run --release -p teamcraft-media --features gstreamer,openh264-source --example screen_bench -- \
+  --profile detail --source 2560x1440 --scene slides --seconds 12 --encoder software
+```
+
+Chrome 156 on Linux (software H.264, `bitrateMode` unset; the layer's own target):
+
+| Scene, layer             |       Target | Largest picture | Busiest 100 ms | Busiest 1 s | Model link: longest wait, dropped |
+|--------------------------|-------------:|----------------:|---------------:|------------:|----------------------------------:|
+| typing, 1440p            |  6636 kbit/s |           < 0.1 |           0.01 |        0.09 |                           0 ms, 0 |
+| slides, 1440p            |  6636 kbit/s |            10.2 |           3.39 |        0.34 |                         250 ms, 3 |
+| scroll, 1440p            |  6636 kbit/s |             2.1 |           1.34 |        1.00 |                          55 ms, 0 |
+| slides, 720p (half size) |  1659 kbit/s |            17.3 |           5.77 |        0.58 |                           0 ms, 4 |
+| scroll, 720p (half size) |  1659 kbit/s |             2.3 |           1.24 |        0.94 |                          62 ms, 0 |
+| slides, 4K               | 14930 kbit/s |             7.9 |           2.64 |        0.27 |                         211 ms, 0 |
+| camera, 720p             |  1500 kbit/s |             0.8 |           0.80 |        0.73 |                          23 ms, 0 |
+| camera, 360p             |   375 kbit/s |             1.3 |           1.15 |        1.02 |                          34 ms, 0 |
+| camera-cut, 720p         |  1500 kbit/s |             7.0 |           3.41 |        0.92 |                         215 ms, 0 |
+| camera-cut, 360p         |   375 kbit/s |             3.3 |           1.76 |        1.08 |                          88 ms, 0 |
+
+OpenH264 through the call's encoder (`screen_bench`, detail profile, a 1440p display, every frame
+encoded, release build):
+
+| Scene, layer             |      Target | Largest picture | Busiest 100 ms | Busiest 1 s | Model link: longest wait, dropped |
+|--------------------------|------------:|----------------:|---------------:|------------:|----------------------------------:|
+| slides, 720p (half size) | 1659 kbit/s |            26.4 |           8.81 |        0.88 |                    0 ms, 3 of 165 |
+| slides, 1440p            | 6636 kbit/s |            14.1 |           4.72 |        0.47 |                  225 ms, 1 of 168 |
+| scroll, 720p (half size) | 1659 kbit/s |            25.5 |           8.49 |        1.38 |                    25 ms, 9 of 18 |
+| scroll, 1440p            | 6636 kbit/s |             0.2 |           0.10 |        0.07 |                    4 ms, 0 of 177 |
+| typing (both layers)     |           – |           < 0.1 |           0.04 |        0.01 |                           0 ms, 0 |
+
+On a Mac (#1205). VideoToolbox through the call's encoder (`screen_bench`, detail profile, a 1440p
+display, 12 s; `camera_bitrate calm`, a 1080p camera's four layers at a constant bitrate):
+
+| Encoder, scene, layer                     |      Target | Largest picture | Busiest 100 ms | Busiest 1 s | Model link: longest wait, dropped |
+|-------------------------------------------|------------:|----------------:|---------------:|------------:|----------------------------------:|
+| VideoToolbox, slides, 720p                | 1659 kbit/s |            28.2 |          10.94 |        1.61 |                   7 ms, 16 of 331 |
+| VideoToolbox, slides, 1440p               | 6636 kbit/s |            17.3 |           6.11 |        0.62 |                  145 ms, 1 of 331 |
+| VideoToolbox, slides, 720p, changes only  | 1659 kbit/s |            19.7 |           6.56 |        0.67 |                    15 ms, 6 of 12 |
+| VideoToolbox, slides, 1440p, changes only | 6636 kbit/s |             5.5 |           1.83 |        0.21 |                   146 ms, 0 of 12 |
+| VideoToolbox, scroll, 720p                | 1659 kbit/s |             5.5 |           2.77 |        1.03 |                  158 ms, 0 of 331 |
+| VideoToolbox, scroll, 1440p               | 6636 kbit/s |            17.3 |           6.27 |        0.72 |                   30 ms, 1 of 331 |
+| VideoToolbox, typing, 720p / 1440p        |           – |     28.0 / 17.5 |    9.41 / 6.15 |  0.96 / 0.63 |     6 / 23 ms, 1 of 331 each |
+| VideoToolbox, typing, changes only (both) |           – |           ≤ 0.1 |         ≤ 0.03 |      ≤ 0.01 |                           0 ms, 0 |
+| VideoToolbox camera, 180p                 |   94 kbit/s |             6.6 |           2.87 |        1.23 |                  175 ms, 0 of 331 |
+| VideoToolbox camera, 360p                 |  375 kbit/s |             3.8 |           1.97 |        1.13 |                  102 ms, 0 of 331 |
+| VideoToolbox camera, 720p                 | 1500 kbit/s |             3.5 |           1.83 |        1.12 |                   93 ms, 0 of 331 |
+| VideoToolbox camera, 1080p                | 3000 kbit/s |             2.4 |           1.50 |        1.10 |                   63 ms, 0 of 331 |
+
+The largest picture of a still screen with every frame encoded (typing) is the keyframe a rebuild
+of the quality governor starts with; with only changed pictures (`--frames changes`, as
+ScreenCaptureKit delivers them) nothing is rebuilt. A slide show with every frame encoded (the
+worst case) makes the governor rebuild the 720p layer on most slide changes (11 keyframes in
+12 s): the one row above 1.4 times the target in a second.
+
+Chrome 156 and Firefox 159 on the Mac (`make_peaks.py`, `bitrateMode` unset; Chrome's encoder is
+VideoToolbox, Firefox's by its sizes too):
+
+| Scene, layer     |       Target | Chrome: largest, 100 ms, 1 s, link wait | Firefox: largest, 100 ms, 1 s, link wait |
+|------------------|-------------:|----------------------------------------:|-----------------------------------------:|
+| typing, 1440p    |  6636 kbit/s |                   0.1, 0.05, 0.49, 2 ms |                    0.1, 0.05, 0.49, 2 ms |
+| slides, 1440p    |  6636 kbit/s |                 8.8, 2.97, 0.49, 235 ms |                  8.7, 2.95, 0.48, 233 ms |
+| scroll, 1440p    |  6636 kbit/s |                  2.0, 1.30, 0.96, 53 ms |                   2.2, 1.34, 0.99, 60 ms |
+| slides, 720p     |  1659 kbit/s |         17.0, 5.72, 0.88, 91 ms, 4 lost |          17.0, 5.72, 0.77, 99 ms, 4 lost |
+| scroll, 720p     |  1659 kbit/s |                  2.8, 1.30, 0.95, 74 ms |                   2.5, 1.22, 0.91, 66 ms |
+| slides, 4K       | 14930 kbit/s |                 7.3, 2.47, 0.40, 195 ms |                  7.3, 2.47, 0.40, 194 ms |
+| camera, 720p     |  1500 kbit/s |                  1.1, 1.04, 1.01, 28 ms |       0.2, 0.16, 0.15, 4 ms (202 kbit/s) |
+| camera-cut, 720p |  1500 kbit/s |                  2.4, 1.44, 1.04, 63 ms |                   3.1, 1.69, 1.01, 84 ms |
+| camera-cut, 360p |   375 kbit/s |                  2.8, 1.64, 1.05, 75 ms |                   2.9, 1.53, 1.05, 79 ms |
+
+Through the call (`screen_uplink_bursts`, release build; slides of text at a Retina display's
+size fitted into 1440p, a change every 2 s, the first 8 s left out; the time until the viewer
+shows each slide):
+
+| Presenter's uplink   | VideoToolbox | OpenH264 | Dropped at the bottleneck (VideoToolbox / OpenH264) |
+|----------------------|-------------:|---------:|----------------------------------------------------:|
+| unlimited            |        16 ms |   177 ms |                                                   0 |
+| 20 Mbit/s            |        62 ms |   233 ms |                                                   0 |
+| 12 Mbit/s            |        94 ms |   271 ms |                                                   0 |
+| 10 Mbit/s            |       110 ms |   310 ms |                                                   0 |
+| 4 Mbit/s (720p only) |       217 ms |   205 ms |                                       5.7 % / 0.6 % |
+
+The share's two layers ask for 8.3 Mbit/s. At 10 to 20 Mbit/s a slide costs the time its picture
+takes on the link and nothing is lost. At 4 Mbit/s the top layer stops; what the bottleneck
+dropped there were the top layer's keyframes when the uplink tried it again, not a peak of the
+720p layer (its slides came within 0.22 s). A debug build with OpenH264 at 12 Mbit/s: 350 ms,
+nothing dropped.
+
+What it shows:
+
+- **The peaks are the new picture, not the rate control.** A slide change, a cut or the half-size
+  layer of a scroll (which re-keys when it can't follow the motion) sends a picture of 7 to 26 times
+  a frame's share, 2.6 to 8.8 times the target in 100 ms, and at most 1.4 times in a second. The
+  picture is what it takes to draw the new content; steady content (a typed line, a calm camera,
+  a scroll at the top layer) stays at or just above the target in every window (camera 360p: 1.15 times
+  in 100 ms, the encoder's own overshoot).
+- **On a link with a quarter of headroom and a 250 ms queue** a slide change waits 210 to 250 ms
+  in the queue and drops up to four pictures (the 720p layer's picture, 17 times a frame's share, does
+  not fit the queue at all); a camera cut waits 90 to 215 ms. Nothing else drops anything. A viewer
+  sees the slide late by a quarter second, or gets a keyframe request; the window is short and the
+  next picture repairs it. The model does not tell what a real network does after a drop.
+- **A cap would spend sharpness for this.** The bytes of a new slide are the bytes of its sharp
+  text: a 1440p slide is about 10 times a frame's share of the layer (6636 kbit/s / 30 fps = 27.7 kB,
+  so about 280 kB). A cap at 1.5 times the target per second (the issue's figure) would hold that
+  back for roughly a second, and the text stays blurred for as long as the picture is spread out.
+  The call also reacts to a congested uplink another way already: the layers' allocation
+  (`uplink_layers`) and the estimator's probing margin are sized so that a keyframe's queue
+  doesn't push a layer off (#939).
+- **`bitrateMode` made no difference in Chrome's software encoder.** The runs with it unset, with
+  `"variable"` and with `"constant"` sent the same rate (within 0.6 %) and the same peaks (within
+  0.3 in the ratios, the 720p scroll the only one that moved at all). On the Mac, Chrome's
+  hardware encoder and Firefox sent byte for byte the same in all three modes, in every scene
+  (Firefox also ignored `hardwareAcceleration` in an earlier run). Safari is not measured. The
+  call leaves `bitrateMode` unset. Were it
+  set, a browser that refuses it must fall back through `VideoEncoder.isConfigSupported` rather than fail the call
+  (the bench does: a refused config is reported as unsupported).
+- **Keyframes** cost the same sharpness as the pictures after them in the software encoder: no
+  cap, so nothing to turn blurry. The bench's PSNR column is not comparable on Linux (a constant
+  22.4 dB in every run, a colour-range offset of the software decoder's output) nor in Firefox
+  (9 to 15 dB: its decoded pictures aren't read right), so sharpness is judged from
+  `screen_sharpness` and the tables above, which this change does not touch. Chrome's hardware
+  encoder on the Mac makes its keyframes blurrier by itself: with one every 1.5 s, 42.5 dB against
+  51.8 dB for the pictures after them (1440p, typing and slides).
+- **VideoToolbox's data rate limits** (`data-rate-limits`, `kVTCompressionPropertyKey_DataRateLimits`)
+  are a property of the `vtenc_h264` element and need no native call, but they cap nothing.
+  GStreamer sets them only at an average bitrate (it leaves them out at a constant one, the
+  cameras'), and there a screen share's slides sent the same with 1.5 times the target per
+  second or 1 times per 200 ms as without (720 to 724 kbit/s for the 720p layer, the same
+  keyframes; `GST_DEBUG=vtenc:5` shows them accepted), as #979 found: with `quality` set, which
+  GStreamer always does, VideoToolbox ignores rate limits. Cameras need none: at a constant
+  bitrate no second sends more than 1.23 times the target. Screens have the quality governor.
+
+So there is **no cap**: the peaks are one picture long, at most a quarter second on a link that is barely
+above the layer's target, and the encoders' average over a second stays at or near the target.
+Through the call, a limited uplink that carries the share delays a slide by the time its picture
+takes on the link and loses nothing.
+A cap would blur the slide it is meant to deliver, for a problem the uplink allocation already
+handles.
+
+Cost on the call's hot path: none, no runtime code changed (the bench and its examples only).
 
 ### Each picture with its own frame (issue #990)
 

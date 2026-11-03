@@ -35,6 +35,19 @@ impl CallLayout {
   }
 }
 
+/// How the desktop page shows call video, as far as its webview can be trusted with it (#824). In
+/// order of what is left: each step takes more away after a crash of the web process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebviewVideoMode {
+  /// WebCodecs where it decodes the track, JPEG images from the shell where it doesn't.
+  Automatic,
+  /// JPEG images from the shell for every track: no WebCodecs in the page.
+  Images,
+  /// No video in the page; the call goes on without its pictures.
+  Off,
+}
+
 /// Background shown behind the user's camera image (applied on the device, before encoding).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

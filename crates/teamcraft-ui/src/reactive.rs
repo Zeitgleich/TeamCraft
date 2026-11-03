@@ -220,6 +220,10 @@ pub async fn pause(duration: std::time::Duration) {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::atomic::AtomicUsize;
+
+  use leptos::reactive::effect::ImmediateEffect;
+
   use super::*;
 
   /// Issue #322: an upload or a core answer finishes after its component was unmounted.
@@ -231,6 +235,54 @@ mod tests {
     value.set_if_alive(2);
     list.update_if_alive(|list| list.push(3));
     assert_eq!(value.try_get_untracked(), None);
+  }
+
+  /// #1203: `track()` on a `Memo` does not compute it. A memo nobody reads has no sources, so a
+  /// change of its inputs never reaches the effect that only tracked it (the cause of #1196).
+  #[test]
+  fn tracking_a_memo_nobody_reads_never_wakes_the_effect() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let input = RwSignal::new(0_u32);
+      let memo = Memo::new(move |_| input.get() % 2);
+      let runs = Arc::new(AtomicUsize::new(0));
+      let counted = Arc::clone(&runs);
+      let _effect = ImmediateEffect::new_isomorphic(move || {
+        memo.track();
+        counted.fetch_add(1, Ordering::Relaxed);
+      });
+      input.set(1);
+      assert_eq!(runs.load(Ordering::Relaxed), 1, "ran at mount only");
+    });
+  }
+
+  /// The fix for the case above, and the other common shapes that are fine.
+  #[test]
+  fn reading_a_memo_in_the_effect_or_elsewhere_wakes_it() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let input = RwSignal::new(0_u32);
+      let memo = Memo::new(move |_| input.get() % 2);
+      let runs_read = Arc::new(AtomicUsize::new(0));
+      let runs_tracked = Arc::new(AtomicUsize::new(0));
+      let counted = Arc::clone(&runs_read);
+      let _read = ImmediateEffect::new_isomorphic(move || {
+        let _ = memo.get();
+        counted.fetch_add(1, Ordering::Relaxed);
+      });
+      // Another reader computes the memo, so a plain `track()` is enough from then on.
+      let counted = Arc::clone(&runs_tracked);
+      let _tracked = ImmediateEffect::new_isomorphic(move || {
+        memo.track();
+        counted.fetch_add(1, Ordering::Relaxed);
+      });
+      input.set(1);
+      assert_eq!(runs_read.load(Ordering::Relaxed), 2);
+      assert_eq!(runs_tracked.load(Ordering::Relaxed), 2);
+      // The memo's value did not change: the effects stay quiet.
+      input.set(3);
+      assert_eq!(runs_read.load(Ordering::Relaxed), 2);
+    });
   }
 
   /// A Back press after signing in again reached the signed-out shell's `popstate` handler.

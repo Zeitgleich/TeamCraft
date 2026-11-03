@@ -15,9 +15,10 @@
 //! viewers on weak links take them). Before, the top layer stopped as soon as its whole bitrate
 //! didn't fit: a 500 kbit/s uplink sent 320×180 at about 80 kbit/s, a 2 Mbit/s one 640×360.
 //! A share changes only after a hold ([`UplinkPolicy::share_downswitch_hold`],
-//! [`UplinkPolicy::share_upswitch_hold`]; each change rebuilds the encoder, which starts with a
-//! keyframe), and such a camera climbs back one step at a time: an estimate that grew while the
-//! uplink carried less is no proof that it carries every layer at once.
+//! [`UplinkPolicy::share_upswitch_hold`]; on the desktop each change rebuilds the encoder, which
+//! starts with a keyframe, while the browser's WebCodecs encoders change their rate in place), and
+//! such a camera climbs back one step at a time: an estimate that grew while the uplink carried
+//! less is no proof that it carries every layer at once.
 //!
 //! Pure policy: the call engine feeds estimates and its tracks, and asks which layers may be sent.
 

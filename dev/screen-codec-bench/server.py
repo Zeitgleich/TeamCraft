@@ -25,7 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 browser, runs_path, results_path = sys.argv[1], sys.argv[2], sys.argv[3]
 mode = sys.argv[4] if len(sys.argv) > 4 else 'bench'
 runs = json.load(open(runs_path)) if runs_path != '-' else []
-profile = os.path.join(HERE, f'profile-{browser}')
+profile = os.environ.get('BENCH_PROFILE_DIR') or os.path.join(HERE, f'profile-{browser}')
 os.makedirs(profile, exist_ok=True)
 state = {'root': None, 'cpu_at_start': None, 'done': threading.Event()}
 
@@ -109,14 +109,17 @@ server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 port = server.server_address[1]
 threading.Thread(target=server.serve_forever, daemon=True).start()
 url = f'http://127.0.0.1:{port}/bench.html?mode={mode}'
+# Browser binaries: macOS app bundles, or BENCH_CHROME / BENCH_FIREFOX (a Linux install).
+CHROME = os.environ.get('BENCH_CHROME', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')
+FIREFOX = os.environ.get('BENCH_FIREFOX', '/Applications/Firefox.app/Contents/MacOS/firefox')
 if browser == 'chrome':
-    command = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '--headless=new',
+    command = [CHROME, '--headless=new',
                f'--user-data-dir={profile}', '--no-first-run', '--no-default-browser-check', url]
 elif browser == 'chrome-gui':
-    command = ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    command = [CHROME,
                f'--user-data-dir={profile}', '--no-first-run', '--no-default-browser-check', url]
 else:
-    command = ['/Applications/Firefox.app/Contents/MacOS/firefox', '--headless', '--no-remote',
+    command = [FIREFOX, '--headless', '--no-remote',
                '--profile', profile, url]
 process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 state['root'] = process.pid

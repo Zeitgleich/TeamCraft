@@ -39,6 +39,7 @@ mod webview_downloads;
 #[cfg(target_os = "linux")]
 mod webview_memory;
 mod webview_menu;
+mod webview_recovery;
 #[cfg(target_os = "linux")]
 mod webview_scrolling;
 mod window_chrome;
@@ -49,7 +50,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use tauri::path::BaseDirectory;
-use tauri::webview::NewWindowResponse;
+use tauri::webview::{NewWindowResponse, PageLoadEvent};
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use teamcraft_client_api::remote::CORE_FAILED_EVENT;
@@ -64,6 +65,7 @@ use crate::core::commands::CoreHost;
 use crate::dropped_files::DroppedFilesState;
 use crate::shell_prefs::ShellPrefsState;
 use crate::updates::UpdateHost;
+use crate::webview_recovery::WebviewRecovery;
 use crate::window_chrome::WindowChromeState;
 
 fn main() -> anyhow::Result<()> {
@@ -92,6 +94,8 @@ fn main() -> anyhow::Result<()> {
     .plugin(tauri_plugin_deep_link::init());
   #[cfg(windows)]
   let builder = windows_shell::plugins(builder);
+  #[cfg(target_os = "macos")]
+  let builder = builder.on_web_content_process_terminate(webview_recovery::on_process_terminated);
   // "Start at login" as a LaunchAgent that starts the app in the tray (autostart.rs).
   #[cfg(target_os = "macos")]
   let builder = builder.plugin(tauri_plugin_autostart::init(
@@ -131,6 +135,7 @@ fn main() -> anyhow::Result<()> {
     .manage(CoreHost::new(tokens))
     .manage(Arc::new(DroppedFilesState::default()))
     .setup(move |app| {
+      app.manage(Arc::new(WebviewRecovery::for_this_system(app.handle())));
       vault.set_directory(&core::commands::base_dir(app.handle())?);
       app.manage(vault);
       let servers = Arc::new(ServerState::new(
@@ -201,6 +206,11 @@ fn main() -> anyhow::Result<()> {
       watch_native_network(app.handle());
       deep_links::collect(app.handle());
       Ok(())
+    })
+    .on_page_load(|webview, payload| {
+      if webview.label() == tray::MAIN_WINDOW && payload.event() == PageLoadEvent::Started {
+        webview_recovery::page_started(webview.app_handle());
+      }
     })
     .on_window_event(|window, event| {
       if let WindowEvent::Resized(_) = event
@@ -340,6 +350,9 @@ fn main() -> anyhow::Result<()> {
       updates::update_dismiss,
       video_playback::video_playback,
       video_playback::open_video_externally,
+      webview_recovery::webview_video_mode,
+      webview_recovery::webview_codec_probe_begin,
+      webview_recovery::webview_codec_probe_end,
       window_chrome::window_chrome,
       window_chrome::window_action,
     ])
@@ -447,6 +460,7 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
       webview_memory::configure(&webview);
       webview_scrolling::configure(&webview);
       webview_menu::filter_menus(&webview);
+      webview_recovery::watch(&webview, handle.clone());
       dropped_files::watch(&webview, dropped, handle);
     });
     if let Err(error) = configured {

@@ -5,18 +5,25 @@
 //! ```sh
 //! cargo run --release -p teamcraft-media --features gstreamer,openh264-source \
 //!   --example screen_bench -- [--profile detail|motion|detail-4k|motion-4k] \
-//!   [--source 3840x2160] [--scene still|scroll] [--seconds 10] [--encoder preferred|software] \
+//!   [--source 3840x2160] [--scene still|scroll|slides] [--seconds 10] [--encoder preferred|software] \
 //!   [--frames every|changes]
 //! ```
 //!
 //! `--source` is the display's size in pixels (default 3840x2160, a 4K display); the profile
 //! shrinks it to its limits. `--scene still` is a page of text where one line is typed (a
-//! character every few frames, a blinking cursor), `scroll` the page scrolling steadily. With
+//! character every few frames, a blinking cursor), `scroll` the page scrolling steadily, `slides` the page jumping to a
+//! part nothing like the last every 2 seconds (a slide change: the whole picture is new). With
 //! `--frames every` (the default) every frame is encoded, at the profile's frame rate: the worst
 //! case. `--frames changes` encodes only frames that differ from the last one, plus the last one
 //! again after a second without change, as a share does (the capture delivers changes only, and
 //! the encoder thread refreshes a still screen, `video_pipeline::SCREEN_IDLE_REFRESH`). `--encoder preferred` (the default) encodes as the call does
 //! (VideoToolbox, VA-API), `software` with OpenH264.
+//!
+//! The report also gives each layer's peaks against its target (issue #1005): its largest picture
+//! and its busiest 100 ms and 1 s window, as a multiple of what the target bitrate sends in that
+//! time, from the pictures' sizes by capture time. A multiple of 1 is a layer that never sends more
+//! than its bitrate in the window; the keyframe a layer starts with is left out (the warm-up). The
+//! code is `common/peaks.rs`, shared with `camera_bitrate`.
 //!
 //! The report gives the encoding's cost per frame (the process's CPU time over all threads, the
 //! hardware encoder's included, and the wall time), each layer's bitrate against its target and
@@ -35,8 +42,14 @@ use teamcraft_media::video_pipeline::{
 use teamcraft_proto::{ScreenContentMode, ScreenShareResolution, VideoLayerInfo};
 use tracing::info;
 
+#[path = "common/peaks.rs"]
+mod peaks;
+use peaks::peaks_report;
+
 /// Left out of the rates and costs: the first keyframes and the rate control settling.
 const WARM_UP: Duration = Duration::from_secs(1);
+/// Frames of a slide in the `slides` scene.
+const SLIDE_FRAMES: usize = 60;
 /// Every this many pictures of a layer is compared with its source (PSNR).
 const PSNR_EVERY: u64 = 10;
 /// An encoder may give a frame's picture a frame or two later: the best match of the last few
@@ -54,7 +67,7 @@ fn main() -> anyhow::Result<()> {
     width: 3840,
     height: 2160,
   };
-  let mut is_scrolling = false;
+  let mut scene = Scene::Still;
   let mut seconds = 10u64;
   let mut encoder = "preferred".to_owned();
   let mut is_changes_only = false;
@@ -62,7 +75,7 @@ fn main() -> anyhow::Result<()> {
     match (argument.as_str(), arguments.next()) {
       ("--profile", Some(value)) => profile = parse_profile(&value)?,
       ("--source", Some(value)) => source = parse_size(&value)?,
-      ("--scene", Some(value)) => is_scrolling = parse_scene(&value)?,
+      ("--scene", Some(value)) => scene = parse_scene(&value)?,
       ("--seconds", Some(value)) => seconds = value.parse().context("--seconds takes a number")?,
       ("--encoder", Some(value)) => encoder = value,
       ("--frames", Some(value)) => is_changes_only = parse_frames(&value)?,
@@ -95,7 +108,7 @@ fn main() -> anyhow::Result<()> {
     }
     // When the frame was due, as a capture stamps it, also when the encoding runs late.
     let timestamp_us = u64::try_from((interval * u32::try_from(index)?).as_micros())?;
-    let frame = page.frame(index, is_scrolling, timestamp_us)?;
+    let frame = page.frame(index, scene, timestamp_us)?;
     index += 1;
     let is_unchanged = maybe_last.as_ref().is_some_and(|(last, encoded_at)| {
       last.data() == frame.data() && encoded_at.elapsed() < SCREEN_IDLE_REFRESH
@@ -121,11 +134,19 @@ fn parse_profile(value: &str) -> anyhow::Result<ScreenProfile> {
   Ok(ScreenProfile { mode, size })
 }
 
-fn parse_scene(value: &str) -> anyhow::Result<bool> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scene {
+  Still,
+  Scroll,
+  Slides,
+}
+
+fn parse_scene(value: &str) -> anyhow::Result<Scene> {
   match value {
-    "still" => Ok(false),
-    "scroll" => Ok(true),
-    other => bail!("unknown scene {other}; use still or scroll"),
+    "still" => Ok(Scene::Still),
+    "scroll" => Ok(Scene::Scroll),
+    "slides" => Ok(Scene::Slides),
+    other => bail!("unknown scene {other}; use still, scroll or slides"),
   }
 }
 
@@ -206,18 +227,19 @@ impl Page {
 
   /// The screen at frame `index`: the page scrolled by a line every half second, or still with a
   /// line being typed.
-  fn frame(&self, index: u64, is_scrolling: bool, timestamp_us: u64) -> anyhow::Result<VideoFrame> {
+  fn frame(&self, index: u64, scene: Scene, timestamp_us: u64) -> anyhow::Result<VideoFrame> {
     let (width, height) = (usize::from(self.size.width), usize::from(self.size.height));
-    let offset = if is_scrolling {
-      (index as usize * self.line_height / 15) % (self.rows.len() - height)
-    } else {
-      0
+    let offset = match scene {
+      Scene::Scroll => (index as usize * self.line_height / 15) % (self.rows.len() - height),
+      // Two seconds at 30 fps; a jump of 1.37 screens, so the next picture shares no line.
+      Scene::Slides => (index as usize / SLIDE_FRAMES * (height * 11 / 8)) % (self.rows.len() - height),
+      Scene::Still => 0,
     };
     let mut data = Vec::with_capacity(width * height * 3 / 2);
     for row in &self.rows[offset..offset + height] {
       data.extend_from_slice(row);
     }
-    if !is_scrolling {
+    if scene == Scene::Still {
       // A line being typed: a character every fourth frame, a cursor blinking twice a second.
       let typed = (index / 4 % 80) as usize;
       let glyph = (self.line_height * 7 / 19).max(3);
@@ -261,6 +283,8 @@ struct LayerTally {
   keyframes: u64,
   psnr_sum: f64,
   psnr_samples: u64,
+  /// Capture time (microseconds) and size of each steady picture, for the peaks.
+  steady_sizes: Vec<(u64, usize)>,
 }
 
 /// The share's encoders as the call runs them, and what they cost and sent.
@@ -316,6 +340,9 @@ impl Encoding {
       if is_steady {
         tally.steady_pictures += 1;
         tally.steady_bytes += picture.data.len() as u64;
+        tally
+          .steady_sizes
+          .push((frame.timestamp_us(), picture.data.len()));
       }
       let maybe_decoded = match self.decoders.get_mut(&picture.layer.value()) {
         Some(decoder) => decoder.decode(&picture.data, frame.timestamp_us())?,
@@ -365,8 +392,9 @@ fn report(encoding: &Encoding, framerate: u8) {
     } else {
       "-".to_owned()
     };
+    let peaks = peaks_report(&tally.steady_sizes, layer.max_bitrate_bps, framerate);
     info!(
-      "{:<6} {:>10} {:>7.0} kb/s {:>7.0} kb/s {:>6.1} {:>10} {:>8}",
+      "{:<6} {:>10} {:>7.0} kb/s {:>7.0} kb/s {:>6.1} {:>10} {:>8} {}",
       layer.layer,
       format!("{}x{}", layer.width, layer.height),
       f64::from(layer.max_bitrate_bps) / 1000.0,
@@ -374,6 +402,7 @@ fn report(encoding: &Encoding, framerate: u8) {
       tally.steady_pictures as f64 / steady_seconds,
       tally.keyframes,
       psnr,
+      peaks,
     );
   }
 }

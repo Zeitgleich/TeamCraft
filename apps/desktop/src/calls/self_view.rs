@@ -139,6 +139,11 @@ impl SelfView {
     self.watchers.fetch_add(1, Ordering::Relaxed);
   }
 
+  /// Stops whichever watcher there is.
+  pub(crate) fn unwatch_any(&self) {
+    *self.lock() = None;
+  }
+
   /// Stops the watcher of `channel`; a newer watcher (another channel) stays.
   pub(crate) fn unwatch(&self, channel: ChannelId) {
     let mut maybe_viewer = self.lock();
@@ -527,6 +532,19 @@ mod tests {
     self_view.unwatch(ChannelId(1));
     filter(gray_frame(1_000_000));
     assert!(received.recv_timeout(Duration::from_secs(10)).is_ok());
+  }
+
+  /// #824: a dead page's channel gets nothing more, and its thread ends.
+  #[test]
+  fn unwatching_any_ends_the_watcher_of_a_page_that_is_gone() {
+    let self_view = SelfView::default();
+    let mut filter = self_view.filter(None);
+    let (sent, received) = std_mpsc::channel();
+    self_view.watch(ChannelId(1), move |message| sent.send(message).is_ok());
+    self_view.unwatch_any();
+    filter(gray_frame(1_000_000));
+    // The sender went with the thread, and no image came before it.
+    assert_eq!(received.recv(), Err(std_mpsc::RecvError));
   }
 
   #[test]

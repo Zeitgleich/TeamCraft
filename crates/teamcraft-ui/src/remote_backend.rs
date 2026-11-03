@@ -25,9 +25,9 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::model::{
-  Conversation, ConversationId, CustomStatus, InviteId, JoinableSpace, Message, MessageId, PendingInvite,
-  PresenceStatus, Space, SpaceId, SpaceRole, SpaceRoster, ThreadId, ThreadSummary, UnseenReactions, User,
-  UserId,
+  Conversation, ConversationId, CustomStatus, GapEdge, HistoryGap, InviteId, JoinableSpace, Message,
+  MessageId, OlderHistory, PendingInvite, PresenceStatus, Space, SpaceId, SpaceRole, SpaceRoster, ThreadId,
+  ThreadSummary, UnseenReactions, User, UserId,
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
@@ -266,6 +266,22 @@ struct Feed {
   /// A page of older history was asked for and no answer read since says how that stands. What is
   /// cached from before still says "available", and asking again on it would read on and on.
   is_asking_older: bool,
+  /// A page of a hole in the history was asked for and hasn't moved the rows yet (#1156): its rows
+  /// arrive among the rows held, not before them.
+  maybe_gap_rows: Option<GapRows>,
+  /// A page of a hole was asked for and no answer read since says how that stands, as
+  /// [`Self::is_asking_older`].
+  is_asking_gap: bool,
+}
+
+/// Where the rows of a hole's page arrive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GapRows {
+  /// The rows from here on move.
+  index: usize,
+  /// They arrive before what the reader looks at, read from the hole's newer side: they count as
+  /// prepended, so the reader's rows stay where they are.
+  is_before_reader: bool,
 }
 
 struct Mirror {
@@ -376,18 +392,28 @@ impl Feed {
       .find_map(|(index, row)| places.get(&row.id).map(|place| place.saturating_sub(*index)))
   }
 
-  /// `shift` rows arrived before the rows held: they and the pages read follow.
+  /// `shift` rows arrived before the rows held, or with a hole's page asked for, among them: the
+  /// rows after them and the pages read follow.
   fn move_rows(&mut self, shift: usize) {
     if shift == 0 {
       return;
     }
+    let GapRows {
+      index: from,
+      is_before_reader,
+    } = self.maybe_gap_rows.take().unwrap_or(GapRows {
+      index: 0,
+      is_before_reader: true,
+    });
     self.rows = std::mem::take(&mut self.rows)
       .into_iter()
-      .map(|(index, row)| (index + shift, row))
+      .map(|(index, row)| (if index >= from { index + shift } else { index }, row))
       .collect();
-    self.read_pages = moved_pages(&self.read_pages, shift);
-    self.shown_pages = moved_pages(&self.shown_pages, shift);
-    self.prepended += shift;
+    self.read_pages = moved_pages(&self.read_pages, from, shift);
+    self.shown_pages = moved_pages(&self.shown_pages, from, shift);
+    if is_before_reader {
+      self.prepended += shift;
+    }
   }
 
   fn store(&mut self, window: MessageWindow) -> bool {
@@ -451,11 +477,16 @@ impl Feed {
   }
 }
 
-/// Where the rows of `pages` are once `shift` rows arrived before them.
-fn moved_pages(pages: &BTreeSet<usize>, shift: usize) -> BTreeSet<usize> {
+/// Where the rows of `pages` are once `shift` rows arrived at `from`: those before it stay.
+fn moved_pages(pages: &BTreeSet<usize>, from: usize, shift: usize) -> BTreeSet<usize> {
   pages
     .iter()
-    .flat_map(|page| (page * PAGE + shift) / PAGE..=((page + 1) * PAGE - 1 + shift) / PAGE)
+    .flat_map(|page| {
+      let (start, end) = (page * PAGE, (page + 1) * PAGE - 1);
+      let maybe_stays = (start < from).then_some(*page);
+      let maybe_moves = (end >= from).then(|| (start.max(from) + shift) / PAGE..=(end + shift) / PAGE);
+      maybe_stays.into_iter().chain(maybe_moves.into_iter().flatten())
+    })
     .collect()
 }
 
@@ -705,7 +736,8 @@ impl RemoteChat {
         if applied.touches(*conversation)
           && let Some(total) = mirror.snapshot.message_count(*conversation)
         {
-          let is_jump = total > feed.total + 1 || (feed.is_expecting_older && total > feed.total);
+          let is_expecting = feed.is_expecting_older || feed.maybe_gap_rows.is_some();
+          let is_jump = total > feed.total + 1 || (is_expecting && total > feed.total);
           if feed.is_used && !feed.rows.is_empty() && is_jump {
             feed.is_moving = true;
             plan.moved.push((*conversation, total));
@@ -2066,6 +2098,78 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn request_history_at(&self, conversation: ConversationId, at: i64) {
+    self.act(ChatAction::RequestHistoryAt { conversation, at });
+  }
+
+  fn is_history_loaded(&self, conversation: ConversationId, at: i64) -> bool {
+    matches!(
+      self.ask(ChatQuery::IsHistoryLoaded { conversation, at }),
+      Some(ChatAnswer::Flag { value: true })
+    )
+  }
+
+  fn history_gaps(&self, conversation: ConversationId) -> Vec<HistoryGap> {
+    let Some(ChatAnswer::HistoryGaps { gaps, total }) = self.ask(ChatQuery::HistoryGaps { conversation })
+    else {
+      return Vec::new();
+    };
+    let mut mirror = self.mirror.borrow_mut();
+    let Some(feed) = mirror.feeds.get_mut(&conversation) else {
+      return gaps;
+    };
+    // As for older history: asked and not answered, or the page is in the core and its rows not
+    // here yet.
+    let is_waiting = feed.is_asking_gap || total > feed.total;
+    if !is_waiting && gaps.iter().all(|gap| gap.status != OlderHistory::Loading) {
+      // Answered without rows: none will move the rows held.
+      feed.maybe_gap_rows = None;
+    }
+    gaps
+      .into_iter()
+      .map(|gap| HistoryGap {
+        status: if is_waiting {
+          OlderHistory::Loading
+        } else {
+          gap.status
+        },
+        ..gap
+      })
+      .collect()
+  }
+
+  fn fill_history_gap(&self, conversation: ConversationId, gap: HistoryGap, edge: GapEdge) {
+    if let Some(feed) = self.mirror.borrow_mut().feeds.get_mut(&conversation) {
+      feed.maybe_gap_rows = Some(GapRows {
+        index: gap.index,
+        is_before_reader: edge == GapEdge::Newer,
+      });
+      feed.is_asking_gap = true;
+    }
+    let backend = self.clone();
+    spawn_local(async move {
+      let action = ChatAction::FillHistoryGap {
+        conversation,
+        after: gap.after,
+        edge,
+      };
+      match call::<()>("core_action", &json!({ "action": action })).await {
+        Ok(()) => {
+          // Read after the core took the action, so it says how this request stands.
+          let query = ChatQuery::HistoryGaps { conversation };
+          if let Ok(key) = serde_json::to_string(&query) {
+            backend.fetch_answer(key, query).await;
+          }
+        },
+        Err(error) => report_failure(ActionFailure::from_wire(&error)),
+      }
+      if let Some(feed) = backend.mirror.borrow_mut().feeds.get_mut(&conversation) {
+        feed.is_asking_gap = false;
+      }
+      backend.changed();
+    });
+  }
+
   fn last_activity(&self, conversation: ConversationId) -> Option<teamcraft_client_api::model::TimestampMs> {
     self.mirror.borrow().snapshot.last_activity_of(conversation)
   }
@@ -2503,6 +2607,86 @@ mod tests {
       assert_eq!(backend.older_history(conversation), OlderHistory::Failed);
     }
 
+    #[test]
+    fn a_hole_says_loading_until_its_rows_are_here() {
+      let gap = HistoryGap {
+        after: id_from_raw(2),
+        index: 2,
+        status: OlderHistory::Available,
+      };
+      let (backend, conversation) = backend_with_answer(OlderHistory::Available, 3);
+      let answer = |total: usize| ChatAnswer::HistoryGaps {
+        gaps: vec![gap],
+        total,
+      };
+      let key = serde_json::to_string(&ChatQuery::HistoryGaps { conversation }).unwrap();
+      let settle = |answer: ChatAnswer| {
+        backend
+          .answers
+          .borrow_mut()
+          .entry(key.clone())
+          .or_default()
+          .settle(answer);
+      };
+      settle(answer(3));
+      assert_eq!(backend.history_gaps(conversation), vec![gap]);
+
+      backend
+        .mirror
+        .borrow_mut()
+        .feeds
+        .get_mut(&conversation)
+        .unwrap()
+        .is_asking_gap = true;
+      assert_eq!(
+        backend.history_gaps(conversation)[0].status,
+        OlderHistory::Loading
+      );
+      backend
+        .mirror
+        .borrow_mut()
+        .feeds
+        .get_mut(&conversation)
+        .unwrap()
+        .is_asking_gap = false;
+
+      settle(answer(53));
+      assert_eq!(
+        backend.history_gaps(conversation)[0].status,
+        OlderHistory::Loading,
+        "the page is in the core, its rows not here"
+      );
+    }
+
+    #[test]
+    fn an_answer_without_rows_expects_none() {
+      let (backend, conversation) = backend_with_answer(OlderHistory::Available, 3);
+      backend
+        .mirror
+        .borrow_mut()
+        .feeds
+        .get_mut(&conversation)
+        .unwrap()
+        .maybe_gap_rows = Some(GapRows {
+        index: 2,
+        is_before_reader: false,
+      });
+      let key = serde_json::to_string(&ChatQuery::HistoryGaps { conversation }).unwrap();
+      let answer = ChatAnswer::HistoryGaps {
+        gaps: Vec::new(),
+        total: 3,
+      };
+      backend
+        .answers
+        .borrow_mut()
+        .entry(key)
+        .or_default()
+        .settle(answer);
+
+      assert!(backend.history_gaps(conversation).is_empty());
+      assert_eq!(backend.mirror.borrow().feeds[&conversation].maybe_gap_rows, None);
+    }
+
     /// A feed of 3 rows, and a fresh answer of the core with `total` rows.
     fn backend_with_answer(older_history: OlderHistory, total: usize) -> (RemoteChat, ConversationId) {
       let backend = super::refresh_plan::backend();
@@ -2552,7 +2736,48 @@ mod tests {
 
     #[test]
     fn a_shift_within_a_page_keeps_both_pages_it_now_spans() {
-      assert_eq!(moved_pages(&BTreeSet::from([0]), 50), BTreeSet::from([0, 1]));
+      assert_eq!(moved_pages(&BTreeSet::from([0]), 0, 50), BTreeSet::from([0, 1]));
+      assert_eq!(
+        moved_pages(&BTreeSet::from([0, 1, 3]), 150, 200),
+        BTreeSet::from([0, 1, 3, 5]),
+        "rows before the place they arrived at stay"
+      );
+    }
+
+    #[test]
+    fn a_hole_read_from_its_older_side_moves_only_the_rows_after_it() {
+      // Rows a, b (the jumped page) and c (held); 200 rows of the hole arrive between b and c.
+      let mut feed = feed_of(&["a", "b", "c"]);
+      feed.read_pages.insert(0);
+      feed.maybe_gap_rows = Some(GapRows {
+        index: 2,
+        is_before_reader: false,
+      });
+      let newest = MessageWindow {
+        start: 202,
+        ..with_rows(window(203, &[]), &[3])
+      };
+      assert!(feed.take_newest(newest));
+      assert_eq!(feed.prepended, 0, "the reader above the hole stays");
+      assert_eq!(feed.rows.keys().copied().collect::<Vec<_>>(), vec![0, 1, 202]);
+      assert_eq!(feed.read_pages, BTreeSet::from([0, 2]));
+      assert_eq!(feed.maybe_gap_rows, None);
+    }
+
+    #[test]
+    fn a_hole_read_from_its_newer_side_counts_as_rows_before_the_reader() {
+      let mut feed = feed_of(&["a", "b", "c"]);
+      feed.maybe_gap_rows = Some(GapRows {
+        index: 2,
+        is_before_reader: true,
+      });
+      let newest = MessageWindow {
+        start: 52,
+        ..with_rows(window(53, &[]), &[3])
+      };
+      assert!(feed.take_newest(newest));
+      assert_eq!(feed.prepended, 50, "the reader below the hole stays");
+      assert_eq!(feed.rows.keys().copied().collect::<Vec<_>>(), vec![0, 1, 52]);
     }
 
     #[test]

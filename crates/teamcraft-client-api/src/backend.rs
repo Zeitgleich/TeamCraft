@@ -76,6 +76,12 @@ pub trait ChatBackend {
   fn space_conversations(&self, space: SpaceId) -> Vec<Conversation>;
   /// DMs and group DMs; they live outside spaces.
   fn direct_conversations(&self) -> Vec<Conversation>;
+  /// Meeting chats the user is in (docs/meetings.md): outside spaces and the sidebar's lists, but
+  /// reachable by ID for the meeting's call and its chat (#1141). Backends without meetings have
+  /// none.
+  fn meeting_conversations(&self) -> Vec<Conversation> {
+    Vec::new()
+  }
   fn conversation(&self, id: ConversationId) -> Option<Conversation>;
 
   /// Number of rows of the feed, as [`Self::messages`] pages them: top-level messages and replies
@@ -704,6 +710,21 @@ pub trait ChatBackend {
   /// or there is no more. It arrives like any store update, before the rows held
   /// ([`Self::rows_prepended`]); [`Self::older_history`] tells how the request stands.
   fn load_older_history(&self, _conversation: ConversationId) {}
+  /// The holes between the rows held that a jump to a date left (#1156), oldest first. Backends
+  /// that hold the whole history have none.
+  fn history_gaps(&self, _conversation: ConversationId) -> Vec<crate::model::HistoryGap> {
+    Vec::new()
+  }
+  /// The reader came near a hole: one page of it from the server, from the reader's side, unless a
+  /// request is on its way. It arrives like any store update, among the rows held; a page read from
+  /// the newer side lands before the reader and counts in [`Self::rows_prepended`].
+  fn fill_history_gap(
+    &self,
+    _conversation: ConversationId,
+    _gap: crate::model::HistoryGap,
+    _edge: crate::model::GapEdge,
+  ) {
+  }
   /// The conversation includes people from outside the organization (the "external" badge).
   fn has_external_people(&self, _conversation: ConversationId) -> bool {
     false
