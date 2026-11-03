@@ -108,5 +108,9 @@ cargo deny check
   when the whole CI passed; without it CI is skipped and it passes at once. So auto-merge
   (`gh pr merge --auto --squash`) waits for CI exactly when the pull request asked for it. Admins
   bypass the rule (batch merges); the nightly workflow marks its bump commit (docs/release.md).
+  Opening a PR with labels starts several runs at once (`opened`, then one `labeled` each); a run
+  that a newer one cancels, and the run of a label other than `ci`/`arm`, report as
+  `ci-gate (not the run that counts)`, which the ruleset doesn't require, so there is no false red
+  and auto-merge still waits for the `ci-gate` of the run that counts.
 - Commit messages: imperative subject line (≤ 72 chars), body explains *why*. Sign off with
   `git commit -s` (Developer Certificate of Origin, as in CalCraft).

@@ -15,7 +15,9 @@ on:
 
 # A new push to the same branch or PR cancels the run still going for the previous one.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # A label other than `ci` or `arm` changes nothing about CI: its run gets a group of its own, so it
+  # neither cancels the run that matters nor is counted as one (see `plan` and `ci-gate`).
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event.action == 'labeled' && !contains(fromJSON('["ci","arm"]'), github.event.label.name) && format('-label-{0}', github.run_id) || '' }}
   # Superseded PR runs are cancelled; a running main run finishes so main always gets a verdict
   # (only the newest queued main run is kept).
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -38,11 +40,59 @@ env:
 # release caches out of the repository's 10 GB budget).
 
 jobs:
+  # Decides what this run does, from the pull request's labels as they are now (not the event's
+  # payload, which can lack a label added a moment earlier). `run_ci`: the jobs below run (always on
+  # push and dispatch, with the `ci` label on pull requests); `arm`: also on arm64; `relevant`: false
+  # for the run of a label that changes nothing, which must not produce a `ci-gate`.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      run_ci: ${{ steps.plan.outputs.run_ci }}
+      arm: ${{ steps.plan.outputs.arm }}
+      relevant: ${{ steps.plan.outputs.relevant }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          relevant=true
+          arm=false
+          if [ "$EVENT" != pull_request ]; then
+            run_ci=true
+            [ "$EVENT" = push ] && arm=true
+          else
+            run_ci=false
+            if [ "$ACTION" = labeled ] && [ "$LABEL" != ci ] && [ "$LABEL" != arm ]; then
+              relevant=false
+            else
+              labels="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" --jq '.[].name')"
+              echo "labels: $(echo $labels)"
+              if [ "$AUTHOR" = 'dependabot[bot]' ] || echo "$labels" | grep -qx ci; then run_ci=true; fi
+              if echo "$labels" | grep -qx arm; then arm=true; fi
+            fi
+          fi
+          echo "event=$EVENT action=$ACTION run_ci=$run_ci arm=$arm relevant=$relevant"
+          {
+            echo "run_ci=$run_ci"
+            echo "arm=$arm"
+            echo "relevant=$relevant"
+          } >> "$GITHUB_OUTPUT"
+
   check:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     name: check (${{ matrix.arch }})
     # Both Linux architectures the desktop ships for, each on a native runner; they run in
     # parallel, so arm64 adds no wall-clock time. Format and the wasm build are
@@ -50,7 +100,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'arm')) && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
+        include: ${{ fromJSON(needs.plan.outputs.arm == 'true' && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
     runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
@@ -101,12 +151,13 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     name: test (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'arm')) && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
+        include: ${{ fromJSON(needs.plan.outputs.arm == 'true' && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
     runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
@@ -154,7 +205,8 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
@@ -185,7 +237,8 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     runs-on: windows-latest
     env:
       SQLX_OFFLINE: "true"
@@ -225,7 +278,8 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     runs-on: macos-26
     env:
       # Current macOS and the two releases before it (26 Tahoe, 15 Sequoia, 14 Sonoma).
@@ -274,7 +328,8 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -285,7 +340,8 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -316,20 +372,40 @@ jobs:
   # The one required check of `main` (repository ruleset), so auto-merge waits for CI where it ran:
   # with the `ci` label it passes only when every job above passed; without it the jobs are skipped
   # and it passes at once, so an unlabelled pull request doesn't wait for builds nobody asked for.
+  #
+  # Two kinds of run must not leave a red `ci-gate` behind, and must not leave a green one either (a
+  # skipped or passed required check counts as passed, so it would let auto-merge jump ahead of the
+  # real run). They report under another name, which no ruleset requires, so the pull request keeps
+  # waiting for the `ci-gate` of the run that counts:
+  #   - a run cancelled by a newer one for the same pull request (several events start in the same
+  #     second: opened, labeled, labeled), or by hand;
+  #   - the run of a label that changes nothing (`relevant` is false).
+  # Every other run reports `ci-gate`, also when `plan` itself failed (the name falls back to it).
   ci-gate:
-    name: ci-gate
+    name: ${{ (needs.plan.outputs.relevant == 'false' || contains(needs.*.result, 'cancelled')) && 'ci-gate (not the run that counts)' || 'ci-gate' }}
     if: always()
-    needs: [check, test, audio-processing, windows, macos, deny, versions]
+    needs: [plan, check, test, audio-processing, windows, macos, deny, versions]
     runs-on: ubuntu-latest
     steps:
       - name: Every job that ran passed
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
+          RELEVANT: ${{ needs.plan.outputs.relevant }}
+          RUN_CI: ${{ needs.plan.outputs.run_ci }}
         run: |
-          echo "job results: $RESULTS"
+          echo "job results: $RESULTS (relevant=$RELEVANT, run_ci=$RUN_CI)"
+          case " $RESULTS " in
+            *" cancelled "*) echo "::notice::this run was cancelled; the run that replaced it reports ci-gate"; exit 0 ;;
+          esac
+          if [ "$RELEVANT" = false ]; then
+            echo "::notice::this label changes nothing about CI; the earlier or running ci-gate stands"
+            exit 0
+          fi
           for result in $RESULTS; do
             case "$result" in
-              success | skipped) ;;
+              success) ;;
+              # Jobs are skipped on purpose only without the `ci` label; with it, a skip is a fault.
+              skipped) [ "$RUN_CI" != true ] || { echo "::error::a CI job was skipped although CI was requested"; exit 1; } ;;
               *) echo "::error::a CI job ended with '$result'"; exit 1 ;;
             esac
           done
