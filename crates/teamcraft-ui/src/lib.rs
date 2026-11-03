@@ -100,6 +100,7 @@ pub mod sections;
 pub mod server_backend;
 pub mod session;
 pub mod settings;
+pub mod settings_sync;
 pub mod share_link;
 pub mod shell_drop;
 #[cfg(target_arch = "wasm32")]

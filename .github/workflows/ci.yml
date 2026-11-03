@@ -148,6 +148,52 @@ jobs:
       - name: Doctests
         run: cargo test --workspace --doc
 
+  # The crates' browser tests (wasm-bindgen-test in headless Chromium: the IndexedDB store and its
+  # upgrades, the service worker). nextest skips them, they only compile for wasm32 (issue #1164).
+  # The CI image has no browser: Chromium and its driver come from apt, the test runner is the
+  # prebuilt release matching Cargo.lock.
+  browser-tests:
+    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
+    # before merging, and main gets one run per batch. This keeps the runner budget for main and
+    # releases.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+      CHROMEDRIVER: /usr/bin/chromedriver
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: browser-tests
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: "false"
+      - name: Chromium and its driver
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends chromium chromium-driver
+      - name: Test runner (the wasm-bindgen release Cargo.lock pins; its checksum is checked)
+        run: |
+          version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, "", $0); print; exit }' Cargo.lock)"
+          name="wasm-bindgen-${version}-x86_64-unknown-linux-musl"
+          base="https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${version}/${name}.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/runner.tar.gz" "$base"
+          expected="$(curl -fsSL "${base}.sha256sum" | cut -d' ' -f1)"
+          echo "${expected}  $RUNNER_TEMP/runner.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/runner.tar.gz" -C "$RUNNER_TEMP"
+          install "$RUNNER_TEMP/${name}/wasm-bindgen-test-runner" /usr/local/bin/
+      # crates/teamcraft-core/webdriver.json starts Chromium headless with --no-sandbox (a container).
+      - name: Browser tests
+        run: >
+          cargo test --target wasm32-unknown-unknown -p teamcraft-core --features service-worker
+          --test web --test web_service_worker
+
   # WebRTC audio processing (echo cancellation) is opt-in at build time, see
   # crates/teamcraft-media/README.md. Built from source here (version 2 isn't packaged).
   audio-processing:
@@ -354,7 +400,7 @@ jobs:
   ci-gate:
     name: ci-gate
     if: always()
-    needs: [check, test, audio-processing, windows, macos, deny, versions, vendored-and-fuzz]
+    needs: [check, test, browser-tests, audio-processing, windows, macos, deny, versions, vendored-and-fuzz]
     runs-on: ubuntu-latest
     steps:
       - name: Every job that ran passed

@@ -5324,6 +5324,7 @@ dependencies = [
  "base64 0.23.1",
  "rand_core 0.6.4",
  "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "utoipa",
  "zeroize",

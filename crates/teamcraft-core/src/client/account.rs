@@ -4,12 +4,14 @@ use teamcraft_crypto::key_bag::EncryptedKeyBag;
 
 use super::Client;
 use super::enroll::WrapsOnMerge;
+use teamcraft_proto::synced_settings::{SettingWrite, SettingsWritten, write_settings};
 use teamcraft_proto::{Base64Bytes, ConversationId, UserId};
 
 use crate::account_data::{AccountData, PinnedKey};
 use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
+use crate::read_state;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
@@ -37,6 +39,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.store_account_data(&data)?;
     self.persist_keys()
+  }
+
+  /// Applies this device's writes to the synced settings (e2ee.md §6.4). They wait for upload like
+  /// any account data, also across a restart, so a change made offline goes out later. What would
+  /// break the size bound stays on this device and is reported; the rest is written.
+  pub fn write_synced_settings(&mut self, writes: &[SettingWrite]) -> Result<(), CoreError> {
+    let device = self.device_id();
+    let mut written = SettingsWritten::default();
+    self.update_account_data(|data, _now| {
+      written = write_settings(&mut data.settings.entries, writes, device);
+      written.is_changed
+    })?;
+    if written.is_changed {
+      read_state::update_marks(&self.store, |marks| marks.settings += 1)?;
+    }
+    if written.refused.is_empty() {
+      Ok(())
+    } else {
+      Err(CoreError::SettingsTooLarge {
+        keys: written.refused,
+      })
+    }
   }
 
   /// Writes the decoded account data next to the key bag for readers without the backup key (the
@@ -77,11 +101,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         WrapsOnMerge::Adopt,
       )?;
     }
+    self.note_account_merged()?;
     self.share_trust_decisions()?;
     if self.sync.is_key_bag_dirty {
       self.upload_key_bag().await?;
     }
     Ok(())
+  }
+
+  /// This device knows what the account holds now, so settings may start following it: a device that
+  /// hasn't merged yet can't tell an empty account from one it hasn't heard of.
+  fn note_account_merged(&self) -> Result<(), CoreError> {
+    if read_state::marks(&self.store)?.settings == 0 {
+      read_state::update_marks(&self.store, |marks| marks.settings = 1)?;
+    }
+    Ok(())
+  }
+
+  /// Tells the UI that the server refuses this device's key bag as too large. A failure to record it
+  /// is only logged: the upload is tried again anyway.
+  pub(crate) fn note_key_bag_refused(&self) {
+    if let Err(error) = read_state::update_marks(&self.store, |marks| marks.key_bag_refused += 1) {
+      tracing::warn!(%error, "the refused key bag could not be recorded");
+    }
   }
 
   /// Accepts a changed identity key the server reported for `user` (after the user compared it):
@@ -182,9 +224,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let remote_data = AccountData::from_bytes(decrypted.account_data())
       .map_err(|error| CoreError::Corrupt(error.to_string()))?;
+    if remote_data.settings.opaque_count() > 0 {
+      // Kept for whoever can read them; the keys and pins in this bag go on as usual.
+      tracing::warn!(
+        count = remote_data.settings.opaque_count(),
+        "the key bag holds synced settings this version can't read"
+      );
+    }
     let mut data = self.account_data();
+    let settings_before = data.settings.entries.clone();
     data.merge(&remote_data, self.now_ms());
     self.store_account_data(&data)?;
+    if data.settings.entries != settings_before {
+      read_state::update_marks(&self.store, |marks| marks.settings += 1)?;
+    }
     // Removals another device of the user saw count here before the next message is decrypted.
     self.apply_shared_removals()?;
     // Entries the other device didn't have yet still need an upload.

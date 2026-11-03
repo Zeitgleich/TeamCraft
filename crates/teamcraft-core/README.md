@@ -241,4 +241,5 @@ docker run --rm -v "$PWD":/src:ro -v teamcraft-wasm-target:/target -e CARGO_TARG
   --features service-worker --test web --test web_service_worker
 ```
 
-`webdriver.json` passes `--no-sandbox` to Chromium for the container.
+`webdriver.json` passes `--no-sandbox` to Chromium for the container. CI runs both files in the
+`browser-tests` job of `.github/workflows/ci.yml` (nextest skips them: they only compile for wasm32).

@@ -135,8 +135,8 @@ fn GuestShell(
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
   Effect::new(move |previous: Option<crate::prefs::CallPrefs>| {
     let calls = call_prefs.get();
-    apply_call_prefs(state.call, previous.as_ref(), &calls);
-    calls
+    state.call.phase.track();
+    apply_call_prefs(state.call, previous.as_ref(), &calls)
   });
 
   let title = move || {

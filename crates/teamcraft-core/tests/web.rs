@@ -28,6 +28,10 @@ use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
 wasm_bindgen_test_configure!(run_in_browser);
 
+/// Entries and messages of the schema 2 database: more than one batch of the catalog build.
+const USERS: usize = 1000;
+const MESSAGES: u8 = 100;
+
 #[wasm_bindgen_test]
 async fn store_survives_reopening() {
   let name = database_name();
@@ -183,12 +187,14 @@ async fn two_browser_clients_exchange_an_encrypted_message() {
 }
 
 /// Issue #424: a database of the first schema version opens with this one, and the MLS state a
-/// version before 1.0.9 wrote as one record moves to one record per entry, which reopens.
+/// version before 1.0.9 wrote as one record moves to one record per entry, which reopens. The old
+/// record stays as a marker that versions before 1.0.9 report as damage instead of reading no state
+/// (mls_storage.rs `MOVED_MARKER`).
 #[wasm_bindgen_test]
 async fn an_older_database_opens_and_its_mls_state_moves_to_entries() {
   let name = database_name();
   let key = SymmetricKey::generate(&mut OsRng);
-  create_first_version(&name).await;
+  create_version(&name, 1).await;
   let store = IndexedDbStore::open(&name, &key).await.unwrap();
   let mut legacy = Vec::new();
   for chunk in [b"group".as_slice(), b"state".as_slice()] {
@@ -207,7 +213,12 @@ async fn an_older_database_opens_and_its_mls_state_moves_to_entries() {
       Some(&b"state".to_vec())
     );
     store.flush().await.unwrap();
-    assert_eq!(store.get(Table::MlsStorage, "provider").unwrap(), None);
+    let marker = store.get(Table::MlsStorage, "provider").unwrap().unwrap();
+    assert_ne!(marker, legacy, "the old record is replaced");
+    assert!(
+      marker.starts_with(&[0xff; 4]),
+      "its length prefix reaches past the record, so an older version sees damage"
+    );
   }
 }
 
@@ -216,14 +227,93 @@ async fn an_older_database_opens_and_its_mls_state_moves_to_entries() {
 #[wasm_bindgen_test]
 async fn the_service_worker_never_upgrades_the_database() {
   let name = database_name();
-  create_first_version(&name).await;
+  create_version(&name, 1).await;
   let key = browser_database_key_without_upgrade(&name).await.unwrap();
   drop(IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap());
   assert_eq!(database_version(&name).await, 1.0);
 
   let key = browser_database_key(&name).await.unwrap();
   drop(IndexedDbStore::open(&name, &key).await.unwrap());
-  assert_eq!(database_version(&name).await, 2.0);
+  assert_eq!(database_version(&name).await, current_version().await);
+}
+
+/// Issue #1128: a database of schema version 2 (MLS state per entry, no catalog) with records
+/// opens with this version, which upgrades it and builds the catalog in several batches; every
+/// record reads back, listed and by key, and a reopened store builds nothing again.
+#[wasm_bindgen_test]
+async fn a_schema_2_database_upgrades_and_builds_its_catalog() {
+  let name = database_name();
+  let (key, _) = write_schema_2_database(&name).await;
+
+  let mut seen = Vec::new();
+  let store = IndexedDbStore::open_reporting(&name, &key, |percent| {
+    seen.push(percent);
+    ControlFlow::Continue(())
+  })
+  .await
+  .unwrap();
+  assert!(!seen.is_empty(), "the catalog was built, in batches");
+  assert_eq!(database_version(&name).await, current_version().await);
+  assert_everything_is_there(&store);
+  store.flush().await.unwrap();
+  drop(store);
+
+  let mut was_called = false;
+  let store = IndexedDbStore::open_reporting(&name, &key, |_| {
+    was_called = true;
+    ControlFlow::Continue(())
+  })
+  .await
+  .unwrap();
+  assert!(!was_called, "built once");
+  assert_everything_is_there(&store);
+}
+
+/// Issue #1128: the service worker on a store whose catalog is not complete (the page that owns it
+/// stopped building) reads what it needs, writes without upgrading the database, and what it wrote
+/// is in the catalog the page completes next.
+#[wasm_bindgen_test]
+async fn the_service_worker_works_on_a_store_whose_catalog_is_not_complete() {
+  let name = database_name();
+  let (key, _) = write_schema_2_database(&name).await;
+  let stopped = IndexedDbStore::open_reporting(&name, &key, |_| ControlFlow::Break(())).await;
+  assert!(matches!(stopped, Err(StoreError::InUse)));
+  let version = database_version(&name).await;
+  assert_eq!(version, current_version().await);
+
+  let worker = IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap();
+  assert_eq!(
+    worker.get(Table::Users, "user 7").unwrap(),
+    Some(b"value 7".to_vec())
+  );
+  assert_eq!(
+    worker
+      .message(id(1), ClientMessageId::from_bytes([3; 16]))
+      .unwrap()
+      .map(|found| body(&found)),
+    Some("message 3".to_string())
+  );
+  worker.put(Table::Users, "from the worker", b"pushed").unwrap();
+  worker
+    .upsert_message(&message(1, 200, "from the worker"))
+    .unwrap();
+  worker.flush().await.unwrap();
+  drop(worker);
+  assert_eq!(
+    database_version(&name).await,
+    version,
+    "the worker upgrades nothing"
+  );
+
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  assert_everything_is_there(&store);
+  assert_eq!(
+    store.get(Table::Users, "from the worker").unwrap(),
+    Some(b"pushed".to_vec())
+  );
+  assert_eq!(store.list(Table::Users).unwrap().len(), USERS + 1);
+  assert_eq!(texts(&store, id(1)).len(), usize::from(MESSAGES) + 1);
+  assert!(texts(&store, id(1)).contains(&"from the worker".to_string()));
 }
 
 /// Issue #1127: a first catalog build tells how far it is, and one that stops (a reload, another tab
@@ -405,12 +495,67 @@ async fn forget_catalog_state(name: &str, key: &SymmetricKey) {
   wasm_bindgen_futures::JsFuture::from(deleted).await.unwrap();
 }
 
-/// Creates `name` as the first schema version did: version 1 with the same object stores.
-async fn create_first_version(name: &str) {
+/// A schema 2 database as a version from 1.0.9 up to the catalog left it: no catalog, the MLS
+/// state per entry, `USERS` entries and `MESSAGES` messages. Returns its key and its version.
+async fn write_schema_2_database(name: &str) -> (SymmetricKey, f64) {
+  create_version(name, 2).await;
+  let key = browser_database_key_without_upgrade(name).await.unwrap();
+  let store = IndexedDbStore::open_without_upgrade(name, &key).await.unwrap();
+  store.begin_writes().unwrap();
+  for index in 0..USERS {
+    store
+      .put(
+        Table::Users,
+        &format!("user {index}"),
+        format!("value {index}").as_bytes(),
+      )
+      .unwrap();
+  }
+  for client in 0..MESSAGES {
+    store
+      .upsert_message(&message(1, client, &format!("message {client}")))
+      .unwrap();
+  }
+  store.end_writes().unwrap();
+  store.flush().await.unwrap();
+  drop(store);
+  let version = database_version(name).await;
+  assert_eq!(version, 2.0, "a store opened as it is upgrades nothing");
+  (key, version)
+}
+
+/// Everything `write_schema_2_database` wrote, listed and read by key.
+fn assert_everything_is_there(store: &IndexedDbStore) {
+  let users = store.list(Table::Users).unwrap();
+  assert_eq!(
+    users.len(),
+    USERS.max(users.len().min(USERS + 1)).min(users.len())
+  );
+  for index in 0..USERS {
+    assert_eq!(
+      store.get(Table::Users, &format!("user {index}")).unwrap(),
+      Some(format!("value {index}").into_bytes())
+    );
+  }
+  let wanted: Vec<String> = (0..MESSAGES).map(|client| format!("message {client}")).collect();
+  let found: Vec<String> = texts(store, id(1)).into_iter().take(wanted.len()).collect();
+  assert_eq!(found, wanted);
+}
+
+/// The schema version this build of the app gives a new database.
+async fn current_version() -> f64 {
+  let name = database_name();
+  let key = browser_database_key(&name).await.unwrap();
+  drop(IndexedDbStore::open(&name, &key).await.unwrap());
+  database_version(&name).await
+}
+
+/// Creates `name` at an early schema `version` (the object stores are those of version 1).
+async fn create_version(name: &str, version: u32) {
   use wasm_bindgen::JsCast;
   let script = format!(
     "new Promise((resolve, reject) => {{
-      const request = indexedDB.open({name:?}, 1);
+      const request = indexedDB.open({name:?}, {version});
       request.onupgradeneeded = () => {{
         request.result.createObjectStore('records');
         request.result.createObjectStore('keys');

@@ -19,6 +19,7 @@ mod permission;
 mod rendezvous;
 mod role;
 pub mod role_rules;
+pub mod synced_settings;
 mod wire_enum;
 
 pub use api::*;

@@ -27,6 +27,9 @@ pub struct Upkeep {
   /// When the account sync was last attempted, and whether that attempt failed.
   last_attempt_ms: i64,
   has_failed: bool,
+  /// The server refused the key bag as too large and the user was told; once per run until an
+  /// upload goes through again, since every retry fails the same way.
+  has_reported_refusal: bool,
   /// When the roster and workspace head were last checked.
   last_local_check_ms: i64,
   uploads: UploadMode,
@@ -50,6 +53,7 @@ impl Upkeep {
       maybe_synced_connection: None,
       last_attempt_ms: i64::MIN,
       has_failed: false,
+      has_reported_refusal: false,
       last_local_check_ms: i64::MIN,
       uploads: UploadMode::Inline,
     }
@@ -137,10 +141,19 @@ impl Upkeep {
     let maybe_connection = client.gateway_connections();
     self.has_failed = true;
     if let Err(error) = client.sync_account_data().await {
+      if error.is_key_bag_refused() {
+        tracing::warn!("the server refuses the key bag as too large: keys and account data aren't backed up");
+        let is_news = !std::mem::replace(&mut self.has_reported_refusal, true);
+        if is_news {
+          client.note_key_bag_refused();
+        }
+        return is_news;
+      }
       tracing::debug!(%error, "account data not synced yet");
       return false;
     }
     self.has_failed = false;
+    self.has_reported_refusal = false;
     self.maybe_synced_connection = maybe_connection;
     // A rotated org recovery key: wrap the backup key to the new one (security review B4). The
     // gateway does this when the roster changes; this catches a change missed while away.

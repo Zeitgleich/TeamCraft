@@ -156,6 +156,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   if let Some(sync) = use_context::<StoredValue<NotificationSync, LocalStorage>>() {
     sync.get_value().start(settings);
   }
+  // The rest of the settings follows the account in its encrypted data (issue #945).
+  crate::settings_sync::start(state, settings);
   let link_menu = RwSignal::new(None::<crate::external_links::LinkMenuTarget>);
   provide_context(link_menu);
   crate::external_links::start(link_menu);
@@ -214,8 +216,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let call_prefs = Memo::new(move |_| settings.prefs.get().calls);
   Effect::new(move |previous: Option<CallPrefs>| {
     let calls = call_prefs.get();
-    apply_call_prefs(state.call, previous.as_ref(), &calls);
-    calls
+    state.call.phase.track();
+    apply_call_prefs(state.call, previous.as_ref(), &calls)
   });
 
   let listener = window_event_listener(ev::keydown, move |ev| handle_global_shortcut(&ev, state));
