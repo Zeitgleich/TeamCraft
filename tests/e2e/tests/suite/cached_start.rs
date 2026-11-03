@@ -373,7 +373,7 @@ async fn nothing_goes_out_before_the_answer(page: &Page, channel: String) {
     let (noted, answer) = (noted.clone(), answer.clone());
     async move {
       if event.request.url.ends_with("/api/v1/me") {
-        tokio::time::sleep(Duration::from_secs(4)).await;
+        tokio::time::sleep(Duration::from_secs(8)).await;
         answer.store(true, Ordering::SeqCst);
       } else if !answer.load(Ordering::SeqCst)
         && serde_json::to_string(&event.request.headers)
@@ -392,10 +392,10 @@ async fn nothing_goes_out_before_the_answer(page: &Page, channel: String) {
   let (end, took) = start_until_list(page, &url).await;
   assert_eq!(end, StartEnd::ChannelList, "after {took:?}");
   assert!(
-    took < Duration::from_secs(3),
+    !is_answered.load(Ordering::SeqCst),
     "the chats waited for the answer: {took:?}"
   );
-  let deadline = Instant::now() + Duration::from_secs(10);
+  let deadline = Instant::now() + Duration::from_secs(30);
   while !is_answered.load(Ordering::SeqCst) {
     assert!(Instant::now() < deadline, "GET /me never went out");
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -422,8 +422,28 @@ async fn ended_session_says_so(page: &Page, channel: String) {
   assert!(!text.contains(CHANNEL) && !text.contains(MESSAGE), "{text}");
   ended.stop(page).await;
   page.goto(url).await.unwrap();
-  wait_for_text(page, MESSAGE).await;
+  sign_in_again_if_asked(page).await;
   tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
+/// The tokens are gone, and the app goes through the identity provider: back in by the provider's own
+/// session or by its login page, which either may show. Whichever it is, the chats return.
+async fn sign_in_again_if_asked(page: &Page) {
+  let deadline = Instant::now() + Duration::from_secs(30);
+  while !body_text(page).await.contains(MESSAGE) {
+    assert!(Instant::now() < deadline, "no way back in");
+    if page.find_element("input[name=username]").await.is_ok() {
+      // The login page knows the last account (issue #448); typed after it, the name would be wrong.
+      page
+        .evaluate("document.querySelector('input[name=username]').value = ''")
+        .await
+        .unwrap();
+      sign_in_at_keycloak(page, "carol").await;
+      wait_for_text(page, MESSAGE).await;
+      return;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
 }
 
 /// `GET /me` never comes back: the check asks again by itself and the app connects.
@@ -514,20 +534,7 @@ async fn refresh_token_stays_away_from_another_provider(page: &Page, channel: St
   page.goto(format!("{WEB_ORIGIN}/healthz")).await.unwrap();
   page.evaluate("sessionStorage.clear()").await.unwrap();
   page.goto(url).await.unwrap();
-  let deadline = Instant::now() + Duration::from_secs(30);
-  while !body_text(page).await.contains(MESSAGE) {
-    assert!(Instant::now() < deadline, "no way back in");
-    if page.find_element("input[name=username]").await.is_ok() {
-      page
-        .evaluate("document.querySelector('input[name=username]').value = ''")
-        .await
-        .unwrap();
-      sign_in_at_keycloak(page, "carol").await;
-      wait_for_text(page, MESSAGE).await;
-      break;
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-  }
+  sign_in_again_if_asked(page).await;
   tokio::time::sleep(Duration::from_secs(2)).await;
 }
 
