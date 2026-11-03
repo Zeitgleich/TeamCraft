@@ -532,7 +532,7 @@ mod tests {
   use teamcraft_crypto::dpop::{DpopProofRequest, DpopSigningKey};
 
   use super::*;
-  use crate::error::{ApiError, DpopNonceChallenge};
+  use crate::error::{ApiError, DpopNonceChallenge, DpopProofRefusal};
 
   const NOW: i64 = 1_800_000_000;
   const TOKEN: &str = "an.access.token";
@@ -1203,11 +1203,15 @@ mod tests {
     }
 
     #[test]
-    fn only_the_nonce_challenge_is_marked_as_not_a_failure() {
+    fn the_nonce_challenge_and_refused_proofs_are_marked_as_not_a_failure() {
       let challenge = ApiError::from(AuthError::Dpop(DpopRefusal::UseNonce)).into_response();
       assert!(challenge.extensions().get::<DpopNonceChallenge>().is_some());
+      assert!(challenge.extensions().get::<DpopProofRefusal>().is_some());
       let refused = ApiError::from(AuthError::Dpop(DpopRefusal::Replayed)).into_response();
       assert!(refused.extensions().get::<DpopNonceChallenge>().is_none());
+      assert!(refused.extensions().get::<DpopProofRefusal>().is_some());
+      let guessed = ApiError::from(AuthError::MissingToken).into_response();
+      assert!(guessed.extensions().get::<DpopProofRefusal>().is_none());
     }
   }
 

@@ -136,6 +136,11 @@ pub enum SignInReason {
   /// session limit of the provider), was revoked, or the user was disabled there (issue #883). The
   /// app says so itself; no server sends it.
   SignInExpired,
+  /// The server only takes tokens bound to a key on the device (`dpop_required`), and this one isn't.
+  DeviceBindingRequired,
+  /// The token is bound to a key this device doesn't have any more (its local data was cleared or
+  /// damaged). The app says so itself; no server sends it.
+  DeviceKeyLost,
   /// The token was refused without a reason (expired, invalid), or by an older server.
   #[default]
   #[serde(other)]
@@ -147,6 +152,7 @@ impl SignInReason {
     match code {
       ErrorCode::SessionEnded => Self::SessionEnded,
       ErrorCode::SessionTimedOut => Self::SessionTimedOut,
+      ErrorCode::DpopRequired => Self::DeviceBindingRequired,
       _ => Self::Unknown,
     }
   }

@@ -27,6 +27,8 @@ mod dependency_outages;
 mod deployed;
 mod devices;
 mod display_names;
+#[cfg(feature = "browser")]
+mod dpop_web;
 mod email_digest;
 mod guest_domains;
 mod guests;

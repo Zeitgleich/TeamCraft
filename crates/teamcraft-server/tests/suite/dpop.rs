@@ -68,10 +68,10 @@ mod challenge {
     app.stop().await;
   }
 
-  /// Everybody meets the challenge after a restart; an office behind one address must not get
-  /// blocked for it.
+  /// Everybody meets the challenge after a restart, and a wrong public origin refuses every proof; an
+  /// office behind one address must not get blocked for either. Only guessed tokens count.
   #[tokio::test]
-  async fn the_challenge_does_not_count_as_a_failed_sign_in_but_a_bad_proof_does() {
+  async fn only_guessed_tokens_block_an_address_not_challenges_or_refused_proofs() {
     let app = app!(TestApp::start_with(|settings| {
       settings.security.public_origins = vec![ORIGIN.to_owned()];
       settings.security.rate_limits.is_enabled = true;
@@ -85,16 +85,42 @@ mod challenge {
     assert_eq!(device.get(&app, ME, Some(&nonce)).await.status, StatusCode::OK);
 
     let wrong = device.proof_for("POST", ME, Some(&nonce));
-    for _ in 0..2 {
+    for _ in 0..5 {
       assert_eq!(
         device.send(&app, ME, Some(&wrong)).await.status,
         StatusCode::UNAUTHORIZED
       );
     }
-    assert_eq!(
-      device.get(&app, ME, Some(&nonce)).await.status,
-      StatusCode::TOO_MANY_REQUESTS
-    );
+    // Somebody else behind the same address, with a bearer token.
+    let colleague = app.token_with(&owner(), now_unix(), &json!({}));
+    let answer = app
+      .http
+      .get(format!("{}{ME}", app.base_url))
+      .bearer_auth(&colleague)
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(answer.status(), StatusCode::OK);
+
+    // Guessing tokens still blocks it.
+    for _ in 0..2 {
+      let answer = app
+        .http
+        .get(format!("{}{ME}", app.base_url))
+        .bearer_auth("not-a-token")
+        .send()
+        .await
+        .unwrap();
+      assert_eq!(answer.status(), StatusCode::UNAUTHORIZED);
+    }
+    let blocked = app
+      .http
+      .get(format!("{}{ME}", app.base_url))
+      .bearer_auth(&colleague)
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
     app.stop().await;
   }
 }
@@ -624,7 +650,7 @@ mod websockets {
   }
 
   #[tokio::test]
-  async fn a_refused_proof_on_the_gateway_counts_as_a_failed_sign_in_and_the_challenge_does_not() {
+  async fn refused_proofs_on_the_gateway_and_the_relay_do_not_block_the_address() {
     let app = app!(TestApp::start_with(|settings| {
       settings.security.public_origins = vec![ORIGIN.to_owned()];
       settings.security.rate_limits.is_enabled = true;
@@ -639,17 +665,16 @@ mod websockets {
       assert_error(&challenged, "use_dpop_nonce");
     }
     let nonce = device.fresh_nonce(&app).await;
-    for _ in 0..2 {
+    for _ in 0..4 {
       let wrong = device.proof_for("POST", GATEWAY_PATH, Some(&nonce));
       assert_error(
         &identify(&app, &device, &device_id, Some(wrong)).await,
         "invalid_dpop_proof",
       );
+      let wrong = device.proof_for("POST", RENDEZVOUS_PATH, Some(&nonce));
+      join_relay(&app, &device, Some(wrong)).await;
     }
-    assert_eq!(
-      device.get(&app, ME, Some(&nonce)).await.status,
-      StatusCode::TOO_MANY_REQUESTS
-    );
+    assert_eq!(device.get(&app, ME, Some(&nonce)).await.status, StatusCode::OK);
     app.stop().await;
   }
 

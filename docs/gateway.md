@@ -12,7 +12,7 @@ types are ignored on both sides, so new ones can be added without breaking old c
    this first frame and never in the URL. Wrong token, a device of somebody else or a missing role end the
    connection after an `error` frame. A token bound to a device comes with its DPoP proof in `dpop_proof`
    (for `GET` on `/api/v1/gateway`), because a browser can't set headers on the upgrade; a proof without
-   the current nonce gets a `dpop_nonce` frame before the error (e2ee.md §3.1.2).
+   the current nonce gets a `dpop_nonce` frame before the error, and connects once more with it (e2ee.md §3.1.2).
 3. Server answers `ready` (with the `session_id`) or `resumed` and then the missed events, or
    `session_invalid`: the client then identifies again and refetches state over REST.
 4. The client sends `heartbeat` at the announced interval (answered by `heartbeat_ack`), also while the REST

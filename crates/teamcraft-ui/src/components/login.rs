@@ -494,6 +494,14 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
       Some("login-session-timed-out-title"),
       Some("login-session-timed-out-body"),
     ),
+    Some(LoginProblem::DeviceBindingRequired) => (
+      Some("login-device-binding-required-title"),
+      Some("login-device-binding-required-body"),
+    ),
+    Some(LoginProblem::DeviceKeyLost) => (
+      Some("login-device-key-lost-title"),
+      Some("login-device-key-lost-body"),
+    ),
     Some(LoginProblem::AccountDeleted) => (
       Some("login-account-deleted-title"),
       Some("login-account-deleted-body"),
@@ -507,6 +515,7 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
         | LoginProblem::SessionExpired
         | LoginProblem::SessionEnded
         | LoginProblem::SessionTimedOut
+        | LoginProblem::DeviceKeyLost
     )
   ) {
     ProblemTone::Notice

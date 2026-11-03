@@ -50,12 +50,13 @@ pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
   let user = match authenticate(&state, &token, maybe_dpop_proof.as_deref()).await {
     Ok(user) => user,
     Err(error) => {
-      // A client meets the nonce challenge after every restart of the server: not a failed sign-in.
       if error.is_dpop_nonce_challenge() {
         let settings = state.settings.get();
         let nonce = state.dpop.current_nonce(&settings.token_binding);
         let _ = send(&mut socket, &RendezvousServerMessage::DpopNonce { nonce }).await;
-      } else {
+      }
+      // A refused proof isn't a failed sign-in (`is_dpop_refusal`).
+      if !matches!(&error, ApiError::Auth(auth) if auth.is_dpop_refusal()) {
         state
           .rate_limits
           .record_auth_failure(&ip, std::time::Instant::now());

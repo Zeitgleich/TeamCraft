@@ -12,6 +12,7 @@ use std::time::Duration;
 use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use teamcraft_crypto::dpop::{JwkThumbprint, token_bound_key};
 use teamcraft_proto::GetMeResponse;
 
 /// Refresh this long before the access token expires.
@@ -59,6 +60,9 @@ pub(super) enum RefreshPlan {
     token: SecretString,
     /// The account `token` belongs to, kept if the answer names none.
     maybe_subject: Option<String>,
+    /// The key the session is bound to, by what its access token says: the refresh takes a proof
+    /// with this key and no other.
+    maybe_bound_key: Option<JwkThumbprint>,
     is_shared: bool,
   },
   NotSignedIn,
@@ -126,10 +130,12 @@ pub(super) fn plan_refresh(
       if saved.is_fresh(now_ms) {
         return RefreshPlan::Adopt(saved);
       }
+      let maybe_bound_key = token_bound_key(saved.access.expose_secret());
       if let Some(token) = saved.maybe_refresh {
         return RefreshPlan::Refresh {
           token,
           maybe_subject: saved.maybe_subject,
+          maybe_bound_key,
           is_shared: true,
         };
       }
@@ -142,6 +148,7 @@ pub(super) fn plan_refresh(
     Some((memory, token)) => RefreshPlan::Refresh {
       token: token.clone(),
       maybe_subject: memory.maybe_subject.clone(),
+      maybe_bound_key: token_bound_key(memory.access.expose_secret()),
       is_shared,
     },
     None => RefreshPlan::NotSignedIn,

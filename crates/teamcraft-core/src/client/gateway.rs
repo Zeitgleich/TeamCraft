@@ -9,8 +9,8 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use futures_util::future::{Either, select};
 use teamcraft_proto::{
-  DeviceActivity, ErrorBody, ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
-  MlsMessageKind, UserPresence,
+  DeviceActivity, ErrorBody, ErrorCode, GATEWAY_PATH, GatewayClientMessage, GatewayEvent,
+  GatewayServerMessage, MlsMessageKind, UserPresence,
 };
 
 use super::Client;
@@ -132,7 +132,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.maybe_replay_left = None;
     self.drop_read_ahead();
     self.trace_start();
-    let outcome = self.start_gateway_traced(timing).await;
+    let outcome = match self.start_gateway_traced(timing).await {
+      Err(CoreError::Api(error)) if error.is_proof_refusal() => self.after_proof_refusal(timing, error).await,
+      outcome => outcome,
+    };
     // Answers no step took this time must not stand in for a later read.
     self.drop_read_ahead();
     if outcome.is_ok() {
@@ -142,15 +145,32 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     outcome
   }
 
+  /// The server refused the first frame's proof, which ends the connection: it had an old nonce (a
+  /// `dpop_nonce` frame brought the new one), or a date the server doesn't take. One more connection
+  /// with what was learned, never more (e2ee.md §3.1.2). A frame has no `Date` to correct the clock
+  /// with, so a request answers that first; if it fails too, trying again would change nothing.
+  async fn after_proof_refusal(
+    &mut self,
+    timing: GatewayTiming,
+    error: ApiError,
+  ) -> Result<GatewayStart<A::Gateway>, CoreError> {
+    if error.error_code() == Some(&ErrorCode::InvalidDpopProof) && self.api.me().await.is_err() {
+      return Err(error.into());
+    }
+    tracing::debug!(%error, "the gateway refused the proof, connecting once more");
+    self.start_gateway_traced(timing).await
+  }
+
   async fn start_gateway_traced(
     &mut self,
     timing: GatewayTiming,
   ) -> Result<GatewayStart<A::Gateway>, CoreError> {
     let handshake_timeout = timing.handshake_timeout;
     if let Some(session) = self.sync.maybe_gateway_session.clone() {
+      let token = self.api.gateway_token().await?;
       let resume = GatewayClientMessage::Resume {
-        maybe_dpop_proof: None,
-        token: self.api.gateway_token().await?,
+        maybe_dpop_proof: self.api.first_frame_proof(GATEWAY_PATH, &token).await?,
+        token,
         session_id: session.session_id,
         last_seq: session.last_seq,
         device_id: self.account.device_id,
@@ -164,7 +184,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .is_some_and(|heard| self.now_ms().saturating_sub(heard) < LIKELY_RESUMABLE_MS);
       let known = self.known_people_ahead()?;
       let (answer, maybe_read_ahead) =
-        futures_util::join!(receive(&mut connection, handshake_timeout), async {
+        futures_util::join!(self.handshake_answer(&mut connection, handshake_timeout), async {
           if is_likely_resumable {
             Some(self.read_resumed(known.clone()).await)
           } else {
@@ -228,15 +248,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     // The first reads wait for `ready`: a change between a read and the new session would reach
     // neither (#714).
+    let token = self.api.gateway_token().await?;
     let identify = GatewayClientMessage::Identify {
-      maybe_dpop_proof: None,
-      token: self.api.gateway_token().await?,
+      maybe_dpop_proof: self.api.first_frame_proof(GATEWAY_PATH, &token).await?,
+      token,
       device_id: self.account.device_id,
       activity: self.device_activity.clone(),
     };
     let (mut connection, heartbeat_interval) = self.open_gateway(handshake_timeout, &identify).await?;
     self.trace_lap("socket and hello");
-    let session_id = match receive(&mut connection, handshake_timeout).await? {
+    let session_id = match self.handshake_answer(&mut connection, handshake_timeout).await? {
       GatewayServerMessage::Ready { session_id, .. } => {
         self.trace_lap("identify answer");
         session_id
@@ -346,6 +367,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The token the handshake sends (`identify`/`resume`).
   pub(crate) async fn gateway_token(&self) -> Result<String, ApiError> {
     self.api.gateway_token().await
+  }
+
+  /// The server's answer to the first frame. A `dpop_nonce` frame comes before the answer that needs
+  /// it, and is kept for the next proof.
+  async fn handshake_answer(
+    &self,
+    connection: &mut A::Gateway,
+    timeout: Duration,
+  ) -> Result<GatewayServerMessage, CoreError> {
+    loop {
+      match receive(connection, timeout).await? {
+        GatewayServerMessage::DpopNonce { nonce } => self.api.note_dpop_nonce(&nonce),
+        answer => return Ok(answer),
+      }
+    }
   }
 
   /// A new gateway connection after the server's `hello`, with `first` (`identify` or `resume`)
@@ -804,7 +840,11 @@ async fn within<T>(timeout: Duration, future: impl Future<Output = T>) -> Result
 /// the caller can tell "sign in again" apart from an outage.
 fn rejected(error: ErrorBody) -> CoreError {
   let status = match error.error_code {
-    ErrorCode::Unauthorized | ErrorCode::InvalidToken => 401,
+    ErrorCode::Unauthorized
+    | ErrorCode::InvalidToken
+    | ErrorCode::UseDpopNonce
+    | ErrorCode::InvalidDpopProof
+    | ErrorCode::DpopRequired => 401,
     ErrorCode::Unavailable | ErrorCode::Internal => 503,
     ErrorCode::RateLimited => 429,
     _ => 403,
@@ -819,6 +859,20 @@ fn rejected(error: ErrorBody) -> CoreError {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_refused_proof_is_not_a_refused_token() {
+    for code in [ErrorCode::UseDpopNonce, ErrorCode::InvalidDpopProof] {
+      let error = rejected(ErrorBody::new(code.clone(), "refused"));
+      assert!(!error.is_sign_in_required(), "{code}");
+      let CoreError::Api(error) = error else {
+        panic!("{code}");
+      };
+      assert!(error.is_proof_refusal() && error.is_transient(), "{code}");
+    }
+    let required = rejected(ErrorBody::new(ErrorCode::DpopRequired, "refused"));
+    assert!(required.is_sign_in_required());
+  }
 
   #[test]
   fn a_deactivated_account_needs_a_sign_in_not_a_retry_loop() {

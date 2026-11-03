@@ -123,6 +123,8 @@ web-sys = { version = "0.3.83", features = [
   "DomException",
   "DomStringList",
   "Document",
+  "EcKeyGenParams",
+  "EcdsaParams",
   "Element",
   "Event",
   "ExtendableEvent",

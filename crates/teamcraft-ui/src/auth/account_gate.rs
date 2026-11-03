@@ -204,6 +204,10 @@ impl Authenticator for AccountGate {
     self.inner.access_token()
   }
 
+  fn dpop_prover(&self) -> LocalFuture<'_, Option<std::sync::Arc<teamcraft_core::api::dpop::DpopProver>>> {
+    self.inner.dpop_prover()
+  }
+
   fn api_request_bytes(
     &self,
     method: ApiMethod,

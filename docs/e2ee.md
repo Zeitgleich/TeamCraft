@@ -145,8 +145,8 @@ tokens are kept per origin, issuer and client. Fixed by binding tokens to the de
 
 DPoP (RFC 9449) makes a stolen or relayed access token useless without a key that stays on the
 device. This protects API access (posting, metadata, admin actions); message content is protected
-by E2EE either way. The server part is implemented; clients don't send proofs yet (see "Not done
-yet").
+by E2EE either way. The server and the desktop and web clients are implemented; mobile sends no
+proofs yet (see "Not done yet").
 
 **How it works.** The device has an ES256 key pair. At the token endpoint it proves that it holds
 the key, and the identity provider puts the key's thumbprint into the access token (`cnf.jkt`). With
@@ -179,7 +179,10 @@ A token with a `cnf` that can't be checked (no `jkt`) is refused, not taken as u
 and the `error_code` values `use_dpop_nonce`, `invalid_dpop_proof`, `dpop_required`. Every answer to
 a request with a proof carries `DPoP-Nonce`, so a rotation normally costs no extra round trip. The
 nonce challenge doesn't count as a failed sign-in for the rate limits, since everybody meets it after
-a restart. Other refusals on REST do.
+a restart, and neither does any other refusal of a proof or binding (`AuthError::is_dpop_refusal`): the
+token was valid by then, so nothing was guessed, and with a wrong public origin it would block a whole
+address, bearer users behind the same NAT included. Those requests stay under the per-address limit, and
+guessed tokens still block an address.
 
 **Policy** (admin console, group `token_binding`; default `optional`). The setting is not part of the
 signed policy: only the server enforces it, and a server that ignored it could ignore a signature on
@@ -234,19 +237,89 @@ exported (software keys), malware on the device can take it along with the token
 platforms use hardware-backed keys where they have them. Tokens the server issues itself remain
 bearer tokens.
 
+**Clients** (`teamcraft_core::api::dpop`; web: `store/browser/dpop_key.rs`, `auth/browser.rs`;
+desktop: `apps/desktop/src/auth`).
+
+- **Key.** Behind `DpopSigner`: a public key and "sign these bytes", so that a hardware-backed key
+  fits. One per device and server. In the browser a non-extractable Web Crypto ES256 key pair in
+  its own IndexedDB database (the origin is the server), also for the service worker. On the desktop
+  in the sealed secrets file (`SecretVault`), read with it at the start: no keychain access of its own
+  at the start or later (#1150), and it is only made when it is needed. It stays after a sign-out,
+  because other tabs may be signing with it and it says nothing without a token.
+- **When a token goes with a proof.** A token that names a key (`cnf.jkt`) goes with `Authorization:
+  DPoP` and a proof, on every API request and in the first frames of gateway and relay. Any other token
+  stays a `Bearer` token: local accounts, bots, guests and unbound sessions. A proof with an unbound
+  token proves nothing (see the policy table), would cost a round trip, and could get the session
+  refused for an origin the server has wrong.
+- **When a session gets bound.** The token endpoint gets a proof only if the provider advertises
+  ES256 in `dpop_signing_alg_values_supported` *and* a fresh `GET /server-info` (`no-store`) carries
+  `DPoP-Nonce`, which the server only sends under `optional` and `required`, on a host its public origins
+  name. Without the header the session stays unbound as before, so an older server (which refuses
+  `typ: DPoP` tokens outright), a proxy that strips the header, or a wrong origin don't lock anybody out.
+  A 404 or 421 is a clear answer like a missing header. No answer or another error is not: a desktop sign-in fails with a network error after
+  one more try. A refresh of an unbound session goes on unbound and asks again next time.
+- **Going without the proof.** Only for a session that isn't bound, and each case logs. A refusal
+  (400 or 401, except `invalid_grant`, which is about the token) of a request with a proof is sent once
+  more without it, since a provider may advertise
+  ES256 and not take proofs for this client, or refuse a date whose correction it hides from the browser.
+  Later refreshes in that run skip the proof; a new sign-in tries again. In the browser, a proof-carrying
+  request without any answer, twice, is also sent without the proof, because a CORS rule lacking `DPoP`
+  looks exactly like that. A bound session never goes without its proof.
+- **What that leaves open.** A new sign-in can be made unbound by whoever controls the server's answer or
+  makes the provider refuse: a look-alike withholding `DPoP-Nonce` (it needs nothing else), a proxy on a
+  TLS-terminating path, a provider's CORS rule, and in a browser a network that drops the first two tries
+  of the request (it can't see which one has the proof, but it can drop by size or timing). The token is
+  then a bearer token, and can be relayed under `optional`. A device that has a key and signs in unbound
+  logs a warning; it shows nothing, since the user can't act on it and it works. Binding is not enforced
+  on the client: only `required` on the real server closes this, since it refuses unbound tokens from
+  anywhere.
+- **A bound session.** Whether the refresh token is bound is read from the access token's `cnf.jkt`
+  (browser: kept with the tokens; desktop: note `TokenBinding` in the sealed file, written before the
+  token, and a failure to write it stops like a failure to save the token). A bound refresh token
+  always gets a proof with that key, whatever the discovery document says by now. If the key is gone,
+  nothing goes to the provider: the tokens go, and the user is told "sign in again, this device gets a
+  new key" (`DeviceKeyLost`). Only a store that was read and lacks the key means gone: a store that can't
+  be read keeps the session and reads as a network problem, retried, with the bound token held back. The
+  browser's key database has its own fixed version, so no schema bump locks an older bundle or the service
+  worker out. A sign-out sends end-session with a proof and one nonce retry, and if that is refused
+  revokes the refresh token (RFC 7009): the reference provider (Keycloak) refuses end-session for a bound
+  refresh token even with its proof, and revoking ends the session there.
+- **Nonce.** Remembered per party (the server's and the provider's are separate), taken from every
+  answer and from `dpop_nonce` frames. A `use_dpop_nonce` is retried once if the answer brought a new
+  nonce. Without one (a proxy stripping it) a retry would change nothing and isn't made. On a WebSocket
+  the challenge ends the connection, so that is one more connection.
+- **Clock.** `iat` is the local time plus the offset to the party's `Date`, kept from every answer of
+  that party (not a captive portal's or another host's after a redirect, and not one with an `Age`),
+  within 10 years. The provider's prover takes the server's offset at each use until it has read the
+  provider's own `Date`, which a browser often can't. A refusal is retried once if the answer's `Date`
+  moved the offset by 5 s or more; providers word that refusal differently. Frames have no `Date`, so
+  on the gateway a request corrects the clock first.
+- **Redirects.** reqwest takes `Authorization` off a redirect to another host and leaves `DPoP` on, so
+  native requests with a proof don't follow one to another origin (it reads as a captive portal). In the
+  browser the core's `fetch` follows redirects by itself, with no option through reqwest: the proof goes
+  along only if the target's CORS rule allows `DPoP`. Only the server or something terminating its TLS can
+  send that redirect, and the token stays behind.
+- **Never a loop.** One retry per request or connection. What stays refused is an error: `use_dpop_nonce`
+  and `invalid_dpop_proof` are no sign-in problem, since another token wouldn't help. The session
+  stays, the app retries with backoff, and the banner names a proxy or the server's address
+  (`Interception::ProofRefused`). `dpop_required` asks for a sign-in, with its own wording.
+- **Start.** The cached start (§9.8) is unchanged: nothing is signed before the account is confirmed,
+  and the request that confirms it is the first signed one. It normally has its nonce already: from
+  `server-info` next to the refresh on the desktop and before it in the browser, past the browser's
+  cache. A challenge costs **one extra round trip** when that nonce is too old (after a server restart,
+  an old `server-info` from a cache on the way, or more than two rotations of idle time), per concurrent
+  request. Numbers:
+  performance.md, "DPoP".
+
 **Not done yet** (the next steps of issue #120):
 
-- `teamcraft-core`: a per-device key behind a small signing interface, so that hardware keys fit (the
-  software `DpopSigningKey` only suits platforms without one); the `DPoP` scheme and header on every
-  request; the proof in the three first frames; remembering `DPoP-Nonce` per origin and retrying
-  `use_dpop_nonce` once, on the REST client and by reconnecting on the gateway and the relay, whose
-  `dpop_nonce` frames come before their error frames; `iat` from an offset
-  to the server's `Date`, retried once after `invalid_dpop_proof`; `dpop_required` worded for people.
-  Proofs at the token endpoint and for refreshes, with the identity provider's own nonce.
-- Keys: Secure Enclave (iOS, macOS), Android Keystore, the OS keychain (desktop), a non-extractable
-  WebCrypto key in the browser. A key is per device and survives token refreshes.
-- The identity provider: DPoP-bound tokens on the OIDC client, documented vendor-neutrally with the
-  reference setup as example, and refresh tokens bound for public clients.
+- Android and iOS: hardware-backed keys (Android Keystore, Secure Enclave) behind `DpopSigner`. Until
+  then they send no proofs and get unbound tokens: they work as bearer clients under `optional`, and
+  `required` refuses them. A software key through the FFI would be little work (`SoftwareDpopSigner`,
+  `AccessTokenSource::dpop_prover`), plus the proof in their own token requests (AppAuth, iOS).
+- Secure Enclave for the macOS desktop: the key is software in the sealed file for now.
+- The identity provider: documented vendor-neutrally with the reference setup as example, and refresh
+  tokens bound for public clients.
 - Then the rollout in operations.md, "Binding tokens to devices".
 
 ### 3.2 Enrollment order and interruptions

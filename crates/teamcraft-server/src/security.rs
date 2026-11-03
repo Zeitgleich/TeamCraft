@@ -21,7 +21,7 @@ use teamcraft_proto::UserId;
 
 use crate::auth::{DPOP_HEADER, note_nonce_header};
 use crate::config::RateLimitConfig;
-use crate::error::{ApiError, DpopNonceChallenge};
+use crate::error::{ApiError, DpopProofRefusal};
 use crate::state::AppState;
 
 /// More entries than this trigger a sweep of idle buckets.
@@ -263,7 +263,7 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
   // Unknown meeting link tokens answer 404; guessing them counts like a failed sign-in.
   let is_guessed_link = response.status() == StatusCode::NOT_FOUND && path.starts_with(MEETING_LINK_PREFIX);
   let is_failed_authentication = response.status() == StatusCode::UNAUTHORIZED
-    && response.extensions().get::<DpopNonceChallenge>().is_none();
+    && response.extensions().get::<DpopProofRefusal>().is_none();
   if is_failed_authentication || is_guessed_link {
     limits.record_auth_failure(&ip, Instant::now());
   }

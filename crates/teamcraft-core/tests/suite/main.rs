@@ -26,6 +26,7 @@ mod devices;
 mod direct_uploads;
 mod disk_downloads;
 mod dm_setup;
+mod dpop;
 mod enrollment;
 mod files;
 mod first_add_back;

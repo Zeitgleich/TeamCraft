@@ -1,5 +1,9 @@
 use axum::Json;
-use axum::extract::State;
+use std::net::SocketAddr;
+
+use axum::Extension;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, Uri};
 use axum::response::{IntoResponse, Response};
 use teamcraft_proto::{
   BrandAssetSlot, ErrorBody, SERVER_INFO_PRODUCT, ServerInfoResponse, SignInInfo, SignInMethod,
@@ -7,6 +11,7 @@ use teamcraft_proto::{
 
 use super::get_brand_handler::set_public_cache;
 use super::get_client_compatibility_handler::MINIMUM_CLIENT_VERSION;
+use crate::auth::{note_nonce_header, public_origins};
 use crate::brand::ResolvedBrand;
 use crate::services::local_accounts;
 use crate::state::AppState;
@@ -14,8 +19,20 @@ use crate::state::AppState;
 /// Tells a native app what it needs before sign-in: that this is a TeamCraft server, which
 /// versions work together, the brand of the host and how to sign in (docs/operations.md "Server
 /// address in the apps"). Public and without secrets.
+///
+/// `DPoP-Nonce` on this answer says that a client may let the identity provider bind its token to
+/// a key (e2ee.md §3.1.2): the server would check the proofs, and the public origins name the host
+/// the client came through, so its proofs would pass. A client that sees none, from an older server,
+/// from a proxy that strips the header or from an origin the server doesn't know, stays with an
+/// unbound token, and nobody is locked out by a binding the server would refuse.
 #[utoipa::path(get, path = "/api/v1/server-info", tag = "health", summary = "Returns what an app needs to sign in to this server.", responses((status = 200, body = ServerInfoResponse), (status = 421, body = ErrorBody)))]
-pub async fn get_server_info_handler(State(state): State<AppState>, resolved: ResolvedBrand) -> Response {
+pub async fn get_server_info_handler(
+  State(state): State<AppState>,
+  resolved: ResolvedBrand,
+  maybe_peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+  uri: Uri,
+  headers: HeaderMap,
+) -> Response {
   let settings = state.settings.get();
   let sign_in = &settings.sign_in;
   let has_local_accounts = local_accounts::is_available(&state);
@@ -46,7 +63,19 @@ pub async fn get_server_info_handler(State(state): State<AppState>, resolved: Re
   };
   let mut response = Json(body).into_response();
   set_public_cache(&mut response);
+  let maybe_peer = maybe_peer.map(|Extension(ConnectInfo(peer))| peer.ip());
+  let maybe_host = state.brands.current().request_host(&headers, &uri, maybe_peer);
+  if maybe_host.is_some_and(|host| is_known_host(&state, &host)) {
+    note_nonce_header(&state, response.headers_mut());
+  }
   response
+}
+
+/// Whether the request's host is one of the origins proofs may name. The same reading of the host
+/// as for the brand, which is good enough here: all a false answer can do is change this client's
+/// own choice, and proofs are checked against the configuration alone.
+fn is_known_host(state: &AppState, host: &str) -> bool {
+  public_origins(state).iter().any(|origin| origin.is_host(host))
 }
 
 /// The configured methods that work now, in their order; the identity provider when nothing is

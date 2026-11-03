@@ -37,10 +37,24 @@ pub(crate) async fn open_database(name: &str) -> Result<IdbDatabase, StoreError>
 
 /// Opens the database `name` as `mode` says; created at the first version if it doesn't exist.
 pub(crate) async fn open_database_with(name: &str, mode: OpenMode) -> Result<IdbDatabase, StoreError> {
+  let maybe_version = match mode {
+    OpenMode::Upgrade => Some(SCHEMA_VERSION),
+    OpenMode::AsIs => None,
+  };
+  open(name, maybe_version, SCHEMA_VERSION).await
+}
+
+/// Opens the database `name` at this version of its own, which never follows [`SCHEMA_VERSION`]: any
+/// version of the app, and the service worker, can open it without upgrading anything.
+pub(crate) async fn open_database_at(name: &str, version: u32) -> Result<IdbDatabase, StoreError> {
+  open(name, Some(version), version).await
+}
+
+async fn open(name: &str, maybe_version: Option<u32>, supported: u32) -> Result<IdbDatabase, StoreError> {
   let factory = factory()?;
-  let request = match mode {
-    OpenMode::Upgrade => factory.open_with_u32(name, SCHEMA_VERSION),
-    OpenMode::AsIs => factory.open(name),
+  let request = match maybe_version {
+    Some(version) => factory.open_with_u32(name, version),
+    None => factory.open(name),
   }
   .map_err(|error| js_error("open", &error))?;
   let on_upgrade = Closure::<dyn FnMut(web_sys::Event)>::new({
@@ -59,8 +73,8 @@ pub(crate) async fn open_database_with(name: &str, mode: OpenMode) -> Result<Idb
       .is_some_and(|error| error.name() == "VersionError")
   {
     return Err(StoreError::NewerSchema {
-      found: i64::from(SCHEMA_VERSION) + 1,
-      supported: i64::from(SCHEMA_VERSION),
+      found: i64::from(supported) + 1,
+      supported: i64::from(supported),
     });
   }
   result?

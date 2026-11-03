@@ -17,6 +17,7 @@ use teamcraft_client_api::remote::{
   LinkRequestView, LinkStatus, MessageWindow, PhoneLinkStatus, SecuritySnapshot, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
+use teamcraft_core::api::dpop::DpopProver;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
 use teamcraft_core::client::files::{BlobUpload, sweep_staged_copies};
 use teamcraft_core::client::{
@@ -101,6 +102,7 @@ pub struct CoreConfig {
 pub struct TokenCache {
   last: Arc<Mutex<Option<CachedToken>>>,
   maybe_source: Option<Arc<dyn Fn() -> TokenPeek + Send + Sync>>,
+  maybe_prover_source: Option<Arc<dyn Fn() -> Option<Arc<DpopProver>> + Send + Sync>>,
   maybe_refresher: Option<Refresher>,
 }
 
@@ -120,9 +122,11 @@ impl TokenCache {
   /// Reads the current token of `service` on every request.
   pub fn live<S: TokenStore + 'static>(service: Arc<AuthService<S>>) -> Self {
     let refreshing = Arc::clone(&service);
+    let proving = Arc::clone(&service);
     Self {
       last: Arc::default(),
       maybe_source: Some(Arc::new(move || service.peek_server_bearer_token())),
+      maybe_prover_source: Some(Arc::new(move || proving.peek_dpop_prover())),
       maybe_refresher: Some(Arc::new(move |refused| {
         let service = Arc::clone(&refreshing);
         Box::pin(async move { service.refresh_rejected(refused).await })
@@ -196,6 +200,10 @@ impl TokenCache {
         self.remember(None);
         Err(ApiError::SignInExpired)
       },
+      Some(TokenPeek::KeyLost) => {
+        self.remember(None);
+        Err(ApiError::BoundKeyLost)
+      },
       Some(TokenPeek::Busy) | None => {
         let slot = self.last.lock().map_err(|_| not_signed_in())?;
         match slot.as_ref() {
@@ -236,6 +244,14 @@ impl AccessTokenSource for ServerTokens {
     } else {
       Err(not_signed_in())
     }
+  }
+
+  fn dpop_prover(&self) -> Option<Arc<DpopProver>> {
+    self
+      .cache
+      .maybe_prover_source
+      .as_ref()
+      .and_then(|source| source())
   }
 }
 
@@ -1153,7 +1169,12 @@ impl Core {
           Ok(maybe_key) => maybe_key.is_some(),
           // No token yet, one waiting for its refresh, or a refused sign-in (the UI takes it from
           // there): opening is retried.
-          Err(error @ (ApiError::Token(_) | ApiError::Network(_) | ApiError::SignInExpired)) => {
+          Err(
+            error @ (ApiError::Token(_)
+            | ApiError::Network(_)
+            | ApiError::SignInExpired
+            | ApiError::BoundKeyLost),
+          ) => {
             return Err(OpenError::NoToken(error.to_string()));
           },
           Err(error) => return Err(OpenError::Failed(error.to_string())),
@@ -2577,6 +2598,9 @@ fn is_refused_token(error: &CoreError) -> bool {
         | ErrorCode::SessionTimedOut
         | ErrorCode::AccountDeleted
         | ErrorCode::AccountDeactivated
+        // The proof was refused, not the token: a new token would change nothing.
+        | ErrorCode::UseDpopNonce
+        | ErrorCode::InvalidDpopProof
     )
   )
 }
@@ -2921,6 +2945,7 @@ mod tests {
       TokenCache {
         last: Arc::default(),
         maybe_refresher: None,
+        maybe_prover_source: None,
         maybe_source: Some(Arc::new(move || {
           if was_read.swap(true, Ordering::SeqCst) {
             TokenPeek::Busy

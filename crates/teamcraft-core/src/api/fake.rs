@@ -122,6 +122,11 @@ pub struct FakeGateway {
 #[derive(Default)]
 struct State {
   next_id: i64,
+  /// See [`FakeServer::challenge_first_frames`].
+  first_frame_challenges: usize,
+  noted_dpop_nonces: usize,
+  /// See [`FakeServer::refuse_first_frame_proofs`].
+  first_frame_proof_refusals: usize,
   /// `GET /sync/heads` answers a bare 404, like a server from before the endpoint (issue #714):
   /// a full sync then reads everything.
   lacks_sync_heads: bool,
@@ -583,6 +588,23 @@ impl FakeServer {
   }
 
   /// How many gateway handshakes were refused for a bad token so far.
+  /// The next `count` first frames (gateway and relay) are refused like a proof with an old nonce:
+  /// a `dpop_nonce` frame, `use_dpop_nonce`, and the connection ends. With `usize::MAX`, all of them.
+  pub fn challenge_first_frames(&self, count: usize) {
+    self.lock().first_frame_challenges = count;
+  }
+
+  /// The nonces of `dpop_nonce` frames a client noted.
+  pub fn noted_dpop_nonces(&self) -> usize {
+    self.lock().noted_dpop_nonces
+  }
+
+  /// The next `count` first frames are refused as `invalid_dpop_proof` (a wrong clock, or an address
+  /// the server doesn't know).
+  pub fn refuse_first_frame_proofs(&self, count: usize) {
+    self.lock().first_frame_proof_refusals = count;
+  }
+
   pub fn gateway_refusal_count(&self) -> u64 {
     self.lock().gateway_refusals
   }
@@ -5363,6 +5385,10 @@ impl ServerApi for FakeServerApi {
   async fn gateway_token(&self) -> Result<String, ApiError> {
     Ok(format!("fake-token-{}", self.user))
   }
+
+  fn note_dpop_nonce(&self, _nonce: &str) {
+    self.server.lock().noted_dpop_nonces += 1;
+  }
 }
 
 impl GatewayConnection for FakeGateway {
@@ -5398,6 +5424,28 @@ impl GatewayConnection for FakeGateway {
       message,
       GatewayClientMessage::Identify { .. } | GatewayClientMessage::Resume { .. }
     );
+    if is_handshake && state.first_frame_proof_refusals > 0 {
+      state.first_frame_proof_refusals -= 1;
+      state.sessions.remove(&pending_session(self.connection));
+      let _ = sender.unbounded_send(GatewayServerMessage::Error {
+        error: ErrorBody::new(
+          ErrorCode::InvalidDpopProof,
+          "the proof is too old or from the future",
+        ),
+      });
+      return Ok(());
+    }
+    if is_handshake && state.first_frame_challenges > 0 {
+      state.first_frame_challenges = state.first_frame_challenges.saturating_sub(1);
+      state.sessions.remove(&pending_session(self.connection));
+      let _ = sender.unbounded_send(GatewayServerMessage::DpopNonce {
+        nonce: "fake-nonce".to_owned(),
+      });
+      let _ = sender.unbounded_send(GatewayServerMessage::Error {
+        error: ErrorBody::new(ErrorCode::UseDpopNonce, "the DPoP proof needs the current nonce"),
+      });
+      return Ok(());
+    }
     if is_handshake && state.signed_out_users.contains(&self.user) {
       // Like the server: an error frame, then the connection closes.
       state.gateway_refusals += 1;
@@ -5522,6 +5570,19 @@ impl RendezvousConnection for FakeRendezvous {
       return Ok(());
     };
     let mut state = self.server.lock();
+    if state.first_frame_challenges > 0 {
+      state.first_frame_challenges = state.first_frame_challenges.saturating_sub(1);
+      let _ = self
+        .sender
+        .unbounded_send(RendezvousFrame::Control(RendezvousServerMessage::DpopNonce {
+          nonce: "fake-nonce".to_owned(),
+        }));
+      let error = ErrorBody::new(ErrorCode::UseDpopNonce, "the DPoP proof needs the current nonce");
+      let _ = self
+        .sender
+        .unbounded_send(RendezvousFrame::Control(RendezvousServerMessage::Error { error }));
+      return Ok(());
+    }
     let relay = state.relays.entry(rendezvous_id.clone()).or_default();
     // One user's two devices only, like the server.
     if relay.endpoints.len() >= 2 || relay.endpoints.iter().any(|(_, user, _)| *user != self.user) {

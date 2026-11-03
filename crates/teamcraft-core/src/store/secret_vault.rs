@@ -1,5 +1,5 @@
-//! A desktop's local secrets in one sealed file (e2ee.md §9): refresh tokens, local sessions and
-//! copies of the database and backup keys, under one key that the OS keychain holds.
+//! A desktop's local secrets in one sealed file (e2ee.md §9): refresh tokens, local sessions, DPoP
+//! keys and copies of the database and backup keys, under one key that the OS keychain holds.
 //!
 //! Every keychain access can raise a dialog on macOS, so the keychain is read once per start, for
 //! the file's key, and not touched while the app runs. What is in the file is served from memory.
@@ -100,6 +100,12 @@ pub enum SessionNote {
   CachedAccount,
   /// The account at the identity provider that the stored refresh token belongs to.
   TokenSubject,
+  /// The device's DPoP key for a server, in base64url (e2ee.md §3.1.2). In this file so that using
+  /// it never raises a keychain dialog (#1150), and a damaged file costs a sign-in, as for the
+  /// refresh token that needs it.
+  DpopKey,
+  /// The thumbprint of the key the stored refresh token is bound to.
+  TokenBinding,
 }
 
 impl SessionNote {
@@ -107,6 +113,8 @@ impl SessionNote {
     match self {
       Self::CachedAccount => "cached-account",
       Self::TokenSubject => "token-subject",
+      Self::DpopKey => "dpop-key",
+      Self::TokenBinding => "token-binding",
     }
   }
 }

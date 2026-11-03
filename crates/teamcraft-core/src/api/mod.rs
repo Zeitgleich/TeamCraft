@@ -6,6 +6,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod connect;
+pub mod dpop;
 pub mod fake;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fetch;
@@ -27,7 +28,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 pub use connect::black_hole;
 pub use http::{
-  AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, StaticToken, change_web_push_subscription,
+  AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, ProvenToken, StaticToken,
+  change_web_push_subscription,
 };
 use teamcraft_proto::DeleteConversationRequest;
 use teamcraft_proto::{
@@ -703,6 +705,17 @@ pub trait ServerApi {
   fn connect_rendezvous(&self) -> impl Future<Output = Result<Self::Rendezvous, ApiError>>;
   /// The token for the gateway's `identify`/`resume` frame.
   fn gateway_token(&self) -> impl Future<Output = Result<String, ApiError>>;
+  /// The DPoP proof for a WebSocket's first frame that carries `token`, for `GET` on `path` (e2ee.md
+  /// §3.1.2); `None` for a token that isn't bound to a key, or where the app has no key.
+  fn first_frame_proof(
+    &self,
+    _path: &str,
+    _token: &str,
+  ) -> impl Future<Output = Result<Option<String>, ApiError>> {
+    std::future::ready(Ok(None))
+  }
+  /// The nonce of a `dpop_nonce` frame, for the next proof.
+  fn note_dpop_nonce(&self, _nonce: &str) {}
 }
 
 /// One open gateway connection.
@@ -740,6 +753,9 @@ pub enum Interception {
   /// The TLS certificate isn't trusted: usually a proxy that inspects encrypted traffic with a
   /// company CA this device doesn't trust.
   UntrustedCertificate,
+  /// The server keeps refusing this device's DPoP proofs: something on the way changes requests or
+  /// strips headers, or the server doesn't know the address it is reached on (operations.md).
+  ProofRefused,
 }
 
 impl std::fmt::Display for Interception {
@@ -747,6 +763,7 @@ impl std::fmt::Display for Interception {
     f.write_str(match self {
       Self::CaptivePortal => "captive portal",
       Self::UntrustedCertificate => "untrusted certificate",
+      Self::ProofRefused => "refused proof",
     })
   }
 }
@@ -763,6 +780,10 @@ pub enum ApiError {
   /// proxy (issue #157). Retried like [`Self::Network`]; the UI says what the user can do.
   #[error("the network intercepted the connection ({kind}): {detail}")]
   Intercepted { kind: Interception, detail: String },
+  /// The sign-in is bound to a key this device doesn't have any more (e2ee.md §3.1.2): the user has
+  /// to sign in again, and is told why.
+  #[error("the key this sign-in is bound to is gone")]
+  BoundKeyLost,
   #[error("server answered {status}: {}", .maybe_body.as_ref().map_or("", |body| body.message.as_str()))]
   Status {
     status: u16,
@@ -830,6 +851,7 @@ impl ApiError {
   pub fn interception(&self) -> Option<Interception> {
     match self {
       Self::Intercepted { kind, .. } => Some(*kind),
+      _ if self.is_proof_refusal() => Some(Interception::ProofRefused),
       _ => None,
     }
   }
@@ -839,7 +861,7 @@ impl ApiError {
   pub fn is_transient(&self) -> bool {
     match self {
       Self::Network(_) | Self::Intercepted { .. } => true,
-      Self::Status { status, .. } => *status == 429 || *status >= 500,
+      Self::Status { status, .. } => *status == 429 || *status >= 500 || self.is_proof_refusal(),
       _ => false,
     }
   }
@@ -855,10 +877,22 @@ impl ApiError {
   /// token won't help, the user (or the app's token refresh) has to sign in again. A deactivated
   /// account's queued work waits for a reactivation like for a new token.
   pub fn is_sign_in_required(&self) -> bool {
-    matches!(
+    let is_refused = matches!(
       self,
-      Self::Token(_) | Self::SignInExpired | Self::Status { status: 401, .. }
-    ) || self.is_account_deactivated()
+      Self::Token(_) | Self::SignInExpired | Self::BoundKeyLost | Self::Status { status: 401, .. }
+    );
+    (is_refused && !self.is_proof_refusal()) || self.is_account_deactivated()
+  }
+
+  /// The server took the token and refused the DPoP proof with it, after the one retry
+  /// (`use_dpop_nonce`, `invalid_dpop_proof`). Another sign-in wouldn't help: something on the way
+  /// changes requests, or the server's public origin is wrong (operations.md). The session stays,
+  /// and the connection tries again.
+  pub fn is_proof_refusal(&self) -> bool {
+    matches!(
+      self.error_code(),
+      Some(ErrorCode::UseDpopNonce | ErrorCode::InvalidDpopProof)
+    )
   }
 
   /// The account is deactivated (suspended): nothing works until an admin reactivates it.

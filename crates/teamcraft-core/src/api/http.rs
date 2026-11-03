@@ -3,7 +3,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
@@ -66,6 +66,9 @@ use teamcraft_proto::{NotificationSettings, TestPushResponse};
 use teamcraft_proto::{PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
+use super::dpop::{
+  DPOP_HEADER, DPOP_NONCE_HEADER, DpopAnswer, DpopProver, Learned, is_from_a_cache, signed_headers,
+};
 #[cfg(target_arch = "wasm32")]
 use super::web_socket::{BrowserSocket, SocketFrame};
 use super::{
@@ -125,10 +128,22 @@ pub trait AccessTokenSource {
   fn fresh_token(&self) -> impl Future<Output = Result<String, ApiError>> {
     std::future::ready(self.access_token())
   }
+
+  /// What signs DPoP proofs for this source's tokens; `None` where the app has no key yet. Tokens
+  /// that aren't bound to a key need none (`dpop.rs`).
+  fn dpop_prover(&self) -> Option<Arc<DpopProver>> {
+    None
+  }
 }
 
 /// A fixed token (tests, command-line tools).
 pub struct StaticToken(pub String);
+
+/// A fixed token with the key it may be bound to (the service worker, tests).
+pub struct ProvenToken {
+  pub token: String,
+  pub maybe_prover: Option<Arc<DpopProver>>,
+}
 
 /// Waits until the local store has persisted what was written so far. Hosts whose store writes
 /// asynchronously (the browser's IndexedDB) set it, so nothing the server is told about can be
@@ -139,6 +154,8 @@ pub type WriteBarrier = std::rc::Rc<dyn Fn() -> futures_util::future::LocalBoxFu
 pub struct HttpServerApi<T> {
   /// Replaced by [`HttpServerApi::drop_connections`] after a wake-up or network change.
   client: RwLock<reqwest::Client>,
+  /// For requests with a proof, which stay on their host; made when the first one goes out.
+  maybe_proof_client: RwLock<Option<reqwest::Client>>,
   /// Awaited before every request that changes server state.
   #[cfg(target_arch = "wasm32")]
   maybe_write_barrier: Option<WriteBarrier>,
@@ -165,6 +182,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     let base_url = base_url.into().trim_end_matches('/').to_string();
     Self {
       client,
+      maybe_proof_client: RwLock::new(None),
       maybe_insecure: insecure_reason(&base_url),
       base_url,
       tokens,
@@ -186,6 +204,20 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
   /// Requests already running keep theirs.
   pub fn drop_connections(&self) {
     *self.client.write().unwrap_or_else(PoisonError::into_inner) = http_client();
+    *self
+      .maybe_proof_client
+      .write()
+      .unwrap_or_else(PoisonError::into_inner) = None;
+  }
+
+  /// The client of a request with a proof. reqwest takes `Authorization` off a redirect to another
+  /// host and leaves `DPoP` on, so these requests don't follow one at all.
+  fn proof_http(&self) -> reqwest::Client {
+    let mut slot = self
+      .maybe_proof_client
+      .write()
+      .unwrap_or_else(PoisonError::into_inner);
+    slot.get_or_insert_with(same_origin_http_client).clone()
   }
 
   /// The HTTP client of the next request (a cheap handle on the shared pool).
@@ -209,15 +241,51 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
   async fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, ApiError> {
     self.require_secure_transport()?;
     let token = self.tokens.fresh_token().await?;
-    let request = self
-      .http()
-      .request(method, format!("{}/api/v1{path}", self.base_url))
-      .bearer_auth(token);
+    let url = format!("{}/api/v1{path}", self.base_url);
+    let maybe_prover = self.tokens.dpop_prover();
+    let signed = signed_headers(maybe_prover.as_deref(), &token, method.as_str(), &url).await?;
+    let client = if signed.maybe_proof.is_some() {
+      self.proof_http()
+    } else {
+      self.http()
+    };
+    let mut request = client
+      .request(method, url)
+      .header(reqwest::header::AUTHORIZATION, sensitive(&signed.authorization)?);
+    if let Some(proof) = signed.maybe_proof {
+      request = request.header(DPOP_HEADER, sensitive(proof.as_str())?);
+    }
     Ok(request)
   }
 
+  /// Sends an API request, with what DPoP asks for: the answer's nonce and clock are kept, and a
+  /// proof refused for them is made again once, never more (e2ee.md §3.1.2).
+  async fn call(&self, request: RequestBuilder) -> Result<Response, ApiError> {
+    let Some(prover) = self.tokens.dpop_prover() else {
+      return send_api(request).await;
+    };
+    let maybe_again = request.try_clone();
+    let mut learned = Learned::default();
+    let outcome = send_api_noting(request, |headers| learned = note_answer(&prover, headers)).await;
+    let (Err(error), Some(again)) = (&outcome, maybe_again) else {
+      return outcome;
+    };
+    let is_retried = matches!(error, ApiError::Status { status: 401, .. })
+      && error
+        .error_code()
+        .is_some_and(|code| learned.is_worth_a_retry(code));
+    if !is_retried {
+      return outcome;
+    }
+    let again = with_new_proof(again, &prover).await?;
+    send_api_noting(again, |headers| {
+      note_answer(&prover, headers);
+    })
+    .await
+  }
+
   async fn get<R: DeserializeOwned>(&self, path: &str) -> Result<R, ApiError> {
-    decode_api(send_api(self.request(Method::GET, path).await?).await?).await
+    decode_api(self.call(self.request(Method::GET, path).await?).await?).await
   }
 
   /// A user the server doesn't show the caller (404 with an error code) has published nothing, as
@@ -244,7 +312,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     body: &B,
   ) -> Result<R, ApiError> {
     self.before_change(&method).await;
-    decode_api(send_api(self.request(method, path).await?.json(body)).await?).await
+    decode_api(self.call(self.request(method, path).await?.json(body)).await?).await
   }
 
   async fn send_without_response<B: Serialize>(
@@ -258,7 +326,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     if let Some(body) = maybe_body {
       request = request.json(body);
     }
-    send_api(request).await.map(|_| ())
+    self.call(request).await.map(|_| ())
   }
 
   /// An authenticated request to `/api/v1{path}` with a JSON body, answered with the raw JSON
@@ -282,7 +350,7 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body);
     }
-    let body = read_api_body(send_api(request).await?).await?;
+    let body = read_api_body(self.call(request).await?).await?;
     String::from_utf8(body).map_err(|error| ApiError::Decode(error.to_string()))
   }
 
@@ -1257,7 +1325,7 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     let request = self
       .request(Method::POST, &format!("/attachments/{attachment}/complete"))
       .await?;
-    decode_api(send_api(request).await?).await
+    decode_api(self.call(request).await?).await
   }
 
   async fn create_multipart_attachment(
@@ -1601,6 +1669,67 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn gateway_token(&self) -> Result<String, ApiError> {
     self.tokens.fresh_token().await
   }
+
+  async fn first_frame_proof(&self, path: &str, token: &str) -> Result<Option<String>, ApiError> {
+    let maybe_prover = self.tokens.dpop_prover();
+    let url = format!("{}{path}", self.base_url);
+    let signed = signed_headers(maybe_prover.as_deref(), token, Method::GET.as_str(), &url).await?;
+    Ok(signed.maybe_proof.map(|proof| proof.as_str().to_owned()))
+  }
+
+  fn note_dpop_nonce(&self, nonce: &str) {
+    if let Some(prover) = self.tokens.dpop_prover() {
+      prover.remember_nonce(nonce);
+    }
+  }
+}
+
+impl AccessTokenSource for ProvenToken {
+  fn access_token(&self) -> Result<String, ApiError> {
+    Ok(self.token.clone())
+  }
+
+  fn dpop_prover(&self) -> Option<Arc<DpopProver>> {
+    self.maybe_prover.clone()
+  }
+}
+
+/// A header value that stays out of logs.
+fn sensitive(value: &str) -> Result<reqwest::header::HeaderValue, ApiError> {
+  let mut value = reqwest::header::HeaderValue::from_str(value)
+    .map_err(|_| ApiError::Token("the token can't go into a header".to_owned()))?;
+  value.set_sensitive(true);
+  Ok(value)
+}
+
+/// Takes in what an answer says for the next proof.
+fn note_answer(prover: &DpopProver, headers: &reqwest::header::HeaderMap) -> Learned {
+  let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+  prover.note_answer(DpopAnswer {
+    maybe_nonce: text(DPOP_NONCE_HEADER),
+    maybe_date: text(reqwest::header::DATE.as_str()).filter(|_| !is_from_a_cache(text("age"))),
+  })
+}
+
+/// `request` with a new proof in place of the one it was sent with.
+async fn with_new_proof(request: RequestBuilder, prover: &DpopProver) -> Result<RequestBuilder, ApiError> {
+  let (client, request) = request.build_split();
+  let mut request = request.map_err(network_error)?;
+  let maybe_token = request
+    .headers()
+    .get(reqwest::header::AUTHORIZATION)
+    .and_then(|value| value.to_str().ok())
+    .and_then(|value| value.strip_prefix("DPoP "))
+    .map(str::to_owned);
+  let token = maybe_token.ok_or_else(|| ApiError::Token("the request has no bound token".to_owned()))?;
+  let proof = prover
+    .proof(request.method().as_str(), request.url().as_str(), Some(&token))
+    .await
+    .map_err(super::dpop::DpopSendError::from)?;
+  request
+    .headers_mut()
+    .insert(DPOP_HEADER, sensitive(proof.as_str())?);
+  Ok(RequestBuilder::from_parts(client, request))
 }
 
 /// Sends the service worker's proof for a rotated Web Push subscription (e2ee.md §7). No access
@@ -2004,6 +2133,44 @@ fn http_client() -> reqwest::Client {
   }
 }
 
+/// [`http_client`] that follows no redirect to another origin (see [`HttpServerApi::proof_http`]).
+#[cfg(not(target_arch = "wasm32"))]
+fn same_origin_http_client() -> reqwest::Client {
+  match http_client_builder()
+    .redirect(reqwest::redirect::Policy::custom(follow_same_origin_redirect))
+    .build()
+  {
+    Ok(client) => client,
+    Err(error) => {
+      tracing::error!(%error, "HTTP client configuration rejected, using the default client");
+      reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default()
+    },
+  }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn follow_same_origin_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+  let is_same_origin = attempt
+    .previous()
+    .last()
+    .is_some_and(|previous| previous.origin() == attempt.url().origin());
+  if is_same_origin {
+    follow_redirect(attempt)
+  } else {
+    attempt.stop()
+  }
+}
+
+/// reqwest has no redirect policy in the browser, whose `fetch` follows redirects itself, and takes a
+/// custom header to another origin only if that origin's CORS rule allows it.
+#[cfg(target_arch = "wasm32")]
+fn same_origin_http_client() -> reqwest::Client {
+  http_client()
+}
+
 /// reqwest races IPv6 and IPv4 itself (hyper-util's Happy Eyeballs, 300 ms; issue #420), with the
 /// connect timeout split across a family's addresses.
 #[cfg(not(target_arch = "wasm32"))]
@@ -2121,6 +2288,15 @@ fn websocket_error(error: tokio_tungstenite::tungstenite::Error) -> ApiError {
 }
 
 async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
+  send_noting(request, |_| {}).await
+}
+
+/// [`send`], with `note` looking at the headers of the server's answer: not at a captive portal's,
+/// whose clock and headers say nothing about the server.
+async fn send_noting(
+  request: RequestBuilder,
+  note: impl FnOnce(&reqwest::header::HeaderMap),
+) -> Result<Response, ApiError> {
   let (client, request) = request.build_split();
   let request = request.map_err(network_error)?;
   let origin = request.url().origin();
@@ -2131,6 +2307,10 @@ async fn send(request: RequestBuilder) -> Result<Response, ApiError> {
       kind: Interception::CaptivePortal,
       detail,
     });
+  }
+  // Another host's clock and nonce say nothing about the server.
+  if response.url().origin() == origin {
+    note(response.headers());
   }
   if status.is_success() {
     return Ok(response);
@@ -2167,6 +2347,13 @@ fn captive_portal_sign(origin: &url::Origin, response: &Response) -> Option<Stri
   if status == reqwest::StatusCode::NETWORK_AUTHENTICATION_REQUIRED {
     return Some("HTTP 511 network authentication required".into());
   }
+  // Only a client that doesn't follow it gets to see one (requests with a proof). The API doesn't
+  // send people to other sites.
+  if status.is_redirection()
+    && let Some(host) = redirect_host_elsewhere(origin, response)
+  {
+    return Some(format!("redirected to {host}"));
+  }
   if !status.is_success() {
     return None;
   }
@@ -2178,6 +2365,13 @@ fn captive_portal_sign(origin: &url::Origin, response: &Response) -> Option<Stri
     return Some(format!("redirected to an HTML page on {host}"));
   }
   Some(format!("HTTP {} with an HTML page", status.as_u16()))
+}
+
+/// The host a redirect points to, if that is another origin.
+fn redirect_host_elsewhere(origin: &url::Origin, response: &Response) -> Option<String> {
+  let location = response.headers().get(reqwest::header::LOCATION)?.to_str().ok()?;
+  let target = response.url().join(location).ok()?;
+  (target.origin() != *origin).then(|| target.host_str().unwrap_or_default().to_owned())
 }
 
 fn is_html(headers: &reqwest::header::HeaderMap) -> bool {
@@ -2232,12 +2426,20 @@ fn found<R>(result: Result<R, ApiError>) -> Result<Option<R>, ApiError> {
 
 /// [`send`] for a JSON API call, within [`API_ANSWER_TIMEOUT`] (the browser's fetch has its own).
 async fn send_api(request: RequestBuilder) -> Result<Response, ApiError> {
+  send_api_noting(request, |_| {}).await
+}
+
+/// [`send_api`] with [`send_noting`]'s look at the answer.
+async fn send_api_noting(
+  request: RequestBuilder,
+  note: impl FnOnce(&reqwest::header::HeaderMap),
+) -> Result<Response, ApiError> {
   #[cfg(not(target_arch = "wasm32"))]
-  return tokio::time::timeout(API_ANSWER_TIMEOUT, send(request))
+  return tokio::time::timeout(API_ANSWER_TIMEOUT, send_noting(request, note))
     .await
     .map_err(|_| ApiError::Network(format!("no answer within {} s", API_ANSWER_TIMEOUT.as_secs())))?;
   #[cfg(target_arch = "wasm32")]
-  send(request).await
+  send_noting(request, note).await
 }
 
 /// The JSON of an API answer, read by [`read_api_body`].
@@ -2476,6 +2678,189 @@ mod tests {
       !message.contains("deadbeef") && !message.contains("X-Amz"),
       "{message}"
     );
+  }
+
+  /// What a client does with the answers a proof can get, whatever the server: one more try when
+  /// the answer gives a reason, never two (e2ee.md §3.1.2).
+  #[cfg(not(target_arch = "wasm32"))]
+  mod dpop {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use teamcraft_crypto::dpop::DpopSigningKey;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
+    use crate::api::dpop::SoftwareDpopSigner;
+
+    const CHALLENGE: &str =
+      r#"{"error_code":"use_dpop_nonce","message":"the DPoP proof needs the current nonce"}"#;
+
+    #[tokio::test]
+    async fn a_server_that_keeps_challenging_gets_two_requests() {
+      let server = scripted(|attempt| {
+        format!(
+          "HTTP/1.1 401 Unauthorized\r\ndpop-nonce: nonce-{attempt}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{CHALLENGE}",
+          CHALLENGE.len()
+        )
+      })
+      .await;
+      let error = bound_api(&server.url).me().await.unwrap_err();
+      assert_eq!(server.requests(), 2);
+      assert!(error.is_proof_refusal(), "{error}");
+      assert!(!error.is_sign_in_required());
+    }
+
+    /// A proxy that strips `DPoP-Nonce`: nothing new to try with, and the user is told.
+    #[tokio::test]
+    async fn a_challenge_without_a_nonce_gets_no_retry() {
+      let server = scripted(|_| {
+        format!(
+          "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{CHALLENGE}",
+          CHALLENGE.len()
+        )
+      })
+      .await;
+      let error = bound_api(&server.url).me().await.unwrap_err();
+      assert_eq!(server.requests(), 1);
+      assert_eq!(error.interception(), Some(Interception::ProofRefused));
+    }
+
+    /// A proxy that strips the `DPoP` request header: the server takes it for a client without a
+    /// proof. No retry, and it reads as what it is.
+    #[tokio::test]
+    async fn dpop_required_gets_no_retry_and_asks_for_a_sign_in() {
+      let body = r#"{"error_code":"dpop_required","message":"this token is bound to a key"}"#;
+      let server = scripted(move |_| {
+        format!(
+          "HTTP/1.1 401 Unauthorized\r\ndpop-nonce: n\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+          body.len()
+        )
+      })
+      .await;
+      let error = bound_api(&server.url).me().await.unwrap_err();
+      assert_eq!(server.requests(), 1);
+      assert!(error.is_sign_in_required());
+    }
+
+    /// reqwest leaves `DPoP` on a redirect to another host. A request with a proof doesn't follow it.
+    #[tokio::test]
+    async fn a_proof_never_follows_a_redirect_to_another_host() {
+      let elsewhere = scripted(|_| {
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
+          .to_owned()
+      })
+      .await;
+      let target = elsewhere.url.clone();
+      let server = scripted(move |_| {
+        format!(
+          "HTTP/1.1 302 Found\r\nlocation: {target}/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )
+      })
+      .await;
+      let error = bound_api(&server.url).me().await.unwrap_err();
+      assert_eq!(elsewhere.requests(), 0);
+      assert_eq!(error.interception(), Some(Interception::CaptivePortal), "{error}");
+    }
+
+    /// An unbound request still follows, as before; what the other host says isn't taken in.
+    #[tokio::test]
+    async fn another_hosts_answer_teaches_the_prover_nothing() {
+      let elsewhere = scripted(|_| {
+        "HTTP/1.1 403 Forbidden\r\ndpop-nonce: from-elsewhere\r\ndate: Sun, 06 Nov 1994 08:49:37 GMT\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+          .to_owned()
+      })
+      .await;
+      let target = elsewhere.url.clone();
+      let server = scripted(move |_| {
+        format!(
+          "HTTP/1.1 302 Found\r\nlocation: {target}/x\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )
+      })
+      .await;
+      let prover = prover();
+      let api = HttpServerApi::new(
+        server.url.as_str(),
+        ProvenToken {
+          token: "unbound".to_owned(),
+          maybe_prover: Some(Arc::clone(&prover)),
+        },
+      );
+      api.me().await.unwrap_err();
+      assert_eq!(elsewhere.requests(), 1);
+      assert!(!prover.has_nonce());
+      assert_eq!(prover.clock_offset(), 0);
+    }
+
+    /// A captive portal's `Date` and headers say nothing about the server.
+    #[tokio::test]
+    async fn a_captive_portal_teaches_the_prover_nothing() {
+      let server = scripted(|_| {
+        let body = "<html>sign in</html>";
+        format!(
+          "HTTP/1.1 200 OK\r\ndpop-nonce: portal\r\ndate: Sun, 06 Nov 1994 08:49:37 GMT\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+          body.len()
+        )
+      })
+      .await;
+      let prover = prover();
+      let error = api_with(&server.url, Arc::clone(&prover)).me().await.unwrap_err();
+      assert_eq!(error.interception(), Some(Interception::CaptivePortal));
+      assert!(!prover.has_nonce());
+    }
+
+    struct Scripted {
+      url: String,
+      count: Arc<AtomicUsize>,
+    }
+
+    impl Scripted {
+      fn requests(&self) -> usize {
+        self.count.load(Ordering::SeqCst)
+      }
+    }
+
+    /// Answers request number `n` (from 0) with `answer(n)`.
+    async fn scripted(answer: impl Fn(usize) -> String + Send + 'static) -> Scripted {
+      let listener = loopback_listener().await;
+      let address = listener.local_addr().unwrap();
+      let count = Arc::new(AtomicUsize::new(0));
+      let counting = Arc::clone(&count);
+      tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+          let mut request = [0u8; 8192];
+          let _ = socket.read(&mut request).await;
+          let attempt = counting.fetch_add(1, Ordering::SeqCst);
+          let _ = socket.write_all(answer(attempt).as_bytes()).await;
+        }
+      });
+      Scripted {
+        url: format!("http://{address}"),
+        count,
+      }
+    }
+
+    fn prover() -> Arc<DpopProver> {
+      Arc::new(DpopProver::new(Arc::new(SoftwareDpopSigner::new(
+        DpopSigningKey::generate(),
+      ))))
+    }
+
+    fn bound_api(url: &str) -> HttpServerApi<ProvenToken> {
+      api_with(url, prover())
+    }
+
+    fn api_with(url: &str, prover: Arc<DpopProver>) -> HttpServerApi<ProvenToken> {
+      let claims = format!(r#"{{"cnf":{{"jkt":"{}"}}}}"#, prover.thumbprint().as_str());
+      HttpServerApi::new(
+        url,
+        ProvenToken {
+          token: format!("e30.{}.c2ln", URL_SAFE_NO_PAD.encode(claims)),
+          maybe_prover: Some(prover),
+        },
+      )
+    }
   }
 
   #[cfg(not(target_arch = "wasm32"))]

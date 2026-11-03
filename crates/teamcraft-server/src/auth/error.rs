@@ -45,10 +45,12 @@ impl From<crate::dependencies::CircuitOpen> for AuthError {
 }
 
 impl AuthError {
-  /// A proof that was refused: counts as a failed authentication everywhere. The nonce challenge
-  /// doesn't, since everybody meets it after a restart (`DpopNonceChallenge`).
-  pub fn is_refused_dpop_proof(&self) -> bool {
-    matches!(self, Self::Dpop(refusal) if *refusal != DpopRefusal::UseNonce)
+  /// The token is valid, and only its proof or binding was refused. All of it comes after the token's
+  /// own check, so it guesses nothing: a proof can't be brute-forced, and only somebody with a token
+  /// gets this far. It stays under the per-address request limit, and it doesn't count as a failed
+  /// authentication: a wrong public origin or an old app would otherwise block a whole office.
+  pub fn is_dpop_refusal(&self) -> bool {
+    matches!(self, Self::Dpop(_))
   }
 
   /// What a token guesser produces (missing, forged or malformed tokens). Rate limits count these;
@@ -74,9 +76,15 @@ mod tests {
     assert!(!AuthError::KeysUnavailable("down".into()).is_guess());
     assert!(!AuthError::Dpop(DpopRefusal::UseNonce).is_guess());
     assert!(!AuthError::Dpop(DpopRefusal::Replayed).is_guess());
-    assert!(AuthError::Dpop(DpopRefusal::Replayed).is_refused_dpop_proof());
-    assert!(AuthError::Dpop(DpopRefusal::ProofMissing).is_refused_dpop_proof());
-    assert!(!AuthError::Dpop(DpopRefusal::UseNonce).is_refused_dpop_proof());
-    assert!(!AuthError::DpopUserLimit.is_refused_dpop_proof());
+    for refusal in [
+      DpopRefusal::Replayed,
+      DpopRefusal::ProofMissing,
+      DpopRefusal::TokenNotBound,
+      DpopRefusal::UseNonce,
+    ] {
+      let error = AuthError::Dpop(refusal);
+      assert!(error.is_dpop_refusal() && !error.is_guess(), "{error}");
+    }
+    assert!(!AuthError::DpopUserLimit.is_dpop_refusal());
   }
 }
