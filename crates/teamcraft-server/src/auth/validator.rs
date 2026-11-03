@@ -5,8 +5,10 @@ use std::sync::Mutex;
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
+use teamcraft_crypto::dpop::JwkThumbprint;
 use teamcraft_proto::Role;
 
+use super::dpop::TokenBinding;
 use super::error::AuthError;
 use super::jwks::JwksCache;
 use super::roles::RoleMapping;
@@ -64,6 +66,8 @@ pub struct TokenIdentity {
   pub is_exempt_from_session_policy: bool,
   /// The organization claim of the token (`None`: no claim configured or present).
   pub maybe_organization: Option<String>,
+  /// Whether the token is bound to a device's key.
+  pub token_binding: TokenBinding,
 }
 
 /// Who a back-channel logout token ends sessions of.
@@ -78,9 +82,13 @@ struct AccessClaims {
   sub: String,
   #[serde(default)]
   azp: Option<String>,
-  /// `Bearer` for access tokens; `ID`, `Logout` and `Refresh` tokens must not be accepted as one.
+  /// `Bearer` for access tokens, or `DPoP` for bound ones; `ID`, `Logout` and `Refresh` tokens must
+  /// not be accepted as one.
   #[serde(default)]
   typ: Option<String>,
+  /// The key the token is bound to (RFC 9449 §6.1).
+  #[serde(default)]
+  cnf: Option<Confirmation>,
   #[serde(default)]
   preferred_username: Option<String>,
   #[serde(default)]
@@ -122,6 +130,12 @@ struct LogoutClaims {
   nonce: Option<String>,
   #[serde(default)]
   events: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct Confirmation {
+  #[serde(default)]
+  jkt: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -260,11 +274,11 @@ impl TokenValidator {
     if claims.sub.trim().is_empty() {
       return Err(AuthError::InvalidToken("token has no subject".into()));
     }
-    if claims
-      .typ
-      .as_deref()
-      .is_some_and(|typ| !typ.eq_ignore_ascii_case("Bearer"))
-    {
+    let token_binding = token_binding_of(claims.cnf.as_ref())?;
+    let is_bound = matches!(token_binding, TokenBinding::Bound(_));
+    if claims.typ.as_deref().is_some_and(|typ| {
+      !typ.eq_ignore_ascii_case("Bearer") && !(is_bound && typ.eq_ignore_ascii_case("DPoP"))
+    }) {
       return Err(AuthError::InvalidToken("not an access token".into()));
     }
     if !claims.is_issued_to(&self.options.client_id) {
@@ -302,6 +316,7 @@ impl TokenValidator {
       maybe_acr: claims.acr,
       is_exempt_from_session_policy: false,
       maybe_organization,
+      token_binding,
     })
   }
 }
@@ -320,6 +335,21 @@ impl AccessClaims {
       .into_iter()
       .flat_map(|access| access.roles.iter().map(String::as_str))
   }
+}
+
+/// What a token's `cnf` claim binds it to. A `cnf` we can't check (no `jkt`, such as a certificate
+/// binding, or a thumbprint that isn't one) is refused: taking the token as unbound would throw its
+/// binding away.
+fn token_binding_of(maybe_confirmation: Option<&Confirmation>) -> Result<TokenBinding, AuthError> {
+  let Some(confirmation) = maybe_confirmation else {
+    return Ok(TokenBinding::Unbound);
+  };
+  confirmation
+    .jkt
+    .as_deref()
+    .and_then(|jkt| JwkThumbprint::parse(jkt).ok())
+    .map(TokenBinding::Bound)
+    .ok_or_else(|| AuthError::InvalidToken("unusable cnf claim".into()))
 }
 
 /// The organization out of a claim value: a string, or the first string of a list. Blank values
@@ -471,6 +501,54 @@ mod tests {
     for typ in [json!("Bearer"), json!("bearer"), json!(null)] {
       let token = sign(&claims(json!({"typ": typ})));
       assert!(validator().verify(&token, &public_key()).is_ok(), "{typ}");
+    }
+  }
+
+  mod token_binding {
+    use super::*;
+
+    const JKT: &str = "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I";
+
+    #[test]
+    fn a_token_without_cnf_is_unbound() {
+      let token = sign(&claims(json!({})));
+      assert_eq!(
+        validator().verify(&token, &public_key()).unwrap().token_binding,
+        TokenBinding::Unbound
+      );
+    }
+
+    #[test]
+    fn cnf_jkt_binds_the_token_with_either_typ() {
+      for typ in ["Bearer", "DPoP", "dpop"] {
+        let token = sign(&claims(json!({"typ": typ, "cnf": {"jkt": JKT}})));
+        assert_eq!(
+          validator().verify(&token, &public_key()).unwrap().token_binding,
+          TokenBinding::Bound(JwkThumbprint::parse(JKT).unwrap()),
+          "{typ}"
+        );
+      }
+    }
+
+    #[test]
+    fn typ_dpop_without_a_binding_is_no_access_token() {
+      let token = sign(&claims(json!({"typ": "DPoP"})));
+      assert_invalid(validator().verify(&token, &public_key()), "not an access token");
+    }
+
+    #[test]
+    fn a_binding_we_cannot_check_is_refused_not_ignored() {
+      for cnf in [
+        json!({}),
+        json!({"x5t#S256": "abc"}),
+        json!({"jkt": "short"}),
+        json!({"jkt": null}),
+      ] {
+        let token = sign(&claims(json!({"cnf": cnf})));
+        assert_invalid(validator().verify(&token, &public_key()), "unusable cnf claim");
+      }
+      let token = sign(&claims(json!({"cnf": "text"})));
+      assert_invalid(validator().verify(&token, &public_key()), "malformed token");
     }
   }
 

@@ -3,14 +3,14 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use teamcraft_proto::{
-  ConversationId, DeviceActivity, DeviceId, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
-  Permission, ThreadId, UserId,
+  ConversationId, DeviceActivity, DeviceId, GATEWAY_PATH, GatewayClientMessage, GatewayEvent,
+  GatewayServerMessage, Permission, ThreadId, UserId,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 use tracing::{debug, warn};
 
 use super::hub::Attached;
-use crate::auth::AuthenticatedUser;
+use crate::auth::{AuthenticatedUser, PresentedProof, PresentedToken, TokenScheme};
 use crate::drain::CLOSE_SERVICE_RESTART;
 use crate::error::ApiError;
 use crate::outage_gate::OutageGate;
@@ -90,8 +90,9 @@ async fn handshake(
       token,
       device_id,
       activity,
+      maybe_dpop_proof,
     } => {
-      let caller = authenticate(state, socket, &token, device_id, ip).await?;
+      let caller = authenticate(state, socket, &token, maybe_dpop_proof.as_deref(), device_id, ip).await?;
       let attached = state.hub.open_session(caller.user.id, device_id, activity);
       if !is_still_active(state, socket, caller.user.id, &attached).await {
         return None;
@@ -111,8 +112,9 @@ async fn handshake(
       session_id,
       last_seq,
       device_id,
+      maybe_dpop_proof,
     } => {
-      let caller = authenticate(state, socket, &token, device_id, ip).await?;
+      let caller = authenticate(state, socket, &token, maybe_dpop_proof.as_deref(), device_id, ip).await?;
       match state
         .hub
         .resume_session(&session_id, caller.user.id, device_id, last_seq)
@@ -152,13 +154,21 @@ async fn authenticate(
   state: &AppState,
   socket: &mut WebSocket,
   token: &str,
+  maybe_proof: Option<&str>,
   device: DeviceId,
   ip: &str,
 ) -> Option<AuthenticatedUser> {
   let gate = OutageGate::from_state(state);
   let result = async {
     gate.admit().await?;
-    let identity = accounts::validate_token(state, token).await?;
+    let presented = PresentedToken {
+      token,
+      scheme: TokenScheme::Frame,
+      proof: PresentedProof::from_frame(maybe_proof),
+      method: "GET",
+      path: GATEWAY_PATH,
+    };
+    let identity = accounts::validate_presented_token(state, &presented).await?;
     let caller = accounts::authenticate(state, identity).await?;
     if !state.database.is_active_device_of(caller.user.id, device).await? {
       return Err(ApiError::device_not_found());
@@ -172,11 +182,16 @@ async fn authenticate(
     Err(error) => {
       // Guessing tokens over the gateway counts like guessing them over HTTP. Expired tokens don't:
       // clients waking up from sleep reconnect with them, and an office behind one address would
-      // otherwise lock itself out.
-      if matches!(&error, ApiError::Auth(auth) if auth.is_guess()) {
+      // otherwise lock itself out. A refused DPoP proof counts as it does over HTTP and on the relay.
+      if matches!(&error, ApiError::Auth(auth) if auth.is_guess() || auth.is_refused_dpop_proof()) {
         state
           .rate_limits
           .record_auth_failure(ip, std::time::Instant::now());
+      }
+      if error.is_dpop_nonce_challenge() {
+        let settings = state.settings.get();
+        let nonce = state.dpop.current_nonce(&settings.token_binding);
+        let _ = send(socket, &GatewayServerMessage::DpopNonce { nonce }).await;
       }
       let _ = send(socket, &GatewayServerMessage::Error { error: error.body() }).await;
       None

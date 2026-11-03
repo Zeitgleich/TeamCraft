@@ -281,6 +281,7 @@ mod http {
     let (mut socket, _) = tokio_tungstenite::connect_async(&app.ws_url).await.unwrap();
     let _hello = socket.next().await.unwrap().unwrap();
     let identify = GatewayClientMessage::Identify {
+      maybe_dpop_proof: None,
       token: app.token(user),
       device_id: "1".parse().unwrap(),
       activity: DeviceActivity::Active,

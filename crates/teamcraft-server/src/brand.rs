@@ -867,7 +867,7 @@ fn asset_etag(bytes: &[u8]) -> Option<HeaderValue> {
   .ok()
 }
 
-fn origin_of(host: &str) -> String {
+pub(crate) fn origin_of(host: &str) -> String {
   if host.is_empty() {
     String::new()
   } else if host == "localhost" || host.ends_with(".localhost") {

@@ -327,6 +327,7 @@ async fn connected_clients_are_told_about_new_entries() {
   let (mut socket, _) = tokio_tungstenite::connect_async(&app.ws_url).await.unwrap();
   socket.next().await;
   let identify = GatewayClientMessage::Identify {
+    maybe_dpop_proof: None,
     token: app.token(&carol),
     device_id: serde_json::from_value(json!(carol_device)).unwrap(),
     activity: DeviceActivity::Active,

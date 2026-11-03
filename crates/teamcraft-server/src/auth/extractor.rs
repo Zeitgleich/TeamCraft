@@ -4,6 +4,7 @@ use axum::http::request::Parts;
 use teamcraft_db::User;
 use teamcraft_proto::Role;
 
+use super::dpop::{PresentedProof, PresentedToken, TokenScheme};
 use super::error::AuthError;
 use crate::error::ApiError;
 use crate::meetings::guest::GUEST_ISSUER;
@@ -23,14 +24,23 @@ pub struct AuthenticatedUser {
   pub role: Role,
   /// The identity provider's session the token belongs to, if it names one.
   pub maybe_oidc_session: Option<String>,
+  /// The request proved that it holds the key its token is bound to.
+  pub has_verified_token_binding: bool,
 }
 
 impl FromRequestParts<AppState> for AuthenticatedUser {
   type Rejection = ApiError;
 
   async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
-    let token = bearer_token(parts)?;
-    let identity = accounts::validate_token(state, token).await?;
+    let (scheme, token) = access_token(parts)?;
+    let presented = PresentedToken {
+      token,
+      scheme,
+      proof: PresentedProof::from_headers(&parts.headers),
+      method: parts.method.as_str(),
+      path: parts.uri.path(),
+    };
+    let identity = accounts::validate_presented_token(state, &presented).await?;
     if identity.issuer == GUEST_ISSUER {
       let maybe_path = parts.extensions.get::<MatchedPath>().map(MatchedPath::as_str);
       if !guest_scope::allows(&parts.method, maybe_path) {
@@ -105,16 +115,37 @@ fn is_write(method: &axum::http::Method) -> bool {
   )
 }
 
+/// The token of the `Bearer` or `DPoP` scheme: what callers with an access token send.
+fn access_token(parts: &Parts) -> Result<(TokenScheme, &str), AuthError> {
+  let (scheme, token) = authorization(parts)?;
+  if scheme.eq_ignore_ascii_case("bearer") {
+    Ok((TokenScheme::Bearer, token))
+  } else if scheme.eq_ignore_ascii_case("dpop") {
+    Ok((TokenScheme::Dpop, token))
+  } else {
+    Err(AuthError::MissingToken)
+  }
+}
+
+/// The token of the `Bearer` scheme: for services, whose tokens are never bound.
 fn bearer_token(parts: &Parts) -> Result<&str, AuthError> {
+  let (scheme, token) = authorization(parts)?;
+  if !scheme.eq_ignore_ascii_case("bearer") {
+    return Err(AuthError::MissingToken);
+  }
+  Ok(token)
+}
+
+fn authorization(parts: &Parts) -> Result<(&str, &str), AuthError> {
   let header = parts.headers.get(AUTHORIZATION).ok_or(AuthError::MissingToken)?;
   let value = header
     .to_str()
     .map_err(|_| AuthError::InvalidToken("malformed authorization header".into()))?;
   let (scheme, token) = value.split_once(' ').ok_or(AuthError::MissingToken)?;
-  if !scheme.eq_ignore_ascii_case("bearer") || token.trim().is_empty() {
+  if token.trim().is_empty() {
     return Err(AuthError::MissingToken);
   }
-  Ok(token.trim())
+  Ok((scheme, token.trim()))
 }
 
 #[cfg(test)]
@@ -127,6 +158,26 @@ mod tests {
   fn extracts_bearer_token_case_insensitively() {
     assert_eq!(bearer_token(&parts_with("Bearer abc.def")).unwrap(), "abc.def");
     assert_eq!(bearer_token(&parts_with("bearer abc")).unwrap(), "abc");
+  }
+
+  #[test]
+  fn access_tokens_come_with_either_scheme_and_services_only_with_bearer() {
+    assert_eq!(
+      access_token(&parts_with("DPoP abc")).unwrap(),
+      (TokenScheme::Dpop, "abc")
+    );
+    assert_eq!(
+      access_token(&parts_with("Bearer abc")).unwrap(),
+      (TokenScheme::Bearer, "abc")
+    );
+    assert!(matches!(
+      access_token(&parts_with("Basic abc")),
+      Err(AuthError::MissingToken)
+    ));
+    assert!(matches!(
+      bearer_token(&parts_with("DPoP abc")),
+      Err(AuthError::MissingToken)
+    ));
   }
 
   #[test]

@@ -84,7 +84,8 @@ instance to the app, which sends it to the lookalike, and the lookalike can repl
 server (bearer tokens are not bound to a client). Mitigations today: the confirmation screen shows
 the identity provider's host and warns when it lies outside the server's domain, tokens are stored
 per server origin and issuer, and E2EE keeps message content out of reach (the relayed token gives
-API access, not keys). The real fix is sender-constrained tokens with DPoP (RFC 9449, issue #120).
+API access, not keys). The real fix is sender-constrained tokens with DPoP (RFC 9449, issue #120):
+the server checks proofs against its own public origins (e2ee.md §3.1.2); clients don't send them yet.
 
 Push goes through APNs/FCM, optionally via a **push gateway** operated by the publisher of the store
 apps. Wake-ups are sealed to the device's push key before they leave the server, so neither Apple,

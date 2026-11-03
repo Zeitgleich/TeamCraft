@@ -32,7 +32,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .route("/api/v1/device-links/{request_id}", delete(handlers::withdraw_device_link_handler))
     .route("/api/v1/device-links/{request_id}/reject", post(handlers::reject_device_link_handler))
     // A WebSocket; the device-linking protocol is in teamcraft-proto (docs/e2ee.md).
-    .route("/api/v1/rendezvous", get(handlers::rendezvous_handler))
+    .route(teamcraft_proto::RENDEZVOUS_PATH, get(handlers::rendezvous_handler))
 }
 
 /// Schemas in the document that no documented route names: the device link requests.

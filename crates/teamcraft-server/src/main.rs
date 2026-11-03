@@ -112,6 +112,11 @@ async fn run() -> anyhow::Result<()> {
     .validate()
     .map_err(anyhow::Error::msg)
     .context("checking [web]")?;
+  config
+    .security
+    .validate()
+    .map_err(anyhow::Error::msg)
+    .context("checking [security]")?;
   let brands = BrandStore::new(BrandInputs {
     branding: config.branding.clone(),
     config_brands: config.brands.clone(),
@@ -205,6 +210,7 @@ async fn run() -> anyhow::Result<()> {
     mail_status: Arc::new(MailStatus::default()),
     maybe_settings_key: maybe_settings_key.map(Arc::new),
     settings_lock: Arc::default(),
+    dpop: Arc::default(),
     policy: Arc::new(PolicyHolder::default()),
     scheme: Arc::new(SchemeStore::default()),
     settings: Arc::new(SettingsCell::new(Settings {
@@ -234,6 +240,7 @@ async fn run() -> anyhow::Result<()> {
       branding: config.branding.clone(),
       brands: config.brands.clone(),
       push: push_settings(&config),
+      token_binding: teamcraft_proto::TokenBindingSettings::default(),
       max_attachment_bytes: config
         .storage
         .as_ref()

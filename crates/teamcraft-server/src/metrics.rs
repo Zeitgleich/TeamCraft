@@ -66,6 +66,16 @@ pub enum BackgroundJob {
   UrgentScheduler,
 }
 
+/// What DPoP made of a request with an identity provider's token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DpopOutcome {
+  /// Bound, with a valid proof.
+  Bound,
+  /// Not bound, and accepted: a client the policy `required` would lock out.
+  Unbound,
+  Refused,
+}
+
 /// The server's metrics.
 pub struct ServerMetrics {
   metrics: Metrics,
@@ -83,6 +93,7 @@ pub struct ServerMetrics {
   push_provider_failing: IntGaugeVec,
   dependency_state: IntGaugeVec,
   job_last_success: IntGaugeVec,
+  dpop_requests: IntCounterVec,
   /// One scrape at a time: the push counters are brought up to date by their difference.
   scrape: Mutex<()>,
 }
@@ -108,6 +119,18 @@ impl Default for MetricsConfig {
 impl MetricsConfig {
   pub fn database_check_interval(&self) -> Duration {
     Duration::from_secs(self.database_check_interval_secs.max(1))
+  }
+}
+
+impl DpopOutcome {
+  const ALL: [Self; 3] = [Self::Bound, Self::Unbound, Self::Refused];
+
+  fn label(self) -> &'static str {
+    match self {
+      Self::Bound => "bound",
+      Self::Unbound => "unbound",
+      Self::Refused => "refused",
+    }
   }
 }
 
@@ -202,13 +225,27 @@ impl ServerMetrics {
         "When the background job last succeeded (Unix time); 0: not since the start.",
         &["job"],
       )?,
+      dpop_requests: metrics.int_counter_vec(
+        "teamcraft_dpop_requests_total",
+        "Requests with an identity provider's token, by what DPoP made of them.",
+        &["outcome"],
+      )?,
       scrape: Mutex::new(()),
       metrics,
     };
     for job in BackgroundJob::ALL {
       this.job_last_success.with_label_values(&[job.label()]).set(0);
     }
+    for outcome in DpopOutcome::ALL {
+      this.dpop_requests.with_label_values(&[outcome.label()]).inc_by(0);
+    }
     Ok(this)
+  }
+
+  /// Counts a request with an identity provider's token. What tells an admin that nobody is left
+  /// who would be locked out by the policy `required` (operations.md, "Binding tokens to devices").
+  pub fn note_dpop(&self, outcome: DpopOutcome) {
+    self.dpop_requests.with_label_values(&[outcome.label()]).inc();
   }
 
   /// What the HTTP router counts its requests with, with the listener on.
@@ -679,6 +716,7 @@ mod tests {
         "teamcraft_db_pool_max_connections",
         "teamcraft_db_size_bytes",
         "teamcraft_dependency_state",
+        "teamcraft_dpop_requests_total",
         "teamcraft_gateway_connections",
         "teamcraft_gateway_resume_buffer_bytes",
         "teamcraft_gateway_sessions",
@@ -733,6 +771,7 @@ mod tests {
           "state",
           BTreeSet::from(["down", "idle", "in_use", "ok", "recovering"]),
         ),
+        ("outcome", BTreeSet::from(["bound", "refused", "unbound"])),
         (
           "job",
           BTreeSet::from([

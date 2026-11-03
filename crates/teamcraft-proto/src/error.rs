@@ -14,6 +14,13 @@ wire_enum! {
     SessionEnded => "session_ended",
     /// The session policy's idle timeout or longest session ran out.
     SessionTimedOut => "session_timed_out",
+    /// The DPoP proof needs the server's current nonce: try again with the `DPoP-Nonce` it sent
+    /// (RFC 9449 §8). Not a failure; the session is fine.
+    UseDpopNonce => "use_dpop_nonce",
+    /// The DPoP proof was refused (wrong method, URL, token, key or time, or used already).
+    InvalidDpopProof => "invalid_dpop_proof",
+    /// The server takes this token only together with a DPoP proof, or only bound to a key.
+    DpopRequired => "dpop_required",
     NoTeamcraftRole => "no_teamcraft_role",
     /// The account is deactivated (suspended by an admin or the identity provider); signing in is
     /// refused until it is reactivated.

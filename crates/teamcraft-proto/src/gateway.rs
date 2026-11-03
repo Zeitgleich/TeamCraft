@@ -21,23 +21,33 @@ use crate::{
 /// learns coarse transitions, not a timeline of every glance away.
 pub const ATTENTION_AWAY_DELAY_SECS: u64 = 60;
 
+/// The path of the gateway: what a DPoP proof in `Identify` or `Resume` names.
+pub const GATEWAY_PATH: &str = "/api/v1/gateway";
+
 /// Frames sent by the client.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GatewayClientMessage {
-  /// Starts a new session. `token` is the OIDC access token.
+  /// Starts a new session. `token` is the OIDC access token. `dpop_proof` is the DPoP proof for
+  /// `GET` on [`GATEWAY_PATH`]: it travels here with the token because a browser can't set headers
+  /// on a WebSocket upgrade (e2ee.md §3.1.2).
   Identify {
     token: String,
     device_id: DeviceId,
     #[serde(default = "default_activity")]
     activity: DeviceActivity,
+    #[serde(rename = "dpop_proof", default, skip_serializing_if = "Option::is_none")]
+    maybe_dpop_proof: Option<String>,
   },
-  /// Continues session `session_id`; the server replays events after `last_seq`.
+  /// Continues session `session_id`; the server replays events after `last_seq`. `dpop_proof` as
+  /// for [`Self::Identify`].
   Resume {
     token: String,
     session_id: String,
     last_seq: u64,
     device_id: DeviceId,
+    #[serde(rename = "dpop_proof", default, skip_serializing_if = "Option::is_none")]
+    maybe_dpop_proof: Option<String>,
   },
   Heartbeat,
   /// The user is typing in a conversation, or with `thread_id` a reply in one of its threads (#882;
@@ -85,6 +95,11 @@ pub enum GatewayServerMessage {
   },
   Error {
     error: ErrorBody,
+  },
+  /// Comes right before an [`Self::Error`] with `use_dpop_nonce`: what to put into the next proof.
+  /// The connection ends with the error; the client connects again.
+  DpopNonce {
+    nonce: String,
   },
   #[serde(other)]
   Unknown,
@@ -318,6 +333,7 @@ impl fmt::Debug for GatewayClientMessage {
       } => f
         .debug_struct("Identify")
         .field("token", &"[redacted]")
+        .field("dpop_proof", &"[redacted]")
         .field("device_id", device_id)
         .field("activity", activity)
         .finish(),
@@ -329,6 +345,7 @@ impl fmt::Debug for GatewayClientMessage {
       } => f
         .debug_struct("Resume")
         .field("token", &"[redacted]")
+        .field("dpop_proof", &"[redacted]")
         .field("session_id", session_id)
         .field("last_seq", last_seq)
         .field("device_id", device_id)
@@ -497,8 +514,10 @@ mod tests {
       token: "secret-token".into(),
       device_id: DeviceId::from_snowflake(Snowflake::new(1).unwrap()),
       activity: DeviceActivity::Idle,
+      maybe_dpop_proof: Some("secret-proof".into()),
     };
     assert!(!format!("{message:?}").contains("secret-token"));
+    assert!(!format!("{message:?}").contains("secret-proof"));
   }
 
   #[test]

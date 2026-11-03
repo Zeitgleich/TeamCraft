@@ -550,6 +550,7 @@ impl TestApp {
       policy: Arc::new(PolicyHolder::default()),
       scheme: Arc::new(SchemeStore::default()),
       rate_limits: Arc::new(RateLimits::new(&settings.security.rate_limits)),
+      dpop: Arc::default(),
       brands: Arc::new(
         BrandStore::new(BrandInputs {
           branding: settings.branding.clone(),
@@ -628,6 +629,7 @@ impl TestApp {
     let settings = self.state.settings.base();
     self.state.hub = Arc::new(new_hub(&settings));
     self.state.rendezvous = Arc::new(RendezvousHub::new(&settings.rendezvous));
+    self.state.dpop = Arc::default();
     self.state.drain = Arc::default();
     self.serve();
     closed
