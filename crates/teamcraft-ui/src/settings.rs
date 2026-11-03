@@ -1,5 +1,6 @@
-//! Per-device user preferences, persisted in `localStorage`. They will move to the synced, encrypted
-//! user settings of the client core later; the UI only depends on the signals here.
+//! User preferences, persisted in `localStorage`. Those that follow the account go through
+//! `settings_sync` into the encrypted account data of the client core (issue #945); the UI only
+//! depends on the signals here.
 
 use std::collections::HashMap;
 
@@ -489,7 +490,7 @@ pub fn stored_locale() -> Locale {
   load(KEY_LOCALE, Locale::from_tag).unwrap_or_else(browser_locale)
 }
 
-fn browser_locale() -> Locale {
+pub(crate) fn browser_locale() -> Locale {
   web_sys::window()
     .and_then(|window| window.navigator().language())
     .and_then(|tag| Locale::from_tag(&tag))

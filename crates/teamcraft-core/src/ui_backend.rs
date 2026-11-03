@@ -28,6 +28,7 @@ use teamcraft_client_api::model::{
   SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow,
   UnseenReactions, User, UserId, hue_from_hex,
 };
+use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
   ConversationVisibility, Id, InviteId, JoinPolicy, ListConversationMembersResponse, ListInvitesResponse,
@@ -109,6 +110,10 @@ pub enum CoreCommand {
   },
   DeleteSavedSearch {
     id: u64,
+  },
+  /// Settings that follow the account, into the encrypted account data (e2ee.md §6.4).
+  WriteSettings {
+    writes: Vec<SettingWrite>,
   },
   /// One of the user's own call backgrounds: encrypted, uploaded and recorded in the key bag.
   AddBackground {
@@ -2273,6 +2278,20 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn link_request_mark(&self) -> u64 {
     self.read(crate::read_state::marks(&self.store)).link_requests
+  }
+
+  fn settings_mark(&self) -> u64 {
+    self.read(crate::read_state::marks(&self.store)).settings
+  }
+
+  fn account_settings(&self) -> SyncedSettings {
+    self
+      .read(crate::client::stored_account_data(&self.store))
+      .settings
+  }
+
+  fn write_settings(&self, writes: Vec<SettingWrite>) {
+    self.command(CoreCommand::WriteSettings { writes });
   }
 
   fn notify_typing(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {

@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 base64.workspace = true
 serde.workspace = true
+# Values of synced settings are opaque JSON: only the client that reads a key knows its type.
+serde_json.workspace = true
 thiserror.workspace = true
 utoipa.workspace = true
 # Fresh idempotency keys for create requests (browsers use the getrandom js backend of the app).
@@ -21,4 +23,3 @@ rand_core.workspace = true
 zeroize = { version = "1.9.1", features = ["derive"] }
 
 [dev-dependencies]
-serde_json.workspace = true

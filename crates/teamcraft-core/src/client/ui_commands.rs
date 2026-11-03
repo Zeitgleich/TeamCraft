@@ -123,6 +123,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         data.delete_saved_search(id, now);
         true
       }),
+      CoreCommand::WriteSettings { writes } => self.write_synced_settings(&writes),
       CoreCommand::AddBackground { name, picture } => self.add_background(name, picture).await.map(|_| ()),
       CoreCommand::DeleteBackground { id } => self.delete_background(id).await,
       CoreCommand::AddOrgBackground { name, picture } => {

@@ -22,6 +22,10 @@ pub struct LiveMarks {
   /// The open device link requests changed (e2ee.md §5): the UI reads them from the core.
   #[serde(default)]
   pub link_requests: u64,
+  /// The account's synced settings changed (e2ee.md §6.4). 0 until this device has merged the key
+  /// bag from the server once: only then it knows what the account holds.
+  #[serde(default)]
+  pub settings: u64,
 }
 
 /// How far another member of a DM has read, from `read_receipt` events.

@@ -152,6 +152,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   if let Some(sync) = use_context::<StoredValue<NotificationSync, LocalStorage>>() {
     sync.get_value().start(settings);
   }
+  // The rest of the settings follows the account in its encrypted data (issue #945).
+  crate::settings_sync::start(state, settings);
   let link_menu = RwSignal::new(None::<crate::external_links::LinkMenuTarget>);
   provide_context(link_menu);
   crate::external_links::start(link_menu);

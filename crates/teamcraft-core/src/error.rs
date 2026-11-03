@@ -19,6 +19,8 @@ use crate::store::StoreError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
+  #[error("synced settings would grow past their limit: {keys:?}")]
+  SettingsTooLarge { keys: Vec<String> },
   #[error("local store: {0}")]
   Store(#[from] StoreError),
   #[error("server: {0}")]

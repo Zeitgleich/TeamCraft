@@ -171,6 +171,15 @@ pub async fn link_announce() -> Result<(), String> {
   call("core_link_announce", &json!({})).await
 }
 
+/// The settings the account holds (e2ee.md §6.4), fresh from the core rather than from the cache of
+/// answers: the caller reads them once per change of `ChatBackend::settings_mark`.
+pub async fn account_settings() -> Result<teamcraft_proto::synced_settings::SyncedSettings, String> {
+  match call::<ChatAnswer>("core_query", &json!({ "query": ChatQuery::AccountSettings })).await? {
+    ChatAnswer::AccountSettings { settings } => Ok(settings),
+    _ => Err("unexpected answer to the account settings query".to_owned()),
+  }
+}
+
 /// The new devices of this account that ask to be linked (e2ee.md §5).
 pub async fn link_requests() -> Result<Vec<LinkRequestView>, String> {
   call("core_link_requests", &json!({})).await
@@ -1932,6 +1941,20 @@ impl ChatBackend for RemoteChat {
       .maybe_live
       .as_ref()
       .map_or(0, |live| live.marks.link_requests)
+  }
+
+  fn settings_mark(&self) -> u64 {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .maybe_live
+      .as_ref()
+      .map_or(0, |live| live.marks.settings)
+  }
+
+  fn write_settings(&self, writes: Vec<teamcraft_proto::synced_settings::SettingWrite>) {
+    self.act(ChatAction::WriteSettings { writes });
   }
 
   fn live_snapshot(&self) -> Option<teamcraft_client_api::live::LiveSnapshot> {

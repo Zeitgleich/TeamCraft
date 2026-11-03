@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   BackgroundId, Base64Bytes, CallRosterEntry, CategoryId, HistoryPolicy, OrgBackgroundId, SignInReason,
 };
@@ -1040,6 +1041,9 @@ pub enum ChatAction {
   DeleteSavedSearch {
     id: u64,
   },
+  WriteSettings {
+    writes: Vec<SettingWrite>,
+  },
 }
 
 /// How soon the UI wants a file's bytes (`core_attachment`): the image viewer before the previews.
@@ -1321,6 +1325,7 @@ impl ChatAction {
       Self::RevokeSpaceInvite { space, invite } => backend.revoke_space_invite(space, invite),
       Self::SaveSearch { name, query } => backend.save_search(&name, &query),
       Self::DeleteSavedSearch { id } => backend.delete_saved_search(id),
+      Self::WriteSettings { writes } => backend.write_settings(writes),
       original => return Some(original),
     }
     None
@@ -1436,6 +1441,7 @@ pub enum ChatQuery {
   },
   RecentMentions,
   SavedSearches,
+  AccountSettings,
   Thread {
     conversation: ConversationId,
     thread: ThreadId,
@@ -1589,6 +1595,9 @@ pub enum ChatAnswer {
   },
   SavedSearches {
     searches: Vec<SavedSearch>,
+  },
+  AccountSettings {
+    settings: SyncedSettings,
   },
   Flag {
     value: bool,
@@ -1780,6 +1789,9 @@ impl ChatQuery {
       },
       Self::SavedSearches => ChatAnswer::SavedSearches {
         searches: backend.saved_searches(),
+      },
+      Self::AccountSettings => ChatAnswer::AccountSettings {
+        settings: backend.account_settings(),
       },
       Self::HasExternalPeople { conversation } => ChatAnswer::Flag {
         value: backend.has_external_people(conversation),

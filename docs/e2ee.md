@@ -2250,7 +2250,7 @@ sharing); nothing below is a new primitive.
 
 ### 6.4 Account data in the key bag (implemented)
 
-Saved items, drafts, saved searches and trust decisions are personal and must follow the user to every device, but
+Saved items, drafts, saved searches, settings and trust decisions are personal and must follow the user to every device, but
 the server must not learn them. They live in the key bag (version 2 adds an `account_data` field
 next to the identity and content keys), so they are encrypted with the backup key like the keys and
 restored together with them on a new device.
@@ -2259,9 +2259,9 @@ restored together with them on a new device.
   conflict the device downloads the newer bag, merges and retries: content keys are a union; every
   account data entry carries the time of its last change, the newer side wins per entry, and
   removals stay as tombstones (dropped after 90 days) so a removal isn't undone by an older copy.
-- Other devices pull the key bag when a gateway session starts and periodically while running
-  (default every 60 s). A gateway event announcing a new key bag version would make this instant
-  (server gap).
+  Settings have their own rule below, without a clock.
+- Other devices pull the key bag when a gateway session starts, and when the `key_bag_update`
+  gateway event announces a new version.
 - The server sees that the key bag changed and its size, not what changed. Drafts make the key bag
   change while typing; clients upload at most once per sync round.
 - **Trust decisions travel too.** The identity keys the user's devices pinned and the workspace root
@@ -2291,6 +2291,40 @@ restored together with them on a new device.
   key bag is stored, uploads still pending, and which wraps exist (passphrase, passkey,
   organization). The server learns nothing new. When the recovery kit was last made is kept the
   same way (`recovery_key_set_at`, §6.5).
+- **User settings** (issue #945): theme, language, layout, notification words and the like, under
+  `settings`, one entry per setting: `{ value, version, writer }`, with the value opaque JSON to
+  everything but the client that reads that key. The server sees neither names nor values. What is
+  synced and what stays on the device is listed in `teamcraft-ui/src/settings_sync.rs`; settings
+  the server enforces (push, do not disturb, mutes, read receipts) stay with the server and aren't
+  copied here.
+  - *Merge:* per setting the higher `version` wins, then the higher `writer` (the device ID). A
+    change takes the version after the one its device holds. No clock is involved, unlike the rest
+    of the account data, so a wrong device clock can't decide. The order is total, so every device
+    settles on the same value whatever order uploads land in. A key a device doesn't know is an
+    entry like any other: kept, merged and uploaded again. An app from before the field drops it
+    on upload (as for §6.4's other newer fields), and the next newer device puts it back.
+  - *First sync:* a device takes the account's value for a setting only if it never customized it
+    (the value is still the default). A customized and different value stays on the device, and
+    the account's stays too, until somebody changes that setting on purpose: then the change
+    applies everywhere. A customized value the account has nothing for becomes a seed, version 0,
+    which never replaces a value another device already has; so two existing installs don't
+    overwrite each other, whichever uploads first. Defaults aren't stored. A device starts only
+    after it has merged the key bag from the server once, since before that it can't tell an empty
+    account from one it hasn't heard of.
+  - *On the device:* the client keeps, next to the settings, what it last agreed on with the account
+    per setting (value and stamp), in the same place as the settings themselves. A value
+    that differs from that is a local change; so one made offline, or before a restart, goes out
+    later. An account's value this build can't read leaves the local one in place and isn't
+    overwritten.
+  - *Cost and bounds:* writes are debounced by 1.5 s in the UI, and a write of the value the account
+    already holds does nothing. Each change that gets through is one key bag upload on the next sync
+    round, as for a saved item: the whole bag is encrypted again. The settings add a few KiB to it.
+    A device's writes can't take them past 32 KiB (`MAX_SYNCED_SETTINGS_BYTES`); what doesn't fit
+    stays on the device and is shown as a failure. A merge never drops entries, so two devices can
+    exceed that together; then only writes that shrink them pass, and the server's
+    `limits.max_key_bag_bytes` stays the hard limit.
+  - *Propagation:* the `key_bag_update` gateway event brings a change to the user's other devices,
+    which merge and apply it live; there is no polling for it.
 - **The activity feed has no read mark of its own** (issue #534): an entry is read when the read
   position of its target (conversation or thread) is at or after it, and those positions sync
   through the server like any other. The older `activity_read` field is still merged (the later one

@@ -3,7 +3,8 @@
 //! Push routing runs on the server, so push mode, the do-not-disturb schedule, read receipts,
 //! thread auto-follow, the phone push level and the per-conversation level and mute time are stored
 //! there. The rest of the
-//! notification preferences (desktop level, keywords, highlights) stay on the device. On start the
+//! notification preferences (desktop level, keywords, highlights) follow the account in its encrypted
+//! data, where the server can't read them (`settings_sync`). On start the
 //! server's values are applied to the local preferences; afterwards every local change of a server
 //! field is sent. Both directions are pure mappings, tested below.
 //!
