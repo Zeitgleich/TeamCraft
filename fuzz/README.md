@@ -10,6 +10,12 @@ fuzz/run.sh                   # all targets, 180 s each
 fuzz/run.sh imip 600          # one target for ten minutes (needs rootless podman or CONTAINER_ENGINE=docker)
 ```
 
+CI (`vendored-and-fuzz` in `ci.yml`, part of `ci-gate`) builds every target on stable with
+`cargo build --manifest-path fuzz/Cargo.toml --bins --locked`, so API drift in a decoder or a stale
+`fuzz/Cargo.lock` fails the pull request. Run the same command locally after changing a fuzzed API; if
+it says the lock needs an update, run `cargo update --manifest-path fuzz/Cargo.toml -w` and commit
+the lockfile. Fuzzing itself stays manual (`run.sh`).
+
 | Target             | What it feeds                                                                                                    |
 |--------------------|------------------------------------------------------------------------------------------------------------------|
 | `proto_requests`   | every request body and query type of the REST API, and the notification/status types: decode, re-encode, decode  |

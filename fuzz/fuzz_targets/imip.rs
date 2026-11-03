@@ -24,12 +24,15 @@ struct Input<'a> {
   attendee_name: &'a str,
   starts: i32,
   length: u16,
+  excluded: Vec<i32>,
+  maybe_recurrence_id: Option<i32>,
 }
 
 fuzz_target!(|input: Input<'_>| {
   let _ = parse_reply(input.reply);
 
-  let start = OffsetDateTime::from_unix_timestamp(i64::from(input.starts) * 60).unwrap();
+  let at = |minutes: i32| OffsetDateTime::from_unix_timestamp(i64::from(minutes) * 60).unwrap();
+  let start = at(input.starts);
   let person = |email: &str, name: &str| EventPerson {
     email: email.to_owned(),
     maybe_name: Some(name.to_owned()),
@@ -43,6 +46,8 @@ fuzz_target!(|input: Input<'_>| {
     starts_at: start,
     ends_at: start + time::Duration::minutes(i64::from(input.length) + 1),
     maybe_recurrence_rule: None,
+    excluded_starts: input.excluded.iter().copied().map(at).collect(),
+    maybe_recurrence_id: input.maybe_recurrence_id.map(at),
     status: EventStatus::Confirmed,
     join_url: input.join_url,
     organizer: person(input.organizer_email, input.organizer_name),
