@@ -95,6 +95,9 @@ login-core-retry = Try again
 login-core-sign-out = Sign out
 login-opening-core-title = Opening your encrypted data
 login-opening-core = Connecting…
+login-store-build-title = Updating your local data
+login-store-build = This happens once after an update. You can reload or close this page; it goes on where it stopped.
+login-store-build-percent = { $percent } %
 
 # Sign-in card: methods, local accounts (e-mail, password, one-time code), help
 login-local-email = E-mail address

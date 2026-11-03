@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use teamcraft_proto::{
-  ConversationId, DeviceActivity, DeviceId, ErrorBody, GatewayClientMessage, GatewayEvent,
-  GatewayServerMessage, Permission, ThreadId, UserId,
+  ConversationId, DeviceActivity, DeviceId, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
+  Permission, ThreadId, UserId,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 use tracing::{debug, warn};
@@ -13,6 +13,7 @@ use super::hub::Attached;
 use crate::auth::AuthenticatedUser;
 use crate::drain::CLOSE_SERVICE_RESTART;
 use crate::error::ApiError;
+use crate::outage_gate::OutageGate;
 use crate::services::access::{load_conversation, require};
 use crate::services::{accounts, presence};
 use crate::state::AppState;
@@ -154,7 +155,9 @@ async fn authenticate(
   device: DeviceId,
   ip: &str,
 ) -> Option<AuthenticatedUser> {
+  let gate = OutageGate::from_state(state);
   let result = async {
+    gate.admit().await?;
     let identity = accounts::validate_token(state, token).await?;
     let caller = accounts::authenticate(state, identity).await?;
     if !state.database.is_active_device_of(caller.user.id, device).await? {
@@ -163,6 +166,7 @@ async fn authenticate(
     Ok::<_, ApiError>(caller)
   }
   .await;
+  gate.note_outcome(&result);
   match result {
     Ok(caller) => Some(caller),
     Err(error) => {
@@ -174,8 +178,7 @@ async fn authenticate(
           .rate_limits
           .record_auth_failure(ip, std::time::Instant::now());
       }
-      let body = ErrorBody::new(error.error_code(), error.public_message());
-      let _ = send(socket, &GatewayServerMessage::Error { error: body }).await;
+      let _ = send(socket, &GatewayServerMessage::Error { error: error.body() }).await;
       None
     },
   }
@@ -202,8 +205,7 @@ async fn is_still_active(
       ApiError::from(error)
     },
   };
-  let body = ErrorBody::new(error.error_code(), error.public_message());
-  let _ = send(socket, &GatewayServerMessage::Error { error: body }).await;
+  let _ = send(socket, &GatewayServerMessage::Error { error: error.body() }).await;
   false
 }
 
@@ -329,8 +331,7 @@ async fn handle_client_message(
       // Only conversations the caller may type in are remembered: made-up IDs cost a lookup each
       // (bounded by the frame limit) but never grow the map.
       if let Err(error) = publish_typing(state, caller, conversation_id, maybe_thread_id).await {
-        let body = ErrorBody::new(error.error_code(), error.public_message());
-        return send(socket, &GatewayServerMessage::Error { error: body })
+        return send(socket, &GatewayServerMessage::Error { error: error.body() })
           .await
           .is_ok();
       }

@@ -1,11 +1,10 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use teamcraft_db::DbError;
 use teamcraft_proto::{DependencyHealth, DependencyName, DependencyState, HealthResponse, HealthStatus};
 use tracing::warn;
 
-use crate::dependencies::{CircuitOpen, Fault, Retries};
+use crate::outage_gate::OutageGate;
 use crate::state::AppState;
 
 /// Readiness: the server is not shutting down and the database answers. The database's breaker
@@ -19,7 +18,7 @@ pub async fn readyz_handler(State(state): State<AppState>) -> (StatusCode, Json<
       Json(HealthResponse::new(HealthStatus::Unavailable)),
     );
   }
-  if let Err(error) = ping_database(&state).await {
+  if let Err(error) = OutageGate::from_state(&state).probe().await {
     warn!(%error, "readiness check failed");
   }
   let dependencies = state.dependencies.health();
@@ -30,35 +29,6 @@ pub async fn readyz_handler(State(state): State<AppState>) -> (StatusCode, Json<
     StatusCode::OK
   };
   (code, Json(HealthResponse { status, dependencies }))
-}
-
-#[derive(Debug, thiserror::Error)]
-enum PingError {
-  #[error(transparent)]
-  Database(#[from] DbError),
-  #[error("the database did not answer in time")]
-  TimedOut,
-  #[error(transparent)]
-  Down(#[from] CircuitOpen),
-}
-
-/// One ping through the database's breaker, bounded by `readiness_timeout`.
-async fn ping_database(state: &AppState) -> Result<(), PingError> {
-  let timeout = state.dependencies.options().readiness_timeout;
-  state
-    .dependencies
-    .guard(DependencyName::Database)
-    .call(
-      Retries::Once,
-      |_| Fault::Outage,
-      || async {
-        match tokio::time::timeout(timeout, state.database.ping()).await {
-          Ok(result) => Ok(result?),
-          Err(_) => Err(PingError::TimedOut),
-        }
-      },
-    )
-    .await
 }
 
 /// Ready while the database's breaker is closed; degraded while another dependency is not ok.

@@ -10,6 +10,7 @@ use crate::audit::NewAuditEntry;
 use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db, from_db_opt, to_db, to_db_all};
+use crate::push_retry::delete_push_retries_of;
 
 /// Messages removed in one statement while a channel's rows are cleared.
 const MESSAGE_BATCH: i64 = 5_000;
@@ -337,6 +338,8 @@ impl Database {
     )
     .execute(&mut *tx)
     .await?;
+    // Normally gone with the marking; a wake-up queued by a send racing it is removed here.
+    delete_push_retries_of(&mut tx, &[to_db(conversation)]).await?;
     sqlx::query!(
       "DELETE FROM conversations WHERE id = $1 AND deleted_at IS NOT NULL",
       to_db(conversation),
@@ -525,6 +528,7 @@ async fn mark_deleted(
   )
   .execute(&mut **tx)
   .await?;
+  delete_push_retries_of(tx, &[to_db(conversation)]).await?;
   Ok(())
 }
 
@@ -553,5 +557,6 @@ pub(crate) async fn mark_memberless_private_deleted(
   )
   .execute(&mut **tx)
   .await?;
+  delete_push_retries_of(tx, &deleted).await?;
   Ok(deleted)
 }

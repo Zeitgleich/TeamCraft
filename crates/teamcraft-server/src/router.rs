@@ -40,6 +40,7 @@ use utoipa_axum::router::OpenApiRouter;
 
 use crate::brand as brand_resolver;
 use crate::openapi;
+use crate::outage_gate::{OutageGate, outage_gate};
 use crate::security;
 use crate::state::AppState;
 use crate::web;
@@ -53,6 +54,10 @@ pub fn router(state: AppState) -> Router {
     .layer(middleware::from_fn_with_state(
       state.clone(),
       brand_resolver::resolve_brand,
+    ))
+    .layer(middleware::from_fn_with_state(
+      OutageGate::from_state(&state),
+      outage_gate,
     ))
     .layer(middleware::from_fn_with_state(state.clone(), security::guard))
     .layer(
@@ -69,7 +74,7 @@ pub fn router(state: AppState) -> Router {
 
 /// The request path as logs show it: meeting link tokens (`/meeting/<token>`, the knock route)
 /// are left out, and so is the query (#987 review).
-fn logged_path(path: &str) -> String {
+pub(crate) fn logged_path(path: &str) -> String {
   for prefix in ["/meeting/", "/api/v1/meetings/link/"] {
     if let Some(rest) = path.strip_prefix(prefix) {
       let tail = rest.split_once('/').map_or("", |(_, tail)| tail);

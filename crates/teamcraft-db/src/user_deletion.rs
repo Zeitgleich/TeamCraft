@@ -11,6 +11,7 @@ use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db, to_db, to_db_all};
 use crate::local_account::LOCAL_ISSUER;
+use crate::push_retry::delete_push_retries_of;
 
 /// The display name a tombstone keeps for clients that don't know `is_deleted` yet; newer clients
 /// show their own translation.
@@ -144,6 +145,8 @@ impl Database {
     )
     .execute(&mut *tx)
     .await?;
+    // The other participants' queued wake-ups for it (the deleted user's own go with the user).
+    delete_push_retries_of(&mut tx, &[to_db(conversation)]).await?;
     sqlx::query!(
       "DELETE FROM conversations WHERE id = $1 AND kind IN ('dm', 'group')",
       to_db(conversation)
