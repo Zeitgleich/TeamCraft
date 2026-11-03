@@ -8,6 +8,12 @@ policy. Edit it under Administration > **Security** (read-only for admins).
 with the owner's device key. The first save also founds the signed roster of owners and admins from the
 identity provider's roles. Policy versions are append-only; each save is a new version.
 
+**Keep at least two owners.** Only an owner can sign the roster and the policy. If every owner is
+lost there is no recovery: the workspace has to be set up again from scratch. When an owner leaves,
+add the successor first and remove the old owner afterwards. See
+[Owner lifecycle](../../admin.md#231-owner-lifecycle) and
+[Setting up again](../../operations.md#setting-up-again).
+
 ## Settings
 
 | Setting               | Values and default                                                        | Meaning                                                                                     |

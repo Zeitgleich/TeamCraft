@@ -11,6 +11,9 @@ They come from the identity provider's client roles ([Keycloak setup](keycloak.m
 | member | Employee              | Chat, create channels and group DMs, mention groups, create share links            |
 | guest  | External person       | Write and react in conversations they were added to; start no conversation alone   |
 
+Keep **at least two owners**; with none left the workspace cannot be administered again and must be
+set up from scratch ([owner lifecycle](../../admin.md#231-owner-lifecycle)).
+
 Inside a space there is also **space admin** (manage the space's channels and members, invite guests)
 and inside a channel **channel admin** (manage members, roles and properties, delete others' posts)
 and **moderator** (remove members and delete others' posts and reactions, but no roles, properties,

@@ -37,6 +37,10 @@ pub struct DependenciesConfig {
   pub retry_max_ms: u64,
   /// How long `/readyz` waits for the database to answer; longer counts as a failure.
   pub readiness_timeout_ms: u64,
+  /// How long an API request may make no progress (no answer, no new piece of its body) before it
+  /// is answered with 503 and `Retry-After`; what ends a request hanging on a database connection
+  /// that stopped answering (0: no deadline).
+  pub request_deadline_secs: u64,
 }
 
 /// The breakers of all dependencies, for `/readyz`.
@@ -62,6 +66,7 @@ pub struct DependencyOptions {
   pub retries: u32,
   pub retry: RetryPolicy,
   pub readiness_timeout: Duration,
+  pub maybe_request_deadline: Option<Duration>,
 }
 
 /// The time source of the breakers and the retry waits.
@@ -264,6 +269,16 @@ impl DependencyGuard {
     state.breaker = Breaker::Closed { failures: 0 };
   }
 
+  /// A request that uses the dependency went fine, as far as one can tell from outside: failures
+  /// are no longer in a row. Never closes an open breaker: a request admitted before it opened, or
+  /// one that didn't need the dependency after all, says nothing about whether it is back.
+  pub fn record_answer(&self) {
+    let mut state = lock(&self.state);
+    if matches!(state.breaker, Breaker::Closed { .. }) {
+      state.breaker = Breaker::Closed { failures: 0 };
+    }
+  }
+
   /// The dependency failed (called by code that talks to it without [`Self::call`]).
   pub fn record_failure(&self) {
     let now = self.clock.now();
@@ -391,6 +406,7 @@ impl Default for DependenciesConfig {
       retry_initial_ms: 200,
       retry_max_ms: 2_000,
       readiness_timeout_ms: 2_000,
+      request_deadline_secs: 60,
     }
   }
 }
@@ -406,6 +422,8 @@ impl From<&DependenciesConfig> for DependencyOptions {
         Duration::from_millis(config.retry_max_ms),
       ),
       readiness_timeout: Duration::from_millis(config.readiness_timeout_ms.max(1)),
+      maybe_request_deadline: (config.request_deadline_secs > 0)
+        .then(|| Duration::from_secs(config.request_deadline_secs)),
     }
   }
 }
@@ -569,6 +587,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_answer_restarts_the_count_but_never_closes_an_open_breaker() {
+      let (guard, _clock) = guard(0);
+      guard.record_failure();
+      guard.record_failure();
+      guard.record_answer();
+      guard.record_failure();
+      guard.record_failure();
+      assert_eq!(guard.state(), DependencyState::Ok);
+      guard.record_failure();
+      assert_eq!(guard.state(), DependencyState::Down);
+      guard.record_answer();
+      assert_eq!(guard.state(), DependencyState::Down);
+    }
+
+    #[tokio::test]
     async fn refusals_count_as_answers() {
       let (guard, _clock) = guard(0);
       for _ in 0..10 {
@@ -683,6 +716,19 @@ mod tests {
     });
     assert_eq!(options.failure_threshold, 1);
     assert_eq!(options.open_for, Duration::from_secs(1));
+  }
+
+  #[test]
+  fn a_request_deadline_of_zero_means_none() {
+    let deadline = |request_deadline_secs| {
+      DependencyOptions::from(&DependenciesConfig {
+        request_deadline_secs,
+        ..DependenciesConfig::default()
+      })
+      .maybe_request_deadline
+    };
+    assert_eq!(deadline(0), None);
+    assert_eq!(deadline(60), Some(Duration::from_secs(60)));
   }
 
   fn guard(retries: u32) -> (DependencyGuard, ManualClock) {

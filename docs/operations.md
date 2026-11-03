@@ -96,6 +96,16 @@ exists; clients can still read what they have stored locally.
   dependency that is down makes it `degraded` with 200: every instance would meet the same outage,
   and taking them out would turn a storage outage into a full one. Alert on `degraded` and on the
   log lines `dependency is down` / `dependency is back`.
+- **Database outages.** Handlers' errors feed the database's breaker, so it opens under traffic
+  without anybody asking `/readyz`: requests that need the database then answer at once rather than
+  after `acquire_timeout_secs`, and one request pings after `open_secs`. Server info, brand and client
+  compatibility answer from memory and stay up. Queries are not repeated by the server; the clients
+  do that after `Retry-After`. A pool that is exhausted under load looks the same as an outage once
+  nothing has succeeded three times in a row, and sheds load for `open_secs`.
+- **Request deadline** (`request_deadline_secs`, 60 s, 0 turns it off). An API request that makes no
+  progress this long answers 503, whatever it hangs on; receiving a piece of its body is progress, so
+  a slow upload is not cut off. Imports and the gateway are exempt. Log line: `a request made no
+  progress within the deadline`. Raise it if a legitimate admin action runs longer behind your proxy.
 - Every 503 of the server carries `Retry-After` (in the header and as `retry_after_secs` in the
   body); the apps wait at least that long (one shared retry policy, capped exponential backoff
   with jitter). A short database blip at startup — also between the connect and the migrations —
@@ -267,10 +277,42 @@ make someone an owner.
   for 30 days, member clients stop accepting the admins until an owner does; the console warns a
   week ahead.
 - **If every owner is lost** (left, or lost all devices and the recovery kit), the workspace
-  can't be administered any more: chat keeps working, admin actions don't. Restoring a backup does
-  not help, and a new first owner is refused by every client. A recovery procedure is not
-  available yet (issue #188); until then the only way out is a new workspace (fresh database, new
-  enrollment of every user).
+  can't be administered any more, and there is **no recovery path** (issue #188): chat keeps
+  working, admin actions stop once the freshness window (30 days) ran out, restoring a backup does
+  not help, and a new first owner is refused by every client (`RootChanged`). The only way out is
+  [setting up again](#setting-up-again). Details: admin.md §2.3.1.
+
+### Setting up again
+
+Only when no owner can be brought back. It starts a new workspace; the old one's history is not
+carried over. Work through it in this order:
+
+1. **Tell everybody.** All members must re-enroll, so pick a time. The old history stays readable
+   only on devices that still hold it.
+2. **Stop** `teamcraft-server`, `teamcraft-sfu`, bridges and the notetaker. Keep a last backup of the
+   old database for the record, but do not restore it.
+3. **Start from an empty database** (new database or dropped schema; the server migrates it on
+   start) and an empty bucket (or a new one: the old objects have no rows any more and are
+   ciphertext only). Keep the configuration and secrets, the identity provider and the domain.
+4. **Give the role `owner` to at least two people** in the identity provider (`just ensure-admin`
+   for the first), before anybody signs.
+5. **Every member reinstalls or clears the app's local data** and signs in again. This is not
+   optional: each app pins the old root of trust in its local store and would refuse the new
+   genesis (`RootChanged`). Everybody sets up a new key (new identity key, key bag and recovery
+   kit).
+6. **The first owner saves the first policy** (Administration → Security). That signs the genesis
+   roster with the first owner as root of trust; confirm the proposed owners and admins one by one
+   (admin.md §2.3.1, "The first roster"). Members compare the root fingerprint with that owner.
+7. **Re-enroll bridges and the notetaker** (their keys belong to the old workspace), then recreate
+   spaces, channels and memberships; guests are invited again.
+
+| Kept                                                 | Lost                                                        |
+|------------------------------------------------------|-------------------------------------------------------------|
+| Configuration file, secrets, domain, certificates    | Messages, files, channels, spaces, memberships              |
+| Identity provider accounts and roles (incl. `owner`) | Devices, identity keys, key backups, recovery kits          |
+| Deployment of server, SFU and push gateway           | The signed roster and policy (signed again)                 |
+|                                                      | Settings made in the console (mail, calendar, policy)       |
+|                                                      | Guests, invitations, integration sources, bridge enrollment |
 
 ## Upgrades
 

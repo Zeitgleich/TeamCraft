@@ -3,8 +3,8 @@
 //! fails fast with 503 and `Retry-After`, readiness that reports it — and recovers by itself once
 //! the dependency is back. Time is a manual clock the tests step; nothing sleeps.
 //!
-//! The storage cases at the store level need nothing else; the HTTP, push and SFU cases need the
-//! dev Postgres (`--features integration`). The heavier cases against the real binaries (Postgres
+//! The storage cases at the store level and the database gate need nothing else; the HTTP, push and
+//! SFU cases need the dev Postgres (`--features integration`). The heavier cases against the real binaries (Postgres
 //! cut, identity provider cut, server restarts) are in the nightly e2e suite
 //! (`tests/e2e/tests/suite/dependency_outages.rs`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -106,9 +106,14 @@ mod storage {
 
 #[cfg(feature = "integration")]
 mod http {
+  use futures_util::{SinkExt, StreamExt};
   use serde_json::json;
-  use teamcraft_proto::{ErrorBody, HealthResponse, HealthStatus};
+  use teamcraft_proto::{
+    DeviceActivity, ErrorBody, ErrorCode, GatewayClientMessage, GatewayServerMessage, HealthResponse,
+    HealthStatus,
+  };
   use teamcraft_server::testing::TestApp;
+  use tokio_tungstenite::tungstenite::Message;
 
   use super::*;
   use crate::common::member;
@@ -223,6 +228,70 @@ mod http {
         json!({"content_type": "image/png", "size_bytes": 4}),
       )
       .await
+  }
+
+  /// The real stack with the database's breaker open: requests that need the database answer at
+  /// once, what answers from memory still works, the gateway's handshake says how long to wait, and
+  /// the first request after the open time finds Postgres back and closes the breaker.
+  #[tokio::test]
+  async fn an_open_database_breaker_answers_at_once_and_a_request_closes_it() {
+    let clock = ManualClock::new();
+    let dependencies = Arc::new(Dependencies::new(
+      DependencyOptions::default(),
+      Arc::new(clock.clone()),
+    ));
+    let Some(app) = TestApp::start_with_dependencies(None, None, dependencies.clone()).await else {
+      return;
+    };
+    let carol = member("carol");
+    assert_eq!(app.get(&carol, "/me").await.status, StatusCode::OK);
+    let database = dependencies.guard(DependencyName::Database);
+    for _ in 0..3 {
+      database.record_failure();
+    }
+
+    let refused = app.get(&carol, "/me").await;
+    assert_unavailable(&refused.status, &refused.body);
+    let from_memory = app
+      .http
+      .get(format!("{}/api/v1/server-info", app.base_url))
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(from_memory.status(), StatusCode::OK);
+    let liveness = app
+      .http
+      .get(format!("{}/healthz", app.base_url))
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(liveness.status(), StatusCode::OK);
+
+    let error = identify_error(&app, &carol).await;
+    assert_eq!(error.error_code, ErrorCode::Unavailable);
+    assert!(error.maybe_retry_after_secs.is_some(), "{error:?}");
+
+    clock.advance(OPEN_FOR);
+    assert_eq!(app.get(&carol, "/me").await.status, StatusCode::OK);
+    assert_eq!(database.state(), DependencyState::Ok);
+    app.stop().await;
+  }
+
+  async fn identify_error(app: &TestApp, user: &teamcraft_server::testing::TestUser) -> ErrorBody {
+    let (mut socket, _) = tokio_tungstenite::connect_async(&app.ws_url).await.unwrap();
+    let _hello = socket.next().await.unwrap().unwrap();
+    let identify = GatewayClientMessage::Identify {
+      token: app.token(user),
+      device_id: "1".parse().unwrap(),
+      activity: DeviceActivity::Active,
+    };
+    let frame = serde_json::to_string(&identify).unwrap();
+    socket.send(Message::text(frame)).await.unwrap();
+    let answer = socket.next().await.unwrap().unwrap();
+    match serde_json::from_str(answer.to_text().unwrap()).unwrap() {
+      GatewayServerMessage::Error { error } => error,
+      other => panic!("expected an error frame, got {other:?}"),
+    }
   }
 
   async fn readiness(app: &TestApp) -> HealthResponse {
@@ -453,6 +522,400 @@ mod sfu {
     } else {
       StatusCode::NO_CONTENT
     }
+  }
+}
+
+mod database {
+  use std::future::pending;
+
+  use axum::body::Body;
+  use axum::extract::Request;
+  use axum::http::header;
+  use futures_util::stream;
+  use sqlx::postgres::PgPoolOptions;
+  use teamcraft_db::{Database, DbError};
+  use teamcraft_proto::{ErrorBody, ErrorCode};
+  use teamcraft_server::error::ApiError;
+  use teamcraft_server::outage_gate::{OutageGate, Ping};
+  use tokio::net::TcpListener;
+  use tokio::time::Instant;
+
+  use super::*;
+
+  const API_PATH: &str = "/api/v1/me";
+  const DEADLINE: Duration = Duration::from_secs(60);
+  const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
+
+  mod breaker {
+    use super::*;
+
+    /// Postgres gone: each request fails on its own until the third, then none reaches a handler or
+    /// the pool, and each answer says when to come back. After the open time one request pings; while
+    /// Postgres is still gone it fails and the wait starts over, once Postgres is back it goes on.
+    #[tokio::test]
+    async fn an_outage_opens_it_and_a_request_probes_it_closed() {
+      let rig = Rig::new(Some(DEADLINE));
+      rig.fake.set_down(true);
+      for _ in 0..3 {
+        let response = rig.request(API_PATH).await;
+        assert_unavailable(response, DATABASE_RETRY_AFTER).await;
+      }
+      assert_eq!(rig.fake.handled(), 3);
+      assert_eq!(rig.guard.state(), DependencyState::Down);
+
+      let response = rig.request(API_PATH).await;
+      assert_unavailable(response, OPEN_FOR).await;
+      assert_eq!(
+        rig.fake.handled(),
+        3,
+        "an open breaker keeps requests off the pool"
+      );
+      assert_eq!(rig.fake.pings(), 0);
+
+      rig.clock.advance(OPEN_FOR);
+      let response = rig.request(API_PATH).await;
+      assert_unavailable(response, OPEN_FOR).await;
+      assert_eq!(rig.fake.pings(), 1, "one probe");
+      assert_eq!(rig.fake.handled(), 3);
+      assert_eq!(rig.guard.state(), DependencyState::Down);
+
+      rig.fake.set_down(false);
+      rig.clock.advance(OPEN_FOR);
+      assert_eq!(rig.request(API_PATH).await.status(), StatusCode::OK);
+      assert_eq!(rig.fake.pings(), 2);
+      assert_eq!(rig.fake.handled(), 4);
+      assert_eq!(rig.guard.state(), DependencyState::Ok);
+    }
+
+    /// Errors now and then are not an outage: only failures in a row count.
+    #[tokio::test]
+    async fn answers_in_between_keep_it_closed() {
+      let rig = Rig::new(Some(DEADLINE));
+      for _ in 0..5 {
+        rig.fake.set_down(true);
+        rig.request(API_PATH).await;
+        rig.request(API_PATH).await;
+        rig.fake.set_down(false);
+        assert_eq!(rig.request(API_PATH).await.status(), StatusCode::OK);
+      }
+      assert_eq!(rig.guard.state(), DependencyState::Ok);
+    }
+
+    /// A failure that says nothing about Postgres (a refusal, a storage 503) doesn't count.
+    #[tokio::test]
+    async fn other_errors_do_not_count() {
+      let rig = Rig::new(Some(DEADLINE));
+      for _ in 0..5 {
+        let response = rig
+          .gate
+          .handle(request(API_PATH), |_| async {
+            ApiError::storage_unavailable("attachment storage").into_response()
+          })
+          .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+      }
+      assert_eq!(rig.guard.state(), DependencyState::Ok);
+    }
+
+    /// What answers from memory goes on during an outage, and doesn't probe.
+    #[tokio::test]
+    async fn paths_that_do_not_need_the_database_stay_up() {
+      let rig = Rig::new(Some(DEADLINE));
+      rig.open();
+      for path in [
+        "/",
+        "/healthz",
+        "/api/v1/brand",
+        "/api/v1/brand/assets/logo",
+        "/api/v1/client-compatibility",
+        "/api/v1/openapi.json",
+        "/api/v1/server-info",
+      ] {
+        assert_eq!(rig.request(path).await.status(), StatusCode::OK, "{path}");
+      }
+      assert_eq!(rig.fake.pings(), 0);
+      assert_eq!(rig.guard.state(), DependencyState::Down);
+    }
+
+    /// The gateway's handshake uses the database outside the HTTP stack and counts the same.
+    #[tokio::test]
+    async fn work_outside_the_http_stack_feeds_it_and_is_refused_by_it() {
+      let rig = Rig::new(Some(DEADLINE));
+      rig.gate.admit().await.unwrap();
+      for _ in 0..3 {
+        rig.gate.note_outcome::<()>(&Err(ApiError::Database(refused())));
+      }
+      assert_eq!(rig.guard.state(), DependencyState::Down);
+      assert!(rig.gate.admit().await.is_err());
+    }
+
+    /// A probe of a Postgres that stopped answering is bounded by the readiness timeout, and meanwhile
+    /// only that request waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_probe_is_bounded_and_others_do_not_wait_for_it() {
+      let rig = Rig::new(Some(DEADLINE));
+      rig.open();
+      rig.fake.set_hung(true);
+      rig.clock.advance(OPEN_FOR);
+      let started = Instant::now();
+      let probe = rig.request(API_PATH);
+      let other = async {
+        // The probe has taken its turn by the time this one is polled.
+        tokio::task::yield_now().await;
+        rig.request(API_PATH).await
+      };
+      let (probe, other) = tokio::join!(probe, other);
+      assert_eq!(started.elapsed(), READINESS_TIMEOUT);
+      assert_eq!(probe.status(), StatusCode::SERVICE_UNAVAILABLE);
+      assert_eq!(other.status(), StatusCode::SERVICE_UNAVAILABLE);
+      assert_eq!(rig.fake.pings(), 1);
+      assert_eq!(rig.guard.state(), DependencyState::Down);
+    }
+  }
+
+  mod deadline {
+    use super::*;
+
+    /// A query on a connection that stopped answering never returns: the request answers 503 with
+    /// `Retry-After` at the deadline instead of hanging.
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_request_answers_503_at_the_deadline() {
+      let rig = Rig::new(Some(DEADLINE));
+      let started = Instant::now();
+      let response = rig
+        .gate
+        .handle(request(API_PATH), |_| pending::<Response>())
+        .await;
+      assert_eq!(started.elapsed(), DEADLINE);
+      assert_unavailable(response, DATABASE_RETRY_AFTER).await;
+    }
+
+    /// A slow upload that keeps moving is not cut off, however long it takes in total.
+    #[tokio::test(start_paused = true)]
+    async fn a_body_that_keeps_arriving_is_not_cut_off() {
+      let rig = Rig::new(Some(DEADLINE));
+      let started = Instant::now();
+      let chunks = 10_u32;
+      let response = rig
+        .gate
+        .handle(request_with_body(chunks, Some(DEADLINE / 2)), |request| async {
+          let body = axum::body::to_bytes(request.into_body(), usize::MAX)
+            .await
+            .unwrap();
+          assert_eq!(body.len(), chunks as usize);
+          StatusCode::OK.into_response()
+        })
+        .await;
+      assert_eq!(response.status(), StatusCode::OK);
+      assert!(started.elapsed() > DEADLINE * 2, "{:?}", started.elapsed());
+    }
+
+    /// A body that stops is no progress any more: the wait ends a deadline after its last piece.
+    #[tokio::test(start_paused = true)]
+    async fn a_body_that_stalls_is_cut_off() {
+      let rig = Rig::new(Some(DEADLINE));
+      let started = Instant::now();
+      let response = rig
+        .gate
+        .handle(request_with_body(2, None), |request| async {
+          let _ = axum::body::to_bytes(request.into_body(), usize::MAX).await;
+          StatusCode::OK.into_response()
+        })
+        .await;
+      assert_eq!(started.elapsed(), DEADLINE);
+      assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn imports_and_the_gateway_have_no_deadline() {
+      let rig = Rig::new(Some(DEADLINE));
+      for path in ["/api/v1/admin/import/users", "/api/v1/gateway"] {
+        let waiting = rig.gate.handle(request(path), |_| pending::<Response>());
+        assert!(
+          tokio::time::timeout(DEADLINE * 10, waiting).await.is_err(),
+          "{path}"
+        );
+      }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_deadline_can_be_turned_off() {
+      let rig = Rig::new(None);
+      let waiting = rig.gate.handle(request(API_PATH), |_| pending::<Response>());
+      assert!(tokio::time::timeout(DEADLINE * 10, waiting).await.is_err());
+    }
+  }
+
+  mod transport {
+    use super::*;
+
+    /// Nothing listens on the port: what the pool reports counts as an outage.
+    #[tokio::test]
+    async fn a_refused_connection_is_an_outage() {
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let address = listener.local_addr().unwrap();
+      drop(listener);
+      let error = dead_database(address).ping().await.unwrap_err();
+      assert!(error.is_outage(), "{error}");
+    }
+
+    /// The connection opens but nothing ever answers (a black-holed Postgres): bounded by the pool's
+    /// acquire timeout, and an outage too.
+    #[tokio::test]
+    async fn a_silent_server_is_an_outage() {
+      let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let address = listener.local_addr().unwrap();
+      let error = dead_database(address).ping().await.unwrap_err();
+      assert!(error.is_outage(), "{error}");
+      drop(listener);
+    }
+
+    fn dead_database(address: std::net::SocketAddr) -> Database {
+      let pool = PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(100))
+        .connect_lazy(&format!("postgres://nobody:nothing@{address}/none"))
+        .unwrap();
+      Database::from_pool(pool)
+    }
+  }
+
+  const DATABASE_RETRY_AFTER: Duration = Duration::from_secs(5);
+
+  /// The gate on a manual clock, in front of a fake database.
+  struct Rig {
+    gate: OutageGate,
+    guard: Arc<DependencyGuard>,
+    clock: ManualClock,
+    fake: FakeDatabase,
+  }
+
+  impl Rig {
+    fn new(maybe_deadline: Option<Duration>) -> Self {
+      let (guard, clock) = guard(DependencyName::Database);
+      let fake = FakeDatabase::default();
+      let gate = OutageGate::new(guard.clone(), fake.ping(), READINESS_TIMEOUT, maybe_deadline);
+      Self {
+        gate,
+        guard,
+        clock,
+        fake,
+      }
+    }
+
+    fn open(&self) {
+      for _ in 0..3 {
+        self.guard.record_failure();
+      }
+      assert_eq!(self.guard.state(), DependencyState::Down);
+    }
+
+    /// One request to a handler that uses the fake database.
+    async fn request(&self, path: &str) -> Response {
+      let fake = self.fake.clone();
+      self
+        .gate
+        .handle(request(path), |_| async move { fake.handle() })
+        .await
+    }
+  }
+
+  #[derive(Clone, Default)]
+  struct FakeDatabase {
+    is_down: Arc<AtomicBool>,
+    is_hung: Arc<AtomicBool>,
+    pings: Arc<AtomicUsize>,
+    handled: Arc<AtomicUsize>,
+  }
+
+  impl FakeDatabase {
+    fn set_down(&self, is_down: bool) {
+      self.is_down.store(is_down, Ordering::SeqCst);
+    }
+
+    fn set_hung(&self, is_hung: bool) {
+      self.is_hung.store(is_hung, Ordering::SeqCst);
+    }
+
+    fn pings(&self) -> usize {
+      self.pings.load(Ordering::SeqCst)
+    }
+
+    fn handled(&self) -> usize {
+      self.handled.load(Ordering::SeqCst)
+    }
+
+    fn ping(&self) -> Ping {
+      let fake = self.clone();
+      Arc::new(move || {
+        let fake = fake.clone();
+        Box::pin(async move {
+          fake.pings.fetch_add(1, Ordering::SeqCst);
+          if fake.is_hung.load(Ordering::SeqCst) {
+            pending::<()>().await;
+          }
+          if fake.is_down.load(Ordering::SeqCst) {
+            Err(refused())
+          } else {
+            Ok(())
+          }
+        })
+      })
+    }
+
+    fn handle(&self) -> Response {
+      self.handled.fetch_add(1, Ordering::SeqCst);
+      if self.is_down.load(Ordering::SeqCst) {
+        ApiError::Database(refused()).into_response()
+      } else {
+        StatusCode::OK.into_response()
+      }
+    }
+  }
+
+  fn refused() -> DbError {
+    DbError::Query(sqlx::Error::Io(std::io::Error::from(
+      std::io::ErrorKind::ConnectionRefused,
+    )))
+  }
+
+  fn request(path: &str) -> Request {
+    Request::builder().uri(path).body(Body::empty()).unwrap()
+  }
+
+  /// A body of `chunks` bytes, one every `maybe_pause`; without one it stalls after them.
+  fn request_with_body(chunks: u32, maybe_pause: Option<Duration>) -> Request {
+    let body = stream::unfold(0_u32, move |sent| async move {
+      if sent == chunks {
+        if maybe_pause.is_none() {
+          std::future::pending::<()>().await;
+        }
+        return None;
+      }
+      if let Some(pause) = maybe_pause {
+        tokio::time::sleep(pause).await;
+      }
+      Some((Ok::<_, std::io::Error>(Bytes::from_static(b"x")), sent + 1))
+    });
+    Request::builder()
+      .uri(API_PATH)
+      .header(header::CONTENT_LENGTH, chunks.to_string())
+      .body(Body::from_stream(body))
+      .unwrap()
+  }
+
+  async fn assert_unavailable(response: Response, retry_after: Duration) {
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let seconds = retry_after.as_secs();
+    assert_eq!(
+      response.headers()[header::RETRY_AFTER],
+      seconds.to_string().as_str()
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+      .await
+      .unwrap();
+    let body: ErrorBody = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body.error_code, ErrorCode::Unavailable);
+    assert_eq!(body.maybe_retry_after_secs, Some(seconds));
   }
 }
 

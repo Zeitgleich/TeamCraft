@@ -19,6 +19,11 @@ pub const DATABASE_RETRY_AFTER_SECS: u64 = 5;
 /// off the server and the storage while it recovers.
 const STORAGE_RETRY_AFTER_SECS: u64 = 30;
 
+/// In a response's extensions: the answer failed because the database looks down, for the database's
+/// breaker around the request (`outage_gate.rs`).
+#[derive(Debug, Clone, Copy)]
+pub struct DatabaseOutage;
+
 /// Every error a handler can return; maps to a status code and the stable `error_code` body.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -420,6 +425,19 @@ impl ApiError {
     }
   }
 
+  /// The body clients see, over HTTP and in the gateway's error frame.
+  pub fn body(&self) -> ErrorBody {
+    let mut body = ErrorBody::new(self.error_code(), self.public_message());
+    if let Some(seconds) = self.retry_after_secs() {
+      body = body.with_retry_after_secs(seconds);
+    }
+    match self {
+      Self::EpochConflict { current_epoch } => body.with_current_epoch(*current_epoch),
+      Self::VersionConflict { current_version } => body.with_current_version(*current_version),
+      _ => body,
+    }
+  }
+
   /// Client-facing text. Internal details stay in the logs.
   pub fn public_message(&self) -> String {
     match self {
@@ -445,27 +463,22 @@ impl From<CircuitOpen> for ApiError {
 
 impl IntoResponse for ApiError {
   fn into_response(self) -> Response {
+    // An open breaker rejects many requests at once, and said so once when it opened.
     if matches!(
       self.status(),
       StatusCode::INTERNAL_SERVER_ERROR | StatusCode::SERVICE_UNAVAILABLE
-    ) {
+    ) && !matches!(self, Self::DependencyDown { .. })
+    {
       error!(error = %self, "request failed");
     }
-    let mut body = ErrorBody::new(self.error_code(), self.public_message());
-    let maybe_retry_after_secs = self.retry_after_secs();
-    if let Some(seconds) = maybe_retry_after_secs {
-      body = body.with_retry_after_secs(seconds);
-    }
-    match &self {
-      Self::EpochConflict { current_epoch } => body = body.with_current_epoch(*current_epoch),
-      Self::VersionConflict { current_version } => body = body.with_current_version(*current_version),
-      _ => {},
-    }
-    let mut response = (self.status(), Json(body)).into_response();
-    if let Some(seconds) = maybe_retry_after_secs {
+    let mut response = (self.status(), Json(self.body())).into_response();
+    if let Some(seconds) = self.retry_after_secs() {
       response
         .headers_mut()
         .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+    }
+    if matches!(&self, Self::Database(error) if error.is_outage()) {
+      response.extensions_mut().insert(DatabaseOutage);
     }
     if self.status() == StatusCode::UNAUTHORIZED {
       response
@@ -739,6 +752,35 @@ mod tests {
       let body: ErrorBody = serde_json::from_slice(&bytes).unwrap();
       assert_eq!(body.maybe_retry_after_secs, Some(seconds));
     }
+  }
+
+  /// The gateway sends the same body: a client that can't connect waits as it would over HTTP.
+  #[test]
+  fn the_body_for_the_gateway_carries_retry_after() {
+    let body = ApiError::Database(teamcraft_db::DbError::Query(refused())).body();
+    assert_eq!(body.error_code, ErrorCode::Unavailable);
+    assert_eq!(body.maybe_retry_after_secs, Some(DATABASE_RETRY_AFTER_SECS));
+  }
+
+  /// Only an outage feeds the database's breaker: a lost race between transactions is not one.
+  #[test]
+  fn only_a_database_outage_is_marked_for_the_breaker() {
+    let marked = |error: ApiError| {
+      error
+        .into_response()
+        .extensions()
+        .get::<DatabaseOutage>()
+        .is_some()
+    };
+    let database = |error| ApiError::Database(teamcraft_db::DbError::Query(error));
+    assert!(marked(database(refused())));
+    assert!(marked(database(sqlx::Error::PoolTimedOut)));
+    assert!(!marked(database(sqlx::Error::RowNotFound)));
+    assert!(!marked(ApiError::Conflict("x".into())));
+  }
+
+  fn refused() -> sqlx::Error {
+    sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
   }
 
   #[test]

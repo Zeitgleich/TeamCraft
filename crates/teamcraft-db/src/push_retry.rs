@@ -94,6 +94,8 @@ impl Database {
                 (EXTRACT(EPOCH FROM (expires_at - now())) * 1000)::bigint AS "remaining_ms!"
          FROM push_retries
          WHERE is_user_endpoint = $1 AND next_attempt_at <= now() AND expires_at > now()
+           AND NOT EXISTS (SELECT 1 FROM conversations c
+                           WHERE c.id = push_retries.conversation_id AND c.deleted_at IS NOT NULL)
          ORDER BY next_attempt_at
          LIMIT 1
          FOR UPDATE SKIP LOCKED"#,
@@ -223,6 +225,27 @@ impl PushRetryClaim {
     self.transaction.commit().await?;
     Ok(())
   }
+}
+
+/// Drops the queued wake-ups of conversations that are being deleted, in the deleting transaction
+/// (issue #1136). `push_retries.conversation_id` has no foreign key and no index of its own: the
+/// table is bounded by the TTL and the per-device cap, and a foreign key would need a validating
+/// scan of it (or a new index) under a lock, in a migration. Rows a worker holds are skipped
+/// instead of waited for, so a deletion never waits for a push service; the claim query refuses
+/// rows of a conversation marked deleted, and the sweep removes what is left.
+pub(crate) async fn delete_push_retries_of(
+  tx: &mut Transaction<'_, Postgres>,
+  conversations: &[i64],
+) -> Result<u64, DbError> {
+  let result = sqlx::query!(
+    r#"DELETE FROM push_retries
+       WHERE id IN (
+         SELECT id FROM push_retries WHERE conversation_id = ANY($1) FOR UPDATE SKIP LOCKED)"#,
+    conversations,
+  )
+  .execute(&mut **tx)
+  .await?;
+  Ok(result.rows_affected())
 }
 
 fn millis(duration: Duration) -> i64 {
