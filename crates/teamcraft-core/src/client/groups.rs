@@ -447,11 +447,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ///
   /// The founded group stays until the server accepted the join: the join runs on a provider of
   /// its own, and the server's word that the epoch moved on is no proof of anything. The proof is
-  /// the group information: it opens, every leaf verifies, the group's first member is this user
-  /// (only this user's devices found this user's meeting chats, which this device knows from having
-  /// founded one) and it holds nobody but this user and the people this device invited. Otherwise,
-  /// or without a link's key bag to judge old information by, this device asks to be added and
-  /// keeps its group. Tried at most every `rejoin_retry`.
+  /// the group information: it opens, every leaf verifies and the group's first member is this
+  /// user (only this user's devices found this user's meeting chats, which this device knows from
+  /// having founded one). Otherwise, or without a link's key bag to judge old information by, this
+  /// device asks to be added and keeps its group. Tried at most every `rejoin_retry`.
   pub(super) async fn rejoin_superseded_group(
     &mut self,
     id: ConversationId,
@@ -462,9 +461,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.member_join_attempts.insert(id, self.now_ms());
     tracing::info!(conversation_id = %id, "another device may have founded the meeting chat's group first");
     let me = self.user_id();
-    let invited = self.dm_setup(id)?.map_or_else(Vec::new, |setup| setup.others);
+    let members = self.api.list_members(id).await?;
     let directory = self
-      .trusted_directory(invited.iter().copied().chain([me]))
+      .trusted_directory(members.members.iter().map(|member| member.user.id).chain([me]))
       .await?;
     if !self.has_other_devices(&directory)? {
       self.member_join_attempts.remove(&id);
@@ -515,10 +514,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Some(founder) => convert::user_from_crypto(founder.user_id)? == me,
       None => false,
     };
-    let holds_only_invited = group.members()?.iter().all(|member| {
-      convert::user_from_crypto(member.user_id).is_ok_and(|user| user == me || invited.contains(&user))
-    });
-    if !is_founded_by_this_user || !holds_only_invited {
+    if !is_founded_by_this_user {
       tracing::warn!(conversation_id = %id, "group information of a group this device can't take for its own; not joined");
       self.request_device_addition(id).await?;
       return Ok(MemberDeviceJoin::Unjoinable);
@@ -2825,6 +2821,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(error) => return Err(error.into()),
     };
     let me = self.user_id();
+    let is_meeting_chat = self.is_meeting_chat_setup(conversation)?;
     let is_listed = members.members.iter().any(|member| member.user.id == me);
     self
       .pin_identities(members.members.iter().map(|member| member.user.id))
@@ -2878,17 +2875,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       Err(error) => return Err(error),
     };
-    if let Some(others) = maybe_founded_for {
+    // A meeting chat's group needn't match this device's list (an invitee without a device, a guest
+    // somebody admitted, a list changed on another device): `is_founded_by_organizer` below decides.
+    if let Some(others) = maybe_founded_for.filter(|_| !is_meeting_chat) {
       let me = self.own_member();
       let maybe_importer = crate::imported::importer(&self.store);
-      let is_meeting_chat = self.is_meeting_chat_setup(conversation)?;
-      let checked = staged.verify(&directory).and_then(|verified| {
-        if is_meeting_chat {
-          check_meeting_welcome(&verified, me, others)
-        } else {
-          check_dm_welcome(&verified, me, others, maybe_importer)
-        }
-      });
+      let checked = staged
+        .verify(&directory)
+        .and_then(|verified| check_dm_welcome(&verified, me, others, maybe_importer));
       if let Err(error) = checked {
         return Ok(WelcomeJoin::Rejected(error));
       }
@@ -3666,42 +3660,6 @@ fn check_dm_welcome(
   Ok(())
 }
 
-/// Whether a welcome may replace the group of a meeting chat this device founded: made by another
-/// device of this user or somebody this device invited, holding this device and nobody it didn't
-/// invite. Unlike a DM's, the group needn't hold everybody: an invitee may have no device yet. Who
-/// founded it is checked with the joined group (`is_founded_by_organizer`).
-fn check_meeting_welcome(
-  verified: &VerifiedWelcome,
-  me: GroupMember,
-  invited: &[UserId],
-) -> Result<(), MlsError> {
-  let expected: BTreeSet<_> = invited
-    .iter()
-    .map(|user| convert::user(*user))
-    .chain([me.user_id])
-    .collect();
-  if !verified
-    .members
-    .iter()
-    .all(|member| expected.contains(&member.user_id))
-  {
-    return Err(MlsError::UnexpectedMessage(
-      "the welcome's group holds somebody this device didn't invite",
-    ));
-  }
-  if !verified.members.contains(&me) {
-    return Err(MlsError::UnexpectedMessage(
-      "the welcome's group doesn't hold this device",
-    ));
-  }
-  if verified.sender == me || !expected.contains(&verified.sender.user_id) {
-    return Err(MlsError::UnexpectedMessage(
-      "the welcome wasn't made by another device in the meeting",
-    ));
-  }
-  Ok(())
-}
-
 /// Devices a commit took out of the group for good (a rejoining device stays).
 fn left_members(update: &MembershipUpdate) -> Vec<GroupMember> {
   update
@@ -3819,52 +3777,6 @@ mod tests {
       let mut original = ContentKeyRing::new(conversation);
       original.insert(known).unwrap();
       assert!(ring.insert(original.keys()[0].duplicate()).is_ok());
-    }
-  }
-
-  mod meeting_welcome {
-    use super::*;
-
-    #[test]
-    fn a_group_of_this_users_device_without_every_invitee_is_taken() {
-      let welcome = welcome_of(
-        &[member(ME, MY_LAPTOP), member(ME, MY_PHONE)],
-        member(ME, MY_LAPTOP),
-      );
-      assert!(check_meeting_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_ok());
-    }
-
-    #[test]
-    fn a_welcome_from_an_invitee_is_taken() {
-      let welcome = welcome_of(
-        &[member(ME, MY_PHONE), member(BOB, BOB_PHONE)],
-        member(BOB, BOB_PHONE),
-      );
-      assert!(check_meeting_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_ok());
-    }
-
-    #[test]
-    fn a_tree_with_somebody_not_invited_is_refused() {
-      let welcome = welcome_of(
-        &[member(ME, MY_PHONE), member(CAROL, CAROL_PHONE)],
-        member(ME, MY_LAPTOP),
-      );
-      assert!(check_meeting_welcome(&welcome, member(ME, MY_PHONE), &[user(BOB)]).is_err());
-    }
-
-    #[test]
-    fn a_tree_without_this_device_is_refused() {
-      let welcome = welcome_of(&[member(ME, MY_LAPTOP)], member(ME, MY_LAPTOP));
-      assert!(check_meeting_welcome(&welcome, member(ME, MY_PHONE), &[]).is_err());
-    }
-
-    #[test]
-    fn a_welcome_from_this_device_or_a_stranger_is_refused() {
-      let tree = [member(ME, MY_PHONE)];
-      let own = welcome_of(&tree, member(ME, MY_PHONE));
-      assert!(check_meeting_welcome(&own, member(ME, MY_PHONE), &[]).is_err());
-      let stranger = welcome_of(&tree, member(CAROL, CAROL_PHONE));
-      assert!(check_meeting_welcome(&stranger, member(ME, MY_PHONE), &[user(BOB)]).is_err());
     }
   }
 

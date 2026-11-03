@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use openmls::messages::group_info::VerifiableGroupInfo;
 use openmls::prelude::{
   GroupEpoch, GroupId, KeyPackage, LeafNodeIndex, MlsGroup, MlsGroupJoinConfig, MlsGroupState,
-  MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, ProcessedMessageContent, Proposal, ProposalStore,
-  PublicGroup, Sender, StagedCommit, StagedWelcome, WelcomeError,
+  MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit,
+  StagedWelcome, WelcomeError,
 };
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::storage::StorageProvider as _;
@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use super::content_keys::{ApplicationPayload, ContentKeyBundle, SealedContentKeys};
 use super::rejoin::{SignedRejoinRequest, VerifiedRejoinRequest};
-use super::{CIPHERSUITE, DefaultMlsProvider, GroupMember, MlsError, credential, validate_key_package};
+use super::{CIPHERSUITE, GroupMember, MlsError, credential, validate_key_package};
 use crate::content_key::{ContentKey, ContentKeyId};
 use crate::domain;
 use crate::identity::{DeviceKeyPair, SignedDeviceCertificate, VerifiedDevice};
@@ -1423,25 +1423,15 @@ impl ChangeHistory {
   }
 }
 
-/// Whether the tree in a group information holds a leaf with this signature key. Group
-/// information that doesn't open says no: joining refuses it with the reason.
+/// Whether the tree in a group information holds a leaf with this signature key. Read as it comes,
+/// without checking lifetimes or signatures: an old leaf must not hide this device's own, and a
+/// made-up one only makes the device ask to be added.
 fn holds_signature_key(info: &VerifiableGroupInfo, signature_key: &[u8]) -> bool {
-  let Some(tree) = info.extensions().ratchet_tree() else {
-    return false;
-  };
-  // A provider of its own: reading the tree stores it, and must not touch the device's state.
-  let scratch = DefaultMlsProvider::default();
-  PublicGroup::from_external(
-    scratch.crypto(),
-    scratch.storage(),
-    tree.ratchet_tree().clone(),
-    info.clone(),
-    ProposalStore::new(),
-  )
-  .is_ok_and(|(group, _)| {
-    group
-      .members()
-      .any(|member| member.signature_key == signature_key)
+  info.extensions().ratchet_tree().is_some_and(|tree| {
+    tree
+      .ratchet_tree()
+      .leaves()
+      .any(|leaf| leaf.signature_key().as_slice() == signature_key)
   })
 }
 
