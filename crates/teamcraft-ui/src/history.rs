@@ -19,11 +19,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use leptos::prelude::*;
-use teamcraft_client_api::remote::DEEP_LINK_EVENT;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
 
+use crate::app_links::AppLinks;
 use crate::auth::tauri;
 use crate::clock::now_ms;
 use crate::components::app::on_window;
@@ -110,9 +110,13 @@ pub fn start(state: AppState, i18n: I18n) {
   });
   if tauri::is_available() {
     handle_mouse_buttons();
-    tauri::listen_text(DEEP_LINK_EVENT, move |link| {
-      if let Some(route) = Route::from_permalink(&link) {
-        untrack(|| follow(state, bar, route));
+  }
+  // A link from outside (app_links.rs), also one that waited for the sign-in.
+  if let Some(links) = use_context::<AppLinks>() {
+    Effect::new(move |_| {
+      if let Some(route) = links.maybe_place.get() {
+        links.maybe_place.set(None);
+        untrack(|| follow_from_outside(state, bar, route));
       }
     });
   }
@@ -224,6 +228,17 @@ fn follow_location(state: AppState, bar: AddressBar) {
   };
   bar.shown.set_value(route);
   if route == state.route_untracked() {
+    return;
+  }
+  follow(state, bar, route);
+}
+
+/// A place a link from outside names. A meeting link's visit knocks, which tells its hosts, so
+/// from outside it waits for a click (`meetings_view.rs`); the address bar's own URL doesn't.
+fn follow_from_outside(state: AppState, bar: AddressBar, route: Route) {
+  if let Route::Meeting(meeting) = route {
+    state.open_meetings();
+    state.maybe_outside_meeting_link.set(Some(meeting));
     return;
   }
   follow(state, bar, route);

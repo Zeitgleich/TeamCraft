@@ -9,6 +9,51 @@ plugins {
 
 fun setting(name: String): String = (findProperty("teamcraft.$name") as String?).orEmpty()
 
+/**
+ * The App Links filter of `teamcraft.appLinkHosts` (comma-separated host names), merged into the app's
+ * manifest. Android only offers verified links for hosts listed when the app is built, so a build
+ * can't cover unknown self-hosted instances; those use the `teamcraft://` filter (docs/app-links.md).
+ * The paths are the places a link may name: keep in step with teamcraft-server `services/app_links.rs`.
+ */
+abstract class AppLinksManifestTask : DefaultTask() {
+  @get:Input abstract val hosts: ListProperty<String>
+
+  @get:OutputFile abstract val manifest: RegularFileProperty
+
+  @TaskAction
+  fun write() {
+    val data = hosts.get().joinToString("\n") { host -> "        <data android:host=\"$host\" />" }
+    val filter = if (hosts.get().isEmpty()) {
+      ""
+    } else {
+      """
+      <intent-filter android:autoVerify="true">
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <category android:name="android.intent.category.BROWSABLE" />
+        <data android:scheme="https" />
+$data
+        <data android:path="/home" />
+        <data android:pathPrefix="/c/" />
+        <data android:pathPrefix="/s/" />
+        <data android:pathPrefix="/dm/" />
+        <data android:pathPrefix="/meeting/" />
+      </intent-filter>
+      """
+    }
+    manifest.get().asFile.writeText(
+      """
+      <?xml version="1.0" encoding="utf-8"?>
+      <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+        <application>
+          <activity android:name="de.zeitgleich.teamcraft.ui.MainActivity">$filter</activity>
+        </application>
+      </manifest>
+      """.trimIndent(),
+    )
+  }
+}
+
 android {
   namespace = "de.zeitgleich.teamcraft"
   compileSdk = 37
@@ -97,6 +142,14 @@ android {
   packaging {
     jniLibs.useLegacyPackaging = false
   }
+}
+
+androidComponents.onVariants { variant ->
+  val task = tasks.register<AppLinksManifestTask>("generate${variant.name.replaceFirstChar(Char::uppercase)}AppLinksManifest") {
+    hosts.set(setting("appLinkHosts").split(',').map(String::trim).filter(String::isNotEmpty))
+    manifest.set(layout.buildDirectory.file("generated/appLinks/${variant.name}/AndroidManifest.xml"))
+  }
+  variant.sources.manifests.addGeneratedManifestFile(task, AppLinksManifestTask::manifest)
 }
 
 kotlin {

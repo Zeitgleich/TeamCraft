@@ -17,6 +17,8 @@ struct TeamCraftApp: App {
           updateShield(phase: scenePhase)
           await model.bootstrap()
         }
+        // Universal Links and `teamcraft://` alike; waits behind the app lock's shield and the sign-in.
+        .onOpenURL { url in model.receiveAppLink(url) }
         .onChange(of: lock.isLocked) { _, _ in updateShield(phase: scenePhase) }
         .onChange(of: scenePhase) { _, phase in
           switch phase {

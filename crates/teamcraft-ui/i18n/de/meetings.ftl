@@ -162,3 +162,5 @@ meetings-guest-code-hint = Der Gast sieht denselben Code auf seinem Bildschirm. 
 meetings-organizer-code = Dein Code für Gäste:
 meetings-joined-by-link = { $name } ist mit dem Meeting-Link beigetreten
 meetings-remove-joined = Entfernen
+meetings-visit-from-outside = Ein Link möchte eine Besprechung öffnen. Bist du noch nicht dabei, bittet das Öffnen die Hosts, dich einzulassen.
+meetings-visit-open = Besprechung öffnen

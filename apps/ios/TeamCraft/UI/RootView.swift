@@ -37,10 +37,21 @@ struct RootView: View {
       LoadingMarkOverlay(isLoading: isStarting)
     }
     .overlay { if model.isBusy { BusyOverlay() } }
+    .appLinkQuestions(model)
+    .task(id: appLinkMoment) { await model.actOnAppLink() }
     // Every touch counts for presence; the core reports it at most every 30 s (issue #472).
     .background { InteractionObserver { model.reportActivity(.interaction) } }
     .fullScreenCover(item: callBinding) { call in
       CallScreen(call: call)
+    }
+  }
+
+  /// Changes when a waiting link may get further: the start is over, or the account changed.
+  private var appLinkMoment: String {
+    switch model.phase {
+    case .starting: "starting"
+    case .ready: "ready \(model.currentServerOrigin ?? "")"
+    default: "other \(model.currentServerOrigin ?? "")"
     }
   }
 

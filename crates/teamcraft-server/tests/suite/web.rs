@@ -122,15 +122,21 @@ async fn health_probes_and_well_known_paths_never_get_the_shell() {
     );
     assert_ne!(String::from_utf8(body).unwrap(), INDEX, "{path}");
   }
-  for path in [
-    "/.well-known/assetlinks.json",
-    "/.well-known/apple-app-site-association",
-    "/.well-known/security.txt",
-  ] {
-    let (status, _, body) = get(&app, path).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
-    assert_ne!(String::from_utf8(body).unwrap(), INDEX, "{path}");
-  }
+  let (status, _, body) = get(&app, "/.well-known/security.txt").await;
+  assert_eq!(status, StatusCode::NOT_FOUND);
+  assert_ne!(String::from_utf8(body).unwrap(), INDEX);
+  // The official apps by default. Apple's file waits for a team ID (docs/app-links.md).
+  let (status, headers, body) = get(&app, "/.well-known/assetlinks.json").await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(header(&headers, "content-type"), "application/json");
+  let statements: serde_json::Value = serde_json::from_slice(&body).unwrap();
+  assert_eq!(
+    statements[0]["target"]["package_name"],
+    teamcraft_proto::OFFICIAL_APP_ID
+  );
+  let (status, _, body) = get(&app, "/.well-known/apple-app-site-association").await;
+  assert_eq!(status, StatusCode::NOT_FOUND);
+  assert_ne!(String::from_utf8(body).unwrap(), INDEX);
   app.stop().await;
 }
 

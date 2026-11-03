@@ -21,6 +21,7 @@ Read before changing behaviour:
 | [docs/bridge.md](docs/bridge.md)                   | Integration bridge: webhooks and logs into encrypted channels |
 | [docs/meetings.md](docs/meetings.md)               | Meetings, invitations, guests and lobby                       |
 | [docs/push-gateway.md](docs/push-gateway.md)       | Push gateway for store apps (own repo): server side, contract |
+| [docs/app-links.md](docs/app-links.md)             | Links that open the installed app, per platform               |
 | [docs/operations.md](docs/operations.md)           | Running an instance; deployment: Zeitgleich/teamcraft-deploy  |
 | [docs/release.md](docs/release.md)                 | Versions and the release procedure                            |
 | [docs/updates.md](docs/updates.md)                 | Desktop self-update, package repositories, update policy      |

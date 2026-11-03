@@ -190,6 +190,8 @@ that skips them by itself is a follow-up (v1.1).
 
 ## Links
 
+Opening one in an installed app: [app-links.md](app-links.md).
+
 What a host copies and sends, and what each link lets the holder do:
 
 | Link                                         | Who it is for                       | What it does                                                    |

@@ -372,6 +372,8 @@ pub struct AppState {
   /// A meeting link (`/meeting/{token}` or `/meeting/{id}`) the meetings screen has yet to open;
   /// it takes it.
   pub maybe_meeting_link: RwSignal<Option<crate::route::MeetingHandle>>,
+  /// A meeting link from outside the app (docs/app-links.md): shown, opened only after a click.
+  pub maybe_outside_meeting_link: RwSignal<Option<crate::route::MeetingHandle>>,
   /// Bumped when a route named something that doesn't exist or the user can't open.
   pub unavailable_routes: RwSignal<u64>,
   /// Set while the app follows a URL it was given or redirects on its own (the first conversation
@@ -478,6 +480,7 @@ impl AppState {
       is_restoring: StoredValue::new(false),
       restored_reading: StoredValue::new(None),
       maybe_meeting_link: RwSignal::new(None),
+      maybe_outside_meeting_link: RwSignal::new(None),
       unavailable_routes: RwSignal::new(0),
       follows_url: StoredValue::new(false),
       settings,

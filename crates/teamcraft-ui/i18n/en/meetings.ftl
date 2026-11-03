@@ -162,3 +162,5 @@ meetings-guest-code-hint = The guest sees the same code on their screen. Compare
 meetings-organizer-code = Your code for guests:
 meetings-joined-by-link = { $name } joined with the meeting link
 meetings-remove-joined = Remove
+meetings-visit-from-outside = A link wants to open a meeting. If you aren't in it yet, opening it asks its hosts to let you in.
+meetings-visit-open = Open the meeting

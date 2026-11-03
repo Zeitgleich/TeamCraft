@@ -24,6 +24,7 @@ const COMMANDS: &[&str] = &[
   "server_suggest",
   "server_confirm",
   "server_forget",
+  "deep_link_take",
   "core_start",
   "core_retry_keychain",
   "core_status",

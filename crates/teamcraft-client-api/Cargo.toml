@@ -13,6 +13,8 @@ workspace = true
 
 [dependencies]
 teamcraft-proto.workspace = true
+# The shape of a meeting link token (src/app_link.rs); every client links this crate already.
+teamcraft-crypto = { path = "../teamcraft-crypto" }
 serde.workspace = true
 thiserror.workspace = true
 # Release versions for desktop updates (1.2.3-rc.1 < 1.2.3); already in the tree through Tauri.

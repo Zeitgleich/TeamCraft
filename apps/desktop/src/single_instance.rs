@@ -15,7 +15,7 @@ use crate::tray;
 /// The plugin; registered before every other one, so a second launch ends before it does anything.
 pub fn plugin() -> TauriPlugin<Wry> {
   tauri_plugin_single_instance::init(|app, args, _working_directory| {
-    // On Windows the deep-link plugin has already consumed any link in `args` (`deep-link` feature).
+    // The deep-link plugin has already taken any link in `args` (`deep-link` feature): deep_links.rs.
     debug!(
       argument_count = args.len(),
       "second instance started; showing the first"

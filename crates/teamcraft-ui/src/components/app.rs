@@ -9,6 +9,7 @@ use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, OsNotific
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
+use crate::app_links::{AppLinkPrompt, AppLinks, OpenInAppButton};
 use crate::areas::{self, Place, lazy_area};
 use crate::attention::{AttentionReporter, AttentionSignals, LockReading, is_attentive, last_activity_at};
 use crate::auth::tauri;
@@ -81,10 +82,14 @@ pub fn App() -> impl IntoView {
   if tauri::is_available() {
     sync_tray_labels(i18n);
   }
+  let links = AppLinks::provide();
+  links.listen();
   // Above every screen: sign-in has no top bar, but the window still needs its controls.
   view! {
     <WindowControls />
     {screen(settings)}
+    <AppLinkPrompt links=links />
+    <OpenInAppButton />
   }
 }
 

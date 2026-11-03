@@ -50,6 +50,8 @@ class MainActivity : FragmentActivity() {
   private val openConversation = mutableStateOf<String?>(null)
   /** Text or files another app shared, until the user picked a conversation. */
   private val share = mutableStateOf<SharedContent?>(null)
+  /** A link the system handed over, until it was acted on (docs/app-links.md). */
+  private val appLink = mutableStateOf<String?>(null)
   private val isLocked = mutableStateOf(false)
   /** Where the system splash left the TeamCraft mark, once it handed over (Android 12+). */
   private val splashHandoff = mutableStateOf<SplashHandoff?>(null)
@@ -72,6 +74,8 @@ class MainActivity : FragmentActivity() {
     if (!isLocked.value) isUnlockedInProcess = true
     openConversation.value = conversationToOpen(intent)
     share.value = sharedContent(intent, packageName)
+    // Not again when the activity is recreated with the same intent (a rotation): it was acted on.
+    if (savedInstanceState == null) appLink.value = appLinkOf(intent)
     setContent {
       // The server's brand colors the whole app (branding.md §5), not only the sign-in screen.
       val maybeBrand by viewModel.loginBrand.collectAsState()
@@ -91,6 +95,8 @@ class MainActivity : FragmentActivity() {
               onConversationOpened = { openConversation.value = null },
               maybeShare = share.value,
               onShareHandled = { share.value = null },
+              maybeAppLink = appLink.value,
+              onAppLinkHandled = { appLink.value = null },
               onLogin = { intent -> loginLauncher.launch(intent) },
             )
           }
@@ -163,6 +169,7 @@ class MainActivity : FragmentActivity() {
     super.onNewIntent(intent)
     conversationToOpen(intent)?.let { openConversation.value = it }
     sharedContent(intent, packageName)?.let { share.value = it }
+    appLinkOf(intent)?.let { appLink.value = it }
   }
 
   /**

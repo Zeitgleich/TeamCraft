@@ -163,7 +163,12 @@ async fn send_invite_mail(
   let inviter_brand = inviter_brand(state, &caller.user.id).await;
   let brands = state.brands.current();
   let brand = brands.for_recipient(&invite.email, &inviter_brand);
-  let url = brand.base_url(&state.settings.get().mail.public_base_url);
+  // `/home` and not the bare address: the apps claim places, and the bare address is also where a
+  // browser's sign-in comes back to (docs/app-links.md).
+  let url = format!(
+    "{}/home",
+    brand.base_url(&state.settings.get().mail.public_base_url)
+  );
   let (subject, body) = brand.invite_texts(&state.settings.get().mail);
   let fill = |template: &str| {
     template

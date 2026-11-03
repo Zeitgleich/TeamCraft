@@ -24,5 +24,11 @@ NSE_ENTITLEMENTS = NotificationService/NotificationService.entitlements
 // pushes and hands calls to CallKit; NO shows them quietly and calls as an incoming-call alert.
 NSE_NOTIFICATION_FILTERING = NO
 
+// Entitlements of the app. Universal Links need a host listed when the app is built, and the Associated
+// Domains capability on the app ID: for a build that has them, set both of these (docs/app-links.md).
+// APP_ENTITLEMENTS = TeamCraft/Resources/TeamCraft.AppLinks.entitlements
+// TEAMCRAFT_APP_LINK_DOMAIN = team.example.com
+APP_ENTITLEMENTS = TeamCraft/Resources/TeamCraft.entitlements
+
 // APNs environment of the push entitlement (archives for TestFlight/App Store get production from the profile).
 APS_ENVIRONMENT = development

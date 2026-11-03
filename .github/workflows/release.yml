@@ -301,6 +301,8 @@ jobs:
       - name: Build APKs and the App Bundle
         env:
           PUSH_GATEWAY_URL: ${{ vars.TEAMCRAFT_ANDROID_PUSH_GATEWAY_URL }}
+          # The hosts this publisher's Android build opens as App Links (docs/app-links.md); may be empty.
+          APP_LINK_HOSTS: ${{ vars.TEAMCRAFT_APP_LINK_HOSTS }}
           KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
@@ -308,6 +310,7 @@ jobs:
           # No server or identity provider: the apps ask for the server (docs/release.md).
           args=(assembleFullRelease assembleLibreRelease assembleFullDebug assembleLibreDebug bundleFullRelease)
           [ -n "$PUSH_GATEWAY_URL" ] && args+=("-Pteamcraft.pushGatewayUrl=$PUSH_GATEWAY_URL")
+          [ -n "$APP_LINK_HOSTS" ] && args+=("-Pteamcraft.appLinkHosts=$APP_LINK_HOSTS")
           if [ "${HAS_UPLOAD_KEY:-}" = true ]; then
             args+=("-Pteamcraft.uploadKeystore=/src/apps/android/upload.keystore"
               "-Pteamcraft.uploadKeystorePassword=$KEYSTORE_PASSWORD"

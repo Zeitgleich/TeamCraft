@@ -139,6 +139,17 @@ final class AppModel {
   var openConversationId: String?
   /// A message to show once its conversation is open (from a message link).
   var focusMessageId: String?
+  /// A link the system handed over, until it was acted on (AppModel+AppLinks.swift).
+  var pendingAppLink: String?
+  /// The question a waiting link asks.
+  var appLinkQuestion: OpenedAppLink?
+  /// The question was answered with "Sign in there": it doesn't come back on the way there.
+  var isHostQuestionHandled = false
+  var appLinkWebURL: URL?
+  var isAskingAboutMeetingLink = false
+  var isShowingMeetingsFromLink = false
+  var isPermalinkFromLinkMissing = false
+  var browserLink: BrowserLink?
   /// The conversation on screen; its notifications are not shown as banners.
   var visibleConversationId: String?
   private(set) var pushStatus: PushStatus = .unknown
@@ -223,6 +234,8 @@ final class AppModel {
 
   /// Whether the user may only use the server the device's management set.
   var isServerLocked: Bool { managedServer.isLocked }
+  /// The server in use, as a link's host is compared with it.
+  var currentServerOrigin: String? { maybeServer?.address.origin }
 
   /// Checks what the user typed or pasted (address, URL, invite or message link): normalises it,
   /// asks the server and shows it for confirmation; stays at the entry with the reason otherwise.

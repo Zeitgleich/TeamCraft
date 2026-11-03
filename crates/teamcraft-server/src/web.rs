@@ -47,8 +47,9 @@ pub fn router(config: &WebConfig) -> Router {
     .precompressed_br()
     .precompressed_gzip()
     .fallback(ServeFile::new(dir.join(INDEX)));
-  // Files that other services look up by name (security.txt, app links) are served if they exist
-  // and are a plain 404 otherwise: an app shell with 200 there would read as a broken file.
+  // Files that other services look up by name (security.txt) are served if they exist and are a
+  // plain 404 otherwise: an app shell with 200 there would read as a broken file. The app link files
+  // are routes of their own (`services/app_links.rs`), which win over this fallback.
   let well_known = ServeDir::new(dir.join(WELL_KNOWN_DIR));
   let policy = Some(policy_header(&config.resolved_content_security_policy()));
   // The share-link download page is a route of the app (it needs no sign-in, `share_download.rs`).

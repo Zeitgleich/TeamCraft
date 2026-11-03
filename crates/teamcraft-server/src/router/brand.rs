@@ -13,4 +13,6 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .routes(routes!(handlers::get_brand_manifest_handler))
     .routes(routes!(handlers::get_brand_theme_handler))
     .routes(routes!(handlers::list_brands_handler))
+    .routes(routes!(handlers::get_asset_links_handler))
+    .routes(routes!(handlers::get_apple_app_site_association_handler))
 }

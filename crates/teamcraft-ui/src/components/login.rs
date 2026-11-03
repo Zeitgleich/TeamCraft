@@ -56,6 +56,15 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
   let control = SessionControl::new(auth::detect(config));
   provide_context(control);
   control.start();
+  // "Sign in there" on a link to an instance (app_links.rs): the usual check and confirmation.
+  if let Some(links) = use_context::<crate::app_links::AppLinks>() {
+    Effect::new(move |_| {
+      if let Some(host) = links.maybe_server_to_check.get() {
+        links.maybe_server_to_check.set(None);
+        control.check_server(host);
+      }
+    });
+  }
   // The loading screen covers the session check, the way through the identity provider and the
   // opening of the account's data: the first view it hands over to is a screen that waits for the
   // user, or the shell (`Shell`, below `Ready`). Not the passing states, which a signed-in start

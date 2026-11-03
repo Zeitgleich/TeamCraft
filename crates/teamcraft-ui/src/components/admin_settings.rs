@@ -21,7 +21,7 @@ const MINUTE: u64 = 60;
 type Values = BTreeMap<&'static str, String>;
 
 /// Groups in the order of the page.
-const GROUPS: [&str; 11] = [
+const GROUPS: [&str; 12] = [
   "server_rules",
   "notifications",
   "email_digest",
@@ -33,6 +33,7 @@ const GROUPS: [&str; 11] = [
   "mail_texts",
   "meeting_mail",
   "token_binding",
+  "app_links",
 ];
 /// The sign-in methods an admin can choose, as the form's values: comma-separated, in order.
 const METHOD_CHOICES: [&str; 4] = ["sso,local", "local,sso", "sso", "local"];
@@ -57,6 +58,8 @@ enum Kind {
   Area,
   /// Space or channel IDs.
   IdList,
+  /// Other identifiers, checked by the server.
+  TextList,
   /// The sign-in methods in order, one of [`METHOD_CHOICES`].
   Methods,
   /// A notification level, one of [`LEVEL_CHOICES`].
@@ -164,6 +167,19 @@ const TOKEN_BINDING: &[FieldDef] = &[
   amount("nonce_rotation_secs", 1, 86_400, SECONDS),
   amount("replay_cache_max_entries", 1, 10_000_000, ENTRIES),
   amount("replay_cache_max_entries_per_user", 1, 10_000_000, ENTRIES),
+];
+const APP_LINKS: &[FieldDef] = &[
+  flag("is_enabled"),
+  FieldDef {
+    id: "android_package_names",
+    kind: Kind::TextList,
+  },
+  FieldDef {
+    id: "android_cert_fingerprints",
+    kind: Kind::TextList,
+  },
+  text("apple_team_id"),
+  text("apple_bundle_id"),
 ];
 const NOTIFICATIONS: &[FieldDef] = &[
   flag("read_receipts_default"),
@@ -485,7 +501,7 @@ fn FieldRow(
       }
       .into_any()
     },
-    Kind::IdList => view! {
+    Kind::IdList | Kind::TextList => view! {
       <TextAreaField
         id=leak_key(dom_id)
         label=label
@@ -556,6 +572,7 @@ fn fields_of(slug: &str) -> &'static [FieldDef] {
     "mail_texts" => MAIL_TEXTS,
     "meeting_mail" => MEETING_MAIL,
     "token_binding" => TOKEN_BINDING,
+    "app_links" => APP_LINKS,
     _ => &[],
   }
 }
@@ -574,6 +591,7 @@ fn group_json(key: &RuntimeSettingsKey, response: &RuntimeSettingsResponse) -> O
     RuntimeSettingsKey::MailTexts => serde_json::to_value(&response.mail_texts),
     RuntimeSettingsKey::MeetingMail => serde_json::to_value(&response.meeting_mail),
     RuntimeSettingsKey::TokenBinding => serde_json::to_value(&response.token_binding),
+    RuntimeSettingsKey::AppLinks => serde_json::to_value(&response.app_links),
     _ => return None,
   };
   value.ok()
@@ -619,7 +637,7 @@ fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
           .join(",")
       })
       .unwrap_or_default(),
-    Kind::IdList => {
+    Kind::IdList | Kind::TextList => {
       let items: Vec<String> = value
         .as_array()
         .map(|items| {
@@ -709,6 +727,7 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
         .unwrap_or(DPOP_POLICY_CHOICES[0]);
       Ok(json!(choice))
     },
+    Kind::TextList => Ok(json!(parse_list(typed))),
     Kind::IdList => {
       let items = parse_list(typed);
       if items.iter().all(|item| item.parse::<Snowflake>().is_ok()) {

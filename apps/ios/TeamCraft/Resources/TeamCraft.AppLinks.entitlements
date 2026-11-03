@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- TeamCraft.entitlements (generated from project.yml) plus Universal Links for the host in
+	     TEAMCRAFT_APP_LINK_DOMAIN. Used through APP_ENTITLEMENTS (Config/Base.xcconfig), and needs
+	     the Associated Domains capability on the app ID. Add a line per further host. -->
+	<key>aps-environment</key>
+	<string>$(APS_ENVIRONMENT)</string>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>$(APP_GROUP_ID)</string>
+	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(KEYCHAIN_ACCESS_GROUP)</string>
+	</array>
+	<key>com.apple.developer.usernotifications.communication</key>
+	<true/>
+	<key>com.apple.developer.usernotifications.time-sensitive</key>
+	<true/>
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:$(TEAMCRAFT_APP_LINK_DOMAIN)</string>
+	</array>
+</dict>
+</plist>

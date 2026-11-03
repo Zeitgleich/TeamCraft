@@ -1,0 +1,16 @@
+/* "Open in the app" on a page that is a place in the app (app_links.rs). Above the composer's row on
+   phones, out of the way of the page's own controls. */
+.open-in-app {
+  position: fixed;
+  inset-block-end: calc(var(--space-3) + env(safe-area-inset-bottom, 0px));
+  inset-inline-end: var(--space-3);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
