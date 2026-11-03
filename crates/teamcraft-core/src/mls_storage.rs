@@ -221,6 +221,17 @@ pub fn save_mls_storage(
   }
 }
 
+/// Copies what a join staged on a provider of its own into `into`, once the server accepted it.
+/// Nothing reaches the store until the next [`save_mls_storage`].
+pub fn adopt_mls_entries(staging: &OpenMlsRustCrypto, into: &OpenMlsRustCrypto) -> Result<(), CoreError> {
+  let staged = staging.storage().values.read().map_err(|_| poisoned())?;
+  let mut values = into.storage().values.write().map_err(|_| poisoned())?;
+  for (key, value) in staged.iter() {
+    values.insert(key.clone(), value.clone());
+  }
+  Ok(())
+}
+
 /// The size of the provider storage, keys and values (diagnostics; 0 if the lock is poisoned).
 pub fn mls_storage_len(provider: &OpenMlsRustCrypto) -> usize {
   provider.storage().values.read().map_or(0, |values| {

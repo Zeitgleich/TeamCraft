@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use openmls::messages::group_info::VerifiableGroupInfo;
 use openmls::prelude::{
   GroupEpoch, GroupId, KeyPackage, LeafNodeIndex, MlsGroup, MlsGroupJoinConfig, MlsGroupState,
   MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit,
@@ -359,6 +360,12 @@ impl ConversationGroup {
     if info.ciphersuite() != CIPHERSUITE {
       return Err(MlsError::UnexpectedMessage("group info with another ciphersuite"));
     }
+    // Before the commit is built: openmls would remove this device's old leaf in it, a resync the
+    // members refuse (`authorize_external_join`), and the device would be out of step with them.
+    let credential_with_key = credential::credential_with_key(certificate)?;
+    if holds_signature_key(&info, credential_with_key.signature_key.as_slice()) {
+      return Err(MlsError::AlreadyInGroup);
+    }
     let config = MlsGroupJoinConfig::builder()
       .use_ratchet_tree_extension(true)
       .build();
@@ -366,7 +373,7 @@ impl ConversationGroup {
     let (group, bundle) = MlsGroup::external_commit_builder()
       .with_config(config)
       .skip_lifetime_validation()
-      .build_group(provider, info, credential::credential_with_key(certificate)?)
+      .build_group(provider, info, credential_with_key)
       .map_err(|error| MlsError::openmls("external join", error))?
       .load_psks(provider.storage())
       .map_err(|error| MlsError::openmls("external join", error))?
@@ -1414,6 +1421,18 @@ impl ChangeHistory {
   pub fn from_bytes(bytes: &[u8]) -> Result<Self, MlsError> {
     Ok(Self::tls_deserialize_exact_bytes(bytes)?)
   }
+}
+
+/// Whether the tree in a group information holds a leaf with this signature key. Read as it comes,
+/// without checking lifetimes or signatures: an old leaf must not hide this device's own, and a
+/// made-up one only makes the device ask to be added.
+fn holds_signature_key(info: &VerifiableGroupInfo, signature_key: &[u8]) -> bool {
+  info.extensions().ratchet_tree().is_some_and(|tree| {
+    tree
+      .ratchet_tree()
+      .leaves()
+      .any(|leaf| leaf.signature_key().as_slice() == signature_key)
+  })
 }
 
 fn group_id(conversation_id: ConversationId) -> GroupId {

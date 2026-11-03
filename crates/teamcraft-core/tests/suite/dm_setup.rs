@@ -47,6 +47,34 @@ mod repair {
     assert_talks(&mut alice, &mut bob, dm).await;
   }
 
+  /// A founding add whose answer failed leaves a pending commit; a commit of another group in the
+  /// queue then discards it. The founder keeps its group: only a welcome that checks out replaces
+  /// it, never the queue or the server's epoch (e2ee.md §4.6, #796).
+  #[tokio::test]
+  async fn a_foreign_commit_does_not_cost_a_founder_with_a_commit_in_flight_its_group() {
+    let (server, clock, alice, mut bob) = two().await;
+    let (mut alice, dm) = open_cut_short(&server, &clock, alice, &bob, CUT_AFTER_FOUNDING).await;
+    let alice_id = alice.client.user_id();
+    server.drop_next_commit(alice_id);
+    clock.advance(retry_ms());
+    // The sync's add fails on the way to the server; repairing it is not a sync's failure.
+    drop(alice.client.full_sync().await);
+    assert_eq!(alice.client.mls_epoch(dm).unwrap(), Some(0));
+
+    // Bob founds a group for the same DM and his commit wins the epoch.
+    assert_eq!(bob.client.open_dm(alice_id).await.unwrap(), dm);
+    assert!(bob.client.mls_epoch(dm).unwrap() > Some(0));
+
+    alice.client.sync_mls(dm).await.unwrap();
+    assert_eq!(alice.client.mls_epoch(dm).unwrap(), Some(0), "kept its group");
+
+    // Bob's welcome checks out and replaces it.
+    alice.client.full_sync().await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    alice.client.full_sync().await.unwrap();
+    assert_talks(&mut alice, &mut bob, dm).await;
+  }
+
   #[tokio::test]
   async fn a_dm_founded_but_never_shared_adds_the_other_side_on_a_later_sync() {
     let (server, clock, alice, mut bob) = two().await;

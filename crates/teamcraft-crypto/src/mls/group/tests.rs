@@ -1602,9 +1602,45 @@ fn a_pending_commit_survives_a_reload_and_is_recognised_in_the_queue() {
 }
 
 mod external_join {
-  use openmls::prelude::{MlsGroup, MlsGroupJoinConfig, MlsMessageBodyIn, MlsMessageIn};
+  use openmls::prelude::{Lifetime, MlsGroup, MlsGroupJoinConfig, MlsMessageBodyIn, MlsMessageIn};
 
   use super::*;
+
+  /// A leaf that never committed keeps its key package's lifetime, and an old one must not hide
+  /// this device's own leaf: the external commit would replace it, which members refuse.
+  #[test]
+  fn a_device_is_found_in_a_group_with_an_expired_leaf() {
+    let world = World::new();
+    let founder = &world.alice;
+    let other = DefaultMlsProvider::default();
+    let old = MlsGroup::builder()
+      .with_group_id(group_id(CONVERSATION))
+      .ciphersuite(CIPHERSUITE)
+      .use_ratchet_tree_extension(true)
+      .lifetime(Lifetime::init(1_000, 2_000))
+      .build(
+        &other,
+        &founder.user.device,
+        credential::credential_with_key(&founder.user.certificate).unwrap(),
+      )
+      .unwrap();
+    let group_info = old
+      .export_group_info(other.crypto(), &founder.user.device, true)
+      .unwrap()
+      .to_bytes()
+      .unwrap();
+    let other = DefaultMlsProvider::default();
+    let again = ConversationGroup::join_external(
+      &other,
+      &founder.user.device,
+      &founder.user.certificate,
+      &group_info,
+      CONVERSATION,
+      0,
+      &world.directory,
+    );
+    assert!(matches!(again, Err(MlsError::AlreadyInGroup)));
+  }
 
   #[test]
   fn a_further_device_of_a_member_joins_on_its_own() {
