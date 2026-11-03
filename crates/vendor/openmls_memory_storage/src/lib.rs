@@ -1,6 +1,10 @@
 use openmls_traits::storage::*;
 use serde::Serialize;
-use std::{collections::HashMap, sync::RwLock};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Deref,
+    sync::{Mutex, MutexGuard, RwLock, RwLockWriteGuard},
+};
 
 #[cfg(feature = "test-utils")]
 use std::io::Write as _;
@@ -15,6 +19,80 @@ pub mod persistence;
 #[derive(Debug, Default)]
 pub struct MemoryStorage {
     pub values: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
+    /// TeamCraft patch: the keys whose value changed since the last
+    /// [`Self::take_changed_keys`]. Every write of this crate goes through
+    /// [`TrackedValues`], which does not hand out the map mutably.
+    changed_keys: Mutex<HashSet<Vec<u8>>>,
+}
+
+/// TeamCraft patch: the map under its write lock; each change notes its key.
+struct TrackedValues<'a> {
+    values: RwLockWriteGuard<'a, HashMap<Vec<u8>, Vec<u8>>>,
+    changed_keys: MutexGuard<'a, HashSet<Vec<u8>>>,
+}
+
+impl Deref for TrackedValues<'_> {
+    type Target = HashMap<Vec<u8>, Vec<u8>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.values
+    }
+}
+
+impl TrackedValues<'_> {
+    /// A value written again unchanged is not a change.
+    fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        if self.values.get(&key) != Some(&value) {
+            self.changed_keys.insert(key.clone());
+        }
+        self.values.insert(key, value);
+    }
+
+    fn remove(&mut self, key: &[u8]) {
+        if self.values.remove(key).is_some() {
+            self.changed_keys.insert(key.to_vec());
+        }
+    }
+
+    /// The bytes of a list, created empty if missing, for the caller to change.
+    fn list_bytes(&mut self, key: Vec<u8>) -> &mut Vec<u8> {
+        self.changed_keys.insert(key.clone());
+        self.values.entry(key).or_insert_with(|| b"[]".to_vec())
+    }
+}
+
+/// TeamCraft patch: what a persisting caller needs to write only what changed.
+impl MemoryStorage {
+    /// The keys changed since the last call: each is now in [`Self::values`] (written) or not
+    /// (deleted). A value set back to an earlier one in between may still be listed.
+    pub fn take_changed_keys(&self) -> HashSet<Vec<u8>> {
+        std::mem::take(&mut *self.changed_keys.lock().unwrap())
+    }
+
+    /// Whether [`Self::take_changed_keys`] would list anything.
+    pub fn has_changed_keys(&self) -> bool {
+        !self.changed_keys.lock().unwrap().is_empty()
+    }
+
+    /// Sets a value from outside the storage trait, as a change.
+    pub fn set_value(&self, key: Vec<u8>, value: Vec<u8>) {
+        self.tracked_values().insert(key, value);
+    }
+
+    /// Deletes a value from outside the storage trait, as a change.
+    pub fn remove_value(&self, key: &[u8]) {
+        self.tracked_values().remove(key);
+    }
+
+    fn tracked_values(&self) -> TrackedValues<'_> {
+        let values = self.values.write().unwrap();
+        // Always after the map's lock.
+        let changed_keys = self.changed_keys.lock().unwrap();
+        TrackedValues {
+            values,
+            changed_keys,
+        }
+    }
 }
 
 // For testing we want to clone.
@@ -24,6 +102,7 @@ impl Clone for MemoryStorage {
         let values = self.values.read().unwrap();
         Self {
             values: RwLock::new(values.clone()),
+            changed_keys: Mutex::new(self.changed_keys.lock().unwrap().clone()),
         }
     }
 }
@@ -80,6 +159,7 @@ impl MemoryStorage {
 
         Ok(Self {
             values: RwLock::new(map),
+            changed_keys: Mutex::default(),
         })
     }
 }
@@ -93,7 +173,7 @@ impl MemoryStorage {
         key: &[u8],
         value: Vec<u8>,
     ) -> Result<(), <Self as StorageProvider<CURRENT_VERSION>>::Error> {
-        let mut values = self.values.write().unwrap();
+        let mut values = self.tracked_values();
         let storage_key = build_key_from_vec::<VERSION>(label, key.to_vec());
 
         #[cfg(feature = "test-utils")]
@@ -110,7 +190,7 @@ impl MemoryStorage {
         key: &[u8],
         value: Vec<u8>,
     ) -> Result<(), <Self as StorageProvider<CURRENT_VERSION>>::Error> {
-        let mut values = self.values.write().unwrap();
+        let mut values = self.tracked_values();
         let storage_key = build_key_from_vec::<VERSION>(label, key.to_vec());
 
         #[cfg(feature = "test-utils")]
@@ -118,7 +198,7 @@ impl MemoryStorage {
         log::trace!("{}", std::backtrace::Backtrace::capture());
 
         // fetch value from db, falling back to an empty list if doens't exist
-        let list_bytes = values.entry(storage_key).or_insert_with(|| b"[]".to_vec());
+        let list_bytes = values.list_bytes(storage_key);
 
         // parse old value and push new data
         let mut list: Vec<Vec<u8>> = serde_json::from_slice(list_bytes)?;
@@ -137,7 +217,7 @@ impl MemoryStorage {
         key: &[u8],
         value: Vec<u8>,
     ) -> Result<(), <Self as StorageProvider<CURRENT_VERSION>>::Error> {
-        let mut values = self.values.write().unwrap();
+        let mut values = self.tracked_values();
         let storage_key = build_key_from_vec::<VERSION>(label, key.to_vec());
 
         #[cfg(feature = "test-utils")]
@@ -145,7 +225,7 @@ impl MemoryStorage {
         log::trace!("{}", std::backtrace::Backtrace::capture());
 
         // fetch value from db, falling back to an empty list if doens't exist
-        let list_bytes = values.entry(storage_key).or_insert_with(|| b"[]".to_vec());
+        let list_bytes = values.list_bytes(storage_key);
 
         // parse old value, find value to delete and remove it from list
         let mut list: Vec<Vec<u8>> = serde_json::from_slice(list_bytes)?;
@@ -221,7 +301,7 @@ impl MemoryStorage {
         label: &[u8],
         key: &[u8],
     ) -> Result<(), <Self as StorageProvider<CURRENT_VERSION>>::Error> {
-        let mut values = self.values.write().unwrap();
+        let mut values = self.tracked_values();
 
         let mut storage_key = label.to_vec();
         storage_key.extend_from_slice(key);
@@ -334,7 +414,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         interim_transcript_hash: &InterimTranscriptHash,
     ) -> Result<(), Self::Error> {
-        let mut values = self.values.write().unwrap();
+        let mut values = self.tracked_values();
         let key = build_key::<CURRENT_VERSION, &GroupId>(INTERIM_TRANSCRIPT_HASH_LABEL, group_id);
         let value = serde_json::to_vec(&interim_transcript_hash).unwrap();
 
@@ -350,7 +430,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         group_context: &GroupContext,
     ) -> Result<(), Self::Error> {
-        let mut values = self.values.write().unwrap();
+        let mut values = self.tracked_values();
         let key = build_key::<CURRENT_VERSION, &GroupId>(GROUP_CONTEXT_LABEL, group_id);
         let value = serde_json::to_vec(&group_context).unwrap();
 
@@ -366,7 +446,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         group_id: &GroupId,
         confirmation_tag: &ConfirmationTag,
     ) -> Result<(), Self::Error> {
-        let mut values = self.values.write().unwrap();
+        let mut values = self.tracked_values();
         let key = build_key::<CURRENT_VERSION, &GroupId>(CONFIRMATION_TAG_LABEL, group_id);
         let value = serde_json::to_vec(&confirmation_tag).unwrap();
 
@@ -382,7 +462,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         public_key: &SignaturePublicKey,
         signature_key_pair: &SignatureKeyPair,
     ) -> Result<(), Self::Error> {
-        let mut values = self.values.write().unwrap();
+        let mut values = self.tracked_values();
         let key =
             build_key::<CURRENT_VERSION, &SignaturePublicKey>(SIGNATURE_KEY_PAIR_LABEL, public_key);
         let value = serde_json::to_vec(&signature_key_pair).unwrap();
@@ -870,7 +950,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         // Get all proposal refs for this group.
         let proposal_refs: Vec<ProposalRef> =
             self.read_list(PROPOSAL_QUEUE_REFS_LABEL, &serde_json::to_vec(group_id)?)?;
-        let mut values = self.values.write().unwrap();
+        let mut values = self.tracked_values();
         for proposal_ref in proposal_refs {
             // Delete all proposals.
             let key = serde_json::to_vec(&(group_id, proposal_ref))?;
@@ -1085,7 +1165,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         let serialized_epoch_id = serde_json::to_vec(epoch_id)?;
         // Hold the write lock across the liveness check and the deletion so a
         // material stored concurrently cannot be orphaned.
-        let mut values = self.values.write().unwrap();
+        let mut values = self.tracked_values();
         let referenced = values
             .iter()
             .any(|(key, value)| is_epoch_tag(key) && value == &serialized_epoch_id);
@@ -1238,7 +1318,7 @@ impl StorageProvider<CURRENT_VERSION> for MemoryStorage {
         // Take the write lock once so the advanced tree and all materials are
         // written together. A reader cannot observe an advanced tree without
         // the materials it produced.
-        let mut values = self.values.write().unwrap();
+        let mut values = self.tracked_values();
         let tree_key = build_key_from_vec::<CURRENT_VERSION>(
             VC_OPERATION_TREE_LABEL,
             serialized_epoch_id.clone(),
@@ -1338,5 +1418,64 @@ fn epoch_key_pairs_id(
 impl From<serde_json::Error> for MemoryStorageError {
     fn from(_: serde_json::Error) -> Self {
         Self::SerializationError
+    }
+}
+
+/// TeamCraft patch.
+#[cfg(test)]
+mod changed_keys {
+    use super::*;
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct GroupId(u8);
+    impl Key<CURRENT_VERSION> for GroupId {}
+    impl traits::GroupId<CURRENT_VERSION> for GroupId {}
+    impl Entity<CURRENT_VERSION> for GroupId {}
+    impl traits::TreeSync<CURRENT_VERSION> for GroupId {}
+    impl traits::GroupContext<CURRENT_VERSION> for GroupId {}
+
+    #[test]
+    fn a_write_and_a_delete_through_the_trait_name_their_keys() {
+        let storage = MemoryStorage::default();
+        assert!(!storage.has_changed_keys());
+        storage.write_tree(&GroupId(1), &GroupId(2)).unwrap();
+        storage.write_context(&GroupId(1), &GroupId(3)).unwrap();
+        let written = storage.take_changed_keys();
+        assert_eq!(written.len(), 2);
+        let values = storage.values.read().unwrap().clone();
+        assert!(written.iter().all(|key| values.contains_key(key)));
+        assert!(!storage.has_changed_keys());
+
+        storage.delete_tree(&GroupId(1)).unwrap();
+        let deleted = storage.take_changed_keys();
+        assert_eq!(deleted.len(), 1);
+        assert!(deleted.is_subset(&written));
+        assert!(!storage
+            .values
+            .read()
+            .unwrap()
+            .contains_key(deleted.iter().next().unwrap()));
+    }
+
+    #[test]
+    fn writing_the_same_value_or_deleting_nothing_is_no_change() {
+        let storage = MemoryStorage::default();
+        storage.write_tree(&GroupId(1), &GroupId(2)).unwrap();
+        storage.take_changed_keys();
+
+        storage.write_tree(&GroupId(1), &GroupId(2)).unwrap();
+        storage.delete_context(&GroupId(1)).unwrap();
+        assert!(!storage.has_changed_keys());
+
+        storage.write_tree(&GroupId(1), &GroupId(3)).unwrap();
+        assert!(storage.has_changed_keys());
+    }
+
+    #[test]
+    fn values_set_from_outside_count_too() {
+        let storage = MemoryStorage::default();
+        storage.set_value(b"a".to_vec(), b"1".to_vec());
+        storage.remove_value(b"a");
+        assert_eq!(storage.take_changed_keys().len(), 1);
     }
 }

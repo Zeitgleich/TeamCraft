@@ -38,5 +38,6 @@ shows every change since.
 
 When `openmls_rust_crypto` moves to a newer `openmls_memory_storage`, the patch stops applying and
 `teamcraft-core` stops compiling (no `take_changed_keys`). Take the new upstream crate and repeat
-change 2. `mls_storage_on_real_groups` (`teamcraft-core`, `tests/suite/mls_storage.rs`) checks on real
-MLS operations that what was saved is what the provider holds.
+change 2. `what_was_saved_is_what_the_provider_holds_after_real_operations` (`teamcraft-core`,
+`tests/suite/mls_storage.rs`) checks on real MLS operations that what was saved is what the provider
+holds.

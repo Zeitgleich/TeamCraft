@@ -384,6 +384,7 @@ jobs:
           key: vendored-and-fuzz
           workspaces: |
             crates/vendor/davey
+            crates/vendor/openmls_memory_storage
             fuzz
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-bin: "false"
@@ -391,6 +392,8 @@ jobs:
         run: cargo test --manifest-path crates/vendor/davey/Cargo.toml
       - name: Davey clippy
         run: cargo clippy --manifest-path crates/vendor/davey/Cargo.toml --all-targets -- -D warnings
+      - name: openmls_memory_storage tests
+        run: cargo test --manifest-path crates/vendor/openmls_memory_storage/Cargo.toml --features test-utils
       - name: Fuzz targets build (lockfile up to date)
         run: cargo build --manifest-path fuzz/Cargo.toml --bins --locked
 
