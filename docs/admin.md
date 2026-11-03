@@ -396,6 +396,11 @@ sign it yet (a follow-up of issue #380), so until then the new owner's role show
 
 #### 3.1.1 Leaving and deleting channels and spaces (issue #1130)
 
+A workspace admin or owner of the roster, or a channel admin whose signed roles go back to one, signs a
+channel's deletion, and members' devices that verify it drop the history at once. Any other deletion,
+every space's deletion among them, is the server's word there: hidden, its history kept for a retention
+(e2ee.md §4.6).
+
 | Case                                              | Who                                                                                                             | What happens                                                                                                                         |
 |---------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | Delete a channel (`delete_channel`)               | Channel admin, workspace admin, owner; space admin where they reach it (public, or they are in it)              | Gone for all members, also with people in it, active or archived. A channel the caller can't see answers 404                        |

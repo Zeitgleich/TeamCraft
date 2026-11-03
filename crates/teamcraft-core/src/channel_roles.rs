@@ -67,6 +67,11 @@ pub struct ChannelRoleState {
   /// A member's head newer than ours, to check after the next sync.
   #[serde(rename = "ahead", default, skip_serializing_if = "Option::is_none")]
   pub maybe_ahead: Option<ChannelRolesHead>,
+  /// Whether the accepted snapshot goes back to a workspace admin's entry, not only to a founder's
+  /// claim, which is trust on first use: a member and the server together can make one up. Only a
+  /// decision that destroys history asks this (e2ee.md §4.6, "A signed deletion purges at once").
+  #[serde(default)]
+  pub is_workspace_anchored: bool,
 }
 
 /// The accepted head of a channel's role log; sent along inside the channel's encrypted messages.
@@ -93,6 +98,9 @@ pub struct RoleVerifier<'a, D: IdentityDirectory> {
   pub workspace: &'a WorkspaceState,
   /// How old the newest signed roster may be for its admins to count.
   pub roster_max_age_ms: i64,
+  /// This device's time. Whether a roster anchors a snapshot is judged at it, not at the entry's
+  /// time, which the server sets.
+  pub now_ms: i64,
   /// Identity keys this device pinned: a founder must hold the key pinned for them.
   pub pinned: &'a D,
 }
@@ -323,9 +331,22 @@ impl ChannelRoleState {
     // The first authority the signature holds under and the document passes with decides; a
     // workspace admin founding a channel signs as its founder, for example.
     let mut outcome = Err(ChannelRoleError::Unauthorized { version });
-    for (signer, authority) in self.verify_signer(entry, &document, verifier) {
+    let mut maybe_authority = None;
+    let signers = self.verify_signer(entry, &document, verifier);
+    // A workspace admin founding a channel passes as its founder (nobody changes their own role
+    // otherwise), and it is a workspace admin's word all the same. It anchors only on what a purge
+    // itself would take from that admin (`signed_deletion`): the server sets the entry's time.
+    let is_by_workspace_admin = verifier.workspace.heads.maybe_roster_signed_at_ms.is_some()
+      && verifier
+        .workspace
+        .is_roster_fresh(verifier.now_ms, verifier.roster_max_age_ms)
+      && signers
+        .iter()
+        .any(|(_, authority)| matches!(authority, SignerAuthority::Workspace { .. }));
+    for (signer, authority) in signers {
       outcome = self.check_document(&document, verifier.conversation, signer, authority);
       if outcome.is_ok() {
+        maybe_authority = Some(authority);
         break;
       }
     }
@@ -343,6 +364,16 @@ impl ChannelRoleState {
     self.version = version;
     self.maybe_head_hash = Some(Base64Bytes::new(hash.to_vec()));
     self.assignments = document.assignments;
+    match maybe_authority {
+      _ if is_by_workspace_admin => self.is_workspace_anchored = true,
+      // A claim, or a roster admin on a roster too old to anchor anything: their snapshot replaces
+      // what was anchored before.
+      Some(SignerAuthority::Founder | SignerAuthority::Workspace { .. }) => {
+        self.is_workspace_anchored = false
+      },
+      // A channel admin carries on what the snapshot they build on was.
+      Some(SignerAuthority::ChannelAdmin) | None => {},
+    }
     Ok(())
   }
 
@@ -533,7 +564,7 @@ fn check_snapshot(version: u64, assignments: &[ChannelRoleAssignment]) -> Result
 }
 
 /// Identity keys of the roster's owners and admins: they may sign any channel's roles.
-fn roster_admin_keys(workspace: &WorkspaceState) -> BTreeMap<crypto::UserId, IdentityPublicKey> {
+pub(crate) fn roster_admin_keys(workspace: &WorkspaceState) -> BTreeMap<crypto::UserId, IdentityPublicKey> {
   workspace
     .roster
     .members
@@ -569,14 +600,14 @@ fn workspace_authority(
 }
 
 /// Identity keys as an [`IdentityDirectory`], for one verification attempt.
-struct KeyDirectory(BTreeMap<crypto::UserId, IdentityPublicKey>);
+pub(crate) struct KeyDirectory(BTreeMap<crypto::UserId, IdentityPublicKey>);
 
 impl KeyDirectory {
-  fn from_keys(keys: BTreeMap<crypto::UserId, IdentityPublicKey>) -> Self {
+  pub(crate) fn from_keys(keys: BTreeMap<crypto::UserId, IdentityPublicKey>) -> Self {
     Self(keys)
   }
 
-  fn from_assignments<'a>(assignments: impl Iterator<Item = &'a ChannelRoleAssignment>) -> Self {
+  pub(crate) fn from_assignments<'a>(assignments: impl Iterator<Item = &'a ChannelRoleAssignment>) -> Self {
     Self(
       assignments
         .filter_map(|assignment| {
@@ -665,6 +696,75 @@ mod tests {
       let founding = admin.entry(&state, &[(&admin, ChannelRole::Admin)]);
       assert!(world.apply(&mut state, founding).is_empty());
       assert_eq!(state.role_of(admin.user_id), ChannelRole::Admin);
+      assert!(state.is_workspace_anchored, "a roster admin's word, not a claim");
+    }
+
+    #[test]
+    fn a_founders_claim_is_anchored_only_by_a_workspace_admins_entry_and_stays_so() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(&world, &alice, &[]);
+      assert!(!state.is_workspace_anchored);
+      let promote = alice.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, promote).is_empty());
+      assert!(!state.is_workspace_anchored, "a founded admin adds no trust");
+
+      let checkpoint = admin.entry(&state, &[(&bob, ChannelRole::Admin)]);
+      assert!(world.apply(&mut state, checkpoint).is_empty());
+      assert!(state.is_workspace_anchored);
+      let next = bob.entry(
+        &state,
+        &[(&bob, ChannelRole::Admin), (&alice, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, next).is_empty());
+      assert!(state.is_workspace_anchored, "a channel admin carries it on");
+    }
+  }
+
+  mod anchoring {
+    use super::*;
+
+    /// A demotion withheld past the roster's age, and an entry the server dates back to when the
+    /// roster was fresh: accepted for roles as before, but it anchors nothing, and takes away what
+    /// was anchored, since it replaces the snapshot.
+    #[test]
+    fn a_backdated_entry_on_a_roster_too_old_now_anchors_nothing() {
+      let (alice, mallory, eve) = (Person::new(1), Person::new(2), Person::new(9));
+      let mut world = World::new(&[&alice, &mallory], &[&eve]);
+      let mut state = founded(&world, &eve, &[(&alice, ChannelRole::Admin)]);
+      assert!(state.is_workspace_anchored);
+
+      world.now_ms = NOW_MS + MAX_AGE_MS + 1;
+      let mut checkpoint = eve.entry(
+        &state,
+        &[
+          (&eve, ChannelRole::Admin),
+          (&alice, ChannelRole::Admin),
+          (&mallory, ChannelRole::Admin),
+        ],
+      );
+      checkpoint.created_at = UnixMillis(NOW_MS);
+      assert!(world.apply(&mut state, checkpoint).is_empty());
+
+      assert_eq!(state.role_of(mallory.user_id), ChannelRole::Admin);
+      assert!(!state.is_workspace_anchored);
+    }
+
+    /// Other uses take an unchained roster with no signing time as fresh. An anchor doesn't.
+    #[test]
+    fn a_roster_without_a_signing_time_anchors_nothing() {
+      let (alice, admin) = (Person::new(1), Person::new(9));
+      let mut world = World::new(&[&alice], &[&admin]);
+      world.workspace.heads.is_roster_chained = false;
+      world.workspace.heads.maybe_roster_signed_at_ms = None;
+      let mut state = founded(&world, &alice, &[]);
+      let checkpoint = admin.entry(&state, &[(&alice, ChannelRole::Admin)]);
+      assert!(world.apply(&mut state, checkpoint).is_empty());
+      assert_eq!(state.version, 2);
+      assert!(!state.is_workspace_anchored);
     }
   }
 
@@ -1058,6 +1158,7 @@ mod tests {
   struct World {
     pinned: KeyDirectory,
     workspace: WorkspaceState,
+    now_ms: i64,
   }
 
   impl World {
@@ -1089,7 +1190,11 @@ mod tests {
         },
         ..WorkspaceState::default()
       };
-      Self { pinned, workspace }
+      Self {
+        pinned,
+        workspace,
+        now_ms: NOW_MS,
+      }
     }
 
     fn apply(
@@ -1101,6 +1206,7 @@ mod tests {
         conversation: conversation(CHANNEL),
         workspace: &self.workspace,
         roster_max_age_ms: MAX_AGE_MS,
+        now_ms: self.now_ms,
         pinned: &self.pinned,
       };
       state.apply_entries(vec![entry], &verifier)

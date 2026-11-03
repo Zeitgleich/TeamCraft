@@ -94,6 +94,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         workspace: &workspace,
         roster_max_age_ms: self.roster_max_age_ms(),
+        now_ms: self.now_ms(),
         pinned: &pinned,
       };
       for error in state.apply_entries(entries, &verifier) {
@@ -331,7 +332,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  fn roster_max_age_ms(&self) -> i64 {
+  pub(crate) fn roster_max_age_ms(&self) -> i64 {
     i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX)
   }
 }

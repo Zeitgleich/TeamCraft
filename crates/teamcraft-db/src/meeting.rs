@@ -616,6 +616,12 @@ impl Database {
     .execute(self.pool())
     .await?;
     sqlx::query!(
+      "DELETE FROM channel_role_log WHERE conversation_id = $1",
+      to_db(meeting.conversation)
+    )
+    .execute(self.pool())
+    .await?;
+    sqlx::query!(
       "DELETE FROM conversations WHERE id = $1",
       to_db(meeting.conversation)
     )

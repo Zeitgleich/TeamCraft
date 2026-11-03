@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM conversation_deletion_signatures s\n         WHERE s.created_at < $1 AND NOT EXISTS\n           (SELECT 1 FROM deleted_conversations d WHERE d.conversation_id = s.conversation_id)\n         RETURNING s.conversation_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "conversation_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversation_deletion_signatures",
+            "name": "conversation_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "751adff9387e9bc73ed3a670668cc139782193f2449151b2dc871bb10dd16c18"
+}

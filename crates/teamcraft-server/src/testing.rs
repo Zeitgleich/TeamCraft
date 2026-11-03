@@ -787,6 +787,12 @@ impl TestApp {
   pub async fn delete(&self, user: &TestUser, path: &str) -> Reply {
     self.call(Method::DELETE, Some(user), path, None).await
   }
+
+  pub async fn delete_json(&self, user: &TestUser, path: &str, body: &Value) -> Reply {
+    self
+      .call(Method::DELETE, Some(user), path, Some(body.clone()))
+      .await
+  }
 }
 
 impl Reply {

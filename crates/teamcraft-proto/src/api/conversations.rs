@@ -4,7 +4,8 @@ use utoipa::ToSchema;
 use crate::wire_enum::wire_enum;
 use crate::{
   CategoryId, ChannelModeration, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
-  HistoryPolicy, IdempotencyKey, MessageId, Permission, SpaceId, SpaceImage, UnixMillis, UserId, UserSummary,
+  DeletedConversationSignature, HistoryPolicy, IdempotencyKey, MessageId, Permission, SpaceId, SpaceImage,
+  UnixMillis, UserId, UserSummary,
 };
 
 wire_enum! {
@@ -157,10 +158,15 @@ impl ConversationResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListConversationsResponse {
   pub conversations: Vec<ConversationResponse>,
-  /// Direct messages deleted with a deleted account since this user's devices last looked
-  /// (admin.md §3.2.1): devices drop them with their local history. Absent from older servers.
+  /// Conversations deleted lately that this user was in: channels (e2ee.md §4.6), and direct messages
+  /// with a deleted account (admin.md §3.2.1). The server's word: devices hide them and keep their
+  /// history for a while. Absent from older servers.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub deleted_conversation_ids: Vec<ConversationId>,
+  /// The signatures some of those deletions came with: a device that verifies one drops the history
+  /// at once. A separate list, so clients and servers before signed deletions just don't see it.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub signed_deletions: Vec<DeletedConversationSignature>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -361,6 +367,7 @@ mod tests {
     let empty = ListConversationsResponse {
       conversations: Vec::new(),
       deleted_conversation_ids: Vec::new(),
+      signed_deletions: Vec::new(),
     };
     assert_eq!(serde_json::to_string(&empty).unwrap(), r#"{"conversations":[]}"#);
     let listed: ListConversationsResponse =
@@ -368,6 +375,17 @@ mod tests {
     assert_eq!(listed.deleted_conversation_ids.len(), 1);
     let older: ListConversationsResponse = serde_json::from_str(r#"{"conversations":[]}"#).unwrap();
     assert!(older.deleted_conversation_ids.is_empty());
+    assert!(older.signed_deletions.is_empty());
+  }
+
+  /// Signatures stay beside the ids, which is all a client before signed deletions reads.
+  #[test]
+  fn a_signed_deletion_is_listed_beside_the_id() {
+    let json = r#"{"conversations":[],"deleted_conversation_ids":["8"],"signed_deletions":[{"conversation_id":"8","signed_deletion":{"payload":"AQ==","signature":"Ag=="}}]}"#;
+    let listed: ListConversationsResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(listed.signed_deletions.len(), 1);
+    assert_eq!(listed.signed_deletions[0].conversation_id.to_string(), "8");
+    assert_eq!(serde_json::to_string(&listed).unwrap(), json);
   }
 
   use crate::{Id, Snowflake, UserKind};

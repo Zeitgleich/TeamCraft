@@ -10,6 +10,10 @@ use crate::error::ApiError;
 /// JSON request body.
 pub struct ApiJson<T>(pub T);
 
+/// A JSON request body that may be left out: an empty body reads as `T::default()`, for requests that
+/// older clients send without one.
+pub struct ApiOptionalJson<T>(pub T);
+
 /// URL path parameters.
 pub struct ApiPath<T>(pub T);
 
@@ -29,6 +33,27 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
         },
         _ => ApiError::InvalidRequest(rejection.body_text()),
       })
+  }
+}
+
+impl<S: Send + Sync, T: DeserializeOwned + Default> FromRequest<S> for ApiOptionalJson<T> {
+  type Rejection = ApiError;
+
+  async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+    let body = axum::body::Bytes::from_request(request, state)
+      .await
+      .map_err(|rejection| match rejection.status() {
+        axum::http::StatusCode::PAYLOAD_TOO_LARGE => {
+          ApiError::PayloadTooLarge("request body is too large".into())
+        },
+        _ => ApiError::InvalidRequest(rejection.body_text()),
+      })?;
+    if body.is_empty() {
+      return Ok(Self(T::default()));
+    }
+    serde_json::from_slice(&body)
+      .map(Self)
+      .map_err(|error| ApiError::InvalidRequest(format!("the request body is not valid: {error}")))
   }
 }
 

@@ -475,7 +475,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // A finished import sends no messages, only this update (e2ee.md §4.10).
         self.load_finished_import(conversation_id).await
       },
-      GatewayEvent::ConversationDelete { conversation_id } => self.note_deletion_event(conversation_id).await,
+      GatewayEvent::ConversationDelete {
+        conversation_id,
+        maybe_signed_deletion,
+      } => {
+        self
+          .note_deletion_event(conversation_id, maybe_signed_deletion)
+          .await
+      },
       GatewayEvent::MembershipRemove {
         conversation_id,
         user_id,

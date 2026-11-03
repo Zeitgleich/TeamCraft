@@ -259,7 +259,7 @@ pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: Spac
     for member in members {
       super::calls::evict_from_call(state, *channel, *member).await;
     }
-    announce_deleted_direct(state, *channel, members);
+    announce_deleted_direct(state, *channel, members, None);
   }
   // A device asks for the spaces again and finds this one gone; one that is away does at its next
   // sync.
@@ -499,7 +499,7 @@ pub async fn remove_everywhere(
     let channel = *channel;
     super::calls::evict_from_call(state, channel, user_id).await;
     if left.deleted.contains(&channel) {
-      announce_deleted_direct(state, channel, &[user_id]);
+      announce_deleted_direct(state, channel, &[user_id], None);
       continue;
     }
     let members = state.database.conversation_member_ids(channel).await?;
