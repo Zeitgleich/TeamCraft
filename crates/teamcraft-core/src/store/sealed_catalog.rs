@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, ThreadId};
 
 use super::lru::Lru;
-use super::sealed_index::{IndexNodes, IndexPage, IndexRoot};
+use super::sealed_index::{HeapBytes, IndexNodes, IndexPage, IndexRoot};
 use super::{MessageFilter, MessageOrder, StoreError, StoredMessage};
 
 /// The reserved table the catalog's records are entries of.
@@ -144,6 +144,10 @@ pub(crate) struct ScopedNodes<'a, K, V> {
   pub(crate) scope: &'a str,
   pub(crate) read: NodeRead<'a>,
 }
+
+impl HeapBytes for MessageKey {}
+impl HeapBytes for MessageEntry {}
+impl HeapBytes for RelationKey {}
 
 impl Relation {
   /// The relations `message` has.
@@ -290,14 +294,14 @@ impl MessageEntry {
 }
 
 impl<K, V> NodeCache<K, V> {
-  /// A cache of the indexes of one `kind` (the prefix of their records), keeping up to `max_nodes`
-  /// roots and as many pages.
-  pub(crate) fn new(kind: &'static str, max_nodes: usize) -> Self {
+  /// A cache of the indexes of one `kind` (the prefix of their records), keeping up to
+  /// `max_size_bytes` of roots and as many of pages.
+  pub(crate) fn new(kind: &'static str, max_size_bytes: usize) -> Self {
     Self {
       kind,
       maybe_generation: None,
-      roots: Lru::new(max_nodes),
-      pages: Lru::new(max_nodes),
+      roots: Lru::new(max_size_bytes),
+      pages: Lru::new(max_size_bytes),
       dirty_roots: BTreeMap::new(),
       dirty_pages: BTreeMap::new(),
     }
@@ -353,7 +357,9 @@ impl<K, V> NodeCache<K, V> {
   }
 }
 
-impl<K: DeserializeOwned, V: DeserializeOwned> IndexNodes<K, V> for ScopedNodes<'_, K, V> {
+impl<K: DeserializeOwned + HeapBytes, V: DeserializeOwned + HeapBytes> IndexNodes<K, V>
+  for ScopedNodes<'_, K, V>
+{
   fn root(&mut self) -> Result<Arc<IndexRoot<K>>, StoreError> {
     if self.cache.maybe_generation.is_none() {
       return Ok(Arc::new(IndexRoot::empty()));
@@ -370,7 +376,8 @@ impl<K: DeserializeOwned, V: DeserializeOwned> IndexNodes<K, V> for ScopedNodes<
       None => IndexRoot::empty(),
     };
     let root = Arc::new(root);
-    self.cache.roots.insert(scope, Arc::clone(&root), 1);
+    let weight = root.footprint_bytes();
+    self.cache.roots.insert(scope, Arc::clone(&root), weight);
     Ok(root)
   }
 
@@ -387,7 +394,8 @@ impl<K: DeserializeOwned, V: DeserializeOwned> IndexNodes<K, V> for ScopedNodes<
     let bytes = (self.read)(&page_key(self.cache.prefix(), self.scope, id))?
       .ok_or_else(|| StoreError::Corrupt("an index page of the local database is missing".into()))?;
     let page = Arc::new(decode::<IndexPage<K, V>>(&bytes)?);
-    self.cache.pages.insert(key, Arc::clone(&page), 1);
+    let weight = page.footprint_bytes();
+    self.cache.pages.insert(key, Arc::clone(&page), weight);
     Ok(page)
   }
 
@@ -397,7 +405,8 @@ impl<K: DeserializeOwned, V: DeserializeOwned> IndexNodes<K, V> for ScopedNodes<
     }
     let root = Arc::new(root);
     let scope = self.scope.to_string();
-    self.cache.roots.insert(scope.clone(), Arc::clone(&root), 1);
+    let weight = root.footprint_bytes();
+    self.cache.roots.insert(scope.clone(), Arc::clone(&root), weight);
     self.cache.dirty_roots.insert(scope, root);
   }
 
@@ -408,7 +417,10 @@ impl<K: DeserializeOwned, V: DeserializeOwned> IndexNodes<K, V> for ScopedNodes<
     let key = (self.scope.to_string(), id);
     let maybe_page = maybe_page.map(Arc::new);
     match &maybe_page {
-      Some(page) => self.cache.pages.insert(key.clone(), Arc::clone(page), 1),
+      Some(page) => {
+        let weight = page.footprint_bytes();
+        self.cache.pages.insert(key.clone(), Arc::clone(page), weight);
+      },
       None => {
         self.cache.pages.remove(&key);
       },

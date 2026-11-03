@@ -76,16 +76,19 @@ pub struct SealedStore<B> {
   entries: Mutex<EntryLog>,
 }
 
-/// How much a [`SealedStore`] keeps decrypted. Each cache drops what was used least recently
-/// first; nothing else grows with the store.
+/// How much a [`SealedStore`] keeps decrypted, in bytes (issue #1125: a count of messages says
+/// little when messages differ a hundredfold in length). Each cache drops what was used least
+/// recently first; nothing else grows with the store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SealedStoreLimits {
   /// Decrypted entry values (MLS state, members, settings), in bytes.
   pub max_entry_bytes: usize,
-  /// Decoded messages.
-  pub max_messages: usize,
-  /// Index roots and index pages, each (a page holds up to 256 entries of a few dozen bytes).
-  pub max_index_nodes: usize,
+  /// Decoded messages ([`StoredMessage::footprint_bytes`]): about 1 KB for a message of ordinary
+  /// length.
+  pub max_message_bytes: usize,
+  /// Index roots, and index pages, of each of the four indexes, each of the eight caches up to
+  /// this size (a page holds up to 256 entries of about 80 bytes).
+  pub max_index_node_bytes: usize,
 }
 
 /// The caches, the catalog's nodes and the open group, under one lock.
@@ -220,13 +223,14 @@ enum BuildProgress {
 }
 
 impl Default for SealedStoreLimits {
-  /// About 16 MiB at most: enough for the MLS state and the open conversations of a large
+  /// About 28 MiB at most (8 of entries, 4 of messages, 16 of index nodes, which a store of
+  /// ordinary messages doesn't fill): enough for the MLS state and the open conversations of a large
   /// workspace (docs/performance.md, "Local store").
   fn default() -> Self {
     Self {
       max_entry_bytes: 8 * 1024 * 1024,
-      max_messages: 4_096,
-      max_index_nodes: 256,
+      max_message_bytes: 4 * 1024 * 1024,
+      max_index_node_bytes: 2 * 1024 * 1024,
     }
   }
 }
@@ -237,8 +241,8 @@ impl SealedStoreLimits {
   pub fn minimal() -> Self {
     Self {
       max_entry_bytes: 512 * 1024,
-      max_messages: 64,
-      max_index_nodes: 32,
+      max_message_bytes: 128 * 1024,
+      max_index_node_bytes: 128 * 1024,
     }
   }
 }
@@ -288,11 +292,11 @@ impl<B: RecordBackend> SealedStore<B> {
       keys: Arc::new(LocalStoreKeys::derive(database_key)),
       state: Mutex::new(State {
         values: Lru::new(limits.max_entry_bytes),
-        messages: Lru::new(limits.max_messages),
-        message_nodes: NodeCache::new(MESSAGES_KIND, limits.max_index_nodes),
-        directory_nodes: NodeCache::new(DIRECTORY_KIND, limits.max_index_nodes),
-        feed_nodes: NodeCache::new(FEED_KIND, limits.max_index_nodes),
-        relation_nodes: NodeCache::new(RELATIONS_KIND, limits.max_index_nodes),
+        messages: Lru::new(limits.max_message_bytes),
+        message_nodes: NodeCache::new(MESSAGES_KIND, limits.max_index_node_bytes),
+        directory_nodes: NodeCache::new(DIRECTORY_KIND, limits.max_index_node_bytes),
+        feed_nodes: NodeCache::new(FEED_KIND, limits.max_index_node_bytes),
+        relation_nodes: NodeCache::new(RELATIONS_KIND, limits.max_index_node_bytes),
         revisions: HashMap::new(),
         feed_versions: HashMap::new(),
         epoch: 0,
@@ -923,7 +927,9 @@ impl<B: RecordBackend> SealedStore<B> {
     let Record::Message { message } = self.open_record(&id, &sealed)? else {
       return Err(StoreError::Corrupt("a message record holds an entry".into()));
     };
-    state.messages.insert(key, (*message).clone(), 1);
+    state
+      .messages
+      .insert(key, (*message).clone(), message.footprint_bytes());
     Ok(Some(*message))
   }
 
@@ -1233,7 +1239,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       state.messages.insert(
         (conversation, *message.client_message_id.as_bytes()),
         message.clone(),
-        1,
+        message.footprint_bytes(),
       );
       state.bump(conversation);
       Ok(())
@@ -1809,8 +1815,45 @@ mod tests {
         assert_eq!(all.len(), usize::try_from(MESSAGES_PER_CONVERSATION).unwrap());
       }
       let state = store.lock();
-      assert!(state.messages.held() <= limits.max_messages);
+      assert!(state.messages.held() <= limits.max_message_bytes);
       assert!(state.values.held() <= limits.max_entry_bytes);
+    }
+
+    /// Issue #1125: the decoded messages are bounded by their size, not their number: a channel of
+    /// long messages stays within the figure, however few of them it takes to reach it.
+    #[test]
+    fn long_messages_are_bounded_by_their_bytes() {
+      const COUNT: i64 = 300;
+      const BODY_BYTES: usize = 64 * 1024;
+      let limits = SealedStoreLimits {
+        max_message_bytes: 1024 * 1024,
+        ..SealedStoreLimits::default()
+      };
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, limits).unwrap();
+      for n in 0..COUNT {
+        let mut long = numbered(0, n);
+        long.content = crate::store::MessageContent::Text {
+          body: "x".repeat(BODY_BYTES),
+          mentions: Vec::new(),
+          meta: Default::default(),
+        };
+        store.upsert_message(&long).unwrap();
+        assert!(
+          store.lock().messages.held() <= limits.max_message_bytes,
+          "after write {n}"
+        );
+      }
+      // Far fewer than the count limit allowed before, and the whole channel still reads.
+      let held = store.lock().messages.held();
+      assert!(
+        held >= BODY_BYTES && held <= limits.max_message_bytes,
+        "{held} bytes"
+      );
+      let all = store.messages(id(0), MessageFilter::All).unwrap();
+      assert_eq!(all.len(), usize::try_from(COUNT).unwrap());
+      assert!(store.lock().messages.held() <= limits.max_message_bytes);
     }
 
     /// Issue #155: opening a conversation reads the page it shows, however long the history. A cold

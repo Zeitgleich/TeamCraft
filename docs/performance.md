@@ -1134,7 +1134,8 @@ channel. The core thread spent 7.8 s of CPU on the reads after a start; now 0.3 
 0.22 % of a core (core thread 0.13 %), within the 0.5 % budget. What changed:
 
 - The UI's reads of a conversation come from a cache of decoded messages (`TrackedStore` message
-  cache, up to 60,000 messages on the desktop, about 20 MiB here): it is filled on the first read
+  cache, up to 64 MiB on every platform, `DEFAULT_MESSAGE_CACHE_BYTES`; bounded by bytes since
+  #1125, see "Local store" below): it is filled on the first read
   and updated with every write the core makes, so a new message no longer means reading the
   conversation again. A revision per conversation lets the activity feed keep each conversation's
   entries until its messages or read state change.
@@ -1248,10 +1249,29 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
   doesn't see it). It opens the store with `SealedStoreLimits::minimal()`, keeps no message cache and
   never builds the catalog: on the first push after an update, before the app ran the migration, it
   fetches the message instead.
-- **The app's memory for the store is bounded:** decrypted entries (8 MiB), decoded messages (4,096)
-  and index nodes (256 each) by default, plus the message cache of the conversations read last
-  (60,000 messages on every platform, as the desktop had). Before, the whole store was in memory:
-  148 MiB for this account, growing with every message.
+- **The app's memory for the store is bounded, in bytes:** decrypted entries (8 MiB), decoded
+  messages (4 MiB) and index nodes (2 MiB for each of the eight root and page caches) by default,
+  plus the message cache of the conversations read last (64 MiB on every platform). Before, the
+  whole store was in memory: 148 MiB for this account, growing with every message.
+- **Limits count bytes, not items (#1125):** they used to count messages (4,096 in the store, 60,000
+  in the message cache) and nodes (256), which assumed about 1 KB a message. A channel of 10 KB
+  messages held ten times that, so the mobile budget (250 MiB) was only kept by messages of
+  ordinary length. Each message is weighed once when it enters or leaves a cache
+  (`StoredMessage::footprint_bytes`: the structs plus the length of every string, list and byte
+  buffer, 96 bytes of bookkeeping on top; an estimate, not the allocator's), an index page when it
+  is read or written (at most 256 entries), a root as pages times the size of a page reference.
+  The caches keep a running sum, so a write or a read costs O(the message) and never looks at
+  the rest of the conversation. A message cache write that grows the cache past its budget drops
+  the least recently read other conversations, never the one being written to while it fits
+  alone; one that outgrew the whole budget is dropped and read from the store next time (its
+  revision has moved, so no stale read is kept). Readers hold their conversation by `Arc`, so
+  eviction never takes it from a read in progress. A conversation larger than the whole budget is
+  not cached at all. The cap on the sealed store (`SealedStoreLimits::max_message_bytes`,
+  `max_index_node_bytes`) and on the message cache (`TrackedStore::with_message_cache`) are
+  arguments, so a platform can set its own; the defaults are the figures above (`minimal()`: 128
+  KiB each, no message cache). With the 64 MiB default, the 50,000-message channel measured above
+  (about 50 MiB read whole) still fits; 50,000 messages of 10 KB would not, and are read from
+  the store on each use instead of taking 500 MiB.
 - **A full read of a big conversation got slower:** records are read one by one under pseudorandom
   IDs, about 9 µs a message (the file is memory-mapped, so a read is no system call).
 - **The feed no longer needs a full read:** the sealed store's catalog also keeps, per conversation,

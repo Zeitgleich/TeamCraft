@@ -50,6 +50,20 @@ pub(crate) struct IndexPage<K, V> {
   entries: Vec<(K, V)>,
 }
 
+impl<K: HeapBytes, V: HeapBytes> IndexPage<K, V> {
+  /// About how many bytes the page takes in memory. O([`MAX_PAGE_ENTRIES`]) at most, and only
+  /// when the page is read from the store or written.
+  pub(crate) fn footprint_bytes(&self) -> usize {
+    std::mem::size_of::<Self>()
+      + self.entries.capacity() * std::mem::size_of::<(K, V)>()
+      + self
+        .entries
+        .iter()
+        .map(|(key, value)| key.heap_bytes() + value.heap_bytes())
+        .sum::<usize>()
+  }
+}
+
 /// Which way [`scan`] walks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Direction {
@@ -69,7 +83,30 @@ pub(crate) trait IndexNodes<K, V> {
   fn put_page(&mut self, id: u64, maybe_page: Option<IndexPage<K, V>>);
 }
 
+/// The memory behind a key or value of an index, beyond its own size, so the caches of nodes can be
+/// bounded by bytes (issue #1125).
+pub(crate) trait HeapBytes {
+  fn heap_bytes(&self) -> usize {
+    0
+  }
+}
+
+impl HeapBytes for () {}
+
+impl HeapBytes for String {
+  fn heap_bytes(&self) -> usize {
+    self.len()
+  }
+}
+
 impl<K> IndexRoot<K> {
+  /// About how many bytes the root takes in memory: one reference per page, however long the
+  /// index. (The first keys' own heap is not counted: it is a few bytes each, and only the
+  /// directory's keys have any.) O(1).
+  pub(crate) fn footprint_bytes(&self) -> usize {
+    std::mem::size_of::<Self>() + self.pages.len() * std::mem::size_of::<PageRef<K>>()
+  }
+
   pub(crate) fn empty() -> Self {
     Self {
       next_page: 0,

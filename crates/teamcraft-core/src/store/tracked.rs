@@ -26,6 +26,12 @@ use super::{
   MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally,
 };
 
+/// What the UI's message cache may hold by default (issue #1125): about 60,000 messages at the
+/// 1 KB a message of ordinary length takes decoded (docs/performance.md, "Local store"), but
+/// counted in bytes, so a channel of long messages doesn't hold more. Within the mobile budget of
+/// 250 MiB together with the store's own caches ([`super::SealedStoreLimits`]).
+pub const DEFAULT_MESSAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
 /// Records of [`Table::Account`] every conversation entry reads (unread marks, mention rules).
 const SHARED_ACCOUNT_RECORDS: [&str; 2] = [
   crate::client::ACCOUNT_DATA_KEY,
@@ -97,15 +103,17 @@ impl<S: LocalStore> TrackedStore<S> {
     Self::with_message_cache(inner, 0)
   }
 
-  /// Also keeps up to `max_messages` decoded messages of the conversations read last, for a store
-  /// whose reads are expensive (SQLCipher decrypts and checks every page it reads). Stores that
-  /// already hold everything in memory gain nothing from it.
-  pub fn with_message_cache(inner: S, max_messages: usize) -> Self {
+  /// Also keeps the decoded messages of the conversations read last, up to `max_size_bytes` of
+  /// memory in all ([`DEFAULT_MESSAGE_CACHE_BYTES`] is the usual figure), for a store whose reads
+  /// are expensive (SQLCipher decrypts and checks every page it reads). Stores that already hold
+  /// everything in memory gain nothing from it. A conversation larger than the whole budget is
+  /// never kept; `0` keeps none.
+  pub fn with_message_cache(inner: S, max_size_bytes: usize) -> Self {
     Self {
       inner,
       changes: Arc::default(),
       removed_renditions: Arc::default(),
-      messages: Arc::new(Mutex::new(MessageCache::new(max_messages))),
+      messages: Arc::new(Mutex::new(MessageCache::new(max_size_bytes))),
     }
   }
 
@@ -727,14 +735,17 @@ mod tests {
   mod message_cache {
     use super::*;
 
+    /// Room for every message these tests write.
+    const ROOM_BYTES: usize = 1 << 20;
+
     #[test]
     fn it_is_a_store_with_a_cache() {
-      exercise_store(&TrackedStore::with_message_cache(MemoryStore::new(), 100));
+      exercise_store(&TrackedStore::with_message_cache(MemoryStore::new(), ROOM_BYTES));
     }
 
     #[test]
     fn reads_after_writes_through_it_see_them_in_order() {
-      let store = TrackedStore::with_message_cache(MemoryStore::new(), 100);
+      let store = TrackedStore::with_message_cache(MemoryStore::new(), ROOM_BYTES);
       store.upsert_message(&text(1, Some(300), None)).unwrap();
       store.upsert_message(&text(2, Some(100), None)).unwrap();
       assert_eq!(clients(&store, MessageFilter::All), [2, 1], "read and kept");
@@ -761,7 +772,8 @@ mod tests {
 
     #[test]
     fn a_conversation_larger_than_the_cache_is_read_from_the_store_each_time() {
-      let store = TrackedStore::with_message_cache(MemoryStore::new(), 1);
+      let store =
+        TrackedStore::with_message_cache(MemoryStore::new(), 2 * text(1, None, None).footprint_bytes());
       store.upsert_message(&text(1, Some(100), None)).unwrap();
       store.upsert_message(&text(2, Some(200), None)).unwrap();
       assert_eq!(clients(&store, MessageFilter::All), [1, 2]);
@@ -771,7 +783,7 @@ mod tests {
 
     #[test]
     fn the_revision_moves_with_each_write_to_the_conversation_only() {
-      let store = TrackedStore::with_message_cache(MemoryStore::new(), 100);
+      let store = TrackedStore::with_message_cache(MemoryStore::new(), ROOM_BYTES);
       let before = store.message_revision(id(7));
       store.upsert_message(&text(1, Some(100), None)).unwrap();
       let after = store.message_revision(id(7));
@@ -851,7 +863,11 @@ mod tests {
         let key = SymmetricKey::generate(&mut rand_core::OsRng);
         let ours = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
         let theirs = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
-        (directory, TrackedStore::with_message_cache(ours, 100), theirs)
+        (
+          directory,
+          TrackedStore::with_message_cache(ours, ROOM_BYTES),
+          theirs,
+        )
       }
 
       fn clients(store: &TrackedStore<SealedSqliteStore>, filter: MessageFilter) -> Vec<u8> {
