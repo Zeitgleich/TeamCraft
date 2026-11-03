@@ -12,6 +12,15 @@
 //! window resized), every layer gets a new encoder at the new shape ([`LayerSizer`], #931), so the
 //! picture isn't stretched.
 //!
+//! A camera's encoders follow the engine's `LayerBitrates` (#939): on a limited uplink its top
+//! sent layer is encoded at a share of its bitrate before it stops, as on the desktop. The running
+//! encoder is configured again with only the bitrate changed, and no keyframe is asked for. Chrome
+//! (measured with 152 on macOS: OpenH264, VideoToolbox and libaom) changes the running encoder's
+//! rate within a few frames, without a keyframe and with at most one frame's pause; the spec leaves
+//! it to the browser, and one that rebuilds its encoder for it marks the next chunk a keyframe
+//! itself, so viewers decode it either way. An encoder that refuses the new configuration is
+//! replaced at the new bitrate like a failed one.
+//!
 //! A watched track's canvas reports its shown size ([`SizeWatch`]), from which the call picks the
 //! layer to receive ([`crate::video::layer_for_view`]).
 //!
@@ -123,6 +132,8 @@ type EncoderOpener<E> = Box<dyn FnMut(VideoLayerInfo, u64) -> Result<E, WebCallE
 
 struct Layer<E> {
   info: VideoLayerInfo,
+  /// What the layer is encoded at: `info.max_bitrate_bps`, or less on a limited uplink (#939).
+  bitrate_bps: u32,
   encoder: E,
   generation: u64,
   is_needed: bool,
@@ -138,6 +149,8 @@ pub(super) trait FrameEncoder {
   fn is_configured(&self) -> bool;
   fn queue_size(&self) -> u32;
   fn encode(&self, frame: &Self::Frame, is_keyframe: bool) -> Result<(), WebCallError>;
+  /// Encodes the next frames at `bitrate_bps`, the running encoder configured again.
+  fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<(), WebCallError>;
 }
 
 /// A layer's encoders kept failing: the browser can't encode the track, which stops.
@@ -156,6 +169,8 @@ pub(super) struct SizeWatch {
 /// A WebCodecs H.264 encoder for one layer; closed on drop.
 struct LayerEncoder {
   encoder: VideoEncoder,
+  /// Its `VideoEncoderConfig`, configured again with another bitrate (#939).
+  config: js_sys::Object,
   _output: Closure<dyn FnMut(EncodedVideoChunk)>,
   _error: Closure<dyn FnMut(JsValue)>,
 }
@@ -390,6 +405,12 @@ impl TrackSender {
     self.encoders.set_needed_layers(needed);
   }
 
+  /// Encodes the layers at `bitrates` (layer, bit/s) from now on: the engine's `LayerBitrates`
+  /// (#939). Only an encoder that refuses it is replaced, and the error is a layer that gave up.
+  pub fn set_layer_bitrates(&mut self, bitrates: &[(u8, u32)]) -> Result<(), EncoderGaveUp> {
+    self.encoders.set_bitrates(bitrates)
+  }
+
   #[cfg(feature = "effects")]
   pub fn set_effect(&mut self, effect: crate::effects::BackgroundEffect) {
     if let Some(effects) = &mut self.maybe_effects {
@@ -496,6 +517,7 @@ impl<E: FrameEncoder> LayerEncoders<E> {
       .map(|(info, generation)| {
         Ok(Layer {
           info,
+          bitrate_bps: info.max_bitrate_bps,
           encoder: open(info, generation)?,
           generation,
           is_needed: true,
@@ -511,8 +533,34 @@ impl<E: FrameEncoder> LayerEncoders<E> {
     })
   }
 
+  /// The layers as published, each with its whole bitrate.
   pub fn infos(&self) -> Vec<VideoLayerInfo> {
     self.layers.iter().map(|layer| layer.info).collect()
+  }
+
+  /// Encodes the layers at `bitrates` (layer, bit/s) from now on (#939). A layer whose bitrate
+  /// changes keeps its encoder, configured again, and no keyframe: the picture goes on. One that
+  /// refuses the configuration is replaced at the new bitrate (starting with a keyframe); a closed
+  /// one is replaced with the next frame at it. A bitrate of 0 or of an unknown layer is ignored.
+  pub fn set_bitrates(&mut self, bitrates: &[(u8, u32)]) -> Result<(), EncoderGaveUp> {
+    for index in 0..self.layers.len() {
+      let layer = &mut self.layers[index];
+      let Some(&(_, bitrate_bps)) = bitrates.iter().find(|(id, _)| *id == layer.info.layer) else {
+        continue;
+      };
+      if bitrate_bps == layer.bitrate_bps || bitrate_bps == 0 {
+        continue;
+      }
+      layer.bitrate_bps = bitrate_bps;
+      if !layer.encoder.is_configured() {
+        continue;
+      }
+      if let Err(error) = layer.encoder.set_bitrate(bitrate_bps) {
+        warn!(%error, layer = layer.info.layer, bitrate_bps, "a video encoder takes no new bitrate; replacing it");
+        self.restart(index)?;
+      }
+    }
+    Ok(())
   }
 
   pub fn request_keyframe(&mut self, layer: u8) {
@@ -571,7 +619,7 @@ impl<E: FrameEncoder> LayerEncoders<E> {
     for layer in &mut self.layers {
       let generation = self.next_generation;
       self.next_generation += 1;
-      layer.encoder = (self.open)(layer.info, generation)?;
+      layer.encoder = (self.open)(layer.built(), generation)?;
       layer.generation = generation;
       layer.wants_keyframe = true;
       layer.restarts_in_a_row = 0;
@@ -587,10 +635,14 @@ impl<E: FrameEncoder> LayerEncoders<E> {
       let Some(info) = infos.iter().find(|info| info.layer == layer.info.layer) else {
         continue;
       };
+      // A bitrate lowered for the uplink stays lowered.
+      if layer.bitrate_bps == layer.info.max_bitrate_bps {
+        layer.bitrate_bps = info.max_bitrate_bps;
+      }
       layer.info = *info;
       let generation = self.next_generation;
       self.next_generation += 1;
-      match (self.open)(*info, generation) {
+      match (self.open)(layer.built(), generation) {
         Ok(encoder) => {
           layer.encoder = encoder;
           layer.generation = generation;
@@ -636,7 +688,7 @@ impl<E: FrameEncoder> LayerEncoders<E> {
       layer.restarts_in_a_row += 1;
       let generation = self.next_generation;
       self.next_generation += 1;
-      match (self.open)(layer.info, generation) {
+      match (self.open)(layer.built(), generation) {
         Ok(encoder) => {
           debug!(layer = layer.info.layer, "started a new video encoder");
           layer.encoder = encoder;
@@ -651,6 +703,16 @@ impl<E: FrameEncoder> LayerEncoders<E> {
 
   fn layer_mut(&mut self, layer: u8) -> Option<&mut Layer<E>> {
     self.layers.iter_mut().find(|current| current.info.layer == layer)
+  }
+}
+
+impl<E> Layer<E> {
+  /// What its encoder is opened with: the layer at the bitrate it is encoded at.
+  fn built(&self) -> VideoLayerInfo {
+    VideoLayerInfo {
+      max_bitrate_bps: self.bitrate_bps,
+      ..self.info
+    }
   }
 }
 
@@ -774,11 +836,11 @@ impl LayerEncoder {
       .map_err(browser("VideoEncoder"))?,
     )
     .map_err(browser("VideoEncoder"))?;
-    encoder
-      .configure(&encoding.config(&info).map_err(browser("VideoEncoder"))?)
-      .map_err(browser("VideoEncoder"))?;
+    let config = encoding.config(&info).map_err(browser("VideoEncoder"))?;
+    encoder.configure(&config).map_err(browser("VideoEncoder"))?;
     Ok(Self {
       encoder,
+      config,
       _output: output,
       _error: error,
     })
@@ -802,6 +864,23 @@ impl FrameEncoder for LayerEncoder {
     self
       .encoder
       .encode(frame, &options)
+      .map_err(browser("VideoEncoder"))
+  }
+
+  /// `configure()` again with only the bitrate changed: the spec queues it behind the frames
+  /// already given, and Chrome then changes the running encoder's rate rather than build a new
+  /// one; either way the chunks say which are keyframes. An error makes the caller replace the
+  /// encoder.
+  fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<(), WebCallError> {
+    js_sys::Reflect::set(
+      &self.config,
+      &JsValue::from_str("bitrate"),
+      &JsValue::from(bitrate_bps),
+    )
+    .map_err(browser("VideoEncoder"))?;
+    self
+      .encoder
+      .configure(&self.config)
       .map_err(browser("VideoEncoder"))
   }
 }
@@ -1857,6 +1936,113 @@ mod tests {
     }
   }
 
+  /// Issue #939: a camera's layers follow the engine's `LayerBitrates` like the desktop's.
+  mod layer_bitrates {
+    use super::*;
+
+    #[test]
+    fn a_new_bitrate_configures_the_running_encoder_again_without_a_keyframe() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.encode(&(), false).unwrap();
+      encoders.set_bitrates(&[(0, 150_000), (1, 210_000)]).unwrap();
+      // Layer 0 keeps its bitrate and is left alone; layer 1 keeps its encoder.
+      assert_eq!(bench.borrow().opened, vec![(0, 0), (1, 1)]);
+      assert_eq!(
+        bench.borrow().rates,
+        vec![(0, 150_000), (1, 300_000), (1, 210_000)]
+      );
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().coded[2..], [(0, 0, false), (1, 1, false)]);
+      // Back to its whole bitrate, the same way; the layers as published don't change.
+      encoders.set_bitrates(&[(0, 150_000), (1, 300_000)]).unwrap();
+      assert_eq!(bench.borrow().rates[2..], [(1, 210_000), (1, 300_000)]);
+      assert_eq!(encoders.infos(), vec![layer_info(0), layer_info(1)]);
+    }
+
+    #[test]
+    fn unchanged_zero_and_unknown_bitrates_change_nothing() {
+      let (bench, mut encoders) = encoders(2);
+      encoders
+        .set_bitrates(&[(0, 150_000), (1, 0), (7, 90_000)])
+        .unwrap();
+      encoders.set_bitrates(&[]).unwrap();
+      assert_eq!(bench.borrow().rates.len(), 2);
+      assert_eq!(bench.borrow().opened.len(), 2);
+    }
+
+    #[test]
+    fn an_encoder_that_refuses_the_bitrate_is_replaced_at_it_with_a_keyframe() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.encode(&(), false).unwrap();
+      bench.borrow_mut().refusing.insert(1);
+      encoders.set_bitrates(&[(1, 210_000)]).unwrap();
+      assert_eq!(bench.borrow().opened, vec![(0, 0), (1, 1), (1, 2)]);
+      assert_eq!(bench.borrow().rates[2..], [(2, 210_000)]);
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().coded[2..], [(0, 0, false), (1, 2, true)]);
+    }
+
+    #[test]
+    fn encoders_that_keep_refusing_give_up() {
+      let (bench, mut encoders) = encoders(1);
+      for generation in 0..=u64::from(MAX_ENCODER_RESTARTS) {
+        bench.borrow_mut().refusing.insert(generation);
+      }
+      for step in 0..u32::from(MAX_ENCODER_RESTARTS) {
+        encoders.set_bitrates(&[(0, 100_000 - step)]).unwrap();
+      }
+      assert_eq!(
+        encoders.set_bitrates(&[(0, 50_000)]),
+        Err(EncoderGaveUp { layer: 0 })
+      );
+    }
+
+    #[test]
+    fn a_closed_encoder_is_replaced_at_the_new_bitrate_with_the_next_frame() {
+      let (bench, mut encoders) = encoders(1);
+      bench.borrow_mut().closed.insert(0);
+      encoders.set_bitrates(&[(0, 75_000)]).unwrap();
+      // Nothing configures a closed encoder; the next frame replaces it.
+      assert_eq!(bench.borrow().rates.len(), 1);
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().opened, vec![(0, 0), (0, 1)]);
+      assert_eq!(bench.borrow().rates[1..], [(1, 75_000)]);
+    }
+
+    /// The desktop's rule (`SimulcastEncoder::resize`): a bitrate lowered for the uplink stays
+    /// lowered when the source changes size; a whole one becomes the new size's.
+    #[test]
+    fn a_lowered_bitrate_outlives_a_resize_and_a_failure() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.set_bitrates(&[(1, 210_000)]).unwrap();
+      let resized: Vec<VideoLayerInfo> = encoders
+        .infos()
+        .into_iter()
+        .map(|info| VideoLayerInfo {
+          max_bitrate_bps: info.max_bitrate_bps * 2,
+          ..info
+        })
+        .collect();
+      encoders.resize(&resized).unwrap();
+      assert_eq!(encoders.infos(), resized);
+      assert_eq!(bench.borrow().rates[3..], [(2, 300_000), (3, 210_000)]);
+      encoders.on_failed(1, 3).unwrap();
+      assert_eq!(bench.borrow().rates[5..], [(4, 210_000)]);
+    }
+
+    #[test]
+    fn a_paused_layer_resumes_at_the_bitrate_it_got_meanwhile() {
+      let (bench, mut encoders) = encoders(2);
+      encoders.set_needed_layers(&[0]);
+      encoders.set_bitrates(&[(1, 180_000)]).unwrap();
+      assert_eq!(bench.borrow().rates[2..], [(1, 180_000)]);
+      encoders.set_needed_layers(&[0, 1]);
+      encoders.encode(&(), false).unwrap();
+      assert_eq!(bench.borrow().coded, vec![(0, 0, true), (1, 1, true)]);
+      assert_eq!(bench.borrow().opened.len(), 2);
+    }
+  }
+
   mod video_view {
     use super::*;
 
@@ -1951,6 +2137,10 @@ mod tests {
     closed: HashSet<u64>,
     throwing: HashSet<u64>,
     failing_opens: usize,
+    /// Encoders' bitrates by generation: each opened one's and each configured again.
+    rates: Vec<(u64, u32)>,
+    /// Generations whose `set_bitrate` throws.
+    refusing: HashSet<u64>,
   }
 
   type Shared<C> = Rc<RefCell<Bench<C>>>;
@@ -1975,6 +2165,8 @@ mod tests {
         closed: HashSet::new(),
         throwing: HashSet::new(),
         failing_opens: 0,
+        rates: Vec::new(),
+        refusing: HashSet::new(),
       }))
     }
 
@@ -2016,6 +2208,15 @@ mod tests {
         .borrow_mut()
         .code(self.layer, self.generation, is_keyframe)
     }
+
+    fn set_bitrate(&mut self, bitrate_bps: u32) -> Result<(), WebCallError> {
+      let mut bench = self.bench.borrow_mut();
+      if bench.refusing.contains(&self.generation) {
+        return Err(failure("configure"));
+      }
+      bench.rates.push((self.generation, bitrate_bps));
+      Ok(())
+    }
   }
 
   impl FrameDecoder for FakeDecoder {
@@ -2040,7 +2241,10 @@ mod tests {
     let shared = Rc::clone(&bench);
     let infos = (0..layer_count).map(layer_info).collect();
     let encoders = LayerEncoders::new(infos, move |info, generation| {
-      shared.borrow_mut().open(info.layer, generation)?;
+      let mut bench = shared.borrow_mut();
+      bench.open(info.layer, generation)?;
+      bench.rates.push((generation, info.max_bitrate_bps));
+      drop(bench);
       Ok(FakeEncoder {
         layer: info.layer,
         generation,
