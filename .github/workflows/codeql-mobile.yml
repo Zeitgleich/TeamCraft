@@ -123,8 +123,9 @@ jobs:
       - name: Android SDK packages
         if: matrix.build == 'android'
         run: |
-          (yes || true) | sdkmanager --licenses > /dev/null
-          sdkmanager "platforms;android-37.0" "build-tools;36.0.0"
+          sdkmanager="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          (yes || true) | "${sdkmanager}" --licenses > /dev/null
+          "${sdkmanager}" "platforms;android-37.0" "build-tools;36.0.0"
 
       - if: matrix.build == 'ios'
         name: Tools
