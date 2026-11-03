@@ -5,10 +5,13 @@ use std::{
   time::Duration,
 };
 
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv4Net};
 use teamcraft_media::fallback_queue::MediaQueueConfig;
 
 use crate::forwarding::ForwardingConfig;
+
+/// The bits of `::ffff:a.b.c.d` in front of the IPv4 address.
+const IPV4_MAPPED_PREFIX_BITS: u8 = 96;
 
 #[derive(Debug, Clone)]
 pub struct SfuConfig {
@@ -116,12 +119,25 @@ pub fn parse_trusted_proxies(text: &str) -> Option<Vec<IpNet>> {
     .map(str::trim)
     .filter(|entry| !entry.is_empty())
     .map(|entry| {
-      entry
-        .parse::<IpNet>()
-        .ok()
-        .or_else(|| entry.parse::<IpAddr>().ok().map(IpNet::from))
+      entry.parse::<IpNet>().ok().map(canonical_network).or_else(|| {
+        entry
+          .parse::<IpAddr>()
+          .ok()
+          .map(|ip| IpNet::from(ip.to_canonical()))
+      })
     })
     .collect()
+}
+
+/// Peers are compared in their canonical form, so an IPv4-mapped entry has to be in it too, or it
+/// never matches.
+fn canonical_network(network: IpNet) -> IpNet {
+  match network.addr().to_canonical() {
+    IpAddr::V4(ip) if network.addr().is_ipv6() && network.prefix_len() >= IPV4_MAPPED_PREFIX_BITS => {
+      Ipv4Net::new(ip, network.prefix_len() - IPV4_MAPPED_PREFIX_BITS).map_or(network, IpNet::V4)
+    },
+    _ => network,
+  }
 }
 
 impl Default for FallbackConfig {
@@ -188,6 +204,18 @@ mod tests {
     }
     assert!(parse_trusted_proxies("not an address").is_none());
     assert_eq!(parse_trusted_proxies(""), Some(Vec::new()));
+  }
+
+  #[test]
+  fn ipv4_mapped_entries_match_the_canonical_peer() {
+    let proxies = parse_trusted_proxies("::ffff:10.0.0.1, ::ffff:172.18.0.0/112").unwrap();
+    let config = FallbackConfig {
+      trusted_proxies: proxies,
+      ..FallbackConfig::default()
+    };
+    assert!(config.is_trusted_proxy("10.0.0.1".parse().unwrap()));
+    assert!(config.is_trusted_proxy("172.18.3.4".parse().unwrap()));
+    assert!(!config.is_trusted_proxy("172.19.0.1".parse().unwrap()));
   }
 
   #[test]

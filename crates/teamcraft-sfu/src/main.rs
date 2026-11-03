@@ -162,6 +162,7 @@ async fn run() -> anyhow::Result<()> {
   let certificate_hash = sfu.certificate_hash();
   info!(
     %local_addr,
+    maybe_fallback_addr = ?sfu.fallback_addr()?,
     certificate_hash = %certificate_hash.fmt(wtransport::tls::Sha256DigestFmt::DottedHex),
     "SFU listening"
   );

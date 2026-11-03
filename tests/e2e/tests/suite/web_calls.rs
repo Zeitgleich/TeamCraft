@@ -183,6 +183,76 @@ async fn the_web_client_falls_back_on_a_network_without_udp() {
   rig.finish().await;
 }
 
+/// A full SFU turns a browser away after the upgrade, which to the browser is a session that opened.
+/// It retries at the pace of any failure, not as fast as the network allows (#123).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the network namespace: scripts/e2e-network.sh"]
+async fn the_web_client_turned_away_from_a_full_sfu_retries_with_backoff() {
+  let identity = sfu_identity();
+  let sha256: String = Sha256::digest(identity.cert.der())
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect();
+  let (certificate, key) = (identity.cert.pem(), identity.signing_key.serialize_pem());
+  let Some(mut rig) = Rig::start_with(
+    |builder| {
+      builder
+        .with_one_call_fallback_slot()
+        .with_sfu_identity(certificate, key, sha256)
+    },
+    &MEDIA_ARGS,
+  )
+  .await
+  else {
+    return;
+  };
+  let Some(conditions) = PortConditions::take(1) else {
+    rig.finish().await;
+    return;
+  };
+  conditions.set(Condition::NoUdp);
+  let channel = rig.channel;
+  let certificate_hash = rig.stack.maybe_sfu.as_ref().unwrap().certificate_hash;
+  let page = rig.browser.page.clone();
+  let console = console_log(&page).await;
+  sign_in_and_join_the_channel(&mut rig, &page).await;
+  // Carol takes the one slot; she stays connected while the browser is turned away.
+  let carol_call = join_call(&mut rig.carol, channel, certificate_hash, 550.0).await;
+  rig
+    .browser
+    .screenshot_on_failure("web-call-full-sfu", |page| async move {
+      crate::web::click_text(&page, "browser-channel").await;
+      click_selector(&page, "button[aria-label='Start video call']").await;
+      wait_for_element(&page, ".prejoin").await;
+      click_selector(&page, ".prejoin-actions .btn-primary").await;
+    })
+    .await;
+  let lost = || {
+    console
+      .lock()
+      .unwrap()
+      .iter()
+      .filter(|line| line.contains("lost the connection to the call"))
+      .count()
+  };
+  // The first socket waits for QUIC's fallback delay; from the first loss on it is about pacing.
+  let deadline = tokio::time::Instant::now() + SETUP_TIMEOUT;
+  while lost() == 0 && tokio::time::Instant::now() < deadline {
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  let first = lost();
+  tokio::time::sleep(Duration::from_secs(8)).await;
+  let attempts = lost() - first;
+  eprintln!("the browser's attempts in 8 s against a full SFU: {attempts}");
+  assert!(first > 0, "the browser never reached the full SFU");
+  // With 250 ms doubling to 2 s, jittered down to half: about 5 to 13 in 8 s. Hundreds without.
+  assert!((2..=20).contains(&attempts), "{attempts} attempts in 8 s");
+  assert!(!carol_call.is_finished(), "the call on the one slot goes on");
+  carol_call.leave().await.expect("leaving the call");
+  drop(conditions);
+  rig.finish().await;
+}
+
 /// The other way round: with UDP working and the fallback on offer, the browser and the native client
 /// stay on QUIC and nothing says the network is limited (#123).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

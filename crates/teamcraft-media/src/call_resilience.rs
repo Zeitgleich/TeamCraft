@@ -268,6 +268,17 @@ impl ReconnectSchedule {
     self.next_attempt_at = now + jittered;
   }
 
+  /// The attempts so far that got a connection but lost it before the SFU took the join: a full SFU
+  /// or an address over its limit drops a socket after the upgrade. To the driver those attempts
+  /// succeeded, so nothing else slows them down, and every client would fetch a ticket, connect and
+  /// join without a pause until the grace period ends. They count as failed: the call still retries
+  /// and doesn't end, at the pace of any other failure.
+  pub fn count_lost_before_joining(&mut self, attempts: u32, now: Instant, config: &ResilienceConfig) {
+    for _ in 0..attempts {
+      self.on_failed_attempt(now, config);
+    }
+  }
+
   /// Makes the next attempt due at once (the network came back).
   pub fn hurry(&mut self, now: Instant) {
     self.next_attempt_at = self.next_attempt_at.min(now);
@@ -726,6 +737,26 @@ mod tests {
       assert!(!schedule.has_expired(at(start, 29_999)));
       assert!(schedule.has_expired(at(start, 30_000)));
     }
+  }
+
+  #[test]
+  fn a_link_lost_before_joining_paces_the_next_attempt_like_a_failure() {
+    let config = config();
+    let start = Instant::now();
+    let mut schedule = ReconnectSchedule::with_jitter(start, Duration::from_secs(30), Jitter::seeded(1));
+    assert_eq!(
+      schedule.next_attempt_at(),
+      start,
+      "a lost connection retries at once"
+    );
+    schedule.count_lost_before_joining(1, start, &config);
+    assert!(schedule.next_attempt_at() >= start + config.first_retry_interval / 2);
+    // A schedule built anew after each loss (the browser's) gets there too, up to the maximum.
+    let mut rebuilt = ReconnectSchedule::with_jitter(start, Duration::from_secs(30), Jitter::seeded(2));
+    rebuilt.count_lost_before_joining(10, start, &config);
+    assert!(rebuilt.next_attempt_at() >= start + config.max_retry_interval / 2);
+    assert!(rebuilt.next_attempt_at() <= start + config.max_retry_interval);
+    assert!(!rebuilt.has_expired(start), "the call goes on retrying");
   }
 
   #[test]

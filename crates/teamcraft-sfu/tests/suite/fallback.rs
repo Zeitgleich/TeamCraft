@@ -10,7 +10,10 @@
 use std::{
   collections::HashMap,
   net::{Ipv6Addr, SocketAddr, UdpSocket},
-  sync::{Arc, Mutex},
+  sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+  },
   time::{Duration, Instant},
 };
 
@@ -328,6 +331,32 @@ mod hostile_clients {
 mod slots {
   use super::*;
 
+  /// A full SFU drops a joining client's socket after the upgrade, which to the client is a connection
+  /// that worked. It must retry at the pace of any failure, not as fast as the network allows: a
+  /// whole office would otherwise hammer the REST API and the proxy until the grace period ends.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn a_client_turned_away_after_the_upgrade_retries_with_backoff() {
+    let mut config = SfuConfig::default();
+    config.fallback.max_connections = 1;
+    let sfu = start_sfu(config).await;
+    let mut holder = sfu.connect_socket().await;
+    send_join(&mut holder, &token(ALICE)).await;
+    wait_for_joined(&mut holder).await;
+    let tap = WireTap::start(sfu.fallback_addr).await;
+    let black_hole = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let quic_url = format!("https://{}{CALL_PATH}", black_hole.local_addr().unwrap());
+    let turned_away = sfu.native_client_via(&quic_url, tap.addr, BOB, 550.0, None).await;
+    let started_at = Instant::now();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let attempts = tap.connections.load(Ordering::Relaxed);
+    let elapsed = started_at.elapsed();
+    // With 250 ms doubling to 2 s, jittered down to half: about 6 to 12 in 4 s. Thousands without.
+    assert!((3..=16).contains(&attempts), "{attempts} attempts in {elapsed:?}");
+    assert!(!turned_away.is_finished(), "the call retries and doesn't end");
+    assert_eq!(sfu.control.room_stats().participants, 1);
+    turned_away.leave().await.ok();
+  }
+
   /// A lost connection's place in the call waits for the reconnect grace period, and its connection
   /// slot doesn't: else a member looping connect, join, reset fills the limit, and a proxy restart
   /// with many calls refuses their rejoins for as long as the grace lasts.
@@ -623,6 +652,8 @@ impl CallReport {
 /// Copies between clients and an upstream, and keeps what flows toward the clients.
 struct WireTap {
   addr: SocketAddr,
+  /// Connections it took so far.
+  connections: Arc<AtomicUsize>,
   recorded: Arc<Mutex<Vec<u8>>>,
 }
 
@@ -634,9 +665,12 @@ impl WireTap {
     let addr = listener.local_addr().unwrap();
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let keeping = Arc::clone(&recorded);
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counting = Arc::clone(&connections);
     tokio::spawn(async move {
       loop {
         let (client, _) = listener.accept().await.unwrap();
+        counting.fetch_add(1, Ordering::Relaxed);
         let server = tokio::net::TcpStream::connect(upstream).await.unwrap();
         let (mut client_read, mut client_write) = client.into_split();
         let (mut server_read, mut server_write) = server.into_split();
@@ -653,7 +687,11 @@ impl WireTap {
         });
       }
     });
-    Self { addr, recorded }
+    Self {
+      addr,
+      connections,
+      recorded,
+    }
   }
 
   fn recorded(&self) -> Vec<u8> {

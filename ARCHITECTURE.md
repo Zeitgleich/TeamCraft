@@ -792,7 +792,9 @@ reverse proxy as the gateway. Setup and what an existing deployment has to chang
 - **Before the join**, anybody can connect, so those connections get limits that can't touch anything
   else: a cap of their own (128), 3 s for the upgrade, 16 per address (an IPv6 /64 counts as one)
   in a limiter apart from QUIC's. `X-Forwarded-For` counts only from the listed trusted proxies. A
-  flood costs new fallback joins while it lasts, not a running call or a QUIC session. Someone with
+  flood costs new fallback joins while it lasts, not a running call or a QUIC session. A client
+  turned away after the upgrade counts that as a failed attempt: it retries with backoff and jitter
+  until the grace period ends, so a full SFU isn't hammered and the call doesn't end. Someone with
   many addresses can still fill the 128 (each holds its place at most 3 s plus the join timeout).
 - **Rejoin loops re-key.** A member with a valid token who connects, joins and drops in a loop makes
   the group re-key each time. That is the case on QUIC too and not specific to this path: limiting

@@ -444,6 +444,11 @@ impl NativeCall {
     })
   }
 
+  /// Whether the call has ended by itself.
+  pub fn is_finished(&self) -> bool {
+    self.task.is_finished()
+  }
+
   /// The microphone's level (0.0 to 1.0) as the call captures it, also while muted, about ten
   /// readings a second; silence while no microphone delivers. For the call's device menu (#986).
   pub fn microphone_level(&self) -> SharedLevel {
@@ -1098,12 +1103,17 @@ impl CallConnection {
     warn!("lost the connection to the call, rejoining");
     link.stop_reading();
     self.lost_links.push(link);
+    let was_in_call = engine.is_in_call();
     engine.connection_lost();
-    if self.maybe_schedule.is_none() {
+    let resilience = self.resilience;
+    let schedule = self.maybe_schedule.get_or_insert_with(|| {
       let grace = engine
         .maybe_reconnect_grace()
-        .unwrap_or(self.resilience.default_reconnect_grace);
-      self.maybe_schedule = Some(ReconnectSchedule::new(now, grace));
+        .unwrap_or(resilience.default_reconnect_grace);
+      ReconnectSchedule::new(now, grace)
+    });
+    if !was_in_call {
+      schedule.count_lost_before_joining(1, now, &resilience);
     }
   }
 

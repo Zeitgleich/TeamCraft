@@ -1043,6 +1043,7 @@ async fn run_call(
     sessions,
     watch: SessionWatch::new(Instant::now(), config.resilience),
     maybe_lost_at: None,
+    lost_before_joining: 0,
     maybe_hurry: None,
     timer_ticks: 0,
     ticket: JoinTicket {
@@ -1124,6 +1125,7 @@ async fn run_call(
     }
     if engine.is_in_call() {
       state.maybe_lost_at = None;
+      state.lost_before_joining = 0;
       state.close_lost_sessions();
     }
   };
@@ -1160,6 +1162,8 @@ struct CallState<'a> {
   watch: SessionWatch,
   /// When the connection was lost, while rejoining.
   maybe_lost_at: Option<Instant>,
+  /// Sessions in a row that were lost before the SFU took the join, which paces the next attempt.
+  lost_before_joining: u32,
   /// Asks the rejoin task to try again early, while rejoining.
   maybe_hurry: Option<mpsc::UnboundedSender<()>>,
   timer_ticks: u32,
@@ -1628,6 +1632,9 @@ impl CallState<'_> {
     if let Some(transport) = self.maybe_transport.take() {
       self.lost_transports.push(transport);
     }
+    if !engine.is_in_call() {
+      self.lost_before_joining += 1;
+    }
     engine.connection_lost();
     let now = Instant::now();
     let lost_at = *self.maybe_lost_at.get_or_insert(now);
@@ -1636,7 +1643,9 @@ impl CallState<'_> {
       .unwrap_or(self.resilience.default_reconnect_grace);
     // From here on, news of the lost session is stale.
     let generation = self.watch.lose();
-    let schedule = reconnect_schedule(lost_at, grace, end, now, &self.resilience, Jitter::random());
+    let mut schedule = reconnect_schedule(lost_at, grace, end, now, &self.resilience, Jitter::random());
+    // The schedule is new, the attempts before it aren't.
+    schedule.count_lost_before_joining(self.lost_before_joining, now, &self.resilience);
     let (hurry, hurry_rx) = mpsc::unbounded();
     self.maybe_hurry = Some(hurry);
     self.spawn_reconnect(schedule, hurry_rx, generation);
