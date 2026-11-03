@@ -110,8 +110,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Whether a signed deletion holds on this device (`crate::signed_deletion`). Reads the channel's
   /// role log first: the signer's role may be newer than this device's copy, and the server keeps a
-  /// signed-deleted channel's log for that. If the read fails the device judges on what it has, which
-  /// can only refuse: a real deletion then takes the retention.
+  /// signed-deleted channel's log for that. If the read fails, or the server leaves entries out, the
+  /// device judges on what it has: a promotion it missed refuses, and a demotion it missed still
+  /// accepts (e2ee.md §4.6, residual risks).
   async fn verifies_signed_deletion(
     &mut self,
     conversation: ConversationId,

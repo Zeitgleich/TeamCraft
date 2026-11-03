@@ -7,9 +7,13 @@
 
 use crate::common;
 
+use std::sync::Arc;
+
 use common::{Peer, settle};
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
+use teamcraft_core::client::RoleSigning;
+use teamcraft_core::clock::ManualClock;
 use teamcraft_core::store::{LocalStore, MessageFilter, Table};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::{
@@ -260,6 +264,109 @@ mod false_claims {
     bob.client.full_sync().await.unwrap();
 
     assert_hidden_with_history(&bob, direct);
+  }
+
+  /// A DM on a device from before pins: the server leaves it out of a list, or answers 404, then calls
+  /// it a channel. The record goes in between, the group doesn't, so the pin has to come first.
+  #[tokio::test]
+  async fn a_direct_message_left_out_and_then_relabelled_purges_nothing() {
+    for is_by_gateway in [false, true] {
+      let server = FakeServer::new();
+      let (mut owner, mut bob) = two(&server).await;
+      let mut admin = Peer::enroll(&server, "Admin").await;
+      make_workspace_admin(&server, &mut owner, &mut admin).await;
+      bob.client.full_sync().await.unwrap();
+      let owner_id = owner.client.user_id();
+      let bob_id = bob.client.user_id();
+      let direct = bob.client.open_dm(owner_id).await.unwrap();
+      bob.client.send_text(direct, None, "just us").await.unwrap();
+      settle(&mut [&mut bob, &mut owner]).await;
+      bob
+        .store
+        .delete(Table::AppliedChanges, &format!("direct/{direct}"))
+        .unwrap();
+
+      let membership = server.omit_from(bob_id, direct);
+      if is_by_gateway {
+        server.publish_event(
+          &[bob_id],
+          &GatewayEvent::ConversationUpdate {
+            conversation_id: direct,
+          },
+        );
+        settle(&mut [&mut bob]).await;
+      } else {
+        bob.client.full_sync().await.unwrap();
+      }
+      assert!(!is_cached(&bob, direct), "by gateway: {is_by_gateway}");
+      assert!(bob.client.has_group(direct).unwrap());
+
+      server.relabel_conversation(direct, ConversationKind::Channel);
+      server.restore_for(bob_id, direct, membership);
+      bob.client.full_sync().await.unwrap();
+      let epoch = epoch_of(&mut bob, direct);
+      let signed = admin.client.sign_channel_deletion(direct, epoch).unwrap();
+      server.claim_signed_deletion(direct, signed);
+      server.hide_from(bob_id, direct);
+      bob.client.full_sync().await.unwrap();
+
+      assert!(has_history(&bob, direct), "by gateway: {is_by_gateway}");
+    }
+  }
+
+  /// Eve's demotion is withheld past the roster's age, so her own signature wouldn't do. The server
+  /// dates back an entry of hers that makes Mallory, in the group, an admin: for roles it passes,
+  /// but it anchors nothing, so Mallory's signature doesn't purge.
+  #[tokio::test]
+  async fn a_backdated_checkpoint_on_a_stale_roster_purges_nothing() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut eve = Peer::enroll(&server, "Eve").await;
+    let mut bob = Peer::enroll_on_clock(
+      server.add_user("Bob"),
+      "Bob",
+      common::settings(),
+      Box::new(clock.clone()),
+    )
+    .await;
+    let mut mallory = Peer::enroll_on_clock(
+      server.add_user("Mallory"),
+      "Mallory",
+      common::settings(),
+      Box::new(clock.clone()),
+    )
+    .await;
+    make_workspace_admin(&server, &mut alice, &mut eve).await;
+    let channel = channel_with_history(&mut alice, &mut bob).await;
+    add(&mut alice, &mut bob, &mut mallory, channel).await;
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    assert!(bob.client.channel_role_state(channel).unwrap().is_workspace_anchored);
+
+    clock.advance(31 * 24 * 60 * 60 * 1000);
+    let mallory_id = mallory.client.user_id();
+    assert_eq!(
+      eve
+        .client
+        .sign_channel_roles(channel, &[(mallory_id, ChannelRole::Admin)], false)
+        .await
+        .unwrap(),
+      RoleSigning::Signed
+    );
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    assert_eq!(
+      bob.client.verified_channel_role(channel, mallory_id).unwrap(),
+      ChannelRole::Admin,
+      "the entry passes for roles, at the time the server gives it"
+    );
+
+    let epoch = epoch_of(&mut bob, channel);
+    let signed = mallory.client.sign_channel_deletion(channel, epoch).unwrap();
+    server.claim_signed_deletion(channel, signed);
+    server.hide_from(bob.client.user_id(), channel);
+    bob.client.full_sync().await.unwrap();
+
+    assert_hidden_with_history(&bob, channel);
   }
 
   /// A device its user removed still has a good certificate; the user's signed list decides.

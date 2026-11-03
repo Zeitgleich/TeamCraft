@@ -923,27 +923,31 @@ holds:
 
 - **The signer may.** One of:
   - an owner or admin of the verified workspace roster. The newest roster must carry a signing time and be
-    fresh (`workspace_max_age`) at this device's time and at the signing time; the later one counts, so a
-    wrong clock can only refuse. Such a person needs no place in the group.
+    fresh (`workspace_max_age`) at this device's time and at the signing time; the later one counts, so one
+    of them being ahead can only refuse. Such a person needs no place in the group.
   - an `admin` of the signed snapshot this device accepted last (§4.6.1), verified against the key that
     snapshot names, who is in this device's group, **if that snapshot goes back to a workspace admin's
-    entry** (`is_workspace_anchored`): one of theirs was accepted since the last founding, and channel
+    entry** (`is_workspace_anchored`): one of theirs was accepted since the last founding, while this
+    device's newest roster carried a signing time and was fresh at this device's time (not at the entry's,
+    which the server sets; an entry that passes for roles without this takes the anchor away), and channel
     admins building on it carry it on. Moderators, members, space admins and custom schemes aren't signed
     facts and sign nothing that counts.
 
-  *Awaiting the owner's confirmation.* A snapshot that goes back only to a founder's claim doesn't count.
+  A snapshot that goes back only to a founder's claim doesn't count.
   That claim is trust on first use (§4.6.1): a member and the server together can make one up for a channel
   from before signed roles, or for a device with no role state, which would otherwise purge every member at
   once. The cost: every channel created by somebody who isn't a workspace admin is founder-rooted, so its
   channel admin's real deletion takes the retention on the members' devices, until a workspace admin signs a
-  role entry in that channel. Their device still signs, in case a verifying device has that entry by then.
+  role entry in that channel. The owner chose this cost. Their device still signs, in case a verifying device has that entry by then.
 - **The device is its user's.** The signing device must be on the signer's signed device list, read then
   from the server (the newer of it and the stored one), failing closed: no list, or none readable, refuses.
   A certificate alone has no expiry and outlives a device's removal. A removal the server withholds from this
   device isn't seen, as anywhere else lists are used.
-- **It is for this channel.** The document names the channel, and this device knows the conversation as a
+- **It is for this channel.** The document names the channel's ID and nothing else that a person saw: not its
+  name, its members or what the admin was shown (residual, below). This device knows the conversation as a
   channel. `kind` is the server's word and can change, so a device pins a conversation as direct the first
-  time it sees it as anything but a channel, like the notes to self: no signature purges a direct message, a
+  time it sees it as anything but a channel, also just before a record of it goes while the group stays,
+  like the notes to self: no signature purges a direct message, a
   meeting chat or the notes, once it has seen them so. A device told "channel" from the very first look has
   nothing to compare with (residual, below).
 - **It isn't old.**
@@ -966,9 +970,9 @@ holds:
 A device reads the channel's role log first, since the signer's role may be newer than its copy. The
 server keeps the log of a channel deleted with a signature, for whoever was told of the deletion, until the
 tombstones go (`deleted_conversations_kept_days`), so a device that slept through the deletion gets there
-too. If the read fails, the device judges on what it has, which can only refuse. A device whose copy is too
-old for that, or that verifies nothing for another reason, treats the deletion as a claim (below): a real
-deletion takes the retention, a false claim purges nothing. Verifying is idempotent: the mark that lets the
+too. If the read fails, or the server leaves entries out, the device judges on the copy it has. A promotion it
+missed then refuses, so a real deletion takes the retention; a demotion it missed still accepts (residual,
+below). A device that verifies nothing treats the deletion as a claim (below), and a false claim purges nothing. Verifying is idempotent: the mark that lets the
 purge finish after a crash is the same as for the user's own deletion, the server listing the conversation
 again lifts it, and a replay finds nothing left, without asking the server anything. Verified purges count
 towards the mass notice below, since a real signature on many channels is worth telling too.
@@ -993,10 +997,16 @@ Residual risks:
   withholding and to be still in the group.
 - A workspace admin's routine role entry anchors the whole snapshot it re-signs, so a founder's forged admin it
   carries along counts from then on.
+- **The name an admin sees is the server's word.** The signature binds the channel's ID, the epoch and the time,
+  not the name or anything else the admin saw. A server can show channel X's ID under the name "old-test", and
+  one confirmation purges X on every member's device at once. It takes a real admin's real click, on a list the
+  server wrote. Nothing here stops it, and a retention would have.
+- A device that can't read the role log or roster, or that the server shows fewer entries, judges on its copy,
+  which may still hold a demoted admin. Failing closed on a failed read wouldn't help: the server can answer
+  with fewer entries instead.
 - An admin who asked for a deletion has given the server a signature it may use while the group stays at that
   epoch and within the age limit, also after answering with a refusal. An admin outside the group can be told a
-  high epoch, which leaves only the age limit. Both take a real admin's real request for that very channel,
-  which their device believed to be a channel.
+  high epoch, which leaves only the age limit.
 - A conversation the server calls a channel from a device's first look is one to that device: pinning works
   only from what it has seen. It still takes a real signature on that conversation.
 - The server can withhold a signature at any time, which only makes a real deletion take the retention.

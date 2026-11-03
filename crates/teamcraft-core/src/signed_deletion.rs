@@ -164,8 +164,8 @@ pub(crate) fn is_told_epoch_plausible(own: u64, told: u64) -> bool {
   told >= own && told - own <= MAX_CHANGE_AGE_EPOCHS
 }
 
-/// The roster has to be fresh at the later of this device's time and the signer's: a clock wrong
-/// either way can only refuse. A roster without a signing time has no freshness to judge, whatever
+/// The roster has to be fresh at the later of this device's time and the signer's: one of the two
+/// being ahead can only refuse. A roster without a signing time has no freshness to judge, whatever
 /// else may accept it, so it purges nothing.
 fn verified_by_workspace_admin(
   signed: &SignedChannelDeletion,

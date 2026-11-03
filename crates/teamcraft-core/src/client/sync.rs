@@ -121,10 +121,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.purge_expired_quarantines()?;
     let conversations = listing.conversations;
     let known = self.cached_conversations()?;
-    for stale in known
-      .keys()
-      .filter(|id| !conversations.iter().any(|conversation| conversation.id == **id))
+    for (stale, record) in known
+      .iter()
+      .filter(|(id, _)| !conversations.iter().any(|conversation| conversation.id == **id))
     {
+      // The group stays and so may the conversation come back; what it was stays known.
+      self.pin_if_direct(record)?;
       self.store.delete(Table::Conversations, &stale.to_string())?;
       self.unmark_resync(*stale, ResyncPart::Members)?;
       self.unmark_resync(*stale, ResyncPart::Content)?;
@@ -626,6 +628,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.refresh_members(conversation).await
       },
       Err(error) if error.is_not_found() => {
+        // The group stays and so may the conversation come back; what it was stays known.
+        if let Some(record) = records::get_json::<ConversationResponse>(
+          &self.store,
+          Table::Conversations,
+          &conversation.to_string(),
+        )? {
+          self.pin_if_direct(&record)?;
+        }
         self
           .store
           .delete(Table::Conversations, &conversation.to_string())?;

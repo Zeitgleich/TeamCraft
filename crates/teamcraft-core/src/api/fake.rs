@@ -1351,6 +1351,16 @@ impl FakeServer {
       .and_then(|entry| entry.members.remove(&user))
   }
 
+  /// The server stops listing the conversation for `user`, without a word: returns their membership
+  /// for [`Self::restore_for`].
+  pub fn omit_from(&self, user: UserId, conversation: ConversationId) -> Option<(ChannelRole, i64)> {
+    self
+      .lock()
+      .conversations
+      .get_mut(&conversation)
+      .and_then(|entry| entry.members.remove(&user))
+  }
+
   /// Lists it again and takes the claim back.
   pub fn restore_for(
     &self,

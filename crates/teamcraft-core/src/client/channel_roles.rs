@@ -94,6 +94,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         workspace: &workspace,
         roster_max_age_ms: self.roster_max_age_ms(),
+        now_ms: self.now_ms(),
         pinned: &pinned,
       };
       for error in state.apply_entries(entries, &verifier) {
