@@ -29,13 +29,16 @@ updates:
     # isn't built twice (crates/teamcraft-crypto/Cargo.toml). Lift these with the openmls upgrade
     # that moves them (#163 tracks each). Only breaking bumps are ignored: for 0.x crates
     # Dependabot calls 0.10 -> 0.11 "minor", so those ignore minor too; patch releases (and security
-    # fixes) still come through. x25519-dalek is not listed: hpke-rs links both 2 and 3 already.
+    # fixes) still come through. x25519-dalek moves with hpke-rs 0.8: until then hpke-rs-rust-crypto
+    # runs X25519 on major 2, and a direct major 3 would mean two live implementations.
     ignore:
       - dependency-name: aes-gcm
         update-types: [version-update:semver-major, version-update:semver-minor]
       - dependency-name: chacha20poly1305
         update-types: [version-update:semver-major, version-update:semver-minor]
       - dependency-name: ed25519-dalek
+        update-types: [version-update:semver-major]
+      - dependency-name: x25519-dalek
         update-types: [version-update:semver-major]
       - dependency-name: p256
         update-types: [version-update:semver-major, version-update:semver-minor]
