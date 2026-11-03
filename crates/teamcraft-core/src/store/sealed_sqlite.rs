@@ -713,12 +713,9 @@ mod tests {
     let path = directory.join("store.db");
     let key = SymmetricKey::generate(&mut OsRng);
     let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
-    let set = |key: &[u8], maybe_value: Option<&[u8]>| {
-      let mut values = provider.storage().values.write().unwrap();
-      match maybe_value {
-        Some(value) => values.insert(key.to_vec(), value.to_vec()),
-        None => values.remove(key),
-      };
+    let set = |key: &[u8], maybe_value: Option<&[u8]>| match maybe_value {
+      Some(value) => provider.storage().set_value(key.to_vec(), value.to_vec()),
+      None => provider.storage().remove_value(key),
     };
     {
       let store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
@@ -771,11 +768,10 @@ mod tests {
     let path = directory.join("store.db");
     let key = SymmetricKey::generate(&mut OsRng);
     let set = |provider: &openmls_rust_crypto::OpenMlsRustCrypto, key: &[u8], maybe_value: Option<&[u8]>| {
-      let mut values = provider.storage().values.write().unwrap();
       match maybe_value {
-        Some(value) => values.insert(key.to_vec(), value.to_vec()),
-        None => values.remove(key),
-      };
+        Some(value) => provider.storage().set_value(key.to_vec(), value.to_vec()),
+        None => provider.storage().remove_value(key),
+      }
     };
     let expected;
     {
@@ -828,12 +824,7 @@ mod tests {
     let path = directory.join("store.db");
     let key = SymmetricKey::generate(&mut OsRng);
     let set = |provider: &openmls_rust_crypto::OpenMlsRustCrypto, key: &[u8], value: &[u8]| {
-      provider
-        .storage()
-        .values
-        .write()
-        .unwrap()
-        .insert(key.to_vec(), value.to_vec());
+      provider.storage().set_value(key.to_vec(), value.to_vec());
     };
     {
       let first = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
@@ -868,6 +859,135 @@ mod tests {
       (b"epoch 1".as_slice(), b"epoch 1, one message later".as_slice()),
       "one writer's whole state, not mixed epochs"
     );
+  }
+
+  /// Issue #840: another process's commit of other records (the iOS notification extension's push
+  /// bookkeeping, on every app resume) leaves the MLS state alone: the app's next save writes what
+  /// changed, not the whole state again.
+  #[test]
+  fn another_process_committing_other_records_costs_no_rewrite_of_the_mls_state() {
+    use openmls_traits::OpenMlsProvider as _;
+
+    use crate::mls_storage::{SavedMlsStorage, load_mls_storage, save_mls_storage};
+
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let app_store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+    let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
+    for entry in 0..50u8 {
+      provider.storage().set_value(vec![entry], vec![entry; 1_000]);
+    }
+    save_mls_storage(&app_store, &provider, &SavedMlsStorage::default()).unwrap();
+    drop(provider);
+    let (provider, saved) = load_mls_storage(&app_store).unwrap();
+
+    let extension = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    extension.put(Table::Users, "pushed", b"bookkeeping").unwrap();
+    drop(extension);
+    provider.storage().set_value(vec![0], vec![1; 1_000]);
+    save_mls_storage(&app_store, &provider, &saved).unwrap();
+
+    assert!(
+      saved.written_bytes() < 2_000,
+      "{} bytes written for one changed entry",
+      saved.written_bytes()
+    );
+    drop(app_store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Issue #424 review: a rewrite after another writer's save also goes for the entries only that
+  /// writer created, which this process never heard of: its cache follows the disk first.
+  #[test]
+  fn a_rewrite_leaves_no_entry_of_another_writer_behind() {
+    use openmls_traits::OpenMlsProvider as _;
+
+    use crate::mls_storage::{SavedMlsStorage, load_mls_storage, save_mls_storage};
+
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let app_store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+    let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
+    provider
+      .storage()
+      .set_value(b"X/context".to_vec(), b"epoch 1".to_vec());
+    let saved = SavedMlsStorage::default();
+    save_mls_storage(&app_store, &provider, &saved).unwrap();
+    {
+      let other_store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+      let (other, other_saved) = load_mls_storage(&other_store).unwrap();
+      other
+        .storage()
+        .set_value(b"X/only the other's".to_vec(), b"epoch 2".to_vec());
+      save_mls_storage(&other_store, &other, &other_saved).unwrap();
+    }
+    provider
+      .storage()
+      .set_value(b"X/context".to_vec(), b"epoch 1, later".to_vec());
+    save_mls_storage(&app_store, &provider, &saved).unwrap();
+    drop(app_store);
+
+    let reopened = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    let (loaded, _) = load_mls_storage(&reopened).unwrap();
+    assert_eq!(
+      *loaded.storage().values.read().unwrap(),
+      *provider.storage().values.read().unwrap()
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// A panic while the catalog is written, at the very end of a group: the group still ends. Left
+  /// open at the backend, every later group would nest in it, report success and never commit, and
+  /// the app would lose it all on exit though the server had seen those commits.
+  #[test]
+  fn a_panic_while_the_catalog_flushes_ends_the_group_and_rolls_it_back() {
+    let connection = Connection::open_in_memory().unwrap();
+    let backend = PanicsOnPut {
+      records: SealedSqliteStore::backend_of(connection).unwrap(),
+      is_armed: std::cell::Cell::new(false),
+    };
+    let key = SymmetricKey::generate(&mut OsRng);
+    let store = SealedStore::open_backend(backend, &key, SealedStoreLimits::default()).unwrap();
+    store.put(Table::Spaces, "before", b"1").unwrap();
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      crate::store::write_group(&store, || -> Result<(), StoreError> {
+        store.put(Table::Spaces, "half", b"2")?;
+        store.backend().is_armed.set(true);
+        Ok(())
+      })
+    }));
+
+    assert!(panicked.is_err(), "the panic goes on");
+    assert!(
+      !store.backend().is_armed.get(),
+      "it was the catalog's write that panicked"
+    );
+    assert!(
+      store.backend().records.lock().connection.is_autocommit(),
+      "the transaction ended"
+    );
+    assert!(!store.has_group_owner());
+    assert_eq!(store.write_tally().map(|tally| tally.lost), Some(1));
+    assert_eq!(store.get(Table::Spaces, "half").unwrap(), None);
+    assert_eq!(store.get(Table::Spaces, "before").unwrap(), Some(b"1".to_vec()));
+
+    store.put(Table::Spaces, "after", b"3").unwrap();
+    assert!(
+      store.backend().records.lock().connection.is_autocommit(),
+      "a later write commits"
+    );
+    assert_eq!(store.get(Table::Spaces, "after").unwrap(), Some(b"3".to_vec()));
+  }
+
+  #[test]
+  fn a_panic_undoes_its_group() {
+    let store =
+      SealedSqliteStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    crate::store::tests::a_panic_undoes_its_group(&store);
   }
 
   /// Issue #424 review, H1: 1.0.8 (its steps end before the marker) refuses the database; so does
@@ -1169,6 +1289,51 @@ mod tests {
       if let Some(commit) = self.on_begin.borrow_mut().take() {
         commit();
       }
+      self.records.begin_writes()
+    }
+
+    fn end_writes(&self) -> Result<(), StoreError> {
+      self.records.end_writes()
+    }
+
+    fn fail_group(&self) {
+      self.records.fail_group();
+    }
+
+    fn write_tally(&self) -> Option<WriteTally> {
+      self.records.write_tally()
+    }
+  }
+
+  /// Records on SQLite whose next put panics once armed.
+  struct PanicsOnPut {
+    records: SqliteRecords,
+    is_armed: std::cell::Cell<bool>,
+  }
+
+  impl RecordBackend for PanicsOnPut {
+    fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
+      assert!(!self.is_armed.replace(false), "made to panic");
+      self.records.put_record(id, sealed)
+    }
+
+    fn delete_record(&self, id: &LookupId) -> Result<(), StoreError> {
+      self.records.delete_record(id)
+    }
+
+    fn get_record(&self, id: &LookupId) -> Result<Option<Vec<u8>>, StoreError> {
+      self.records.get_record(id)
+    }
+
+    fn records_after(
+      &self,
+      maybe_after: Option<&LookupId>,
+      limit: usize,
+    ) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
+      self.records.records_after(maybe_after, limit)
+    }
+
+    fn begin_writes(&self) -> Result<(), StoreError> {
       self.records.begin_writes()
     }
 

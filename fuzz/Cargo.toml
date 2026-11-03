@@ -26,6 +26,7 @@ teamcraft-server = { path = "../crates/teamcraft-server" }
 
 [patch.crates-io]
 davey = { path = "../crates/vendor/davey" }
+openmls_memory_storage = { path = "../crates/vendor/openmls_memory_storage" }
 
 [profile.release]
 debug = 1

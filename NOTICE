@@ -19,6 +19,11 @@ davey (crates/vendor/davey/)
   WebAssembly (see crates/vendor/davey/VENDORED.md).
   MIT License, see crates/vendor/davey/LICENSE.
 
+openmls_memory_storage (crates/vendor/openmls_memory_storage/)
+  The OpenMLS project's in-memory key store, vendored with a patch that notes the keys it changes
+  (see crates/vendor/openmls_memory_storage/VENDORED.md).
+  MIT License, see crates/vendor/openmls_memory_storage/LICENSE.
+
 Photo backgrounds (assets/backgrounds/)
   Sixteen pictures for background replacement, cropped and scaled by scripts/process-backgrounds.py.
   Each is dedicated to the public domain (CC0 1.0) or marked public domain by its author

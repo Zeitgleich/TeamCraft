@@ -191,7 +191,7 @@ jobs:
       # crates/teamcraft-core/webdriver.json starts Chromium headless with --no-sandbox (a container).
       - name: Browser tests
         run: >
-          cargo test --target wasm32-unknown-unknown -p teamcraft-core --features service-worker
+          cargo test --target wasm32-unknown-unknown -p teamcraft-core --features service-worker,test-support
           --test web --test web_service_worker
 
   # WebRTC audio processing (echo cancellation) is opt-in at build time, see
@@ -384,6 +384,7 @@ jobs:
           key: vendored-and-fuzz
           workspaces: |
             crates/vendor/davey
+            crates/vendor/openmls_memory_storage
             fuzz
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-bin: "false"
@@ -391,6 +392,8 @@ jobs:
         run: cargo test --manifest-path crates/vendor/davey/Cargo.toml
       - name: Davey clippy
         run: cargo clippy --manifest-path crates/vendor/davey/Cargo.toml --all-targets -- -D warnings
+      - name: openmls_memory_storage tests
+        run: cargo test --manifest-path crates/vendor/openmls_memory_storage/Cargo.toml --features test-utils
       - name: Fuzz targets build (lockfile up to date)
         run: cargo build --manifest-path fuzz/Cargo.toml --bins --locked
 

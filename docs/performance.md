@@ -1184,16 +1184,53 @@ MLS_STORAGE_CHANNELS=300 cargo test -p teamcraft-core --all-features --test suit
   they grow again.
 - More, smaller records: a group's state is about a dozen entries (tree, context, secrets, leaf
   keys). Opening a store reads them all, as it read the one record; the bytes are the same.
-- What a save costs besides the writes: the client compares the provider storage with what it
-  wrote last (a copy of the state in memory, compared byte for byte: no hashing, and no read of the
-  store). With the state of 300 groups (2.7 MB in 3,600 entries) a save of one changed entry takes
-  0.3 ms in a release build (`mls_storage::tests::measure_save_of_one_change`). The copy costs as
-  much memory as the state.
+- What a save cost besides the writes until #840: the client compared the provider storage with what
+  it wrote last, a copy of the state in memory, so 0.3 ms per save with the state of 300 groups in a
+  release build, and as much memory again as the state. See "What a save costs" below.
 - The catch-up time still grows faster than the number of groups (memory store, debug build: 1.3 s
-  for 100, 8 s for 300). The comparison is one part of it (unoptimised in a debug build); the rest
+  for 100, 8 s for 300). The comparison was one part of it (unoptimised in a debug build); the rest
   was not taken apart here.
 - The browser's batches stay small now, so the extra wait for a batch over 1 MiB (#326) rarely
   applies; the large web workspace (`perf.rs`, `PERF_SCALE=large`) is still to be measured with it.
+
+##### What a save costs (issue #840)
+
+The provider storage now notes the keys it changes (crates/vendor/openmls_memory_storage/VENDORED.md),
+so a save writes those: no copy of the state to compare with, and no comparison. (A sealed store's cache
+stays, bounded by `SealedStoreLimits`: tiny in the extension, which is what the table measures.) Every save also bumps a generation
+record, so another process's commit that left the MLS state alone (the iOS notification extension's
+push bookkeeping, on every app resume) costs no rewrite. Debug build, local machine, November 2026,
+the state of 300 groups (2.7 MB in 3,600 entries); "before" is the same test on c47464d1:
+
+```sh
+cargo test -p teamcraft-core --all-features --lib -- --ignored --nocapture measure_save_of_one
+cargo test -p teamcraft-core --all-features --test suite -- --ignored --nocapture measure_save_after
+cargo test -p teamcraft-core --all-features --test store_memory -- --ignored --nocapture measure_mls
+MLS_STORAGE_CHANNELS=100 cargo test -p teamcraft-core --all-features --test suite -- \
+  --ignored --nocapture measure_catch_up
+```
+
+| What                                                        | Before    | After     |
+|-------------------------------------------------------------|-----------|-----------|
+| A save of one changed entry, memory store                   | 1.585 ms  | 4.2 µs    |
+| First save after another process's commit: bytes of entries | 2,742,997 | 27        |
+| First save after another process's commit: time, sealed     | 2.69 s    | 25.7 ms   |
+| Loading the state in the extension's store: peak            | 7.09 MB   | 4.37 MB   |
+| Loading the state in the extension's store: kept            | 7.09 MB   | 3.97 MB   |
+| Catch-up of 100 groups: bytes of MLS state written          | 1,112,708 | 1,111,240 |
+| Catch-up of 100 groups: records of MLS state written        | 1,203     | 1,404     |
+| Catch-up of 100 groups: time, memory store                  | 12.14 s   | 12.17 s   |
+
+- **A save no longer grows with the state.** Issue #840 projected about 0.5 s of comparing over a
+  catch-up of 300 groups, 6 s for 1,000 and a minute for 3,000 in a release build. That work is gone;
+  it was a small part of a catch-up of 100 groups in a debug build, which took as long as before on
+  this (busy) machine.
+- **One more small record per save:** the generation, 8 bytes sealed, which is where the catch-up's
+  201 extra records come from. They were offset in bytes by a value written again unchanged, which
+  no longer counts as a change.
+- **The extension** (about 24 MB) holds the state once instead of twice, beside its minimal cache. It no longer moves the record
+  of a version before 1.0.9 itself, which was estimated at 5 to 6 times the state at the worst
+  moment. No release build was measured here; the ratios of a save are what to take from the table.
 
 ### Desktop on Linux: idle (issue #399)
 

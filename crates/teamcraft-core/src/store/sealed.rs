@@ -724,14 +724,11 @@ impl<B: RecordBackend> SealedStore<B> {
     write: &mut impl FnMut(&mut State<B>) -> Result<T, StoreError>,
   ) -> Result<T, StoreError> {
     self.begin_writes()?;
-    let result = write(&mut self.lock());
-    if result.is_err() {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&mut self.lock())));
+    if matches!(result, Ok(Err(_))) {
       self.backend.fail_group();
     }
-    let ended = self.end_writes();
-    let value = result?;
-    ended?;
-    Ok(value)
+    super::end_group(self, result)
   }
 
   /// Runs `read` on one snapshot of the records, after dropping the caches if the disk moved under
@@ -1110,6 +1107,40 @@ impl<B: RecordBackend> SealedStore<B> {
     let keys = Arc::clone(&self.keys);
     let seal = Box::new(move || pending.seal(&keys, &id));
     self.backend.put_lazy(&id, size_hint, seal)
+  }
+
+  /// Writes an entry whose seal fails until `is_sealable` is set: nothing else makes a seal fail, so
+  /// a browser test can't reach that path otherwise. Not in the store's directory.
+  #[cfg(feature = "test-support")]
+  pub fn put_sealing_when(
+    &self,
+    table: Table,
+    key: &str,
+    value: &[u8],
+    is_sealable: std::rc::Rc<std::cell::Cell<bool>>,
+  ) -> Result<(), StoreError> {
+    let id = self.entry_id(table.name(), key);
+    let pending = PendingEntry {
+      table: table.name().to_string(),
+      key: key.to_string(),
+      value: Zeroizing::new(value.to_vec()),
+    };
+    let size_hint = pending.size_hint();
+    let keys = Arc::clone(&self.keys);
+    let seal = Box::new(move || {
+      if is_sealable.get() {
+        pending.seal(&keys, &id)
+      } else {
+        Err(StoreError::Database("made to fail".into()))
+      }
+    });
+    self.backend.put_lazy(&id, size_hint, seal)
+  }
+
+  /// Whether a thread holds a group of writes open.
+  #[cfg(all(test, feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+  pub(super) fn has_group_owner(&self) -> bool {
+    self.lock().maybe_group_owner.is_some()
   }
 
   /// Writes the catalog nodes the ending group changed.
@@ -1656,21 +1687,33 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     let mut state = self.lock();
     state.depth = state.depth.saturating_sub(1);
     let is_group_over = state.depth == 0;
+    let mut maybe_panic = None;
     if state.depth == 0
       && (state.message_nodes.has_dirty()
         || state.directory_nodes.has_dirty()
         || state.feed_nodes.has_dirty()
         || state.relation_nodes.has_dirty())
-      && let Err(error) = self.flush_catalog(&mut state)
     {
-      tracing::error!(%error, "could not write the local store's catalog");
-      self.backend.fail_group();
+      // A panic here must still end the group: left open, every later group would nest in it, report
+      // success and never commit. It fails the group, and goes on once the group has ended.
+      let flushed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.flush_catalog(&mut state)));
+      match flushed {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => {
+          tracing::error!(%error, "could not write the local store's catalog");
+          self.backend.fail_group();
+        },
+        Err(panic) => {
+          self.backend.fail_group();
+          maybe_panic = Some(panic);
+        },
+      }
     }
     let ended = self.backend.end_writes();
     if state.depth == 0 {
       // What moved here is a rollback or another process: this one's commits don't count.
       let maybe_tally = self.backend.write_tally();
-      if ended.is_err() || maybe_tally != state.maybe_tally {
+      if ended.is_err() || maybe_panic.is_some() || maybe_tally != state.maybe_tally {
         state.forget_all();
       }
       state.maybe_tally = maybe_tally;
@@ -1693,7 +1736,14 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       self.lock().maybe_group_owner = None;
       self.group_ended.notify_all();
     }
+    if let Some(panic) = maybe_panic {
+      std::panic::resume_unwind(panic);
+    }
     ended
+  }
+
+  fn fail_writes(&self) {
+    self.backend.fail_group();
   }
 
   fn write_soon(&self) {
@@ -1832,6 +1882,36 @@ mod tests {
 
   const CONVERSATIONS: i64 = 3;
   const MESSAGES_PER_CONVERSATION: i64 = 1_500;
+
+  /// Issue #840 asked whether a failed seal fails the group: [`RecordBackend::put_lazy`] seals
+  /// outside the backend's write, so nothing in the backend notices. The store's own group does.
+  #[test]
+  fn a_failed_seal_fails_the_group_it_is_in() {
+    let records = Records::default();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+    records.put_trouble.set(PutTrouble::SealFails);
+    assert!(store.put(Table::Users, "9", b"value").is_err());
+    assert_eq!(records.failed_groups.get(), 1);
+  }
+
+  /// A panic inside one of the store's own groups ends that group too: left open, every later write
+  /// would land in a group that never commits.
+  #[test]
+  fn a_panic_inside_a_write_ends_its_group_failed() {
+    let records = Records::default();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+    records.put_trouble.set(PutTrouble::Panics);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _ = store.put(Table::Users, "9", b"value");
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(records.failed_groups.get(), 1);
+    assert_eq!(store.lock().depth, 0, "the group ended");
+    store.put(Table::Users, "9", b"value").unwrap();
+    assert_eq!(store.get(Table::Users, "9").unwrap(), Some(b"value".to_vec()));
+  }
 
   #[test]
   fn sealed_store_behaves_like_a_store_and_reopens() {
@@ -2572,12 +2652,35 @@ mod tests {
   struct Records {
     map: Mutex<BTreeMap<LookupId, Vec<u8>>>,
     reads: Cell<usize>,
+    /// How the next lazy put goes wrong, if it does.
+    put_trouble: Cell<PutTrouble>,
+    failed_groups: Cell<usize>,
+  }
+
+  #[derive(Clone, Copy, Default)]
+  enum PutTrouble {
+    #[default]
+    None,
+    SealFails,
+    Panics,
   }
 
   impl RecordBackend for &Records {
     fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
       self.map.lock().unwrap().insert(*id, sealed.to_vec());
       Ok(())
+    }
+
+    fn put_lazy(&self, id: &LookupId, _size_hint: usize, seal: LazySeal) -> Result<(), StoreError> {
+      match self.put_trouble.take() {
+        PutTrouble::None => self.put_record(id, &seal()?),
+        PutTrouble::SealFails => Err(StoreError::Database("made to fail".into())),
+        PutTrouble::Panics => panic!("made to panic"),
+      }
+    }
+
+    fn fail_group(&self) {
+      self.failed_groups.set(self.failed_groups.get() + 1);
     }
 
     fn delete_record(&self, id: &LookupId) -> Result<(), StoreError> {

@@ -12,16 +12,18 @@
 //! costs no encryption either, and a batch holding a large record waits [`LARGE_BATCH_EXTRA`]
 //! longer to take the next rewrite of it along (issue #326: the MLS state was one record of
 //! megabytes, sealed after every group a catch-up joined; since #424 it is one record per entry).
-//! IndexedDB runs read-write transactions on the same object store in the order they were created,
-//! so the database follows the cache in order.
-//! [`IndexedDbStore::flush`] waits until everything written so far is committed.
+//! One batch runs at a time (`write_queue`): the next is issued when it ended, so the database
+//! follows the cache in order, also when a batch aborts. [`IndexedDbStore::flush`] waits until
+//! everything written so far is committed.
 //!
-//! Durability: a batch is one transaction, so what survives a page that dies is always a prefix of
-//! the writes in their order (never a cursor or MLS state without the messages written before it).
+//! Durability: a batch is one transaction, and a later one never commits without an earlier one that
+//! failed, so what survives a page that dies is always a prefix of the writes in their order (never
+//! a cursor or MLS state without the messages written before it; issue #840).
 //! What must not be lost is made durable before it is confirmed: the web core's API waits for a
 //! flush before every request that changes server state, and the page issues the queue at once when
-//! it is hidden, frozen or unloaded ([`IndexedDbStore::write_now`]). A write lost anyway is one the
-//! server never heard of; the next start catches up from the last persisted cursor.
+//! it is hidden, frozen or unloaded ([`IndexedDbStore::write_now`]; behind a running batch it goes
+//! when that ended, if the page lives that long). A write lost anyway is one the server never heard
+//! of; the next start catches up from the last persisted cursor.
 //!
 //! A group of writes ([`crate::store::LocalStore::begin_writes`]) is never split between two
 //! transactions: it runs synchronously, so the batch timer and the page's lifecycle events can't
@@ -139,15 +141,26 @@ impl SealedStore<IndexedDbRecords> {
     let inner = &self.backend().inner;
     inner.writes.borrow_mut().retry_failed();
     inner.issue_queued();
-    if !inner.writes.borrow().is_closed {
-      // A read-only transaction over the same store starts only after earlier read-write ones ended.
+    let maybe_due = inner.writes.borrow().last_batch_due();
+    while !inner.writes.borrow().is_closed {
+      if inner.writes.borrow().group_depth > 0 {
+        // Groups are synchronous: only a panic leaves one open, and its writes stay out for good.
+        return Err(StoreError::GroupFailed("a group of writes never ended".into()));
+      }
+      // A read-only transaction over the same store starts only after earlier read-write ones ended,
+      // and their events fired before it finishes, which issues the next batch.
       let transaction = inner
         .database
         .transaction_with_str(RECORDS)
         .map_err(|error| idb::js_error("flush", &error))?;
       idb::transaction_done(&transaction).await?;
+      if inner.writes.borrow().is_past(maybe_due) {
+        break;
+      }
+      // Written meanwhile, with nothing running: no need to wait for the batch timer.
+      inner.issue_queued();
     }
-    inner.writes.borrow_mut().failure()
+    inner.writes.borrow().failure()
   }
 
   /// Waits until the catalog build's last batch is committed: the build's backpressure, and the
@@ -281,53 +294,8 @@ impl IndexedDbRecords {
   }
 
   fn new(database: IdbDatabase, records: BTreeMap<LookupId, Vec<u8>>) -> Self {
-    let writes = Rc::new(RefCell::new(Writes::default()));
-    let on_complete = Closure::<dyn FnMut(web_sys::Event)>::new({
-      let writes = writes.clone();
-      move |event: web_sys::Event| {
-        if let Some(batch) = batch_of(&event) {
-          writes.borrow_mut().committed(batch);
-        }
-      }
-    });
-    let on_abort = Closure::<dyn FnMut(web_sys::Event)>::new({
-      let writes = writes.clone();
-      move |event: web_sys::Event| {
-        let failure = event
-          .target()
-          .and_then(|target| target.dyn_into::<IdbTransaction>().ok())
-          .and_then(|transaction| transaction.error())
-          .map_or(WriteFailure::Other, |error| classify(&error.name()));
-        tracing::error!(
-          quota = matches!(failure, WriteFailure::QuotaExceeded),
-          "an IndexedDB write failed"
-        );
-        if let Some(batch) = batch_of(&event) {
-          writes.borrow_mut().aborted(batch, failure);
-        }
-      }
-    });
-    // e2ee.md §9.4: a newer version of the app (another tab, the service worker) upgrades the
-    // database. Holding it open would block that page; this page stops writing and asks for a reload.
-    let on_version_change = Closure::<dyn FnMut(web_sys::Event)>::new({
-      let writes = writes.clone();
-      let database = database.clone();
-      move |_| {
-        tracing::warn!("a newer version needs the local database; closing it");
-        database.close();
-        writes.borrow_mut().close();
-      }
-    });
-    database.set_onversionchange(Some(on_version_change.as_ref().unchecked_ref()));
     Self {
-      inner: Rc::new(Inner {
-        database,
-        records: RefCell::new(records),
-        writes,
-        on_complete,
-        on_abort,
-        _on_version_change: on_version_change,
-      }),
+      inner: Rc::new_cyclic(|inner| Inner::new(inner, database, records)),
     }
   }
 
@@ -352,20 +320,73 @@ impl IndexedDbRecords {
 }
 
 impl Inner {
-  /// Issues every queued write in one transaction. A write that can't even start counts as failed.
-  fn issue_queued(&self) {
-    // Writes that failed go with every batch: a later write never commits without them, so what
-    // is on disk stays a prefix of what was written.
-    let keys = {
-      let mut writes = self.writes.borrow_mut();
-      if writes.has_queued() {
-        writes.retry_failed();
+  /// `own`: this `Inner` itself, for the handlers that issue the next batch when one ended.
+  fn new(own: &Weak<Inner>, database: IdbDatabase, records: BTreeMap<LookupId, Vec<u8>>) -> Self {
+    let writes = Rc::new(RefCell::new(Writes::default()));
+    let on_complete = Closure::<dyn FnMut(web_sys::Event)>::new({
+      let writes = writes.clone();
+      let own = own.clone();
+      move |event: web_sys::Event| {
+        if let Some(batch) = batch_of(&event) {
+          writes.borrow_mut().committed(batch);
+        }
+        if let Some(inner) = own.upgrade() {
+          inner.issue_queued();
+        }
       }
-      writes.take_queued()
-    };
-    if keys.is_empty() {
-      return;
+    });
+    let on_abort = Closure::<dyn FnMut(web_sys::Event)>::new({
+      let writes = writes.clone();
+      let own = own.clone();
+      move |event: web_sys::Event| {
+        let failure = event
+          .target()
+          .and_then(|target| target.dyn_into::<IdbTransaction>().ok())
+          .and_then(|transaction| transaction.error())
+          .map_or(WriteFailure::Other, |error| classify(&error.name()));
+        tracing::error!(
+          quota = matches!(failure, WriteFailure::QuotaExceeded),
+          "an IndexedDB write failed"
+        );
+        if let Some(batch) = batch_of(&event) {
+          writes.borrow_mut().aborted(batch, failure);
+        }
+        // What waits for this batch goes now, with this batch's writes. If nothing waits they stay
+        // failed until the next write or flush, so a full disk doesn't retry in a loop.
+        if let Some(inner) = own.upgrade() {
+          inner.issue_queued();
+        }
+      }
+    });
+    // e2ee.md §9.4: a newer version of the app (another tab, the service worker) upgrades the
+    // database. Holding it open would block that page; this page stops writing and asks for a reload.
+    let on_version_change = Closure::<dyn FnMut(web_sys::Event)>::new({
+      let writes = writes.clone();
+      let database = database.clone();
+      move |_| {
+        tracing::warn!("a newer version needs the local database; closing it");
+        database.close();
+        writes.borrow_mut().close();
+      }
+    });
+    database.set_onversionchange(Some(on_version_change.as_ref().unchecked_ref()));
+    Self {
+      database,
+      records: RefCell::new(records),
+      writes,
+      on_complete,
+      on_abort,
+      _on_version_change: on_version_change,
     }
+  }
+
+  /// Issues every queued write in one transaction, unless a batch runs: then this happens when it
+  /// ended. A write that can't even start counts as failed. What may go out, and what fails a batch,
+  /// is `Writes`'s to decide (and tested natively); this only talks to the browser.
+  fn issue_queued(&self) {
+    let Some(keys) = self.writes.borrow_mut().take_next_batch() else {
+      return;
+    };
     let (transaction, records) = match self.transaction() {
       Ok(opened) => opened,
       Err(failure) => {
@@ -376,57 +397,39 @@ impl Inner {
         return;
       },
     };
-    let mut writes = self.writes.borrow_mut();
-    let mut carried = Vec::with_capacity(keys.len());
-    let mut maybe_refused = None;
-    for key in &keys {
+    let filled = self.writes.borrow_mut().fill_batch(&keys, |key, issue| {
       let record = JsValue::from_str(key);
       let maybe_id = parse_id(key);
-      let (issued, sequence) = match writes.issue(key) {
-        Some(Issue::Put { sealed, sequence }) => {
+      let sent = match issue {
+        Issue::Put { sealed, .. } => {
           if let Some(id) = maybe_id {
             self.records.borrow_mut().insert(id, sealed.to_vec());
           }
-          (
-            records.put_with_key(&js_sys::Uint8Array::from(sealed), &record),
-            sequence,
-          )
+          records.put_with_key(&js_sys::Uint8Array::from(*sealed), &record)
         },
-        Some(Issue::Delete { sequence }) => {
+        Issue::Delete { .. } => {
           if let Some(id) = maybe_id {
             self.records.borrow_mut().remove(&id);
           }
-          (records.delete(&record), sequence)
+          records.delete(&record)
         },
-        // Replaced, or dropped for a failed seal.
-        None => continue,
       };
-      match issued {
-        Ok(_) => {
-          writes.issued(key);
-          carried.push((key.clone(), sequence));
-        },
-        // Refused at once (a full disk can refuse at once): nothing of the batch may commit.
-        Err(error) => {
-          maybe_refused = Some(failure_of(&error));
-          break;
-        },
-      }
+      sent.map(|_| ()).map_err(|error| failure_of(&error))
+    });
+    match filled {
+      Ok(batch) => {
+        // The events fire after this returns, so the handlers are in time. Setting a property on a
+        // fresh transaction object can't fail.
+        let _ = js_sys::Reflect::set(&transaction, &BATCH_PROPERTY.into(), &batch.into());
+        transaction.set_oncomplete(Some(self.on_complete.as_ref().unchecked_ref()));
+        transaction.set_onabort(Some(self.on_abort.as_ref().unchecked_ref()));
+      },
+      // Aborted before it carried a batch number: the abort handler leaves it alone. Deliberately
+      // ignored: a transaction that can't abort any more was already aborted by the browser.
+      Err(_) => {
+        let _ = transaction.abort();
+      },
     }
-    if let Some(failure) = maybe_refused {
-      // Aborted before it carried a batch number: the abort handler leaves it alone.
-      let _ = transaction.abort();
-      for key in &keys {
-        writes.fail_open(key, failure);
-      }
-      return;
-    }
-    let batch = writes.start_batch(carried);
-    // The events fire after this returns, so the handlers are in time. Setting a property on a
-    // fresh transaction object can't fail.
-    let _ = js_sys::Reflect::set(&transaction, &BATCH_PROPERTY.into(), &batch.into());
-    transaction.set_oncomplete(Some(self.on_complete.as_ref().unchecked_ref()));
-    transaction.set_onabort(Some(self.on_abort.as_ref().unchecked_ref()));
   }
 
   fn transaction(&self) -> Result<(IdbTransaction, IdbObjectStore), WriteFailure> {

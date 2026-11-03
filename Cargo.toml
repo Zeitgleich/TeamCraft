@@ -114,8 +114,11 @@ figment = { version = "0.10", features = ["toml", "env"] }
 # without the libcrux advisories of the openmls 0.8 stack. See crates/vendor/davey/VENDORED.md.
 # wtransport 0.7.2 with a client Endpoint::rebind, so calls survive network changes (ARCHITECTURE.md
 # §6.5). See crates/vendor/wtransport/VENDORED.md.
+# openmls_memory_storage 0.6.0 notes the keys it changes, so a save of the MLS state writes them without
+# comparing the whole state (#840). See crates/vendor/openmls_memory_storage/VENDORED.md.
 [patch.crates-io]
 davey = { path = "crates/vendor/davey" }
+openmls_memory_storage = { path = "crates/vendor/openmls_memory_storage" }
 wtransport = { path = "crates/vendor/wtransport" }
 
 # Keep target/ small: several worktrees build in parallel on one disk. Line tables are enough
