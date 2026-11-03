@@ -132,6 +132,17 @@ pub async fn link_device_on_clock(
   client_settings: ClientSettings,
   device_clock: Box<dyn teamcraft_core::clock::Clock>,
 ) -> TestClient {
+  link_device_with_store(owner, client_settings, device_clock)
+    .await
+    .0
+}
+
+/// [`link_device_on_clock`], with the device's store, for a device that restarts in the test.
+pub async fn link_device_with_store(
+  owner: &mut Peer,
+  client_settings: ClientSettings,
+  device_clock: Box<dyn teamcraft_core::clock::Clock>,
+) -> (TestClient, Arc<MemoryStore>) {
   let api = owner.api.clone();
   let offer = teamcraft_core::LinkOffer::generate();
   let code = offer.to_code();
@@ -150,10 +161,17 @@ pub async fn link_device_on_clock(
   .await;
   approved.unwrap();
   let link_options = linked_options(received.unwrap());
-  PendingEnrollment::new()
-    .complete(api, new_store, device_clock, client_settings, link_options)
+  let client = PendingEnrollment::new()
+    .complete(
+      api,
+      new_store.clone(),
+      device_clock,
+      client_settings,
+      link_options,
+    )
     .await
-    .unwrap()
+    .unwrap();
+  (client, new_store)
 }
 
 /// A UI adapter over a peer's store, as the desktop shell creates it.

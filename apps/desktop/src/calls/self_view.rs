@@ -11,15 +11,22 @@
 //! the self view's own scales and encodes it, so the encoder never waits. Frames that arrive while
 //! the previous one is still being encoded are dropped: each image stands alone. Nothing is copied
 //! or encoded while nobody watches (robustness.md, "Performance and resources").
+//!
+//! The preview of the own screen share (#1175) goes the same way, from its own [`SelfView`]: JPEG
+//! images, so it needs neither WebCodecs nor a second decoder in the webview, which matters where
+//! WebKitGTK aborts on those (#824). A small preview of a capture that may be 4K: at most
+//! [`SCREEN_PREVIEW_MAX_SIZE`] and [`SCREEN_PREVIEW_INTERVAL`], whatever the preview's size. Its
+//! frames come from the encoder's last picture ([`SelfView::picture_tap`]), because a still screen
+//! delivers none for a viewer who looks at it only now.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use teamcraft_media::video::{VideoFrame, VideoResolution};
 use teamcraft_media::video_jpeg::encode_jpeg;
-use teamcraft_media::video_pipeline::FrameFilter;
+use teamcraft_media::video_pipeline::{FrameFilter, PictureTap};
 use teamcraft_proto::MediaStreamId;
 use tracing::{debug, warn};
 
@@ -40,13 +47,36 @@ const JPEG_QUALITY: u8 = 85;
 /// The stream id in the self view's messages: the own camera has no track id of its own here.
 const SELF_VIEW_STREAM: MediaStreamId = MediaStreamId(0);
 
-/// Who watches the own camera, shared by the camera's frame filter and the commands.
-#[derive(Clone, Default)]
+/// A share's preview changes when the screen does: five images per second show that it runs, at a
+/// third of the self view's rate.
+const SCREEN_PREVIEW_INTERVAL: Duration = Duration::from_millis(200);
+/// Twice the largest size the preview is drawn at (`.share-preview`, 320 CSS pixels wide), for
+/// displays that scale by two.
+const SCREEN_PREVIEW_MAX_SIZE: VideoResolution = VideoResolution {
+  width: 640,
+  height: 400,
+};
+/// Enough to recognise the window: nobody reads text in a preview this small.
+const SCREEN_PREVIEW_JPEG_QUALITY: u8 = 70;
+
+/// Who watches a capture of this device (the own camera, the own screen share), shared by the
+/// capture's pipeline and the commands.
+#[derive(Clone)]
 pub(crate) struct SelfView {
+  limits: ImageLimits,
   maybe_viewer: Arc<Mutex<Option<Viewer>>>,
+  /// Counts the watchers so far: a new one gets the current picture even if it is an old one.
+  watchers: Arc<AtomicU64>,
   /// The size the webview draws the self view in, in device pixels ([`pack_size`]); 0 while it
   /// hasn't said.
   drawn_size: Arc<AtomicU32>,
+}
+
+/// How large and how good the images of a [`SelfView`] are.
+#[derive(Clone, Copy)]
+struct ImageLimits {
+  max_size: VideoResolution,
+  jpeg_quality: u8,
 }
 
 /// The encoding thread of one watcher; it ends when this is dropped or an image can't be
@@ -56,8 +86,35 @@ struct Viewer {
   frames: std_mpsc::SyncSender<VideoFrame>,
 }
 
+impl Default for SelfView {
+  /// The own camera's.
+  fn default() -> Self {
+    Self::with_limits(ImageLimits {
+      max_size: MAX_SIZE,
+      jpeg_quality: JPEG_QUALITY,
+    })
+  }
+}
+
 impl SelfView {
-  /// Sends the own camera to `send` (one message per image, format of `video::video_message`)
+  /// The preview of the own screen share.
+  pub(crate) fn for_screen() -> Self {
+    Self::with_limits(ImageLimits {
+      max_size: SCREEN_PREVIEW_MAX_SIZE,
+      jpeg_quality: SCREEN_PREVIEW_JPEG_QUALITY,
+    })
+  }
+
+  fn with_limits(limits: ImageLimits) -> Self {
+    Self {
+      limits,
+      maybe_viewer: Arc::default(),
+      watchers: Arc::default(),
+      drawn_size: Arc::default(),
+    }
+  }
+
+  /// Sends the capture to `send` (one message per image, format of `video::video_message`)
   /// until [`Self::unwatch`], another watcher, or `send` answering that it could not deliver.
   pub(crate) fn watch(&self, channel: ChannelId, send: impl Fn(Vec<u8>) -> bool + Send + 'static) {
     // One frame in the queue: the encoder thread never blocks on a busy self view.
@@ -65,10 +122,11 @@ impl SelfView {
     // A new view says its size with its first images; until then the whole capture.
     self.drawn_size.store(0, Ordering::Relaxed);
     let drawn_size = Arc::clone(&self.drawn_size);
+    let limits = self.limits;
     let spawned = std::thread::Builder::new()
       .name("teamcraft-self-view".into())
       .spawn(move || {
-        encode_images(&queue, &drawn_size, &send);
+        encode_images(&queue, limits, &drawn_size, &send);
         // The queue first: once `send` is gone (what a test waits for), offers already fail.
         drop(queue);
         drop(send);
@@ -78,6 +136,7 @@ impl SelfView {
       return;
     }
     *self.lock() = Some(Viewer { channel, frames });
+    self.watchers.fetch_add(1, Ordering::Relaxed);
   }
 
   /// Stops the watcher of `channel`; a newer watcher (another channel) stays.
@@ -119,6 +178,20 @@ impl SelfView {
     })
   }
 
+  /// A screen share's look at the picture it sent last: a copy for the preview when one is due, and
+  /// no copy at all while nobody watches.
+  pub(crate) fn picture_tap(&self) -> PictureTap {
+    let self_view = self.clone();
+    let mut pace = PreviewPace::default();
+    Box::new(move |frame| {
+      let watchers = self_view.watchers.load(Ordering::Relaxed);
+      let now = Instant::now();
+      if pace.is_due(frame.timestamp_us(), watchers, now) && self_view.offer(frame) {
+        pace.offered(frame.timestamp_us(), watchers, now);
+      }
+    })
+  }
+
   /// Hands a copy of `frame` to the watcher, if there is one and it isn't busy.
   fn offer(&self, frame: &VideoFrame) -> bool {
     let mut maybe_viewer = self.lock();
@@ -141,21 +214,55 @@ impl SelfView {
   }
 }
 
+/// When a look at the last picture ([`SelfView::picture_tap`]) gives the preview a new image: when
+/// the picture changed and the last image is old enough, or at once for a new watcher.
+#[derive(Debug, Default)]
+struct PreviewPace {
+  maybe_last: Option<OfferedPicture>,
+}
+
+#[derive(Debug)]
+struct OfferedPicture {
+  timestamp_us: u64,
+  watchers: u64,
+  at: Instant,
+}
+
+impl PreviewPace {
+  fn is_due(&self, timestamp_us: u64, watchers: u64, now: Instant) -> bool {
+    let Some(last) = &self.maybe_last else {
+      return true;
+    };
+    last.watchers != watchers
+      || (last.timestamp_us != timestamp_us
+        && now.saturating_duration_since(last.at) >= SCREEN_PREVIEW_INTERVAL)
+  }
+
+  fn offered(&mut self, timestamp_us: u64, watchers: u64, at: Instant) {
+    self.maybe_last = Some(OfferedPicture {
+      timestamp_us,
+      watchers,
+      at,
+    });
+  }
+}
+
 fn encode_images(
   queue: &std_mpsc::Receiver<VideoFrame>,
+  limits: ImageLimits,
   drawn_size: &AtomicU32,
   send: &dyn Fn(Vec<u8>) -> bool,
 ) {
   while let Ok(frame) = queue.recv() {
     let maybe_drawn = unpack_size(drawn_size.load(Ordering::Relaxed));
-    let small = match frame.scaled(image_size(frame.resolution(), maybe_drawn)) {
+    let small = match frame.scaled(image_size(frame.resolution(), limits.max_size, maybe_drawn)) {
       Ok(small) => small,
       Err(error) => {
         debug!(%error, "self view frame not scaled");
         continue;
       },
     };
-    match encode_jpeg(&small, JPEG_QUALITY) {
+    match encode_jpeg(&small, limits.jpeg_quality) {
       Ok(jpeg) => {
         if !send(jpeg_message(SELF_VIEW_STREAM, frame.timestamp_us(), &jpeg)) {
           debug!("the webview takes no more self view images");
@@ -169,9 +276,13 @@ fn encode_images(
 
 /// The size of the image for a capture of `source` drawn in `maybe_drawn` device pixels: scaled
 /// down just enough to still cover the drawn area (the tile crops like `object-fit: cover`), never
-/// up, and within [`MAX_SIZE`]. Even sizes, as I420 needs.
-fn image_size(source: VideoResolution, maybe_drawn: Option<VideoResolution>) -> VideoResolution {
-  let limited = fit_within(source, MAX_SIZE);
+/// up, and within `max_size`. Even sizes, as I420 needs.
+fn image_size(
+  source: VideoResolution,
+  max_size: VideoResolution,
+  maybe_drawn: Option<VideoResolution>,
+) -> VideoResolution {
+  let limited = fit_within(source, max_size);
   let Some(drawn) = maybe_drawn else {
     return limited;
   };
@@ -238,35 +349,35 @@ mod tests {
   #[test]
   fn without_a_drawn_size_the_whole_capture_goes() {
     // #937: every tile got 640x360.
-    assert_eq!(image_size(HD, None), HD);
-    assert_eq!(image_size(size(640, 480), None), size(640, 480));
+    assert_eq!(image_size(HD, MAX_SIZE, None), HD);
+    assert_eq!(image_size(size(640, 480), MAX_SIZE, None), size(640, 480));
     // A camera that only offers 4K stays within the cap, with its aspect ratio.
-    assert_eq!(image_size(size(3840, 2160), None), MAX_SIZE);
-    assert_eq!(image_size(size(2160, 3840), None), size(606, 1080));
+    assert_eq!(image_size(size(3840, 2160), MAX_SIZE, None), MAX_SIZE);
+    assert_eq!(image_size(size(2160, 3840), MAX_SIZE, None), size(606, 1080));
   }
 
   #[test]
   fn a_tile_larger_than_the_capture_gets_the_capture_unscaled() {
     // The pre-join tile on a Retina display: 760x475 CSS pixels at 2x.
-    assert_eq!(image_size(HD, Some(size(1520, 950))), HD);
+    assert_eq!(image_size(HD, MAX_SIZE, Some(size(1520, 950))), HD);
     // As tall or as wide as the capture: cropped on the other side, so nothing to spare.
-    assert_eq!(image_size(HD, Some(size(400, 720))), HD);
-    assert_eq!(image_size(HD, Some(size(1280, 300))), HD);
+    assert_eq!(image_size(HD, MAX_SIZE, Some(size(400, 720))), HD);
+    assert_eq!(image_size(HD, MAX_SIZE, Some(size(1280, 300))), HD);
   }
 
   #[test]
   fn a_smaller_tile_gets_an_image_that_just_covers_it() {
     // A 16:10 filmstrip tile at 2x: the height decides, the tile crops the sides.
-    assert_eq!(image_size(HD, Some(size(440, 276))), size(492, 276));
+    assert_eq!(image_size(HD, MAX_SIZE, Some(size(440, 276))), size(492, 276));
     // The same tile at 1x.
-    assert_eq!(image_size(HD, Some(size(220, 138))), size(246, 138));
+    assert_eq!(image_size(HD, MAX_SIZE, Some(size(220, 138))), size(246, 138));
     // A tile of the capture's own shape gets exactly its size.
-    assert_eq!(image_size(HD, Some(size(960, 540))), size(960, 540));
+    assert_eq!(image_size(HD, MAX_SIZE, Some(size(960, 540))), size(960, 540));
     // A wide strip: the width decides.
-    assert_eq!(image_size(HD, Some(size(1000, 100))), size(1000, 564));
+    assert_eq!(image_size(HD, MAX_SIZE, Some(size(1000, 100))), size(1000, 564));
     // Tiny and odd sizes stay even and at least 2 pixels.
-    assert_eq!(image_size(HD, Some(size(1, 1))), size(2, 2));
-    assert_eq!(image_size(HD, Some(size(333, 187))), size(334, 188));
+    assert_eq!(image_size(HD, MAX_SIZE, Some(size(1, 1))), size(2, 2));
+    assert_eq!(image_size(HD, MAX_SIZE, Some(size(333, 187))), size(334, 188));
   }
 
   #[test]
@@ -276,13 +387,65 @@ mod tests {
       for width in (1..=2000).step_by(37) {
         for height in (1..=1600).step_by(41) {
           let drawn = size(width, height);
-          let image = image_size(source, Some(drawn));
+          let image = image_size(source, MAX_SIZE, Some(drawn));
           assert!(image.width <= limited.width && image.height <= limited.height);
           assert!(image.width.is_multiple_of(2) && image.height.is_multiple_of(2));
           let is_covered = image == limited || (image.width >= drawn.width && image.height >= drawn.height);
           assert!(is_covered, "{source:?} drawn at {drawn:?} gave {image:?}");
         }
       }
+    }
+  }
+
+  mod screen_preview {
+    use super::*;
+
+    #[test]
+    fn a_new_picture_waits_for_the_interval() {
+      let start = Instant::now();
+      let mut pace = PreviewPace::default();
+      assert!(pace.is_due(1, 1, start), "the first picture at once");
+      pace.offered(1, 1, start);
+      let soon = start + SCREEN_PREVIEW_INTERVAL - Duration::from_millis(1);
+      assert!(!pace.is_due(2, 1, soon));
+      assert!(pace.is_due(2, 1, start + SCREEN_PREVIEW_INTERVAL));
+    }
+
+    #[test]
+    fn a_still_picture_is_not_sent_again_unless_someone_new_watches() {
+      let start = Instant::now();
+      let mut pace = PreviewPace::default();
+      pace.offered(1, 1, start);
+      let later = start + SCREEN_PREVIEW_INTERVAL * 100;
+      assert!(!pace.is_due(1, 1, later));
+      assert!(pace.is_due(1, 2, later));
+    }
+
+    #[test]
+    fn a_new_watcher_gets_the_picture_of_a_still_screen_once() {
+      let self_view = SelfView::for_screen();
+      let mut tap = self_view.picture_tap();
+      let (images, images_rx) = std_mpsc::channel();
+      let frame = gray_frame(1_000);
+      // Nobody watches yet: looked at, nothing goes anywhere.
+      tap(&frame);
+      self_view.watch(ChannelId(5), move |message| images.send(message).is_ok());
+      tap(&frame);
+      images_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+      tap(&frame);
+      assert!(images_rx.recv_timeout(Duration::from_millis(100)).is_err());
+    }
+
+    #[test]
+    fn a_large_screen_gives_small_images() {
+      let self_view = SelfView::for_screen();
+      let mut tap = self_view.picture_tap();
+      let (images, images_rx) = std_mpsc::channel();
+      self_view.watch(ChannelId(5), move |message| images.send(message).is_ok());
+      let bytes = 1920 * 1080 * 3 / 2;
+      tap(&VideoFrame::new(size(1920, 1080), 0, vec![128; bytes]).unwrap());
+      let image = images_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+      assert_eq!(jpeg_size(&image), (640, 360));
     }
   }
 

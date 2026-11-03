@@ -212,6 +212,7 @@ fn camera_config() -> VideoSendConfig {
     maybe_layer_plan: Some(Box::new(move |source| camera_layers(source, FRAMERATE, limit))),
     encoders: software_encoders(),
     maybe_filter: None,
+    maybe_picture_tap: None,
     maybe_idle_refresh: None,
   }
 }

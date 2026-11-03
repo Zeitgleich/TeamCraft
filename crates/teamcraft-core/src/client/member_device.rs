@@ -125,15 +125,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     conversation: ConversationId,
   ) -> Result<MemberDeviceJoin, CoreError> {
-    let now = self.now_ms();
-    let retry_ms = i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX);
-    if self
-      .member_join_attempts
-      .get(&conversation)
-      .is_some_and(|tried_at| now.saturating_sub(*tried_at) < retry_ms)
-    {
+    if self.is_member_join_too_soon(conversation) {
       return Ok(MemberDeviceJoin::Waiting);
     }
+    let now = self.now_ms();
     let me = self.account.user_id;
     let members = self.api.list_members(conversation).await?;
     let users: BTreeSet<UserId> = members
@@ -259,6 +254,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Err(error.into())
       },
     }
+  }
+
+  /// Whether this device tried joining the conversation's group within the last `rejoin_retry`.
+  pub(super) fn is_member_join_too_soon(&self, conversation: ConversationId) -> bool {
+    let (now, retry_ms) = (self.now_ms(), self.rejoin_retry_ms());
+    self
+      .member_join_attempts
+      .get(&conversation)
+      .is_some_and(|tried_at| now.saturating_sub(*tried_at) < retry_ms)
+  }
+
+  /// What is left once a join by external commit is through: the request to be added, and the
+  /// note of the attempt.
+  pub(super) fn finish_member_join(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self
+      .store
+      .delete(Table::AppliedChanges, &device_add_key(conversation))?;
+    self.member_join_attempts.remove(&conversation);
+    Ok(())
   }
 
   /// After joining by external commit or from a welcome: the key bag's current key may be from
@@ -707,7 +721,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Asks the members, through the group's queue, to add this device; at most every
   /// `rejoin_retry`.
-  async fn request_device_addition(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+  pub(super) async fn request_device_addition(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<(), CoreError> {
     let now = self.now_ms();
     let retry_ms = i64::try_from(self.settings.rejoin_retry.as_millis()).unwrap_or(i64::MAX);
     if let Some(record) =
@@ -764,12 +781,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Whether this device's key bag came over the link from another device of the user (not from
   /// the server, as on recovery).
-  fn has_key_bag_from_link(&self) -> Result<bool, CoreError> {
+  pub(super) fn has_key_bag_from_link(&self) -> Result<bool, CoreError> {
     Ok(records::get_json::<bool>(&self.store, Table::Account, KEY_BAG_FROM_LINK_KEY)?.unwrap_or(false))
   }
 
   /// Whether the user's signed device list names another active device.
-  fn has_other_devices(&self, directory: &crate::trust::PinnedDirectory) -> Result<bool, CoreError> {
+  pub(super) fn has_other_devices(
+    &self,
+    directory: &crate::trust::PinnedDirectory,
+  ) -> Result<bool, CoreError> {
     let me = self.account.user_id;
     let own = convert::device(self.account.device_id);
     Ok(

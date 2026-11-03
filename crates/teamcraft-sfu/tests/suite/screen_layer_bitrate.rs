@@ -160,6 +160,7 @@ async fn measure(size: VideoResolution) -> Vec<Measured> {
       maybe_layer_plan: None,
       encoders: preferred_encoders(),
       maybe_filter: None,
+      maybe_picture_tap: None,
       maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
     })
     .await

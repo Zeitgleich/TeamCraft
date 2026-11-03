@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::common;
 
-use common::{Peer, link_device, settings, settle};
+use common::{Peer, link_device, link_device_with_store, settings, settle};
 #[cfg(feature = "ui")]
 use teamcraft_client_api::failure::{CallFailure, FailureKind};
 use teamcraft_core::api::ServerApi;
@@ -15,6 +15,9 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::call_move_announcement;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
+use teamcraft_core::store::MemoryStore;
+use teamcraft_core::{Client, PendingEnrollment};
+use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_proto::{AddConversationMemberRequest, ConversationId, GatewayEvent, IdempotencyKey, UserId};
 
 const NOW_MS: i64 = 1_800_000_000_000;
@@ -796,6 +799,523 @@ mod call_moves {
     let carol = Peer::enroll(&server, "Carol").await;
     let mallory = Peer::enroll(&server, "Mallory").await.client.user_id();
     (server, alice, bob, carol, mallory)
+  }
+}
+
+/// A call started before the chat's group is set up (#796): nobody waits for keys that can't come,
+/// and a retry gets in once the group is there.
+mod call_before_setup {
+  use super::*;
+
+  #[tokio::test]
+  async fn the_organizer_whose_setup_was_cut_off_founds_when_starting_the_call() {
+    let (server, mut alice, mut bob) = two().await;
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[bob.client.user_id()]);
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    server.set_offline(alice_id, true);
+    assert!(alice.client.set_up_meeting_chat(chat, &[bob_id]).await.is_err());
+    assert!(alice.client.prepare_call(chat).await.is_err());
+    server.set_offline(alice_id, false);
+
+    let prepared = alice.client.prepare_call(chat).await.unwrap();
+    assert_eq!(prepared.devices.len(), 2, "the call starts from the setup record");
+    let prepared = bob.client.prepare_call(chat).await.unwrap();
+    assert_eq!(prepared.devices.len(), 2);
+    assert_talks(&mut alice, &mut bob, chat).await;
+  }
+
+  #[tokio::test]
+  async fn an_invitee_with_two_devices_gets_in_on_both_once_the_chat_is_set_up() {
+    let (server, mut alice, mut bob) = two().await;
+    let mut tablet = link_device(&mut bob).await;
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[bob.client.user_id()]);
+    assert!(matches!(
+      tablet.prepare_call(chat).await,
+      Err(CoreError::CallEncryptionPending(_))
+    ));
+    let bob_id = bob.client.user_id();
+    alice.client.set_up_meeting_chat(chat, &[bob_id]).await.unwrap();
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(bob.client.prepare_call(chat).await.unwrap().devices.len(), 3);
+    assert_eq!(tablet.prepare_call(chat).await.unwrap().devices.len(), 3);
+  }
+
+  #[tokio::test]
+  async fn an_invitees_other_device_stays_out_of_a_group_that_lacks_the_invitee() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let mut tablet = link_device(&mut bob).await;
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[bob.client.user_id()]);
+    // Founded and published, but Bob isn't in yet (the setup was cut off before adding him).
+    alice.client.set_up_meeting_chat(chat, &[]).await.unwrap();
+    assert!(matches!(
+      tablet.prepare_call(chat).await,
+      Err(CoreError::CallEncryptionPending(_))
+    ));
+    assert!(!tablet.has_group(chat).unwrap());
+    let bob_id = bob.client.user_id();
+    alice.client.set_up_meeting_chat(chat, &[bob_id]).await.unwrap();
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(tablet.prepare_call(chat).await.unwrap().devices.len(), 3);
+  }
+
+  /// The organizer's phone founded the group and waits for an invitee's first device; the laptop
+  /// joins the group of one by external commit and starts the call. The phone must keep its seat
+  /// when the organizer then presses "Start" there, before it has read the laptop's commit.
+  #[tokio::test]
+  async fn the_founder_keeps_its_seat_when_its_other_device_joined_first() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut laptop = link_device(&mut alice).await;
+    let carol_api = server.add_user("Carol");
+    let carol_id = carol_api.user_id();
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[carol_id]);
+    alice.client.set_up_meeting_chat(chat, &[carol_id]).await.unwrap();
+    assert!(alice.client.has_group(chat).unwrap());
+
+    laptop.full_sync().await.unwrap();
+    assert_eq!(
+      laptop.prepare_call(chat).await.unwrap().devices.len(),
+      2,
+      "both devices"
+    );
+
+    // "Start" on the phone: the setup again, then the call.
+    alice.client.set_up_meeting_chat(chat, &[carol_id]).await.unwrap();
+    let prepared = alice.client.prepare_call(chat).await.unwrap();
+    assert_eq!(prepared.devices.len(), 2);
+    laptop.full_sync().await.unwrap();
+    assert_eq!(
+      alice.client.mls_epoch(chat).unwrap(),
+      laptop.mls_epoch(chat).unwrap(),
+      "one group"
+    );
+
+    // Carol's first device comes along and is added; everybody is in the one group.
+    let mut carol = Peer::enroll_as(carol_api, "Carol").await;
+    settle(&mut [&mut alice, &mut carol]).await;
+    alice.client.full_sync().await.unwrap();
+    carol.client.full_sync().await.unwrap();
+    laptop.full_sync().await.unwrap();
+    assert_eq!(carol.client.prepare_call(chat).await.unwrap().devices.len(), 3);
+    assert_eq!(
+      alice.client.mls_epoch(chat).unwrap(),
+      laptop.mls_epoch(chat).unwrap(),
+      "one group"
+    );
+    alice.client.send_text(chat, None, "hi all").await.unwrap();
+    settle(&mut [&mut alice, &mut carol]).await;
+    assert_eq!(carol.texts(chat), vec!["hi all"]);
+  }
+
+  /// The same order with a sync in between: the phone reads the laptop's commit first.
+  #[tokio::test]
+  async fn the_founder_follows_its_other_devices_join_on_a_sync() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut laptop = link_device(&mut alice).await;
+    let carol_api = server.add_user("Carol");
+    let carol_id = carol_api.user_id();
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[carol_id]);
+    alice.client.set_up_meeting_chat(chat, &[carol_id]).await.unwrap();
+    assert_eq!(laptop.prepare_call(chat).await.unwrap().devices.len(), 2);
+
+    alice.client.full_sync().await.unwrap();
+    assert!(alice.client.has_group(chat).unwrap(), "the phone keeps its seat");
+    assert_eq!(
+      alice.client.mls_epoch(chat).unwrap(),
+      laptop.mls_epoch(chat).unwrap(),
+      "one group"
+    );
+    assert_eq!(alice.client.prepare_call(chat).await.unwrap().devices.len(), 2);
+  }
+
+  /// The laptop asks to be added, having found no group to join: the founder reads that request
+  /// from the queue, too.
+  #[tokio::test]
+  async fn the_founder_waiting_for_an_invitee_adds_its_other_device_on_request() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut laptop = link_device(&mut alice).await;
+    let carol_id = server.add_user("Carol").user_id();
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[carol_id]);
+    // The laptop looks before anything is founded: it asks, and finds nothing to join.
+    assert!(matches!(
+      laptop.prepare_call(chat).await,
+      Err(CoreError::CallEncryptionPending(_))
+    ));
+    alice.client.set_up_meeting_chat(chat, &[carol_id]).await.unwrap();
+
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(laptop.prepare_call(chat).await.unwrap().devices.len(), 2);
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(
+      alice.client.mls_epoch(chat).unwrap(),
+      laptop.mls_epoch(chat).unwrap(),
+      "one group"
+    );
+  }
+
+  /// The other side of following the queue: the commits there are of a group the laptop founded
+  /// first. This phone's key bag didn't come over a link, so it can't join by itself: it keeps its
+  /// group, asks, and the laptop's welcome replaces it.
+  #[tokio::test]
+  async fn the_founder_gives_up_a_group_that_lost_to_its_other_device_on_a_sync() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut laptop = link_device(&mut alice).await;
+    let carol_api = server.add_user("Carol");
+    let carol_id = carol_api.user_id();
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[carol_id]);
+    alice.client.set_up_meeting_chat(chat, &[carol_id]).await.unwrap();
+    let mut carol = Peer::enroll_as(carol_api, "Carol").await;
+    // The laptop looked before the phone published: it founds its own and its first add wins.
+    server.hide_group_info_reads(chat, 2);
+    laptop.set_up_meeting_chat(chat, &[carol_id]).await.unwrap();
+    assert!(laptop.mls_epoch(chat).unwrap() > Some(0));
+
+    alice.client.full_sync().await.unwrap();
+    assert!(alice.client.has_group(chat).unwrap(), "asked, and kept its group");
+    laptop.full_sync().await.unwrap();
+    alice.client.full_sync().await.unwrap();
+    laptop.full_sync().await.unwrap();
+    assert_eq!(
+      alice.client.mls_epoch(chat).unwrap(),
+      laptop.mls_epoch(chat).unwrap(),
+      "one group"
+    );
+    carol.client.full_sync().await.unwrap();
+    assert_eq!(alice.client.prepare_call(chat).await.unwrap().devices.len(), 3);
+  }
+
+  /// A linked founder that lost to its other device joins that group by itself.
+  #[tokio::test]
+  async fn a_linked_founder_joins_the_group_that_won() {
+    let mut rig = lost_founding().await;
+    rig.laptop.full_sync().await.unwrap();
+    rig.alice.client.full_sync().await.unwrap();
+    assert_eq!(
+      rig.alice.client.mls_epoch(rig.chat).unwrap(),
+      rig.laptop.mls_epoch(rig.chat).unwrap(),
+      "one group"
+    );
+    assert_eq!(rig.laptop.prepare_call(rig.chat).await.unwrap().devices.len(), 3);
+  }
+
+  /// The server's word that the epoch moved on is no proof: nothing it serves can be joined, so
+  /// the founder keeps its group (e2ee.md §4.6).
+  #[tokio::test]
+  async fn the_server_cannot_make_a_founder_drop_its_group_with_unusable_information() {
+    let mut rig = lost_founding().await;
+    rig.server.plant_group_info(rig.chat, b"not group information");
+    rig.laptop.full_sync().await.unwrap();
+    assert_eq!(rig.laptop.mls_epoch(rig.chat).unwrap(), Some(0), "kept its group");
+  }
+
+  #[tokio::test]
+  async fn the_server_cannot_make_a_founder_drop_its_group_by_withholding_information() {
+    let mut rig = lost_founding().await;
+    rig.server.forget_group_infos();
+    rig.laptop.full_sync().await.unwrap();
+    assert_eq!(rig.laptop.mls_epoch(rig.chat).unwrap(), Some(0), "kept its group");
+  }
+
+  /// A join whose commit never reached the server changes nothing, also across a restart: the
+  /// founder still has its group, and joins on a later try.
+  #[tokio::test]
+  async fn a_failed_join_keeps_the_group_and_is_tried_again_after_a_restart() {
+    let mut rig = lost_founding().await;
+    rig.server.drop_next_commit(rig.alice.client.user_id());
+    assert!(rig.laptop.full_sync().await.is_err(), "the commit was lost");
+    assert_eq!(rig.laptop.mls_epoch(rig.chat).unwrap(), Some(0), "kept its group");
+
+    let mut laptop = Client::open(
+      rig.alice.api.clone(),
+      rig.laptop_store.clone(),
+      Box::new(rig.clock.clone()),
+      settings(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+      laptop.mls_epoch(rig.chat).unwrap(),
+      Some(0),
+      "kept across the restart"
+    );
+    rig
+      .clock
+      .advance(i64::try_from(settings().rejoin_retry.as_millis()).unwrap());
+    laptop.full_sync().await.unwrap();
+    rig.alice.client.full_sync().await.unwrap();
+    assert_eq!(
+      rig.alice.client.mls_epoch(rig.chat).unwrap(),
+      laptop.mls_epoch(rig.chat).unwrap(),
+      "one group"
+    );
+  }
+
+  /// The server took the join but the answer was lost: the founder is in the server's group
+  /// without knowing, and asks to be added back instead of being stuck.
+  #[tokio::test]
+  async fn a_join_whose_answer_was_lost_ends_in_one_group() {
+    let mut rig = lost_founding().await;
+    rig.server.lose_next_commit_answer(rig.alice.client.user_id());
+    assert!(rig.laptop.full_sync().await.is_err(), "the answer was lost");
+    assert_eq!(rig.laptop.mls_epoch(rig.chat).unwrap(), Some(0), "kept its group");
+
+    rig
+      .clock
+      .advance(i64::try_from(settings().rejoin_retry.as_millis()).unwrap());
+    // The server's group holds this device already: it asks, the phone adds it back.
+    rig.laptop.full_sync().await.unwrap();
+    rig.alice.client.full_sync().await.unwrap();
+    rig.laptop.full_sync().await.unwrap();
+    assert_eq!(
+      rig.alice.client.mls_epoch(rig.chat).unwrap(),
+      rig.laptop.mls_epoch(rig.chat).unwrap(),
+      "one group"
+    );
+  }
+
+  /// The same for a further device without a group of its own: a second external commit would
+  /// replace its own leaf, which the members refuse, so it asks to be added back.
+  #[tokio::test]
+  async fn a_further_device_whose_join_answer_was_lost_is_added_back() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(NOW_MS));
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let (mut laptop, _) = link_device_with_store(&mut alice, settings(), Box::new(clock.clone())).await;
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[]);
+    alice.client.set_up_meeting_chat(chat, &[]).await.unwrap();
+    server.lose_next_commit_answer(alice.client.user_id());
+    assert!(laptop.prepare_call(chat).await.is_err(), "the answer was lost");
+    assert!(!laptop.has_group(chat).unwrap());
+
+    clock.advance(i64::try_from(settings().rejoin_retry.as_millis()).unwrap());
+    assert!(
+      laptop.prepare_call(chat).await.is_err(),
+      "asks instead of joining again"
+    );
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(laptop.prepare_call(chat).await.unwrap().devices.len(), 2);
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(
+      alice.client.mls_epoch(chat).unwrap(),
+      laptop.mls_epoch(chat).unwrap(),
+      "one group"
+    );
+  }
+
+  /// The winner's group needn't match this device's list: an admitted guest is on nobody's list.
+  #[tokio::test]
+  async fn a_linked_founder_joins_a_group_holding_an_admitted_guest() {
+    let mut rig = lost_founding().await;
+    let guest = admit_guest(&rig.server, rig.chat, &mut rig.alice.client).await;
+    drop(guest);
+
+    rig.laptop.full_sync().await.unwrap();
+    rig.alice.client.full_sync().await.unwrap();
+    assert_eq!(
+      rig.alice.client.mls_epoch(rig.chat).unwrap(),
+      rig.laptop.mls_epoch(rig.chat).unwrap(),
+      "one group"
+    );
+    assert_eq!(rig.laptop.verified_call_devices(rig.chat).await.unwrap().len(), 4);
+  }
+
+  /// Without a link's key bag the founder asks and takes the welcome: it isn't refused for the
+  /// guest, and the adding back ends with it.
+  #[tokio::test]
+  async fn a_founder_is_added_to_a_group_holding_an_admitted_guest_and_that_ends_it() {
+    let mut rig = lost_founding_of_the_first_device(false).await;
+    admit_guest(&rig.server, rig.chat, &mut rig.laptop).await;
+    assert_ends_in_one_group(&mut rig).await;
+    assert_eq!(rig.laptop.verified_call_devices(rig.chat).await.unwrap().len(), 4);
+  }
+
+  /// The same for lists that differ per device: the winner invited somebody this device didn't.
+  #[tokio::test]
+  async fn a_founder_is_added_to_a_group_from_another_list_and_that_ends_it() {
+    let mut rig = lost_founding_of_the_first_device(true).await;
+    assert_ends_in_one_group(&mut rig).await;
+    // Both devices, Dave from the laptop's list, Carol from the phone's: nobody on either is lost.
+    assert_eq!(rig.laptop.verified_call_devices(rig.chat).await.unwrap().len(), 4);
+  }
+
+  #[tokio::test]
+  async fn a_linked_founder_joins_a_group_from_another_list() {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(NOW_MS));
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let (mut laptop, _) = link_device_with_store(&mut alice, settings(), Box::new(clock.clone())).await;
+    let carol_id = server.add_user("Carol").user_id();
+    let dave = Peer::enroll(&server, "Dave").await;
+    let dave_id = dave.client.user_id();
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[carol_id, dave_id]);
+    laptop.set_up_meeting_chat(chat, &[carol_id]).await.unwrap();
+    server.hide_group_info_reads(chat, 2);
+    alice.client.set_up_meeting_chat(chat, &[dave_id]).await.unwrap();
+    assert!(alice.client.mls_epoch(chat).unwrap() > Some(0));
+
+    laptop.full_sync().await.unwrap();
+    alice.client.full_sync().await.unwrap();
+    assert_eq!(
+      alice.client.mls_epoch(chat).unwrap(),
+      laptop.mls_epoch(chat).unwrap(),
+      "one group"
+    );
+  }
+
+  /// The phone's key bag didn't come over a link: it is added by the laptop, once, and no further
+  /// commits follow however many retry intervals pass.
+  async fn assert_ends_in_one_group(rig: &mut FirstDeviceLost) {
+    let retry_ms = i64::try_from(settings().rejoin_retry.as_millis()).unwrap();
+    for _ in 0..3 {
+      rig.alice.client.full_sync().await.unwrap();
+      rig.laptop.full_sync().await.unwrap();
+      rig.clock.advance(retry_ms);
+    }
+    rig.alice.client.full_sync().await.unwrap();
+    rig.laptop.full_sync().await.unwrap();
+    let settled = rig.laptop.mls_epoch(rig.chat).unwrap();
+    assert!(rig.alice.client.has_group(rig.chat).unwrap());
+    assert_eq!(
+      rig.alice.client.mls_epoch(rig.chat).unwrap(),
+      settled,
+      "one group"
+    );
+    for _ in 0..3 {
+      rig.clock.advance(retry_ms);
+      rig.alice.client.full_sync().await.unwrap();
+      rig.laptop.full_sync().await.unwrap();
+    }
+    assert_eq!(
+      rig.laptop.mls_epoch(rig.chat).unwrap(),
+      settled,
+      "no more re-adding"
+    );
+    assert_eq!(rig.alice.client.mls_epoch(rig.chat).unwrap(), settled);
+  }
+
+  /// A guest the server admitted and `organizer`'s device let into the chat's group.
+  async fn admit_guest(
+    server: &FakeServer,
+    chat: ConversationId,
+    organizer: &mut common::TestClient,
+  ) -> common::TestClient {
+    let guest_api = server.add_guest("Gus");
+    let guest = PendingEnrollment::complete_as_guest(
+      guest_api.clone(),
+      Arc::new(MemoryStore::new()),
+      common::clock(),
+      settings(),
+      "Browser".into(),
+      Argon2Settings {
+        memory_kib: 64,
+        iterations: 1,
+        parallelism: 1,
+      },
+    )
+    .await
+    .unwrap();
+    guest
+      .set_guest_organizer_anchor(chat, &organizer.own_fingerprint())
+      .unwrap();
+    organizer
+      .api()
+      .add_member(
+        chat,
+        &AddConversationMemberRequest {
+          user_id: guest.user_id(),
+          maybe_role: None,
+        },
+      )
+      .await
+      .unwrap();
+    let code = guest.own_fingerprint();
+    organizer
+      .let_guest_into_meeting_chat(chat, guest.user_id(), &code, 4_000_000_000_000)
+      .await
+      .unwrap();
+    guest
+  }
+
+  /// The phone (no key bag from a link) founded and waits for Carol; the laptop's group won, past
+  /// epoch 0, holding Carol or, with `is_other_list`, Dave, whom the phone didn't invite.
+  struct FirstDeviceLost {
+    server: FakeServer,
+    alice: Peer,
+    laptop: common::TestClient,
+    chat: ConversationId,
+    clock: Arc<ManualClock>,
+  }
+
+  async fn lost_founding_of_the_first_device(is_other_list: bool) -> FirstDeviceLost {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(NOW_MS));
+    let mut alice = Peer::enroll_on_clock(
+      server.add_user("Alice"),
+      "Alice",
+      settings(),
+      Box::new(clock.clone()),
+    )
+    .await;
+    let (mut laptop, _) = link_device_with_store(&mut alice, settings(), Box::new(clock.clone())).await;
+    let carol_api = server.add_user("Carol");
+    let carol_id = carol_api.user_id();
+    let dave = Peer::enroll(&server, "Dave").await;
+    let dave_id = dave.client.user_id();
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[carol_id, dave_id]);
+    alice.client.set_up_meeting_chat(chat, &[carol_id]).await.unwrap();
+    let _carol = Peer::enroll_as(carol_api, "Carol").await;
+    server.hide_group_info_reads(chat, 2);
+    let winners_list = if is_other_list { dave_id } else { carol_id };
+    laptop.set_up_meeting_chat(chat, &[winners_list]).await.unwrap();
+    assert!(laptop.mls_epoch(chat).unwrap() > Some(0));
+    FirstDeviceLost {
+      server,
+      alice,
+      laptop,
+      chat,
+      clock,
+    }
+  }
+
+  /// A founder whose laptop lost the founding: the phone's group holds Carol and is past epoch 0,
+  /// the laptop's linked key bag lets it join by external commit.
+  struct LostFounding {
+    server: FakeServer,
+    alice: Peer,
+    laptop: common::TestClient,
+    laptop_store: Arc<MemoryStore>,
+    chat: ConversationId,
+    clock: Arc<ManualClock>,
+  }
+
+  async fn lost_founding() -> LostFounding {
+    let server = FakeServer::new();
+    let clock = Arc::new(ManualClock::new(NOW_MS));
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let (mut laptop, laptop_store) =
+      link_device_with_store(&mut alice, settings(), Box::new(clock.clone())).await;
+    let carol_api = server.add_user("Carol");
+    let carol_id = carol_api.user_id();
+    let chat = server.create_meeting_chat(alice.client.user_id(), &[carol_id]);
+    laptop.set_up_meeting_chat(chat, &[carol_id]).await.unwrap();
+    assert_eq!(laptop.mls_epoch(chat).unwrap(), Some(0));
+    let _carol = Peer::enroll_as(carol_api, "Carol").await;
+    server.hide_group_info_reads(chat, 2);
+    alice.client.set_up_meeting_chat(chat, &[carol_id]).await.unwrap();
+    assert!(alice.client.mls_epoch(chat).unwrap() > Some(0));
+    LostFounding {
+      server,
+      alice,
+      laptop,
+      laptop_store,
+      chat,
+      clock,
+    }
   }
 }
 

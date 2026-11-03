@@ -443,11 +443,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   async fn read_first_pages(&mut self, batch: &[ConversationId]) -> Result<Vec<FirstPages>, CoreError> {
     let mut queries = Vec::with_capacity(batch.len());
     for conversation in batch {
-      let maybe_mls = (self.has_group(*conversation)? && !self.is_unfinished_dm_founding(*conversation)?)
-        .then(|| ListMlsMessagesQuery {
-          maybe_after: self.sync.mls_cursors.get(conversation).copied(),
-          maybe_limit: None,
-        });
+      let maybe_mls = (self.has_group(*conversation)?
+        && !self.ignores_queue_while_founding(*conversation)?)
+      .then(|| ListMlsMessagesQuery {
+        maybe_after: self.sync.mls_cursors.get(conversation).copied(),
+        maybe_limit: None,
+      });
       queries.push((
         *conversation,
         maybe_mls,

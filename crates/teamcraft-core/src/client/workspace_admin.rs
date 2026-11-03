@@ -207,7 +207,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             Ok(GroupInfoOutcome::OnServer) => self.note_meeting_group_info_published(response.id)?,
             Ok(GroupInfoOutcome::Superseded) => {
               // Only the organizer's setup founds anew if that group can't be joined.
-              if let Err(error) = self.rejoin_superseded_group(response.id).await {
+              if let Err(error) = Box::pin(self.rejoin_superseded_group(response.id)).await {
                 tracing::debug!(conversation_id = %response.id, %error, "could not join the meeting chat's first group");
               }
             },

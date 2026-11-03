@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use openmls_rust_crypto::OpenMlsRustCrypto;
 use rand_core::OsRng;
 use teamcraft_crypto::content_key::{ContentKey, ContentKeyId};
 use teamcraft_crypto::identity::VerifiedDevice;
@@ -28,6 +29,7 @@ use super::{Client, pending_post_key};
 use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
+use crate::mls_storage::adopt_mls_entries;
 use crate::records;
 use crate::retry::{RetryPolicy, millis};
 use crate::store::{ConversationEvent, LocalStore, Table};
@@ -339,11 +341,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // Two devices of the organizer founded it at once and the other one was first: this one
       // joins that group, then adds whoever is still missing; if that group can't be joined, the
       // organizer founds anew and replaces it.
-      return match self.rejoin_superseded_group(id).await? {
+      return match Box::pin(self.rejoin_superseded_group(id)).await? {
         MemberDeviceJoin::Unjoinable | MemberDeviceJoin::NotAMember => {
           self.found_again_replacing(id, &others).await
         },
-        _ => self.finish_dm_setup(id, &others).await,
+        MemberDeviceJoin::Joined => self.finish_dm_setup(id, &others).await,
+        // Still in its own group, which isn't the server's: adding to it would fork the two.
+        MemberDeviceJoin::Waiting => self.complete_dm_setup(id, &others),
       };
     }
     Ok(is_complete)
@@ -442,13 +446,133 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// This device founded a meeting chat's group alone while another device's group holds epoch 0
   /// on the server: gives its own up and joins the server's by external commit, so the organizer's
   /// devices never run two groups (e2ee.md §4.6, "Meeting chats").
+  ///
+  /// The founded group stays until the server accepted the join: the join runs on a provider of
+  /// its own, and the server's word that the epoch moved on is no proof of anything. The proof is
+  /// the group information: it opens, every leaf verifies and the group's first member is this
+  /// user (only this user's devices found this user's meeting chats, which this device knows from
+  /// having founded one). Otherwise, or without a link's key bag to judge old information by, this
+  /// device asks to be added and keeps its group. Tried at most every `rejoin_retry`.
   pub(super) async fn rejoin_superseded_group(
     &mut self,
     id: ConversationId,
   ) -> Result<MemberDeviceJoin, CoreError> {
-    tracing::info!(conversation_id = %id, "another device founded the meeting chat's group first");
-    self.drop_group(id)?;
-    self.join_as_member_device(id).await
+    if self.is_member_join_too_soon(id) {
+      return Ok(MemberDeviceJoin::Waiting);
+    }
+    self.member_join_attempts.insert(id, self.now_ms());
+    tracing::info!(conversation_id = %id, "another device may have founded the meeting chat's group first");
+    let me = self.user_id();
+    let members = self.api.list_members(id).await?;
+    let directory = self
+      .trusted_directory(members.members.iter().map(|member| member.user.id).chain([me]))
+      .await?;
+    if !self.has_other_devices(&directory)? {
+      self.member_join_attempts.remove(&id);
+      return Ok(MemberDeviceJoin::NotAMember);
+    }
+    let maybe_info = if self.has_key_bag_from_link()? {
+      match self.api.mls_group_info(id).await {
+        Ok(info) => Some(info),
+        Err(error) if error.is_not_found() => None,
+        Err(error) => return Err(error.into()),
+      }
+    } else {
+      None
+    };
+    let Some(info) = maybe_info else {
+      self.request_device_addition(id).await?;
+      return Ok(MemberDeviceJoin::Waiting);
+    };
+    let staging = OpenMlsRustCrypto::default();
+    let joined = ConversationGroup::join_external(
+      &staging,
+      &self.account.device,
+      &self.account.certificate,
+      info.group_info.as_slice(),
+      convert::conversation(id),
+      self.account_data().group_epoch(id),
+      &directory,
+    );
+    let (group, output) = match joined {
+      Ok(joined) => joined,
+      Err(MlsError::MissingSignedChange) => {
+        self.member_join_attempts.remove(&id);
+        return Ok(MemberDeviceJoin::NotAMember);
+      },
+      Err(MlsError::AlreadyInGroup) => {
+        // This device's own group, which it can't follow (an entry it refused, or a join of its
+        // own whose answer was lost): not another group at all. Added back with a fresh leaf.
+        self.request_rejoin(id, info.epoch).await?;
+        return Ok(MemberDeviceJoin::Waiting);
+      },
+      Err(error) => {
+        tracing::warn!(conversation_id = %id, %error, "could not join the group that may have replaced this one");
+        self.request_device_addition(id).await?;
+        return Ok(MemberDeviceJoin::Unjoinable);
+      },
+    };
+    let is_founded_by_this_user = match group.members()?.first() {
+      Some(founder) => convert::user_from_crypto(founder.user_id)? == me,
+      None => false,
+    };
+    if !is_founded_by_this_user {
+      tracing::warn!(conversation_id = %id, "group information of a group this device can't take for its own; not joined");
+      self.request_device_addition(id).await?;
+      return Ok(MemberDeviceJoin::Unjoinable);
+    }
+    let epoch = group.epoch().saturating_sub(1);
+    let maybe_group_info = output
+      .maybe_group_info
+      .filter(|group_info| group_info.len() <= self.settings.max_group_info_bytes)
+      .map(Base64Bytes::new);
+    let request = PostMlsCommitRequest {
+      device_id: self.account.device_id,
+      epoch,
+      commit: Base64Bytes::new(output.commit),
+      welcomes: Vec::new(),
+      maybe_group_info,
+    };
+    let response = match self.api.post_mls_commit(id, &request).await {
+      Ok(response) => response,
+      Err(error) if error.is_epoch_conflict() => {
+        self.member_join_attempts.remove(&id);
+        return Ok(MemberDeviceJoin::Waiting);
+      },
+      // The founded group is untouched. If the server took the commit after all, the next try
+      // finds this device in its group and asks to be added back.
+      Err(error) => return Err(error.into()),
+    };
+    self.replace_founded_group(id, group, &staging, &response.commit)?;
+    self.remember_member_keys(id, &directory, response.commit.id.snowflake().unix_millis())?;
+    self.finish_member_join(id)?;
+    self.retry_undecrypted(id)?;
+    tracing::info!(conversation_id = %id, "joined the group that was founded first");
+    Ok(MemberDeviceJoin::Joined)
+  }
+
+  /// The server accepted the join into `group`, staged on a provider of its own: it takes the
+  /// founded group's place, in one group of writes with the records about it.
+  fn replace_founded_group(
+    &mut self,
+    id: ConversationId,
+    group: ConversationGroup,
+    staging: &OpenMlsRustCrypto,
+    commit: &MlsMessageResponse,
+  ) -> Result<(), CoreError> {
+    if self.group(id)?.is_some()
+      && let Some(founded) = self.groups.remove(&id)
+    {
+      founded.delete(&self.provider)?;
+    }
+    adopt_mls_entries(staging, &self.provider)?;
+    self.atomically(|client| {
+      client.delete_group_records(id)?;
+      client.groups.insert(id, group);
+      client.forget_key_history(id)?;
+      client.wait_for_current_key(id, None)?;
+      client.persist_group_at(id, commit)
+    })
   }
 
   fn group_holds(&mut self, id: ConversationId, users: &[UserId]) -> Result<bool, CoreError> {
@@ -678,9 +802,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     match self.mls_epoch(id)? {
       // A meeting chat is only ever founded by the organizer's devices: the winner is the
       // organizer's other device, which sends this one no welcome. It joins by external commit.
+      // Unless that commit is the other device joining this very group: the queue tells.
       Some(0) if server_epoch > 0 && is_meeting_chat => {
-        self.rejoin_superseded_group(id).await?;
-        if !self.has_group(id)? {
+        // Boxed: a sync's future is large, and this rare path would add it to every setup's.
+        Box::pin(self.sync_mls(id)).await?;
+        if self.mls_epoch(id)?.is_none_or(|epoch| epoch == 0) {
+          // Not joined (yet): adding to this group would only lose the epoch again.
           return self.complete_dm_setup(id, others);
         }
       },
@@ -917,6 +1044,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
+  /// Whether this device leaves the conversation's MLS queue unread because its group is an
+  /// unfinished founding. Not a meeting chat's: while the founder waits for an invitee (one
+  /// who hasn't set up the app, or has no key package), the organizer's other device may join the
+  /// group by external commit or ask to be added, both through the queue (e2ee.md §4.6, #796).
+  pub(crate) fn ignores_queue_while_founding(&mut self, id: ConversationId) -> Result<bool, CoreError> {
+    Ok(self.is_unfinished_dm_founding(id)? && !self.is_meeting_chat_setup(id)?)
+  }
+
+  /// [`Self::is_unfinished_dm_founding`] of a meeting chat's group.
+  fn is_unfinished_meeting_founding(&mut self, id: ConversationId) -> Result<bool, CoreError> {
+    Ok(self.is_unfinished_dm_founding(id)? && self.is_meeting_chat_setup(id)?)
+  }
+
+  fn is_meeting_chat_setup(&self, id: ConversationId) -> Result<bool, CoreError> {
+    Ok(self.dm_setup(id)?.is_some_and(|setup| setup.is_meeting_chat))
+  }
+
   /// Whether this device opened the DM and keeps its setup record.
   pub(crate) fn has_dm_setup(&self, id: ConversationId) -> Result<bool, CoreError> {
     Ok(self.dm_setup(id)?.is_some())
@@ -1090,7 +1234,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     maybe_first: Option<Result<ListMlsMessagesResponse, ApiError>>,
   ) -> Result<(), CoreError> {
-    if self.is_unfinished_dm_founding(conversation)? {
+    if self.ignores_queue_while_founding(conversation)? {
       // Nobody else is in this group, so the queue can only hold another founding's group
       // (whose welcome replaces this one) or nothing: following it would only refuse its entries
       // and ask to be added back to a group this device was never in.
@@ -1114,6 +1258,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // it. Another commit may win meanwhile; the next pass finds out.
       self.post_pending_again(conversation).await?;
       catch_up = self.catch_up_mls(conversation, None).await?;
+    }
+    if catch_up.current_epoch > 0 && self.is_unfinished_meeting_founding(conversation)? {
+      // A meeting chat's founder that read the queue and is still at epoch 0. Those commits may be
+      // of a group the organizer's other device founded first, which sends this one no welcome.
+      // The group information decides, not the queue or the epoch (e2ee.md §4.6).
+      // Boxed: this rare join would otherwise add its size to every sync's future.
+      Box::pin(self.rejoin_superseded_group(conversation)).await?;
+      return Ok(());
     }
     // A request that went unanswered (members ignore repeats within `rejoin_cooldown`, issue
     // #149): the cursor went past the entries that showed this device behind, the epoch still does.
@@ -2672,6 +2824,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(error) => return Err(error.into()),
     };
     let me = self.user_id();
+    let is_meeting_chat = self.is_meeting_chat_setup(conversation)?;
     let is_listed = members.members.iter().any(|member| member.user.id == me);
     self
       .pin_identities(members.members.iter().map(|member| member.user.id))
@@ -2725,7 +2878,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       Err(error) => return Err(error),
     };
-    if let Some(others) = maybe_founded_for {
+    // A meeting chat's group needn't match this device's list (an invitee without a device, a guest
+    // somebody admitted, a list changed on another device): `is_founded_by_organizer` below decides.
+    if let Some(others) = maybe_founded_for.filter(|_| !is_meeting_chat) {
       let me = self.own_member();
       let maybe_importer = crate::imported::importer(&self.store);
       let checked = staged

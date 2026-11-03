@@ -1269,7 +1269,20 @@ never by the server's member list:
   asks no more), so the organizer's other devices join by external commit
   even while the group holds nobody else (an instant meeting). Any other device, the organizer's
   included, only joins: as a further device, from a welcome, or by a device-add request. It never
-  founds, so a server that hides a group can't make a second device fork it.
+  founds, so a server that hides a group can't make a second device fork it. While the founder's
+  setup is unfinished (an invitee has no device or key package yet) it keeps reading the group's
+  queue, unlike a DM's founder: another device of the organizer may have joined its group or asked
+  to be added (#796). The queue leaving it at epoch 0 while the server is past that proves nothing:
+  commits of a group it isn't in can't be verified, and the epoch is the server's word. It keeps its
+  group until the server accepted its join into the other one. The join runs apart from the
+  device's MLS state and goes ahead only if the group information opens, every leaf verifies and
+  the group's first member is this user (the founder knows from its own founding that it is the
+  organizer's device, so here the server's word for the organizer plays no part). Otherwise, or
+  without a key bag from a link, it asks to be added and keeps its group, until a welcome replaces
+  it. Neither is held to this device's list of invitees: an admitted guest is on nobody's list, the
+  list can differ per device, and it isn't signed anyway. A device whose own leaf is in the group
+  information (a join whose answer was lost) asks to be added back, since members refuse an external
+  commit that replaces a leaf.
 - **Old meetings.** A meeting made before the server stopped founding these groups has a chat
   without one. The organizer's device founds it the first time the organizer opens or joins the
   meeting (the same `set_up_meeting_chat`, with the attendees as that device knows the meeting; it

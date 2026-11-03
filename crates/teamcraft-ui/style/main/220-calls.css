@@ -922,73 +922,88 @@
   flex: 1;
   min-height: 0;
   display: grid;
+  grid-template-rows: minmax(0, 1fr);
   place-items: center;
   border-radius: var(--radius-md);
   background: #05070b;
   padding: 16px;
 }
 
-.mock-window {
-  width: min(100%, 880px);
-  aspect-ratio: 16 / 10;
+.share-waiting {
+  margin: 0;
+  color: #b9c3d6;
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+/* What the own screen share sends, small on purpose (#1175): sharing the whole screen or this
+   window must not fill the stage with mirrors of itself. Over another person's shared screen it
+   sits in a corner. The stage is dark in both themes, like the rest of the call. */
+.share-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(100%, 320px);
   max-height: 100%;
-  display: flex;
-  flex-direction: column;
-  border-radius: var(--radius);
-  background: #f4f6fa;
-  overflow: hidden;
-}
-
-.mock-titlebar {
-  display: flex;
-  gap: 6px;
-  padding: 8px 10px;
-  background: #dfe4ec;
-}
-
-.mock-titlebar span {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: #aab3c2;
-}
-
-.mock-body {
-  flex: 1;
-  display: flex;
   min-height: 0;
+  padding: 8px;
+  border: 1px solid #2a3550;
+  border-radius: var(--radius-md);
+  background: #1b2434;
 }
 
-.mock-sidebar {
-  width: 22%;
-  background: #1a2434;
+.share-preview-over-picture {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 1;
+  width: min(calc(100% - 24px), 240px);
+  max-height: calc(100% - 24px);
 }
 
-.mock-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 16px;
-}
-
-.mock-line {
-  height: 9px;
-  width: 60%;
-  border-radius: var(--radius-xs);
-  background: #c7cfdc;
-}
-
-.mock-line.wide {
-  width: 85%;
-  background: #aeb9cc;
-}
-
-.mock-chart {
-  flex: 1;
-  min-height: 40px;
+.share-preview-picture {
+  position: relative;
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  /* In a short stage the picture gives way, never the button. */
+  aspect-ratio: 16 / 9;
   border-radius: var(--radius-sm);
-  background: linear-gradient(135deg, #d6e4ff, #a8c6ff);
+  background: #05070b;
+}
+
+.share-preview-picture .live-video > canvas,
+.share-preview-picture .live-video > video {
+  object-fit: contain;
+}
+
+/* No picture from the capture: the last one must not pass for a live one. */
+.share-preview-picture .live-video:has(+ .video-stalled) {
+  opacity: 0.3;
+}
+
+.share-preview-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm);
+}
+
+.share-preview-bar > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.share-preview-bar .icon {
+  flex: none;
+}
+
+.share-preview-bar .btn {
+  flex: none;
+  background: #2a3550;
+  border-color: #3a4766;
+  color: var(--on-fill);
 }
 
 .call-controls {
