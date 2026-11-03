@@ -544,13 +544,14 @@ Through the real SFU (`screen_layer_bitrate` in the SFU suite, release build wit
 | 720p  | 360p  |    500 | 6428 (1286 %)     | 314 (63 %)       | 480–585 (8 frames)     |
 |       | 720p  |   2000 | 269 (13 %)        | 259 (13 %)       | 334–351                |
 
-### Short bitrate peaks of the encoders (issue #1005)
+### Short bitrate peaks of the encoders (issues #1005, #1205)
 
 The encoders get an average (VideoToolbox for screens, WebCodecs, OpenH264), and a whole new
 picture can send far more than that for a moment. The question was whether those peaks hurt on a
-capped uplink, and so whether a cap is worth what it costs. Measured with what runs here (Linux,
-Chrome 156 and OpenH264). **Never run: VideoToolbox's peaks, Chrome on a Mac, Safari, Firefox,
-the hardware encoders of Windows and Android**; the tools below run on them unchanged.
+capped uplink, and so whether a cap is worth what it costs. Measured on Linux (Chrome 156 and
+OpenH264, #1005) and on a Mac (#1205: VideoToolbox, Chrome 156 and Firefox 159 on an Apple M4
+Max, macOS 26.6, GStreamer 1.28.8). **Never run: Safari, the hardware encoders of Windows and
+Android**; the tools below run on them unchanged.
 
 **How.** Bytes per picture from the encoder, as a multiple of what the target bitrate sends in
 the same time: the largest picture (a frame's share of the target), the busiest 100 ms and the
@@ -566,7 +567,11 @@ typed), *slides* (the whole page changes every 2 s), *scroll* (a fast steady scr
   frames at 30 fps.
 - Desktop: `screen_bench` (`--scene slides`; the report ends with the peaks), OpenH264 through
   the call's `SimulcastEncoder`, 12 s, `--frames every`. It runs the preferred hardware encoder
-  too, on a Mac or with VA-API, by leaving `--encoder` out.
+  too, on a Mac or with VA-API, by leaving `--encoder` out. `camera_bitrate` reports the same
+  peaks for the camera layers (`examples/common/peaks.rs`).
+- Through the call: `screen_uplink_bursts` in the SFU's tests sends slides through a presenter
+  uplink limited like a bottleneck (250 ms queue), with the real SFU and estimator in between,
+  and times each slide until the viewer shows it.
 
 ```sh
 cd dev/screen-codec-bench && python3 make_peaks.py
@@ -602,6 +607,63 @@ encoded, release build):
 | scroll, 1440p            | 6636 kbit/s |             0.2 |           0.10 |        0.07 |                    4 ms, 0 of 177 |
 | typing (both layers)     |           – |           < 0.1 |           0.04 |        0.01 |                           0 ms, 0 |
 
+On a Mac (#1205). VideoToolbox through the call's encoder (`screen_bench`, detail profile, a 1440p
+display, 12 s; `camera_bitrate calm`, a 1080p camera's four layers at a constant bitrate):
+
+| Encoder, scene, layer                     |      Target | Largest picture | Busiest 100 ms | Busiest 1 s | Model link: longest wait, dropped |
+|-------------------------------------------|------------:|----------------:|---------------:|------------:|----------------------------------:|
+| VideoToolbox, slides, 720p                | 1659 kbit/s |            28.2 |          10.94 |        1.61 |                   7 ms, 16 of 331 |
+| VideoToolbox, slides, 1440p               | 6636 kbit/s |            17.3 |           6.11 |        0.62 |                  145 ms, 1 of 331 |
+| VideoToolbox, slides, 720p, changes only  | 1659 kbit/s |            19.7 |           6.56 |        0.67 |                    15 ms, 6 of 12 |
+| VideoToolbox, slides, 1440p, changes only | 6636 kbit/s |             5.5 |           1.83 |        0.21 |                   146 ms, 0 of 12 |
+| VideoToolbox, scroll, 720p                | 1659 kbit/s |             5.5 |           2.77 |        1.03 |                  158 ms, 0 of 331 |
+| VideoToolbox, scroll, 1440p               | 6636 kbit/s |            17.3 |           6.27 |        0.72 |                   30 ms, 1 of 331 |
+| VideoToolbox, typing, 720p / 1440p        |           – |     28.0 / 17.5 |    9.41 / 6.15 |  0.96 / 0.63 |     6 / 23 ms, 1 of 331 each |
+| VideoToolbox, typing, changes only (both) |           – |           ≤ 0.1 |         ≤ 0.03 |      ≤ 0.01 |                           0 ms, 0 |
+| VideoToolbox camera, 180p                 |   94 kbit/s |             6.6 |           2.87 |        1.23 |                  175 ms, 0 of 331 |
+| VideoToolbox camera, 360p                 |  375 kbit/s |             3.8 |           1.97 |        1.13 |                  102 ms, 0 of 331 |
+| VideoToolbox camera, 720p                 | 1500 kbit/s |             3.5 |           1.83 |        1.12 |                   93 ms, 0 of 331 |
+| VideoToolbox camera, 1080p                | 3000 kbit/s |             2.4 |           1.50 |        1.10 |                   63 ms, 0 of 331 |
+
+The largest picture of a still screen with every frame encoded (typing) is the keyframe a rebuild
+of the quality governor starts with; with only changed pictures (`--frames changes`, as
+ScreenCaptureKit delivers them) nothing is rebuilt. A slide show with every frame encoded (the
+worst case) makes the governor rebuild the 720p layer on most slide changes (11 keyframes in
+12 s): the one row above 1.4 times the target in a second.
+
+Chrome 156 and Firefox 159 on the Mac (`make_peaks.py`, `bitrateMode` unset; Chrome's encoder is
+VideoToolbox, Firefox's by its sizes too):
+
+| Scene, layer     |       Target | Chrome: largest, 100 ms, 1 s, link wait | Firefox: largest, 100 ms, 1 s, link wait |
+|------------------|-------------:|----------------------------------------:|-----------------------------------------:|
+| typing, 1440p    |  6636 kbit/s |                   0.1, 0.05, 0.49, 2 ms |                    0.1, 0.05, 0.49, 2 ms |
+| slides, 1440p    |  6636 kbit/s |                 8.8, 2.97, 0.49, 235 ms |                  8.7, 2.95, 0.48, 233 ms |
+| scroll, 1440p    |  6636 kbit/s |                  2.0, 1.30, 0.96, 53 ms |                   2.2, 1.34, 0.99, 60 ms |
+| slides, 720p     |  1659 kbit/s |         17.0, 5.72, 0.88, 91 ms, 4 lost |          17.0, 5.72, 0.77, 99 ms, 4 lost |
+| scroll, 720p     |  1659 kbit/s |                  2.8, 1.30, 0.95, 74 ms |                   2.5, 1.22, 0.91, 66 ms |
+| slides, 4K       | 14930 kbit/s |                 7.3, 2.47, 0.40, 195 ms |                  7.3, 2.47, 0.40, 194 ms |
+| camera, 720p     |  1500 kbit/s |                  1.1, 1.04, 1.01, 28 ms |       0.2, 0.16, 0.15, 4 ms (202 kbit/s) |
+| camera-cut, 720p |  1500 kbit/s |                  2.4, 1.44, 1.04, 63 ms |                   3.1, 1.69, 1.01, 84 ms |
+| camera-cut, 360p |   375 kbit/s |                  2.8, 1.64, 1.05, 75 ms |                   2.9, 1.53, 1.05, 79 ms |
+
+Through the call (`screen_uplink_bursts`, release build; slides of text at a Retina display's
+size fitted into 1440p, a change every 2 s, the first 8 s left out; the time until the viewer
+shows each slide):
+
+| Presenter's uplink   | VideoToolbox | OpenH264 | Dropped at the bottleneck (VideoToolbox / OpenH264) |
+|----------------------|-------------:|---------:|----------------------------------------------------:|
+| unlimited            |        16 ms |   177 ms |                                                   0 |
+| 20 Mbit/s            |        62 ms |   233 ms |                                                   0 |
+| 12 Mbit/s            |        94 ms |   271 ms |                                                   0 |
+| 10 Mbit/s            |       110 ms |   310 ms |                                                   0 |
+| 4 Mbit/s (720p only) |       217 ms |   205 ms |                                       5.7 % / 0.6 % |
+
+The share's two layers ask for 8.3 Mbit/s. At 10 to 20 Mbit/s a slide costs the time its picture
+takes on the link and nothing is lost. At 4 Mbit/s the top layer stops; what the bottleneck
+dropped there were the top layer's keyframes when the uplink tried it again, not a peak of the
+720p layer (its slides came within 0.22 s). A debug build with OpenH264 at 12 Mbit/s: 350 ms,
+nothing dropped.
+
 What it shows:
 
 - **The peaks are the new picture, not the rate control.** A slide change, a cut or the half-size
@@ -624,23 +686,32 @@ What it shows:
   doesn't push a layer off (#939).
 - **`bitrateMode` made no difference in Chrome's software encoder.** The runs with it unset, with
   `"variable"` and with `"constant"` sent the same rate (within 0.6 %) and the same peaks (within
-  0.3 in the ratios, the 720p scroll the only one that moved at all). Hardware encoders may honour the mode (#967 saw no
-  change from it in Chrome's VideoToolbox encoder either, in `"realtime"`), which can only be measured on
-  them; Safari and Firefox are not measured. The call leaves `bitrateMode` unset. Were it
+  0.3 in the ratios, the 720p scroll the only one that moved at all). On the Mac, Chrome's
+  hardware encoder and Firefox sent byte for byte the same in all three modes, in every scene
+  (Firefox also ignored `hardwareAcceleration` in an earlier run). Safari is not measured. The
+  call leaves `bitrateMode` unset. Were it
   set, a browser that refuses it must fall back through `VideoEncoder.isConfigSupported` rather than fail the call
   (the bench does: a refused config is reported as unsupported).
-- **Keyframes** cost the same sharpness as the pictures after them: no cap, so nothing to
-  turn blurry. The bench's PSNR column is not comparable on Linux (a constant 22.4 dB in every
-  run, a colour-range offset of the software decoder's output), so sharpness is judged from
-  `screen_sharpness` and the tables above, which this change does not touch.
+- **Keyframes** cost the same sharpness as the pictures after them in the software encoder: no
+  cap, so nothing to turn blurry. The bench's PSNR column is not comparable on Linux (a constant
+  22.4 dB in every run, a colour-range offset of the software decoder's output) nor in Firefox
+  (9 to 15 dB: its decoded pictures aren't read right), so sharpness is judged from
+  `screen_sharpness` and the tables above, which this change does not touch. Chrome's hardware
+  encoder on the Mac makes its keyframes blurrier by itself: with one every 1.5 s, 42.5 dB against
+  51.8 dB for the pictures after them (1440p, typing and slides).
 - **VideoToolbox's data rate limits** (`data-rate-limits`, `kVTCompressionPropertyKey_DataRateLimits`)
-  are a property of the `vtenc_h264` element and need no native call, but #979 set and
-  measured them: accepted, no effect at an average bitrate. Cameras use a constant
-  bitrate already (they hold 100 to 101 % of the target, #967) and screens have the quality governor. Peaks of the Mac
-  encoder are for a Mac to measure with `screen_bench`; nothing is wired here.
+  are a property of the `vtenc_h264` element and need no native call, but they cap nothing.
+  GStreamer sets them only at an average bitrate (it leaves them out at a constant one, the
+  cameras'), and there a screen share's slides sent the same with 1.5 times the target per
+  second or 1 times per 200 ms as without (720 to 724 kbit/s for the 720p layer, the same
+  keyframes; `GST_DEBUG=vtenc:5` shows them accepted), as #979 found: with `quality` set, which
+  GStreamer always does, VideoToolbox ignores rate limits. Cameras need none: at a constant
+  bitrate no second sends more than 1.23 times the target. Screens have the quality governor.
 
 So there is **no cap**: the peaks are one picture long, at most a quarter second on a link that is barely
 above the layer's target, and the encoders' average over a second stays at or near the target.
+Through the call, a limited uplink that carries the share delays a slide by the time its picture
+takes on the link and loses nothing.
 A cap would blur the slide it is meant to deliver, for a problem the uplink allocation already
 handles.
 

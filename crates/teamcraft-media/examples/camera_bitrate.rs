@@ -22,8 +22,10 @@
 //! The report is logged as a table, a row per layer. The PSNR column decodes a sample of each
 //! layer's pictures with OpenH264 and compares them with what the layer's encoder was given. The
 //! encoding's cost is the process's CPU time (all threads: GStreamer's and VideoToolbox's too)
-//! and the wall time while the simulcast encoder works on a frame, after the warm-up. The
-//! numbers of #967 are in docs/performance.md ("What each camera layer sends").
+//! and the wall time while the simulcast encoder works on a frame, after the warm-up. Each
+//! layer's row ends with its short peaks against its target (#1005, `common/peaks.rs`, as
+//! `screen_bench` reports them). The numbers of #967 are in docs/performance.md ("What each camera
+//! layer sends"), those of #1005 in "Short bitrate peaks of the encoders".
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -37,6 +39,10 @@ use teamcraft_media::video_codec::{OpenH264Decoder, SimulcastEncoder, VideoConte
 use teamcraft_media::video_pipeline::{EncoderFactory, preferred_encoders, software_encoders};
 use teamcraft_proto::VideoLayerInfo;
 use tracing::info;
+
+#[path = "common/peaks.rs"]
+mod peaks;
+use peaks::peaks_report;
 
 const FRAMERATE: u8 = 30;
 /// Left out of the rates: the first keyframes and the rate control settling.
@@ -60,6 +66,8 @@ struct LayerTally {
   /// Luma PSNR (dB) of sampled pictures after [`WARM_UP`], decoded with OpenH264.
   psnr_sum: f64,
   psnr_samples: u64,
+  /// Capture time (microseconds) and size of each steady picture, for the peaks.
+  steady_sizes: Vec<(u64, usize)>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -261,6 +269,9 @@ impl Encoding {
       if is_steady {
         tally.steady_pictures += 1;
         tally.steady_bytes += bytes;
+        tally
+          .steady_sizes
+          .push((frame.timestamp_us(), picture.data.len()));
       }
     }
     Ok(())
@@ -312,7 +323,7 @@ fn report(run: &Run) {
       |tally| format!("{:.1} dB", tally.psnr_sum / tally.psnr_samples as f64),
     );
     info!(
-      "{:<6} {:>10} {:>6.0} kb/s {:>6.0} kb/s {:>6.0}% {:>6.1} {:>10} {:>11.0} {:>8}",
+      "{:<6} {:>10} {:>6.0} kb/s {:>6.0} kb/s {:>6.0}% {:>6.1} {:>10} {:>11.0} {:>8} {}",
       layer.layer,
       format!("{}x{}", layer.width, layer.height),
       target_kbps,
@@ -322,6 +333,9 @@ fn report(run: &Run) {
       keyframes,
       bytes.saturating_sub(keyframe_bytes) as f64 / deltas as f64,
       psnr,
+      tally.map_or_else(String::new, |tally| {
+        peaks_report(&tally.steady_sizes, layer.max_bitrate_bps, FRAMERATE)
+      }),
     );
   }
 }
