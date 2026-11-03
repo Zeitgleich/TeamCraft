@@ -41,6 +41,7 @@ pub use teamcraft_proto::role_rules;
 pub mod search;
 pub mod security;
 pub mod server_entry;
+pub mod settings_sync;
 pub mod sign_in_look;
 pub mod sign_in_page;
 pub mod snapshot_changes;

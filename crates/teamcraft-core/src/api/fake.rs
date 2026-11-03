@@ -278,6 +278,8 @@ struct State {
   hidden_last_seen: HashSet<UserId>,
   /// Custom statuses set through `PUT /me/status`.
   custom_statuses: HashMap<UserId, teamcraft_proto::CustomStatus>,
+  /// Key bag uploads above this size answer 413 ([`FakeServer::limit_key_bags`]).
+  maybe_max_key_bag_bytes: Option<usize>,
   /// The workspace allows only presets: `PUT /me/status` answers 403 ([`FakeServer::refuse_custom_statuses`]).
   refuses_custom_statuses: bool,
   /// How far the server's clock runs ahead of the system clock ([`FakeServer::advance_clock`]).
@@ -876,6 +878,11 @@ impl FakeServer {
   }
 
   /// From now on `PUT /me/status` answers 403, as with custom statuses switched off.
+  /// Key bags above this size are refused from now on, like `limits.max_key_bag_bytes`.
+  pub fn limit_key_bags(&self, maybe_max_bytes: Option<usize>) {
+    self.lock().maybe_max_key_bag_bytes = maybe_max_bytes;
+  }
+
   pub fn refuse_custom_statuses(&self, is_refused: bool) {
     self.lock().refuses_custom_statuses = is_refused;
   }
@@ -3800,6 +3807,16 @@ impl ServerApi for FakeServerApi {
           409,
           ErrorCode::VersionConflict,
           format!("stored version is {current}"),
+        ));
+      }
+      if state
+        .maybe_max_key_bag_bytes
+        .is_some_and(|limit| request.encrypted_key_bag.len() > limit)
+      {
+        return Err(ApiError::status(
+          413,
+          ErrorCode::PayloadTooLarge,
+          "key bag too large",
         ));
       }
       let stored = KeyBagResponse {

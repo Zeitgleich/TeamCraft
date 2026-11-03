@@ -19,6 +19,8 @@ use crate::store::StoreError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
+  #[error("synced settings would grow past their limit: {keys:?}")]
+  SettingsTooLarge { keys: Vec<String> },
   #[error("local store: {0}")]
   Store(#[from] StoreError),
   #[error("server: {0}")]
@@ -254,6 +256,11 @@ impl CoreError {
   /// See [`ApiError::is_sign_in_required`].
   pub fn is_sign_in_required(&self) -> bool {
     matches!(self, Self::Api(error) if error.is_sign_in_required())
+  }
+
+  /// The server won't take the key bag at its size (`limits.max_key_bag_bytes`).
+  pub fn is_key_bag_refused(&self) -> bool {
+    matches!(self, Self::Api(error) if error.error_code() == Some(&teamcraft_proto::ErrorCode::PayloadTooLarge))
   }
 
   /// The failure as the UI words it (issue #322): the server's error code, an unreachable server,

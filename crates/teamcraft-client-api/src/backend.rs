@@ -6,6 +6,7 @@
 //! core. Network and decryption happen below it and arrive as store updates, which the UI picks up by
 //! re-reading after a revision bump (`AppState::revision` in `teamcraft-ui`).
 
+use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminInstanceResponse, AdminMailSettingsResponse,
   AnnouncementResponse, BackgroundId, BrandAssetSlot, CategoryId, ChannelModeration, CreateBrandRequest,
@@ -456,6 +457,22 @@ pub trait ChatBackend {
   fn newest_message(&self, _conversation: ConversationId) -> Option<MessageId> {
     None
   }
+  /// Moves when the account's synced settings changed; the UI then reads them. 0 until the device
+  /// merged the account once, and without a core: settings don't follow the account then.
+  fn settings_mark(&self) -> u64 {
+    0
+  }
+  /// Moves when the server refused this device's key bag as too large; the UI says so.
+  fn key_bag_refused_mark(&self) -> u64 {
+    0
+  }
+  /// The settings that follow the account (encrypted, e2ee.md §6.4), with keys of newer clients.
+  fn account_settings(&self) -> SyncedSettings {
+    SyncedSettings::new()
+  }
+  /// Hands this device's setting changes to the account. Call debounced: each goes into the key
+  /// bag, which is encrypted and uploaded as a whole.
+  fn write_settings(&self, _writes: Vec<SettingWrite>) {}
   /// The unsent text of a conversation or thread (synced to the user's devices, encrypted).
   fn draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>) -> Option<String> {
     None

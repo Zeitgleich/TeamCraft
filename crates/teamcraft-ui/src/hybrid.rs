@@ -979,6 +979,22 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.link_request_mark()
   }
 
+  fn settings_mark(&self) -> u64 {
+    self.chat.settings_mark()
+  }
+
+  fn key_bag_refused_mark(&self) -> u64 {
+    self.chat.key_bag_refused_mark()
+  }
+
+  fn account_settings(&self) -> teamcraft_proto::synced_settings::SyncedSettings {
+    self.chat.account_settings()
+  }
+
+  fn write_settings(&self, writes: Vec<teamcraft_proto::synced_settings::SettingWrite>) {
+    self.chat.write_settings(writes);
+  }
+
   fn seen_by(&self, conversation: ConversationId, message: MessageId) -> Vec<UserId> {
     self
       .maybe_live

@@ -60,6 +60,7 @@ mod runner;
 mod search;
 mod sending;
 mod server_changes;
+mod settings_sync;
 mod signed_deletions;
 mod snapshot_cache;
 mod store_integrity;
