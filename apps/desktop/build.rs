@@ -106,6 +106,7 @@ const COMMANDS: &[&str] = &[
   "update_status",
   "update_check",
   "update_set_preference",
+  "update_set_check_interval",
   "update_download",
   "update_restart",
   "update_with_package_manager",

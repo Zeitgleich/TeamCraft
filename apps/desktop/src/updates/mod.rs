@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, Url};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use teamcraft_client_api::updates::{
-  CheckPlan, ClientVersion, Delivery, InstallKind, InstallPhase, ManualUpdate, PackageManager,
+  CheckInterval, CheckPlan, ClientVersion, Delivery, InstallKind, InstallPhase, ManualUpdate, PackageManager,
   PackageManagerHint, PackageSource, PlanInputs, UpdatePlan, UpdatePreference, UpdateState, UpdateStatus,
   is_offered, missing_version, next_check_delay, plan, required_version,
 };
@@ -50,6 +50,8 @@ pub struct UpdateHost {
   has_update_key: bool,
   inner: Mutex<Inner>,
   wake: Notify,
+  /// The check interval changed: the next check is planned again, without checking now.
+  reschedule: Notify,
 }
 
 /// What is kept across launches.
@@ -57,6 +59,7 @@ pub struct UpdateHost {
 #[serde(default)]
 struct SavedUpdates {
   preference: UpdatePreference,
+  check_interval: CheckInterval,
   #[serde(rename = "policy", skip_serializing_if = "Option::is_none")]
   maybe_policy: Option<ClientUpdatePolicy>,
   #[serde(rename = "server_minimum", skip_serializing_if = "Option::is_none")]
@@ -103,6 +106,7 @@ impl UpdateHost {
         maybe_manual: None,
       }),
       wake: Notify::new(),
+      reschedule: Notify::new(),
     };
     // Settings shows why nothing is checked right away, not only after the first check.
     if let UpdatePlan::Off(reason) = host.plan() {
@@ -115,7 +119,8 @@ impl UpdateHost {
   pub fn spawn(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
       let host = app.state::<Arc<UpdateHost>>().inner().clone();
-      let mut next_check = tokio::time::Instant::now() + next_check_delay(true, jitter());
+      let mut has_checked = false;
+      let mut next_check = tokio::time::Instant::now() + next_check_delay(true, host.interval(), jitter());
       loop {
         let wait = next_check
           .saturating_duration_since(tokio::time::Instant::now())
@@ -123,10 +128,18 @@ impl UpdateHost {
         let is_woken = tokio::select! {
           () = tokio::time::sleep(wait) => false,
           () = host.wake.notified() => true,
+          () = host.reschedule.notified() => {
+            // A new interval counts from now; the first check after start keeps its own delay.
+            if has_checked {
+              next_check = tokio::time::Instant::now() + next_check_delay(false, host.interval(), jitter());
+            }
+            continue;
+          }
         };
         if is_woken || tokio::time::Instant::now() >= next_check {
           host.check(&app).await;
-          next_check = tokio::time::Instant::now() + next_check_delay(false, jitter());
+          has_checked = true;
+          next_check = tokio::time::Instant::now() + next_check_delay(false, host.interval(), jitter());
         } else {
           host.resume_deferred_download(&app).await;
         }
@@ -148,6 +161,7 @@ impl UpdateHost {
       current_version: BUILD_VERSION.to_owned(),
       install: self.install,
       preference: inner.saved.preference,
+      check_interval: inner.saved.check_interval,
       state: inner.state.clone(),
       maybe_required_version: self
         .maybe_current
@@ -220,6 +234,16 @@ impl UpdateHost {
     }
     if inner.saved != before {
       save(app, &inner.saved);
+    }
+  }
+
+  /// The interval of the periodic check. Package managers (deb, rpm, Flatpak) keep their own
+  /// schedule, so the app's own choice only applies where it updates itself.
+  fn interval(&self) -> CheckInterval {
+    if self.install.updates_itself() {
+      self.lock().saved.check_interval
+    } else {
+      CheckInterval::default()
     }
   }
 
@@ -448,6 +472,21 @@ pub fn update_set_preference(app: AppHandle, host: State<'_, Arc<UpdateHost>>, p
     save(&app, &inner.saved);
   }
   host.wake.notify_one();
+}
+
+/// Settings → Updates → "Check for updates": changes the periodic interval and plans the next check
+/// again at once.
+#[tauri::command(rename_all = "snake_case")]
+pub fn update_set_check_interval(app: AppHandle, host: State<'_, Arc<UpdateHost>>, interval: CheckInterval) {
+  {
+    let mut inner = host.lock();
+    if inner.saved.check_interval == interval {
+      return;
+    }
+    inner.saved.check_interval = interval;
+    save(&app, &inner.saved);
+  }
+  host.reschedule.notify_one();
 }
 
 /// Notify-only: downloads the update the user asked for.
@@ -810,11 +849,14 @@ mod tests {
   fn saved_settings_survive_missing_fields() {
     let saved: SavedUpdates = serde_json::from_str(r#"{"preference":"notify_only"}"#).unwrap_or_default();
     assert_eq!(saved.preference, UpdatePreference::NotifyOnly);
+    assert_eq!(saved.check_interval, CheckInterval::Daily);
     assert_eq!(saved.maybe_policy, None);
     assert_eq!(saved.maybe_dismissed_version, None);
     let dismissed: SavedUpdates =
       serde_json::from_str(r#"{"dismissed_version":"1.0.8"}"#).unwrap_or_default();
     assert_eq!(dismissed.maybe_dismissed_version.as_deref(), Some("1.0.8"));
+    let hourly: SavedUpdates = serde_json::from_str(r#"{"check_interval":"hourly"}"#).unwrap_or_default();
+    assert_eq!(hourly.check_interval, CheckInterval::Hourly);
     let empty: SavedUpdates = serde_json::from_str("{}").unwrap_or_default();
     assert_eq!(empty, SavedUpdates::default());
   }

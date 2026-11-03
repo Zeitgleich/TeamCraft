@@ -13,9 +13,6 @@ use crate::model::TimestampMs;
 /// First check after start: between these (docs/updates.md §4.1).
 const FIRST_CHECK_MIN: Duration = Duration::from_secs(60);
 const FIRST_CHECK_MAX: Duration = Duration::from_secs(10 * 60);
-/// Later checks: a day plus or minus this.
-const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
-const CHECK_JITTER: Duration = Duration::from_secs(2 * 60 * 60);
 /// The name of the deb and rpm packages.
 pub const LINUX_PACKAGE_NAME: &str = "team-craft";
 /// The Flatpak's application ID.
@@ -48,6 +45,32 @@ pub enum UpdatePreference {
   /// Say that an update exists; download when the user asks.
   NotifyOnly,
   Off,
+}
+
+/// How often the app looks for a new version after the first check (Settings → Updates).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckInterval {
+  /// Every 24 hours.
+  #[default]
+  Daily,
+  /// Every 6 hours.
+  SixHours,
+  /// Every hour.
+  Hourly,
+}
+
+impl CheckInterval {
+  pub const ALL: [Self; 3] = [Self::Daily, Self::SixHours, Self::Hourly];
+
+  /// The time between two checks, before jitter.
+  pub fn period(self) -> Duration {
+    Duration::from_secs(match self {
+      Self::Daily => 24 * 60 * 60,
+      Self::SixHours => 6 * 60 * 60,
+      Self::Hourly => 60 * 60,
+    })
+  }
 }
 
 /// What updates an install that doesn't replace itself: the system package manager of a deb or rpm
@@ -136,6 +159,9 @@ pub struct UpdateStatus {
   pub current_version: String,
   pub install: InstallKind,
   pub preference: UpdatePreference,
+  /// How often the periodic check runs; only the installs that update themselves offer a choice.
+  #[serde(default)]
+  pub check_interval: CheckInterval,
   pub state: UpdateState,
   /// Set when the running version is older than the organization or server accepts.
   #[serde(rename = "required_version", default, skip_serializing_if = "Option::is_none")]
@@ -578,13 +604,16 @@ pub fn missing_version(current: &ClientVersion, maybe_required: Option<&ClientVe
     .map(ToString::to_string)
 }
 
-/// How long to wait before the next check. `jitter` is a random number in `[0, 1)`.
-pub fn next_check_delay(is_first: bool, jitter: f64) -> Duration {
+/// How long to wait before the next check. `jitter` is a random number in `[0, 1)`. Later checks
+/// come every `interval` plus or minus 10 % of it (daily: 24 h ± 2.4 h).
+pub fn next_check_delay(is_first: bool, interval: CheckInterval, jitter: f64) -> Duration {
   let jitter = jitter.clamp(0.0, 1.0);
   if is_first {
     FIRST_CHECK_MIN + (FIRST_CHECK_MAX - FIRST_CHECK_MIN).mul_f64(jitter)
   } else {
-    CHECK_INTERVAL - CHECK_JITTER + (CHECK_JITTER * 2).mul_f64(jitter)
+    let period = interval.period();
+    let spread = period / 10;
+    period - spread + (spread * 2).mul_f64(jitter)
   }
 }
 
@@ -1136,15 +1165,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_first_check_comes_within_minutes_and_later_ones_about_daily() {
-      assert_eq!(next_check_delay(true, 0.0), Duration::from_secs(60));
-      assert_eq!(next_check_delay(true, 1.0), Duration::from_secs(600));
-      assert_eq!(next_check_delay(false, 0.0), Duration::from_secs(22 * 3600));
-      assert_eq!(next_check_delay(false, 0.5), Duration::from_secs(24 * 3600));
-      assert_eq!(next_check_delay(false, 1.0), Duration::from_secs(26 * 3600));
+    fn the_first_check_comes_within_minutes_and_later_ones_at_the_chosen_interval() {
+      let hours = |count: f64| Duration::from_secs_f64(count * 3600.0);
+      let daily = CheckInterval::Daily;
+      assert_eq!(next_check_delay(true, daily, 0.0), Duration::from_secs(60));
+      assert_eq!(next_check_delay(true, daily, 1.0), Duration::from_secs(600));
+      // The first check ignores the interval.
+      assert_eq!(
+        next_check_delay(true, CheckInterval::Hourly, 1.0),
+        Duration::from_secs(600)
+      );
+      assert_eq!(next_check_delay(false, daily, 0.0), hours(21.6));
+      assert_eq!(next_check_delay(false, daily, 0.5), hours(24.0));
+      assert_eq!(next_check_delay(false, daily, 1.0), hours(26.4));
+      assert_eq!(next_check_delay(false, CheckInterval::SixHours, 0.0), hours(5.4));
+      assert_eq!(next_check_delay(false, CheckInterval::SixHours, 1.0), hours(6.6));
+      assert_eq!(
+        next_check_delay(false, CheckInterval::Hourly, 0.0),
+        Duration::from_secs(54 * 60)
+      );
+      assert_eq!(
+        next_check_delay(false, CheckInterval::Hourly, 0.5),
+        Duration::from_secs(3600)
+      );
+      assert_eq!(
+        next_check_delay(false, CheckInterval::Hourly, 1.0),
+        Duration::from_secs(66 * 60)
+      );
       // Out-of-range jitter is clamped, never negative or unbounded.
-      assert_eq!(next_check_delay(false, -3.0), Duration::from_secs(22 * 3600));
-      assert_eq!(next_check_delay(true, f64::INFINITY), Duration::from_secs(600));
+      assert_eq!(next_check_delay(false, daily, -3.0), hours(21.6));
+      assert_eq!(
+        next_check_delay(true, daily, f64::INFINITY),
+        Duration::from_secs(600)
+      );
+    }
+
+    #[test]
+    fn the_interval_defaults_to_daily_and_survives_old_files() {
+      assert_eq!(CheckInterval::default(), CheckInterval::Daily);
+      assert_eq!(
+        serde_json::to_string(&CheckInterval::SixHours).unwrap_or_default(),
+        r#""six_hours""#
+      );
+      assert_eq!(
+        serde_json::from_str::<CheckInterval>(r#""hourly""#).ok(),
+        Some(CheckInterval::Hourly)
+      );
     }
   }
 
@@ -1472,6 +1538,7 @@ mod tests {
           "current_version": "1.0.0",
           "install": "app_image",
           "preference": "automatic",
+          "check_interval": "daily",
           "state": {"kind": "downloading", "version": "1.0.1", "percent": 12},
           "is_in_call": false,
           "manual": {
@@ -1523,6 +1590,7 @@ mod tests {
       current_version: "1.0.0".into(),
       install: InstallKind::AppImage,
       preference: UpdatePreference::Automatic,
+      check_interval: CheckInterval::default(),
       state,
       maybe_required_version: None,
       is_in_call: false,

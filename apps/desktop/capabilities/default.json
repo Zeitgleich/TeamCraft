@@ -110,6 +110,7 @@
     "allow-update-status",
     "allow-update-check",
     "allow-update-set-preference",
+    "allow-update-set-check-interval",
     "allow-update-download",
     "allow-update-restart",
     "allow-update-with-package-manager",

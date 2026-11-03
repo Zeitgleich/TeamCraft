@@ -683,6 +683,16 @@ pub async fn update_set_preference(
   .await
 }
 
+pub async fn update_set_check_interval(
+  interval: teamcraft_client_api::updates::CheckInterval,
+) -> Result<(), String> {
+  call::<()>(
+    "update_set_check_interval",
+    &serde_json::json!({ "interval": interval }),
+  )
+  .await
+}
+
 /// Notify-only: downloads the update now.
 pub async fn update_download() -> Result<(), String> {
   call::<()>("update_download", &serde_json::json!({})).await

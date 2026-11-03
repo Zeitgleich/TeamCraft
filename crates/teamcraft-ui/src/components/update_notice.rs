@@ -3,9 +3,9 @@
 
 use leptos::prelude::*;
 use teamcraft_client_api::updates::{
-  AvailableAction, Dismissal, InstallKind, InstallPhase, ManualUpdate, PackageManager, PackageManagerHint,
-  SelfUpdateStep, TooOldAction, UpdateBanner, UpdateBlocker, UpdatePreference, UpdateProgress, UpdateState,
-  UpdateStatus,
+  AvailableAction, CheckInterval, Dismissal, InstallKind, InstallPhase, ManualUpdate, PackageManager,
+  PackageManagerHint, SelfUpdateStep, TooOldAction, UpdateBanner, UpdateBlocker, UpdatePreference,
+  UpdateProgress, UpdateState, UpdateStatus,
 };
 
 use crate::areas::{self, Place, lazy_area};
@@ -164,6 +164,16 @@ pub fn UpdatesSection() -> impl IntoView {
       error.set_if_alive(tauri::update_set_preference(preference).await.err());
     });
   };
+  let choose_interval = move |interval: CheckInterval| {
+    status.update(|maybe| {
+      if let Some(current) = maybe {
+        current.check_interval = interval;
+      }
+    });
+    leptos::task::spawn_local(async move {
+      error.set_if_alive(tauri::update_set_check_interval(interval).await.err());
+    });
+  };
   let is_managed = move || {
     status.get().is_some_and(|current| {
       matches!(
@@ -205,6 +215,42 @@ pub fn UpdatesSection() -> impl IntoView {
           }
         })
         .collect_view()}
+      {move || {
+        let current = status.get()?;
+        Some(if current.install.updates_itself() {
+          let interval = current.check_interval;
+          view! {
+            <label class="small">
+              {i18n.t("settings-update-interval")}
+              <select
+                class="input set-select"
+                prop:disabled=is_managed
+                on:change=move |event| {
+                  let value = event_target_value(&event);
+                  if let Some(choice) = CheckInterval::ALL.into_iter().find(|choice| interval_slug(*choice) == value) {
+                    choose_interval(choice);
+                  }
+                }
+              >
+                {CheckInterval::ALL
+                  .into_iter()
+                  .map(|choice| {
+                    let slug = interval_slug(choice);
+                    view! {
+                      <option value=slug selected=choice == interval>
+                        {i18n.t(&format!("settings-update-interval-{slug}"))}
+                      </option>
+                    }
+                  })
+                  .collect_view()}
+              </select>
+            </label>
+          }
+          .into_any()
+        } else {
+          view! { <p class="small muted-text">{i18n.t("settings-update-interval-managed")}</p> }.into_any()
+        })
+      }}
       <button
         class="btn"
         prop:disabled=move || is_managed() || status.get().is_some_and(|current| current.preference == UpdatePreference::Off)
@@ -555,6 +601,14 @@ fn preference_slug(preference: UpdatePreference) -> &'static str {
   }
 }
 
+fn interval_slug(interval: CheckInterval) -> &'static str {
+  match interval {
+    CheckInterval::Daily => "daily",
+    CheckInterval::SixHours => "six_hours",
+    CheckInterval::Hourly => "hourly",
+  }
+}
+
 fn blocker_slug(blocker: UpdateBlocker) -> &'static str {
   match blocker {
     UpdateBlocker::Policy => "policy",
@@ -698,6 +752,7 @@ mod tests {
         current_version: "1.0.0".into(),
         install: InstallKind::AppImage,
         preference: UpdatePreference::Automatic,
+        check_interval: CheckInterval::default(),
         state,
         maybe_required_version: None,
         is_in_call: false,

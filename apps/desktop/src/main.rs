@@ -344,6 +344,7 @@ fn main() -> anyhow::Result<()> {
       updates::update_status,
       updates::update_check,
       updates::update_set_preference,
+      updates::update_set_check_interval,
       updates::update_download,
       updates::update_restart,
       updates::update_with_package_manager,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-set-check-interval"
+description = "Enables the update_set_check_interval command without any pre-configured scope."
+commands.allow = ["update_set_check_interval"]
+
+[[permission]]
+identifier = "deny-update-set-check-interval"
+description = "Denies the update_set_check_interval command without any pre-configured scope."
+commands.deny = ["update_set_check_interval"]
