@@ -50,6 +50,8 @@ pub struct BridgeConfig {
   pub files: FilesSection,
   #[serde(default)]
   pub idempotency: IdempotencySection,
+  #[serde(default)]
+  pub metrics: crate::metrics::MetricsSection,
   /// Optional: sources written into this file. Sources added in the app need none.
   #[serde(default)]
   pub sources: Vec<SourceConfig>,

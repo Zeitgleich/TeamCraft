@@ -26,6 +26,9 @@ the VPS that runs the server.
 | `POST /ingest/<token>` | Log lines: plain text, or NDJSON with `Content-Type: application/x-ndjson`; the body is read as a stream (see "Log streams")                                    |
 | `GET /healthz`         | `200 ok`, for the container health check                                                                                                                        |
 
+`GET /metrics` is not on these addresses: it has a listener of its own, off by default (`[metrics]`,
+docs/operations.md, "Metrics"). Source tokens never appear in it.
+
   `icon_url`, `channel` and blocks of the Slack format are ignored: the source's token decides the
   conversation. Slack markup (`<url|label>`, `<@user>`, `<!here>`) becomes Markdown. A source added
   in the app opens one of the two endpoints (its kind); a token on the other one gets `404`.

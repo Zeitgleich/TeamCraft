@@ -17,6 +17,7 @@
 //! - [`multipart`], [`form`], [`spool`], [`file_hooks`], [`file_jobs`]: webhooks with files, from
 //!   the form as it arrives to the encrypted uploads.
 //! - [`worker`]: the task that owns the client (gateway, sending, uploads, index segments).
+//! - [`metrics`]: the optional `GET /metrics`.
 //! - [`app`]: wiring for the binary.
 
 pub mod app;
@@ -29,6 +30,7 @@ pub mod http;
 pub mod idempotency;
 pub mod ingest;
 pub mod limiter;
+pub mod metrics;
 pub mod multipart;
 pub mod render;
 pub mod sources;

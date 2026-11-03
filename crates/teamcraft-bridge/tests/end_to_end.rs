@@ -286,7 +286,9 @@ async fn start_bridge(
     .unwrap();
   let (sender, receiver) = mpsc::channel(64);
   let sources = SourceRegistry::new(config);
-  let endpoints = start_endpoints(config, sources.clone(), sender).await.unwrap();
+  let endpoints = start_endpoints(config, sources.clone(), sender, None)
+    .await
+    .unwrap();
   let base = format!("http://{}", endpoints.addrs[0]);
   let worker = Worker::new(client, sources, receiver, worker_settings(config));
   (endpoints, base, worker)

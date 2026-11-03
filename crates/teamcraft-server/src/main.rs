@@ -12,6 +12,7 @@ use rand_core::{OsRng, RngCore};
 use secrecy::{ExposeSecret, SecretString};
 use teamcraft_db::{Database, DatabaseOptions, DbError, SnowflakeGenerator};
 use teamcraft_net::retry::{Jitter, RetryPolicy as RetryPolicyNet};
+use teamcraft_ops::metrics::{bind_metrics, spawn_metrics_endpoint, with_http_metrics};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
 use teamcraft_proto::{DependencyName, PushProvider};
 use teamcraft_server::auth::{
@@ -27,6 +28,7 @@ use teamcraft_server::listener::bind_listener;
 use teamcraft_server::logging;
 use teamcraft_server::meetings::mailer::Mailer;
 use teamcraft_server::meetings::{MeetingBackends, MeetingService};
+use teamcraft_server::metrics::{BackgroundJob, MetricsConfig, ServerMetrics};
 use teamcraft_server::push::crypto::VapidKey;
 use teamcraft_server::push::{
   APNS_PRODUCTION_URL, APNS_SANDBOX_URL, ApnsSender, ApnsSettings, FCM_BASE_URL, FcmSender, FcmSettings,
@@ -261,6 +263,7 @@ async fn run() -> anyhow::Result<()> {
     image_decodes: Arc::new(tokio::sync::Semaphore::new(
       config.limits.max_concurrent_image_decodes.max(1),
     )),
+    metrics: Arc::new(ServerMetrics::new().context("setting up the metrics")?),
   };
   with_startup_retries("loading the settings", startup_deadline, || {
     load_runtime_settings(&state)
@@ -297,18 +300,16 @@ async fn run() -> anyhow::Result<()> {
   calls::adopt_running_calls(&state).await;
   // Wake-ups that failed for a temporary reason, also those queued before a restart.
   spawn_retry_workers(&state);
+  let app = serve_metrics(&state, &config.metrics).context("[metrics]")?;
 
   let listener = bind_listener(config.server.listen_addr)
     .with_context(|| format!("binding {}", config.server.listen_addr))?;
   info!(addr = %config.server.listen_addr, "teamcraft-server listening");
   let drain = state.drain.clone();
   let drain_timeout = Duration::from_secs(config.gateway.drain_timeout_secs);
-  axum::serve(
-    listener,
-    router(state).into_make_service_with_connect_info::<SocketAddr>(),
-  )
-  .with_graceful_shutdown(begin_drain(drain.clone()))
-  .await?;
+  axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+    .with_graceful_shutdown(begin_drain(drain.clone()))
+    .await?;
   // Upgraded WebSockets outlive the HTTP server: give them a bounded time to send their 1012.
   let open_sockets = drain.open_sockets();
   if drain.wait_closed(drain_timeout).await {
@@ -320,6 +321,36 @@ async fn run() -> anyhow::Result<()> {
     );
   }
   Ok(())
+}
+
+/// The HTTP router. With `[metrics]` on, it counts its requests, and the metrics listener and the
+/// periodic database check run; with it off, requests pay nothing for them.
+fn serve_metrics(state: &AppState, config: &MetricsConfig) -> anyhow::Result<axum::Router> {
+  let app = router(state.clone());
+  if !config.is_enabled {
+    return Ok(app);
+  }
+  let listeners = bind_metrics(&config.listen_addrs)?;
+  let scraped = state.clone();
+  spawn_metrics_endpoint(listeners, move || scraped.metrics.render(&scraped));
+  spawn_metrics_database_check(state.clone(), config.database_check_interval());
+  Ok(with_http_metrics(app, state.metrics.http()))
+}
+
+/// Reads the database size and the push retry queue for the metrics, every
+/// `[metrics] database_check_interval_secs`: a query that is too slow for a request or a scrape.
+fn spawn_metrics_database_check(state: AppState, period: Duration) {
+  tokio::spawn(async move {
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+      interval.tick().await;
+      state
+        .metrics
+        .check_database(&state.database, period, time::OffsetDateTime::now_utc())
+        .await;
+    }
+  });
 }
 
 /// Resolves on SIGTERM or Ctrl-C after starting the drain: readiness fails at once and every
@@ -452,10 +483,18 @@ fn spawn_partition_maintenance(state: AppState, months_ahead: u32) {
     let mut interval = tokio::time::interval(PARTITION_MAINTENANCE_INTERVAL);
     // The first tick fires at once; startup has just created the partitions.
     interval.tick().await;
+    state.metrics.job_succeeded(
+      BackgroundJob::PartitionMaintenance,
+      time::OffsetDateTime::now_utc(),
+    );
     loop {
       interval.tick().await;
-      if let Err(error) = state.database.ensure_partitions(months_ahead).await {
-        warn!(%error, "creating message partitions ahead failed");
+      match state.database.ensure_partitions(months_ahead).await {
+        Ok(_) => state.metrics.job_succeeded(
+          BackgroundJob::PartitionMaintenance,
+          time::OffsetDateTime::now_utc(),
+        ),
+        Err(error) => warn!(%error, "creating message partitions ahead failed"),
       }
     }
   });
@@ -519,8 +558,10 @@ fn spawn_retention_job(state: AppState) {
     let mut interval = tokio::time::interval(Duration::from_secs(settings.interval_secs.max(1)));
     loop {
       interval.tick().await;
-      if let Err(error) = retention::run_once(&state, time::OffsetDateTime::now_utc()).await {
-        warn!(%error, "retention run failed");
+      let now = time::OffsetDateTime::now_utc();
+      match retention::run_once(&state, now).await {
+        Ok(_) => state.metrics.job_succeeded(BackgroundJob::Retention, now),
+        Err(error) => warn!(%error, "retention run failed"),
       }
     }
   });
@@ -595,8 +636,9 @@ fn spawn_account_housekeeping(state: AppState) {
     loop {
       interval.tick().await;
       let now = time::OffsetDateTime::now_utc();
-      if let Err(error) = guests::expire_once(&state, now).await {
-        warn!(%error, "expiring guests failed");
+      match guests::expire_once(&state, now).await {
+        Ok(_) => state.metrics.job_succeeded(BackgroundJob::GuestExpiry, now),
+        Err(error) => warn!(%error, "expiring guests failed"),
       }
       if let Err(error) = session::forget_stale_sessions(&state, now).await {
         warn!(%error, "forgetting stale sessions failed");
@@ -627,8 +669,12 @@ fn spawn_account_housekeeping(state: AppState) {
         Err(error) => warn!(%error, "forgetting deleted direct messages failed"),
       }
       match key_packages::sweep_expired(&state, now).await {
-        Ok(0) => {},
-        Ok(deleted) => info!(deleted, "deleted expiring key packages"),
+        Ok(deleted) => {
+          state.metrics.job_succeeded(BackgroundJob::KeyPackagePruning, now);
+          if deleted > 0 {
+            info!(deleted, "deleted expiring key packages");
+          }
+        },
         Err(error) => warn!(%error, "deleting expiring key packages failed"),
       }
       match state.database.delete_expired_create_keys().await {
@@ -654,8 +700,10 @@ fn spawn_urgent_scheduler(state: AppState) {
     let mut interval = tokio::time::interval(period);
     loop {
       interval.tick().await;
-      if let Err(error) = urgent::run_due(&state, time::OffsetDateTime::now_utc()).await {
-        warn!(%error, "urgent reminders failed");
+      let now = time::OffsetDateTime::now_utc();
+      match urgent::run_due(&state, now).await {
+        Ok(_) => state.metrics.job_succeeded(BackgroundJob::UrgentScheduler, now),
+        Err(error) => warn!(%error, "urgent reminders failed"),
       }
     }
   });
@@ -677,8 +725,10 @@ fn spawn_email_digests(state: AppState) {
     let mut interval = tokio::time::interval(period);
     loop {
       interval.tick().await;
-      if let Err(error) = email_digest::run_due(&state, time::OffsetDateTime::now_utc()).await {
-        warn!(%error, "mention digests failed");
+      let now = time::OffsetDateTime::now_utc();
+      match email_digest::run_due(&state, now).await {
+        Ok(_) => state.metrics.job_succeeded(BackgroundJob::EmailDigest, now),
+        Err(error) => warn!(%error, "mention digests failed"),
       }
     }
   });
@@ -723,8 +773,11 @@ fn spawn_oidc_sync(state: AppState, initial_delay: Duration, interval: Duration)
     let mut ticker = tokio::time::interval(interval.max(Duration::from_secs(1)));
     loop {
       ticker.tick().await;
-      if let Err(error) = oidc::sync_once(&state).await {
-        warn!(%error, "oidc sync failed");
+      match oidc::sync_once(&state).await {
+        Ok(_) => state
+          .metrics
+          .job_succeeded(BackgroundJob::OidcSync, time::OffsetDateTime::now_utc()),
+        Err(error) => warn!(%error, "oidc sync failed"),
       }
     }
   });

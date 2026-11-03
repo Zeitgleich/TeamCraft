@@ -606,7 +606,9 @@ mod tests {
     let config = bridge_config(channel, "drain_timeout_secs = 1");
     let (sender, receiver) = mpsc::channel(16);
     let sources = SourceRegistry::new(&config);
-    let endpoints = start_endpoints(&config, sources.clone(), sender).await.unwrap();
+    let endpoints = start_endpoints(&config, sources.clone(), sender, None)
+      .await
+      .unwrap();
     let address = endpoints.addrs[0];
     let worker = Worker::new(bot, sources, receiver, worker_settings(&config));
     let (stop, stopped) = WorkerStop::new();
@@ -734,7 +736,9 @@ mod tests {
     .unwrap();
     let (sender, receiver) = mpsc::channel(16);
     let sources = SourceRegistry::new(&config);
-    let endpoints = start_endpoints(&config, sources.clone(), sender).await.unwrap();
+    let endpoints = start_endpoints(&config, sources.clone(), sender, None)
+      .await
+      .unwrap();
     let url = format!("http://{}/hooks/{TOKEN}", endpoints.addrs[0]);
     let settings = WorkerSettings {
       index_interval: None,
