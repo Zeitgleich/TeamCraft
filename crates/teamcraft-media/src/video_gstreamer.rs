@@ -676,7 +676,6 @@ mod tests {
       );
       return;
     };
-    let mut decoder = OpenH264Decoder::new().unwrap();
     let mut pictures = Vec::new();
     let mut sources = Vec::new();
     for index in 0..40u64 {
@@ -701,8 +700,15 @@ mod tests {
       keyframes.iter().any(|index| (20..=22).contains(index)),
       "forced keyframe missing: {keyframes:?}"
     );
+    assert_decoded_pictures_match(&pictures, &sources);
+  }
+
+  /// The pictures decode to the frames they were encoded for: not black, close to the source
+  /// (PSNR), and (nearly) all of them decode.
+  fn assert_decoded_pictures_match(pictures: &[(u64, EncodedPicture)], sources: &[VideoFrame]) {
+    let mut decoder = OpenH264Decoder::new().unwrap();
     let mut decoded = 0;
-    for (index, picture) in &pictures {
+    for (index, picture) in pictures {
       if let Some(frame) = decoder.decode(&picture.data, index * 33_333).unwrap() {
         assert_eq!(frame.resolution(), HD);
         // The picture itself, not just a stream that decodes (issue #683: video arrived black):
@@ -1257,5 +1263,148 @@ mod tests {
       .sum::<f64>()
       / ya.len() as f64;
     10.0 * (255.0f64.powi(2) / mse.max(1e-9)).log10()
+  }
+
+  /// #915: Media Foundation's `mfh264enc` takes `constrained-baseline` (VideoToolbox did not:
+  /// #683), and what it encodes decodes to the pictures it was given. Needs GStreamer's MSVC
+  /// runtime with the Media Foundation plugin, which CI installs (`windows` job). Where the
+  /// element is missing the test says so loudly (`SKIPPED`, and a GitHub Actions warning) and
+  /// passes without having tested anything; with `TEAMCRAFT_REQUIRE_MEDIA_FOUNDATION` set that is
+  /// a failure instead. A machine with only Microsoft's software encoder says so too: the hardware
+  /// encoders (NVIDIA, AMD, Intel) are then untested.
+  ///
+  /// On a Windows machine with a GPU, in a shell with GStreamer's `bin` in `PATH`:
+  /// `cargo test -p teamcraft-media --features native,gstreamer,openh264-source media_foundation
+  /// -- --nocapture`
+  #[cfg(target_os = "windows")]
+  mod media_foundation {
+    use super::*;
+
+    const ELEMENT: &str = "mfh264enc";
+    const REQUIRE_VARIABLE: &str = "TEAMCRAFT_REQUIRE_MEDIA_FOUNDATION";
+
+    #[test]
+    fn mfh264enc_takes_the_profile_the_encoder_asks_for_and_its_pictures_are_right() {
+      gst::init().unwrap();
+      if gst::ElementFactory::find(ELEMENT).is_none() {
+        let reason =
+          "mfh264enc is not installed (no GStreamer Media Foundation plugin, or no Media Foundation)";
+        assert!(
+          std::env::var_os(REQUIRE_VARIABLE).is_none(),
+          "{REQUIRE_VARIABLE} is set, and: {reason}"
+        );
+        say_not_tested(reason);
+        return;
+      }
+      let element = &HARDWARE_ELEMENTS[0];
+      assert_eq!(element.name, ELEMENT);
+      // Both profiles, so the log says which ones negotiate whatever the first does.
+      let probes: Vec<_> = ["constrained-baseline", "baseline"]
+        .into_iter()
+        .map(|profile| probe_profile(element, profile))
+        .collect();
+      for probe in &probes {
+        eprintln!("MF-PROFILE: {probe}");
+      }
+      if probes.iter().any(|probe| probe.maybe_is_hardware == Some(false)) {
+        say_not_tested(
+          "mfh264enc is Microsoft's software encoder here: the profile is tested, but no hardware \
+           Media Foundation encoder (NVIDIA, AMD, Intel) was",
+        );
+      }
+      let used = probes
+        .iter()
+        .find(|probe| probe.profile == element.profile)
+        .unwrap();
+      assert!(
+        used.error.is_none() && !used.pictures.is_empty(),
+        "the profile the encoder asks for does not work: {used}"
+      );
+      assert_decoded_pictures_match(&used.pictures, &used.sources);
+    }
+
+    /// What encoding 40 frames through `mfh264enc` with `profile` gave.
+    struct Probe {
+      profile: &'static str,
+      maybe_is_hardware: Option<bool>,
+      pictures: Vec<(u64, EncodedPicture)>,
+      sources: Vec<VideoFrame>,
+      error: Option<String>,
+    }
+
+    impl std::fmt::Display for Probe {
+      fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let negotiated = if self.error.is_none() && !self.pictures.is_empty() {
+          "negotiates"
+        } else {
+          "does NOT negotiate"
+        };
+        write!(
+          f,
+          "profile={} {negotiated}: {} of {} frames came out, hardware={:?}, error={:?}",
+          self.profile,
+          self.pictures.len(),
+          self.sources.len(),
+          self.maybe_is_hardware,
+          self.error
+        )
+      }
+    }
+
+    fn probe_profile(element: &HardwareElement, profile: &'static str) -> Probe {
+      let element = HardwareElement {
+        name: element.name,
+        profile,
+        properties: element.properties,
+        is_screen_quality_governed: false,
+      };
+      let layer = simulcast_layers(HD, 30, 2_000_000, 1)[0];
+      let description = pipeline_description(&element, &layer, VideoContent::Camera, None);
+      let mut probe = Probe {
+        profile,
+        maybe_is_hardware: None,
+        pictures: Vec::new(),
+        sources: Vec::new(),
+        error: None,
+      };
+      let mut encoder =
+        match GstreamerEncoder::build(&description, element.name, &layer, VideoContent::Camera) {
+          Ok(encoder) => encoder,
+          Err(error) => {
+            probe.error = Some(error.to_string());
+            return probe;
+          },
+        };
+      probe.maybe_is_hardware = is_hardware(&encoder);
+      for index in 0..40u64 {
+        let frame = test_pattern(HD, index, index * 33_333).unwrap();
+        match encoder.encode(&frame, false) {
+          Ok(Some(picture)) => probe.pictures.push((index, picture)),
+          Ok(None) => {},
+          Err(error) => {
+            probe.error = Some(error.to_string());
+            break;
+          },
+        }
+        probe.sources.push(frame);
+      }
+      probe
+    }
+
+    /// The element's `hardware` property: whether its Media Foundation transform is a hardware one.
+    fn is_hardware(encoder: &GstreamerEncoder) -> Option<bool> {
+      let elements = encoder.pipeline.iterate_elements().into_iter().flatten();
+      let element = elements
+        .into_iter()
+        .find(|element| element.factory().is_some_and(|factory| factory.name() == ELEMENT))?;
+      element.find_property("hardware")?;
+      Some(element.property::<bool>("hardware"))
+    }
+
+    /// Says that (part of) the test did not run: a log line and a GitHub Actions warning.
+    fn say_not_tested(reason: &str) {
+      eprintln!("SKIPPED (not tested): {reason}");
+      eprintln!("::warning title=Media Foundation H.264 encoder not tested::{reason}");
+    }
   }
 }
