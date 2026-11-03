@@ -14,6 +14,9 @@
 //! it is known to happen, and remembers a crash during the question for this WebKitGTK and
 //! GStreamer version where it isn't.
 
+// Nothing on Windows reports a dead web process yet (`ProcessFailed`, #1214).
+#![cfg_attr(windows, allow(dead_code))]
+
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -256,7 +259,7 @@ pub fn watch(webview: &webkit2gtk::WebView, app: AppHandle) {
 }
 
 /// macOS kills web content processes it needs the memory of, and they die like any others. The
-/// Windows counterpart (`ProcessFailed`) isn't handled yet.
+/// Windows counterpart (`ProcessFailed`) is #1214.
 #[cfg(target_os = "macos")]
 pub fn on_process_terminated(webview: &tauri::Webview) {
   let handle = webview.app_handle().clone();
