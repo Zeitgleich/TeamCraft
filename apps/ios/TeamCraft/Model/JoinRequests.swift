@@ -153,6 +153,9 @@ struct JoinRequestNotice: Equatable {
     case .notAnAdmin:
       body = maybeNote?.notificationText ?? String(localized: "join_request_not_admin")
       categoryIdentifier = NotificationCategories.joinRequestDeclineOnlyCategory
+    case .ownerRoleNotSigned:
+      body = maybeNote?.notificationText ?? String(localized: "join_request_owner_not_signed")
+      categoryIdentifier = NotificationCategories.joinRequestDeclineOnlyCategory
     }
   }
 
