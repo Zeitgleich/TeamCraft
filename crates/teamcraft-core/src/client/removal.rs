@@ -235,29 +235,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.purge_conversation(conversation)
   }
 
-  /// Deletes a space with its channels for everybody, then drops them here (e2ee.md §4.6). Done also
-  /// when it is gone already.
+  /// Deletes a space with its channels for everybody (e2ee.md §4.6). Done also when it is gone
+  /// already. Here its channels go as on every member's device, on the server's word
+  /// ([`Self::note_space_deletion`]): which channels are in it is `maybe_space_id`, which nothing
+  /// signed backs (#1162).
   pub async fn delete_space(&mut self, space: SpaceId) -> Result<(), CoreError> {
-    let channels: Vec<ConversationId> = self
-      .cached_conversations()?
-      .into_values()
-      .filter(|known| known.maybe_space_id == Some(space))
-      .map(|known| known.id)
-      .collect();
-    for channel in &channels {
-      self.note_own_deletion(*channel)?;
-    }
     if let Err(error) = self.api.delete_space(space).await
       && error.error_code() != Some(&ErrorCode::SpaceNotFound)
     {
-      for channel in &channels {
-        self.forget_own_deletion(*channel)?;
-      }
       return Err(error.into());
     }
-    for channel in channels {
-      self.purge_conversation(channel)?;
-    }
+    self.note_space_deletion(space)?;
     self.forget_space(&space.to_string())
   }
 

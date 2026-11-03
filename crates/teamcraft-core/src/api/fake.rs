@@ -1360,6 +1360,13 @@ impl FakeServer {
     }
   }
 
+  /// The server says from now on that the conversation is in this space, without a move.
+  pub fn relabel_space(&self, conversation: ConversationId, space: SpaceId) {
+    if let Some(entry) = self.lock().conversations.get_mut(&conversation) {
+      entry.response.maybe_space_id = Some(space);
+    }
+  }
+
   /// The signature kept with a conversation's deletion.
   pub fn deletion_signature(&self, conversation: ConversationId) -> Option<SignedChannelDeletion> {
     self.lock().deletion_signatures.get(&conversation).cloned()

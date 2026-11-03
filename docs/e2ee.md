@@ -1161,7 +1161,13 @@ towards the mass notice below, since a real signature on many channels is worth 
 When there is no signature: **a space's deletion is never signed.** Which channels are in a space is
 `maybe_space_id`, the server's word, so a server could relabel any conversation into the space being deleted
 and collect a workspace admin's signature for all of them. So its channels stay claims, however the admin
-signs in. Other deletions that stay claims: a space admin's, one under a custom permission scheme, the last
+signs in, **also on the deleter's own device** (issue #1162): nothing a device verified says which space a
+channel is in (channels move between spaces too), so purging what the server lists in the deleted space at
+once would let it relabel a direct message or another space's channel in and destroy the deleter's copy.
+The deleter's device hides those channels with their history kept for the retention, and they count towards
+the mass notice, where a relabel shows as more than the user deleted; a conversation it pinned as direct
+it leaves alone. Binding a channel's space in signed state, which would let this purge at once again, is
+#1171. Other deletions that stay claims: a space admin's, one under a custom permission scheme, the last
 member's leave with `delete_if_last`, a channel without signed roles deleted by its channel admin, a direct
 message deleted with an account, and a deletion from a client or against a server from before signed
 deletions. Within 1.x neither side needs the other: a client before this version sends no body and gets the
@@ -1212,8 +1218,9 @@ local copy may be the last copy there is, a claim is not enough to destroy it:
   logged as suspect and the user is told once. No purge comes earlier for it: what protects the history
   is the retention; the notice is what makes people react within it. What a single claim shows is the
   conversation going away.
-- **The user's own deletion.** A deletion the user confirmed on this device purges at once there, by a
-  mark set before the request. The user's other devices verify its signature like anybody's, and treat it
+- **The user's own deletion.** A channel's deletion the user confirmed on this device purges at once
+  there, by a mark set before the request. A space's deletion doesn't: its channels are claims there too
+  (above, issue #1162). The user's other devices verify its signature like anybody's, and treat it
   as a claim without one.
 - **What it doesn't protect.** Retention runs on the device's clock, so a clock set forward shortens it.
   Local copies are the only thing kept: what a real deletion removed from the server doesn't come back.

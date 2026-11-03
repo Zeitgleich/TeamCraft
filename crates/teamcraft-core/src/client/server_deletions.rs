@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, DeleteConversationRequest, SignedChannelDeletion,
+  SpaceId,
 };
 
 use super::Client;
@@ -336,6 +337,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.drop_pending_work(conversation)?;
     tracing::info!(conversation_id = %conversation, "the server says this conversation was deleted; hidden, its messages stay for now");
     self.note_suspect_deletions()
+  }
+
+  /// The user deleted a space here and the server took it. Which channels were in it is
+  /// `maybe_space_id`, the server's word: nothing signed binds a channel to its space yet (#1171),
+  /// and channels move between spaces. A server could relabel any conversation into the space being
+  /// deleted, so purging what it lists there at once would let it destroy the deleter's copies
+  /// (#1162). So they are claims here too: hidden, their history kept for the retention, and counted
+  /// towards the mass notice, where a relabel shows as more than the user deleted. What this device
+  /// saw as direct stays as it is: no space holds one.
+  pub(crate) fn note_space_deletion(&mut self, space: SpaceId) -> Result<(), CoreError> {
+    let listed: Vec<ConversationId> = self
+      .cached_conversations()?
+      .into_values()
+      .filter(|known| known.maybe_space_id == Some(space) && known.kind == ConversationKind::Channel)
+      .map(|known| known.id)
+      .collect();
+    for channel in listed {
+      if self.is_pinned(&direct_key(channel))? {
+        tracing::warn!(conversation_id = %channel, "the server lists a direct conversation in a deleted space; left alone");
+        continue;
+      }
+      self.note_server_deletion(channel)?;
+    }
+    Ok(())
   }
 
   /// Marks that this conversation may purge at once: the user confirmed deleting it here (set before
