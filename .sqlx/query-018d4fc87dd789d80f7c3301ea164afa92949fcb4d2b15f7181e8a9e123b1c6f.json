@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM push_retries\n       WHERE id IN (\n         SELECT id FROM push_retries WHERE conversation_id = ANY($1) FOR UPDATE SKIP LOCKED)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "018d4fc87dd789d80f7c3301ea164afa92949fcb4d2b15f7181e8a9e123b1c6f"
+}
