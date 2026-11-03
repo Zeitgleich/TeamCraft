@@ -608,6 +608,17 @@ pub enum ChatAction {
   LoadOlderHistory {
     conversation: ConversationId,
   },
+  /// [`ChatBackend::request_history_at`].
+  RequestHistoryAt {
+    conversation: ConversationId,
+    at: i64,
+  },
+  /// [`ChatBackend::fill_history_gap`]: the hole after `after`.
+  FillHistoryGap {
+    conversation: ConversationId,
+    after: MessageId,
+    edge: crate::model::GapEdge,
+  },
   SetFavorite {
     conversation: ConversationId,
     is_favorite: bool,
@@ -1111,6 +1122,20 @@ impl ChatAction {
         messages,
       } => backend.mark_reactions_seen(conversation, messages),
       Self::LoadOlderHistory { conversation } => backend.load_older_history(conversation),
+      Self::RequestHistoryAt { conversation, at } => backend.request_history_at(conversation, at),
+      Self::FillHistoryGap {
+        conversation,
+        after,
+        edge,
+      } => {
+        let maybe_gap = backend
+          .history_gaps(conversation)
+          .into_iter()
+          .find(|gap| gap.after == after);
+        if let Some(gap) = maybe_gap {
+          backend.fill_history_gap(conversation, gap, edge);
+        }
+      },
       Self::SetFavorite {
         conversation,
         is_favorite,
@@ -1378,6 +1403,15 @@ pub enum ChatQuery {
   OlderHistory {
     conversation: ConversationId,
   },
+  /// [`ChatBackend::is_history_loaded`].
+  IsHistoryLoaded {
+    conversation: ConversationId,
+    at: i64,
+  },
+  /// [`ChatBackend::history_gaps`].
+  HistoryGaps {
+    conversation: ConversationId,
+  },
   /// [`ChatBackend::first_sync`].
   FirstSync,
   /// The `#fragment` values of a guest link to the meeting, once the core made them.
@@ -1506,6 +1540,11 @@ pub enum ChatAnswer {
   OlderHistory {
     older_history: crate::model::OlderHistory,
     /// The feed's rows when this was read: a mirror that holds fewer hasn't got the page yet.
+    total: usize,
+  },
+  HistoryGaps {
+    gaps: Vec<crate::model::HistoryGap>,
+    /// The feed's rows when this was read, as for [`Self::OlderHistory`].
     total: usize,
   },
   FirstSync {
@@ -1701,6 +1740,13 @@ impl ChatQuery {
         older_history: backend.older_history(conversation),
         total: backend.message_count(conversation),
       },
+      Self::IsHistoryLoaded { conversation, at } => ChatAnswer::Flag {
+        value: backend.is_history_loaded(conversation, at),
+      },
+      Self::HistoryGaps { conversation } => ChatAnswer::HistoryGaps {
+        gaps: backend.history_gaps(conversation),
+        total: backend.message_count(conversation),
+      },
       Self::FirstSync => ChatAnswer::FirstSync {
         maybe_progress: backend.first_sync(),
       },
@@ -1887,6 +1933,46 @@ mod tests {
         format!(r#"{{"answer":"older_history","older_history":"{name}","total":3}}"#)
       );
     }
+  }
+
+  #[test]
+  fn history_jumps_and_holes_keep_their_wire_names() {
+    fn wire(value: &impl Serialize) -> String {
+      serde_json::to_string(value).expect("serialize")
+    }
+    assert_eq!(
+      wire(&ChatAction::RequestHistoryAt {
+        conversation: id_from_raw(7),
+        at: 1_000,
+      }),
+      r#"{"action":"request_history_at","conversation":"7","at":1000}"#
+    );
+    assert_eq!(
+      wire(&ChatAction::FillHistoryGap {
+        conversation: id_from_raw(7),
+        after: id_from_raw(5),
+        edge: crate::model::GapEdge::Newer,
+      }),
+      r#"{"action":"fill_history_gap","conversation":"7","after":"5","edge":"newer"}"#
+    );
+    assert_eq!(
+      wire(&ChatQuery::IsHistoryLoaded {
+        conversation: id_from_raw(7),
+        at: 1_000,
+      }),
+      r#"{"kind":"is_history_loaded","conversation":"7","at":1000}"#
+    );
+    assert_eq!(
+      wire(&ChatAnswer::HistoryGaps {
+        gaps: vec![crate::model::HistoryGap {
+          after: id_from_raw(5),
+          index: 2,
+          status: crate::model::OlderHistory::Loading,
+        }],
+        total: 3,
+      }),
+      r#"{"answer":"history_gaps","gaps":[{"after":"5","index":2,"status":"loading"}],"total":3}"#
+    );
   }
 
   #[test]

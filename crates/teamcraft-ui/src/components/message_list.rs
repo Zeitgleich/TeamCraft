@@ -23,7 +23,9 @@ use crate::components::reaction_jump::ReactionJump;
 use crate::components::skeleton::MessageSkeleton;
 use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::{I18n, use_i18n};
-use crate::model::{ConversationId, ConversationKind, Message, OlderHistory, TimestampMs, as_chat_message};
+use crate::model::{
+  ConversationId, ConversationKind, GapEdge, HistoryGap, Message, OlderHistory, TimestampMs, as_chat_message,
+};
 use crate::reactive::SetIfAlive;
 use crate::state::{AppState, Overlay, use_app_state};
 use crate::unread_divider::{DividerEvent, DwellClock, ReadMarkerGate};
@@ -516,6 +518,24 @@ pub fn MessageList(
     let is_near = window.get().first_visible < OLDER_STATUS_ROWS;
     is_near.then(|| older_history.get())
   };
+  // A jump to a date can leave a hole between the rows held (#1156). Near one, a page of it comes
+  // from the server, from the reader's side, so what the reader looks at stays where it is. Asked
+  // like older history: not at the bottom of a list that scrolls, again when a request ends.
+  let gaps = Memo::new(move |_| state.read(|backend| backend.history_gaps(conversation)));
+  Effect::new(move |_| {
+    if !is_positioned.get() {
+      return;
+    }
+    let window = window.get();
+    let Some((gap, edge)) = gap_near(&gaps.get(), &window, OLDER_AHEAD_ROWS) else {
+      return;
+    };
+    let fits = heights.with_value(|heights| f64::from(heights.iter().sum::<f32>())) <= viewport.get();
+    if gap.status == OlderHistory::Available && (!stick_to_bottom.get() || fits) {
+      state.write(|backend| backend.fill_history_gap(conversation, gap, edge));
+    }
+  });
+  let gap_status = move || gap_near(&gaps.get(), &window.get(), 0);
   // The pages beyond the rendered rows load ahead, so scrolling into them doesn't wait (#1050).
   // Asked again after every change too, like the rows read theirs: a backend keeps what is read.
   Effect::new(move |_| {
@@ -812,7 +832,26 @@ pub fn MessageList(
             </button>
           </div>
         }.into_any()),
-        _ => None,
+        _ => match gap_status() {
+          Some((gap, _)) if gap.status == OlderHistory::Loading => Some(view! {
+            <div class="older-history" role="status">
+              <span class="spinner" aria-hidden="true"></span>
+              <span>{move || i18n.t("history-gap-loading")}</span>
+            </div>
+          }.into_any()),
+          Some((gap, edge)) if gap.status == OlderHistory::Failed => Some(view! {
+            <div class="older-history" role="alert">
+              <span>{move || i18n.t("history-gap-failed")}</span>
+              <button
+                class="older-history-retry"
+                on:click=move |_| state.write(|backend| backend.fill_history_gap(conversation, gap, edge))
+              >
+                {move || i18n.t("older-history-retry")}
+              </button>
+            </div>
+          }.into_any()),
+          _ => None,
+        },
       }}
       <div
         class="message-list"
@@ -886,12 +925,27 @@ pub fn MessageList(
   }
 }
 
-/// The name of the round "jump to latest" button, which has no text of its own.
 /// Whether the list asks for older history with `first_visible` as the first row on screen.
 fn asks_for_older(first_visible: usize, is_following: bool, fits_on_screen: bool) -> bool {
   first_visible < OLDER_AHEAD_ROWS && (!is_following || fits_on_screen)
 }
 
+/// The first hole in the history within `ahead` rows of the rendered ones, and the side the reader
+/// comes from: a hole below the first row on screen is read from its older side, so its rows arrive
+/// below the reader; one above it from its newer side.
+fn gap_near(gaps: &[HistoryGap], window: &Window, ahead: usize) -> Option<(HistoryGap, GapEdge)> {
+  let gap = gaps
+    .iter()
+    .find(|gap| gap.index + ahead >= window.first && gap.index <= window.end + ahead)?;
+  let edge = if gap.index > window.first_visible {
+    GapEdge::Older
+  } else {
+    GapEdge::Newer
+  };
+  Some((*gap, edge))
+}
+
+/// The name of the round "jump to latest" button, which has no text of its own.
 fn jump_latest_label(i18n: I18n, new_below: usize) -> String {
   match new_below {
     0 => i18n.t("jump-to-latest"),
@@ -1451,6 +1505,45 @@ mod tests {
     assert!(
       asks_for_older(0, true, true),
       "a list too short to scroll can't get any nearer"
+    );
+  }
+
+  #[test]
+  fn a_hole_is_read_from_the_side_the_reader_comes_from() {
+    let gap = HistoryGap {
+      after: crate::model::id_from_raw(5),
+      index: 120,
+      status: OlderHistory::Available,
+    };
+    let window = |first: usize, first_visible: usize, end: usize| Window {
+      first,
+      end,
+      pad_top: 0.0,
+      pad_bottom: 0.0,
+      total: 0.0,
+      first_visible,
+    };
+    assert_eq!(
+      gap_near(&[gap], &window(60, 70, 90), OLDER_AHEAD_ROWS),
+      Some((gap, GapEdge::Older)),
+      "reading down towards it"
+    );
+    assert_eq!(
+      gap_near(&[gap], &window(150, 160, 180), OLDER_AHEAD_ROWS),
+      Some((gap, GapEdge::Newer)),
+      "reading up towards it"
+    );
+    assert_eq!(
+      gap_near(&[gap], &window(100, 110, 130), 0),
+      Some((gap, GapEdge::Older)),
+      "on screen, below the first row"
+    );
+    assert_eq!(gap_near(&[gap], &window(0, 10, 30), OLDER_AHEAD_ROWS), None);
+    assert_eq!(gap_near(&[gap], &window(200, 210, 230), OLDER_AHEAD_ROWS), None);
+    assert_eq!(
+      gap_near(&[gap], &window(60, 70, 90), 0),
+      None,
+      "no status that far"
     );
   }
 
