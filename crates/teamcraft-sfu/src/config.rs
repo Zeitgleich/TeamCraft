@@ -1,10 +1,11 @@
 //! SFU settings with their defaults.
 
 use std::{
-  net::{Ipv6Addr, SocketAddr},
+  net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
   time::Duration,
 };
 
+use ipnet::IpNet;
 use teamcraft_media::fallback_queue::MediaQueueConfig;
 
 use crate::forwarding::ForwardingConfig;
@@ -71,8 +72,16 @@ pub struct FallbackConfig {
   /// dual-stack. `None`: no fallback, the SFU speaks QUIC only (the default of this type, for tests;
   /// `main` opens it unless told not to).
   pub maybe_bind_addr: Option<SocketAddr>,
-  /// Connections at once, joined or not; one more is closed at once.
+  /// Connections in a call at once. A further join is turned away without a verdict on the call: a
+  /// client that is rejoining tries again. Mind the process's descriptor limit.
   pub max_connections: usize,
+  /// Connections that haven't joined yet, at once; one more is closed before a byte is read. Anybody
+  /// can open these, with no token: small, and apart from `max_connections`, so that a flood of them
+  /// can't take a place from a call.
+  pub max_unjoined_connections: usize,
+  /// How long the WebSocket upgrade may take, before any token is seen. Enough for a slow link: a
+  /// client that means it has sent the request as its first packet after TCP.
+  pub handshake_timeout: Duration,
   /// What waits for one slow connection. Media beyond it, or older, is dropped.
   pub queue: MediaQueueConfig,
   /// The socket's send buffer. What is in it can't be dropped any more and has to go through, so a
@@ -85,10 +94,34 @@ pub struct FallbackConfig {
   /// A single write may take this long; after it the peer counts as gone. Bounds how long a slow
   /// peer can hold a connection, and all that belongs to it.
   pub write_timeout: Duration,
-  /// Behind a reverse proxy: use the last address in `X-Forwarded-For` for the per-address limits.
-  /// Without it every client has the proxy's address and shares its limit. Never turn it on without
-  /// a proxy that sets the header: clients could then choose their own address.
-  pub trust_forwarded_for: bool,
+  /// The reverse proxies in front of this listener: only from these peers does the last address in
+  /// `X-Forwarded-For` count for the per-address limits; from anybody else the header is ignored, so
+  /// a client can't choose its address. The machine itself by default, as the default listener is
+  /// only for it. A proxy not listed makes every client have its address and share one limit.
+  pub trusted_proxies: Vec<IpNet>,
+}
+
+impl FallbackConfig {
+  /// Whether `peer` (in its canonical form) is a proxy to take `X-Forwarded-For` from.
+  pub fn is_trusted_proxy(&self, peer: IpAddr) -> bool {
+    self.trusted_proxies.iter().any(|proxy| proxy.contains(&peer))
+  }
+}
+
+/// `TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES`: addresses or networks, comma-separated; `None` for
+/// something else.
+pub fn parse_trusted_proxies(text: &str) -> Option<Vec<IpNet>> {
+  text
+    .split(',')
+    .map(str::trim)
+    .filter(|entry| !entry.is_empty())
+    .map(|entry| {
+      entry
+        .parse::<IpNet>()
+        .ok()
+        .or_else(|| entry.parse::<IpAddr>().ok().map(IpNet::from))
+    })
+    .collect()
 }
 
 impl Default for FallbackConfig {
@@ -96,11 +129,16 @@ impl Default for FallbackConfig {
     Self {
       maybe_bind_addr: None,
       max_connections: 1024,
+      max_unjoined_connections: 128,
+      handshake_timeout: Duration::from_secs(3),
       queue: MediaQueueConfig::default(),
       socket_send_buffer_bytes: 128 * 1024,
       ping_interval: Duration::from_secs(1),
       write_timeout: Duration::from_secs(5),
-      trust_forwarded_for: false,
+      trusted_proxies: vec![
+        IpNet::from(IpAddr::from(Ipv4Addr::LOCALHOST)),
+        IpNet::from(IpAddr::from(Ipv6Addr::LOCALHOST)),
+      ],
     }
   }
 }
@@ -128,5 +166,35 @@ impl Default for SfuConfig {
       udp_receive_buffer_bytes: 4 * 1024 * 1024,
       fallback: FallbackConfig::default(),
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn trusted_proxies_are_addresses_or_networks() {
+    let proxies = parse_trusted_proxies(" 10.0.0.1, 172.18.0.0/16,2001:db8::/64 ,").unwrap();
+    let config = FallbackConfig {
+      trusted_proxies: proxies,
+      ..FallbackConfig::default()
+    };
+    for trusted in ["10.0.0.1", "172.18.3.4", "2001:db8::9"] {
+      assert!(config.is_trusted_proxy(trusted.parse().unwrap()), "{trusted}");
+    }
+    for other in ["10.0.0.2", "172.19.0.1", "2001:db8:0:1::9", "127.0.0.1"] {
+      assert!(!config.is_trusted_proxy(other.parse().unwrap()), "{other}");
+    }
+    assert!(parse_trusted_proxies("not an address").is_none());
+    assert_eq!(parse_trusted_proxies(""), Some(Vec::new()));
+  }
+
+  #[test]
+  fn only_the_machine_itself_is_trusted_by_default() {
+    let config = FallbackConfig::default();
+    assert!(config.is_trusted_proxy(Ipv4Addr::LOCALHOST.into()));
+    assert!(config.is_trusted_proxy(Ipv6Addr::LOCALHOST.into()));
+    assert!(!config.is_trusted_proxy("192.0.2.1".parse().unwrap()));
   }
 }

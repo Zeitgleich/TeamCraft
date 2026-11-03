@@ -26,7 +26,7 @@ use std::{
   net::{SocketAddr, UdpSocket},
   sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
   },
   time::{Duration, Instant},
 };
@@ -63,7 +63,7 @@ use crate::{
 const PERIODIC_INTERVAL: Duration = Duration::from_millis(100);
 
 /// HTTP path of the WebTransport session.
-pub(crate) const PRE_JOIN_LIMIT: u32 = 0x4803;
+const PRE_JOIN_LIMIT: u32 = 0x4803;
 /// Rosters never go out more often than this, whatever the configuration says.
 const MIN_ROSTER_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -82,13 +82,17 @@ pub(crate) struct Shared {
   pub(crate) rooms: Rooms,
   verifier: Arc<dyn JoinTokenVerifier>,
   reporter: Arc<dyn ParticipantReporter>,
-  pub(crate) prejoin: Arc<PreJoinLimiter>,
+  prejoin: Arc<PreJoinLimiter>,
+  /// The fallback's own: what fills it, through a proxy or not, costs a QUIC session nothing.
+  pub(crate) fallback_prejoin: Arc<PreJoinLimiter>,
   /// When this SFU started: the roster tells the server how fresh its rooms are.
   started_at: Instant,
   /// Wakes the roster reporter before its interval (a call moved between devices).
   roster_now: Arc<Notify>,
   /// Open connections of the WebSocket fallback, for the metrics.
   pub(crate) fallback_connections: AtomicUsize,
+  /// Told the operator of a forwarded address from somebody who isn't a trusted proxy.
+  pub(crate) has_warned_of_forwarding: AtomicBool,
 }
 
 /// Carries out meeting host controls on this SFU's calls (see [`crate::control`]).
@@ -190,6 +194,9 @@ impl Sfu {
         .inspect_err(|error| error!(%addr, %error, "no call fallback: its port can't be bound"))
         .ok()
     });
+    if maybe_fallback_listener.is_some() {
+      fallback::warn_if_descriptors_are_short(&config.fallback);
+    }
     Ok(Self {
       endpoint,
       certificate_hash,
@@ -200,9 +207,11 @@ impl Sfu {
         verifier,
         reporter: Arc::new(NoReporter),
         prejoin: Arc::new(PreJoinLimiter::default()),
+        fallback_prejoin: Arc::new(PreJoinLimiter::default()),
         started_at: Instant::now(),
         roster_now: Arc::new(Notify::new()),
         fallback_connections: AtomicUsize::new(0),
+        has_warned_of_forwarding: AtomicBool::new(false),
       }),
     })
   }

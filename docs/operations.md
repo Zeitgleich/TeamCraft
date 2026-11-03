@@ -192,9 +192,11 @@ The endpoint can't tell you that the server is down: probe `/readyz` from outsid
   that block outbound UDP (some corporate, hotel and guest networks), calls use the WebSocket
   fallback below, at lower quality, if your proxy passes it.
 - **The call fallback for networks that block UDP** (ARCHITECTURE.md §6.6). The SFU listens for it on
-  `TEAMCRAFT_SFU_FALLBACK_BIND` (default `[::]:8082`, plain HTTP: never publish this port directly,
-  the join token would go in the clear; if it can't be bound, the SFU logs an error and runs on
-  without the fallback). **An existing deployment has to add this**, or clients on
+  `TEAMCRAFT_SFU_FALLBACK_BIND`, plain HTTP: **never publish this port**, the join token would go in
+  the clear. The default is `127.0.0.1:8082`, for a proxy on the same machine; the container image
+  sets `[::]:8082`, since the proxy is another container there, so don't publish it and don't run
+  that image with host networking without changing it. If the port can't be bound, the SFU logs an
+  error and runs on without the fallback. **An existing deployment has to add this**, or clients on
   such networks keep failing to join as before; nothing else breaks without it:
   - The reverse proxy serves `wss://<SFU host>/call/fallback` on 443 and passes it to that port:
     WebSocket upgrade allowed, no response buffering, idle timeout above a few seconds (the SFU pings
@@ -213,21 +215,29 @@ The endpoint can't tell you that the server is down: probe `/readyz` from outsid
     }
     ```
 
-    The deployment repository (Zeitgleich/teamcraft-deploy) needs this route, the environment
-    variable below and the SFU's port `8082` on the proxy's network, not published.
-  - Set `TEAMCRAFT_SFU_FALLBACK_TRUST_FORWARDED_FOR=1` on the SFU once the proxy sets the header:
-    **without it every client shares the proxy's address** and with it the limit of 16 unjoined
-    sessions per address. Never set it where clients can reach the SFU's port directly.
+    The deployment repository (Zeitgleich/teamcraft-deploy) needs this route and the setting below.
+  - `TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES` names the proxy: addresses or networks, comma-separated
+    (`172.18.0.0/16`). Only from these peers does the last `X-Forwarded-For` entry count for the
+    limit of 16 unjoined connections per address (an IPv6 /64 is one address). The default is the
+    machine itself, which fits a proxy on the same host; **a proxy in another container has to be
+    listed, or all its clients share one limit**, and the SFU logs one warning when it sees the
+    header from a peer it doesn't trust. Don't list networks that clients can connect from: they
+    could then name any address.
   - Clients are told the URL with their join token. The default is `wss://<host of sfu_url>/call/fallback`;
     `[calls] sfu_fallback_url` sets another one, and the web client's `connect-src` follows it.
   - **Turning it off:** `[calls] sfu_fallback_enabled = false` on the server stops offering it, and
     `TEAMCRAFT_SFU_FALLBACK_ENABLED=0` on the SFU closes the listener. Without an offer, clients behave
     as if there were no fallback; QUIC's behaviour doesn't depend on it either way.
-  - Bounds, each with a setting: `TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS` (default 1024),
+  - Bounds, each with a setting: `TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS` (in a call, default 1024),
+    `TEAMCRAFT_SFU_FALLBACK_MAX_UNJOINED_CONNECTIONS` (not yet in a call, default 128),
+    `TEAMCRAFT_SFU_FALLBACK_HANDSHAKE_TIMEOUT_MILLIS` (the upgrade, default 3000),
     `TEAMCRAFT_SFU_FALLBACK_QUEUE_BYTES` (per connection, default 1 MiB, so at most about 1 GiB in all
     with every connection full), `TEAMCRAFT_SFU_FALLBACK_QUEUE_MAX_AGE_MILLIS` (default 300) and
     `TEAMCRAFT_SFU_FALLBACK_SEND_BUFFER_BYTES` (default 128 KiB). `teamcraft_sfu_fallback_connections`
     in the metrics shows how many use it.
+  - **Descriptors:** the SFU warns at start when `RLIMIT_NOFILE` is below those two connection limits
+    plus a margin. Raise it (`LimitNOFILE=` in systemd, `--ulimit nofile=` in Docker) or lower the
+    limits: running out would also hurt QUIC calls through the roster reports and the health endpoint.
 - The SFU asks for a 4 MiB UDP receive buffer (`TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES`), so a
   keyframe's burst isn't lost while it is busy. The kernel caps it at `net.core.rmem_max` without an
   error, often about 200 KiB: raise that sysctl on the host to at least the same value (it isn't

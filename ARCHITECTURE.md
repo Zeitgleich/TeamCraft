@@ -759,7 +759,9 @@ reverse proxy as the gateway. Setup and what an existing deployment has to chang
   The engine and DAVE don't know the difference. The SFU reads the same datagram and RTP headers, so
   it **still never sees media payload**. Nothing of DAVE or the key handling changed.
 - **The SFU** (`crates/teamcraft-sfu/src/fallback.rs`) serves plain HTTP on a TCP listener of its own
-  (`TEAMCRAFT_SFU_FALLBACK_BIND`, default `[::]:8082`, dual stack); TLS terminates at the proxy. A
+  (`TEAMCRAFT_SFU_FALLBACK_BIND`: `127.0.0.1:8082` by default, for a proxy on the same machine,
+  and `[::]:8082`, dual stack, in the container image, whose proxy is another container); TLS
+  terminates at the proxy. A
   session on it is a participant in the same `Room`, behind the same `ParticipantLink` trait.
 - **First-frame auth is the same code**: both paths call `server::admit`. The first frame has to be
   `join` with a join token, verified against the server's key, under the same join timeout and
@@ -782,9 +784,27 @@ reverse proxy as the gateway. Setup and what an existing deployment has to chang
   dropped; a browser can't drop what it buffered, so it stops adding at 64 KiB of video or 256 KiB
   of audio (`bufferedAmount`). Audio jitter buffers go from 60 ms to 160 ms on this path
   (`JitterBufferConfig::for_fallback`).
-- **Bounds and hostile peers:** a connection limit, the message size limit, a write timeout that drops
-  a peer that stopped reading, the idle timeout, and everything rooms enforce. Frames from the
-  network go through a parser with hostile-input tests and a fuzz target (`call_fallback_frame`).
+- **Bounds and hostile peers:** a limit on connections in a call, the message size limit, a write
+  timeout that drops a peer that stopped reading, the idle timeout, and everything rooms enforce. A
+  lost connection gives up its slot at once, and only its place in the call waits for the reconnect
+  grace period. Frames from the network go through a parser with hostile-input tests and a fuzz
+  target (`call_fallback_frame`).
+- **Before the join**, anybody can connect, so those connections get limits that can't touch anything
+  else: a cap of their own (128), 3 s for the upgrade, 16 per address (an IPv6 /64 counts as one)
+  in a limiter apart from QUIC's. `X-Forwarded-For` counts only from the listed trusted proxies. A
+  flood costs new fallback joins while it lasts, not a running call or a QUIC session. Someone with
+  many addresses can still fill the 128 (each holds its place at most 3 s plus the join timeout).
+- **Rejoin loops re-key.** A member with a valid token who connects, joins and drops in a loop makes
+  the group re-key each time. That is the case on QUIC too and not specific to this path: limiting
+  it means deciding what a legitimately flapping client gets, which affects both (#1227).
+- **Residual risk of TLS:** the socket verifies the SFU with the platform's trust store (or the
+  browser's). `sfu_certificate_sha256` applies to QUIC only, since a browser's WebSocket can't pin,
+  so an explicit `sfu_fallback_url` on an SFU pinned by hash loses that pin. A TLS-intercepting
+  middlebox with a trusted root (a company's, typically) can read the join token, the signaling and
+  the RTP headers on this path, and replay the token until it expires, within 60 s by default. That
+  gets it into the call's signaling, not into the media: DAVE keys are bound to device identities,
+  so media stays protected and an unknown device shows as such. QUIC has the same exposure unless
+  pinned.
 - **Liveness:** the SFU pings each second, which keeps proxies from closing a quiet call. Native
   clients count frames as they count QUIC packets, and browsers use the pings they use on Safari.
   A TCP connection can't migrate: after a network change it goes silent and the call rejoins.

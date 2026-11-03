@@ -24,7 +24,7 @@ dave = [
 ]
 # Native clients: Opus via libopus (C, built with cmake), audio device I/O via cpal (ALSA on Linux
 # needs libasound2-dev) and the WebTransport call driver. Browsers use WebCodecs and Web Audio.
-native = ["dave", "dep:webpki-roots", "dep:ndk", "dep:openh264", "dep:bzip2", "dep:zune-jpeg", "dep:jpeg-encoder", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:socket2", "dep:teamcraft-net", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow", "fallback-socket"]
+native = ["dave", "dep:webpki-roots", "dep:ndk", "dep:openh264", "dep:bzip2", "dep:zune-jpeg", "dep:jpeg-encoder", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:socket2", "dep:teamcraft-net", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow", "dep:url", "fallback-socket"]
 
 # The writer of a call's WebSocket fallback (ARCHITECTURE.md §6.6), shared by the SFU and the native
 # clients.
@@ -146,6 +146,8 @@ wtransport = { version = "0.7.2", optional = true, features = ["quinn"] }
 # socket, so no new code enters the tree.
 tokio-tungstenite = { version = "0.30", optional = true, default-features = false, features = ["handshake"] }
 futures-util = { version = "0.3", optional = true, default-features = false, features = ["sink", "std"] }
+# Reads the host of a call socket's address the way the socket will, not by cutting strings.
+url = { workspace = true, optional = true }
 # A fresh dual-stack socket to move a call connection to after a network change (wtransport
 # binds its first socket the same way; already in the tree through it and quinn).
 socket2 = { version = "0.6.3", optional = true }

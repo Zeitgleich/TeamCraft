@@ -3,7 +3,6 @@
 
 use std::fmt;
 use std::future::Future;
-use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,6 +13,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Bytes, Error as WebSocketError, Message};
 use tracing::{debug, warn};
+use url::{Host, Url};
 
 use crate::fallback_socket::ControlFrames;
 
@@ -100,23 +100,26 @@ impl FallbackOpener for LoopbackOpener {
 }
 
 /// A call socket carries the join token in the clear unless it is TLS: `wss://`, or `ws://` to the
-/// machine itself (development, a test). A server can't talk a client out of this.
+/// machine itself (development, a test). This holds whatever URL a server names, so the host is read
+/// by a real URL parser, and an address with credentials in it is refused: nothing of ours needs
+/// them, and they make an address look like another host.
 pub(crate) fn is_allowed_url(url: &str) -> bool {
-  if url.starts_with("wss://") {
-    return true;
-  }
-  let Some(rest) = url.strip_prefix("ws://") else {
+  let Ok(parsed) = Url::parse(url) else {
     return false;
   };
-  let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-  let host = match authority.strip_prefix('[') {
-    Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
-    None => authority.split(':').next().unwrap_or_default(),
-  };
-  host == "localhost"
-    || host
-      .parse::<IpAddr>()
-      .is_ok_and(|ip| ip.to_canonical().is_loopback())
+  if !parsed.username().is_empty() || parsed.password().is_some() {
+    return false;
+  }
+  match parsed.scheme() {
+    "wss" => parsed.host().is_some(),
+    "ws" => match parsed.host() {
+      Some(Host::Domain(name)) => name == "localhost",
+      Some(Host::Ipv4(ip)) => ip.is_loopback(),
+      Some(Host::Ipv6(ip)) => ip.to_canonical().is_loopback(),
+      None => false,
+    },
+    _ => false,
+  }
 }
 
 /// Reads until the socket ends. Every frame counts for the path's liveness, pings included (the
@@ -241,6 +244,12 @@ mod tests {
         "ws://[2001:db8::1]:8082/call/fallback",
         "ws://localhost.example.com/call/fallback",
         "ws://127.0.0.1.example.com/call/fallback",
+        "ws://localhost:x@evil.example.com/call/fallback",
+        "ws://localhost@evil.example.com/call/fallback",
+        "ws://[::1]@evil.example.com/call/fallback",
+        "ws://127.0.0.1:8082@evil.example.com/call/fallback",
+        "ws://user:secret@localhost/call/fallback",
+        "wss://localhost:x@evil.example.com/call/fallback",
         "http://localhost/call/fallback",
         "https://sfu.example.com/call/fallback",
         "",

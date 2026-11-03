@@ -42,6 +42,7 @@ use teamcraft_sfu::{
   config::SfuConfig,
   server::{CALL_PATH, Sfu},
 };
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{Bytes, Message};
 use wtransport::Identity;
 
@@ -199,15 +200,36 @@ mod first_frame {
   }
 
   #[tokio::test]
-  async fn unjoined_sessions_are_limited_per_address_as_on_quic() {
+  async fn a_connection_that_never_upgrades_is_closed_at_the_handshake_timeout() {
     let mut config = SfuConfig::default();
+    config.fallback.handshake_timeout = Duration::from_millis(100);
+    config.join_timeout = Duration::from_secs(60);
+    let sfu = start_sfu(config).await;
+    let mut stream = tokio::net::TcpStream::connect(sfu.fallback_addr).await.unwrap();
+    let mut buffer = [0u8; 16];
+    // Half a request, and then nothing.
+    stream
+      .write_all(b"GET /call/fallback HTTP/1.1\r\n")
+      .await
+      .unwrap();
+    let closed = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buffer)).await;
+    assert!(matches!(closed, Ok(Ok(0) | Err(_))), "{closed:?}");
+    wait_until(|| sfu.control.fallback_connections() == 0).await;
+  }
+
+  /// Not a trusted proxy's: refused before a byte is read.
+  #[tokio::test]
+  async fn unjoined_connections_are_limited_per_address() {
+    let mut config = SfuConfig::default();
+    config.fallback.trusted_proxies = Vec::new();
     config.max_prejoin_sessions_per_ip = 2;
     let sfu = start_sfu(config).await;
     let _first = sfu.connect_socket().await;
     let _second = sfu.connect_socket().await;
-    let mut third = sfu.connect_socket().await;
-    let (_, close_code) = read_refusal(&mut third).await;
-    assert_eq!(close_code, Some(0x4803));
+    assert!(sfu.try_connect_socket(None).await.is_err());
+    drop(_first);
+    wait_until(|| sfu.control.fallback_connections() == 1).await;
+    assert!(sfu.try_connect_socket(None).await.is_ok());
   }
 
   #[tokio::test]
@@ -271,14 +293,111 @@ mod hostile_clients {
   }
 
   #[tokio::test]
-  async fn a_connection_over_the_limit_is_closed_at_once() {
+  async fn unjoined_connections_have_a_cap_that_leaves_joined_ones_alone() {
+    let mut config = SfuConfig::default();
+    config.fallback.max_unjoined_connections = 2;
+    let sfu = start_sfu(config).await;
+    let mut joined = sfu.connect_socket().await;
+    send_join(&mut joined, &token(ALICE)).await;
+    wait_for_joined(&mut joined).await;
+    let _first = sfu.connect_socket().await;
+    let _second = sfu.connect_socket().await;
+    assert!(sfu.try_connect_socket(None).await.is_err());
+    let ping = serde_json::to_vec(&CallClientMessage::Ping { id: 3 }).unwrap();
+    send_frame(&mut joined, FallbackFrame::Signal(&ping)).await;
+    wait_for_pong(&mut joined, 3).await;
+  }
+
+  /// Unjoined ones can't take a joined place either way round: a full call still has its own slots.
+  #[tokio::test]
+  async fn a_join_over_the_limit_goes_without_a_verdict_on_the_call() {
     let mut config = SfuConfig::default();
     config.fallback.max_connections = 1;
     let sfu = start_sfu(config).await;
-    let _first = sfu.connect_socket().await;
-    wait_until(|| sfu.control.fallback_connections() == 1).await;
-    let url = format!("ws://{}{CALL_FALLBACK_PATH}", sfu.fallback_addr);
-    assert!(tokio_tungstenite::connect_async(url).await.is_err());
+    let mut first = sfu.connect_socket().await;
+    send_join(&mut first, &token(ALICE)).await;
+    wait_for_joined(&mut first).await;
+    let mut second = sfu.connect_socket().await;
+    send_join(&mut second, &token(BOB)).await;
+    // No close frame and no error: the client tries again, as after a lost connection.
+    assert_eq!(read_refusal(&mut second).await, (None, None));
+    assert_eq!(sfu.control.room_stats().participants, 1);
+  }
+}
+
+mod slots {
+  use super::*;
+
+  /// A lost connection's place in the call waits for the reconnect grace period, and its connection
+  /// slot doesn't: else a member looping connect, join, reset fills the limit, and a proxy restart
+  /// with many calls refuses their rejoins for as long as the grace lasts.
+  #[tokio::test]
+  async fn a_lost_connection_gives_up_its_slot_at_once_and_keeps_its_place() {
+    let mut config = SfuConfig::default();
+    config.fallback.max_connections = 1;
+    config.reconnect_grace = Duration::from_secs(60);
+    let sfu = start_sfu(config).await;
+    for _ in 0..5 {
+      let mut socket = sfu.connect_socket().await;
+      send_join(&mut socket, &token(ALICE)).await;
+      wait_for_joined(&mut socket).await;
+      assert_eq!(sfu.control.fallback_connections(), 1);
+      drop(socket);
+      wait_until(|| sfu.control.fallback_connections() == 0).await;
+      assert_eq!(sfu.control.room_stats().participants, 1, "the place stays");
+    }
+    // Another device gets the one slot while the first's grace period runs.
+    let mut other = sfu.connect_socket().await;
+    send_join(&mut other, &token(BOB)).await;
+    wait_for_joined(&mut other).await;
+  }
+}
+
+mod forwarded_addresses {
+  use super::*;
+
+  const HOLDER: &str = "198.51.100.1";
+  const OTHER: &str = "198.51.100.2";
+
+  /// Through a proxy, each client has its own limit.
+  #[tokio::test]
+  async fn a_trusted_proxy_names_its_clients() {
+    let sfu = start_sfu(limited_to_one(vec!["::1/128".parse().unwrap()])).await;
+    let _holder = sfu.try_connect_socket(Some(HOLDER)).await.unwrap();
+    let mut same = sfu.try_connect_socket(Some(HOLDER)).await.unwrap();
+    assert_eq!(read_refusal(&mut same).await, (None, None), "over its limit");
+    let mut other = sfu.try_connect_socket(Some(OTHER)).await.unwrap();
+    send_join(&mut other, &token(ALICE)).await;
+    wait_for_joined(&mut other).await;
+  }
+
+  /// A client that isn't a trusted proxy can't claim to be anybody: it is limited by its own address
+  /// whatever it writes.
+  #[tokio::test]
+  async fn from_anybody_else_the_header_is_ignored() {
+    let sfu = start_sfu(limited_to_one(Vec::new())).await;
+    let _holder = sfu.try_connect_socket(Some(HOLDER)).await.unwrap();
+    assert!(sfu.try_connect_socket(Some(OTHER)).await.is_err());
+  }
+
+  /// Forging a victim's address on the fallback, or filling the fallback's slots, leaves QUIC alone.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn the_fallbacks_limit_is_not_quics() {
+    let sfu = start_sfu(limited_to_one(Vec::new())).await;
+    let _holder = sfu.connect_socket().await;
+    let quic_url = sfu.quic_url();
+    let mut alice = sfu
+      .native_client_via(&quic_url, sfu.fallback_addr, ALICE, 440.0, None)
+      .await;
+    assert_eq!(wait_for_transport(&mut alice).await, CallTransport::Quic);
+    alice.leave().await.unwrap();
+  }
+
+  fn limited_to_one(trusted_proxies: Vec<ipnet::IpNet>) -> SfuConfig {
+    let mut config = SfuConfig::default();
+    config.max_prejoin_sessions_per_ip = 1;
+    config.fallback.trusted_proxies = trusted_proxies;
+    config
   }
 }
 
@@ -396,8 +515,7 @@ mod behind_a_reverse_proxy {
   #[ignore = "needs a reverse proxy, FALLBACK_PROXY_ADDR"]
   async fn a_call_goes_through_it() {
     let proxy: SocketAddr = std::env::var("FALLBACK_PROXY_ADDR").unwrap().parse().unwrap();
-    let mut config = SfuConfig::default();
-    config.fallback.trust_forwarded_for = true;
+    let config = SfuConfig::default();
     let sfu = start_sfu_on(config, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 18082)).await;
     let black_hole = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
     let quic_url = format!("https://{}{CALL_PATH}", black_hole.local_addr().unwrap());
@@ -552,8 +670,21 @@ impl RunningSfu {
   }
 
   async fn connect_socket(&self) -> Socket {
+    self.try_connect_socket(None).await.unwrap()
+  }
+
+  async fn try_connect_socket(
+    &self,
+    maybe_forwarded_for: Option<&str>,
+  ) -> Result<Socket, tokio_tungstenite::tungstenite::Error> {
     let url = format!("ws://{}{CALL_FALLBACK_PATH}", self.fallback_addr);
-    tokio_tungstenite::connect_async(url).await.unwrap().0
+    let mut request = url.into_client_request()?;
+    if let Some(address) = maybe_forwarded_for {
+      request
+        .headers_mut()
+        .insert("x-forwarded-for", address.parse().unwrap());
+    }
+    Ok(tokio_tungstenite::connect_async(request).await?.0)
   }
 
   async fn native_client(

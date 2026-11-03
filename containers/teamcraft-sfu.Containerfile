@@ -34,7 +34,8 @@ COPY --from=build /out/teamcraft-sfu /usr/local/bin/teamcraft-sfu
 # TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER (see crates/teamcraft-sfu/src/main.rs).
 USER 65532:65532
 ENV TEAMCRAFT_SFU_BIND=[::]:4433 \
-    TEAMCRAFT_SFU_HEALTH_BIND=[::]:8081
+    TEAMCRAFT_SFU_HEALTH_BIND=[::]:8081 \
+    TEAMCRAFT_SFU_FALLBACK_BIND=[::]:8082
 EXPOSE 4433/udp 8081/tcp 8082/tcp
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["/usr/local/bin/teamcraft-sfu", "healthcheck"]

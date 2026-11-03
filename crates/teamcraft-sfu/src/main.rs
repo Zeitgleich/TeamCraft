@@ -33,10 +33,14 @@
 //!   server (also at start), which drops participants the SFU no longer has, default 30
 //! - `TEAMCRAFT_SFU_FALLBACK_ENABLED`: `0` turns off the WebSocket fallback for networks that block
 //!   UDP, default `1` (ARCHITECTURE.md §6.6); `TEAMCRAFT_SFU_FALLBACK_BIND`: its TCP address, plain
-//!   HTTP behind the reverse proxy, default `[::]:8082`
-//! - `TEAMCRAFT_SFU_FALLBACK_TRUST_FORWARDED_FOR=1`: behind that proxy, use the last address in
-//!   `X-Forwarded-For` for the per-address limits; only when the proxy sets the header
-//! - `TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS` (default 1024), `TEAMCRAFT_SFU_FALLBACK_QUEUE_BYTES`
+//!   HTTP behind the reverse proxy, default `127.0.0.1:8082` (a proxy on this machine; the container
+//!   image sets `[::]:8082`)
+//! - `TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES`: addresses or networks, comma-separated, whose
+//!   `X-Forwarded-For` counts for the per-address limits; default the machine itself
+//! - `TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS` (joined, default 1024),
+//!   `TEAMCRAFT_SFU_FALLBACK_MAX_UNJOINED_CONNECTIONS` (default 128),
+//!   `TEAMCRAFT_SFU_FALLBACK_HANDSHAKE_TIMEOUT_MILLIS` (default 3000),
+//!   `TEAMCRAFT_SFU_FALLBACK_QUEUE_BYTES`
 //!   (media waiting for one connection, default 1 MiB), `TEAMCRAFT_SFU_FALLBACK_QUEUE_MAX_AGE_MILLIS`
 //!   (older media is dropped, default 300) and `TEAMCRAFT_SFU_FALLBACK_SEND_BUFFER_BYTES` (a
 //!   connection's socket buffer, default 128 KiB)
@@ -56,7 +60,7 @@ use teamcraft_ops::metrics::{bind_metrics, spawn_metrics_endpoint};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
 use teamcraft_sfu::{
   auth::{DevTokenVerifier, JoinTokenVerifier, JwtJoinTokenConfig, JwtJoinTokenVerifier, RejectAllVerifier},
-  config::{FallbackConfig, SfuConfig},
+  config::{FallbackConfig, SfuConfig, parse_trusted_proxies},
   control::control_router,
   dev_page::serve_dev_page,
   health::{DEFAULT_HEALTH_ADDR, serve_health},
@@ -69,7 +73,7 @@ use tracing_subscriber::EnvFilter;
 use wtransport::Identity;
 
 /// Where the fallback listens unless `TEAMCRAFT_SFU_FALLBACK_BIND` says otherwise.
-const DEFAULT_FALLBACK_ADDR: &str = "[::]:8082";
+const DEFAULT_FALLBACK_ADDR: &str = "127.0.0.1:8082";
 
 fn main() -> ExitCode {
   if std::env::args().nth(1).as_deref() == Some("healthcheck") {
@@ -190,8 +194,16 @@ fn apply_fallback_env(fallback: &mut FallbackConfig) -> anyhow::Result<()> {
     Ok("0") => None,
     Ok(other) => anyhow::bail!("TEAMCRAFT_SFU_FALLBACK_ENABLED must be 0 or 1, not {other:?}"),
   };
-  fallback.trust_forwarded_for =
-    std::env::var("TEAMCRAFT_SFU_FALLBACK_TRUST_FORWARDED_FOR").as_deref() == Ok("1");
+  if let Ok(text) = std::env::var("TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES") {
+    fallback.trusted_proxies = parse_trusted_proxies(&text)
+      .with_context(|| format!("TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES: {text:?}"))?;
+  }
+  if let Some(connections) = env_count("TEAMCRAFT_SFU_FALLBACK_MAX_UNJOINED_CONNECTIONS")? {
+    fallback.max_unjoined_connections = connections;
+  }
+  if let Some(millis) = env_count("TEAMCRAFT_SFU_FALLBACK_HANDSHAKE_TIMEOUT_MILLIS")? {
+    fallback.handshake_timeout = Duration::from_millis(u64::try_from(millis)?);
+  }
   if let Some(connections) = env_count("TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS")? {
     fallback.max_connections = connections;
   }
