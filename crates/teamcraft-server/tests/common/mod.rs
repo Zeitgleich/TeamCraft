@@ -209,6 +209,7 @@ pub mod ws {
     let (mut socket, _) = tokio_tungstenite::connect_async(&app.ws_url).await.unwrap();
     socket.next().await;
     let identify = GatewayClientMessage::Identify {
+      maybe_dpop_proof: None,
       token,
       device_id: serde_json::from_value(json!(device)).unwrap(),
       activity: DeviceActivity::Active,

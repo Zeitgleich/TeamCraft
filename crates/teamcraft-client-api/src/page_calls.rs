@@ -79,6 +79,14 @@ pub const EXPORT_UNWATCH_VIDEO: &str = "unwatch_video";
 /// `camera_view() -> video | undefined`: a new `<video>` playing the camera this device sends, or
 /// the pre-join check's camera.
 pub const EXPORT_CAMERA_VIEW: &str = "camera_view";
+/// `screen_view() -> video | undefined`: a `<video>` playing what this device shares, at a low frame
+/// rate, for the preview (#1175); nothing while it shares nothing. The capture runs on for it until
+/// [`EXPORT_UNWATCH_SCREEN`].
+pub const EXPORT_SCREEN_VIEW: &str = "screen_view";
+/// `unwatch_screen()`: the preview is out of sight; what [`EXPORT_SCREEN_VIEW`] holds is let go.
+pub const EXPORT_UNWATCH_SCREEN: &str = "unwatch_screen";
+/// `screen_view_has_picture() -> boolean`: whether the preview plays a capture that delivers.
+pub const EXPORT_SCREEN_VIEW_HAS_PICTURE: &str = "screen_view_has_picture";
 /// `preview_level() -> number`: the microphone's level in the pre-join check (#442), from 0
 /// (silence, or no check running) to 1.
 pub const EXPORT_PREVIEW_LEVEL: &str = "preview_level";

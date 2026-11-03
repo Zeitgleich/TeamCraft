@@ -280,6 +280,7 @@ async fn run(limited: Limited, steps: &[(Option<u64>, Duration)]) -> Timeline {
     // about 140 kbit/s), so no limit here would limit it.
     encoders: counting(software_encoders(), start, Arc::clone(&encoded)),
     maybe_filter: None,
+    maybe_picture_tap: None,
     maybe_idle_refresh: None,
   };
   presenter.start_video(config).await.unwrap();

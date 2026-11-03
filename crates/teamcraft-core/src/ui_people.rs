@@ -3,20 +3,22 @@
 //! has. Repeated reads don't repeat the request within [`RETRY_AFTER_MS`].
 
 use std::collections::HashMap;
+use std::hash::Hash;
 
 use teamcraft_client_api::admin::{DeviceInfo, DevicePushStatus, DeviceVerification};
-use teamcraft_client_api::backend::{LoadingList, filter_people};
+use teamcraft_client_api::backend::filter_people;
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
-use teamcraft_client_api::model::{TimestampMs, User, UserId};
+use teamcraft_client_api::list_load::{ListLoad, LoadingList};
+use teamcraft_client_api::model::{ConversationId, TimestampMs, User, UserId};
 use teamcraft_client_api::privacy::PrivacySettings;
-use teamcraft_proto::CallHistoryEntry;
+use teamcraft_proto::{CallHistoryEntry, ListConversationMembersResponse};
 
-use crate::client::OwnDeviceCheck;
 use crate::client::devices::{OWN_DEVICES_KEY, OwnDevicesRecord};
 use crate::client::people::{
   CALL_HISTORY_KEY, CallHistoryRecord, DirectoryCache, LastSeenRecord, PRIVACY_KEY, PrivacyRecord,
   last_seen_key,
 };
+use crate::client::{FirstSyncStage, OwnDeviceCheck, first_sync_progress, list_outcomes};
 use crate::records;
 use crate::store::{LocalStore, Table};
 use crate::ui_backend::{CoreChatBackend, CoreCommand};
@@ -39,6 +41,8 @@ pub(crate) struct RequestLog {
   maybe_privacy: Option<i64>,
   maybe_call_history: Option<i64>,
   maybe_own_devices: Option<i64>,
+  /// Member lists asked for because a member list had none, bounded like the searches.
+  members: HashMap<ConversationId, i64>,
 }
 
 impl<S: LocalStore> CoreChatBackend<S> {
@@ -139,7 +143,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .unwrap_or_default()
   }
 
-  pub(crate) fn ui_is_loaded(&self, list: LoadingList) -> bool {
+  /// How far a list is (issue #297). A list that has data is ready, however its newest refresh
+  /// ended; one without shows how its request ended.
+  pub(crate) fn ui_list_load(&self, list: &LoadingList) -> ListLoad {
     match list {
       LoadingList::CallHistory => {
         let maybe_record: Option<CallHistoryRecord> = self.read(records::get_json(
@@ -147,8 +153,77 @@ impl<S: LocalStore> CoreChatBackend<S> {
           Table::SyncState,
           CALL_HISTORY_KEY,
         ));
-        maybe_record.is_some()
+        if maybe_record.is_some() {
+          ListLoad::Ready
+        } else {
+          self.request_outcome(list)
+        }
       },
+      LoadingList::Directory { .. } => self.request_outcome(list),
+      LoadingList::Members { conversation } => {
+        let maybe_members: Option<ListConversationMembersResponse> = self.read(records::get_json(
+          self.store_ref(),
+          Table::Members,
+          &conversation.to_string(),
+        ));
+        if maybe_members.is_some() {
+          ListLoad::Ready
+        } else {
+          self.request_members(*conversation);
+          self.request_outcome(list)
+        }
+      },
+      // Built from local data, so all it waits for is the newest messages of the first sync.
+      LoadingList::Activity => match self.read(first_sync_progress(self.store_ref())) {
+        Some(progress) if progress.stage == FirstSyncStage::Newest => ListLoad::Loading,
+        _ => ListLoad::Ready,
+      },
+      LoadingList::Unknown => ListLoad::Ready,
+    }
+  }
+
+  /// Asks again, whenever the last request was: the user pressed the button.
+  pub(crate) fn ui_retry_list(&self, list: &LoadingList) {
+    self.read(list_outcomes::forget(self.store_ref(), list));
+    let now = self.now_ms();
+    let mut log = self.requests.borrow_mut();
+    match list {
+      LoadingList::CallHistory => {
+        log.maybe_call_history = Some(now);
+        self.command(CoreCommand::RefreshCallHistory);
+      },
+      LoadingList::Directory { query } => {
+        remember_search(&mut log.directory, query.clone(), now);
+        self.command(CoreCommand::SearchDirectory { query: query.clone() });
+      },
+      LoadingList::Members { conversation } => {
+        remember_search(&mut log.members, *conversation, now);
+        self.command(CoreCommand::RefreshMembers {
+          conversation: *conversation,
+        });
+      },
+      // The first sync goes on by itself; the list only waits for it anew.
+      LoadingList::Activity | LoadingList::Unknown => {},
+    }
+  }
+
+  fn request_outcome(&self, list: &LoadingList) -> ListLoad {
+    self
+      .read(list_outcomes::load_of(self.store_ref(), list).map(Some))
+      .unwrap_or(ListLoad::Loading)
+  }
+
+  fn request_members(&self, conversation: ConversationId) {
+    let now = self.now_ms();
+    let mut log = self.requests.borrow_mut();
+    let is_due = log
+      .members
+      .get(&conversation)
+      .is_none_or(|requested| now - requested > RETRY_AFTER_MS);
+    if is_due {
+      remember_search(&mut log.members, conversation, now);
+      drop(log);
+      self.command(CoreCommand::RefreshMembers { conversation });
     }
   }
 
@@ -283,7 +358,7 @@ fn history_item(me: UserId, call: &CallHistoryEntry) -> CallHistoryItem {
 }
 
 /// Records a search, dropping the oldest when the log is full (its bound).
-fn remember_search(log: &mut HashMap<String, i64>, query: String, now: i64) {
+fn remember_search<K: Clone + Eq + Hash>(log: &mut HashMap<K, i64>, query: K, now: i64) {
   if log.len() >= MAX_REMEMBERED_SEARCHES
     && let Some(oldest) = log
       .iter()

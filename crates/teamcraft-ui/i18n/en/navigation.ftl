@@ -117,6 +117,7 @@ activity-all = All
 activity-unread = Unread
 activity-mentions = Mentions
 activity-threads = Threads
+activity-loading = Loading activity
 activity-empty-title = You're all caught up
 activity-mark-read = Mark all as read
 activity-empty = Mentions, reactions to your messages and replies in your threads show up here.

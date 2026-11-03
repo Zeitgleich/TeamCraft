@@ -1,9 +1,11 @@
 use leptos::html;
 use leptos::prelude::*;
+use teamcraft_client_api::list_load::{ListLoad, ListPhase, REQUEST_DEADLINE_MS};
 
 use crate::clock::format_date_time;
 use crate::components::compact_back::CompactBack;
 use crate::components::icons::{Icon, IconName};
+use crate::components::list_status::{ListPlaceholder, ListStatus};
 use crate::i18n::use_i18n;
 use crate::model::ConversationKind;
 use crate::search::{SearchHit, TokenKind, parse_query};
@@ -20,6 +22,9 @@ const FILTER_BUTTONS: [(&str, &str); 8] = [
   ("search-filter-after", "after:"),
   ("search-filter-thread", "in-thread"),
 ];
+
+/// Placeholder rows while the core works out the answer.
+const SKELETON_ROWS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pane {
@@ -74,9 +79,30 @@ pub fn SearchView() -> impl IntoView {
     }
   };
 
+  // An answer that never comes ends as failed; the status line says nothing was found only once
+  // there is an answer. The mentions pane has its rows or none, with no wait to show.
+  let load = ListStatus::new(
+    move || pane.get() == Pane::Results && results.with(|results| results.hits.is_empty()),
+    move || {
+      if results.with(|results| results.is_pending) {
+        ListLoad::Loading
+      } else {
+        ListLoad::Ready
+      }
+    },
+    query.into(),
+    REQUEST_DEADLINE_MS,
+  );
+  let on_retry = Callback::new(move |()| {
+    load.restart();
+    // A failed question holds no answer, so reading again asks the core again.
+    state.write(|_| ());
+  });
+
   let status = move || match pane.get() {
     Pane::Mentions => i18n.t_count("search-count", mentions.get().len()),
     Pane::Results if parsed.get().is_empty() => i18n.t("search-start"),
+    Pane::Results if matches!(load.phase.get(), ListPhase::Failed(_)) => i18n.t("list-failed-title"),
     Pane::Results if results.get().is_pending => i18n.t("search-pending"),
     Pane::Results => {
       let total = results.get().total;
@@ -254,6 +280,15 @@ pub fn SearchView() -> impl IntoView {
           <For each=shown_hits key=|hit| hit.message.id let:hit>
             <HitCard hit=hit />
           </For>
+          // The empty state is the status line above.
+          <ListPlaceholder
+            phase=load.phase
+            rows=SKELETON_ROWS
+            label=Signal::derive(move || i18n.t("search-pending"))
+            on_retry=on_retry
+            as_item=true
+          />
+
         </ul>
       </div>
     </section>

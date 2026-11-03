@@ -93,6 +93,8 @@ pub struct CallHost {
   video_sinks: VideoSinks,
   /// The own camera for the webview's self view.
   self_view: SelfView,
+  /// The preview of the own screen share for the webview (#1175).
+  screen_view: SelfView,
   codecs: CodecLibrary,
   maybe_segmentation_model: Option<PathBuf>,
   /// The pre-join check (#442); a mutex across awaits, always taken after `media`.
@@ -255,6 +257,7 @@ impl CallHost {
       media: tokio::sync::Mutex::new(None),
       video_sinks: Arc::default(),
       self_view: SelfView::default(),
+      screen_view: SelfView::for_screen(),
       codecs: CodecLibrary::new(files.codec_directory),
       maybe_segmentation_model: files.maybe_segmentation_model,
       preview: tokio::sync::Mutex::default(),
@@ -484,6 +487,17 @@ impl CallHost {
     self.self_view.unwatch(channel);
   }
 
+  /// Sends what the own screen share sends to `send` as small JPEG images (see `self_view`), also
+  /// of a share started later; `send` answers whether the image was delivered.
+  pub fn watch_screen(&self, channel: ChannelId, send: impl Fn(Vec<u8>) -> bool + Send + 'static) {
+    self.screen_view.watch(channel, send);
+  }
+
+  /// Stops the share's preview, if `channel` is the one it sends through.
+  pub fn unwatch_screen(&self, channel: ChannelId) {
+    self.screen_view.unwatch(channel);
+  }
+
   /// The webview draws the self view in `width` x `height` device pixels: its images are made to
   /// cover that (#937).
   pub fn size_camera(&self, width: u32, height: u32) {
@@ -687,6 +701,7 @@ impl CallHost {
       capture,
       encoders: preferred_encoders(),
       maybe_filter: Some(self.self_view.filter(maybe_filter)),
+      maybe_picture_tap: None,
       maybe_idle_refresh: None,
     };
     // Answers once the capture runs; the media task turns the camera on in the call state, and
@@ -833,6 +848,7 @@ impl CallHost {
       capture,
       encoders: preferred_encoders(),
       maybe_filter: None,
+      maybe_picture_tap: Some(self.screen_view.picture_tap()),
       maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
     };
     self.start_video(config).await?;
@@ -2256,6 +2272,7 @@ mod tests {
     ) -> oneshot::Receiver<Result<(), String>> {
       let config = VideoSendConfig {
         maybe_layer_plan: None,
+        maybe_picture_tap: None,
         maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&kind),
         kind,
         capture,

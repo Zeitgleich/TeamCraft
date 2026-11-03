@@ -42,6 +42,8 @@ sha2 = "0.11.0"
 # Constant-time comparisons of keys and fingerprints.
 subtle = "2.6.1"
 thiserror = "2.0.21"
+# DPoP: `htu` compared with the origins of the server after RFC 3986 normalization.
+url.workspace = true
 # Binary encoding of signed and encrypted structures (already an openmls dependency).
 tls_codec = { version = "0.5.0", features = ["derive", "std"] }
 # Device key agreement (rendezvous, key transfer).

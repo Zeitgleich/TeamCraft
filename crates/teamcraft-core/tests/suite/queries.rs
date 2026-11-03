@@ -9,6 +9,7 @@ use crate::common;
 use common::{Peer, backend_of, run_commands, settle};
 use teamcraft_client_api::actions::LinkedMessage;
 use teamcraft_client_api::backend::ChatBackend;
+use teamcraft_client_api::list_load::{ListLoad, LoadFailure};
 use teamcraft_client_api::remote::{ChatAction, ChatAnswer, ChatQuery};
 use teamcraft_core::api::fake::FakeServer;
 
@@ -79,6 +80,43 @@ async fn search_mentions_and_saved_searches_answer_over_ipc() {
 }
 
 /// What the desktop shell does with a query from the webview.
+#[tokio::test]
+async fn a_list_status_and_its_retry_go_over_ipc() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let alice_ui = backend_of(&alice);
+  let query = r#"{"kind":"list_load","list":{"name":"call_history"}}"#;
+  assert_eq!(load(&alice_ui, query), ListLoad::Loading);
+
+  // A failed read is answered as failed; retrying asks again and shows as loading until it ends.
+  server.set_offline(alice.client.user_id(), true);
+  alice_ui.call_history();
+  run_commands(&mut alice, &alice_ui).await;
+  let failed = ListLoad::Failed {
+    failure: LoadFailure::Network,
+  };
+  assert_eq!(load(&alice_ui, query), failed);
+
+  server.set_offline(alice.client.user_id(), false);
+  let action: ChatAction =
+    serde_json::from_str(r#"{"action":"retry_list","list":{"name":"call_history"}}"#).unwrap();
+  action.apply_to(&alice_ui);
+  assert_eq!(load(&alice_ui, query), ListLoad::Loading);
+  run_commands(&mut alice, &alice_ui).await;
+  assert_eq!(load(&alice_ui, query), ListLoad::Ready);
+}
+
+fn load(
+  backend: &teamcraft_core::ui_backend::CoreChatBackend<std::sync::Arc<teamcraft_core::store::MemoryStore>>,
+  json: &str,
+) -> ListLoad {
+  let answer = ask(backend, json);
+  let ChatAnswer::ListLoad { load } = answer else {
+    panic!("unexpected answer {answer:?}");
+  };
+  load
+}
+
 fn ask(
   backend: &teamcraft_core::ui_backend::CoreChatBackend<std::sync::Arc<teamcraft_core::store::MemoryStore>>,
   json: &str,

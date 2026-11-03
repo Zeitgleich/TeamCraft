@@ -2,14 +2,16 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use teamcraft_proto::{
-  DeviceLinkClosedReason, ErrorBody, ErrorCode, GatewayEvent, RendezvousClientMessage,
+  DeviceLinkClosedReason, ErrorBody, ErrorCode, GatewayEvent, RENDEZVOUS_PATH, RendezvousClientMessage,
   RendezvousServerMessage, UserId,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 use tracing::debug;
 
 use super::hub::{JoinError, RelayError, Signal};
+use crate::auth::{PresentedProof, PresentedToken, TokenScheme};
 use crate::drain::CLOSE_SERVICE_RESTART;
+use crate::error::ApiError;
 use crate::services::accounts;
 use crate::state::AppState;
 
@@ -27,7 +29,12 @@ pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
     next_text(&mut socket),
   )
   .await;
-  let Ok(Some(RendezvousClientMessage::Join { token, rendezvous_id })) = first else {
+  let Ok(Some(RendezvousClientMessage::Join {
+    token,
+    rendezvous_id,
+    maybe_dpop_proof,
+  })) = first
+  else {
     close(&mut socket, CLOSE_POLICY, "expected join").await;
     return;
   };
@@ -40,13 +47,24 @@ pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
     .await;
     return;
   }
-  let user = match authenticate(&state, &token).await {
+  let user = match authenticate(&state, &token, maybe_dpop_proof.as_deref()).await {
     Ok(user) => user,
-    Err(body) => {
-      state
-        .rate_limits
-        .record_auth_failure(&ip, std::time::Instant::now());
-      fail_with(&mut socket, body).await;
+    Err(error) => {
+      // A client meets the nonce challenge after every restart of the server: not a failed sign-in.
+      if error.is_dpop_nonce_challenge() {
+        let settings = state.settings.get();
+        let nonce = state.dpop.current_nonce(&settings.token_binding);
+        let _ = send(&mut socket, &RendezvousServerMessage::DpopNonce { nonce }).await;
+      } else {
+        state
+          .rate_limits
+          .record_auth_failure(&ip, std::time::Instant::now());
+      }
+      fail_with(
+        &mut socket,
+        ErrorBody::new(error.error_code(), error.public_message()),
+      )
+      .await;
       return;
     },
   };
@@ -161,15 +179,21 @@ pub fn publish_closed(state: &AppState, user: UserId, request_id: &str, reason: 
   );
 }
 
-async fn authenticate(state: &AppState, token: &str) -> Result<teamcraft_proto::UserId, ErrorBody> {
-  let result = async {
-    let identity = accounts::validate_token(state, token).await?;
-    accounts::authenticate(state, identity).await
-  }
-  .await;
-  result
-    .map(|caller| caller.user.id)
-    .map_err(|error| ErrorBody::new(error.error_code(), error.public_message()))
+async fn authenticate(
+  state: &AppState,
+  token: &str,
+  maybe_proof: Option<&str>,
+) -> Result<teamcraft_proto::UserId, ApiError> {
+  let presented = PresentedToken {
+    token,
+    scheme: TokenScheme::Frame,
+    proof: PresentedProof::from_frame(maybe_proof),
+    method: "GET",
+    path: RENDEZVOUS_PATH,
+  };
+  let identity = accounts::validate_presented_token(state, &presented).await?;
+  let caller = accounts::authenticate(state, identity).await?;
+  Ok(caller.user.id)
 }
 
 fn is_valid_id(id: &str) -> bool {

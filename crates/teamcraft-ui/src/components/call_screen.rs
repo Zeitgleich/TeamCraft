@@ -17,6 +17,7 @@ use crate::components::call_video::{
 };
 use crate::components::count_badge::CountBadge;
 use crate::components::icons::{Icon, IconName};
+use crate::components::share_preview::OwnSharePreview;
 use crate::components::video_quality::VideoQualityMenu;
 use crate::components::video_stats::{VideoStatsHub, VideoStatsOverlay};
 use crate::i18n::use_i18n;
@@ -345,6 +346,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
     if is_share_layout() {
       let maybe_screen = shared_screen.get();
       let sharer_name = sharer.get().map(|(_, name)| name).unwrap_or_default();
+      let sharer_name_for_wait = sharer_name.clone();
       let is_me_sharing = call.is_sharing_screen.get();
       let banner = if is_me_sharing {
         i18n.t("share-banner-self")
@@ -386,28 +388,21 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
                 </button>
               </Show>
             </div>
-            <div class="shared-screen" role="img" aria-label=label>
-              // The own share shows no picture here; its stats do (send side).
+            // With the own share's preview in it, this is more than a picture: it has a button.
+            <div class="shared-screen" role=if is_me_sharing { "group" } else { "img" } aria-label=label>
+              // Its stats go with the share, not with the preview, which may be collapsed.
               {is_me_sharing.then(|| view! { <VideoStatsOverlay target=StatsTarget::OwnScreen /> })}
               {match maybe_screen {
-                Some(source) => view! { <LiveVideo source=source is_mirrored=false /> }.into_any(),
-                None => view! {
-              <div class="mock-window">
-                <div class="mock-titlebar"><span></span><span></span><span></span></div>
-                <div class="mock-body">
-                  <div class="mock-sidebar"></div>
-                  <div class="mock-content">
-                    <div class="mock-line wide"></div>
-                    <div class="mock-line"></div>
-                    <div class="mock-line"></div>
-                    <div class="mock-chart"></div>
-                    <div class="mock-line wide"></div>
-                    <div class="mock-line"></div>
-                  </div>
-                </div>
-              </div>
+                Some(source) => view! {
+                  <LiveVideo source=source is_mirrored=false />
+                  {is_me_sharing.then(|| view! { <OwnSharePreview is_over_picture=true /> })}
                 }
                 .into_any(),
+                None if is_me_sharing => view! { <OwnSharePreview is_over_picture=false /> }.into_any(),
+                None => {
+                  let waiting = i18n.t_with("share-waiting", &[("name", &sharer_name_for_wait)]);
+                  view! { <p class="share-waiting" role="status">{waiting}</p> }.into_any()
+                },
               }}
             </div>
           </div>

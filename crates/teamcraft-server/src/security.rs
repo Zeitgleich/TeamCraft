@@ -19,8 +19,9 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use teamcraft_proto::UserId;
 
+use crate::auth::{DPOP_HEADER, note_nonce_header};
 use crate::config::RateLimitConfig;
-use crate::error::ApiError;
+use crate::error::{ApiError, DpopNonceChallenge};
 use crate::state::AppState;
 
 /// More entries than this trigger a sweep of idle buckets.
@@ -236,6 +237,7 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
   let settings = &state.settings.get().security;
   let ip = client_ip(&request, settings.trust_forwarded_for);
   let mut request = request;
+  let has_dpop_proof = request.headers().contains_key(DPOP_HEADER);
   warn_once_if_behind_an_unconfigured_proxy(&request, settings.trust_forwarded_for);
   request.extensions_mut().insert(ClientIp(ip.clone()));
   let now = Instant::now();
@@ -260,8 +262,13 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
   };
   // Unknown meeting link tokens answer 404; guessing them counts like a failed sign-in.
   let is_guessed_link = response.status() == StatusCode::NOT_FOUND && path.starts_with(MEETING_LINK_PREFIX);
-  if response.status() == StatusCode::UNAUTHORIZED || is_guessed_link {
+  let is_failed_authentication = response.status() == StatusCode::UNAUTHORIZED
+    && response.extensions().get::<DpopNonceChallenge>().is_none();
+  if is_failed_authentication || is_guessed_link {
     limits.record_auth_failure(&ip, Instant::now());
+  }
+  if has_dpop_proof {
+    note_nonce_header(&state, response.headers_mut());
   }
   add_headers(response.headers_mut(), settings.hsts);
   response

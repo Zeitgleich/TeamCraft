@@ -4,6 +4,7 @@
 
 use leptos::prelude::*;
 use teamcraft_client_api::activity::{ActivityItem, ActivityKind};
+use teamcraft_client_api::list_load::{FIRST_SYNC_DEADLINE_MS, LoadingList};
 
 use crate::activity_place::{ActivityFilter, summary_key, thread_summary_key};
 use crate::clock::{format_date_time, format_relative, now_ms};
@@ -11,10 +12,14 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::join_requests::ActivityJoinRequests;
+use crate::components::list_status::{ListPlaceholder, ListStatus};
 use crate::components::rich_text::RichText;
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ThreadSummary, thread_id_of};
 use crate::state::{MainView, SidePanel, use_app_state};
+
+/// Placeholder rows while the first sync brings the feed.
+const SKELETON_ROWS: usize = 6;
 
 /// The activity list in the sidebar's place: filters, then the entries.
 #[component]
@@ -51,6 +56,16 @@ pub fn ActivitySidebar() -> impl IntoView {
       items.with(Vec::is_empty) && !(shows_requests() && feed.with(|feed| !feed.join_requests.is_empty()))
     }
   };
+  let status = ListStatus::new(
+    is_empty,
+    move || state.read(|backend| backend.list_load(&LoadingList::Activity)),
+    Signal::stored(String::new()),
+    FIRST_SYNC_DEADLINE_MS,
+  );
+  let on_retry = Callback::new(move |()| {
+    status.restart();
+    state.write(|backend| backend.retry_list(&LoadingList::Activity));
+  });
 
   view! {
     <nav class="sidebar activity-sidebar" aria-label=move || i18n.t("activity-title")>
@@ -115,13 +130,18 @@ pub fn ActivitySidebar() -> impl IntoView {
             }
           }}
         </ul>
-        {move || {
-          is_empty().then(|| {
+        <ListPlaceholder
+          phase=status.phase
+          rows=SKELETON_ROWS
+          label=Signal::derive(move || i18n.t("activity-loading"))
+          on_retry=on_retry
+        >
+          {move || {
             let (title_key, body_key) = filter.get().empty_keys();
             let icon = if filter.get().lists_threads() { IconName::Threads } else { IconName::Bell };
             view! { <div class="activity-empty"><EmptyState icon=icon title_key=title_key body_key=body_key /></div> }
-          })
-        }}
+          }}
+        </ListPlaceholder>
       </div>
     </nav>
   }

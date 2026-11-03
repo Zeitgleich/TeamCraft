@@ -1,9 +1,10 @@
 //! Runs the requests the UI adapter queued ([`CoreCommand`]) against the server.
 
+use teamcraft_client_api::list_load::{ListLoad, LoadingList};
 use teamcraft_client_api::model::PresenceStatus;
 use teamcraft_proto::{ManualPresence, SetPresenceRequest, UnixMillis, UpdateConversationMemberRequest};
 
-use super::{Client, PendingAction};
+use super::{Client, PendingAction, list_outcomes};
 use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
@@ -12,6 +13,21 @@ use crate::ui_backend::{CoreCommand, history_jump_key, newest_server_id, note_li
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn run_ui_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    let Some(list) = command.loading_list() else {
+      return self.run_command(command).await;
+    };
+    let load = match self.run_command(command).await {
+      Ok(()) => ListLoad::Ready,
+      // The list says so itself with a retry (issue #297), or shows its cached rows: no toast too.
+      Err(error) => {
+        tracing::warn!(%error, "a list could not be read");
+        list_outcomes::failed(&error)
+      },
+    };
+    list_outcomes::note(&self.store, list, load)
+  }
+
+  async fn run_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
     match command {
       CoreCommand::FlushOutbox => self.flush_outbox().await.map(|_| ()),
       // Only the sync loop has the gateway to announce it on; without one there is no one to tell.
@@ -355,6 +371,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           )),
         }
       },
+      CoreCommand::RefreshMembers { conversation } => self.refresh_members(conversation).await,
       CoreCommand::RefreshChannelRoles { conversation } => {
         self.refresh_members(conversation).await?;
         self.sync_channel_roles(conversation).await
@@ -372,6 +389,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .set_custom_status(maybe_status.and_then(|status| status.to_wire(now)))
           .await
       },
+    }
+  }
+}
+
+impl CoreCommand {
+  /// The list this request answers, whose status follows how it ends.
+  fn loading_list(&self) -> Option<LoadingList> {
+    match self {
+      Self::RefreshCallHistory => Some(LoadingList::CallHistory),
+      Self::SearchDirectory { query } => Some(LoadingList::directory(query)),
+      Self::RefreshMembers { conversation } => Some(LoadingList::Members {
+        conversation: *conversation,
+      }),
+      _ => None,
     }
   }
 }

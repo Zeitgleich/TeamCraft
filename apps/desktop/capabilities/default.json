@@ -77,6 +77,8 @@
     "allow-call-video-stats",
     "allow-call-watch-camera",
     "allow-call-unwatch-camera",
+    "allow-call-watch-screen",
+    "allow-call-unwatch-screen",
     "allow-call-size-camera",
     "allow-call-size-video",
     "allow-call-watch-level",

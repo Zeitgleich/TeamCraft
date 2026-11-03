@@ -1748,12 +1748,22 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::RefreshCallHistory);
   }
 
-  fn is_loaded(&self, list: teamcraft_client_api::backend::LoadingList) -> bool {
-    // Until the first answer arrives the list counts as loading.
-    matches!(
-      self.ask(ChatQuery::ListLoaded { list }),
-      Some(ChatAnswer::ListLoaded { is_loaded: true })
-    )
+  fn list_load(
+    &self,
+    list: &teamcraft_client_api::list_load::LoadingList,
+  ) -> teamcraft_client_api::list_load::ListLoad {
+    use teamcraft_client_api::list_load::ListLoad;
+    match self.ask(ChatQuery::ListLoad { list: list.clone() }) {
+      Some(ChatAnswer::ListLoad { load }) => load,
+      // An older core has no status: the list shows what it holds, as it did then.
+      Some(ChatAnswer::Unsupported) => ListLoad::Ready,
+      // Until the first answer arrives the list counts as loading.
+      _ => ListLoad::Loading,
+    }
+  }
+
+  fn retry_list(&self, list: &teamcraft_client_api::list_load::LoadingList) {
+    self.act(ChatAction::RetryList { list: list.clone() });
   }
 
   fn own_devices(&self) -> Vec<teamcraft_client_api::admin::DeviceInfo> {

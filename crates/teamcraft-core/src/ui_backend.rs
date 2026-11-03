@@ -402,6 +402,10 @@ pub enum CoreCommand {
     conversation: ConversationId,
     user: UserId,
   },
+  /// A conversation's members, for a member list that has none yet.
+  RefreshMembers {
+    conversation: ConversationId,
+  },
   /// The channel's members and signed roles, for its settings.
   RefreshChannelRoles {
     conversation: ConversationId,
@@ -1957,8 +1961,15 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_refresh_call_history();
   }
 
-  fn is_loaded(&self, list: teamcraft_client_api::backend::LoadingList) -> bool {
-    self.ui_is_loaded(list)
+  fn list_load(
+    &self,
+    list: &teamcraft_client_api::list_load::LoadingList,
+  ) -> teamcraft_client_api::list_load::ListLoad {
+    self.ui_list_load(list)
+  }
+
+  fn retry_list(&self, list: &teamcraft_client_api::list_load::LoadingList) {
+    self.ui_retry_list(list);
   }
 
   fn own_devices(&self) -> Vec<teamcraft_client_api::admin::DeviceInfo> {

@@ -63,6 +63,11 @@ pub type EncoderFactory =
 
 /// Turns frames before encoding, e.g. background effects. Runs on the encoder thread.
 pub type FrameFilter = Box<dyn FnMut(VideoFrame) -> VideoFrame + Send>;
+/// Sees the picture encoded last, again and again while the track runs (every [`CONTROL_POLL`] or
+/// sooner), also when nothing new comes: a still screen's preview needs its picture too. It decides
+/// itself what it wants of it, and takes its copy only then. Runs on the encoder thread: it must
+/// return at once.
+pub type PictureTap = Box<dyn FnMut(&VideoFrame) + Send>;
 
 /// Plans a track's layers for the size its source delivers ([`VideoSendConfig::maybe_layer_plan`]).
 pub type LayerPlanner = Box<dyn FnOnce(VideoResolution) -> Vec<VideoLayerInfo> + Send>;
@@ -223,6 +228,8 @@ pub struct VideoSendConfig {
   pub maybe_layer_plan: Option<LayerPlanner>,
   pub encoders: EncoderFactory,
   pub maybe_filter: Option<FrameFilter>,
+  /// Who looks at what is sent, on this device (the preview of the own screen share).
+  pub maybe_picture_tap: Option<PictureTap>,
   /// Encodes the last picture again after this long without a new frame. Screen captures only
   /// deliver when something changes ([`VideoSendConfig::default_idle_refresh`]); `None` for
   /// cameras, which deliver all the time.
@@ -309,6 +316,7 @@ impl VideoSender {
       maybe_layer_plan,
       encoders,
       maybe_filter,
+      maybe_picture_tap,
       maybe_idle_refresh,
     } = config;
     let content = match kind {
@@ -340,6 +348,7 @@ impl VideoSender {
       content,
       encoders,
       maybe_filter,
+      maybe_picture_tap,
       refresh: Refresh {
         maybe_idle_interval: maybe_idle_refresh,
       },
@@ -424,6 +433,7 @@ struct EncoderLoop {
   content: VideoContent,
   encoders: EncoderFactory,
   maybe_filter: Option<FrameFilter>,
+  maybe_picture_tap: Option<PictureTap>,
   refresh: Refresh,
   frame_rx: FrameReceiver,
   /// A frame taken from the capture before the loop ran (the one the layers were planned for).
@@ -518,6 +528,9 @@ impl EncoderLoop {
       // A still screen delivers no frames: its black is noticed with time passing.
       if let Some(change) = self.black.poll(Instant::now()) {
         self.report_black(change);
+      }
+      if let (Some(tap), Some(last)) = (&mut self.maybe_picture_tap, &maybe_last) {
+        tap(&last.frame);
       }
       if let Some(frame) = self.due_refresh(&simulcast, maybe_last.as_ref(), Instant::now()) {
         match self.encode_and_send(&mut simulcast, frame, &mut encode_warning) {
@@ -1208,6 +1221,7 @@ mod tests {
         let resolution = frame.resolution();
         VideoFrame::new(resolution, frame.timestamp_us(), vec![128; frame.data().len()]).unwrap()
       })),
+      maybe_picture_tap: None,
       maybe_idle_refresh: None,
     };
     let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
@@ -1268,6 +1282,7 @@ mod tests {
       layers: simulcast_layers(VGA, 30, 800_000, 1),
       encoders: software_encoders(),
       maybe_filter: None,
+      maybe_picture_tap: None,
       maybe_idle_refresh: None,
     };
     let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
@@ -1315,6 +1330,7 @@ mod tests {
       // No encoder: the thread ends at once, as when the system ends the capture.
       encoders: Arc::new(|_, _| Err(VideoCodecError::Codec("none".into()))),
       maybe_filter: None,
+      maybe_picture_tap: None,
       maybe_idle_refresh: None,
     };
     let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
@@ -1352,6 +1368,7 @@ mod tests {
       })),
       encoders: first_picture::fake_encoders(),
       maybe_filter: None,
+      maybe_picture_tap: None,
       maybe_idle_refresh: None,
     };
     let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
@@ -1387,6 +1404,7 @@ mod tests {
       })),
       encoders: first_picture::fake_encoders(),
       maybe_filter: None,
+      maybe_picture_tap: None,
       maybe_idle_refresh: None,
     }
     .within_layer_limit(3);
@@ -1398,6 +1416,41 @@ mod tests {
       .map(|info| (info.layer, info.height))
       .collect();
     assert_eq!(sides, vec![(0, 360), (1, 720), (2, 1080)]);
+  }
+
+  #[tokio::test]
+  async fn a_picture_tap_keeps_seeing_a_still_picture() {
+    let (encoded, _encoded_rx) = mpsc::unbounded_channel();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen_by_tap = Arc::clone(&seen);
+    let config = VideoSendConfig {
+      kind: VideoTrackKind::Screen,
+      capture: Box::new(Delivering {
+        format: CaptureFormat {
+          resolution: VGA,
+          framerate: 30,
+        },
+        delivers: VGA,
+        maybe_frames: None,
+      }),
+      layers: simulcast_layers(VGA, 30, 800_000, 1),
+      maybe_layer_plan: None,
+      encoders: first_picture::fake_encoders(),
+      maybe_filter: None,
+      maybe_picture_tap: Some(Box::new(move |frame| {
+        seen_by_tap.lock().unwrap().push(frame.timestamp_us());
+      })),
+      maybe_idle_refresh: None,
+    };
+    let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
+    // The one frame the capture delivers, over and over: a late viewer gets its picture.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while seen.lock().unwrap().len() < 3 {
+      assert!(Instant::now() < deadline, "the tap saw the picture only once");
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    drop(sender);
+    assert!(seen.lock().unwrap().iter().all(|timestamp_us| *timestamp_us == 0));
   }
 
   /// Delivers one frame of `delivers` as soon as it starts, whatever it was asked for.
@@ -1705,6 +1758,7 @@ mod tests {
         layers: simulcast_layers(VGA, 30, 800_000, 1),
         encoders,
         maybe_filter: None,
+        maybe_picture_tap: None,
         maybe_idle_refresh: None,
       };
       let (sender, first_picture) = VideoSender::start(config, encoded).unwrap();
@@ -1725,6 +1779,7 @@ mod tests {
         content: VideoContent::Camera,
         encoders: fake_encoders(),
         maybe_filter: None,
+        maybe_picture_tap: None,
         refresh: Refresh {
           maybe_idle_interval: None,
         },
@@ -1813,6 +1868,7 @@ mod tests {
         layers: simulcast_layers(VGA, 30, 800_000, 1),
         encoders: fake_encoders(),
         maybe_filter: None,
+        maybe_picture_tap: None,
         maybe_idle_refresh,
       };
       let (sender, _first_picture) = VideoSender::start(config, encoded).unwrap();
@@ -2008,6 +2064,7 @@ mod tests {
         layers: simulcast_layers(VGA, 30, 800_000, 1),
         encoders: fake_encoders(),
         maybe_filter: None,
+        maybe_picture_tap: None,
         maybe_idle_refresh: None,
       };
       let (sender, mut first_picture) = VideoSender::start(config, encoded).unwrap();
@@ -2035,6 +2092,7 @@ mod tests {
         layers: simulcast_layers(VGA, 30, 800_000, 1),
         encoders: fake_encoders(),
         maybe_filter: None,
+        maybe_picture_tap: None,
         maybe_idle_refresh: None,
       };
       let (sender, mut first_picture) = VideoSender::start(config, encoded).unwrap();

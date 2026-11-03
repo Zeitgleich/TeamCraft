@@ -888,6 +888,7 @@ Groups that are stored and reset as a whole:
 | `sign_in_page`   | which methods the sign-in page offers (SSO, e-mail and password) and in which order; help text per language; help link; whether every sign-in shows the identity provider's login page |
 | `mail_texts`     | invitation and activation mail                                                                                                                |
 | `meeting_mail`   | most invitees; invitation, update and cancellation mail                                                                                       |
+| `token_binding`  | DPoP: off, optional (default) or required; proof age, clock leeway, nonce rotation, replay cache size in all and per account (e2ee.md §3.1.2) |
 
 **Signed or not.** Settings that member clients must be able to verify against a compromised server
 are part of the owner-signed workspace policy (§2.3) and are edited there: `admin_self_join`, org

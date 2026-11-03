@@ -7,6 +7,7 @@ use figment::Figment;
 use figment::providers::{Env, Format, Toml};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
+use teamcraft_crypto::dpop::PublicOrigin;
 use teamcraft_proto::{ConversationId, GuestDmStart, NotificationLevel, SignInMethod, SpaceId};
 
 /// Prefix of environment overrides. Nested keys are separated by a double underscore:
@@ -682,6 +683,10 @@ pub struct SecurityConfig {
   /// it as the client address (the one the proxy saw). Leave off when clients connect directly,
   /// since anybody could forge the header.
   pub trust_forwarded_for: bool,
+  /// Origins clients reach this server on (`https://chat.example.com`), for what isn't already
+  /// known from `[[brands]]`, `[branding].served_hostnames` and the `public_base_url` settings, such
+  /// as a port. DPoP proofs must name one of these: the check never reads a request's headers.
+  pub public_origins: Vec<String>,
   pub rate_limits: RateLimitConfig,
 }
 
@@ -702,12 +707,24 @@ pub struct RateLimitConfig {
   pub auth_failures_per_minute: u32,
 }
 
+impl SecurityConfig {
+  /// Rejects a `public_origins` entry that is no origin, which would refuse every proof for it.
+  pub fn validate(&self) -> Result<(), String> {
+    for origin in &self.public_origins {
+      PublicOrigin::parse(origin)
+        .map_err(|_| format!("security.public_origins: {origin:?} is not http(s)://host[:port]"))?;
+    }
+    Ok(())
+  }
+}
+
 impl Default for SecurityConfig {
   fn default() -> Self {
     Self {
       max_request_body_bytes: 4 * 1024 * 1024,
       hsts: false,
       trust_forwarded_for: false,
+      public_origins: Vec::new(),
       rate_limits: RateLimitConfig::default(),
     }
   }
@@ -1717,6 +1734,18 @@ mod tests {
   use secrecy::ExposeSecret;
 
   use super::*;
+
+  #[test]
+  fn a_public_origin_must_be_an_origin() {
+    let with = |origin: &str| SecurityConfig {
+      public_origins: vec![origin.to_owned()],
+      ..SecurityConfig::default()
+    };
+    assert!(SecurityConfig::default().validate().is_ok());
+    assert!(with("https://chat.example.com:8443").validate().is_ok());
+    assert!(with("chat.example.com").validate().is_err());
+    assert!(with("https://chat.example.com/app").validate().is_err());
+  }
 
   #[test]
   fn storage_client_url_follows_the_addressing_style() {

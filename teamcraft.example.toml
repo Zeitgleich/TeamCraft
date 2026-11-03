@@ -348,6 +348,10 @@ hsts = false
 # off every client has the proxy's address, shares one rate limit, and bad tokens from anybody block
 # everybody (the server warns once when it sees X-Forwarded-For from a private address).
 trust_forwarded_for = false
+# Origins clients reach this server on, for what isn't known from [[brands]], served_hostnames and the
+# public_base_url settings, such as a port. DPoP proofs must name one of these; a request's own Host or
+# forwarded headers never count (docs/operations.md, "Binding tokens to devices").
+public_origins = []
 
 # Per-minute token buckets (burst = the same number), in memory per instance. A first line against
 # abuse; the reverse proxy's limits come on top.

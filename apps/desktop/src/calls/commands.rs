@@ -84,6 +84,28 @@ pub fn call_unwatch_camera(calls: State<'_, Arc<CallHost>>, channel: u32) {
   calls.unwatch_camera(ChannelId(channel));
 }
 
+/// Streams what the own screen share sends to the webview's preview through `frames` (#1175):
+/// small JPEG images in the format of `call_watch_video`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_watch_screen(calls: State<'_, Arc<CallHost>>, frames: Channel) {
+  let channel = ChannelId(frames.id());
+  calls.watch_screen(channel, move |message| {
+    match frames.send(InvokeResponseBody::Raw(message)) {
+      Ok(()) => true,
+      Err(error) => {
+        tracing::debug!(%error, "share preview image not delivered to the webview");
+        false
+      },
+    }
+  });
+}
+
+/// Stops the share's preview; `channel` is the id of the `frames` channel it was started with.
+#[tauri::command(rename_all = "snake_case")]
+pub fn call_unwatch_screen(calls: State<'_, Arc<CallHost>>, channel: u32) {
+  calls.unwatch_screen(ChannelId(channel));
+}
+
 /// The size the webview draws the self view in, in device pixels (the tile's size times the
 /// display's scale): the images of `call_watch_camera` are made just large enough to cover it.
 #[tauri::command(rename_all = "snake_case")]

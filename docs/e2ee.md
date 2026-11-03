@@ -139,7 +139,115 @@ Mitigated by: showing the identity provider's host on the server confirmation, w
 is outside the server's domain; discovery documents must match the announced issuer (RFC 8414 §3.3)
 and use https; ID tokens must carry the announced issuer and client (iOS, which reads them); refresh
 tokens are kept per origin, issuer and client. Fixed by binding tokens to the device with DPoP
-(RFC 9449), issue #120.
+(§3.1.2), once clients send proofs and the policy is `required`.
+
+### 3.1.2 Tokens bound to a device: DPoP (issue #120)
+
+DPoP (RFC 9449) makes a stolen or relayed access token useless without a key that stays on the
+device. This protects API access (posting, metadata, admin actions); message content is protected
+by E2EE either way. The server part is implemented; clients don't send proofs yet (see "Not done
+yet").
+
+**How it works.** The device has an ES256 key pair. At the token endpoint it proves that it holds
+the key, and the identity provider puts the key's thumbprint into the access token (`cnf.jkt`). With
+every request it sends a *proof*: a JWT signed with that key, naming the method (`htm`), the URL
+without query (`htu`), the time (`iat`), a unique ID (`jti`), the hash of the token (`ath`) and the
+server's nonce.
+
+**Why this closes the relay of §3.1.1.** The app signs proofs for the origin it is talking to, so a
+look-alike only ever receives proofs naming its own origin. The real server compares `htu` with
+*its own public origins*: `security.public_origins`, the brands' host names and the `public_base_url`
+settings. It never reads `Host` or a forwarded header for this, because whoever sends the request
+controls those. To use the token at the real server the look-alike would need the private key.
+
+**What the server checks** (`teamcraft_crypto::dpop`, `auth/dpop.rs`), after the token itself:
+
+| Check            | Refused unless                                                                     |
+|------------------|------------------------------------------------------------------------------------|
+| Form             | at most 4 KiB, one proof, `typ` is `dpop+jwt`, `alg` is `ES256`, no `crit`         |
+| Key              | a P-256 point on the curve, no private part                                        |
+| `cnf.jkt`        | the RFC 7638 thumbprint of the proof's key is the one the token names              |
+| `htm`, `htu`     | the request's method and raw path, on one of the server's public origins           |
+| `iat`            | at most `proof_max_age_secs` old and not from the future, `proof_leeway_secs` each |
+| `ath`            | the hash of the token presented                                                    |
+| Signature        | valid for the proof's key                                                          |
+| `nonce`          | the server's current or previous nonce, else `use_dpop_nonce`                      |
+| `jti`            | not seen before from this key                                                      |
+
+A token with a `cnf` that can't be checked (no `jkt`) is refused, not taken as unbound. Answers are
+401 with `WWW-Authenticate: DPoP error=…` (`use_dpop_nonce`, `invalid_dpop_proof`, `invalid_token`)
+and the `error_code` values `use_dpop_nonce`, `invalid_dpop_proof`, `dpop_required`. Every answer to
+a request with a proof carries `DPoP-Nonce`, so a rotation normally costs no extra round trip. The
+nonce challenge doesn't count as a failed sign-in for the rate limits, since everybody meets it after
+a restart. Other refusals on REST do.
+
+**Policy** (admin console, group `token_binding`; default `optional`). The setting is not part of the
+signed policy: only the server enforces it, and a server that ignored it could ignore a signature on
+it as well. Tokens this server made itself (local accounts, bots, meeting guests) aren't part of it:
+they don't come from the identity provider, so they can't be obtained from an SSO session.
+
+| Token of the identity provider  | `off`    | `optional` | `required` |
+|---------------------------------|----------|------------|------------|
+| Unbound, no proof               | accepted | accepted   | refused    |
+| Unbound, valid proof            | accepted | accepted   | refused    |
+| Unbound, invalid proof          | accepted | refused    | refused    |
+| Bound, no proof or `Bearer`     | accepted | refused    | refused    |
+| Bound, valid proof with `DPoP`  | accepted | accepted   | accepted   |
+
+A proof with an unbound token proves nothing about the token, so it doesn't satisfy `required`.
+`required` can only be set from a session that just proved its key, and only while the server knows
+its public origins, so that the change can't lock out the admin who makes it.
+
+**WebSockets.** A browser can't set headers on a WebSocket upgrade, and the token already travels in
+the first frame instead of the URL. The proof sits next to it: `dpop_proof` in `identify`, `resume`
+and the rendezvous `join`, for `GET` on `/api/v1/gateway` or `/api/v1/rendezvous`. A proof with an
+old nonce gets a `dpop_nonce` frame and `use_dpop_nonce`, then the connection ends and the client
+connects again.
+
+**Replay and restart.** Seen proofs of bound tokens are kept in memory for `max_age + 2 × leeway`,
+the longest time one can be fresh, as hashes of key and `jti`, up to `replay_cache_max_entries`. One
+account may hold `replay_cache_max_entries_per_user` of them and gets 429 past that, whichever keys it
+uses. A full cache refuses further proofs of bound tokens with 503 rather than forget one that could
+still be replayed. Proofs with unbound tokens are checked but not remembered: a replay could as well
+leave the proof out, and anybody with a token could otherwise fill the cache with keys of their own
+making. What is left is several accounts working together, which takes 20 of them at the defaults and
+the per-address limits on top. A restart loses the
+cache, and that is safe only because it loses the nonces too: every proof needs a nonce, nonces are
+random and kept only in memory, so a proof made before the restart gets a challenge, and a new proof
+takes the private key. Clients see one extra round trip.
+
+**Settings that can't be read.** A stored policy this version doesn't know (from a newer version)
+checks like `optional`, and a row it can't read falls back to the default `optional`, each with an
+error in the log. That accepts unbound tokens until an admin looks, but failing closed would lock out
+everybody with no way back from inside the app, and bound tokens stay protected either way.
+
+**Clocks.** The client's clock may be off by `proof_leeway_secs` (default 60) in either direction
+beyond the proof's age. A client whose clock is off by more is told `invalid_dpop_proof` and can
+correct `iat` from the response's `Date` header: it must date proofs by the server's time, which the
+next step has to implement. The server's own clock decides, and a clock that steps back only keeps
+replay entries longer.
+
+**What it doesn't do.** A compromised TeamCraft server isn't bound by anything here, it can ignore
+proofs; this protects the real server's API from whoever holds a token. Under `optional` a client
+without DPoP can still have its token relayed: only `required` closes that. With a key that can be
+exported (software keys), malware on the device can take it along with the token, which is why the
+platforms use hardware-backed keys where they have them. Tokens the server issues itself remain
+bearer tokens.
+
+**Not done yet** (the next steps of issue #120):
+
+- `teamcraft-core`: a per-device key behind a small signing interface, so that hardware keys fit (the
+  software `DpopSigningKey` only suits platforms without one); the `DPoP` scheme and header on every
+  request; the proof in the three first frames; remembering `DPoP-Nonce` per origin and retrying
+  `use_dpop_nonce` once, on the REST client and by reconnecting on the gateway and the relay, whose
+  `dpop_nonce` frames come before their error frames; `iat` from an offset
+  to the server's `Date`, retried once after `invalid_dpop_proof`; `dpop_required` worded for people.
+  Proofs at the token endpoint and for refreshes, with the identity provider's own nonce.
+- Keys: Secure Enclave (iOS, macOS), Android Keystore, the OS keychain (desktop), a non-extractable
+  WebCrypto key in the browser. A key is per device and survives token refreshes.
+- The identity provider: DPoP-bound tokens on the OIDC client, documented vendor-neutrally with the
+  reference setup as example, and refresh tokens bound for public clients.
+- Then the rollout in operations.md, "Binding tokens to devices".
 
 ### 3.2 Enrollment order and interruptions
 

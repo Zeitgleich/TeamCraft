@@ -42,6 +42,13 @@ data-failed-title = Deine Daten konnten nicht geladen werden
 data-failed-body = Der Server hat geantwortet, aber deine Spaces und Unterhaltungen konnten nicht gelesen werden. Versuche es erneut.
 data-retry = Erneut versuchen
 
+## Lists that could not be read
+list-failed-title = Diese Liste konnte nicht geladen werden
+list-failed-network = Der Server ist nicht erreichbar. Prüfe deine Verbindung und versuche es erneut.
+list-failed-server = Der Server kann gerade nicht antworten. Versuche es gleich noch einmal.
+list-failed-timed-out = Es kam keine Antwort. Prüfe deine Verbindung und versuche es erneut.
+list-failed-other = Beim Lesen ist etwas schiefgegangen. Versuche es erneut.
+
 ## Einstellungen: Darstellung, Seitenleiste, Sprache, Datenschutz, Geräte, Anrufe
 language-en = English
 language-de = Deutsch

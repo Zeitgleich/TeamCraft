@@ -245,6 +245,7 @@ mod tests {
       maybe_acr: maybe_acr.map(str::to_owned),
       is_exempt_from_session_policy: false,
       maybe_organization: None,
+      token_binding: crate::auth::TokenBinding::ServerIssued,
     }
   }
 }

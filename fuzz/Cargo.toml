@@ -79,6 +79,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "dpop_proof"
+path = "fuzz_targets/dpop_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "crypto_decoders"
 path = "fuzz_targets/crypto_decoders.rs"
 test = false

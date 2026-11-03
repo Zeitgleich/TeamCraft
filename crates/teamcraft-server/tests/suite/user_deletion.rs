@@ -388,6 +388,7 @@ async fn identify_with(app: &TestApp, token: &str, device: &str) -> String {
   let (mut socket, _) = tokio_tungstenite::connect_async(&app.ws_url).await.unwrap();
   socket.next().await;
   let identify = GatewayClientMessage::Identify {
+    maybe_dpop_proof: None,
     token: token.to_owned(),
     device_id: serde_json::from_value(json!(device)).unwrap(),
     activity: DeviceActivity::Active,
@@ -418,6 +419,7 @@ async fn connect(app: &TestApp, user: &TestUser, device: &str) -> Socket {
   let (mut socket, _) = tokio_tungstenite::connect_async(&app.ws_url).await.unwrap();
   socket.next().await;
   let identify = GatewayClientMessage::Identify {
+    maybe_dpop_proof: None,
     token: app.token(user),
     device_id: serde_json::from_value(json!(device)).unwrap(),
     activity: DeviceActivity::Active,

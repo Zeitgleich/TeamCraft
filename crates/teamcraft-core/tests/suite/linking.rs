@@ -522,6 +522,7 @@ mod failures_are_visible {
     let mut silent = alice.api.connect_rendezvous().await.unwrap();
     silent
       .send_control(&RendezvousClientMessage::Join {
+        maybe_dpop_proof: None,
         token: alice.api.gateway_token().await.unwrap(),
         rendezvous_id,
       })

@@ -11,5 +11,5 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
   OpenApiRouter::new()
     .routes(routes!(handlers::get_sync_heads_handler))
     // A WebSocket; its frames are in teamcraft-proto (named in the document's description).
-    .route("/api/v1/gateway", get(handlers::gateway_handler))
+    .route(teamcraft_proto::GATEWAY_PATH, get(handlers::gateway_handler))
 }

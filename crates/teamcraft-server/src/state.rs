@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use teamcraft_db::{Database, SnowflakeGenerator};
 
-use crate::auth::{Revocations, TokenValidator};
+use crate::auth::{DpopGuard, Revocations, TokenValidator};
 use secrecy::SecretString;
 
 use teamcraft_crypto::server_secret::SettingsSealingKey;
+use teamcraft_proto::TokenBindingSettings;
 
 use crate::brand::BrandStore;
 use crate::config::{
@@ -74,6 +75,8 @@ pub struct AppState {
   /// The settings in force: the configuration with the admin console's changes on top.
   pub settings: Arc<SettingsCell>,
   pub rate_limits: Arc<RateLimits>,
+  /// The server's DPoP nonces and the proofs it has seen. Only in memory, on purpose (e2ee.md §3.1.2).
+  pub dpop: Arc<DpopGuard>,
   /// The brands and the host names that select them.
   pub brands: Arc<BrandStore>,
   /// Permits for decoding uploaded pictures (`limits.max_concurrent_image_decodes`).
@@ -111,6 +114,8 @@ pub struct Settings {
   pub brands: Vec<BrandConfig>,
   /// Largest attachment a client may announce (`[storage].max_attachment_bytes`).
   pub max_attachment_bytes: u64,
+  /// Binding tokens to devices with DPoP; only ever changed in the admin console.
+  pub token_binding: TokenBindingSettings,
   /// Meeting invitations: most invitees and the mail texts.
   pub meeting_mail: MeetingMailConfig,
   /// The mail server of the configuration file (`[mail.smtp]`, else `[meetings.smtp]`).
