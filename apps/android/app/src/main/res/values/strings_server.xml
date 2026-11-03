@@ -35,4 +35,5 @@
   <string name="restriction_trust_user_certificates_description">Also trust certificate authorities installed by the user or the device management, for example the CA of a proxy that inspects encrypted traffic. Off: only the system\'s CAs.</string>
   <string name="server_confirm_provider">You will sign in at %1$s.</string>
   <string name="server_confirm_provider_elsewhere">This server signs you in through %1$s, which is not part of its own domain. Continue only if your organization uses this sign-in service; otherwise someone could be impersonating your server.</string>
+  <string name="server_confirm_from_link">You didn\'t enter this server: a link brought you here. Signing in gives this server access to your account. Continue only if you trust it.</string>
 </resources>

@@ -32,4 +32,5 @@
   <string name="restriction_trust_user_certificates_description">Auch Zertifizierungsstellen vertrauen, die der Nutzer oder die Geräteverwaltung installiert hat, zum Beispiel die eines Proxys, der verschlüsselten Verkehr prüft. Aus: nur die Zertifizierungsstellen des Systems.</string>
   <string name="server_confirm_provider">Du meldest dich bei %1$s an.</string>
   <string name="server_confirm_provider_elsewhere">Dieser Server meldet dich über %1$s an, das nicht zu seiner eigenen Domain gehört. Fahre nur fort, wenn deine Organisation diesen Anmeldedienst nutzt; sonst könnte sich jemand als dein Server ausgeben.</string>
+  <string name="server_confirm_from_link">Du hast diesen Server nicht eingegeben: Ein Link hat dich hierher gebracht. Mit der Anmeldung bekommt dieser Server Zugriff auf dein Konto. Fahre nur fort, wenn du ihm vertraust.</string>
 </resources>

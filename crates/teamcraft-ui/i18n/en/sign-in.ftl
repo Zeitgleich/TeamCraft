@@ -128,3 +128,4 @@ login-help-link = Help with signing in
 ## Getting started (empty workspace)
 # Runtime settings: brands, mail, calendar and instance settings in the admin console
 login-organization = Operated by { $name }
+server-entry-from-link = You didn't enter this server: a link brought you here. Signing in gives this server access to your account. Continue only if you trust it.

@@ -1,0 +1,8 @@
+/* The host in the question about a link (app_links.rs): the end that says who owns it first and large,
+   then all of it, wrapped, so a long name can't push that end out of sight. */
+.app-link-host { display: flex; flex-direction: column; gap: var(--space-1); }
+.app-link-domain { font-size: var(--text-xl); letter-spacing: var(--tracking-xl); line-height: var(--leading-xl); font-weight: var(--weight-semibold); overflow-wrap: anywhere; }
+.app-link-full-host { font-size: var(--text-sm); color: var(--text-muted); font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.modal-body .app-link-host { margin-block: var(--space-3); }
+/* "Open in the app" (app_links.rs): a button in the banner row, not a link in a text. */
+.open-in-app a.btn { text-decoration: none; }

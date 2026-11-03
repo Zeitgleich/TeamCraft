@@ -5,6 +5,8 @@ import Foundation
 extension AppModel {
   /// A link arrived (Universal Link or `teamcraft://`). It waits until it can be acted on.
   func receiveAppLink(_ url: URL) {
+    // Never swaps a question being read: what the user answers must be what they read.
+    guard appLinkQuestion == nil, !isAskingAboutMeetingLink else { return }
     pendingAppLink = url.absoluteString
     isHostQuestionHandled = false
     Task { await actOnAppLink() }
@@ -56,7 +58,7 @@ extension AppModel {
   func signInForAppLink(host: String) {
     appLinkQuestion = nil
     isHostQuestionHandled = true
-    Task { await checkServer(host) }
+    Task { await checkServer(host, isFromLink: true) }
   }
 
   func openAppLinkInBrowser() {

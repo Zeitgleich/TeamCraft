@@ -145,6 +145,8 @@ final class AppModel {
   var appLinkQuestion: OpenedAppLink?
   /// The question was answered with "Sign in there": it doesn't come back on the way there.
   var isHostQuestionHandled = false
+  /// The server being confirmed came from a link, not from the user (docs/app-links.md).
+  var isServerFromLink = false
   var appLinkWebURL: URL?
   var isAskingAboutMeetingLink = false
   var isShowingMeetingsFromLink = false
@@ -239,7 +241,9 @@ final class AppModel {
 
   /// Checks what the user typed or pasted (address, URL, invite or message link): normalises it,
   /// asks the server and shows it for confirmation; stays at the entry with the reason otherwise.
-  func checkServer(_ input: String) async {
+  /// `isFromLink`: a link supplied the address, and the confirmation warns about that.
+  func checkServer(_ input: String, isFromLink: Bool = false) async {
+    isServerFromLink = isFromLink
     await busy {
       do {
         let address = try normalizeServerAddress(input: input, allowInsecureHttp: AppEnvironment.allowsInsecureHttp)

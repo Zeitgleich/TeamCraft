@@ -32,8 +32,10 @@ private struct AppLinkQuestions: ViewModifier {
 
   func body(content: Content) -> some View {
     content
-      .alert("app_link_title", isPresented: isAskingHost, presenting: model.appLinkQuestion) { question in
-        if case .askForeignServer(let host, true) = question.step {
+      // The end of the host that says who owns it is the title; the message has the whole host, which
+      // an alert wraps, so a long name can't hide it.
+      .alert(Text(verbatim: questionDomain), isPresented: isAskingHost, presenting: model.appLinkQuestion) { question in
+        if case .askForeignServer(let host, _, true) = question.step {
           Button("app_link_sign_in") { model.signInForAppLink(host: host) }
         }
         Button("app_link_open_browser") { model.openAppLinkInBrowser() }
@@ -58,11 +60,18 @@ private struct AppLinkQuestions: ViewModifier {
     Binding(get: { model.appLinkQuestion != nil }, set: { _ in })
   }
 
+  private var questionDomain: String {
+    switch model.appLinkQuestion?.step {
+    case .askForeignServer(_, let domain, _), .askWebOnly(_, let domain): domain
+    default: ""
+    }
+  }
+
   private func questionText(_ step: OpenedAppLinkStep) -> LocalizedStringKey {
     switch step {
-    case .askForeignServer(let host, true): "app_link_foreign_add \(host)"
-    case .askForeignServer(let host, false): "app_link_foreign_other \(host)"
-    case .askWebOnly(let host): "app_link_web_only \(host)"
+    case .askForeignServer(let host, _, true): "app_link_foreign_add \(host)"
+    case .askForeignServer(let host, _, false): "app_link_foreign_other \(host)"
+    case .askWebOnly(let host, _): "app_link_web_only \(host)"
     case .navigate: ""
     }
   }

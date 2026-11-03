@@ -89,7 +89,6 @@ pub fn App() -> impl IntoView {
     <WindowControls />
     {screen(settings)}
     <AppLinkPrompt links=links />
-    <OpenInAppButton />
   }
 }
 
@@ -274,6 +273,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     >
       // One grid row for all banners, so the top bar and the body keep their own rows.
       <div class="app-banners" node_ref=banners>
+        <OpenInAppButton />
         <BundleBanner />
         <ReleaseBanner />
         <OfflineBanner />

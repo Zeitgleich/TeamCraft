@@ -1,18 +1,34 @@
 {
   "sourceLanguage": "en",
   "strings": {
-    "app_link_foreign_add %@": {
+    "server_confirm_from_link": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This link leads to %@, and this app has no account yet. Do you want to sign in there, or open the link in the browser?"
+            "value": "You didn't enter this server: a link brought you here. Signing in gives this server access to your account. Continue only if you trust it."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Dieser Link führt zu %@, und diese App hat noch kein Konto. Möchtest du dich dort anmelden oder den Link im Browser öffnen?"
+            "value": "Du hast diesen Server nicht eingegeben: Ein Link hat dich hierher gebracht. Mit der Anmeldung bekommt dieser Server Zugriff auf dein Konto. Fahre nur fort, wenn du ihm vertraust."
+          }
+        }
+      }
+    },
+    "app_link_foreign_add %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@\n\nYou didn't enter this server: a link brought you here, and this app has no account yet. Signing in gives this server access to your account, so sign in only if you trust it. Otherwise open the link in the browser."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@\n\nDu hast diesen Server nicht eingegeben: Ein Link hat dich hierher gebracht, und diese App hat noch kein Konto. Mit der Anmeldung bekommt dieser Server Zugriff auf dein Konto. Melde dich also nur an, wenn du ihm vertraust. Sonst öffne den Link im Browser."
           }
         }
       }
@@ -22,13 +38,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This link leads to %@, not to the server this app is signed in to. The app holds one account at a time, so it can only open this link in the browser."
+            "value": "%@\n\nThis link leads to another server, not the one this app is signed in to. The app holds one account at a time, so it can only open this link in the browser."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Dieser Link führt zu %@, nicht zu dem Server, an dem diese App angemeldet ist. Die App hat immer nur ein Konto und kann den Link daher nur im Browser öffnen."
+            "value": "%@\n\nDieser Link führt zu einem anderen Server, nicht zu dem, an dem diese App angemeldet ist. Die App hat immer nur ein Konto und kann den Link daher nur im Browser öffnen."
           }
         }
       }
@@ -113,34 +129,18 @@
         }
       }
     },
-    "app_link_title": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Open this link?"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Diesen Link öffnen?"
-          }
-        }
-      }
-    },
     "app_link_web_only %@": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This link on %@ only works in the browser."
+            "value": "%@\n\nThis link only works in the browser."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Dieser Link auf %@ funktioniert nur im Browser."
+            "value": "%@\n\nDieser Link funktioniert nur im Browser."
           }
         }
       }

@@ -11,6 +11,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -22,6 +23,9 @@ pub use teamcraft_client_api::remote::DEEP_LINK_EVENT;
 
 /// Links kept for the UI. A page firing links in a loop only costs the oldest ones.
 const MAX_WAITING_LINKS: usize = 8;
+/// The window comes forward at most this often for links: a page firing them in a loop must not
+/// keep taking the focus from what the user is doing.
+const MIN_FOCUS_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Links the UI hasn't taken yet.
 #[derive(Default)]
@@ -46,6 +50,22 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
   mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// When a link last brought the window forward.
+#[derive(Default)]
+struct FocusThrottle(Mutex<Option<Instant>>);
+
+impl FocusThrottle {
+  /// Whether a link arriving at `now` may take the focus; if so, it counts as having done it.
+  fn allows(&self, now: Instant) -> bool {
+    let mut last = lock(&self.0);
+    let is_allowed = last.is_none_or(|last| now.saturating_duration_since(last) >= MIN_FOCUS_INTERVAL);
+    if is_allowed {
+      *last = Some(now);
+    }
+    is_allowed
+  }
+}
+
 /// The UI takes the links waiting for it. A link is handed over once.
 #[tauri::command(rename_all = "snake_case")]
 pub fn deep_link_take(links: State<'_, WaitingLinks>) -> Vec<String> {
@@ -63,9 +83,12 @@ pub fn collect(app: &AppHandle) {
     Err(error) => warn!(%error, "could not read the link the app was started with"),
   }
   let handle = app.clone();
+  let focus = FocusThrottle::default();
   deep_links.on_open_url(move |event| {
     receive(&handle, event.urls().iter().map(url::Url::as_str));
-    tray::show_main_window(&handle);
+    if focus.allows(Instant::now()) {
+      tray::show_main_window(&handle);
+    }
   });
 }
 
@@ -105,6 +128,17 @@ mod tests {
     links.push("teamcraft:/c/1/m/2".to_owned());
     assert_eq!(links.take(), ["teamcraft:/c/1/m/1", "teamcraft:/c/1/m/2"]);
     assert!(links.take().is_empty());
+  }
+
+  #[test]
+  fn links_take_the_focus_at_most_once_per_interval() {
+    let throttle = FocusThrottle::default();
+    let start = Instant::now();
+    assert!(throttle.allows(start));
+    assert!(!throttle.allows(start + Duration::from_secs(1)));
+    assert!(!throttle.allows(start + MIN_FOCUS_INTERVAL - Duration::from_millis(1)));
+    assert!(throttle.allows(start + MIN_FOCUS_INTERVAL));
+    assert!(!throttle.allows(start + MIN_FOCUS_INTERVAL));
   }
 
   #[test]

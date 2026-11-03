@@ -19,11 +19,19 @@ outside input, since any web page or app can fire a link, so:
 - **A link names a place, it does nothing there.** A message opens; joining a call, knocking at a
   meeting's lobby or accepting anything takes a click. On the desktop a meeting link from outside
   waits with "Open the meeting" before it knocks, because the knock tells the hosts.
-- **Another instance is never opened silently.** The app asks, naming the host as punycode, so a
-  look-alike shows as what it is. Without an account it offers to sign in there, through the usual
+- **Another instance is never opened silently.** The app asks. It shows the end of the host that says
+  who owns it (the registrable domain) first and large, then the whole host, wrapped; a host beyond
+  what DNS allows (253 characters, 63 per label) is refused, so a long name can't push that end out
+  of sight. Non-ASCII is refused and punycode stays punycode, so a look-alike shows as what it is.
+  Without an account it offers to sign in there, through the usual
   check and confirmation of a server the user typed; with an account it offers the browser, because
   the apps hold one account at a time. A device locked by management gets the browser only. Several
   host names of one server (brands) count as different hosts here: the client can't tell.
+- **A link can't swap a question.** One that arrives while a question is open is dropped, so what the
+  user answers is what they read. On the desktop links bring the window forward at most every three
+  seconds, so a page firing them in a loop can't keep taking the focus. A link naming a place on the
+  active server still moves the app there each time: it asks nothing, and shows only what the user
+  can already see.
 - **Secrets stay in the web client.** A share link's key (`/f/{id}#key`) and a one-time guest token
   (`#invite=`) live in the fragment, which browsers never send to a server. The parser reads them as
   "web only": the app asks, then hands the address to the browser, and neither goes into a
@@ -55,7 +63,9 @@ instance that isn't in its list, whatever that instance serves.
 So on those instances a tap on an `https://` link opens the web client, and the web client shows
 **"Open in the app"**. That button is a `teamcraft://open/<host>/<path>` link. The page can't know
 whether an app is installed, so it never redirects by itself; without the app the button does nothing
-useful, and the reader can close it for good (a choice kept in this browser). It isn't shown in an
+useful, and the reader can close it for good (a choice kept in this browser). It sits in the page's flow
+(the banner row, the sign-in card), never above it, so it can't cover the composer's send or a call's
+controls, and it isn't in a guest's running call. It isn't shown in an
 installed web app, on the bare address and sign-in page, or on links that are web only.
 
 What a self-hosted instance gets without any setup: the button, on all platforms. What takes more: an
@@ -108,6 +118,18 @@ to the running instance through `tauri-plugin-single-instance` (e2ee.md §9.4). 
 (`deep_links.rs`, the newest eight) until the UI takes them, so one that started the app isn't lost
 before the webview exists. The UI routes them through `Route::parse`, the web client's own routing; one
 that arrives while signed out waits for the sign-in.
+
+## Residual risk: a link can suggest a malicious server
+
+Before this feature the victim had to type a server's address; now a link can supply it. An attacker's
+server can copy another instance's sign-in settings, so the user signs in at their real identity
+provider and the attacker's server receives a token it can try to relay to the real server (#120).
+"Sign in there" therefore warns more than a typed address does, in the question and again on the
+confirmation: the user didn't enter this server, and signing in gives it access to their account. The
+warning about an identity provider outside the server's domain still applies. This reduces the risk
+and doesn't remove it: somebody who trusts the wrong name still signs in. What ends it is binding tokens
+to devices with DPoP (#120, e2ee.md §3.1.2) with the policy `required`; the default is `optional`.
+Message content stays end-to-end encrypted either way.
 
 ## Open points
 

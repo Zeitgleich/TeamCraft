@@ -106,7 +106,10 @@ pub fn MeetingsView() -> impl IntoView {
   Effect::new(move |_| {
     if let Some(meeting) = state.maybe_outside_meeting_link.get() {
       state.maybe_outside_meeting_link.set(None);
-      visit.set(LinkVisit::FromOutside(meeting));
+      // Not over a visit that runs, or a question being read: what they click must be what they read.
+      if visit.get_untracked() == LinkVisit::Idle {
+        visit.set(LinkVisit::FromOutside(meeting));
+      }
     }
   });
   // Once the meeting's chat has loaded, the member is in: on to the pre-join screen.

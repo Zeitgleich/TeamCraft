@@ -79,6 +79,7 @@ fun AppRoot(
   val brandIcons by viewModel.brandIcons.collectAsState()
   val maybeServer by viewModel.server.collectAsState()
   val isServerLocked by viewModel.isServerLocked.collectAsState()
+  val isServerFromLink by viewModel.isServerFromLink.collectAsState()
   val maybeSignInPage by viewModel.signInPage.collectAsState()
   val maybeSsoIcon by viewModel.ssoIcon.collectAsState()
   val isDark = isSystemInDarkTheme()
@@ -90,25 +91,35 @@ fun AppRoot(
   val maybeOpenedLink = remember(maybeAppLink, maybeServer, isServerLocked) {
     maybeAppLink?.let { openAppLink(it, maybeServer?.address?.origin, isServerLocked) }
   }
-  LaunchedEffect(maybeAppLink, maybeOpenedLink) {
+  // The question being read stays until it is answered: a link arriving meanwhile doesn't swap it, so
+  // what the user answers is what they read.
+  var maybeQuestion by remember { mutableStateOf<OpenedAppLink?>(null) }
+  LaunchedEffect(maybeAppLink, maybeOpenedLink, state == AppState.Starting, isSigningInForLink) {
     // Not a link after all: nothing to do, nothing to say.
     if (maybeAppLink != null && maybeOpenedLink == null) onAppLinkHandled()
+    val isAsking = maybeOpenedLink != null && maybeOpenedLink.step != OpenedAppLinkStep.Navigate
+    if (isAsking && maybeQuestion == null && state != AppState.Starting && !isSigningInForLink) maybeQuestion = maybeOpenedLink
   }
   Box(Modifier.fillMaxSize()) {
-    if (maybeOpenedLink != null && maybeOpenedLink.step != OpenedAppLinkStep.Navigate && state != AppState.Starting && !isSigningInForLink) {
+    maybeQuestion?.let { question ->
       AppLinkQuestion(
-        link = maybeOpenedLink,
+        link = question,
         onSignIn = { host ->
+          maybeQuestion = null
           isSigningInForLink = true
-          viewModel.submitServer(host)
+          viewModel.submitServerFromLink(host)
         },
         onBrowser = {
-          maybeOpenedLink.maybeWebUrl?.let { url ->
+          maybeQuestion = null
+          question.maybeWebUrl?.let { url ->
             if (!openInBrowser(context, url)) viewModel.showFailure(R.string.app_link_no_browser)
           }
           onAppLinkHandled()
         },
-        onCancel = onAppLinkHandled,
+        onCancel = {
+          maybeQuestion = null
+          onAppLinkHandled()
+        },
       )
     }
     when (val current = state) {
@@ -123,6 +134,7 @@ fun AppRoot(
       )
       is AppState.ConfirmServer -> ConfirmServerScreen(
         checked = current.checked,
+        isFromLink = isServerFromLink,
         maybeBrand = brand,
         maybeLogo = remember(brand, isDark) { viewModel.brandLogo(isDark) },
         isBusy = isBusy,
@@ -225,9 +237,16 @@ private fun ReadyNavigation(
     val link = maybeOpenedLink ?: return@LaunchedEffect
     when (val place = link.place) {
       AppLinkPlace.Home, AppLinkPlace.None -> Unit
-      is AppLinkPlace.Conversation -> navigation.navigate("conversation/${place.conversationId}")
+      // Only one this device knows: a link can name any ID, and the screen would stay blank.
+      is AppLinkPlace.Conversation ->
+        if (viewModel.conversations().any { it.id == place.conversationId }) {
+          navigation.navigate("conversation/${place.conversationId}")
+        } else {
+          viewModel.showFailure(R.string.app_link_conversation_unavailable)
+        }
       is AppLinkPlace.Permalink -> openPermalink(place.link)
-      AppLinkPlace.Meeting -> maybeMeetingLinkUrl = link.maybeWebUrl
+      // Doesn't swap the question if one is open.
+      AppLinkPlace.Meeting -> if (maybeMeetingLinkUrl == null) maybeMeetingLinkUrl = link.maybeWebUrl
     }
     onAppLinkHandled()
   }

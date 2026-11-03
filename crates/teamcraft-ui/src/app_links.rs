@@ -33,19 +33,25 @@ pub struct AppLinks {
   maybe_question: RwSignal<Option<Question>>,
 }
 
-/// What a link makes the app ask.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// What a link makes the app ask. No `Debug`: the web address can hold a share key or a one-time
+/// token in its fragment.
+#[derive(Clone, PartialEq, Eq)]
 enum Question {
   /// Another instance. Offers signing in there only when that is possible.
   Foreign {
     host: String,
+    registrable_domain: String,
     can_add_account: bool,
     /// Shown after signing in, on the new account.
     maybe_place: Option<Route>,
     web_url: String,
   },
   /// A link only the web client can open.
-  WebOnly { host: String, web_url: String },
+  WebOnly {
+    host: String,
+    registrable_domain: String,
+    web_url: String,
+  },
 }
 
 impl AppLinks {
@@ -103,22 +109,36 @@ impl AppLinks {
       AppLinkStep::Navigate => self.maybe_place.set_if_alive(place_of(&link)),
       AppLinkStep::AskForeignServer {
         host,
+        registrable_domain,
         can_add_account,
       } => {
         self.ask(link.web_url(), |web_url| Question::Foreign {
           host,
+          registrable_domain,
           can_add_account,
           maybe_place: place_of(&link),
           web_url,
         });
       },
-      AppLinkStep::AskWebOnly { host } => {
-        self.ask(link.web_url(), |web_url| Question::WebOnly { host, web_url });
+      AppLinkStep::AskWebOnly {
+        host,
+        registrable_domain,
+      } => {
+        self.ask(link.web_url(), |web_url| Question::WebOnly {
+          host,
+          registrable_domain,
+          web_url,
+        });
       },
     }
   }
 
+  /// Never swaps a question the user is reading: what they answer must be what they read. A link
+  /// arriving meanwhile is dropped; a real one can be opened again.
   fn ask(self, maybe_web_url: Option<String>, question: impl FnOnce(String) -> Question) {
+    if self.maybe_question.try_with_untracked(Option::is_some) != Some(false) {
+      return;
+    }
     if let Some(web_url) = maybe_web_url {
       self.maybe_question.set_if_alive(Some(question(web_url)));
     }
@@ -151,27 +171,31 @@ pub fn AppLinkPrompt(links: AppLinks) -> impl IntoView {
   };
   move || {
     let question = links.maybe_question.get()?;
-    let (text, maybe_sign_in, web_url) = match question {
+    let (text_key, host, domain, maybe_sign_in, web_url) = match question {
       Question::Foreign {
         host,
+        registrable_domain,
         can_add_account: true,
         maybe_place,
         web_url,
       } => (
-        i18n.t_with("app-link-foreign-add", &[("host", &host)]),
+        "app-link-foreign-add",
+        host.clone(),
+        registrable_domain,
         Some((host, maybe_place)),
         web_url,
       ),
-      Question::Foreign { host, web_url, .. } => (
-        i18n.t_with("app-link-foreign-other", &[("host", &host)]),
-        None,
+      Question::Foreign {
+        host,
+        registrable_domain,
         web_url,
-      ),
-      Question::WebOnly { host, web_url } => (
-        i18n.t_with("app-link-web-only", &[("host", &host)]),
-        None,
+        ..
+      } => ("app-link-foreign-other", host, registrable_domain, None, web_url),
+      Question::WebOnly {
+        host,
+        registrable_domain,
         web_url,
-      ),
+      } => ("app-link-web-only", host, registrable_domain, None, web_url),
     };
     let sign_in_button = maybe_sign_in.map(|(host, maybe_place)| {
       let on_sign_in = move |_| {
@@ -196,7 +220,11 @@ pub fn AppLinkPrompt(links: AppLinks) -> impl IntoView {
             <h2 id="app-link-title">{move || i18n.t("app-link-title")}</h2>
           </header>
           <div class="modal-body">
-            <p>{text}</p>
+            <p>{move || i18n.t(text_key)}</p>
+            <p class="app-link-host" translate="no" dir="ltr">
+              <strong class="app-link-domain">{domain}</strong>
+              <span class="app-link-full-host">{host}</span>
+            </p>
             <footer class="modal-foot">
               <span class="grow"></span>
               <button type="button" class="btn" node_ref=cancel_button on:click=move |_| close()>
@@ -215,7 +243,8 @@ pub fn AppLinkPrompt(links: AppLinks) -> impl IntoView {
 }
 
 /// Browser: "Open in the app" on a page that is a place in the app. Never redirects by itself, since
-/// without the app the link would lead nowhere.
+/// without the app the link would lead nowhere. In the page's flow (the banner row, the sign-in card),
+/// never above it: nothing fixed may cover the composer's send or a call's controls.
 #[component]
 pub fn OpenInAppButton() -> impl IntoView {
   let i18n = use_i18n();
@@ -228,10 +257,11 @@ pub fn OpenInAppButton() -> impl IntoView {
   move || {
     let link = maybe_link.clone().filter(|_| is_shown.get())?;
     Some(view! {
-      <div class="open-in-app" role="region" aria-label=move || i18n.t("open-in-app")>
+      <div class="update-banner open-in-app" role="region" aria-label=move || i18n.t("open-in-app")>
         <a class="btn btn-small btn-primary" href=link on:click=move |_| is_shown.set(false)>
           {move || i18n.t("open-in-app")}
         </a>
+        <span class="grow"></span>
         <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=dismiss>
           <Icon name=IconName::Close />
         </button>

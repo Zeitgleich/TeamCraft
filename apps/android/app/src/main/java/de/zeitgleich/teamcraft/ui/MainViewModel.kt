@@ -179,6 +179,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** The organization fixed the server (managed configuration): no "Change server". */
   val isServerLocked: StateFlow<Boolean> = serverLocked
 
+  private val serverFromLink = MutableStateFlow(false)
+
+  /** The server being confirmed came from a link, not from the user (docs/app-links.md). */
+  val isServerFromLink: StateFlow<Boolean> = serverFromLink
+
   /** Whether the current sign-in already had its automatic retry; a user's new one resets it. */
   private var hasRetriedAuthorization = false
   private val loginRetries = Channel<Intent>(Channel.BUFFERED)
@@ -245,7 +250,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /** The user entered (or pasted) a server address. */
-  fun submitServer(input: String) = launchBusy { checkServer(input) }
+  fun submitServer(input: String) = launchBusy {
+    serverFromLink.value = false
+    checkServer(input)
+  }
+
+  /** "Sign in there" on a link: the same check, and the confirmation warns who entered this server. */
+  fun submitServerFromLink(host: String) = launchBusy {
+    serverFromLink.value = true
+    checkServer(host)
+  }
 
   /**
    * The user confirmed the server: it becomes the account's. True when the browser sign-in

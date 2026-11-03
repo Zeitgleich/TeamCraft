@@ -1,11 +1,13 @@
 //! Links the system hands to the mobile apps (docs/app-links.md): the parser and the decision of
 //! `teamcraft-client-api::app_link`, so Android and iOS treat a link exactly like the desktop app.
 
+use std::fmt;
+
 use teamcraft_client_api::app_link::{self, AppLink, AppLinkStep, AppLinkTarget};
 use teamcraft_client_api::server_entry::{HttpPolicy, ServerOrigin};
 
 /// What to do with a link right now, and where it leads once it is the user's turn.
-#[derive(Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(PartialEq, Eq, uniffi::Record)]
 pub struct OpenedAppLink {
   pub step: OpenedAppLinkStep,
   pub place: AppLinkPlace,
@@ -14,15 +16,35 @@ pub struct OpenedAppLink {
   pub maybe_web_url: Option<String>,
 }
 
-/// See `AppLinkStep`.
+impl fmt::Debug for OpenedAppLink {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("OpenedAppLink")
+      .field("step", &self.step)
+      .field("place", &self.place)
+      .field(
+        "maybe_web_url",
+        &self.maybe_web_url.as_ref().map(|_| "[redacted]"),
+      )
+      .finish()
+  }
+}
+
+/// See `AppLinkStep`. Shows `registrable_domain` most prominently, and `host` whole.
 #[derive(Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum OpenedAppLinkStep {
   /// Show the place, once signed in.
   Navigate,
   /// Another instance: ask, naming `host`. Offer signing in there only with `can_add_account`.
-  AskForeignServer { host: String, can_add_account: bool },
+  AskForeignServer {
+    host: String,
+    registrable_domain: String,
+    can_add_account: bool,
+  },
   /// Only the web client can open it: ask before the browser, naming `host`.
-  AskWebOnly { host: String },
+  AskWebOnly {
+    host: String,
+    registrable_domain: String,
+  },
 }
 
 /// The places a mobile app has.
@@ -58,12 +80,20 @@ pub fn open_app_link(
     AppLinkStep::Navigate => OpenedAppLinkStep::Navigate,
     AppLinkStep::AskForeignServer {
       host,
+      registrable_domain,
       can_add_account,
     } => OpenedAppLinkStep::AskForeignServer {
       host,
+      registrable_domain,
       can_add_account,
     },
-    AppLinkStep::AskWebOnly { host } => OpenedAppLinkStep::AskWebOnly { host },
+    AppLinkStep::AskWebOnly {
+      host,
+      registrable_domain,
+    } => OpenedAppLinkStep::AskWebOnly {
+      host,
+      registrable_domain,
+    },
   };
   Some(OpenedAppLink {
     step,
@@ -144,6 +174,7 @@ mod tests {
       opened.step,
       OpenedAppLinkStep::AskForeignServer {
         host: "other.example.org".to_owned(),
+        registrable_domain: "example.org".to_owned(),
         can_add_account: true
       }
     );
@@ -167,9 +198,11 @@ mod tests {
     assert_eq!(
       opened.step,
       OpenedAppLinkStep::AskWebOnly {
-        host: "chat.example.com".to_owned()
+        host: "chat.example.com".to_owned(),
+        registrable_domain: "example.com".to_owned(),
       }
     );
     assert_eq!(opened.place, AppLinkPlace::None);
+    assert!(!format!("{opened:?}").contains("key"));
   }
 }

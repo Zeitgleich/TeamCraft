@@ -147,13 +147,14 @@
   <string name="spaces_empty_title">Noch keine Kanäle</string>
   <string name="spaces_empty">Durchsuche die Kanäle deiner Spaces, um einem beizutreten.</string>
   <string name="app_link_title">Diesen Link öffnen?</string>
-  <string name="app_link_foreign_add">Dieser Link führt zu %1$s, und diese App hat noch kein Konto. Möchtest du dich auf %1$s anmelden oder den Link im Browser öffnen?</string>
-  <string name="app_link_foreign_other">Dieser Link führt zu %1$s, nicht zu dem Server, an dem diese App angemeldet ist. Die App hat immer nur ein Konto und kann den Link daher nur im Browser öffnen.</string>
-  <string name="app_link_web_only">Dieser Link auf %1$s funktioniert nur im Browser.</string>
+  <string name="app_link_foreign_add">Du hast diesen Server nicht eingegeben: Ein Link hat dich hierher gebracht, und diese App hat noch kein Konto. Mit der Anmeldung bekommt dieser Server Zugriff auf dein Konto. Melde dich also nur an, wenn du ihm vertraust. Sonst öffne den Link im Browser.</string>
+  <string name="app_link_foreign_other">Dieser Link führt zu einem anderen Server, nicht zu dem, an dem diese App angemeldet ist. Die App hat immer nur ein Konto und kann den Link daher nur im Browser öffnen.</string>
+  <string name="app_link_web_only">Dieser Link funktioniert nur im Browser.</string>
   <string name="app_link_sign_in">Dort anmelden</string>
   <string name="app_link_open_browser">Im Browser öffnen</string>
   <string name="app_link_no_browser">Kein Browser auf diesem Gerät kann den Link öffnen.</string>
   <string name="app_link_meeting_title">Meeting-Link</string>
   <string name="app_link_meeting">Die App zeigt die Meetings, zu denen du eingeladen bist. Ist dieses nicht dabei, kann der Browser die Hosts bitten, dich einzulassen.</string>
   <string name="app_link_my_meetings">Meine Meetings</string>
+  <string name="app_link_conversation_unavailable">Diese Unterhaltung ist auf diesem Gerät nicht verfügbar.</string>
 </resources>

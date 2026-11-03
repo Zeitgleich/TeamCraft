@@ -12,11 +12,12 @@
 //! through `teamcraft-ffi`, the mobile apps, so the platforms can't disagree about a link.
 
 use std::fmt;
+use std::net::Ipv4Addr;
 
 use teamcraft_crypto::meeting_link::is_meeting_link_token;
 use teamcraft_proto::{ConversationId, MeetingId, MessageId, SpaceId, ThreadId};
 
-use crate::server_entry::{HttpPolicy, ServerOrigin};
+use crate::server_entry::{HttpPolicy, ServerOrigin, registrable_domain};
 
 /// The custom scheme the apps register. Not exclusive on mobile (another app may claim it too), so
 /// links in this scheme carry no secret: see [`AppLink::scheme_link`].
@@ -26,6 +27,10 @@ pub const APP_LINK_SCHEME: &str = "teamcraft";
 const OPEN_AUTHORITY: &str = "open";
 /// Longer links are not looked at. The longest real one is well under this.
 pub const MAX_APP_LINK_BYTES: usize = 2048;
+/// The longest host name DNS has, and the longest part of one. A longer one exists only to push the
+/// part that matters out of sight in a prompt.
+const MAX_HOST_CHARS: usize = 253;
+const MAX_HOST_LABEL_CHARS: usize = 63;
 /// The longest share ID a download page accepts.
 const MAX_SHARE_ID_LEN: usize = 128;
 /// `/meeting/<token>`: the path of a meeting link.
@@ -91,12 +96,17 @@ pub enum AppLinkStep {
   /// It names another instance: ask, naming the host. Never opened silently.
   AskForeignServer {
     host: String,
+    /// What to show most prominently: the end of `host` that says who owns it.
+    registrable_domain: String,
     /// There is no account yet and the device isn't locked to a server, so signing in there is
     /// possible. With an account the apps offer the browser only: they hold one account at a time.
     can_add_account: bool,
   },
   /// Only the web client can open it: ask before leaving for the browser, naming the host.
-  AskWebOnly { host: String },
+  AskWebOnly {
+    host: String,
+    registrable_domain: String,
+  },
 }
 
 /// Why a link isn't one. Carries nothing of the input, so it is safe to log.
@@ -199,8 +209,10 @@ impl AppLinkTarget {
 impl fmt::Debug for AppLinkTarget {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      // Share keys and one-time tokens never reach a log (security.md).
+      // Share keys and one-time tokens never reach a log (security.md), and neither does a meeting
+      // link's token (`logged_path` in teamcraft-server).
       Self::WebOnly { .. } => f.write_str("WebOnly([redacted])"),
+      Self::Meeting { .. } => f.write_str("Meeting([redacted])"),
       other => f.write_str(&other.path()),
     }
   }
@@ -242,14 +254,19 @@ pub fn next_step(link: &AppLink, maybe_active: Option<&ServerOrigin>, is_server_
     return AppLinkStep::Navigate;
   };
   let host = origin.host().to_owned();
+  let registrable_domain = owner_of(host_name(&host));
   if matches!(link.target, AppLinkTarget::WebOnly { .. }) {
-    return AppLinkStep::AskWebOnly { host };
+    return AppLinkStep::AskWebOnly {
+      host,
+      registrable_domain,
+    };
   }
   if maybe_active == Some(origin) {
     return AppLinkStep::Navigate;
   }
   AppLinkStep::AskForeignServer {
     host,
+    registrable_domain,
     can_add_account: maybe_active.is_none() && !is_server_locked,
   }
 }
@@ -287,10 +304,35 @@ fn parse_on_instance(scheme: &str, rest: &str, fragment: &str) -> Result<AppLink
   }
   let origin = ServerOrigin::parse(&format!("{scheme}://{authority}"), HttpPolicy::LoopbackOnly)
     .map_err(|_| AppLinkError::InvalidHost)?;
+  if !is_real_host_length(host_name(origin.host())) {
+    return Err(AppLinkError::InvalidHost);
+  }
   Ok(AppLink {
     maybe_origin: Some(origin),
     target: parse_place(path, fragment)?,
   })
+}
+
+/// A host without its port. An IPv6 address keeps its brackets.
+fn host_name(host: &str) -> &str {
+  match host.rfind(']') {
+    Some(end) => &host[..=end],
+    None => host.split(':').next().unwrap_or(host),
+  }
+}
+
+/// The part of a host that says who owns it. An address has no such part: it stands for itself.
+fn owner_of(name: &str) -> String {
+  let is_address = name.starts_with('[') || name.parse::<Ipv4Addr>().is_ok();
+  if is_address {
+    name.to_owned()
+  } else {
+    registrable_domain(name)
+  }
+}
+
+fn is_real_host_length(name: &str) -> bool {
+  name.len() <= MAX_HOST_CHARS && name.split('.').all(|label| label.len() <= MAX_HOST_LABEL_CHARS)
 }
 
 /// `teamcraft:/c/{c}/m/{m}[/t/{t}]` (also with `//`), the format of a message link inside messages:
@@ -558,6 +600,28 @@ mod tests {
     }
 
     #[test]
+    fn hosts_longer_than_dns_allows_are_refused() {
+      let label = "a".repeat(MAX_HOST_LABEL_CHARS);
+      let at_the_limit = format!("{label}.{label}.{label}.{}.example", "b".repeat(53));
+      assert_eq!(at_the_limit.len(), MAX_HOST_CHARS);
+      assert!(parse_app_link(&format!("https://{at_the_limit}/c/1")).is_ok());
+      // A port doesn't count.
+      assert!(parse_app_link(&format!("https://{at_the_limit}:8443/c/1")).is_ok());
+      for host in [
+        format!("chat.example.com.{label}.{label}.{label}.{label}.evil.example"),
+        format!("{}.example", "a".repeat(MAX_HOST_LABEL_CHARS + 1)),
+      ] {
+        for form in ["https://", "teamcraft://open/"] {
+          assert_eq!(
+            parse_app_link(&format!("{form}{host}/c/1")),
+            Err(AppLinkError::InvalidHost),
+            "{form}{host}"
+          );
+        }
+      }
+    }
+
+    #[test]
     fn plain_http_only_reaches_this_device() {
       assert_eq!(
         parse_app_link("http://chat.example.com/c/1"),
@@ -630,6 +694,8 @@ mod tests {
         assert_eq!(parsed.scheme_link(), None, "{link}");
         assert!(!format!("{parsed:?}").contains("s3cret"), "{link}");
       }
+      let meeting = parse_app_link(&format!("https://chat.example.com/meeting/{TOKEN}")).unwrap();
+      assert!(!format!("{meeting:?}").contains(TOKEN));
     }
 
     #[test]
@@ -662,10 +728,12 @@ mod tests {
     fn another_instance_is_never_opened_silently() {
       let link = parse_app_link("https://other.example.org:8443/c/1").unwrap();
       let host = "other.example.org:8443".to_owned();
+      let registrable_domain = "example.org".to_owned();
       assert_eq!(
         next_step(&link, None, false),
         AppLinkStep::AskForeignServer {
           host: host.clone(),
+          registrable_domain: registrable_domain.clone(),
           can_add_account: true
         }
       );
@@ -674,6 +742,7 @@ mod tests {
         next_step(&link, Some(&origin("https://chat.example.com")), false),
         AppLinkStep::AskForeignServer {
           host: host.clone(),
+          registrable_domain: registrable_domain.clone(),
           can_add_account: false
         }
       );
@@ -681,9 +750,40 @@ mod tests {
         next_step(&link, None, true),
         AppLinkStep::AskForeignServer {
           host,
+          registrable_domain,
           can_add_account: false
         }
       );
+    }
+
+    #[test]
+    fn the_prominent_domain_is_the_end_that_says_who_owns_the_host() {
+      let link = parse_app_link("teamcraft://open/chat.example.com.a.b.evil.example.org:8443/c/1").unwrap();
+      let AppLinkStep::AskForeignServer {
+        host,
+        registrable_domain,
+        ..
+      } = next_step(&link, None, false)
+      else {
+        panic!("not a question");
+      };
+      assert_eq!(host, "chat.example.com.a.b.evil.example.org:8443");
+      assert_eq!(registrable_domain, "example.org");
+      // Without the structure of a public name it stands for itself, and punycode stays punycode.
+      for (text, domain) in [
+        ("https://localhost/c/1", "localhost"),
+        ("https://10.0.0.1:8443/c/1", "10.0.0.1"),
+        ("https://[2001:db8::1]:8443/c/1", "[2001:db8::1]"),
+        ("https://chat.xn--bcher-kva.example/c/1", "xn--bcher-kva.example"),
+      ] {
+        let AppLinkStep::AskForeignServer {
+          registrable_domain, ..
+        } = next_step(&parse_app_link(text).unwrap(), None, false)
+        else {
+          panic!("not a question");
+        };
+        assert_eq!(registrable_domain, domain, "{text}");
+      }
     }
 
     #[test]
@@ -711,7 +811,8 @@ mod tests {
       assert_eq!(
         next_step(&link, Some(&active), false),
         AppLinkStep::AskWebOnly {
-          host: "chat.example.com".to_owned()
+          host: "chat.example.com".to_owned(),
+          registrable_domain: "example.com".to_owned(),
         }
       );
     }
