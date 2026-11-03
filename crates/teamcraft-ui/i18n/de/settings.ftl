@@ -347,6 +347,11 @@ settings-update-notify_only-hint = Weist auf eine neue Version hin; du entscheid
 settings-update-off = Aus
 settings-update-off-hint = TeamCraft sucht nicht nach neuen Versionen.
 settings-update-check = Jetzt suchen
+settings-update-interval = Nach Updates suchen
+settings-update-interval-daily = Alle 24 Stunden
+settings-update-interval-six_hours = Alle 6 Stunden
+settings-update-interval-hourly = Jede Stunde
+settings-update-interval-managed = Wie oft nach Updates gesucht wird, bestimmt dein Paketmanager.
 
 ## Getting started (empty workspace)
 # Runtime settings: brands, mail, calendar and instance settings in the admin console
