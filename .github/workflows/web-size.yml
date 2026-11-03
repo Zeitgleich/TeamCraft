@@ -49,7 +49,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Only the `ci` label starts a run; any other label gets a group of its own and skips the job, so it
+  # doesn't cancel the build that is running.
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'ci' && format('-label-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
@@ -65,7 +67,7 @@ jobs:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
     # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || (contains(github.event.pull_request.labels.*.name, 'ci') && (github.event.action != 'labeled' || github.event.label.name == 'ci'))
     name: Web wasm size
     runs-on: ubuntu-latest
     # Rust, the wasm32 target and trunk are in the CI image (containers/ci.Containerfile).
