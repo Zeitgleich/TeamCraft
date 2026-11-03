@@ -54,7 +54,7 @@ use teamcraft_client_api::sign_in_look::SignInLook;
 use teamcraft_core::api::dpop::{
   Authorization as TokenAuthorization, DPOP_ALGORITHM_FOR_DISCOVERY, DPOP_HEADER, DPOP_NONCE_HEADER,
   DpopAnswer, DpopProofError, DpopProver, DpopSendError, Learned, ProofFallback, SoftwareDpopSigner,
-  TokenEndpointAttempt, signed_headers, with_token_endpoint_proof,
+  TokenEndpointAttempt, is_from_a_cache, signed_headers, with_token_endpoint_proof,
 };
 use teamcraft_core::store::SessionNote;
 use teamcraft_crypto::dpop::{DpopSigningKey, JwkThumbprint, token_bound_key};
@@ -1303,7 +1303,16 @@ impl<S: TokenStore> AuthService<S> {
     else {
       return ServerProofs::NoAnswer;
     };
-    if !response.status().is_success() {
+    // A server that is there and has no `server-info` (404), or that doesn't know this host (421, the
+    // brand check before any route): a clear answer, and no proof would pass. Others may pass.
+    let status = response.status();
+    if matches!(
+      status,
+      reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::MISDIRECTED_REQUEST
+    ) {
+      return ServerProofs::NotOffered;
+    }
+    if !status.is_success() {
       return ServerProofs::NoAnswer;
     }
     let text = |name: &str| {
@@ -1313,8 +1322,7 @@ impl<S: TokenStore> AuthService<S> {
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
     };
-    let is_cached = text("age").is_some_and(|age| age.trim() != "0");
-    let maybe_date = text(DATE.as_str()).filter(|_| !is_cached);
+    let maybe_date = text(DATE.as_str()).filter(|_| !is_from_a_cache(text("age").as_deref()));
     match text(DPOP_NONCE_HEADER) {
       Some(nonce) => ServerProofs::Offered { nonce, maybe_date },
       None => ServerProofs::NotOffered,
@@ -1352,7 +1360,11 @@ impl<S: TokenStore> AuthService<S> {
       .store
       .load_note(SessionNote::TokenBinding, &server.token_key())
       .await?;
-    Ok(maybe_note.and_then(|note| JwkThumbprint::parse(&note).ok()))
+    // A note only exists for a bound refresh token. One that can't be read must not make it unbound,
+    // which would send it without a proof: nothing goes out, and the user signs in again.
+    maybe_note
+      .map(|note| JwkThumbprint::parse(&note).map_err(|_| AuthError::KeyLost))
+      .transpose()
   }
 
   /// A bound refresh token is never in the file without its note, or its next refresh would go out
@@ -2013,7 +2025,7 @@ fn note_answer(prover: &DpopProver, headers: &HeaderMap) -> Learned {
   let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
   prover.note_answer(DpopAnswer {
     maybe_nonce: text(DPOP_NONCE_HEADER),
-    maybe_date: text(DATE.as_str()),
+    maybe_date: text(DATE.as_str()).filter(|_| !is_from_a_cache(text("age"))),
   })
 }
 
@@ -3448,6 +3460,8 @@ mod tests {
       provider_tells_time: AtomicBool,
       /// `server-info` answers 503.
       server_info_is_down: AtomicBool,
+      /// `server-info` answers 404.
+      server_info_is_missing: AtomicBool,
       server_info_requests: AtomicUsize,
       /// How the end-session endpoint answers a proof.
       end_session: AtomicU8,
@@ -3526,6 +3540,8 @@ mod tests {
         script.server_info_requests.fetch_add(1, Ordering::SeqCst);
         if script.server_info_is_down.load(Ordering::SeqCst) {
           ("503 Service Unavailable", String::new(), String::new())
+        } else if script.server_info_is_missing.load(Ordering::SeqCst) {
+          ("404 Not Found", String::new(), String::new())
         } else {
           let mut extra = date_of(script, &script.server_tells_time);
           if script.offers_nonce.load(Ordering::SeqCst) {
@@ -3880,6 +3896,22 @@ mod tests {
         );
       }
 
+      /// A note says the refresh token is bound. One that can't be read must not send it without a proof.
+      #[tokio::test]
+      async fn an_unreadable_binding_note_sends_nothing_to_the_provider() {
+        let fake = Fake::with_dpop().await;
+        let service = starting(&fake, MemoryStore::default()).await;
+        let config = fake.config();
+        service
+          .store
+          .save_note(SessionNote::TokenBinding, &config.token_key(), "not-a-thumbprint")
+          .await
+          .unwrap();
+        let error = service.restore().await.unwrap_err();
+        assert!(matches!(error, AuthError::KeyLost), "{error}");
+        assert!(fake.token_proofs().is_empty());
+      }
+
       /// If the note can't be kept, the bound token isn't kept either: it would go out without a proof.
       #[tokio::test]
       async fn a_bound_token_is_not_kept_without_its_note() {
@@ -4066,6 +4098,21 @@ mod tests {
           .await;
         assert!(matches!(proof, Err(AuthError::Network(_))));
         assert_eq!(fake.script.server_info_requests.load(Ordering::SeqCst), 2);
+      }
+
+      #[tokio::test]
+      async fn a_server_without_server_info_is_a_clear_answer() {
+        let fake = Fake::with_dpop().await;
+        fake.script.server_info_is_missing.store(true, Ordering::SeqCst);
+        let service = AuthService::new(Some(fake.config()), MemoryStore::default()).unwrap();
+        let mut session = service.session.lock().await;
+        let config = fake.config();
+        let discovery = service.discovery_in(&mut session, &config).await.unwrap();
+        let proof = service
+          .new_session_proof(&mut session, &config, &discovery, UnboundRequest::SignIn)
+          .await;
+        assert!(matches!(proof, Ok(TokenProof::Unbound)));
+        assert_eq!(fake.script.server_info_requests.load(Ordering::SeqCst), 1);
       }
 
       #[tokio::test]

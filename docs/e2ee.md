@@ -256,10 +256,11 @@ desktop: `apps/desktop/src/auth`).
   `DPoP-Nonce`, which the server only sends under `optional` and `required`, on a host its public origins
   name. Without the header the session stays unbound as before, so an older server (which refuses
   `typ: DPoP` tokens outright), a proxy that strips the header, or a wrong origin don't lock anybody out.
-  No answer from the server is not "no header": a desktop sign-in fails with a network error after
+  A 404 or 421 is a clear answer like a missing header. No answer or another error is not: a desktop sign-in fails with a network error after
   one more try. A refresh of an unbound session goes on unbound and asks again next time.
 - **Going without the proof.** Only for a session that isn't bound, and each case logs. A refusal
-  (400 or 401) of a request with a proof is sent once more without it, since a provider may advertise
+  (400 or 401, except `invalid_grant`, which is about the token) of a request with a proof is sent once
+  more without it, since a provider may advertise
   ES256 and not take proofs for this client, or refuse a date whose correction it hides from the browser.
   Later refreshes in that run skip the proof; a new sign-in tries again. In the browser, a proof-carrying
   request without any answer, twice, is also sent without the proof, because a CORS rule lacking `DPoP`

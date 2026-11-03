@@ -22,7 +22,7 @@ use teamcraft_client_api::oidc_login::{
 use teamcraft_client_api::server_entry::{HttpPolicy, SERVER_INFO_PATH, check_discovery};
 use teamcraft_core::api::dpop::{
   Authorization, DPOP_ALGORITHM_FOR_DISCOVERY, DPOP_HEADER, DpopAnswer, DpopProofError, DpopProver,
-  DpopSendError, ProofFallback, TokenEndpointAttempt, clock_offset_of, signed_headers,
+  DpopSendError, ProofFallback, TokenEndpointAttempt, clock_offset_of, is_from_a_cache, signed_headers,
   with_token_endpoint_proof,
 };
 use teamcraft_crypto::dpop::{JwkThumbprint, token_bound_key};
@@ -794,10 +794,7 @@ impl BrowserAuth {
     let Some(prover) = maybe_prover else {
       return Ok(first);
     };
-    let learned = prover.note_answer(DpopAnswer {
-      maybe_nonce: first.maybe_dpop_nonce.as_deref(),
-      maybe_date: first.maybe_date.as_deref(),
-    });
+    let learned = prover.note_answer(dpop_answer(&first));
     let is_retried = first.status == UNAUTHORIZED
       && serde_json::from_slice::<ErrorBody>(&first.body)
         .is_ok_and(|body| learned.is_worth_a_retry(&body.error_code));
@@ -810,10 +807,7 @@ impl BrowserAuth {
     let second = fetch(method, url, &headers, maybe_body)
       .await
       .map_err(AuthError::Network)?;
-    prover.note_answer(DpopAnswer {
-      maybe_nonce: second.maybe_dpop_nonce.as_deref(),
-      maybe_date: second.maybe_date.as_deref(),
-    });
+    prover.note_answer(dpop_answer(&second));
     Ok(second)
   }
 
@@ -1139,11 +1133,21 @@ fn key_of_session(
 
 /// The clock offset an answer names, unless it comes out of a cache on the way.
 fn fresh_clock_offset(response: &FetchResponse) -> Option<i64> {
-  let is_cached = response.maybe_age.as_deref().is_some_and(|age| age.trim() != "0");
-  if is_cached {
+  if is_from_a_cache(response.maybe_age.as_deref()) {
     return None;
   }
   clock_offset_of(response.maybe_date.as_deref()?)
+}
+
+/// What an API answer tells the prover.
+fn dpop_answer(response: &FetchResponse) -> DpopAnswer<'_> {
+  DpopAnswer {
+    maybe_nonce: response.maybe_dpop_nonce.as_deref(),
+    maybe_date: response
+      .maybe_date
+      .as_deref()
+      .filter(|_| !is_from_a_cache(response.maybe_age.as_deref())),
+  }
 }
 
 async fn token_attempt(

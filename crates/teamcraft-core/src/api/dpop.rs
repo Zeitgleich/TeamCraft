@@ -372,7 +372,7 @@ where
     outcome = proven_attempt(prover, token_endpoint, &attempt).await;
   }
   match outcome {
-    Ok(answer) if fallback == ProofFallback::None || !is_refusal(answer.status) => Ok(answer.response),
+    Ok(answer) if fallback == ProofFallback::None || !refuses_the_proof(&answer) => Ok(answer.response),
     Ok(answer) => {
       tracing::warn!(
         status = answer.status,
@@ -426,6 +426,22 @@ where
 /// How an OAuth endpoint says no to the request itself, as opposed to being down.
 fn is_refusal(status: u16) -> bool {
   matches!(status, 400 | 401)
+}
+
+/// A refusal that may be about the proof. `invalid_grant` is about the code or refresh token: without
+/// the proof it would be refused again, and the session is over, not unbound.
+fn refuses_the_proof<R>(answer: &TokenEndpointAttempt<R>) -> bool {
+  #[derive(serde::Deserialize)]
+  struct OAuthError {
+    error: String,
+  }
+  is_refusal(answer.status)
+    && !serde_json::from_slice::<OAuthError>(&answer.body).is_ok_and(|body| body.error == "invalid_grant")
+}
+
+/// Whether an answer's `Age` says it comes out of a cache on the way: its `Date` is that old.
+pub fn is_from_a_cache(maybe_age: Option<&str>) -> bool {
+  maybe_age.is_some_and(|age| age.trim() != "0")
 }
 
 /// The clock offset an answer's `Date` names, within [`MAX_CLOCK_OFFSET_SECS`]. For a value that has
@@ -732,6 +748,26 @@ mod tests {
         assert!(prover.has_refused_proof());
       }
 
+      /// The refresh token is dead: that goes to the caller as it is, and says nothing about proofs.
+      #[tokio::test]
+      async fn invalid_grant_is_not_replayed_without_the_proof() {
+        let prover = prover();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let status: Result<u16, TestError> = with_token_endpoint_proof(
+          &prover,
+          TOKEN_ENDPOINT,
+          ProofFallback::OnRefusal,
+          |maybe_proof: Option<String>| {
+            seen.borrow_mut().push(maybe_proof.is_some());
+            std::future::ready(Ok(answer(400, r#"{"error":"invalid_grant"}"#, None, None)))
+          },
+        )
+        .await;
+        assert_eq!(status, Ok(400));
+        assert_eq!(*seen.borrow(), vec![true]);
+        assert!(!prover.has_refused_proof());
+      }
+
       #[tokio::test]
       async fn a_provider_that_is_down_is_no_refusal() {
         let attempts = std::cell::Cell::new(0);
@@ -918,6 +954,13 @@ mod tests {
 
   mod dates {
     use super::*;
+
+    #[test]
+    fn only_an_age_above_zero_means_a_cache() {
+      assert!(!is_from_a_cache(None));
+      assert!(!is_from_a_cache(Some("0")));
+      assert!(is_from_a_cache(Some("120")));
+    }
 
     #[test]
     fn a_hostile_date_moves_the_clock_no_further_than_the_limit() {

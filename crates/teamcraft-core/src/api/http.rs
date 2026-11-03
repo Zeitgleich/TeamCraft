@@ -66,7 +66,9 @@ use teamcraft_proto::{NotificationSettings, TestPushResponse};
 use teamcraft_proto::{PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
 
-use super::dpop::{DPOP_HEADER, DPOP_NONCE_HEADER, DpopAnswer, DpopProver, Learned, signed_headers};
+use super::dpop::{
+  DPOP_HEADER, DPOP_NONCE_HEADER, DpopAnswer, DpopProver, Learned, is_from_a_cache, signed_headers,
+};
 #[cfg(target_arch = "wasm32")]
 use super::web_socket::{BrowserSocket, SocketFrame};
 use super::{
@@ -1705,7 +1707,7 @@ fn note_answer(prover: &DpopProver, headers: &reqwest::header::HeaderMap) -> Lea
   let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
   prover.note_answer(DpopAnswer {
     maybe_nonce: text(DPOP_NONCE_HEADER),
-    maybe_date: text(reqwest::header::DATE.as_str()),
+    maybe_date: text(reqwest::header::DATE.as_str()).filter(|_| !is_from_a_cache(text("age"))),
   })
 }
 
