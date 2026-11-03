@@ -35,6 +35,8 @@ use chromiumoxide::cdp::js_protocol::runtime::{EvaluateParams, EventConsoleApiCa
 use chromiumoxide::page::Page;
 use futures_util::StreamExt;
 use teamcraft_core::client::OutgoingFile;
+use teamcraft_crypto::local_store::LocalStoreKeys;
+use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_e2e::browser::{BrowserSession, WebPortLease, artifact_dir, lease_web_port, web_dir};
 use teamcraft_e2e::peer::PASSPHRASE;
 use teamcraft_e2e::resources::ProcessUsage;
@@ -88,6 +90,34 @@ const LONG_TASK_RECORDER: &str = "window.__longTasks = [0, 0, 0];
       window.__longTasks[2] = Math.max(window.__longTasks[2], entry.duration);
     }
   }).observe({ type: 'longtask', buffered: true });";
+/// Reads the raw database key the way the page does (docs/e2ee.md §9.1): any script of the origin
+/// can. Hex, for the harness to derive the lookup ID of the catalog's state.
+const READ_DATABASE_KEY: &str = "(async () => {
+  const databases = await indexedDB.databases();
+  const { name } = databases.find(database => database.name.startsWith('teamcraft-')
+    && !database.name.startsWith('teamcraft-media'));
+  const database = await new Promise((resolve, reject) => {
+    const request = indexedDB.open(name);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  const keys = database.transaction('keys').objectStore('keys');
+  const read = key => new Promise((resolve, reject) => {
+    const request = keys.get(key);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  const [wrapping, wrapped] = await Promise.all([read('wrapping_key'), read('wrapped_database_key')]);
+  database.close();
+  const raw = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: wrapped.slice(0, 12) }, wrapping, wrapped.slice(12));
+  return JSON.stringify([name, Array.from(new Uint8Array(raw), byte => byte.toString(16).padStart(2, '0')).join('')]);
+})()";
+/// How far the catalog build's progress bar is, or -1 while it doesn't show.
+const BUILD_PROGRESS: &str = "(() => {
+  const bar = document.querySelector('.store-build[role=progressbar]');
+  return bar ? Number(bar.getAttribute('aria-valuenow')) : -1;
+})()";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_web_client_stays_fast_and_lean_with_a_large_workspace() {
@@ -122,6 +152,7 @@ async fn the_web_client_stays_fast_and_lean_with_a_large_workspace() {
       eprintln!("seeded the {} workspace in {:?}", scale.name, started.elapsed());
       let mut report = measure(&page, &seeded, &profile, scale).await;
       scroll_through_held_history(&page, &mut alice, &seeded, scale, &mut report).await;
+      measure_catalog_build(&page, &seeded, &mut report).await;
       report.seconds_sign_in_and_unlock = first_setup;
       report.pss_mib_empty_browser = baseline;
       report.empty_browser_idle_cpu_percent = baseline_cpu;
@@ -203,6 +234,14 @@ struct Report {
   return_long_task_total_ms: f64,
   return_longest_task_ms: f64,
   seconds_reload_to_channel_list: f64,
+  /// Main-thread tasks over 50 ms from the reload until the channel list shows: reading the store.
+  reload_long_task_count: f64,
+  reload_longest_task_ms: f64,
+  /// What the store's own `opened the local store` line says of the reload; -1 without one.
+  store_read_ms: f64,
+  store_records: f64,
+  store_sealed_mib: f64,
+  wasm_memory_mib_after_store_read: f64,
   /// The reload's gateway connection from the socket until caught up, as the client measured it
   /// (`gateway connection caught up`, issue #714); -1 when the client logged none.
   reload_sync_ms: f64,
@@ -257,6 +296,19 @@ struct Report {
   js_heap_mib_idle_start: f64,
   js_heap_mib_idle_end: f64,
   wasm_kib: f64,
+  /// The first catalog build after an update (issue #1127): from loading the page until the channel
+  /// list shows, the main-thread tasks over 50 ms meanwhile, and how many steps the bar showed.
+  seconds_catalog_build_to_channel_list: f64,
+  catalog_build_long_task_count: f64,
+  catalog_build_long_task_total_ms: f64,
+  catalog_build_longest_task_ms: f64,
+  catalog_build_progress_steps: f64,
+  /// A reload in the middle of a build: the percentage it had reached, the first it shows after the
+  /// reload (no lower, or it started over), and the time from the reload to the channel list. -1
+  /// when the build was too short to interrupt, or shows no progress.
+  catalog_resume_percent_at_reload: f64,
+  catalog_resume_first_percent_after: f64,
+  seconds_catalog_resume_to_channel_list: f64,
 }
 
 impl Scale {
@@ -605,7 +657,24 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   page.evaluate("location.reload()").await.unwrap();
   wait_long_for_text(page, &seeded.first_space_channels[1].0).await;
   report.seconds_reload_to_channel_list = started.elapsed().as_secs_f64();
+  let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
+  report.reload_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
+  report.reload_longest_task_ms = long_tasks[2].as_f64().unwrap_or(0.0);
   wait_until_done(page).await;
+  let store_line = catch_up_log
+    .lock()
+    .unwrap()
+    .get(lines_before_reload..)
+    .unwrap_or_default()
+    .iter()
+    .rev()
+    .find(|(_, line)| line.contains("opened the local store"))
+    .map(|(_, line)| line.clone())
+    .unwrap_or_default();
+  report.store_read_ms = field_of(&store_line, "read_ms").unwrap_or(-1.0);
+  report.store_records = field_of(&store_line, "records").unwrap_or(-1.0);
+  report.store_sealed_mib = field_of(&store_line, "sealed_mib").unwrap_or(-1.0);
+  report.wasm_memory_mib_after_store_read = field_of(&store_line, "wasm_mib").unwrap_or(-1.0);
   report.reload_sync_ms = catch_up_log
     .lock()
     .unwrap()
@@ -706,6 +775,140 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   report
 }
 
+/// The first catalog build after an update, on the store the run filled: the catalog's state is
+/// deleted from outside the app, so the next start builds it again under a new generation, like an
+/// update that changes what the catalog holds. Then once more with a reload in the middle.
+async fn measure_catalog_build(page: &Page, seeded: &Seeded, report: &mut Report) {
+  let channel = &seeded.first_space_channels[1].0;
+  forget_catalog_state(page).await;
+  let started = Instant::now();
+  page
+    .evaluate(format!("location.href = '{WEB_ORIGIN}/?backend=server'"))
+    .await
+    .unwrap();
+  let mut percents = std::collections::BTreeSet::new();
+  wait_long_while_watching_build(page, channel, &mut percents).await;
+  report.seconds_catalog_build_to_channel_list = started.elapsed().as_secs_f64();
+  report.catalog_build_progress_steps = percents.len() as f64;
+  let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
+  report.catalog_build_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
+  report.catalog_build_long_task_total_ms = long_tasks[1].as_f64().unwrap_or(0.0);
+  report.catalog_build_longest_task_ms = long_tasks[2].as_f64().unwrap_or(0.0);
+  report.catalog_resume_percent_at_reload = -1.0;
+  report.catalog_resume_first_percent_after = -1.0;
+  report.seconds_catalog_resume_to_channel_list = -1.0;
+  if percents.is_empty() {
+    return;
+  }
+  wait_until_done(page).await;
+  forget_catalog_state(page).await;
+  page
+    .evaluate(format!("location.href = '{WEB_ORIGIN}/?backend=server'"))
+    .await
+    .unwrap();
+  let Some(at_reload) = wait_for_build_percent(page, 30.0).await else {
+    wait_long_for_text(page, channel).await;
+    return;
+  };
+  report.catalog_resume_percent_at_reload = at_reload;
+  let started = Instant::now();
+  page.evaluate("location.reload()").await.unwrap();
+  // The new document has to show the bar first; the old one's value isn't this build's.
+  tokio::time::sleep(Duration::from_millis(100)).await;
+  report.catalog_resume_first_percent_after = wait_for_build_percent(page, 0.0).await.unwrap_or(-1.0);
+  wait_long_for_text(page, channel).await;
+  report.seconds_catalog_resume_to_channel_list = started.elapsed().as_secs_f64();
+  assert!(
+    report.catalog_resume_first_percent_after >= at_reload - 5.0,
+    "the build started over after the reload: {report:#?}"
+  );
+}
+
+/// Leaves the app (its core holds the store), deletes the record of the catalog's state.
+async fn forget_catalog_state(page: &Page) {
+  page.goto(format!("{WEB_ORIGIN}/healthz")).await.unwrap();
+  let answer = evaluate_value(page, READ_DATABASE_KEY.to_owned()).await;
+  let answer: Vec<String> = serde_json::from_str(answer.as_str().unwrap()).unwrap();
+  let raw: Vec<u8> = (0..answer[1].len() / 2)
+    .map(|index| u8::from_str_radix(&answer[1][index * 2..index * 2 + 2], 16).unwrap())
+    .collect();
+  let key = SymmetricKey::from_slice(&raw).unwrap();
+  // sealed.rs `entry_id`: the reserved table's name, a zero byte, the key.
+  let id = LocalStoreKeys::derive(&key).lookup_id("entry", b"_catalog\0meta");
+  let record: String = id.0.iter().map(|byte| format!("{byte:02x}")).collect();
+  let database = &answer[0];
+  evaluate_value(
+    page,
+    format!(
+      "new Promise((resolve, reject) => {{
+        const request = indexedDB.open('{database}');
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {{
+          const transaction = request.result.transaction('records', 'readwrite');
+          transaction.objectStore('records').delete('{record}');
+          transaction.oncomplete = () => {{ request.result.close(); resolve(true); }};
+          transaction.onerror = () => reject(transaction.error);
+        }};
+      }})"
+    ),
+  )
+  .await;
+}
+
+/// [`wait_long_for_text`], noting every percentage the build's bar shows on the way.
+async fn wait_long_while_watching_build(
+  page: &Page,
+  needle: &str,
+  percents: &mut std::collections::BTreeSet<u64>,
+) {
+  let deadline = Instant::now() + LONG_WAIT;
+  loop {
+    let script = format!("JSON.stringify([{BUILD_PROGRESS}, document.body ? document.body.innerText : ''])");
+    let answer = page
+      .evaluate(script)
+      .await
+      .ok()
+      .and_then(|result| result.into_value::<String>().ok())
+      .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    if let Some(answer) = answer {
+      if let Some(percent) = answer[0].as_f64().filter(|percent| *percent >= 0.0) {
+        percents.insert(percent as u64);
+      }
+      if answer[1].as_str().is_some_and(|text| text.contains(needle)) {
+        return;
+      }
+    }
+    assert!(
+      Instant::now() < deadline,
+      "{needle:?} did not appear within {LONG_WAIT:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+}
+
+/// The build's percentage once it has reached `at_least`; `None` when it ended before.
+async fn wait_for_build_percent(page: &Page, at_least: f64) -> Option<f64> {
+  let deadline = Instant::now() + LONG_WAIT;
+  let mut has_shown = false;
+  while Instant::now() < deadline {
+    let percent = page
+      .evaluate(BUILD_PROGRESS)
+      .await
+      .ok()
+      .and_then(|result| result.into_value::<f64>().ok())
+      .unwrap_or(-1.0);
+    if percent >= at_least && percent >= 0.0 {
+      return Some(percent);
+    }
+    if has_shown && percent < 0.0 {
+      return None;
+    }
+    has_shown |= percent >= 0.0;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  None
+}
+
 /// [`BUSY_SWITCHES`] switches between the first space's channels, sorted. Generous timeout: the
 /// channel may still be catching up.
 async fn busy_switches(page: &Page, channels: &[(String, String)]) -> Vec<f64> {
@@ -721,7 +924,8 @@ async fn busy_switches(page: &Page, channels: &[(String, String)]) -> Vec<f64> {
 /// The client's console lines about the catch-up and the gateway (phase timings, lost
 /// connections), with the seconds since `since`.
 async fn watch_catch_up_log(page: &Page, since: Instant) -> Arc<Mutex<Vec<(f64, String)>>> {
-  const WATCHED: [&str; 5] = [
+  const WATCHED: [&str; 6] = [
+    "opened the local store",
     "catch-up",
     "full sync",
     "gateway connection lost",
@@ -759,6 +963,16 @@ fn caught_up_ms(line: &str) -> Option<f64> {
   }
   let (_, rest) = line.split_once("total_ms=")?;
   let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+  digits.parse().ok()
+}
+
+/// The number after `name=` in a log line.
+fn field_of(line: &str, name: &str) -> Option<f64> {
+  let (_, rest) = line.split_once(&format!("{name}="))?;
+  let digits: String = rest
+    .chars()
+    .take_while(|digit| digit.is_ascii_digit() || *digit == '.')
+    .collect();
   digits.parse().ok()
 }
 
@@ -1295,6 +1509,44 @@ impl Report {
       ("js_heap_mib_idle_start", self.js_heap_mib_idle_start),
       ("js_heap_mib_idle_end", self.js_heap_mib_idle_end),
       ("wasm_kib", self.wasm_kib),
+      ("reload_long_task_count", self.reload_long_task_count),
+      ("reload_longest_task_ms", self.reload_longest_task_ms),
+      ("store_read_ms", self.store_read_ms),
+      ("store_records", self.store_records),
+      ("store_sealed_mib", self.store_sealed_mib),
+      (
+        "wasm_memory_mib_after_store_read",
+        self.wasm_memory_mib_after_store_read,
+      ),
+      (
+        "seconds_catalog_build_to_channel_list",
+        self.seconds_catalog_build_to_channel_list,
+      ),
+      (
+        "catalog_build_long_task_count",
+        self.catalog_build_long_task_count,
+      ),
+      (
+        "catalog_build_long_task_total_ms",
+        self.catalog_build_long_task_total_ms,
+      ),
+      (
+        "catalog_build_longest_task_ms",
+        self.catalog_build_longest_task_ms,
+      ),
+      ("catalog_build_progress_steps", self.catalog_build_progress_steps),
+      (
+        "catalog_resume_percent_at_reload",
+        self.catalog_resume_percent_at_reload,
+      ),
+      (
+        "catalog_resume_first_percent_after",
+        self.catalog_resume_first_percent_after,
+      ),
+      (
+        "seconds_catalog_resume_to_channel_list",
+        self.seconds_catalog_resume_to_channel_list,
+      ),
     ]
   }
 

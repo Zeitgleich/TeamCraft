@@ -212,8 +212,19 @@ impl IndexedDbRecords {
   /// Opens the database `name` as `mode` says and reads every record's ciphertext.
   async fn read(name: &str, mode: OpenMode) -> Result<Self, StoreError> {
     let database = idb::open_database_with(name, mode).await?;
+    let started_ms = js_sys::Date::now();
     match read_all(&database).await {
-      Ok(records) => Ok(Self::new(database, records.into_iter().collect())),
+      Ok(records) => {
+        let sealed_bytes: usize = records.iter().map(|(_, sealed)| sealed.len()).sum();
+        tracing::info!(
+          records = records.len(),
+          sealed_mib = sealed_bytes / (1024 * 1024),
+          read_ms = js_sys::Date::now() - started_ms,
+          wasm_mib = core::arch::wasm32::memory_size(0) / 16,
+          "opened the local store"
+        );
+        Ok(Self::new(database, records.into_iter().collect()))
+      },
       Err(error) => {
         // Closed, so a reset can delete the database (issue #160) instead of being blocked by it.
         database.close();
