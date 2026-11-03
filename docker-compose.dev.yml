@@ -28,7 +28,7 @@ services:
       retries: 20
 
   keycloak:
-    image: keycloak/keycloak:26.8.1
+    image: keycloak/keycloak:26.8.1-1
     # Dev mode keeps its H2 database inside the container; the realm is re-imported from dev/keycloak
     # whenever the container is recreated (`docker compose ... down` resets all Keycloak state).
     command: ["start-dev", "--import-realm"]
@@ -61,7 +61,7 @@ services:
       - garage-data:/var/lib/garage/data
 
   mailpit:
-    image: docker.io/axllent/mailpit:v1.32.0
+    image: docker.io/axllent/mailpit:v1.33.0
     ports:
       - "127.0.0.1:1025:1025"
       - "[::1]:1025:1025" # SMTP, no authentication
