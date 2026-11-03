@@ -77,8 +77,22 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
     }
   });
 
+  let store_build = use_store_build();
+  let shows_store_build = Memo::new(move |_| {
+    store_build.get().is_some()
+      && control.state.with(|state| {
+        matches!(
+          state,
+          SessionState::Checking | SessionState::SigningIn | SessionState::OpeningCore
+        )
+      })
+  });
+
   view! {
     {move || match control.state.get() {
+      _ if shows_store_build.get() => {
+        view! { <StoreBuildScreen percent=store_build control=control /> }.into_any()
+      },
       SessionState::Checking => view! { <CheckingScreen /> }.into_any(),
       SessionState::NeedsServer { maybe_address, maybe_problem } => {
         view! { <ServerEntryScreen maybe_address=maybe_address maybe_problem=maybe_problem control=control /> }.into_any()
@@ -231,6 +245,77 @@ fn CheckingScreen() -> impl IntoView {
       </p>
     </AuthFrame>
   }
+}
+
+/// The first start after an update that changed the local store's catalog (issue #1127): a large
+/// store takes a while, and a reload or a closed tab loses nothing, so it says both.
+#[component]
+fn StoreBuildScreen(percent: Signal<Option<u8>>, control: SessionControl) -> impl IntoView {
+  let i18n = use_i18n();
+  let value = move || percent.get().unwrap_or(0);
+  view! {
+    <AuthFrame>
+      <h1>{move || i18n.t("login-store-build-title")}</h1>
+      <p class="auth-status">{move || i18n.t("login-store-build")}</p>
+      <div
+        class="store-build"
+        role="progressbar"
+        aria-label=move || i18n.t("login-store-build-title")
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow=move || value().to_string()
+      >
+        <div class="store-build-track">
+          <div
+            class="store-build-fill"
+            style:--store-build-fraction=move || (f32::from(value()) / 100.0).to_string()
+          ></div>
+        </div>
+        <span class="store-build-percent">
+          {move || i18n.t_with("login-store-build-percent", &[("percent", &value().to_string())])}
+        </span>
+      </div>
+      <div class="auth-actions">
+        <button class="btn auth-wide" on:click=move |_| control.sign_out()>
+          {move || i18n.t("login-core-sign-out")}
+        </button>
+      </div>
+    </AuthFrame>
+  }
+}
+
+/// How far the store's catalog build is, while one runs in this tab.
+fn use_store_build() -> Signal<Option<u8>> {
+  #[cfg(target_arch = "wasm32")]
+  {
+    let signal = RwSignal::new(crate::web_core::store_build_percent());
+    STORE_BUILD_FEED.with(|feed| {
+      let mut feed = feed.borrow_mut();
+      let is_first = feed.is_none();
+      *feed = Some(signal);
+      if is_first {
+        crate::web_core::listen_store_build(|| {
+          // async-ok: `try_set` of a signal that may be gone by the time a build reports.
+          let maybe_signal = STORE_BUILD_FEED.with(|feed| *feed.borrow());
+          if let Some(signal) = maybe_signal {
+            signal.try_set(crate::web_core::store_build_percent());
+          }
+        });
+      }
+    });
+    signal.into()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  {
+    Signal::stored(None)
+  }
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+  /// The signal of the gate on screen; the core's listener lives as long as the page.
+  static STORE_BUILD_FEED: std::cell::RefCell<Option<RwSignal<Option<u8>>>> =
+    const { std::cell::RefCell::new(None) };
 }
 
 #[component]

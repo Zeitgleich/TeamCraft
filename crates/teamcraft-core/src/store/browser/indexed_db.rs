@@ -2,7 +2,9 @@
 //! (e2ee.md §9.1).
 //!
 //! [`LocalStore`] is synchronous, IndexedDB is not. Opening reads every record's ciphertext into
-//! memory, which the store decrypts only when a record is asked for (issue #155, #778); writes are queued
+//! memory, a page at a time in one read-only transaction so the page keeps its thread, and the store
+//! decrypts a record only when it is asked for (issue #155, #778, #1127; docs/performance.md says why
+//! it can't fetch per conversation instead); writes are queued
 //! and issued together in one transaction a moment later ([`BATCH_DELAY`], or at once when much is
 //! queued or on [`IndexedDbStore::flush`]). Of several writes of one record in that time only the
 //! last is issued: a catch-up rewrites some records after every group it processes, and one
@@ -30,9 +32,16 @@
 //! again on the next flush, so the database catches up with the cache once space is free again
 //! instead of silently rolling back on the next reload (e2ee.md §9.4). The flush reports the
 //! failure; the app shows it to the user.
+//!
+//! A first catalog build ([`IndexedDbStore::open_reporting`]) takes one batch per task: each is
+//! committed before the next starts. Waiting for the commit gives the page its thread back; no timer
+//! is involved, so a hidden tab, whose timers are throttled, doesn't crawl, and a frozen one just goes
+//! on when it thaws. What was committed survives a reload, which goes on from there. A build found
+//! necessary while the store is in use (damage) can't wait for anything: [`LocalStore`] is synchronous.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
@@ -40,10 +49,10 @@ use teamcraft_crypto::local_store::LookupId;
 use teamcraft_crypto::secret::SymmetricKey;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
+use web_sys::{IdbDatabase, IdbKeyRange, IdbObjectStore, IdbRequest, IdbTransaction, IdbTransactionMode};
 
 use super::idb::{self, OpenMode, RECORDS};
-use crate::store::sealed::{LazySeal, RecordBackend, SealedStore, format_id, parse_id};
+use crate::store::sealed::{BuildStep, LazySeal, RecordBackend, SealedStore, format_id, parse_id};
 use crate::store::write_queue::{Issue, OpenValue, RecordValue, WriteFailure, Writes};
 use crate::store::{SealedStoreLimits, StoreError};
 
@@ -56,6 +65,8 @@ const LARGE_BATCH_EXTRA: Duration = Duration::from_millis(200);
 const BATCH_PROPERTY: &str = "teamcraftBatch";
 /// `DOMException.name` of a write refused for lack of space.
 const QUOTA_EXCEEDED: &str = "QuotaExceededError";
+/// Records read per task when the store opens: a few milliseconds of copying.
+const READ_PAGE_RECORDS: u32 = 1024;
 
 /// The encrypted browser store.
 pub type IndexedDbStore = SealedStore<IndexedDbRecords>;
@@ -80,8 +91,35 @@ impl SealedStore<IndexedDbRecords> {
   /// Opens the database `name` with `database_key`, reading its ciphertext into memory; a page that
   /// owns the store (it holds the Web Lock) upgrades it to this version and builds its catalog.
   pub async fn open(name: &str, database_key: &SymmetricKey) -> Result<Self, StoreError> {
+    Self::open_reporting(name, database_key, |_| ControlFlow::Continue(())).await
+  }
+
+  /// [`Self::open`] for a page that shows how far a catalog build is: `on_progress` hears the
+  /// percentage after every batch (never when no build is needed) and may stop the build, say
+  /// because another tab takes over: it fails with [`StoreError::InUse`], and whoever opens the
+  /// store next goes on from there. A newer version closing the database stops it with
+  /// [`StoreError::Closed`]. Lack of space doesn't stop it: the store works from what it holds, and
+  /// the next flush reports it, as for every other write.
+  pub async fn open_reporting(
+    name: &str,
+    database_key: &SymmetricKey,
+    mut on_progress: impl FnMut(u8) -> ControlFlow<()>,
+  ) -> Result<Self, StoreError> {
     let backend = IndexedDbRecords::read(name, OpenMode::Upgrade).await?;
-    Self::open_backend(backend, database_key, SealedStoreLimits::default())
+    let store = Self::open_backend_to_build(backend, database_key, SealedStoreLimits::default())?;
+    let Some(mut build) = store.start_catalog_build()? else {
+      return Ok(store);
+    };
+    loop {
+      let step = store.step_catalog_build(&mut build)?;
+      store.commit_build_batch().await?;
+      if step == BuildStep::Complete {
+        return Ok(store);
+      }
+      if on_progress(build.percent()).is_break() {
+        return Err(StoreError::InUse);
+      }
+    }
   }
 
   /// [`Self::open`] for the service worker, a second writer beside the page that owns the store: at
@@ -113,6 +151,18 @@ impl SealedStore<IndexedDbRecords> {
       idb::transaction_done(&transaction).await?;
     }
     inner.writes.borrow_mut().failure()
+  }
+
+  /// Waits until the catalog build's last batch is committed: the build's backpressure, and the
+  /// moment the page has its thread back.
+  async fn commit_build_batch(&self) -> Result<(), StoreError> {
+    match self.flush().await {
+      Err(StoreError::QuotaExceeded) => {
+        tracing::warn!("no space for the local store's catalog; it stays in memory for now");
+        Ok(())
+      },
+      flushed => flushed,
+    }
   }
 
   /// Issues what is queued now instead of after the batch delay, without waiting for it (the page
@@ -215,7 +265,7 @@ impl IndexedDbRecords {
     let started_ms = js_sys::Date::now();
     match read_all(&database).await {
       Ok(records) => {
-        let sealed_bytes: usize = records.iter().map(|(_, sealed)| sealed.len()).sum();
+        let sealed_bytes: usize = records.values().map(Vec::len).sum();
         tracing::info!(
           records = records.len(),
           sealed_mib = sealed_bytes / (1024 * 1024),
@@ -223,7 +273,7 @@ impl IndexedDbRecords {
           wasm_mib = core::arch::wasm32::memory_size(0) / 16,
           "opened the local store"
         );
-        Ok(Self::new(database, records.into_iter().collect()))
+        Ok(Self::new(database, records))
       },
       Err(error) => {
         // Closed, so a reset can delete the database (issue #160) instead of being blocked by it.
@@ -445,24 +495,29 @@ fn classify(name: &str) -> WriteFailure {
   }
 }
 
-async fn read_all(database: &IdbDatabase) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
-  let transaction = database
-    .transaction_with_str(RECORDS)
-    .map_err(|error| idb::js_error("load", &error))?;
-  let records = transaction
-    .object_store(RECORDS)
-    .map_err(|error| idb::js_error("load", &error))?;
-  // Both lists come in key order, so they line up.
-  let keys = records
-    .get_all_keys()
-    .map_err(|error| idb::js_error("load", &error))?;
-  let values = records.get_all().map_err(|error| idb::js_error("load", &error))?;
-  let keys: js_sys::Array = idb::request_result(&keys).await?.unchecked_into();
-  let values: js_sys::Array = idb::request_result(&values).await?.unchecked_into();
-  keys
-    .iter()
-    .zip(values.iter())
-    .map(|(key, value)| {
+/// Every record, [`READ_PAGE_RECORDS`] per task. One transaction, so they are one snapshot: the next
+/// page is asked for in the same task that got the last (the transaction stays active for it), and a
+/// browser only runs other tasks in between. Reading them all at once made one long task of them, and
+/// held every record twice, in JavaScript and in the store, at the peak.
+async fn read_all(database: &IdbDatabase) -> Result<BTreeMap<LookupId, Vec<u8>>, StoreError> {
+  let mut records = BTreeMap::new();
+  let mut store = read_transaction(database)?;
+  let mut maybe_last_key = None;
+  loop {
+    let (keys, values) = match request_page(&store, maybe_last_key.as_ref()) {
+      Ok(requests) => requests,
+      // The browser ended the transaction between two pages after all: the rest is read in a new
+      // one. Only this page writes while it opens the store, and it doesn't yet.
+      Err(_) => {
+        store = read_transaction(database)?;
+        request_page(&store, maybe_last_key.as_ref()).map_err(|error| idb::js_error("load", &error))?
+      },
+    };
+    let keys: js_sys::Array = idb::request_result(&keys).await?.unchecked_into();
+    let values: js_sys::Array = idb::request_result(&values).await?.unchecked_into();
+    let count = keys.length();
+    // Both lists come in key order, so they line up.
+    for (key, value) in keys.iter().zip(values.iter()) {
       let id = key
         .as_string()
         .as_deref()
@@ -472,7 +527,33 @@ async fn read_all(database: &IdbDatabase) -> Result<Vec<(LookupId, Vec<u8>)>, St
         .dyn_ref::<js_sys::Uint8Array>()
         .ok_or_else(|| StoreError::Corrupt("record value".into()))?
         .to_vec();
-      Ok((id, sealed))
-    })
-    .collect()
+      records.insert(id, sealed);
+    }
+    if count < READ_PAGE_RECORDS {
+      return Ok(records);
+    }
+    maybe_last_key = Some(keys.get(count - 1));
+  }
+}
+
+fn read_transaction(database: &IdbDatabase) -> Result<IdbObjectStore, StoreError> {
+  database
+    .transaction_with_str(RECORDS)
+    .and_then(|transaction| transaction.object_store(RECORDS))
+    .map_err(|error| idb::js_error("load", &error))
+}
+
+/// The requests for the keys and the values of the page after `maybe_last_key`.
+fn request_page(
+  store: &IdbObjectStore,
+  maybe_last_key: Option<&JsValue>,
+) -> Result<(IdbRequest, IdbRequest), JsValue> {
+  let range = match maybe_last_key {
+    Some(last) => JsValue::from(IdbKeyRange::lower_bound_with_open(last, true)?),
+    None => JsValue::UNDEFINED,
+  };
+  Ok((
+    store.get_all_keys_with_key_and_limit(&range, READ_PAGE_RECORDS)?,
+    store.get_all_with_key_and_limit(&range, READ_PAGE_RECORDS)?,
+  ))
 }

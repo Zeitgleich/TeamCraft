@@ -7,6 +7,7 @@
 
 mod common;
 
+use std::ops::ControlFlow;
 use std::rc::Rc;
 
 use common::{PASSPHRASE, clock, options, settings};
@@ -19,6 +20,7 @@ use teamcraft_core::store::{
   browser_database_key, browser_database_key_without_upgrade,
 };
 use teamcraft_core::{PendingEnrollment, mls_storage};
+use teamcraft_crypto::local_store::LocalStoreKeys;
 use teamcraft_crypto::push::{open_wakeup, seal_wakeup};
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{ClientMessageId, ConversationId, Id, Snowflake, UserId};
@@ -224,6 +226,97 @@ async fn the_service_worker_never_upgrades_the_database() {
   assert_eq!(database_version(&name).await, 2.0);
 }
 
+/// Issue #1127: a first catalog build tells how far it is, and one that stops (a reload, another tab
+/// taking over) goes on from there when the store opens next; nothing is missing afterwards.
+#[wasm_bindgen_test]
+async fn a_catalog_build_reports_progress_and_goes_on_where_it_stopped() {
+  const MESSAGES: u8 = 200;
+  const MORE_RECORDS: usize = 1600;
+  let name = database_name();
+  let key = browser_database_key(&name).await.unwrap();
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  store.begin_writes().unwrap();
+  for client in 0..MESSAGES {
+    store
+      .upsert_message(&message(1, client, &format!("message {client}")))
+      .unwrap();
+  }
+  // Enough records for several batches, quickly: an entry costs less than a message.
+  for index in 0..MORE_RECORDS {
+    store
+      .put(Table::Users, &format!("key {index}"), b"value")
+      .unwrap();
+  }
+  store.end_writes().unwrap();
+  store.flush().await.unwrap();
+  drop(store);
+  forget_catalog_state(&name, &key).await;
+
+  let mut seen = Vec::new();
+  let stopped = IndexedDbStore::open_reporting(&name, &key, |percent| {
+    seen.push(percent);
+    ControlFlow::Break(())
+  })
+  .await;
+  assert!(matches!(stopped, Err(StoreError::InUse)));
+  let stopped_at = seen[0];
+  assert!(stopped_at > 0, "one batch of about four is past the start");
+
+  let mut seen = Vec::new();
+  let store = IndexedDbStore::open_reporting(&name, &key, |percent| {
+    seen.push(percent);
+    ControlFlow::Continue(())
+  })
+  .await
+  .unwrap();
+  assert!(!seen.is_empty());
+  assert!(
+    seen[0] > stopped_at,
+    "started over: {seen:?}, stopped at {stopped_at}"
+  );
+  assert!(seen.windows(2).all(|pair| pair[0] <= pair[1]), "{seen:?}");
+  assert_eq!(
+    texts(&store, id(1)).len(),
+    usize::from(MESSAGES),
+    "every message is in the index"
+  );
+  assert_eq!(store.list(Table::Users).unwrap().len(), MORE_RECORDS);
+  store.flush().await.unwrap();
+  drop(store);
+
+  let mut was_called = false;
+  let store = IndexedDbStore::open_reporting(&name, &key, |_| {
+    was_called = true;
+    ControlFlow::Continue(())
+  })
+  .await
+  .unwrap();
+  assert!(!was_called, "built once");
+  assert_eq!(texts(&store, id(1)).len(), usize::from(MESSAGES));
+}
+
+/// Issue #1127: opening reads a page at a time, and more than one page reads back whole, with the
+/// records around a page's end among them.
+#[wasm_bindgen_test]
+async fn a_store_of_several_read_pages_reads_back_whole() {
+  const RECORDS: usize = 2500;
+  let name = database_name();
+  let key = browser_database_key(&name).await.unwrap();
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  store.begin_writes().unwrap();
+  for index in 0..RECORDS {
+    store
+      .put(Table::Users, &format!("key {index}"), b"value")
+      .unwrap();
+  }
+  store.end_writes().unwrap();
+  store.flush().await.unwrap();
+  drop(store);
+
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  assert_eq!(store.list(Table::Users).unwrap().len(), RECORDS);
+}
+
 #[wasm_bindgen_test]
 fn push_wake_up_round_trips_in_wasm() {
   let key = SymmetricKey::generate(&mut OsRng);
@@ -310,6 +403,28 @@ async fn open_with_newer_version(name: &str) {
     .unwrap()
     .unchecked_into();
   database.close();
+}
+
+/// Deletes the record saying how far the catalog is built (sealed.rs `entry_id`), so the next open
+/// builds it: what an update that changes what the catalog holds does.
+async fn forget_catalog_state(name: &str, key: &SymmetricKey) {
+  use wasm_bindgen::JsCast;
+  let id = LocalStoreKeys::derive(key).lookup_id("entry", b"_catalog\0meta");
+  let record: String = id.0.iter().map(|byte| format!("{byte:02x}")).collect();
+  let script = format!(
+    "new Promise((resolve, reject) => {{
+      const request = indexedDB.open({name:?});
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {{
+        const transaction = request.result.transaction('records', 'readwrite');
+        transaction.objectStore('records').delete({record:?});
+        transaction.oncomplete = () => {{ request.result.close(); resolve(); }};
+        transaction.onerror = () => reject(transaction.error);
+      }};
+    }})"
+  );
+  let deleted: js_sys::Promise = js_sys::eval(&script).unwrap().unchecked_into();
+  wasm_bindgen_futures::JsFuture::from(deleted).await.unwrap();
 }
 
 /// Creates `name` as the first schema version did: version 1 with the same object stores.
