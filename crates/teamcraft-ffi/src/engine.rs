@@ -34,7 +34,8 @@ use teamcraft_core::push_preview::{PreviewGap, PushPreview, push_preview, save_d
 use teamcraft_core::records;
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{
-  LocalStore as _, SealedSqliteStore, SealedStoreLimits, StaticKeySource, TrackedStore,
+  DEFAULT_MESSAGE_CACHE_BYTES, LocalStore as _, SealedSqliteStore, SealedStoreLimits, StaticKeySource,
+  TrackedStore,
 };
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand, FeedAnchor};
 use teamcraft_core::{
@@ -80,8 +81,8 @@ const MAX_DOWNLOADS_BYTES: u64 = 1024 * 1024 * 1024;
 const UPLOAD_STAGING_DIR: &str = "outgoing";
 /// Decoded messages of the conversations read last, kept so the open conversation isn't decrypted
 /// again on every change (issue #155; as many as the desktop keeps). A memory-constrained process
-/// (the iOS notification extension) keeps none.
-const MESSAGE_CACHE_MESSAGES: usize = 60_000;
+/// (the iOS notification extension) keeps none. Bounded by bytes, not by messages (issue #1125).
+const MESSAGE_CACHE_BYTES: usize = DEFAULT_MESSAGE_CACHE_BYTES;
 /// A sync loop that keeps dying waits this long at most before the next one starts; the first
 /// restart is immediate.
 const MAX_LOOP_RESTART_DELAY: Duration = Duration::from_secs(300);
@@ -496,7 +497,7 @@ impl Engine {
       ..
     } = start;
     let key_source = StaticKeySource::new(key);
-    let (store, cached_messages) = if is_memory_constrained {
+    let (store, cached_bytes) = if is_memory_constrained {
       // Never the catalog's build: a first push after an update would run it under the limit.
       let limits = SealedStoreLimits::minimal();
       (
@@ -504,13 +505,10 @@ impl Engine {
         0,
       )
     } else {
-      (
-        SealedSqliteStore::open(&path, &key_source),
-        MESSAGE_CACHE_MESSAGES,
-      )
+      (SealedSqliteStore::open(&path, &key_source), MESSAGE_CACHE_BYTES)
     };
     let store = store.map_err(|error| open_error(error.into()))?;
-    let store = TrackedStore::with_message_cache(Arc::new(store), cached_messages);
+    let store = TrackedStore::with_message_cache(Arc::new(store), cached_bytes);
     // A broken record only costs the preferences, not the store.
     let mentions: MentionSettings = load_mention_preferences(&store).unwrap_or_default().into();
     let maybe_account = records::load_account(&store).map_err(open_error)?;

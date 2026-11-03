@@ -48,7 +48,9 @@ use teamcraft_core::downloads::{Downloads, Finished};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::push_text::{NAME_PLACEHOLDER, NotificationLabels};
 use teamcraft_core::records;
-use teamcraft_core::store::{IndexedDbStore, StoreError, TrackedStore, browser_database_key};
+use teamcraft_core::store::{
+  DEFAULT_MESSAGE_CACHE_BYTES, IndexedDbStore, StoreError, TrackedStore, browser_database_key,
+};
 use teamcraft_core::transfers::Transfers;
 use teamcraft_core::typing::TypingAnnouncer;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
@@ -80,7 +82,8 @@ use crate::web_tabs::{self, Follower, OwnerChannel, OwnerLock, Ownership};
 const MAX_APPROVAL_MISSES: u8 = 3;
 /// Decoded messages of the conversations read last: the store decrypts a record only when it is
 /// asked for (issue #155), so the open conversation is kept instead of decrypted on every change.
-const MESSAGE_CACHE_MESSAGES: usize = 60_000;
+/// Bounded by bytes, not by messages (issue #1125).
+const MESSAGE_CACHE_BYTES: usize = DEFAULT_MESSAGE_CACHE_BYTES;
 /// How often the loop wakes up on its own: outbox retries, heartbeats, staggered commits.
 const TICK: Duration = Duration::from_secs(3);
 /// How often the UI is told to read again while a long sync fills the store (issue #247).
@@ -1373,7 +1376,7 @@ impl Core {
       Ok(opened) => opened,
       Err(error) => return unreadable_status(error.into()),
     };
-    let store = TrackedStore::with_message_cache(Rc::new(opened), MESSAGE_CACHE_MESSAGES);
+    let store = TrackedStore::with_message_cache(Rc::new(opened), MESSAGE_CACHE_BYTES);
     self.store = Some(store.clone());
     watch_page_lifecycle(store.inner());
     let maybe_client = match Client::open(
