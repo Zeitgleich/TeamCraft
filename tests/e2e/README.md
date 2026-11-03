@@ -118,6 +118,10 @@ cargo test -p teamcraft-e2e --features browser --test suite -- --include-ignored
 | `E2E_ARTIFACTS`  | Where failure screenshots go (default `target/e2e-artifacts`)                              |
 | `CHROME`         | Chrome or Chromium executable (default: first of `google-chrome`, `chromium`, ... on PATH) |
 | `E2E_CONSOLE`    | Browser tests print the page's console as it happens (`web_calls.rs`)                      |
+| `RUST_MIN_STACK` | Stack of a test thread: 16 MiB in `scripts/e2e.sh`, set it for a plain `cargo test`        |
+
+A test that aborts (a stack overflow, a kill) leaves its server and Chromium running; the web tests share port
+8082, so stop them (`ss -ltnp | grep 8082`) before the next run, or every web test talks to the stale server.
 
 The harness removes every inherited `TEAMCRAFT_*` variable from the processes it starts (the server reads
 them all as configuration), which is also why none of these variables carries that prefix.
