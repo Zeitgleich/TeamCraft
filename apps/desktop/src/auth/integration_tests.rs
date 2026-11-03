@@ -9,7 +9,7 @@ use std::sync::Arc;
 use teamcraft_client_api::oidc_login::LoginRequest;
 use teamcraft_client_api::sign_in_look::SignInLook;
 
-use super::store::{KeyringStore, MemoryStore, TokenStore};
+use super::store::{MemoryStore, TokenStore};
 use super::{AuthError, AuthService, DesktopConfig};
 
 /// Shares one in-memory store between two service instances, like the keyring across app restarts.
@@ -175,21 +175,4 @@ pub(crate) fn spawn_fake_browser(authorization_url: &str, user: &str) -> Result<
     client.get(location).send().await.expect("loopback request");
   });
   Ok(())
-}
-
-/// Needs a running Secret Service (GNOME Keyring, KWallet) or the macOS Keychain.
-#[tokio::test]
-async fn keyring_store_round_trips() {
-  let store = KeyringStore;
-  let server = "https://keyring-test.example.com";
-  store.clear(server).await.expect("clear");
-  assert!(store.load(server).await.expect("load").is_none());
-  store.save(server, "refresh-token-for-test").await.expect("save");
-  let loaded = store.load(server).await.expect("load");
-  assert_eq!(
-    secrecy::ExposeSecret::expose_secret(&loaded.expect("stored")),
-    "refresh-token-for-test"
-  );
-  store.clear(server).await.expect("clear");
-  assert!(store.load(server).await.expect("load").is_none());
 }

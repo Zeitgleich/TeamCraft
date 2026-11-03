@@ -1,13 +1,9 @@
 use secrecy::{ExposeSecret, SecretString};
 use std::future::Future;
-use teamcraft_core::store::run_outside_runtime;
+use std::sync::Arc;
+use teamcraft_core::store::{KeySourceError, SecretVault, TokenKind};
 
 use super::AuthError;
-
-const SERVICE: &str = "de.zeitgleich.teamcraft";
-const ACCOUNT: &str = "oidc-refresh-token";
-/// The session of a local account (token and expiry as JSON), a separate entry per server.
-const LOCAL_SESSION_ACCOUNT: &str = "local-session";
 
 /// Where the refresh tokens live between runs, one per server (`server` is its origin), and the
 /// sessions of local accounts next to them.
@@ -25,95 +21,107 @@ pub trait TokenStore: Send + Sync + 'static {
     session: &SecretString,
   ) -> impl Future<Output = Result<(), AuthError>> + Send;
   fn clear_local_session(&self, server: &str) -> impl Future<Output = Result<(), AuthError>> + Send;
+  /// The user signed out or left: deletes what a normal start doesn't look at, such as secrets an
+  /// older version of the app wrote or a damaged file set aside. `token_key` and `server` name the
+  /// server's refresh token and local session.
+  fn purge_after_sign_out(
+    &self,
+    _token_key: &str,
+    _server: &str,
+  ) -> impl Future<Output = Result<(), AuthError>> + Send {
+    async { Ok(()) }
+  }
 }
 
-/// The OS keyring: Secret Service on Linux, Keychain on macOS. One entry per server origin, so
-/// signing in to another instance never overwrites or reuses this one's token.
-#[derive(Default)]
-pub struct KeyringStore;
+/// The sealed file of local secrets (`SecretVault`, e2ee.md §9), one token of each kind per server
+/// origin, so signing in to another instance never overwrites or reuses this one's token. Saving a
+/// token writes the file and doesn't touch the OS keychain.
+#[derive(Clone)]
+pub struct VaultStore {
+  vault: Arc<SecretVault>,
+}
 
-impl KeyringStore {
+impl VaultStore {
+  pub fn new(vault: Arc<SecretVault>) -> Self {
+    Self { vault }
+  }
+
   async fn run<T: Send + 'static>(
     &self,
-    account: String,
-    action: impl FnOnce(keyring::Entry) -> keyring::Result<T> + Send + 'static,
+    action: impl FnOnce(&SecretVault) -> Result<T, KeySourceError> + Send + 'static,
   ) -> Result<T, AuthError> {
-    // Keyring calls block (D-Bus on Linux); keep them off the async executor, and out of any
-    // runtime context, where zbus' blocking API panics (run_outside_runtime).
-    tauri::async_runtime::spawn_blocking(move || {
-      run_outside_runtime(move || {
-        let entry = keyring::Entry::new(SERVICE, &account)?;
-        action(entry)
-      })
-    })
-    .await
-    .map_err(|error| AuthError::Unsupported(error.to_string()))?
-    .map_err(|error| AuthError::Unsupported(format!("keyring: {error}")))?
-    .map_err(|error| AuthError::Unsupported(format!("keyring: {error}")))
-  }
-}
-
-impl KeyringStore {
-  async fn load_entry(&self, account: String) -> Result<Option<SecretString>, AuthError> {
-    let found = self
-      .run(account, |entry| match entry.get_password() {
-        Ok(token) => Ok(Some(token)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(error),
-      })
-      .await?;
-    Ok(found.map(SecretString::from))
+    // File access and, the first time, the keychain block; keep them off the async executor.
+    let vault = Arc::clone(&self.vault);
+    tauri::async_runtime::spawn_blocking(move || action(&vault))
+      .await
+      .map_err(|error| AuthError::Unsupported(error.to_string()))?
+      .map_err(|error| AuthError::Unsupported(format!("keyring: {error}")))
   }
 
-  async fn save_entry(&self, account: String, secret: SecretString) -> Result<(), AuthError> {
+  async fn load_token(&self, kind: TokenKind, server: &str) -> Result<Option<SecretString>, AuthError> {
+    let server = server.to_owned();
+    let found = self.run(move |vault| vault.load_token(kind, &server)).await?;
+    Ok(found.map(|token| SecretString::from(token.as_str().to_owned())))
+  }
+
+  async fn save_token(&self, kind: TokenKind, server: &str, token: SecretString) -> Result<(), AuthError> {
+    let server = server.to_owned();
     self
-      .run(account, move |entry| entry.set_password(secret.expose_secret()))
+      .run(move |vault| vault.save_token(kind, &server, token.expose_secret()))
       .await
   }
 
-  async fn clear_entry(&self, account: String) -> Result<(), AuthError> {
-    self
-      .run(account, |entry| match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(error),
-      })
-      .await
+  async fn clear_token(&self, kind: TokenKind, server: &str) -> Result<(), AuthError> {
+    let server = server.to_owned();
+    self.run(move |vault| vault.clear_token(kind, &server)).await
   }
 }
 
-impl TokenStore for KeyringStore {
+impl TokenStore for VaultStore {
   async fn load(&self, server: &str) -> Result<Option<SecretString>, AuthError> {
-    self.load_entry(account(ACCOUNT, server)).await
+    self.load_token(TokenKind::RefreshToken, server).await
   }
 
   async fn save(&self, server: &str, refresh_token: &str) -> Result<(), AuthError> {
     let token = SecretString::from(refresh_token.to_owned());
-    self.save_entry(account(ACCOUNT, server), token).await
+    self.save_token(TokenKind::RefreshToken, server, token).await
   }
 
   async fn clear(&self, server: &str) -> Result<(), AuthError> {
-    self.clear_entry(account(ACCOUNT, server)).await
+    self.clear_token(TokenKind::RefreshToken, server).await
   }
 
   async fn load_local_session(&self, server: &str) -> Result<Option<SecretString>, AuthError> {
-    self.load_entry(account(LOCAL_SESSION_ACCOUNT, server)).await
+    self.load_token(TokenKind::LocalSession, server).await
   }
 
   async fn save_local_session(&self, server: &str, session: &SecretString) -> Result<(), AuthError> {
     let session = SecretString::from(session.expose_secret().to_owned());
-    self
-      .save_entry(account(LOCAL_SESSION_ACCOUNT, server), session)
-      .await
+    self.save_token(TokenKind::LocalSession, server, session).await
   }
 
   async fn clear_local_session(&self, server: &str) -> Result<(), AuthError> {
-    self.clear_entry(account(LOCAL_SESSION_ACCOUNT, server)).await
+    self.clear_token(TokenKind::LocalSession, server).await
+  }
+
+  async fn purge_after_sign_out(&self, token_key: &str, server: &str) -> Result<(), AuthError> {
+    let (token_key, server) = (token_key.to_owned(), server.to_owned());
+    self
+      .run(move |vault| {
+        vault.purge_after_sign_out(&[
+          (TokenKind::RefreshToken, &token_key),
+          (TokenKind::LocalSession, &server),
+        ])
+      })
+      .await
   }
 }
 
-/// The keyring account of one kind of secret of one server.
-fn account(kind: &str, server: &str) -> String {
-  format!("{kind}@{server}")
+/// The in-memory store's name of a local session, apart from the server's refresh token. The
+/// session itself is its token and expiry as JSON.
+#[cfg(test)]
+fn local_session_name(server: &str) -> String {
+  format!("local-session@{server}")
 }
 
 /// In-memory store for tests.
@@ -151,17 +159,17 @@ impl TokenStore for MemoryStore {
   }
 
   async fn load_local_session(&self, server: &str) -> Result<Option<SecretString>, AuthError> {
-    self.load(&account(LOCAL_SESSION_ACCOUNT, server)).await
+    self.load(&local_session_name(server)).await
   }
 
   async fn save_local_session(&self, server: &str, session: &SecretString) -> Result<(), AuthError> {
     self
-      .save(&account(LOCAL_SESSION_ACCOUNT, server), session.expose_secret())
+      .save(&local_session_name(server), session.expose_secret())
       .await
   }
 
   async fn clear_local_session(&self, server: &str) -> Result<(), AuthError> {
-    self.clear(&account(LOCAL_SESSION_ACCOUNT, server)).await
+    self.clear(&local_session_name(server)).await
   }
 }
 
@@ -207,9 +215,5 @@ mod tests {
     assert!(store.load_local_session(SERVER_B).await.expect("load").is_none());
     store.clear_local_session(SERVER_A).await.expect("clear");
     assert!(store.load_local_session(SERVER_A).await.expect("load").is_none());
-    assert_eq!(
-      account(LOCAL_SESSION_ACCOUNT, SERVER_A),
-      "local-session@https://a.example.com"
-    );
   }
 }

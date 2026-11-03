@@ -52,10 +52,11 @@ use tauri::webview::NewWindowResponse;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use teamcraft_client_api::remote::CORE_FAILED_EVENT;
+use teamcraft_core::store::{OsKeystore, SecretVault};
 use tracing_subscriber::EnvFilter;
 
 use crate::auth::servers::{ManagedServer, ServerDirectory, ServerState};
-use crate::auth::{AuthService, DesktopConfig, KeyringStore};
+use crate::auth::{AuthService, DesktopConfig, VaultStore};
 use crate::calls::{BUNDLED_MODEL, CALL_CHANGED_EVENT, CallHost, FailureReporter, MediaFiles};
 use crate::core::TokenCache;
 use crate::core::commands::CoreHost;
@@ -74,7 +75,11 @@ fn main() -> anyhow::Result<()> {
     .init();
 
   // No server yet: the account's server is set in `setup`, once the data directory is known.
-  let service = Arc::new(AuthService::new(None, KeyringStore).context("could not set up sign-in")?);
+  // The one read of the OS keychain per start happens when something first asks it for a secret
+  // (e2ee.md §9); the file's folder is set in `setup`.
+  let vault = Arc::new(SecretVault::new(Arc::new(OsKeystore)));
+  let service =
+    Arc::new(AuthService::new(None, VaultStore::new(vault.clone())).context("could not set up sign-in")?);
   // The core reads the session's current token on every request; the loop below refreshes it.
   let tokens = TokenCache::live(service.clone());
   let refresh_now = reconnect::RefreshNow::default();
@@ -123,6 +128,8 @@ fn main() -> anyhow::Result<()> {
     .manage(CoreHost::new(tokens))
     .manage(Arc::new(DroppedFilesState::default()))
     .setup(move |app| {
+      vault.set_directory(&core::commands::base_dir(app.handle())?);
+      app.manage(vault);
       let servers = Arc::new(ServerState::new(
         ServerDirectory::load(&core::commands::base_dir(app.handle())?),
         ManagedServer::load(),
@@ -241,6 +248,7 @@ fn main() -> anyhow::Result<()> {
       auth::commands::server_confirm,
       auth::commands::server_forget,
       core::commands::core_start,
+      core::commands::core_retry_keychain,
       core::commands::core_status,
       core::commands::core_connection,
       core::commands::core_network_changed,

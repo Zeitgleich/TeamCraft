@@ -433,7 +433,14 @@ impl SessionControl {
   pub fn retry_core(&self) {
     let control = *self;
     control.state.set(SessionState::SigningIn);
-    spawn_local(async move { control.load_account().await });
+    spawn_local(async move {
+      if tauri::is_available()
+        && let Err(error) = remote_backend::retry_keychain().await
+      {
+        tracing::debug!(%error, "could not allow asking the keychain again");
+      }
+      control.load_account().await;
+    });
   }
 
   /// The user confirmed setting this device up again after its local data turned out unreadable:

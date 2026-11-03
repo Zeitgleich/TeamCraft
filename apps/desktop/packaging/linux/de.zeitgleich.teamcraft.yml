@@ -35,7 +35,7 @@ finish-args:
   # our capture stream (the ScreenCast portal has no audio). Without it calls use the PulseAudio
   # socket and the "share sound" option is unavailable.
   - --filesystem=xdg-run/pipewire-0
-  # Refresh token in the desktop's keyring (GNOME Keyring, KWallet/ksecretd).
+  # Keys in the desktop's keyring (GNOME Keyring, KWallet/ksecretd), read once per start.
   - --talk-name=org.freedesktop.secrets
   # Mention and direct-message notifications.
   - --talk-name=org.freedesktop.Notifications

@@ -30,8 +30,7 @@ use teamcraft_core::connection::{
 use teamcraft_core::downloads::Downloads;
 use teamcraft_core::records;
 use teamcraft_core::store::{
-  DatabaseKeySource, KeptBackupKey, KeySourceError, KeyringKeySource, SqlCipherStore, StoreError, StoreLock,
-  TrackedStore,
+  DatabaseKeySource, KeySourceError, SecretVault, SqlCipherStore, StoreError, StoreLock, TrackedStore,
 };
 use teamcraft_core::typing::TypingAnnouncer;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
@@ -247,14 +246,10 @@ fn waiting_for_refresh() -> ApiError {
   ApiError::Network("waiting for a fresh access token".to_owned())
 }
 
-/// Keychain service of the account's backup key (e2ee.md §6.5.6); the account name is the
-/// database key's.
-const BACKUP_KEY_SERVICE: &str = "de.zeitgleich.teamcraft.backup-key";
-
-/// A database key that comes from the OS keystore, or a fixed one in tests.
+/// A database key that comes from the sealed file of local secrets, or a fixed one in tests.
 pub enum KeyChoice {
-  Keyring {
-    service: String,
+  Vault {
+    vault: Arc<SecretVault>,
     account: String,
   },
   /// A fixed key (tests).
@@ -265,9 +260,9 @@ pub enum KeyChoice {
 impl KeyChoice {
   /// Where the account's backup key is kept next to the database key (e2ee.md §6.5.6); tests keep
   /// none, so they never touch the real keychain.
-  fn kept_backup_key(&self) -> Option<KeptBackupKey> {
+  fn vault(&self) -> Option<(&SecretVault, &str)> {
     match self {
-      Self::Keyring { account, .. } => Some(KeptBackupKey::new(BACKUP_KEY_SERVICE, account.clone())),
+      Self::Vault { vault, account } => Some((vault, account)),
       #[cfg(test)]
       Self::Fixed(_) => None,
     }
@@ -277,7 +272,7 @@ impl KeyChoice {
 impl DatabaseKeySource for KeyChoice {
   fn database_key(&self) -> Result<SymmetricKey, KeySourceError> {
     match self {
-      Self::Keyring { service, account } => KeyringKeySource::new(service, account).database_key(),
+      Self::Vault { vault, account } => vault.database_key(account),
       #[cfg(test)]
       Self::Fixed(bytes) => SymmetricKey::from_slice(bytes).ok_or(KeySourceError::InvalidKey(bytes.len())),
     }
@@ -1297,32 +1292,34 @@ impl Core {
     status
   }
 
-  /// Keeps the account's backup key in the OS keychain (e2ee.md §6.5.6), on every start when it is
-  /// missing or differs. Without a keychain the recovery kit stays the way back, so a failure is
-  /// only logged.
+  /// Keeps the account's backup key (e2ee.md §6.5.6). A start with the same key touches nothing;
+  /// without a keychain the recovery kit stays the way back, so a failure is only logged.
   fn keep_backup_key(&mut self, client: &Client<Api, Store>) {
-    let Some(kept) = self.key.kept_backup_key() else {
+    let Some((vault, account)) = self.key.vault() else {
       return;
     };
-    match kept.keep(&client.backup_secret()) {
+    match vault.keep_backup_key(account, &client.backup_secret()) {
       Ok(()) => self.maybe_has_kept_backup_key = Some(true),
       Err(error) => tracing::warn!(%error, "could not keep the backup key in the OS keychain"),
     }
   }
 
-  /// Whether the OS keychain holds a backup key for this account; read once per start, since the
-  /// setup screen asks for the status every second.
+  /// Whether a backup key is kept for this account; read once per start, since the setup screen
+  /// asks for the status every second.
   fn has_kept_backup_key(&mut self) -> bool {
     if let Some(known) = self.maybe_has_kept_backup_key {
       return known;
     }
-    let has_key = self.key.kept_backup_key().is_some_and(|kept| match kept.load() {
-      Ok(maybe_key) => maybe_key.is_some(),
-      Err(error) => {
-        tracing::info!(%error, "no backup key kept in the OS keychain");
-        false
-      },
-    });
+    let has_key = self
+      .key
+      .vault()
+      .is_some_and(|(vault, account)| match vault.kept_backup_key(account) {
+        Ok(maybe_key) => maybe_key.is_some(),
+        Err(error) => {
+          tracing::info!(%error, "no backup key kept in the OS keychain");
+          false
+        },
+      });
     self.maybe_has_kept_backup_key = Some(has_key);
     has_key
   }
@@ -1335,11 +1332,11 @@ impl Core {
       },
       EnrollSecret::Passphrase { passphrase } => Ok(EnrollmentSecret::passphrase(passphrase)),
       EnrollSecret::KeptOnDevice => {
-        let kept = self
+        let (vault, account) = self
           .key
-          .kept_backup_key()
+          .vault()
           .ok_or("this computer keeps no key for the account")?;
-        match kept.load() {
+        match vault.kept_backup_key(account) {
           Ok(Some(backup_secret)) => Ok(EnrollmentSecret::KeptBackupKey(backup_secret)),
           Ok(None) => Err("this computer keeps no key for the account".to_owned()),
           Err(error) => Err(error.to_string()),

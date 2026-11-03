@@ -382,7 +382,7 @@ async fn invoke(bridge: &Arc<Bridge>, body: &str) -> Value {
       Ok(Value::Null)
     },
     // The scripted calls measure no microphone.
-    "call_watch_level" | "call_unwatch_level" => Ok(Value::Null),
+    "call_watch_level" | "call_unwatch_level" | "core_retry_keychain" => Ok(Value::Null),
     "core_start" | "core_status" => {
       Ok(serde_json::to_value(bridge.alice.runtime.status().await).expect("status"))
     },

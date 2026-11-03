@@ -24,6 +24,8 @@ mod sealed_catalog;
 mod sealed_index;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
 mod sealed_sqlite;
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+mod secret_vault;
 #[cfg(all(
   any(feature = "sqlcipher", feature = "sealed-sqlite"),
   not(target_arch = "wasm32")
@@ -51,8 +53,6 @@ pub use browser::{
   own_sound_delete, own_sound_get, own_sound_put, vault_delete, vault_get, vault_put,
 };
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
-#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
-pub use key_source::{KeptBackupKey, KeyringKeySource};
 #[cfg(not(target_arch = "wasm32"))]
 pub use key_source::{KeystoreThreadError, run_outside_runtime};
 #[cfg(not(target_arch = "wasm32"))]
@@ -61,6 +61,8 @@ pub use memory::MemoryStore;
 pub use sealed::SealedStoreLimits;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
 pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))]
+pub use secret_vault::{Keystore, OsKeystore, SecretVault, TokenKind};
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 pub use sqlite::SqlCipherStore;
 pub use tracked::{RemovedRendition, StoreChanges, TrackedStore};

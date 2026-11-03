@@ -22,6 +22,7 @@ const COMMANDS: &[&str] = &[
   "server_confirm",
   "server_forget",
   "core_start",
+  "core_retry_keychain",
   "core_status",
   "core_connection",
   "core_network_changed",
