@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-watch-screen"
+description = "Enables the call_watch_screen command without any pre-configured scope."
+commands.allow = ["call_watch_screen"]
+
+[[permission]]
+identifier = "deny-call-watch-screen"
+description = "Denies the call_watch_screen command without any pre-configured scope."
+commands.deny = ["call_watch_screen"]

@@ -12,6 +12,7 @@
 
 mod effects;
 mod ringtone;
+mod screen_preview;
 
 use std::cell::{Cell, RefCell};
 use std::pin::pin;
@@ -62,6 +63,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{HtmlCanvasElement, HtmlVideoElement, MediaStream, MediaStreamTrack};
+
+use crate::screen_preview::ScreenPreview;
 
 /// Simulcast layers the camera sends (as on desktop).
 const MAX_SIMULCAST_LAYERS: u8 = 3;
@@ -135,6 +138,8 @@ struct State {
   maybe_local_camera: Option<MediaStream>,
   /// The self view: one `<video>` for the whole session, playing whichever camera is on.
   maybe_camera_view: Option<HtmlVideoElement>,
+  /// What this device shares, for the preview next to the stage (#1175).
+  screen_preview: ScreenPreview,
   /// What the pre-join screen asked to check (#442); an input starts when asked for, not again
   /// with every request, so a refused one isn't asked for over and over.
   preview: CallPreview,
@@ -175,11 +180,6 @@ enum Control {
   /// Another effect for a camera that goes through the effects.
   SetEffect(MediaEffect),
   StopCamera,
-  Screen {
-    profile: ScreenProfile,
-    has_sound: bool,
-    done: ScreenDone,
-  },
   /// A screen the user already chose in a picker the page opened in the click (issue #930).
   PickedScreen {
     stream: MediaStream,
@@ -404,6 +404,27 @@ pub fn camera_view() -> Option<HtmlVideoElement> {
   let video = state.maybe_camera_view.clone()?;
   video.set_src_object(state.shown_camera());
   Some(video)
+}
+
+/// The `<video>` playing what this device shares, for the preview next to the stage (#1175), until
+/// [`unwatch_screen`]; nothing while it shares nothing.
+#[wasm_bindgen]
+pub fn screen_view() -> Option<HtmlVideoElement> {
+  host().ok()?.state.borrow_mut().screen_preview.show()
+}
+
+/// The preview is out of sight (scrolled away, collapsed, the page hidden, the share over).
+#[wasm_bindgen]
+pub fn unwatch_screen() {
+  if let Ok(host) = host() {
+    host.state.borrow_mut().screen_preview.hide();
+  }
+}
+
+/// Whether the preview plays a capture that delivers.
+#[wasm_bindgen]
+pub fn screen_view_has_picture() -> bool {
+  host().is_ok_and(|host| host.state.borrow().screen_preview.has_picture())
 }
 
 /// The microphone's level, from 0 (silence, or nothing measured) to 1: the pre-join check's, or
@@ -647,6 +668,7 @@ impl Host {
       },
       CallAction::StopScreenShare => {
         self.control(Control::StopScreen);
+        self.state.borrow_mut().screen_preview.end_stream();
         self.update_active(|active| {
           active.is_sharing_screen = false;
           active.screen_sound = ScreenShareSound::Off;
@@ -1178,14 +1200,11 @@ impl Host {
   ) -> Result<(), ActionFailure> {
     let result = match maybe_picked {
       Some(picked) => self.share_picked_screen(picked, profile, has_sound).await,
-      None => {
-        self
-          .ask_screen(|done| Control::Screen {
-            profile,
-            has_sound,
-            done,
-          })
-          .await
+      // Without a call, no picker.
+      None if self.maybe_media.borrow().is_none() => Ok(None),
+      None => match call_web::request_screen(&profile, has_sound) {
+        Ok(picked) => self.share_picked_screen(picked, profile, has_sound).await,
+        Err(error) => Err(error),
       },
     };
     let is_sound_sent = match result {
@@ -1200,25 +1219,6 @@ impl Host {
       active.screen_sound = started_screen_sound(has_sound, is_sound_sent);
     });
     Ok(())
-  }
-
-  /// Sends a screen control to the call task and waits for whether the share's sound is sent;
-  /// `None` without a call.
-  async fn ask_screen(
-    &self,
-    control: impl FnOnce(ScreenDone) -> Control,
-  ) -> Result<Option<bool>, WebCallError> {
-    let (done, answer) = oneshot::channel();
-    let is_sent = self
-      .maybe_media
-      .borrow()
-      .as_ref()
-      .is_some_and(|media| media.controls.unbounded_send(control(done)).is_ok());
-    if !is_sent {
-      return Ok(None);
-    }
-    // No answer: the call ended meanwhile.
-    answer.await.map_or(Ok(None), |result| result.map(Some))
   }
 
   /// Waits for the user's choice in a picker the page opened and sends that screen. The stream is
@@ -1261,7 +1261,10 @@ impl Host {
       Err(WebCallError::Ended)
     };
     match result {
-      Ok(is_sound_sent) => Ok(Some(is_sound_sent)),
+      Ok(is_sound_sent) => {
+        self.state.borrow_mut().screen_preview.set_stream(stream);
+        Ok(Some(is_sound_sent))
+      },
       Err(WebCallError::Ended) => {
         stop_tracks(&stream);
         Ok(None)
@@ -1307,6 +1310,15 @@ impl Host {
     {
       self.on_camera_ended();
     }
+    if let CallEngineEvent::OwnVideoEnded {
+      kind: VideoTrackKind::Screen,
+      ..
+    } = &event
+    {
+      // Its preview goes with it, and with what that held the browser's capture. No failure: from
+      // here, the browser's own "Stop sharing" looks just like a capture that went away.
+      self.state.borrow_mut().screen_preview.end_stream();
+    }
     let is_changed = roster.apply(&mut self.state.borrow_mut().view, event);
     if is_changed {
       self.changed();
@@ -1351,6 +1363,7 @@ impl Host {
       }
       state.view.end_active();
       state.release_camera();
+      state.screen_preview.end_stream();
     }
     if let Err(error) = result {
       tracing::warn!(%error, "the call ended with an error");
@@ -1477,11 +1490,6 @@ async fn apply(call: &WebCall, control: Control) {
     },
     Control::SetEffect(effect) => call.set_background_effect(effect),
     Control::StopCamera => call.stop_camera(),
-    Control::Screen {
-      profile,
-      has_sound,
-      done,
-    } => drop(done.send(call.start_screen_share(&profile, has_sound).await)),
     Control::PickedScreen {
       stream,
       profile,

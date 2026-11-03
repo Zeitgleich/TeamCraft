@@ -138,8 +138,22 @@ html.call-window body {
     flex: 1;
   }
 
+  /* The shared screen first; the people in a strip below it, not a column of full-width tiles
+     that leaves the screen a sliver. */
   .stage-share {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(0, 28%);
+  }
+
+  .stage-share .filmstrip-side {
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: visible;
+  }
+
+  .stage-share .filmstrip-side .tile {
+    height: 100%;
+    width: auto;
   }
 }
 
