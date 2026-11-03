@@ -27,13 +27,6 @@ MEMO_BINDING = re.compile(r"\blet\s+(?:mut\s+)?(\w+)\s*(?::[^=]+)?=\s*Memo::(?:n
 TRACK_CALL = re.compile(r"\b(\w+)\.track\(\)")
 MARKER = "memo-ok:"
 
-# Files with a known bad `track()` whose fix is in flight: relative path -> pull request.
-# #1202 fixes this one; delete the entry once it is merged.
-PENDING_FIX = {
-  "crates/teamcraft-ui/src/components/link_request_prompt.rs": "#1202",
-}
-
-
 STRING_LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
@@ -81,8 +74,6 @@ def main() -> int:
   problems = []
   for path in sorted(base.rglob("*.rs")):
     relative = path.relative_to(root).as_posix()
-    if relative in PENDING_FIX:
-      continue
     for number, name in findings_in(path.read_text(encoding="utf-8")):
       problems.append(
         f"{relative}:{number}: `{name}.track()` on a memo nothing else reads is never computed, "
