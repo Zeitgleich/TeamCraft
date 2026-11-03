@@ -5,23 +5,23 @@
 use serde_json::json;
 use teamcraft_db::StoredSetting;
 use teamcraft_proto::{
-  EmailDigestSettings, IntegrationSettings, LimitSettings, LocalAccountSettings, MailTextSettings,
-  MeetingMailSettings, NotificationLevel, NotificationRuntimeSettings, Permission, RuntimeSettingsKey,
-  RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource,
-  ShareSettings, SignInMethod, SignInPageSettings, Target,
+  DpopPolicy, EmailDigestSettings, IntegrationSettings, LimitSettings, LocalAccountSettings,
+  MailTextSettings, MeetingMailSettings, NotificationLevel, NotificationRuntimeSettings, Permission,
+  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState,
+  ServerRulesSettings, SettingSource, ShareSettings, SignInMethod, SignInPageSettings, Target,
 };
 use tracing::warn;
 
 use super::access::require;
 use super::audit;
 use super::convert::unix_millis;
-use crate::auth::AuthenticatedUser;
+use crate::auth::{AuthenticatedUser, public_origins};
 use crate::error::ApiError;
 use crate::state::{AppState, Settings};
 
 /// Prefix of the rows in `server_settings`.
 const NAME_PREFIX: &str = "settings.";
-const ALL_KEYS: [RuntimeSettingsKey; 10] = [
+const ALL_KEYS: [RuntimeSettingsKey; 11] = [
   RuntimeSettingsKey::ServerRules,
   RuntimeSettingsKey::Notifications,
   RuntimeSettingsKey::EmailDigest,
@@ -32,6 +32,7 @@ const ALL_KEYS: [RuntimeSettingsKey; 10] = [
   RuntimeSettingsKey::SignInPage,
   RuntimeSettingsKey::MailTexts,
   RuntimeSettingsKey::MeetingMail,
+  RuntimeSettingsKey::TokenBinding,
 ];
 const MAX_TEXT_CHARS: usize = 5000;
 /// Longest help text of the sign-in page, per language.
@@ -43,6 +44,11 @@ const MAX_INTERVAL_SECS: u64 = 86_400;
 const MAX_REMOVAL_DAYS: u64 = 3_650;
 /// Longest time an admin's request to join a private channel may stay open (a quarter).
 const MAX_ADMIN_JOIN_REQUEST_DAYS: u64 = 90;
+
+/// Fewest proofs remembered: fewer would turn normal use into 503s.
+const MIN_REPLAY_CACHE_ENTRIES: u64 = 1000;
+/// Most proofs remembered: some 1 GiB, far above what the rate limits let through.
+const MAX_REPLAY_CACHE_ENTRIES: u64 = 10_000_000;
 
 /// Puts the stored groups on top of the configuration; at startup and after every change.
 pub async fn load(state: &AppState) -> Result<(), ApiError> {
@@ -72,6 +78,7 @@ pub async fn put_settings(
 ) -> Result<RuntimeSettingsResponse, ApiError> {
   require(state, caller, Permission::ManageWorkspace, &Target::Instance)?;
   validate(&section)?;
+  check_token_binding_is_safe(state, caller, &section)?;
   let key = section.key();
   let value = serde_json::to_string(&section).map_err(|error| ApiError::Internal(error.to_string()))?;
   {
@@ -170,6 +177,7 @@ fn row_name(key: &RuntimeSettingsKey) -> String {
 /// Puts one group's values into the settings.
 fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
   match section {
+    RuntimeSettingsSection::TokenBinding(values) => settings.token_binding = values.clone(),
     RuntimeSettingsSection::ServerRules(rules) => {
       settings.policy.invites_require_verified_email = rules.invites_require_verified_email;
       settings.policy.default_spaces.clone_from(&rules.default_spaces);
@@ -278,6 +286,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
   let local = &settings.local_accounts;
   let texts = &settings.meeting_mail.texts;
   RuntimeSettingsResponse {
+    token_binding: settings.token_binding.clone(),
     server_rules: ServerRulesSettings {
       invites_require_verified_email: settings.policy.invites_require_verified_email,
       default_spaces: settings.policy.default_spaces.clone(),
@@ -358,9 +367,62 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
   }
 }
 
+/// `required` refuses every unbound token of the identity provider, also the admin's. Whoever turns
+/// it on has to show that binding works from where they sit, and the server has to know the origins
+/// proofs name, or the change locks everybody out, the admin who could undo it included.
+fn check_token_binding_is_safe(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  section: &RuntimeSettingsSection,
+) -> Result<(), ApiError> {
+  let RuntimeSettingsSection::TokenBinding(values) = section else {
+    return Ok(());
+  };
+  if values.dpop_policy != DpopPolicy::Required {
+    return Ok(());
+  }
+  if public_origins(state).is_empty() {
+    return Err(ApiError::InvalidRequest(
+      "the server does not know its public origin: set security.public_origins".into(),
+    ));
+  }
+  if !caller.has_verified_token_binding {
+    return Err(ApiError::InvalidRequest(
+      "dpop_policy required needs a client that signed in with a bound token".into(),
+    ));
+  }
+  Ok(())
+}
+
 /// Rejects values that would break the server or its users; the bounds are generous on purpose.
 fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
   match section {
+    RuntimeSettingsSection::TokenBinding(values) => {
+      if matches!(values.dpop_policy, DpopPolicy::Unknown(_)) {
+        return Err(ApiError::InvalidRequest(
+          "dpop_policy must be off, optional or required".into(),
+        ));
+      }
+      check_range(
+        "proof_max_age_secs",
+        u64::from(values.proof_max_age_secs),
+        1,
+        3600,
+      )?;
+      check_range("proof_leeway_secs", u64::from(values.proof_leeway_secs), 0, 3600)?;
+      check_range(
+        "nonce_rotation_secs",
+        u64::from(values.nonce_rotation_secs),
+        1,
+        MAX_INTERVAL_SECS,
+      )?;
+      check_range(
+        "replay_cache_max_entries",
+        u64::from(values.replay_cache_max_entries),
+        MIN_REPLAY_CACHE_ENTRIES,
+        MAX_REPLAY_CACHE_ENTRIES,
+      )
+    },
     RuntimeSettingsSection::ServerRules(rules) => {
       check_count("default_spaces", rules.default_spaces.len())?;
       check_count("default_channels", rules.default_channels.len())?;
@@ -644,6 +706,7 @@ mod tests {
       RuntimeSettingsSection::SignInPage(original.sign_in_page.clone()),
       RuntimeSettingsSection::MailTexts(original.mail_texts.clone()),
       RuntimeSettingsSection::MeetingMail(original.meeting_mail.clone()),
+      RuntimeSettingsSection::TokenBinding(original.token_binding.clone()),
     ];
     assert_eq!(sections.len(), ALL_KEYS.len());
     let mut applied = Settings::default();

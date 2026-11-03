@@ -28,7 +28,7 @@ use super::audit::{self, Target as AuditTarget};
 use super::convert::{presented_name, unix_millis, user_summary};
 use super::invites::{check_channels, check_guest_domain, future_expiry, normalize_email};
 use super::spaces::require_member_management;
-use crate::auth::{AuthError, AuthenticatedUser, TokenIdentity};
+use crate::auth::{AuthError, AuthenticatedUser, TokenBinding, TokenIdentity};
 use crate::config::LocalAccountsConfig;
 use crate::error::ApiError;
 use crate::meetings::ical::Method;
@@ -582,6 +582,7 @@ pub async fn validate_session_token(
     maybe_acr: None,
     is_exempt_from_session_policy: true,
     maybe_organization: None,
+    token_binding: TokenBinding::ServerIssued,
   }))
 }
 

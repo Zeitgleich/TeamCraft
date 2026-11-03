@@ -3,14 +3,24 @@ use teamcraft_proto::{GatewayEvent, Role, UserKind};
 use tracing::info;
 
 use super::bots;
-use crate::auth::{AuthError, AuthenticatedUser, TokenIdentity};
+use crate::auth::{AuthError, AuthenticatedUser, PresentedToken, TokenBinding, TokenIdentity, enforce_dpop};
 use crate::error::ApiError;
 use crate::meetings::guest;
 use crate::state::AppState;
 
-/// Validates a bearer token: meeting guests carry tokens signed by this server, everybody else a
-/// token of the identity provider.
-pub async fn validate_token(state: &AppState, token: &str) -> Result<TokenIdentity, AuthError> {
+/// Validates the token a request presents and what DPoP asks of it (e2ee.md §3.1.2).
+pub async fn validate_presented_token(
+  state: &AppState,
+  presented: &PresentedToken<'_>,
+) -> Result<TokenIdentity, AuthError> {
+  let mut identity = validate_token(state, presented.token).await?;
+  enforce_dpop(state, presented, &mut identity.token_binding)?;
+  Ok(identity)
+}
+
+/// Validates a token: meeting guests carry tokens signed by this server, everybody else a token of
+/// the identity provider.
+async fn validate_token(state: &AppState, token: &str) -> Result<TokenIdentity, AuthError> {
   if token.starts_with(bots::TOKEN_PREFIX) {
     let bot = bots::find_by_token(state, token)
       .await
@@ -50,6 +60,7 @@ fn bot_identity(bot: &teamcraft_db::StoredBot) -> TokenIdentity {
     maybe_acr: None,
     is_exempt_from_session_policy: true,
     maybe_organization: None,
+    token_binding: TokenBinding::ServerIssued,
   }
 }
 
@@ -71,6 +82,7 @@ pub fn guest_identity(invite_subject: String, display_name: String, issued_at: i
     maybe_acr: None,
     is_exempt_from_session_policy: true,
     maybe_organization: None,
+    token_binding: TokenBinding::ServerIssued,
   }
 }
 
@@ -127,6 +139,7 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
     user,
     role: identity.role,
     maybe_oidc_session: identity.maybe_session_id,
+    has_verified_token_binding: identity.token_binding.is_verified(),
   })
 }
 

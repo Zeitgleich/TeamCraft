@@ -10,8 +10,8 @@ use teamcraft_proto::{
   MailTextSettings, MeetingMailSettings, NotificationRuntimeSettings, RuntimeSettingsKey,
   RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState, SecretUpdate, ServedHostname,
   ServerRulesSettings, SettingSource, SettingsTestResponse, ShareSettings, SignInMethod, SignInPageSettings,
-  SmtpSecurityMode, SmtpSettings, UnixMillis, UpdateBrandRequest, UpdateCalendarSettingsRequest,
-  UpdateMailSettingsRequest,
+  SmtpSecurityMode, SmtpSettings, TokenBindingSettings, UnixMillis, UpdateBrandRequest,
+  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest,
 };
 
 use crate::admin::SettingsTestKind;
@@ -219,6 +219,7 @@ impl SettingsMock {
       RuntimeSettingsSection::SignInPage(values) => self.runtime.sign_in_page = values,
       RuntimeSettingsSection::MailTexts(values) => self.runtime.mail_texts = values,
       RuntimeSettingsSection::MeetingMail(values) => self.runtime.meeting_mail = values,
+      RuntimeSettingsSection::TokenBinding(values) => self.runtime.token_binding = values,
       // A section a newer wire version added; the mock has nothing to store.
       #[allow(unreachable_patterns)]
       _ => return,
@@ -239,6 +240,7 @@ impl SettingsMock {
       RuntimeSettingsKey::SignInPage => self.runtime.sign_in_page = defaults.sign_in_page,
       RuntimeSettingsKey::MailTexts => self.runtime.mail_texts = defaults.mail_texts,
       RuntimeSettingsKey::MeetingMail => self.runtime.meeting_mail = defaults.meeting_mail,
+      RuntimeSettingsKey::TokenBinding => self.runtime.token_binding = defaults.token_binding,
       _ => return,
     }
     self.set_source(key, SettingSource::Config);
@@ -320,6 +322,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
   );
   let (activation_subject, activation_body) = texts("Activate your account", "Activate your account: {url}");
   RuntimeSettingsResponse {
+    token_binding: TokenBindingSettings::default(),
     server_rules: ServerRulesSettings {
       invites_require_verified_email: true,
       default_spaces: Vec::new(),
@@ -406,6 +409,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
       RuntimeSettingsKey::LocalAccounts,
       RuntimeSettingsKey::MailTexts,
       RuntimeSettingsKey::MeetingMail,
+      RuntimeSettingsKey::TokenBinding,
     ]
     .into_iter()
     .map(|key| RuntimeSettingsState {

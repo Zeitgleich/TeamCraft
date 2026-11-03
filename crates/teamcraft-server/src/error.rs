@@ -5,7 +5,7 @@ use teamcraft_db::DbError;
 use teamcraft_proto::{DependencyName, ErrorBody, ErrorCode};
 use tracing::error;
 
-use crate::auth::AuthError;
+use crate::auth::{AuthError, DpopRefusal};
 use crate::dependencies::CircuitOpen;
 
 /// `Retry-After` of a 503 for a backend that is not reachable (issue #743): long enough that
@@ -23,6 +23,11 @@ const STORAGE_RETRY_AFTER_SECS: u64 = 30;
 /// breaker around the request (`outage_gate.rs`).
 #[derive(Debug, Clone, Copy)]
 pub struct DatabaseOutage;
+
+/// In a response's extensions: the 401 only asks for a proof with the current nonce. Everybody
+/// meets it after a restart, so it doesn't count as a failed authentication (`security.rs`).
+#[derive(Debug, Clone, Copy)]
+pub struct DpopNonceChallenge;
 
 /// Every error a handler can return; maps to a status code and the stable `error_code` body.
 #[derive(Debug, thiserror::Error)]
@@ -314,6 +319,11 @@ impl ApiError {
     }
   }
 
+  /// See [`DpopNonceChallenge`].
+  pub fn is_dpop_nonce_challenge(&self) -> bool {
+    matches!(self, Self::Auth(AuthError::Dpop(DpopRefusal::UseNonce)))
+  }
+
   pub fn status(&self) -> StatusCode {
     match self {
       Self::Auth(
@@ -322,7 +332,8 @@ impl ApiError {
         | AuthError::Expired(_)
         | AuthError::SessionEnded
         | AuthError::SessionTimedOut
-        | AuthError::AccountDeleted,
+        | AuthError::AccountDeleted
+        | AuthError::Dpop(_),
       ) => StatusCode::UNAUTHORIZED,
       Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated)
       | Self::Forbidden(_)
@@ -379,6 +390,7 @@ impl ApiError {
       Self::ImportNotAllowed => ErrorCode::ImportNotAllowed,
       Self::ImportWindowFull => ErrorCode::ImportWindowFull,
       Self::Auth(AuthError::KeysUnavailable(_)) => ErrorCode::Unavailable,
+      Self::Auth(AuthError::Dpop(refusal)) => refusal.error_code(),
       Self::NotFound { code, .. } => code.clone(),
       Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
       Self::MfaRequired => ErrorCode::MfaRequired,
@@ -481,9 +493,14 @@ impl IntoResponse for ApiError {
       response.extensions_mut().insert(DatabaseOutage);
     }
     if self.status() == StatusCode::UNAUTHORIZED {
-      response
-        .headers_mut()
-        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+      let challenge = match &self {
+        Self::Auth(AuthError::Dpop(refusal)) => refusal.challenge(),
+        _ => HeaderValue::from_static("Bearer"),
+      };
+      response.headers_mut().insert(header::WWW_AUTHENTICATE, challenge);
+    }
+    if self.is_dpop_nonce_challenge() {
+      response.extensions_mut().insert(DpopNonceChallenge);
     }
     response
   }

@@ -66,6 +66,21 @@ wire_enum! {
     SignInPage => "sign_in_page",
     MailTexts => "mail_texts",
     MeetingMail => "meeting_mail",
+    TokenBinding => "token_binding",
+  }
+}
+
+wire_enum! {
+  /// Whether access tokens must be bound to the device's key (DPoP, RFC 9449; e2ee.md §3.1.2).
+  pub enum DpopPolicy {
+    /// Nothing is checked, bound tokens count as bearer tokens: the way back if proofs fail for
+    /// everybody.
+    Off => "off",
+    /// Proofs that are sent are checked and bound tokens need one; unbound tokens still work, so
+    /// clients without DPoP keep working. The default.
+    Optional => "optional",
+    /// Tokens of the identity provider must be bound. Closes token relay by a look-alike server.
+    Required => "required",
   }
 }
 
@@ -316,6 +331,9 @@ pub struct RuntimeSettingsResponse {
   pub sign_in_page: SignInPageSettings,
   pub mail_texts: MailTextSettings,
   pub meeting_mail: MeetingMailSettings,
+  /// Absent from older servers: the defaults, which is what they did not check either way.
+  #[serde(default)]
+  pub token_binding: TokenBindingSettings,
   /// One entry per group.
   pub sources: Vec<RuntimeSettingsState>,
 }
@@ -342,6 +360,46 @@ pub enum RuntimeSettingsSection {
   SignInPage(SignInPageSettings),
   MailTexts(MailTextSettings),
   MeetingMail(MeetingMailSettings),
+  TokenBinding(TokenBindingSettings),
+}
+
+/// Binding access tokens to devices with DPoP (e2ee.md §3.1.2, operations.md "Binding tokens to
+/// devices"). The server's public origins are deployment facts, so they stay in the configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct TokenBindingSettings {
+  pub dpop_policy: DpopPolicy,
+  /// How old a proof may be by the server's clock.
+  pub proof_max_age_secs: u32,
+  /// How far a client's clock may be off, on both ends of a proof's time window.
+  pub proof_leeway_secs: u32,
+  /// How often the server's nonce changes; the previous one stays good for as long.
+  pub nonce_rotation_secs: u32,
+  /// Most proofs remembered to refuse replays. When it is full and none has expired, requests with
+  /// a proof get 503, because accepting them could let a replay through.
+  pub replay_cache_max_entries: u32,
+}
+
+/// Default of [`TokenBindingSettings::proof_max_age_secs`]: a proof is made for one request.
+pub const DEFAULT_DPOP_PROOF_MAX_AGE_SECS: u32 = 60;
+/// Default of [`TokenBindingSettings::proof_leeway_secs`].
+pub const DEFAULT_DPOP_PROOF_LEEWAY_SECS: u32 = 60;
+/// Default of [`TokenBindingSettings::nonce_rotation_secs`]: at most one extra round trip per
+/// client in this time, and a nonce is good for twice as long.
+pub const DEFAULT_DPOP_NONCE_ROTATION_SECS: u32 = 300;
+/// Default of [`TokenBindingSettings::replay_cache_max_entries`]: about 1100 requests per second
+/// with the default window, at some 20 MiB when full.
+pub const DEFAULT_DPOP_REPLAY_CACHE_MAX_ENTRIES: u32 = 200_000;
+
+impl Default for TokenBindingSettings {
+  fn default() -> Self {
+    Self {
+      dpop_policy: DpopPolicy::Optional,
+      proof_max_age_secs: DEFAULT_DPOP_PROOF_MAX_AGE_SECS,
+      proof_leeway_secs: DEFAULT_DPOP_PROOF_LEEWAY_SECS,
+      nonce_rotation_secs: DEFAULT_DPOP_NONCE_ROTATION_SECS,
+      replay_cache_max_entries: DEFAULT_DPOP_REPLAY_CACHE_MAX_ENTRIES,
+    }
+  }
 }
 
 /// Rules only the server enforces (admin.md §6.3). Guest rules and password lengths are part of
@@ -549,6 +607,7 @@ impl RuntimeSettingsSection {
       Self::SignInPage(_) => RuntimeSettingsKey::SignInPage,
       Self::MailTexts(_) => RuntimeSettingsKey::MailTexts,
       Self::MeetingMail(_) => RuntimeSettingsKey::MeetingMail,
+      Self::TokenBinding(_) => RuntimeSettingsKey::TokenBinding,
     }
   }
 }

@@ -148,6 +148,7 @@ the start; only an IPv6 address that fails after another one worked is skipped (
 | `teamcraft_push_retries_pending`               | gauge     |                           | server         | Wake-ups in the retry queue (`push_retries`), from the periodic check             |
 | `teamcraft_dependency_state`                   | gauge     | `dependency`, `state`     | server         | 1 for the state the circuit breaker is in (`[dependencies]`), else 0              |
 | `teamcraft_job_last_success_timestamp_seconds` | gauge     | `job`                     | server         | Unix time of the last success; 0: not since the start, or the job is switched off |
+| `teamcraft_dpop_requests_total`                | counter   | `outcome`                 | server         | Requests with an identity provider's token: `bound`, `unbound`, `refused`         |
 | `teamcraft_sfu_rooms`                          | gauge     |                           | SFU            | Calls running                                                                     |
 | `teamcraft_sfu_participants`                   | gauge     |                           | SFU            | Devices in those calls, reconnecting ones included                                |
 | `teamcraft_bridge_queue_depth`                 | gauge     |                           | bridge         | Submissions waiting for the worker (it holds 4096)                                |
@@ -396,6 +397,67 @@ carried over. Work through it in this order:
   it is filled by the SFU's participant reports once the SFU sends them).
 - Check `docs/` and the release notes for configuration changes before upgrading. The server rejects
   unknown configuration keys at startup, so a stale key fails fast instead of being ignored.
+
+## Binding tokens to devices
+
+DPoP (RFC 9449) ties access tokens to a key on the device, so a stolen token, or one relayed by a
+look-alike server, doesn't work without that key (e2ee.md §3.1.2). The setting is in the admin console:
+Instance settings, "Binding sign-ins to devices". The default `optional` changes nothing for clients
+that don't support it. **The current apps don't send proofs yet**, so stay on `optional` for now.
+
+**What the server has to know: its public origin.** Proofs name the URL the client used, and the
+server compares it with what it was told, never with what a request claims. Host names of `[[brands]]`
+and `[branding].served_hostnames` count as `https://<host>`, and the `public_base_url` values of
+`[meetings]`, `[mail]` and `[shares]` count too. Anything else, such as a port, goes here:
+
+```toml
+[security]
+public_origins = ["https://chat.example.com:8443"]
+```
+
+Behind a reverse proxy nothing else changes. It must pass the `DPoP` request header and the
+`DPoP-Nonce` and `WWW-Authenticate` response headers, as proxies do by default, and must not rewrite
+the path: the path of the request is compared with the path in the proof. Without a known origin
+proofs with unbound tokens are ignored, bound tokens are refused, the server warns once in its log,
+and the console refuses `required`.
+
+**Rollout**
+
+1. Upgrade the server. The policy stays `optional`. Check that the origin above is right.
+2. Ship apps that send proofs to everybody, on all platforms in use.
+3. Let the identity provider bind tokens: allow DPoP on the app's OIDC client, without forcing it yet.
+   Apps that send a proof at the token endpoint then get bound tokens, the others go on as before.
+4. Watch `teamcraft_dpop_requests_total`. `unbound` counts requests that `required` would refuse, and
+   it should reach 0 for longer than your slowest users take to update. `refused` should stay near
+   0. Bots, local accounts and meeting guests aren't counted, and `required` doesn't affect them.
+5. In the console, from an updated app, set the policy to `required`. The server refuses the change
+   from a session that isn't bound, so you can't lock yourself out with an old app. Tokens that are
+   not bound now get 401 `dpop_required`, and an old app has to be updated before it can sign in.
+6. Force binding at the identity provider, so that nobody is issued an unbound token any more.
+   Forcing it before step 2 is finished breaks sign-in for old apps.
+
+**When something goes wrong**
+
+- 401 `invalid_dpop_proof` for everybody, "names another URL" in `WWW-Authenticate`: the public origin
+  is wrong or missing, or the proxy rewrites the path. Set `public_origins` and restart.
+- 401 `invalid_dpop_proof` for one person, "too old or from the future": their device's clock is off
+  by more than the proof's window, and the app doesn't correct for it. Raise `proof_leeway_secs` for
+  the time being.
+- 503 for requests with proofs and "replay cache is full" in the log: more requests than
+  `replay_cache_max_entries` within the window. Raise it (some 100 bytes per entry); entries expire on
+  their own after the window (default 3 minutes).
+- Nobody can get in to change the policy: `off` takes every token of the identity provider without
+  checking it, as before DPoP. On the database, then restart the server:
+
+  ```sql
+  UPDATE server_settings SET value = jsonb_set(value, '{values,dpop_policy}', '"off"')
+   WHERE name = 'settings.token_binding';
+  ```
+
+**A restart** forgets the nonces and the proofs seen, on purpose: proofs from before it are refused
+and each client signs a new one after one extra round trip, also while the policy is `required`. No
+data goes with it. Run one `teamcraft-server` only (see "Upgrades"): a second would refuse the first
+one's nonces.
 
 ## Server address in the apps
 

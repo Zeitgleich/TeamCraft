@@ -57,6 +57,7 @@ impl Gateway {
     transmit(
       &mut socket,
       &GatewayClientMessage::Identify {
+        maybe_dpop_proof: None,
         token: app.token(user),
         device_id: device_id(device),
         activity: DeviceActivity::Active,
@@ -84,6 +85,7 @@ impl Gateway {
     transmit(
       &mut socket,
       &GatewayClientMessage::Resume {
+        maybe_dpop_proof: None,
         token: app.token(user),
         session_id: session_id.to_owned(),
         last_seq,
@@ -230,6 +232,7 @@ mod handshake {
     transmit(
       &mut socket,
       &GatewayClientMessage::Identify {
+        maybe_dpop_proof: None,
         token: "not-a-token".into(),
         device_id: device_id(&s.alice_device),
         activity: DeviceActivity::Active,
@@ -251,6 +254,7 @@ mod handshake {
     transmit(
       &mut socket,
       &GatewayClientMessage::Identify {
+        maybe_dpop_proof: None,
         token: app.token(&s.carol),
         device_id: device_id(&s.alice_device),
         activity: DeviceActivity::Active,

@@ -21,7 +21,7 @@ const MINUTE: u64 = 60;
 type Values = BTreeMap<&'static str, String>;
 
 /// Groups in the order of the page.
-const GROUPS: [&str; 10] = [
+const GROUPS: [&str; 11] = [
   "server_rules",
   "notifications",
   "email_digest",
@@ -32,11 +32,14 @@ const GROUPS: [&str; 10] = [
   "sign_in_page",
   "mail_texts",
   "meeting_mail",
+  "token_binding",
 ];
 /// The sign-in methods an admin can choose, as the form's values: comma-separated, in order.
 const METHOD_CHOICES: [&str; 4] = ["sso,local", "local,sso", "sso", "local"];
 /// The notification levels an instance default can be (`none` would silence everybody).
 const LEVEL_CHOICES: [&str; 2] = ["all", "mentions"];
+/// The policies for binding tokens to devices.
+const DPOP_POLICY_CHOICES: [&str; 3] = ["optional", "required", "off"];
 
 /// How a field is edited and checked.
 #[derive(Clone, Copy)]
@@ -58,6 +61,8 @@ enum Kind {
   Methods,
   /// A notification level, one of [`LEVEL_CHOICES`].
   Level,
+  /// A policy for binding tokens to devices, one of [`DPOP_POLICY_CHOICES`].
+  DpopPolicy,
   /// One language's entry of a text map (`help_text.de`); empty means none.
   MapText,
   /// An https link that may be empty (none).
@@ -127,6 +132,7 @@ const fn map_text(id: &'static str) -> FieldDef {
 }
 
 const SECONDS: &str = "settings-unit-seconds";
+const ENTRIES: &str = "settings-unit-entries";
 const MINUTES: &str = "settings-unit-minutes";
 const HOURS: &str = "settings-unit-hours";
 const DAYS: &str = "settings-unit-days";
@@ -147,6 +153,16 @@ const SERVER_RULES: &[FieldDef] = &[
   optional_amount("remove_deactivated_after_days", 1, 3_650, DAYS),
   amount("admin_join_request_days", 1, 90, DAYS),
   flag("one_to_one_call_ends_for_both"),
+];
+const TOKEN_BINDING: &[FieldDef] = &[
+  FieldDef {
+    id: "dpop_policy",
+    kind: Kind::DpopPolicy,
+  },
+  amount("proof_max_age_secs", 1, 3_600, SECONDS),
+  amount("proof_leeway_secs", 1, 3_600, SECONDS),
+  amount("nonce_rotation_secs", 1, 86_400, SECONDS),
+  amount("replay_cache_max_entries", 1, 10_000_000, ENTRIES),
 ];
 const NOTIFICATIONS: &[FieldDef] = &[
   flag("read_receipts_default"),
@@ -444,6 +460,30 @@ fn FieldRow(
       }
       .into_any()
     },
+    Kind::DpopPolicy => {
+      let i18n = use_i18n();
+      let dom_id = leak_key(dom_id);
+      view! {
+        <div class="field">
+          <label for=dom_id>{move || i18n.t(label)}</label>
+          <select
+            id=dom_id
+            class="input"
+            prop:value=move || value.get()
+            on:change=move |ev| on_input.run(event_target_value(&ev))
+          >
+            {DPOP_POLICY_CHOICES
+              .into_iter()
+              .map(|choice| {
+                let key = dpop_policy_choice_key(choice);
+                view! { <option value=choice selected=move || value.get() == choice>{move || i18n.t(key)}</option> }
+              })
+              .collect_view()}
+          </select>
+        </div>
+      }
+      .into_any()
+    },
     Kind::IdList => view! {
       <TextAreaField
         id=leak_key(dom_id)
@@ -482,6 +522,15 @@ fn level_choice_key(choice: &str) -> &'static str {
   }
 }
 
+/// The i18n key that names a policy for binding tokens to devices.
+fn dpop_policy_choice_key(choice: &str) -> &'static str {
+  match choice {
+    "required" => "settings-dpop-required",
+    "off" => "settings-dpop-off",
+    _ => "settings-dpop-optional",
+  }
+}
+
 /// The i18n key or DOM id of a field, which components take as `&'static str`. The set is the
 /// fixed field tables above, so the few bytes leaked per field row are bounded.
 fn leak_key(text: String) -> &'static str {
@@ -505,6 +554,7 @@ fn fields_of(slug: &str) -> &'static [FieldDef] {
     "sign_in_page" => SIGN_IN_PAGE,
     "mail_texts" => MAIL_TEXTS,
     "meeting_mail" => MEETING_MAIL,
+    "token_binding" => TOKEN_BINDING,
     _ => &[],
   }
 }
@@ -522,6 +572,7 @@ fn group_json(key: &RuntimeSettingsKey, response: &RuntimeSettingsResponse) -> O
     RuntimeSettingsKey::SignInPage => serde_json::to_value(&response.sign_in_page),
     RuntimeSettingsKey::MailTexts => serde_json::to_value(&response.mail_texts),
     RuntimeSettingsKey::MeetingMail => serde_json::to_value(&response.meeting_mail),
+    RuntimeSettingsKey::TokenBinding => serde_json::to_value(&response.token_binding),
     _ => return None,
   };
   value.ok()
@@ -554,7 +605,7 @@ fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
       .as_u64()
       .map(|raw| format_scaled(raw, scale))
       .unwrap_or_default(),
-    Kind::Text | Kind::Area | Kind::MapText | Kind::Link | Kind::Level => {
+    Kind::Text | Kind::Area | Kind::MapText | Kind::Link | Kind::Level | Kind::DpopPolicy => {
       value.as_str().unwrap_or_default().to_owned()
     },
     Kind::Methods => value
@@ -648,6 +699,13 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
         .into_iter()
         .find(|choice| *choice == typed)
         .unwrap_or(LEVEL_CHOICES[0]);
+      Ok(json!(choice))
+    },
+    Kind::DpopPolicy => {
+      let choice = DPOP_POLICY_CHOICES
+        .into_iter()
+        .find(|choice| *choice == typed)
+        .unwrap_or(DPOP_POLICY_CHOICES[0]);
       Ok(json!(choice))
     },
     Kind::IdList => {

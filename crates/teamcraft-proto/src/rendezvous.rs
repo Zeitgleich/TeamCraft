@@ -8,13 +8,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::ErrorBody;
 
+/// The path of the rendezvous relay: what a DPoP proof in `Join` names.
+pub const RENDEZVOUS_PATH: &str = "/api/v1/rendezvous";
+
 /// Control frames sent by a device. The first frame must be `join`.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RendezvousClientMessage {
   /// `token` is the OIDC access token, `rendezvous_id` 32 random hex characters chosen by the
-  /// device that shows the QR code (or the approval prompt).
-  Join { token: String, rendezvous_id: String },
+  /// device that shows the QR code (or the approval prompt). `dpop_proof` is the DPoP proof for
+  /// `GET` on [`RENDEZVOUS_PATH`], here because a browser can't set headers on a WebSocket upgrade
+  /// (e2ee.md §3.1.2). Its nonce comes from the client's last API response.
+  Join {
+    token: String,
+    rendezvous_id: String,
+    #[serde(rename = "dpop_proof", default, skip_serializing_if = "Option::is_none")]
+    maybe_dpop_proof: Option<String>,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -99,7 +109,9 @@ mod tests {
     let join = RendezvousClientMessage::Join {
       token: "secret".into(),
       rendezvous_id: "ab".into(),
+      maybe_dpop_proof: Some("proof".into()),
     };
     assert!(!format!("{join:?}").contains("secret"));
+    assert!(!format!("{join:?}").contains("proof"));
   }
 }

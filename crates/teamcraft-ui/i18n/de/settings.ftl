@@ -598,3 +598,15 @@ profile-name-empty = Gib einen Namen ein oder verwende den Namen aus deiner Anme
 profile-name-invalid = Der Name darf keine Steuerzeichen enthalten.
 profile-name-rejected = Dieser Name ist zu lang oder enthält nicht erlaubte Zeichen.
 profile-name-not-allowed = Deine Organisation erlaubt es nicht, den Namen zu ändern.
+
+settings-group-token_binding = Anmeldungen an Geräte binden
+settings-group-token_binding-hint = DPoP: Ein Token funktioniert nur zusammen mit einem Schlüssel, der auf dem Gerät bleibt. Stelle „Erforderlich“ erst ein, wenn alle verwendeten Apps es unterstützen.
+settings-f-dpop_policy = An ein Gerät gebundene Tokens
+settings-dpop-optional = Optional: Apps, die es unterstützen, werden geprüft
+settings-dpop-required = Erforderlich: Tokens ohne Geräteschlüssel werden abgelehnt
+settings-dpop-off = Aus: Es wird nichts geprüft
+settings-f-proof_max_age_secs = Nachweise gelten für
+settings-f-proof_leeway_secs = Erlaubter Uhrenunterschied
+settings-f-nonce_rotation_secs = Die Nonce des Servers wechselt alle
+settings-f-replay_cache_max_entries = Gemerkte Nachweise, um Wiederholungen abzulehnen
+settings-unit-entries = Einträge

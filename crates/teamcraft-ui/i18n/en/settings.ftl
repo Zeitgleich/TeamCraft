@@ -598,3 +598,15 @@ profile-name-empty = Enter a name, or use the name from your sign-in.
 profile-name-invalid = The name can't contain control characters.
 profile-name-rejected = This name is too long or has characters that aren't allowed.
 profile-name-not-allowed = Your organization doesn't allow changing the name.
+
+settings-group-token_binding = Binding sign-ins to devices
+settings-group-token_binding-hint = DPoP: a token only works together with a key that stays on the device. Turn on Required only when every app in use supports it.
+settings-f-dpop_policy = Tokens bound to a device
+settings-dpop-optional = Optional: apps that support it are checked
+settings-dpop-required = Required: tokens without a device key are refused
+settings-dpop-off = Off: nothing is checked
+settings-f-proof_max_age_secs = Proofs are good for
+settings-f-proof_leeway_secs = Allowed clock difference
+settings-f-nonce_rotation_secs = The server's nonce changes every
+settings-f-replay_cache_max_entries = Proofs remembered, to refuse replays
+settings-unit-entries = entries

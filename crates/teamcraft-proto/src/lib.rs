@@ -34,7 +34,9 @@ pub use calls::{
 };
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode, SignInReason};
-pub use gateway::{ATTENTION_AWAY_DELAY_SECS, GatewayClientMessage, GatewayEvent, GatewayServerMessage};
+pub use gateway::{
+  ATTENTION_AWAY_DELAY_SECS, GATEWAY_PATH, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
+};
 pub use id::{
   AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId, DeviceId, Id,
   IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId,
@@ -62,5 +64,5 @@ pub use permission::{
   PermissionScope, SchemeChangeError, SchemeRole, SpaceContext, SpaceRole, Target, check_scheme_change,
   is_allowed,
 };
-pub use rendezvous::{RendezvousClientMessage, RendezvousServerMessage};
+pub use rendezvous::{RENDEZVOUS_PATH, RendezvousClientMessage, RendezvousServerMessage};
 pub use role::Role;

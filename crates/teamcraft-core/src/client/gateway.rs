@@ -149,6 +149,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let handshake_timeout = timing.handshake_timeout;
     if let Some(session) = self.sync.maybe_gateway_session.clone() {
       let resume = GatewayClientMessage::Resume {
+        maybe_dpop_proof: None,
         token: self.api.gateway_token().await?,
         session_id: session.session_id,
         last_seq: session.last_seq,
@@ -228,6 +229,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // The first reads wait for `ready`: a change between a read and the new session would reach
     // neither (#714).
     let identify = GatewayClientMessage::Identify {
+      maybe_dpop_proof: None,
       token: self.api.gateway_token().await?,
       device_id: self.account.device_id,
       activity: self.device_activity.clone(),

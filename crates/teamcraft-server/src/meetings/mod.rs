@@ -69,6 +69,11 @@ impl MeetingBackends {
 }
 
 impl MeetingService {
+  /// The public base URL of this server, without trailing slash.
+  pub fn base_url(&self) -> &str {
+    &self.base_url
+  }
+
   pub fn new(config: &MeetingsConfig, backends: MeetingBackends) -> Result<Self, MeetingsSetupError> {
     let url = Url::parse(&config.public_base_url)
       .map_err(|error| MeetingsSetupError::InvalidBaseUrl(error.to_string()))?;

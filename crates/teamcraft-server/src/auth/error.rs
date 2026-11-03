@@ -1,3 +1,5 @@
+use super::dpop::DpopRefusal;
+
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
   #[error("missing bearer token")]
@@ -25,6 +27,9 @@ pub enum AuthError {
   AccountDeleted,
   #[error("signing keys unavailable: {0}")]
   KeysUnavailable(String),
+  /// The token is fine as a token, but not without a valid DPoP proof (RFC 9449).
+  #[error(transparent)]
+  Dpop(#[from] DpopRefusal),
 }
 
 impl From<crate::dependencies::CircuitOpen> for AuthError {
@@ -55,5 +60,7 @@ mod tests {
     assert!(!AuthError::NoTeamcraftRole.is_guess());
     assert!(!AuthError::AccountDeactivated.is_guess());
     assert!(!AuthError::KeysUnavailable("down".into()).is_guess());
+    assert!(!AuthError::Dpop(DpopRefusal::UseNonce).is_guess());
+    assert!(!AuthError::Dpop(DpopRefusal::Replayed).is_guess());
   }
 }
