@@ -1,0 +1,72 @@
+name: CI label
+
+# Starts the checks of a pull request when it gets the `ci` label after they began. The workflows
+# with a `ci` label rule don't trigger on `labeled` (ci.yml says why), so this one does; an unrelated
+# label only skips the job here. It re-runs the run of the head commit: that keeps one run per head
+# and stays attached to the pull request, which a `workflow_dispatch` run isn't (#1185).
+#
+# `gh pr create --label ci` lands here too, and usually nothing is left to do: ci.yml reads the
+# labels live, and the job only acts on a run that finished without doing anything.
+#
+# `pull_request`, so the version on the pull request's branch runs. The token of a fork's pull
+# request can't re-run anything: after labelling one, re-run its CI run by hand.
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  actions: write
+  pull-requests: read
+
+jobs:
+  start:
+    name: Start the checks for the ci label
+    if: >-
+      github.event.label.name == 'ci' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # `gh pr create --label` can report a label twice; the second one finds the first one's re-run.
+    concurrency:
+      group: ci-label-${{ github.event.pull_request.number }}
+    steps:
+      - name: Re-run what finished without doing anything
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          # The runs of the opening start with the label event; give a late one a moment to appear.
+          # A CI run that appears later still reads the label itself.
+          sleep 10
+          for workflow in ci.yml web-size.yml android.yml ios.yml images.yml codeql-mobile.yml; do
+            run_id="$(gh run list --workflow "$workflow" --commit "$HEAD_SHA" --event pull_request \
+              --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+            if [ -z "$run_id" ]; then
+              echo "$workflow: no run on this commit (its path filter)"
+              continue
+            fi
+            # A run that skips its work ends within seconds, so 5 minutes without an answer means
+            # its jobs wait for a runner: they do the work.
+            for _ in $(seq 60); do
+              # Jobs that only decide what the run does don't count as work.
+              state="$(gh run view "$run_id" --json status,jobs --jq '
+                [.jobs[] | select(.name | test("^(plan|changed|ci-gate)$") | not)
+                  | select(.status == "in_progress" or (.status == "completed" and .conclusion != "skipped"))] as $worked
+                | if ($worked | length) > 0 then "worked" else .status end')"
+              [ "$state" = worked ] || [ "$state" = completed ] && break
+              sleep 5
+            done
+            if [ "$state" != completed ]; then
+              echo "$workflow: run $run_id does its work ($state)"
+            elif [ "$(gh api "repos/$GH_REPO/pulls/$PR_NUMBER" --jq .head.sha)" != "$HEAD_SHA" ]; then
+              # A re-run would join the concurrency group and cancel the new commit's run.
+              echo "$workflow: a newer commit has its own run, which reads the labels itself"
+            else
+              echo "$workflow: run $run_id did nothing, re-running it"
+              gh run rerun "$run_id"
+            fi
+          done

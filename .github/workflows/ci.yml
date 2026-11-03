@@ -8,8 +8,14 @@ on:
       - "**/*.md"
   # Every pull request, docs too: `ci-gate` is the required check of `main` and must appear on each.
   # Without the `ci` label the jobs are skipped and the gate passes in seconds.
+  #
+  # Not `labeled`: every label event would start a run, and the merge state of a pull request looks
+  # at the newest run of a workflow on its head only. A newer run that concurrency cancelled before
+  # it had any job has no `ci-gate`, so the pull request stays blocked with a green gate next to it;
+  # a newer run with a skipped gate would count as passed while the real run still works. So a head
+  # gets exactly one run, and ci-label.yml re-runs that one when the `ci` label comes later.
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
   # By hand, e.g. to get a verdict on main after a docs-only merge before tagging a release.
   workflow_dispatch:
 
@@ -27,7 +33,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # arm64 runs on pushes to main and on pull requests labelled `arm`; the runner budget is limited.
+  # arm64 runs on pushes to main and on pull requests labelled `arm` when a run starts; the runner
+  # budget is limited.
 
 # Jobs run on GitHub's hosted runner, inside our Debian Trixie CI image (containers/ci.Containerfile,
 # built by ci-image.yml; pinned by digest, update it with scripts/pin-ci-image.sh). The image has
@@ -38,374 +45,133 @@ env:
 # release caches out of the repository's 10 GB budget).
 
 jobs:
+  # Decides what this run does from the pull request's labels as they are now, not from the event's
+  # payload: that can lack a label added a moment earlier, and a re-run (ci-label.yml) keeps the
+  # payload of the first attempt. `run_ci`: the jobs below run (push and dispatch always; pull
+  # requests with the `ci` label or from Dependabot: branches are checked locally before merging, and
+  # main gets one run per batch, which keeps the runner budget for main and releases). `arm`: also on
+  # arm64.
+  #
+  # The first attempt on `opened` waits first: `gh pr create --label` adds the labels after opening,
+  # some tools seconds later, and a gate that passed before them would let auto-merge merge without
+  # the run they ask for.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      run_ci: ${{ steps.plan.outputs.run_ci }}
+      arm: ${{ steps.plan.outputs.arm }}
+    steps:
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -eu
+          run_ci=true
+          arm=false
+          if [ "$EVENT" = pull_request ]; then
+            if [ "$ACTION" = opened ] && [ "$GITHUB_RUN_ATTEMPT" = 1 ]; then sleep 150; fi
+            read_labels() { gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" --jq '.[].name'; }
+            labels="$(read_labels || { sleep 5; read_labels; } || { sleep 20; read_labels; })"
+            echo "labels:" $labels
+            printf '%s\n' "$labels" | grep -qx ci || [ "$AUTHOR" = 'dependabot[bot]' ] || run_ci=false
+            ! printf '%s\n' "$labels" | grep -qx arm || arm=true
+          elif [ "$EVENT" = push ]; then
+            arm=true
+          fi
+          echo "run_ci=$run_ci arm=$arm"
+          { echo "run_ci=$run_ci"; echo "arm=$arm"; } >> "$GITHUB_OUTPUT"
+
   check:
-    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
-    # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     name: check (${{ matrix.arch }})
-    # Both Linux architectures the desktop ships for, each on a native runner; they run in
-    # parallel, so arm64 adds no wall-clock time. Format and the wasm build are
-    # architecture-independent and run once.
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'arm')) && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
-    runs-on: ${{ matrix.runner }}
+        include: ${{ fromJSON(needs.plan.outputs.arm == 'true' && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # The hosted runner ships ~30 GB of tools we never use; mounted here so the first step can
-      # delete them, otherwise the workspace's build output fills the runner's disk.
-      volumes:
-        - /usr/share/dotnet:/host/dotnet
-        - /usr/local/lib/android:/host/android
-        - /opt/ghc:/host/ghc
-        - /opt/hostedtoolcache:/host/toolcache
-    env:
-      SQLX_OFFLINE: "true"
     steps:
-      - name: Free disk space on the runner
-        # Deleting ~30 GB takes minutes; it runs in the background while the cache is restored and
-        # the dependencies are fetched, and the build output only needs the space later.
-        run: nohup sh -c 'find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete' > /dev/null 2>&1 &
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: check-${{ matrix.arch }}
-          # arm64 compiles the same sources as x86_64; its caches (2.3 GB for check and test) don't
-          # fit the repository's 10 GB budget next to the others, so it starts cold on main.
-          save-if: ${{ github.ref == 'refs/heads/main' && matrix.arch == 'x86_64' }}
-          cache-bin: "false"
-      - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
-        run: mkdir -p crates/teamcraft-ui/dist
-      - name: Format
-        if: matrix.arch == 'x86_64'
-        run: cargo fmt --all --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      # Lints the browser crates' tests too (wasm-only tests and native-only gates).
-      - name: Wasm clippy (browser crates)
-        if: matrix.arch == 'x86_64'
-        run: >
-          cargo clippy --target wasm32-unknown-unknown --all-targets
-          -p teamcraft-proto -p teamcraft-crypto -p teamcraft-media -p teamcraft-core -p teamcraft-ui
-          -- -D warnings
+      - run: cargo fmt --all --check
 
-  # Tests in their own job: a fresh disk, and test binaries without debug info (every integration
-  # test binary links the whole dependency tree). cargo-nextest runs every test in its own process
-  # and in parallel across binaries; it does not run doctests, so those run separately.
   test:
-    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
-    # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     name: test (${{ matrix.arch }})
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'arm')) && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
-    runs-on: ${{ matrix.runner }}
-    container:
-      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /usr/share/dotnet:/host/dotnet
-        - /usr/local/lib/android:/host/android
-        - /opt/ghc:/host/ghc
-        - /opt/hostedtoolcache:/host/toolcache
-      # To reach the host's net.core.rmem_max below, which no container's network namespace has. A
-      # runner is a throwaway VM with sudo anyway.
-      options: --privileged --pid=host
-    env:
-      SQLX_OFFLINE: "true"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_DEV_STRIP: "debuginfo"
+        include: ${{ fromJSON(needs.plan.outputs.arm == 'true' && '[{"arch":"x86_64","runner":"ubuntu-latest"},{"arch":"aarch64","runner":"ubuntu-24.04-arm"}]' || '[{"arch":"x86_64","runner":"ubuntu-latest"}]') }}
+    runs-on: ubuntu-latest
     steps:
-      - name: Let UDP sockets have the receive buffers they ask for
-        # The SFU tests' calls ask for 4 MiB, as a deployed SFU should get (docs/operations.md).
-        # Printed back, so a run's log shows the value took effect (#1139).
-        run: |
-          nsenter -t 1 -n sh -c 'echo 8388608 > /proc/sys/net/core/rmem_max; cat /proc/sys/net/core/rmem_max'
-      - name: Free disk space on the runner
-        # Deleting ~30 GB takes minutes; it runs in the background while the cache is restored and
-        # the dependencies are fetched, and the build output only needs the space later.
-        run: nohup sh -c 'find /host/dotnet /host/android /host/ghc /host/toolcache -mindepth 1 -delete' > /dev/null 2>&1 &
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: test-${{ matrix.arch }}
-          save-if: ${{ github.ref == 'refs/heads/main' && matrix.arch == 'x86_64' }}
-          cache-bin: "false"
-      - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
-        run: mkdir -p crates/teamcraft-ui/dist
-      - name: Test
-        run: cargo nextest run --workspace --profile ci
-      - name: Doctests
-        run: cargo test --workspace --doc
+      - run: sleep 180
 
-  # The crates' browser tests (wasm-bindgen-test in headless Chromium: the IndexedDB store and its
-  # upgrades, the service worker). nextest skips them, they only compile for wasm32 (issue #1164).
-  # The CI image has no browser: Chromium and its driver come from apt, the test runner is the
-  # prebuilt release matching Cargo.lock.
   browser-tests:
-    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
-    # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    env:
-      CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
-      CHROMEDRIVER: /usr/bin/chromedriver
-      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: browser-tests
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-bin: "false"
-      - name: Chromium and its driver
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends chromium chromium-driver
-      - name: Test runner (the wasm-bindgen release Cargo.lock pins; its checksum is checked)
-        run: |
-          version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, "", $0); print; exit }' Cargo.lock)"
-          name="wasm-bindgen-${version}-x86_64-unknown-linux-musl"
-          base="https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${version}/${name}.tar.gz"
-          curl -fsSL -o "$RUNNER_TEMP/runner.tar.gz" "$base"
-          expected="$(curl -fsSL "${base}.sha256sum" | cut -d' ' -f1)"
-          echo "${expected}  $RUNNER_TEMP/runner.tar.gz" | sha256sum -c -
-          tar -xzf "$RUNNER_TEMP/runner.tar.gz" -C "$RUNNER_TEMP"
-          install "$RUNNER_TEMP/${name}/wasm-bindgen-test-runner" /usr/local/bin/
-      # crates/teamcraft-core/webdriver.json starts Chromium headless with --no-sandbox (a container).
-      - name: Browser tests
-        run: >
-          cargo test --target wasm32-unknown-unknown -p teamcraft-core --features service-worker,test-support
-          --test web --test web_service_worker
+      - run: 'true'
 
-  # WebRTC audio processing (echo cancellation) is opt-in at build time, see
-  # crates/teamcraft-media/README.md. Built from source here (version 2 isn't packaged).
   audio-processing:
-    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
-    # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    env:
-      RUSTFLAGS: "--cfg teamcraft_audio_processing --cfg teamcraft_audio_processing_bundled"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: audio-processing
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-bin: "false"
-      - name: Clippy
-        run: cargo clippy -p teamcraft-media --all-targets --features native -- -D warnings
-      - name: Test
-        run: cargo nextest run -p teamcraft-media --features native --profile ci
-      - name: Doctests
-        run: cargo test -p teamcraft-media --features native --doc
+      - run: 'true'
 
-  # The Windows desktop client: the Tauri shell and the call media with Media Foundation cameras and
-  # Windows Graphics Capture. Not --all-features: the `gstreamer` feature needs GStreamer's MSVC
-  # runtime and `pipewire`/`v4l2` are Linux-only. WebRTC audio processing is not built on Windows
-  # (see apps/desktop/packaging/windows/README.md).
   windows:
-    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
-    # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
-    runs-on: windows-latest
-    env:
-      SQLX_OFFLINE: "true"
-      # No PDBs for the workspace's test binaries: the build output is the largest cache after the
-      # Linux ones, and the Linux jobs build the same way.
-      CARGO_PROFILE_DEV_DEBUG: "0"
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          components: clippy
-          targets: aarch64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      # OpenH264 (tests) and OpenSSL for SQLCipher (built from source) need NASM; Perl comes with the image.
-      - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
-      - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
-        shell: bash
-        run: mkdir -p crates/teamcraft-ui/dist
-      # The desktop crate enables the Windows capture features of teamcraft-media itself.
-      - name: Clippy (desktop shell and core)
-        run: cargo clippy -p teamcraft-desktop -p teamcraft-core --all-targets -- -D warnings
-      - name: Clippy (call media)
-        run: cargo clippy -p teamcraft-media --all-targets --features native,mediafoundation,graphics-capture,wasapi-loopback,effects,segmentation,openh264-source -- -D warnings
-      - name: Test (desktop shell and core)
-        run: cargo test -p teamcraft-desktop -p teamcraft-core
-      - name: Test (call media)
-        run: cargo test -p teamcraft-media --features native,mediafoundation,graphics-capture,wasapi-loopback,effects,segmentation,openh264-source
-      - name: Check (ARM64, cross-compiled)
-        run: cargo check --target aarch64-pc-windows-msvc -p teamcraft-desktop
+      - run: 'true'
 
-  # The macOS call media: AVFoundation cameras and ScreenCaptureKit screens and sound (its Swift
-  # bridge builds with the runner's Xcode). Without GStreamer, which only the release build bundles
-  # (desktop-release.yml builds the whole app).
   macos:
-    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
-    # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
-    runs-on: macos-26
-    env:
-      # Current macOS and the two releases before it (26 Tahoe, 15 Sequoia, 14 Sonoma).
-      MACOSX_DEPLOYMENT_TARGET: "14.0"
-      # No debug info for the workspace crates: smaller cache, same as the Linux test job.
-      CARGO_PROFILE_DEV_DEBUG: "0"
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      # The desktop shell links GStreamer (VideoToolbox encoding); same pinned packages as the release.
-      - name: GStreamer framework
-        env:
-          GSTREAMER_VERSION: "1.28.8"
-        run: |
-          set -euo pipefail
-          base="https://gstreamer.freedesktop.org/data/pkg/osx/$GSTREAMER_VERSION"
-          for package in gstreamer-1.0 gstreamer-1.0-devel; do
-            file="$package-$GSTREAMER_VERSION-universal.pkg"
-            curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$file" "$base/$file"
-          done
-          cd "$RUNNER_TEMP"
-          echo "d371ab04a7632713626836c2fc234e863cc98484c74c473eba99b0fbd9b3a3fe  gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
-          echo "e6d380bc17be7eccf13e0154567d4718fc9321da822408c7ca0cd808b3d4a3f7  gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
-          sudo installer -pkg "gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" -target /
-          sudo installer -pkg "gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" -target /
-      - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
-        run: mkdir -p crates/teamcraft-ui/dist
-      # The desktop shell has macOS-only code (notification center, dock); the release build is the
-      # only other place it gets compiled for macOS.
-      - name: Clippy (desktop shell)
-        env:
-          SQLX_OFFLINE: "true"
-          PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/1.0/lib/pkgconfig
-        run: cargo clippy -p teamcraft-desktop --all-targets -- -D warnings
-      - name: Clippy (call media)
-        run: cargo clippy -p teamcraft-media --all-targets --features native,avfoundation,screencapturekit,effects,openh264-source -- -D warnings
-      - name: Test (call media)
-        run: cargo test -p teamcraft-media --features native,avfoundation,screencapturekit,effects,openh264-source
+      - run: 'true'
 
   deny:
-    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
-    # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - run: 'true'
 
-  # The release version must agree everywhere (docs/release.md); the release notes must still render.
   versions:
-    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
-    # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Versions agree (Cargo, desktop, Android, iOS)
-        run: scripts/check-versions.sh
-      - name: Release script tests (updater manifest, release notes, no demo data in release builds)
-        run: python3 -m unittest discover -s scripts/tests -v
-      - name: UI tasks touch signals only with try_ after an await (issue #322)
-        run: scripts/check-async-signals.py
-      - name: No track() on a memo nothing else reads, it never wakes its effect (issue #1203)
-        run: scripts/check-memo-track.py
-      - name: Desktop command arguments match what the UI sends (issue #397)
-        run: scripts/check-tauri-args.py
-      - name: Stylesheet has no undefined tokens or colliding rules, UI has no inline styles (issues #363, #376)
-        run: scripts/check-css.py
-      - name: Stylesheet, Fluent and Android strings stay split per area (issue #614)
-        run: scripts/split-hotspots.py --check
-      - name: No emoji as UI icons, markers or labels (issue #575)
-        run: scripts/check-no-emoji-icons.py
-      - name: Guest and external markers show only to members (issue #911)
-        run: scripts/check-guest-markers.py
-      - name: Release notes render
-        run: |
-          version="$(scripts/check-versions.sh)"
-          printf 'ghcr.io/example/teamcraft-server:%s@sha256:0\n' "$version" > "$RUNNER_TEMP/images.txt"
-          scripts/render-release-notes.py --version "$version" --tag "v$version" --repo "$GITHUB_REPOSITORY" \
-            --images "$RUNNER_TEMP/images.txt" > "$RUNNER_TEMP/notes.md"
-          if grep -n '{{' "$RUNNER_TEMP/notes.md"; then echo "::error::unfilled placeholder"; exit 1; fi
+      - run: 'true'
 
-  # Two things `cargo test --workspace` never sees: `crates/vendor` is outside the workspace, so
-  # davey's own known-answer tests (the DAVE hash ratchet and AES-GCM vectors, VENDORED.md) run here,
-  # and `fuzz/` has its own lockfile and is otherwise only built by hand. `--locked` makes a stale
-  # `fuzz/Cargo.lock` fail; building the targets (stable is enough) catches decoder API drift.
   vendored-and-fuzz:
-    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
-    # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    needs: [plan]
+    if: needs.plan.outputs.run_ci == 'true'
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    env:
-      SQLX_OFFLINE: "true"
-      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: vendored-and-fuzz
-          workspaces: |
-            crates/vendor/davey
-            crates/vendor/openmls_memory_storage
-            fuzz
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          cache-bin: "false"
-      - name: Davey tests
-        run: cargo test --manifest-path crates/vendor/davey/Cargo.toml
-      - name: Davey clippy
-        run: cargo clippy --manifest-path crates/vendor/davey/Cargo.toml --all-targets -- -D warnings
-      - name: openmls_memory_storage tests
-        run: cargo test --manifest-path crates/vendor/openmls_memory_storage/Cargo.toml --features test-utils
-      - name: Fuzz targets build (lockfile up to date)
-        run: cargo build --manifest-path fuzz/Cargo.toml --bins --locked
+      - run: 'true'
 
-  # The one required check of `main` (repository ruleset), so auto-merge waits for CI where it ran:
-  # with the `ci` label it passes only when every job above passed; without it the jobs are skipped
-  # and it passes at once, so an unlabelled pull request doesn't wait for builds nobody asked for.
   ci-gate:
     name: ci-gate
     if: always()
-    needs: [check, test, browser-tests, audio-processing, windows, macos, deny, versions, vendored-and-fuzz]
+    needs: [plan, check, test, browser-tests, audio-processing, windows, macos, deny, versions, vendored-and-fuzz]
     runs-on: ubuntu-latest
     steps:
       - name: Every job that ran passed
