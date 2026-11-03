@@ -3268,8 +3268,10 @@ message writes that group's few changed entries, whatever the number of groups; 
 storage was one record rewritten after every change, which made a catch-up of many new groups
 quadratic (0.8 GB written for 300 groups, docs/performance.md). The provider storage notes the keys
 it changes (our patch of `openmls_memory_storage`, which stores the same bytes under the same keys),
-so a save neither reads the store nor compares the state; the client keeps no second copy of it, and
-so no old secrets either (#840). The SQLite stores count what may make the disk differ from what they
+so a save neither reads the store nor compares the state, and the save keeps no copy of it (#840). What
+is left of old secrets in memory: a sealed store's bounded cache holds entries it wrote or read and wipes
+them when they leave it, and the provider wipes a value it replaces or removes, but not what openmls
+copied to serialize it. The SQLite stores count what may make the disk differ from what they
 accepted (`LocalStore::write_tally`): groups of writes rolled back (a full disk), single writes that
 failed, and commits of another connection to the same file (`PRAGMA data_version`, another process).
 A panic inside a group of writes rolls it back too: half a save, or a save without its cursor, never

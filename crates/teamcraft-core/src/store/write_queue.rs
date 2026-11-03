@@ -68,9 +68,17 @@ pub(crate) enum Issue<'a> {
   Delete { sequence: u32 },
 }
 
+impl Issue<'_> {
+  fn sequence(&self) -> u32 {
+    match self {
+      Self::Put { sequence, .. } | Self::Delete { sequence } => *sequence,
+    }
+  }
+}
+
 /// A record's seal failed; the batch must not go out without it.
 #[derive(Debug)]
-pub(crate) struct SealFailed;
+struct SealFailed;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WriteFailure {
@@ -123,11 +131,59 @@ impl Writes {
     self.group_depth == 0 && self.is_over_limit()
   }
 
-  /// Whether a batch may be issued now: none is running, and no group of writes is open. Groups run
-  /// synchronously, so the only group still open here is one a panic ended (in the browser a panic
-  /// doesn't unwind): what it wrote so far must never reach the disk.
-  pub(crate) fn may_issue(&self) -> bool {
-    self.maybe_running_batch.is_none() && self.group_depth == 0
+  /// The keys of the next batch, with every failed write if anything new is queued; the queue starts
+  /// over. `None` if there is nothing to issue, or a batch may not be issued now: one is running
+  /// (when it ended, the store asks again), or a group of writes is open. Groups run synchronously,
+  /// so the only group still open here is one a panic ended (in the browser a panic doesn't unwind):
+  /// what it wrote so far must never reach the disk.
+  pub(crate) fn take_next_batch(&mut self) -> Option<Vec<String>> {
+    if self.maybe_running_batch.is_some() || self.group_depth > 0 {
+      return None;
+    }
+    // Writes that failed go with every batch: a later write never commits without them, so what
+    // is on disk stays a prefix of what was written.
+    if self.has_queued() {
+      self.retry_failed();
+    }
+    let keys = self.take_queued();
+    (!keys.is_empty()).then_some(keys)
+  }
+
+  /// Puts the writes of `keys` into a transaction through `send` and starts the batch; its number
+  /// goes on the transaction. A seal that fails or a write `send` refuses fails the whole batch, all
+  /// of its writes stay open to be issued again, and the caller aborts the transaction: nothing of
+  /// the batch may commit.
+  pub(crate) fn fill_batch(
+    &mut self,
+    keys: &[String],
+    mut send: impl FnMut(&str, &Issue<'_>) -> Result<(), WriteFailure>,
+  ) -> Result<u32, WriteFailure> {
+    let mut carried = Vec::with_capacity(keys.len());
+    let mut maybe_failure = None;
+    for key in keys {
+      let sent = match self.issue(key) {
+        Ok(None) => continue,
+        Ok(Some(issue)) => send(key, &issue).map(|()| issue.sequence()),
+        Err(SealFailed) => Err(WriteFailure::Other),
+      };
+      match sent {
+        Ok(sequence) => {
+          self.issued(key);
+          carried.push((key.clone(), sequence));
+        },
+        Err(failure) => {
+          maybe_failure = Some(failure);
+          break;
+        },
+      }
+    }
+    if let Some(failure) = maybe_failure {
+      for key in keys {
+        self.fail_open(key, failure);
+      }
+      return Err(failure);
+    }
+    Ok(self.start_batch(carried))
   }
 
   /// The latest write of `key` that hasn't committed, if one is open; a put waiting for its batch
@@ -167,7 +223,7 @@ impl Writes {
   }
 
   /// The keys of the next batch; the queue starts over.
-  pub(crate) fn take_queued(&mut self) -> Vec<String> {
+  fn take_queued(&mut self) -> Vec<String> {
     self.is_scheduled = false;
     self.queued_bytes = 0;
     std::mem::take(&mut self.queued)
@@ -192,7 +248,7 @@ impl Writes {
   /// What the queued write of `key` puts into the batch, sealed now if it waited for it; `None`
   /// if it isn't queued any more. A record whose seal fails stops the batch: the caller fails it, the
   /// write stays open with its seal, and the cache and the disk still end up the same.
-  pub(crate) fn issue(&mut self, key: &str) -> Result<Option<Issue<'_>>, SealFailed> {
+  fn issue(&mut self, key: &str) -> Result<Option<Issue<'_>>, SealFailed> {
     let Some(write) = self
       .open
       .get_mut(key)
@@ -223,7 +279,7 @@ impl Writes {
   }
 
   /// The write of `key` went into a transaction.
-  pub(crate) fn issued(&mut self, key: &str) {
+  fn issued(&mut self, key: &str) {
     if let Some(write) = self.open.get_mut(key) {
       write.state = WriteState::Issued;
     }
@@ -231,7 +287,7 @@ impl Writes {
 
   /// Numbers the batch that carries `carried` (key and sequence of each write); it runs until
   /// [`Self::committed`] or [`Self::aborted`].
-  pub(crate) fn start_batch(&mut self, carried: Vec<(String, u32)>) -> u32 {
+  fn start_batch(&mut self, carried: Vec<(String, u32)>) -> u32 {
     self.next_batch = self.next_batch.wrapping_add(1);
     self.batches.insert(self.next_batch, carried);
     self.maybe_running_batch = Some(self.next_batch);
@@ -292,7 +348,7 @@ impl Writes {
   }
 
   /// A write of the batch that was aborted before it was sent (queued or already issued).
-  pub(crate) fn fail_open(&mut self, key: &str, failure: WriteFailure) {
+  fn fail_open(&mut self, key: &str, failure: WriteFailure) {
     if let Some(write) = self.open.get_mut(key)
       && write.state != WriteState::Failed
     {
@@ -426,14 +482,12 @@ mod tests {
       let first = disk.last_batch();
 
       writes.queue("second".into(), Some(sealed(b"2")), 1);
-      assert!(!writes.may_issue(), "the first batch runs");
+      assert!(!issue_batch(&mut writes, &mut disk), "the first batch runs");
 
       writes.aborted(first, WriteFailure::QuotaExceeded);
       disk.abort_last();
-      assert!(writes.may_issue());
-      // What the store does when a batch ended: the failed writes go with the next one.
-      writes.retry_failed();
-      issue_batch(&mut writes, &mut disk);
+      // The batch ended: the failed writes go with the next one.
+      assert!(issue_batch(&mut writes, &mut disk));
       writes.committed(disk.last_batch());
       disk.commit_last();
 
@@ -455,8 +509,7 @@ mod tests {
         writes.aborted(disk.last_batch(), WriteFailure::QuotaExceeded);
         disk.abort_last();
         assert!(matches!(writes.failure(), Err(StoreError::QuotaExceeded)));
-        writes.retry_failed();
-        issue_batch(&mut writes, &mut disk);
+        assert!(issue_batch(&mut writes, &mut disk));
       }
       assert!(disk.committed.is_empty());
     }
@@ -470,7 +523,11 @@ mod tests {
         ..Writes::default()
       };
       writes.queue("half of a group".into(), Some(sealed(b"1")), 1);
-      assert!(!writes.may_issue());
+      assert!(!issue_batch(&mut writes, &mut Disk::default()));
+      assert!(
+        writes.has_queued(),
+        "it stays out, and is not lost to a later batch"
+      );
     }
 
     /// A flush waits for the batch that holds what was queued when it began, not for what is
@@ -514,7 +571,7 @@ mod tests {
 
       writes.committed(disk.last_batch());
       disk.commit_last();
-      for key in writes.take_queued() {
+      for key in writes.take_next_batch().unwrap() {
         writes.fail_queued(&key, WriteFailure::Closed);
       }
       assert!(writes.is_past(due));
@@ -587,26 +644,35 @@ mod tests {
     }
   }
 
-  /// What the store does to issue a batch: every queued write, or none if a seal fails.
-  fn issue_batch(writes: &mut Writes, disk: &mut Disk) {
-    assert!(writes.may_issue());
-    let keys = writes.take_queued();
-    let mut carried = Vec::new();
-    for key in &keys {
-      let sequence = match writes.issue(key) {
-        Ok(Some(Issue::Put { sequence, .. } | Issue::Delete { sequence })) => sequence,
-        Ok(None) => continue,
-        Err(SealFailed) => {
-          for key in &keys {
-            writes.fail_open(key, WriteFailure::Other);
-          }
-          return;
-        },
-      };
-      writes.issued(key);
-      carried.push((key.clone(), sequence));
-    }
-    let batch = writes.start_batch(carried);
-    disk.batches.push((batch, keys));
+  /// Issues a batch as the store does, through the same code, with the disk in the transaction's
+  /// place. Whether one went out.
+  fn issue_batch(writes: &mut Writes, disk: &mut Disk) -> bool {
+    let Some(keys) = writes.take_next_batch() else {
+      return false;
+    };
+    let mut sent = Vec::new();
+    let Ok(batch) = writes.fill_batch(&keys, |key, _| {
+      sent.push(key.to_string());
+      Ok(())
+    }) else {
+      return false;
+    };
+    disk.batches.push((batch, sent));
+    true
+  }
+
+  /// A record the transaction refuses at once: the whole batch fails.
+  #[test]
+  fn a_write_refused_at_once_fails_its_whole_batch() {
+    let mut writes = Writes::default();
+    writes.queue("first".into(), Some(sealed(b"1")), 1);
+    writes.queue("second".into(), Some(sealed(b"2")), 1);
+    let keys = writes.take_next_batch().unwrap();
+    let refused = writes.fill_batch(&keys, |_, _| Err(WriteFailure::QuotaExceeded));
+    assert_eq!(refused, Err(WriteFailure::QuotaExceeded));
+    assert!(matches!(writes.failure(), Err(StoreError::QuotaExceeded)));
+    // Not running: the next batch can go, and it takes both along.
+    writes.queue("third".into(), Some(sealed(b"3")), 1);
+    assert_eq!(writes.take_next_batch().unwrap().len(), 3);
   }
 }

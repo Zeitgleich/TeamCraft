@@ -1167,7 +1167,8 @@ MLS_STORAGE_CHANNELS=300 cargo test -p teamcraft-core --all-features --test suit
 ##### What a save costs (issue #840)
 
 The provider storage now notes the keys it changes (crates/vendor/openmls_memory_storage/VENDORED.md),
-so a save writes those: no copy of the state, no comparison. Every save also bumps a generation
+so a save writes those: no copy of the state to compare with, and no comparison. (A sealed store's cache
+stays, bounded by `SealedStoreLimits`: tiny in the extension, which is what the table measures.) Every save also bumps a generation
 record, so another process's commit that left the MLS state alone (the iOS notification extension's
 push bookkeeping, on every app resume) costs no rewrite. Debug build, local machine, November 2026,
 the state of 300 groups (2.7 MB in 3,600 entries); "before" is the same test on c47464d1:
@@ -1198,7 +1199,7 @@ MLS_STORAGE_CHANNELS=100 cargo test -p teamcraft-core --all-features --test suit
 - **One more small record per save:** the generation, 8 bytes sealed, which is where the catch-up's
   201 extra records come from. They were offset in bytes by a value written again unchanged, which
   no longer counts as a change.
-- **The extension** (about 24 MB) holds the state once instead of twice. It no longer moves the record
+- **The extension** (about 24 MB) holds the state once instead of twice, beside its minimal cache. It no longer moves the record
   of a version before 1.0.9 itself, which was estimated at 5 to 6 times the state at the worst
   moment. No release build was measured here; the ratios of a save are what to take from the table.
 

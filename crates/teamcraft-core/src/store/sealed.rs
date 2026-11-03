@@ -1109,6 +1109,40 @@ impl<B: RecordBackend> SealedStore<B> {
     self.backend.put_lazy(&id, size_hint, seal)
   }
 
+  /// Writes an entry whose seal fails until `is_sealable` is set: nothing else makes a seal fail, so
+  /// a browser test can't reach that path otherwise. Not in the store's directory.
+  #[cfg(feature = "test-support")]
+  pub fn put_sealing_when(
+    &self,
+    table: Table,
+    key: &str,
+    value: &[u8],
+    is_sealable: std::rc::Rc<std::cell::Cell<bool>>,
+  ) -> Result<(), StoreError> {
+    let id = self.entry_id(table.name(), key);
+    let pending = PendingEntry {
+      table: table.name().to_string(),
+      key: key.to_string(),
+      value: Zeroizing::new(value.to_vec()),
+    };
+    let size_hint = pending.size_hint();
+    let keys = Arc::clone(&self.keys);
+    let seal = Box::new(move || {
+      if is_sealable.get() {
+        pending.seal(&keys, &id)
+      } else {
+        Err(StoreError::Database("made to fail".into()))
+      }
+    });
+    self.backend.put_lazy(&id, size_hint, seal)
+  }
+
+  /// Whether a thread holds a group of writes open.
+  #[cfg(all(test, feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+  pub(super) fn has_group_owner(&self) -> bool {
+    self.lock().maybe_group_owner.is_some()
+  }
+
   /// Writes the catalog nodes the ending group changed.
   fn flush_catalog(&self, state: &mut State<B>) -> Result<(), StoreError> {
     let changes = state
@@ -1653,21 +1687,33 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     let mut state = self.lock();
     state.depth = state.depth.saturating_sub(1);
     let is_group_over = state.depth == 0;
+    let mut maybe_panic = None;
     if state.depth == 0
       && (state.message_nodes.has_dirty()
         || state.directory_nodes.has_dirty()
         || state.feed_nodes.has_dirty()
         || state.relation_nodes.has_dirty())
-      && let Err(error) = self.flush_catalog(&mut state)
     {
-      tracing::error!(%error, "could not write the local store's catalog");
-      self.backend.fail_group();
+      // A panic here must still end the group: left open, every later group would nest in it, report
+      // success and never commit. It fails the group, and goes on once the group has ended.
+      let flushed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.flush_catalog(&mut state)));
+      match flushed {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) => {
+          tracing::error!(%error, "could not write the local store's catalog");
+          self.backend.fail_group();
+        },
+        Err(panic) => {
+          self.backend.fail_group();
+          maybe_panic = Some(panic);
+        },
+      }
     }
     let ended = self.backend.end_writes();
     if state.depth == 0 {
       // What moved here is a rollback or another process: this one's commits don't count.
       let maybe_tally = self.backend.write_tally();
-      if ended.is_err() || maybe_tally != state.maybe_tally {
+      if ended.is_err() || maybe_panic.is_some() || maybe_tally != state.maybe_tally {
         state.forget_all();
       }
       state.maybe_tally = maybe_tally;
@@ -1689,6 +1735,9 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     if is_group_over {
       self.lock().maybe_group_owner = None;
       self.group_ended.notify_all();
+    }
+    if let Some(panic) = maybe_panic {
+      std::panic::resume_unwind(panic);
     }
     ended
   }

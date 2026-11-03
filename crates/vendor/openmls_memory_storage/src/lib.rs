@@ -1,5 +1,6 @@
 use openmls_traits::storage::*;
 use serde::Serialize;
+use zeroize::Zeroize as _;
 use std::{
     collections::{HashMap, HashSet},
     ops::Deref,
@@ -20,15 +21,16 @@ pub mod persistence;
 pub struct MemoryStorage {
     pub values: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
     /// TeamCraft patch: the keys whose value changed since the last
-    /// [`Self::take_changed_keys`]. Every write of this crate goes through
-    /// [`TrackedValues`], which does not hand out the map mutably.
-    changed_keys: Mutex<HashSet<Vec<u8>>>,
+    /// [`Self::take_changed_keys`]; `None` until the first call, so a storage nobody saves (a call's
+    /// DAVE session) notes nothing. Every write of this crate goes through [`TrackedValues`], which
+    /// does not hand out the map mutably.
+    changed_keys: Mutex<Option<HashSet<Vec<u8>>>>,
 }
 
 /// TeamCraft patch: the map under its write lock; each change notes its key.
 struct TrackedValues<'a> {
     values: RwLockWriteGuard<'a, HashMap<Vec<u8>, Vec<u8>>>,
-    changed_keys: MutexGuard<'a, HashSet<Vec<u8>>>,
+    changed_keys: MutexGuard<'a, Option<HashSet<Vec<u8>>>>,
 }
 
 impl Deref for TrackedValues<'_> {
@@ -40,38 +42,57 @@ impl Deref for TrackedValues<'_> {
 }
 
 impl TrackedValues<'_> {
-    /// A value written again unchanged is not a change.
+    /// A value written again unchanged is not a change. The value replaced is wiped: it may be an
+    /// old epoch's secret.
     fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) {
         if self.values.get(&key) != Some(&value) {
-            self.changed_keys.insert(key.clone());
+            self.note(&key);
         }
-        self.values.insert(key, value);
+        if let Some(mut replaced) = self.values.insert(key, value) {
+            replaced.zeroize();
+        }
     }
 
     fn remove(&mut self, key: &[u8]) {
-        if self.values.remove(key).is_some() {
-            self.changed_keys.insert(key.to_vec());
+        if let Some(mut removed) = self.values.remove(key) {
+            removed.zeroize();
+            self.note(key);
         }
     }
 
     /// The bytes of a list, created empty if missing, for the caller to change.
     fn list_bytes(&mut self, key: Vec<u8>) -> &mut Vec<u8> {
-        self.changed_keys.insert(key.clone());
+        self.note(&key);
         self.values.entry(key).or_insert_with(|| b"[]".to_vec())
+    }
+
+    fn note(&mut self, key: &[u8]) {
+        if let Some(changed_keys) = self.changed_keys.as_mut() {
+            changed_keys.insert(key.to_vec());
+        }
     }
 }
 
 /// TeamCraft patch: what a persisting caller needs to write only what changed.
 impl MemoryStorage {
     /// The keys changed since the last call: each is now in [`Self::values`] (written) or not
-    /// (deleted). A value set back to an earlier one in between may still be listed.
+    /// (deleted). A value set back to an earlier one in between may still be listed. The first call
+    /// returns nothing and starts the noting: its caller knows the storage as it is then.
     pub fn take_changed_keys(&self) -> HashSet<Vec<u8>> {
-        std::mem::take(&mut *self.changed_keys.lock().unwrap())
+        self.changed_keys
+            .lock()
+            .unwrap()
+            .replace(HashSet::new())
+            .unwrap_or_default()
     }
 
     /// Whether [`Self::take_changed_keys`] would list anything.
     pub fn has_changed_keys(&self) -> bool {
-        !self.changed_keys.lock().unwrap().is_empty()
+        self.changed_keys
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|changed_keys| !changed_keys.is_empty())
     }
 
     /// Sets a value from outside the storage trait, as a change.
@@ -1435,8 +1456,28 @@ mod changed_keys {
     impl traits::GroupContext<CURRENT_VERSION> for GroupId {}
 
     #[test]
+    fn a_storage_nobody_takes_changes_from_notes_nothing() {
+        let storage = MemoryStorage::default();
+        storage.write_tree(&GroupId(1), &GroupId(2)).unwrap();
+        assert!(!storage.has_changed_keys());
+        assert!(storage.changed_keys.lock().unwrap().is_none());
+        assert!(storage.take_changed_keys().is_empty(), "known as it is now");
+    }
+
+    #[test]
+    fn a_replaced_or_removed_value_is_gone_and_the_new_one_stays() {
+        let storage = MemoryStorage::default();
+        storage.set_value(b"a".to_vec(), b"old".to_vec());
+        storage.set_value(b"a".to_vec(), b"new".to_vec());
+        assert_eq!(storage.values.read().unwrap()[&b"a".to_vec()], b"new");
+        storage.remove_value(b"a");
+        assert!(storage.values.read().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_write_and_a_delete_through_the_trait_name_their_keys() {
         let storage = MemoryStorage::default();
+        storage.take_changed_keys();
         assert!(!storage.has_changed_keys());
         storage.write_tree(&GroupId(1), &GroupId(2)).unwrap();
         storage.write_context(&GroupId(1), &GroupId(3)).unwrap();
@@ -1460,6 +1501,7 @@ mod changed_keys {
     #[test]
     fn writing_the_same_value_or_deleting_nothing_is_no_change() {
         let storage = MemoryStorage::default();
+        storage.take_changed_keys();
         storage.write_tree(&GroupId(1), &GroupId(2)).unwrap();
         storage.take_changed_keys();
 
@@ -1474,6 +1516,7 @@ mod changed_keys {
     #[test]
     fn values_set_from_outside_count_too() {
         let storage = MemoryStorage::default();
+        storage.take_changed_keys();
         storage.set_value(b"a".to_vec(), b"1".to_vec());
         storage.remove_value(b"a");
         assert_eq!(storage.take_changed_keys().len(), 1);

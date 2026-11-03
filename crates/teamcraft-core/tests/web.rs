@@ -470,6 +470,68 @@ async fn a_batch_after_one_that_aborts_never_commits_without_it() {
   assert_eq!(reopened.get(Table::Users, "second").unwrap(), Some(b"2".to_vec()));
 }
 
+/// Issue #840: a record that can't be sealed holds its whole batch back: nothing of it is on disk,
+/// the flush says so, and everything goes through once the seal works.
+#[cfg(feature = "test-support")]
+#[wasm_bindgen_test]
+async fn a_record_that_does_not_seal_holds_its_batch_back() {
+  let name = database_name();
+  let key = SymmetricKey::generate(&mut OsRng);
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  store.flush().await.unwrap();
+
+  let is_sealable = std::rc::Rc::new(std::cell::Cell::new(false));
+  store.put(Table::Users, "before", b"1").unwrap();
+  store
+    .put_sealing_when(Table::Users, "unsealable", b"2", is_sealable.clone())
+    .unwrap();
+  store.put(Table::Users, "after", b"3").unwrap();
+  assert!(matches!(store.flush().await, Err(StoreError::Database(_))));
+  assert!(store.flush().await.is_err(), "reported until it went through");
+
+  let other = IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap();
+  assert_eq!(
+    other.get(Table::Users, "before").unwrap(),
+    None,
+    "none of the batch"
+  );
+  assert_eq!(
+    other.get(Table::Users, "after").unwrap(),
+    None,
+    "none of the batch"
+  );
+
+  is_sealable.set(true);
+  store.flush().await.unwrap();
+  let other = IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap();
+  for (key, value) in [("before", b"1"), ("unsealable", b"2"), ("after", b"3")] {
+    assert_eq!(
+      other.get(Table::Users, key).unwrap(),
+      Some(value.to_vec()),
+      "{key}"
+    );
+  }
+}
+
+/// Issue #840: in the browser a panic doesn't unwind, so a group it ended stays open. What the group
+/// wrote never reaches the disk, not by the timer, the page going away or a flush, and the flush
+/// says why.
+#[wasm_bindgen_test]
+async fn a_group_a_panic_left_open_never_reaches_the_disk() {
+  let name = database_name();
+  let key = SymmetricKey::generate(&mut OsRng);
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  store.flush().await.unwrap();
+
+  store.begin_writes().unwrap();
+  store.put(Table::Users, "half of a group", b"1").unwrap();
+  store.write_now();
+  assert!(matches!(store.flush().await, Err(StoreError::GroupFailed(_))));
+
+  let other = IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap();
+  assert_eq!(other.get(Table::Users, "half of a group").unwrap(), None);
+}
+
 fn id<T: Id>(raw: i64) -> T {
   T::from_snowflake(Snowflake::new(raw).unwrap())
 }

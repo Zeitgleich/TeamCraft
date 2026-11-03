@@ -14,9 +14,11 @@
 //! catch-up that joined 300 groups wrote it 600 times, about 0.8 GB (docs/performance.md).
 //!
 //! The provider's storage notes the keys it changes (our patch of `openmls_memory_storage`,
-//! crates/vendor/openmls_memory_storage/VENDORED.md), so a save costs what changed: no second copy
-//! of the state to compare with, and no read of the store (issue #840). Everything that writes to the
-//! provider from outside openmls uses its `set_value` and `remove_value`, or the change isn't saved.
+//! crates/vendor/openmls_memory_storage/VENDORED.md), so a save costs what changed: this module keeps
+//! no copy of the state to compare with, and doesn't read the store (issue #840). A sealed store's
+//! bounded cache may still hold plaintext entries it wrote or read, wiped when they leave it. Everything
+//! that writes to the provider from outside openmls uses its `set_value` and `remove_value`, or the
+//! change isn't saved.
 //!
 //! [`SavedMlsStorage`] remembers whether the store holds what the last save left. It may not when
 //! the disk rolled back a group of writes ([`LocalStore::write_tally`]), a save failed, or another
@@ -115,6 +117,7 @@ enum OldRecord {
 struct Listed {
   entries: Entries,
   maybe_old_record: Option<Zeroizing<Vec<u8>>>,
+  /// The highest number in use among the records set aside: a wipe can leave gaps.
   set_aside: usize,
   maybe_generation: Option<u64>,
 }
@@ -198,6 +201,9 @@ pub fn load_mls_storage(store: &impl LocalStore) -> Result<(OpenMlsRustCrypto, S
       values.insert(key, std::mem::take(&mut *value));
     }
   }
+  // Nothing has changed against the store yet, and from here on what changes is noted. (A provider
+  // that starts with a new `SavedMlsStorage` has no need: its first save writes everything.)
+  provider.storage().take_changed_keys();
   // The store lost writes (a client reopened in the same process): what it lists may not be what
   // the disk holds. Another process's commits don't matter here: the listing read them.
   let is_rewrite_due = maybe_tally.is_some_and(|tally| tally.lost > 0);
@@ -295,7 +301,7 @@ pub fn has_unmoved_record(store: &impl LocalStore) -> Result<bool, CoreError> {
 
 /// Wipes the records set aside longer than `grace` ago: never read again, but holding old MLS
 /// secrets. A record's age counts from the first start that saw it. A wrong clock can only make
-/// that sooner or later, and nothing depends on these records.
+/// that sooner or later (a date in the future counts from now), and nothing depends on these records.
 pub fn wipe_old_set_aside(store: &impl LocalStore, now_ms: i64, grace: Duration) -> Result<(), CoreError> {
   let set_aside = store.list_prefix(Table::MlsStorage, SET_ASIDE_PREFIX)?;
   if set_aside.is_empty() {
@@ -312,13 +318,14 @@ pub fn wipe_old_set_aside(store: &impl LocalStore, now_ms: i64, grace: Duration)
         .get(Table::MlsStorage, &seen_key)?
         .and_then(|seen| Some(i64::from_be_bytes(<[u8; 8]>::try_from(seen.as_slice()).ok()?)));
       match maybe_seen_ms {
-        Some(seen_ms) if now_ms.saturating_sub(seen_ms) >= grace_ms => {
+        Some(seen_ms) if seen_ms <= now_ms && now_ms.saturating_sub(seen_ms) >= grace_ms => {
           store.delete(Table::MlsStorage, &key)?;
           store.delete(Table::MlsStorage, &seen_key)?;
           wiped += 1;
         },
-        Some(_) => {},
-        None => store.put(Table::MlsStorage, &seen_key, &now_ms.to_be_bytes())?,
+        Some(seen_ms) if seen_ms <= now_ms => {},
+        // Never seen, or "seen" in the future: a clock that was ahead would put the wipe off.
+        _ => store.put(Table::MlsStorage, &seen_key, &now_ms.to_be_bytes())?,
       }
     }
     Ok(wiped)
@@ -471,7 +478,8 @@ fn list_records(store: &impl LocalStore) -> Result<Listed, CoreError> {
     } else if key == GENERATION_KEY {
       listed.maybe_generation = parse_generation(&value);
     } else if key.starts_with(SET_ASIDE_PREFIX) {
-      listed.set_aside += 1;
+      let maybe_number = key.rsplit('-').next().and_then(|number| number.parse().ok());
+      listed.set_aside = listed.set_aside.max(maybe_number.unwrap_or(listed.set_aside + 1));
     } else if !key.starts_with(SET_ASIDE_SEEN_PREFIX) {
       tracing::warn!("skipping an MLS storage record of an unknown kind");
     }
@@ -836,6 +844,45 @@ mod tests {
         [(entry_key(b"group"), b"epoch 7".to_vec())],
         "the record and its note are gone, the entries stay"
       );
+    }
+
+    /// A clock that was ahead must not put the wipe off for as long as it was ahead.
+    #[test]
+    fn a_first_sighting_in_the_future_counts_from_now() {
+      let store = MemoryStore::new();
+      store
+        .put(Table::MlsStorage, &set_aside_key(0), b"old secret")
+        .unwrap();
+      wipe_old_set_aside(&store, 10_000 * DAY_MS, GRACE).unwrap();
+
+      wipe_old_set_aside(&store, 100 * DAY_MS, GRACE).unwrap();
+      assert!(store.get(Table::MlsStorage, &set_aside_key(0)).unwrap().is_some());
+      wipe_old_set_aside(&store, 130 * DAY_MS, GRACE).unwrap();
+      assert!(store.get(Table::MlsStorage, &set_aside_key(0)).unwrap().is_none());
+    }
+
+    /// A number a wipe left free stays out of the way of one still in use: taking the count as the
+    /// next number would overwrite that record, which then goes early under its old date.
+    #[test]
+    fn a_new_record_never_takes_the_number_of_one_still_there() {
+      let store = MemoryStore::new();
+      store
+        .put(Table::MlsStorage, &entry_key(b"group"), b"epoch 7")
+        .unwrap();
+      store
+        .put(Table::MlsStorage, &set_aside_key(1), b"survivor")
+        .unwrap();
+      store
+        .put(Table::MlsStorage, LEGACY_KEY, &legacy(&[(b"a", b"1")]))
+        .unwrap();
+
+      load_mls_storage(&store).unwrap();
+
+      assert_eq!(
+        store.get(Table::MlsStorage, &set_aside_key(1)).unwrap(),
+        Some(b"survivor".to_vec())
+      );
+      assert!(store.get(Table::MlsStorage, &set_aside_key(2)).unwrap().is_some());
     }
 
     #[test]

@@ -939,6 +939,50 @@ mod tests {
     std::fs::remove_dir_all(&directory).unwrap();
   }
 
+  /// A panic while the catalog is written, at the very end of a group: the group still ends. Left
+  /// open at the backend, every later group would nest in it, report success and never commit, and
+  /// the app would lose it all on exit though the server had seen those commits.
+  #[test]
+  fn a_panic_while_the_catalog_flushes_ends_the_group_and_rolls_it_back() {
+    let connection = Connection::open_in_memory().unwrap();
+    let backend = PanicsOnPut {
+      records: SealedSqliteStore::backend_of(connection).unwrap(),
+      is_armed: std::cell::Cell::new(false),
+    };
+    let key = SymmetricKey::generate(&mut OsRng);
+    let store = SealedStore::open_backend(backend, &key, SealedStoreLimits::default()).unwrap();
+    store.put(Table::Spaces, "before", b"1").unwrap();
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      crate::store::write_group(&store, || -> Result<(), StoreError> {
+        store.put(Table::Spaces, "half", b"2")?;
+        store.backend().is_armed.set(true);
+        Ok(())
+      })
+    }));
+
+    assert!(panicked.is_err(), "the panic goes on");
+    assert!(
+      !store.backend().is_armed.get(),
+      "it was the catalog's write that panicked"
+    );
+    assert!(
+      store.backend().records.lock().connection.is_autocommit(),
+      "the transaction ended"
+    );
+    assert!(!store.has_group_owner());
+    assert_eq!(store.write_tally().map(|tally| tally.lost), Some(1));
+    assert_eq!(store.get(Table::Spaces, "half").unwrap(), None);
+    assert_eq!(store.get(Table::Spaces, "before").unwrap(), Some(b"1".to_vec()));
+
+    store.put(Table::Spaces, "after", b"3").unwrap();
+    assert!(
+      store.backend().records.lock().connection.is_autocommit(),
+      "a later write commits"
+    );
+    assert_eq!(store.get(Table::Spaces, "after").unwrap(), Some(b"3".to_vec()));
+  }
+
   #[test]
   fn a_panic_undoes_its_group() {
     let store =
@@ -1245,6 +1289,51 @@ mod tests {
       if let Some(commit) = self.on_begin.borrow_mut().take() {
         commit();
       }
+      self.records.begin_writes()
+    }
+
+    fn end_writes(&self) -> Result<(), StoreError> {
+      self.records.end_writes()
+    }
+
+    fn fail_group(&self) {
+      self.records.fail_group();
+    }
+
+    fn write_tally(&self) -> Option<WriteTally> {
+      self.records.write_tally()
+    }
+  }
+
+  /// Records on SQLite whose next put panics once armed.
+  struct PanicsOnPut {
+    records: SqliteRecords,
+    is_armed: std::cell::Cell<bool>,
+  }
+
+  impl RecordBackend for PanicsOnPut {
+    fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
+      assert!(!self.is_armed.replace(false), "made to panic");
+      self.records.put_record(id, sealed)
+    }
+
+    fn delete_record(&self, id: &LookupId) -> Result<(), StoreError> {
+      self.records.delete_record(id)
+    }
+
+    fn get_record(&self, id: &LookupId) -> Result<Option<Vec<u8>>, StoreError> {
+      self.records.get_record(id)
+    }
+
+    fn records_after(
+      &self,
+      maybe_after: Option<&LookupId>,
+      limit: usize,
+    ) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
+      self.records.records_after(maybe_after, limit)
+    }
+
+    fn begin_writes(&self) -> Result<(), StoreError> {
       self.records.begin_writes()
     }
 

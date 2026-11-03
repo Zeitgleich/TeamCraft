@@ -32,6 +32,21 @@ shows every change since.
    map for reading and has only `insert`, `remove` and `list_bytes` to change it, so a write that
    doesn't note its key doesn't compile. New public methods: `take_changed_keys`, `has_changed_keys`,
    `set_value`, `remove_value`. Keys and values are stored exactly as before.
+
+   Noting starts with the first `take_changed_keys`: a provider nobody saves (DAVE's, for the length
+   of a call) keeps no set of keys. `teamcraft-core` calls it when it loads a state; a save from a new
+   `SavedMlsStorage` writes everything anyway, and starts it there.
+
+   The public `values` field stays, so code outside this crate can still change the map past the
+   guard. Two places do: `teamcraft-core` fills it when it loads a state (nothing has changed against
+   the store then), and `Session::reset` in the vendored `davey` calls `values.write().clear()`, which
+   is harmless: nobody saves a DAVE provider, and it notes nothing. Writes that must be saved use
+   `set_value` and `remove_value`.
+
+   `insert` and `remove` wipe the value they replace (new dependency `zeroize`, already in our tree):
+   it costs a write over the few kilobytes of each changed entry, and old epoch secrets otherwise stay
+   in freed memory. It is not a guarantee: the lists changed in place through `list_bytes`, dropping
+   the whole map, `clear()`, and the copies openmls makes to serialize are not wiped.
 3. Added `VENDORED.md`, `LICENSE`, and the `changed_keys` tests at the end of `src/lib.rs`.
 
 ## Updating

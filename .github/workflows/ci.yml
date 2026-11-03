@@ -191,7 +191,7 @@ jobs:
       # crates/teamcraft-core/webdriver.json starts Chromium headless with --no-sandbox (a container).
       - name: Browser tests
         run: >
-          cargo test --target wasm32-unknown-unknown -p teamcraft-core --features service-worker
+          cargo test --target wasm32-unknown-unknown -p teamcraft-core --features service-worker,test-support
           --test web --test web_service_worker
 
   # WebRTC audio processing (echo cancellation) is opt-in at build time, see

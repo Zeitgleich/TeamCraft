@@ -54,7 +54,7 @@ use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
 use super::idb::{self, OpenMode, RECORDS};
 use crate::store::sealed::{BuildStep, LazySeal, RecordBackend, SealedStore, format_id, parse_id};
-use crate::store::write_queue::{Issue, OpenValue, RecordValue, SealFailed, WriteFailure, Writes};
+use crate::store::write_queue::{Issue, OpenValue, RecordValue, WriteFailure, Writes};
 use crate::store::{SealedStoreLimits, StoreError};
 
 /// How long writes are collected before they are issued together. Short enough that little is
@@ -381,23 +381,12 @@ impl Inner {
   }
 
   /// Issues every queued write in one transaction, unless a batch runs: then this happens when it
-  /// ended. A write that can't even start counts as failed.
+  /// ended. A write that can't even start counts as failed. What may go out, and what fails a batch,
+  /// is `Writes`'s to decide (and tested natively); this only talks to the browser.
   fn issue_queued(&self) {
-    // Writes that failed go with every batch: a later write never commits without them, so what
-    // is on disk stays a prefix of what was written.
-    let keys = {
-      let mut writes = self.writes.borrow_mut();
-      if !writes.may_issue() {
-        return;
-      }
-      if writes.has_queued() {
-        writes.retry_failed();
-      }
-      writes.take_queued()
-    };
-    if keys.is_empty() {
+    let Some(keys) = self.writes.borrow_mut().take_next_batch() else {
       return;
-    }
+    };
     let (transaction, records) = match self.transaction() {
       Ok(opened) => opened,
       Err(failure) => {
@@ -408,61 +397,39 @@ impl Inner {
         return;
       },
     };
-    let mut writes = self.writes.borrow_mut();
-    let mut carried = Vec::with_capacity(keys.len());
-    let mut maybe_refused = None;
-    for key in &keys {
+    let filled = self.writes.borrow_mut().fill_batch(&keys, |key, issue| {
       let record = JsValue::from_str(key);
       let maybe_id = parse_id(key);
-      let (issued, sequence) = match writes.issue(key) {
-        Ok(Some(Issue::Put { sealed, sequence })) => {
+      let sent = match issue {
+        Issue::Put { sealed, .. } => {
           if let Some(id) = maybe_id {
             self.records.borrow_mut().insert(id, sealed.to_vec());
           }
-          (
-            records.put_with_key(&js_sys::Uint8Array::from(sealed), &record),
-            sequence,
-          )
+          records.put_with_key(&js_sys::Uint8Array::from(*sealed), &record)
         },
-        Ok(Some(Issue::Delete { sequence })) => {
+        Issue::Delete { .. } => {
           if let Some(id) = maybe_id {
             self.records.borrow_mut().remove(&id);
           }
-          (records.delete(&record), sequence)
-        },
-        // Replaced.
-        Ok(None) => continue,
-        Err(SealFailed) => {
-          maybe_refused = Some(WriteFailure::Other);
-          break;
+          records.delete(&record)
         },
       };
-      match issued {
-        Ok(_) => {
-          writes.issued(key);
-          carried.push((key.clone(), sequence));
-        },
-        // Refused at once (a full disk can refuse at once): nothing of the batch may commit.
-        Err(error) => {
-          maybe_refused = Some(failure_of(&error));
-          break;
-        },
-      }
+      sent.map(|_| ()).map_err(|error| failure_of(&error))
+    });
+    match filled {
+      Ok(batch) => {
+        // The events fire after this returns, so the handlers are in time. Setting a property on a
+        // fresh transaction object can't fail.
+        let _ = js_sys::Reflect::set(&transaction, &BATCH_PROPERTY.into(), &batch.into());
+        transaction.set_oncomplete(Some(self.on_complete.as_ref().unchecked_ref()));
+        transaction.set_onabort(Some(self.on_abort.as_ref().unchecked_ref()));
+      },
+      // Aborted before it carried a batch number: the abort handler leaves it alone. Deliberately
+      // ignored: a transaction that can't abort any more was already aborted by the browser.
+      Err(_) => {
+        let _ = transaction.abort();
+      },
     }
-    if let Some(failure) = maybe_refused {
-      // Aborted before it carried a batch number: the abort handler leaves it alone.
-      let _ = transaction.abort();
-      for key in &keys {
-        writes.fail_open(key, failure);
-      }
-      return;
-    }
-    let batch = writes.start_batch(carried);
-    // The events fire after this returns, so the handlers are in time. Setting a property on a
-    // fresh transaction object can't fail.
-    let _ = js_sys::Reflect::set(&transaction, &BATCH_PROPERTY.into(), &batch.into());
-    transaction.set_oncomplete(Some(self.on_complete.as_ref().unchecked_ref()));
-    transaction.set_onabort(Some(self.on_abort.as_ref().unchecked_ref()));
   }
 
   fn transaction(&self) -> Result<(IdbTransaction, IdbObjectStore), WriteFailure> {

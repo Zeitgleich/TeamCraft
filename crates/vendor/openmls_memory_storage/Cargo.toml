@@ -77,6 +77,9 @@ version = "1.0"
 [dependencies.thiserror]
 version = "^2.0"
 
+[dependencies.zeroize]
+version = "1.9.1"
+
 [dev-dependencies]
 
 # Outside our workspace, like the other vendored crates (crates/vendor/*/VENDORED.md).
