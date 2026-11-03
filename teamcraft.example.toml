@@ -39,6 +39,9 @@ retry_initial_ms = 200
 retry_max_ms = 2000
 # How long /readyz waits for the database; longer counts as a failure.
 readiness_timeout_ms = 2000
+# An API request that makes no progress this long (no answer, no new piece of its body) gets 503 and
+# Retry-After instead of hanging on a database connection that stopped answering. 0: no deadline.
+request_deadline_secs = 60
 
 [oidc]
 # Required. Issuer of the OIDC provider (reference setup: a Keycloak realm). Must equal the `iss`
