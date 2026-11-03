@@ -7,7 +7,7 @@ import UserNotifications
 
 /// Why something failed, as the screens show it (translated per case).
 enum AppFailure: Equatable {
-  case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, callMoveRefused, callDeviceLimit, generic
+  case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, callMoveRefused, callDeviceLimit, callEncryptionPending, generic
   case backupOutOfMemory, backupTooNew, backupDamaged
   case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
   /// The identity provider refused the sign-in (issue #1063); `code` is its cleaned `error`.
@@ -26,6 +26,7 @@ enum AppFailure: Equatable {
     case .recoveryPending: self = .recoveryPending
     case .callMoveRefused: self = .callMoveRefused
     case .callDeviceLimit: self = .callDeviceLimit
+    case .callEncryptionPending: self = .callEncryptionPending
     case .linkCodeInvalid: self = .linkCodeInvalid
     case .linkCodeForNewDevice: self = .linkCodeForNewDevice
     case .linkCodeForSignedInDevice: self = .linkCodeForSignedInDevice
@@ -47,6 +48,7 @@ enum AppFailure: Equatable {
     case .recoveryPending: return "recovery_pending"
     case .callMoveRefused: return "call_move_refused"
     case .callDeviceLimit: return "call_device_limit"
+    case .callEncryptionPending: return "call_encryption_pending"
     case .generic: return "error_generic"
     case .linkCodeInvalid: return "link_code_invalid"
     case .linkCodeForNewDevice: return "link_code_for_new_device"

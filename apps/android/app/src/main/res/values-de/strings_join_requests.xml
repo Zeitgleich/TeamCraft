@@ -8,6 +8,7 @@
   <string name="join_request_hint_history">Wenn du zustimmst, kann die Person auch den bisherigen Verlauf lesen. Alle im Kanal sehen, dass ein Workspace-Admin beigetreten ist.</string>
   <string name="join_request_share_history">Auch den bisherigen Verlauf teilen</string>
   <string name="join_request_not_admin">Die signierte Rollenliste auf diesem Gerät führt die Person nicht als Workspace-Admin, du kannst nur ablehnen.</string>
+  <string name="join_request_owner_not_signed">Deine Eigentümerrolle in diesem Kanal ist noch nicht signiert, andere Mitglieder würden die Admin-Person daher nicht annehmen. Bitte eine signierte Admin-Person oder einen Workspace-Admin, deine Rolle in den Mitgliedern des Kanals zu signieren; bis dahin kannst du nur ablehnen.</string>
   <string name="join_request_approve">Zustimmen</string>
   <string name="join_request_decline">Ablehnen</string>
   <string name="join_request_gone">Diese Anfrage ist nicht mehr offen: Sie wurde auf einem anderen Gerät oder von einem anderen Eigentümer entschieden, zurückgezogen oder ist abgelaufen.</string>

@@ -29,6 +29,7 @@
   <string name="call_move_offer">%1$s hat den Anruf in einen Meetingraum verschoben und %2$s hinzugefügt.</string>
   <string name="call_move_join">Meetingraum beitreten</string>
   <string name="error_call_device_limit">Dein Konto ist bereits auf so vielen Geräten im Anruf, wie erlaubt sind. Verlasse den Anruf zuerst auf einem davon und tritt dann von diesem Gerät bei.</string>
+  <string name="error_call_encryption_pending">Dieses Gerät kann dem Anruf noch nicht beitreten: Es wird gerade in die Verschlüsselung der Unterhaltung aufgenommen. Versuche es gleich noch einmal. Hilfreich ist, TeamCraft auf einem anderen deiner Geräte geöffnet zu lassen.</string>
   <string name="error_call_move_refused">Der Anruf wurde nicht verschoben: Der Meetingraum passt nicht zu dem, was in der Unterhaltung angekündigt wurde. Bleib in diesem Anruf oder tritt dem Meetingraum über die Liste bei, wenn du ihm vertraust.</string>
   <string name="channel_mention_confirm_title">Alle benachrichtigen?</string>
   <plurals name="channel_mention_confirm">

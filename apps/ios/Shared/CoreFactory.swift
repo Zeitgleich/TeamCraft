@@ -109,6 +109,8 @@ enum CoreFailure: Equatable {
   case callMoveRefused
   /// The account is in the call on as many devices as it allows: leave on one of them first.
   case callDeviceLimit
+  /// The call needs the conversation's encryption group, which this device is not in yet: try again shortly.
+  case callEncryptionPending
   /// Device linking: the typed code is not the one on the new device (try again), or the last try failed.
   case linkCodeRejected, linkAttemptEnded
   /// Device linking: not a link code; a code for the other side (issue #998); a code that ran out.
@@ -137,6 +139,8 @@ enum CoreFailure: Equatable {
       self = .recoveryPending
     } else if name.hasPrefix("callmoverefused") {
       self = .callMoveRefused
+    } else if name.hasPrefix("callencryptionpending") {
+      self = .callEncryptionPending
     } else if name.hasPrefix("calldevicelimit") {
       self = .callDeviceLimit
     } else if name.hasPrefix("linkcoderejected") {

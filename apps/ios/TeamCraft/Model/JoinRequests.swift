@@ -26,6 +26,7 @@ enum JoinRequests {
     case .notAnAdmin: return step == .ask ? .notAnAdminYourself : .requesterNotAdmin
     case .tooSoon: return .tooSoon
     case .notApprovable: return .notApprovable
+    case .ownerRoleNotSigned: return .ownerRoleNotSigned
     }
   }
 }
@@ -61,6 +62,8 @@ enum JoinNote: Equatable {
   case tooSoon
   /// Approving: the verified policy or the channel doesn't allow it on this device.
   case notApprovable
+  /// Approving: the owner's own role in the channel is not signed, so members would refuse the add.
+  case ownerRoleNotSigned
   case failed(AppFailure)
 
   var message: LocalizedStringKey {
@@ -70,6 +73,7 @@ enum JoinNote: Equatable {
     case .notAnAdminYourself: return "join_ask_not_admin"
     case .tooSoon: return "join_ask_too_soon"
     case .notApprovable: return "join_request_not_approvable"
+    case .ownerRoleNotSigned: return "join_request_owner_not_signed"
     case .failed(let failure): return failure.message
     }
   }
@@ -82,6 +86,7 @@ enum JoinNote: Equatable {
     case .notAnAdminYourself: return String(localized: "join_ask_not_admin")
     case .tooSoon: return String(localized: "join_ask_too_soon")
     case .notApprovable: return String(localized: "join_request_not_approvable")
+    case .ownerRoleNotSigned: return String(localized: "join_request_owner_not_signed")
     case .failed: return String(localized: "join_request_failed")
     }
   }
@@ -147,6 +152,9 @@ struct JoinRequestNotice: Equatable {
       categoryIdentifier = NotificationCategories.joinRequestCategory
     case .notAnAdmin:
       body = maybeNote?.notificationText ?? String(localized: "join_request_not_admin")
+      categoryIdentifier = NotificationCategories.joinRequestDeclineOnlyCategory
+    case .ownerRoleNotSigned:
+      body = maybeNote?.notificationText ?? String(localized: "join_request_owner_not_signed")
       categoryIdentifier = NotificationCategories.joinRequestDeclineOnlyCategory
     }
   }

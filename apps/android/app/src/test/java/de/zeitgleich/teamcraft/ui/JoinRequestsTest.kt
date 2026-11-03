@@ -47,6 +47,10 @@ class JoinRequestsTest {
       R.string.join_request_not_approvable,
       joinOutcomeMessage(JoinStep.Approve, JoinRequestOutcome.NOT_APPROVABLE),
     )
+    assertEquals(
+      R.string.join_request_owner_not_signed,
+      joinOutcomeMessage(JoinStep.Approve, JoinRequestOutcome.OWNER_ROLE_NOT_SIGNED),
+    )
   }
 
   @Test
