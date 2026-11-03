@@ -439,8 +439,50 @@ fn message(conversation: i64, client: u8, text: &str) -> StoredMessage {
   }
 }
 
+/// Issue #840: a batch that aborts (quota) must not be overtaken by the batch after it. With both
+/// transactions running, the second committed without the first, and a page dying then left a
+/// disk that was no prefix of the writes: the second write without the first.
+#[wasm_bindgen_test]
+async fn a_batch_after_one_that_aborts_never_commits_without_it() {
+  let name = database_name();
+  let key = SymmetricKey::generate(&mut OsRng);
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  store.flush().await.unwrap();
+
+  abort_next_write_transaction();
+  store.put(Table::Users, "first", b"1").unwrap();
+  store.write_now();
+  store.put(Table::Users, "second", b"2").unwrap();
+  store.write_now();
+  // Another connection, as a reload would read it; its read comes after the abort.
+  let other = IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap();
+  let is_first_on_disk = other.get(Table::Users, "first").unwrap().is_some();
+  let is_second_on_disk = other.get(Table::Users, "second").unwrap().is_some();
+  assert!(
+    is_first_on_disk || !is_second_on_disk,
+    "the second write reached the disk without the first"
+  );
+
+  // Both go through in the end, with nothing else asked for than a flush.
+  store.flush().await.unwrap();
+  let reopened = IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap();
+  assert_eq!(reopened.get(Table::Users, "first").unwrap(), Some(b"1".to_vec()));
+  assert_eq!(reopened.get(Table::Users, "second").unwrap(), Some(b"2".to_vec()));
+}
+
 fn id<T: Id>(raw: i64) -> T {
   T::from_snowflake(Snowflake::new(raw).unwrap())
+}
+
+/// Aborts the transaction of the next `IDBObjectStore.put` once the page returned to the browser, when
+/// its batch has been issued whole: what a write refused late does (quota, on commit).
+fn abort_next_write_transaction() {
+  js_sys::eval(
+    "const put = IDBObjectStore.prototype.put; IDBObjectStore.prototype.put = function (...args) { \
+     IDBObjectStore.prototype.put = put; const transaction = this.transaction; \
+     queueMicrotask(() => transaction.abort()); return put.apply(this, args); };",
+  )
+  .unwrap();
 }
 
 /// Makes `IDBObjectStore.put` throw `QuotaExceededError`, as a full disk does, or restores it.
