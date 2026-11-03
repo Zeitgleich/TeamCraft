@@ -701,6 +701,84 @@ What the numbers say:
 - **wasm:** uncompressed sizes at the time (#248); the budget now counts the compressed transfer,
   see "Web bundle size" below for the current numbers.
 
+#### Opening the store and the first catalog build (issue #1127)
+
+The large workspace on this machine (Linux, Ryzen, headless Chrome, release server and web build),
+November 2026, other sessions' builds at times beside it (load 1 to 3). One run on `main` a7182eb2
+plus only the measuring (`perf.rs`, one log line), and two of the change. `perf.rs` forces the build
+by deleting the catalog's state from IndexedDB, so the next start builds it under a new generation,
+as an update that changes the catalog does.
+
+| Large workspace                                   | Before    | After, run 1 | After, run 2 |
+|---------------------------------------------------|-----------|--------------|--------------|
+| Build: page load until the channel list           | 11.8 s    | 18.7 s       | 18.1 s       |
+| Build: longest main-thread task                   | 10,974 ms | 928 ms       | 904 ms       |
+| Build: tasks over 50 ms / their total             | 3 / 11 s  | 92 / 12.9 s  | 91 / 12.5 s  |
+| Build: steps the progress bar showed              | none      | 89           | 87           |
+| Reload during the build: percent before, after it | -         | -            | 36 / 37      |
+| The same: from the reload until the channel list  | -         | 24.6 s       | 21.9 s       |
+
+| The store, on a reload                             | Value                   |
+|----------------------------------------------------|-------------------------|
+| Records / their ciphertext                         | 23,487 / 22 MiB         |
+| Reading them, before anything else (`read_all`)    | 350 ms                  |
+| Wasm memory right after that                       | 29 MiB                  |
+| Reload until the channel list                      | 1.6 s (budget ≤ 1.5 s)  |
+| PSS of the browser: empty / app started            | 294 / 577 MiB           |
+
+What the numbers say:
+
+- **The page keeps its thread:** the one task of 11 s is gone. The build takes one batch per task
+  and waits for its commit. Most tasks still run over 50 ms (median 133 ms, up to 193 ms, longer as
+  the indexes grow), so the bar moves a few times a second; the 904 ms is not a batch, a plain reload
+  has one of that size too (777 ms). On this screen nothing but the bar and "Sign out" responds, and
+  it happens once per update.
+- **It costs about 6 s more (+53 %) here:** the commit after every batch, and before it the writes
+  went out in far fewer transactions. Not profiled. A smaller batch would mean shorter tasks and more
+  rewrites of the same index nodes; that trade was not tried.
+- **A reload goes on:** the bar stood at 36 % in a screenshot just before the reload and came back at
+  37 %. The rest then took longer than a whole build from the start (21.9 s for about 64 % against
+  18.1 s), which is not explained.
+- **The waiting costs no timers:** the commit is what gives the thread back, so a hidden tab's
+  throttled timers don't slow the build. Not measured in a hidden or frozen tab.
+- **This store is small for the workspace:** 100k messages on the server are 23,487 records here,
+  because a browser holds what it caught up (one page per channel, plus what it read). A store that
+  really holds 100,000 messages would be about four times this if it grows linearly (about 1.5 s and
+  90 MiB); that is an estimate, no such store was measured.
+- **Reading a page at a time was tried and dropped:** `getAll` with a limit, in one transaction, read
+  in 405 ms instead of 350 ms in both runs, with the same three long tasks on a reload and the same
+  wasm memory, so it bought nothing measurable on a hot path over its budget. The tasks of the reload
+  before the change were not recorded separately, and a larger store may show a difference. The
+  columns "After" were measured with it; the code is back to the single read of "Before", and that
+  combination has no large run of its own. It changes only the first 400 ms of a start.
+- **Not the change, as far as the code says:** channel switches at p95 while catching up went from
+  126 to 164 and 152 ms, right after it from 75 to 100 and 93 ms, and one long channel open from 38
+  to 130 ms in the second run. Nothing after opening changed; one baseline run can't rule it out.
+
+**Fetching records per conversation at the async boundaries: not sound, so not done.** `LocalStore`
+is synchronous, and IndexedDB has no synchronous read, so what a read may touch has to be in memory
+before it starts:
+
+- A record that isn't loaded can't look absent: `upsert_message` would take an existing message for
+  new and leave its old place in the indexes. It would have to fail instead.
+- It can't fail either: a group of writes can't be undone in the browser (the backend keeps every
+  write, and `Client` state has moved on), so a read that fails in the middle of a group leaves half
+  of it applied, MLS state included.
+- So every path would have to name its records up front. About 128 calls read or write messages in
+  the client and the UI backend alone, a gateway frame names its conversation only once it is parsed,
+  a catch-up crosses conversations, record IDs are pseudorandom (so a conversation's records are found
+  only through its sealed index, one step after another), and a repair of the catalog or a removed
+  conversation's sweep walks every record, synchronously, from inside a read.
+- A key prefix per conversation would make the fetch easy, and would show in one copy of the files
+  which records belong together, more than e2ee.md §9.1 allows today.
+
+What it would take, either of: the core in a dedicated worker over a store with synchronous reads
+(OPFS sync access handles), which gives the browser what the mobile apps have, O(1) open, and takes
+the build and the catch-up off the main thread; the `remote_backend` calls are already the boundary
+for that. Or an async `LocalStore`, which rewrites the client on every platform. At the numbers above
+(350 ms of a reload, 22 of 283 MiB) neither is urgent for this workspace; it matters for a browser
+that holds far more history. The service worker reads the whole store for every push, too.
+
 #### Idle traffic and updates per conversation
 
 Re-measured for #246, #247, #252, #259 and #270 in the same kind of cloud VM (4 vCPUs, 15 GiB,
@@ -904,6 +982,7 @@ Left open (see the PR of #714/#717):
 - The web and desktop shells restored the sign-in and read `GET /me` before they started the core.
   Fixed since, see "Starting from the cached account" below.
 - The web core decrypts the whole IndexedDB store into memory before it answers the first read.
+  (Since #155 it only reads the ciphertext; #1127 says what fetching less would take.)
 - The MLS state was still one record (#424); a catch-up of many changed groups rewrote it per group.
   Fixed since, see the next section.
 
@@ -1174,7 +1253,8 @@ channel. The core thread spent 7.8 s of CPU on the reads after a start; now 0.3 
 0.22 % of a core (core thread 0.13 %), within the 0.5 % budget. What changed:
 
 - The UI's reads of a conversation come from a cache of decoded messages (`TrackedStore` message
-  cache, up to 60,000 messages on the desktop, about 20 MiB here): it is filled on the first read
+  cache, up to 64 MiB on every platform, `DEFAULT_MESSAGE_CACHE_BYTES`; bounded by bytes since
+  #1125, see "Local store" below): it is filled on the first read
   and updated with every write the core makes, so a new message no longer means reading the
   conversation again. A revision per conversation lets the activity feed keep each conversation's
   entries until its messages or read state change.
@@ -1288,10 +1368,29 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
   doesn't see it). It opens the store with `SealedStoreLimits::minimal()`, keeps no message cache and
   never builds the catalog: on the first push after an update, before the app ran the migration, it
   fetches the message instead.
-- **The app's memory for the store is bounded:** decrypted entries (8 MiB), decoded messages (4,096)
-  and index nodes (256 each) by default, plus the message cache of the conversations read last
-  (60,000 messages on every platform, as the desktop had). Before, the whole store was in memory:
-  148 MiB for this account, growing with every message.
+- **The app's memory for the store is bounded, in bytes:** decrypted entries (8 MiB), decoded
+  messages (4 MiB) and index nodes (2 MiB for each of the eight root and page caches) by default,
+  plus the message cache of the conversations read last (64 MiB on every platform). Before, the
+  whole store was in memory: 148 MiB for this account, growing with every message.
+- **Limits count bytes, not items (#1125):** they used to count messages (4,096 in the store, 60,000
+  in the message cache) and nodes (256), which assumed about 1 KB a message. A channel of 10 KB
+  messages held ten times that, so the mobile budget (250 MiB) was only kept by messages of
+  ordinary length. Each message is weighed once when it enters or leaves a cache
+  (`StoredMessage::footprint_bytes`: the structs plus the length of every string, list and byte
+  buffer, 96 bytes of bookkeeping on top; an estimate, not the allocator's), an index page when it
+  is read or written (at most 256 entries), a root as pages times the size of a page reference.
+  The caches keep a running sum, so a write or a read costs O(the message) and never looks at
+  the rest of the conversation. A message cache write that grows the cache past its budget drops
+  the least recently read other conversations, never the one being written to while it fits
+  alone; one that outgrew the whole budget is dropped and read from the store next time (its
+  revision has moved, so no stale read is kept). Readers hold their conversation by `Arc`, so
+  eviction never takes it from a read in progress. A conversation larger than the whole budget is
+  not cached at all. The cap on the sealed store (`SealedStoreLimits::max_message_bytes`,
+  `max_index_node_bytes`) and on the message cache (`TrackedStore::with_message_cache`) are
+  arguments, so a platform can set its own; the defaults are the figures above (`minimal()`: 128
+  KiB each, no message cache). With the 64 MiB default, the 50,000-message channel measured above
+  (about 50 MiB read whole) still fits; 50,000 messages of 10 KB would not, and are read from
+  the store on each use instead of taking 500 MiB.
 - **A full read of a big conversation got slower:** records are read one by one under pseudorandom
   IDs, about 9 µs a message (the file is memory-mapped, so a read is no system call).
 - **The feed no longer needs a full read:** the sealed store's catalog also keeps, per conversation,
@@ -1311,8 +1410,9 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
   as these numbers once none of them runs for it. Not measured end to end in an app.
 - **The browser** keeps the records' ciphertext in memory (IndexedDB has no synchronous reads) and
   decrypts a record only when it is read: opening no longer decrypts the store (part of #778), but
-  it still reads all of the ciphertext, so its open time and memory stay O(store), and the first
-  catalog build runs on the main thread. The catalog costs download size: about 28 kB gzip in the
+  it still reads all of the ciphertext, so its open time and memory stay O(store) (issue #1127, under
+  "Web client" above, has the numbers and why). The first catalog build gives the page its thread back
+  between batches and shows its progress. The catalog costs download size: about 28 kB gzip in the
   app and 25 kB in the service worker, which doesn't carry the build (27 kB less). It is needed
   from the first page on, so it can't move to a chunk; the guest budget went from 5.6 to 5.7 MB.
 - **Migration:** a store written before builds its catalog once, when the app opens it: every

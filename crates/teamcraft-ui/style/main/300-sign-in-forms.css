@@ -176,6 +176,46 @@
   margin: var(--space-4) 0;
 }
 
+/* The local store's catalog being built: the core's number, set on the element. */
+.store-build {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+}
+
+.store-build-track {
+  flex: 1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+.store-build-fill {
+  --store-build-fraction: 0;
+  height: 100%;
+  background: var(--accent);
+  transform: scaleX(var(--store-build-fraction));
+  transform-origin: left;
+  transition: transform var(--dur-fast) var(--ease-standard);
+}
+
+.store-build-percent {
+  flex: none;
+  min-width: 4ch;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .store-build-fill {
+    transition: none;
+  }
+}
+
 /* Problems: plain language first, the technical detail folded away. */
 .auth-problem,
 .auth-card .auth-alert {

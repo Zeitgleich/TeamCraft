@@ -1,5 +1,5 @@
 //! A map that keeps what was used last, up to a weight (issue #155): the bounded caches of the
-//! sealed store (decrypted entries by bytes, decoded messages and index pages by count).
+//! sealed store (decrypted entries, decoded messages and index nodes, all by bytes, issue #1125).
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;

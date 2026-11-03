@@ -30,7 +30,8 @@ use teamcraft_core::connection::{
 use teamcraft_core::downloads::Downloads;
 use teamcraft_core::records;
 use teamcraft_core::store::{
-  DatabaseKeySource, KeySourceError, SecretVault, SqlCipherStore, StoreError, StoreLock, TrackedStore,
+  DEFAULT_MESSAGE_CACHE_BYTES, DatabaseKeySource, KeySourceError, SecretVault, SqlCipherStore, StoreError,
+  StoreLock, TrackedStore,
 };
 use teamcraft_core::typing::TypingAnnouncer;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
@@ -56,9 +57,9 @@ use crate::auth::{AuthError, AuthService, TokenPeek, TokenStore, token_fingerpri
 
 /// Decoded messages the core keeps of the conversations read last (`TrackedStore` message cache,
 /// issue #1000): SQLCipher decrypts and checks every page it reads, and the UI reads the open
-/// conversation several times per change. About 1 KiB each in memory; a busy log channel of 30,000
-/// messages fits with a few smaller conversations beside it.
-const MESSAGE_CACHE_MESSAGES: usize = 60_000;
+/// conversation several times per change. Bounded by bytes, not by messages (issue #1125): about
+/// 60,000 messages of ordinary length.
+const MESSAGE_CACHE_BYTES: usize = DEFAULT_MESSAGE_CACHE_BYTES;
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
 /// Retries (outbox, uploads, previews), staggered commits and the other periodic upkeep; also the
@@ -1122,7 +1123,7 @@ impl Core {
         let key = KeptKey::new(&self.key);
         let store = TrackedStore::with_message_cache(
           Arc::new(SqlCipherStore::open(&path, &key).map_err(|error| open_error(error.into()))?),
-          MESSAGE_CACHE_MESSAGES,
+          MESSAGE_CACHE_BYTES,
         );
         self.store = Some(store.clone());
         if let Some(database_key) = key.take() {

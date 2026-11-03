@@ -13,6 +13,7 @@ pub(crate) mod browser;
   not(target_arch = "wasm32")
 ))]
 mod fixtures;
+mod footprint;
 mod key_source;
 #[cfg(not(target_arch = "wasm32"))]
 mod lock;
@@ -65,7 +66,7 @@ pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};
 pub use secret_vault::{Keystore, OsKeystore, SecretVault, TokenKind};
 #[cfg(all(feature = "sqlcipher", not(target_arch = "wasm32")))]
 pub use sqlite::SqlCipherStore;
-pub use tracked::{RemovedRendition, StoreChanges, TrackedStore};
+pub use tracked::{DEFAULT_MESSAGE_CACHE_BYTES, RemovedRendition, StoreChanges, TrackedStore};
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, MlsMessageId, ThreadId, UserId};

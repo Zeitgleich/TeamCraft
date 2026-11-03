@@ -15,6 +15,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
+use std::ops::ControlFlow;
 use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::time::Duration;
@@ -48,7 +49,9 @@ use teamcraft_core::downloads::{Downloads, Finished};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::push_text::{NAME_PLACEHOLDER, NotificationLabels};
 use teamcraft_core::records;
-use teamcraft_core::store::{IndexedDbStore, StoreError, TrackedStore, browser_database_key};
+use teamcraft_core::store::{
+  DEFAULT_MESSAGE_CACHE_BYTES, IndexedDbStore, StoreError, TrackedStore, browser_database_key,
+};
 use teamcraft_core::transfers::Transfers;
 use teamcraft_core::typing::TypingAnnouncer;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
@@ -76,11 +79,14 @@ use crate::tab_handover::{
 };
 use crate::web_tabs::{self, Follower, OwnerChannel, OwnerLock, Ownership};
 
+/// A catalog build shorter than this shows nothing: a small store would only flash a screen.
+const STORE_BUILD_SHOWS_AFTER_MS: i64 = 300;
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
 /// Decoded messages of the conversations read last: the store decrypts a record only when it is
 /// asked for (issue #155), so the open conversation is kept instead of decrypted on every change.
-const MESSAGE_CACHE_MESSAGES: usize = 60_000;
+/// Bounded by bytes, not by messages (issue #1125).
+const MESSAGE_CACHE_BYTES: usize = DEFAULT_MESSAGE_CACHE_BYTES;
 /// How often the loop wakes up on its own: outbox retries, heartbeats, staggered commits.
 const TICK: Duration = Duration::from_secs(3);
 /// How often the UI is told to read again while a long sync fills the store (issue #247).
@@ -139,6 +145,9 @@ thread_local! {
   /// Takeovers waiting for this tab to become the active one.
   static ACTIVATIONS: RefCell<Vec<oneshot::Sender<()>>> = const { RefCell::new(Vec::new()) };
   static IS_WATCHING_FOCUS: Cell<bool> = const { Cell::new(false) };
+  /// How far the store's first catalog build is, while it runs and shows.
+  static STORE_BUILD: Cell<Option<u8>> = const { Cell::new(None) };
+  static STORE_BUILD_LISTENERS: RefCell<Vec<Listener>> = const { RefCell::new(Vec::new()) };
   /// The store whose queued writes the page lifecycle listener issues.
   static LIFECYCLE_STORE: RefCell<std::rc::Weak<IndexedDbStore>> =
     const { RefCell::new(std::rc::Weak::new()) };
@@ -289,6 +298,28 @@ pub fn tab_state() -> TabState {
 /// Calls `callback` whenever [`tab_state`] changed.
 pub fn listen_tab(callback: impl FnMut() + 'static) {
   TAB_LISTENERS.with(|listeners| listeners.borrow_mut().push(Rc::new(RefCell::new(callback))));
+}
+
+/// How far the local store's catalog build is, in percent, while one runs (issue #1127).
+pub fn store_build_percent() -> Option<u8> {
+  STORE_BUILD.with(Cell::get)
+}
+
+/// Calls `callback` whenever [`store_build_percent`] changed.
+pub fn listen_store_build(callback: impl FnMut() + 'static) {
+  STORE_BUILD_LISTENERS.with(|listeners| listeners.borrow_mut().push(Rc::new(RefCell::new(callback))));
+}
+
+fn set_store_build(maybe_percent: Option<u8>) {
+  if STORE_BUILD.with(|current| current.replace(maybe_percent)) == maybe_percent {
+    return;
+  }
+  let listeners: Vec<_> = STORE_BUILD_LISTENERS.with(|listeners| listeners.borrow().clone());
+  for listener in listeners {
+    if let Ok(mut callback) = listener.try_borrow_mut() {
+      (*callback)();
+    }
+  }
 }
 
 /// "Use here": asks the active tab to hand the app over and runs the core here once it let go.
@@ -1447,11 +1478,26 @@ impl Core {
         let key = browser_database_key(&name)
           .await
           .map_err(|error| error.to_string())?;
-        let opened = match IndexedDbStore::open(&name, &key).await {
+        let user = self.user;
+        let started_ms = now_ms();
+        let opened = IndexedDbStore::open_reporting(&name, &key, |percent| {
+          // Handed over or signed out meanwhile: whoever opens the store next goes on from here, and the
+          // lock this core holds is what that tab waits for.
+          if !is_owner_of(user) {
+            return ControlFlow::Break(());
+          }
+          if now_ms().saturating_sub(started_ms) >= STORE_BUILD_SHOWS_AFTER_MS {
+            set_store_build(Some(percent));
+          }
+          ControlFlow::Continue(())
+        })
+        .await;
+        set_store_build(None);
+        let opened = match opened {
           Ok(opened) => opened,
           Err(error) => return unreadable_status(error.into()),
         };
-        let store = TrackedStore::with_message_cache(Rc::new(opened), MESSAGE_CACHE_MESSAGES);
+        let store = TrackedStore::with_message_cache(Rc::new(opened), MESSAGE_CACHE_BYTES);
         self.store = Some(store.clone());
         watch_page_lifecycle(store.inner());
         store

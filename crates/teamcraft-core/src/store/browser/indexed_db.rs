@@ -2,7 +2,8 @@
 //! (e2ee.md §9.1).
 //!
 //! [`LocalStore`] is synchronous, IndexedDB is not. Opening reads every record's ciphertext into
-//! memory, which the store decrypts only when a record is asked for (issue #155, #778); writes are queued
+//! memory, which the store decrypts only when a record is asked for (issue #155, #778; #1127 in
+//! docs/performance.md says why it can't fetch per conversation instead); writes are queued
 //! and issued together in one transaction a moment later ([`BATCH_DELAY`], or at once when much is
 //! queued or on [`IndexedDbStore::flush`]). Of several writes of one record in that time only the
 //! last is issued: a catch-up rewrites some records after every group it processes, and one
@@ -30,9 +31,16 @@
 //! again on the next flush, so the database catches up with the cache once space is free again
 //! instead of silently rolling back on the next reload (e2ee.md §9.4). The flush reports the
 //! failure; the app shows it to the user.
+//!
+//! A first catalog build ([`IndexedDbStore::open_reporting`]) takes one batch per task: each is
+//! committed before the next starts. Waiting for the commit gives the page its thread back; no timer
+//! is involved, so a hidden tab, whose timers are throttled, doesn't crawl, and a frozen one just goes
+//! on when it thaws. What was committed survives a reload, which goes on from there. A build found
+//! necessary while the store is in use (damage) can't wait for anything: [`LocalStore`] is synchronous.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
@@ -43,7 +51,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
 use super::idb::{self, OpenMode, RECORDS};
-use crate::store::sealed::{LazySeal, RecordBackend, SealedStore, format_id, parse_id};
+use crate::store::sealed::{BuildStep, LazySeal, RecordBackend, SealedStore, format_id, parse_id};
 use crate::store::write_queue::{Issue, OpenValue, RecordValue, WriteFailure, Writes};
 use crate::store::{SealedStoreLimits, StoreError};
 
@@ -80,8 +88,35 @@ impl SealedStore<IndexedDbRecords> {
   /// Opens the database `name` with `database_key`, reading its ciphertext into memory; a page that
   /// owns the store (it holds the Web Lock) upgrades it to this version and builds its catalog.
   pub async fn open(name: &str, database_key: &SymmetricKey) -> Result<Self, StoreError> {
+    Self::open_reporting(name, database_key, |_| ControlFlow::Continue(())).await
+  }
+
+  /// [`Self::open`] for a page that shows how far a catalog build is: `on_progress` hears the
+  /// percentage after every batch (never when no build is needed) and may stop the build, say
+  /// because another tab takes over: it fails with [`StoreError::InUse`], and whoever opens the
+  /// store next goes on from there. A newer version closing the database stops it with
+  /// [`StoreError::Closed`]. Lack of space doesn't stop it: the store works from what it holds, and
+  /// the next flush reports it, as for every other write.
+  pub async fn open_reporting(
+    name: &str,
+    database_key: &SymmetricKey,
+    mut on_progress: impl FnMut(u8) -> ControlFlow<()>,
+  ) -> Result<Self, StoreError> {
     let backend = IndexedDbRecords::read(name, OpenMode::Upgrade).await?;
-    Self::open_backend(backend, database_key, SealedStoreLimits::default())
+    let store = Self::open_backend_to_build(backend, database_key, SealedStoreLimits::default())?;
+    let Some(mut build) = store.start_catalog_build()? else {
+      return Ok(store);
+    };
+    loop {
+      let step = store.step_catalog_build(&mut build)?;
+      store.commit_build_batch().await?;
+      if step == BuildStep::Complete {
+        return Ok(store);
+      }
+      if on_progress(build.percent()).is_break() {
+        return Err(StoreError::InUse);
+      }
+    }
   }
 
   /// [`Self::open`] for the service worker, a second writer beside the page that owns the store: at
@@ -113,6 +148,18 @@ impl SealedStore<IndexedDbRecords> {
       idb::transaction_done(&transaction).await?;
     }
     inner.writes.borrow_mut().failure()
+  }
+
+  /// Waits until the catalog build's last batch is committed: the build's backpressure, and the
+  /// moment the page has its thread back.
+  async fn commit_build_batch(&self) -> Result<(), StoreError> {
+    match self.flush().await {
+      Err(StoreError::QuotaExceeded) => {
+        tracing::warn!("no space for the local store's catalog; it stays in memory for now");
+        Ok(())
+      },
+      flushed => flushed,
+    }
   }
 
   /// Issues what is queued now instead of after the batch delay, without waiting for it (the page
@@ -212,8 +259,19 @@ impl IndexedDbRecords {
   /// Opens the database `name` as `mode` says and reads every record's ciphertext.
   async fn read(name: &str, mode: OpenMode) -> Result<Self, StoreError> {
     let database = idb::open_database_with(name, mode).await?;
+    let started_ms = js_sys::Date::now();
     match read_all(&database).await {
-      Ok(records) => Ok(Self::new(database, records.into_iter().collect())),
+      Ok(records) => {
+        let sealed_bytes: usize = records.iter().map(|(_, sealed)| sealed.len()).sum();
+        tracing::info!(
+          records = records.len(),
+          sealed_mib = sealed_bytes / (1024 * 1024),
+          read_ms = js_sys::Date::now() - started_ms,
+          wasm_mib = core::arch::wasm32::memory_size(0) / 16,
+          "opened the local store"
+        );
+        Ok(Self::new(database, records.into_iter().collect()))
+      },
       Err(error) => {
         // Closed, so a reset can delete the database (issue #160) instead of being blocked by it.
         database.close();

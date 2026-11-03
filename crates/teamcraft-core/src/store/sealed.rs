@@ -11,7 +11,9 @@
 //! like every other record. What was read last stays decrypted in bounded caches
 //! ([`SealedStoreLimits`]); a page of messages costs that page, not the conversation, and opening
 //! costs nothing that grows with the history. A store written before the catalog existed builds it
-//! once when it is opened, in batches, and goes on where it stopped when that is interrupted.
+//! once when it is opened, in batches, and goes on where it stopped when that is interrupted. A
+//! backend that must not hold up its thread takes the batches one at a time
+//! ([`SealedStore::step_catalog_build`], the browser's).
 //!
 //! Writes go to the backend right away and update the caches. A backend that collects writes may
 //! seal a record only when it writes it ([`RecordBackend::put_lazy`]), so a record rewritten before
@@ -76,16 +78,19 @@ pub struct SealedStore<B> {
   entries: Mutex<EntryLog>,
 }
 
-/// How much a [`SealedStore`] keeps decrypted. Each cache drops what was used least recently
-/// first; nothing else grows with the store.
+/// How much a [`SealedStore`] keeps decrypted, in bytes (issue #1125: a count of messages says
+/// little when messages differ a hundredfold in length). Each cache drops what was used least
+/// recently first; nothing else grows with the store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SealedStoreLimits {
   /// Decrypted entry values (MLS state, members, settings), in bytes.
   pub max_entry_bytes: usize,
-  /// Decoded messages.
-  pub max_messages: usize,
-  /// Index roots and index pages, each (a page holds up to 256 entries of a few dozen bytes).
-  pub max_index_nodes: usize,
+  /// Decoded messages ([`StoredMessage::footprint_bytes`]): about 1 KB for a message of ordinary
+  /// length.
+  pub max_message_bytes: usize,
+  /// Index roots, and index pages, of each of the four indexes, each of the eight caches up to
+  /// this size (a page holds up to 256 entries of about 80 bytes).
+  pub max_index_node_bytes: usize,
 }
 
 /// The caches, the catalog's nodes and the open group, under one lock.
@@ -219,14 +224,50 @@ enum BuildProgress {
   Interrupted,
 }
 
+/// A catalog build under way, one batch per [`SealedStore::step_catalog_build`].
+pub(crate) struct CatalogBuild {
+  generation: u64,
+  maybe_after: Option<LookupId>,
+  /// Went on with a build that was interrupted: no record of this run says anything about the key.
+  is_resumed: bool,
+  /// Damage to the catalog found on the way may start it over, once.
+  may_start_over: bool,
+  opened: usize,
+  skipped: usize,
+  batches: usize,
+}
+
+/// What one batch of a [`CatalogBuild`] did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuildStep {
+  /// More to do. Written, unless the backend still holds it back.
+  Advanced,
+  Complete,
+}
+
+impl CatalogBuild {
+  /// How far the build is, 0 to 99. Records are walked in ID order and their IDs are pseudorandom,
+  /// so the place in the ID space says how far: no count needed, it never moves back while the
+  /// build adds its own records, and a build that goes on after a reload goes on from there.
+  #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+  pub(crate) fn percent(&self) -> u8 {
+    self.maybe_after.as_ref().map_or(0, |after| {
+      let place = u32::from(u16::from_be_bytes([after.0[0], after.0[1]]));
+      // At most 99: 65535 * 100 / 65536. The last batch is followed by `Complete`.
+      u8::try_from(place * 100 / 65_536).unwrap_or(99)
+    })
+  }
+}
+
 impl Default for SealedStoreLimits {
-  /// About 16 MiB at most: enough for the MLS state and the open conversations of a large
+  /// About 28 MiB at most (8 of entries, 4 of messages, 16 of index nodes, which a store of
+  /// ordinary messages doesn't fill): enough for the MLS state and the open conversations of a large
   /// workspace (docs/performance.md, "Local store").
   fn default() -> Self {
     Self {
       max_entry_bytes: 8 * 1024 * 1024,
-      max_messages: 4_096,
-      max_index_nodes: 256,
+      max_message_bytes: 4 * 1024 * 1024,
+      max_index_node_bytes: 2 * 1024 * 1024,
     }
   }
 }
@@ -237,8 +278,8 @@ impl SealedStoreLimits {
   pub fn minimal() -> Self {
     Self {
       max_entry_bytes: 512 * 1024,
-      max_messages: 64,
-      max_index_nodes: 32,
+      max_message_bytes: 128 * 1024,
+      max_index_node_bytes: 128 * 1024,
     }
   }
 }
@@ -253,14 +294,27 @@ impl<B: RecordBackend> SealedStore<B> {
   /// catalog builds it first ([`Self::build_catalog`]). A key that opens no record is
   /// [`StoreError::WrongKey`]; a record that doesn't open with a key that opens others is
   /// [`StoreError::Corrupt`], when it is read.
+  // The browser's store takes the build a batch at a time instead.
+  #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
   pub(crate) fn open_backend(
+    backend: B,
+    database_key: &SymmetricKey,
+    limits: SealedStoreLimits,
+  ) -> Result<Self, StoreError> {
+    let store = Self::open_backend_to_build(backend, database_key, limits)?;
+    store.build_catalog(None)?;
+    Ok(store)
+  }
+
+  /// [`Self::open_backend`] for a caller that runs the build itself
+  /// ([`Self::start_catalog_build`]) and uses the store only once that is done.
+  pub(crate) fn open_backend_to_build(
     backend: B,
     database_key: &SymmetricKey,
     limits: SealedStoreLimits,
   ) -> Result<Self, StoreError> {
     let store = Self::unbuilt(backend, database_key, limits)?;
     store.lock().maybe_rebuild = Some(Self::rebuild_catalog);
-    store.build_catalog(None)?;
     Ok(store)
   }
 
@@ -288,11 +342,11 @@ impl<B: RecordBackend> SealedStore<B> {
       keys: Arc::new(LocalStoreKeys::derive(database_key)),
       state: Mutex::new(State {
         values: Lru::new(limits.max_entry_bytes),
-        messages: Lru::new(limits.max_messages),
-        message_nodes: NodeCache::new(MESSAGES_KIND, limits.max_index_nodes),
-        directory_nodes: NodeCache::new(DIRECTORY_KIND, limits.max_index_nodes),
-        feed_nodes: NodeCache::new(FEED_KIND, limits.max_index_nodes),
-        relation_nodes: NodeCache::new(RELATIONS_KIND, limits.max_index_nodes),
+        messages: Lru::new(limits.max_message_bytes),
+        message_nodes: NodeCache::new(MESSAGES_KIND, limits.max_index_node_bytes),
+        directory_nodes: NodeCache::new(DIRECTORY_KIND, limits.max_index_node_bytes),
+        feed_nodes: NodeCache::new(FEED_KIND, limits.max_index_node_bytes),
+        relation_nodes: NodeCache::new(RELATIONS_KIND, limits.max_index_node_bytes),
         revisions: HashMap::new(),
         feed_versions: HashMap::new(),
         epoch: 0,
@@ -318,11 +372,21 @@ impl<B: RecordBackend> SealedStore<B> {
   /// or goes on with a build that was interrupted (issue #155). Damage to a catalog found on the way
   /// starts it over under a new generation: it is derived data, so it never makes the store
   /// unreadable. At most `maybe_batches` batches (tests).
+  #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
   fn build_catalog(&self, maybe_batches: Option<usize>) -> Result<BuildProgress, StoreError> {
+    match self.start_catalog_build()? {
+      Some(mut build) => self.run_build(&mut build, maybe_batches),
+      None => Ok(BuildProgress::Complete),
+    }
+  }
+
+  /// The build this store needs, if any: a new one, or the one that was interrupted. Run it with
+  /// [`Self::step_catalog_build`] until it is complete, before anything else uses the store.
+  pub(crate) fn start_catalog_build(&self) -> Result<Option<CatalogBuild>, StoreError> {
     let (generation, maybe_after) = match self.read_catalog_state()? {
       Some(complete @ CatalogState::Complete { version, .. }) if version == CATALOG_VERSION => {
         self.lock().set_catalog(Some(complete));
-        return Ok(BuildProgress::Complete);
+        return Ok(None);
       },
       Some(CatalogState::Building {
         generation,
@@ -336,12 +400,28 @@ impl<B: RecordBackend> SealedStore<B> {
       // None, or a catalog of another version: its nodes go with the build.
       Some(_) | None => (new_generation(), None),
     };
-    match self.run_build(generation, maybe_after, maybe_batches) {
-      Err(StoreError::Corrupt(reason)) if self.take_catalog_damage() => {
-        tracing::warn!(%reason, "the local store's catalog is damaged; building it again");
-        self.run_build(new_generation(), None, maybe_batches)
+    Ok(Some(self.begin_build(generation, maybe_after, true)))
+  }
+
+  /// Decrypts and notes the next batch of records: one group of writes, which saves how far the
+  /// build got, so what is written is always a build that can go on from there. Every record is
+  /// noted once, and a build that is killed goes on after its last batch.
+  pub(crate) fn step_catalog_build(&self, build: &mut CatalogBuild) -> Result<BuildStep, StoreError> {
+    match self.build_batch(build) {
+      Ok(BuildStep::Complete) => {
+        self.lock().is_building = false;
+        Ok(BuildStep::Complete)
       },
-      progress => progress,
+      Ok(BuildStep::Advanced) => Ok(BuildStep::Advanced),
+      Err(StoreError::Corrupt(reason)) if build.may_start_over && self.take_catalog_damage() => {
+        tracing::warn!(%reason, "the local store's catalog is damaged; building it again");
+        *build = self.begin_build(new_generation(), None, false);
+        Ok(BuildStep::Advanced)
+      },
+      Err(error) => {
+        self.lock().is_building = false;
+        Err(error)
+      },
     }
   }
 
@@ -349,92 +429,112 @@ impl<B: RecordBackend> SealedStore<B> {
   fn rebuild_catalog(&self) -> Result<(), StoreError> {
     tracing::warn!("the local store's catalog disagrees with its records; building it again");
     self.lock().forget_all();
-    self.run_build(new_generation(), None, None).map(|_| ())
+    let mut build = self.begin_build(new_generation(), None, false);
+    self.run_build(&mut build, None).map(|_| ())
   }
 
+  /// Runs `build` here and now, at most `maybe_batches` batches (tests).
   fn run_build(
+    &self,
+    build: &mut CatalogBuild,
+    maybe_batches: Option<usize>,
+  ) -> Result<BuildProgress, StoreError> {
+    let mut batches = 0usize;
+    loop {
+      if maybe_batches.is_some_and(|allowed| batches == allowed) {
+        self.lock().is_building = false;
+        return Ok(BuildProgress::Interrupted);
+      }
+      if self.step_catalog_build(build)? == BuildStep::Complete {
+        return Ok(BuildProgress::Complete);
+      }
+      batches += 1;
+    }
+  }
+
+  fn begin_build(
     &self,
     generation: u64,
     maybe_after: Option<LookupId>,
-    maybe_batches: Option<usize>,
-  ) -> Result<BuildProgress, StoreError> {
-    {
-      let mut state = self.lock();
-      state.set_catalog(Some(CatalogState::Building {
-        generation,
-        maybe_after: maybe_after.as_ref().map(format_id),
-        version: CATALOG_VERSION,
-      }));
-      state.is_building = true;
+    may_start_over: bool,
+  ) -> CatalogBuild {
+    let mut state = self.lock();
+    state.set_catalog(Some(CatalogState::Building {
+      generation,
+      maybe_after: maybe_after.as_ref().map(format_id),
+      version: CATALOG_VERSION,
+    }));
+    state.is_building = true;
+    CatalogBuild {
+      generation,
+      is_resumed: maybe_after.is_some(),
+      maybe_after,
+      may_start_over,
+      opened: 0,
+      skipped: 0,
+      batches: 0,
     }
-    let progress = self.build_batches(generation, maybe_after, maybe_batches);
-    self.lock().is_building = false;
-    progress
   }
 
-  /// Every record is decrypted once and noted in its table's directory or its conversation's
-  /// indexes, a batch per group of writes with the progress saved in the same group, so a
-  /// build that is killed goes on after its last batch.
-  fn build_batches(
-    &self,
-    generation: u64,
-    mut maybe_after: Option<LookupId>,
-    maybe_batches: Option<usize>,
-  ) -> Result<BuildProgress, StoreError> {
-    let is_resumed = maybe_after.is_some();
-    let (mut opened, mut skipped, mut batches) = (0usize, 0usize, 0usize);
-    loop {
-      if maybe_batches.is_some_and(|allowed| batches == allowed) {
-        return Ok(BuildProgress::Interrupted);
+  /// One batch of `build`, or its end when no record is left.
+  fn build_batch(&self, build: &mut CatalogBuild) -> Result<BuildStep, StoreError> {
+    let batch = self
+      .backend
+      .records_after(build.maybe_after.as_ref(), CATALOG_BATCH)?;
+    let Some((last, _)) = batch.last() else {
+      return self.finish_build(build);
+    };
+    let last = *last;
+    let (generation, is_resumed) = (build.generation, build.is_resumed);
+    let (opened_before, skipped_before) = (build.opened, build.skipped);
+    let (mut opened, mut skipped) = (opened_before, skipped_before);
+    self.grouped(|state| {
+      (opened, skipped) = (opened_before, skipped_before);
+      for (id, sealed) in &batch {
+        match self.open_record(id, sealed) {
+          Ok(record) => {
+            opened += 1;
+            self.note_in_catalog(state, generation, id, record)?;
+          },
+          Err(_) => skipped += 1,
+        }
       }
-      let batch = self.backend.records_after(maybe_after.as_ref(), CATALOG_BATCH)?;
-      let Some((last, _)) = batch.last() else {
-        break;
+      // No record opened: the key is wrong (issue #160 handles a store whose every record is
+      // damaged the same way). One that doesn't open beside others may be a node of the catalog
+      // being replaced; if it is a message or an entry, reading it reports it.
+      if opened == 0 && skipped > 0 && !is_resumed {
+        return Err(StoreError::WrongKey);
+      }
+      let progress = CatalogState::Building {
+        generation,
+        maybe_after: Some(format_id(&last)),
+        version: CATALOG_VERSION,
       };
-      let last = *last;
-      let (opened_before, skipped_before) = (opened, skipped);
-      self.grouped(|state| {
-        (opened, skipped) = (opened_before, skipped_before);
-        for (id, sealed) in &batch {
-          match self.open_record(id, sealed) {
-            Ok(record) => {
-              opened += 1;
-              self.note_in_catalog(state, generation, id, record)?;
-            },
-            Err(_) => skipped += 1,
-          }
-        }
-        // No record opened: the key is wrong (issue #160 handles a store whose every record is
-        // damaged the same way). One that doesn't open beside others may be a node of the catalog
-        // being replaced; if it is a message or an entry, reading it reports it.
-        if opened == 0 && skipped > 0 && !is_resumed {
-          return Err(StoreError::WrongKey);
-        }
-        let progress = CatalogState::Building {
-          generation,
-          maybe_after: Some(format_id(&last)),
-          version: CATALOG_VERSION,
-        };
-        self.write_named(CATALOG_TABLE, META_KEY, &encode(&progress)?)
-      })?;
-      batches += 1;
-      maybe_after = Some(last);
-    }
+      self.write_named(CATALOG_TABLE, META_KEY, &encode(&progress)?)
+    })?;
+    build.opened = opened;
+    build.skipped = skipped;
+    build.batches += 1;
+    build.maybe_after = Some(last);
+    Ok(BuildStep::Advanced)
+  }
+
+  fn finish_build(&self, build: &CatalogBuild) -> Result<BuildStep, StoreError> {
     let complete = CatalogState::Complete {
-      generation,
+      generation: build.generation,
       version: CATALOG_VERSION,
     };
     self.grouped(|_| self.write_named(CATALOG_TABLE, META_KEY, &encode(&complete)?))?;
     self.lock().set_catalog(Some(complete));
-    if batches > 0 {
+    if build.batches > 0 {
       tracing::info!(
-        batches,
-        records = opened,
-        skipped,
+        batches = build.batches,
+        records = build.opened,
+        skipped = build.skipped,
         "built the local store's catalog"
       );
     }
-    Ok(BuildProgress::Complete)
+    Ok(BuildStep::Complete)
   }
 
   /// How far the catalog is built. A damaged state builds it again, under a new generation. (Under
@@ -923,7 +1023,9 @@ impl<B: RecordBackend> SealedStore<B> {
     let Record::Message { message } = self.open_record(&id, &sealed)? else {
       return Err(StoreError::Corrupt("a message record holds an entry".into()));
     };
-    state.messages.insert(key, (*message).clone(), 1);
+    state
+      .messages
+      .insert(key, (*message).clone(), message.footprint_bytes());
     Ok(Some(*message))
   }
 
@@ -1233,7 +1335,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       state.messages.insert(
         (conversation, *message.client_message_id.as_bytes()),
         message.clone(),
-        1,
+        message.footprint_bytes(),
       );
       state.bump(conversation);
       Ok(())
@@ -1809,8 +1911,45 @@ mod tests {
         assert_eq!(all.len(), usize::try_from(MESSAGES_PER_CONVERSATION).unwrap());
       }
       let state = store.lock();
-      assert!(state.messages.held() <= limits.max_messages);
+      assert!(state.messages.held() <= limits.max_message_bytes);
       assert!(state.values.held() <= limits.max_entry_bytes);
+    }
+
+    /// Issue #1125: the decoded messages are bounded by their size, not their number: a channel of
+    /// long messages stays within the figure, however few of them it takes to reach it.
+    #[test]
+    fn long_messages_are_bounded_by_their_bytes() {
+      const COUNT: i64 = 300;
+      const BODY_BYTES: usize = 64 * 1024;
+      let limits = SealedStoreLimits {
+        max_message_bytes: 1024 * 1024,
+        ..SealedStoreLimits::default()
+      };
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, limits).unwrap();
+      for n in 0..COUNT {
+        let mut long = numbered(0, n);
+        long.content = crate::store::MessageContent::Text {
+          body: "x".repeat(BODY_BYTES),
+          mentions: Vec::new(),
+          meta: Default::default(),
+        };
+        store.upsert_message(&long).unwrap();
+        assert!(
+          store.lock().messages.held() <= limits.max_message_bytes,
+          "after write {n}"
+        );
+      }
+      // Far fewer than the count limit allowed before, and the whole channel still reads.
+      let held = store.lock().messages.held();
+      assert!(
+        held >= BODY_BYTES && held <= limits.max_message_bytes,
+        "{held} bytes"
+      );
+      let all = store.messages(id(0), MessageFilter::All).unwrap();
+      assert_eq!(all.len(), usize::try_from(COUNT).unwrap());
+      assert!(store.lock().messages.held() <= limits.max_message_bytes);
     }
 
     /// Issue #155: opening a conversation reads the page it shows, however long the history. A cold
@@ -1949,6 +2088,57 @@ mod tests {
       assert!(matches!(
         store.read_catalog_state().unwrap(),
         Some(CatalogState::Complete { .. })
+      ));
+    }
+
+    /// Issue #1127: the steps a browser takes between its yields: each is saved as it goes, the
+    /// percentage only rises, and one who stops after any step finds the place again on the next open.
+    #[test]
+    fn a_stepped_build_rises_and_goes_on_from_where_it_stopped() {
+      let (records, key) = legacy_store();
+      let store = SealedStore::open_backend_to_build(&records, &key, SealedStoreLimits::default()).unwrap();
+      let mut build = store.start_catalog_build().unwrap().unwrap();
+      assert_eq!(build.percent(), 0);
+      let mut last = 0;
+      for _ in 0..2 {
+        assert_eq!(store.step_catalog_build(&mut build).unwrap(), BuildStep::Advanced);
+        assert!(build.percent() >= last);
+        last = build.percent();
+      }
+      assert!(last > 0, "two of about nine batches are past the start");
+      drop(store);
+
+      let store = SealedStore::open_backend_to_build(&records, &key, SealedStoreLimits::default()).unwrap();
+      let mut build = store.start_catalog_build().unwrap().unwrap();
+      assert_eq!(
+        build.percent(),
+        last,
+        "the reopened build starts where it stopped"
+      );
+      while store.step_catalog_build(&mut build).unwrap() == BuildStep::Advanced {
+        assert!(build.percent() >= last);
+        assert!(build.percent() < 100);
+        last = build.percent();
+      }
+      check(&store);
+      drop(store);
+
+      let store = SealedStore::open_backend_to_build(&records, &key, SealedStoreLimits::default()).unwrap();
+      assert!(store.start_catalog_build().unwrap().is_none(), "built once");
+      check(&store);
+    }
+
+    /// A key that opens nothing is found in the first step, without writing anything that would
+    /// make the next open with the right key believe a build is under way.
+    #[test]
+    fn a_stepped_build_with_another_key_is_the_wrong_key() {
+      let (records, _) = legacy_store();
+      let other = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend_to_build(&records, &other, SealedStoreLimits::default()).unwrap();
+      let mut build = store.start_catalog_build().unwrap().unwrap();
+      assert!(matches!(
+        store.step_catalog_build(&mut build),
+        Err(StoreError::WrongKey)
       ));
     }
 
