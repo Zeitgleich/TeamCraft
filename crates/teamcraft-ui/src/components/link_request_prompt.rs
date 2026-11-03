@@ -61,7 +61,9 @@ pub fn LinkRequestPrompt() -> impl IntoView {
   };
   Effect::new(move |_| {
     // Read on every move of the mark: the first value too, since a request may be open already.
-    mark.track();
+    // `get`, not `track`: tracking a memo that was never read doesn't compute it, so it never
+    // subscribes to the state and the effect would run once and never again.
+    let _ = mark.get();
     reload();
   });
 
