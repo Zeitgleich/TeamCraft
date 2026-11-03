@@ -114,6 +114,7 @@ Gradle properties (`gradle.properties` has the defaults; override with `-P` or i
 |--------------------------------|----------------------------------------------------------------------------------|
 | `teamcraft.defaultServer`      | Server pre-selected on first start (self-built apps); empty: the user enters it  |
 | `teamcraft.pushGatewayUrl`     | Push gateway the FCM token is sealed for (publisher builds); empty: the server's |
+| `teamcraft.appLinkHosts`       | Hosts opened as verified App Links, comma-separated (docs/app-links.md); empty: none |
 | `teamcraft.oidcRedirectScheme` | Redirect URI is `<scheme>:/oauth/callback`; the server's client must allow it    |
 | `teamcraft.fcm*`               | Firebase project of the deployment (flavor `full`); empty: no FCM                |
 | `teamcraft.upload*`            | Upload signing key (see "Signing")                                               |

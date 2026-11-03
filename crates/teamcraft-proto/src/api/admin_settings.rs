@@ -16,6 +16,18 @@ use crate::{
   UnixMillis,
 };
 
+/// The application and bundle ID of the official apps.
+pub const OFFICIAL_APP_ID: &str = "de.zeitgleich.teamcraft";
+/// The official Android apps: the Play build and the one without Google services.
+pub const OFFICIAL_ANDROID_PACKAGES: [&str; 2] = [OFFICIAL_APP_ID, "de.zeitgleich.teamcraft.libre"];
+/// The certificate every official Android build is signed with, Play App Signing included
+/// (apps/android/README.md, "Signing"). Public: it is in every published APK.
+pub const OFFICIAL_ANDROID_CERT_FINGERPRINT: &str =
+  "68:60:BF:07:4F:47:08:19:82:4F:92:A9:E6:57:30:5A:7A:30:81:49:2C:FD:C2:55:07:81:02:08:5E:50:05:D7";
+/// The Apple team of the official iOS app; public once the app is published. Empty until then: no
+/// association file for Apple, unless an admin sets a team (docs/app-links.md, "Open points").
+pub const OFFICIAL_APPLE_TEAM_ID: &str = "";
+
 /// Default of [`LimitSettings::max_space_image_bytes`]: a 256×256 PNG stays well below it.
 pub const DEFAULT_MAX_SPACE_IMAGE_BYTES: u64 = 1024 * 1024;
 
@@ -67,6 +79,7 @@ wire_enum! {
     MailTexts => "mail_texts",
     MeetingMail => "meeting_mail",
     TokenBinding => "token_binding",
+    AppLinks => "app_links",
   }
 }
 
@@ -334,6 +347,9 @@ pub struct RuntimeSettingsResponse {
   /// Absent from older servers: the defaults, which is what they did not check either way.
   #[serde(default)]
   pub token_binding: TokenBindingSettings,
+  /// Absent from older servers: the defaults, the official apps.
+  #[serde(default)]
+  pub app_links: AppLinkSettings,
   /// One entry per group.
   pub sources: Vec<RuntimeSettingsState>,
 }
@@ -361,6 +377,35 @@ pub enum RuntimeSettingsSection {
   MailTexts(MailTextSettings),
   MeetingMail(MeetingMailSettings),
   TokenBinding(TokenBindingSettings),
+  AppLinks(AppLinkSettings),
+}
+
+/// Which installed apps may open this server's links (docs/app-links.md): what
+/// `/.well-known/assetlinks.json` and `/.well-known/apple-app-site-association` say, on every brand's
+/// host. The defaults are the official apps, so an instance using them sets nothing; another
+/// publisher's build (other signing key, other Apple team) changes them in the console.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AppLinkSettings {
+  /// Off: both files answer 404 and the apps leave links to the browser.
+  pub is_enabled: bool,
+  pub android_package_names: Vec<String>,
+  /// SHA-256 of the signing certificates: upper-case hex pairs with colons.
+  pub android_cert_fingerprints: Vec<String>,
+  /// The Apple team of the iOS app; empty: no association file for Apple.
+  pub apple_team_id: String,
+  pub apple_bundle_id: String,
+}
+
+impl Default for AppLinkSettings {
+  fn default() -> Self {
+    Self {
+      is_enabled: true,
+      android_package_names: OFFICIAL_ANDROID_PACKAGES.map(str::to_owned).to_vec(),
+      android_cert_fingerprints: vec![OFFICIAL_ANDROID_CERT_FINGERPRINT.to_owned()],
+      apple_team_id: OFFICIAL_APPLE_TEAM_ID.to_owned(),
+      apple_bundle_id: OFFICIAL_APP_ID.to_owned(),
+    }
+  }
 }
 
 /// Binding access tokens to devices with DPoP (e2ee.md §3.1.2, operations.md "Binding tokens to
@@ -621,6 +666,7 @@ impl RuntimeSettingsSection {
       Self::MailTexts(_) => RuntimeSettingsKey::MailTexts,
       Self::MeetingMail(_) => RuntimeSettingsKey::MeetingMail,
       Self::TokenBinding(_) => RuntimeSettingsKey::TokenBinding,
+      Self::AppLinks(_) => RuntimeSettingsKey::AppLinks,
     }
   }
 }

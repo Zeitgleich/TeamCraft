@@ -6,7 +6,7 @@ use crate::auth::{DpopGuard, Revocations, TokenValidator};
 use secrecy::SecretString;
 
 use teamcraft_crypto::server_secret::SettingsSealingKey;
-use teamcraft_proto::TokenBindingSettings;
+use teamcraft_proto::{AppLinkSettings, TokenBindingSettings};
 
 use crate::brand::BrandStore;
 use crate::config::{
@@ -116,6 +116,8 @@ pub struct Settings {
   pub max_attachment_bytes: u64,
   /// Binding tokens to devices with DPoP; only ever changed in the admin console.
   pub token_binding: TokenBindingSettings,
+  /// Which apps may open this server's links; only ever changed in the admin console.
+  pub app_links: AppLinkSettings,
   /// Meeting invitations: most invitees and the mail texts.
   pub meeting_mail: MeetingMailConfig,
   /// The mail server of the configuration file (`[mail.smtp]`, else `[meetings.smtp]`).

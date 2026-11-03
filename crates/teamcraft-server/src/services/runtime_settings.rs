@@ -5,7 +5,7 @@
 use serde_json::json;
 use teamcraft_db::StoredSetting;
 use teamcraft_proto::{
-  DpopPolicy, EmailDigestSettings, IntegrationSettings, LimitSettings, LocalAccountSettings,
+  AppLinkSettings, DpopPolicy, EmailDigestSettings, IntegrationSettings, LimitSettings, LocalAccountSettings,
   MailTextSettings, MeetingMailSettings, NotificationLevel, NotificationRuntimeSettings, Permission,
   RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState,
   ServerRulesSettings, SettingSource, ShareSettings, SignInMethod, SignInPageSettings, Target,
@@ -21,7 +21,7 @@ use crate::state::{AppState, Settings};
 
 /// Prefix of the rows in `server_settings`.
 const NAME_PREFIX: &str = "settings.";
-const ALL_KEYS: [RuntimeSettingsKey; 11] = [
+const ALL_KEYS: [RuntimeSettingsKey; 12] = [
   RuntimeSettingsKey::ServerRules,
   RuntimeSettingsKey::Notifications,
   RuntimeSettingsKey::EmailDigest,
@@ -33,11 +33,17 @@ const ALL_KEYS: [RuntimeSettingsKey; 11] = [
   RuntimeSettingsKey::MailTexts,
   RuntimeSettingsKey::MeetingMail,
   RuntimeSettingsKey::TokenBinding,
+  RuntimeSettingsKey::AppLinks,
 ];
 const MAX_TEXT_CHARS: usize = 5000;
 /// Longest help text of the sign-in page, per language.
 const MAX_HELP_TEXT_CHARS: usize = 1000;
 const MAX_LIST_ENTRIES: usize = 200;
+/// An Apple team ID's length.
+const APPLE_TEAM_ID_LEN: usize = 10;
+/// Longest application or bundle ID.
+const MAX_APP_ID_CHARS: usize = 255;
+const SHA256_BYTES: usize = 32;
 /// Longest repeat or grace interval an admin can set: a day.
 const MAX_INTERVAL_SECS: u64 = 86_400;
 /// Longest period before deactivated users are removed from all chats automatically (ten years).
@@ -192,6 +198,7 @@ fn row_name(key: &RuntimeSettingsKey) -> String {
 fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
   match section {
     RuntimeSettingsSection::TokenBinding(values) => settings.token_binding = values.clone(),
+    RuntimeSettingsSection::AppLinks(values) => settings.app_links = values.clone(),
     RuntimeSettingsSection::ServerRules(rules) => {
       settings.policy.invites_require_verified_email = rules.invites_require_verified_email;
       settings.policy.default_spaces.clone_from(&rules.default_spaces);
@@ -301,6 +308,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
   let texts = &settings.meeting_mail.texts;
   RuntimeSettingsResponse {
     token_binding: settings.token_binding.clone(),
+    app_links: settings.app_links.clone(),
     server_rules: ServerRulesSettings {
       invites_require_verified_email: settings.policy.invites_require_verified_email,
       default_spaces: settings.policy.default_spaces.clone(),
@@ -411,6 +419,7 @@ fn check_token_binding_is_safe(
 /// Rejects values that would break the server or its users; the bounds are generous on purpose.
 fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
   match section {
+    RuntimeSettingsSection::AppLinks(values) => check_app_links(values),
     RuntimeSettingsSection::TokenBinding(values) => {
       if matches!(values.dpop_policy, DpopPolicy::Unknown(_)) {
         return Err(ApiError::InvalidRequest(
@@ -619,6 +628,62 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
 }
 
 /// At least one known method, each once; short help texts; an https help link.
+/// What goes into a file another company's servers read: nothing but well-formed identifiers.
+fn check_app_links(values: &AppLinkSettings) -> Result<(), ApiError> {
+  check_count("android_package_names", values.android_package_names.len())?;
+  check_count(
+    "android_cert_fingerprints",
+    values.android_cert_fingerprints.len(),
+  )?;
+  let refuse = |message: &str| Err(ApiError::InvalidRequest(message.to_owned()));
+  if !values.android_package_names.iter().all(|name| is_app_id(name)) {
+    return refuse("android_package_names must be application IDs like com.example.app");
+  }
+  if !values
+    .android_cert_fingerprints
+    .iter()
+    .all(|fingerprint| is_cert_fingerprint(fingerprint))
+  {
+    return refuse("android_cert_fingerprints must be SHA-256 as upper-case hex pairs with colons");
+  }
+  if !values.apple_team_id.is_empty()
+    && (values.apple_team_id.len() != APPLE_TEAM_ID_LEN
+      || !values
+        .apple_team_id
+        .bytes()
+        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit()))
+  {
+    return refuse("apple_team_id must be ten upper-case letters and digits");
+  }
+  if !is_app_id(&values.apple_bundle_id) {
+    return refuse("apple_bundle_id must be a bundle ID like com.example.app");
+  }
+  Ok(())
+}
+
+/// `com.example.app`: at least two dot-separated parts of letters, digits, `_` and `-`.
+fn is_app_id(text: &str) -> bool {
+  text.len() <= MAX_APP_ID_CHARS
+    && text.split('.').count() >= 2
+    && text.split('.').all(|part| {
+      !part.is_empty()
+        && part
+          .bytes()
+          .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    })
+}
+
+/// 32 bytes as `AB:CD:…`.
+fn is_cert_fingerprint(text: &str) -> bool {
+  text.split(':').count() == SHA256_BYTES
+    && text.split(':').all(|pair| {
+      pair.len() == 2
+        && pair
+          .bytes()
+          .all(|byte| byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte))
+    })
+}
+
 fn check_sign_in_page(values: &SignInPageSettings) -> Result<(), ApiError> {
   let invalid = |reason: &str| Err(ApiError::InvalidRequest(reason.to_owned()));
   if values.methods.is_empty() {
@@ -727,6 +792,7 @@ mod tests {
       RuntimeSettingsSection::MailTexts(original.mail_texts.clone()),
       RuntimeSettingsSection::MeetingMail(original.meeting_mail.clone()),
       RuntimeSettingsSection::TokenBinding(original.token_binding.clone()),
+      RuntimeSettingsSection::AppLinks(original.app_links.clone()),
     ];
     assert_eq!(sections.len(), ALL_KEYS.len());
     let mut applied = Settings::default();
@@ -769,9 +835,49 @@ mod tests {
       RuntimeSettingsSection::SignInPage(defaults.sign_in_page),
       RuntimeSettingsSection::MailTexts(defaults.mail_texts),
       RuntimeSettingsSection::MeetingMail(defaults.meeting_mail),
+      RuntimeSettingsSection::AppLinks(defaults.app_links),
     ] {
       assert!(validate(&section).is_ok(), "{}", section.key());
     }
+  }
+
+  #[test]
+  fn app_link_settings_take_only_well_formed_identifiers() {
+    let good = AppLinkSettings::default();
+    let refused = [
+      AppLinkSettings {
+        android_package_names: vec!["\"},{\"x".to_owned()],
+        ..good.clone()
+      },
+      AppLinkSettings {
+        android_package_names: vec!["nodots".to_owned()],
+        ..good.clone()
+      },
+      AppLinkSettings {
+        android_cert_fingerprints: vec!["ab:cd".to_owned()],
+        ..good.clone()
+      },
+      AppLinkSettings {
+        android_cert_fingerprints: vec![good.android_cert_fingerprints[0].to_lowercase()],
+        ..good.clone()
+      },
+      AppLinkSettings {
+        apple_team_id: "short".to_owned(),
+        ..good.clone()
+      },
+      AppLinkSettings {
+        apple_bundle_id: String::new(),
+        ..good.clone()
+      },
+    ];
+    for values in refused {
+      assert!(check_app_links(&values).is_err(), "{values:?}");
+    }
+    let other_publisher = AppLinkSettings {
+      apple_team_id: "ABCDE12345".to_owned(),
+      ..good
+    };
+    assert!(check_app_links(&other_publisher).is_ok());
   }
 
   #[test]

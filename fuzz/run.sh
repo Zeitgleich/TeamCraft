@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 engine=${CONTAINER_ENGINE:-podman}
 seconds=${2:-180}
-targets=(proto_requests proto_gateway bridge_ingest bridge_multipart thumbnail imip workspace_log crypto_decoders dpop_proof)
+targets=(proto_requests proto_gateway bridge_ingest bridge_multipart thumbnail imip workspace_log crypto_decoders dpop_proof app_link)
 
 if [ "${1:-}" = list ]; then printf '%s\n' "${targets[@]}"; exit 0; fi
 if [ -n "${1:-}" ] && [ "$1" != all ]; then targets=("$1"); fi

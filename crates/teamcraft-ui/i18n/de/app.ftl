@@ -237,3 +237,11 @@ error-space-has-hidden-channels = Dieser Space enthält private Kanäle, in dene
 error-channel-needs-admin = Dieser Kanal hat keinen Admin. Ein Workspace-Admin muss einen bestimmen, bevor er wiederhergestellt werden kann.
 error-not-a-channel = Das geht nur bei Kanälen, nicht bei Direktnachrichten.
 deletions-suspect = Der Server meldet { $count } deiner Unterhaltungen auf einmal als gelöscht. Die von einem Administrator signierten sind von diesem Gerät entfernt, die übrigen sind ausgeblendet, ihre Nachrichten bleiben vorerst hier. Informiere deine Administration.
+
+app-link-title = Diesen Link öffnen?
+app-link-foreign-add = Du hast diesen Server nicht eingegeben: Ein Link hat dich hierher gebracht, und diese App hat noch kein Konto. Mit der Anmeldung bekommt dieser Server Zugriff auf dein Konto. Melde dich also nur an, wenn du ihm vertraust. Sonst öffne den Link im Browser.
+app-link-foreign-other = Dieser Link führt zu einem anderen Server, nicht zu dem, an dem diese App angemeldet ist. Die App hat immer nur ein Konto und kann den Link daher nur im Browser öffnen.
+app-link-web-only = Dieser Link funktioniert nur im Browser.
+app-link-sign-in = Dort anmelden
+app-link-open-browser = Im Browser öffnen
+open-in-app = In der App öffnen

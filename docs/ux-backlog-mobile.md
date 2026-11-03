@@ -93,7 +93,7 @@ work stream).
 | App shortcuts for recent conversations                                             | Android      | owner: push-quality (MessagingStyle conversation shortcuts) |
 | Message links in messages open the conversation at the message (in the app)        | Android      | done   |
 | Message links in messages open the conversation or thread at the message           | iOS          | done   |
-| Message links from other apps (`teamcraft:` deep links; decide with the launch-token rule) | Android, iOS | open |
+| Message links from other apps (`teamcraft://`, App Links, Universal Links: docs/app-links.md) | Android, iOS | done |
 | Tablet / foldable / landscape: list next to the open conversation                  | Android      | done   |
 | Open conversation after process death (checked: the navigation state restores it) | Android      | done   |
 

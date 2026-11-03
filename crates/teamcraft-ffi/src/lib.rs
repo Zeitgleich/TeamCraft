@@ -8,6 +8,7 @@
 //! don't wait for the network. The app supplies access tokens ([`TokenProvider`]) and is told when
 //! to re-read ([`EventListener`]).
 
+mod app_link;
 mod bridge;
 mod calls;
 mod engine;

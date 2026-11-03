@@ -171,7 +171,7 @@ fn anchor_of(event: &web_sys::MouseEvent) -> Option<web_sys::HtmlAnchorElement> 
     .and_then(|element| element.dyn_into::<web_sys::HtmlAnchorElement>().ok())
 }
 
-fn open_in_system(url: String) {
+pub(crate) fn open_in_system(url: String) {
   leptos::task::spawn_local(async move {
     let args = serde_json::json!({ "url": url });
     if let Err(error) = tauri::call::<()>("open_external", &args).await {

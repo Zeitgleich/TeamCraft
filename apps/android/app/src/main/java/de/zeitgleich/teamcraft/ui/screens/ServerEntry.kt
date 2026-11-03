@@ -124,6 +124,7 @@ fun ServerEntryScreen(
 @Composable
 fun ConfirmServerScreen(
   checked: CheckedServer,
+  isFromLink: Boolean,
   maybeBrand: LoginBrand?,
   maybeLogo: Bitmap?,
   isBusy: Boolean,
@@ -155,6 +156,14 @@ fun ConfirmServerScreen(
       style = MaterialTheme.typography.bodyMedium,
       textAlign = TextAlign.Center,
     )
+    if (isFromLink) {
+      Text(
+        stringResource(R.string.server_confirm_from_link),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.error,
+        textAlign = TextAlign.Center,
+      )
+    }
     if (checked.isIdentityProviderElsewhere) {
       // A server can copy another instance's sign-in settings; a provider outside the server's
       // domain gets an explicit warning (docs/e2ee.md "Sign-in through the server's provider").

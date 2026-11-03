@@ -126,6 +126,12 @@ struct ConversationListView: View {
     .joinNoteAlert(model, isActive: maybeBrowseTab == nil)
     .sheet(isPresented: $isShowingSettings) { SettingsView(account: account) }
     .sheet(isPresented: $isShowingMeetings) { MeetingsView(account: account) }
+    .onChange(of: model.isShowingMeetingsFromLink) { _, isAsked in
+      if isAsked {
+        isShowingMeetings = true
+        model.isShowingMeetingsFromLink = false
+      }
+    }
     .sheet(isPresented: $isShowingFilters) { SearchFiltersView(filters: $filters) }
     .sheet(item: $maybeBrowseTab) { tab in
       BrowseView(tab: tab) { conversationId in selection = conversationId }

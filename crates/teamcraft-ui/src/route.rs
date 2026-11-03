@@ -8,6 +8,7 @@
 //! or tokens, except a meeting link's token, which is the meeting's public handle and only lets
 //! its holder knock (e2ee.md §4.6). The message paths match the permalinks (`teamcraft:/c/{c}/m/{m}[/t/{t}]`).
 
+use teamcraft_client_api::app_link::parse_app_link;
 use teamcraft_crypto::meeting_link::{MEETING_LINK_TOKEN_LEN, is_meeting_link_token};
 use teamcraft_proto::MeetingId;
 
@@ -217,14 +218,11 @@ impl Route {
   /// The route of a permalink (`teamcraft:/c/{c}/m/{m}[/t/{t}]`, also with `//`), so message links
   /// handed to the desktop app open the same place as in the browser.
   pub fn from_permalink(link: &str) -> Option<Self> {
-    let rest = link.trim().strip_prefix("teamcraft:")?;
-    let rest = rest.strip_prefix("//").unwrap_or(rest);
-    let path = if rest.starts_with('/') {
-      rest.to_owned()
-    } else {
-      format!("/{rest}")
-    };
-    Self::parse(&path).filter(|route| matches!(route, Self::Message { .. }))
+    let link = parse_app_link(link).ok()?;
+    if link.maybe_origin().is_some() {
+      return None;
+    }
+    Self::parse(&link.path())
   }
 
   /// The conversation this route shows, if any.

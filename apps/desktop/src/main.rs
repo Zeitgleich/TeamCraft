@@ -17,6 +17,7 @@ mod calls;
 mod clipboard;
 mod clipboard_paste;
 mod core;
+mod deep_links;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
 mod dropped_files;
@@ -86,7 +87,9 @@ fn main() -> anyhow::Result<()> {
   reconnect::keep_tokens_fresh(service.clone(), refresh_now.clone());
 
   // Registered first: the single-instance plugin must see a second launch before anything else.
-  let builder = tauri::Builder::default().plugin(single_instance::plugin());
+  let builder = tauri::Builder::default()
+    .plugin(single_instance::plugin())
+    .plugin(tauri_plugin_deep_link::init());
   #[cfg(windows)]
   let builder = windows_shell::plugins(builder);
   // "Start at login" as a LaunchAgent that starts the app in the tray (autostart.rs).
@@ -196,8 +199,7 @@ fn main() -> anyhow::Result<()> {
       watch_native_wake(app.handle());
       #[cfg(any(target_os = "macos", windows))]
       watch_native_network(app.handle());
-      #[cfg(windows)]
-      windows_shell::forward_deep_links(app.handle());
+      deep_links::collect(app.handle());
       Ok(())
     })
     .on_window_event(|window, event| {
@@ -250,6 +252,7 @@ fn main() -> anyhow::Result<()> {
       auth::commands::server_suggest,
       auth::commands::server_confirm,
       auth::commands::server_forget,
+      deep_links::deep_link_take,
       core::commands::core_start,
       core::commands::core_retry_keychain,
       core::commands::core_status,

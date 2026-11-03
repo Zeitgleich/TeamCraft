@@ -69,6 +69,7 @@ targets:
       - sdk: BackgroundTasks.framework
       - sdk: Network.framework
       - sdk: PhotosUI.framework
+      - sdk: SafariServices.framework
       - sdk: QuickLook.framework
     entitlements:
       path: TeamCraft/Resources/TeamCraft.entitlements
@@ -120,6 +121,9 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: oidc
             CFBundleURLSchemes: [$(TEAMCRAFT_OIDC_REDIRECT_SCHEME)]
+          # Links to any instance, from the web client's "Open in the app" (docs/app-links.md).
+          - CFBundleURLName: links
+            CFBundleURLSchemes: [teamcraft]
         # Read by Shared/AppEnvironment.swift. No server: the user enters it (or MDM sets it).
         TCDefaultServerURL: $(TEAMCRAFT_DEFAULT_SERVER_URL)
         TCPushGatewayURL: $(TEAMCRAFT_PUSH_GATEWAY_URL)
@@ -133,6 +137,8 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.zeitgleich.teamcraft
+        # TeamCraft.entitlements (above), or the same with Universal Links (Config/Base.xcconfig).
+        CODE_SIGN_ENTITLEMENTS: $(APP_ENTITLEMENTS)
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
 

@@ -54,6 +54,14 @@
         <category android:name="android.intent.category.DEFAULT" />
         <data android:mimeType="*/*" />
       </intent-filter>
+      <!-- Links to any instance, from the web client's "Open in the app" (docs/app-links.md). App Links
+           of the hosts a build lists are generated: build.gradle.kts, `teamcraft.appLinkHosts`. -->
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <category android:name="android.intent.category.BROWSABLE" />
+        <data android:scheme="teamcraft" android:host="open" />
+      </intent-filter>
       <!-- Direct share: the notes and recent conversations in the system share sheet (#829). -->
       <meta-data
         android:name="android.app.shortcuts"

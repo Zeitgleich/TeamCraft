@@ -514,7 +514,7 @@ fn normalized_host(host: &str) -> String {
 
 /// The registrable domain (eTLD+1) of a host name; a name that is itself a public suffix, or has
 /// no known suffix structure (`localhost`), stands for itself.
-fn registrable_domain(host: &str) -> String {
+pub fn registrable_domain(host: &str) -> String {
   let host = normalized_host(host);
   psl::domain_str(&host).map_or_else(|| host.clone(), str::to_owned)
 }

@@ -62,6 +62,8 @@ the extension (each links the static library; they are separate processes).
 | `TEAMCRAFT_OIDC_REDIRECT_SCHEME` | Redirect URI is `<scheme>:/oauth/callback`; the server must list it in its sign-in settings                   |
 | `DEVELOPMENT_TEAM`               | Your Apple team (signed builds)                                                                               |
 | `APP_GROUP_ID`                   | App Group shared by app and extension (change it with your bundle IDs)                                        |
+| `APP_ENTITLEMENTS`               | `TeamCraft/Resources/TeamCraft.AppLinks.entitlements` for Universal Links (docs/app-links.md)                 |
+| `TEAMCRAFT_APP_LINK_DOMAIN`      | The host of those Universal Links; needs the Associated Domains capability on the app ID                      |
 | `NSE_ENTITLEMENTS`               | `NotificationService/NotificationService.Filtering.entitlements` once Apple granted the filtering entitlement |
 | `NSE_NOTIFICATION_FILTERING`     | `YES` together with the filtering entitlements: the extension drops muted pushes and hands calls to CallKit   |
 

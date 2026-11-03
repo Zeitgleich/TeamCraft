@@ -339,7 +339,7 @@ fn set_app_class(body: &web_sys::HtmlDivElement, class: &str, is_on: bool) {
 }
 
 /// Installed (home screen app, desktop app window): no system edge swipe to go back.
-fn is_installed() -> bool {
+pub(crate) fn is_installed() -> bool {
   let Some(window) = web_sys::window() else {
     return false;
   };

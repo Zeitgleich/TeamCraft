@@ -42,7 +42,8 @@ pub const CORE_FAILED_EVENT: &str = "core-failed";
 /// Event name the host emits whenever call state changed (ringing, roster, media).
 pub const CALL_CHANGED_EVENT: &str = "call-changed";
 
-/// A `teamcraft:` link the operating system handed to the desktop app; the payload is the link.
+/// The operating system handed the desktop app a `teamcraft:` link. No payload: every window gets
+/// events, so the UI takes the link with `deep_link_take` (docs/app-links.md).
 pub const DEEP_LINK_EVENT: &str = "teamcraft://deep-link";
 
 /// Everything the call UI shows, in one piece.

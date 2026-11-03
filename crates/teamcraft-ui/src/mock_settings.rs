@@ -220,6 +220,7 @@ impl SettingsMock {
       RuntimeSettingsSection::MailTexts(values) => self.runtime.mail_texts = values,
       RuntimeSettingsSection::MeetingMail(values) => self.runtime.meeting_mail = values,
       RuntimeSettingsSection::TokenBinding(values) => self.runtime.token_binding = values,
+      RuntimeSettingsSection::AppLinks(values) => self.runtime.app_links = values,
       // A section a newer wire version added; the mock has nothing to store.
       #[allow(unreachable_patterns)]
       _ => return,
@@ -241,6 +242,7 @@ impl SettingsMock {
       RuntimeSettingsKey::MailTexts => self.runtime.mail_texts = defaults.mail_texts,
       RuntimeSettingsKey::MeetingMail => self.runtime.meeting_mail = defaults.meeting_mail,
       RuntimeSettingsKey::TokenBinding => self.runtime.token_binding = defaults.token_binding,
+      RuntimeSettingsKey::AppLinks => self.runtime.app_links = defaults.app_links,
       _ => return,
     }
     self.set_source(key, SettingSource::Config);
@@ -323,6 +325,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
   let (activation_subject, activation_body) = texts("Activate your account", "Activate your account: {url}");
   RuntimeSettingsResponse {
     token_binding: TokenBindingSettings::default(),
+    app_links: teamcraft_proto::AppLinkSettings::default(),
     server_rules: ServerRulesSettings {
       invites_require_verified_email: true,
       default_spaces: Vec::new(),

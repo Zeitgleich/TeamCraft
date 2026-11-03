@@ -115,6 +115,11 @@ struct ServerConfirmView: View {
           .foregroundStyle(Theme.textMuted)
         Text("server_confirm_provider \(checked.identityProviderHost)")
           .multilineTextAlignment(.center)
+        if model.isServerFromLink {
+          Label("server_confirm_from_link", systemImage: "exclamationmark.triangle.fill")
+            .foregroundStyle(.red)
+            .multilineTextAlignment(.leading)
+        }
         if checked.isIdentityProviderElsewhere {
           // A server can copy another instance's sign-in settings; a provider outside the
           // server's domain gets an explicit warning (docs/e2ee.md).

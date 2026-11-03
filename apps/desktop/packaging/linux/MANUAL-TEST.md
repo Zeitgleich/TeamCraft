@@ -72,6 +72,15 @@ Mark each line with pass/fail and a note. "Dialog" is what the desktop should sh
 | R5 | First video use                         | OpenH264 is downloaded once (`~/.var/app/de.zeitgleich.teamcraft/data/de.zeitgleich.teamcraft/codecs/`)    |
 | R6 | Hardware encoding (AMD/Intel)           | `flatpak run --env=GST_DEBUG=va*:3 de.zeitgleich.teamcraft` shows the VA encoder in use; else software    |
 
+### Links (#125, docs/app-links.md)
+
+| #  | Action                                                                 | Expected                                                                  |
+|----|------------------------------------------------------------------------|---------------------------------------------------------------------------|
+| L1 | `xdg-open 'teamcraft://open/<your host>/home'`, the app closed         | The app starts and shows Home once signed in                              |
+| L2 | The same with the app running                                          | One window comes to the front; no second process                          |
+| L3 | `xdg-open 'teamcraft://open/other.example.org/c/1'`                    | A question naming `other.example.org`; nothing opens by itself            |
+| L4 | `xdg-open 'teamcraft://open/<your host>/meeting/<token>'`              | Meetings, with "Open the meeting"; nobody is asked before that click      |
+
 ### Start at login (#676)
 
 Run once each with the `.deb`/`.rpm`, the AppImage and the Flatpak. The tray needs a host (GNOME:

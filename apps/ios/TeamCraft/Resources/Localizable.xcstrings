@@ -1,6 +1,150 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "server_confirm_from_link": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You didn't enter this server: a link brought you here. Signing in gives this server access to your account. Continue only if you trust it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du hast diesen Server nicht eingegeben: Ein Link hat dich hierher gebracht. Mit der Anmeldung bekommt dieser Server Zugriff auf dein Konto. Fahre nur fort, wenn du ihm vertraust."
+          }
+        }
+      }
+    },
+    "app_link_foreign_add %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@\n\nYou didn't enter this server: a link brought you here, and this app has no account yet. Signing in gives this server access to your account, so sign in only if you trust it. Otherwise open the link in the browser."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@\n\nDu hast diesen Server nicht eingegeben: Ein Link hat dich hierher gebracht, und diese App hat noch kein Konto. Mit der Anmeldung bekommt dieser Server Zugriff auf dein Konto. Melde dich also nur an, wenn du ihm vertraust. Sonst öffne den Link im Browser."
+          }
+        }
+      }
+    },
+    "app_link_foreign_other %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@\n\nThis link leads to another server, not the one this app is signed in to. The app holds one account at a time, so it can only open this link in the browser."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@\n\nDieser Link führt zu einem anderen Server, nicht zu dem, an dem diese App angemeldet ist. Die App hat immer nur ein Konto und kann den Link daher nur im Browser öffnen."
+          }
+        }
+      }
+    },
+    "app_link_meeting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The app shows the meetings you are invited to. If this one isn't among them, the browser can ask its hosts to let you in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die App zeigt die Meetings, zu denen du eingeladen bist. Ist dieses nicht dabei, kann der Browser die Hosts bitten, dich einzulassen."
+          }
+        }
+      }
+    },
+    "app_link_meeting_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meeting link"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meeting-Link"
+          }
+        }
+      }
+    },
+    "app_link_my_meetings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "My meetings"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meine Meetings"
+          }
+        }
+      }
+    },
+    "app_link_open_browser": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open in browser"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Im Browser öffnen"
+          }
+        }
+      }
+    },
+    "app_link_sign_in": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in there"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dort anmelden"
+          }
+        }
+      }
+    },
+    "app_link_web_only %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@\n\nThis link only works in the browser."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@\n\nDieser Link funktioniert nur im Browser."
+          }
+        }
+      }
+    },
     "app_lock": {
       "localizations": {
         "en": {

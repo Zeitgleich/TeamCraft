@@ -56,6 +56,15 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
   let control = SessionControl::new(auth::detect(config));
   provide_context(control);
   control.start();
+  // "Sign in there" on a link to an instance (app_links.rs): the usual check and confirmation.
+  if let Some(links) = use_context::<crate::app_links::AppLinks>() {
+    Effect::new(move |_| {
+      if let Some(host) = links.maybe_server_to_check.get() {
+        links.maybe_server_to_check.set(None);
+        control.check_server_from_link(host);
+      }
+    });
+  }
   // The loading screen covers the session check, the way through the identity provider and the
   // opening of the account's data: the first view it hands over to is a screen that waits for the
   // user, or the shell (`Shell`, below `Ready`). Not the passing states, which a signed-in start
@@ -161,6 +170,7 @@ pub(crate) fn AuthFrame(
     <main class="auth-page">
       <BundleBanner />
       <section class="auth-card">
+        <crate::app_links::OpenInAppButton />
         {(!hide_brand).then(|| view! {
           <div class="auth-brand" translate="no">
             {move || brand_mark(brand)}
@@ -1091,6 +1101,7 @@ fn ServerConfirmScreen(check: ServerCheck, control: SessionControl) -> impl Into
   let host = check.server.host.clone();
   let provider = check.identity_provider_host.clone();
   let is_elsewhere = check.is_identity_provider_elsewhere;
+  let is_from_link = control.is_server_from_link.get_untracked();
   let maybe_logo = check.maybe_logo.clone().filter(|url| is_data_image(url));
   let maybe_logo_dark = check
     .maybe_logo_dark
@@ -1139,6 +1150,15 @@ fn ServerConfirmScreen(check: ServerCheck, control: SessionControl) -> impl Into
       <h1 class="auth-center">{move || i18n.t("server-entry-confirm-title")}</h1>
       <p class="auth-subtitle muted-text auth-center">{move || i18n.t("server-entry-confirm-body")}</p>
       <ProviderRow provider=provider.clone() />
+      {is_from_link
+        .then(|| {
+          view! {
+            <div class="auth-alert" role="alert">
+              <Icon name=IconName::Alert />
+              <p>{move || i18n.t("server-entry-from-link")}</p>
+            </div>
+          }
+        })}
       {is_elsewhere
         .then(|| {
           view! {

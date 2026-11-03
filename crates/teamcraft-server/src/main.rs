@@ -241,6 +241,7 @@ async fn run() -> anyhow::Result<()> {
       brands: config.brands.clone(),
       push: push_settings(&config),
       token_binding: teamcraft_proto::TokenBindingSettings::default(),
+      app_links: teamcraft_proto::AppLinkSettings::default(),
       max_attachment_bytes: config
         .storage
         .as_ref()

@@ -237,3 +237,11 @@ error-space-has-hidden-channels = This space holds private channels you aren't i
 error-channel-needs-admin = This channel has no admin. A workspace admin assigns one before it can be restored.
 error-not-a-channel = This only works for channels, not for direct messages.
 deletions-suspect = The server says { $count } of your conversations were deleted at once. Those an administrator signed for are gone from this device; the others are hidden, and their messages stay here for now. Tell your administrator.
+
+app-link-title = Open this link?
+app-link-foreign-add = You didn't enter this server: a link brought you here, and this app has no account yet. Signing in gives this server access to your account, so sign in only if you trust it. Otherwise open the link in the browser.
+app-link-foreign-other = This link leads to another server, not the one this app is signed in to. The app holds one account at a time, so it can only open this link in the browser.
+app-link-web-only = This link only works in the browser.
+app-link-sign-in = Sign in there
+app-link-open-browser = Open in browser
+open-in-app = Open in the app

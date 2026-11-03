@@ -28,6 +28,7 @@
     "allow-server-suggest",
     "allow-server-confirm",
     "allow-server-forget",
+    "allow-deep-link-take",
     "allow-core-start",
     "allow-core-retry-keychain",
     "allow-core-status",

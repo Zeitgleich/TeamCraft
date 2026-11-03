@@ -128,3 +128,4 @@ login-help-link = Hilfe bei der Anmeldung
 ## Getting started (empty workspace)
 # Runtime settings: brands, mail, calendar and instance settings in the admin console
 login-organization = Betrieben von { $name }
+server-entry-from-link = Du hast diesen Server nicht eingegeben: Ein Link hat dich hierher gebracht. Mit der Anmeldung bekommt dieser Server Zugriff auf dein Konto. Fahre nur fort, wenn du ihm vertraust.

@@ -16,7 +16,7 @@ person on a real PC, camera, microphone and GPU yet; see [What needs a real mach
 | Local database        | SQLCipher with OpenSSL built from source (`bundled-sqlcipher-vendored-openssl`)                     |
 | OIDC login            | System browser plus the loopback listener on `127.0.0.1` (RFC 8252), same as elsewhere              |
 | Notifications         | `tauri-plugin-notification` (toast); shown under the app's name once installed                      |
-| Links                 | `teamcraft://` registered by the installer; a second launch hands its link to the running instance   |
+| Links                 | `teamcraft://` registered by the installer; a second launch hands its link to the running instance (docs/app-links.md) |
 | Start at login        | `tauri-plugin-autostart` (per-user registry Run entry) behind the shell commands `autostart_get`/`autostart_set` |
 | Audio                 | cpal over WASAPI, Opus                                                                              |
 | Echo cancellation     | WebRTC audio processing is **not** in the release build yet (see below)                             |

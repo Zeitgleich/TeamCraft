@@ -57,7 +57,10 @@ tauri-plugin-window-state = "2"
 tauri-plugin-updater = "2"
 # One running instance on every OS: a second process would fork the encrypted store (e2ee.md §9.4).
 # Same Tauri plugin family; on Linux it adds zbus, already in the tree through the keyring (teamcraft-core).
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# `teamcraft://` links on every OS (deep_links.rs). Same Tauri plugin family, already in the lock
+# file through the Windows build; adds no crate that isn't there.
+tauri-plugin-deep-link = "2"
 reqwest = { workspace = true, features = ["form"] }
 # PKCE, state and token requests; HTTP goes through our own reqwest client.
 oauth2 = { version = "5", default-features = false }
@@ -68,6 +71,9 @@ base64.workspace = true
 # Linux capture: the desktop portal (cameras, screens) and V4L2 cameras; hardware encoding through
 # GStreamer's VA-API encoder.
 [target.'cfg(target_os = "linux")'.dependencies]
+# Not used directly: tauri-plugin-deep-link 2.6 asks for `rust-ini = "0.21"` but builds only against
+# 0.21.1 (0.21.2 and later added public fields it doesn't set). Drop this once the plugin is fixed.
+rust-ini = "=0.21.1"
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["pipewire", "v4l2", "gstreamer"] }
 # Push-to-talk on Wayland through the GlobalShortcuts portal (MIT; already in the tree for capture).
 ashpd = { version = "0.13.13", features = ["global_shortcuts", "background"] }
@@ -114,11 +120,8 @@ block2 = "0.6.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["mediafoundation", "graphics-capture", "wasapi-loopback"] }
 
-# Windows shell integration: the `teamcraft://` links (registered by the installer), handed to the
-# running instance, and the "start at login" option (a registry Run entry).
+# Windows shell integration: the "start at login" option (a registry Run entry).
 [target.'cfg(windows)'.dependencies]
-tauri-plugin-deep-link = "2"
-tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-autostart = "2"
 # OS idle time for the attention report: a safe wrapper of GetLastInputInfo (MIT/Apache-2.0; only
 # windows-sys and anyhow, both already in the tree).

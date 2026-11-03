@@ -103,6 +103,15 @@ pub fn MeetingsView() -> impl IntoView {
       open_meeting_link(hub, visit, meeting);
     }
   });
+  Effect::new(move |_| {
+    if let Some(meeting) = state.maybe_outside_meeting_link.get() {
+      state.maybe_outside_meeting_link.set(None);
+      // Not over a visit that runs, or a question being read: what they click must be what they read.
+      if visit.get_untracked() == LinkVisit::Idle {
+        visit.set(LinkVisit::FromOutside(meeting));
+      }
+    }
+  });
   // Once the meeting's chat has loaded, the member is in: on to the pre-join screen.
   Effect::new(move |_| {
     if let LinkVisit::Entering(conversation) = visit.get()
@@ -148,7 +157,7 @@ pub fn MeetingsView() -> impl IntoView {
           view! { <div class="auth-alert meetings-error" role="alert">{move || i18n.t_with("meetings-error", &[("detail", &message)])}</div> }
         })
       }}
-      <LinkVisitBanner visit=visit />
+      <LinkVisitBanner hub=hub visit=visit />
       <div class="meetings-list panel-scroll">
         <For
           each=move || meeting_days(&hub.meetings.get(), now_ms())
@@ -1041,6 +1050,8 @@ pub fn CancelMeetingDialog(meeting: MeetingId, occurrence: i64) -> impl IntoView
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LinkVisit {
   Idle,
+  /// A link from outside the app: opening it knocks, so that takes a click.
+  FromOutside(MeetingHandle),
   Opening,
   /// Not in the meeting yet: knocked, waits for a host.
   Waiting(MeetingId),
@@ -1120,12 +1131,26 @@ fn visit_failure(error: &MeetingError) -> LinkVisit {
 
 /// What opening a meeting link is doing, above the list.
 #[component]
-fn LinkVisitBanner(visit: RwSignal<LinkVisit>) -> impl IntoView {
+fn LinkVisitBanner(hub: MeetingsHub, visit: RwSignal<LinkVisit>) -> impl IntoView {
   let i18n = use_i18n();
   let stop = move |_| visit.set(LinkVisit::Idle);
   move || {
     match visit.get() {
     LinkVisit::Idle => ().into_any(),
+    LinkVisit::FromOutside(meeting) => view! {
+      <div class="meetings-visit" role="status">
+        <span class="grow">{move || i18n.t("meetings-visit-from-outside")}</span>
+        <button type="button" class="btn" on:click=stop>{move || i18n.t("cancel")}</button>
+        <button
+          type="button"
+          class="btn btn-primary"
+          on:click=move |_| open_meeting_link(hub, visit, meeting)
+        >
+          {move || i18n.t("meetings-visit-open")}
+        </button>
+      </div>
+    }
+    .into_any(),
     LinkVisit::Opening | LinkVisit::Entering(_) => view! {
       <div class="meetings-visit" role="status">
         <span class="spinner"></span>

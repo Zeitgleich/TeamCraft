@@ -145,6 +145,8 @@ pub struct SessionControl {
   pub is_server_locked: RwSignal<bool>,
   /// Desktop: a server address is being checked.
   pub is_checking_server: RwSignal<bool>,
+  /// Desktop: the server being checked came from a link, not from the user (docs/app-links.md).
+  pub is_server_from_link: RwSignal<bool>,
   /// Counts core starts, so waiting for an older one stops (sign-out, retry). A check of the cached
   /// account belongs to the start it began with.
   core_round: RwSignal<u64>,
@@ -217,6 +219,7 @@ impl SessionControl {
       server: RwSignal::new(None),
       is_server_locked: RwSignal::new(false),
       is_checking_server: RwSignal::new(false),
+      is_server_from_link: RwSignal::new(false),
       core_round: RwSignal::new(0),
       is_account_unconfirmed: RwSignal::new(false),
       maybe_confirmed: RwSignal::new(None),
@@ -503,6 +506,18 @@ impl SessionControl {
 
   /// Checks the server the user typed (desktop); its answer is shown for confirmation.
   pub fn check_server(&self, address: String) {
+    self.is_server_from_link.set(false);
+    self.run_server_check(address);
+  }
+
+  /// "Sign in there" on a link: the same check, and the confirmation warns that the user didn't
+  /// enter this server.
+  pub fn check_server_from_link(&self, address: String) {
+    self.is_server_from_link.set(true);
+    self.run_server_check(address);
+  }
+
+  fn run_server_check(&self, address: String) {
     let control = *self;
     control.is_checking_server.set(true);
     spawn_local(async move {

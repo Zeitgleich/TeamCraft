@@ -5,6 +5,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.runtime.setValue
@@ -39,6 +40,10 @@ import de.zeitgleich.teamcraft.ui.screens.ConfirmServerScreen
 import de.zeitgleich.teamcraft.ui.screens.ServerEntryScreen
 import de.zeitgleich.teamcraft.ui.screens.FilesScreen
 import de.zeitgleich.teamcraft.ui.screens.MeetingsScreen
+import uniffi.teamcraft_ffi.AppLinkPlace
+import uniffi.teamcraft_ffi.OpenedAppLink
+import uniffi.teamcraft_ffi.OpenedAppLinkStep
+import uniffi.teamcraft_ffi.openAppLink
 import de.zeitgleich.teamcraft.ui.screens.SavedScreen
 import de.zeitgleich.teamcraft.ui.screens.ThreadsScreen
 import de.zeitgleich.teamcraft.ui.screens.ConversationScreen
@@ -64,6 +69,8 @@ fun AppRoot(
   onConversationOpened: () -> Unit,
   maybeShare: SharedContent?,
   onShareHandled: () -> Unit,
+  maybeAppLink: String?,
+  onAppLinkHandled: () -> Unit,
   onLogin: (Intent) -> Unit,
 ) {
   val state by viewModel.appState.collectAsState()
@@ -72,11 +79,49 @@ fun AppRoot(
   val brandIcons by viewModel.brandIcons.collectAsState()
   val maybeServer by viewModel.server.collectAsState()
   val isServerLocked by viewModel.isServerLocked.collectAsState()
+  val isServerFromLink by viewModel.isServerFromLink.collectAsState()
   val maybeSignInPage by viewModel.signInPage.collectAsState()
   val maybeSsoIcon by viewModel.ssoIcon.collectAsState()
   val isDark = isSystemInDarkTheme()
   val scope = rememberCoroutineScope()
+  val context = LocalContext.current
+  // What the core makes of a link, with the server in use; a question doesn't come back after "Sign in
+  // there", while the user is on the way to the account it asked about.
+  var isSigningInForLink by remember(maybeAppLink) { mutableStateOf(false) }
+  val maybeOpenedLink = remember(maybeAppLink, maybeServer, isServerLocked) {
+    maybeAppLink?.let { openAppLink(it, maybeServer?.address?.origin, isServerLocked) }
+  }
+  // The question being read stays until it is answered: a link arriving meanwhile doesn't swap it, so
+  // what the user answers is what they read.
+  var maybeQuestion by remember { mutableStateOf<OpenedAppLink?>(null) }
+  LaunchedEffect(maybeAppLink, maybeOpenedLink, state == AppState.Starting, isSigningInForLink) {
+    // Not a link after all: nothing to do, nothing to say.
+    if (maybeAppLink != null && maybeOpenedLink == null) onAppLinkHandled()
+    val isAsking = maybeOpenedLink != null && maybeOpenedLink.step != OpenedAppLinkStep.Navigate
+    if (isAsking && maybeQuestion == null && state != AppState.Starting && !isSigningInForLink) maybeQuestion = maybeOpenedLink
+  }
   Box(Modifier.fillMaxSize()) {
+    maybeQuestion?.let { question ->
+      AppLinkQuestion(
+        link = question,
+        onSignIn = { host ->
+          maybeQuestion = null
+          isSigningInForLink = true
+          viewModel.submitServerFromLink(host)
+        },
+        onBrowser = {
+          maybeQuestion = null
+          question.maybeWebUrl?.let { url ->
+            if (!openInBrowser(context, url)) viewModel.showFailure(R.string.app_link_no_browser)
+          }
+          onAppLinkHandled()
+        },
+        onCancel = {
+          maybeQuestion = null
+          onAppLinkHandled()
+        },
+      )
+    }
     when (val current = state) {
       // The loading mark (MainActivity) stands in for this screen.
       AppState.Starting -> Unit
@@ -89,6 +134,7 @@ fun AppRoot(
       )
       is AppState.ConfirmServer -> ConfirmServerScreen(
         checked = current.checked,
+        isFromLink = isServerFromLink,
         maybeBrand = brand,
         maybeLogo = remember(brand, isDark) { viewModel.brandLogo(isDark) },
         isBusy = isBusy,
@@ -144,7 +190,16 @@ fun AppRoot(
         onSignOut = viewModel::signOut,
       )
       is AppState.Ready -> {
-        ReadyNavigation(viewModel, current, maybeConversationToOpen, onConversationOpened, maybeShare, onShareHandled)
+        ReadyNavigation(
+          viewModel,
+          current,
+          maybeConversationToOpen,
+          onConversationOpened,
+          maybeShare,
+          onShareHandled,
+          maybeOpenedLink?.takeIf { it.step == OpenedAppLinkStep.Navigate },
+          onAppLinkHandled,
+        )
         LinkRequestPrompts(viewModel, Modifier.align(Alignment.TopCenter))
       }
     }
@@ -159,9 +214,13 @@ private fun ReadyNavigation(
   onConversationOpened: () -> Unit,
   maybeShare: SharedContent?,
   onShareHandled: () -> Unit,
+  maybeOpenedLink: OpenedAppLink?,
+  onAppLinkHandled: () -> Unit,
 ) {
   val navigation = rememberNavController()
   val scope = rememberCoroutineScope()
+  val context = LocalContext.current
+  var maybeMeetingLinkUrl by remember { mutableStateOf<String?>(null) }
   // A message link in a message: open its conversation (or thread) at the message, if readable here.
   val openPermalink: (String) -> Unit = { link ->
     scope.launch {
@@ -173,6 +232,36 @@ private fun ReadyNavigation(
         else -> navigation.navigate("conversation/${maybeTarget.conversation}?focus=${maybeTarget.message}")
       }
     }
+  }
+  LaunchedEffect(maybeOpenedLink) {
+    val link = maybeOpenedLink ?: return@LaunchedEffect
+    when (val place = link.place) {
+      AppLinkPlace.Home, AppLinkPlace.None -> Unit
+      // Only one this device knows: a link can name any ID, and the screen would stay blank.
+      is AppLinkPlace.Conversation ->
+        if (viewModel.conversations().any { it.id == place.conversationId }) {
+          navigation.navigate("conversation/${place.conversationId}")
+        } else {
+          viewModel.showFailure(R.string.app_link_conversation_unavailable)
+        }
+      is AppLinkPlace.Permalink -> openPermalink(place.link)
+      // Doesn't swap the question if one is open.
+      AppLinkPlace.Meeting -> if (maybeMeetingLinkUrl == null) maybeMeetingLinkUrl = link.maybeWebUrl
+    }
+    onAppLinkHandled()
+  }
+  maybeMeetingLinkUrl?.let { url ->
+    MeetingLinkQuestion(
+      onMeetings = {
+        maybeMeetingLinkUrl = null
+        navigation.navigate("meetings") { launchSingleTop = true }
+      },
+      onBrowser = {
+        maybeMeetingLinkUrl = null
+        if (!openInBrowser(context, url)) viewModel.showFailure(R.string.app_link_no_browser)
+      },
+      onCancel = { maybeMeetingLinkUrl = null },
+    )
   }
   LaunchedEffect(maybeConversationToOpen) {
     maybeConversationToOpen?.let {

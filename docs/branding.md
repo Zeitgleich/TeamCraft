@@ -196,6 +196,9 @@ global one with `{connect_src}` extended by the brand's `connect_origins`. Becau
 request origin, each brand host automatically allows only itself. The brand-specific policy is
 validated like the global one.
 
+`GET /.well-known/assetlinks.json` and `GET /.well-known/apple-app-site-association` answer on every
+brand's host, so its links can open in an installed app ([app-links.md](app-links.md)).
+
 ## 5. Clients
 
 - **Web**: served from the brand host. `index.html` links `/api/v1/brand/theme.css` after the app's own

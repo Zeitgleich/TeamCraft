@@ -15,6 +15,7 @@ serde = "1"
 time = "0.3"
 serde_json = "1"
 teamcraft-bridge = { path = "../crates/teamcraft-bridge" }
+teamcraft-client-api = { path = "../crates/teamcraft-client-api" }
 teamcraft-core = { path = "../crates/teamcraft-core" }
 teamcraft-crypto = { path = "../crates/teamcraft-crypto" }
 teamcraft-proto = { path = "../crates/teamcraft-proto" }
@@ -60,6 +61,13 @@ bench = false
 [[bin]]
 name = "thumbnail"
 path = "fuzz_targets/thumbnail.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "app_link"
+path = "fuzz_targets/app_link.rs"
 test = false
 doc = false
 bench = false

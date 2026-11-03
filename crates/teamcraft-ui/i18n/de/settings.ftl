@@ -611,3 +611,10 @@ settings-f-nonce_rotation_secs = Die Nonce des Servers wechselt alle
 settings-f-replay_cache_max_entries = Gemerkte Nachweise, um Wiederholungen abzulehnen
 settings-f-replay_cache_max_entries_per_user = Davon für ein Konto
 settings-unit-entries = Einträge
+
+settings-group-app_links = Links öffnen sich in den Apps
+settings-group-app_links-hint = In welchen Apps Android und iOS die Links dieses Servers öffnen dürfen. Voreingestellt sind die offiziellen Apps; ändere das nur für eine App, die du selbst baust und signierst.
+settings-f-android_package_names = Android-Anwendungs-IDs
+settings-f-android_cert_fingerprints = Android-Signaturzertifikate (SHA-256)
+settings-f-apple_team_id = Apple-Team-ID
+settings-f-apple_bundle_id = iOS-Bundle-ID
