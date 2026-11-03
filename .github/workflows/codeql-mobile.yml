@@ -105,6 +105,11 @@ jobs:
         with:
           key: codeql-android
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: System libraries of the host build
+        if: matrix.build == 'android'
+        # The CI image's list (containers/ci.Containerfile) for this crate's -sys dependencies: ALSA
+        # (alsa-sys, via the audio stack), clang and cmake (opusic-sys, openh264-sys2, aws-lc-sys).
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev libclang-dev pkg-config cmake
       - name: Kotlin bindings from the host build of the Rust core
         if: matrix.build == 'android'
         # The bindings are read from the library's metadata, which is the same for any target, so the
