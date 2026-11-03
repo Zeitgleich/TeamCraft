@@ -96,6 +96,16 @@ exists; clients can still read what they have stored locally.
   dependency that is down makes it `degraded` with 200: every instance would meet the same outage,
   and taking them out would turn a storage outage into a full one. Alert on `degraded` and on the
   log lines `dependency is down` / `dependency is back`.
+- **Database outages.** Handlers' errors feed the database's breaker, so it opens under traffic
+  without anybody asking `/readyz`: requests that need the database then answer at once rather than
+  after `acquire_timeout_secs`, and one request pings after `open_secs`. Server info, brand and client
+  compatibility answer from memory and stay up. Queries are not repeated by the server; the clients
+  do that after `Retry-After`. A pool that is exhausted under load looks the same as an outage once
+  nothing has succeeded three times in a row, and sheds load for `open_secs`.
+- **Request deadline** (`request_deadline_secs`, 60 s, 0 turns it off). An API request that makes no
+  progress this long answers 503, whatever it hangs on; receiving a piece of its body is progress, so
+  a slow upload is not cut off. Imports and the gateway are exempt. Log line: `a request made no
+  progress within the deadline`. Raise it if a legitimate admin action runs longer behind your proxy.
 - Every 503 of the server carries `Retry-After` (in the header and as `retry_after_secs` in the
   body); the apps wait at least that long (one shared retry policy, capped exponential backoff
   with jitter). A short database blip at startup — also between the connect and the migrations —
