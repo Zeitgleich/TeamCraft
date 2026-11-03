@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-webview-video-mode"
+description = "Enables the webview_video_mode command without any pre-configured scope."
+commands.allow = ["webview_video_mode"]
+
+[[permission]]
+identifier = "deny-webview-video-mode"
+description = "Denies the webview_video_mode command without any pre-configured scope."
+commands.deny = ["webview_video_mode"]

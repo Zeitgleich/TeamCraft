@@ -136,6 +136,10 @@ TEAMCRAFT_WEBKIT_DMABUF=0 ./TeamCraft_amd64.AppImage       # the same for the Ap
 flatpak run --env=TEAMCRAFT_WEBKIT_DMABUF=0 de.zeitgleich.teamcraft
 ```
 
+With the compatible renderer, call video comes to the window as JPEG images: WebKitGTK 2.54 kills
+its web process when asked whether WebCodecs decodes a video while the DMABUF renderer is off
+(`WebCore::setGstElementGLContext`, #824), so the app doesn't ask. Pictures cost more CPU this way.
+
 For a permanent choice, put the variable into the `.desktop` file's `Exec=env …` line or
 `~/.config/environment.d/`, or use `flatpak override --user --env=TEAMCRAFT_WEBKIT_DMABUF=0
 de.zeitgleich.teamcraft`. Please report the GPU, driver, compositor and scaling when you need it.

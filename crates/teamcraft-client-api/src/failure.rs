@@ -208,6 +208,9 @@ pub enum CallFailure {
   /// The browser didn't let the page play sound (no interaction with the page yet, or a site
   /// setting).
   SoundBlocked,
+  /// The window's web process crashed again and again, so this app shows no call video until it
+  /// restarts; the call itself goes on (#824).
+  VideoOffAfterCrashes,
   /// The call broke off and couldn't be resumed within the reconnect grace period while the chat
   /// server stayed reachable: the call server went away (restarted, crashed) and didn't come back
   /// in time (issue #427).
@@ -218,7 +221,7 @@ pub enum CallFailure {
 }
 
 impl CallFailure {
-  const ALL: [Self; 30] = [
+  const ALL: [Self; 31] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -247,6 +250,7 @@ impl CallFailure {
     Self::SpeakersUnavailable,
     Self::SpeakersMissing,
     Self::SoundBlocked,
+    Self::VideoOffAfterCrashes,
     Self::ServerLost,
     Self::ConnectionLost,
   ];
@@ -282,6 +286,7 @@ impl CallFailure {
       Self::SpeakersUnavailable => "speakers_unavailable",
       Self::SpeakersMissing => "speakers_missing",
       Self::SoundBlocked => "sound_blocked",
+      Self::VideoOffAfterCrashes => "video_off_after_crashes",
       Self::ServerLost => "server_lost",
       Self::ConnectionLost => "connection_lost",
     }
