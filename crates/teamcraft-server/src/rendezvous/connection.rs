@@ -51,7 +51,11 @@ pub async fn run(state: AppState, mut socket: WebSocket, ip: String) {
     Ok(user) => user,
     Err(error) => {
       // A client meets the nonce challenge after every restart of the server: not a failed sign-in.
-      if !error.is_dpop_nonce_challenge() {
+      if error.is_dpop_nonce_challenge() {
+        let settings = state.settings.get();
+        let nonce = state.dpop.current_nonce(&settings.token_binding);
+        let _ = send(&mut socket, &RendezvousServerMessage::DpopNonce { nonce }).await;
+      } else {
         state
           .rate_limits
           .record_auth_failure(&ip, std::time::Instant::now());

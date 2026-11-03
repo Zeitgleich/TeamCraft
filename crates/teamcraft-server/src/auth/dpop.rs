@@ -7,9 +7,9 @@
 //! with a fresh challenge and the client signs a new one. Run exactly one server (operations.md);
 //! several would each refuse the others' nonces.
 
-use std::collections::{HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, PoisonError};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use teamcraft_crypto::dpop::{
@@ -17,7 +17,7 @@ use teamcraft_crypto::dpop::{
   verify_proof,
 };
 use teamcraft_proto::{DpopPolicy, ErrorCode, TokenBindingSettings};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use super::error::AuthError;
 use crate::metrics::DpopOutcome;
@@ -28,16 +28,22 @@ pub const DPOP_HEADER: HeaderName = HeaderName::from_static("dpop");
 /// The response header that carries the nonce for the next proof.
 pub const DPOP_NONCE_HEADER: HeaderName = HeaderName::from_static("dpop-nonce");
 
+/// How often a full replay cache is logged at most: it stays full for a while, and refuses every
+/// request with a proof meanwhile.
+const FULL_CACHE_LOG_INTERVAL_SECS: i64 = 300;
+
 /// What the server remembers about proofs. Created once at startup.
 #[derive(Debug)]
 pub struct DpopGuard {
   nonces: Mutex<DpopNonces>,
   replays: Mutex<ReplayCache>,
   has_warned_about_origins: AtomicBool,
+  /// When a full replay cache was logged last.
+  full_cache_logged_at_unix: AtomicI64,
 }
 
-/// A token as a request presents it.
-#[derive(Debug, Clone, Copy)]
+/// A token as a request presents it. Its `Debug` doesn't print the token or the proof.
+#[derive(Clone, Copy)]
 pub struct PresentedToken<'a> {
   pub token: &'a str,
   pub scheme: TokenScheme,
@@ -58,8 +64,8 @@ pub enum TokenScheme {
   Frame,
 }
 
-/// The request's proof, before anything is known about it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The request's proof, before anything is known about it. Its `Debug` doesn't print the proof.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PresentedProof<'a> {
   Absent,
   One(&'a str),
@@ -100,16 +106,36 @@ pub enum DpopRefusal {
 
 /// The proofs seen lately. A set for the lookup, a queue for expiry: every entry lives equally long,
 /// so the oldest is at the front, and a request pays for the ones that just expired, not for all.
+/// Each entry counts for the user whose token it came with, so that one account can't fill the cache
+/// for everybody, however many keys the identity provider binds its tokens to.
 #[derive(Debug, Default)]
 struct ReplayCache {
   seen: HashSet<[u8; 32]>,
-  by_expiry: VecDeque<([u8; 32], i64)>,
+  by_expiry: VecDeque<ReplayEntry>,
+  entries_per_owner: HashMap<Arc<str>, u32>,
+}
+
+#[derive(Debug)]
+struct ReplayEntry {
+  id: [u8; 32],
+  /// The last moment the proof can be fresh; the entry goes after it.
+  last_fresh_unix: i64,
+  owner: Arc<str>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReplayLimits {
+  retention_secs: u64,
+  max_entries: usize,
+  max_entries_per_owner: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplayOutcome {
   New,
   Seen,
+  /// This user has as many proofs in the cache as one may.
+  OwnerFull,
   Full,
 }
 
@@ -119,6 +145,7 @@ impl Default for DpopGuard {
       nonces: Mutex::new(DpopNonces::new(now_unix())),
       replays: Mutex::default(),
       has_warned_about_origins: AtomicBool::new(false),
+      full_cache_logged_at_unix: AtomicI64::new(i64::MIN),
     }
   }
 }
@@ -144,9 +171,12 @@ impl DpopGuard {
     rules: &TokenBindingSettings,
     origins: &[PublicOrigin],
     presented: &PresentedToken<'_>,
+    subject: &str,
     binding: &mut TokenBinding,
     now: i64,
   ) -> Result<Option<DpopOutcome>, AuthError> {
+    // A policy this version doesn't know (a row from a newer version, see `runtime_settings::load`)
+    // checks like `optional`: bound tokens stay protected, and nobody is locked out.
     if rules.dpop_policy == DpopPolicy::Off {
       return Ok(None);
     }
@@ -162,7 +192,8 @@ impl DpopGuard {
           _ if presented.scheme == TokenScheme::Bearer => return Err(DpopRefusal::BearerScheme.into()),
           _ => {},
         }
-        self.check_proof(rules, origins, presented, Some(&key), now)?;
+        let replay_id = self.check_proof(rules, origins, presented, Some(&key), now)?;
+        self.remember(rules, replay_id, subject, now)?;
         *binding = TokenBinding::Verified(key);
         Ok(Some(DpopOutcome::Bound))
       },
@@ -172,7 +203,9 @@ impl DpopGuard {
         }
         // A proof with an unbound token protects nothing yet, but a wrong one is a broken or a
         // hostile client either way. Only if the server can't check it, it is ignored: the token
-        // would be accepted without the proof all the same.
+        // would be accepted without the proof all the same. For the same reason it isn't remembered:
+        // a replay could as well leave the proof out, and anybody with a token could otherwise fill
+        // the cache with keys of their own making.
         if presented.proof != PresentedProof::Absent && !origins.is_empty() {
           self.check_proof(rules, origins, presented, None, now)?;
         }
@@ -188,7 +221,7 @@ impl DpopGuard {
     presented: &PresentedToken<'_>,
     maybe_bound_key: Option<&JwkThumbprint>,
     now: i64,
-  ) -> Result<(), AuthError> {
+  ) -> Result<[u8; 32], AuthError> {
     let proof = match presented.proof {
       PresentedProof::One(proof) => proof,
       PresentedProof::Absent | PresentedProof::Unusable => {
@@ -212,8 +245,7 @@ impl DpopGuard {
     )
     .map_err(DpopRefusal::InvalidProof)?;
 
-    // After the signature: only somebody with a valid token and proof can make the server remember
-    // anything. Before the replay cache: a proof that only lacks the nonce isn't used up.
+    // Before the replay cache: a proof that only lacks the nonce isn't used up.
     let has_valid_nonce = verified.maybe_nonce.as_deref().is_some_and(|nonce| {
       self
         .nonces
@@ -224,22 +256,57 @@ impl DpopGuard {
     if !has_valid_nonce {
       return Err(DpopRefusal::UseNonce.into());
     }
-    let retention = replay_retention_secs(max_age_secs, leeway_secs);
+    Ok(verified.replay_id)
+  }
+
+  /// Records a valid proof of a bound token. After the signature: only somebody with a bound token
+  /// and its key can make the server remember anything.
+  fn remember(
+    &self,
+    rules: &TokenBindingSettings,
+    replay_id: [u8; 32],
+    subject: &str,
+    now: i64,
+  ) -> Result<(), AuthError> {
+    let limits = ReplayLimits {
+      retention_secs: replay_retention_secs(
+        u64::from(rules.proof_max_age_secs),
+        u64::from(rules.proof_leeway_secs),
+      ),
+      max_entries: rules.replay_cache_max_entries as usize,
+      max_entries_per_owner: rules.replay_cache_max_entries_per_user,
+    };
     let outcome = self
       .replays
       .lock()
       .unwrap_or_else(PoisonError::into_inner)
-      .record(
-        verified.replay_id,
-        now,
-        retention,
-        rules.replay_cache_max_entries as usize,
-      );
+      .record(replay_id, subject, now, limits);
     match outcome {
       ReplayOutcome::New => Ok(()),
       ReplayOutcome::Seen => Err(DpopRefusal::Replayed.into()),
+      // The one account that sends this much waits, and nobody else notices.
+      ReplayOutcome::OwnerFull => Err(AuthError::DpopUserLimit),
       // Fail closed: taking the request could let a replay through. Clients retry on 503.
-      ReplayOutcome::Full => Err(AuthError::KeysUnavailable("the DPoP replay cache is full".into())),
+      ReplayOutcome::Full => {
+        self.log_full_cache(now);
+        Err(AuthError::DpopReplayCacheFull)
+      },
+    }
+  }
+
+  fn log_full_cache(&self, now: i64) {
+    let last = self.full_cache_logged_at_unix.load(Ordering::Relaxed);
+    let is_due = now.saturating_sub(last) >= FULL_CACHE_LOG_INTERVAL_SECS;
+    if is_due
+      && self
+        .full_cache_logged_at_unix
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+      error!(
+        "the DPoP replay cache is full: requests with bound tokens get 503 until entries expire; \
+         see replay_cache_max_entries"
+      );
     }
   }
 
@@ -267,6 +334,28 @@ impl<'a> PresentedProof<'a> {
   /// The proof in a WebSocket's first frame.
   pub fn from_frame(maybe_proof: Option<&'a str>) -> Self {
     maybe_proof.map_or(Self::Absent, Self::One)
+  }
+}
+
+impl std::fmt::Debug for PresentedToken<'_> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("PresentedToken")
+      .field("token", &"[redacted]")
+      .field("scheme", &self.scheme)
+      .field("proof", &self.proof)
+      .field("method", &self.method)
+      .field("path", &self.path)
+      .finish()
+  }
+}
+
+impl std::fmt::Debug for PresentedProof<'_> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(match self {
+      Self::Absent => "Absent",
+      Self::One(_) => "One([redacted])",
+      Self::Unusable => "Unusable",
+    })
   }
 }
 
@@ -301,24 +390,53 @@ impl DpopRefusal {
 impl ReplayCache {
   /// Remembers a proof, unless it was seen or there is no room. No eviction of live entries: that
   /// would let exactly those proofs be replayed.
-  fn record(&mut self, id: [u8; 32], now: i64, retention_secs: u64, max_entries: usize) -> ReplayOutcome {
-    while let Some((oldest, expiry)) = self.by_expiry.front() {
-      if *expiry > now {
-        break;
-      }
-      self.seen.remove(oldest);
-      self.by_expiry.pop_front();
-    }
+  fn record(&mut self, id: [u8; 32], owner: &str, now: i64, limits: ReplayLimits) -> ReplayOutcome {
+    self.forget_expired(now);
     if self.seen.contains(&id) {
       return ReplayOutcome::Seen;
     }
-    if self.seen.len() >= max_entries {
+    // Before the shared limit: whoever fills the cache is told so, not everybody else's error.
+    let owner_entries = self.entries_per_owner.get(owner).copied().unwrap_or(0);
+    if owner_entries >= limits.max_entries_per_owner {
+      return ReplayOutcome::OwnerFull;
+    }
+    if self.seen.len() >= limits.max_entries {
       return ReplayOutcome::Full;
     }
-    let retention = i64::try_from(retention_secs).unwrap_or(i64::MAX);
+    let owner = self
+      .entries_per_owner
+      .get_key_value(owner)
+      .map_or_else(|| Arc::from(owner), |(known, _)| Arc::clone(known));
+    let retention = i64::try_from(limits.retention_secs).unwrap_or(i64::MAX);
     self.seen.insert(id);
-    self.by_expiry.push_back((id, now.saturating_add(retention)));
+    self
+      .entries_per_owner
+      .insert(Arc::clone(&owner), owner_entries + 1);
+    self.by_expiry.push_back(ReplayEntry {
+      id,
+      last_fresh_unix: now.saturating_add(retention),
+      owner,
+    });
     ReplayOutcome::New
+  }
+
+  fn forget_expired(&mut self, now: i64) {
+    while self
+      .by_expiry
+      .front()
+      .is_some_and(|entry| entry.last_fresh_unix < now)
+    {
+      let Some(entry) = self.by_expiry.pop_front() else {
+        return;
+      };
+      self.seen.remove(&entry.id);
+      if let Some(count) = self.entries_per_owner.get_mut(&entry.owner) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+          self.entries_per_owner.remove(&entry.owner);
+        }
+      }
+    }
   }
 }
 
@@ -326,6 +444,7 @@ impl ReplayCache {
 pub fn enforce(
   state: &AppState,
   presented: &PresentedToken<'_>,
+  subject: &str,
   binding: &mut TokenBinding,
 ) -> Result<(), AuthError> {
   let settings = state.settings.get();
@@ -341,7 +460,9 @@ pub fn enforce(
   if presented.proof != PresentedProof::Absent && origins.is_empty() {
     state.dpop.warn_once_about_missing_origins();
   }
-  let result = state.dpop.check(rules, &origins, presented, binding, now_unix());
+  let result = state
+    .dpop
+    .check(rules, &origins, presented, subject, binding, now_unix());
   match &result {
     Ok(Some(outcome)) => state.metrics.note_dpop(*outcome),
     Ok(None) => {},
@@ -417,6 +538,7 @@ mod tests {
   const TOKEN: &str = "an.access.token";
   const ORIGIN: &str = "https://chat.example.com";
   const PATH: &str = "/api/v1/me";
+  const SUBJECT: &str = "user-1";
 
   static ORIGINS: LazyLock<Vec<PublicOrigin>> = LazyLock::new(|| vec![PublicOrigin::parse(ORIGIN).unwrap()]);
 
@@ -432,6 +554,7 @@ mod tests {
         &rules(DpopPolicy::Off),
         &ORIGINS,
         &presented(TokenScheme::Bearer, PresentedProof::Absent),
+        SUBJECT,
         &mut binding,
         NOW,
       );
@@ -449,6 +572,7 @@ mod tests {
           &rules(DpopPolicy::Optional),
           &ORIGINS,
           &request,
+          SUBJECT,
           &mut binding,
           NOW
         ),
@@ -459,6 +583,7 @@ mod tests {
           &rules(DpopPolicy::Required),
           &ORIGINS,
           &request,
+          SUBJECT,
           &mut binding,
           NOW
         )),
@@ -478,6 +603,7 @@ mod tests {
               &rules(policy.clone()),
               &ORIGINS,
               &presented(scheme, PresentedProof::Absent),
+              SUBJECT,
               &mut binding,
               NOW
             )),
@@ -499,6 +625,7 @@ mod tests {
           &rules(DpopPolicy::Optional),
           &ORIGINS,
           &presented(TokenScheme::Bearer, PresentedProof::One(&proof)),
+          SUBJECT,
           &mut binding,
           NOW
         )),
@@ -516,6 +643,7 @@ mod tests {
         &rules(DpopPolicy::Required),
         &ORIGINS,
         &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+        SUBJECT,
         &mut binding,
         NOW,
       );
@@ -534,6 +662,7 @@ mod tests {
           &rules(DpopPolicy::Required),
           &ORIGINS,
           &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+          SUBJECT,
           &mut binding,
           NOW
         )),
@@ -552,11 +681,44 @@ mod tests {
           &rules(DpopPolicy::Optional),
           &ORIGINS,
           &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+          SUBJECT,
           &mut binding,
           NOW
         )),
         Some(DpopRefusal::InvalidProof(DpopError::WrongMethod))
       );
+    }
+
+    /// A row from a newer version: bound tokens stay protected and nobody is locked out.
+    #[test]
+    fn an_unknown_policy_checks_like_optional() {
+      let guard = guard();
+      let settings = rules(DpopPolicy::Unknown("stricter".to_owned()));
+      let key = DpopSigningKey::generate();
+      let mut binding = TokenBinding::Bound(key.thumbprint());
+      assert_eq!(
+        refusal(guard.check(
+          &settings,
+          &ORIGINS,
+          &presented(TokenScheme::Bearer, PresentedProof::Absent),
+          SUBJECT,
+          &mut binding,
+          NOW
+        )),
+        Some(DpopRefusal::ProofMissing)
+      );
+      let mut binding = TokenBinding::Unbound;
+      assert!(matches!(
+        guard.check(
+          &settings,
+          &ORIGINS,
+          &presented(TokenScheme::Bearer, PresentedProof::Absent),
+          SUBJECT,
+          &mut binding,
+          NOW
+        ),
+        Ok(Some(DpopOutcome::Unbound))
+      ));
     }
 
     #[test]
@@ -568,6 +730,7 @@ mod tests {
           &rules(DpopPolicy::Required),
           &ORIGINS,
           &presented(TokenScheme::Bearer, PresentedProof::Absent),
+          SUBJECT,
           &mut binding,
           NOW
         ),
@@ -585,6 +748,7 @@ mod tests {
           &rules(DpopPolicy::Optional),
           &ORIGINS,
           &presented(TokenScheme::Dpop, PresentedProof::Unusable),
+          SUBJECT,
           &mut binding,
           NOW
         )),
@@ -609,6 +773,18 @@ mod tests {
     }
   }
 
+  mod secrets {
+    use super::*;
+
+    #[test]
+    fn debug_shows_neither_the_token_nor_the_proof() {
+      let request = presented(TokenScheme::Dpop, PresentedProof::One("the.secret.proof"));
+      let printed = format!("{request:?}");
+      assert!(!printed.contains(TOKEN), "{printed}");
+      assert!(!printed.contains("the.secret.proof"), "{printed}");
+    }
+  }
+
   mod theft_and_relay {
     use super::*;
 
@@ -625,6 +801,7 @@ mod tests {
           &rules(DpopPolicy::Optional),
           &ORIGINS,
           &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+          SUBJECT,
           &mut binding,
           NOW
         )),
@@ -644,6 +821,7 @@ mod tests {
           &rules(DpopPolicy::Required),
           &ORIGINS,
           &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+          SUBJECT,
           &mut binding,
           NOW
         )),
@@ -663,6 +841,7 @@ mod tests {
           &rules(DpopPolicy::Optional),
           &[],
           &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+          SUBJECT,
           &mut binding,
           NOW
         )),
@@ -683,6 +862,7 @@ mod tests {
           &rules(DpopPolicy::Optional),
           &[],
           &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+          SUBJECT,
           &mut binding,
           NOW
         ),
@@ -706,6 +886,7 @@ mod tests {
             &rules(DpopPolicy::Optional),
             &ORIGINS,
             &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+            SUBJECT,
             &mut binding,
             NOW
           )),
@@ -725,12 +906,12 @@ mod tests {
       let mut binding = TokenBinding::Bound(key.thumbprint());
       assert!(
         guard
-          .check(&settings, &ORIGINS, &request, &mut binding, NOW)
+          .check(&settings, &ORIGINS, &request, SUBJECT, &mut binding, NOW)
           .is_ok()
       );
       let mut binding = TokenBinding::Bound(key.thumbprint());
       assert_eq!(
-        refusal(guard.check(&settings, &ORIGINS, &request, &mut binding, NOW + 1)),
+        refusal(guard.check(&settings, &ORIGINS, &request, SUBJECT, &mut binding, NOW + 1)),
         Some(DpopRefusal::Replayed)
       );
     }
@@ -747,14 +928,14 @@ mod tests {
       let mut binding = TokenBinding::Bound(key.thumbprint());
       assert!(
         before
-          .check(&settings, &ORIGINS, &request, &mut binding, NOW)
+          .check(&settings, &ORIGINS, &request, SUBJECT, &mut binding, NOW)
           .is_ok()
       );
 
       let after = guard();
       let mut binding = TokenBinding::Bound(key.thumbprint());
       assert_eq!(
-        refusal(after.check(&settings, &ORIGINS, &request, &mut binding, NOW + 1)),
+        refusal(after.check(&settings, &ORIGINS, &request, SUBJECT, &mut binding, NOW + 1)),
         Some(DpopRefusal::UseNonce)
       );
     }
@@ -773,27 +954,55 @@ mod tests {
       let mut binding = TokenBinding::Bound(key.thumbprint());
       assert!(
         guard
-          .check(&settings, &ORIGINS, &request, &mut binding, NOW)
+          .check(&settings, &ORIGINS, &request, SUBJECT, &mut binding, NOW)
           .is_ok()
       );
 
+      // The very last moment `iat` still lets it through.
       let last_fresh_moment = NOW + leeway + max_age + leeway;
       let mut binding = TokenBinding::Bound(key.thumbprint());
       assert_eq!(
-        refusal(guard.check(&settings, &ORIGINS, &request, &mut binding, last_fresh_moment - 1)),
+        refusal(guard.check(
+          &settings,
+          &ORIGINS,
+          &request,
+          SUBJECT,
+          &mut binding,
+          last_fresh_moment
+        )),
         Some(DpopRefusal::Replayed)
+      );
+      // One second later it isn't fresh any more, whatever the cache knows.
+      let mut binding = TokenBinding::Bound(key.thumbprint());
+      assert_eq!(
+        refusal(guard.check(
+          &settings,
+          &ORIGINS,
+          &request,
+          SUBJECT,
+          &mut binding,
+          last_fresh_moment + 1
+        )),
+        Some(DpopRefusal::InvalidProof(DpopError::NotFresh))
       );
     }
 
     #[test]
     fn a_full_cache_fails_closed_until_entries_expire() {
+      let limits = ReplayLimits {
+        retention_secs: 10,
+        max_entries: 2,
+        max_entries_per_owner: 100,
+      };
       let mut cache = ReplayCache::default();
-      assert_eq!(cache.record([1; 32], NOW, 10, 2), ReplayOutcome::New);
-      assert_eq!(cache.record([2; 32], NOW, 10, 2), ReplayOutcome::New);
-      assert_eq!(cache.record([1; 32], NOW + 1, 10, 2), ReplayOutcome::Seen);
-      assert_eq!(cache.record([3; 32], NOW + 1, 10, 2), ReplayOutcome::Full);
+      assert_eq!(cache.record([1; 32], "a", NOW, limits), ReplayOutcome::New);
+      assert_eq!(cache.record([2; 32], "b", NOW, limits), ReplayOutcome::New);
+      assert_eq!(cache.record([1; 32], "a", NOW + 1, limits), ReplayOutcome::Seen);
+      assert_eq!(cache.record([3; 32], "a", NOW + 1, limits), ReplayOutcome::Full);
       assert_eq!(cache.seen.len(), 2);
-      assert_eq!(cache.record([3; 32], NOW + 10, 10, 2), ReplayOutcome::New);
+      // Still there at the last moment, gone right after it.
+      assert_eq!(cache.record([1; 32], "a", NOW + 10, limits), ReplayOutcome::Seen);
+      assert_eq!(cache.record([3; 32], "a", NOW + 11, limits), ReplayOutcome::New);
       assert_eq!(cache.seen.len(), 1);
       assert_eq!(cache.by_expiry.len(), 1);
     }
@@ -804,25 +1013,123 @@ mod tests {
       let key = DpopSigningKey::generate();
       let mut settings = rules(DpopPolicy::Optional);
       settings.replay_cache_max_entries = 1;
-      guard.replays.lock().unwrap().record([9; 32], NOW, 600, 1);
+      guard.replays.lock().unwrap().record(
+        [9; 32],
+        "somebody-else",
+        NOW,
+        ReplayLimits {
+          retention_secs: 600,
+          max_entries: 1,
+          max_entries_per_owner: 1,
+        },
+      );
       let proof = proof_with_nonce(&guard, &key, "GET", ORIGIN, NOW);
       let mut binding = TokenBinding::Bound(key.thumbprint());
       let result = guard.check(
         &settings,
         &ORIGINS,
         &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+        SUBJECT,
         &mut binding,
         NOW,
       );
-      assert!(matches!(result, Err(AuthError::KeysUnavailable(_))));
+      assert!(matches!(result, Err(AuthError::DpopReplayCacheFull)));
       assert!(!binding.is_verified());
+      assert_eq!(guard.full_cache_logged_at_unix.load(Ordering::Relaxed), NOW);
+    }
+
+    #[test]
+    fn a_full_cache_is_logged_once_per_interval() {
+      let guard = guard();
+      guard.log_full_cache(NOW);
+      guard.log_full_cache(NOW + FULL_CACHE_LOG_INTERVAL_SECS - 1);
+      assert_eq!(guard.full_cache_logged_at_unix.load(Ordering::Relaxed), NOW);
+      guard.log_full_cache(NOW + FULL_CACHE_LOG_INTERVAL_SECS);
+      assert_eq!(
+        guard.full_cache_logged_at_unix.load(Ordering::Relaxed),
+        NOW + FULL_CACHE_LOG_INTERVAL_SECS
+      );
     }
 
     #[test]
     fn a_clock_that_steps_back_keeps_entries_longer_not_shorter() {
+      let limits = ReplayLimits {
+        retention_secs: 10,
+        max_entries: 10,
+        max_entries_per_owner: 10,
+      };
       let mut cache = ReplayCache::default();
-      assert_eq!(cache.record([1; 32], NOW, 10, 10), ReplayOutcome::New);
-      assert_eq!(cache.record([1; 32], NOW - 1000, 10, 10), ReplayOutcome::Seen);
+      assert_eq!(cache.record([1; 32], "a", NOW, limits), ReplayOutcome::New);
+      assert_eq!(
+        cache.record([1; 32], "a", NOW - 1000, limits),
+        ReplayOutcome::Seen
+      );
+    }
+
+    /// A member with any token and keys of their own making could otherwise fill the cache for
+    /// everybody. Such a proof can be left out altogether, so remembering it protects nothing.
+    #[test]
+    fn proofs_with_unbound_tokens_are_not_remembered() {
+      let guard = guard();
+      let settings = rules(DpopPolicy::Optional);
+      for _ in 0..3 {
+        let own_key = DpopSigningKey::generate();
+        let proof = proof_with_nonce(&guard, &own_key, "GET", ORIGIN, NOW);
+        let request = presented(TokenScheme::Dpop, PresentedProof::One(&proof));
+        for _ in 0..2 {
+          let mut binding = TokenBinding::Unbound;
+          assert!(matches!(
+            guard.check(&settings, &ORIGINS, &request, SUBJECT, &mut binding, NOW),
+            Ok(Some(DpopOutcome::Unbound))
+          ));
+        }
+      }
+      assert!(guard.replays.lock().unwrap().seen.is_empty());
+    }
+
+    #[test]
+    fn one_user_at_the_limit_waits_and_others_go_on() {
+      let guard = guard();
+      let mut settings = rules(DpopPolicy::Optional);
+      settings.replay_cache_max_entries_per_user = 1;
+      let check = |key: &DpopSigningKey, subject: &str, now: i64| {
+        let proof = proof_with_nonce(&guard, key, "GET", ORIGIN, now);
+        let mut binding = TokenBinding::Bound(key.thumbprint());
+        guard.check(
+          &settings,
+          &ORIGINS,
+          &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+          subject,
+          &mut binding,
+          now,
+        )
+      };
+      let first_key = DpopSigningKey::generate();
+      let second_key = DpopSigningKey::generate();
+      assert!(check(&first_key, "greedy", NOW).is_ok());
+      // Another key doesn't help: the limit is per account.
+      assert!(matches!(
+        check(&second_key, "greedy", NOW),
+        Err(AuthError::DpopUserLimit)
+      ));
+      assert!(check(&second_key, "patient", NOW).is_ok());
+      // Room again once the entry expired, and the count is gone with it.
+      let later = NOW
+        + i64::try_from(replay_retention_secs(
+          u64::from(settings.proof_max_age_secs),
+          u64::from(settings.proof_leeway_secs),
+        ))
+        .unwrap()
+        + 1;
+      assert!(check(&first_key, "greedy", later).is_ok());
+      assert!(
+        !guard
+          .replays
+          .lock()
+          .unwrap()
+          .entries_per_owner
+          .contains_key("patient")
+      );
     }
   }
 
@@ -848,6 +1155,7 @@ mod tests {
           &settings,
           &ORIGINS,
           &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+          SUBJECT,
           &mut binding,
           NOW,
         );
@@ -908,6 +1216,7 @@ mod tests {
       nonces: Mutex::new(DpopNonces::new(NOW)),
       replays: Mutex::default(),
       has_warned_about_origins: AtomicBool::new(false),
+      full_cache_logged_at_unix: AtomicI64::new(i64::MIN),
     }
   }
 

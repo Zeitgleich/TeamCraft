@@ -30,6 +30,12 @@ pub enum AuthError {
   /// The token is fine as a token, but not without a valid DPoP proof (RFC 9449).
   #[error(transparent)]
   Dpop(#[from] DpopRefusal),
+  /// This account has as many DPoP proofs in the replay cache as one may: 429, for it alone.
+  #[error("too many requests with DPoP proofs from this account")]
+  DpopUserLimit,
+  /// The DPoP replay cache is full and nothing in it has expired. Logged at most once per interval.
+  #[error("the DPoP replay cache is full")]
+  DpopReplayCacheFull,
 }
 
 impl From<crate::dependencies::CircuitOpen> for AuthError {
@@ -39,6 +45,12 @@ impl From<crate::dependencies::CircuitOpen> for AuthError {
 }
 
 impl AuthError {
+  /// A proof that was refused: counts as a failed authentication everywhere. The nonce challenge
+  /// doesn't, since everybody meets it after a restart (`DpopNonceChallenge`).
+  pub fn is_refused_dpop_proof(&self) -> bool {
+    matches!(self, Self::Dpop(refusal) if *refusal != DpopRefusal::UseNonce)
+  }
+
   /// What a token guesser produces (missing, forged or malformed tokens). Rate limits count these;
   /// expired tokens and refused roles say nothing about guessing.
   pub fn is_guess(&self) -> bool {
@@ -62,5 +74,9 @@ mod tests {
     assert!(!AuthError::KeysUnavailable("down".into()).is_guess());
     assert!(!AuthError::Dpop(DpopRefusal::UseNonce).is_guess());
     assert!(!AuthError::Dpop(DpopRefusal::Replayed).is_guess());
+    assert!(AuthError::Dpop(DpopRefusal::Replayed).is_refused_dpop_proof());
+    assert!(AuthError::Dpop(DpopRefusal::ProofMissing).is_refused_dpop_proof());
+    assert!(!AuthError::Dpop(DpopRefusal::UseNonce).is_refused_dpop_proof());
+    assert!(!AuthError::DpopUserLimit.is_refused_dpop_proof());
   }
 }

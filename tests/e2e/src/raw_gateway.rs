@@ -52,6 +52,7 @@ impl RawGateway {
   pub async fn identify(&mut self, token: String, device_id: DeviceId) -> String {
     self
       .send(&GatewayClientMessage::Identify {
+        maybe_dpop_proof: None,
         token,
         device_id,
         activity: DeviceActivity::Active,
@@ -73,6 +74,7 @@ impl RawGateway {
   ) -> Option<GatewayServerMessage> {
     self
       .send(&GatewayClientMessage::Resume {
+        maybe_dpop_proof: None,
         token,
         session_id: session_id.to_owned(),
         last_seq,

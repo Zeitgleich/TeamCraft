@@ -19,6 +19,10 @@ pub const DATABASE_RETRY_AFTER_SECS: u64 = 5;
 /// off the server and the storage while it recovers.
 const STORAGE_RETRY_AFTER_SECS: u64 = 30;
 
+/// `Retry-After` of a 429 for an account at its share of the DPoP replay cache: entries expire over
+/// a few minutes, and some room is free again well before all of them have.
+const DPOP_USER_LIMIT_RETRY_AFTER_SECS: u64 = 30;
+
 /// In a response's extensions: the answer failed because the database looks down, for the database's
 /// breaker around the request (`outage_gate.rs`).
 #[derive(Debug, Clone, Copy)]
@@ -342,7 +346,10 @@ impl ApiError {
       | Self::RecoveryPassphraseNotAllowed
       | Self::DisplayNameOverrideNotAllowed
       | Self::MfaRequired => StatusCode::FORBIDDEN,
-      Self::Auth(AuthError::KeysUnavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
+      Self::Auth(AuthError::KeysUnavailable(_) | AuthError::DpopReplayCacheFull) => {
+        StatusCode::SERVICE_UNAVAILABLE
+      },
+      Self::Auth(AuthError::DpopUserLimit) => StatusCode::TOO_MANY_REQUESTS,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
       Self::NotAChannel
       | Self::InvalidRequest(_)
@@ -389,7 +396,8 @@ impl ApiError {
       Self::GuestDmNotAllowed => ErrorCode::GuestDmNotAllowed,
       Self::ImportNotAllowed => ErrorCode::ImportNotAllowed,
       Self::ImportWindowFull => ErrorCode::ImportWindowFull,
-      Self::Auth(AuthError::KeysUnavailable(_)) => ErrorCode::Unavailable,
+      Self::Auth(AuthError::KeysUnavailable(_) | AuthError::DpopReplayCacheFull) => ErrorCode::Unavailable,
+      Self::Auth(AuthError::DpopUserLimit) => ErrorCode::RateLimited,
       Self::Auth(AuthError::Dpop(refusal)) => refusal.error_code(),
       Self::NotFound { code, .. } => code.clone(),
       Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
@@ -431,6 +439,7 @@ impl ApiError {
       Self::RateLimited { retry_after_secs }
       | Self::Busy { retry_after_secs, .. }
       | Self::DependencyDown { retry_after_secs, .. } => Some(*retry_after_secs),
+      Self::Auth(AuthError::DpopUserLimit) => Some(DPOP_USER_LIMIT_RETRY_AFTER_SECS),
       Self::Database(error) if error.is_transient() => Some(DATABASE_RETRY_AFTER_SECS),
       _ if self.status() == StatusCode::SERVICE_UNAVAILABLE => Some(UNAVAILABLE_RETRY_AFTER_SECS),
       _ => None,
@@ -453,7 +462,9 @@ impl ApiError {
   /// Client-facing text. Internal details stay in the logs.
   pub fn public_message(&self) -> String {
     match self {
-      Self::Auth(AuthError::KeysUnavailable(_)) => "authentication is temporarily unavailable".into(),
+      Self::Auth(AuthError::KeysUnavailable(_) | AuthError::DpopReplayCacheFull) => {
+        "authentication is temporarily unavailable".into()
+      },
       Self::Database(error) if error.is_transient() => "the service is busy, try again".into(),
       Self::Database(_) | Self::Internal(_) => "internal server error".into(),
       Self::Unavailable(_) => "the service is not available".into(),
@@ -479,8 +490,10 @@ impl IntoResponse for ApiError {
     if matches!(
       self.status(),
       StatusCode::INTERNAL_SERVER_ERROR | StatusCode::SERVICE_UNAVAILABLE
-    ) && !matches!(self, Self::DependencyDown { .. })
-    {
+    ) && !matches!(
+      self,
+      Self::DependencyDown { .. } | Self::Auth(AuthError::DpopReplayCacheFull)
+    ) {
       error!(error = %self, "request failed");
     }
     let mut response = (self.status(), Json(self.body())).into_response();

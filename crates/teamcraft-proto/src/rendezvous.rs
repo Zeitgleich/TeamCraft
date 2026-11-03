@@ -18,7 +18,7 @@ pub enum RendezvousClientMessage {
   /// `token` is the OIDC access token, `rendezvous_id` 32 random hex characters chosen by the
   /// device that shows the QR code (or the approval prompt). `dpop_proof` is the DPoP proof for
   /// `GET` on [`RENDEZVOUS_PATH`], here because a browser can't set headers on a WebSocket upgrade
-  /// (e2ee.md §3.1.2). Its nonce comes from the client's last API response.
+  /// (e2ee.md §3.1.2).
   Join {
     token: String,
     rendezvous_id: String,
@@ -49,6 +49,11 @@ pub enum RendezvousServerMessage {
   Rejected,
   Error {
     error: ErrorBody,
+  },
+  /// Comes right before an [`Self::Error`] with `use_dpop_nonce`: what to put into the next proof.
+  /// The connection ends with the error; the client connects again.
+  DpopNonce {
+    nonce: String,
   },
   #[serde(other)]
   Unknown,

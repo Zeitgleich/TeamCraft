@@ -52,8 +52,8 @@ pub struct DpopSigningKey {
   key: SigningKey,
 }
 
-/// What a client signs a proof for.
-#[derive(Debug, Clone, Copy)]
+/// What a client signs a proof for. Its `Debug` doesn't print the token.
+#[derive(Clone, Copy)]
 pub struct DpopProofRequest<'a> {
   pub method: &'a str,
   /// The request's URL; a query and a fragment are left out of the proof.
@@ -73,8 +73,8 @@ pub struct JwkThumbprint(String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicOrigin(Origin);
 
-/// What a proof must state to be accepted for a request.
-#[derive(Debug, Clone, Copy)]
+/// What a proof must state to be accepted for a request. Its `Debug` doesn't print the token.
+#[derive(Clone, Copy)]
 pub struct DpopExpectation<'a> {
   pub method: &'a str,
   /// The request's path as the server received it.
@@ -182,6 +182,36 @@ impl DpopProof {
 impl std::fmt::Debug for DpopProof {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.write_str("DpopProof([redacted])")
+  }
+}
+
+impl std::fmt::Debug for DpopProofRequest<'_> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("DpopProofRequest")
+      .field("method", &self.method)
+      .field("target_uri", &self.target_uri)
+      .field("issued_at_unix", &self.issued_at_unix)
+      .field(
+        "maybe_access_token",
+        &self.maybe_access_token.map(|_| "[redacted]"),
+      )
+      .field("maybe_nonce", &self.maybe_nonce)
+      .finish()
+  }
+}
+
+impl std::fmt::Debug for DpopExpectation<'_> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("DpopExpectation")
+      .field("method", &self.method)
+      .field("path", &self.path)
+      .field("public_origins", &self.public_origins)
+      .field("now_unix", &self.now_unix)
+      .field("max_age_secs", &self.max_age_secs)
+      .field("leeway_secs", &self.leeway_secs)
+      .field("access_token", &"[redacted]")
+      .field("maybe_bound_key", &self.maybe_bound_key)
+      .finish()
   }
 }
 
@@ -353,7 +383,8 @@ pub fn access_token_hash(token: &str) -> String {
 }
 
 /// How long a replay cache has to remember a proof it accepted: until its `iat` window ended in the
-/// worst case, a proof dated `leeway` ahead of the server's clock.
+/// worst case, a proof dated `leeway` ahead of the server's clock. The proof is still fresh at exactly
+/// this many seconds after it was accepted, so an entry may only go after that moment.
 pub fn replay_retention_secs(max_age_secs: u64, leeway_secs: u64) -> u64 {
   max_age_secs
     .saturating_add(leeway_secs)
@@ -442,9 +473,11 @@ fn check_claims(claims: &ProofClaims, expected: &DpopExpectation<'_>) -> Result<
   }
 }
 
-/// `htu` against the server's own origins and the path the request came in on. `Url` normalizes
-/// both (case of scheme and host, default ports, dot segments) as RFC 9449 §4.3 allows; a query and
-/// a fragment are ignored as it says.
+/// `htu` against the server's own origins and the path the request came in on. `Url` normalizes the
+/// claim (case of scheme and host, default ports, dot segments) as RFC 9449 §4.3 allows; a query and
+/// a fragment are ignored as it says. The request's path is compared as it came in, because that is
+/// what the router matched: resolving `%2e%2e` in it would let a proof for `/a` also pass on
+/// `/x/%2e%2e/a`, which is another route with `..` as its parameter.
 fn check_target(htu: &str, expected: &DpopExpectation<'_>) -> Result<(), DpopError> {
   let target = Url::parse(htu).map_err(|_| DpopError::WrongUri)?;
   if !target.username().is_empty() || target.password().is_some() {
@@ -454,16 +487,14 @@ fn check_target(htu: &str, expected: &DpopExpectation<'_>) -> Result<(), DpopErr
   if !expected.public_origins.iter().any(|known| known.0 == origin) {
     return Err(DpopError::WrongUri);
   }
-  let mut request = target.clone();
-  request.set_path(expected.path);
-  if request.path() != target.path() {
+  if target.path() != expected.path {
     return Err(DpopError::WrongUri);
   }
   Ok(())
 }
 
-/// A proof counts from `leeway` before its `iat` until `max_age + leeway` after it. A replay cache
-/// keeps entries for [`replay_retention_secs`], which is that whole window.
+/// A proof counts from `leeway` before its `iat` until `max_age + leeway` after it, both moments
+/// included. A replay cache keeps entries for [`replay_retention_secs`], which is that whole window.
 fn check_issued_at(iat: i64, expected: &DpopExpectation<'_>) -> Result<(), DpopError> {
   let leeway = i64::try_from(expected.leeway_secs).unwrap_or(i64::MAX);
   let max_age = i64::try_from(expected.max_age_secs).unwrap_or(i64::MAX);
@@ -882,6 +913,37 @@ mod tests {
       }
     }
 
+    /// The request's path is taken as it came in. Normalizing it too would let a proof for one
+    /// route match another whose parameter is a dot segment: `/x/%2e%2e/me` is routed to `/x/{id}/me`.
+    #[test]
+    fn a_dot_segment_in_the_requests_path_is_not_resolved() {
+      let key = DpopSigningKey::generate();
+      let proof = sign(&key, "GET", URI, NOW, Some(TOKEN), None);
+      let origins = [PublicOrigin::parse(ORIGIN).unwrap()];
+      for path in [
+        "/api/v1/spaces/%2e%2e/me",
+        "/api/v1/spaces/%2E%2E/me",
+        "/api/v1/spaces/../me",
+        "/api/v1/./me",
+        "/api/v1/%2e/me",
+      ] {
+        let result = verify_proof(
+          &proof,
+          &DpopExpectation {
+            method: "GET",
+            path,
+            public_origins: &origins,
+            now_unix: NOW,
+            max_age_secs: MAX_AGE,
+            leeway_secs: LEEWAY,
+            access_token: TOKEN,
+            maybe_bound_key: None,
+          },
+        );
+        assert_eq!(result.map(|_| ()), Err(DpopError::WrongUri), "{path}");
+      }
+    }
+
     #[test]
     fn a_configured_origin_has_no_path_and_no_credentials() {
       assert!(PublicOrigin::parse("https://chat.example.com").is_ok());
@@ -965,6 +1027,29 @@ mod tests {
         })
         .unwrap();
       assert_eq!(format!("{proof:?}"), "DpopProof([redacted])");
+    }
+
+    #[test]
+    fn debug_of_a_request_and_an_expectation_hides_the_token() {
+      let request = DpopProofRequest {
+        method: "GET",
+        target_uri: URI,
+        issued_at_unix: NOW,
+        maybe_access_token: Some(TOKEN),
+        maybe_nonce: None,
+      };
+      assert!(!format!("{request:?}").contains(TOKEN));
+      let expectation = DpopExpectation {
+        method: "GET",
+        path: PATH,
+        public_origins: &[],
+        now_unix: NOW,
+        max_age_secs: MAX_AGE,
+        leeway_secs: LEEWAY,
+        access_token: TOKEN,
+        maybe_bound_key: None,
+      };
+      assert!(!format!("{expectation:?}").contains(TOKEN));
     }
 
     #[test]

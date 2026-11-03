@@ -167,7 +167,7 @@ controls those. To use the token at the real server the look-alike would need th
 | Form             | at most 4 KiB, one proof, `typ` is `dpop+jwt`, `alg` is `ES256`, no `crit`         |
 | Key              | a P-256 point on the curve, no private part                                        |
 | `cnf.jkt`        | the RFC 7638 thumbprint of the proof's key is the one the token names              |
-| `htm`, `htu`     | the request's method and path, on one of the server's public origins               |
+| `htm`, `htu`     | the request's method and raw path, on one of the server's public origins           |
 | `iat`            | at most `proof_max_age_secs` old and not from the future, `proof_leeway_secs` each |
 | `ath`            | the hash of the token presented                                                    |
 | Signature        | valid for the proof's key                                                          |
@@ -201,15 +201,25 @@ its public origins, so that the change can't lock out the admin who makes it.
 **WebSockets.** A browser can't set headers on a WebSocket upgrade, and the token already travels in
 the first frame instead of the URL. The proof sits next to it: `dpop_proof` in `identify`, `resume`
 and the rendezvous `join`, for `GET` on `/api/v1/gateway` or `/api/v1/rendezvous`. A proof with an
-old nonce gets a `dpop_nonce` gateway frame and `use_dpop_nonce`, then the connection ends and the
-client connects again. The relay only answers with the error: the nonce comes from any API response.
+old nonce gets a `dpop_nonce` frame and `use_dpop_nonce`, then the connection ends and the client
+connects again.
 
-**Replay and restart.** Seen proofs are kept in memory for `max_age + 2 × leeway`, the longest time
-one can be fresh, as hashes of key and `jti`, up to `replay_cache_max_entries`. A full cache refuses
-further proofs with 503 rather than forget one that could still be replayed. A restart loses the
+**Replay and restart.** Seen proofs of bound tokens are kept in memory for `max_age + 2 × leeway`,
+the longest time one can be fresh, as hashes of key and `jti`, up to `replay_cache_max_entries`. One
+account may hold `replay_cache_max_entries_per_user` of them and gets 429 past that, whichever keys it
+uses. A full cache refuses further proofs of bound tokens with 503 rather than forget one that could
+still be replayed. Proofs with unbound tokens are checked but not remembered: a replay could as well
+leave the proof out, and anybody with a token could otherwise fill the cache with keys of their own
+making. What is left is several accounts working together, which takes 20 of them at the defaults and
+the per-address limits on top. A restart loses the
 cache, and that is safe only because it loses the nonces too: every proof needs a nonce, nonces are
 random and kept only in memory, so a proof made before the restart gets a challenge, and a new proof
 takes the private key. Clients see one extra round trip.
+
+**Settings that can't be read.** A stored policy this version doesn't know (from a newer version)
+checks like `optional`, and a row it can't read falls back to the default `optional`, each with an
+error in the log. That accepts unbound tokens until an admin looks, but failing closed would lock out
+everybody with no way back from inside the app, and bound tokens stay protected either way.
 
 **Clocks.** The client's clock may be off by `proof_leeway_secs` (default 60) in either direction
 beyond the proof's age. A client whose clock is off by more is told `invalid_dpop_proof` and can
@@ -229,7 +239,8 @@ bearer tokens.
 - `teamcraft-core`: a per-device key behind a small signing interface, so that hardware keys fit (the
   software `DpopSigningKey` only suits platforms without one); the `DPoP` scheme and header on every
   request; the proof in the three first frames; remembering `DPoP-Nonce` per origin and retrying
-  `use_dpop_nonce` once, on the REST client and by reconnecting on the gateway; `iat` from an offset
+  `use_dpop_nonce` once, on the REST client and by reconnecting on the gateway and the relay, whose
+  `dpop_nonce` frames come before their error frames; `iat` from an offset
   to the server's `Date`, retried once after `invalid_dpop_proof`; `dpop_required` worded for people.
   Proofs at the token endpoint and for refreshes, with the identity provider's own nonce.
 - Keys: Secure Enclave (iOS, macOS), Android Keystore, the OS keychain (desktop), a non-extractable

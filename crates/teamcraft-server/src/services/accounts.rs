@@ -14,7 +14,7 @@ pub async fn validate_presented_token(
   presented: &PresentedToken<'_>,
 ) -> Result<TokenIdentity, AuthError> {
   let mut identity = validate_token(state, presented.token).await?;
-  enforce_dpop(state, presented, &mut identity.token_binding)?;
+  enforce_dpop(state, presented, &identity.subject, &mut identity.token_binding)?;
   Ok(identity)
 }
 

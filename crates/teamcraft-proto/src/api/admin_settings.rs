@@ -375,8 +375,12 @@ pub struct TokenBindingSettings {
   /// How often the server's nonce changes; the previous one stays good for as long.
   pub nonce_rotation_secs: u32,
   /// Most proofs remembered to refuse replays. When it is full and none has expired, requests with
-  /// a proof get 503, because accepting them could let a replay through.
+  /// a bound token get 503, because accepting them could let a replay through.
   pub replay_cache_max_entries: u32,
+  /// Most of those for one account, so that nobody fills it for everybody: past it, that account
+  /// gets 429. Raise it for an account that imports a lot at once.
+  #[serde(default = "default_dpop_replay_cache_max_entries_per_user")]
+  pub replay_cache_max_entries_per_user: u32,
 }
 
 /// Default of [`TokenBindingSettings::proof_max_age_secs`]: a proof is made for one request.
@@ -387,8 +391,16 @@ pub const DEFAULT_DPOP_PROOF_LEEWAY_SECS: u32 = 60;
 /// client in this time, and a nonce is good for twice as long.
 pub const DEFAULT_DPOP_NONCE_ROTATION_SECS: u32 = 300;
 /// Default of [`TokenBindingSettings::replay_cache_max_entries`]: about 1100 requests per second
-/// with the default window, at some 20 MiB when full.
+/// with the default window, at some 30 MiB when full.
 pub const DEFAULT_DPOP_REPLAY_CACHE_MAX_ENTRIES: u32 = 200_000;
+/// Default of [`TokenBindingSettings::replay_cache_max_entries_per_user`]: about 55 requests per
+/// second with the default window, above what the per-address limit lets one device send, and 20
+/// accounts must work together to fill the cache.
+pub const DEFAULT_DPOP_REPLAY_CACHE_MAX_ENTRIES_PER_USER: u32 = 10_000;
+
+fn default_dpop_replay_cache_max_entries_per_user() -> u32 {
+  DEFAULT_DPOP_REPLAY_CACHE_MAX_ENTRIES_PER_USER
+}
 
 impl Default for TokenBindingSettings {
   fn default() -> Self {
@@ -398,6 +410,7 @@ impl Default for TokenBindingSettings {
       proof_leeway_secs: DEFAULT_DPOP_PROOF_LEEWAY_SECS,
       nonce_rotation_secs: DEFAULT_DPOP_NONCE_ROTATION_SECS,
       replay_cache_max_entries: DEFAULT_DPOP_REPLAY_CACHE_MAX_ENTRIES,
+      replay_cache_max_entries_per_user: DEFAULT_DPOP_REPLAY_CACHE_MAX_ENTRIES_PER_USER,
     }
   }
 }

@@ -511,6 +511,7 @@ mod policy {
       ("proof_leeway_secs", json!(3601)),
       ("nonce_rotation_secs", json!(0)),
       ("replay_cache_max_entries", json!(10)),
+      ("replay_cache_max_entries_per_user", json!(10)),
     ] {
       let mut values = binding_values(&app, &user, "optional").await;
       values[name] = value;
@@ -606,7 +607,7 @@ mod websockets {
     let user = owner();
     let device = Device::new(&app, &user);
 
-    let refused = join(&app, &device, None).await;
+    let refused = join_relay(&app, &device, None).await;
     assert!(
       matches!(&refused, Some(RendezvousServerMessage::Error { error }) if error.error_code.as_str() == "dpop_required"),
       "{refused:?}"
@@ -614,11 +615,77 @@ mod websockets {
 
     let nonce = device.fresh_nonce(&app).await;
     let proof = device.proof_for("GET", RENDEZVOUS_PATH, Some(&nonce));
-    let joined = join(&app, &device, Some(proof)).await;
+    let joined = join_relay(&app, &device, Some(proof)).await;
     assert!(
       matches!(joined, Some(RendezvousServerMessage::Joined { .. })),
       "{joined:?}"
     );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_refused_proof_on_the_gateway_counts_as_a_failed_sign_in_and_the_challenge_does_not() {
+    let app = app!(TestApp::start_with(|settings| {
+      settings.security.public_origins = vec![ORIGIN.to_owned()];
+      settings.security.rate_limits.is_enabled = true;
+      settings.security.rate_limits.auth_failures_per_minute = 2;
+    }));
+    let user = owner();
+    let device_id = register_device(&app, &user).await;
+    let device = Device::new(&app, &user);
+    for _ in 0..4 {
+      let proof = device.proof_for("GET", GATEWAY_PATH, None);
+      let challenged = identify(&app, &device, &device_id, Some(proof)).await;
+      assert_error(&challenged, "use_dpop_nonce");
+    }
+    let nonce = device.fresh_nonce(&app).await;
+    for _ in 0..2 {
+      let wrong = device.proof_for("POST", GATEWAY_PATH, Some(&nonce));
+      assert_error(
+        &identify(&app, &device, &device_id, Some(wrong)).await,
+        "invalid_dpop_proof",
+      );
+    }
+    assert_eq!(
+      device.get(&app, ME, Some(&nonce)).await.status,
+      StatusCode::TOO_MANY_REQUESTS
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_rendezvous_relay_names_the_nonce_before_the_challenge() {
+    let app = app!(start());
+    let device = Device::new(&app, &owner());
+    let url = app.ws_url.replace(GATEWAY_PATH, RENDEZVOUS_PATH);
+    let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let join = RendezvousClientMessage::Join {
+      maybe_dpop_proof: Some(device.proof_for("GET", RENDEZVOUS_PATH, None)),
+      token: device.token.clone(),
+      rendezvous_id: RENDEZVOUS_ID.to_owned(),
+    };
+    socket
+      .send(Message::Text(serde_json::to_string(&join).unwrap().into()))
+      .await
+      .unwrap();
+    let mut seen: Vec<RendezvousServerMessage> = Vec::new();
+    while let Ok(Some(Ok(Message::Text(text)))) =
+      tokio::time::timeout(Duration::from_secs(5), socket.next()).await
+    {
+      seen.push(serde_json::from_str(text.as_str()).unwrap());
+    }
+    let Some(RendezvousServerMessage::DpopNonce { nonce }) = seen.first() else {
+      panic!("{seen:?}");
+    };
+    assert!(
+      matches!(seen.get(1), Some(RendezvousServerMessage::Error { error }) if error.error_code.as_str() == "use_dpop_nonce"),
+      "{seen:?}"
+    );
+    let proof = device.proof_for("GET", RENDEZVOUS_PATH, Some(nonce));
+    assert!(matches!(
+      join_relay(&app, &device, Some(proof)).await,
+      Some(RendezvousServerMessage::Joined { .. })
+    ));
     app.stop().await;
   }
 
@@ -664,7 +731,7 @@ mod websockets {
     );
   }
 
-  async fn join(
+  async fn join_relay(
     app: &TestApp,
     device: &Device,
     maybe_dpop_proof: Option<String>,

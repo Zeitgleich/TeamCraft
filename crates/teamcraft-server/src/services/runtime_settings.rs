@@ -10,7 +10,7 @@ use teamcraft_proto::{
   RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState,
   ServerRulesSettings, SettingSource, ShareSettings, SignInMethod, SignInPageSettings, Target,
 };
-use tracing::warn;
+use tracing::{error, warn};
 
 use super::access::require;
 use super::audit;
@@ -56,6 +56,13 @@ pub async fn load(state: &AppState) -> Result<(), ApiError> {
   let mut settings = (*state.settings.base()).clone();
   for (section, _) in &stored {
     apply(&mut settings, section);
+  }
+  if let DpopPolicy::Unknown(policy) = &settings.token_binding.dpop_policy {
+    error!(
+      %policy,
+      "the stored DPoP policy is one this version doesn't know: it checks like optional, so tokens \
+       without a key are accepted; set the policy in the admin console"
+    );
   }
   state.settings.set_current(settings);
   Ok(())
@@ -161,7 +168,14 @@ async fn stored_sections(state: &AppState) -> Result<Vec<(RuntimeSettingsSection
         |row| match serde_json::from_str::<RuntimeSettingsSection>(&row.value) {
           Ok(section) => Some((section, row)),
           Err(error) => {
-            warn!(name = %row.name, %error, "ignoring stored settings this version cannot read");
+            if row.name == row_name(&RuntimeSettingsKey::TokenBinding) {
+              // Fails towards the default on purpose: a lockout has no way back from inside the app,
+              // and bound tokens stay protected. Tokens without a key are accepted meanwhile, so an
+              // admin has to hear about it.
+              error!(%error, "the stored DPoP settings can't be read: the default optional applies");
+            } else {
+              warn!(name = %row.name, %error, "ignoring stored settings this version cannot read");
+            }
             None
           },
         },
@@ -419,6 +433,12 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
       check_range(
         "replay_cache_max_entries",
         u64::from(values.replay_cache_max_entries),
+        MIN_REPLAY_CACHE_ENTRIES,
+        MAX_REPLAY_CACHE_ENTRIES,
+      )?;
+      check_range(
+        "replay_cache_max_entries_per_user",
+        u64::from(values.replay_cache_max_entries_per_user),
         MIN_REPLAY_CACHE_ENTRIES,
         MAX_REPLAY_CACHE_ENTRIES,
       )

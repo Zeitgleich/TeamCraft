@@ -443,9 +443,14 @@ and the console refuses `required`.
 - 401 `invalid_dpop_proof` for one person, "too old or from the future": their device's clock is off
   by more than the proof's window, and the app doesn't correct for it. Raise `proof_leeway_secs` for
   the time being.
-- 503 for requests with proofs and "replay cache is full" in the log: more requests than
-  `replay_cache_max_entries` within the window. Raise it (some 100 bytes per entry); entries expire on
-  their own after the window (default 3 minutes).
+- 503 for requests with bound tokens and "replay cache is full" in the log (at most every five
+  minutes): more requests than `replay_cache_max_entries` within the window. Raise it (some 150 bytes
+  per entry); entries expire on their own after the window (default 3 minutes).
+- 429 for one account: it sent more than `replay_cache_max_entries_per_user` requests within the
+  window. If it is an import or a busy integration, raise that value.
+- "the stored DPoP policy" or "the stored DPoP settings" in the log at error level: the row can't
+  be used by this version (usually after going back a version), so `optional` applies. Set the policy
+  again in the console.
 - Nobody can get in to change the policy: `off` takes every token of the identity provider without
   checking it, as before DPoP. On the database, then restart the server:
 
