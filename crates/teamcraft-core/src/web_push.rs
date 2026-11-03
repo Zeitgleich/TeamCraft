@@ -128,6 +128,7 @@ mod service_worker {
   use web_sys::{NotificationOptions, ServiceWorkerGlobalScope};
 
   use crate::api::ApiError;
+  use crate::api::dpop::Authorization;
   use crate::api::{HttpServerApi, ProvenToken, ServerApi, change_web_push_subscription};
   use crate::clock::{Clock, SystemClock};
   use crate::error::CoreError;
@@ -364,10 +365,13 @@ mod service_worker {
   /// The API with the stored session's token and, for a bound one, this browser's key. Without the
   /// key the server refuses the token, and the notification goes without what it would have read.
   async fn session_api(session: PushSession) -> HttpServerApi<ProvenToken> {
-    let maybe_prover = browser_dpop_prover().await.unwrap_or_else(|error| {
-      tracing::debug!(%error, "the service worker can't read the DPoP key");
-      None
-    });
+    let maybe_prover = match Authorization::of(&session.access_token) {
+      Authorization::Bearer => None,
+      Authorization::Bound(_) => browser_dpop_prover().await.unwrap_or_else(|error| {
+        tracing::debug!(%error, "the service worker can't read the DPoP key");
+        None
+      }),
+    };
     HttpServerApi::new(
       &session.server_url,
       ProvenToken {

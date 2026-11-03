@@ -1,5 +1,5 @@
-//! A desktop's local secrets in one sealed file (e2ee.md §9): refresh tokens, local sessions and
-//! copies of the database and backup keys, under one key that the OS keychain holds.
+//! A desktop's local secrets in one sealed file (e2ee.md §9): refresh tokens, local sessions, DPoP
+//! keys and copies of the database and backup keys, under one key that the OS keychain holds.
 //!
 //! Every keychain access can raise a dialog on macOS, so the keychain is read once per start, for
 //! the file's key, and not touched while the app runs. What is in the file is served from memory.

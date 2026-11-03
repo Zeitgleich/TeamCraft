@@ -11,6 +11,8 @@ use super::web::{Rig, WEB_ORIGIN, sign_in_as_alice, wait_for_text};
 /// `/metrics` of the server under test, off the web port.
 const METRICS_ADDR: &str = "127.0.0.1:8092";
 const WAIT: Duration = Duration::from_secs(30);
+/// Reloads of the start measurement.
+const RELOADS: usize = 5;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_web_client_binds_its_sign_in_and_signs_its_requests() {
@@ -53,9 +55,56 @@ async fn the_web_client_binds_its_sign_in_and_signs_its_requests() {
       wait_for_bound_requests(after_sign_in).await;
 
       eprintln!("in Chromium: {}", evaluate(&page, MEASURE).await);
+      eprintln!("bound: reload to the channel list {:?}", reload_time(&page).await);
     })
     .await;
   rig.finish().await;
+}
+
+/// A server that doesn't know the address it is reached on offers no nonce on `server-info`, like an
+/// older server or a proxy that strips the header: the sign-in stays unbound, and everything works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_a_nonce_from_the_server_the_sign_in_stays_unbound() {
+  let Some(rig) = Rig::start_with(
+    |builder| {
+      builder.with_env("TEAMCRAFT_METRICS__ENABLED", "true").with_env(
+        "TEAMCRAFT_METRICS__LISTEN_ADDRS",
+        &format!(r#"["{METRICS_ADDR}"]"#),
+      )
+    },
+    &[],
+  )
+  .await
+  else {
+    return;
+  };
+  rig
+    .browser
+    .screenshot_on_failure("web-dpop-unbound", |page| async move {
+      sign_in_as_alice(&page).await;
+      wait_for_text(&page, "browser-channel").await;
+      assert_eq!(bound_requests().await, 0);
+      eprintln!(
+        "unbound: reload to the channel list {:?}",
+        reload_time(&page).await
+      );
+      assert_eq!(bound_requests().await, 0);
+    })
+    .await;
+  rig.finish().await;
+}
+
+/// The median time from a reload to the channel list.
+async fn reload_time(page: &Page) -> Duration {
+  let mut times = Vec::new();
+  for _ in 0..RELOADS {
+    let started = Instant::now();
+    page.reload().await.unwrap();
+    wait_for_text(page, "browser-channel").await;
+    times.push(started.elapsed());
+  }
+  times.sort_unstable();
+  times[times.len() / 2]
 }
 
 /// How many requests the server took with a verified proof, once more than `more_than` did.

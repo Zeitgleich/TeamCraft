@@ -203,7 +203,8 @@ impl DpopProver {
   pub fn note_answer(&self, answer: DpopAnswer<'_>) -> Learned {
     let mut learned = Learned::default();
     if let Some(nonce) = answer.maybe_nonce {
-      learned.has_new_nonce = self.remember_nonce(nonce);
+      self.remember_nonce(nonce);
+      learned.has_nonce = is_usable_nonce(nonce);
     }
     if let Some(server_now) = answer.maybe_date.and_then(parse_http_date) {
       let offset = server_now.saturating_sub(now_unix());
@@ -216,18 +217,11 @@ impl DpopProver {
   }
 
   /// Takes in the nonce of a `dpop_nonce` frame or of an answer whose `Date` says nothing (one from
-  /// a cache). True when it is not the one known already.
-  pub fn remember_nonce(&self, nonce: &str) -> bool {
-    // The server's own limit: a longer one could only come from something else on the way.
-    if nonce.is_empty() || nonce.len() > MAX_NONCE_BYTES {
-      return false;
+  /// a cache).
+  pub fn remember_nonce(&self, nonce: &str) {
+    if is_usable_nonce(nonce) {
+      self.state().maybe_nonce = Some(nonce.to_owned());
     }
-    let mut state = self.state();
-    if state.maybe_nonce.as_deref() == Some(nonce) {
-      return false;
-    }
-    state.maybe_nonce = Some(nonce.to_owned());
-    true
   }
 
   /// Whether the nonce is known, for measuring and tests.
@@ -251,17 +245,18 @@ impl std::fmt::Debug for DpopProver {
 /// What an answer changed in a prover.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Learned {
-  has_new_nonce: bool,
+  has_nonce: bool,
   has_clock_moved: bool,
 }
 
 impl Learned {
-  /// Whether a request refused with `code` is worth its one more try: the nonce it lacked came with
-  /// the answer, or its date was wrong and the answer's `Date` says so. Anything else would only
-  /// be refused again, and refused proofs count as failed sign-ins.
+  /// Whether a request refused with `code` is worth its one more try: a nonce came with the answer
+  /// (not necessarily a new one here: requests that go out together meet the same challenge, and the
+  /// first answer has already taken it in), or its date was wrong and the answer's `Date` says so.
+  /// Anything else would only be refused again, and refused proofs count as failed sign-ins.
   pub fn is_worth_a_retry(self, code: &ErrorCode) -> bool {
     match code {
-      ErrorCode::UseDpopNonce => self.has_new_nonce,
+      ErrorCode::UseDpopNonce => self.has_nonce,
       ErrorCode::InvalidDpopProof => self.has_clock_moved,
       _ => false,
     }
@@ -375,6 +370,11 @@ pub fn parse_http_date(value: &str) -> Option<i64> {
   is_valid.then(|| days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
+/// The server's own limit: a longer nonce could only come from something else on the way.
+fn is_usable_nonce(nonce: &str) -> bool {
+  !nonce.is_empty() && nonce.len() <= MAX_NONCE_BYTES
+}
+
 /// Days since 1970-01-01 of a date in the proleptic Gregorian calendar.
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
   let year = if month <= 2 { year - 1 } else { year };
@@ -461,7 +461,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_nonce_challenge_is_retried_only_with_a_new_nonce() {
+    fn a_nonce_challenge_is_retried_only_with_a_nonce() {
       let prover = prover();
       let with_nonce = DpopAnswer {
         maybe_nonce: Some(NONCE),
@@ -469,9 +469,9 @@ mod tests {
       };
       let first = prover.note_answer(with_nonce);
       assert!(first.is_worth_a_retry(&ErrorCode::UseDpopNonce));
-      // The nonce it already used: a retry could only get the same answer. This is what ends it.
-      let second = prover.note_answer(with_nonce);
-      assert!(!second.is_worth_a_retry(&ErrorCode::UseDpopNonce));
+      // A request that went out with the first one and met the same challenge.
+      let beside = prover.note_answer(with_nonce);
+      assert!(beside.is_worth_a_retry(&ErrorCode::UseDpopNonce));
       // A proxy that strips the header: nothing to retry with.
       let stripped = prover.note_answer(DpopAnswer::default());
       assert!(!stripped.is_worth_a_retry(&ErrorCode::UseDpopNonce));
@@ -542,7 +542,7 @@ mod tests {
     #[test]
     fn nothing_else_is_retried() {
       let learned = Learned {
-        has_new_nonce: true,
+        has_nonce: true,
         has_clock_moved: true,
       };
       for code in [
@@ -557,8 +557,8 @@ mod tests {
     #[test]
     fn a_hostile_nonce_is_not_kept() {
       let prover = prover();
-      assert!(!prover.remember_nonce(""));
-      assert!(!prover.remember_nonce(&"a".repeat(MAX_NONCE_BYTES + 1)));
+      prover.remember_nonce("");
+      prover.remember_nonce(&"a".repeat(MAX_NONCE_BYTES + 1));
       assert!(!prover.has_nonce());
     }
 

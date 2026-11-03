@@ -369,7 +369,7 @@ pub struct AuthService<S: TokenStore> {
   maybe_confirmed_user: StdMutex<Option<UserId>>,
   /// The active server's DPoP key with what is known about the server, once it was read or made. The
   /// core reads it without waiting for the session, like its token.
-  maybe_prover: StdMutex<Option<Arc<DpopProver>>>,
+  maybe_prover: StdMutex<Option<(String, Arc<DpopProver>)>>,
   cancel: Notify,
   now_ms: WallClock,
 }
@@ -1082,17 +1082,25 @@ impl<S: TokenStore> AuthService<S> {
   /// What the core signs its requests with: the key is in memory from the sign-in or refresh that
   /// gave it a token, and a read here touches neither the file nor the keychain.
   pub fn peek_dpop_prover(&self) -> Option<Arc<DpopProver>> {
-    self.prover_slot().clone()
+    self.known_prover(&self.active_server()?)
   }
 
-  fn prover_slot(&self) -> std::sync::MutexGuard<'_, Option<Arc<DpopProver>>> {
+  /// The key of `server`, by name: a request that was on its way while the user switched servers
+  /// must not leave its key behind for the next server.
+  fn known_prover(&self, server: &DesktopConfig) -> Option<Arc<DpopProver>> {
+    let slot = self.prover_slot();
+    let (owner, prover) = slot.as_ref()?;
+    (*owner == server.server_url).then(|| Arc::clone(prover))
+  }
+
+  fn prover_slot(&self) -> std::sync::MutexGuard<'_, Option<(String, Arc<DpopProver>)>> {
     self.maybe_prover.lock().unwrap_or_else(PoisonError::into_inner)
   }
 
   /// The server's DPoP key, if it has one: from memory, or from the sealed file, which is open
   /// already and costs no keychain access (#1150). A note that doesn't make a key counts as none.
   async fn stored_prover(&self, server: &DesktopConfig) -> Result<Option<Arc<DpopProver>>, AuthError> {
-    if let Some(prover) = self.peek_dpop_prover() {
+    if let Some(prover) = self.known_prover(server) {
       return Ok(Some(prover));
     }
     let Some(note) = self
@@ -1110,7 +1118,7 @@ impl<S: TokenStore> AuthService<S> {
       tracing::warn!("the stored DPoP key can't be used");
       return Ok(None);
     };
-    Ok(Some(self.keep_prover(key)))
+    Ok(Some(self.keep_prover(server, key)))
   }
 
   /// The server's DPoP key, made and kept on first use.
@@ -1125,12 +1133,12 @@ impl<S: TokenStore> AuthService<S> {
       .store
       .save_note(SessionNote::DpopKey, &server.server_url, &note)
       .await?;
-    Ok(self.keep_prover(key))
+    Ok(self.keep_prover(server, key))
   }
 
-  fn keep_prover(&self, key: DpopSigningKey) -> Arc<DpopProver> {
+  fn keep_prover(&self, server: &DesktopConfig, key: DpopSigningKey) -> Arc<DpopProver> {
     let prover = Arc::new(DpopProver::new(Arc::new(SoftwareDpopSigner::new(key))));
-    *self.prover_slot() = Some(Arc::clone(&prover));
+    *self.prover_slot() = Some((server.server_url.clone(), Arc::clone(&prover)));
     prover
   }
 
@@ -1453,7 +1461,7 @@ impl<S: TokenStore> AuthService<S> {
         TokenProof::Unbound => None,
       }
     });
-    if let (Some(nonce), Some(prover)) = (maybe_nonce, self.peek_dpop_prover()) {
+    if let (Some(nonce), Some(prover)) = (maybe_nonce, self.known_prover(server)) {
       prover.remember_nonce(&nonce);
     }
     let response = response.map_err(map_token_error)?;

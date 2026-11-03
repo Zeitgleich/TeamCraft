@@ -556,6 +556,35 @@ the next frame.
 How fast and how lean the apps are for the person using them; the budgets they must stay within are
 in [.claude/rules/robustness.md](../.claude/rules/robustness.md) ("Performance and resources").
 
+### DPoP (issue #120)
+
+What proofs cost a client with a bound token (e2ee.md §3.1.2); a client with an unbound token pays
+nothing. Measured 2026-11-03 on one machine, by `dpop_clients.rs` (`measured`, with `--nocapture`) and
+`tests/e2e` `dpop_web.rs`. The server and the native client are debug builds, so these are upper
+bounds for the signature and for the server's check.
+
+| What                                                    | Time     |
+|---------------------------------------------------------|----------|
+| `GET /me` on loopback, bearer token                     | 1.7 ms   |
+| The same, bound token, nonce known                      | 5.7 ms   |
+| The same, bound token, first request with its challenge | 10.8 ms  |
+| One proof, software key (desktop)                       | 1.3 ms   |
+| One signature, Web Crypto (Chromium)                    | 0.04 ms  |
+| Reload to the channel list in Chromium, bound session   | 429 ms   |
+| Reload to the channel list in Chromium, unbound session | 548 ms   |
+
+The two reloads are medians of five and within each other's noise; the budget is 1.5 s.
+
+**The extra round trip.** A request whose proof has no current nonce is answered with a challenge and
+sent again: one round trip of the network more, plus one more signature and check. It is rare by
+design. The start doesn't pay it: the nonce comes from `server-info`, next to the token refresh on the
+desktop and before it in the browser, so the request that confirms the account goes out with it. A
+challenge is met after a server restart, after more than two nonce rotations without a request (the
+default rotation is in `DEFAULT_DPOP_NONCE_ROTATION_SECS`), and with a stale `server-info` from a
+cache (at most 5 minutes). Requests that go out together each meet it once. On the gateway or the
+relay it is one more connection, so a reconnect then takes one more handshake. A proof adds about
+600 bytes to a request.
+
 ### Background effects in the browser (#439)
 
 Local bench page with the call module's code paths (`call_web` camera effects, the segmentation

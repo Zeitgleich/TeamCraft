@@ -720,11 +720,12 @@ impl BrowserAuth {
     maybe_body: Option<Vec<u8>>,
   ) -> Result<FetchResponse, AuthError> {
     let token = self.access_token().await?;
+    let proof_url = absolute_url(url);
     let maybe_prover = match Authorization::of(&token) {
       Authorization::Bearer => None,
       Authorization::Bound(_) => Some(self.prover().await.ok_or(AuthError::KeyLost)?),
     };
-    let first_headers = sign_headers(maybe_prover.as_deref(), &token, method, url).await?;
+    let first_headers = sign_headers(maybe_prover.as_deref(), &token, method, &proof_url).await?;
     headers.extend(first_headers);
     let first = fetch(method, url, &headers, maybe_body.clone())
       .await
@@ -742,7 +743,7 @@ impl BrowserAuth {
     if !is_retried {
       return Ok(first);
     }
-    let second_headers = sign_headers(Some(&prover), &token, method, url).await?;
+    let second_headers = sign_headers(Some(&prover), &token, method, &proof_url).await?;
     headers.retain(|(name, _)| name != "Authorization" && name != DPOP_HEADER);
     headers.extend(second_headers);
     let second = fetch(method, url, &headers, maybe_body)
@@ -1053,6 +1054,17 @@ async fn token_attempt(
     maybe_date: answer.maybe_date,
     response,
   })
+}
+
+/// The whole URL of a request: the page's own server is addressed by path, and a proof names it all.
+fn absolute_url(url: &str) -> String {
+  if !url.starts_with('/') {
+    return url.to_owned();
+  }
+  let origin = web_sys::window()
+    .and_then(|window| window.location().origin().ok())
+    .unwrap_or_default();
+  format!("{origin}{url}")
 }
 
 /// `Authorization`, and `DPoP` for a bound token.
