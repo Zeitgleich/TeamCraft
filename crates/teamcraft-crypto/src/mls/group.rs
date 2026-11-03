@@ -2,10 +2,11 @@
 
 use std::collections::BTreeSet;
 
+use openmls::messages::group_info::VerifiableGroupInfo;
 use openmls::prelude::{
   GroupEpoch, GroupId, KeyPackage, LeafNodeIndex, MlsGroup, MlsGroupJoinConfig, MlsGroupState,
-  MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, ProcessedMessageContent, Proposal, Sender, StagedCommit,
-  StagedWelcome, WelcomeError,
+  MlsMessageBodyIn, MlsMessageIn, MlsMessageOut, ProcessedMessageContent, Proposal, ProposalStore,
+  PublicGroup, Sender, StagedCommit, StagedWelcome, WelcomeError,
 };
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::storage::StorageProvider as _;
@@ -16,7 +17,7 @@ use zeroize::Zeroizing;
 
 use super::content_keys::{ApplicationPayload, ContentKeyBundle, SealedContentKeys};
 use super::rejoin::{SignedRejoinRequest, VerifiedRejoinRequest};
-use super::{CIPHERSUITE, GroupMember, MlsError, credential, validate_key_package};
+use super::{CIPHERSUITE, DefaultMlsProvider, GroupMember, MlsError, credential, validate_key_package};
 use crate::content_key::{ContentKey, ContentKeyId};
 use crate::domain;
 use crate::identity::{DeviceKeyPair, SignedDeviceCertificate, VerifiedDevice};
@@ -359,6 +360,12 @@ impl ConversationGroup {
     if info.ciphersuite() != CIPHERSUITE {
       return Err(MlsError::UnexpectedMessage("group info with another ciphersuite"));
     }
+    // Before the commit is built: openmls would remove this device's old leaf in it, a resync the
+    // members refuse (`authorize_external_join`), and the device would be out of step with them.
+    let credential_with_key = credential::credential_with_key(certificate)?;
+    if holds_signature_key(&info, credential_with_key.signature_key.as_slice()) {
+      return Err(MlsError::AlreadyInGroup);
+    }
     let config = MlsGroupJoinConfig::builder()
       .use_ratchet_tree_extension(true)
       .build();
@@ -366,7 +373,7 @@ impl ConversationGroup {
     let (group, bundle) = MlsGroup::external_commit_builder()
       .with_config(config)
       .skip_lifetime_validation()
-      .build_group(provider, info, credential::credential_with_key(certificate)?)
+      .build_group(provider, info, credential_with_key)
       .map_err(|error| MlsError::openmls("external join", error))?
       .load_psks(provider.storage())
       .map_err(|error| MlsError::openmls("external join", error))?
@@ -1414,6 +1421,28 @@ impl ChangeHistory {
   pub fn from_bytes(bytes: &[u8]) -> Result<Self, MlsError> {
     Ok(Self::tls_deserialize_exact_bytes(bytes)?)
   }
+}
+
+/// Whether the tree in a group information holds a leaf with this signature key. Group
+/// information that doesn't open says no: joining refuses it with the reason.
+fn holds_signature_key(info: &VerifiableGroupInfo, signature_key: &[u8]) -> bool {
+  let Some(tree) = info.extensions().ratchet_tree() else {
+    return false;
+  };
+  // A provider of its own: reading the tree stores it, and must not touch the device's state.
+  let scratch = DefaultMlsProvider::default();
+  PublicGroup::from_external(
+    scratch.crypto(),
+    scratch.storage(),
+    tree.ratchet_tree().clone(),
+    info.clone(),
+    ProposalStore::new(),
+  )
+  .is_ok_and(|(group, _)| {
+    group
+      .members()
+      .any(|member| member.signature_key == signature_key)
+  })
 }
 
 fn group_id(conversation_id: ConversationId) -> GroupId {

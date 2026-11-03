@@ -1077,8 +1077,19 @@ never by the server's member list:
   founds, so a server that hides a group can't make a second device fork it. While the founder's
   setup is unfinished (an invitee has no device or key package yet) it keeps reading the group's
   queue, unlike a DM's founder: another device of the organizer may have joined its group or asked
-  to be added (#796). Only when the queue leaves it at epoch 0 while the server is past that do the
-  commits belong to another group, and it gives its own up and joins that one.
+  to be added (#796). The queue leaving it at epoch 0 while the server is past that proves nothing:
+  commits of a group it isn't in can't be verified, and the epoch is the server's word. It keeps its
+  group until the server accepted its join into the other one. The join runs apart from the
+  device's MLS state and goes ahead only if the group information opens, every leaf verifies, the
+  group's first member is this user and it holds nobody but this user and the people this device
+  invited (the founder knows from its own founding that it is the organizer's device, so here the
+  server's word for the organizer plays no part). Otherwise, or without a key bag from a link, it
+  asks to be added and keeps its group; a welcome replaces it only if it holds this device and
+  nobody it didn't invite and comes from another device in that list. A device whose own leaf is in
+  the group information (a join whose answer was lost) asks to be added back, since members refuse
+  an external commit that replaces a leaf. Gap: an invitee added on another device after this
+  device's setup makes that device's group look foreign here, so this one stays in its own until
+  its setup is run again with the new list.
 - **Old meetings.** A meeting made before the server stopped founding these groups has a chat
   without one. The organizer's device founds it the first time the organizer opens or joins the
   meeting (the same `set_up_meeting_chat`, with the attendees as that device knows the meeting; it
