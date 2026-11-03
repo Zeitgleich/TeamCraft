@@ -83,11 +83,13 @@ const SETTLED_CPU_PERCENT: f64 = 3.0;
 const SETTLE_WINDOW: Duration = Duration::from_secs(10);
 /// Counts tasks that block the page's thread for more than 50 ms (`[count, total ms, longest ms]`).
 const LONG_TASK_RECORDER: &str = "window.__longTasks = [0, 0, 0];
+  window.__longTaskList = [];
   new PerformanceObserver(list => {
     for (const entry of list.getEntries()) {
       window.__longTasks[0] += 1;
       window.__longTasks[1] += entry.duration;
       window.__longTasks[2] = Math.max(window.__longTasks[2], entry.duration);
+      window.__longTaskList.push([Math.round(entry.startTime), Math.round(entry.duration)]);
     }
   }).observe({ type: 'longtask', buffered: true });";
 /// Reads the raw database key the way the page does (docs/e2ee.md §9.1): any script of the origin
@@ -661,6 +663,7 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
   report.reload_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
   report.reload_longest_task_ms = long_tasks[2].as_f64().unwrap_or(0.0);
+  print_long_tasks(page, "reload").await;
   wait_until_done(page).await;
   let store_line = catch_up_log
     .lock()
@@ -795,6 +798,7 @@ async fn measure_catalog_build(page: &Page, seeded: &Seeded, report: &mut Report
   report.catalog_build_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
   report.catalog_build_long_task_total_ms = long_tasks[1].as_f64().unwrap_or(0.0);
   report.catalog_build_longest_task_ms = long_tasks[2].as_f64().unwrap_or(0.0);
+  print_long_tasks(page, "catalog build").await;
   report.catalog_resume_percent_at_reload = -1.0;
   report.catalog_resume_first_percent_after = -1.0;
   report.seconds_catalog_resume_to_channel_list = -1.0;
@@ -812,6 +816,21 @@ async fn measure_catalog_build(page: &Page, seeded: &Seeded, report: &mut Report
     return;
   };
   report.catalog_resume_percent_at_reload = at_reload;
+  // The bar is what the user sees, not something behind the loading screen.
+  tokio::time::sleep(Duration::from_secs(1)).await;
+  let is_on_top = evaluate_value(
+    page,
+    "(() => {
+      const bar = document.querySelector('.store-build');
+      if (!bar) return true;
+      const box = bar.getBoundingClientRect();
+      const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return !!(top && top.closest('.store-build'));
+    })()"
+      .into(),
+  )
+  .await;
+  assert_eq!(is_on_top, serde_json::json!(true), "the build's bar is covered");
   let screenshot = artifact_dir().join("perf-store-build.png");
   let _ = std::fs::create_dir_all(artifact_dir());
   if let Err(error) = page
@@ -835,6 +854,12 @@ async fn measure_catalog_build(page: &Page, seeded: &Seeded, report: &mut Report
   }
   wait_long_for_text(page, channel).await;
   report.seconds_catalog_resume_to_channel_list = started.elapsed().as_secs_f64();
+}
+
+/// The page's tasks over 50 ms so far, as `start+duration` in milliseconds.
+async fn print_long_tasks(page: &Page, what: &str) {
+  let tasks = evaluate_value(page, "window.__longTaskList || []".into()).await;
+  eprintln!("long tasks of the {what}: {tasks}");
 }
 
 /// Leaves the app (its core holds the store), deletes the record of the catalog's state.

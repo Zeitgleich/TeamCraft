@@ -88,6 +88,13 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
       })
   });
 
+  // The loading screen would cover the progress: this one is worth handing over for.
+  Effect::new(move |_| {
+    if shows_store_build.get() {
+      crate::startup::first_view_shown();
+    }
+  });
+
   view! {
     {move || match control.state.get() {
       _ if shows_store_build.get() => {
