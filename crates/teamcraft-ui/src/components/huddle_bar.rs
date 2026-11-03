@@ -8,10 +8,50 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
-use crate::model::ConversationId;
+use crate::model::{ConversationId, ConversationKind};
 use crate::state::{MainView, use_app_state};
 
-/// Strip under the channel header: a running huddle to join, or the controls of the user's own call.
+/// What the bar of one conversation says and how it joins. A huddle belongs to channels; a DM or a
+/// group DM has calls (#1211).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BarWording {
+  /// The kind the bar joins with: it decides the call screen (a huddle stays minimized in its
+  /// channel, a call opens full), the title and the add-people button. Ringing and ending for both
+  /// sides are the server's, by the conversation's kind, not by this.
+  join_kind: CallKind,
+  label: &'static str,
+  in_progress: &'static str,
+  join: &'static str,
+  leave: &'static str,
+}
+
+impl BarWording {
+  fn for_conversation(kind: ConversationKind) -> Self {
+    match kind {
+      ConversationKind::Public | ConversationKind::Private => Self {
+        join_kind: CallKind::Huddle,
+        label: "huddle-bar-label",
+        in_progress: "huddle-in-progress",
+        join: "huddle-join",
+        leave: "huddle-leave",
+      },
+      ConversationKind::Direct | ConversationKind::Group | ConversationKind::Integration => Self {
+        join_kind: if kind == ConversationKind::Direct {
+          CallKind::Direct
+        } else {
+          CallKind::Group
+        },
+        label: "call-bar-label",
+        in_progress: "call-bar-in-progress",
+        join: "call-bar-join",
+        leave: "call-bar-leave",
+      },
+    }
+  }
+}
+
+/// Strip under the channel header: a running huddle (in a DM: call) to join, or the controls of the
+/// user's own call.
 #[component]
 pub fn HuddleBar(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
@@ -35,6 +75,14 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
   let call = state.call;
   let huddle = Memo::new(move |_| state.read(|backend| backend.huddle(conversation)));
   let is_in_call = Memo::new(move |_| call.is_in_call_for(conversation));
+  // The conversation is known: the bar is shown inside it.
+  let wording = Memo::new(move |_| {
+    BarWording::for_conversation(
+      state
+        .read(|backend| backend.conversation(conversation))
+        .map_or(ConversationKind::Public, |info| info.kind),
+    )
+  });
   let members = Memo::new(move |_| {
     huddle
       .get()
@@ -59,21 +107,21 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
     call.is_camera_on.set(false);
     call.join_alongside(CallRequest {
       conversation,
-      kind: CallKind::Huddle,
+      kind: wording.get_untracked().join_kind,
     });
   };
   let take_over = move |_| {
     call.is_camera_on.set(false);
     call.join_and_take_over(CallRequest {
       conversation,
-      kind: CallKind::Huddle,
+      kind: wording.get_untracked().join_kind,
     });
   };
   let join = move |_| {
     call.is_camera_on.set(false);
     call.join(CallRequest {
       conversation,
-      kind: CallKind::Huddle,
+      kind: wording.get_untracked().join_kind,
     });
   };
   // Also clears an entry only the server still lists (a device that left without it hearing).
@@ -88,12 +136,12 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
         class="huddle-bar"
         class:huddle-bar-choices=move || is_on_other_device.get()
         role="region"
-        aria-label=move || i18n.t("huddle-bar-label")
+        aria-label=move || i18n.t(wording.get().label)
       >
         <Icon name=IconName::Headphones class="huddle-icon" />
         <div class="huddle-info">
           <strong>
-            {move || if is_on_other_device.get() { i18n.t("huddle-on-other-device") } else { i18n.t("huddle-in-progress") }}
+            {move || if is_on_other_device.get() { i18n.t("huddle-on-other-device") } else { i18n.t(wording.get().in_progress) }}
           </strong>
           <span class="avatar-stack">
             {move || {
@@ -113,7 +161,7 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
                 fallback=move || {
                   view! {
                     <button class="btn btn-primary btn-small" on:click=join>
-                      {move || i18n.t("huddle-join")}
+                      {move || i18n.t(wording.get().join)}
                     </button>
                   }
                 }
@@ -145,7 +193,7 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
               <Icon name=IconName::Maximize />
             </button>
             <button class="btn btn-danger btn-small" on:click=move |_| call.leave()>
-              {move || i18n.t("huddle-leave")}
+              {move || i18n.t(wording.get().leave)}
             </button>
           </div>
         </Show>
@@ -292,5 +340,53 @@ fn CameraButton(class: &'static str) -> impl IntoView {
     >
       <Icon name=Signal::derive(move || if call.is_camera_on.get() { IconName::Video } else { IconName::VideoOff }) />
     </button>
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::i18n::{Locale, translate};
+
+  #[test]
+  fn a_channel_has_a_huddle() {
+    let wording = BarWording::for_conversation(ConversationKind::Public);
+    assert_eq!(wording, BarWording::for_conversation(ConversationKind::Private));
+    assert_eq!(wording.join_kind, CallKind::Huddle);
+    assert_eq!(
+      said(Locale::En, wording),
+      ["Huddle", "Huddle in progress", "Join huddle", "Leave huddle"]
+    );
+    assert_eq!(said(Locale::De, wording)[1], "Huddle läuft");
+  }
+
+  #[test]
+  fn a_dm_has_a_call() {
+    let wording = BarWording::for_conversation(ConversationKind::Direct);
+    assert_eq!(wording.join_kind, CallKind::Direct);
+    assert_eq!(
+      said(Locale::En, wording),
+      ["Call in progress", "Call in progress", "Join call", "Leave call"]
+    );
+    assert_eq!(
+      said(Locale::De, wording),
+      [
+        "Laufender Anruf",
+        "Anruf läuft",
+        "Anruf beitreten",
+        "Anruf verlassen"
+      ]
+    );
+  }
+
+  #[test]
+  fn a_group_dm_has_a_call_that_is_not_a_one_to_one() {
+    let wording = BarWording::for_conversation(ConversationKind::Group);
+    assert_eq!(wording.join_kind, CallKind::Group);
+    assert_eq!(said(Locale::En, wording)[2], "Join call");
+  }
+
+  fn said(locale: Locale, wording: BarWording) -> [String; 4] {
+    [wording.label, wording.in_progress, wording.join, wording.leave].map(|key| translate(locale, key, None))
   }
 }
