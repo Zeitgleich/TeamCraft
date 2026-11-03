@@ -168,6 +168,7 @@ async fn check_content_arrives(
   let config = VideoSendConfig {
     maybe_layer_plan: None,
     kind: kind.clone(),
+    maybe_picture_tap: None,
     maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&kind),
     capture,
     layers,

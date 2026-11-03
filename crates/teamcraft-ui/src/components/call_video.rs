@@ -25,6 +25,9 @@ use crate::video_stats::StatsTarget;
 const PICTURES_STALLED_AFTER: Duration = Duration::from_secs(3);
 /// How often a shown video's count of pictures is looked at.
 const PICTURE_CHECK_INTERVAL_MS: u64 = 1_000;
+/// How long the preview of the own share may have no picture before it says so: a capture that
+/// stopped delivering, not a screen that doesn't change, which is no gap at all.
+const OWN_SCREEN_NO_PICTURE_AFTER: Duration = Duration::from_secs(3);
 
 /// A participant tile (or the self preview). `effect` only applies to the user's own camera.
 #[component]
@@ -148,6 +151,8 @@ pub enum VideoSource {
   Remote(MediaStreamId),
   /// The camera this device sends.
   OwnCamera,
+  /// The screen this device shares: the preview of what goes out (#1175).
+  OwnScreen,
 }
 
 /// Whether this page shows real call video: the desktop app (the shell sends it, `shell_video`),
@@ -228,6 +233,7 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
   let is_shown = RwSignal::new(false);
   let is_stalled = RwSignal::new(false);
   let picture_watch = StoredValue::new(None::<PictureWatch>);
+  let own_picture_watch = StoredValue::new(None::<OwnPictureWatch>);
   let observer = StoredValue::new_local(None::<OnScreenObserver>);
   Effect::new(move |_| {
     let Some(element) = host.get() else {
@@ -241,6 +247,7 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
       is_shown.set(should_show);
       // Watched afresh from now on: a hidden video gets no pictures by design.
       picture_watch.set_value(None);
+      own_picture_watch.set_value(None);
       is_stalled.set(false);
       if should_show {
         show(&element, source);
@@ -249,6 +256,27 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
       }
     }
   });
+  if source == VideoSource::OwnScreen {
+    use_interval_while(
+      PICTURE_CHECK_INTERVAL_MS,
+      move || is_shown.get(),
+      move || {
+        let Some(element) = host.get_untracked() else {
+          return;
+        };
+        let is_lost = own_picture_watch
+          .try_update_value(|maybe_watch| {
+            maybe_watch
+              .get_or_insert_with(OwnPictureWatch::default)
+              .observe(own_screen_has_picture(&element), crate::motion::now())
+          })
+          .unwrap_or(false);
+        if is_lost != is_stalled.get_untracked() {
+          is_stalled.set(is_lost);
+        }
+      },
+    );
+  }
   if let VideoSource::Remote(_) = source {
     use_interval_while(
       PICTURE_CHECK_INTERVAL_MS,
@@ -286,22 +314,29 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
       stop_watching(source);
     }
   });
-  let stats_target = match source {
-    VideoSource::Remote(stream_id) => StatsTarget::Received(stream_id),
-    VideoSource::OwnCamera => StatsTarget::OwnCamera,
+  // The own share's stats belong to the stage, which also has them with the preview collapsed.
+  let maybe_stats_target = match source {
+    VideoSource::Remote(stream_id) => Some(StatsTarget::Received(stream_id)),
+    VideoSource::OwnCamera => Some(StatsTarget::OwnCamera),
+    VideoSource::OwnScreen => None,
+  };
+  let stalled_key = if source == VideoSource::OwnScreen {
+    "share-preview-no-picture"
+  } else {
+    "video-stalled"
   };
   // Another device's video has a quality menu (#967).
   let maybe_quality = match source {
     VideoSource::Remote(stream_id) => Some(view! { <VideoQualityButton stream_id=stream_id /> }),
-    VideoSource::OwnCamera => None,
+    VideoSource::OwnCamera | VideoSource::OwnScreen => None,
   };
   view! {
     <div class="live-video" class:mirrored=move || is_mirrored.get() node_ref=host aria-hidden="true"></div>
     <Show when=move || is_stalled.get() fallback=|| ()>
-      <span class="video-stalled" role="status">{move || i18n.t("video-stalled")}</span>
+      <span class="video-stalled" role="status">{move || i18n.t(stalled_key)}</span>
     </Show>
     {maybe_quality}
-    <VideoStatsOverlay target=stats_target maybe_host=host />
+    {maybe_stats_target.map(|target| view! { <VideoStatsOverlay target=target maybe_host=host /> })}
   }
 }
 
@@ -341,6 +376,25 @@ impl PictureWatch {
     } else {
       PictureFlow::Flowing
     }
+  }
+}
+
+/// Whether the preview of the own share has lost its picture: none for
+/// [`OWN_SCREEN_NO_PICTURE_AFTER`] since the watch began or since it last had one. Time is passed in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OwnPictureWatch {
+  maybe_lost_since: Option<Duration>,
+}
+
+impl OwnPictureWatch {
+  /// Takes whether there is a picture at `now`; answers whether to say there is none.
+  fn observe(&mut self, has_picture: bool, now: Duration) -> bool {
+    if has_picture {
+      self.maybe_lost_since = None;
+      return false;
+    }
+    let since = *self.maybe_lost_since.get_or_insert(now);
+    now.saturating_sub(since) >= OWN_SCREEN_NO_PICTURE_AFTER
   }
 }
 
@@ -419,6 +473,17 @@ fn stop_watching(source: VideoSource) {
 fn pictures_drawn(host: &web_sys::HtmlDivElement) -> Option<u64> {
   let element = host.first_element_child()?;
   teamcraft_media::web_api::pictures_drawn(&element)
+}
+
+/// Whether the preview of the own share has a picture. The shell's images come only when the screen
+/// changes, so on the desktop that is a first image; a capture that ends there ends the share. The
+/// browser says how its capture stands.
+#[cfg(target_arch = "wasm32")]
+fn own_screen_has_picture(host: &web_sys::HtmlDivElement) -> bool {
+  if crate::shell_video::can_show_video() {
+    return pictures_drawn(host).is_some_and(|drawn| drawn > 0);
+  }
+  crate::web_calls::screen_view_has_picture()
 }
 
 /// A shown track stopped getting pictures: the desktop shell asks for a keyframe once more. (The
@@ -526,14 +591,20 @@ mod shown {
     match source {
       VideoSource::Remote(stream_id) => crate::web_calls::watch_video(stream_id),
       VideoSource::OwnCamera => crate::web_calls::camera_view(),
+      VideoSource::OwnScreen => crate::web_calls::screen_view(),
     }
   }
 
   fn stop(source: VideoSource) {
     if crate::shell_video::can_show_video() {
       crate::shell_video::hide(source);
-    } else if let VideoSource::Remote(stream_id) = source {
-      crate::web_calls::unwatch_video(stream_id);
+    } else {
+      match source {
+        VideoSource::Remote(stream_id) => crate::web_calls::unwatch_video(stream_id),
+        // Without waiting for anybody: the clone keeps the capture running.
+        VideoSource::OwnScreen => crate::web_calls::unwatch_screen(),
+        VideoSource::OwnCamera => {},
+      }
     }
   }
 }
@@ -550,6 +621,11 @@ fn stop_watching(_source: VideoSource) {}
 #[cfg(not(target_arch = "wasm32"))]
 fn pictures_drawn(_host: &web_sys::HtmlDivElement) -> Option<u64> {
   None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn own_screen_has_picture(_host: &web_sys::HtmlDivElement) -> bool {
+  false
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -614,6 +690,37 @@ mod tests {
       watch.observe(0, START + PICTURES_STALLED_AFTER),
       PictureFlow::Stalled
     );
+  }
+
+  mod own_screen {
+    use super::*;
+
+    #[test]
+    fn a_share_with_a_picture_says_nothing_however_still_it_is() {
+      let mut watch = OwnPictureWatch::default();
+      for second in 0..60u64 {
+        assert!(!watch.observe(true, START + Duration::from_secs(second)));
+      }
+    }
+
+    #[test]
+    fn a_share_without_a_picture_says_so_after_a_moment() {
+      let mut watch = OwnPictureWatch::default();
+      assert!(!watch.observe(false, START));
+      assert!(!watch.observe(false, START + Duration::from_secs(2)));
+      assert!(watch.observe(false, START + OWN_SCREEN_NO_PICTURE_AFTER));
+    }
+
+    #[test]
+    fn a_picture_again_ends_the_note_and_starts_the_wait_anew() {
+      let mut watch = OwnPictureWatch::default();
+      watch.observe(false, START);
+      assert!(watch.observe(false, START + OWN_SCREEN_NO_PICTURE_AFTER));
+      assert!(!watch.observe(true, START + Duration::from_secs(4)));
+      assert!(!watch.observe(false, START + Duration::from_secs(5)));
+      assert!(!watch.observe(false, START + Duration::from_secs(7)));
+      assert!(watch.observe(false, START + Duration::from_secs(8)));
+    }
   }
 
   #[test]

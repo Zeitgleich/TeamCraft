@@ -70,6 +70,8 @@ const COMMANDS: &[&str] = &[
   "call_video_stats",
   "call_watch_camera",
   "call_unwatch_camera",
+  "call_watch_screen",
+  "call_unwatch_screen",
   "call_size_camera",
   "call_size_video",
   "call_watch_level",

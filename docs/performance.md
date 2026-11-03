@@ -295,6 +295,22 @@ VideoToolbox for both cameras (2.9 and 4.5 ms wall time), 2.6 and 4.9 ms with Op
   (`call_web/video.rs`, `camera_latency_mode`); Safari, Firefox and other platforms' hardware
   encoders are not measured.
 
+### Preview of the own screen share (issue #1175)
+
+The person sharing sees a small live preview. It decodes nothing and runs only while it is on
+screen, the page is visible and it isn't collapsed (the setting stays for the next share).
+
+| Client  | Source                                                  | Rate        | Size                        |
+|---------|---------------------------------------------------------|-------------|-----------------------------|
+| Browser | A clone of the capture's track in a muted `<video>`     | At most 5/s | The capture, drawn small    |
+| Desktop | The encoder's last picture as JPEG images (`self_view`) | At most 5/s | At most 640x400, quality 70 |
+
+The browser's frame rate limit applies to the clone only, where the browser honours it; elsewhere
+the preview plays the capture's rate, at the compositor's cost of a small video. On the desktop,
+each image costs one copy of the sent picture, one scale and one JPEG encode on the view's own
+thread, and a still screen costs nothing after its first image. Without a viewer the encoder
+thread does one lock per loop and no copy. Not measured yet on real hardware.
+
 ### Screen share: profiles and codecs (issue #565)
 
 A share is sent per its profile (`video::ScreenProfile`): detail up to 1440p30, motion up to

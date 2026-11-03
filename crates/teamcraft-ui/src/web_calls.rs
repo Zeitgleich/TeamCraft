@@ -23,9 +23,9 @@ use teamcraft_client_api::calls::{BackgroundEffect, CallsUnavailableReason};
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::page_calls::{
   BrowserGraphics, EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_NETWORK_CHANGED, EXPORT_PICK_SCREEN,
-  EXPORT_PREVIEW_LEVEL, EXPORT_RING, EXPORT_SHARE_SCREEN, EXPORT_SIGNAL, EXPORT_START, EXPORT_STOP,
-  EXPORT_UNWATCH_VIDEO, EXPORT_VIDEO_STATS, EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META,
-  browser_effects_compositing,
+  EXPORT_PREVIEW_LEVEL, EXPORT_RING, EXPORT_SCREEN_VIEW, EXPORT_SCREEN_VIEW_HAS_PICTURE, EXPORT_SHARE_SCREEN,
+  EXPORT_SIGNAL, EXPORT_START, EXPORT_STOP, EXPORT_UNWATCH_SCREEN, EXPORT_UNWATCH_VIDEO, EXPORT_VIDEO_STATS,
+  EXPORT_WATCH_VIDEO, MODULE_META, PreparedCall, WORKLET_META, browser_effects_compositing,
 };
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_core::CallKeySigner;
@@ -203,6 +203,28 @@ pub fn camera_view() -> Option<Element> {
   module
     .call_sync(EXPORT_CAMERA_VIEW, &[])
     .and_then(|video| video.dyn_into().ok())
+}
+
+/// The element playing what this device shares, for the preview (#1175), until [`unwatch_screen`].
+pub fn screen_view() -> Option<Element> {
+  let module = current()?.loaded_module()?;
+  module
+    .call_sync(EXPORT_SCREEN_VIEW, &[])
+    .and_then(|video| video.dyn_into().ok())
+}
+
+pub fn unwatch_screen() {
+  if let Some(module) = current().and_then(|host| host.loaded_module()) {
+    module.call_sync(EXPORT_UNWATCH_SCREEN, &[]);
+  }
+}
+
+/// Whether the preview plays a capture that delivers.
+pub fn screen_view_has_picture() -> bool {
+  current()
+    .and_then(|host| host.loaded_module())
+    .and_then(|module| module.call_sync(EXPORT_SCREEN_VIEW_HAS_PICTURE, &[]))
+    .is_some_and(|answer| answer.is_truthy())
 }
 
 /// Opens the browser's screen picker now and returns the promise of the chosen screen, for

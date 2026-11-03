@@ -244,6 +244,7 @@ async fn run(scenario: Scenario, duration: Duration) -> Timeline {
     capture: Box::new(screen),
     encoders: counting(preferred_encoders(), start, Arc::clone(&encoded)),
     maybe_filter: None,
+    maybe_picture_tap: None,
     maybe_idle_refresh: VideoSendConfig::default_idle_refresh(&VideoTrackKind::Screen),
   };
   presenter.start_video(config).await.unwrap();

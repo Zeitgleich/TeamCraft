@@ -407,6 +407,9 @@ pub struct CallPrefs {
   pub push_to_talk: bool,
   /// Screen shares include the computer's sound (off until the user turns it on).
   pub share_sound: bool,
+  /// The preview of the own screen share stays collapsed (#1175): whoever hid it for their own
+  /// window's sake wants that next time too.
+  pub hide_share_preview: bool,
   /// What a screen share keeps under pressure (detail: resolution, motion: frame rate).
   pub screen_mode: teamcraft_client_api::calls::ScreenContentMode,
   /// How large a screen share may be (#565): standard (up to 1440p) until the user picks 4K.
@@ -431,6 +434,7 @@ impl Default for CallPrefs {
       echo_cancellation: true,
       push_to_talk: false,
       share_sound: false,
+      hide_share_preview: false,
       screen_mode: teamcraft_client_api::calls::ScreenContentMode::Detail,
       screen_resolution: teamcraft_client_api::calls::ScreenShareResolution::Standard,
       status_sounds: teamcraft_client_api::calls::CallStatusSounds::All,

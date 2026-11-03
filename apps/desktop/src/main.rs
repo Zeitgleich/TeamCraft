@@ -296,6 +296,8 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_video_stats,
       calls::commands::call_watch_camera,
       calls::commands::call_unwatch_camera,
+      calls::commands::call_watch_screen,
+      calls::commands::call_unwatch_screen,
       calls::commands::call_size_camera,
       calls::commands::call_size_video,
       calls::commands::call_watch_level,

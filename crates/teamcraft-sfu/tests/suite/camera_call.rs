@@ -174,6 +174,7 @@ fn camera_config() -> VideoSendConfig {
     layers: simulcast_layers(HD, 30, 1_500_000, 3),
     encoders: software_encoders(),
     maybe_filter: None,
+    maybe_picture_tap: None,
     maybe_idle_refresh: None,
   }
 }

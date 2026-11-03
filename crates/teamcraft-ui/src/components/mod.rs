@@ -121,6 +121,7 @@ pub mod setup_checklist;
 #[cfg(target_arch = "wasm32")]
 pub mod share_download;
 pub mod share_link_dialog;
+pub mod share_preview;
 pub mod sheet;
 pub mod sidebar;
 pub mod sidebar_resizer;

@@ -8,9 +8,13 @@ use std::time::{Duration, Instant};
 use chromiumoxide::cdp::browser_protocol::browser::{
   PermissionDescriptor, PermissionSetting, SetPermissionParams,
 };
-use chromiumoxide::page::Page;
+use chromiumoxide::cdp::browser_protocol::emulation::{
+  MediaFeature, SetDeviceMetricsOverrideParams, SetEmulatedMediaParams,
+};
+use chromiumoxide::page::{Page, ScreenshotParams};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
+use teamcraft_e2e::browser::artifact_dir;
 use teamcraft_e2e::call::join_call;
 use teamcraft_media::call_engine::CallEngineEvent;
 use teamcraft_proto::VideoTrackKind;
@@ -28,20 +32,7 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_web_client_and_a_native_client_share_a_call() {
-  // The SFU's certificate is self-signed and short-lived; the server hands out its hash with join
-  // tokens, which browsers accept (`serverCertificateHashes`), like the native clients' pin.
-  let identity = sfu_identity();
-  let sha256: String = Sha256::digest(identity.cert.der())
-    .iter()
-    .map(|byte| format!("{byte:02x}"))
-    .collect();
-  let (certificate, key) = (identity.cert.pem(), identity.signing_key.serialize_pem());
-  let Some(mut rig) = Rig::start_with(
-    |builder| builder.with_calls().with_sfu_identity(certificate, key, sha256),
-    &MEDIA_ARGS,
-  )
-  .await
-  else {
+  let Some(mut rig) = start_rig().await else {
     return;
   };
   let channel = rig.channel;
@@ -49,46 +40,7 @@ async fn the_web_client_and_a_native_client_share_a_call() {
 
   let page = rig.browser.page.clone();
   let console = console_log(&page).await;
-  // Headless Chromium denies the microphone and camera unless the origin has them.
-  for name in ["microphone", "camera"] {
-    page
-      .execute(
-        SetPermissionParams::builder()
-          .permission(PermissionDescriptor::new(name))
-          .setting(PermissionSetting::Granted)
-          .origin(WEB_ORIGIN)
-          .build()
-          .unwrap(),
-      )
-      .await
-      .unwrap();
-  }
-  sign_in_as_alice(&page).await;
-  wait_for_text(&page, "browser-channel").await;
-  // The browser is a new device of Alice: her other device commits it into the channel, and Carol
-  // must have verified it before the call admits it.
-  let deadline = Instant::now() + SETUP_TIMEOUT;
-  let mut round = 0_u32;
-  loop {
-    let verified = rig.carol.client.verified_call_devices(channel).await.unwrap();
-    if verified.len() >= 3 {
-      break;
-    }
-    assert!(
-      Instant::now() < deadline,
-      "the browser never joined the channel's group"
-    );
-    if round.is_multiple_of(50) {
-      rig.alice.heartbeat().await;
-      rig.carol.heartbeat().await;
-    }
-    round += 1;
-    rig.alice.pump_reconnecting().await;
-    rig.alice.client.apply_pending_changes().await.unwrap();
-    rig.carol.pump_reconnecting().await;
-    rig.carol.client.apply_pending_changes().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
-  }
+  sign_in_and_join_the_channel(&mut rig, &page).await;
 
   rig
     .browser
@@ -158,6 +110,231 @@ async fn the_web_client_and_a_native_client_share_a_call() {
   );
 
   rig.finish().await;
+}
+
+/// The person sharing sees what goes out (#1175): small, live, from the capture, and gone with the
+/// share or when collapsed. Chromium's fake capture stands in for the screen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sharing_the_screen_shows_a_small_live_preview_of_it() {
+  let Some(mut rig) = start_rig().await else {
+    return;
+  };
+  let page = rig.browser.page.clone();
+  sign_in_and_join_the_channel(&mut rig, &page).await;
+  rig
+    .browser
+    .screenshot_on_failure("web-share-preview", |page| async move {
+      crate::web::click_text(&page, "browser-channel").await;
+      click_selector(&page, "button[aria-label='Start video call']").await;
+      wait_for_element(&page, ".prejoin").await;
+      click_selector(&page, ".prejoin-actions .btn-primary").await;
+      wait_for_element(&page, ".call-screen").await;
+
+      // Real clicks: the browser opens its screen picker only for a user's gesture.
+      click_for_real(&page, "button[aria-label='Share screen']").await;
+      click_for_real(&page, ".share-popover .btn").await;
+      let first = wait_for_preview_picture(&page).await;
+      assert!(
+        first["cssWidth"].as_f64().unwrap() <= 320.0,
+        "the preview is small: {first}"
+      );
+      assert!(
+        first["frameRate"].as_f64().unwrap() <= 5.0,
+        "the preview runs at a low frame rate: {first}"
+      );
+      assert!(!has_element(&page, ".mock-window").await);
+      wait_until_it_plays_on(&page, first["time"].as_f64().unwrap()).await;
+
+      // Collapsed: the share goes on, and nothing keeps running for the preview.
+      page.evaluate(KEEP_PREVIEW_TRACK).await.unwrap();
+      click_for_real(&page, ".share-preview .btn").await;
+      wait_until_true(&page, "window.previewTrack.readyState === 'ended'").await;
+      assert!(!has_element(&page, ".share-preview video").await);
+      assert!(has_element(&page, ".share-banner .btn").await);
+
+      // Back: the capture still runs, so the picture comes at once.
+      click_for_real(&page, ".share-preview .btn").await;
+      let again = wait_for_preview_picture(&page).await;
+      wait_until_it_plays_on(&page, again["time"].as_f64().unwrap()).await;
+
+      page
+        .execute(SetDeviceMetricsOverrideParams::new(1280, 800, 1.0, false))
+        .await
+        .unwrap();
+      for scheme in ["light", "dark"] {
+        screenshot(&page, scheme, &format!("share-preview-{scheme}")).await;
+      }
+      page
+        .execute(SetDeviceMetricsOverrideParams::new(390, 844, 2.0, true))
+        .await
+        .unwrap();
+      let on_phone = wait_for_preview_picture(&page).await;
+      assert!(
+        on_phone["cssWidth"].as_f64().unwrap() <= 358.0,
+        "within the phone's gutters: {on_phone}"
+      );
+      screenshot(&page, "dark", "share-preview-phone").await;
+      click_for_real(&page, ".share-preview .btn").await;
+      screenshot(&page, "dark", "share-preview-collapsed-phone").await;
+      click_for_real(&page, ".share-preview .btn").await;
+      wait_for_preview_picture(&page).await;
+
+      // The share ends: the preview ends, and its hold on the capture with it.
+      page.evaluate(KEEP_PREVIEW_TRACK).await.unwrap();
+      click_for_real(&page, ".share-banner .btn").await;
+      wait_until_true(&page, "window.previewTrack.readyState === 'ended'").await;
+      wait_until_true(&page, "!document.querySelector('.share-preview')").await;
+    })
+    .await;
+  rig.finish().await;
+}
+
+/// A rig with calls, whose browser has fake devices.
+async fn start_rig() -> Option<Rig> {
+  // The SFU's certificate is self-signed and short-lived; the server hands out its hash with join
+  // tokens, which browsers accept (`serverCertificateHashes`), like the native clients' pin.
+  let identity = sfu_identity();
+  let sha256: String = Sha256::digest(identity.cert.der())
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect();
+  let (certificate, key) = (identity.cert.pem(), identity.signing_key.serialize_pem());
+  Rig::start_with(
+    |builder| builder.with_calls().with_sfu_identity(certificate, key, sha256),
+    &MEDIA_ARGS,
+  )
+  .await
+}
+
+/// Signs the browser in as a new device of Alice, which her other device commits into the channel;
+/// Carol must have verified it before a call admits it.
+async fn sign_in_and_join_the_channel(rig: &mut Rig, page: &Page) {
+  let channel = rig.channel;
+  // Headless Chromium denies the microphone and camera unless the origin has them.
+  for name in ["microphone", "camera"] {
+    page
+      .execute(
+        SetPermissionParams::builder()
+          .permission(PermissionDescriptor::new(name))
+          .setting(PermissionSetting::Granted)
+          .origin(WEB_ORIGIN)
+          .build()
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+  }
+  sign_in_as_alice(page).await;
+  wait_for_text(page, "browser-channel").await;
+  // The browser is a new device of Alice: her other device commits it into the channel, and Carol
+  // must have verified it before the call admits it.
+  let deadline = Instant::now() + SETUP_TIMEOUT;
+  let mut round = 0_u32;
+  loop {
+    let verified = rig.carol.client.verified_call_devices(channel).await.unwrap();
+    if verified.len() >= 3 {
+      break;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "the browser never joined the channel's group"
+    );
+    if round.is_multiple_of(50) {
+      rig.alice.heartbeat().await;
+      rig.carol.heartbeat().await;
+    }
+    round += 1;
+    rig.alice.pump_reconnecting().await;
+    rig.alice.client.apply_pending_changes().await.unwrap();
+    rig.carol.pump_reconnecting().await;
+    rig.carol.client.apply_pending_changes().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+}
+
+/// Remembers the track the preview plays, to look at it after it left the page.
+const KEEP_PREVIEW_TRACK: &str =
+  "window.previewTrack = document.querySelector('.share-preview video').srcObject.getVideoTracks()[0]";
+const PREVIEW_STATE: &str = r"(() => {
+  const video = document.querySelector('.share-preview video');
+  if (!video || !video.srcObject || video.videoWidth === 0) return null;
+  return {
+    time: video.currentTime,
+    cssWidth: video.getBoundingClientRect().width,
+    frameRate: video.srcObject.getVideoTracks()[0].getSettings().frameRate,
+  };
+})()";
+
+/// A look at the page for reviewing the design, in `target/e2e-artifacts`.
+async fn screenshot(page: &Page, scheme: &str, name: &str) {
+  page
+    .execute(
+      SetEmulatedMediaParams::builder()
+        .feature(MediaFeature::new("prefers-color-scheme", scheme))
+        .build(),
+    )
+    .await
+    .unwrap();
+  let dir = artifact_dir();
+  std::fs::create_dir_all(&dir).unwrap();
+  page
+    .save_screenshot(
+      ScreenshotParams::builder().build(),
+      dir.join(format!("{name}.png")),
+    )
+    .await
+    .unwrap();
+}
+
+/// A click with the mouse, not through the DOM: it counts as the user's gesture.
+async fn click_for_real(page: &Page, selector: &str) {
+  wait_for_element(page, selector).await.click().await.unwrap();
+}
+
+async fn has_element(page: &Page, selector: &str) -> bool {
+  page.find_element(selector).await.is_ok()
+}
+
+async fn wait_for_preview_picture(page: &Page) -> serde_json::Value {
+  let deadline = Instant::now() + SETUP_TIMEOUT;
+  loop {
+    let state: serde_json::Value = page
+      .evaluate(PREVIEW_STATE)
+      .await
+      .unwrap()
+      .into_value()
+      .unwrap_or(serde_json::Value::Null);
+    if !state.is_null() {
+      return state;
+    }
+    assert!(Instant::now() < deadline, "the preview never showed a picture");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+}
+
+async fn wait_until_it_plays_on(page: &Page, time: f64) {
+  wait_until_true(
+    page,
+    &format!("document.querySelector('.share-preview video').currentTime > {time}"),
+  )
+  .await;
+}
+
+async fn wait_until_true(page: &Page, expression: &str) {
+  let deadline = Instant::now() + Duration::from_secs(20);
+  loop {
+    let is_true = page
+      .evaluate(expression)
+      .await
+      .ok()
+      .and_then(|result| result.into_value::<bool>().ok())
+      .unwrap_or(false);
+    if is_true {
+      return;
+    }
+    assert!(Instant::now() < deadline, "never true: {expression}");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
 }
 
 /// A self-signed certificate valid for ten days: certificate hash pins (the native clients) accept

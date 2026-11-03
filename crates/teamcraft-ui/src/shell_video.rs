@@ -4,7 +4,8 @@
 //! webview decodes it: #565) or VP9 (older browsers) that WebCodecs decodes here, or JPEG images
 //! where the webview can't decode H.264 (WebKitGTK without the codec). The own camera comes as JPEG images of the capture (with effects), drawn at
 //! the size the tile covers in device pixels; the shell is told that size, so the images just
-//! cover it (#937).
+//! cover it (#937). The preview of the own screen share comes as small JPEG images too (#1175): it
+//! never touches WebCodecs, nor its support probe.
 //!
 //! [`LiveVideo`](crate::components::call_video::LiveVideo) shows the canvases made here, the same
 //! way it shows the browser's call module's, and decides when a track is watched.
@@ -350,7 +351,7 @@ mod view {
       spawn_local(async move {
         let prefer_jpeg = match starting.source {
           VideoSource::Remote(_) => !can_decode_h264().await,
-          VideoSource::OwnCamera => true,
+          VideoSource::OwnCamera | VideoSource::OwnScreen => true,
         };
         starting.watch(prefer_jpeg);
       });
@@ -374,6 +375,7 @@ mod view {
           json!({ "stream_id": stream_id, "prefer_jpeg": prefer_jpeg, "frames": frames }),
         ),
         VideoSource::OwnCamera => ("call_watch_camera", json!({ "frames": frames })),
+        VideoSource::OwnScreen => ("call_watch_screen", json!({ "frames": frames })),
       };
       spawn_local(async move {
         if let Err(error) = call::<()>(command, &args).await {
@@ -530,7 +532,7 @@ mod view {
         self.last_drawn_image.set(sequence);
         let is_drawn = match self.source {
           VideoSource::OwnCamera => self.draw_self_view(&bitmap),
-          VideoSource::Remote(_) => {
+          VideoSource::Remote(_) | VideoSource::OwnScreen => {
             fit_canvas(&self.canvas, bitmap.width(), bitmap.height());
             self
               .context
@@ -743,6 +745,7 @@ mod view {
           json!({ "stream_id": stream_id, "channel": channel }),
         ),
         VideoSource::OwnCamera => ("call_unwatch_camera", json!({ "channel": channel })),
+        VideoSource::OwnScreen => ("call_unwatch_screen", json!({ "channel": channel })),
       };
       spawn_local(async move {
         if let Err(error) = call::<()>(command, &args).await {

@@ -67,6 +67,7 @@ async fn a_late_viewer_of_a_still_screen_gets_its_picture() {
     encoders: software_encoders(),
     maybe_filter: None,
     // Only the answer to the keyframe request may bring the picture, not the idle refresh.
+    maybe_picture_tap: None,
     maybe_idle_refresh: None,
   };
   let first_picture = presenter.start_video_checked(config).await.unwrap();
@@ -128,6 +129,7 @@ async fn a_viewer_that_lost_the_first_keyframe_asks_for_another() {
     encoders: software_encoders(),
     maybe_filter: None,
     // Frames come all the time: only a requested keyframe can help.
+    maybe_picture_tap: None,
     maybe_idle_refresh: None,
   };
   presenter.start_video(config).await.unwrap();
@@ -175,6 +177,7 @@ async fn a_capture_that_never_stops_does_not_freeze_the_call() {
     layers: simulcast_layers(VGA, 30, 150_000, 1),
     encoders: software_encoders(),
     maybe_filter: None,
+    maybe_picture_tap: None,
     maybe_idle_refresh: None,
   };
   presenter.start_video(config).await.unwrap();
@@ -202,6 +205,7 @@ async fn a_camera_that_stops_delivering_ends_its_track() {
     layers: simulcast_layers(VGA, 30, 150_000, 1),
     encoders: software_encoders(),
     maybe_filter: None,
+    maybe_picture_tap: None,
     maybe_idle_refresh: None,
   };
   let first_picture = presenter.start_video_checked(config).await.unwrap();
@@ -246,6 +250,7 @@ async fn a_camera_that_is_slow_to_open_leaves_the_call_free() {
     layers: simulcast_layers(VGA, 30, 150_000, 1),
     encoders: software_encoders(),
     maybe_filter: None,
+    maybe_picture_tap: None,
     maybe_idle_refresh: None,
   };
   {
@@ -291,6 +296,7 @@ async fn a_camera_that_is_slow_to_stop_leaves_the_call_free() {
     layers: simulcast_layers(VGA, 30, 150_000, 1),
     encoders: software_encoders(),
     maybe_filter: None,
+    maybe_picture_tap: None,
     maybe_idle_refresh: None,
   };
   presenter.start_video(config).await.unwrap();

@@ -205,6 +205,7 @@ fn camera_config(capture: Box<dyn VideoCapture>) -> VideoSendConfig {
     maybe_layer_plan: None,
     encoders: preferred_encoders(),
     maybe_filter: None,
+    maybe_picture_tap: None,
     maybe_idle_refresh: None,
   }
 }

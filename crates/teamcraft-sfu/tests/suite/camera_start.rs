@@ -197,6 +197,7 @@ fn camera_config(camera: WarmingCamera) -> VideoSendConfig {
     layers: simulcast_layers(HD, FRAMERATE, 1_500_000, 3),
     encoders: preferred_encoders(),
     maybe_filter: None,
+    maybe_picture_tap: None,
     maybe_idle_refresh: None,
   }
 }
