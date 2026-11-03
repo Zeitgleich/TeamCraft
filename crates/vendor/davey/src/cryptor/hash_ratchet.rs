@@ -101,5 +101,17 @@ mod tests {
       *nonce,
       vec![48, 30, 95, 75, 116, 9, 15, 152, 94, 114, 107, 178]
     );
+    // TeamCraft (vendored change 5): the next generation runs the 32-byte secret derivation too.
+    let (key, nonce) = ratchet.get(1).expect("Expected success from ratchet");
+    assert_eq!(
+      *key,
+      vec![
+        205, 221, 6, 224, 243, 67, 117, 150, 186, 203, 156, 6, 160, 50, 156, 73
+      ]
+    );
+    assert_eq!(
+      *nonce,
+      vec![150, 253, 18, 131, 76, 61, 231, 55, 136, 236, 52, 25]
+    );
   }
 }

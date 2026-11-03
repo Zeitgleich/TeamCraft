@@ -40,6 +40,19 @@ The first commit adding this directory is the unmodified crate (its `Cargo.toml.
 4. Added `VENDORED.md`, `UPSTREAM_PR.md` with `upstream.patch` and `upstream-web-time.patch` (changes 1 and 2 without the
    `[workspace]` table, relative to the upstream repository), `.gitignore` (standalone `Cargo.lock`
    and `target/`).
+5. Known-answer tests (issue #124, captured before the dependency upgrade in change 6):
+   `src/cryptor/aead_cipher.rs` checks the truncated-tag AES-128-GCM against fixed values (they
+   match a standard AES-128-GCM with the tag cut to 8 bytes) and rejects a tampered tag;
+   `src/cryptor/hash_ratchet.rs` also checks ratchet generation 1, which runs the 32-byte secret
+   derivation of `mlspp_crypto.rs`.
+6. `Cargo.toml`: `sha2` 0.10 → 0.11 and `hmac` 0.12 → 0.13 together (issue #124; neither builds
+   alone, both moved to `digest` 0.11). `src/cryptor/mlspp_crypto.rs` imports `hmac::KeyInit`, where
+   `new_from_slice` lives now. `src/cryptor/aead_cipher.rs` takes `InvalidLength` and the `U8`/`U12`
+   sizes from the `cipher` crate its AES-GCM is built on instead of from `sha2::digest` (the old
+   import only worked while both shared `crypto-common` 0.1). Same HMAC-SHA256, same bytes: the
+   tests from change 5 and the original libdave vector pass unchanged. `aes` 0.9 / `cipher` 0.5 are
+   not taken: the AES-GCM in `src/aes_gcm.rs` is a copy of `aes-gcm` 0.10 internals, which stays
+   in our tree through `openmls_rust_crypto` 0.6; it moves together with `aes-gcm` 0.11.
 
 No other source changes. `cargo test` and `cargo clippy` pass on the copy.
 
