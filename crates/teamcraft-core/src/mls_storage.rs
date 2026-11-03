@@ -13,22 +13,34 @@
 //! number of groups. Before, the whole storage was one record rewritten after every change: a
 //! catch-up that joined 300 groups wrote it 600 times, about 0.8 GB (docs/performance.md).
 //!
-//! [`SavedMlsStorage`] remembers what the store holds, so a save finds the changes without reading
-//! the store. When the disk may hold something else ([`LocalStore::write_tally`]: a group of writes
-//! the disk rolled back, a commit of another process) or a save failed, the next save writes every
-//! entry again and deletes every key that may still be on disk, the deletes the disk lost included
-//! ([`LocalStore::lost_deletes`]): memory and disk agree again, as they did with one record. A
-//! client loaded on a store that lost writes (reopened in the same process) starts that way too.
+//! The provider's storage notes the keys it changes (our patch of `openmls_memory_storage`,
+//! crates/vendor/openmls_memory_storage/VENDORED.md), so a save costs what changed: no second copy
+//! of the state to compare with, and no read of the store (issue #840). Everything that writes to the
+//! provider from outside openmls uses its `set_value` and `remove_value`, or the change isn't saved.
+//!
+//! [`SavedMlsStorage`] remembers whether the store holds what the last save left. It may not when
+//! the disk rolled back a group of writes ([`LocalStore::write_tally`]), a save failed, or another
+//! process saved MLS state; then the next save writes every entry again and deletes every other key
+//! that may still be on disk, the deletes the disk lost included ([`LocalStore::lost_deletes`]):
+//! memory and disk agree again, as they did with one record. A client loaded on a store that lost
+//! writes (reopened in the same process) starts that way too. Another process's commit alone says
+//! nothing about the MLS state (the iOS notification extension commits its push bookkeeping on every
+//! run), so every save also bumps [`GENERATION_KEY`], and the state is written again only if that
+//! record moved. All of this is looked at inside the save's group, which holds the database's write
+//! lock: nobody else can commit between the look and the save.
 //!
 //! Versions before 1.0.9 kept the storage as one record ([`LEGACY_KEY`]). [`load_mls_storage`] moves
 //! it to entries in one group of writes and leaves [`MOVED_MARKER`] in its place, which every
 //! earlier version fails to read (instead of reading no MLS state, losing every group, and later
 //! saving a near-empty record). The store layouts carry a version for the change as well (SQLite
 //! layout 3, IndexedDB version 2), so versions that check it refuse the store before that. Entries
-//! next to an old record of another kind are never dropped: that record is set aside.
+//! next to an old record of another kind are never dropped: that record is set aside, and wiped
+//! after a grace period ([`wipe_old_set_aside`]). A process short of memory leaves the move to the
+//! app ([`has_unmoved_record`]).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -50,24 +62,30 @@ const MOVED_MARKER: &[u8] = b"\xff\xff\xff\xffMLS state stored per entry since T
 const ENTRY_PREFIX: &str = "entry/";
 /// Where an old record found next to entries is kept (numbered), never read again.
 const SET_ASIDE_PREFIX: &str = "set_aside/";
+/// When a set-aside record was first seen, by its key after this prefix: milliseconds, big endian.
+const SET_ASIDE_SEEN_PREFIX: &str = "set_aside_seen/";
+/// Bumped by every save, big endian: another process's commit moved the MLS state if this moved.
+/// Versions that don't know it (1.0.9 and later ignore records of unknown kinds) don't bump it; they
+/// never run beside this one, the app and its extension update together.
+const GENERATION_KEY: &str = "generation";
 
 /// The provider storage's map, as openmls keeps it.
 type StorageMap = HashMap<Vec<u8>, Vec<u8>>;
-/// Entries as this module keeps them: the values hold secrets and are wiped on drop.
+/// Entries as this module reads them: the values hold secrets and are wiped on drop.
 type Entries = HashMap<Vec<u8>, Zeroizing<Vec<u8>>>;
 
-/// What the store holds of the MLS storage, as this device last wrote it; see the module docs.
-/// A new one knows nothing: its first save writes every entry and deletes every other one.
+/// Whether the store holds what the last save left; see the module docs. A new one knows nothing:
+/// its first save writes every entry and deletes every other one. It holds no MLS state itself.
 pub struct SavedMlsStorage {
   inner: Mutex<Saved>,
 }
 
 struct Saved {
-  /// The entries the store holds, by storage key.
-  entries: Entries,
   /// The store's tally at the last save (or the load).
   maybe_tally: Option<WriteTally>,
-  /// The store may not hold [`Self::entries`]: the next save writes everything.
+  /// [`GENERATION_KEY`] as of the last save (or the load).
+  generation: u64,
+  /// The store may not hold the provider's entries: the next save writes everything.
   is_rewrite_due: bool,
   /// Bytes of records saves wrote (diagnostics).
   written_bytes: u64,
@@ -80,6 +98,7 @@ struct Changes<'a> {
   /// Everything is written (a rewrite); `old_record`: what the store holds under [`LEGACY_KEY`].
   is_rewrite: bool,
   old_record: OldRecord,
+  next_generation: u64,
 }
 
 /// What a store holds under [`LEGACY_KEY`].
@@ -97,13 +116,22 @@ struct Listed {
   entries: Entries,
   maybe_old_record: Option<Zeroizing<Vec<u8>>>,
   set_aside: usize,
+  maybe_generation: Option<u64>,
+}
+
+/// What a save's group of writes did.
+struct Written {
+  maybe_tally: Option<WriteTally>,
+  next_generation: u64,
+  bytes: u64,
+  has_written: bool,
 }
 
 impl Default for SavedMlsStorage {
   fn default() -> Self {
     Self::new(Saved {
-      entries: HashMap::new(),
       maybe_tally: None,
+      generation: 0,
       is_rewrite_due: true,
       written_bytes: 0,
     })
@@ -131,21 +159,30 @@ impl SavedMlsStorage {
 /// Loads the provider storage, moving the record of a version before 1.0.9 to entries first.
 /// The returned [`SavedMlsStorage`] knows what the store holds.
 pub fn load_mls_storage(store: &impl LocalStore) -> Result<(OpenMlsRustCrypto, SavedMlsStorage), CoreError> {
+  // Before the listing: another process's commit after it counts.
+  let maybe_tally = store.write_tally();
   let Listed {
     mut entries,
     maybe_old_record,
     set_aside,
+    maybe_generation,
   } = list_records(store)?;
+  let mut generation = maybe_generation.unwrap_or(0);
   match maybe_old_record {
     Some(old) if old.as_slice() == MOVED_MARKER => {},
-    Some(old) if entries.is_empty() => entries = migrate(store, &old)?,
+    Some(old) if entries.is_empty() => {
+      generation = generation.saturating_add(1);
+      entries = migrate(store, &old, generation)?;
+    },
     // Only an older version writing next to moved entries gets here (all stores write a group
     // whole, the move included): the entries are the device's state, the record is kept apart.
     Some(old) => {
       tracing::warn!("an MLS record of an older version was found next to the entries; set aside");
+      generation = generation.saturating_add(1);
       write_group(store, || -> Result<(), CoreError> {
         store.put(Table::MlsStorage, &set_aside_key(set_aside), &old)?;
         store.put(Table::MlsStorage, LEGACY_KEY, MOVED_MARKER)?;
+        store.put(Table::MlsStorage, GENERATION_KEY, &generation.to_be_bytes())?;
         Ok(())
       })?;
     },
@@ -153,17 +190,20 @@ pub fn load_mls_storage(store: &impl LocalStore) -> Result<(OpenMlsRustCrypto, S
     None => store.put(Table::MlsStorage, LEGACY_KEY, MOVED_MARKER)?,
   }
   let provider = OpenMlsRustCrypto::default();
-  *provider.storage().values.write().map_err(|_| poisoned())? = entries
-    .iter()
-    .map(|(key, value)| (key.clone(), value.to_vec()))
-    .collect();
-  let maybe_tally = store.write_tally();
-  // The store already lost writes (a client reopened in the same process) or another process
-  // wrote: what it lists may not be what the disk holds.
-  let is_rewrite_due = maybe_tally.is_some_and(|tally| tally.lost > 0 || tally.foreign > 0);
+  {
+    let mut values = provider.storage().values.write().map_err(|_| poisoned())?;
+    values.reserve(entries.len());
+    for (key, mut value) in entries {
+      // Moved, not copied: the state is in memory once, also while it loads.
+      values.insert(key, std::mem::take(&mut *value));
+    }
+  }
+  // The store lost writes (a client reopened in the same process): what it lists may not be what
+  // the disk holds. Another process's commits don't matter here: the listing read them.
+  let is_rewrite_due = maybe_tally.is_some_and(|tally| tally.lost > 0);
   let saved = SavedMlsStorage::new(Saved {
-    entries,
     maybe_tally,
+    generation,
     is_rewrite_due,
     written_bytes: 0,
   });
@@ -178,40 +218,44 @@ pub fn save_mls_storage(
   provider: &OpenMlsRustCrypto,
   saved: &SavedMlsStorage,
 ) -> Result<(), CoreError> {
-  let values = provider.storage().values.read().map_err(|_| poisoned())?;
+  let storage = provider.storage();
+  let values = storage.values.read().map_err(|_| poisoned())?;
   let mut state = saved.lock()?;
-  state.note_tally(store.write_tally());
-  let changes = state.changes(&values, store)?;
-  if !changes.is_rewrite && changes.puts.is_empty() && changes.deletes.is_empty() {
+  // Nothing to write and nothing moved: no group, no write lock to wait for. A commit this look
+  // misses is seen by the next save, which looks again inside its group.
+  if !state.is_rewrite_due && !storage.has_changed_keys() && store.write_tally() == state.maybe_tally {
     return Ok(());
   }
-  let written = write_group(store, || -> Result<_, CoreError> {
-    let mut bytes = 0u64;
-    for key in &changes.puts {
-      let Some(value) = values.get(*key) else {
-        continue;
-      };
-      let record_key = entry_key(key);
-      store.put(Table::MlsStorage, &record_key, value)?;
-      bytes = bytes.saturating_add(u64::try_from(record_key.len() + value.len()).unwrap_or(u64::MAX));
-    }
-    for key in &changes.deletes {
-      store.delete(Table::MlsStorage, &entry_key(key))?;
-    }
-    if changes.is_rewrite && changes.old_record != OldRecord::Marker {
-      // A store set up again (an old record of any version goes) or one that lost the marker.
-      store.put(Table::MlsStorage, LEGACY_KEY, MOVED_MARKER)?;
-    }
-    Ok(bytes)
+  let written = write_group(store, || -> Result<Written, CoreError> {
+    let maybe_tally = store.write_tally();
+    state.follow_disk(maybe_tally, store)?;
+    let changes = state.changes(&values, storage.take_changed_keys(), store)?;
+    let has_written = changes.is_rewrite || !changes.puts.is_empty() || !changes.deletes.is_empty();
+    let bytes = if has_written {
+      write_changes(store, &changes, &values)?
+    } else {
+      0
+    };
+    Ok(Written {
+      maybe_tally,
+      next_generation: if has_written {
+        changes.next_generation
+      } else {
+        state.generation
+      },
+      bytes,
+      has_written,
+    })
   });
   match written {
-    Ok(bytes) => {
-      state.saved(&changes, &values, store.write_tally());
-      state.written_bytes = state.written_bytes.saturating_add(bytes);
+    Ok(written) => {
+      state.saved(&written);
       drop(state);
-      // Replaced and deleted entries (old epoch secrets, spent key package private keys) sit in
-      // free pages and the write-ahead log until the store clears them (#417).
-      store.purge_freed_soon();
+      if written.has_written {
+        // Replaced and deleted entries (old epoch secrets, spent key package private keys) sit in
+        // free pages and the write-ahead log until the store clears them (#417).
+        store.purge_freed_soon();
+      }
       Ok(())
     },
     Err(error) => {
@@ -225,9 +269,8 @@ pub fn save_mls_storage(
 /// Nothing reaches the store until the next [`save_mls_storage`].
 pub fn adopt_mls_entries(staging: &OpenMlsRustCrypto, into: &OpenMlsRustCrypto) -> Result<(), CoreError> {
   let staged = staging.storage().values.read().map_err(|_| poisoned())?;
-  let mut values = into.storage().values.write().map_err(|_| poisoned())?;
   for (key, value) in staged.iter() {
-    values.insert(key.clone(), value.clone());
+    into.storage().set_value(key.clone(), value.clone());
   }
   Ok(())
 }
@@ -242,52 +285,103 @@ pub fn mls_storage_len(provider: &OpenMlsRustCrypto) -> usize {
   })
 }
 
-impl Saved {
-  /// A moved tally since the last save means the disk may hold something else: writes it lost,
-  /// or another process's commits.
-  fn note_tally(&mut self, maybe_now: Option<WriteTally>) {
-    if maybe_now != self.maybe_tally {
-      if self.maybe_tally.is_some() {
-        tracing::warn!(
-          "the local store lost writes or another process wrote; the MLS state is written in full"
-        );
+/// Whether the store still holds the one record of a version before 1.0.9 (or of one that wrote next
+/// to the entries). Moving it takes several times the state's size in memory at once: a process
+/// short of it (the iOS notification extension) leaves that to the app.
+pub fn has_unmoved_record(store: &impl LocalStore) -> Result<bool, CoreError> {
+  let maybe_record = store.get(Table::MlsStorage, LEGACY_KEY)?.map(Zeroizing::new);
+  Ok(maybe_record.is_some_and(|record| record.as_slice() != MOVED_MARKER))
+}
+
+/// Wipes the records set aside longer than `grace` ago: never read again, but holding old MLS
+/// secrets. A record's age counts from the first start that saw it. A wrong clock can only make
+/// that sooner or later, and nothing depends on these records.
+pub fn wipe_old_set_aside(store: &impl LocalStore, now_ms: i64, grace: Duration) -> Result<(), CoreError> {
+  let set_aside = store.list_prefix(Table::MlsStorage, SET_ASIDE_PREFIX)?;
+  if set_aside.is_empty() {
+    return Ok(());
+  }
+  let grace_ms = i64::try_from(grace.as_millis()).unwrap_or(i64::MAX);
+  let wiped = write_group(store, || -> Result<usize, CoreError> {
+    let mut wiped = 0;
+    for (key, value) in set_aside {
+      // The listing's copy holds the secrets too.
+      drop(Zeroizing::new(value));
+      let seen_key = format!("{SET_ASIDE_SEEN_PREFIX}{key}");
+      let maybe_seen_ms = store
+        .get(Table::MlsStorage, &seen_key)?
+        .and_then(|seen| Some(i64::from_be_bytes(<[u8; 8]>::try_from(seen.as_slice()).ok()?)));
+      match maybe_seen_ms {
+        Some(seen_ms) if now_ms.saturating_sub(seen_ms) >= grace_ms => {
+          store.delete(Table::MlsStorage, &key)?;
+          store.delete(Table::MlsStorage, &seen_key)?;
+          wiped += 1;
+        },
+        Some(_) => {},
+        None => store.put(Table::MlsStorage, &seen_key, &now_ms.to_be_bytes())?,
       }
+    }
+    Ok(wiped)
+  })?;
+  if wiped > 0 {
+    tracing::info!(wiped, "wiped MLS records set aside long ago");
+    store.purge_freed_soon();
+  }
+  Ok(())
+}
+
+impl Saved {
+  /// Inside the save's group, which holds the write lock. A lost write means the disk may hold
+  /// something else. Another process's commit only does if it moved the MLS state.
+  fn follow_disk(&mut self, maybe_now: Option<WriteTally>, store: &impl LocalStore) -> Result<(), CoreError> {
+    if maybe_now == self.maybe_tally {
+      return Ok(());
+    }
+    let is_mls_state_moved = match (self.maybe_tally, maybe_now) {
+      (Some(before), Some(now)) if before.lost == now.lost => {
+        stored_generation(store)? != Some(self.generation)
+      },
+      // A first look, from a saved state that knew nothing: a rewrite is due anyway.
+      (None, _) => false,
+      _ => true,
+    };
+    if is_mls_state_moved {
+      tracing::warn!("the local store lost writes or another process saved MLS state; written in full");
       self.is_rewrite_due = true;
     }
+    Ok(())
   }
 
-  /// The keys to write and to delete: what differs from the saved entries, or everything when a
+  /// The keys to write and to delete: what changed since the last save, or everything when a
   /// rewrite is due.
-  fn changes<'a>(&self, values: &'a StorageMap, store: &impl LocalStore) -> Result<Changes<'a>, CoreError> {
+  fn changes<'a>(
+    &self,
+    values: &'a StorageMap,
+    changed_keys: HashSet<Vec<u8>>,
+    store: &impl LocalStore,
+  ) -> Result<Changes<'a>, CoreError> {
     if !self.is_rewrite_due {
-      let puts = values
-        .iter()
-        .filter(|(key, value)| {
-          self
-            .entries
-            .get(key.as_slice())
-            .is_none_or(|saved| saved.as_slice() != value.as_slice())
-        })
-        .map(|(key, _)| key.as_slice())
-        .collect();
-      let deletes = self
-        .entries
-        .keys()
-        .filter(|key| !values.contains_key(key.as_slice()))
-        .cloned()
-        .collect();
+      let mut puts = Vec::with_capacity(changed_keys.len());
+      let mut deletes = Vec::new();
+      for key in changed_keys {
+        match values.get_key_value(&key) {
+          Some((key, _)) => puts.push(key.as_slice()),
+          None => deletes.push(key),
+        }
+      }
       return Ok(Changes {
         puts,
         deletes,
         is_rewrite: false,
         old_record: OldRecord::Marker,
+        next_generation: self.generation.saturating_add(1),
       });
     }
-    // Every key that may be on disk: what the store lists (the disk itself for SQLCipher), what
-    // this remembers, and deletes the disk lost (a sealed store's cache doesn't list those).
+    // Every key that may be on disk: what the store lists (the disk itself for SQLCipher, and a
+    // sealed store's cache followed the disk when this group began), and deletes the disk lost
+    // (which a sealed store's cache doesn't list).
     let listed = list_records(store)?;
-    let mut maybe_stored: BTreeSet<Vec<u8>> = self.entries.keys().cloned().collect();
-    maybe_stored.extend(listed.entries.into_keys());
+    let mut maybe_stored: BTreeSet<Vec<u8>> = listed.entries.into_keys().collect();
     maybe_stored.extend(
       store
         .lost_deletes(Table::MlsStorage)
@@ -299,6 +393,7 @@ impl Saved {
       Some(old) if old.as_slice() == MOVED_MARKER => OldRecord::Marker,
       Some(_) => OldRecord::Snapshot,
     };
+    let stored_generation = listed.maybe_generation.unwrap_or(0);
     Ok(Changes {
       puts: values.keys().map(Vec::as_slice).collect(),
       deletes: maybe_stored
@@ -307,24 +402,17 @@ impl Saved {
         .collect(),
       is_rewrite: true,
       old_record,
+      // Past whatever another process wrote, so it sees that this moved.
+      next_generation: self.generation.max(stored_generation).saturating_add(1),
     })
   }
 
   /// The save's group of writes went through; an outer group may still roll it back, which the
   /// store's tally tells the next save.
-  fn saved(&mut self, changes: &Changes<'_>, values: &StorageMap, maybe_tally: Option<WriteTally>) {
-    if changes.is_rewrite {
-      self.entries.clear();
-    }
-    for key in &changes.puts {
-      if let Some(value) = values.get(*key) {
-        self.entries.insert(key.to_vec(), Zeroizing::new(value.clone()));
-      }
-    }
-    for key in &changes.deletes {
-      self.entries.remove(key);
-    }
-    self.maybe_tally = maybe_tally;
+  fn saved(&mut self, written: &Written) {
+    self.maybe_tally = written.maybe_tally;
+    self.generation = written.next_generation;
+    self.written_bytes = self.written_bytes.saturating_add(written.bytes);
     self.is_rewrite_due = false;
   }
 
@@ -335,13 +423,44 @@ impl Saved {
   }
 }
 
-/// The MLS records of `store`: entries, the record under [`LEGACY_KEY`], and how many were set
-/// aside. Records of other kinds (a newer version's) are left alone.
+/// Writes `changes` and the next generation; returns the bytes of the entries written.
+fn write_changes(
+  store: &impl LocalStore,
+  changes: &Changes<'_>,
+  values: &StorageMap,
+) -> Result<u64, CoreError> {
+  let mut bytes = 0u64;
+  for key in &changes.puts {
+    let Some(value) = values.get(*key) else {
+      continue;
+    };
+    let record_key = entry_key(key);
+    store.put(Table::MlsStorage, &record_key, value)?;
+    bytes = bytes.saturating_add(u64::try_from(record_key.len() + value.len()).unwrap_or(u64::MAX));
+  }
+  for key in &changes.deletes {
+    store.delete(Table::MlsStorage, &entry_key(key))?;
+  }
+  if changes.is_rewrite && changes.old_record != OldRecord::Marker {
+    // A store set up again (an old record of any version goes) or one that lost the marker.
+    store.put(Table::MlsStorage, LEGACY_KEY, MOVED_MARKER)?;
+  }
+  store.put(
+    Table::MlsStorage,
+    GENERATION_KEY,
+    &changes.next_generation.to_be_bytes(),
+  )?;
+  Ok(bytes)
+}
+
+/// The MLS records of `store`: entries, the record under [`LEGACY_KEY`], how many were set aside and
+/// the generation. Records of other kinds (a newer version's) are left alone.
 fn list_records(store: &impl LocalStore) -> Result<Listed, CoreError> {
   let mut listed = Listed {
     entries: Entries::new(),
     maybe_old_record: None,
     set_aside: 0,
+    maybe_generation: None,
   };
   for (key, value) in store.list(Table::MlsStorage)? {
     let value = Zeroizing::new(value);
@@ -349,23 +468,39 @@ fn list_records(store: &impl LocalStore) -> Result<Listed, CoreError> {
       listed.maybe_old_record = Some(value);
     } else if let Some(storage_key) = parse_entry_key(&key) {
       listed.entries.insert(storage_key, value);
+    } else if key == GENERATION_KEY {
+      listed.maybe_generation = parse_generation(&value);
     } else if key.starts_with(SET_ASIDE_PREFIX) {
       listed.set_aside += 1;
-    } else {
+    } else if !key.starts_with(SET_ASIDE_SEEN_PREFIX) {
       tracing::warn!("skipping an MLS storage record of an unknown kind");
     }
   }
   Ok(listed)
 }
 
+/// [`GENERATION_KEY`] on disk (a store follows the disk when read inside a group of writes): 0 if a
+/// save of this version never wrote it, `None` if it isn't one.
+fn stored_generation(store: &impl LocalStore) -> Result<Option<u64>, CoreError> {
+  Ok(match store.get(Table::MlsStorage, GENERATION_KEY)? {
+    Some(value) => parse_generation(&value),
+    None => Some(0),
+  })
+}
+
+fn parse_generation(value: &[u8]) -> Option<u64> {
+  Some(u64::from_be_bytes(<[u8; 8]>::try_from(value).ok()?))
+}
+
 /// Moves the record of a version before 1.0.9 to entries (see the module docs) and returns them.
 /// One group of writes: the entries, then [`MOVED_MARKER`] in the old record's place.
-fn migrate(store: &impl LocalStore, legacy: &[u8]) -> Result<Entries, CoreError> {
+fn migrate(store: &impl LocalStore, legacy: &[u8], generation: u64) -> Result<Entries, CoreError> {
   let entries = decode_legacy(legacy)?;
   write_group(store, || -> Result<(), CoreError> {
     for (key, value) in &entries {
       store.put(Table::MlsStorage, &entry_key(key), value)?;
     }
+    store.put(Table::MlsStorage, GENERATION_KEY, &generation.to_be_bytes())?;
     // Last: until the entries are on disk, the old record is what a start reads.
     store.put(Table::MlsStorage, LEGACY_KEY, MOVED_MARKER)?;
     Ok(())
@@ -487,6 +622,7 @@ mod tests {
       store.list(Table::MlsStorage).unwrap(),
       [
         (entry_key(b"new"), b"z".to_vec()),
+        (GENERATION_KEY.to_string(), 1u64.to_be_bytes().to_vec()),
         (LEGACY_KEY.to_string(), MOVED_MARKER.to_vec())
       ]
     );
@@ -650,6 +786,19 @@ mod tests {
       assert_eq!(durable_entries(&restarted), entries_of(&provider));
     }
 
+    /// Issue #840: the extension leaves the move to the app, whatever it finds under the old key.
+    #[test]
+    fn an_unmoved_record_is_told_apart_from_the_marker() {
+      let store = MemoryStore::new();
+      assert!(!has_unmoved_record(&store).unwrap(), "a new store");
+      store
+        .put(Table::MlsStorage, LEGACY_KEY, &legacy(&[(b"a", b"1")]))
+        .unwrap();
+      assert!(has_unmoved_record(&store).unwrap());
+      load_mls_storage(&store).unwrap();
+      assert!(!has_unmoved_record(&store).unwrap(), "moved");
+    }
+
     #[test]
     fn a_damaged_old_record_is_an_error() {
       let store = MemoryStore::new();
@@ -657,6 +806,57 @@ mod tests {
         .put(Table::MlsStorage, LEGACY_KEY, &[0, 0, 0, 9, 1])
         .unwrap();
       assert!(matches!(load_mls_storage(&store), Err(CoreError::Corrupt(_))));
+    }
+  }
+
+  mod set_aside {
+    use super::*;
+
+    const GRACE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+    #[test]
+    fn a_record_set_aside_goes_after_the_grace_period_counted_from_when_it_was_first_seen() {
+      let store = MemoryStore::new();
+      store
+        .put(Table::MlsStorage, &entry_key(b"group"), b"epoch 7")
+        .unwrap();
+      store
+        .put(Table::MlsStorage, &set_aside_key(0), b"old secret")
+        .unwrap();
+
+      wipe_old_set_aside(&store, 100 * DAY_MS, GRACE).unwrap();
+      assert!(store.get(Table::MlsStorage, &set_aside_key(0)).unwrap().is_some());
+      wipe_old_set_aside(&store, 129 * DAY_MS, GRACE).unwrap();
+      assert!(store.get(Table::MlsStorage, &set_aside_key(0)).unwrap().is_some());
+
+      wipe_old_set_aside(&store, 130 * DAY_MS, GRACE).unwrap();
+      assert_eq!(
+        store.list(Table::MlsStorage).unwrap(),
+        [(entry_key(b"group"), b"epoch 7".to_vec())],
+        "the record and its note are gone, the entries stay"
+      );
+    }
+
+    #[test]
+    fn a_store_with_nothing_set_aside_is_not_written() {
+      let store = FlakyStore::default();
+      wipe_old_set_aside(&store, 0, GRACE).unwrap();
+      assert_eq!(store.groups(), 0);
+    }
+
+    /// The notes are not entries and not unknown records: a load neither reads nor counts them.
+    #[test]
+    fn a_load_is_not_confused_by_the_notes() {
+      let store = MemoryStore::new();
+      store.put(Table::MlsStorage, &entry_key(b"a"), b"1").unwrap();
+      store.put(Table::MlsStorage, &set_aside_key(0), b"old").unwrap();
+      wipe_old_set_aside(&store, 0, GRACE).unwrap();
+
+      let (provider, _) = load_mls_storage(&store).unwrap();
+      assert_eq!(entries_of(&provider), [entry(b"a", b"1")]);
+      let listed = list_records(&store).unwrap();
+      assert_eq!(listed.set_aside, 1);
     }
   }
 
@@ -734,6 +934,119 @@ mod tests {
 
       assert_eq!(store.take_counts(), (2, 0), "both entries written");
       assert_eq!(durable_entries(&store), entries_of(&provider));
+    }
+
+    /// Issue #840: the iOS notification extension commits its push bookkeeping on every run. That
+    /// leaves the MLS state alone, so the app's next save writes what changed, not all of it.
+    #[test]
+    fn another_process_committing_something_else_costs_no_rewrite() {
+      let store = FlakyStore::default();
+      let provider = provider_with(&[(b"a", b"1"), (b"b", b"2"), (b"c", b"3")]);
+      let saved = SavedMlsStorage::default();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+
+      store.commit_elsewhere();
+      set(&provider, b"a", Some(b"11"));
+      store.take_counts();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      assert_eq!(store.take_counts(), (1, 0), "only what changed");
+
+      // Without a change the commit is taken note of, and nothing is written.
+      store.commit_elsewhere();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      assert_eq!(store.take_counts(), (0, 0));
+    }
+
+    /// A store of the version before: no generation record yet, on load or after another process's
+    /// commit.
+    #[test]
+    fn a_store_without_a_generation_record_counts_as_generation_zero() {
+      let store = FlakyStore::default();
+      store.put(Table::MlsStorage, &entry_key(b"a"), b"1").unwrap();
+      store.put(Table::MlsStorage, LEGACY_KEY, MOVED_MARKER).unwrap();
+      let (provider, saved) = load_mls_storage(&store).unwrap();
+
+      store.commit_elsewhere();
+      set(&provider, b"b", Some(b"2"));
+      store.take_counts();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      assert_eq!(store.take_counts(), (1, 0));
+      assert_eq!(
+        store.durable.get(Table::MlsStorage, GENERATION_KEY).unwrap(),
+        Some(1u64.to_be_bytes().to_vec())
+      );
+    }
+
+    /// A generation record that isn't one says nothing: everything is written again.
+    #[test]
+    fn a_damaged_generation_record_makes_the_next_save_write_everything() {
+      let store = FlakyStore::default();
+      let provider = provider_with(&[(b"a", b"1"), (b"b", b"2")]);
+      let saved = SavedMlsStorage::default();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+
+      store
+        .cache
+        .put(Table::MlsStorage, GENERATION_KEY, b"junk")
+        .unwrap();
+      store.commit_elsewhere();
+      store.take_counts();
+      set(&provider, b"a", Some(b"11"));
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      assert_eq!(store.take_counts(), (2, 0));
+    }
+
+    /// Issue #424 review: a commit of another process while the save waited for the write lock. The
+    /// tally read before the group, compared after it, took the commit for the baseline: its
+    /// entries stayed next to ours.
+    #[test]
+    fn another_process_saving_while_the_save_waits_for_the_lock_is_seen() {
+      let store = FlakyStore::default();
+      let provider = provider_with(&[(b"X/context", b"epoch 1"), (b"X/secrets", b"epoch 1")]);
+      let saved = SavedMlsStorage::default();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+
+      store.write_elsewhere_during_next_lock(b"X/context", b"epoch 2");
+      set(&provider, b"X/secrets", Some(b"epoch 1, one message later"));
+      save_mls_storage(&store, &provider, &saved).unwrap();
+
+      assert_eq!(durable_entries(&store), entries_of(&provider), "no mix of epochs");
+    }
+
+    /// Issue #424 review, the tally race: a commit of another process right after this save's
+    /// commit, before the tally was read again, became the baseline without a rewrite.
+    #[test]
+    fn another_process_saving_right_after_the_commit_is_seen_by_the_next_save() {
+      let store = FlakyStore::default();
+      let provider = provider_with(&[(b"X/context", b"epoch 1"), (b"X/secrets", b"epoch 1")]);
+      let saved = SavedMlsStorage::default();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+
+      store.write_elsewhere_after_next_commit(b"X/context", b"epoch 2");
+      set(&provider, b"X/secrets", Some(b"epoch 1, one message later"));
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      assert_eq!(durable_entries(&store)[0], entry(b"X/context", b"epoch 2"));
+
+      set(&provider, b"X/secrets", Some(b"epoch 1, two messages later"));
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      assert_eq!(durable_entries(&store), entries_of(&provider), "no mix of epochs");
+    }
+
+    /// Issue #424 review: the saved state kept the old secrets after a failed save. It holds no
+    /// values at all now; the next save still writes everything, the failed save's changes included.
+    #[test]
+    fn a_failed_save_leaves_nothing_of_the_state_behind_and_the_next_one_writes_it() {
+      let store = FlakyStore::default();
+      let provider = provider_with(&[(b"a", b"old secret")]);
+      let saved = SavedMlsStorage::default();
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      set(&provider, b"a", Some(b"new secret"));
+      store.fail_next_group();
+      assert!(save_mls_storage(&store, &provider, &saved).is_err());
+
+      assert!(!provider.storage().has_changed_keys(), "taken by the failed save");
+      save_mls_storage(&store, &provider, &saved).unwrap();
+      assert_eq!(durable_entries(&store), [entry(b"a", b"new secret")]);
     }
 
     /// A save whose own group failed: unknown what reached the store, so the next one writes all.
@@ -833,11 +1146,10 @@ mod tests {
   }
 
   fn set(provider: &OpenMlsRustCrypto, key: &[u8], maybe_value: Option<&[u8]>) {
-    let mut values = provider.storage().values.write().unwrap();
     match maybe_value {
-      Some(value) => values.insert(key.to_vec(), value.to_vec()),
-      None => values.remove(key),
-    };
+      Some(value) => provider.storage().set_value(key.to_vec(), value.to_vec()),
+      None => provider.storage().remove_value(key),
+    }
   }
 
   fn entries_of(provider: &OpenMlsRustCrypto) -> Vec<Entry> {
@@ -902,6 +1214,10 @@ mod tests {
     puts: usize,
     deletes: usize,
     marker_writes: usize,
+    /// Another process's save the next group meets while it waits for the write lock.
+    maybe_write_at_lock: Option<Entry>,
+    /// Another process's save right after the next group's commit.
+    maybe_write_after_commit: Option<Entry>,
   }
 
   impl FlakyStore {
@@ -919,13 +1235,39 @@ mod tests {
       self.state.lock().unwrap().is_next_group_failing = true;
     }
 
-    /// Another process commits an entry: on the disk, not in this store's cache.
+    /// Another process saves an entry, as a save does: on the disk, not in this store's cache, and
+    /// past the generation (which the store reads from the disk once it saw the commit).
     fn write_elsewhere(&self, storage_key: &[u8], value: &[u8]) {
       self
         .durable
         .put(Table::MlsStorage, &entry_key(storage_key), value)
         .unwrap();
+      let generation = self
+        .durable
+        .get(Table::MlsStorage, GENERATION_KEY)
+        .unwrap()
+        .and_then(|value| parse_generation(&value))
+        .unwrap_or(0)
+        + 1;
+      for store in [&self.durable, &self.cache] {
+        store
+          .put(Table::MlsStorage, GENERATION_KEY, &generation.to_be_bytes())
+          .unwrap();
+      }
       self.state.lock().unwrap().tally.foreign += 1;
+    }
+
+    /// Another process commits something other than MLS state.
+    fn commit_elsewhere(&self) {
+      self.state.lock().unwrap().tally.foreign += 1;
+    }
+
+    fn write_elsewhere_during_next_lock(&self, storage_key: &[u8], value: &[u8]) {
+      self.state.lock().unwrap().maybe_write_at_lock = Some((storage_key.to_vec(), value.to_vec()));
+    }
+
+    fn write_elsewhere_after_next_commit(&self, storage_key: &[u8], value: &[u8]) {
+      self.state.lock().unwrap().maybe_write_after_commit = Some((storage_key.to_vec(), value.to_vec()));
     }
 
     /// Puts and deletes of MLS entries since the last call.
@@ -1058,7 +1400,16 @@ mod tests {
     }
 
     fn begin_writes(&self) -> Result<(), StoreError> {
-      self.state.lock().unwrap().depth += 1;
+      let maybe_elsewhere = {
+        let mut state = self.state.lock().unwrap();
+        state.depth += 1;
+        (state.depth == 1)
+          .then(|| state.maybe_write_at_lock.take())
+          .flatten()
+      };
+      if let Some((key, value)) = maybe_elsewhere {
+        self.write_elsewhere(&key, &value);
+      }
       Ok(())
     }
 
@@ -1088,6 +1439,11 @@ mod tests {
       for write in &group {
         state.lost_deletes.remove(&write.0);
         apply(&self.durable, write)?;
+      }
+      let maybe_elsewhere = state.maybe_write_after_commit.take();
+      drop(state);
+      if let Some((key, value)) = maybe_elsewhere {
+        self.write_elsewhere(&key, &value);
       }
       Ok(())
     }

@@ -348,11 +348,12 @@ mod kill_points {
   }
 
   fn set_entry(provider: &OpenMlsRustCrypto, key: &str, maybe_value: Option<&str>) {
-    let mut values = provider.storage().values.write().unwrap();
     match maybe_value {
-      Some(value) => values.insert(key.as_bytes().to_vec(), value.as_bytes().to_vec()),
-      None => values.remove(key.as_bytes()),
-    };
+      Some(value) => provider
+        .storage()
+        .set_value(key.as_bytes().to_vec(), value.as_bytes().to_vec()),
+      None => provider.storage().remove_value(key.as_bytes()),
+    }
   }
 
   fn entries(provider: &OpenMlsRustCrypto) -> Vec<(Vec<u8>, Vec<u8>)> {

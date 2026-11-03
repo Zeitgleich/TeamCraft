@@ -494,6 +494,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     ended
   }
 
+  fn fail_writes(&self) {
+    self.inner.fail_writes();
+  }
+
   fn write_soon(&self) {
     self.inner.write_soon();
   }

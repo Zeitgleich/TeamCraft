@@ -418,6 +418,23 @@ pub(crate) mod tests {
     assert_eq!(version(&connection), 3);
   }
 
+  /// Outside a group a failed write is lost by itself; inside one it counts once, when the group
+  /// is rolled back.
+  #[test]
+  fn a_failed_write_counts_as_lost_outside_a_group_and_with_its_group_inside_one() {
+    let connection = Connection::open_in_memory().unwrap();
+    let mut group = WriteGroup::default();
+    group.note_failure();
+    assert_eq!(group.tally(&connection).lost, 1);
+
+    group.begin(&connection).unwrap();
+    group.note_failure();
+    group.note_failure();
+    assert_eq!(group.tally(&connection).lost, 1, "the group hasn't ended");
+    assert!(group.end(&connection).is_err());
+    assert_eq!(group.tally(&connection).lost, 2);
+  }
+
   /// Another connection's commit shows in the tally; this connection's own don't.
   #[test]
   fn commits_of_another_connection_are_counted() {

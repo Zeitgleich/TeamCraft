@@ -23,6 +23,10 @@ pub enum CoreError {
   SettingsTooLarge { keys: Vec<String> },
   #[error("local store: {0}")]
   Store(#[from] StoreError),
+  /// The store holds the MLS record of a version before 1.0.9, and this process leaves moving it to
+  /// the app ([`crate::client::ClientSettings::leaves_mls_upkeep_to_app`]).
+  #[error("the app hasn't moved the MLS state of an older version yet")]
+  MlsStateNotMoved,
   #[error("server: {0}")]
   Api(#[from] ApiError),
   #[error("push gateway: {0}")]

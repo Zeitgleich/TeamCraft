@@ -62,8 +62,128 @@ mod catch_up {
   }
 }
 
+/// The first save after another process committed something other than MLS state (the iOS
+/// notification extension's push bookkeeping, on every app resume).
+#[cfg(feature = "sealed-sqlite")]
+mod resume {
+  use openmls_rust_crypto::OpenMlsRustCrypto;
+  use openmls_traits::OpenMlsProvider as _;
+  use rand_core::OsRng;
+  use teamcraft_core::mls_storage::{SavedMlsStorage, load_mls_storage, save_mls_storage};
+  use teamcraft_core::store::{SealedSqliteStore, StaticKeySource};
+  use teamcraft_crypto::secret::SymmetricKey;
+
+  use super::*;
+
+  const GROUPS: usize = 300;
+  /// About 9 KB per group in a dozen entries, the tree the largest (as measured).
+  const ENTRY_SIZES: [usize; 12] = [3_000, 2_000, 1_000, 800, 600, 500, 400, 300, 200, 100, 50, 50];
+
+  /// The numbers of docs/performance.md:
+  /// `cargo test -p teamcraft-core --all-features --test suite -- --ignored --nocapture measure_save_after`
+  #[test]
+  #[ignore = "measurement; prints what the first save after another process's commit writes"]
+  fn measure_save_after_another_process_committed() {
+    let directory = std::env::temp_dir().join(format!("teamcraft-mls-resume-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let app_store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+    let provider = OpenMlsRustCrypto::default();
+    for group in 0..GROUPS {
+      for (entry, size) in ENTRY_SIZES.into_iter().enumerate() {
+        set_entry(&provider, format!("{entry}/{group}").as_bytes(), &vec![7; size]);
+      }
+    }
+    save_mls_storage(&app_store, &provider, &SavedMlsStorage::default()).unwrap();
+    drop(provider);
+    let (provider, saved) = load_mls_storage(&app_store).unwrap();
+
+    let extension = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    extension.put(Table::Users, "pushed", b"bookkeeping").unwrap();
+    drop(extension);
+
+    set_entry(&provider, b"0/0", b"one message later");
+    let started = std::time::Instant::now();
+    save_mls_storage(&app_store, &provider, &saved).unwrap();
+    println!(
+      "first save after another process's commit: {} bytes written in {:?}",
+      saved.written_bytes(),
+      started.elapsed()
+    );
+    drop(app_store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  fn set_entry(provider: &OpenMlsRustCrypto, key: &[u8], value: &[u8]) {
+    provider.storage().set_value(key.to_vec(), value.to_vec());
+  }
+}
+
 mod groups {
   use super::*;
+
+  /// The provider storage notes the keys it changes (crates/vendor/openmls_memory_storage), and a
+  /// save writes those. Through everything real MLS operations do to it, what a start would load is
+  /// what the running client holds: a key the storage failed to note would differ here.
+  #[tokio::test]
+  async fn what_was_saved_is_what_the_provider_holds_after_real_operations() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let dave = Peer::enroll(&server, "Dave").await;
+    let (mut carol, store) = enroll_on_counting_store(&server, "Carol").await;
+    assert_saved(&carol, &store, "enrolled");
+
+    let space = alice.space().await;
+    let joined = alice.client.create_channel(space, "joined").await.unwrap();
+    alice.client.add_member(joined, carol.user_id()).await.unwrap();
+    let left = alice.client.create_channel(space, "left").await.unwrap();
+    alice.client.add_member(left, carol.user_id()).await.unwrap();
+    carol.full_sync().await.unwrap();
+    assert_saved(&carol, &store, "joined by welcome");
+
+    alice.client.send_text(joined, None, "hello").await.unwrap();
+    carol.full_sync().await.unwrap();
+    assert_saved(&carol, &store, "received a message");
+
+    carol.send_text(joined, None, "hello back").await.unwrap();
+    assert_saved(&carol, &store, "sent a message");
+
+    alice
+      .client
+      .add_member(joined, dave.client.user_id())
+      .await
+      .unwrap();
+    carol.full_sync().await.unwrap();
+    assert_saved(&carol, &store, "processed another's commit");
+
+    let own = carol.create_channel(space, "own").await.unwrap();
+    assert_saved(&carol, &store, "founded a group");
+    carol.add_member(own, dave.client.user_id()).await.unwrap();
+    assert_saved(&carol, &store, "made a commit");
+
+    alice.client.remove_member(left, carol.user_id()).await.unwrap();
+    carol.full_sync().await.unwrap();
+    assert_saved(&carol, &store, "removed from a group");
+  }
+
+  #[track_caller]
+  fn assert_saved(client: &Client<FakeServerApi, Arc<CountingStore>>, store: &CountingStore, step: &str) {
+    use openmls_traits::OpenMlsProvider as _;
+
+    let (loaded, _) = teamcraft_core::mls_storage::load_mls_storage(store).unwrap();
+    let saved = loaded.storage().values.read().unwrap();
+    let held = client.mls_provider().storage().values.read().unwrap();
+    assert_eq!(saved.len(), held.len(), "number of entries, {step}");
+    for (key, value) in held.iter() {
+      assert_eq!(
+        saved.get(key),
+        Some(value),
+        "{step}: {}",
+        String::from_utf8_lossy(key)
+      );
+    }
+  }
 
   /// A commit in one channel writes records of that channel's group, none of another's.
   #[tokio::test]
@@ -137,6 +257,36 @@ mod groups {
   }
 }
 
+mod opening {
+  use super::*;
+
+  /// Issue #840: the iOS notification extension opens the client on every push. Opening commits
+  /// nothing when nothing changed, so the commit of its push bookkeeping is the only one.
+  #[tokio::test]
+  async fn opening_the_client_again_writes_nothing() {
+    let server = FakeServer::new();
+    let api = server.add_user("Carol");
+    let store = Arc::new(CountingStore::default());
+    let carol = PendingEnrollment::new()
+      .complete(
+        api.clone(),
+        store.clone(),
+        common::clock(),
+        common::settings(),
+        common::options(PASSPHRASE),
+      )
+      .await
+      .unwrap();
+    drop(carol);
+    drop(Client::open(api.clone(), store.clone(), common::clock(), common::settings()).unwrap());
+
+    store.reset_counts();
+    drop(Client::open(api, store.clone(), common::clock(), common::settings()).unwrap());
+
+    assert_eq!(store.writes(), 0, "{:?}", store.written_tables());
+  }
+}
+
 mod migration {
   use super::*;
 
@@ -159,7 +309,7 @@ mod migration {
       .unwrap();
     alice.client.send_text(channel, None, "before").await.unwrap();
     settle(&mut [&mut alice, &mut bob]).await;
-    let entries = bob.store.list(Table::MlsStorage).unwrap();
+    let entries = entry_records(&bob.store);
     let (store, api) = (bob.store.clone(), bob.api.clone());
     drop(bob);
     store_as_before_v1_0_9(&store);
@@ -167,11 +317,7 @@ mod migration {
     let mut client = Client::open(api.clone(), store.clone(), common::clock(), common::settings())
       .unwrap()
       .unwrap();
-    assert_eq!(
-      store.list(Table::MlsStorage).unwrap(),
-      entries,
-      "moved back to entries"
-    );
+    assert_eq!(entry_records(&store), entries, "moved back to entries");
     let (gateway, _) = client.connect_gateway().await.unwrap();
     let mut bob = Peer {
       name: "Bob".into(),
@@ -190,6 +336,55 @@ mod migration {
 
   /// Rewrites the MLS records as versions before 1.0.9 kept them: one record of length-prefixed
   /// storage keys and values.
+  /// Issue #840: moving the record takes several times the state in memory, which the iOS
+  /// notification extension doesn't have, and it would keep the app out of the store meanwhile. The
+  /// process short of memory doesn't open and leaves everything as it found it; the app moves it.
+  #[tokio::test]
+  async fn a_process_short_of_memory_leaves_the_move_to_the_app() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let channel = alice
+      .client
+      .create_channel(alice.space().await, "general")
+      .await
+      .unwrap();
+    alice
+      .client
+      .add_member(channel, bob.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let entries = entry_records(&bob.store);
+    let (store, api) = (bob.store.clone(), bob.api.clone());
+    drop(bob);
+    store_as_before_v1_0_9(&store);
+    let unmoved = store.list(Table::MlsStorage).unwrap();
+
+    let short_of_memory = teamcraft_core::ClientSettings {
+      leaves_mls_upkeep_to_app: true,
+      ..common::settings()
+    };
+    let refused = Client::open(api.clone(), store.clone(), common::clock(), short_of_memory);
+    assert!(matches!(
+      refused,
+      Err(teamcraft_core::CoreError::MlsStateNotMoved)
+    ));
+    assert_eq!(store.list(Table::MlsStorage).unwrap(), unmoved, "not touched");
+
+    Client::open(api, store.clone(), common::clock(), common::settings())
+      .unwrap()
+      .unwrap();
+    assert_eq!(entry_records(&store), entries, "the app moved it");
+  }
+
+  /// The entry records of the MLS table, without what a save writes besides them.
+  fn entry_records(store: &MemoryStore) -> Vec<(String, Vec<u8>)> {
+    let mut records = store.list(Table::MlsStorage).unwrap();
+    records.retain(|(key, _)| key.starts_with("entry/"));
+    records
+  }
+
   fn store_as_before_v1_0_9(store: &MemoryStore) {
     let mut legacy = Vec::new();
     for (key, value) in store.list(Table::MlsStorage).unwrap() {
@@ -338,8 +533,10 @@ struct CountingStore {
   inner: Box<dyn LocalStore + Send + Sync>,
   mls_puts: AtomicUsize,
   mls_bytes: AtomicUsize,
-  /// Keys of the MLS records written or deleted.
+  /// Keys of the MLS entries written or deleted.
   mls_keys: Mutex<Vec<String>>,
+  /// Tables and keys of every write.
+  writes: Mutex<Vec<String>>,
 }
 
 impl Default for CountingStore {
@@ -355,10 +552,31 @@ impl CountingStore {
       mls_puts: AtomicUsize::default(),
       mls_bytes: AtomicUsize::default(),
       mls_keys: Mutex::default(),
+      writes: Mutex::default(),
+    }
+  }
+
+  fn writes(&self) -> usize {
+    self.writes.lock().unwrap().len()
+  }
+
+  fn written_tables(&self) -> Vec<String> {
+    self.writes.lock().unwrap().clone()
+  }
+
+  fn note_write(&self, table: Table, key: &str) {
+    self
+      .writes
+      .lock()
+      .unwrap()
+      .push(format!("{}/{key}", table.name()));
+    if table == Table::MlsStorage && key.starts_with("entry/") {
+      self.mls_keys.lock().unwrap().push(key.to_string());
     }
   }
 
   fn reset_counts(&self) {
+    self.writes.lock().unwrap().clear();
     self.mls_puts.store(0, Ordering::Relaxed);
     self.mls_bytes.store(0, Ordering::Relaxed);
     self.mls_keys.lock().unwrap().clear();
@@ -380,15 +598,13 @@ impl LocalStore for CountingStore {
       self
         .mls_bytes
         .fetch_add(key.len() + value.len(), Ordering::Relaxed);
-      self.mls_keys.lock().unwrap().push(key.to_string());
     }
+    self.note_write(table, key);
     self.inner.put(table, key, value)
   }
 
   fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
-    if table == Table::MlsStorage {
-      self.mls_keys.lock().unwrap().push(key.to_string());
-    }
+    self.note_write(table, key);
     self.inner.delete(table, key)
   }
 

@@ -99,6 +99,8 @@ pub(crate) type Store = TrackedStore<Arc<SealedSqliteStore>>;
 pub(crate) type CoreClient = Client<Api, Store>;
 
 pub(crate) struct Engine {
+  /// A process short of memory (the iOS notification extension): the client leaves upkeep to the app.
+  is_memory_constrained: bool,
   pub(crate) server_url: String,
   /// Where downloaded files are decrypted to (inside the app's private storage).
   download_dir: PathBuf,
@@ -521,6 +523,7 @@ impl Engine {
     .map_err(OpenError::Failed)?;
     let tokens = ForeignTokens::new(tokens).map_err(OpenError::Failed)?;
     let mut engine = Self {
+      is_memory_constrained,
       server_url,
       maybe_push_gateway_url,
       download_dir,
@@ -1511,6 +1514,7 @@ impl Engine {
       maybe_upload_staging_dir: Some(self.upload_staging_dir.clone()),
       creates_notes_to_self: true,
       history_backfill: HistoryBackfill::KEEP_RECENT,
+      leaves_mls_upkeep_to_app: self.is_memory_constrained,
       ..ClientSettings::default()
     }
   }

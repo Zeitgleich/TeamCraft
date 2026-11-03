@@ -824,6 +824,10 @@ impl LocalStore for SqlCipherStore {
     Ok(())
   }
 
+  fn fail_writes(&self) {
+    self.lock().group.note_failure();
+  }
+
   /// Writes the log back into the database (whose freed pages `secure_delete` zeroes) and
   /// truncates it, so no old page version stays in the log file. Inside a group of writes it waits
   /// for the group's commit: a checkpoint before would write half of the group to the database.
@@ -1193,6 +1197,28 @@ mod tests {
   }
 
   #[test]
+  fn a_panic_undoes_its_group() {
+    let store =
+      SqlCipherStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    crate::store::tests::a_panic_undoes_its_group(&store);
+  }
+
+  /// A write outside a group that fails is lost: the MLS state would be written again. MLS saves
+  /// always run in a group, so this is the rule for everybody else.
+  #[test]
+  fn a_failed_write_outside_a_group_counts_as_lost() {
+    let store =
+      SqlCipherStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    store
+      .lock()
+      .connection
+      .execute_batch("ALTER TABLE kv RENAME TO kv_gone")
+      .unwrap();
+    assert!(store.put(Table::SyncState, "sync", b"cursor").is_err());
+    assert_eq!(store.write_tally(), Some(WriteTally { lost: 1, foreign: 0 }));
+  }
+
+  #[test]
   fn a_failed_write_undoes_its_group() {
     let store =
       SqlCipherStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
@@ -1329,12 +1355,9 @@ mod tests {
     let path = directory.join("store.db");
     let key = SymmetricKey::generate(&mut OsRng);
     let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
-    let set = |key: &[u8], maybe_value: Option<&[u8]>| {
-      let mut values = provider.storage().values.write().unwrap();
-      match maybe_value {
-        Some(value) => values.insert(key.to_vec(), value.to_vec()),
-        None => values.remove(key),
-      };
+    let set = |key: &[u8], maybe_value: Option<&[u8]>| match maybe_value {
+      Some(value) => provider.storage().set_value(key.to_vec(), value.to_vec()),
+      None => provider.storage().remove_value(key),
     };
     {
       let store = SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();

@@ -949,6 +949,11 @@ pub trait LocalStore {
     Ok(())
   }
 
+  /// Makes the open group fail when it ends, as a failed write of the group would: a step of it
+  /// panicked, and what it wrote so far must not reach the disk. Stores that can't undo a group keep
+  /// the default. Only inside a group.
+  fn fail_writes(&self) {}
+
   /// Starts writing what is queued now instead of after a batching delay, without waiting for it:
   /// for a write another device relies on next (the secrets of a link, issue #168). Stores that
   /// write at once keep the default.
@@ -957,7 +962,8 @@ pub trait LocalStore {
   /// What the disk may hold other than what this store accepted, counted since it was opened, for
   /// a caller that remembers what it wrote instead of reading it back (the MLS state,
   /// `mls_storage`): writes the disk lost, and commits of another connection to the same database.
-  /// Once a count moved, that caller writes everything again. `None` for a store that keeps every
+  /// Once `lost` moved, that caller writes everything again; `foreign` makes it look whether its
+  /// records moved (and a sealed store drop its caches). `None` for a store that keeps every
   /// write it accepted and has no other writer (in memory; the browser's, which writes a failed
   /// one again until it goes through and is owned by one tab).
   fn write_tally(&self) -> Option<WriteTally> {
@@ -985,15 +991,28 @@ pub struct WriteTally {
 }
 
 /// Runs `writes` as one group of writes ([`LocalStore::begin_writes`]). An error of `writes` doesn't
-/// undo what it wrote before; only a crash or a failed write of the group does.
+/// undo what it wrote before; only a crash, a failed write of the group or a panic does.
 pub fn write_group<S, T, E>(store: &S, writes: impl FnOnce() -> Result<T, E>) -> Result<T, E>
 where
   S: LocalStore + ?Sized,
   E: From<StoreError>,
 {
   store.begin_writes()?;
-  // A panic must not leave the group open: nothing would ever be committed again.
   let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(writes));
+  end_group(store, result)
+}
+
+/// Ends a group of writes after its steps ran under `catch_unwind`. A panic must not leave the group
+/// open, where nothing would ever be committed again, and must not commit what it wrote so far: half
+/// a save of the MLS state, or one without its cursor, which the reopened client would then read.
+pub(crate) fn end_group<S, T, E>(store: &S, result: std::thread::Result<Result<T, E>>) -> Result<T, E>
+where
+  S: LocalStore + ?Sized,
+  E: From<StoreError>,
+{
+  if result.is_err() {
+    store.fail_writes();
+  }
   let ended = store.end_writes();
   match result {
     Ok(result) => {
@@ -1178,6 +1197,10 @@ macro_rules! forward_local_store {
 
       fn end_writes(&self) -> Result<(), StoreError> {
         (**self).end_writes()
+      }
+
+      fn fail_writes(&self) {
+        (**self).fail_writes()
       }
 
       fn write_soon(&self) {
@@ -1890,6 +1913,36 @@ pub(crate) mod tests {
     MessageContent::File {
       attachment: serde_json::from_value(attachment).unwrap(),
     }
+  }
+
+  /// Issue #840: what a group wrote before a panic stays out, the panic counts as lost writes, and
+  /// the store goes on. A store that can undo a group calls this ([`exercise_store`] also runs on
+  /// the one in memory, which can't).
+  #[cfg(all(
+    not(target_arch = "wasm32"),
+    any(feature = "sqlcipher", feature = "sealed-sqlite")
+  ))]
+  pub(crate) fn a_panic_undoes_its_group(store: &impl LocalStore) {
+    store.put(Table::Spaces, "before", b"1").unwrap();
+    let lost_before = store.write_tally().unwrap().lost;
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      write_group(store, || -> Result<(), StoreError> {
+        store.put(Table::Spaces, "half", b"2")?;
+        write_group(store, || -> Result<(), StoreError> {
+          store.put(Table::Spaces, "inner", b"3")?;
+          panic!("made to panic inside a group of writes");
+        })
+      })
+    }));
+
+    assert!(panicked.is_err(), "the panic goes on");
+    assert_eq!(store.get(Table::Spaces, "half").unwrap(), None);
+    assert_eq!(store.get(Table::Spaces, "inner").unwrap(), None);
+    assert_eq!(store.get(Table::Spaces, "before").unwrap(), Some(b"1".to_vec()));
+    assert_eq!(store.write_tally().unwrap().lost, lost_before + 1);
+    write_group(store, || store.put(Table::Spaces, "after", b"4")).unwrap();
+    assert_eq!(store.get(Table::Spaces, "after").unwrap(), Some(b"4".to_vec()));
   }
 
   fn groups_of_writes_nest_and_are_read_at_once(store: &impl LocalStore) {

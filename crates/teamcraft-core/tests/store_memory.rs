@@ -173,6 +173,54 @@ async fn a_large_store_opens_and_shows_a_notification_within_budget() {
   settle(&mut [&mut alice, &mut bob]).await;
 }
 
+/// What loading the MLS state costs in the extension's store, with the state of 300 groups
+/// (2.7 MB in 3,600 entries; docs/performance.md, "The MLS state per entry"):
+/// `cargo test -p teamcraft-core --all-features --test store_memory -- --ignored --nocapture measure_mls`
+#[test]
+#[ignore = "measurement; prints the memory of loading the MLS state"]
+fn measure_mls_state_memory() {
+  use openmls_traits::OpenMlsProvider as _;
+  use teamcraft_core::mls_storage;
+
+  const GROUPS: usize = 300;
+  // About 9 KB per group in a dozen entries, the tree the largest (as measured).
+  const ENTRY_SIZES: [usize; 12] = [3_000, 2_000, 1_000, 800, 600, 500, 400, 300, 200, 100, 50, 50];
+
+  let directory = std::env::temp_dir().join(format!("teamcraft-mls-memory-{}", std::process::id()));
+  std::fs::create_dir_all(&directory).unwrap();
+  let path = directory.join("store.db");
+  let key = SymmetricKey::generate(&mut OsRng);
+  let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
+  {
+    let mut values = provider.storage().values.write().unwrap();
+    for group in 0..GROUPS {
+      for (entry, size) in ENTRY_SIZES.into_iter().enumerate() {
+        values.insert(format!("{entry}/{group}").into_bytes(), vec![7; size]);
+      }
+    }
+  }
+  let state_bytes = mls_storage::mls_storage_len(&provider);
+  {
+    let store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+    mls_storage::save_mls_storage(&store, &provider, &mls_storage::SavedMlsStorage::default()).unwrap();
+  }
+  drop(provider);
+
+  let store =
+    SealedSqliteStore::open_without_building(&path, &StaticKeySource::new(key), SealedStoreLimits::minimal())
+      .unwrap();
+  let before = ALLOCATOR.current_usage();
+  ALLOCATOR.reset_peak_usage();
+  let (loaded, saved) = mls_storage::load_mls_storage(&store).unwrap();
+  let load_peak = ALLOCATOR.peak_usage().saturating_sub(before);
+  let kept = ALLOCATOR.current_usage().saturating_sub(before);
+  println!(
+    "state {state_bytes} bytes: loading peaks at {load_peak} bytes above the open store, keeps {kept}"
+  );
+  drop((loaded, saved, store));
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;

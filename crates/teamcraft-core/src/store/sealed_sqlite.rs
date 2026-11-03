@@ -713,12 +713,9 @@ mod tests {
     let path = directory.join("store.db");
     let key = SymmetricKey::generate(&mut OsRng);
     let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
-    let set = |key: &[u8], maybe_value: Option<&[u8]>| {
-      let mut values = provider.storage().values.write().unwrap();
-      match maybe_value {
-        Some(value) => values.insert(key.to_vec(), value.to_vec()),
-        None => values.remove(key),
-      };
+    let set = |key: &[u8], maybe_value: Option<&[u8]>| match maybe_value {
+      Some(value) => provider.storage().set_value(key.to_vec(), value.to_vec()),
+      None => provider.storage().remove_value(key),
     };
     {
       let store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
@@ -771,11 +768,10 @@ mod tests {
     let path = directory.join("store.db");
     let key = SymmetricKey::generate(&mut OsRng);
     let set = |provider: &openmls_rust_crypto::OpenMlsRustCrypto, key: &[u8], maybe_value: Option<&[u8]>| {
-      let mut values = provider.storage().values.write().unwrap();
       match maybe_value {
-        Some(value) => values.insert(key.to_vec(), value.to_vec()),
-        None => values.remove(key),
-      };
+        Some(value) => provider.storage().set_value(key.to_vec(), value.to_vec()),
+        None => provider.storage().remove_value(key),
+      }
     };
     let expected;
     {
@@ -828,12 +824,7 @@ mod tests {
     let path = directory.join("store.db");
     let key = SymmetricKey::generate(&mut OsRng);
     let set = |provider: &openmls_rust_crypto::OpenMlsRustCrypto, key: &[u8], value: &[u8]| {
-      provider
-        .storage()
-        .values
-        .write()
-        .unwrap()
-        .insert(key.to_vec(), value.to_vec());
+      provider.storage().set_value(key.to_vec(), value.to_vec());
     };
     {
       let first = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
@@ -868,6 +859,91 @@ mod tests {
       (b"epoch 1".as_slice(), b"epoch 1, one message later".as_slice()),
       "one writer's whole state, not mixed epochs"
     );
+  }
+
+  /// Issue #840: another process's commit of other records (the iOS notification extension's push
+  /// bookkeeping, on every app resume) leaves the MLS state alone: the app's next save writes what
+  /// changed, not the whole state again.
+  #[test]
+  fn another_process_committing_other_records_costs_no_rewrite_of_the_mls_state() {
+    use openmls_traits::OpenMlsProvider as _;
+
+    use crate::mls_storage::{SavedMlsStorage, load_mls_storage, save_mls_storage};
+
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let app_store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+    let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
+    for entry in 0..50u8 {
+      provider.storage().set_value(vec![entry], vec![entry; 1_000]);
+    }
+    save_mls_storage(&app_store, &provider, &SavedMlsStorage::default()).unwrap();
+    drop(provider);
+    let (provider, saved) = load_mls_storage(&app_store).unwrap();
+
+    let extension = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    extension.put(Table::Users, "pushed", b"bookkeeping").unwrap();
+    drop(extension);
+    provider.storage().set_value(vec![0], vec![1; 1_000]);
+    save_mls_storage(&app_store, &provider, &saved).unwrap();
+
+    assert!(
+      saved.written_bytes() < 2_000,
+      "{} bytes written for one changed entry",
+      saved.written_bytes()
+    );
+    drop(app_store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Issue #424 review: a rewrite after another writer's save also goes for the entries only that
+  /// writer created, which this process never heard of: its cache follows the disk first.
+  #[test]
+  fn a_rewrite_leaves_no_entry_of_another_writer_behind() {
+    use openmls_traits::OpenMlsProvider as _;
+
+    use crate::mls_storage::{SavedMlsStorage, load_mls_storage, save_mls_storage};
+
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut OsRng);
+    let app_store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+    let provider = openmls_rust_crypto::OpenMlsRustCrypto::default();
+    provider
+      .storage()
+      .set_value(b"X/context".to_vec(), b"epoch 1".to_vec());
+    let saved = SavedMlsStorage::default();
+    save_mls_storage(&app_store, &provider, &saved).unwrap();
+    {
+      let other_store = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+      let (other, other_saved) = load_mls_storage(&other_store).unwrap();
+      other
+        .storage()
+        .set_value(b"X/only the other's".to_vec(), b"epoch 2".to_vec());
+      save_mls_storage(&other_store, &other, &other_saved).unwrap();
+    }
+    provider
+      .storage()
+      .set_value(b"X/context".to_vec(), b"epoch 1, later".to_vec());
+    save_mls_storage(&app_store, &provider, &saved).unwrap();
+    drop(app_store);
+
+    let reopened = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    let (loaded, _) = load_mls_storage(&reopened).unwrap();
+    assert_eq!(
+      *loaded.storage().values.read().unwrap(),
+      *provider.storage().values.read().unwrap()
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[test]
+  fn a_panic_undoes_its_group() {
+    let store =
+      SealedSqliteStore::open_in_memory(&StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    crate::store::tests::a_panic_undoes_its_group(&store);
   }
 
   /// Issue #424 review, H1: 1.0.8 (its steps end before the marker) refuses the database; so does

@@ -3198,17 +3198,25 @@ So exactly one core owns a device's store at a time:
 - **Mobile.** One app process. The iOS notification service extension opens the same store under a
   cross-process lock and never advances the account's state: it opens a push with
   `notification_preview_for_push`, which shows what the store and the one fetched message give and
-  never catches the conversation up (§7.2). It writes only its push bookkeeping (received pushes,
-  what it showed) and, on its first open after an update, the store's migrations. Until 1.0.9 its
-  core did catch a conversation up when the app wasn't syncing, writing MLS state next to the app's
-  copy (issue #424 review). Should another process write MLS state anyway, the app's next MLS save
-  sees its commit and writes the whole state (§9.5).
+  never catches the conversation up (§7.2). It never saves MLS state. It writes its push bookkeeping
+  (received pushes, what it showed) and, on its first open after an update, the store's layout
+  migrations. Opening the client on the way (`Client::open`) can also write, when there is something
+  to write: the upload limit if it changed, catch-up marks a closed app left behind (dropped), removal
+  records and account data it finds new. It doesn't move the MLS record of a version before 1.0.9
+  (that takes several times the state in memory, and would keep the app out of the store): it doesn't
+  open then, shows a generic notification, and leaves the move to the app. Until 1.0.9 its core did
+  catch a conversation up when the app wasn't syncing, writing MLS state next to the app's copy
+  (issue #424 review). Should another process save MLS state anyway, the app's next MLS save sees it
+  and writes the whole state (§9.5).
 
 **Writes that fail (web).** IndexedDB refuses writes when the origin's quota is exhausted. A failed
 write is kept and issued again on every flush, until it went through; the flush reports the reason
 (quota exceeded, or the database closed for a newer version) and the app shows that changes are not
 saved on this device. Without that, memory and disk would diverge silently and the next reload would
-roll the MLS state back. A newer version of the app that upgrades the database (`versionchange`) gets
+roll the MLS state back. One batch of writes runs at a time, and a batch goes with the writes of the
+one that failed before it: a later write never commits without an earlier one, so what a page that
+dies leaves is always a prefix of the writes (#840). A record that can't be sealed fails its batch
+the same way. A newer version of the app that upgrades the database (`versionchange`) gets
 it: the old page closes its connection, stops writing and asks for a reload.
 
 **Journal (native).** Both SQLite stores write ahead (`journal_mode = WAL`) with
@@ -3258,16 +3266,23 @@ applied changes): after a crash the store holds the state before or after the sa
 half old, half new (kill-point tests in `store_integrity.rs`). Joining a group or processing a
 message writes that group's few changed entries, whatever the number of groups; before, the whole
 storage was one record rewritten after every change, which made a catch-up of many new groups
-quadratic (0.8 GB written for 300 groups, docs/performance.md). The client remembers what the
-store holds (`SavedMlsStorage`) to find the changes without reading the store. The SQLite stores
-count what may make the disk differ from what they accepted (`LocalStore::write_tally`): groups
-of writes rolled back (a full disk) and commits of another connection to the same file (`PRAGMA
-data_version`, another process). Once a count moved, the next save writes every entry again and
-deletes every key that may still be on disk, the deletes the disk lost included: the sealed store's
-cache keeps a rolled-back group, so it remembers the entries such a group deleted
-(`LocalStore::lost_deletes`) until a later group that reached the disk wrote them again. So a second
-writer, should there be one, makes the whole state of whoever saves last win, as with the one
-record, instead of mixing two epochs of a group per entry. A client loaded again on a store that
+quadratic (0.8 GB written for 300 groups, docs/performance.md). The provider storage notes the keys
+it changes (our patch of `openmls_memory_storage`, which stores the same bytes under the same keys),
+so a save neither reads the store nor compares the state; the client keeps no second copy of it, and
+so no old secrets either (#840). The SQLite stores count what may make the disk differ from what they
+accepted (`LocalStore::write_tally`): groups of writes rolled back (a full disk), single writes that
+failed, and commits of another connection to the same file (`PRAGMA data_version`, another process).
+A panic inside a group of writes rolls it back too: half a save, or a save without its cursor, never
+reaches a client that reopens after it. After a loss or a failed save, the next save writes every
+entry again and deletes every key that may still be on disk, the deletes the disk lost included: the
+sealed store's cache keeps a rolled-back group, so it remembers the entries such a group deleted
+(`LocalStore::lost_deletes`) until a later group that reached the disk wrote them again. Another
+process's commit says nothing about the MLS state, since the notification extension commits on every
+run, so every save also bumps a generation record in the `mls_storage` table: the same full save
+follows only if that moved. All of this is read inside the save's group, under the database's write
+lock, so no commit can slip in between the look and the save. So a second writer, should there be
+one, makes the whole state of whoever saves last win, as with the one record, instead of mixing two
+epochs of a group per entry; entries only it created go too. A client loaded again on a store that
 already lost writes (the mobile engine reopens it after a panic, on the same store) starts with
 such a full save. The browser store never loses an accepted write while the page runs and has one
 owner (§9.4). A deleted group leaves no entry, the previous epoch's leaf keys included, which
@@ -3281,6 +3296,8 @@ damaged instead of reading no MLS state, which would lose every group and later 
 record. A store without the marker (set up by this version) gets it when it opens. An old record
 next to entries can only come from an older version that wrote after the move: the entries are the
 device's groups and stay, the record is set aside (`set_aside/provider-<n>`, never read) and logged.
+It holds old MLS secrets, so it is wiped a month after the first start that saw it
+(`ClientSettings::mls_set_aside_grace`); a wrong clock only makes that sooner or later.
 
 **Layout versions.** The SQLite stores keep their layout version in `PRAGMA user_version`. Each store
 has a list of numbered steps (forward-only, never edited once released); opening runs the missing

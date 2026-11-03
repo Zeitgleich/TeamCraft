@@ -163,6 +163,13 @@ pub struct ClientSettings {
   pub device_add_stagger: std::time::Duration,
   /// Largest file this client uploads (the server's default limit; it rejects larger ones too).
   pub max_upload_bytes: u64,
+  /// This process is short of memory (the iOS notification extension): it doesn't move a version
+  /// before 1.0.9's MLS record (the client doesn't open, [`CoreError::MlsStateNotMoved`]) or tidy
+  /// the MLS records up; the app does when it opens.
+  pub leaves_mls_upkeep_to_app: bool,
+  /// How long an old MLS record set aside stays until it is wiped: never read, kept in case somebody
+  /// has to look at a store that went wrong (e2ee.md §9.5).
+  pub mls_set_aside_grace: std::time::Duration,
   /// Where downloaded files are written (native apps); `None` disables downloads to disk.
   pub maybe_download_dir: Option<std::path::PathBuf>,
   /// The push gateway this app was built for (a publisher's store app): device tokens are sealed for
@@ -436,6 +443,9 @@ impl Default for ClientSettings {
       max_group_info_bytes: 256 * 1024,
       max_missed_keys: 512,
       max_upload_bytes: 100 * 1024 * 1024,
+      leaves_mls_upkeep_to_app: false,
+      // A month: long enough to notice and ask.
+      mls_set_aside_grace: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       maybe_download_dir: None,
       maybe_push_gateway_url: None,
       push_reseal_after: std::time::Duration::from_secs(7 * 24 * 60 * 60),
@@ -474,9 +484,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(account) = records::load_account(&store)? else {
       return Ok(None);
     };
+    if settings.leaves_mls_upkeep_to_app && mls_storage::has_unmoved_record(&store)? {
+      return Err(CoreError::MlsStateNotMoved);
+    }
     let (provider, saved_mls) = mls_storage::load_mls_storage(&store)?;
-    // The UI shows the upload limit before sending.
-    records::put_json(&store, Table::Account, MAX_UPLOAD_KEY, &settings.max_upload_bytes)?;
+    if !settings.leaves_mls_upkeep_to_app {
+      let now_ms = clock.now_ms();
+      if let Err(error) = mls_storage::wipe_old_set_aside(&store, now_ms, settings.mls_set_aside_grace) {
+        // Records nothing reads; the next start tries again.
+        tracing::warn!(%error, "could not wipe old MLS records set aside");
+      }
+    }
+    // The UI shows the upload limit before sending. Only when it changed: a commit here on every
+    // open (the iOS notification extension's too) is a commit for nothing.
+    let maybe_recorded: Option<u64> =
+      records::get_json(&store, Table::Account, MAX_UPLOAD_KEY).unwrap_or(None);
+    if maybe_recorded != Some(settings.max_upload_bytes) {
+      records::put_json(&store, Table::Account, MAX_UPLOAD_KEY, &settings.max_upload_bytes)?;
+    }
     let sync = records::load_sync_state(&store)?;
     let maybe_preview_fetcher = previews::default_fetcher(&settings.link_previews);
     let maybe_jwks_source = attested::default_jwks_source(settings.maybe_attestation.as_ref());
@@ -551,6 +576,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   pub fn store(&self) -> &S {
     &self.store
+  }
+
+  /// The MLS state in memory: tests compare it with what was saved.
+  #[doc(hidden)]
+  pub fn mls_provider(&self) -> &OpenMlsRustCrypto {
+    &self.provider
   }
 
   #[cfg(not(target_arch = "wasm32"))]
@@ -952,17 +983,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     writes: impl FnOnce(&mut Self) -> Result<T, CoreError>,
   ) -> Result<T, CoreError> {
     self.store.begin_writes()?;
-    // A panic must not leave the group open: nothing would be committed again.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| writes(self)));
-    let ended = self.store.end_writes();
-    match result {
-      Ok(result) => {
-        let value = result?;
-        ended?;
-        Ok(value)
-      },
-      Err(panic) => std::panic::resume_unwind(panic),
-    }
+    crate::store::end_group(&self.store, result)
   }
 }
 

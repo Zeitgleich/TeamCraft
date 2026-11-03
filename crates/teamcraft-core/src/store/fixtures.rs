@@ -161,6 +161,18 @@ fn check(store: &impl LocalStore, name: &str) {
       "{name}"
     );
   }
+  // And it saves on: what changes is written, and read back (no generation record before 1.0.17).
+  let (provider, saved) = mls_storage::load_mls_storage(store).unwrap();
+  provider
+    .storage()
+    .set_value(b"later".to_vec(), b"more state".to_vec());
+  mls_storage::save_mls_storage(store, &provider, &saved).unwrap();
+  let (reloaded, _) = mls_storage::load_mls_storage(store).unwrap();
+  assert_eq!(
+    *reloaded.storage().values.read().unwrap(),
+    *provider.storage().values.read().unwrap(),
+    "{name}"
+  );
   let messages = store.messages(conversation, MessageFilter::TopLevel).unwrap();
   let bodies: Vec<&str> = messages
     .iter()

@@ -724,14 +724,11 @@ impl<B: RecordBackend> SealedStore<B> {
     write: &mut impl FnMut(&mut State<B>) -> Result<T, StoreError>,
   ) -> Result<T, StoreError> {
     self.begin_writes()?;
-    let result = write(&mut self.lock());
-    if result.is_err() {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&mut self.lock())));
+    if matches!(result, Ok(Err(_))) {
       self.backend.fail_group();
     }
-    let ended = self.end_writes();
-    let value = result?;
-    ended?;
-    Ok(value)
+    super::end_group(self, result)
   }
 
   /// Runs `read` on one snapshot of the records, after dropping the caches if the disk moved under
@@ -1696,6 +1693,10 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     ended
   }
 
+  fn fail_writes(&self) {
+    self.backend.fail_group();
+  }
+
   fn write_soon(&self) {
     self.backend.write_soon();
   }
@@ -1832,6 +1833,36 @@ mod tests {
 
   const CONVERSATIONS: i64 = 3;
   const MESSAGES_PER_CONVERSATION: i64 = 1_500;
+
+  /// Issue #840 asked whether a failed seal fails the group: [`RecordBackend::put_lazy`] seals
+  /// outside the backend's write, so nothing in the backend notices. The store's own group does.
+  #[test]
+  fn a_failed_seal_fails_the_group_it_is_in() {
+    let records = Records::default();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+    records.put_trouble.set(PutTrouble::SealFails);
+    assert!(store.put(Table::Users, "9", b"value").is_err());
+    assert_eq!(records.failed_groups.get(), 1);
+  }
+
+  /// A panic inside one of the store's own groups ends that group too: left open, every later write
+  /// would land in a group that never commits.
+  #[test]
+  fn a_panic_inside_a_write_ends_its_group_failed() {
+    let records = Records::default();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+    records.put_trouble.set(PutTrouble::Panics);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+      let _ = store.put(Table::Users, "9", b"value");
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(records.failed_groups.get(), 1);
+    assert_eq!(store.lock().depth, 0, "the group ended");
+    store.put(Table::Users, "9", b"value").unwrap();
+    assert_eq!(store.get(Table::Users, "9").unwrap(), Some(b"value".to_vec()));
+  }
 
   #[test]
   fn sealed_store_behaves_like_a_store_and_reopens() {
@@ -2572,12 +2603,35 @@ mod tests {
   struct Records {
     map: Mutex<BTreeMap<LookupId, Vec<u8>>>,
     reads: Cell<usize>,
+    /// How the next lazy put goes wrong, if it does.
+    put_trouble: Cell<PutTrouble>,
+    failed_groups: Cell<usize>,
+  }
+
+  #[derive(Clone, Copy, Default)]
+  enum PutTrouble {
+    #[default]
+    None,
+    SealFails,
+    Panics,
   }
 
   impl RecordBackend for &Records {
     fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
       self.map.lock().unwrap().insert(*id, sealed.to_vec());
       Ok(())
+    }
+
+    fn put_lazy(&self, id: &LookupId, _size_hint: usize, seal: LazySeal) -> Result<(), StoreError> {
+      match self.put_trouble.take() {
+        PutTrouble::None => self.put_record(id, &seal()?),
+        PutTrouble::SealFails => Err(StoreError::Database("made to fail".into())),
+        PutTrouble::Panics => panic!("made to panic"),
+      }
+    }
+
+    fn fail_group(&self) {
+      self.failed_groups.set(self.failed_groups.get() + 1);
     }
 
     fn delete_record(&self, id: &LookupId) -> Result<(), StoreError> {
