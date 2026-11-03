@@ -15,7 +15,8 @@ use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::CoreError;
 use teamcraft_core::store::{LocalStore, MessageFilter, Table};
 use teamcraft_proto::{
-  ChannelRole, ConversationId, ConversationVisibility, DeleteConversationRequest, ErrorCode, GatewayEvent,
+  ChannelRole, ConversationId, ConversationKind, ConversationResponse, ConversationVisibility,
+  CreateSpaceRequest, DeleteConversationRequest, ErrorCode, GatewayEvent, JoinPolicy, SpaceId,
   UpdateConversationMemberRequest, UpdateConversationRequest,
 };
 
@@ -617,7 +618,8 @@ mod deleting_a_space {
     server.set_admin(alice.client.user_id());
 
     alice.client.delete_space(space).await.unwrap();
-    assert_purged(&alice, channel);
+    // Which channels are in the space is the server's word, also on the deleter's device (#1162).
+    assert_hidden_with_history(&alice, channel);
     assert!(
       alice
         .store
@@ -636,6 +638,101 @@ mod deleting_a_space {
         .unwrap()
         .is_none()
     );
+  }
+
+  /// The deleter's device keeps a space's channels for the retention like everybody's, then purges
+  /// them; the gateway's claims that follow don't move it.
+  #[tokio::test]
+  async fn the_deleters_device_purges_its_channels_when_the_retention_ran_out() {
+    let server = FakeServer::new();
+    let (clock, mut alice, mut bob) = on_clock(&server).await;
+    let channel = channel_with(&mut alice, &mut bob).await;
+    bob.client.send_text(channel, None, "hello").await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let space = bob.space().await;
+    server.set_admin(bob.client.user_id());
+
+    bob.client.delete_space(space).await.unwrap();
+    settle(&mut [&mut bob]).await;
+    bob.client.full_sync().await.unwrap();
+    assert_hidden_with_history(&bob, channel);
+
+    clock.advance(RETENTION / 2);
+    bob.client.full_sync().await.unwrap();
+    assert_hidden_with_history(&bob, channel);
+
+    clock.advance(RETENTION / 2);
+    bob.client.full_sync().await.unwrap();
+    assert_purged(&bob, channel);
+  }
+
+  /// #1162: the server relabels a direct message and another space's channel into the space being
+  /// deleted. The deleter's device purges neither at once.
+  #[tokio::test]
+  async fn what_the_server_relabels_into_it_is_not_purged_on_the_deleters_device() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob) = two(&server).await;
+    let other_channel = channel_with(&mut alice, &mut bob).await;
+    alice
+      .client
+      .send_text(other_channel, None, "keep me")
+      .await
+      .unwrap();
+    let direct = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    alice.client.send_text(direct, None, "just us").await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    server.set_admin(alice.client.user_id());
+    let doomed = alice
+      .client
+      .create_space(&CreateSpaceRequest {
+        name: "Old".to_string(),
+        maybe_icon: None,
+        maybe_color: None,
+        maybe_description: None,
+        join_policy: JoinPolicy::InviteOnly,
+        maybe_idempotency_key: None,
+      })
+      .await
+      .unwrap()
+      .id;
+    let genuine = alice.client.create_channel(doomed, "old").await.unwrap();
+    alice.client.send_text(genuine, None, "old news").await.unwrap();
+
+    for conversation in [other_channel, direct] {
+      server.relabel_space(conversation, doomed);
+    }
+    server.relabel_conversation(direct, ConversationKind::Channel);
+    alice.client.full_sync().await.unwrap();
+    for conversation in [other_channel, direct, genuine] {
+      assert_eq!(
+        space_of(&alice, conversation),
+        Some(doomed),
+        "the server's word, taken"
+      );
+    }
+
+    alice.client.delete_space(doomed).await.unwrap();
+    settle(&mut [&mut alice]).await;
+    alice.client.full_sync().await.unwrap();
+
+    for conversation in [other_channel, direct, genuine] {
+      assert!(
+        !alice
+          .store
+          .messages(conversation, MessageFilter::TopLevel)
+          .unwrap()
+          .is_empty(),
+        "{conversation} keeps its history"
+      );
+      assert!(
+        alice
+          .store
+          .get(Table::AppliedChanges, &format!("own_deletion/{conversation}"))
+          .unwrap()
+          .is_none(),
+        "{conversation} isn't marked to purge at once"
+      );
+    }
   }
 
   #[tokio::test]
@@ -706,6 +803,17 @@ fn is_cached(peer: &Peer, channel: ConversationId) -> bool {
     .get(Table::Conversations, &channel.to_string())
     .unwrap()
     .is_some()
+}
+
+/// The space this device's record of the conversation names.
+fn space_of(peer: &Peer, conversation: ConversationId) -> Option<SpaceId> {
+  let bytes = peer
+    .store
+    .get(Table::Conversations, &conversation.to_string())
+    .unwrap()?;
+  serde_json::from_slice::<ConversationResponse>(&bytes)
+    .unwrap()
+    .maybe_space_id
 }
 
 const RETENTION: i64 = 30 * 24 * 60 * 60 * 1000;
