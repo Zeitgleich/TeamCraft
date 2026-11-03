@@ -27,6 +27,9 @@ jobs:
       github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # `gh pr create --label` can report a label twice; the second one finds the first one's re-run.
+    concurrency:
+      group: ci-label-${{ github.event.pull_request.number }}
     steps:
       - name: Re-run what finished without doing anything
         env:
