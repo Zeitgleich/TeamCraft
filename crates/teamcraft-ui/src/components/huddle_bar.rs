@@ -8,8 +8,45 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
-use crate::model::ConversationId;
+use crate::model::{ConversationId, ConversationKind};
 use crate::state::{MainView, use_app_state};
+
+/// How the bar words and joins the call of a conversation: a channel has huddles; a DM or group DM
+/// has calls (#1211), joined with the kind the header's call buttons use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BarKind {
+  kind: CallKind,
+  /// Wording keys: running, join, leave, and the bar's label.
+  in_progress: &'static str,
+  join: &'static str,
+  leave: &'static str,
+  label: &'static str,
+}
+
+fn bar_kind(conversation: Option<ConversationKind>) -> BarKind {
+  let kind = match conversation {
+    Some(ConversationKind::Direct) => CallKind::Direct,
+    Some(ConversationKind::Group) => CallKind::Group,
+    _ => CallKind::Huddle,
+  };
+  if kind == CallKind::Huddle {
+    BarKind {
+      kind,
+      in_progress: "huddle-in-progress",
+      join: "huddle-join",
+      leave: "huddle-leave",
+      label: "huddle-bar-label",
+    }
+  } else {
+    BarKind {
+      kind,
+      in_progress: "call-bar-in-progress",
+      join: "call-bar-join",
+      leave: "call-bar-leave",
+      label: "call-bar-label",
+    }
+  }
+}
 
 /// Strip under the channel header: a running huddle to join, or the controls of the user's own call.
 #[component]
@@ -33,6 +70,13 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let call = state.call;
+  let bar = Memo::new(move |_| {
+    bar_kind(
+      state
+        .read(|backend| backend.conversation(conversation))
+        .map(|info| info.kind),
+    )
+  });
   let huddle = Memo::new(move |_| state.read(|backend| backend.huddle(conversation)));
   let is_in_call = Memo::new(move |_| call.is_in_call_for(conversation));
   let members = Memo::new(move |_| {
@@ -59,21 +103,21 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
     call.is_camera_on.set(false);
     call.join_alongside(CallRequest {
       conversation,
-      kind: CallKind::Huddle,
+      kind: bar.get_untracked().kind,
     });
   };
   let take_over = move |_| {
     call.is_camera_on.set(false);
     call.join_and_take_over(CallRequest {
       conversation,
-      kind: CallKind::Huddle,
+      kind: bar.get_untracked().kind,
     });
   };
   let join = move |_| {
     call.is_camera_on.set(false);
     call.join(CallRequest {
       conversation,
-      kind: CallKind::Huddle,
+      kind: bar.get_untracked().kind,
     });
   };
   // Also clears an entry only the server still lists (a device that left without it hearing).
@@ -88,12 +132,12 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
         class="huddle-bar"
         class:huddle-bar-choices=move || is_on_other_device.get()
         role="region"
-        aria-label=move || i18n.t("huddle-bar-label")
+        aria-label=move || i18n.t(bar.get().label)
       >
         <Icon name=IconName::Headphones class="huddle-icon" />
         <div class="huddle-info">
           <strong>
-            {move || if is_on_other_device.get() { i18n.t("huddle-on-other-device") } else { i18n.t("huddle-in-progress") }}
+            {move || if is_on_other_device.get() { i18n.t("huddle-on-other-device") } else { i18n.t(bar.get().in_progress) }}
           </strong>
           <span class="avatar-stack">
             {move || {
@@ -113,7 +157,7 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
                 fallback=move || {
                   view! {
                     <button class="btn btn-primary btn-small" on:click=join>
-                      {move || i18n.t("huddle-join")}
+                      {move || i18n.t(bar.get().join)}
                     </button>
                   }
                 }
@@ -145,7 +189,7 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
               <Icon name=IconName::Maximize />
             </button>
             <button class="btn btn-danger btn-small" on:click=move |_| call.leave()>
-              {move || i18n.t("huddle-leave")}
+              {move || i18n.t(bar.get().leave)}
             </button>
           </div>
         </Show>
@@ -292,5 +336,33 @@ fn CameraButton(class: &'static str) -> impl IntoView {
     >
       <Icon name=Signal::derive(move || if call.is_camera_on.get() { IconName::Video } else { IconName::VideoOff }) />
     </button>
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn channels_keep_the_huddle() {
+    for kind in [ConversationKind::Public, ConversationKind::Private] {
+      let bar = bar_kind(Some(kind));
+      assert_eq!(bar.kind, CallKind::Huddle);
+      assert_eq!(bar.join, "huddle-join");
+    }
+  }
+
+  #[test]
+  fn direct_messages_have_calls_not_huddles() {
+    let direct = bar_kind(Some(ConversationKind::Direct));
+    assert_eq!(direct.kind, CallKind::Direct);
+    let group = bar_kind(Some(ConversationKind::Group));
+    assert_eq!(group.kind, CallKind::Group);
+    for bar in [direct, group] {
+      assert_eq!(bar.in_progress, "call-bar-in-progress");
+      assert_eq!(bar.join, "call-bar-join");
+      assert_eq!(bar.leave, "call-bar-leave");
+      assert_eq!(bar.label, "call-bar-label");
+    }
   }
 }
