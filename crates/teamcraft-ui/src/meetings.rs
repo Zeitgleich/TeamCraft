@@ -278,11 +278,12 @@ impl MeetingsClient {
     Ok(response.state)
   }
 
-  pub async fn lobby(&self, meeting: MeetingId) -> Result<Vec<LobbyEntry>, MeetingError> {
-    let response: ListLobbyResponse = self
+  /// Who waits in a meeting's lobby, and whether the caller hosts it (decides on everybody) or is
+  /// another member of a meeting without a lobby (sees only who came with the link).
+  pub async fn lobby(&self, meeting: MeetingId) -> Result<ListLobbyResponse, MeetingError> {
+    self
       .call(ApiMethod::Get, &format!("/api/v1/meetings/{meeting}/lobby"), None)
-      .await?;
-    Ok(response.entries)
+      .await
   }
 
   pub async fn admit(&self, meeting: MeetingId, guest: UserId) -> Result<(), MeetingError> {
@@ -333,8 +334,14 @@ impl MeetingsClient {
 pub struct MeetingsHub {
   client: StoredValue<MeetingsClient, LocalStorage>,
   pub meetings: RwSignal<Vec<MeetingResponse>>,
-  /// Guests waiting for admission, per meeting (only meetings the user hosts are asked).
+  /// Guests waiting for admission, per meeting (meetings the user organizes, and those whose call
+  /// the user is in: [`Self::in_call`]).
   pub lobbies: RwSignal<Vec<(MeetingId, Vec<LobbyEntry>)>>,
+  /// Meetings of somebody else whose call the user is in: their lobby is asked for too, so a host
+  /// decides there and an admitter the organizer named lets people of the link in (#1103).
+  pub in_call: RwSignal<HashSet<MeetingId>>,
+  /// Meetings of somebody else whose lobby the server let the user decide on (a host).
+  pub cohosted: RwSignal<HashSet<MeetingId>>,
   /// Why the last call failed, for a visible message.
   pub maybe_error: RwSignal<Option<String>>,
   pub is_loaded: RwSignal<bool>,
@@ -358,6 +365,8 @@ impl MeetingsHub {
       client: StoredValue::new_local(client),
       meetings: RwSignal::new(Vec::new()),
       lobbies: RwSignal::new(Vec::new()),
+      in_call: RwSignal::new(HashSet::new()),
+      cohosted: RwSignal::new(HashSet::new()),
       maybe_error: RwSignal::new(None),
       is_loaded: RwSignal::new(false),
       maybe_created: RwSignal::new(None),
@@ -383,6 +392,18 @@ impl MeetingsHub {
     })
   }
 
+  /// The meeting of somebody else whose chat is `conversation`, if the server let the user host
+  /// its lobby. Reactive.
+  pub fn cohosted_meeting_for(&self, conversation: ConversationId) -> Option<MeetingId> {
+    let cohosted = self.cohosted.get();
+    self.meetings.with(|all| {
+      all
+        .iter()
+        .find(|meeting| meeting.conversation_id == conversation && cohosted.contains(&meeting.id))
+        .map(|meeting| meeting.id)
+    })
+  }
+
   /// The title of the meeting whose chat is `conversation`, if it is one of the user's. Reactive.
   pub fn title_for(&self, conversation: ConversationId) -> Option<String> {
     self.meetings.with(|all| {
@@ -394,7 +415,8 @@ impl MeetingsHub {
     })
   }
 
-  /// Reloads the list, then the lobbies of the meetings `me` hosts that use one.
+  /// Reloads the list, then the lobbies of the meetings `me` organizes and of those whose call
+  /// `me` is in.
   pub async fn refresh(&self, me: UserId, now: TimestampMs) {
     match self.client().list(now).await {
       Ok(MeetingList {
@@ -408,13 +430,24 @@ impl MeetingsHub {
         self.meetings.set_if_alive(meetings.clone());
         self.is_loaded.set_if_alive(true);
         let mut lobbies = Vec::new();
-        for meeting in meetings.iter().filter(|meeting| hosts_lobby(meeting, me)) {
-          if let Ok(entries) = self.client().lobby(meeting.id).await
-            && !entries.is_empty()
-          {
-            lobbies.push((meeting.id, entries));
+        let mut cohosted = HashSet::new();
+        let in_call = self.in_call.try_get_untracked().unwrap_or_default();
+        for meeting in meetings
+          .iter()
+          .filter(|meeting| hosts_lobby(meeting, me) || in_call.contains(&meeting.id))
+        {
+          // A member of a meeting with a lobby who doesn't host it is refused: no lobby for them.
+          let Ok(lobby) = self.client().lobby(meeting.id).await else {
+            continue;
+          };
+          if lobby.is_host && meeting.organizer_user_id != me {
+            cohosted.insert(meeting.id);
+          }
+          if !lobby.entries.is_empty() {
+            lobbies.push((meeting.id, lobby.entries));
           }
         }
+        self.cohosted.set_if_alive(cohosted);
         self.lobbies.set_if_alive(lobbies);
       },
       Err(error) => {

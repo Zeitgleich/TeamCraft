@@ -52,7 +52,10 @@ use teamcraft_proto::{
   InviteResponse, ListCategoriesResponse, SpaceResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
-use teamcraft_proto::{CreateInstantMeetingRequest, MeetingId, MeetingResponse};
+use teamcraft_proto::{
+  CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingId, MeetingResponse,
+  PutMeetingAdmittersRequest,
+};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentResponse};
 use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
@@ -837,6 +840,29 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn cancel_meeting(&self, meeting: MeetingId) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(Method::DELETE, &format!("/meetings/{meeting}"), None)
+      .await
+  }
+
+  async fn put_meeting_admitters(
+    &self,
+    conversation: ConversationId,
+    request: &PutMeetingAdmittersRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(
+        Method::PUT,
+        &format!("/conversations/{conversation}/meeting-admitters"),
+        Some(request),
+      )
+      .await
+  }
+
+  async fn meeting_admitters(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<MeetingAdmittersResponse, ApiError> {
+    self
+      .get(&format!("/conversations/{conversation}/meeting-admitters"))
       .await
   }
 

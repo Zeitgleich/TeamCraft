@@ -5,27 +5,28 @@ All TeamCraft cryptography. No other crate implements or combines primitives
 
 ## Modules
 
-| Module           | What                                                                        | Design                           |
-|------------------|-----------------------------------------------------------------------------|----------------------------------|
-| `secret`         | `SymmetricKey`, `SecretBytes`: zeroized on drop, redacted `Debug`           | security.md                      |
-| `ids`            | Local ID newtypes; `ClientMessageId` (random 128 bit, bound in the AEAD)    | –                                |
-| `identity`       | Identity key, device keys (Ed25519 + X25519), device certificates           | e2ee.md §2, §3                   |
-| `content_key`    | Content key ring per conversation, random key IDs, rotation policy          | e2ee.md §4.1–§4.3                |
-| `message`        | XChaCha20-Poly1305 message encryption bound to the plaintext metadata       | e2ee.md §4.1, §4.4               |
-| `attachment`     | Per-file key, chunked STREAM encryption (XChaCha20-Poly1305, BE32)          | e2ee.md §4.5                     |
-| `key_bag`        | Identity key + all content keys, serialized and encrypted with backup key   | e2ee.md §2, §6                   |
-| `backup`         | Backup key, `BackupKeyWrapper` trait, passphrase (Argon2id), keystore, PRF  | e2ee.md §6.1–§6.3                |
-| `recovery_key`   | Recovery kit key: 128 bit, Crockford Base32, checksum, `tcrecovery1:` form  | e2ee.md §6.5                     |
-| `membership`     | Signed membership changes, `IdentityDirectory`, `MembershipAuthority`       | e2ee.md §4.6, admin.md §2.2–§2.3 |
-| `mls`            | `openmls` groups, key packages, content key bundles, commit authorization   | e2ee.md §4.1, §4.6               |
-| `push`           | Push wake-up sealed with the device push key; Web Push (RFC 8291) + VAPID   | e2ee.md §7                       |
-| `workspace`      | Owner signatures on the admin roster and policy log entries                 | admin.md §2.3, e2ee.md §11       |
-| `org_recovery`   | Org key (HPKE DeriveKeyPair), Shamir shares (vsss-rs GF(2⁸)), HPKE wrapping | e2ee.md §6.3.1                   |
-| `rendezvous`     | Device linking handshake (AK auth keys, X25519, counter-nonce channel)      | e2ee.md §5                       |
-| `local_store`    | IndexedDB record encryption: HKDF lookup IDs, XChaCha20-Poly1305 records    | e2ee.md §9.1                     |
-| `source_token`   | Bridge source tokens (256 bit), their SHA-256, constant-time lookup         | e2ee.md §13.1, bridge.md         |
-| `fingerprint`    | SHA-256 of a content fed piece by piece, compared in constant time          | bridge.md                        |
-| `aead`, `domain` | Internal: AEAD helper with random nonces; domain separation labels          | –                                |
+| Module              | What                                                                        | Design                           |
+|---------------------|-----------------------------------------------------------------------------|----------------------------------|
+| `secret`            | `SymmetricKey`, `SecretBytes`: zeroized on drop, redacted `Debug`           | security.md                      |
+| `ids`               | Local ID newtypes; `ClientMessageId` (random 128 bit, bound in the AEAD)    | –                                |
+| `identity`          | Identity key, device keys (Ed25519 + X25519), device certificates           | e2ee.md §2, §3                   |
+| `content_key`       | Content key ring per conversation, random key IDs, rotation policy          | e2ee.md §4.1–§4.3                |
+| `message`           | XChaCha20-Poly1305 message encryption bound to the plaintext metadata       | e2ee.md §4.1, §4.4               |
+| `attachment`        | Per-file key, chunked STREAM encryption (XChaCha20-Poly1305, BE32)          | e2ee.md §4.5                     |
+| `key_bag`           | Identity key + all content keys, serialized and encrypted with backup key   | e2ee.md §2, §6                   |
+| `backup`            | Backup key, `BackupKeyWrapper` trait, passphrase (Argon2id), keystore, PRF  | e2ee.md §6.1–§6.3                |
+| `recovery_key`      | Recovery kit key: 128 bit, Crockford Base32, checksum, `tcrecovery1:` form  | e2ee.md §6.5                     |
+| `membership`        | Signed membership changes, `IdentityDirectory`, `MembershipAuthority`       | e2ee.md §4.6, admin.md §2.2–§2.3 |
+| `meeting_admitters` | Organizer-signed admitters of a meeting chat: sequence, end, "no lobby"     | e2ee.md §4.6 ("Meeting guests")  |
+| `mls`               | `openmls` groups, key packages, content key bundles, commit authorization   | e2ee.md §4.1, §4.6               |
+| `push`              | Push wake-up sealed with the device push key; Web Push (RFC 8291) + VAPID   | e2ee.md §7                       |
+| `workspace`         | Owner signatures on the admin roster and policy log entries                 | admin.md §2.3, e2ee.md §11       |
+| `org_recovery`      | Org key (HPKE DeriveKeyPair), Shamir shares (vsss-rs GF(2⁸)), HPKE wrapping | e2ee.md §6.3.1                   |
+| `rendezvous`        | Device linking handshake (AK auth keys, X25519, counter-nonce channel)      | e2ee.md §5                       |
+| `local_store`       | IndexedDB record encryption: HKDF lookup IDs, XChaCha20-Poly1305 records    | e2ee.md §9.1                     |
+| `source_token`      | Bridge source tokens (256 bit), their SHA-256, constant-time lookup         | e2ee.md §13.1, bridge.md         |
+| `fingerprint`       | SHA-256 of a content fed piece by piece, compared in constant time          | bridge.md                        |
+| `aead`, `domain`    | Internal: AEAD helper with random nonces; domain separation labels          | –                                |
 
 Dependencies are audited RustCrypto / dalek crates plus `openmls` with `openmls_rust_crypto`.
 Versions follow what `openmls_rust_crypto` already pulls in, so the stack isn't duplicated more

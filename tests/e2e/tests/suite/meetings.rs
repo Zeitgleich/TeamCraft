@@ -102,7 +102,9 @@ async fn a_call_before_the_chat_is_set_up_is_refused_clearly_and_the_retry_gets_
   .await
   .unwrap();
   let anchor = alice.client.own_fingerprint();
-  guest.set_guest_organizer_anchor(chat, &anchor).unwrap();
+  guest
+    .set_guest_organizer_anchor(chat, meeting_id.parse().unwrap(), &anchor)
+    .unwrap();
   stack
     .post(
       &alice.tokens,

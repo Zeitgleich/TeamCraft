@@ -57,7 +57,10 @@ use teamcraft_proto::{
   DeletedConversationSignature, SignedChannelDeletion,
 };
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkClosedReason, DeviceLinkRequest};
-use teamcraft_proto::{CreateInstantMeetingRequest, MeetingKind, MeetingResponse, MeetingStatus};
+use teamcraft_proto::{
+  CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingKind, MeetingResponse, MeetingStatus,
+  PutMeetingAdmittersRequest,
+};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
 use teamcraft_proto::{DevicePushHealth, PushDeliveryCounts, PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
@@ -143,6 +146,8 @@ struct State {
   read_position_writes: u64,
   /// Meetings cancelled through the API, in order.
   cancelled_meetings: Vec<teamcraft_proto::MeetingId>,
+  /// The newest signed admitters of each meeting chat, as published (or swapped in by a test).
+  meeting_admitters: HashMap<ConversationId, Vec<u8>>,
   /// The running call of each conversation (a new one after [`FakeServer::end_call`]).
   calls: HashMap<ConversationId, CallId>,
   /// Who is in each conversation's call, as the SFU reported it ([`FakeServer::join_call`]); a
@@ -1104,6 +1109,17 @@ impl FakeServer {
   /// The calls moved into a meeting so far, in order.
   pub fn call_moves(&self) -> Vec<(ConversationId, MoveCallRequest)> {
     self.lock().call_moves.clone()
+  }
+
+  /// A meeting chat's admitters as the server holds them (the encoded signed statement).
+  pub fn meeting_admitters(&self, conversation: ConversationId) -> Option<Vec<u8>> {
+    self.lock().meeting_admitters.get(&conversation).cloned()
+  }
+
+  /// Serves `statement` as the meeting chat's admitters from now on, whatever it holds: a hostile
+  /// server swapping lists, or bringing back an older one.
+  pub fn set_meeting_admitters(&self, conversation: ConversationId, statement: Vec<u8>) {
+    self.lock().meeting_admitters.insert(conversation, statement);
   }
 
   /// How many channels have this name.
@@ -3215,6 +3231,62 @@ impl ServerApi for FakeServerApi {
     self.with(|state, _| {
       state.cancelled_meetings.push(meeting);
       Ok(())
+    })
+  }
+
+  /// Like the server: the meeting chat's organizer publishes a statement for this chat, one with
+  /// the same or an older sequence than the stored one is refused, and nothing is verified beyond
+  /// the shape (the fake has no meetings table to check the meeting against).
+  async fn put_meeting_admitters(
+    &self,
+    conversation: ConversationId,
+    request: &PutMeetingAdmittersRequest,
+  ) -> Result<(), ApiError> {
+    use teamcraft_crypto::meeting_admitters::SignedMeetingAdmitters;
+    let bytes = request.statement.as_slice().to_vec();
+    let malformed = || ApiError::status(400, ErrorCode::InvalidRequest, "malformed admitters");
+    let statement = SignedMeetingAdmitters::from_bytes(&bytes).map_err(|_| malformed())?;
+    statement.check_shape().map_err(|_| malformed())?;
+    if crate::convert::conversation_from_crypto(statement.unverified_conversation_id()).ok()
+      != Some(conversation)
+    {
+      return Err(malformed());
+    }
+    self.with(|state, me| {
+      let entry = state.member_conversation(conversation, me)?;
+      if entry.response.maybe_organizer_user_id != Some(me) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "only the organizer"));
+      }
+      if let Some(stored) = state.meeting_admitters.get(&conversation)
+        && SignedMeetingAdmitters::from_bytes(stored)
+          .is_ok_and(|stored| stored.unverified_sequence() >= statement.unverified_sequence())
+      {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::Conflict,
+          "a newer list is stored",
+        ));
+      }
+      state.meeting_admitters.insert(conversation, bytes);
+      Ok(())
+    })
+  }
+
+  /// The stored statement, for members of the chat.
+  async fn meeting_admitters(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<MeetingAdmittersResponse, ApiError> {
+    self.with(|state, me| {
+      state.member_conversation(conversation, me)?;
+      let stored = state
+        .meeting_admitters
+        .get(&conversation)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::MeetingAdmittersNotFound, "no admitters"))?
+        .clone();
+      Ok(MeetingAdmittersResponse {
+        statement: Base64Bytes::new(stored),
+      })
     })
   }
 

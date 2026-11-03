@@ -358,7 +358,7 @@ pub enum CoreCommand {
     conversation: ConversationId,
     meeting: teamcraft_proto::MeetingId,
   },
-  /// An organizer's device lets an admitted guest's device into the chat's group.
+  /// An organizer's or admitter's device lets an admitted guest's device into the chat's group.
   LetGuestIntoMeetingChat {
     conversation: ConversationId,
     guest: UserId,
@@ -373,6 +373,16 @@ pub enum CoreCommand {
   NoteMeetingLobby {
     meeting: teamcraft_proto::MeetingId,
     has_lobby: bool,
+  },
+  /// The organizer's device publishes who may let guests in, if that changed (#1103).
+  SyncMeetingAdmitters {
+    meeting: teamcraft_proto::MeetingId,
+    conversation: ConversationId,
+    expires_at_ms: i64,
+  },
+  /// A member's device checks the organizer-signed admitters (`admits_link_arrivals`).
+  CheckMeetingAdmission {
+    conversation: ConversationId,
   },
   InviteToSpace {
     space: SpaceId,
@@ -2298,6 +2308,27 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn is_open_by_own_record(&self, meeting: teamcraft_proto::MeetingId) -> bool {
     crate::client::is_open_by_own_record(self.store_ref(), meeting)
+  }
+
+  fn sync_meeting_admitters(
+    &self,
+    meeting: teamcraft_proto::MeetingId,
+    conversation: ConversationId,
+    expires_at_ms: i64,
+  ) {
+    self.command(CoreCommand::SyncMeetingAdmitters {
+      meeting,
+      conversation,
+      expires_at_ms,
+    });
+  }
+
+  fn check_meeting_admission(&self, conversation: ConversationId) {
+    self.command(CoreCommand::CheckMeetingAdmission { conversation });
+  }
+
+  fn admits_link_arrivals(&self, conversation: ConversationId, now_ms: i64) -> bool {
+    crate::client::admits_link_arrivals(self.store_ref(), conversation, now_ms)
   }
 
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {

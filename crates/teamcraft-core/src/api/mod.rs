@@ -71,7 +71,10 @@ use teamcraft_proto::{
   UpdateConversationRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest,
 };
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest};
-use teamcraft_proto::{CreateInstantMeetingRequest, MeetingId, MeetingResponse};
+use teamcraft_proto::{
+  CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingId, MeetingResponse,
+  PutMeetingAdmittersRequest,
+};
 use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
 use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
@@ -432,6 +435,23 @@ pub trait ServerApi {
 
   /// Cancels a meeting the user organizes (`DELETE /meetings/{id}`).
   fn cancel_meeting(&self, meeting: MeetingId) -> impl Future<Output = Result<(), ApiError>>;
+
+  /// Publishes the organizer-signed admitters of the meeting whose chat this is
+  /// (`PUT /conversations/{id}/meeting-admitters`, the organizer only); `409` when the server
+  /// holds the same or a newer sequence.
+  fn put_meeting_admitters(
+    &self,
+    conversation: ConversationId,
+    request: &PutMeetingAdmittersRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+
+  /// The newest admitters the organizer published (`GET /conversations/{id}/meeting-admitters`,
+  /// members of the meeting chat); `404` before the first. Unverified: the caller checks the
+  /// signature.
+  fn meeting_admitters(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<MeetingAdmittersResponse, ApiError>>;
 
   /// Moves the conversation's DM call into a meeting the user started for it (docs/meetings.md).
   fn move_call(
@@ -840,6 +860,11 @@ impl ApiError {
 
   pub fn is_forbidden(&self) -> bool {
     matches!(self, Self::Status { status: 403, .. })
+  }
+
+  /// Any `409`: the server holds something that conflicts (e.g. a newer version).
+  pub fn is_conflict(&self) -> bool {
+    matches!(self, Self::Status { status: 409, .. })
   }
 
   /// The request never reached the server: offline, or intercepted on the way.

@@ -357,7 +357,7 @@ async fn prepare_device(
   }
   // Without any fingerprint the device fails closed: it joins no group (e2ee.md §4.6).
   if let Some(fingerprint) = maybe_organizer_fingerprint {
-    remote_backend::guest_anchor(conversation, fingerprint)
+    remote_backend::guest_anchor(conversation, meeting, fingerprint)
       .await
       .map_err(|error| failed("anchor", error))?;
   }

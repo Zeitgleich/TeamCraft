@@ -58,6 +58,8 @@ pub(crate) const SEALED_CONTENT_KEYS: &str = "TeamCraft-v1 sealed content keys";
 pub(crate) const WORKSPACE_LOG_HASH: &str = "TeamCraft-v1 workspace log entry hash";
 /// Hash input label of an imported message's client message ID (e2ee.md §4.10).
 pub(crate) const IMPORTED_MESSAGE_ID: &str = "TeamCraft-v1 imported message";
+/// The organizer's signature on who may let guests into a meeting (e2ee.md §4.6, "Meeting guests").
+pub(crate) const MEETING_ADMITTERS: &str = "TeamCraft-v1 meeting admitters";
 
 /// Returns `len(label) || label || body`.
 pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
@@ -74,7 +76,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 41] = [
+  const ALL_LABELS: [&str; 42] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -116,6 +118,7 @@ mod tests {
     SERVER_SETTING_KEY,
     SERVER_SETTING_AAD,
     SEALED_CONTENT_KEYS,
+    MEETING_ADMITTERS,
   ];
 
   #[test]

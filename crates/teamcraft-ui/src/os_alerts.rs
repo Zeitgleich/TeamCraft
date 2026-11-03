@@ -60,6 +60,11 @@ const TAB_FOCUS_RENEW_MS: u64 = 5_000;
 const FIRST_MEETINGS_LOAD: Duration = Duration::from_secs(3);
 /// How early a meeting reminder may show: the clock is re-measured right before.
 const DUE_SLACK_MS: i64 = 2_000;
+/// The organizer's device keeps the signed admitters current for meetings that run or start within
+/// this time (#1103); later ones keep the list signed when they were scheduled or edited.
+const ADMITTERS_LEAD_MS: i64 = 24 * 60 * 60_000;
+/// How often per meeting the organizer's device has the core compare its signed admitters.
+const ADMITTERS_SYNC_INTERVAL_MS: i64 = 10 * 60_000;
 /// Storage key prefix of the reminders shown on this device; the user ID follows.
 const FIRED_REMINDERS_KEY: &str = "teamcraft.meeting_reminders.";
 /// Storage key prefix of the conversation a tab shows in front; the user ID follows.
@@ -612,6 +617,7 @@ fn watch_meetings(state: AppState, i18n: I18n, hub: MeetingsHub) {
     i18n,
     hub,
     timer: RefCell::new(None),
+    admitters_synced_at: RefCell::new(std::collections::HashMap::new()),
   });
   // The list may change elsewhere (the meetings view, an RSVP) and so may the settings: plan again
   // without fetching.
@@ -637,6 +643,35 @@ fn watch_meetings(state: AppState, i18n: I18n, hub: MeetingsHub) {
       hub.lobbies.track();
       crate::components::meetings_view::admit_link_arrivals(state, i18n, hub, started);
     });
+  }
+  // In the call of somebody else's meeting, its lobby is read too: a host decides there, and an
+  // admitter the organizer named lets people of the link in by itself (#1103). Entering the call
+  // checks the organizer's signed admitters and reads the lobbies at once.
+  {
+    let watch = watch.clone();
+    Effect::new(
+      move |maybe_last: Option<std::collections::HashSet<teamcraft_proto::MeetingId>>| {
+        let me = state.me().id;
+        let maybe_call = state.read(|backend| backend.active_call().map(|active| active.conversation));
+        let now = now_ms();
+        let current: std::collections::HashSet<_> = hub.meetings.with(|all| {
+          all
+            .iter()
+            .filter(|meeting| Some(meeting.conversation_id) == maybe_call)
+            .filter(|meeting| meeting.organizer_user_id != me && !crate::meetings::is_over(meeting, now))
+            .map(|meeting| meeting.id)
+            .collect()
+        });
+        if maybe_last.as_ref() != Some(&current) {
+          hub.in_call.set(current.clone());
+          if let Some(conversation) = maybe_call.filter(|_| !current.is_empty()) {
+            state.try_write(|backend| backend.check_meeting_admission(conversation));
+            watch.check();
+          }
+        }
+        current
+      },
+    );
   }
   // A meeting created, moved or cancelled elsewhere (gateway `meeting_update`), and a reconnect
   // (updates in between may be lost): read the list again now. This replaces a periodic refresh.
@@ -664,6 +699,9 @@ struct MeetingWatch {
   i18n: I18n,
   hub: MeetingsHub,
   timer: RefCell<Option<TimeoutHandle>>,
+  /// When this app last had the core compare the signed admitters of each of the user's meetings
+  /// (#1103), so a busy list doesn't ask the server on every reload.
+  admitters_synced_at: RefCell<std::collections::HashMap<teamcraft_proto::MeetingId, TimestampMs>>,
 }
 
 impl MeetingWatch {
@@ -680,6 +718,7 @@ impl MeetingWatch {
       if !watch.is_alive() {
         return;
       }
+      watch.keep_admitters_current(me);
       crate::meetings::finish_pending_edits(watch.state, watch.hub);
       remind_due(watch.state, watch.i18n, watch.hub);
       watch.plan_next();
@@ -688,6 +727,52 @@ impl MeetingWatch {
 
   fn is_alive(&self) -> bool {
     self.state.is_alive() && !self.hub.clock.is_disposed()
+  }
+
+  /// The organizer's device keeps the signed admitters of the user's meetings that run or start
+  /// within a day current: who is in the meeting chat's group changes, and a series' next meeting
+  /// needs a list that lasts until its end (#1103). The core signs anew only when that differs.
+  /// In the call of somebody else's meeting the device reads the organizer's list again, so a
+  /// change (the lobby turned off) counts from the next knock on.
+  fn keep_admitters_current(&self, me: UserId) {
+    let now = now_ms();
+    let due: Vec<_> = self.hub.meetings.with_untracked(|all| {
+      all
+        .iter()
+        .filter(|meeting| meeting.organizer_user_id == me && !crate::meetings::is_over(meeting, now))
+        .filter(|meeting| meeting.starts_at.0 <= now + ADMITTERS_LEAD_MS)
+        .map(|meeting| (meeting.id, meeting.conversation_id, meeting.ends_at.0))
+        .collect()
+    });
+    let mut synced = self.admitters_synced_at.borrow_mut();
+    for (meeting, conversation, ends_at) in due {
+      if synced
+        .get(&meeting)
+        .is_some_and(|at| now - at < ADMITTERS_SYNC_INTERVAL_MS)
+      {
+        continue;
+      }
+      synced.insert(meeting, now);
+      let until = ends_at + crate::components::meetings_view::GUEST_ACCESS_GRACE_MS;
+      self
+        .state
+        .try_write(|backend| backend.sync_meeting_admitters(meeting, conversation, until));
+    }
+    let maybe_call = self
+      .state
+      .try_read(|backend| backend.active_call().map(|active| active.conversation))
+      .flatten();
+    let is_in_meeting_call = !self
+      .hub
+      .in_call
+      .try_get_untracked()
+      .unwrap_or_default()
+      .is_empty();
+    if let Some(conversation) = maybe_call.filter(|_| is_in_meeting_call) {
+      self
+        .state
+        .try_write(|backend| backend.check_meeting_admission(conversation));
+    }
   }
 
   fn plan_next(self: &Rc<Self>) {

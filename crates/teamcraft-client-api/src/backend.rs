@@ -410,9 +410,9 @@ pub trait ChatBackend {
   fn guest_link_fragment(&self, _meeting: teamcraft_proto::MeetingId) -> Option<String> {
     None
   }
-  /// An organizer's device lets an admitted guest's device into the chat's group, until
-  /// `access_ends_at_ms`, if the key it pins has the fingerprint the guest's page reported
-  /// (e2ee.md §4.6, "Meeting guests").
+  /// An organizer's device, or an admitter's the organizer signed for the meeting (#1103), lets an
+  /// admitted guest's device into the chat's group, until `access_ends_at_ms`, if the key it pins
+  /// has the fingerprint the guest's page reported (e2ee.md §4.6, "Meeting guests").
   fn let_guest_into_meeting_chat(
     &self,
     _conversation: ConversationId,
@@ -432,6 +432,24 @@ pub trait ChatBackend {
   /// Whether the organizer chose "no lobby" for the meeting on this device: only then does it let
   /// guests of the link in by itself.
   fn is_open_by_own_record(&self, _meeting: teamcraft_proto::MeetingId) -> bool {
+    false
+  }
+  /// The organizer's device signs and publishes who may let guests into the meeting, if that
+  /// changed or the list ends before `expires_at_ms` (#1103).
+  fn sync_meeting_admitters(
+    &self,
+    _meeting: teamcraft_proto::MeetingId,
+    _conversation: ConversationId,
+    _expires_at_ms: i64,
+  ) {
+  }
+  /// A member's device checks the organizer-signed admitters of the meeting whose chat is
+  /// `conversation`, which [`Self::admits_link_arrivals`] then answers from.
+  fn check_meeting_admission(&self, _conversation: ConversationId) {}
+  /// Whether this member's device lets people of the meeting link in by itself: the
+  /// organizer-signed admitters of the meeting chat name this user and say "no lobby", and are in
+  /// force at `now_ms`.
+  fn admits_link_arrivals(&self, _conversation: ConversationId, _now_ms: i64) -> bool {
     false
   }
   /// Unconfirmed removals in every conversation, for the admin console: an admin outside the

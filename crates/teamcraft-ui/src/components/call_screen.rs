@@ -518,6 +518,20 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           </div>
         })
       }}
+      // A host of somebody else's meeting (a chat admin) decides on the lobby too (#1103).
+      {move || {
+        let hub = use_context::<crate::meetings::MeetingsHub>()?;
+        let me = state.me().id;
+        if hub.hosted_meeting_for(request.conversation, me).is_some() {
+          return None;
+        }
+        let meeting = hub.cohosted_meeting_for(request.conversation)?;
+        Some(view! {
+          <div class="call-host">
+            <crate::components::meetings_view::Lobby meeting=meeting />
+          </div>
+        })
+      }}
       <crate::components::add_to_call::CallMoveBanner />
       <NotetakerBanner conversation=request.conversation notetaker=notetaker is_asked=notetaker_invite.is_asked />
       <div class="call-body">

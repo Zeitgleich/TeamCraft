@@ -535,9 +535,11 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
       Ok(serde_json::json!({ "fingerprint": fingerprint, "code": code }))
     },
     "core_guest_anchor" => {
-      let (conversation, fingerprint) = (field(&args, "conversation")?, field(&args, "fingerprint")?);
+      let (conversation, meeting) = (field(&args, "conversation")?, field(&args, "meeting")?);
+      let fingerprint = field(&args, "fingerprint")?;
       ask(|reply| Request::GuestAnchor {
         conversation,
+        meeting,
         fingerprint,
         reply,
       })
@@ -1094,9 +1096,11 @@ enum Request {
   /// This device's identity key fingerprint and key code (a guest's page shows the code and reports
   /// the fingerprint with its device).
   OwnKey(oneshot::Sender<Result<(String, String), String>>),
-  /// A guest's page keeps the organizer's key from the link for a conversation (e2ee.md §4.6).
+  /// A guest's page keeps the organizer's key from the link for a conversation, and the meeting
+  /// whose admitters it checks (e2ee.md §4.6).
   GuestAnchor {
     conversation: ConversationId,
+    meeting: teamcraft_proto::MeetingId,
     fingerprint: String,
     reply: oneshot::Sender<Result<(), String>>,
   },
@@ -1739,12 +1743,13 @@ impl Core {
       },
       Request::GuestAnchor {
         conversation,
+        meeting,
         fingerprint,
         reply,
       } => {
         let result = match self.client.as_ref() {
           Some(client) => client
-            .set_guest_organizer_anchor(conversation, &fingerprint)
+            .set_guest_organizer_anchor(conversation, meeting, &fingerprint)
             .map_err(describe),
           None => Err(not_set_up()),
         };

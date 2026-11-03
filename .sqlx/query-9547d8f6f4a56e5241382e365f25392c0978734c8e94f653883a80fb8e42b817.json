@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO meeting_admitters (meeting_id, sequence, statement) VALUES ($1, $2, $3)\n         ON CONFLICT (meeting_id) DO UPDATE\n           SET sequence = EXCLUDED.sequence, statement = EXCLUDED.statement, updated_at = now()\n           WHERE meeting_admitters.sequence < EXCLUDED.sequence",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9547d8f6f4a56e5241382e365f25392c0978734c8e94f653883a80fb8e42b817"
+}
