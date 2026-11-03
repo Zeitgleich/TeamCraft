@@ -29,7 +29,8 @@ files. This check fails on:
   with `top`/`bottom: 0` and sized only by `var(--vv-height, auto)` (no `vh`/`dvh`/`svh`/`lvh`/
   `-webkit-fill-available`, which iOS computes shorter than the screen in a home screen app), and
   the bottom safe area is applied once, as the bottom navigation's `padding-bottom` (not also on
-  the shell, `html` or `body`).
+  the shell, `html` or `body`),
+- the sign-in page (`.auth-page`) off the same rule: `position: fixed; inset: 0`, no viewport units.
 
     scripts/check-css.py [paths ...]   # default: the stylesheets as served, and crates/teamcraft-ui/src
 
@@ -135,6 +136,7 @@ def check_sources(sources):
     findings += raw_hex_colours(parsed)
     findings += layer_hints(parsed)
     findings += compact_shell(parsed)
+    findings += auth_page(parsed)
     return findings
 
 
@@ -308,6 +310,23 @@ def compact_shell(parsed):
         for decl in sheet.declarations:
             if BOTTOM_SAFE_AREA in decl.value and any(selector in ("html", "body", ":root") or selector.endswith(" body") for selector in decl.selectors):
                 findings.append(f"{path}:{decl.line}: the bottom safe area on the page itself would add to the tab bar's (#1222)")
+    return findings
+
+
+def auth_page(parsed):
+    """The sign-in page is pinned to the window; Safari keeps a stale `dvh` after its toolbar collapses (#1222)."""
+    page = [(path, decl) for path, sheet in parsed.items() for decl in sheet.declarations if ".auth-page" in decl.selectors]
+    if not page:
+        return []
+    findings = [
+        f"{path}:{decl.line}: .auth-page is sized by {decl.value}; a stale viewport unit left a band below it in Safari (#1222), pin it with position: fixed; inset: 0"
+        for path, decl in page
+        if decl.name in ("height", "min-height", "max-height") and VIEWPORT_UNITS.search(decl.value)
+    ]
+    declared = {decl.name: decl.value for _, decl in page}
+    if declared.get("position") != "fixed" or declared.get("inset") != "0":
+        path, decl = page[0]
+        findings.append(f"{path}:{decl.line}: .auth-page is pinned with position: fixed; inset: 0 (#1222)")
     return findings
 
 

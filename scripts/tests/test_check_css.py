@@ -178,5 +178,19 @@ class CompactShellTest(unittest.TestCase):
         self.assertIn("exactly once", findings(SHELL.replace("padding-bottom: env(safe-area-inset-bottom)", "padding-bottom: 0"))[0])
 
 
+class AuthPageTest(unittest.TestCase):
+    PINNED = ".auth-page { position: fixed; inset: 0; display: grid; }"
+
+    def test_the_pinned_page_passes(self):
+        self.assertEqual(findings(self.PINNED), [])
+
+    def test_a_viewport_unit_min_height_is_found(self):
+        css = ".auth-page { min-height: 100dvh; position: fixed; inset: 0; }"
+        self.assertIn("stale viewport unit", findings(css)[0])
+
+    def test_an_unpinned_page_is_found(self):
+        self.assertIn("pinned", findings(".auth-page { display: grid; }")[0])
+
+
 if __name__ == "__main__":
     unittest.main()
