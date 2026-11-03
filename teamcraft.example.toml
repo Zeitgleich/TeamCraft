@@ -110,6 +110,17 @@ filter = "info"
 # "pretty" for humans, "json" for log collectors.
 format = "pretty"
 
+# Optional GET /metrics in Prometheus text format, on a listener of its own that serves nothing else
+# (docs/operations.md, "Metrics"). Off by default. No user or conversation IDs, no content, no tokens,
+# but also no authentication: keep it on loopback, or use "[::]:9464" (dual stack, IPv4 and IPv6) with
+# a firewall that only lets the scraper in. The SFU takes TEAMCRAFT_SFU_METRICS_ENABLED and
+# TEAMCRAFT_SFU_METRICS_ADDRS instead (port 9465), the bridge has a [metrics] section (port 9466).
+[metrics]
+enabled = false
+listen_addrs = ["127.0.0.1:9464", "[::1]:9464"]
+# How often the database size and the queued push wake-ups are read: never per request or scrape.
+database_check_interval_secs = 60
+
 # Rules only the server enforces (PLAN.md §12, §13). Seed of Administration → Settings → server rules;
 # guest rules there and in the signed policy win over guests_dm_start.
 [policy]

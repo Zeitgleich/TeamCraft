@@ -10,7 +10,20 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `GET /metrics` of the server binaries; the others (the notetaker) link none of this.
+metrics = ["dep:axum", "dep:prometheus", "dep:tracing", "tokio/rt"]
+
 [dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"], optional = true }
+# Counters, gauges, histograms and the Prometheus text format, without a global registry (each
+# instance and test has its own). No default features: they only add protobuf.
+prometheus = { version = "0.14", default-features = false, optional = true }
 socket2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["signal", "net"] }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+reqwest.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

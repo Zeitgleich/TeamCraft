@@ -14,6 +14,7 @@ pub mod handlers;
 pub mod listener;
 pub mod logging;
 pub mod meetings;
+pub mod metrics;
 pub mod openapi;
 pub mod outage_gate;
 pub mod push;

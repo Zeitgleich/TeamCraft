@@ -12,6 +12,7 @@ pub mod forwarding;
 pub mod health;
 pub mod ids;
 pub mod layers;
+pub mod metrics;
 pub mod net;
 pub mod prejoin;
 pub mod probe;

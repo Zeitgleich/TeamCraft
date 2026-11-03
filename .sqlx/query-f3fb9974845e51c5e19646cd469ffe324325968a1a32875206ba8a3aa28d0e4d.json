@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_database_size(current_database()) AS \"database_size_bytes!\",\n                (SELECT COUNT(*) FROM push_retries) AS \"push_retries_pending!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "database_size_bytes!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "push_retries_pending!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "f3fb9974845e51c5e19646cd469ffe324325968a1a32875206ba8a3aa28d0e4d"
+}

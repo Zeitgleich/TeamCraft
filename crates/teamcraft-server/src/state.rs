@@ -78,6 +78,8 @@ pub struct AppState {
   pub brands: Arc<BrandStore>,
   /// Permits for decoding uploaded pictures (`limits.max_concurrent_image_decodes`).
   pub image_decodes: Arc<tokio::sync::Semaphore>,
+  /// What `GET /metrics` shows, with the listener on (`[metrics]`).
+  pub metrics: Arc<crate::metrics::ServerMetrics>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.

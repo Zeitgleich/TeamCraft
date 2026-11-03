@@ -142,6 +142,17 @@ pub struct ActiveDevices {
   pub is_desktop_attentive: bool,
 }
 
+/// The hub in numbers, for the metrics endpoint.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HubStats {
+  /// Open sessions, also those whose connection is gone and that wait to be resumed.
+  pub sessions: usize,
+  /// Sessions with a live connection.
+  pub connections: usize,
+  /// Bytes of all the sessions' resume buffers.
+  pub buffer_bytes: usize,
+}
+
 /// What a desktop or web session said about the user's attention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Attention {
@@ -513,6 +524,20 @@ impl Hub {
       }
     }
     users.into_iter().collect()
+  }
+
+  /// One pass over the sessions, for a scrape; nothing on a hot path calls this.
+  pub fn stats(&self) -> HubStats {
+    let inner = self.lock();
+    HubStats {
+      sessions: inner.sessions.len(),
+      connections: inner
+        .sessions
+        .values()
+        .filter(|session| session.maybe_connection.is_some())
+        .count(),
+      buffer_bytes: inner.total_buffer_bytes,
+    }
   }
 
   /// Users with at least one live connection.
@@ -1102,6 +1127,22 @@ mod tests {
     attention_lease: Duration::from_secs(75),
     desktop_activity_window: Duration::from_secs(120),
   };
+
+  #[tokio::test(start_paused = true)]
+  async fn the_stats_tell_sessions_from_live_connections() {
+    let hub = Hub::new(OPTIONS);
+    assert_eq!(hub.stats(), HubStats::default());
+    let first = hub.open_session(user(1), device(1), DeviceActivity::Active);
+    let _second = hub.open_session(user(2), device(2), DeviceActivity::Active);
+    hub.publish([user(1)], &event(1));
+    let stats = hub.stats();
+    assert_eq!((stats.sessions, stats.connections), (2, 2));
+    assert!(stats.buffer_bytes > 0);
+
+    hub.detach(&first.session_id, first.connection_id);
+    let stats = hub.stats();
+    assert_eq!((stats.sessions, stats.connections), (2, 1));
+  }
 
   #[tokio::test(start_paused = true)]
   async fn events_get_consecutive_sequence_numbers_per_session() {

@@ -6,6 +6,10 @@
 //! - [`bind_dual_stack`]: the one way HTTP listeners of the binaries are bound (IPv4 and IPv6).
 //! - [`shutdown_signal`]: resolves on SIGINT or SIGTERM. In a container the process is PID 1 and
 //!   the kernel ignores SIGTERM there unless a handler is installed, so every binary needs this.
+//! - [`metrics`] (feature `metrics`): the optional `GET /metrics` listener and HTTP counters.
+
+#[cfg(feature = "metrics")]
+pub mod metrics;
 
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};

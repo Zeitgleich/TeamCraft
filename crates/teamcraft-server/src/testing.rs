@@ -562,6 +562,7 @@ impl TestApp {
       image_decodes: Arc::new(tokio::sync::Semaphore::new(
         settings.limits.max_concurrent_image_decodes.max(1),
       )),
+      metrics: Arc::new(crate::metrics::ServerMetrics::new().unwrap()),
       settings: Arc::new(SettingsCell::new(settings)),
     };
 

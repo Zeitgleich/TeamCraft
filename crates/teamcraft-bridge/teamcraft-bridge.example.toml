@@ -54,6 +54,13 @@ drain_timeout_secs = 10
 # count as activity, so a producer can send them as a keep-alive.
 ingest_idle_timeout_secs = 0
 
+# Optional GET /metrics in Prometheus text format on a listener of its own (docs/operations.md,
+# "Metrics"): requests by route class and status, and the worker's queue. No source tokens, no
+# content. It has no authentication: use loopback, or "[::]:9466" (dual stack) behind a firewall.
+[metrics]
+enabled = false
+listen_addrs = ["127.0.0.1:9466", "[::1]:9466"]
+
 # Webhooks with files (multipart/form-data, docs/bridge.md "Files"): each file is encrypted with its
 # own key; the files of a message are uploaded, and completed together, before the message is sent.
 # The form's other fields count against listen.max_body_bytes.
