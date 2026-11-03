@@ -7,7 +7,8 @@ name: Images
 # Like ci.yml, pull requests need the `ci` label.
 on:
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    # No `labeled`: ci-label.yml re-runs this when the `ci` label comes after opening.
+    types: [opened, synchronize, reopened]
     paths:
       - "containers/teamcraft-*.Containerfile"
       - ".github/workflows/images.yml"
@@ -24,7 +25,7 @@ permissions:
 jobs:
   changed:
     name: Changed images
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci')
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci') || github.run_attempt > 1
     runs-on: ubuntu-latest
     outputs:
       images: ${{ steps.list.outputs.images }}
