@@ -316,6 +316,7 @@ error-call-encryption-pending = This device can't join the call yet: it is still
 error-call-move-refused = The call wasn't moved: the meeting room doesn't match what was announced in the conversation. Stay in this call, or join the meeting room from the list if you trust it.
 error-call-speakers-unavailable = The chosen speakers can't be used here. The test sound played on the default output.
 error-call-speakers-missing = No speakers were found. Connect speakers or headphones and try again.
+error-call-video-off-after-crashes = This window crashed several times in a row, so it shows no call video for now. The call goes on. Quit and reopen TeamCraft to get video back.
 error-call-sound-blocked = The browser didn't let the page play sound. Click anywhere on the page, then try again.
 error-call-server-lost = The call server can't be reached anymore, so the call ended. Try again in a moment.
 error-call-connection-lost = The connection broke and the call couldn't be resumed. Check your connection, then call again.

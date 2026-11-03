@@ -10,11 +10,14 @@
 //! | [`watch_network_up`]: the network is back | Windows  | `network`                 |
 //! | [`install_notification_delegate`]         | macOS    | `notification_delegate`   |
 //! | `notification_attachment`: a picture      | macOS    | `notification_attachment` |
+//! | `webkit_version`: the library in use      | Linux    | `webkit_version`          |
 
 mod network;
 mod notification_attachment;
 mod notification_delegate;
 mod resume;
+#[cfg(target_os = "linux")]
+mod webkit_version;
 
 pub use notification_attachment::AttachmentError;
 #[cfg(target_os = "macos")]
@@ -23,3 +26,5 @@ pub use notification_delegate::{NotificationResponse, ResponseAction, install_no
 
 pub use network::{NetworkWatchError, watch_network_up};
 pub use resume::{ResumeWatchError, watch_resume};
+#[cfg(target_os = "linux")]
+pub use webkit_version::webkit_version;

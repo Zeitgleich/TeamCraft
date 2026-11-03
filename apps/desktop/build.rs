@@ -112,6 +112,9 @@ const COMMANDS: &[&str] = &[
   "update_dismiss",
   "video_playback",
   "open_video_externally",
+  "webview_video_mode",
+  "webview_codec_probe_begin",
+  "webview_codec_probe_end",
   "window_chrome",
   "window_action",
 ];

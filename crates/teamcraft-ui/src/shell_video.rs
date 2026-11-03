@@ -7,6 +7,15 @@
 //! cover it (#937). The preview of the own screen share comes as small JPEG images too (#1175): it
 //! never touches WebCodecs, nor its support probe.
 //!
+//! A web process that dies takes the page with it, and asking WebCodecs what it decodes can be what
+//! kills it (WebKitGTK without its DMABUF renderer, #824): the shell says whether the page may ask,
+//! and how it shows video after a crash (`apps/desktop/src/webview_recovery.rs`).
+//!
+//! H.264 arrives in Annex B, which WebCodecs takes without a `description`. The VA-API decoder behind
+//! WebKitGTK's WebCodecs refuses that with a decode error (AMD, WebKitGTK 2.54, GStreamer 1.28, #683)
+//! and takes the same pictures in AVC form, so after a first decode error a page sends AVC, with the
+//! parameter sets as the `description`.
+//!
 //! [`LiveVideo`](crate::components::call_video::LiveVideo) shows the canvases made here, the same
 //! way it shows the browser's call module's, and decides when a track is watched.
 
@@ -30,6 +39,15 @@ const CODEC_AV1: u8 = 4;
 /// other, a few frames' worth; a lost one never comes).
 const MAX_WAITING: usize = 8;
 
+/// H.264 NAL unit types (ITU-T H.264 table 7-1) with the parameter sets a `description` carries.
+const NAL_SPS: u8 = 7;
+const NAL_PPS: u8 = 8;
+const NAL_TYPE_MASK: u8 = 0x1f;
+/// The fixed part of `AVCDecoderConfigurationRecord`: version, profile, compatibility, level,
+/// 4-byte NAL lengths; then the count of SPS (one).
+const AVC_RECORD_HEADER_BYTES: usize = 6;
+const AVC_NAL_LENGTH_BYTES: u8 = 4;
+
 /// The header of one frame message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FrameHeader {
@@ -52,6 +70,22 @@ enum FrameCodec {
 struct InOrder<T> {
   next: u64,
   waiting: BTreeMap<u64, T>,
+}
+
+/// An H.264 picture in AVC form.
+#[derive(Debug, PartialEq, Eq)]
+struct AvcPicture {
+  /// `AVCDecoderConfigurationRecord` of the parameter sets the picture came with, if it did.
+  maybe_description: Option<AvcDescription>,
+  /// The other NAL units, each after its length (4 bytes, big endian).
+  data: Vec<u8>,
+}
+
+/// A decoder's `description` and the codec string that goes with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AvcDescription {
+  record: Vec<u8>,
+  codec: String,
 }
 
 /// A message in send order; `is_after_gap` when messages before it were given up as lost.
@@ -94,6 +128,89 @@ impl FrameHeader {
       timestamp_us: u64::from_be_bytes(timestamp),
     })
   }
+}
+
+/// The NAL units of an Annex B picture, without their start codes.
+fn annex_b_units(bytes: &[u8]) -> Vec<&[u8]> {
+  let mut units = Vec::new();
+  let mut maybe_start = None;
+  let mut index = 0;
+  while index + 3 <= bytes.len() {
+    if bytes[index..index + 3] == [0, 0, 1] {
+      if let Some(start) = maybe_start {
+        units.push(trim_trailing_zeros(&bytes[start..index]));
+      }
+      maybe_start = Some(index + 3);
+      index += 3;
+    } else {
+      index += 1;
+    }
+  }
+  if let Some(start) = maybe_start {
+    units.push(&bytes[start..]);
+  }
+  units
+}
+
+/// The zeros before a start code are its own (a 4-byte one) or padding, never the unit's: a NAL unit
+/// ends in a non-zero byte (`rbsp_trailing_bits`).
+fn trim_trailing_zeros(unit: &[u8]) -> &[u8] {
+  let end = unit
+    .iter()
+    .rposition(|byte| *byte != 0)
+    .map_or(0, |last| last + 1);
+  &unit[..end]
+}
+
+/// An Annex B picture in AVC form. A picture without its parameter sets has no description: the
+/// decoder keeps the last one.
+fn annex_b_to_avc(bytes: &[u8]) -> AvcPicture {
+  let units = annex_b_units(bytes);
+  let is_type = |unit: &&[u8], kind: u8| unit.first().is_some_and(|byte| byte & NAL_TYPE_MASK == kind);
+  let maybe_sps = units.iter().find(|unit| is_type(unit, NAL_SPS));
+  let pictures = units
+    .iter()
+    .filter(|unit| !is_type(unit, NAL_SPS) && !is_type(unit, NAL_PPS));
+  let mut data = Vec::with_capacity(bytes.len());
+  for unit in pictures.filter(|unit| !unit.is_empty()) {
+    data.extend_from_slice(&(unit.len() as u32).to_be_bytes());
+    data.extend_from_slice(unit);
+  }
+  let parameter_sets: Vec<&[u8]> = units
+    .iter()
+    .copied()
+    .filter(|unit| is_type(unit, NAL_PPS))
+    .collect();
+  AvcPicture {
+    maybe_description: maybe_sps.and_then(|sps| avc_description(sps, &parameter_sets)),
+    data,
+  }
+}
+
+/// `None` where the parameter sets don't fit a record: an SPS too short to name its profile, no
+/// PPS, or sizes beyond its fields.
+fn avc_description(sps: &[u8], parameter_sets: &[&[u8]]) -> Option<AvcDescription> {
+  let (profile, compatibility, level) = (*sps.get(1)?, *sps.get(2)?, *sps.get(3)?);
+  let sps_length = u16::try_from(sps.len()).ok()?;
+  let count = u8::try_from(parameter_sets.len())
+    .ok()
+    .filter(|count| *count > 0)?;
+  let mut record = Vec::with_capacity(AVC_RECORD_HEADER_BYTES + 3 + sps.len());
+  record.extend_from_slice(&[1, profile, compatibility, level]);
+  // Reserved bits set, as the record's syntax has them.
+  record.extend_from_slice(&[0xfc | (AVC_NAL_LENGTH_BYTES - 1), 0xe0 | 1]);
+  record.extend_from_slice(&sps_length.to_be_bytes());
+  record.extend_from_slice(sps);
+  record.push(count);
+  for parameter_set in parameter_sets {
+    let length = u16::try_from(parameter_set.len()).ok()?;
+    record.extend_from_slice(&length.to_be_bytes());
+    record.extend_from_slice(parameter_set);
+  }
+  Some(AvcDescription {
+    record,
+    codec: format!("avc1.{profile:02x}{compatibility:02x}{level:02x}"),
+  })
 }
 
 /// The size a canvas of `css_width` x `css_height` CSS pixels covers on a display of `scale`
@@ -177,6 +294,8 @@ mod view {
   use js_sys::{Array, Reflect, Uint8Array};
   use leptos::task::spawn_local;
   use serde_json::json;
+  use teamcraft_client_api::calls::WebviewVideoMode;
+  use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
   use teamcraft_media::web_api::{
     Canvas2d, EncodedVideoChunk, VideoDecoder, VideoFrame as WebVideoFrame, count_picture_drawn, dictionary,
     has_global,
@@ -187,9 +306,13 @@ mod view {
   use wasm_bindgen_futures::JsFuture;
   use web_sys::{Blob, BlobPropertyBag, CanvasRenderingContext2d, Element, HtmlCanvasElement, ImageBitmap};
 
-  use super::{Delivery, FrameCodec, FrameHeader, HEADER_BYTES, InOrder, cover_crop, drawn_size};
+  use super::{
+    AvcDescription, Delivery, FrameCodec, FrameHeader, HEADER_BYTES, InOrder, annex_b_to_avc, cover_crop,
+    drawn_size,
+  };
   use crate::auth::tauri::{call, close_channel, open_channel};
   use crate::components::call_video::VideoSource;
+  use crate::feedback::report_background_failure;
 
   /// JPEG images being decoded at once; more are dropped (each image stands alone).
   const MAX_IMAGES_IN_FLIGHT: u32 = 2;
@@ -212,6 +335,8 @@ mod view {
     /// Whether this webview decodes H.264 with WebCodecs: asked once, and `false` once a
     /// decoder for it could not be configured.
     static CAN_DECODE_H264: Cell<Option<bool>> = const { Cell::new(None) };
+    /// A decoder refused Annex B here: H.264 goes to decoders in AVC form from now on (#683).
+    static H264_IN_AVC: Cell<bool> = const { Cell::new(false) };
     /// Whether this webview decodes AV1 with WebCodecs (#565); asked once.
     static CAN_DECODE_AV1: Cell<Option<bool>> = const { Cell::new(None) };
   }
@@ -318,6 +443,10 @@ mod view {
   struct Decoder {
     codec: FrameCodec,
     decoder: VideoDecoder,
+    /// Takes H.264 in AVC form.
+    is_avc: bool,
+    /// The parameter sets an AVC decoder is configured with.
+    maybe_description: RefCell<Option<AvcDescription>>,
     _output: Closure<dyn FnMut(WebVideoFrame)>,
     _error: Closure<dyn FnMut(JsValue)>,
   }
@@ -349,6 +478,14 @@ mod view {
       });
       let starting = Rc::clone(&view);
       spawn_local(async move {
+        if is_video_off().await {
+          // Once per a while, not once per tile.
+          report_background_failure(ActionFailure::new(
+            FailureKind::Call(CallFailure::VideoOffAfterCrashes),
+            "the shell keeps call video off after repeated crashes of the web process",
+          ));
+          return;
+        }
         let prefer_jpeg = match starting.source {
           VideoSource::Remote(_) => !can_decode_h264().await,
           VideoSource::OwnCamera | VideoSource::OwnScreen => true,
@@ -381,6 +518,8 @@ mod view {
         if let Err(error) = call::<()>(command, &args).await {
           // The tile keeps its blank canvas; the next time it is shown it asks again.
           tracing::warn!(%error, command, "the shell does not send the video");
+          // No silent black tile: JPEG images need a decoder the shell may have to download.
+          report_background_failure(ActionFailure::from_wire(&error));
         }
       });
     }
@@ -643,6 +782,11 @@ mod view {
       }
       self.is_waiting_for_keyframe.set(false);
       self.has_asked_for_keyframe.set(false);
+      let Some(data) = decoder.prepared(payload) else {
+        drop(maybe_decoder);
+        self.decoder_error(header.codec);
+        return;
+      };
       let chunk = dictionary(&[
         (
           "type",
@@ -650,7 +794,7 @@ mod view {
         ),
         // Only the order matters to the decoder; microseconds stay exact in an f64 for ages.
         ("timestamp", JsValue::from(header.timestamp_us as f64)),
-        ("data", payload.into()),
+        ("data", data.into()),
       ])
       .and_then(|init| EncodedVideoChunk::new(&init));
       if chunk.and_then(|chunk| decoder.decoder.decode(&chunk)).is_err() {
@@ -659,11 +803,18 @@ mod view {
       }
     }
 
-    /// A decoder failed on a frame: the next keyframe gets a new one. Errors that repeat without
-    /// a frame decoded in between switch an H.264 track to JPEG images.
+    /// A decoder failed on a frame: the next keyframe gets a new one. For H.264 the first error
+    /// switches to AVC form, and errors that repeat without a frame decoded in between switch the
+    /// track to JPEG images.
     fn decoder_error(self: &Rc<Self>, codec: FrameCodec) {
       self.is_decoder_broken.set(true);
       self.is_waiting_for_keyframe.set(true);
+      if codec == FrameCodec::H264 && !H264_IN_AVC.replace(true) {
+        tracing::info!("the video decoder refused Annex B; trying AVC");
+        self.has_asked_for_keyframe.set(false);
+        self.ask_for_keyframe();
+        return;
+      }
       let errors = self.decoder_errors.get() + 1;
       self.decoder_errors.set(errors);
       tracing::debug!(errors, "video decoder error; rebuilding it");
@@ -792,15 +943,45 @@ mod view {
       ])
       .ok()?;
       let decoder = VideoDecoder::new(&init).ok()?;
-      // H.264 in Annex B carries its parameter sets in band: no `description` needed.
-      let config = dictionary(&[("codec", JsValue::from_str(codec_string))]).ok()?;
-      decoder.configure(&config).ok()?;
+      let is_avc = codec == FrameCodec::H264 && H264_IN_AVC.get();
+      // H.264 in Annex B carries its parameter sets in band: no `description` needed. In AVC form
+      // the decoder is configured by the first keyframe's parameter sets.
+      if !is_avc {
+        let config = dictionary(&[("codec", JsValue::from_str(codec_string))]).ok()?;
+        decoder.configure(&config).ok()?;
+      }
       Some(Self {
         codec,
         decoder,
+        is_avc,
+        maybe_description: RefCell::new(None),
         _output: output,
         _error: error,
       })
+    }
+
+    /// What goes to the decoder for `payload`; `None` when this decoder can't take it. In AVC form
+    /// a picture with other parameter sets (the size changed) configures the decoder again first.
+    fn prepared(&self, payload: &Uint8Array) -> Option<Uint8Array> {
+      if !self.is_avc {
+        return Some(payload.clone());
+      }
+      let picture = annex_b_to_avc(&payload.to_vec());
+      let mut maybe_current = self.maybe_description.borrow_mut();
+      if let Some(description) = picture.maybe_description
+        && maybe_current.as_ref() != Some(&description)
+      {
+        let record = Uint8Array::from(description.record.as_slice());
+        let config = dictionary(&[
+          ("codec", JsValue::from_str(&description.codec)),
+          ("description", record.into()),
+        ])
+        .ok()?;
+        self.decoder.configure(&config).ok()?;
+        *maybe_current = Some(description);
+      }
+      maybe_current.as_ref()?;
+      Some(Uint8Array::from(picture.data.as_slice()))
     }
   }
 
@@ -826,11 +1007,38 @@ mod view {
     is_supported(H264_CODEC).await
   }
 
-  /// Whether WebCodecs decodes `codec` here (`VideoDecoder.isConfigSupported`).
+  /// Whether the shell keeps call video out of this page, after repeated crashes.
+  async fn is_video_off() -> bool {
+    match call::<WebviewVideoMode>("webview_video_mode", &json!({})).await {
+      Ok(mode) => mode == WebviewVideoMode::Off,
+      Err(error) => {
+        tracing::warn!(%error, "the shell did not say how to show call video");
+        false
+      },
+    }
+  }
+
+  /// Whether WebCodecs decodes `codec` here (`VideoDecoder.isConfigSupported`), as far as the shell
+  /// says it is safe to ask: a crash inside the question can't be caught here, only by the shell,
+  /// which is told while it is open.
   async fn is_supported(codec: &str) -> bool {
     if !has_global("VideoDecoder") {
       return false;
     }
+    if !call::<bool>("webview_codec_probe_begin", &json!({}))
+      .await
+      .unwrap_or(false)
+    {
+      return false;
+    }
+    let is_supported = ask_web_codecs(codec).await;
+    if let Err(error) = call::<()>("webview_codec_probe_end", &json!({})).await {
+      tracing::debug!(%error, "the end of the codec question was not delivered");
+    }
+    is_supported
+  }
+
+  async fn ask_web_codecs(codec: &str) -> bool {
     let Some(promise) = dictionary(&[("codec", JsValue::from_str(codec))])
       .and_then(|config| VideoDecoder::is_config_supported(&config))
       .ok()
@@ -864,6 +1072,83 @@ mod view {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod avc_form {
+    use super::*;
+
+    const SPS: [u8; 6] = [0x67, 0x42, 0xc0, 0x28, 0x8c, 0x68];
+    const PPS: [u8; 3] = [0x68, 0xce, 0x3c];
+    const IDR: [u8; 4] = [0x65, 0xb8, 0x00, 0x04];
+    const DELTA: [u8; 3] = [0x41, 0x9a, 0x21];
+
+    #[test]
+    fn a_keyframe_gives_its_parameter_sets_as_the_description() {
+      let bytes = [&[0, 0, 0, 1][..], &SPS, &[0, 0, 0, 1], &PPS, &[0, 0, 1], &IDR].concat();
+      let picture = annex_b_to_avc(&bytes);
+      assert_eq!(picture.data, [&[0, 0, 0, 4][..], &IDR].concat());
+      let description = picture.maybe_description.unwrap();
+      assert_eq!(description.codec, "avc1.42c028");
+      assert_eq!(
+        description.record,
+        [
+          &[1, 0x42, 0xc0, 0x28, 0xff, 0xe1, 0, 6][..],
+          &SPS,
+          &[1, 0, 3],
+          &PPS
+        ]
+        .concat()
+      );
+    }
+
+    #[test]
+    fn a_delta_has_no_description() {
+      let picture = annex_b_to_avc(&[&[0, 0, 0, 1][..], &DELTA].concat());
+      assert_eq!(picture.maybe_description, None);
+      assert_eq!(picture.data, [&[0, 0, 0, 3][..], &DELTA].concat());
+    }
+
+    #[test]
+    fn other_parameter_sets_are_another_description() {
+      let keyframe = |sps: &[u8]| {
+        annex_b_to_avc(&[&[0, 0, 1][..], sps, &[0, 0, 1], &PPS, &[0, 0, 1], &IDR].concat())
+          .maybe_description
+          .unwrap()
+      };
+      assert_ne!(keyframe(&SPS), keyframe(&[0x67, 0x42, 0xc0, 0x28, 0x8c, 0x69]));
+    }
+
+    #[test]
+    fn empty_and_truncated_input_gives_no_description_and_no_panic() {
+      for bytes in [
+        &[][..],
+        &[0, 0],
+        &[0, 0, 1],
+        &[0, 0, 0, 1],
+        &[0, 0, 1, 0x67],
+        &[0, 0, 1, 0x67, 0x42, 0xc0],
+        &[1, 2, 3, 4, 5],
+      ] {
+        assert_eq!(annex_b_to_avc(bytes).maybe_description, None, "{bytes:?}");
+      }
+    }
+
+    #[test]
+    fn parameter_sets_without_a_pps_give_no_description() {
+      let picture = annex_b_to_avc(&[&[0, 0, 1][..], &SPS, &[0, 0, 1], &IDR].concat());
+      assert_eq!(picture.maybe_description, None);
+      assert_eq!(picture.data, [&[0, 0, 0, 4][..], &IDR].concat());
+    }
+
+    #[test]
+    fn a_unit_too_big_for_the_record_gives_no_description() {
+      let sps = vec![0x67; usize::from(u16::MAX) + 1];
+      assert_eq!(avc_description(&sps, &[&PPS]), None);
+      assert_eq!(
+        avc_description(&SPS, &[&vec![0x68; usize::from(u16::MAX) + 1]]),
+        None
+      );
+    }
+  }
 
   mod headers {
     use super::*;

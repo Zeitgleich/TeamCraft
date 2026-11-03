@@ -159,6 +159,11 @@ impl LevelWatch {
     });
   }
 
+  /// Stops whichever watcher there is.
+  pub(crate) fn unwatch_any(&self) {
+    *self.lock() = None;
+  }
+
   /// Stops the watcher of `channel`; a newer watcher (another channel) stays.
   pub(crate) fn unwatch(&self, channel: ChannelId) {
     let mut maybe_watcher = self.lock();
@@ -407,6 +412,15 @@ mod tests {
       watch.publish(0.5);
       assert_eq!(received.try_recv().unwrap(), 0.5);
       watch.unwatch(ChannelId(1));
+      watch.publish(0.7);
+      assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn unwatching_any_stops_whichever_watcher_there_is() {
+      let watch = LevelWatch::default();
+      let received = watched(&watch, ChannelId(1));
+      watch.unwatch_any();
       watch.publish(0.7);
       assert!(received.try_recv().is_err());
     }
