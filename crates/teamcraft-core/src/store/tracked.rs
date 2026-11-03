@@ -203,6 +203,13 @@ impl<S: LocalStore> TrackedStore<S> {
     }
   }
 
+  /// Before the cache is read or patched: drops it if another process committed to the database.
+  /// One `write_tally` look, which does not grow with the conversation (a `data_version` read).
+  fn follow_disk(&self) {
+    let maybe_tally = self.inner.write_tally();
+    self.cache().follow_disk(maybe_tally);
+  }
+
   fn cache(&self) -> std::sync::MutexGuard<'_, MessageCache> {
     // Invariant-free data: at worst a conversation is read from the disk again.
     self.messages.lock().unwrap_or_else(PoisonError::into_inner)
@@ -265,6 +272,8 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
       self.note_removed([old]);
     }
     self.inner.upsert_message(message)?;
+    // After the write: a commit of another process before it is counted by now.
+    self.follow_disk();
     self.cache().upsert(message);
     self.note(Change::Conversation(message.conversation_id));
     Ok(())
@@ -324,6 +333,7 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn message_revision(&self, conversation: ConversationId) -> Option<u64> {
+    self.follow_disk();
     Some(self.cache().revision(conversation))
   }
 
@@ -347,6 +357,7 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     conversation: ConversationId,
     read: &mut dyn FnMut(&[StoredMessage]),
   ) -> Result<(), StoreError> {
+    self.follow_disk();
     let revision = {
       let mut cache = self.cache();
       if let Some(messages) = cache.shared(conversation) {
@@ -431,6 +442,8 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     self
       .inner
       .delete(Table::EntryTallies, &conversation.to_string())?;
+    // After the write: a commit of another process before it is counted by now.
+    self.follow_disk();
     self.cache().remove_conversation(conversation);
     self.note(Change::Conversation(conversation));
     Ok(())
@@ -445,6 +458,8 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
       self.note_removed([old]);
     }
     self.inner.delete_message(conversation, client_message_id)?;
+    // After the write: a commit of another process before it is counted by now.
+    self.follow_disk();
     self.cache().remove(conversation, client_message_id);
     self.note(Change::Conversation(conversation));
     Ok(())
@@ -764,6 +779,89 @@ mod tests {
       store.put(Table::Members, "7", b"[]").unwrap();
       assert_eq!(store.message_revision(id(7)), after);
       assert_eq!(store.message_revision(id(8)), before);
+    }
+
+    /// Issue #1124: another process (the iOS extension) committed to the same file; the cache
+    /// must not keep serving the conversation as it was.
+    #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+    mod other_connections {
+      use teamcraft_crypto::secret::SymmetricKey;
+
+      use super::*;
+      use crate::store::{SealedSqliteStore, StaticKeySource};
+
+      #[test]
+      fn another_connections_commit_drops_the_cached_conversation() {
+        let (directory, ours, theirs) = two_connections();
+        ours.upsert_message(&text(1, Some(100), None)).unwrap();
+        ours.upsert_message(&text(2, Some(200), None)).unwrap();
+        let before = ours.message_revision(id(7));
+        assert_eq!(clients(&ours, MessageFilter::All), [1, 2], "read and kept");
+
+        theirs.upsert_message(&text(3, Some(300), None)).unwrap();
+        theirs
+          .delete_message(id(7), ClientMessageId::from_bytes([1; 16]))
+          .unwrap();
+
+        assert_ne!(ours.message_revision(id(7)), before, "derived data is stale too");
+        assert_eq!(clients(&ours, MessageFilter::All), [2, 3]);
+        drop((ours, theirs));
+        std::fs::remove_dir_all(&directory).unwrap();
+      }
+
+      #[test]
+      fn a_write_after_another_connections_commit_does_not_patch_a_stale_conversation() {
+        let (directory, ours, theirs) = two_connections();
+        ours.upsert_message(&text(1, Some(100), None)).unwrap();
+        assert_eq!(clients(&ours, MessageFilter::All), [1]);
+
+        theirs.upsert_message(&text(2, Some(200), None)).unwrap();
+        ours.upsert_message(&text(3, Some(300), None)).unwrap();
+
+        assert_eq!(clients(&ours, MessageFilter::All), [1, 2, 3]);
+        drop((ours, theirs));
+        std::fs::remove_dir_all(&directory).unwrap();
+      }
+
+      #[test]
+      fn our_own_commits_keep_the_cache() {
+        let (directory, ours, theirs) = two_connections();
+        ours.upsert_message(&text(1, Some(100), None)).unwrap();
+        assert_eq!(clients(&ours, MessageFilter::All), [1]);
+        let revision = ours.message_revision(id(7));
+        // A drop moves the revision, so it stays while the cache is kept.
+        assert_eq!(ours.message_revision(id(7)), revision);
+        assert_eq!(clients(&ours, MessageFilter::All), [1]);
+        assert_eq!(ours.message_revision(id(7)), revision);
+        drop((ours, theirs));
+        std::fs::remove_dir_all(&directory).unwrap();
+      }
+
+      fn two_connections() -> (
+        std::path::PathBuf,
+        TrackedStore<SealedSqliteStore>,
+        SealedSqliteStore,
+      ) {
+        let directory = std::env::temp_dir().join(format!(
+          "teamcraft-tracked-{}",
+          rand_core::RngCore::next_u64(&mut rand_core::OsRng)
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.db");
+        let key = SymmetricKey::generate(&mut rand_core::OsRng);
+        let ours = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+        let theirs = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+        (directory, TrackedStore::with_message_cache(ours, 100), theirs)
+      }
+
+      fn clients(store: &TrackedStore<SealedSqliteStore>, filter: MessageFilter) -> Vec<u8> {
+        store
+          .messages(id(7), filter)
+          .unwrap()
+          .iter()
+          .map(|message| message.client_message_id.as_bytes()[0])
+          .collect()
+      }
     }
 
     fn text(client: u8, maybe_server: Option<i64>, maybe_thread: Option<i64>) -> StoredMessage {

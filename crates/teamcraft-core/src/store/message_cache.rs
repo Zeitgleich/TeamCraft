@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use teamcraft_proto::{ClientMessageId, ConversationId};
 
-use super::StoredMessage;
+use super::{StoredMessage, WriteTally};
 
 /// What the cache holds and how much it may hold.
 #[derive(Debug, Default)]
@@ -28,6 +28,8 @@ pub(crate) struct MessageCache {
   /// Raised when the disk may differ from every revision handed out (a group of writes rolled
   /// back): part of each revision, so nothing derived before still matches.
   epoch: u64,
+  /// Commits of other connections seen so far ([`super::WriteTally::foreign`]).
+  seen_foreign: u64,
 }
 
 impl MessageCache {
@@ -115,6 +117,18 @@ impl MessageCache {
     self.epoch += 1;
   }
 
+  /// Drops everything if another connection committed since the last look: it may have changed any
+  /// conversation, and which one is unknown. `None`: the store has no other writer.
+  pub(crate) fn follow_disk(&mut self, maybe_tally: Option<WriteTally>) {
+    let Some(tally) = maybe_tally else {
+      return;
+    };
+    if tally.foreign != self.seen_foreign {
+      self.seen_foreign = tally.foreign;
+      self.forget_all();
+    }
+  }
+
   fn bump(&mut self, conversation: ConversationId) {
     let writes = self.revisions.entry(conversation).or_default();
     *writes = writes.wrapping_add(1);
@@ -166,6 +180,31 @@ mod tests {
     cache.forget_all();
     assert!(cache.shared(conversation).is_none());
     assert_ne!(cache.revision(conversation), revision);
+  }
+
+  #[test]
+  fn another_connections_commit_drops_everything_once() {
+    let mut cache = MessageCache::new(10);
+    let conversation = id(7);
+    cache.follow_disk(Some(WriteTally::default()));
+    cache.fill(conversation, cache.revision(conversation), Vec::new());
+    let revision = cache.revision(conversation);
+
+    cache.follow_disk(None);
+    cache.follow_disk(Some(WriteTally { lost: 3, foreign: 0 }));
+    assert!(
+      cache.shared(conversation).is_some(),
+      "lost writes are the group's business"
+    );
+
+    let foreign = Some(WriteTally { lost: 0, foreign: 1 });
+    cache.follow_disk(foreign);
+    assert!(cache.shared(conversation).is_none());
+    assert_ne!(cache.revision(conversation), revision);
+
+    cache.fill(conversation, cache.revision(conversation), Vec::new());
+    cache.follow_disk(foreign);
+    assert!(cache.shared(conversation).is_some(), "seen already");
   }
 
   #[test]
