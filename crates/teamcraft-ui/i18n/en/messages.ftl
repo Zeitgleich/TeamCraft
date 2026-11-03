@@ -242,3 +242,6 @@ linked-message-unavailable = Message from a conversation you can’t see
 ## Settings: sections, search and rows (#327)
 # Files view and setup checklist (issue #301)
 composer-placeholder-notes = Note something for yourself
+older-history-loading = Loading older messages…
+older-history-failed = Older messages could not be loaded.
+older-history-retry = Try again

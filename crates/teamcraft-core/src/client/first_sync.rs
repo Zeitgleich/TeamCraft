@@ -46,7 +46,7 @@ const OLDER_RETRY: Duration = Duration::from_secs(30);
 const TRACKS_FIRST_SYNC: bool = !cfg!(target_arch = "wasm32");
 
 /// How much older history a newly set up device reads ahead. What lies before it stays on the server
-/// and comes with "jump to date".
+/// and comes when the reader scrolls there (`older_history.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistoryBackfill {
   /// How far back from now. The local clock only decides how much is read ahead; a wrong one reads

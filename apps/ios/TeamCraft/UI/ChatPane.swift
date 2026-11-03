@@ -42,6 +42,8 @@ struct ChatPane: View {
   @State private var maybeFeed: (conversationId: String, feed: PagedFeed)?
   @State private var hasOlder = false
   @State private var isLoadingOlder = false
+  /// Older history the store doesn't hold: asked for when the feed reaches the store's end.
+  @State private var serverHistory = OlderHistory.complete
   @State private var maybeKeyCatchUp: KeyCatchUpItem?
   /// The row at the top of the screen: SwiftUI keeps it in place when older rows are added above.
   @State private var maybeTopRowId: String?
@@ -210,11 +212,22 @@ struct ChatPane: View {
           // One section per day: its date pill stays at the top while the day scrolls by.
           LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
             // Above the oldest row: seen only when the reader is faster than the core.
-            if hasOlder && isLoadingOlder {
+            if (hasOlder && isLoadingOlder) || (!hasOlder && serverHistory == .loading) {
               ProgressView()
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
                 .accessibilityLabel(Text("loading_older_messages"))
+            }
+            if !hasOlder && serverHistory == .failed {
+              HStack {
+                Text("older_history_failed")
+                  .font(.footnote)
+                  .foregroundStyle(.secondary)
+                Button("older_history_retry") { Task { await loadOlder() } }
+                  .font(.footnote)
+              }
+              .frame(maxWidth: .infinity)
+              .padding(.vertical, 8)
             }
             ForEach(feedSections(messages)) { section in
               Section {
@@ -288,8 +301,18 @@ struct ChatPane: View {
 
   /// The row that pages back when it scrolls into view.
   private var pageBackTriggerId: String? {
-    guard threadId == nil, hasOlder, !messages.isEmpty else { return nil }
+    guard threadId == nil, canPageBack, !messages.isEmpty else { return nil }
     return messages[min(Self.olderAheadRows, messages.count - 1)].id
+  }
+
+  private var canPageBack: Bool { hasOlder || serverHistory == .available }
+
+  /// Rows that arrive or a request that ended change no row on screen, so none appears to ask for
+  /// the next page: a reader still near the oldest row asks here.
+  private func pageBackIfNearOldest() {
+    guard threadId == nil, canPageBack, !isLoadingOlder else { return }
+    let isNear = messages.prefix(Self.olderAheadRows + 1).contains { rowsOnScreen.contains($0.id) }
+    if isNear { Task { await loadOlder() } }
   }
 
   private var names: MentionNames {
@@ -763,6 +786,8 @@ struct ChatPane: View {
       guard let page = await pagedFeed().reread() else { return }
       messages = page.messages
       hasOlder = page.hasOlder
+      if let history = await model.olderHistory(conversationId: conversation.id) { serverHistory = history }
+      pageBackIfNearOldest()
     }
     if conversation.unreadCount > 0 { await model.markRead(conversationId: conversation.id) }
     maybeKeyCatchUp = await model.keyCatchUp()
@@ -782,11 +807,20 @@ struct ChatPane: View {
     }
     maybeFeed = (conversationId, feed)
     hasOlder = false
+    serverHistory = .complete
     return feed
   }
 
   private func loadOlder() async {
-    guard threadId == nil, hasOlder, !isLoadingOlder else { return }
+    guard threadId == nil, !isLoadingOlder else { return }
+    guard hasOlder else {
+      // The core answers in the store: the change that follows says how it went.
+      if serverHistory != .complete && serverHistory != .loading {
+        serverHistory = .loading
+        await model.perform(.loadOlderHistory(conversationId: conversation.id))
+      }
+      return
+    }
     isLoadingOlder = true
     defer { isLoadingOlder = false }
     // A failed read keeps what is shown; the trigger row asks again when it scrolls back in.

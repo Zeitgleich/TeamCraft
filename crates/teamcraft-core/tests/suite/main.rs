@@ -46,6 +46,7 @@ mod mls_storage;
 mod notes_refound;
 mod notetaker;
 mod offline_actions;
+mod older_history;
 mod org_backgrounds;
 mod org_recovery;
 mod people_directory;

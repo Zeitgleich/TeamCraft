@@ -24,7 +24,7 @@ struct ImportPaging {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum PagingPosition {
+pub(super) enum PagingPosition {
   /// The messages before this one are still to be read.
   Before(MessageId),
   /// The beginning (or the history this device may see) is reached.

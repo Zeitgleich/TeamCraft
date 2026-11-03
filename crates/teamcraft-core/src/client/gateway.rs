@@ -137,6 +137,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.drop_read_ahead();
     if outcome.is_ok() {
       self.maybe_last_heard_ms = Some(self.now_ms());
+      self.note_older_history_connection()?;
     }
     outcome
   }

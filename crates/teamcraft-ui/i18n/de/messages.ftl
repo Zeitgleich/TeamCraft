@@ -242,3 +242,6 @@ linked-message-unavailable = Nachricht aus einem Gespräch, das du nicht sehen k
 ## Settings: sections, search and rows (#327)
 # Dateien-Ansicht und Einrichtungs-Checkliste (Issue #301)
 composer-placeholder-notes = Notiere etwas für dich
+older-history-loading = Ältere Nachrichten werden geladen …
+older-history-failed = Ältere Nachrichten konnten nicht geladen werden.
+older-history-retry = Erneut versuchen

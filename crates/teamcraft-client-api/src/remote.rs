@@ -599,6 +599,9 @@ pub enum ChatAction {
     conversation: ConversationId,
     messages: Vec<MessageId>,
   },
+  LoadOlderHistory {
+    conversation: ConversationId,
+  },
   SetFavorite {
     conversation: ConversationId,
     is_favorite: bool,
@@ -1094,6 +1097,7 @@ impl ChatAction {
         conversation,
         messages,
       } => backend.mark_reactions_seen(conversation, messages),
+      Self::LoadOlderHistory { conversation } => backend.load_older_history(conversation),
       Self::SetFavorite {
         conversation,
         is_favorite,
@@ -1355,6 +1359,10 @@ pub enum ChatQuery {
   },
   /// [`ChatBackend::key_catch_up`].
   KeyCatchUp,
+  /// [`ChatBackend::older_history`].
+  OlderHistory {
+    conversation: ConversationId,
+  },
   /// [`ChatBackend::first_sync`].
   FirstSync,
   /// The `#fragment` values of a guest link to the meeting, once the core made them.
@@ -1478,6 +1486,11 @@ pub enum ChatAnswer {
   },
   KeyCatchUp {
     maybe_progress: Option<crate::model::KeyCatchUp>,
+  },
+  OlderHistory {
+    older_history: crate::model::OlderHistory,
+    /// The feed's rows when this was read: a mirror that holds fewer hasn't got the page yet.
+    total: usize,
   },
   FirstSync {
     maybe_progress: Option<crate::model::FirstSync>,
@@ -1665,6 +1678,10 @@ impl ChatQuery {
       Self::KeyCatchUp => ChatAnswer::KeyCatchUp {
         maybe_progress: backend.key_catch_up(),
       },
+      Self::OlderHistory { conversation } => ChatAnswer::OlderHistory {
+        older_history: backend.older_history(conversation),
+        total: backend.message_count(conversation),
+      },
       Self::FirstSync => ChatAnswer::FirstSync {
         maybe_progress: backend.first_sync(),
       },
@@ -1815,6 +1832,40 @@ impl ChatQuery {
 mod tests {
   use super::*;
   use crate::model::id_from_raw;
+
+  #[test]
+  fn older_history_keeps_its_wire_names() {
+    // The mobile apps match these by name (ChatActions.kt, ChatActions.swift, Wire.*).
+    let action = ChatAction::LoadOlderHistory {
+      conversation: id_from_raw(7),
+    };
+    assert_eq!(
+      serde_json::to_string(&action).expect("serialize"),
+      r#"{"action":"load_older_history","conversation":"7"}"#
+    );
+    let query = ChatQuery::OlderHistory {
+      conversation: id_from_raw(7),
+    };
+    assert_eq!(
+      serde_json::to_string(&query).expect("serialize"),
+      r#"{"kind":"older_history","conversation":"7"}"#
+    );
+    for (older_history, name) in [
+      (crate::model::OlderHistory::Available, "available"),
+      (crate::model::OlderHistory::Loading, "loading"),
+      (crate::model::OlderHistory::Failed, "failed"),
+      (crate::model::OlderHistory::Complete, "complete"),
+    ] {
+      assert_eq!(
+        serde_json::to_string(&ChatAnswer::OlderHistory {
+          older_history,
+          total: 3
+        })
+        .expect("serialize"),
+        format!(r#"{{"answer":"older_history","older_history":"{name}","total":3}}"#)
+      );
+    }
+  }
 
   #[test]
   fn actions_round_trip_as_tagged_json() {

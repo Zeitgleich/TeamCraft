@@ -102,6 +102,9 @@ object ChatActions {
     put("messages", JsonArray(messages.map(::JsonPrimitive)))
   }
 
+  /** The reader came near the oldest row held: one more page from the server. */
+  fun loadOlderHistory(conversation: String) = action("load_older_history") { put("conversation", conversation) }
+
   /** Reads again how far the others read: receipts sent while the app was offline never arrive. */
   fun refreshReadReceipts(conversation: String) = action("refresh_read_receipts") { put("conversation", conversation) }
 
@@ -258,6 +261,8 @@ object ChatQueries {
   fun firstUnread(conversation: String) = query("first_unread") { put("conversation", conversation) }
 
   fun unseenReactions(conversation: String) = query("unseen_reactions") { put("conversation", conversation) }
+
+  fun olderHistory(conversation: String) = query("older_history") { put("conversation", conversation) }
 
   fun draft(conversation: String, maybeThread: String?) = query("draft") {
     put("conversation", conversation)

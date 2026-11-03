@@ -684,6 +684,15 @@ pub trait ChatBackend {
   fn is_history_loaded(&self, _conversation: ConversationId, _at: i64) -> bool {
     true
   }
+  /// How far the history reaches beyond what this device holds. Backends that hold the whole
+  /// history are always complete.
+  fn older_history(&self, _conversation: ConversationId) -> crate::model::OlderHistory {
+    crate::model::OlderHistory::Complete
+  }
+  /// The reader came near the oldest row: one more page from the server, unless one is on its way
+  /// or there is no more. It arrives like any store update, before the rows held
+  /// ([`Self::rows_prepended`]); [`Self::older_history`] tells how the request stands.
+  fn load_older_history(&self, _conversation: ConversationId) {}
   /// The conversation includes people from outside the organization (the "external" badge).
   fn has_external_people(&self, _conversation: ConversationId) -> bool {
     false

@@ -729,6 +729,21 @@ pub struct KeyCatchUp {
   pub waiting: Vec<ConversationId>,
 }
 
+/// How far a conversation's history reaches beyond what this device holds, for the top of its list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OlderHistory {
+  /// More may be on the server: a reader near the oldest row asks for it.
+  Available,
+  /// A page is on its way.
+  Loading,
+  /// The last request failed; the user can ask again, and the next connection does.
+  Failed,
+  /// Everything this device may see is here.
+  #[default]
+  Complete,
+}
+
 /// How far the first sync of a newly set up device is, for the bar under the top bar. The core's
 /// numbers: conversations, the only total known up front.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]

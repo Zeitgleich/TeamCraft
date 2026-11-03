@@ -19,6 +19,35 @@
   pointer-events: none;
 }
 
+/* How a request for older history stands, over the top of the feed: the rows don't move for it. */
+.older-history {
+  position: absolute;
+  top: 40px;
+  left: 50%;
+  z-index: 6;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 32px);
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.older-history-retry {
+  flex: none;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-weight: var(--weight-semibold);
+  cursor: pointer;
+}
+
 /* A translucent material over the text scrolling underneath; fades out once the feed rests. */
 .floating-day .date-pill {
   background: color-mix(in srgb, var(--surface) 72%, transparent);

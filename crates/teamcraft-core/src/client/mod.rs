@@ -37,6 +37,7 @@ mod messaging;
 mod missing_keys;
 mod notes_refound;
 mod notifications;
+pub(crate) mod older_history;
 mod org_backgrounds;
 mod org_recovery;
 mod pending_actions;
