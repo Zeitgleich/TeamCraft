@@ -618,3 +618,5 @@ session (the core has no call-state API yet).
   unreadable stores, convergent edits (e2ee.md §9.5). Linking keeps the received keys across a
   restart (#168, e2ee.md §5); a setup given up on drops its device key pair and revokes its device,
   and the receipt is awaited beside the core loop (#415, e2ee.md §3.2, §5).
+
+<!-- Throwaway proof line for #1172, never merged. -->
