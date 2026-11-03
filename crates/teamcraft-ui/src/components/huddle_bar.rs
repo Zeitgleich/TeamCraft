@@ -3,12 +3,13 @@ use leptos::prelude::*;
 use crate::areas::{self, Place, lazy_area};
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::call_prejoin::call_heading;
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::ConversationId;
-use crate::state::use_app_state;
+use crate::state::{MainView, use_app_state};
 
 /// Strip under the channel header: a running huddle to join, or the controls of the user's own call.
 #[component]
@@ -133,14 +134,8 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
           }
         >
           <div class="huddle-controls" role="group" aria-label=move || i18n.t("call-controls-label")>
-            <button
-              class="icon-btn"
-              aria-pressed=move || (!call.is_mic_on.get()).to_string()
-              aria-label=move || if call.is_mic_on.get() { i18n.t("control-mic-mute") } else { i18n.t("control-mic-unmute") }
-              on:click=move |_| call.is_mic_on.update(|on| *on = !*on)
-            >
-              <Icon name=Signal::derive(move || if call.is_mic_on.get() { IconName::Mic } else { IconName::MicOff }) />
-            </button>
+            <MicButton class="icon-btn" />
+            <CameraButton class="icon-btn" />
             <button
               class="icon-btn"
               aria-label=move || i18n.t("call-open")
@@ -159,48 +154,81 @@ pub fn HuddleBarContent(conversation: ConversationId) -> impl IntoView {
   }
 }
 
-/// Compact controls of the running call, shown in the sidebar while the call is minimized.
+/// The bar of a minimized call (#1141), above the app in every view and layout: the rest of the
+/// app stays usable while the call runs. It loads with the call screens (`areas::call_bar`). Not
+/// over the call's own conversation, whose huddle bar has the same controls.
 #[component]
-pub fn CallPill() -> impl IntoView {
+pub fn MinimizedCallBar() -> impl IntoView {
+  let state = use_app_state();
+  let call = state.call;
+  let is_shown = Memo::new(move |_| {
+    call.phase.get() == CallPhase::Active
+      && call.is_minimized.get()
+      && call
+        .maybe_request
+        .get()
+        .is_some_and(|request| state.view.get() != MainView::Conversation(request.conversation))
+  });
+  move || {
+    is_shown
+      .get()
+      .then(|| lazy_area(Place::Inline, || areas::call_bar(())))
+  }
+}
+
+/// The minimized call's bar: what call it is, the microphone and the camera, back to the call and
+/// leaving it.
+#[component]
+pub fn CallBar() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let call = state.call;
-  let name = Memo::new(move |_| {
-    call
-      .maybe_request
-      .get()
-      .and_then(|request| state.read(|backend| backend.conversation(request.conversation)))
-      .map(|conv| conv.name)
-      .unwrap_or_default()
+  let maybe_hub = use_context::<crate::meetings::MeetingsHub>();
+  let title = Memo::new(move |_| {
+    let Some(request) = call.maybe_request.get() else {
+      return String::new();
+    };
+    let maybe_meeting_title = maybe_hub.and_then(|hub| hub.title_for(request.conversation));
+    let name = state
+      .read(|backend| backend.conversation(request.conversation))
+      .map(|conversation| conversation.name)
+      .unwrap_or_default();
+    call_heading(i18n, request.kind, maybe_meeting_title.as_deref(), &name)
   });
-  let is_visible = move || call.phase.get() == CallPhase::Active && call.is_minimized.get();
+  let people = Memo::new(move |_| {
+    call.maybe_request.get().map_or(1, |request| {
+      state.read(|backend| backend.call_participants(request.conversation).len()) + 1
+    })
+  });
+  let status = move || {
+    if call.has_ended.get() {
+      i18n.t("call-ended")
+    } else {
+      format!(
+        "{} · {}",
+        i18n.t("call-in-progress"),
+        i18n.t_count("call-participants", people.get())
+      )
+    }
+  };
 
   view! {
-    <Show when=is_visible fallback=|| ()>
-      <div class="call-pill" role="region" aria-label=move || i18n.t("call-pill-label")>
-        <span class="call-pill-dot" aria-hidden="true"></span>
-        <button
-          class="call-pill-name"
-          on:click=move |_| {
-            if let Some(request) = call.maybe_request.get_untracked() {
-              state.open_conversation(request.conversation);
-            }
-            call.is_minimized.set(false);
-          }
-          title=move || i18n.t("call-open")
-        >
-          <span class="small" role="status">
-            {move || if call.has_ended.get() { i18n.t("call-ended") } else { i18n.t("call-in-progress") }}
-          </span>
-          <span translate="no">{move || format!("# {}", name.get())}</span>
-        </button>
+    <div class="call-bar" role="region" aria-label=move || i18n.t("call-pill-label")>
+      <span class="call-bar-dot" aria-hidden="true"></span>
+      <button class="call-bar-open" title=move || i18n.t("call-open") on:click=move |_| call.is_minimized.set(false)>
+        <strong translate="no">{move || title.get()}</strong>
+        <span class="small" role="status">{status}</span>
+      </button>
+      <div class="call-bar-controls" role="group" aria-label=move || i18n.t("call-controls-label")>
+        <MicButton class="icon-btn on-dark" />
+        <CameraButton class="icon-btn on-dark" />
         <button
           class="icon-btn on-dark"
-          aria-pressed=move || (!call.is_mic_on.get()).to_string()
-          aria-label=move || if call.is_mic_on.get() { i18n.t("control-mic-mute") } else { i18n.t("control-mic-unmute") }
-          on:click=move |_| call.is_mic_on.update(|on| *on = !*on)
+          aria-label=move || i18n.t("call-open")
+          title=move || i18n.t("call-open")
+          on:click=move |_| call.is_minimized.set(false)
         >
-          <Icon name=Signal::derive(move || if call.is_mic_on.get() { IconName::Mic } else { IconName::MicOff }) />
+          <Icon name=IconName::Maximize />
         </button>
         <button
           class="icon-btn on-dark leave"
@@ -211,6 +239,58 @@ pub fn CallPill() -> impl IntoView {
           <Icon name=IconName::Phone class="hangup" />
         </button>
       </div>
-    </Show>
+    </div>
+  }
+}
+
+/// Mutes and unmutes the call's microphone (in the call too, not only the icon).
+#[component]
+fn MicButton(class: &'static str) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let call = state.call;
+  let label = move || {
+    if call.is_mic_on.get() {
+      i18n.t("control-mic-mute")
+    } else {
+      i18n.t("control-mic-unmute")
+    }
+  };
+  view! {
+    <button
+      class=class
+      aria-pressed=move || (!call.is_mic_on.get()).to_string()
+      aria-label=label
+      title=label
+      on:click=move |_| call.set_muted(call.is_mic_on.get_untracked())
+    >
+      <Icon name=Signal::derive(move || if call.is_mic_on.get() { IconName::Mic } else { IconName::MicOff }) />
+    </button>
+  }
+}
+
+/// Turns the call's camera on and off.
+#[component]
+fn CameraButton(class: &'static str) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let call = state.call;
+  let label = move || {
+    if call.is_camera_on.get() {
+      i18n.t("control-camera-off")
+    } else {
+      i18n.t("control-camera-on")
+    }
+  };
+  view! {
+    <button
+      class=class
+      aria-pressed=move || (!call.is_camera_on.get()).to_string()
+      aria-label=label
+      title=label
+      on:click=move |_| call.set_camera(!call.is_camera_on.get_untracked())
+    >
+      <Icon name=Signal::derive(move || if call.is_camera_on.get() { IconName::Video } else { IconName::VideoOff }) />
+    </button>
   }
 }

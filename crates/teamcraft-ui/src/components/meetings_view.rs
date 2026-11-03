@@ -661,10 +661,16 @@ fn GuestLinks(meeting: MeetingId, conversation: ConversationId) -> impl IntoView
 /// fingerprint is never copied (#987 review). The text is made inside the click, which browsers
 /// require for clipboard writes.
 #[component]
-fn MeetingLinkButton(meeting: MeetingId, conversation: ConversationId, join_url: String) -> impl IntoView {
+pub(crate) fn MeetingLinkButton(
+  meeting: MeetingId,
+  conversation: ConversationId,
+  join_url: String,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let hub = expect_context::<MeetingsHub>();
+  // Made once per meeting; also where the meeting's card didn't ask yet (a call's "Add people").
+  verify_link(state, hub, conversation, meeting);
   let is_copied = RwSignal::new(false);
   let maybe_fragment = move || hub.verified_links.with(|links| links.get(&meeting).cloned());
   let copy = move |_| {

@@ -1625,6 +1625,17 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .collect()
   }
 
+  fn meeting_conversations(&self) -> Vec<Conversation> {
+    let users = self.summaries();
+    let preferences = self.mention_preferences();
+    self
+      .conversations_raw()
+      .iter()
+      .filter(|conversation| conversation.kind == ConversationKindProto::Meeting)
+      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
+      .collect()
+  }
+
   fn conversation(&self, id: ConversationId) -> Option<Conversation> {
     let users = self.summaries();
     let preferences = self.mention_preferences();

@@ -43,7 +43,7 @@ use crate::components::file_preview::FilePreview;
 use crate::components::files_view::FilesView;
 use crate::components::guest_meeting::{GuestMeeting, GuestSession};
 use crate::components::home::NewMessageDialog;
-use crate::components::huddle_bar::HuddleBarContent;
+use crate::components::huddle_bar::{CallBar, HuddleBarContent};
 use crate::components::lightbox::Lightbox;
 use crate::components::link_request_prompt::{LinkRequestCards, Step as LinkStep};
 use crate::components::log_view::IntegrationFeed;
@@ -173,6 +173,8 @@ areas! {
   add_to_call(conversation: ConversationId) => calls: view! { <AddToCallDialog conversation=conversation /> };
   /// The bar of a call going on in a conversation, once there is one: it leads to the call screens.
   huddle_bar(conversation: ConversationId) => calls: view! { <HuddleBarContent conversation=conversation /> };
+  /// The bar of a minimized call above the app (#1141).
+  call_bar(_unit: ()) => calls: view! { <CallBar /> };
   meetings(_unit: ()) => meetings: view! { <MeetingsView /> };
   schedule_meeting(_unit: ()) => meetings: view! { <ScheduleMeetingDialog /> };
   edit_meeting(meeting: MeetingId) => meetings: view! { <ScheduleMeetingDialog maybe_edit=meeting /> };

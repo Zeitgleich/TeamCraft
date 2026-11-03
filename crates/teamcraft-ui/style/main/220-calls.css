@@ -80,40 +80,63 @@
   }
 }
 
-.call-pill {
-  flex: none;
+/* A minimized call (#1141): a bar above the app in every view, in the call's own dark colours, so
+   the rest of the app stays usable. Selecting its name or the expand button returns to the call. */
+.call-bar {
   display: flex;
   align-items: center;
-  gap: 4px;
-  margin: 8px;
-  padding: 6px 6px 6px 12px;
-  border-radius: var(--radius);
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--chrome-strong);
+  gap: 8px;
+  min-height: 44px;
+  padding: 4px 8px 4px 16px;
+  background: var(--call-bg);
+  color: var(--call-text);
 }
 
-.call-pill-dot {
+.call-bar-dot {
+  flex: none;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--online);
 }
 
-.call-pill-name {
+.call-bar-open {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  padding: 0 4px;
+  padding: 2px 4px;
   border: 0;
+  border-radius: var(--radius-sm);
   background: none;
   color: inherit;
   text-align: left;
-  overflow: hidden;
 }
 
-.call-pill .leave {
+.call-bar-open > * {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.call-bar-open .small {
+  color: var(--call-muted);
+}
+
+.call-bar-controls {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.call-bar .icon-btn[aria-pressed="true"] {
+  color: var(--call-danger);
+}
+
+.call-bar .leave {
   background: var(--call-danger);
   color: var(--on-fill);
 }

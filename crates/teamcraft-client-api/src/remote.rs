@@ -312,6 +312,7 @@ impl ChatSnapshot {
       conversations.extend(backend.space_conversations(space.id));
     }
     conversations.extend(backend.direct_conversations());
+    conversations.extend(backend.meeting_conversations());
     let message_counts = conversations
       .iter()
       .map(|conversation| (conversation.id, backend.message_count(conversation.id)))
