@@ -5,6 +5,7 @@
 //! the page) and [`tauri::TauriAuth`] (the desktop shell does the flow on the Rust side with the
 //! system browser and keeps tokens in the OS keyring, so the webview never sees them).
 
+mod account_gate;
 pub mod browser;
 mod config;
 pub(crate) mod fetch;
@@ -16,6 +17,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
+use account_gate::AccountGate;
+pub use account_gate::ME_PATH;
 pub use config::AppConfig;
 pub use teamcraft_client_api::remote::ApiMethod;
 pub use teamcraft_client_api::sign_in_look::SignInLook;
@@ -84,24 +87,22 @@ pub trait Authenticator {
   fn restore(&self) -> LocalFuture<'_, Result<bool, AuthError>>;
   /// The account the server confirmed last on this device, if its session is still stored, read
   /// without the network: the app starts from it at once while [`Self::restore`] and `GET /me` run
-  /// beside it (issue #778). It only shows local data; every request still carries the session's
-  /// own token, and the server's answer decides what happens next. Prepares the session for the
-  /// core, so [`Self::is_restoring`] is true after a `Some`. Not during a redirect back from the
-  /// identity provider, which must finish first.
+  /// beside it (issue #778). It only shows local data; nothing goes out until the server confirmed
+  /// it ([`account_gate`]). Not during a redirect back from the identity provider, which must finish
+  /// first.
   fn cached_account(&self) -> LocalFuture<'_, Option<GetMeResponse>> {
     Box::pin(async { None })
   }
-  /// The server confirmed `account`: the next start can begin with it.
+  /// The server confirmed `account`: requests may go out, and the next start can begin with it.
   fn remember_account<'a>(&'a self, _account: &'a GetMeResponse) -> LocalFuture<'a, ()> {
     Box::pin(async {})
   }
-  /// The next start waits for the server again.
+  /// The cached account doesn't stand: the next start waits for the server again.
   fn forget_account(&self) -> LocalFuture<'_, ()> {
     Box::pin(async {})
   }
-  /// The app started from the cached account and [`Self::restore`] has no verdict yet. Only the
-  /// browser build asks: its core reads the token here, the desktop shell's core in the shell.
-  fn is_restoring(&self) -> bool {
+  /// The app started from the cached account and the server hasn't confirmed it yet.
+  fn is_account_unconfirmed(&self) -> bool {
     false
   }
   /// Starts a login. In the browser this navigates away and never resolves; on desktop it resolves when
@@ -170,10 +171,10 @@ pub trait Authenticator {
 /// Picks the implementation for the current platform.
 pub fn detect(config: AppConfig) -> Rc<dyn Authenticator> {
   if tauri::is_available() {
-    Rc::new(tauri::TauriAuth::new())
+    Rc::new(AccountGate::new(Rc::new(tauri::TauriAuth::new())))
   } else {
     let server_url = config.server_url.clone();
-    let auth: Rc<dyn Authenticator> = Rc::new(browser::BrowserAuth::new(config));
+    let auth: Rc<dyn Authenticator> = Rc::new(AccountGate::new(Rc::new(browser::BrowserAuth::new(config))));
     // The page runs the client core itself (web_core), signing with the page's session.
     #[cfg(target_arch = "wasm32")]
     crate::web_core::configure(auth.clone(), &server_url);

@@ -732,8 +732,8 @@ async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), 
       .ok_or("the web client is not configured")?;
     // The first token must be there before the core makes its first request, unless the app started
     // from the cached account: then the core opens the local data at once and connects when the
-    // token comes (issue #778).
-    let tokens = if auth.is_restoring() {
+    // server confirmed the account (issue #778, auth/account_gate.rs).
+    let tokens = if auth.is_account_unconfirmed() {
       WebTokens::new(TokenSlot::Waiting)
     } else {
       let first = auth
@@ -936,6 +936,25 @@ async fn hand_over(ends_call: bool) {
 fn is_owner_of(user: UserId) -> bool {
   RUNNING
     .with(|running| matches!(&*running.borrow(), Some(Running::Owner { user: owner, .. }) if *owner == user))
+}
+
+/// The page is about to go to the identity provider: what the user just typed is saved first, like at
+/// a handover. Nothing to do without a core.
+pub async fn save_before_leaving() {
+  if RUNNING.with(|running| running.borrow().is_none()) {
+    return;
+  }
+  persist_drafts().await;
+  if !runs_here() {
+    return;
+  }
+  let flushed = Box::pin(ask(Request::Flush));
+  match select(flushed, Box::pin(platform::sleep(HANDOVER_FLUSH_TIMEOUT))).await {
+    Either::Left((Ok(Ok(())), _)) => {},
+    Either::Left((Ok(Err(error)), _)) => tracing::warn!(%error, "local data not saved before leaving"),
+    Either::Left((Err(error), _)) => tracing::debug!(%error, "no core to save before leaving"),
+    Either::Right(_) => tracing::warn!("local data still being saved; leaving anyway"),
+  }
 }
 
 /// Asks the composers to store their drafts now, then gives their writes a moment to reach the
@@ -1776,7 +1795,11 @@ impl Core {
       Request::LinkRequestReject { id, reply } => drop(reply.send(self.link_request_reject(&id).await)),
       Request::NetworkChanged => {
         self.tokens.wake();
-        self.connection.network_changed(now_ms()).await;
+        // Without a token an attempt can only fail, and it would use up the one skipped backoff
+        // the token's arrival needs.
+        if !self.tokens.is_waiting() {
+          self.connection.network_changed(now_ms()).await;
+        }
       },
       Request::PrepareCall(conversation, reply) => {
         let result = match self.client.as_mut() {

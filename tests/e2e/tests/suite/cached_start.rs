@@ -15,8 +15,8 @@
 //! CACHED_START_RUNS=7 cargo test -p teamcraft-e2e --features browser --test suite -- --nocapture cached_start::
 //! ```
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chromiumoxide::cdp::browser_protocol::fetch::{
@@ -24,9 +24,11 @@ use chromiumoxide::cdp::browser_protocol::fetch::{
   EventRequestPaused, FulfillRequestParams, HeaderEntry, RequestPattern,
 };
 use chromiumoxide::cdp::browser_protocol::network::{
-  BlockPattern, ClearBrowserCookiesParams, EnableParams as NetworkEnableParams, SetBlockedUrLsParams,
+  BlockPattern, ClearBrowserCookiesParams, EnableParams as NetworkEnableParams, EventWebSocketCreated,
+  SetBlockedUrLsParams,
 };
 use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
+use chromiumoxide::cdp::js_protocol::runtime::EventConsoleApiCalled;
 use chromiumoxide::page::Page;
 use futures_util::StreamExt;
 use teamcraft_e2e::browser::{BrowserSession, lease_web_port, web_dir};
@@ -119,8 +121,12 @@ async fn a_signed_in_start_needs_no_answer_from_anybody() {
         return;
       }
       offline_start_shows_the_chats_and_connects_later(&page, browser_ref, alice_ref, channel).await;
+      provider_hiccup_keeps_the_session(&page, channel.to_string()).await;
+      proxy_401_keeps_the_session(&page, channel.to_string()).await;
+      nothing_goes_out_before_the_answer(&page, channel.to_string()).await;
       refused_refresh_token_goes_to_the_identity_provider(&page, channel.to_string()).await;
       another_account_in_the_answer_closes_the_data(&page, channel.to_string()).await;
+      ended_session_says_so(&page, channel.to_string()).await;
       deactivation_while_offline_ends_the_session(
         &page,
         channel.to_string(),
@@ -145,19 +151,30 @@ async fn measure_starts(page: &Page, channel: String) {
   add_script(page, CLOCK_RUNS_ON).await;
   let url = format!("{WEB_ORIGIN}/c/{channel}");
 
+  let connected = watch_gateway_connected(page).await;
   let mut good = Vec::new();
+  let mut until_connected = Vec::new();
   for _ in 0..runs {
+    *connected.lock().unwrap() = None;
+    let started = Instant::now();
     good.push(start_until_list(page, &url).await);
+    until_connected.push(wait_for_connection(&connected, started).await);
   }
   report("good network", &good);
+  report_connected("good network", until_connected);
 
   let held = hold_back(page).await;
   let mut slow = Vec::new();
+  let mut until_connected = Vec::new();
   for _ in 0..runs {
+    *connected.lock().unwrap() = None;
+    let started = Instant::now();
     slow.push(start_until_list(page, &url).await);
+    until_connected.push(wait_for_connection(&connected, started).await);
   }
   held.stop(page).await;
   report("every request 1 s late", &slow);
+  report_connected("every request 1 s late", until_connected);
 
   block_the_network(page).await;
   let mut absent = Vec::new();
@@ -171,6 +188,44 @@ async fn measure_starts(page: &Page, channel: String) {
   page.goto(url).await.unwrap();
   wait_for_text(page, CHANNEL).await;
   tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
+/// When the core logged its gateway connection, each time.
+async fn watch_gateway_connected(page: &Page) -> Arc<Mutex<Option<Instant>>> {
+  let connected = Arc::new(Mutex::new(None));
+  let noted = connected.clone();
+  let mut console = page.event_listener::<EventConsoleApiCalled>().await.unwrap();
+  tokio::spawn(async move {
+    while let Some(event) = console.next().await {
+      let is_connected = event
+        .args
+        .iter()
+        .filter_map(|arg| arg.value.as_ref())
+        .any(|value| value.to_string().contains("gateway connected"));
+      if is_connected {
+        noted.lock().unwrap().get_or_insert_with(Instant::now);
+      }
+    }
+  });
+  connected
+}
+
+async fn wait_for_connection(connected: &Mutex<Option<Instant>>, started: Instant) -> Duration {
+  let deadline = Instant::now() + Duration::from_secs(30);
+  loop {
+    if let Some(at) = *connected.lock().unwrap() {
+      return at.saturating_duration_since(started);
+    }
+    assert!(Instant::now() < deadline, "the gateway never connected");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+}
+
+fn report_connected(name: &str, samples: Vec<Duration>) {
+  let mut millis: Vec<u128> = samples.iter().map(Duration::as_millis).collect();
+  millis.sort_unstable();
+  let median = millis.get(millis.len() / 2).copied().unwrap_or(0);
+  eprintln!("cached start: {name}: connected, median {median} ms, all {millis:?} ms");
 }
 
 fn report(name: &str, samples: &[(StartEnd, Duration)]) {
@@ -233,6 +288,140 @@ async fn offline_start_shows_the_chats_and_connects_later(
   unblock_the_network(page).await;
   wait_for_text(page, newer).await;
   wait_until_gone(page, ".connection-hint").await;
+}
+
+/// The identity provider answers a refresh with something other than `invalid_grant`, with and without
+/// a body the OAuth client reads. Nobody is signed out: its cookies are gone, so tokens lost here would
+/// end at its login page.
+async fn provider_hiccup_keeps_the_session(page: &Page, channel: String) {
+  page.execute(ClearBrowserCookiesParams::default()).await.unwrap();
+  let url = format!("{WEB_ORIGIN}/c/{channel}");
+  for (status, body) in [
+    (503, r#"{"error":"temporarily_unavailable"}"#),
+    (500, r#"{"error":"server_error"}"#),
+    (502, "<html>Bad gateway</html>"),
+  ] {
+    let hiccup = answer_refresh_with(page, status, body).await;
+    let (end, took) = start_until_list(page, &url).await;
+    assert_eq!(end, StartEnd::ChannelList, "{status} {body} after {took:?}");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let text = body_text(page).await;
+    assert!(text.contains(MESSAGE), "{status} {body}: {text}");
+    assert!(
+      page.find_element("input[name=username]").await.is_err(),
+      "{status} {body}"
+    );
+    hiccup.stop(page).await;
+  }
+  // The same tokens work once the provider does.
+  let (end, took) = start_until_list(page, &url).await;
+  assert_eq!(end, StartEnd::ChannelList, "after {took:?}");
+  wait_until_gone(page, ".connection-hint").await;
+  tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
+/// A proxy answers `GET /me` with its own 401 page: the saved tokens and the cached account stay, which
+/// the next start without any network shows.
+async fn proxy_401_keeps_the_session(page: &Page, channel: String) {
+  let url = format!("{WEB_ORIGIN}/c/{channel}");
+  let proxy = intercept(page, &["*/api/v1/me"], |page, event| async move {
+    fulfill(
+      &page,
+      &event,
+      401,
+      "text/html",
+      "<html>Proxy authentication required</html>",
+    )
+    .await;
+  })
+  .await;
+  let (end, took) = start_until_list(page, &url).await;
+  assert_eq!(end, StartEnd::ChannelList, "after {took:?}");
+  tokio::time::sleep(Duration::from_secs(3)).await;
+  let text = body_text(page).await;
+  assert!(text.contains(MESSAGE), "{text}");
+  proxy.stop(page).await;
+
+  block_the_network(page).await;
+  let (end, took) = start_until_list(page, &url).await;
+  assert_eq!(end, StartEnd::ChannelList, "after {took:?}");
+  unblock_the_network(page).await;
+  wait_until_gone(page, ".connection-hint").await;
+  tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
+/// Until the server answered `GET /me`, nothing with the session's token goes out and no gateway
+/// connection starts: the session's user may not be the cached one. The chats show meanwhile.
+async fn nothing_goes_out_before_the_answer(page: &Page, channel: String) {
+  let url = format!("{WEB_ORIGIN}/c/{channel}");
+  let is_answered = Arc::new(AtomicBool::new(false));
+  let signed_requests = Arc::new(Mutex::new(Vec::<String>::new()));
+  let sockets = Arc::new(Mutex::new(Vec::<String>::new()));
+  let mut created = page.event_listener::<EventWebSocketCreated>().await.unwrap();
+  let (seen_sockets, seen_answer) = (sockets.clone(), is_answered.clone());
+  tokio::spawn(async move {
+    while let Some(event) = created.next().await {
+      if !seen_answer.load(Ordering::SeqCst) {
+        seen_sockets.lock().unwrap().push(event.url.clone());
+      }
+    }
+  });
+  let (noted, answer) = (signed_requests.clone(), is_answered.clone());
+  let hold = intercept(page, &["*/api/v1/*"], move |page, event| {
+    let (noted, answer) = (noted.clone(), answer.clone());
+    async move {
+      if event.request.url.ends_with("/api/v1/me") {
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        answer.store(true, Ordering::SeqCst);
+      } else if !answer.load(Ordering::SeqCst)
+        && serde_json::to_string(&event.request.headers)
+          .unwrap()
+          .to_lowercase()
+          .contains("authorization")
+      {
+        noted.lock().unwrap().push(event.request.url.clone());
+      }
+      let _ = page
+        .execute(ContinueRequestParams::new(event.request_id.clone()))
+        .await;
+    }
+  })
+  .await;
+  let (end, took) = start_until_list(page, &url).await;
+  assert_eq!(end, StartEnd::ChannelList, "after {took:?}");
+  assert!(
+    took < Duration::from_secs(3),
+    "the chats waited for the answer: {took:?}"
+  );
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while !is_answered.load(Ordering::SeqCst) {
+    assert!(Instant::now() < deadline, "GET /me never went out");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+  assert_eq!(*signed_requests.lock().unwrap(), Vec::<String>::new());
+  assert_eq!(*sockets.lock().unwrap(), Vec::<String>::new());
+  hold.stop(page).await;
+  wait_until_gone(page, ".connection-hint").await;
+  tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
+/// The server says the session ended: the chats go, the screen says why in plain words, and signing
+/// in again through the provider's session brings them back.
+async fn ended_session_says_so(page: &Page, channel: String) {
+  let url = format!("{WEB_ORIGIN}/c/{channel}");
+  let ended = intercept(page, &["*/api/v1/me"], |page, event| async move {
+    let body = r#"{"error_code":"session_ended","message":"ended"}"#;
+    fulfill(&page, &event, 401, "application/json", body).await;
+  })
+  .await;
+  page.goto(url.clone()).await.unwrap();
+  wait_for_text(page, "You were signed out").await;
+  let text = body_text(page).await;
+  assert!(!text.contains(CHANNEL) && !text.contains(MESSAGE), "{text}");
+  ended.stop(page).await;
+  page.goto(url).await.unwrap();
+  wait_for_text(page, MESSAGE).await;
+  tokio::time::sleep(Duration::from_secs(2)).await;
 }
 
 /// The identity provider refuses the refresh token: the app goes to the provider, which has no
@@ -381,12 +570,17 @@ async fn hold_back(page: &Page) -> Interception {
   .await
 }
 
-/// The identity provider answers refresh requests with `invalid_grant`; everything else goes through.
+/// The identity provider answers refresh requests with `invalid_grant`.
 async fn refuse_refresh_tokens(page: &Page) -> Interception {
+  answer_refresh_with(page, 400, r#"{"error":"invalid_grant"}"#).await
+}
+
+/// The identity provider answers refresh requests like this; everything else goes through.
+async fn answer_refresh_with(page: &Page, status: i64, body: &'static str) -> Interception {
   intercept(
     page,
     &["*/protocol/openid-connect/token"],
-    |page, event| async move {
+    move |page, event| async move {
       let is_refresh = event
         .request
         .post_data_entries
@@ -401,7 +595,7 @@ async fn refuse_refresh_tokens(page: &Page) -> Interception {
             .is_ok_and(|body| String::from_utf8_lossy(&body).contains("refresh_token"))
         });
       if is_refresh {
-        fulfill_json(&page, &event, 400, r#"{"error":"invalid_grant"}"#).await;
+        fulfill(&page, &event, status, "application/json", body).await;
       } else {
         let _ = page
           .execute(ContinueRequestParams::new(event.request_id.clone()))
@@ -416,16 +610,16 @@ async fn refuse_refresh_tokens(page: &Page) -> Interception {
 async fn serve_another_account(page: &Page) -> Interception {
   intercept(page, &["*/api/v1/me"], |page, event| async move {
     let body = r#"{"id":"9007199254740001","display_name":"Stranger","role":"member"}"#;
-    fulfill_json(&page, &event, 200, body).await;
+    fulfill(&page, &event, 200, "application/json", body).await;
   })
   .await
 }
 
-async fn fulfill_json(page: &Page, event: &EventRequestPaused, status: i64, body: &str) {
+async fn fulfill(page: &Page, event: &EventRequestPaused, status: i64, content_type: &str, body: &str) {
   use base64::Engine;
   let mut response = FulfillRequestParams::new(event.request_id.clone(), status);
   response.response_headers = Some(vec![
-    HeaderEntry::new("Content-Type", "application/json"),
+    HeaderEntry::new("Content-Type", content_type),
     HeaderEntry::new("Access-Control-Allow-Origin", WEB_ORIGIN),
   ]);
   response.body = Some(base64::engine::general_purpose::STANDARD.encode(body).into());

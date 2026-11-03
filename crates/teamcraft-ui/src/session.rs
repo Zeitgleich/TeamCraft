@@ -16,7 +16,7 @@ use teamcraft_client_api::oidc_login::AuthorizationErrorKind;
 use teamcraft_client_api::remote::{CoreStatus, EnrollRequest, EnrollSecret, StoreProblem};
 
 use crate::auth::tauri::{ServerCheck, ServerProblem, ServerView};
-use crate::auth::{ApiResponse, AuthError, Authenticator, SignInLook, tauri};
+use crate::auth::{ApiResponse, AuthError, Authenticator, ME_PATH, SignInLook, tauri};
 use crate::clock;
 use crate::model::UserId;
 use crate::reactive::SetIfAlive;
@@ -31,11 +31,11 @@ const CORE_START_PATIENCE_MS: i64 = 10_000;
 const CORE_POLL_EARLY: Duration = Duration::from_millis(500);
 const CORE_POLL_LATE: Duration = Duration::from_secs(2);
 /// How long the check of a cached account waits after getting no answer, doubling up to the maximum,
-/// plus a part of a second so tabs and devices don't ask together. The network coming back or the
-/// gateway connecting ends the wait ([`SessionControl::check_account_now`]); this is what's left for
-/// a network that came back without anyone saying so.
+/// plus a part of a second so tabs and devices don't ask together. The network coming back ends the
+/// wait ([`SessionControl::check_account_now`]); this is what's left for a network that came back
+/// without anyone saying so, and nothing connects before the answer, so it stays short.
 const ACCOUNT_CHECK_RETRY_MS: u64 = 2_000;
-const ACCOUNT_CHECK_RETRY_MAX_MS: u64 = 60_000;
+const ACCOUNT_CHECK_RETRY_MAX_MS: u64 = 30_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionState {
@@ -104,6 +104,13 @@ pub enum LoginProblem {
   /// The identity provider no longer accepts the stored sign-in (`invalid_grant`: its idle or
   /// session limit ran out, it was revoked): sign in again (issue #883).
   SessionExpired,
+  /// The session was ended before its token ran out (signed out at the identity provider or on
+  /// another device; `session_ended`): sign in again.
+  SessionEnded,
+  /// The workspace's idle limit ended the session (`session_timed_out`): sign in again.
+  SessionTimedOut,
+  /// The account no longer exists (`account_deleted`).
+  AccountDeleted,
   /// The identity provider refused the sign-in in its redirect (issue #1063): `kind` picks the
   /// message, `code` is the provider's `error`, shown as the detail.
   ProviderRefused {
@@ -234,6 +241,15 @@ impl SessionControl {
       Err(AuthError::Denied(_)) => self
         .state
         .set_if_alive(SessionState::SignedOut(Some(LoginProblem::SessionExpired))),
+      // It refused in its redirect: the end of a refused session's round trip, or of a sign-in.
+      // Either way nobody is signed in, so no pictures stay (#749).
+      Err(error @ AuthError::AuthorizationRefused(_)) => {
+        tracing::warn!(%error, "the sign-in was refused");
+        self
+          .state
+          .set_if_alive(SessionState::SignedOut(Some(problem_from_auth(&error))));
+        crate::persisted_media::sweep_signed_out().await;
+      },
       Err(error) => {
         tracing::warn!(%error, "the stored sign-in could not be restored");
         self
@@ -244,8 +260,8 @@ impl SessionControl {
   }
 
   /// Opens the local data of the cached account at once and checks the account beside it (issue
-  /// #778). The account only picks whose local data opens, on a device it was set up on; the server
-  /// still decides every request. When the local data can't carry the start (not set up here any
+  /// #778). The account only picks whose local data opens, on a device it was set up on; nothing
+  /// goes out until the server confirmed it. When the local data can't carry the start (not set up here any
   /// more, unreadable), the check stops and the start goes the long way, which knows what to do.
   async fn start_from_cached_account(&self, cached: GetMeResponse) {
     let round = self.next_core_round();
@@ -293,19 +309,14 @@ impl SessionControl {
           return;
         }
         match restore_verdict(restored) {
-          RestoreVerdict::SignedIn => {
-            needs_restore = false;
-            // A core that waits for its token connects now.
-            if let Err(error) = remote_backend::network_changed().await {
-              tracing::debug!(%error, "could not tell the core about the token");
-            }
-          },
+          // Nothing goes out yet: the session's user may not be the cached one.
+          RestoreVerdict::SignedIn => needs_restore = false,
           RestoreVerdict::NoVerdict => {},
           RestoreVerdict::Over(maybe_problem) => return self.sign_out_with(maybe_problem),
         }
       }
       if !needs_restore {
-        let answer = auth.api_get("/api/v1/me").await;
+        let answer = auth.api_get(ME_PATH).await;
         if self.core_round.try_get_untracked() != Some(round) {
           return;
         }
@@ -365,6 +376,10 @@ impl SessionControl {
     }
     self.authenticator().remember_account(&me).await;
     self.maybe_confirmed.set_if_alive(Some(me.clone()));
+    // Confirmed: the core gets its token and connects, and what waited goes out.
+    if let Err(error) = remote_backend::network_changed().await {
+      tracing::debug!(%error, "could not tell the core about the confirmed account");
+    }
     // Rebuilds the shell: only when something changed since the last start, and usually
     // before anybody did anything in it. Name and role are read when the shell is built.
     if self
@@ -712,7 +727,7 @@ impl SessionControl {
   }
 
   async fn load_account(&self) {
-    let response = self.authenticator().api_get("/api/v1/me").await;
+    let response = self.authenticator().api_get(ME_PATH).await;
     let outcome = response
       .map_err(|error| problem_from_auth(&error))
       .and_then(interpret_me_response);
@@ -859,6 +874,9 @@ pub fn interpret_me_response(response: ApiResponse) -> Result<GetMeResponse, Log
     status => match serde_json::from_str::<ErrorBody>(&response.body) {
       Ok(body) if body.error_code == ErrorCode::NoTeamcraftRole => Err(LoginProblem::NoTeamcraftRole),
       Ok(body) if body.error_code == ErrorCode::AccountDeactivated => Err(LoginProblem::AccountDeactivated),
+      Ok(body) if body.error_code == ErrorCode::AccountDeleted => Err(LoginProblem::AccountDeleted),
+      Ok(body) if body.error_code == ErrorCode::SessionEnded => Err(LoginProblem::SessionEnded),
+      Ok(body) if body.error_code == ErrorCode::SessionTimedOut => Err(LoginProblem::SessionTimedOut),
       Ok(body) => Err(LoginProblem::Failed(format!("{} ({status})", body.error_code))),
       Err(_) => Err(LoginProblem::Failed(format!("HTTP {status}"))),
     },
@@ -1032,10 +1050,7 @@ mod tests {
     #[test]
     fn the_server_refuses_what_it_says_it_refuses() {
       let deleted = account_verdict(answer(401, &error_body("account_deleted")), false);
-      assert_eq!(
-        deleted,
-        AccountVerdict::Refused(LoginProblem::Failed("account_deleted (401)".into()))
-      );
+      assert_eq!(deleted, AccountVerdict::Refused(LoginProblem::AccountDeleted));
       assert_eq!(
         account_verdict(answer(403, &error_body("account_deactivated")), false),
         AccountVerdict::Refused(LoginProblem::AccountDeactivated)
@@ -1044,15 +1059,14 @@ mod tests {
         account_verdict(answer(403, &error_body("no_teamcraft_role")), false),
         AccountVerdict::Refused(LoginProblem::NoTeamcraftRole)
       );
-      for code in ["session_ended", "session_timed_out"] {
-        assert!(
-          matches!(
-            account_verdict(answer(401, &error_body(code)), false),
-            AccountVerdict::Refused(LoginProblem::Failed(_))
-          ),
-          "{code}"
-        );
-      }
+      assert_eq!(
+        account_verdict(answer(401, &error_body("session_ended")), false),
+        AccountVerdict::Refused(LoginProblem::SessionEnded)
+      );
+      assert_eq!(
+        account_verdict(answer(401, &error_body("session_timed_out")), false),
+        AccountVerdict::Refused(LoginProblem::SessionTimedOut)
+      );
     }
 
     /// A token that ran out during a suspend or by a wrong clock gets one new token before
@@ -1083,8 +1097,8 @@ mod tests {
       let wait = |attempt, seed| account_check_delay(attempt, seed).as_millis();
       assert_eq!(wait(0, 0), 2_000);
       assert_eq!(wait(1, 0), 4_000);
-      assert_eq!(wait(5, 0), 60_000);
-      assert_eq!(wait(u32::MAX, 0), 60_000);
+      assert_eq!(wait(5, 0), 30_000);
+      assert_eq!(wait(u32::MAX, 0), 30_000);
       assert_eq!(wait(0, 1_999), 2_999);
       // A clock before 1970 is no reason to wait less.
       assert!(wait(0, -1) >= 2_000);

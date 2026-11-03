@@ -67,7 +67,7 @@ impl CoreHost {
     // Refreshes a token that is about to run out before the core asks for it; without one the
     // core waits for it on its own. Not while the app starts from the cached account: this would
     // wait for the identity provider, which is what that start is there to avoid (issue #778).
-    if !service.is_restoring()
+    if !service.is_unconfirmed()
       && let Err(error) = service.server_bearer_token().await
     {
       tracing::debug!(%error, "no fresh access token before starting the core");
@@ -222,10 +222,13 @@ pub fn core_connection(host: State<'_, CoreHost>) -> Result<CoreConnection, Comm
 /// The webview saw the network come back or the window become visible again: the gateway checks
 /// its connection at once. A running call is left alone: it notices a new route to the SFU itself
 /// (and wake-up tells it in `main.rs`), while moving it to a new socket on every focus restarted
-/// its media path each time the window was focused.
+/// its media path each time the window was focused. Before the account is confirmed the core has
+/// no token: an attempt can only fail, and would use up the skipped backoff the confirmation needs.
 #[tauri::command(rename_all = "snake_case")]
-pub fn core_network_changed(host: State<'_, CoreHost>) {
-  host.network_changed();
+pub fn core_network_changed(host: State<'_, CoreHost>, service: State<'_, Arc<Service>>) {
+  if !service.is_unconfirmed() {
+    host.network_changed();
+  }
 }
 
 /// The user opened a conversation (issue #247: a running catch-up takes it next).

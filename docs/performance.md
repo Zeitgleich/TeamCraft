@@ -1008,11 +1008,15 @@ CACHED_START_RUNS=5 E2E_REQUIRED=1 cargo test -p teamcraft-e2e --features browse
   --nocapture cached_start::
 ```
 
-| Network                | Before               | After             | Budget (web) |
-|------------------------|----------------------|-------------------|--------------|
-| Good                   | 617 ms               | 568 ms            | ≤ 1.5 s      |
-| Every request 1 s late | 5617 ms              | 1581 ms           | ≤ 1.5 s      |
-| No answer              | sign-in page, 419 ms | 573 ms, the chats | ≤ 1.5 s      |
+| Network                | List: before         | List: after       | Connected: before | Connected: after | Budget (list) |
+|------------------------|----------------------|-------------------|-------------------|------------------|---------------|
+| Good                   | 624 ms               | 560 ms            | 697 ms            | 687 ms           | ≤ 1.5 s       |
+| Every request 1 s late | 5717 ms              | 1591 ms           | 6779 ms           | 6502 ms          | ≤ 1.5 s       |
+| No answer              | sign-in page, 462 ms | 585 ms, the chats | -                 | -                | ≤ 1.5 s       |
+
+"Connected" is until the core logged its gateway connection. Nothing goes out until the server
+confirmed the account (e2ee.md §9.8), so that time doesn't get better, only the list does. It doesn't
+get worse either: before, the core also started only after `GET /me`.
 
 - **The second that is left when requests are late** is one stylesheet: `index.html` links
   `/api/v1/brand/theme.css`, which holds back the first paint and the app's scripts until it is there
@@ -1024,7 +1028,7 @@ CACHED_START_RUNS=5 E2E_REQUIRED=1 cargo test -p teamcraft-e2e --features browse
   and the identity provider, not the page.
 - **Desktop:** the same start, through `auth_cached_account`. It reads the sealed file the tokens are
   in, so a start stays at one keychain read (e2ee.md §9.7). `CoreHost::start` doesn't wait for a token
-  while the session is being restored. Covered by tests (`token_expiry::cached_account`), not measured
+  until the account is confirmed. Covered by tests (`token_expiry::cached_account`), not measured
   in the app.
 - **Left of #778:** a pending message reaches the UI mirror after one answer of the core, not in the
   same frame (it needs an ID the UI picks and the core keeps), and live events don't move the

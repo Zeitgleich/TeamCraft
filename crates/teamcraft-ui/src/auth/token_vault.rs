@@ -9,8 +9,6 @@
 #[cfg(target_arch = "wasm32")]
 use std::time::Duration;
 
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::zeroize::Zeroizing;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -114,15 +112,6 @@ impl Tokens {
   }
 }
 
-/// The account a token answer names: the ID token's `sub`, else a JWT access token's. Read
-/// without checking signatures: it came from the token endpoint over TLS and only tells the
-/// accounts of this browser apart.
-pub(super) fn answer_subject(maybe_id_token: Option<&str>, access: &str) -> Option<String> {
-  maybe_id_token
-    .and_then(token_subject)
-    .or_else(|| token_subject(access))
-}
-
 /// Decides a refresh: saved tokens of the same account win over this tab's own (another tab may
 /// have rotated the refresh token this tab still holds). Tokens of another account, or of an
 /// account this tab can't name, are never taken over nor overwritten. On start (`maybe_memory`
@@ -186,21 +175,36 @@ pub(super) async fn refresh_turn() -> RefreshTurn {
   RefreshTurn {}
 }
 
-/// The saved tokens, if they belong to this provider and client.
+/// The saved tokens, if they belong to this provider and client. `issuer` and `client_id` come from
+/// the server, under the refresh lock: tokens of another provider are of no use any more.
 pub(super) async fn load(issuer: &str, client_id: &str) -> Option<Tokens> {
-  let bytes = vault_read(TOKENS_SLOT).await?;
-  let saved = decode(&bytes)?;
+  let saved = read_saved().await?;
   if saved.issuer != issuer || saved.client_id != client_id {
-    // The server switched providers: these tokens are of no use any more.
     forget().await;
     return None;
   }
-  Some(Tokens::new(
+  Some(tokens_of(saved))
+}
+
+/// [`load`] that changes nothing, for what a cached record claims: without the lock, and a record
+/// that doesn't match says nothing against the tokens.
+pub(super) async fn peek(issuer: &str, client_id: &str) -> Option<Tokens> {
+  let saved = read_saved().await?;
+  (saved.issuer == issuer && saved.client_id == client_id).then(|| tokens_of(saved))
+}
+
+async fn read_saved() -> Option<Saved> {
+  let bytes = vault_read(TOKENS_SLOT).await?;
+  decode(&bytes)
+}
+
+fn tokens_of(saved: Saved) -> Tokens {
+  Tokens::new(
     saved.access,
     Some(saved.refresh),
     saved.expires_at_ms,
     Some(saved.subject),
-  ))
+  )
 }
 
 /// Saves `tokens` for the next page load and the other tabs. Tokens without a refresh token can't
@@ -256,13 +260,6 @@ fn decode(bytes: &[u8]) -> Option<Saved> {
   serde_json::from_slice(bytes)
     .inspect_err(|_| tracing::warn!("the saved sign-in tokens do not read"))
     .ok()
-}
-
-/// The `sub` claim of a JWT. Opaque tokens have none.
-fn token_subject(access: &str) -> Option<String> {
-  let payload = URL_SAFE_NO_PAD.decode(access.split('.').nth(1)?).ok()?;
-  let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-  claims.get("sub")?.as_str().map(str::to_owned)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -382,18 +379,6 @@ mod tests {
   }
 
   #[test]
-  fn the_subject_comes_from_a_jwt_and_opaque_tokens_have_none() {
-    let token = jwt("alice");
-    assert_eq!(token_subject(&token).as_deref(), Some("alice"));
-    assert_eq!(answer_subject(Some(&jwt("bob")), &token).as_deref(), Some("bob"));
-    assert_eq!(answer_subject(None, &token).as_deref(), Some("alice"));
-    assert_eq!(answer_subject(Some("opaque"), "opaque"), None);
-    assert_eq!(token_subject("opaque-token"), None);
-    assert_eq!(token_subject("a.!!!.c"), None);
-    assert_eq!(token_subject(""), None);
-  }
-
-  #[test]
   fn saved_tokens_round_trip_and_garbage_does_not_read() {
     let bytes = serde_json::to_vec(&SavedRef {
       issuer: "https://auth.example.com/realms/a",
@@ -427,10 +412,5 @@ mod tests {
       expires_at_ms,
       maybe_subject: Some(subject.to_owned()),
     }
-  }
-
-  fn jwt(subject: &str) -> String {
-    let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"{subject}"}}"#));
-    format!("eyJhbGciOiJub25lIn0.{payload}.signature")
   }
 }

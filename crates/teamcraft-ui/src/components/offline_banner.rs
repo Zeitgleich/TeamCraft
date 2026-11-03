@@ -102,12 +102,6 @@ pub fn OfflineBanner() -> impl IntoView {
         .is_some_and(|shown| shown != Some(state))
       {
         connection.set_if_alive(Some(state));
-        // The gateway took the token: a good moment to hear what the server says about the account.
-        if state == CoreConnection::Connected
-          && let Some(control) = maybe_session
-        {
-          control.check_account_now();
-        }
         // The identity provider refused the sign-in for good: back to the sign-in screen, which
         // says why (issue #883). Nothing the user could do here would help.
         if state

@@ -5,6 +5,7 @@
 #![allow(clippy::expect_used)]
 
 use std::sync::Arc;
+use teamcraft_core::store::SessionNote;
 
 use teamcraft_client_api::oidc_login::LoginRequest;
 use teamcraft_client_api::sign_in_look::SignInLook;
@@ -39,6 +40,18 @@ impl TokenStore for SharedStore {
 
   async fn clear_local_session(&self, server: &str) -> Result<(), AuthError> {
     self.0.clear_local_session(server).await
+  }
+
+  async fn load_note(&self, kind: SessionNote, server: &str) -> Result<Option<String>, AuthError> {
+    self.0.load_note(kind, server).await
+  }
+
+  async fn save_note(&self, kind: SessionNote, server: &str, note: &str) -> Result<(), AuthError> {
+    self.0.save_note(kind, server, note).await
+  }
+
+  async fn clear_note(&self, kind: SessionNote, server: &str) -> Result<(), AuthError> {
+    self.0.clear_note(kind, server).await
   }
 }
 

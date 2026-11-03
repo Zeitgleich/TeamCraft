@@ -271,26 +271,20 @@ pub async fn auth_restore(service: State<'_, Arc<Service>>) -> Result<bool, Comm
 pub async fn auth_cached_account(
   service: State<'_, Arc<Service>>,
 ) -> Result<Option<GetMeResponse>, CommandError> {
-  let Some(json) = service.cached_account().await else {
-    return Ok(None);
-  };
-  Ok(serde_json::from_str(&json).ok())
+  Ok(service.cached_account().await)
 }
 
-/// The server confirmed this account: the next start can begin with it.
+/// The server confirmed this account: the core gets its token, and the next start can begin with it.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn auth_remember_account(
   account: GetMeResponse,
   service: State<'_, Arc<Service>>,
 ) -> Result<(), CommandError> {
-  match serde_json::to_string(&account) {
-    Ok(json) => service.remember_account(&json).await,
-    Err(error) => tracing::warn!(%error, "could not encode the account for the next start"),
-  }
+  service.remember_account(&account).await;
   Ok(())
 }
 
-/// The next start waits for the server again.
+/// The cached account doesn't stand: the next start waits for the server again.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn auth_forget_account(service: State<'_, Arc<Service>>) -> Result<(), CommandError> {
   service.forget_cached_account().await;

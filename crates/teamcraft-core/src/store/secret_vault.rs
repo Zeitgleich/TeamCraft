@@ -47,7 +47,6 @@ const TEMPORARY_FILE: &str = "secrets.sealed.tmp";
 const SET_ASIDE_FILE: &str = "secrets.sealed.damaged";
 const DATABASE_KEY_KIND: &str = "database-key";
 const BACKUP_KEY_KIND: &str = "backup-key";
-const CACHED_ACCOUNT_KIND: &str = "cached-account";
 /// How long a failed keychain call stands before the keychain is asked again. Long enough that
 /// polling raises no stream of dialogs, short enough that "try again" works after a mistaken "deny".
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(60);
@@ -91,6 +90,25 @@ pub struct OsKeystore;
 pub enum TokenKind {
   RefreshToken,
   LocalSession,
+}
+
+/// What is kept about a server's session besides its tokens, for the start from the cached account
+/// (e2ee.md §9.8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionNote {
+  /// The account the server confirmed last, with the subject it was confirmed for.
+  CachedAccount,
+  /// The account at the identity provider that the stored refresh token belongs to.
+  TokenSubject,
+}
+
+impl SessionNote {
+  fn name(self) -> &'static str {
+    match self {
+      Self::CachedAccount => "cached-account",
+      Self::TokenSubject => "token-subject",
+    }
+  }
 }
 
 #[derive(Default)]
@@ -208,39 +226,43 @@ impl SecretVault {
     flush(&mut state)
   }
 
-  /// The account confirmed last on `server`, as the sign-in service keeps it for the next start.
-  /// Lives in the file only: it never had a keychain entry to move and never gets one.
-  pub fn load_cached_account(&self, server: &str) -> Result<Option<Zeroizing<String>>, KeySourceError> {
+  /// What the sign-in service keeps about a server's session for the next start. Lives in the file
+  /// only: it never had a keychain entry to move and never gets one.
+  pub fn load_session_note(
+    &self,
+    kind: SessionNote,
+    server: &str,
+  ) -> Result<Option<Zeroizing<String>>, KeySourceError> {
     let mut state = self.lock();
     self.ensure_open(&mut state)?;
     Ok(
       contents_of(&mut state)?
         .secrets
-        .get(&item_name(CACHED_ACCOUNT_KIND, server))
-        .map(|account| Zeroizing::new(account.clone())),
+        .get(&item_name(kind.name(), server))
+        .map(|note| Zeroizing::new(note.clone())),
     )
   }
 
-  /// Keeps the account of `server`. Writes the file only, and only when the account changed.
-  pub fn save_cached_account(&self, server: &str, account: &str) -> Result<(), KeySourceError> {
+  /// Keeps a note. Writes the file only, and only when the note changed.
+  pub fn save_session_note(&self, kind: SessionNote, server: &str, note: &str) -> Result<(), KeySourceError> {
     let mut state = self.lock();
     self.ensure_open(&mut state)?;
-    let name = item_name(CACHED_ACCOUNT_KIND, server);
+    let name = item_name(kind.name(), server);
     let contents = contents_of(&mut state)?;
-    if contents.secrets.get(&name).map(String::as_str) != Some(account) {
-      replace_secret(contents, &name, account.to_owned());
+    if contents.secrets.get(&name).map(String::as_str) != Some(note) {
+      replace_secret(contents, &name, note.to_owned());
       state.is_dirty = true;
     }
     flush(&mut state)
   }
 
-  /// Forgets the account of `server`.
-  pub fn clear_cached_account(&self, server: &str) -> Result<(), KeySourceError> {
+  /// Forgets a note. A failure to write says so: the caller relies on it being gone.
+  pub fn clear_session_note(&self, kind: SessionNote, server: &str) -> Result<(), KeySourceError> {
     let mut state = self.lock();
     self.ensure_open(&mut state)?;
-    let name = item_name(CACHED_ACCOUNT_KIND, server);
-    let had_account = forget_secret(contents_of(&mut state)?, &name);
-    state.is_dirty |= had_account;
+    let name = item_name(kind.name(), server);
+    let had_note = forget_secret(contents_of(&mut state)?, &name);
+    state.is_dirty |= had_note;
     flush(&mut state)
   }
 
@@ -811,26 +833,30 @@ mod tests {
       );
     }
 
-    /// The account read at a start comes from the file that is open anyway (issue #778).
+    /// What a start reads for the cached account comes from the file that is open anyway (issue
+    /// #778).
     #[test]
-    fn the_cached_account_does_not_touch_the_keychain() {
+    fn session_notes_do_not_touch_the_keychain() {
       let fake = Fake::new();
       let directory = TestDir::new();
       let vault = start(&fake, &directory);
       fake.reset_counts();
+      let (account, subject) = (SessionNote::CachedAccount, SessionNote::TokenSubject);
 
-      vault.save_cached_account(SERVER_A, "account-a").unwrap();
-      assert_eq!(
+      vault.save_session_note(account, SERVER_A, "account-a").unwrap();
+      vault.save_session_note(subject, SERVER_A, "subject-a").unwrap();
+      let read = |kind, server| {
         vault
-          .load_cached_account(SERVER_A)
+          .load_session_note(kind, server)
           .unwrap()
-          .as_deref()
-          .map(String::as_str),
-        Some("account-a")
-      );
-      assert_eq!(vault.load_cached_account(SERVER_B).unwrap(), None);
-      vault.clear_cached_account(SERVER_A).unwrap();
-      assert_eq!(vault.load_cached_account(SERVER_A).unwrap(), None);
+          .map(|note| note.to_string())
+      };
+      assert_eq!(read(account, SERVER_A).as_deref(), Some("account-a"));
+      assert_eq!(read(subject, SERVER_A).as_deref(), Some("subject-a"));
+      assert_eq!(read(account, SERVER_B), None);
+      vault.clear_session_note(account, SERVER_A).unwrap();
+      assert_eq!(read(account, SERVER_A), None);
+      assert_eq!(read(subject, SERVER_A).as_deref(), Some("subject-a"));
 
       assert_eq!(fake.counts(), Counts::default());
     }
