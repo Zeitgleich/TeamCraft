@@ -49,6 +49,10 @@ pub struct BrowserAuth {
   tokens: RefCell<Option<Tokens>>,
   sign_in: RefCell<Option<SignIn>>,
   discovery: RefCell<Option<Discovery>>,
+  /// The issuer and client the tokens in memory were saved for, while they come from the cached start
+  /// and the server hasn't been asked yet. The server is not trusted: its answer may name another
+  /// provider, and a refresh token only ever goes to the provider it came from.
+  maybe_cached_provider: RefCell<Option<(String, String)>>,
 }
 
 /// How to sign in: the server's settings, or the development overrides of [`AppConfig`].
@@ -121,6 +125,7 @@ impl BrowserAuth {
       tokens: RefCell::new(None),
       sign_in: RefCell::new(None),
       discovery: RefCell::new(None),
+      maybe_cached_provider: RefCell::new(None),
     }
   }
 
@@ -144,6 +149,9 @@ impl BrowserAuth {
       return None;
     }
     self.tokens.replace(Some(tokens));
+    self
+      .maybe_cached_provider
+      .replace(Some((cached.issuer, cached.client_id)));
     Some(cached.account)
   }
 
@@ -338,6 +346,7 @@ impl BrowserAuth {
   /// with or the provider refused it (expired or revoked).
   async fn refresh(&self) -> Result<(), AuthError> {
     let sign_in = self.sign_in().await?;
+    self.drop_tokens_of_another_provider(&sign_in);
     let _turn = token_vault::refresh_turn().await;
     let maybe_saved = token_vault::load(&sign_in.issuer, &sign_in.client_id).await;
     let plan = token_vault::plan_refresh(self.tokens.borrow().as_ref(), maybe_saved, now_ms());
@@ -382,6 +391,21 @@ impl BrowserAuth {
         }
         Err(map_refresh_error(error))
       },
+    }
+  }
+
+  /// The server names another provider than the one the cached start's tokens came from: they are
+  /// no use there, and must not reach it.
+  fn drop_tokens_of_another_provider(&self, sign_in: &SignIn) {
+    let is_other = is_other_provider(
+      self.maybe_cached_provider.borrow().as_ref(),
+      &sign_in.issuer,
+      &sign_in.client_id,
+    );
+    self.maybe_cached_provider.replace(None);
+    if is_other {
+      tracing::warn!("the server names another identity provider than the saved sign-in's");
+      self.tokens.replace(None);
     }
   }
 
@@ -650,6 +674,7 @@ impl Authenticator for BrowserAuth {
         return Ok(());
       }
       let maybe_refresh = self.tokens.replace(None).and_then(|tokens| tokens.maybe_refresh);
+      let maybe_cached_provider = self.maybe_cached_provider.take();
       local_remove(SIGNED_IN_HINT_KEY);
       session_remove(AUTOLOGIN_TRIED_KEY);
       // Under the refresh lock: a refresh another tab runs right now saves its tokens before this
@@ -662,6 +687,11 @@ impl Authenticator for BrowserAuth {
       // machines. A direct request with the refresh token does it without a confirmation page.
       if let (Some(refresh), Ok(discovery), Ok(sign_in)) =
         (maybe_refresh, self.discovery().await, self.sign_in().await)
+        && !is_other_provider(
+          maybe_cached_provider.as_ref(),
+          &sign_in.issuer,
+          &sign_in.client_id,
+        )
         && let Some(endpoint) = discovery.maybe_end_session_endpoint
       {
         let body = format!(
@@ -859,6 +889,13 @@ fn encode(value: &str) -> String {
 }
 
 /// Query parameters of the current page as pairs.
+/// Whether tokens saved for the provider `maybe_saved_for` must stay away from this one. Tokens with
+/// no such note came from a sign-in of this page, through this provider.
+fn is_other_provider(maybe_saved_for: Option<&(String, String)>, issuer: &str, client_id: &str) -> bool {
+  maybe_saved_for
+    .is_some_and(|(saved_issuer, saved_client)| saved_issuer != issuer || saved_client != client_id)
+}
+
 /// The local account's session this tab holds, as long as it lasts.
 fn stored_local_session() -> Option<LocalSession> {
   let stored = session_get(LOCAL_SESSION_KEY)?;
@@ -1047,6 +1084,28 @@ mod tests {
           "{code}"
         );
       }
+    }
+
+    /// A refresh token only ever goes to the provider it came from, whatever the server says.
+    #[test]
+    fn tokens_stay_away_from_another_provider() {
+      let saved_for = ("https://id.example.com".to_owned(), "teamcraft".to_owned());
+      assert!(!is_other_provider(
+        Some(&saved_for),
+        "https://id.example.com",
+        "teamcraft"
+      ));
+      assert!(is_other_provider(
+        Some(&saved_for),
+        "https://evil.example.com",
+        "teamcraft"
+      ));
+      assert!(is_other_provider(
+        Some(&saved_for),
+        "https://id.example.com",
+        "another-client"
+      ));
+      assert!(!is_other_provider(None, "https://id.example.com", "teamcraft"));
     }
 
     #[test]

@@ -33,8 +33,18 @@ const NOT_CONFIRMED: &str = "waiting for the server to confirm the account";
 /// [`Authenticator`] of a shell with the rule of this module.
 pub struct AccountGate {
   inner: Rc<dyn Authenticator>,
+  state: Rc<GateState>,
+  /// One wait between two looks at the state (a timer, except in tests).
+  recheck: Rc<dyn Fn() -> LocalFuture<'static, ()>>,
+}
+
+#[derive(Default)]
+struct GateState {
   /// When the start from the cached account began, while its account isn't confirmed.
   maybe_unconfirmed_since_ms: Cell<Option<i64>>,
+  /// How often the wait ended without a confirmation. A request waiting since before that was meant
+  /// for the cached account, whatever the session is by now, and never goes out.
+  refusals: Cell<u64>,
 }
 
 /// What a request does now.
@@ -49,27 +59,53 @@ impl AccountGate {
   pub fn new(inner: Rc<dyn Authenticator>) -> Self {
     Self {
       inner,
-      maybe_unconfirmed_since_ms: Cell::new(None),
+      state: Rc::default(),
+      recheck: Rc::new(|| Box::pin(platform::sleep(REQUEST_RECHECK))),
     }
   }
 
   async fn wait_for_account(&self, path: &str) -> Result<(), AuthError> {
+    let refusals_before = self.state.refusals.get();
     for _ in 0..MAX_RECHECKS {
-      match gate_step(path, self.maybe_unconfirmed_since_ms.get(), now_ms()) {
+      let step = gate_step(
+        path,
+        self.state.maybe_unconfirmed_since_ms.get(),
+        self.state.refusals.get() != refusals_before,
+        now_ms(),
+      );
+      match step {
         GateStep::Go => return Ok(()),
         GateStep::Refuse => return Err(AuthError::Network(NOT_CONFIRMED.to_owned())),
-        GateStep::Wait => platform::sleep(REQUEST_RECHECK).await,
+        GateStep::Wait => (self.recheck)().await,
       }
     }
     Err(AuthError::Network(NOT_CONFIRMED.to_owned()))
   }
+}
 
-  fn settled(&self) {
+impl GateState {
+  /// The server confirmed the account: what waited goes out.
+  fn confirmed(&self) {
     self.maybe_unconfirmed_since_ms.set(None);
+  }
+
+  /// The wait ended any other way (another user, a refusal, a sign-out): the gate opens for what
+  /// comes next, but what waited goes nowhere.
+  fn refused(&self) {
+    self.maybe_unconfirmed_since_ms.set(None);
+    self.refusals.set(self.refusals.get().wrapping_add(1));
   }
 }
 
-fn gate_step(path: &str, maybe_unconfirmed_since_ms: Option<i64>, now_ms: i64) -> GateStep {
+fn gate_step(
+  path: &str,
+  maybe_unconfirmed_since_ms: Option<i64>,
+  was_refused_meanwhile: bool,
+  now_ms: i64,
+) -> GateStep {
+  if was_refused_meanwhile {
+    return GateStep::Refuse;
+  }
   match maybe_unconfirmed_since_ms {
     None => GateStep::Go,
     Some(_) if path == ME_PATH => GateStep::Go,
@@ -88,7 +124,7 @@ impl Authenticator for AccountGate {
         outcome,
         Ok(false) | Err(AuthError::Denied(_) | AuthError::NotSignedIn)
       ) {
-        self.settled();
+        self.state.refused();
       }
       outcome
     })
@@ -99,24 +135,24 @@ impl Authenticator for AccountGate {
       let maybe_account = self.inner.cached_account().await;
       if maybe_account.is_some() {
         // async-ok: a cell of the sign-in, not a signal.
-        self.maybe_unconfirmed_since_ms.set(Some(now_ms()));
+        self.state.maybe_unconfirmed_since_ms.set(Some(now_ms()));
       }
       maybe_account
     })
   }
 
   fn remember_account<'a>(&'a self, account: &'a GetMeResponse) -> LocalFuture<'a, ()> {
-    self.settled();
+    self.state.confirmed();
     self.inner.remember_account(account)
   }
 
   fn forget_account(&self) -> LocalFuture<'_, ()> {
-    self.settled();
+    self.state.refused();
     self.inner.forget_account()
   }
 
   fn is_account_unconfirmed(&self) -> bool {
-    self.maybe_unconfirmed_since_ms.get().is_some()
+    self.state.maybe_unconfirmed_since_ms.get().is_some()
   }
 
   fn login(&self, look: SignInLook) -> LocalFuture<'_, Result<(), AuthError>> {
@@ -128,7 +164,7 @@ impl Authenticator for AccountGate {
   }
 
   fn logout(&self) -> LocalFuture<'_, Result<(), AuthError>> {
-    self.settled();
+    self.state.refused();
     self.inner.logout()
   }
 
@@ -154,7 +190,7 @@ impl Authenticator for AccountGate {
     Box::pin(async move {
       let outcome = self.inner.login_local(login, password, maybe_totp).await;
       if outcome.is_ok() {
-        self.settled();
+        self.state.refused();
       }
       outcome
     })
@@ -195,20 +231,24 @@ mod tests {
 
   #[test]
   fn before_the_answer_only_the_question_goes_out() {
-    assert_eq!(gate_step(ME_PATH, Some(SINCE_MS), SINCE_MS), GateStep::Go);
-    assert_eq!(gate_step(OTHER_PATH, Some(SINCE_MS), SINCE_MS), GateStep::Wait);
+    assert_eq!(gate_step(ME_PATH, Some(SINCE_MS), false, SINCE_MS), GateStep::Go);
     assert_eq!(
-      gate_step(OTHER_PATH, Some(SINCE_MS), SINCE_MS + REQUEST_PATIENCE_MS),
+      gate_step(OTHER_PATH, Some(SINCE_MS), false, SINCE_MS),
+      GateStep::Wait
+    );
+    assert_eq!(
+      gate_step(OTHER_PATH, Some(SINCE_MS), false, SINCE_MS + REQUEST_PATIENCE_MS),
       GateStep::Refuse
     );
-    assert_eq!(gate_step(OTHER_PATH, None, SINCE_MS), GateStep::Go);
+    assert_eq!(gate_step(OTHER_PATH, None, false, SINCE_MS), GateStep::Go);
+    assert_eq!(gate_step(OTHER_PATH, None, true, SINCE_MS), GateStep::Refuse);
   }
 
   /// The whole path of a request: refused on the way, without reaching the session's token.
   #[test]
   fn a_request_past_the_patience_never_reaches_the_session() {
     let (gate, inner) = started_gate();
-    gate.maybe_unconfirmed_since_ms.set(Some(i64::MIN));
+    gate.state.maybe_unconfirmed_since_ms.set(Some(i64::MIN));
     let outcome = run(gate.api_get(OTHER_PATH));
     assert!(matches!(outcome, Err(AuthError::Network(_))));
     assert_eq!(inner.requests(), Vec::<String>::new());
@@ -216,6 +256,40 @@ mod tests {
     let answered = run(gate.api_get(ME_PATH));
     assert!(answered.is_ok());
     assert_eq!(inner.requests(), [ME_PATH]);
+  }
+
+  /// A request waits for the answer, and the server names another user: the gate opens for that user,
+  /// but what was meant for the cached one must not go out under their token.
+  #[test]
+  fn what_waited_never_goes_out_when_the_account_does_not_stand() {
+    let (mut gate, inner) = started_gate();
+    let state = gate.state.clone();
+    gate.recheck = Rc::new(move || {
+      let state = state.clone();
+      Box::pin(async move { state.refused() })
+    });
+
+    let outcome = run(gate.api_request(ApiMethod::Post, OTHER_PATH, None));
+
+    assert!(matches!(outcome, Err(AuthError::Network(_))));
+    assert_eq!(inner.requests(), Vec::<String>::new());
+    // What comes after it goes out as usual.
+    assert!(run(gate.api_get(OTHER_PATH)).is_ok());
+    assert_eq!(inner.requests(), [OTHER_PATH]);
+  }
+
+  #[test]
+  fn what_waited_goes_out_when_the_account_is_confirmed() {
+    let (mut gate, inner) = started_gate();
+    let state = gate.state.clone();
+    gate.recheck = Rc::new(move || {
+      let state = state.clone();
+      Box::pin(async move { state.confirmed() })
+    });
+
+    assert!(run(gate.api_request(ApiMethod::Post, OTHER_PATH, None)).is_ok());
+
+    assert_eq!(inner.requests(), [OTHER_PATH]);
   }
 
   #[test]

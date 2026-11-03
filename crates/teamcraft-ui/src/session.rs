@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use futures_channel::oneshot;
-use futures_util::future::select;
+use futures_util::future::{Either, select};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_core::platform;
@@ -36,6 +36,12 @@ const CORE_POLL_LATE: Duration = Duration::from_secs(2);
 /// without anyone saying so, and nothing connects before the answer, so it stays short.
 const ACCOUNT_CHECK_RETRY_MS: u64 = 2_000;
 const ACCOUNT_CHECK_RETRY_MAX_MS: u64 = 30_000;
+/// How long the check waits for one answer before it asks again, doubling up to the maximum, so a
+/// request that hangs (a dead link the browser hasn't given up on) doesn't hold the app back, and a
+/// link slower than this still gets an answer in the end. The request that was given up on runs on:
+/// a token refresh in it must finish and save what it got.
+const ACCOUNT_ANSWER_PATIENCE_MS: u64 = 10_000;
+const ACCOUNT_ANSWER_PATIENCE_MAX_MS: u64 = 60_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionState {
@@ -171,6 +177,15 @@ enum AccountVerdict {
   RestoreFirst,
   /// The server refuses this account or session.
   Refused(LoginProblem),
+  /// The identity provider refused the refresh token while asking.
+  SessionOver,
+}
+
+/// Whether the network coming back ends a wait for an answer.
+#[derive(Clone, Copy)]
+enum Wake {
+  Cuts,
+  Ignored,
 }
 
 /// What went wrong in the local-account sign-in form.
@@ -304,22 +319,38 @@ impl SessionControl {
     let mut attempt = 0_u32;
     loop {
       if needs_restore {
-        let restored = auth.restore().await;
+        let restoring = auth.clone();
+        // Not cut short by the network coming back: the first restore may be about to go to the
+        // identity provider, and a second one would take its refused token for no session at all.
+        let maybe_restored = self
+          .answer_in_time(async move { restoring.restore().await }, attempt, Wake::Ignored)
+          .await;
         if self.core_round.try_get_untracked() != Some(round) {
           return;
         }
+        let Some(restored) = maybe_restored else {
+          attempt = attempt.saturating_add(1);
+          continue;
+        };
         match restore_verdict(restored) {
           // Nothing goes out yet: the session's user may not be the cached one.
           RestoreVerdict::SignedIn => needs_restore = false,
           RestoreVerdict::NoVerdict => {},
-          RestoreVerdict::Over(maybe_problem) => return self.sign_out_with(maybe_problem),
+          RestoreVerdict::Over(maybe_problem) => return self.session_over(maybe_problem, cached.id).await,
         }
       }
       if !needs_restore {
-        let answer = auth.api_get(ME_PATH).await;
+        let asking = auth.clone();
+        let maybe_answer = self
+          .answer_in_time(async move { asking.api_get(ME_PATH).await }, attempt, Wake::Cuts)
+          .await;
         if self.core_round.try_get_untracked() != Some(round) {
           return;
         }
+        let Some(answer) = maybe_answer else {
+          attempt = attempt.saturating_add(1);
+          continue;
+        };
         match account_verdict(answer, has_restored_for_refusal) {
           AccountVerdict::Confirmed(me) => return self.account_confirmed(me, &cached).await,
           AccountVerdict::NoVerdict => {},
@@ -329,6 +360,11 @@ impl SessionControl {
             continue;
           },
           AccountVerdict::Refused(problem) => return self.account_refused(problem, cached.id).await,
+          AccountVerdict::SessionOver => {
+            return self
+              .session_over(Some(LoginProblem::SessionExpired), cached.id)
+              .await;
+          },
         }
       }
       self.wait_for_next_account_check(attempt).await;
@@ -352,12 +388,51 @@ impl SessionControl {
   }
 
   async fn wait_for_next_account_check(&self, attempt: u32) {
+    let delay = account_check_delay(attempt, clock::now_ms());
+    select(self.check_woken(), Box::pin(platform::sleep(delay))).await;
+  }
+
+  /// `work`'s answer, or `None` when it took too long or (with [`Wake::Cuts`]) the network came back.
+  /// The work runs on in any case.
+  async fn answer_in_time<T: 'static>(
+    &self,
+    work: impl Future<Output = T> + 'static,
+    attempt: u32,
+    wake: Wake,
+  ) -> Option<T> {
+    let (sender, answer) = oneshot::channel();
+    spawn_local(async move {
+      // Given up on: nobody listens any more.
+      let _ = sender.send(work.await);
+    });
+    let patience = Box::pin(platform::sleep(account_answer_patience(attempt)));
+    let maybe_answer = match wake {
+      Wake::Cuts => match select(answer, select(self.check_woken(), patience)).await {
+        Either::Left((answer, _)) => Some(answer),
+        Either::Right(_) => None,
+      },
+      Wake::Ignored => match select(answer, patience).await {
+        Either::Left((answer, _)) => Some(answer),
+        Either::Right(_) => None,
+      },
+    };
+    maybe_answer.and_then(Result::ok)
+  }
+
+  /// Resolves on the next [`Self::check_account_now`].
+  fn check_woken(&self) -> oneshot::Receiver<()> {
     let (wake, woken) = oneshot::channel();
     if let Some(slot) = self.maybe_check_wake.try_get_value() {
       *slot.borrow_mut() = Some(wake);
     }
-    let delay = account_check_delay(attempt, clock::now_ms());
-    select(woken, Box::pin(platform::sleep(delay))).await;
+    woken
+  }
+
+  /// The session is over before the server said anything about the account. The shell may not be
+  /// up yet, so the pictures go by the cached account.
+  async fn session_over(&self, maybe_problem: Option<LoginProblem>, cached_user: UserId) {
+    crate::persisted_media::clear(Some(cached_user)).await;
+    self.sign_out_with(maybe_problem);
   }
 
   /// The server answered for the cached account's session. The same person: their data stays on
@@ -827,6 +902,8 @@ fn account_verdict(outcome: Result<ApiResponse, AuthError>, has_restored: bool) 
   let response = match outcome {
     Ok(response) => response,
     Err(AuthError::NotSignedIn) => return AccountVerdict::RestoreFirst,
+    // The token ran out meanwhile, and its refresh was refused: the stored one is gone.
+    Err(AuthError::Denied(_)) => return AccountVerdict::SessionOver,
     Err(_) => return AccountVerdict::NoVerdict,
   };
   if response.status == 200 {
@@ -864,6 +941,15 @@ fn account_check_delay(attempt: u32, jitter_seed: i64) -> Duration {
     .saturating_mul(1_u64 << attempt.min(16))
     .min(ACCOUNT_CHECK_RETRY_MAX_MS);
   Duration::from_millis(backoff_ms.saturating_add(jitter_seed.rem_euclid(1_000).unsigned_abs()))
+}
+
+/// How long the check waits for an answer at this attempt.
+fn account_answer_patience(attempt: u32) -> Duration {
+  Duration::from_millis(
+    ACCOUNT_ANSWER_PATIENCE_MS
+      .saturating_mul(1_u64 << attempt.min(16))
+      .min(ACCOUNT_ANSWER_PATIENCE_MAX_MS),
+  )
 }
 
 /// Turns the answer of `GET /api/v1/me` into the account or the reason it cannot be used.
@@ -1090,6 +1176,27 @@ mod tests {
         panic!("expected the account");
       };
       assert_eq!(me.display_name, "Alice");
+    }
+
+    /// Restored, then no network, then a refresh the provider refuses: the session is over, also
+    /// on a retry that only hears the network error of a session with nothing left in it.
+    #[test]
+    fn a_refresh_refused_while_asking_ends_the_session() {
+      assert_eq!(
+        account_verdict(Err(AuthError::Denied("invalid_grant".into())), false),
+        AccountVerdict::SessionOver
+      );
+      assert_eq!(
+        account_verdict(Err(AuthError::NotSignedIn), false),
+        AccountVerdict::RestoreFirst
+      );
+    }
+
+    #[test]
+    fn the_patience_for_an_answer_grows_up_to_its_maximum() {
+      assert_eq!(account_answer_patience(0).as_millis(), 10_000);
+      assert_eq!(account_answer_patience(1).as_millis(), 20_000);
+      assert_eq!(account_answer_patience(u32::MAX).as_millis(), 60_000);
     }
 
     #[test]

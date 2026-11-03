@@ -1014,6 +1014,11 @@ CACHED_START_RUNS=5 E2E_REQUIRED=1 cargo test -p teamcraft-e2e --features browse
 | Every request 1 s late | 5717 ms              | 1591 ms           | 6779 ms           | 6502 ms          | ≤ 1.5 s       |
 | No answer              | sign-in page, 462 ms | 585 ms, the chats | -                 | -                | ≤ 1.5 s       |
 
+"After" is before the last fixes of the review, measured against "before" at the same machine load. On the final
+code, with the machine busy with other builds (load about 10): 706 ms list and 863 ms connected on a good network,
+1686 and 6622 ms when late, 698 ms without an answer. The case without any network moved as much as the others, so
+this reads as the load; "before" was not measured again under it.
+
 "Connected" is until the core logged its gateway connection. Nothing goes out until the server
 confirmed the account (e2ee.md §9.8), so that time doesn't get better, only the list does. It doesn't
 get worse either: before, the core also started only after `GET /me`.

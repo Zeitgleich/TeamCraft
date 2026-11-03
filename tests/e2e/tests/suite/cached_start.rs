@@ -15,7 +15,7 @@
 //! CACHED_START_RUNS=7 cargo test -p teamcraft-e2e --features browser --test suite -- --nocapture cached_start::
 //! ```
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -127,6 +127,8 @@ async fn a_signed_in_start_needs_no_answer_from_anybody() {
       refused_refresh_token_goes_to_the_identity_provider(&page, channel.to_string()).await;
       another_account_in_the_answer_closes_the_data(&page, channel.to_string()).await;
       ended_session_says_so(&page, channel.to_string()).await;
+      hung_answer_is_given_up(&page, channel.to_string()).await;
+      refresh_token_stays_away_from_another_provider(&page, channel.to_string()).await;
       deactivation_while_offline_ends_the_session(
         &page,
         channel.to_string(),
@@ -421,6 +423,111 @@ async fn ended_session_says_so(page: &Page, channel: String) {
   ended.stop(page).await;
   page.goto(url).await.unwrap();
   wait_for_text(page, MESSAGE).await;
+  tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
+/// `GET /me` never comes back: the check asks again by itself and the app connects.
+async fn hung_answer_is_given_up(page: &Page, channel: String) {
+  let url = format!("{WEB_ORIGIN}/c/{channel}");
+  let requests = Arc::new(AtomicUsize::new(0));
+  let counted = requests.clone();
+  let hang = intercept(page, &["*/api/v1/me"], move |page, event| {
+    let counted = counted.clone();
+    async move {
+      if counted.fetch_add(1, Ordering::SeqCst) > 0 {
+        let _ = page
+          .execute(ContinueRequestParams::new(event.request_id.clone()))
+          .await;
+      }
+    }
+  })
+  .await;
+  let (end, took) = start_until_list(page, &url).await;
+  assert_eq!(end, StartEnd::ChannelList, "after {took:?}");
+  let deadline = Instant::now() + Duration::from_secs(25);
+  while requests.load(Ordering::SeqCst) < 2 {
+    assert!(Instant::now() < deadline, "the check never asked again");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+  wait_until_gone(page, ".connection-hint").await;
+  hang.stop(page).await;
+  tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
+/// The server names another identity provider. Nothing of the saved sign-in reaches it: the new provider's
+/// token endpoint never hears from the app, and the app goes there to sign in like anybody.
+async fn refresh_token_stays_away_from_another_provider(page: &Page, channel: String) {
+  let url = format!("{WEB_ORIGIN}/c/{channel}");
+  let moved = "http://127.0.0.1:8080/realms/moved";
+  let answer = page
+    .evaluate("fetch('/api/v1/server-info').then(answer => answer.text())")
+    .await
+    .unwrap()
+    .into_value::<String>()
+    .unwrap();
+  let mut info: serde_json::Value = serde_json::from_str(&answer).unwrap();
+  info["sign_in"]["issuer"] = serde_json::json!(moved);
+  let info = info.to_string();
+  let discovery = serde_json::json!({
+    "issuer": moved,
+    "authorization_endpoint": format!("{moved}/auth"),
+    "token_endpoint": format!("{moved}/token"),
+    "end_session_endpoint": format!("{moved}/logout"),
+  })
+  .to_string();
+  let token_requests = Arc::new(Mutex::new(Vec::<String>::new()));
+  let noted = token_requests.clone();
+  let other = intercept(
+    page,
+    &["*/api/v1/server-info", "http://127.0.0.1:8080/realms/moved/*"],
+    move |page, event| {
+      let (info, discovery, noted) = (info.clone(), discovery.clone(), noted.clone());
+      async move {
+        let request_url = event.request.url.clone();
+        if request_url.ends_with("/api/v1/server-info") {
+          fulfill(&page, &event, 200, "application/json", &info).await;
+        } else if request_url.ends_with("/.well-known/openid-configuration") {
+          fulfill(&page, &event, 200, "application/json", &discovery).await;
+        } else if request_url.contains("/auth") {
+          fulfill(&page, &event, 200, "text/html", "<html>Moved provider</html>").await;
+        } else {
+          noted.lock().unwrap().push(request_url);
+          fulfill(
+            &page,
+            &event,
+            400,
+            "application/json",
+            r#"{"error":"invalid_grant"}"#,
+          )
+          .await;
+        }
+      }
+    },
+  )
+  .await;
+  page.goto(url.clone()).await.unwrap();
+  wait_for_text(page, "Moved provider").await;
+  assert_eq!(*token_requests.lock().unwrap(), Vec::<String>::new());
+  other.stop(page).await;
+
+  // Back, with the tokens gone: a sign-in, through the provider's session or its login page.
+  page.goto(format!("{WEB_ORIGIN}/healthz")).await.unwrap();
+  page.evaluate("sessionStorage.clear()").await.unwrap();
+  page.goto(url).await.unwrap();
+  let deadline = Instant::now() + Duration::from_secs(30);
+  while !body_text(page).await.contains(MESSAGE) {
+    assert!(Instant::now() < deadline, "no way back in");
+    if page.find_element("input[name=username]").await.is_ok() {
+      page
+        .evaluate("document.querySelector('input[name=username]').value = ''")
+        .await
+        .unwrap();
+      sign_in_at_keycloak(page, "carol").await;
+      wait_for_text(page, MESSAGE).await;
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
   tokio::time::sleep(Duration::from_secs(2)).await;
 }
 

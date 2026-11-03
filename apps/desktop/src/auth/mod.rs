@@ -794,12 +794,6 @@ impl<S: TokenStore> AuthService<S> {
       .text()
       .await
       .map_err(|error| AuthError::Network(error.to_string()))?;
-    if path == ME_PATH
-      && status == 200
-      && let Ok(me) = serde_json::from_str::<GetMeResponse>(&body)
-    {
-      *self.confirmed_user() = Some(me.id);
-    }
     Ok(ApiResponse { status, body })
   }
 
@@ -893,6 +887,12 @@ impl<S: TokenStore> AuthService<S> {
       .text()
       .await
       .map_err(|error| AuthError::Network(error.to_string()))?;
+    if path == ME_PATH
+      && status == 200
+      && let Ok(me) = serde_json::from_str::<GetMeResponse>(&body)
+    {
+      *self.confirmed_user() = Some(me.id);
+    }
     Ok(ApiResponse { status, body })
   }
 
@@ -1055,7 +1055,8 @@ impl<S: TokenStore> AuthService<S> {
       return Err(AuthError::NotSignedIn);
     }
     let needs_refresh = match &session.maybe_tokens {
-      None if self.is_unconfirmed() => {
+      // A refused refresh token is no wait: the session is over, and the next look says so.
+      None if self.is_unconfirmed() && !session.is_expired => {
         return Err(AuthError::Network("waiting for the stored sign-in".to_owned()));
       },
       None => return Err(AuthError::NotSignedIn),
@@ -1902,6 +1903,9 @@ mod tests {
     const PROVIDER_DOWN: u8 = 0;
     const PROVIDER_UP: u8 = 1;
     const PROVIDER_REFUSES: u8 = 2;
+    /// Whom the fake provider's tokens name, and who the fake server says that is.
+    const TOKEN_SUBJECT: &str = "subject-of-the-provider";
+    const ME_ANSWER: &str = r#"{"id":"42","display_name":"Alice","role":"owner"}"#;
 
     /// The computer is off for 12 hours, 3 days or 30 days; it wakes up without network. The access
     /// token is long expired: the app waits (offline, never "sign in again") until the provider can
@@ -2242,6 +2246,87 @@ mod tests {
         assert_eq!(stored_record(&service, &provider).await, None);
       }
 
+      /// The fake provider's config, with the fake server at the same address.
+      fn config_with_server(provider: &FakeProvider) -> DesktopConfig {
+        DesktopConfig {
+          server_url: provider.base.clone(),
+          ..provider.config()
+        }
+      }
+
+      /// The whole way: a start without a cached account, the UI's `GET /me`, the UI hands the account
+      /// over; the next start begins from it. Without anything set by hand.
+      #[tokio::test]
+      async fn the_next_start_begins_from_what_the_server_confirmed() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_UP);
+        let config = config_with_server(&provider);
+        let store = MemoryStore::default();
+        store.save(&config.token_key(), "refresh").await.unwrap();
+        let service = AuthService::new(Some(config), store).unwrap();
+        assert_eq!(service.cached_account().await, None);
+
+        assert!(service.restore().await.unwrap());
+        let answer = service.api_get(ME_PATH).await.unwrap();
+        let me: GetMeResponse = serde_json::from_str(&answer.body).unwrap();
+        service.remember_account(&me).await;
+
+        assert_eq!(service.cached_account().await, Some(me));
+        assert!(service.is_unconfirmed());
+      }
+
+      /// The UI hands over somebody the server didn't name: not kept.
+      #[tokio::test]
+      async fn only_who_the_server_named_is_kept() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_UP);
+        let config = config_with_server(&provider);
+        let store = MemoryStore::default();
+        store.save(&config.token_key(), "refresh").await.unwrap();
+        let service = AuthService::new(Some(config), store).unwrap();
+        assert!(service.restore().await.unwrap());
+        service.api_get(ME_PATH).await.unwrap();
+
+        let mut someone_else = account();
+        someone_else.id = serde_json::from_str(r#""43""#).unwrap();
+        service.remember_account(&someone_else).await;
+
+        assert_eq!(service.cached_account().await, None);
+      }
+
+      /// Restored, then no answer from the server, then the token needs a refresh and the provider
+      /// refuses it. The UI hears that, and a look after that doesn't read as a network problem.
+      #[tokio::test]
+      async fn a_refresh_refused_while_unconfirmed_says_so() {
+        let provider = FakeProvider::start().await;
+        provider.set(PROVIDER_UP);
+        let config = config_with_server(&provider);
+        let store = MemoryStore::default();
+        store.save(&config.token_key(), "refresh").await.unwrap();
+        let clock = Arc::new(AtomicI64::new(START_MS));
+        let reading = Arc::clone(&clock);
+        let service = AuthService::with_clock(
+          Some(config.clone()),
+          store,
+          Arc::new(move || reading.load(Ordering::SeqCst)),
+        );
+        assert!(service.restore().await.unwrap());
+        service.is_unconfirmed.store(true, Ordering::Release);
+
+        clock.store(START_MS + HOUR_MS, Ordering::SeqCst);
+        provider.set(PROVIDER_REFUSES);
+
+        assert!(matches!(
+          service.api_get(ME_PATH).await,
+          Err(AuthError::Denied(_))
+        ));
+        assert!(matches!(
+          service.api_get(ME_PATH).await,
+          Err(AuthError::NotSignedIn)
+        ));
+        assert!(service.store.load(&config.token_key()).await.unwrap().is_none());
+      }
+
       /// Somebody else signed in, and writing could not even forget the old record: it still can't
       /// open for the new tokens.
       #[tokio::test]
@@ -2557,6 +2642,12 @@ mod tests {
       }
     }
 
+    fn id_token_of(subject: &str) -> String {
+      use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+      let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"sub":"{subject}"}}"#));
+      format!("eyJhbGciOiJub25lIn0.{payload}.signature")
+    }
+
     async fn serve(
       mut socket: TcpStream,
       base: &str,
@@ -2573,7 +2664,13 @@ mod tests {
         }
       }
       let head = String::from_utf8_lossy(&request).into_owned();
-      let (status, body) = if head.starts_with("POST /logout") {
+      let (status, body) = if head.starts_with("GET /api/v1/me") {
+        // The server's answer, at the same address in the tests that ask it.
+        if mode.load(Ordering::SeqCst) == PROVIDER_DOWN {
+          return;
+        }
+        ("200 OK", ME_ANSWER.to_owned())
+      } else if head.starts_with("POST /logout") {
         logouts.fetch_add(1, Ordering::SeqCst);
         ("200 OK", String::new())
       } else if head.starts_with("GET /.well-known/openid-configuration") {
@@ -2599,6 +2696,7 @@ mod tests {
               "token_type": "Bearer",
               "expires_in": 300,
               "refresh_token": "rotated-refresh",
+              "id_token": id_token_of(TOKEN_SUBJECT),
             })
             .to_string(),
           ),
