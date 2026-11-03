@@ -15,6 +15,7 @@ pub mod listener;
 pub mod logging;
 pub mod meetings;
 pub mod openapi;
+pub mod outage_gate;
 pub mod push;
 pub mod rendezvous;
 pub mod router;
