@@ -746,15 +746,24 @@ fn ChannelMemberRow(
         _ => ().into_any(),
       }}
       {move || appointer.get().map(|appointer| {
+        // The signer and the authority are verified; the name is the server's directory's, so it
+        // is its own isolated element and never part of the sentence (docs/admin.md, 2.5).
         let appointer_name = state.read(|backend| backend.user(appointer.user)).map(|found| found.display_name);
-        let key = appointed_by_key(appointer.authority, appointer_name.is_some());
-        view! {
-          <span class="muted-text">
-            {move || match &appointer_name {
-              Some(name) => i18n.t_with(key, &[("name", name.as_str())]),
-              None => i18n.t(key),
-            }}
-          </span>
+        match appointer_name {
+          Some(name) => view! {
+            <span class="muted-text">
+              {move || i18n.t("channel-role-appointed-by")}
+              " "
+              <bdi translate="no">{name}</bdi>
+              " "
+              {move || i18n.t(appointer_authority_key(appointer.authority))}
+            </span>
+          }
+          .into_any(),
+          None => view! {
+            <span class="muted-text">{move || i18n.t(appointer_unnamed_key(appointer.authority))}</span>
+          }
+          .into_any(),
         }
       })}
       <Show when=move || is_unsigned.get() fallback=|| ()>
@@ -804,16 +813,22 @@ fn ChannelMemberRow(
   }
 }
 
-/// The text key for "appointed by": a workspace admin's signature is told apart from a channel
-/// admin's. Without a name (the signer left the directory) it says only what they were.
-fn appointed_by_key(authority: AppointerAuthority, has_name: bool) -> &'static str {
-  match (authority, has_name) {
-    (AppointerAuthority::WorkspaceOwner, true) => "channel-role-appointed-by-owner",
-    (AppointerAuthority::WorkspaceOwner, false) => "channel-role-appointed-by-owner-unnamed",
-    (AppointerAuthority::WorkspaceAdmin, true) => "channel-role-appointed-by-workspace-admin",
-    (AppointerAuthority::WorkspaceAdmin, false) => "channel-role-appointed-by-workspace-admin-unnamed",
-    (AppointerAuthority::ChannelAdmin, true) => "channel-role-appointed-by-channel-admin",
-    (AppointerAuthority::ChannelAdmin, false) => "channel-role-appointed-by-channel-admin-unnamed",
+/// The text for the authority after the signer's name: a workspace admin's signature is told apart
+/// from a channel admin's.
+fn appointer_authority_key(authority: AppointerAuthority) -> &'static str {
+  match authority {
+    AppointerAuthority::WorkspaceOwner => "channel-role-appointer-owner",
+    AppointerAuthority::WorkspaceAdmin => "channel-role-appointer-workspace-admin",
+    AppointerAuthority::ChannelAdmin => "channel-role-appointer-channel-admin",
+  }
+}
+
+/// The whole line when the signer's name isn't known (they left the directory): only what they were.
+fn appointer_unnamed_key(authority: AppointerAuthority) -> &'static str {
+  match authority {
+    AppointerAuthority::WorkspaceOwner => "channel-role-appointed-by-owner-unnamed",
+    AppointerAuthority::WorkspaceAdmin => "channel-role-appointed-by-workspace-admin-unnamed",
+    AppointerAuthority::ChannelAdmin => "channel-role-appointed-by-channel-admin-unnamed",
   }
 }
 
@@ -2119,27 +2134,29 @@ fn CategoryRow(space: SpaceId, category: CategoryInfo) -> impl IntoView {
 mod tests {
   use teamcraft_client_api::model::AppointerAuthority;
 
-  use super::appointed_by_key;
+  use super::{appointer_authority_key, appointer_unnamed_key};
+
+  const AUTHORITIES: [AppointerAuthority; 3] = [
+    AppointerAuthority::WorkspaceOwner,
+    AppointerAuthority::WorkspaceAdmin,
+    AppointerAuthority::ChannelAdmin,
+  ];
 
   #[test]
   fn a_workspace_admin_is_told_apart_from_a_channel_admin() {
-    let keys: Vec<&str> = [
-      AppointerAuthority::WorkspaceOwner,
-      AppointerAuthority::WorkspaceAdmin,
-      AppointerAuthority::ChannelAdmin,
-    ]
-    .into_iter()
-    .flat_map(|authority| {
-      [
-        appointed_by_key(authority, true),
-        appointed_by_key(authority, false),
-      ]
-    })
-    .collect();
+    let keys: Vec<&str> = AUTHORITIES
+      .into_iter()
+      .flat_map(|authority| {
+        [
+          appointer_authority_key(authority),
+          appointer_unnamed_key(authority),
+        ]
+      })
+      .collect();
     let distinct: std::collections::HashSet<&&str> = keys.iter().collect();
     assert_eq!(distinct.len(), 6);
-    assert!(appointed_by_key(AppointerAuthority::WorkspaceAdmin, true).contains("workspace-admin"));
-    assert!(appointed_by_key(AppointerAuthority::ChannelAdmin, false).contains("channel-admin"));
+    assert!(appointer_authority_key(AppointerAuthority::WorkspaceAdmin).contains("workspace-admin"));
+    assert!(appointer_unnamed_key(AppointerAuthority::ChannelAdmin).contains("channel-admin"));
   }
 
   #[test]
@@ -2148,15 +2165,13 @@ mod tests {
       let source =
         std::fs::read_to_string(format!("{}/i18n/{lang}/channels.ftl", env!("CARGO_MANIFEST_DIR")))
           .expect("the channels bundle");
-      for authority in [
-        AppointerAuthority::WorkspaceOwner,
-        AppointerAuthority::WorkspaceAdmin,
-        AppointerAuthority::ChannelAdmin,
-      ] {
-        for has_name in [true, false] {
-          let key = appointed_by_key(authority, has_name);
-          assert!(source.contains(&format!("\n{key} = ")), "{lang} lacks {key}");
-        }
+      let mut keys = vec!["channel-role-appointed-by"];
+      for authority in AUTHORITIES {
+        keys.push(appointer_authority_key(authority));
+        keys.push(appointer_unnamed_key(authority));
+      }
+      for key in keys {
+        assert!(source.contains(&format!("\n{key} = ")), "{lang} lacks {key}");
       }
     }
   }

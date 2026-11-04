@@ -11,7 +11,7 @@ use crate::common;
 use common::{Peer, backend_of, run_commands, settle};
 use teamcraft_client_api::actions::NewChannel;
 use teamcraft_client_api::backend::ChatBackend;
-use teamcraft_client_api::model::{AppointerAuthority, ChannelMember, RoleAppointer};
+use teamcraft_client_api::model::ChannelMember;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::RoleSigning;
 use teamcraft_proto::{ChannelRole, ConversationId, SpaceId, UserId};
@@ -53,14 +53,8 @@ async fn signed_role_changes_reach_the_members_and_server_only_roles_count_for_n
     "nobody verified names an appointer"
   );
   assert!(row(&bob_ui, channel, bob_id).is_role_signed);
-  // Alice's signed change of Bob's role is named, on her authority as a channel admin.
-  assert_eq!(
-    row(&bob_ui, channel, bob_id).maybe_appointer,
-    Some(RoleAppointer {
-      user: alice_id,
-      authority: AppointerAuthority::ChannelAdmin,
-    })
-  );
+  // Alice founded the channel (trust on first use), so no appointer is claimed for Bob's role.
+  assert_eq!(row(&bob_ui, channel, bob_id).maybe_appointer, None);
   assert_eq!(
     bob.client.verified_channel_role(channel, carol_id).unwrap(),
     ChannelRole::Member
@@ -82,12 +76,7 @@ async fn signed_role_changes_reach_the_members_and_server_only_roles_count_for_n
   assert_eq!(confirmed, RoleSigning::Signed);
   let bob_ui = refreshed_ui(&mut bob, channel).await;
   assert!(row(&bob_ui, channel, carol_id).is_role_signed);
-  assert_eq!(
-    row(&bob_ui, channel, carol_id)
-      .maybe_appointer
-      .map(|appointer| appointer.user),
-    Some(alice_id)
-  );
+  assert_eq!(row(&bob_ui, channel, carol_id).maybe_appointer, None);
   assert_eq!(
     bob.client.verified_channel_role(channel, carol_id).unwrap(),
     ChannelRole::Admin
