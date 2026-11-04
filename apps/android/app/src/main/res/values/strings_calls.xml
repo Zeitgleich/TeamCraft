@@ -28,6 +28,12 @@
   <string name="call_meeting_title">Call</string>
   <string name="call_move_offer">%1$s moved the call into a meeting room and added %2$s.</string>
   <string name="call_move_join">Join the meeting room</string>
+  <string name="call_move_offer_notetaker">%1$s added the notetaker. The call goes on in a meeting room, where what is said is sent to OpenRouter for a transcript. Your audio reaches it only once you join there.</string>
+  <string name="call_notetaker_add">Add notetaker</string>
+  <string name="call_notetaker_remove">Remove notetaker</string>
+  <string name="call_notetaker_room_title">Call with notetaker</string>
+  <string name="call_notetaker_joining">The notetaker is being added. While it is in the call, the audio is sent to OpenRouter for the transcript.</string>
+  <string name="call_notetaker_banner">The notetaker is making a transcript of this call. For this, what is said is sent to OpenRouter (%1$s), so it is not end-to-end encrypted. The summary and the transcript will be posted in the chat afterwards.</string>
   <string name="error_call_device_limit">Your account is already in this call on as many devices as are allowed. Leave the call on one of them first, then join from this device.</string>
   <string name="error_call_encryption_pending">This device can\'t join the call yet: it is still being let into the conversation\'s encryption. Try again shortly. Keeping TeamCraft open on another of your devices helps.</string>
   <string name="error_call_move_refused">The call wasn\'t moved: the meeting room doesn\'t match what was announced in the conversation. Stay in this call, or join the meeting room from the list if you trust it.</string>
