@@ -113,11 +113,16 @@ pub struct OwnKey {
 }
 
 /// A guest keeps the organizer's identity key fingerprint from the link for the meeting chat: its
-/// group is only joined from a welcome of that key's devices (browser only).
-pub async fn guest_anchor(conversation: ConversationId, fingerprint: &str) -> Result<(), String> {
+/// group is only joined from a welcome of that key's devices, or of an admitter's the key signed
+/// for `meeting` (browser only).
+pub async fn guest_anchor(
+  conversation: ConversationId,
+  meeting: teamcraft_proto::MeetingId,
+  fingerprint: &str,
+) -> Result<(), String> {
   call(
     "core_guest_anchor",
-    &json!({ "conversation": conversation, "fingerprint": fingerprint }),
+    &json!({ "conversation": conversation, "meeting": meeting, "fingerprint": fingerprint }),
   )
   .await
 }
@@ -1268,6 +1273,30 @@ impl ChatBackend for RemoteChat {
   fn is_open_by_own_record(&self, meeting: teamcraft_proto::MeetingId) -> bool {
     matches!(
       self.ask(ChatQuery::IsOpenByOwnRecord { meeting }),
+      Some(ChatAnswer::Flag { value: true })
+    )
+  }
+
+  fn sync_meeting_admitters(
+    &self,
+    meeting: teamcraft_proto::MeetingId,
+    conversation: ConversationId,
+    expires_at_ms: i64,
+  ) {
+    self.act(ChatAction::SyncMeetingAdmitters {
+      meeting,
+      conversation,
+      expires_at_ms,
+    });
+  }
+
+  fn check_meeting_admission(&self, conversation: ConversationId) {
+    self.act(ChatAction::CheckMeetingAdmission { conversation });
+  }
+
+  fn admits_link_arrivals(&self, conversation: ConversationId, now_ms: i64) -> bool {
+    matches!(
+      self.ask(ChatQuery::AdmitsLinkArrivals { conversation, now_ms }),
       Some(ChatAnswer::Flag { value: true })
     )
   }

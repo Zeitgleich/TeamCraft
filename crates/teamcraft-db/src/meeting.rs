@@ -1089,6 +1089,39 @@ impl Database {
     Ok(row.is_some())
   }
 
+  /// Keeps the organizer's signed admitters of a meeting (#1103) unless a statement with the same
+  /// or a higher sequence is stored already. Whether it was kept.
+  pub async fn put_meeting_admitters(
+    &self,
+    meeting: MeetingId,
+    sequence: i64,
+    statement: &[u8],
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"INSERT INTO meeting_admitters (meeting_id, sequence, statement) VALUES ($1, $2, $3)
+         ON CONFLICT (meeting_id) DO UPDATE
+           SET sequence = EXCLUDED.sequence, statement = EXCLUDED.statement, updated_at = now()
+           WHERE meeting_admitters.sequence < EXCLUDED.sequence"#,
+      to_db(meeting),
+      sequence,
+      statement,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
+  }
+
+  /// The newest signed admitters of a meeting, as the organizer's device published them.
+  pub async fn meeting_admitters(&self, meeting: MeetingId) -> Result<Option<Vec<u8>>, DbError> {
+    let row = sqlx::query!(
+      "SELECT statement FROM meeting_admitters WHERE meeting_id = $1",
+      to_db(meeting),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(row.map(|row| row.statement))
+  }
+
   /// Guests waiting for a decision, longest waiting first.
   pub async fn list_waiting(&self, meeting: MeetingId) -> Result<Vec<LobbyRow>, DbError> {
     let rows = sqlx::query!(

@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
-use crate::{ConversationId, IdempotencyKey, MeetingId, UnixMillis, UserId, UserSummary, Weekday};
+use crate::{
+  Base64Bytes, ConversationId, IdempotencyKey, MeetingId, UnixMillis, UserId, UserSummary, Weekday,
+};
 
 wire_enum! {
   pub enum MeetingStatus {
@@ -370,6 +372,28 @@ pub struct GuestDeviceReadyRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListLobbyResponse {
   pub entries: Vec<LobbyEntry>,
+  /// The caller hosts the meeting and decides on every entry. Without it the caller is a member of
+  /// a meeting without a lobby, shown only those who came with the meeting link, to let them in by
+  /// itself (absent from older servers, which answer hosts only).
+  #[serde(default = "default_true")]
+  pub is_host: bool,
+}
+
+/// `PUT /api/v1/conversations/{id}/meeting-admitters` (the meeting's organizer): who may let
+/// guests into the meeting chat's encryption group, as the organizer's identity key signs it
+/// (`teamcraft_crypto::meeting_admitters`, e2ee.md §4.6, "Meeting guests"). Addressed by the chat,
+/// which every device in it knows. The server keeps the newest per meeting and checks its shape
+/// only: clients verify it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PutMeetingAdmittersRequest {
+  pub statement: Base64Bytes,
+}
+
+/// `GET /api/v1/conversations/{id}/meeting-admitters` (members of the meeting chat, admitted
+/// guests too): the newest statement the organizer published; `404` before the first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MeetingAdmittersResponse {
+  pub statement: Base64Bytes,
 }
 
 /// `GET /api/v1/meetings/{id}/lobby/me`: the caller's own place in the lobby.
@@ -477,6 +501,22 @@ mod tests {
     let legacy: crate::CreateChannelRequest =
       serde_json::from_str(r#"{"name":"c","visibility":"private"}"#).unwrap();
     assert_eq!(legacy.maybe_idempotency_key, None);
+  }
+
+  #[test]
+  fn lobbies_of_older_servers_are_a_hosts_and_admitters_travel_as_base64() {
+    let old: ListLobbyResponse = serde_json::from_str(r#"{"entries":[]}"#).unwrap();
+    assert!(old.is_host);
+    let member: ListLobbyResponse = serde_json::from_str(r#"{"entries":[],"is_host":false}"#).unwrap();
+    assert!(!member.is_host);
+
+    let body = PutMeetingAdmittersRequest {
+      statement: Base64Bytes::new(vec![1, 2, 3]),
+    };
+    let json = serde_json::to_string(&body).unwrap();
+    assert_eq!(json, r#"{"statement":"AQID"}"#);
+    let back: MeetingAdmittersResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.statement, body.statement);
   }
 
   #[test]

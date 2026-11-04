@@ -1469,11 +1469,12 @@ never by the server's member list:
     the fingerprint with the lobby entry and sends `lobby_join` to the hosts, once). The link
     holds no secret, so nothing in it reaches the member devices: the guest's keys are the
     guest's own, made in the guest's browser.
-  - *Admission seals the keys to the guest.* An organizer's device admits: on the host's "admit"
-    in the lobby, or by itself when the organizer chose "no lobby" **on that device** (a record
-    the device keeps when the meeting is scheduled or edited there; the server's `has_lobby` and
-    `is_by_link` never decide it) and the guest knocked with the meeting's token. Each admission
-    by itself is shown to the organizer ("X joined with the meeting link", with "Remove"). The
+  - *Admission seals the keys to the guest.* An organizer's device admits, or an admitter's the
+    organizer signed (below): on a host's "admit" in the lobby, or by itself when the organizer
+    chose "no lobby" **on that device** (a record the device keeps when the meeting is scheduled or
+    edited there; on an admitter's device the organizer's signed list; the server's `has_lobby`
+    and `is_by_link` never decide it) and the guest knocked with the meeting's token. Each
+    admission by itself is shown on that device ("X joined with the meeting link", with "Remove"). The
     device pins the guest's identity key as the server presents it, admits only if it has the
     fingerprint reported with the knock, records the guest as a guest of this meeting with the
     end of their access, and adds the guest's device to the meeting chat's group with a signed
@@ -1483,9 +1484,9 @@ never by the server's member list:
     ones, never a content key of an earlier one (no history share, §4.3): what was said before
     the admission stays unreadable. In the call the guest's device joins the meeting call's DAVE
     group like any member's (§8): the commit that adds it is another new epoch, and the frames of
-    earlier epochs were encrypted under keys it never gets. A host's "admit" without an
-    organizer's device online makes the guest a member on the server only; the guest's page keeps
-    waiting ("waiting for the organizer") until an organizer's device adds the device. If no app
+    earlier epochs were encrypted under keys it never gets. A host's "admit" without a device of
+    the organizer or of an admitter online makes the guest a member on the server only; the
+    guest's page keeps waiting ("waiting for the organizer") until such a device adds the device. If no app
     of the organizer was seen admitting by this flow (`PUT /meetings/admitter`, sent by apps since
     #987), the guest's page says the organizer's app needs an update: an older app asks for a link
     proof that guests no longer send and never lets them in.
@@ -1506,9 +1507,10 @@ never by the server's member list:
     Without the comparison the guest is exactly what the name says: "Guest (unverified)".
   - *How the guest verifies the admission.* The guest's device is marked as a guest device when
     it enrolls, and it accepts a group only from a welcome whose committer is a device the
-    identity key with the fingerprint `v` certified, so only the organizer's devices let guests
-    in; a co-host's app refuses ("only the organizer's devices can let guests in"), and so does
-    the guest for a welcome from any other device: a **forged admission fails closed**. A guest
+    identity key with the fingerprint `v` certified, or a device of an admitter the statement
+    that key signed for the meeting names (below). Anybody else's app refuses to let a guest in
+    ("only the organizer's devices and the admitters the organizer named can let guests in"), and
+    so does the guest for a welcome from any other device: a **forged admission fails closed**. A guest
     device offered a group by external commit joins nothing. The check is about who added the
     guest, not about who is in the group (a group the server made with devices of its own can
     hold the organizer's published key package) and not about where a leaf sits in the tree, so
@@ -1518,6 +1520,64 @@ never by the server's member list:
     directly) are pinned as attested, the rest on first use. Remaining gap: the guest still pins
     the other members' keys on first use where there is no attestation, and the member path
     (§4.6, "Whose group") still trusts the server's naming of the organizer.
+  - *Admitters the organizer signs* (#1103). So that a guest isn't stuck while the organizer is
+    away, the organizer's identity key signs who else may let guests in
+    (`teamcraft_crypto::meeting_admitters`):
+    - *The statement* names the meeting and its chat, the organizer's identity public key (the
+      signer, so a guest who knows only `v` can check it), a **sequence** that only grows, an
+      **end of validity**, whether admitters let people of the link in by themselves (the
+      organizer's "no lobby"), and the admitters: user IDs, each with the identity key that
+      certifies that user's devices. The identity key signs it under a label of its own (§2); at
+      most 1,000 admitters and 64 KiB.
+    - *Who is on it.* An organizer's device lists everybody with a device in the meeting chat's
+      group as it sees it (the people the organizer's and hosts' own signed adds brought in) but
+      itself and guests ("who counts as a guest", below), each with the identity key that device
+      pinned. "No lobby" is that device's own record, as for its own admissions; a device without
+      one keeps what the organizer's key signed before. It signs anew only when the list or the
+      flag changed, or to make the list last until the meeting's access ends (its end plus the
+      guest grace, also for a series' next meeting); the sequence is above the server's and the
+      last one it saw, and at least the time of signing in milliseconds, so the newest of two
+      organizer devices stays ahead. It publishes when the meeting is scheduled or edited and
+      keeps the list current for meetings that run or start within a day.
+    - *The server* keeps the newest statement per meeting
+      (`PUT /conversations/{id}/meeting-admitters`, the meeting's organizer only; a sequence not
+      above the stored one gets `409`) and serves it to the chat's members, admitted guests too. It
+      checks the shape only (IDs, size, the signature by the key the statement names), never whose
+      key that is.
+    - *The guest* accepts a welcome from a device the key of `v` didn't certify only if the
+      server's statement verifies against `v`, names the chat and the meeting the guest joined, is
+      in force by the guest's clock, isn't older than one the guest saw, and lists the sender's
+      user with exactly the identity key that certified the sender's device (the leaf as the
+      guest's client verified it). Anything else fails closed as before; a failed fetch is retried
+      like a failed pin.
+    - *Members* check the same against the organizer's identity key as they pinned it (the chat
+      only: a member's device doesn't know the meeting's ID, and a chat belongs to one meeting).
+      An admitter's device lets a guest in only if the list names its user with its own key; the
+      guest would refuse its welcome otherwise. In a meeting chat only the roster's members and
+      the organizer sign changes for others ("who counts as a guest", below); a listed admitter
+      may besides add people and take guests out. Before a device judges such a commit by
+      somebody the roster doesn't vouch for, it reads the list again, and it holds the list's end
+      against the commit's server time, so every member decides alike. A device that can't read
+      it judges by the list it kept; if it refuses, it falls out and is added back like any device
+      that does ("Falling out and coming back").
+    - *Lobby on:* a host's "admit" (the organizer or a chat admin) lets the guest in from that
+      host's device if the organizer listed the host. *Lobby off:* an admitter's app in the
+      meeting's call reads the lobby too (the server shows the members of a meeting without a
+      lobby who came with the link, sends them `lobby_join` and lets them admit those) and lets
+      them in by itself where the signed list says "no lobby", never on the server's `has_lobby`.
+    - *Threat notes.* The list widens whom the guest trusts with its admission from the
+      organizer's devices to the listed people's: people of the meeting who are in the group and
+      read the chat anyway. A server can't add an admitter, move a list to another chat or meeting,
+      or forge one. It can withhold the newest list or serve an older one: a guest or member that
+      saw a newer one refuses the older (sequence), but a guest that saw none can be given an older
+      list until it ends, and an admitter the organizer has taken off since can then admit that
+      guest, with the server's help into a group of their own making. The end of validity (the
+      meeting's access end) bounds that; a shorter one would strand guests whenever the
+      organizer's app isn't opened before the meeting. Without a list (an organizer app from
+      before #1103, nothing published yet) only the organizer's devices admit, as before. Remaining
+      gap: the list is as good as the organizer's device's view of who is a guest, so a guest the
+      server relabels as a member to it after another admitter let them in could get on the next
+      list (the gap noted below).
   - *Where `v` comes from.* A link copied in a member's app carries the fingerprint of the
     organizer's key as that device has it pinned; the app waits for it ("Verifying…") and never
     hands out a link with the server's. The **invitation e-mails and the calendar event carry the
@@ -1536,7 +1596,10 @@ never by the server's member list:
     |------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
     | A malicious server     | Not compared: enroll a device of its own for a waiting guest (or invent a guest), and after the host's "admit" read the chat and the media from then on; with a mailed link, pose as the meeting to a mail-only guest. Without a lobby, the same with no click. Serve a leaking page to a first-visit guest. Withhold knocks and admissions. | Compared: swap the guest's key or the organizer's without the codes differing. Ever: read what was said before an admission; hide that a guest is in (shown "Guest (unverified)" to everybody) |
     | Somebody with the mail | Knock, as the name they type                                                                                                                                                                                                                                                                                                                 | Decrypt anything: there is no key in the link; get past the lobby without a host's click (or, without a lobby, past being listed and announced); use the link after it was made anew           |
-    | A forged admission     | –                                                                                                                                                                                                                                                                                                                                            | Be accepted: the welcome's committer must carry the identity key of `v`                                                                                                                        |
+    | A forged admission     | –                                                                                                                                                                                                                                                                                                                                            | Be accepted: the welcome's committer must carry the identity key of `v` or a listed admitter's                                                                                                 |
+    | A listed admitter      | Let guests in like the organizer: on a host's click, or by itself where the organizer signed "no lobby"; with the server, put a guest into a group of their own making                                                                                                                                                                       | Be one without the organizer's signature for this chat; stay one for anybody who saw a newer list without them                                                                                 |
+    | An admitter taken off  | With the server, until the older list ends: admit a guest who saw no newer list                                                                                                                                                                                                                                                              | Fool a guest or member who saw the newer list (sequence); act after the older list ended                                                                                                       |
+    | A swapped list         | –                                                                                                                                                                                                                                                                                                                                            | Be accepted: signed by the key of `v` (guest) or the pinned organizer key (members), for this chat (a guest: and meeting), in force, not older than one seen                                   |
     | A removed guest        | Keep what they saw while in                                                                                                                                                                                                                                                                                                                  | Read anything later: the signed removal commit and the DAVE removal each start an epoch the guest has no keys for; the session token is ended                                                  |
     | Somebody guessing      | –                                                                                                                                                                                                                                                                                                                                            | Find a meeting: 2^192 tokens; unknown tokens count against the per-address limit of failed sign-ins                                                                                            |
 
@@ -1573,7 +1636,11 @@ never by the server's member list:
     meeting chat everyone the signed roster doesn't vouch for is treated as a guest for signed
     changes; a device that admitted a guest records it and treats the user as a guest from then
     on; and a roster member or an organizer is never treated as a guest, whatever kind the server
-    shows. Remaining gap: a hostile server that relabels a guest as a member to the devices that
+    shows. The admitters the organizer signed (above) are the one exception to the roster rule:
+    they may add people and take guests out; a guest on such a list is still a guest. A guest's
+    device also leaves adding other users' further devices and answering their rejoin requests to
+    the members (#1077): members refuse those commits from a guest, so committing them would split
+    the group. Remaining gap: a hostile server that relabels a guest as a member to the devices that
     did not admit them can't give them signed authority (the roster rule), but can let them add
     further devices of users who are already members, which those users' identity keys have
     signed anyway.

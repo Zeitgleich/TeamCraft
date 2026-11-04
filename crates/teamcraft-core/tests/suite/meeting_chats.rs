@@ -1219,8 +1219,9 @@ mod call_before_setup {
     )
     .await
     .unwrap();
+    let meeting: teamcraft_proto::MeetingId = "7".parse().unwrap();
     guest
-      .set_guest_organizer_anchor(chat, &organizer.own_fingerprint())
+      .set_guest_organizer_anchor(chat, meeting, &organizer.own_fingerprint())
       .unwrap();
     organizer
       .api()

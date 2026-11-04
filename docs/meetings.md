@@ -77,15 +77,17 @@ the change, and people taken off the list are removed from the group.
    (`PUT .../lobby/me/device`) and the hosts get `lobby_join` again. `POST .../lobby/{user}/admit`
    makes the guest a member of the meeting chat (`membership_add` to the members,
    `lobby_decision` to the guest); `deny` turns them away and ends their session. A guest reads
-   and speaks only once an organizer's device added theirs to the chat's encryption group (see
-   "Guests in the browser"): on the host's "admit", or by itself when the organizer chose "no
-   lobby" on that device and the guest came with the meeting's token (the server's `has_lobby`
-   doesn't decide it; the organizer is told each time, with "Remove"). Each guest of the link
+   and speaks only once a device of the organizer, or of an admitter the organizer signed (step
+   9), added theirs to the chat's encryption group (see "Guests in the browser"): on a host's
+   "admit", or by itself when the organizer chose "no lobby" and the guest came with the meeting's
+   token (the server's `has_lobby` doesn't decide it; whoever's device let them in is told each
+   time, with "Remove"). Each guest of the link
    gets a one-time invite of their own (as for the shared guest link, step 5). Personal one-time links (`#invite=<token>`, a host's "One-time
    link", and the links mailed to external invitees before #987) still work; their guests always
    wait for a host's click.
    The organizer sees who waits on the meeting's card and, while in the meeting's call, on the
-   call screen; a knock (`lobby_join`) reloads the lobby at once, without polling.
+   call screen; a host who isn't the organizer (a chat admin) sees it on the call screen while in
+   the call. A knock (`lobby_join`) reloads the lobby at once, without polling.
 5. **Shared guest link** (`PUT /meetings/{id}/shared-guest-link`, hosts only): since #987 this is
    the meeting link itself. Every guest who uses it gets a one-time invite of their own
    (`shared_invite_id` names the link), so the rest is step 4. The link lets at most
@@ -109,7 +111,8 @@ the change, and people taken off the list are removed from the group.
    deny as for guests. Members in the chat are answered `admitted` right away; a member admitted
    before who has left the chat waits again. A member with an old ID link always waits for a host,
    also without `has_lobby`: meeting IDs are not secret. With the token in a meeting without a
-   lobby, the organizer's device admits the member by itself, as for guests. For meetings that are
+   lobby, the organizer's device (or an admitter's in the call, step 9) admits the member by
+   itself, as for guests. For meetings that are
    over or cancelled, outsiders get the same 404 as for a meeting or token that doesn't exist, so
    knocking doesn't tell them which IDs are meetings; members of the chat get 409. Denying a member
    only refuses them (the decision is final for that meeting); their account stays. The server
@@ -155,6 +158,24 @@ the change, and people taken off the list are removed from the group.
    its chat, and join the running call from Meetings; nothing rings them yet. Anybody else in the
    call gets the meeting's link to hand out instead: a member who opens it knocks and waits for the
    organizer (see 6).
+9. **Admitters** (#1103; design in e2ee.md §4.6, "Meeting guests"): so that a guest isn't stuck
+   while the organizer is away, the organizer's device signs who else may let guests into the
+   chat's encryption group: everybody with a device in the meeting chat's group as that device sees
+   it, guests left out, with the identity keys it pinned for them, and whether they let in people
+   of the link by themselves (the organizer's "no lobby"). It publishes the statement with
+   `PUT /conversations/{id}/meeting-admitters` (the meeting's organizer only) when the meeting is
+   scheduled or edited, and keeps it current for meetings that run or start within a day (every
+   ten minutes at most per meeting, and only if the list changed or ends too soon). The server
+   keeps the newest per meeting (a higher sequence only, `409` otherwise) and checks its shape;
+   members of the chat and admitted guests read it (`GET /conversations/{id}/meeting-admitters`).
+   - **Lobby on:** a host's "admit" (organizer or chat admin) lets the guest's device in from that
+     host's device if the organizer named the host.
+   - **Lobby off:** a member's app in the meeting's call reads the lobby too (`GET .../lobby`
+     answers members of a meeting without a lobby with those who came with the link,
+     `is_host: false`; the server sends them `lobby_join` as well) and, if the organizer's signed
+     list names this user and says "no lobby", admits them by itself like the organizer's
+     (`POST .../lobby/{user}/admit` is allowed to them for people of the link; turning people away
+     stays with the hosts).
 
 ## Repeating meetings
 
@@ -247,10 +268,11 @@ A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "M
    of the meeting, `leave`, calls). Anything else answers 403. Guests only ever see conversations
    they are members of, which for a guest is the one meeting chat.
 4. **Keys at admission.** The link carries no secret (e2ee.md §4.6, "Meeting guests"). The
-   guest's page makes its own keys (the ephemeral device), and an organizer's device seals the
-   meeting chat's keys to them when it adds the device: a new epoch, so nothing said before the
-   admission is readable. The page checks that the device that added it is the organizer's
-   (the fingerprint `v` from the link). Guest sessions are also ended by the server when the
+   guest's page makes its own keys (the ephemeral device), and a device of the organizer or of an
+   admitter seals the meeting chat's keys to them when it adds the device: a new epoch, so nothing
+   said before the admission is readable. The page checks that the device that added it is the
+   organizer's (the fingerprint `v` from the link) or an admitter's the organizer signed for the
+   meeting (checked against `v` too). Guest sessions are also ended by the server when the
    meeting's access ends (end plus `guest_grace_secs`) or it is cancelled, by a sweep at least
    every ten minutes. A guest sees the other attendees' names, never their e-mail addresses. A
    guest can't replace their identity key.
@@ -281,7 +303,7 @@ A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "M
    organizer's app its own code, so they can compare out of band. If the organizer's app is too
    old to let guests in by this flow, the page says it needs an update. While nobody of the meeting is there yet it shows "Waiting for the organizer to
    let you in"; that is the normal case for a guest who comes early.
-3. Once an organizer's device let the guest in (on "Let in", which the host's app offers when the
+3. Once an organizer's or admitter's device let the guest in (on "Let in", which the host's app offers when the
    guest's device is ready, or by itself without a lobby; `LetGuestIntoMeetingChat`), the page
    shows the slim meeting view: the meeting's name, the chat, "Join the call" and "Leave the
    meeting". The call is the browser call engine; the guest's call key binding is signed by the
@@ -295,19 +317,19 @@ A member's app copies a link with the organizer's fingerprint as its core has it
 copies nothing: a link with the server's fingerprint is never handed out from the app.
 
 Not done yet: reloading the page loses the guest's device (the guest knocks again as a new guest);
-only the organizer's devices let guests in (a co-host's "admit" waits for one of them; letting
-other member devices admit needs an organizer-signed list of admitters, a follow-up); the size of
+a host the organizer's list doesn't name (not in the chat's group when the organizer's device
+last signed it) lets nobody's device in, and the guest waits for another; the size of
 what a guest downloads is not measured yet (the guest entry path is the initial chunk; the
 chat and call chunks load after admission).
 
 ## Gateway events
 
-| Event            | To                          | When                                            |
-|------------------|-----------------------------|-------------------------------------------------|
-| `meeting_update` | organizer and invited users | created, changed, cancelled, answered           |
-| `lobby_join`     | hosts                       | a guest knocked or set up its device, a member knocked |
-| `lobby_decision` | the guest or member         | admitted or denied                              |
-| `call_move`      | members of the DM           | its call moved into a meeting room              |
+| Event            | To                                                                  | When                                                   |
+|------------------|---------------------------------------------------------------------|--------------------------------------------------------|
+| `meeting_update` | organizer and invited users                                         | created, changed, cancelled, answered                  |
+| `lobby_join`     | hosts; without a lobby also the chat's other members (no guests)    | a guest knocked or set up its device, a member knocked |
+| `lobby_decision` | the guest or member                                                 | admitted or denied                                     |
+| `call_move`      | members of the DM                                                   | its call moved into a meeting room                     |
 
 ## Configuration
 

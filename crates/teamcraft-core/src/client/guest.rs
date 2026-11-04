@@ -6,17 +6,24 @@
 //! only lets its holder knock, the fragment is the organizer's identity key fingerprint. The guest's
 //! page makes its own keys (an ephemeral device); an organizer's device adds that device to the
 //! group, which seals the group's keys to it in the welcome (a new epoch). The guest accepts a
-//! group only from a welcome sent by a device the organizer's key from the link certified.
+//! group only from a welcome sent by a device the organizer's key from the link certified, or by
+//! a device of an admitter that key signed for the meeting (#1103): the organizer's devices publish
+//! that list, the other members' devices check they are on it before they let a guest in.
 
 use std::collections::BTreeMap;
 use teamcraft_crypto::backup::Argon2Settings;
 
 use rand_core::{OsRng, RngCore};
+use serde::{Deserialize, Serialize};
 use teamcraft_crypto::guest_link::key_code;
-use teamcraft_crypto::identity::IdentityPublicKey;
+use teamcraft_crypto::identity::{IdentityFingerprint, IdentityPublicKey, VerifiedDevice};
+use teamcraft_crypto::meeting_admitters::{
+  Admitter, AdmittersDraft, AdmittersExpectation, LinkAdmission, SignedMeetingAdmitters,
+  VerifiedMeetingAdmitters,
+};
 use teamcraft_crypto::membership::IdentityDirectory;
 use teamcraft_crypto::secret::SecretBytes;
-use teamcraft_proto::{ConversationId, MeetingId, UserId};
+use teamcraft_proto::{Base64Bytes, ConversationId, MeetingId, PutMeetingAdmittersRequest, UserId};
 use zeroize::Zeroizing;
 
 use super::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
@@ -49,6 +56,27 @@ const ADMITTED_GUESTS_KEY: &str = "admitted-guests";
 /// end the host's app showed it. A guest still in the group by then is removed whatever the server
 /// lists (the server's removal event can be withheld).
 const GUEST_DEADLINES_PREFIX: &str = "guest-deadlines/";
+/// The meeting a guest's page joined, per meeting chat: the guest checks that the admitters are
+/// for it.
+const GUEST_MEETING_PREFIX: &str = "guest-meeting/";
+/// The newest organizer-signed admitters of a meeting chat this device verified
+/// ([`AdmittersRecord`]).
+const ADMITTERS_PREFIX: &str = "meeting-admitters/";
+
+/// The newest organizer-signed admitters of a meeting chat this device verified (#1103, e2ee.md
+/// §4.6, "Meeting guests"). An older statement is refused afterwards (a rollback by the server).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AdmittersRecord {
+  sequence: u64,
+  /// When the list stops counting (milliseconds).
+  expires_at_ms: i64,
+  /// The organizer signed "no lobby": admitters let people who came with the link in by themselves.
+  admits_by_link: bool,
+  /// The listed users (the organizer, who signed, aside).
+  admitters: Vec<UserId>,
+  /// The list names this device's user with this device's identity key (or it is the organizer's).
+  is_own: bool,
+}
 
 impl PendingEnrollment {
   /// Enrolls the ephemeral device of a meeting guest: the normal enrollment (identity key, device
@@ -111,13 +139,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Lets an admitted guest's device into the meeting chat's group (organizer's devices only):
-  /// on the host's "admit", or by itself for a guest of the meeting link in a meeting without a
-  /// lobby. The identity key the server holds for the guest is pinned (a different one on a
-  /// second look is refused), the guest is noted as a guest of this chat until
-  /// `access_ends_at_ms` (end plus grace, as the host's app shows it), and the device is added
-  /// with a signed add, always with history from the join on: a new epoch whose welcome is sealed
-  /// to the guest's key package.
+  /// Lets an admitted guest's device into the meeting chat's group: the organizer's devices, and
+  /// those of the admitters the organizer signed for the chat (#1103). On a host's "admit", or by
+  /// itself for a guest of the meeting link in a meeting without a lobby. The identity key the
+  /// server holds for the guest is pinned (a different one on a second look is refused), the guest
+  /// is noted as a guest of this chat until `access_ends_at_ms` (end plus grace, as the host's app
+  /// shows it), and the device is added with a signed add, always with history from the join on:
+  /// a new epoch whose welcome is sealed to the guest's key package.
   ///
   /// `knock_fingerprint` is the fingerprint the guest's page reported with its device; the key the
   /// server presents must have it. That binds the key to the knock, but the server relays both:
@@ -131,9 +159,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     access_ends_at_ms: i64,
   ) -> Result<(), CoreError> {
     let organizer = self.api.conversation(conversation).await?.maybe_organizer_user_id;
-    // The guest accepts a welcome only from the organizer's devices (`v` in the link).
-    if organizer != Some(self.account.user_id) {
-      return Err(CoreError::GuestRefused(GuestRefusal::NotOrganizer));
+    // The guest accepts a welcome only from the organizer's devices (`v` in the link) and from
+    // those of the admitters the organizer signed: anybody else's would fail on the guest's side.
+    if organizer != Some(self.account.user_id) && self.own_admission(conversation).await?.is_none() {
+      return Err(CoreError::GuestRefused(GuestRefusal::NotAnAdmitter));
     }
     let identity = self
       .api
@@ -197,13 +226,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     key_code(&self.account.identity_public_key())
   }
 
-  /// Remembers the organizer's identity key fingerprint from the guest link: the meeting chat's
-  /// group is only joined if its founder has exactly this identity key.
+  /// Remembers the organizer's identity key fingerprint from the guest link, and the meeting the
+  /// guest joined: the meeting chat's group is only joined from a welcome of a device this key
+  /// certified, or of an admitter's device the key signed for `meeting` (#1103).
   pub fn set_guest_organizer_anchor(
     &self,
     conversation: ConversationId,
+    meeting: MeetingId,
     fingerprint: &str,
   ) -> Result<(), CoreError> {
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{GUEST_MEETING_PREFIX}{conversation}"),
+      &meeting,
+    )?;
     records::put_json(
       &self.store,
       Table::SyncState,
@@ -217,6 +254,321 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
   ) -> Result<Option<String>, CoreError> {
     records::get_json(&self.store, Table::SyncState, &organizer_anchor_key(conversation))
+  }
+
+  /// Whether a guest's welcome came from a device of an admitter the organizer signed for this
+  /// meeting chat (#1103): the statement must verify against `anchor` (`v` of the link), name the
+  /// meeting the guest joined and its chat, be in force by this device's clock and not be older
+  /// than one seen before, and list the device's user with exactly the identity key that certified
+  /// the device. A failed fetch other than "none published" is an error the caller retries; a
+  /// statement that doesn't verify is no admission.
+  pub(super) async fn is_signed_admitters_device(
+    &mut self,
+    conversation: ConversationId,
+    anchor: &str,
+    device: &VerifiedDevice,
+  ) -> Result<bool, CoreError> {
+    let maybe_meeting: Option<MeetingId> = records::get_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{GUEST_MEETING_PREFIX}{conversation}"),
+    )?;
+    let (Some(meeting), Ok(organizer)) = (maybe_meeting, anchor.parse::<IdentityFingerprint>()) else {
+      return Ok(false);
+    };
+    let now_ms = self.now_ms();
+    let maybe_admitters = self
+      .verified_admitters(conversation, Some(meeting), &organizer, now_ms)
+      .await?;
+    Ok(maybe_admitters.is_some_and(|admitters| admitters.admits_device(device)))
+  }
+
+  /// Signs and publishes who may let guests into `meeting` (the organizer's devices only, #1103):
+  /// the users with a device in the meeting chat's group as this device sees it, guests left out,
+  /// with the identity keys this device pinned for them, and whether they let in people of the
+  /// link by themselves (the organizer's "no lobby", as recorded on this device or, without a
+  /// record, as the organizer's key signed it before). Signs anew only when that differs from the
+  /// server's newest statement or the statement ends before `expires_at_ms`; `Ok(true)` when it
+  /// published one. Another device of the organizer publishing at the same time is no error: the
+  /// next call compares again.
+  pub async fn sync_meeting_admitters(
+    &mut self,
+    meeting: MeetingId,
+    conversation: ConversationId,
+    expires_at_ms: i64,
+  ) -> Result<bool, CoreError> {
+    let me = self.account.user_id;
+    let is_organizer = self.api.conversation(conversation).await?.maybe_organizer_user_id == Some(me);
+    if !is_organizer || !self.has_group(conversation)? {
+      return Ok(false);
+    }
+    let admitters = self.admitter_candidates(conversation).await?;
+    let own = self.account.identity_public_key().fingerprint();
+    // The organizer's own statement sets the next sequence even once it ended: no end of
+    // validity counts here (`now_ms` 0).
+    let maybe_current = self
+      .verified_admitters(conversation, Some(meeting), &own, 0)
+      .await?;
+    let link_admission = match records::get_json::<bool>(
+      &self.store,
+      Table::SyncState,
+      &format!("{LOBBY_RECORD_PREFIX}{meeting}"),
+    )? {
+      Some(false) => LinkAdmission::ByThemselves,
+      Some(true) => LinkAdmission::Lobby,
+      None => maybe_current
+        .as_ref()
+        .map_or(LinkAdmission::Lobby, VerifiedMeetingAdmitters::link_admission),
+    };
+    let wanted_until = u64::try_from(expires_at_ms).unwrap_or(0);
+    if let Some(current) = &maybe_current
+      && current.has_same_admitters(&admitters, link_admission)
+      && current.expires_at_ms() >= wanted_until
+    {
+      return Ok(false);
+    }
+    let now = u64::try_from(self.now_ms()).unwrap_or(0);
+    let seen = self
+      .admitters_record(conversation)?
+      .map_or(0, |record| record.sequence);
+    let current_sequence = maybe_current
+      .as_ref()
+      .map_or(0, VerifiedMeetingAdmitters::sequence);
+    // Time as the floor keeps a later list ahead of an earlier one of the organizer's other
+    // devices, even of one this device never saw.
+    let sequence = seen.max(current_sequence).saturating_add(1).max(now);
+    let expires_at_ms = maybe_current
+      .as_ref()
+      .map_or(wanted_until, |current| current.expires_at_ms().max(wanted_until));
+    let signed = AdmittersDraft {
+      meeting_id: convert::meeting(meeting),
+      conversation_id: convert::conversation(conversation),
+      sequence,
+      expires_at_ms,
+      link_admission,
+      admitters,
+    }
+    .sign(self.account.key_bag.identity())?;
+    let request = PutMeetingAdmittersRequest {
+      statement: Base64Bytes::new(signed.to_bytes()?),
+    };
+    match self.api.put_meeting_admitters(conversation, &request).await {
+      Ok(()) => {},
+      Err(error) if error.is_conflict() => {
+        tracing::info!(meeting_id = %meeting, "another device of the organizer published the admitters first");
+        return Ok(false);
+      },
+      Err(error) => return Err(error.into()),
+    }
+    // What this device signed is what it would verify: kept like a verified statement.
+    let expectation = AdmittersExpectation {
+      organizer: &own,
+      maybe_meeting_id: Some(convert::meeting(meeting)),
+      conversation_id: convert::conversation(conversation),
+      now_ms: 0,
+      maybe_seen_sequence: None,
+    };
+    let verified = signed.verify(&expectation)?;
+    self.keep_admitters(conversation, &verified)?;
+    tracing::info!(meeting_id = %meeting, sequence, "published the meeting's admitters");
+    Ok(true)
+  }
+
+  /// Checks the organizer-signed admitters of the meeting chat against the organizer's key as this
+  /// device pinned it, so the server's word adds nothing, and keeps them: for
+  /// [`admits_link_arrivals`] and for judging the admitters' commits.
+  pub async fn check_meeting_admission(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.organizers_admitters(conversation).await.map(drop)
+  }
+
+  /// Before a commit in a meeting chat is judged or made: reads the organizer-signed admitters
+  /// again when the change's signer is neither in the signed roster nor the organizer, so an
+  /// admitter's add (#1103) is judged by the newest list. A failure keeps what this device had.
+  pub(super) async fn refresh_meeting_admitters_for_commit(
+    &mut self,
+    conversation: ConversationId,
+    signer: UserId,
+  ) {
+    let maybe_response = self
+      .cached_conversations()
+      .ok()
+      .and_then(|all| all.get(&conversation).cloned());
+    let Some(response) =
+      maybe_response.filter(|response| response.kind == teamcraft_proto::ConversationKind::Meeting)
+    else {
+      return;
+    };
+    let is_vouched = response.maybe_organizer_user_id == Some(signer)
+      || self.workspace().is_ok_and(|workspace| {
+        workspace
+          .roster
+          .members
+          .iter()
+          .any(|member| member.user_id == signer)
+      });
+    if is_vouched {
+      return;
+    }
+    if let Err(error) = self.organizers_admitters(conversation).await {
+      tracing::warn!(conversation_id = %conversation, %error, "could not read the meeting's admitters before a commit");
+    }
+  }
+
+  /// The admitters of the meeting chat that count for a commit at the server's time `at_ms`: the
+  /// newest list this device verified, while it is in force.
+  pub(super) fn meeting_admitters_at(
+    &self,
+    conversation: ConversationId,
+    at_ms: i64,
+  ) -> Result<Vec<UserId>, CoreError> {
+    Ok(
+      self
+        .admitters_record(conversation)?
+        .filter(|record| at_ms <= record.expires_at_ms)
+        .map(|record| record.admitters)
+        .unwrap_or_default(),
+    )
+  }
+
+  /// The verified admitters of the meeting chat if they name this device's user with its own key
+  /// (the organizer's own device always counts); `None` otherwise.
+  async fn own_admission(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Option<VerifiedMeetingAdmitters>, CoreError> {
+    let me = self.account.user_id;
+    let own_key = self.account.identity_public_key();
+    Ok(
+      self
+        .organizers_admitters(conversation)
+        .await?
+        .filter(|admitters| admitters.is_admitter(convert::user(me), &own_key)),
+    )
+  }
+
+  /// The server's newest admitters of the meeting chat, verified against the organizer's key as
+  /// this device pinned it, by this device's clock.
+  async fn organizers_admitters(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Option<VerifiedMeetingAdmitters>, CoreError> {
+    let Some(organizer) = self.api.conversation(conversation).await?.maybe_organizer_user_id else {
+      return Ok(None);
+    };
+    let directory = self.pin_identities([organizer]).await?;
+    let organizer_key = directory
+      .pinned_identity(convert::user(organizer))
+      .ok_or(CoreError::UnknownIdentity(organizer))?;
+    let now_ms = self.now_ms();
+    self
+      .verified_admitters(conversation, None, &organizer_key.fingerprint(), now_ms)
+      .await
+  }
+
+  /// The server's newest admitters of the meeting chat, verified against `organizer`, the chat
+  /// and, where known, the meeting; by `now_ms` (0: whatever the end) and against the newest
+  /// sequence this device saw, and kept. `None` when none is published or it doesn't verify
+  /// (logged).
+  async fn verified_admitters(
+    &mut self,
+    conversation: ConversationId,
+    maybe_meeting: Option<MeetingId>,
+    organizer: &IdentityFingerprint,
+    now_ms: i64,
+  ) -> Result<Option<VerifiedMeetingAdmitters>, CoreError> {
+    let response = match self.api.meeting_admitters(conversation).await {
+      Ok(response) => response,
+      Err(error) if error.is_not_found() => return Ok(None),
+      Err(error) => return Err(error.into()),
+    };
+    let expectation = AdmittersExpectation {
+      organizer,
+      maybe_meeting_id: maybe_meeting.map(convert::meeting),
+      conversation_id: convert::conversation(conversation),
+      now_ms: u64::try_from(now_ms).unwrap_or(0),
+      maybe_seen_sequence: self.admitters_record(conversation)?.map(|record| record.sequence),
+    };
+    let verified = SignedMeetingAdmitters::from_bytes(response.statement.as_slice())
+      .and_then(|signed| signed.verify(&expectation));
+    match verified {
+      Ok(admitters) => {
+        self.keep_admitters(conversation, &admitters)?;
+        Ok(Some(admitters))
+      },
+      Err(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "the meeting's admitters don't verify; ignored");
+        Ok(None)
+      },
+    }
+  }
+
+  /// The users this organizer's device names as admitters: everybody with a device in the meeting
+  /// chat's group but the organizer and guests, with the identity keys this device pinned.
+  async fn admitter_candidates(&mut self, conversation: ConversationId) -> Result<Vec<Admitter>, CoreError> {
+    let me = self.account.user_id;
+    let in_group: Vec<UserId> = self
+      .group_users(conversation)?
+      .into_iter()
+      .filter(|user| *user != me)
+      .collect();
+    let guests = self.guest_users(in_group.iter().copied())?;
+    let members: Vec<UserId> = in_group
+      .into_iter()
+      .filter(|user| !guests.contains(user))
+      .collect();
+    let directory = self.pin_identities(members.iter().copied()).await?;
+    Ok(
+      members
+        .into_iter()
+        .filter_map(|user| {
+          let user_id = convert::user(user);
+          directory.pinned_identity(user_id).map(|identity_key| Admitter {
+            user_id,
+            identity_key,
+          })
+        })
+        .collect(),
+    )
+  }
+
+  fn admitters_record(&self, conversation: ConversationId) -> Result<Option<AdmittersRecord>, CoreError> {
+    records::get_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{ADMITTERS_PREFIX}{conversation}"),
+    )
+  }
+
+  /// Keeps a verified statement unless one with a higher sequence is kept already.
+  fn keep_admitters(
+    &self,
+    conversation: ConversationId,
+    verified: &VerifiedMeetingAdmitters,
+  ) -> Result<(), CoreError> {
+    if self
+      .admitters_record(conversation)?
+      .is_some_and(|kept| kept.sequence > verified.sequence())
+    {
+      return Ok(());
+    }
+    let me = convert::user(self.account.user_id);
+    let mut admitters = Vec::new();
+    for admitter in verified.admitters() {
+      admitters.push(convert::user_from_crypto(admitter.user_id)?);
+    }
+    let record = AdmittersRecord {
+      sequence: verified.sequence(),
+      expires_at_ms: i64::try_from(verified.expires_at_ms()).unwrap_or(i64::MAX),
+      admits_by_link: verified.link_admission() == LinkAdmission::ByThemselves,
+      admitters,
+      is_own: verified.is_admitter(me, &self.account.identity_public_key()),
+    };
+    records::put_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{ADMITTERS_PREFIX}{conversation}"),
+      &record,
+    )
   }
 
   /// Whether this is a guest's ephemeral device.
@@ -352,6 +704,21 @@ pub fn is_open_by_own_record<S: LocalStore>(store: &S, meeting: MeetingId) -> bo
   .ok()
   .flatten()
     == Some(false)
+}
+
+/// Whether this member's device lets people who came with the meeting link in by itself, by the
+/// organizer-signed admitters of the meeting chat it verified last
+/// ([`Client::check_meeting_admission`]): they name this user, the organizer signed "no lobby", and
+/// they are still in force at `now_ms` (#1103). Unknown means no.
+pub fn admits_link_arrivals<S: LocalStore>(store: &S, conversation: ConversationId, now_ms: i64) -> bool {
+  records::get_json::<AdmittersRecord>(
+    store,
+    Table::SyncState,
+    &format!("{ADMITTERS_PREFIX}{conversation}"),
+  )
+  .ok()
+  .flatten()
+  .is_some_and(|record| record.is_own && record.admits_by_link && now_ms <= record.expires_at_ms)
 }
 
 /// The fragment a member's app appends to the meeting link, if [`Client::prepare_guest_link`] made it.

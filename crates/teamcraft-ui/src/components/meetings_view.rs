@@ -744,9 +744,12 @@ pub fn admits_by_itself(is_open_by_own_record: bool, entry: &LobbyEntry) -> bool
 }
 
 /// In a meeting the organizer opened without a lobby, the organizer's device lets in by itself
-/// whoever knocked with the meeting link ([`admits_by_itself`]), and says so each time with a
-/// "Remove" button (e2ee.md §4.6, "Meeting guests"). Runs on every reload of the lobbies (a
-/// `lobby_join` event or a meeting change); `started` keeps one admission per person in flight.
+/// whoever knocked with the meeting link ([`admits_by_itself`]), and so does the device of an
+/// admitter the organizer named while it is in the meeting's call (#1103): the organizer's own
+/// record decides on the organizer's device, the organizer's signed admitters on the others'.
+/// Each admission by itself is said with a "Remove" button (e2ee.md §4.6, "Meeting guests"). Runs
+/// on every reload of the lobbies (a `lobby_join` event or a meeting change); `started` keeps one
+/// admission per person in flight.
 pub fn admit_link_arrivals(
   state: AppState,
   i18n: I18n,
@@ -754,16 +757,21 @@ pub fn admit_link_arrivals(
   started: StoredValue<HashSet<(MeetingId, UserId)>, LocalStorage>,
 ) {
   let me = state.me().id;
+  let in_call = hub.in_call.get_untracked();
   for (meeting, entries) in hub.lobbies.get_untracked() {
-    let Some((chat, ends_at)) = hub.meetings.with_untracked(|all| {
+    let Some((chat, ends_at, is_organizer)) = hub.meetings.with_untracked(|all| {
       all
         .iter()
-        .find(|item| item.id == meeting && item.organizer_user_id == me)
-        .map(|item| (item.conversation_id, item.ends_at.0))
+        .find(|item| item.id == meeting && (item.organizer_user_id == me || in_call.contains(&item.id)))
+        .map(|item| (item.conversation_id, item.ends_at.0, item.organizer_user_id == me))
     }) else {
       continue;
     };
-    let is_open = state.read(|backend| backend.is_open_by_own_record(meeting));
+    let is_open = if is_organizer {
+      state.read(|backend| backend.is_open_by_own_record(meeting))
+    } else {
+      state.read(|backend| backend.admits_link_arrivals(chat, now_ms()))
+    };
     for entry in entries
       .into_iter()
       .filter(|entry| admits_by_itself(is_open, entry))
@@ -804,8 +812,9 @@ pub fn admit_link_arrivals(
 }
 
 /// How long after a meeting's end the server keeps a guest's session (`guest_grace_secs`, default
-/// two hours): the host's device removes the guest from the encryption group then at the latest.
-const GUEST_ACCESS_GRACE_MS: i64 = 2 * 60 * 60_000;
+/// two hours): the host's device removes the guest from the encryption group then at the latest,
+/// and the organizer's signed admitters end then.
+pub(crate) const GUEST_ACCESS_GRACE_MS: i64 = 2 * 60 * 60_000;
 /// How long the core gets to pin a key for a link's fragment or a guest's key code.
 const VERIFY_WAIT: Duration = Duration::from_secs(8);
 const VERIFY_POLL: Duration = Duration::from_millis(100);
@@ -1403,6 +1412,11 @@ pub fn ScheduleMeetingDialog(
             // decides whether this device lets guests of the link in by itself (#987 review).
             let has_lobby = request.has_lobby;
             state.try_write(|backend| backend.note_meeting_lobby(meeting.id, has_lobby));
+            // Who besides this device may let guests in, signed while the organizer is here (#1103).
+            let until = meeting.ends_at.0 + GUEST_ACCESS_GRACE_MS;
+            state.try_write(|backend| {
+              backend.sync_meeting_admitters(meeting.id, meeting.conversation_id, until)
+            });
             // Queued behind the chat's setup, so it goes into the group the notetaker is in.
             if has_notetaker {
               state.try_write(|backend| backend.request_notetaker(meeting.conversation_id, every_call()));
@@ -1861,6 +1875,8 @@ pub(crate) async fn save_meeting_edit(
   // From the saved meeting, which is what the server holds now.
   let (invitees, removed) = saved_change(&before, &saved);
   state.try_write(|backend| backend.update_meeting_chat_members(saved.conversation_id, invitees, removed));
+  let until = saved.ends_at.0 + GUEST_ACCESS_GRACE_MS;
+  state.try_write(|backend| backend.sync_meeting_admitters(saved.id, saved.conversation_id, until));
   clear_pending_edit(before.id);
   true
 }

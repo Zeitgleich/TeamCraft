@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT statement FROM meeting_admitters WHERE meeting_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "statement",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "meeting_admitters",
+            "name": "statement"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4e5295ad4113876fdcdb5fcd861acd94cd97031d9c01be153fb29cd49d1e6756"
+}

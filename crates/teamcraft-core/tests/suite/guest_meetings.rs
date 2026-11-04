@@ -1,7 +1,7 @@
 //! Meeting guests: a guest's own ephemeral device joins the meeting chat's group when an
-//! organizer's device lets it in; the guest only accepts a group from a device of the organizer the
-//! link names; nothing from before the admission is readable; guests manage nobody (e2ee.md §4.6,
-//! "Meeting guests").
+//! organizer's device, or an admitter's the organizer signed (#1103), lets it in; the guest only
+//! accepts a group from a device of the organizer the link names or of such an admitter; nothing
+//! from before the admission is readable; guests manage nobody (e2ee.md §4.6, "Meeting guests").
 #![allow(clippy::unwrap_used)]
 
 use std::sync::Arc;
@@ -12,7 +12,9 @@ use common::{Peer, settle};
 use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::client::{VERIFIER_KEY, guest_key_code, guest_link_fragment, is_open_by_own_record};
+use teamcraft_core::client::{
+  VERIFIER_KEY, admits_link_arrivals, guest_key_code, guest_link_fragment, is_open_by_own_record,
+};
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::error::{CoreError, GuestRefusal};
 use teamcraft_core::store::MemoryStore;
@@ -33,6 +35,7 @@ struct Rig {
   /// `v` of the meeting link: the organizer's fingerprint as Alice's device has it pinned.
   fingerprint: String,
   clock: Arc<ManualClock>,
+  guest_clock: Arc<ManualClock>,
 }
 
 #[tokio::test]
@@ -126,7 +129,7 @@ async fn an_admission_by_a_device_the_link_does_not_name_is_refused() {
   rig
     .guest
     .client
-    .set_guest_organizer_anchor(rig.chat, &other)
+    .set_guest_organizer_anchor(rig.chat, rig.meeting, &other)
     .unwrap();
   rig.server_admits_the_guest().await;
   rig.organizer_lets_the_guest_in(ACCESS_ENDS_MS).await.unwrap();
@@ -151,7 +154,7 @@ async fn a_group_the_server_made_holding_the_organizer_is_not_joined() {
   rig
     .guest
     .client
-    .set_guest_organizer_anchor(dm, &rig.fingerprint)
+    .set_guest_organizer_anchor(dm, rig.meeting, &rig.fingerprint)
     .unwrap();
 
   rig.guest.client.full_sync().await.unwrap();
@@ -163,25 +166,25 @@ async fn a_group_the_server_made_holding_the_organizer_is_not_joined() {
 }
 
 #[tokio::test]
-async fn only_the_organizers_devices_let_guests_in() {
-  let rig = rig().await;
+async fn a_member_the_organizer_named_no_admitter_lets_no_guest_in() {
+  let mut rig = rig().await;
   let mut cohost = rig.member("Cohost").await;
   rig.guest_knows_the_link();
   rig.server_admits_the_guest().await;
 
-  let refused = cohost
-    .client
-    .let_guest_into_meeting_chat(
-      rig.chat,
-      rig.guest_id(),
-      &rig.guest.client.own_fingerprint(),
-      ACCESS_ENDS_MS,
-    )
-    .await
-    .unwrap_err();
-
+  // Nothing published: only the organizer's devices let guests in.
+  let refused = rig.member_lets_the_guest_in(&mut cohost).await.unwrap_err();
   assert!(
-    matches!(refused, CoreError::GuestRefused(GuestRefusal::NotOrganizer)),
+    matches!(refused, CoreError::GuestRefused(GuestRefusal::NotAnAdmitter)),
+    "{refused}"
+  );
+
+  // Published while the cohost wasn't in the group yet: still not named.
+  rig.publish_admitters().await;
+  rig.let_into_group(&mut cohost).await;
+  let refused = rig.member_lets_the_guest_in(&mut cohost).await.unwrap_err();
+  assert!(
+    matches!(refused, CoreError::GuestRefused(GuestRefusal::NotAnAdmitter)),
     "{refused}"
   );
 }
@@ -312,6 +315,392 @@ async fn a_removed_guest_reads_nothing_sent_after_the_removal() {
   );
 }
 
+/// #1077: a guest's device leaves the organizer's new device to the members, who would refuse its
+/// commit and split the group; the guest still follows the group the members' commit makes.
+#[tokio::test]
+async fn a_guests_device_adds_no_other_users_new_device() {
+  let mut rig = rig().await;
+  rig.guest_knows_the_link();
+  rig.server_admits_the_guest().await;
+  rig.organizer_lets_the_guest_in(ACCESS_ENDS_MS).await.unwrap();
+  settle(&mut [&mut rig.alice, &mut rig.guest]).await;
+  rig.guest.client.full_sync().await.unwrap();
+  assert!(rig.guest.client.has_group(rig.chat).unwrap());
+
+  let _laptop = common::link_device(&mut rig.alice).await;
+  let added_by_guest = rig.guest.client.add_missing_devices(rig.chat).await.unwrap();
+  let added_by_alice = rig.alice.client.add_missing_devices(rig.chat).await.unwrap();
+  rig
+    .alice
+    .client
+    .send_text(rig.chat, None, "with the laptop in")
+    .await
+    .unwrap();
+  settle(&mut [&mut rig.alice, &mut rig.guest]).await;
+  rig.guest.client.full_sync().await.unwrap();
+
+  assert_eq!((added_by_guest, added_by_alice), (0, 1));
+  assert_eq!(rig.guest.texts(rig.chat), vec!["with the laptop in"]);
+}
+
+/// Admitters the organizer signs (#1103): other members' devices let guests in, and the guest
+/// checks the list against the organizer's key from the link.
+mod admitters {
+  use rand_core::OsRng;
+  use teamcraft_crypto::identity::{IdentityKeyPair, IdentityPublicKey};
+  use teamcraft_crypto::ids::{
+    ConversationId as SignedChatId, MeetingId as SignedMeetingId, UserId as SignedUserId,
+  };
+  use teamcraft_crypto::meeting_admitters::{Admitter, AdmittersDraft, LinkAdmission};
+
+  use super::*;
+
+  #[tokio::test]
+  async fn an_admitter_the_organizer_signed_lets_a_guest_in_who_reads_from_then_on() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    assert!(rig.publish_admitters().await);
+    bob
+      .client
+      .send_text(rig.chat, None, "before the guest")
+      .await
+      .unwrap();
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+
+    // The organizer is away: Bob's device lets the guest in.
+    rig.member_lets_the_guest_in(&mut bob).await.unwrap();
+    bob
+      .client
+      .send_text(rig.chat, None, "after the guest")
+      .await
+      .unwrap();
+    settle(&mut [&mut bob, &mut rig.guest]).await;
+    rig.guest.client.full_sync().await.unwrap();
+
+    assert!(rig.guest.client.has_group(rig.chat).unwrap());
+    assert_eq!(rig.guest.texts(rig.chat), vec!["after the guest"]);
+    // The organizer's device takes the guest's add from Bob.
+    settle(&mut [&mut rig.alice]).await;
+    rig.alice.client.full_sync().await.unwrap();
+    assert_eq!(rig.call_devices().await, 3);
+  }
+
+  #[tokio::test]
+  async fn the_admitters_device_takes_its_guest_out_when_the_access_ends() {
+    let mut rig = rig().await;
+    let bob_clock = Arc::new(ManualClock::new(NOW_MS));
+    let mut bob = Peer::enroll_on_clock(
+      rig.server.add_user("Bob"),
+      "Bob",
+      common::settings(),
+      Box::new(bob_clock.clone()),
+    )
+    .await;
+    rig.add_to_chat(bob.client.user_id()).await;
+    rig.let_into_group(&mut bob).await;
+    rig.publish_admitters().await;
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+    bob
+      .client
+      .let_guest_into_meeting_chat(
+        rig.chat,
+        rig.guest_id(),
+        &rig.guest.client.own_fingerprint(),
+        NOW_MS + 1_000,
+      )
+      .await
+      .unwrap();
+    settle(&mut [&mut rig.alice, &mut bob, &mut rig.guest]).await;
+    rig.guest.client.full_sync().await.unwrap();
+    assert!(rig.guest.client.has_group(rig.chat).unwrap());
+    assert_eq!(rig.call_devices().await, 3);
+
+    // The meeting is over by Bob's clock; the server listed the guest all along. Bob is no roster
+    // member, but the organizer named him: his removal of the guest counts.
+    bob_clock.advance(5_000);
+    bob.client.full_sync().await.unwrap();
+    settle(&mut [&mut rig.alice, &mut bob]).await;
+    rig.alice.client.full_sync().await.unwrap();
+
+    assert_eq!(rig.call_devices().await, 2);
+  }
+
+  #[tokio::test]
+  async fn a_member_off_the_list_adds_nobody_even_past_the_guests_check() {
+    let mut rig = rig().await;
+    rig.publish_admitters().await;
+    // Carol joined after the organizer signed, and tries the plain add, which skips the
+    // admitters check of `let_guest_into_meeting_chat`.
+    let mut carol = rig.member("Carol").await;
+    rig.let_into_group(&mut carol).await;
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+
+    let refused = carol
+      .client
+      .let_into_meeting_chat(rig.chat, rig.guest_id())
+      .await
+      .unwrap_err();
+    rig.guest.client.full_sync().await.unwrap();
+
+    // The members' rule refuses the change (her own device first, every other one alike), and
+    // the guest's check would refuse her welcome too.
+    assert!(
+      matches!(
+        refused,
+        CoreError::Mls(teamcraft_crypto::mls::MlsError::Membership(_))
+      ),
+      "{refused}"
+    );
+    assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+  }
+
+  #[tokio::test]
+  async fn a_list_signed_by_another_key_lets_no_admitter_in() {
+    let mut rig = rig().await;
+    let mut bob = rig.admitter_lets_the_guest_in().await;
+    // After Bob's device checked the organizer's list, the server serves one it signed itself,
+    // naming Bob for this very meeting and chat.
+    let bob_key = rig.identity_key_of(&bob).await;
+    let forged = AdmittersDraft {
+      sequence: u64::MAX / 2,
+      ..rig.draft(vec![Admitter {
+        user_id: signed_user(bob.client.user_id()),
+        identity_key: bob_key,
+      }])
+    }
+    .sign(&IdentityKeyPair::generate(&mut OsRng))
+    .unwrap();
+    rig
+      .server
+      .set_meeting_admitters(rig.chat, forged.to_bytes().unwrap());
+
+    rig.guest.client.full_sync().await.unwrap();
+
+    assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+    let _ = &mut bob;
+  }
+
+  #[tokio::test]
+  async fn the_organizers_list_for_another_meeting_lets_no_admitter_in() {
+    let mut rig = rig().await;
+    let bob = rig.admitter_lets_the_guest_in().await;
+    // The organizer also signed Bob as an admitter of another meeting, with a chat of its own; the
+    // server serves that list for this chat.
+    let other_chat = rig
+      .server
+      .create_meeting_chat(rig.alice.client.user_id(), &[bob.client.user_id()]);
+    rig
+      .alice
+      .client
+      .set_up_meeting_chat(other_chat, &[bob.client.user_id()])
+      .await
+      .unwrap();
+    assert!(
+      rig
+        .alice
+        .client
+        .sync_meeting_admitters("8".parse().unwrap(), other_chat, ACCESS_ENDS_MS)
+        .await
+        .unwrap()
+    );
+    let moved = rig.server.meeting_admitters(other_chat).unwrap();
+    rig.server.set_meeting_admitters(rig.chat, moved);
+
+    rig.guest.client.full_sync().await.unwrap();
+
+    assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+  }
+
+  #[tokio::test]
+  async fn the_organizers_list_naming_another_meeting_for_this_chat_lets_no_admitter_in() {
+    let mut rig = rig().await;
+    let _bob = rig.admitter_lets_the_guest_in().await;
+    // Signed for this chat but under another meeting than the one the guest joined.
+    rig
+      .alice
+      .client
+      .sync_meeting_admitters("8".parse().unwrap(), rig.chat, ACCESS_ENDS_MS)
+      .await
+      .unwrap();
+
+    rig.guest.client.full_sync().await.unwrap();
+
+    assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+  }
+
+  #[tokio::test]
+  async fn an_older_list_than_the_guest_saw_lets_no_admitter_in() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    rig.publish_admitters().await;
+    let older = rig.server.meeting_admitters(rig.chat).unwrap();
+    // The organizer opens the meeting: a newer list, which the admitted guest sees.
+    rig.alice.client.note_meeting_lobby(rig.meeting, false).unwrap();
+    assert!(rig.publish_admitters().await);
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+    rig.guest.client.check_meeting_admission(rig.chat).await.unwrap();
+    rig.member_lets_the_guest_in(&mut bob).await.unwrap();
+
+    // The server brings the older list back (it names Bob as well, but is older).
+    rig.server.set_meeting_admitters(rig.chat, older);
+    rig.guest.client.full_sync().await.unwrap();
+
+    assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+  }
+
+  #[tokio::test]
+  async fn an_expired_list_lets_no_admitter_in() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    rig
+      .alice
+      .client
+      .sync_meeting_admitters(rig.meeting, rig.chat, NOW_MS + 1_000)
+      .await
+      .unwrap();
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+    rig.member_lets_the_guest_in(&mut bob).await.unwrap();
+
+    // By the guest's clock the list ended before the welcome is opened.
+    rig.guest_clock.advance(5_000);
+    rig.guest.client.full_sync().await.unwrap();
+
+    assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+  }
+
+  #[tokio::test]
+  async fn the_organizer_signs_anew_only_when_the_admitters_change() {
+    let mut rig = rig().await;
+    assert!(rig.publish_admitters().await, "the first list");
+    assert!(!rig.publish_admitters().await, "nothing changed");
+    let first = rig.server.meeting_admitters(rig.chat).unwrap();
+
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    assert!(rig.publish_admitters().await, "Bob joined the group");
+    // A guest in the group is never an admitter.
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+    rig.organizer_lets_the_guest_in(ACCESS_ENDS_MS).await.unwrap();
+    assert!(!rig.publish_admitters().await, "the guest changes nothing");
+    rig.alice.client.note_meeting_lobby(rig.meeting, false).unwrap();
+    assert!(rig.publish_admitters().await, "no lobby any more");
+    // A longer meeting renews the list, a shorter one keeps it.
+    assert!(
+      rig
+        .alice
+        .client
+        .sync_meeting_admitters(rig.meeting, rig.chat, ACCESS_ENDS_MS + 1)
+        .await
+        .unwrap()
+    );
+    assert!(
+      !rig
+        .alice
+        .client
+        .sync_meeting_admitters(rig.meeting, rig.chat, NOW_MS)
+        .await
+        .unwrap()
+    );
+    // The server refuses the first list again.
+    let refused = rig
+      .alice
+      .api
+      .put_meeting_admitters(
+        rig.chat,
+        &teamcraft_proto::PutMeetingAdmittersRequest {
+          statement: teamcraft_proto::Base64Bytes::new(first),
+        },
+      )
+      .await
+      .unwrap_err();
+    assert!(refused.is_conflict(), "{refused}");
+  }
+
+  #[tokio::test]
+  async fn members_let_link_arrivals_in_only_where_the_organizer_signed_no_lobby() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    let mut carol = rig.member("Carol").await;
+    rig.publish_admitters().await;
+    check(&mut bob, rig.chat).await;
+    assert!(
+      !admits_link_arrivals(&bob.store, rig.chat, NOW_MS),
+      "the organizer kept the lobby"
+    );
+
+    rig.alice.client.note_meeting_lobby(rig.meeting, false).unwrap();
+    rig.publish_admitters().await;
+    check(&mut bob, rig.chat).await;
+    check(&mut carol, rig.chat).await;
+
+    assert!(admits_link_arrivals(&bob.store, rig.chat, NOW_MS));
+    assert!(
+      !admits_link_arrivals(&bob.store, rig.chat, ACCESS_ENDS_MS + 1),
+      "not once the list ended"
+    );
+    assert!(
+      !admits_link_arrivals(&carol.store, rig.chat, NOW_MS),
+      "Carol is not on the list"
+    );
+  }
+
+  impl Rig {
+    /// Bob, in the group and on the organizer's list, lets the guest in; the guest has not opened
+    /// the welcome yet.
+    async fn admitter_lets_the_guest_in(&mut self) -> Peer {
+      let mut bob = self.member("Bob").await;
+      self.let_into_group(&mut bob).await;
+      self.publish_admitters().await;
+      self.guest_knows_the_link();
+      self.server_admits_the_guest().await;
+      self.member_lets_the_guest_in(&mut bob).await.unwrap();
+      bob
+    }
+
+    /// A list for this meeting and chat, unsigned yet.
+    fn draft(&self, admitters: Vec<Admitter>) -> AdmittersDraft {
+      AdmittersDraft {
+        meeting_id: SignedMeetingId::new(self.meeting.to_string().parse().unwrap()),
+        conversation_id: SignedChatId::new(self.chat.to_string().parse().unwrap()),
+        sequence: 1,
+        expires_at_ms: u64::try_from(ACCESS_ENDS_MS).unwrap(),
+        link_admission: LinkAdmission::Lobby,
+        admitters,
+      }
+    }
+
+    /// The identity key the server holds for a peer.
+    async fn identity_key_of(&self, peer: &Peer) -> IdentityPublicKey {
+      let response = self
+        .alice
+        .api
+        .identity_key(peer.client.user_id())
+        .await
+        .unwrap()
+        .unwrap();
+      IdentityPublicKey::from_bytes(response.public_key.as_slice().try_into().unwrap())
+    }
+  }
+
+  async fn check(peer: &mut Peer, chat: ConversationId) {
+    peer.client.check_meeting_admission(chat).await.unwrap();
+  }
+
+  fn signed_user(user: UserId) -> SignedUserId {
+    SignedUserId::new(user.to_string().parse().unwrap())
+  }
+}
+
 impl Rig {
   fn guest_id(&self) -> UserId {
     self.guest.client.user_id()
@@ -322,8 +711,44 @@ impl Rig {
     self
       .guest
       .client
-      .set_guest_organizer_anchor(self.chat, &self.fingerprint)
+      .set_guest_organizer_anchor(self.chat, self.meeting, &self.fingerprint)
       .unwrap();
+  }
+
+  /// A member's device lets the guest's device into the group.
+  async fn member_lets_the_guest_in(&self, member: &mut Peer) -> Result<(), CoreError> {
+    member
+      .client
+      .let_guest_into_meeting_chat(
+        self.chat,
+        self.guest_id(),
+        &self.guest.client.own_fingerprint(),
+        ACCESS_ENDS_MS,
+      )
+      .await
+  }
+
+  /// Alice's device lets a member into the meeting chat's group, and the member's device joins.
+  async fn let_into_group(&mut self, member: &mut Peer) {
+    self
+      .alice
+      .client
+      .let_into_meeting_chat(self.chat, member.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut self.alice, member]).await;
+    member.client.full_sync().await.unwrap();
+    assert!(member.client.has_group(self.chat).unwrap());
+  }
+
+  /// Alice's device signs and publishes who may let guests in, as its group stands.
+  async fn publish_admitters(&mut self) -> bool {
+    self
+      .alice
+      .client
+      .sync_meeting_admitters(self.meeting, self.chat, ACCESS_ENDS_MS)
+      .await
+      .unwrap()
   }
 
   /// The server lets the guest into the chat (a host's "admit"), without any encryption group.
@@ -390,10 +815,11 @@ async fn rig() -> Rig {
   .await;
   let guest_api = server.add_guest(GUEST_NAME);
   let store = Arc::new(MemoryStore::new());
+  let guest_clock = Arc::new(ManualClock::new(NOW_MS));
   let mut client = PendingEnrollment::complete_as_guest(
     guest_api.clone(),
     store.clone(),
-    common::clock(),
+    Box::new(guest_clock.clone()),
     common::settings(),
     "Browser".into(),
     Argon2Settings {
@@ -429,5 +855,6 @@ async fn rig() -> Rig {
     meeting,
     fingerprint,
     clock,
+    guest_clock,
   }
 }
