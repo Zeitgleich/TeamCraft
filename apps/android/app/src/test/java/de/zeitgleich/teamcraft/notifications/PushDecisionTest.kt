@@ -2,6 +2,7 @@ package de.zeitgleich.teamcraft.notifications
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import uniffi.teamcraft_ffi.NotificationGap
 import uniffi.teamcraft_ffi.NotificationSuppression
 import uniffi.teamcraft_ffi.PushNotification
 import uniffi.teamcraft_ffi.PushNotificationKind
@@ -20,6 +21,13 @@ class PushDecisionTest {
       val wakeUp = push(PushNotificationKind.MESSAGE, maybeMessageId = id)
       assertEquals(PushDecision.ShowMessage(wakeUp, isAlerting = true), PushDecision.of(wakeUp))
     }
+  }
+
+  /** A reaction or an edit: the server wakes the device for it, but it is no "New message" (#1249). */
+  @Test
+  fun aHiddenChangeAnnouncesNothing() {
+    val wakeUp = push(PushNotificationKind.MESSAGE).copy(maybeGap = NotificationGap.HIDDEN)
+    assertEquals(PushDecision.HiddenChange(wakeUp), PushDecision.of(wakeUp))
   }
 
   @Test

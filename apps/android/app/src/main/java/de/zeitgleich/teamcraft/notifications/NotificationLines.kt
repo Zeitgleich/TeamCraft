@@ -32,8 +32,12 @@ data class NotificationLine(
   @SerialName("sender_name") val senderName: String = "",
   val text: String,
   @SerialName("sent_at_ms") val sentAtMs: Long,
-  /** Shown before its text could be read ("New message" under the sender): a retry fills it in. */
+  /** Shows "New message" for a message that has more: never mirrored to bridges (see the spec). */
   @SerialName("is_placeholder") val isPlaceholder: Boolean = false,
+  /** The sealed wake-up (Base64) of a placeholder, to read the message later, also after a restart. */
+  @SerialName("payload") val maybePayload: String? = null,
+  /** A placeholder that hasn't alerted yet: it does so when the text comes or the hold ends. */
+  @SerialName("is_alert_held") val isAlertHeld: Boolean = false,
 ) {
   val isOwn: Boolean get() = maybeSenderKey == null
 }
@@ -85,6 +89,19 @@ object NotificationLines {
     if (!shown.isPlaceholder) return null
     return merge(lines, line)
   }
+
+  /**
+   * The lines left after a placeholder turned out to be no message (a reaction, an edit): the
+   * line goes; a line with text stays. The user's own replies go once nothing else is left.
+   */
+  fun withoutPlaceholder(lines: List<NotificationLine>, id: String): List<NotificationLine> {
+    val left = lines.filterNot { it.maybeMessageId == id && it.isPlaceholder }
+    return if (left.any { !it.isOwn }) left else emptyList()
+  }
+
+  /** The lines with `id`'s held alert given up: it alerts now, without the text. */
+  fun withAlertReleased(lines: List<NotificationLine>, id: String): List<NotificationLine> =
+    lines.map { if (it.maybeMessageId == id) it.copy(isAlertHeld = false) else it }
 
   /**
    * The lines left after the conversation was read on another device up to `maybeUpToMessageId`

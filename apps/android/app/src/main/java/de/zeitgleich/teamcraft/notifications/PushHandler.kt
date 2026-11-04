@@ -21,12 +21,22 @@ class PushHandler(
   /** Increments with every wake-up handled; the diagnostics re-read on it. */
   val handledCount: StateFlow<Long> = handled
 
-  fun handle(notification: PushNotification) {
+  /**
+   * `payload`: the sealed wake-up, kept with a placeholder to read it later. `isVisible`: the push
+   * service delivered it as one that must show something (FCM high priority).
+   */
+  fun handle(notification: PushNotification, payload: ByteArray, isVisible: Boolean) {
     when (val decision = PushDecision.of(notification)) {
       is PushDecision.Ignore -> stats.recordIgnored(decision.reason)
       is PushDecision.ShowMessage -> {
         stats.recordPreview(decision.notification.maybeGap)
-        notifier.show(decision.notification, decision.isAlerting)
+        stats.record(PushPath.of(decision.notification))
+        notifier.show(decision.notification, decision.isAlerting, payload)
+      }
+      is PushDecision.HiddenChange -> {
+        stats.record(PushPath.HIDDEN)
+        // FCM lowers the priority of apps whose high-priority messages show nothing.
+        if (!notifier.applyHiddenChange(decision.notification) && isVisible) notifier.showQuietNote()
       }
       is PushDecision.Ring -> calls.ring(ring(decision.conversationId, decision.maybeCallId, decision.notification))
       is PushDecision.ShowQuietCall -> {
@@ -46,19 +56,50 @@ class PushHandler(
   }
 
   /**
-   * A retry of a wake-up shown as a placeholder ([PushRetry]): fills in the message if it is still
-   * shown; never alerts, never posts anything new.
+   * A later look at a wake-up shown as a placeholder ([PushRetry], [PlaceholderWatcher]), where
+   * `path` says which one: fills in the message if it is still shown, or takes the line away if it
+   * was no message after all. Never posts anything new. Alerts only if the first alert was held.
    */
-  fun handleRetry(notification: PushNotification) {
-    if (PushDecision.of(notification) is PushDecision.ShowMessage) notifier.fillIn(notification)
+  fun handleRetry(notification: PushNotification, path: PushPath) {
+    when (PushDecision.of(notification)) {
+      is PushDecision.ShowMessage -> if (notifier.fillIn(notification)) stats.record(path)
+      is PushDecision.HiddenChange -> notifier.applyHiddenChange(notification)
+      else -> Unit
+    }
   }
 
-  /** Whether a notification of this conversation shows now (a retry for it is worth making). */
-  fun isShowing(conversationId: String): Boolean = conversationId in notifier.shownConversationIds()
+  /**
+   * A wake-up that could not be opened at first ([MessageNotifier.showUnreadable]) opened now: it
+   * shows like a new message, without a second alert if a generic one went out (`wasAnnounced`).
+   */
+  fun handleOpenedLate(notification: PushNotification, payload: ByteArray, wasAnnounced: Boolean) {
+    when (val decision = PushDecision.of(notification)) {
+      is PushDecision.ShowMessage -> {
+        stats.record(PushPath.OPENED_LATE)
+        notifier.showOpenedLate(decision.notification, decision.isAlerting && !wasAnnounced, payload)
+      }
+      // A withdrawal or a change that came late: nothing is lost by treating it as it arrives now.
+      else -> handle(notification, payload, isVisible = false)
+    }
+  }
+
+  /** Gives up holding this message's alert: it alerts on the phone, without the text. */
+  fun releaseHeldAlert(notification: PushNotification) {
+    if (notifier.releaseHeldAlert(notification)) stats.record(PushPath.ALERT_RELEASED)
+  }
+
+  /** Whether this notification's message still shows as a placeholder (a retry is worth making). */
+  fun isPlaceholderShowing(notification: PushNotification): Boolean = notifier.isPlaceholderShowing(notification)
+
+  /** The last try for a placeholder failed; it stays until the sync brings the message. */
+  fun recordGaveUp() {
+    stats.record(PushPath.GAVE_UP)
+  }
 
   /** A visible wake-up that could not be opened: never nothing (see [MessageNotifier.showUnreadable]). */
   fun handleUnreadable() {
     stats.recordUnreadable()
+    stats.record(PushPath.UNREADABLE)
     notifier.showUnreadable()
     handled.update { it + 1 }
   }
@@ -66,6 +107,7 @@ class PushHandler(
   /** A wake-up that could not be opened and must not show anything (it may have been a withdrawal). */
   fun recordUnreadable() {
     stats.recordUnreadable()
+    stats.record(PushPath.UNREADABLE_QUIET)
   }
 
   private fun ring(conversationId: String, maybeCallId: String?, notification: PushNotification): IncomingRing {

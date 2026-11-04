@@ -9,13 +9,17 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import de.zeitgleich.teamcraft.core.CoreRepository
+import de.zeitgleich.teamcraft.notifications.CarProjection
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
 import de.zeitgleich.teamcraft.notifications.PushHandler
+import de.zeitgleich.teamcraft.notifications.PushPath
 import de.zeitgleich.teamcraft.notifications.PushRetry
 import uniffi.teamcraft_ffi.PushNotification
 import uniffi.teamcraft_ffi.PushService
+import uniffi.teamcraft_ffi.TeamCraft
 import uniffi.teamcraft_ffi.TeamCraftException
 
 /**
@@ -28,6 +32,7 @@ class PushManager(
   private val handler: PushHandler,
   private val mentionPrefs: MentionPrefs,
   private val contentPrefs: NotificationContentPrefs,
+  private val car: CarProjection,
   private val scope: CoroutineScope,
 ) {
   private val backends: List<PushBackend> = PushBackends.all()
@@ -144,7 +149,7 @@ class PushManager(
     if (isSigningOut) return
     val core = runCatching { core.core() }.getOrElse {
       Log.w(TAG, "wake-up while no account is open: ${it.javaClass.simpleName}")
-      if (isVisible && !isSigningOut) handler.handleUnreadable() else handler.recordUnreadable()
+      onNotOpened(payload, isVisible, isSignedOut = it is IllegalStateException)
       return
     }
     runCatching {
@@ -156,41 +161,97 @@ class PushManager(
       // Checked again: sign-out may have started while the wake-up was being opened.
       .onSuccess {
         if (isSigningOut) return@onSuccess
-        handler.handle(it)
-        scheduleRetry(payload, it, attempt = 1)
+        handler.handle(it, payload, isVisible)
+        if (handler.isPlaceholderShowing(it) && PushRetry.isWanted(it, attempt = 1)) readSoon(core, payload, it)
       }
       .onFailure {
         Log.w(TAG, "wake-up could not be opened: ${it.javaClass.simpleName}")
-        if (isVisible && !isSigningOut) handler.handleUnreadable() else handler.recordUnreadable()
+        onNotOpened(payload, isVisible, isSignedOut = false)
       }
   }
 
   /**
-   * Opens a wake-up again whose message was shown as a placeholder ([PushRetry]) and fills in the
-   * notification, silently and under the same ID; schedules the next attempt while it still can't
-   * be read. Shows nothing new: a notification read or swiped away meanwhile stays gone.
+   * Not opened: says "New message" if it must show something, and tries again later, since what
+   * kept it from opening (a busy or locked store, a process just starting) may pass. Without this
+   * the message would stay unknown until the app is opened.
    */
-  suspend fun retryWakeUp(payload: ByteArray, attempt: Int) {
+  private fun onNotOpened(payload: ByteArray, isVisible: Boolean, isSignedOut: Boolean) {
+    val wasAnnounced = isVisible && !isSigningOut
+    if (wasAnnounced) handler.handleUnreadable() else handler.recordUnreadable()
+    if (!isSigningOut && !isSignedOut) {
+      WakeUpWork.enqueueRetry(context, payload, attempt = 1, unopened = RetryOf.of(wasAnnounced))
+    }
+  }
+
+  /**
+   * The message of a wake-up was not read: keeps the later retries safe from a process death first,
+   * then tries once more right away while its alert is held, so that it usually alerts once and
+   * with the text. The hold is bounded, by [PushRetry.HOLD_TRY_MS] on top of the first try.
+   */
+  private suspend fun readSoon(core: TeamCraft, payload: ByteArray, shown: PushNotification) {
+    Log.i(TAG, "message not read in time (${shown.maybeGap}); trying again")
+    WakeUpWork.enqueueRetry(context, payload, attempt = 1)
+    val again = withTimeoutOrNull(PushRetry.HOLD_TRY_MS) {
+      runCatching { core.notificationForPushRetry(payload, utcOffsetMinutes()) }.getOrNull()
+    }
     if (isSigningOut) return
-    val core = runCatching { core.core() }.getOrNull() ?: return
+    again?.let { handler.handleRetry(it, PushPath.FILLED_HOLD) }
+    if (PushRetry.releasesHeldAlert(attempt = 0, car.isActive)) handler.releaseHeldAlert(shown)
+  }
+
+  /**
+   * Opens a wake-up again ([PushRetry]): a message shown as a placeholder gets its text, or a
+   * wake-up that didn't open at first ([RetryOf]) its notification. Schedules the next attempt
+   * while it still can't be read, also after a failure: a store that was busy or a core that
+   * didn't open is no reason to stop. A notification read or swiped away meanwhile stays gone.
+   */
+  suspend fun retryWakeUp(payload: ByteArray, attempt: Int, retryOf: RetryOf) {
+    if (isSigningOut) return
     runCatching {
+      val core = core.core()
       core.setMentionSettings(mentionPrefs.settings.value)
       core.setNotificationContent(contentPrefs.content.value)
       core.notificationForPushRetry(payload, utcOffsetMinutes())
     }
       .onSuccess {
         if (isSigningOut) return@onSuccess
-        handler.handleRetry(it)
-        scheduleRetry(payload, it, attempt = attempt + 1)
+        when (retryOf) {
+          RetryOf.PLACEHOLDER -> handler.handleRetry(it, PushPath.FILLED_RETRY)
+          RetryOf.UNOPENED_ANNOUNCED -> handler.handleOpenedLate(it, payload, wasAnnounced = true)
+          RetryOf.UNOPENED_QUIET -> handler.handleOpenedLate(it, payload, wasAnnounced = false)
+        }
+        afterRetry(payload, it, attempt)
       }
-      .onFailure { Log.w(TAG, "wake-up retry failed: ${it.javaClass.simpleName}") }
+      .onFailure {
+        Log.w(TAG, "wake-up retry $attempt failed: ${it.javaClass.simpleName}")
+        // Signed out: nothing to read any more, and nothing shows.
+        if (it !is IllegalStateException) enqueueNext(payload, attempt, retryOf)
+      }
   }
 
-  private fun scheduleRetry(payload: ByteArray, shown: PushNotification, attempt: Int) {
-    if (!PushRetry.isWanted(shown, attempt) || !handler.isShowing(shown.conversationId)) return
-    // The gap is logged, never the content (notifications.md, "Mobile push delivery").
-    Log.i(TAG, "message not read in time (${shown.maybeGap}); retry $attempt scheduled")
-    WakeUpWork.enqueueRetry(context, payload, attempt)
+  /** An attempt didn't finish in its time: the next one takes over. */
+  fun onRetryTimedOut(payload: ByteArray, attempt: Int, retryOf: RetryOf) {
+    if (!isSigningOut) enqueueNext(payload, attempt, retryOf)
+  }
+
+  private fun afterRetry(payload: ByteArray, shown: PushNotification, attempt: Int) {
+    if (!handler.isPlaceholderShowing(shown)) return
+    if (PushRetry.releasesHeldAlert(attempt, car.isActive)) handler.releaseHeldAlert(shown)
+    if (PushRetry.isWanted(shown, attempt + 1)) {
+      // The gap is logged, never the content (notifications.md, "Mobile push delivery").
+      Log.i(TAG, "message not read in time (${shown.maybeGap}); retry ${attempt + 1} scheduled")
+      WakeUpWork.enqueueRetry(context, payload, attempt + 1)
+    } else if (attempt >= PushRetry.MAX_ATTEMPTS) {
+      handler.recordGaveUp()
+    }
+  }
+
+  private fun enqueueNext(payload: ByteArray, attempt: Int, retryOf: RetryOf) {
+    if (attempt < PushRetry.MAX_ATTEMPTS) {
+      WakeUpWork.enqueueRetry(context, payload, attempt + 1, retryOf)
+    } else {
+      handler.recordGaveUp()
+    }
   }
 
   private companion object {
@@ -200,5 +261,22 @@ class PushManager(
     /** The device's offset from UTC now, for the core's DND check. */
     fun utcOffsetMinutes(): Short =
       (TimeZone.getDefault().getOffset(System.currentTimeMillis()) / MS_PER_MINUTE).toShort()
+  }
+}
+
+/** What a retry of a wake-up is for, and whether something was said for it yet. */
+enum class RetryOf {
+  /** A message shown as a placeholder. */
+  PLACEHOLDER,
+
+  /** A wake-up that did not open; a generic "New message" went out for it. */
+  UNOPENED_ANNOUNCED,
+
+  /** A wake-up that did not open, and nothing showed (it may have been a withdrawal). */
+  UNOPENED_QUIET,
+  ;
+
+  companion object {
+    fun of(wasAnnounced: Boolean): RetryOf = if (wasAnnounced) UNOPENED_ANNOUNCED else UNOPENED_QUIET
   }
 }

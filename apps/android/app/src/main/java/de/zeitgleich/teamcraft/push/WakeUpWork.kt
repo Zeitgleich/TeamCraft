@@ -33,6 +33,7 @@ object WakeUpWork {
   private const val KEY_PAYLOAD = "payload"
   private const val KEY_IS_VISIBLE = "is_visible"
   private const val KEY_ATTEMPT = "attempt"
+  private const val KEY_RETRY_OF = "retry_of"
   private const val WORK_PREFIX = "wake-up-"
   private const val RETRY_PREFIX = "wake-up-retry-"
   private const val WORK_BUDGET_MS = 60_000L
@@ -51,10 +52,10 @@ object WakeUpWork {
    * Opens the wake-up again after [PushRetry.delayMs] once a network is there; `attempt` 1 is the
    * first retry. One per payload and attempt.
    */
-  fun enqueueRetry(context: Context, payload: ByteArray, attempt: Int) {
+  fun enqueueRetry(context: Context, payload: ByteArray, attempt: Int, unopened: RetryOf = RetryOf.PLACEHOLDER) {
     val encoded = Base64.getEncoder().encodeToString(payload)
     val request = OneTimeWorkRequestBuilder<RetryWorker>()
-      .setInputData(workDataOf(KEY_PAYLOAD to encoded, KEY_ATTEMPT to attempt))
+      .setInputData(workDataOf(KEY_PAYLOAD to encoded, KEY_ATTEMPT to attempt, KEY_RETRY_OF to unopened.name))
       .setInitialDelay(PushRetry.delayMs(attempt), TimeUnit.MILLISECONDS)
       .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
       .build()
@@ -80,7 +81,7 @@ object WakeUpWork {
       val isVisible = inputData.getBoolean(KEY_IS_VISIBLE, false)
       val running = TeamCraftApplication.graph(applicationContext).push.startWakeUp(payload, isVisible)
       withTimeoutOrNull(WORK_BUDGET_MS) { running.await() }
-      // A wake-up is not retried: a later one, or the next sync, brings what it missed.
+      // One that did not open schedules its own retries (PushManager.onNotOpened).
       return Result.success()
     }
 
@@ -102,9 +103,10 @@ object WakeUpWork {
       val encoded = inputData.getString(KEY_PAYLOAD) ?: return Result.failure()
       val payload = runCatching { Base64.getDecoder().decode(encoded) }.getOrNull() ?: return Result.failure()
       val attempt = inputData.getInt(KEY_ATTEMPT, PushRetry.MAX_ATTEMPTS)
-      withTimeoutOrNull(WORK_BUDGET_MS) {
-        TeamCraftApplication.graph(applicationContext).push.retryWakeUp(payload, attempt)
-      }
+      val retryOf = RetryOf.entries.firstOrNull { it.name == inputData.getString(KEY_RETRY_OF) } ?: RetryOf.PLACEHOLDER
+      val push = TeamCraftApplication.graph(applicationContext).push
+      withTimeoutOrNull(WORK_BUDGET_MS) { push.retryWakeUp(payload, attempt, retryOf) }
+        ?: push.onRetryTimedOut(payload, attempt, retryOf)
       // The next attempt, if any, is its own work: WorkManager's retry would not wait for a network.
       return Result.success()
     }

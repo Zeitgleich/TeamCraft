@@ -32,8 +32,9 @@ data class MessageNotificationSpec(
   val alerting: NotificationAlerting,
   /**
    * The newest message is still a placeholder ("New message", not decrypted yet): shown on the
-   * phone only. Watch and band bridges skip local-only notifications, so they show the message
-   * first once it has its text ([NotificationAlerting.REFRESH]), never "New message".
+   * phone only. Watch and band bridges and Android Auto skip local-only notifications, so they get
+   * the message first once it has its text, never "New message" (notifications.md, "Watches, bands
+   * and Android Auto").
    */
   val isLocalOnly: Boolean,
   /** Conversation shortcut and LocusId (the shade's conversation section, bubbles, Wear OS). */
@@ -61,16 +62,21 @@ data class NotificationSender(val key: String, val name: String)
 data class ShortcutSpec(val id: String, val label: String, val maybePerson: NotificationSender?)
 
 enum class NotificationAlerting {
-  /** Sound, vibration and heads-up (once per message). */
+  /**
+   * Sound, vibration and heads-up (once per message). Android Auto announces this, with the text;
+   * a placeholder that was held back alerts this way when it gets its text.
+   */
   ALERT,
 
   /** An update of what is shown: replaces it without alerting again (`setOnlyAlertOnce`). */
   SILENT,
 
   /**
-   * A placeholder ("New message", posted local-only) filled in with the text: silent on the phone,
-   * but without `setOnlyAlertOnce`, because watch and band bridges (Garmin, Mi Band apps) skip
-   * updates that carry it; so they show the message as new.
+   * A placeholder ("New message", posted local-only) that alerted already and now got its text:
+   * silent on the phone, but without `setOnlyAlertOnce`, because watch and band bridges (Garmin,
+   * Mi Band apps) skip updates that carry it; so they show the message as new. Android Auto may
+   * list this without announcing it, which is why [MessageNotificationSpecs.alerting] alerts
+   * instead while the phone projects to a car.
    */
   REFRESH,
 }
@@ -200,20 +206,27 @@ object MessageNotificationSpecs {
   }
 
   /**
-   * How a conversation's notification is posted again: alerting for a new message, else as a silent
-   * update, but as [NotificationAlerting.REFRESH] when a placeholder line got its text, so watches
-   * and bands that skip silent updates show the message instead of "New message".
+   * How a conversation's notification is posted again. A new message alerts. A placeholder that
+   * got its text alerts now if it was held back, so the phone, bridges and Android Auto announce
+   * one message once and with its text; if the phone already alerted for it, it stays silent
+   * there ([NotificationAlerting.REFRESH]) unless the phone projects to a car, where being
+   * announced matters more than a second sound. Everything else is a silent update.
    */
   fun alerting(
     isAlerting: Boolean,
     maybePrevious: ConversationNotification?,
     entry: ConversationNotification,
+    isInCar: Boolean = false,
   ): NotificationAlerting {
-    val placeholdersBefore = maybePrevious?.lines.orEmpty().count { it.isPlaceholder }
+    val read = maybePrevious?.lines.orEmpty().filter { before ->
+      before.isPlaceholder && entry.lines.any { it.maybeMessageId == before.maybeMessageId && !it.isPlaceholder }
+    }
     return when {
       isAlerting -> NotificationAlerting.ALERT
-      entry.lines.count { it.isPlaceholder } < placeholdersBefore -> NotificationAlerting.REFRESH
-      else -> NotificationAlerting.SILENT
+      read.any { it.isAlertHeld } -> NotificationAlerting.ALERT
+      read.isEmpty() -> NotificationAlerting.SILENT
+      isInCar -> NotificationAlerting.ALERT
+      else -> NotificationAlerting.REFRESH
     }
   }
 

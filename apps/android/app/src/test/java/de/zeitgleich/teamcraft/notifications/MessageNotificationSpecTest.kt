@@ -212,7 +212,7 @@ class MessageNotificationSpecTest {
 
   @Test
   fun aPolicyOrSettingCutIsNotRetried() {
-    for (gap in listOf(NotificationGap.WORKSPACE_POLICY, NotificationGap.DEVICE_SETTING, NotificationGap.NOT_SHOWABLE, null)) {
+    for (gap in listOf(NotificationGap.WORKSPACE_POLICY, NotificationGap.DEVICE_SETTING, NotificationGap.NOT_SHOWABLE, NotificationGap.HIDDEN, null)) {
       val shown = PushDecisionTest.push(PushNotificationKind.MESSAGE).copy(maybeGap = gap)
       assertFalse(PushRetry.isWanted(shown, attempt = 1))
     }
@@ -223,7 +223,66 @@ class MessageNotificationSpecTest {
   @Test
   fun theRetriesWaitLonger() {
     assertEquals(30_000L, PushRetry.delayMs(1))
-    assertEquals(60_000L, PushRetry.delayMs(2))
+    assertEquals(120_000L, PushRetry.delayMs(2))
+    assertEquals(600_000L, PushRetry.delayMs(3))
+    assertEquals(3_600_000L, PushRetry.delayMs(PushRetry.MAX_ATTEMPTS))
+  }
+
+  @Test
+  fun aHeldAlertEndsAfterTheTryRightAwayExceptInACar() {
+    assertTrue(PushRetry.releasesHeldAlert(attempt = 0, isInCar = false))
+    assertFalse(PushRetry.releasesHeldAlert(attempt = 0, isInCar = true))
+    assertFalse(PushRetry.releasesHeldAlert(attempt = 1, isInCar = true))
+    assertTrue(PushRetry.releasesHeldAlert(attempt = 2, isInCar = true))
+  }
+
+  /** Android Auto and bridges announce what alerts and isn't local-only: one alert, with the text. */
+  @Test
+  fun aHeldPlaceholderAlertsOnceItHasItsText() {
+    val held = direct(line("1000", "Alice", "New message").copy(isPlaceholder = true, isAlertHeld = true))
+    val filled = direct(line("1000", "Alice", "lunch?"))
+    assertEquals(NotificationAlerting.ALERT, MessageNotificationSpecs.alerting(false, held, filled))
+    assertEquals(NotificationAlerting.ALERT, MessageNotificationSpecs.alerting(false, held, filled, isInCar = true))
+  }
+
+  @Test
+  fun aPlaceholderThatAlertedStaysSilentOnThePhoneUnlessInACar() {
+    val alerted = direct(line("1000", "Alice", "New message").copy(isPlaceholder = true))
+    val filled = direct(line("1000", "Alice", "lunch?"))
+    assertEquals(NotificationAlerting.REFRESH, MessageNotificationSpecs.alerting(false, alerted, filled))
+    assertEquals(NotificationAlerting.ALERT, MessageNotificationSpecs.alerting(false, alerted, filled, isInCar = true))
+  }
+
+  @Test
+  fun aLineThatWasNoMessageGoesAndATextStays() {
+    val placeholder = line("1000", "Alice", "New message").copy(isPlaceholder = true)
+    val text = line("2000", "Alice", "lunch?")
+    assertEquals(listOf(text), NotificationLines.withoutPlaceholder(listOf(placeholder, text), "1000"))
+    assertEquals(listOf(placeholder, text), NotificationLines.withoutPlaceholder(listOf(placeholder, text), "2000"))
+    assertTrue(NotificationLines.withoutPlaceholder(listOf(placeholder), "1000").isEmpty())
+  }
+
+  @Test
+  fun aReleaseOnlyEndsTheHoldOfThatMessage() {
+    val first = line("1000", "Alice", "New message").copy(isPlaceholder = true, isAlertHeld = true)
+    val second = line("2000", "Alice", "New message").copy(isPlaceholder = true, isAlertHeld = true)
+    val released = NotificationLines.withAlertReleased(listOf(first, second), "1000")
+    assertEquals(listOf(false, true), released.map { it.isAlertHeld })
+  }
+
+  /** Every gap has its counted path; only a placeholder may get a text later. */
+  @Test
+  fun everyGapIsCountedOnItsOwnPath() {
+    val push = PushDecisionTest.push(PushNotificationKind.MESSAGE)
+    val paths = NotificationGap.entries.associateWith { PushPath.of(push.copy(maybeGap = it)) }
+    assertEquals(PushPath.PLACEHOLDER_NO_SESSION, paths[NotificationGap.NO_SESSION])
+    assertEquals(PushPath.PLACEHOLDER_NOT_DECRYPTED, paths[NotificationGap.NOT_DECRYPTED])
+    assertEquals(PushPath.PLACEHOLDER_TIMED_OUT, paths[NotificationGap.TIMED_OUT])
+    assertEquals(PushPath.NOT_SHOWABLE, paths[NotificationGap.NOT_SHOWABLE])
+    assertEquals(PushPath.HIDDEN, paths[NotificationGap.HIDDEN])
+    assertEquals(PushPath.LIMITED, paths[NotificationGap.WORKSPACE_POLICY])
+    assertEquals(PushPath.LIMITED, paths[NotificationGap.DEVICE_SETTING])
+    assertEquals(PushPath.SHOWN, PushPath.of(push))
   }
 
   @Test
