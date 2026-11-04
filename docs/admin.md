@@ -379,6 +379,34 @@ remaining members. The admin doesn't need to be a member for that. A workspace a
 what makes the new owner count on members' apps (e2ee.md §4.6.1); the console's assignment doesn't
 sign it yet (a follow-up of issue #380), so until then the new owner's role shows as not signed.
 
+**Decision (issue #877): workspace admins keep appointing channel admins.** There is no instance policy
+that limits them to channels without an admin: an orphaned channel needs exactly this, and a switch
+would have to be exempt for it. Instead the channel's member list says who appointed a role, so
+nobody is surprised that a workspace admin, not a channel admin, made an owner:
+
+- The line "Appointed by Alice (workspace admin)" (or "workspace owner", "channel admin") sits next
+  to the role of a channel's owner or moderator. The signer and the authority come only from the
+  signed role log this device verified (`teamcraft-core::channel_roles`), never from the server's
+  list. **The display name is not verified:** it comes from the member directory the server serves,
+  and the roster carries identity keys, not names. So the name is shown as its own isolated element
+  (bidi-isolated, not translated), apart from the authority text, and never inside a sentence a
+  hostile server could bend. A verified name needs names in the signed roster; not done.
+- It is shown only when the snapshot goes back to a workspace admin by the rule that anchors the
+  channel (e2ee.md §4.6, "A signed deletion purges at once"): the roster counts as fresh at this
+  device's time and carries a signing time. A backdated entry, a stale or untimed roster and a
+  founder's claim (trust on first use) show nothing, and neither does a channel admin's entry in a
+  channel that doesn't go back to a workspace admin. The anchoring is judged by the roster this
+  device has now, so a device that was offline may show a line another doesn't.
+- It shows nothing where nothing verified says so: a role only the server lists (marked "Not
+  signed", as before), a log accepted before appointments were recorded, somebody's own role, a
+  guest, and any member whose role as the server lists it differs from the verified role (a space
+  admin's unsigned demotion, say).
+- A role an entry left as it was keeps its appointer; a later entry by someone else doesn't take it
+  over. A changed identity key counts as a new appointment. A workspace admin's checkpoint that
+  re-anchors a device names that admin for every role it lists.
+- Whoever sees the roles sees this line; it adds nothing about people they can't see already.
+  Mobile apps have no channel member list yet; they follow with it (v1.1, #1246).
+
 ## 3. Admin features
 
 ### 3.1 Spaces and channels

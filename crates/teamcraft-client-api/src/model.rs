@@ -243,6 +243,27 @@ pub struct ChannelMember {
   /// anything that needs a signed role, and the UI says so.
   #[serde(default = "is_true")]
   pub is_role_signed: bool,
+  /// Who appointed `role`, as the signed role log this device verified says (issue #877). `None`
+  /// where nothing verified says it: a member, a role only the server lists, a founder's own claim
+  /// or a log accepted before this was recorded. Never the server's word.
+  #[serde(default, rename = "appointer", skip_serializing_if = "Option::is_none")]
+  pub maybe_appointer: Option<RoleAppointer>,
+}
+
+/// The verified signer of the entry that gave a channel member their role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleAppointer {
+  pub user: UserId,
+  pub authority: AppointerAuthority,
+}
+
+/// On what authority the appointer signed: a workspace admin appointing a channel admin is not the
+/// same trust as a channel admin doing so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppointerAuthority {
+  WorkspaceOwner,
+  WorkspaceAdmin,
+  ChannelAdmin,
 }
 
 fn is_true() -> bool {
