@@ -470,8 +470,11 @@ pub enum NotificationGap {
   NotDecrypted,
   /// Fetching took longer than the notification's time budget.
   TimedOut,
-  /// Not a text or a file.
+  /// Of a kind this version doesn't know (from a newer client): it may be a message.
   NotShowable,
+  /// A reaction, edit, delete or another change to the conversation: no message to announce. Added
+  /// with #1249; a client that ignores it shows "New message" as it did before.
+  Hidden,
   /// The workspace policy shows less.
   WorkspacePolicy,
   /// This device's setting shows less.
@@ -831,6 +834,7 @@ impl From<PreviewGap> for NotificationGap {
       PreviewGap::NotDecrypted => Self::NotDecrypted,
       PreviewGap::TimedOut => Self::TimedOut,
       PreviewGap::NotShowable => Self::NotShowable,
+      PreviewGap::Hidden => Self::Hidden,
       PreviewGap::WorkspacePolicy => Self::WorkspacePolicy,
       PreviewGap::DeviceSetting => Self::DeviceSetting,
     }

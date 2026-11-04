@@ -8,10 +8,11 @@ use crate::common;
 use common::{Peer, settings, settle};
 use teamcraft_core::ClientSettings;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
+use teamcraft_core::client::OutgoingFile;
 use teamcraft_core::notified::{self, NotifiedContent, notified_conversation};
 use teamcraft_core::push_preview::{
-  PreviewContent, PreviewGap, PushSession, device_push_content, push_preview, save_device_push_content,
-  save_push_session,
+  AttachmentKind, PreviewContent, PreviewGap, PushSession, device_push_content, push_preview,
+  save_device_push_content, save_push_session,
 };
 use teamcraft_core::push_subscription::{subscription_change, subscription_change_from};
 use teamcraft_core::store::{LocalStore, MessageFilter};
@@ -408,6 +409,112 @@ async fn the_device_setting_shows_less_than_the_policy_allows() {
     .await
     .unwrap();
   assert!(preview.maybe_sender_name.is_none() && preview.maybe_conversation_name.is_none());
+}
+
+/// The server can't tell a reaction from a message (both are encrypted) and wakes the device for
+/// each (issue #1249): only a message may read as one.
+#[tokio::test]
+async fn every_kind_of_wake_up_ends_on_its_own_path() {
+  let (server, mut alice, bob, channel) = channel_with_two().await;
+  let target = alice.client.send_text(channel, None, "lunch?").await.unwrap();
+  let opened = |server: &FakeServer, alice: &Peer, bob: &Peer| {
+    let newest = alice
+      .store
+      .messages(channel, MessageFilter::All)
+      .unwrap()
+      .iter()
+      .filter_map(|message| message.maybe_server_id)
+      .max()
+      .unwrap();
+    wake_up_for(server, bob, alice, channel, newest)
+  };
+
+  let sealed = opened(&server, &alice, &bob);
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  assert_eq!(preview.content, PreviewContent::Text("lunch?".into()));
+  assert_eq!(preview.maybe_gap, None);
+
+  alice.client.react(channel, target, "x", true).await.unwrap();
+  assert_hidden(&bob, &opened(&server, &alice, &bob)).await;
+  alice
+    .client
+    .edit_message(channel, target, "lunch!")
+    .await
+    .unwrap();
+  assert_hidden(&bob, &opened(&server, &alice, &bob)).await;
+  alice.client.set_pinned(channel, target, true).await.unwrap();
+  assert_hidden(&bob, &opened(&server, &alice, &bob)).await;
+  alice.client.delete_message(channel, target).await.unwrap();
+  assert_hidden(&bob, &opened(&server, &alice, &bob)).await;
+
+  // Pictures without a caption: what the app sends is a text message with an empty body.
+  let picture = |name: &str| OutgoingFile {
+    file_name: name.into(),
+    media_type: "image/png".into(),
+    content: vec![1, 2, 3],
+  };
+  alice
+    .client
+    .send_files(channel, None, "", vec![picture("a.png"), picture("b.png")])
+    .await
+    .unwrap();
+  let sealed = opened(&server, &alice, &bob);
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  assert_eq!(preview.maybe_gap, None);
+  assert!(matches!(
+    preview.content,
+    PreviewContent::File {
+      kind: AttachmentKind::Image,
+      ..
+    }
+  ));
+}
+
+/// A push that overtakes the commit it needs (a member was added, the key rotated): not readable
+/// by the fetch alone, readable after the app caught the conversation up.
+#[tokio::test]
+async fn a_push_before_the_commit_it_needs_reads_after_the_catch_up() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let carol = Peer::enroll(&server, "Carol").await;
+  alice
+    .client
+    .add_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  alice
+    .client
+    .remove_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  let message = alice_says(&mut alice, channel, "after the rotation").await;
+  let sealed = wake_up_for(&server, &bob, &alice, channel, message);
+
+  let before = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  assert_eq!(before.maybe_gap, Some(PreviewGap::NotDecrypted));
+  assert!(before.needs_catch_up());
+
+  bob.client.catch_up_for_push(channel).await.unwrap();
+  let after = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  assert_eq!(after.content, PreviewContent::Text("after the rotation".into()));
+  assert_eq!(after.maybe_gap, None);
+}
+
+async fn assert_hidden(bob: &Peer, sealed: &[u8]) {
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), sealed)
+    .await
+    .unwrap();
+  assert_eq!(preview.maybe_gap, Some(PreviewGap::Hidden));
+  assert_eq!(preview.content, PreviewContent::Unavailable);
+  // Doesn't read as a failure: nothing to catch up, and it can be told apart for the app.
+  assert!(!preview.needs_catch_up());
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {

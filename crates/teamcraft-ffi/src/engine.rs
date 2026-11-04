@@ -52,6 +52,7 @@ use tokio::task::{JoinHandle, LocalSet};
 
 use crate::calls::{CallHub, CallPreparation};
 use crate::error::TeamCraftError;
+use crate::logging::LIFECYCLE;
 use crate::reads::ReadQueue;
 use crate::types::{
   AccountState, AppConfig, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings, NotificationContent,
@@ -238,6 +239,8 @@ pub(crate) enum PushOpening {
   Received,
   /// The app opens it again because the first try could not read the message in time.
   Retry,
+  /// The app looks whether the sync stored the message meanwhile: no network, nothing that waits.
+  StoreOnly,
 }
 
 /// Who opens a push: the app, whose client may catch the conversation up, or a notification
@@ -1132,7 +1135,24 @@ impl Engine {
     opening: PushOpening,
     reader: PushReader,
   ) -> Result<PushNotification, TeamCraftError> {
-    let preview = self.push_preview_within_budget(&payload, reader).await?;
+    let opened_at = std::time::Instant::now();
+    let preview = if opening == PushOpening::StoreOnly {
+      push_preview::<Api>(&self.store, None, &payload).await?
+    } else {
+      self.push_preview_within_budget(&payload, reader).await?
+    };
+    // Why a notification said less, and how long it took: IDs and reasons only (security.md), so
+    // an exported diagnostics log shows how often each path is taken.
+    if opening != PushOpening::StoreOnly {
+      tracing::info!(
+        target: LIFECYCLE,
+        ?opening,
+        gap = ?preview.maybe_gap,
+        ran_ms = opened_at.elapsed().as_millis(),
+        is_client_idle = matches!(self.client, ClientSlot::Idle(_)),
+        "push opened"
+      );
+    }
     let now_ms = SystemClock.now_ms();
     let store = &self.store;
     // A retry is the same push again: counting it would skew the received count and the delay.
@@ -1180,6 +1200,10 @@ impl Engine {
     // Without a token the preview still names conversation and sender, also when a refresh would
     // use up the time for the fetch.
     let maybe_token = tokio::time::timeout(PUSH_FETCH_BUDGET, self.tokens.fresh_token()).await;
+    if !matches!(maybe_token, Ok(Ok(_))) {
+      let is_timed_out = maybe_token.is_err();
+      tracing::info!(target: LIFECYCLE, is_timed_out, "no access token for the push");
+    }
     let maybe_api = matches!(maybe_token, Ok(Ok(_))).then_some(&api);
     // Cancel-safe: the preview only reads the store.
     let fetched =
@@ -1208,7 +1232,7 @@ impl Engine {
     {
       let conversation = preview.wake_up.conversation_id;
       if let Err(error) = catch_up_for_push(client, conversation, deadline).await {
-        tracing::debug!(%error, conversation_id = %conversation, "push catch-up stopped");
+        tracing::info!(target: LIFECYCLE, %error, conversation_id = %conversation, "push catch-up stopped");
       }
       let caught_up = push_preview::<Api>(&self.store, None, payload).await?;
       // The store-only preview names `NoSession` while the message is still missing: then the first
