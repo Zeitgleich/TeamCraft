@@ -2302,6 +2302,29 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn canvas(&self, conversation: ConversationId) -> teamcraft_client_api::canvas::CanvasState {
+    match self.ask(ChatQuery::Canvas { conversation }) {
+      Some(ChatAnswer::Canvas { state }) => state,
+      _ => teamcraft_client_api::canvas::CanvasState::default(),
+    }
+  }
+
+  fn edit_canvas(&self, conversation: ConversationId, update: Vec<u8>, is_snapshot: bool) {
+    self.act(ChatAction::EditCanvas {
+      conversation,
+      update: update.into(),
+      is_snapshot,
+    });
+  }
+
+  fn compact_canvas(&self, conversation: ConversationId, revision: u64, merged: Vec<u8>) {
+    self.act(ChatAction::CompactCanvas {
+      conversation,
+      revision,
+      merged: merged.into(),
+    });
+  }
+
   fn remove_member(&self, conversation: ConversationId, user: UserId) {
     self.act(ChatAction::RemoveMember { conversation, user });
   }
