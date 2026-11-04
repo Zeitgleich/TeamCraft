@@ -72,6 +72,10 @@ pub struct ChannelRoleState {
   /// decision that destroys history asks this (e2ee.md §4.6, "A signed deletion purges at once").
   #[serde(default)]
   pub is_workspace_anchored: bool,
+  /// Who appointed each role of the accepted snapshot. Empty for a snapshot accepted before this
+  /// was recorded: nothing is claimed then.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub appointments: Vec<RoleAppointment>,
 }
 
 /// The accepted head of a channel's role log; sent along inside the channel's encrypted messages.
@@ -79,6 +83,38 @@ pub struct ChannelRoleState {
 pub struct ChannelRolesHead {
   pub version: u64,
   pub hash: Base64Bytes,
+}
+
+/// Who signed the entry that gave a user their role in the accepted snapshot, and on what authority
+/// this device accepted it (issue #877). Recorded only from a verified entry, never from the
+/// server's word; local state, not part of the signed document.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleAppointment {
+  pub user_id: UserId,
+  /// The signer of the entry that set the role.
+  pub by: UserId,
+  pub authority: AppointmentAuthority,
+  /// The identity key the entry named for the user: another key is a new appointment.
+  pub identity_key: Base64Bytes,
+  /// Whether the snapshot this was accepted in goes back to a workspace admin by the rule that
+  /// anchors the channel (`ChannelRoleState::is_workspace_anchored`), judged at this device's
+  /// time. Only then is the appointment shown: otherwise it rests on a founder's claim, or on a
+  /// roster the server could have backdated an entry against.
+  #[serde(default)]
+  pub is_anchored: bool,
+}
+
+/// What the stored appointments say about the signer's authority. Stored locally and so
+/// forward compatible: a value a newer build wrote reads as `Unknown` and is never shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AppointmentAuthority {
+  WorkspaceOwner,
+  WorkspaceAdmin,
+  ChannelAdmin,
+  /// A founder's claim: trust on first use, not an appointment.
+  Founder,
+  #[serde(other)]
+  Unknown,
 }
 
 /// On what authority an entry was (or would be) signed.
@@ -133,6 +169,35 @@ impl ChannelRoleState {
       .iter()
       .find(|assignment| assignment.user_id == user)
       .map_or(ChannelRole::Member, |assignment| assignment.role.clone())
+  }
+
+  /// Who appointed `user` to the role the accepted snapshot gives them, as this device verified
+  /// the signing entry. `None` for a member, for a snapshot accepted before this was recorded, for
+  /// a founder's claim (trust on first use) and for anything that doesn't go back to a workspace
+  /// admin by the rule that anchors the channel (`is_workspace_anchored`): the UI claims an
+  /// authority only where a purge would accept it too. The signer and authority are verified;
+  /// the signer's display name is not (it is the server's directory).
+  pub fn appointment_of(&self, user: UserId) -> Option<&RoleAppointment> {
+    let assignment = self
+      .assignments
+      .iter()
+      .find(|assignment| assignment.user_id == user)?;
+    if assignment.role == ChannelRole::Member || !self.is_workspace_anchored {
+      return None;
+    }
+    self.appointments.iter().find(|appointment| {
+      appointment.user_id == user
+        // Somebody's own role (a workspace admin founding a channel) isn't an appointment.
+        && appointment.by != user
+        && appointment.is_anchored
+        && appointment.identity_key == assignment.identity_key
+        && matches!(
+          appointment.authority,
+          AppointmentAuthority::WorkspaceOwner
+            | AppointmentAuthority::WorkspaceAdmin
+            | AppointmentAuthority::ChannelAdmin
+        )
+    })
   }
 
   /// The users the accepted snapshot makes admins.
@@ -332,7 +397,14 @@ impl ChannelRoleState {
     // workspace admin founding a channel signs as its founder, for example.
     let mut outcome = Err(ChannelRoleError::Unauthorized { version });
     let mut maybe_authority = None;
+    let mut maybe_signer = None;
     let signers = self.verify_signer(entry, &document, verifier);
+    // The workspace admin behind the signature, if the roster vouches for it: they appointed what
+    // the entry changes even where it passes as a founder's.
+    let maybe_workspace_signer = signers
+      .iter()
+      .copied()
+      .find(|(_, authority)| matches!(authority, SignerAuthority::Workspace { .. }));
     // A workspace admin founding a channel passes as its founder (nobody changes their own role
     // otherwise), and it is a workspace admin's word all the same. It anchors only on what a purge
     // itself would take from that admin (`signed_deletion`): the server sets the entry's time.
@@ -347,6 +419,7 @@ impl ChannelRoleState {
       outcome = self.check_document(&document, verifier.conversation, signer, authority);
       if outcome.is_ok() {
         maybe_authority = Some(authority);
+        maybe_signer = Some((signer, authority));
         break;
       }
     }
@@ -361,9 +434,18 @@ impl ChannelRoleState {
       version,
       reason: error.to_string(),
     })?;
+    let maybe_appointer = match (maybe_signer, maybe_workspace_signer) {
+      (Some((_, SignerAuthority::Founder)), Some(workspace)) => Some(workspace),
+      (accepted, _) => accepted,
+    };
+    // A workspace admin's entry built on another head than ours re-anchors this device: it vouches
+    // for every role it lists, including the ones this device already had from an older entry.
+    let is_checkpoint = matches!(maybe_appointer, Some((_, SignerAuthority::Workspace { .. })))
+      && document.prev_hash != self.head_or_zero();
+    let previous = std::mem::take(&mut self.appointments);
     self.version = version;
     self.maybe_head_hash = Some(Base64Bytes::new(hash.to_vec()));
-    self.assignments = document.assignments;
+    let previous_assignments = std::mem::replace(&mut self.assignments, document.assignments);
     match maybe_authority {
       _ if is_by_workspace_admin => self.is_workspace_anchored = true,
       // A claim, or a roster admin on a roster too old to anchor anything: their snapshot replaces
@@ -374,7 +456,54 @@ impl ChannelRoleState {
       // A channel admin carries on what the snapshot they build on was.
       Some(SignerAuthority::ChannelAdmin) | None => {},
     }
+    self.appointments =
+      self.next_appointments(&previous, &previous_assignments, maybe_appointer, is_checkpoint);
     Ok(())
+  }
+
+  /// The appointments after an entry (already applied to `self.assignments`): a role or identity
+  /// key the entry changed or added was appointed by its signer, and so is every role a
+  /// checkpoint lists; one it left as it was keeps what this device recorded (nothing, for a
+  /// snapshot from before appointments were recorded).
+  fn next_appointments(
+    &self,
+    previous: &[RoleAppointment],
+    previous_assignments: &[ChannelRoleAssignment],
+    maybe_appointer: Option<(UserId, SignerAuthority)>,
+    is_checkpoint: bool,
+  ) -> Vec<RoleAppointment> {
+    self
+      .assignments
+      .iter()
+      .filter_map(|assignment| {
+        let user_id = assignment.user_id;
+        let maybe_before = previous_assignments
+          .iter()
+          .find(|before| before.user_id == user_id);
+        let is_unchanged = maybe_before.is_some_and(|before| {
+          before.role == assignment.role && before.identity_key == assignment.identity_key
+        });
+        if is_unchanged && !is_checkpoint {
+          return previous
+            .iter()
+            .find(|appointment| appointment.user_id == user_id)
+            .cloned();
+        }
+        let (by, authority) = maybe_appointer?;
+        Some(RoleAppointment {
+          user_id,
+          by,
+          authority: match authority {
+            SignerAuthority::Workspace { is_owner: true } => AppointmentAuthority::WorkspaceOwner,
+            SignerAuthority::Workspace { is_owner: false } => AppointmentAuthority::WorkspaceAdmin,
+            SignerAuthority::ChannelAdmin => AppointmentAuthority::ChannelAdmin,
+            SignerAuthority::Founder => AppointmentAuthority::Founder,
+          },
+          identity_key: assignment.identity_key.clone(),
+          is_anchored: self.is_workspace_anchored,
+        })
+      })
+      .collect()
   }
 
   /// Who signed the entry and on what authorities the signature holds: the workspace roster, this
@@ -1054,6 +1183,285 @@ mod tests {
         state.signing_authorities(admin.user_id, &world.workspace, NOW_MS, MAX_AGE_MS),
         vec![SignerAuthority::Workspace { is_owner: false }]
       );
+    }
+  }
+
+  mod appointers {
+    use super::*;
+
+    #[test]
+    fn a_founders_own_claim_is_no_appointment() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = World::new(&[&alice, &bob], &[]);
+      let state = founded(&world, &alice, &[(&bob, ChannelRole::Moderator)]);
+      assert_eq!(state.appointment_of(alice.user_id), None);
+      // The founding entry also named Bob, but a founder's entry is trust on first use too.
+      assert_eq!(state.appointment_of(bob.user_id), None);
+    }
+
+    #[test]
+    fn a_channel_admin_is_not_named_where_nothing_goes_back_to_a_workspace_admin() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = World::new(&[&alice, &bob], &[]);
+      let mut state = founded(&world, &alice, &[]);
+      let promote = alice.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, promote).is_empty());
+      assert!(!state.is_workspace_anchored);
+      assert_eq!(
+        state.appointment_of(bob.user_id),
+        None,
+        "a founder's claim carried on"
+      );
+    }
+
+    #[test]
+    fn a_channel_admin_is_named_in_an_anchored_channel_for_the_roles_they_changed_only() {
+      let (alice, bob, carol, admin) = (Person::new(1), Person::new(2), Person::new(3), Person::new(9));
+      let world = World::new(&[&alice, &bob, &carol], &[&admin]);
+      let mut state = founded(
+        &world,
+        &admin,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Moderator)],
+      );
+      let promote = alice.entry(
+        &state,
+        &[
+          (&admin, ChannelRole::Admin),
+          (&alice, ChannelRole::Admin),
+          (&bob, ChannelRole::Moderator),
+          (&carol, ChannelRole::Admin),
+        ],
+      );
+      assert!(world.apply(&mut state, promote).is_empty());
+      assert!(state.is_workspace_anchored);
+      let found = state.appointment_of(carol.user_id).expect("appointed");
+      assert_eq!(
+        (found.by, found.authority),
+        (alice.user_id, AppointmentAuthority::ChannelAdmin)
+      );
+      let kept = state.appointment_of(bob.user_id).expect("not re-appointed");
+      assert_eq!(
+        (kept.by, kept.authority),
+        (admin.user_id, AppointmentAuthority::WorkspaceAdmin)
+      );
+    }
+
+    #[test]
+    fn a_workspace_admin_is_named_and_the_appointment_outlives_later_entries() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(&world, &alice, &[]);
+      let appoint = admin.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, appoint).is_empty());
+      let found = state.appointment_of(bob.user_id).expect("appointed").clone();
+      assert_eq!(
+        (found.by, found.authority),
+        (admin.user_id, AppointmentAuthority::WorkspaceAdmin)
+      );
+
+      // Alice, a channel admin, signs again without changing Bob: nothing changes for Bob.
+      let more = alice.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, more).is_empty());
+      assert_eq!(state.appointment_of(bob.user_id), Some(&found));
+    }
+
+    #[test]
+    fn a_workspace_owner_is_named_as_an_owner() {
+      let (alice, bob, owner) = (Person::new(1), Person::new(2), Person::new(9));
+      let mut world = World::new(&[&alice, &bob], &[&owner]);
+      world.workspace.roster.members[0].role = RosterRole::Owner;
+      let mut state = founded(&world, &alice, &[]);
+      let appoint = owner.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, appoint).is_empty());
+      assert_eq!(
+        state.appointment_of(bob.user_id).map(|found| found.authority),
+        Some(AppointmentAuthority::WorkspaceOwner)
+      );
+    }
+
+    #[test]
+    fn a_workspace_admin_founding_a_channel_names_the_roles_they_gave_others_not_their_own() {
+      let (alice, admin) = (Person::new(1), Person::new(9));
+      let world = World::new(&[&alice, &admin], &[&admin]);
+      let state = founded(&world, &admin, &[(&alice, ChannelRole::Admin)]);
+      assert_eq!(
+        state.appointment_of(alice.user_id).map(|found| found.by),
+        Some(admin.user_id)
+      );
+      assert_eq!(state.appointment_of(admin.user_id), None, "their own role");
+    }
+
+    #[test]
+    fn a_skipped_entry_appoints_nobody() {
+      let (alice, bob, stranger, admin) = (Person::new(1), Person::new(2), Person::new(5), Person::new(9));
+      let world = World::new(&[&alice, &bob, &stranger], &[&admin]);
+      let mut state = founded(&world, &admin, &[(&alice, ChannelRole::Admin)]);
+      let before = state.clone();
+      let forged = stranger.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&stranger, ChannelRole::Admin)],
+      );
+      assert!(!world.apply(&mut state, forged).is_empty());
+      assert_eq!(state.appointment_of(stranger.user_id), None);
+      assert_eq!(state.appointments, before.appointments);
+    }
+
+    /// The server dates an entry back to when the roster was fresh, with a demotion withheld: the
+    /// role counts as before, but the label "workspace admin" would claim what a purge wouldn't take.
+    #[test]
+    fn a_backdated_workspace_entry_is_not_labelled_a_workspace_admins() {
+      let (alice, mallory, eve) = (Person::new(1), Person::new(2), Person::new(9));
+      let mut world = World::new(&[&alice, &mallory], &[&eve]);
+      let mut state = founded(&world, &eve, &[(&alice, ChannelRole::Admin)]);
+      assert!(state.appointment_of(alice.user_id).is_some());
+
+      world.now_ms = NOW_MS + MAX_AGE_MS + 1;
+      let mut checkpoint = eve.entry(
+        &state,
+        &[
+          (&eve, ChannelRole::Admin),
+          (&alice, ChannelRole::Admin),
+          (&mallory, ChannelRole::Admin),
+        ],
+      );
+      checkpoint.created_at = UnixMillis(NOW_MS);
+      assert!(world.apply(&mut state, checkpoint).is_empty());
+      assert_eq!(state.role_of(mallory.user_id), ChannelRole::Admin);
+      assert_eq!(state.appointment_of(mallory.user_id), None);
+      assert_eq!(
+        state.appointment_of(alice.user_id),
+        None,
+        "the snapshot is no longer anchored"
+      );
+    }
+
+    #[test]
+    fn a_roster_without_a_signing_time_labels_nobody_a_workspace_admin() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let mut world = World::new(&[&alice, &bob], &[&admin]);
+      world.workspace.heads.is_roster_chained = false;
+      world.workspace.heads.maybe_roster_signed_at_ms = None;
+      let mut state = founded(&world, &alice, &[]);
+      let checkpoint = admin.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, checkpoint).is_empty());
+      assert_eq!(state.role_of(bob.user_id), ChannelRole::Admin);
+      assert_eq!(state.appointment_of(bob.user_id), None);
+    }
+
+    #[test]
+    fn a_replaced_identity_key_is_a_new_appointment() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(
+        &world,
+        &admin,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      let before = state.appointment_of(bob.user_id).expect("appointed").clone();
+      assert_eq!(before.authority, AppointmentAuthority::WorkspaceAdmin);
+
+      // Alice swaps the key Bob's later entries are verified against, keeping his role.
+      let mut document = alice.document(
+        &state,
+        &[
+          (&admin, ChannelRole::Admin),
+          (&alice, ChannelRole::Admin),
+          (&bob, ChannelRole::Admin),
+        ],
+      );
+      let swapped = Person::new(2).key();
+      for assignment in &mut document.assignments {
+        if assignment.user_id == bob.user_id {
+          assignment.identity_key = swapped.clone();
+        }
+      }
+      assert!(world.apply(&mut state, alice.signed(document)).is_empty());
+      let after = state.appointment_of(bob.user_id).expect("appointed again");
+      assert_eq!(
+        (after.by, after.authority),
+        (alice.user_id, AppointmentAuthority::ChannelAdmin)
+      );
+      assert_eq!(after.identity_key, swapped);
+    }
+
+    #[test]
+    fn a_checkpoint_names_its_signer_for_roles_the_device_already_had() {
+      let (alice, bob, first, second) = (Person::new(1), Person::new(2), Person::new(8), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&first, &second]);
+      let roles = [
+        (&first, ChannelRole::Admin),
+        (&alice, ChannelRole::Admin),
+        (&bob, ChannelRole::Admin),
+      ];
+      let mut state = founded(
+        &world,
+        &first,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert_eq!(
+        state.appointment_of(bob.user_id).map(|found| found.by),
+        Some(first.user_id)
+      );
+      // This device skipped a demotion and re-appointment in between: the checkpoint names another
+      // head, and lists Bob as the device already has him.
+      let mut stale = state.clone();
+      stale.maybe_head_hash = Some(Base64Bytes::new(vec![7; 32]));
+      let checkpoint = second.entry(&stale, &roles);
+      assert!(world.apply(&mut state, checkpoint).is_empty());
+      assert_eq!(
+        state.appointment_of(bob.user_id).map(|found| found.by),
+        Some(second.user_id)
+      );
+    }
+
+    #[test]
+    fn a_snapshot_from_before_appointments_were_recorded_claims_nothing() {
+      let alice = Person::new(1);
+      let json = format!(
+        r#"{{"version":1,"is_workspace_anchored":true,"assignments":[{{"user_id":"{}","role":"admin","identity_key":"AAAA"}}],"cursor":1}}"#,
+        alice.user_id
+      );
+      let state: ChannelRoleState = serde_json::from_str(&json).expect("an older stored state");
+      assert_eq!(state.role_of(alice.user_id), ChannelRole::Admin);
+      assert_eq!(state.appointment_of(alice.user_id), None);
+    }
+
+    #[test]
+    fn an_authority_a_newer_build_wrote_reads_as_unknown_and_is_not_shown() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let state = founded(
+        &world,
+        &admin,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      let json = serde_json::to_string(&state)
+        .expect("serializes")
+        .replace("WorkspaceAdmin", "SomethingFromTheFuture");
+      let read: ChannelRoleState = serde_json::from_str(&json).expect("the rest of the state still reads");
+      assert_eq!(read.role_of(bob.user_id), ChannelRole::Admin);
+      assert!(
+        read
+          .appointments
+          .iter()
+          .any(|found| found.authority == AppointmentAuthority::Unknown)
+      );
+      assert_eq!(read.appointment_of(bob.user_id), None);
     }
   }
 
