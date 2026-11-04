@@ -405,6 +405,11 @@ pub struct CallPrefs {
   pub noise_suppression: bool,
   pub echo_cancellation: bool,
   pub push_to_talk: bool,
+  /// Desktop: a global shortcut mutes and unmutes the microphone during a call (off until the
+  /// user turns it on).
+  pub mute_shortcut_enabled: bool,
+  /// The shortcut, as a Tauri accelerator (`CommandOrControl+Shift+M`).
+  pub mute_shortcut: String,
   /// Screen shares include the computer's sound (off until the user turns it on).
   pub share_sound: bool,
   /// The preview of the own screen share stays collapsed (#1175): whoever hid it for their own
@@ -433,6 +438,8 @@ impl Default for CallPrefs {
       noise_suppression: true,
       echo_cancellation: true,
       push_to_talk: false,
+      mute_shortcut_enabled: false,
+      mute_shortcut: crate::mute_shortcut::DEFAULT_SHORTCUT.to_owned(),
       share_sound: false,
       hide_share_preview: false,
       screen_mode: teamcraft_client_api::calls::ScreenContentMode::Detail,

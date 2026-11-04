@@ -77,6 +77,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::AudioVideo, "calls-noise"),
   (SettingsTab::AudioVideo, "calls-echo"),
   (SettingsTab::AudioVideo, "calls-ptt"),
+  (SettingsTab::AudioVideo, "calls-mute-shortcut"),
   (SettingsTab::AudioVideo, "calls-status-sounds"),
   (SettingsTab::AudioVideo, "calls-background"),
   (SettingsTab::Devices, "settings-device-this"),
@@ -110,6 +111,7 @@ const DESKTOP_APP_ONLY: &[&str] = &[
   "notif-ringtone",
   "notif-call-window",
   "settings-updates",
+  "calls-mute-shortcut",
 ];
 
 /// One search hit: where it is and what it is called.
@@ -189,6 +191,7 @@ mod tests {
       include_str!("settings_notifications.rs"),
       include_str!("settings_security.rs"),
       include_str!("settings_tabs.rs"),
+      include_str!("../mute_shortcut.rs"),
     ]
     .concat();
     for (_, key) in ENTRIES {

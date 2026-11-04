@@ -73,6 +73,7 @@ pub mod message_sounds;
 #[cfg(any(test, feature = "demo"))]
 pub mod mock;
 pub mod motion;
+pub mod mute_shortcut;
 pub mod navigation;
 pub mod notetaker;
 pub mod notification_pictures;
