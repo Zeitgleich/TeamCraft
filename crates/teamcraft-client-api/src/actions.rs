@@ -7,7 +7,7 @@
 //! come from [`crate::backend::ChatBackend::message_extras`] for the rows on screen.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey};
+use teamcraft_proto::{CategoryId, ClientMessageId, HistoryPolicy, IdempotencyKey};
 
 use crate::model::{
   ConversationId, ImportedAuthorView, Message, MessageId, SpaceId, ThreadId, TimestampMs, UserId,
@@ -28,6 +28,11 @@ pub enum MessagePriority {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OutgoingMessage {
   pub conversation: ConversationId,
+  /// The ID the sender picked for the message, when the UI shows it before the core answers (issue
+  /// #778): the core keeps it, so the row shown and the message in the outbox are the same one
+  /// ([`crate::model::pending_message_id`]), and sending the same ID twice stores it once.
+  #[serde(default)]
+  pub maybe_client_message_id: Option<ClientMessageId>,
   /// Thread reply when set.
   #[serde(default)]
   pub maybe_thread: Option<ThreadId>,

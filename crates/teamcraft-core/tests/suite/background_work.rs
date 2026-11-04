@@ -195,6 +195,7 @@ fn pending(peer: &Peer) -> PendingWork {
 
 fn text(conversation: ConversationId, body: &str) -> OutgoingMessage {
   OutgoingMessage {
+    maybe_client_message_id: None,
     conversation,
     maybe_thread: None,
     body: body.into(),

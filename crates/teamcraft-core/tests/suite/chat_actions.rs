@@ -24,6 +24,7 @@ async fn replies_priority_and_acknowledgements() {
   let question = last(&alice_ui, channel);
 
   alice_ui.send_message(OutgoingMessage {
+    maybe_client_message_id: None,
     maybe_reply_to: Some(question.id),
     priority: MessagePriority::Urgent,
     wants_acknowledgement: true,
@@ -159,6 +160,7 @@ async fn pins_forwards_and_channel_copies_of_thread_replies() {
 
   bob_ui.forward_message(channel, plan.id, other, "fyi");
   bob_ui.send_message(OutgoingMessage {
+    maybe_client_message_id: None,
     maybe_thread: Some(thread_id_of(plan.id)),
     also_send_to_channel: true,
     ..outgoing(channel, "agreed, also for everyone")
@@ -374,6 +376,7 @@ async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
 
 fn outgoing(conversation: ConversationId, body: &str) -> OutgoingMessage {
   OutgoingMessage {
+    maybe_client_message_id: None,
     conversation,
     maybe_thread: None,
     body: body.into(),

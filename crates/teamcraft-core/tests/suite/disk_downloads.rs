@@ -290,6 +290,7 @@ impl Setup {
     settle(&mut [&mut alice, &mut bob]).await;
     let alice_ui = backend_of(&alice);
     alice_ui.send_message(OutgoingMessage {
+      maybe_client_message_id: None,
       conversation: channel,
       maybe_thread: None,
       body: String::new(),

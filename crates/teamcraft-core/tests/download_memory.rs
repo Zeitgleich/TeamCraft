@@ -49,6 +49,7 @@ async fn a_large_file_comes_down_a_piece_at_a_time() {
   write_sample(&source);
   let ui = backend_of(&alice);
   ui.send_message(OutgoingMessage {
+    maybe_client_message_id: None,
     conversation: channel,
     maybe_thread: None,
     body: String::new(),

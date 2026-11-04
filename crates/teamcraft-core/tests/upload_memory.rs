@@ -42,6 +42,7 @@ async fn a_large_file_goes_up_one_part_at_a_time() {
 
   let ui = backend_of(&alice);
   ui.send_message(OutgoingMessage {
+    maybe_client_message_id: None,
     conversation: channel,
     maybe_thread: None,
     body: String::new(),
