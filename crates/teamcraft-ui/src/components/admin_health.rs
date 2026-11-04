@@ -38,6 +38,11 @@ fn HealthContent(health: AdminHealthResponse) -> impl IntoView {
   let state = use_app_state();
   let now = now_ms();
   let open_alerts = health.open_alert_count();
+  let failing = health
+    .checks
+    .iter()
+    .filter(|check| check.status == HealthCheckStatus::Failing)
+    .count();
   let is_alerting_enabled = health.is_alerting_enabled;
   let hold_minutes = usize::try_from(health.hold_secs / 60).unwrap_or(usize::MAX);
   let checked = health.maybe_checked_at;
@@ -45,6 +50,8 @@ fn HealthContent(health: AdminHealthResponse) -> impl IntoView {
   let alerts = health.alerts.clone();
   let (summary_class, summary_icon) = if open_alerts > 0 {
     ("health-summary health-summary-alert", IconName::Alert)
+  } else if failing > 0 {
+    ("health-summary health-summary-failing", IconName::Alert)
   } else {
     ("health-summary", IconName::Check)
   };
@@ -57,6 +64,8 @@ fn HealthContent(health: AdminHealthResponse) -> impl IntoView {
           {move || {
             if open_alerts > 0 {
               i18n.t_count("health-summary-alerts", open_alerts)
+            } else if failing > 0 {
+              i18n.t_count("health-summary-failing", failing)
             } else {
               i18n.t("health-summary-ok")
             }

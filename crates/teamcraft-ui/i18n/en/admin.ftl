@@ -835,6 +835,10 @@ admin-health-title = System health
 admin-health-subtitle = Whether the server, its backends and its backups are working. Names, states and times only: nothing from any conversation.
 health-loading = Loading the checks…
 health-summary-ok = All checks pass.
+health-summary-failing = { $count ->
+    [one] One check is failing. It is not an alert yet.
+   *[other] { $count } checks are failing. They are not alerts yet.
+}
 health-summary-alerts = { $count ->
     [one] One check needs attention.
    *[other] { $count } checks need attention.

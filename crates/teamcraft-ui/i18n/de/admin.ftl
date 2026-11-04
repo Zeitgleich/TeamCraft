@@ -835,6 +835,10 @@ admin-health-title = Systemzustand
 admin-health-subtitle = Ob der Server, seine Dienste und seine Backups funktionieren. Nur Namen, Zustände und Zeiten: nichts aus einer Unterhaltung.
 health-loading = Prüfungen werden geladen …
 health-summary-ok = Alle Prüfungen sind in Ordnung.
+health-summary-failing = { $count ->
+    [one] Eine Prüfung schlägt fehl. Das ist noch keine Warnung.
+   *[other] { $count } Prüfungen schlagen fehl. Das sind noch keine Warnungen.
+}
 health-summary-alerts = { $count ->
     [one] Eine Prüfung braucht Aufmerksamkeit.
    *[other] { $count } Prüfungen brauchen Aufmerksamkeit.

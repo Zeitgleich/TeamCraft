@@ -626,7 +626,7 @@ settings-f-apple_bundle_id = iOS-Bundle-ID
 
 settings-unit-percent = %
 settings-group-health_alerts = Systemwarnungen
-settings-group-health_alerts-hint = Wann die Prüfungen des Systemzustands Admins und Eigentümer benachrichtigen. Eine Prüfung muss die erste Zeit unten ununterbrochen fehlschlagen, bevor sie zählt, und eine Warnung endet, sobald die Prüfung die zweite Zeit lang in Ordnung war. Ein Neustart oder eine langsame Antwort löst nichts aus.
+settings-group-health_alerts-hint = Wann die Prüfungen des Systemzustands Admins und Eigentümer benachrichtigen. Eine Prüfung muss so lange ununterbrochen fehlschlagen, wie im ersten Feld steht, bevor Admins Bescheid bekommen; eine Warnung endet, wenn die Prüfung so lange in Ordnung war, wie im zweiten Feld steht. Ein Neustart oder eine langsame Antwort löst nichts aus.
 settings-f-hold_secs = Eine Prüfung muss fehlschlagen für
 settings-f-clear_secs = Eine Warnung endet, wenn die Prüfung in Ordnung war für
 settings-f-backup_max_age_secs = Das letzte Backup ist zu alt nach

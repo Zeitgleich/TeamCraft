@@ -17,6 +17,8 @@
   background: var(--danger-soft);
 }
 .health-summary-alert .icon { color: var(--danger); }
+.health-summary-failing { border-color: var(--warn-text); background: var(--warn-soft); }
+.health-summary-failing .icon { color: var(--warn-text); }
 
 .health-checks,
 .health-alert-list {

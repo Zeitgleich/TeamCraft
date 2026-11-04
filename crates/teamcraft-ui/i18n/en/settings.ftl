@@ -626,7 +626,7 @@ settings-f-apple_bundle_id = iOS bundle ID
 
 settings-unit-percent = %
 settings-group-health_alerts = Health alerts
-settings-group-health_alerts-hint = When the system health checks tell admins and owners. A check must keep failing for the first time below before it counts, and an alert ends once the check has been fine for the second. A restart or a slow answer raises nothing.
+settings-group-health_alerts-hint = When the system health checks tell admins and owners. A check must fail without a break for the first time below before admins are told; an alert ends once the check has been fine for the second. A restart or a slow answer raises nothing.
 settings-f-hold_secs = A check must fail for
 settings-f-clear_secs = An alert ends after the check was fine for
 settings-f-backup_max_age_secs = The last backup is too old after
