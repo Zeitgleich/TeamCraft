@@ -195,9 +195,6 @@ jobs:
       CARGO_PROFILE_DEV_STRIP: "debuginfo"
       DATABASE_URL: postgres://teamcraft:ci-only@postgres:5432/teamcraft
       TEST_DATABASE_REQUIRED: "true"
-      # The test thread polls the whole test body, and in a debug build the futures of the bridge's
-      # end-to-end tests don't fit the default 2 MiB (as in scripts/e2e.sh).
-      RUST_MIN_STACK: "16777216"
     steps:
       - name: Let UDP sockets have the receive buffers they ask for
         # The SFU tests' calls ask for 4 MiB, as a deployed SFU should get (docs/operations.md).
@@ -217,6 +214,11 @@ jobs:
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
       - name: Test
+        env:
+          # The test thread polls the whole test body, and in a debug build the futures of the bridge's
+          # end-to-end tests don't fit the default 2 MiB (as in scripts/e2e.sh). Set here, not on the
+          # job: rust-cache hashes the job's RUST* variables into its key, and would miss main's cache.
+          RUST_MIN_STACK: "16777216"
         run: cargo nextest run --workspace --profile ci --features teamcraft-server/integration,teamcraft-db/integration
       - name: Doctests
         run: cargo test --workspace --doc
