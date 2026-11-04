@@ -31,6 +31,7 @@ pub mod key_bag;
 pub mod key_packages;
 pub mod local_accounts;
 pub mod mail_settings;
+pub mod meeting_admitters;
 pub mod meeting_controls;
 pub mod meeting_guests;
 pub mod meeting_occurrences;

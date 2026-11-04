@@ -606,6 +606,25 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.is_open_by_own_record(meeting)
   }
 
+  fn sync_meeting_admitters(
+    &self,
+    meeting: teamcraft_proto::MeetingId,
+    conversation: ConversationId,
+    expires_at_ms: i64,
+  ) {
+    self
+      .chat
+      .sync_meeting_admitters(meeting, conversation, expires_at_ms);
+  }
+
+  fn check_meeting_admission(&self, conversation: ConversationId) {
+    self.chat.check_meeting_admission(conversation);
+  }
+
+  fn admits_link_arrivals(&self, conversation: ConversationId, now_ms: i64) -> bool {
+    self.chat.admits_link_arrivals(conversation, now_ms)
+  }
+
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {
     self.chat.discard_removal(conversation, user);
   }

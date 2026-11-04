@@ -977,6 +977,14 @@ pub enum ChatAction {
     meeting: teamcraft_proto::MeetingId,
     has_lobby: bool,
   },
+  SyncMeetingAdmitters {
+    meeting: teamcraft_proto::MeetingId,
+    conversation: ConversationId,
+    expires_at_ms: i64,
+  },
+  CheckMeetingAdmission {
+    conversation: ConversationId,
+  },
   SetBookmarks {
     conversation: ConversationId,
     bookmarks: Vec<crate::model::Bookmark>,
@@ -1328,6 +1336,12 @@ impl ChatAction {
       } => backend.let_guest_into_meeting_chat(conversation, guest, knock_fingerprint, access_ends_at_ms),
       Self::PrepareGuestKeyCode { guest } => backend.prepare_guest_key_code(guest),
       Self::NoteMeetingLobby { meeting, has_lobby } => backend.note_meeting_lobby(meeting, has_lobby),
+      Self::SyncMeetingAdmitters {
+        meeting,
+        conversation,
+        expires_at_ms,
+      } => backend.sync_meeting_admitters(meeting, conversation, expires_at_ms),
+      Self::CheckMeetingAdmission { conversation } => backend.check_meeting_admission(conversation),
       Self::SetBookmarks {
         conversation,
         bookmarks,
@@ -1450,6 +1464,10 @@ pub enum ChatQuery {
   },
   IsOpenByOwnRecord {
     meeting: teamcraft_proto::MeetingId,
+  },
+  AdmitsLinkArrivals {
+    conversation: ConversationId,
+    now_ms: i64,
   },
   MembershipIssues {
     conversation: ConversationId,
@@ -1763,6 +1781,9 @@ impl ChatQuery {
       },
       Self::IsOpenByOwnRecord { meeting } => ChatAnswer::Flag {
         value: backend.is_open_by_own_record(meeting),
+      },
+      Self::AdmitsLinkArrivals { conversation, now_ms } => ChatAnswer::Flag {
+        value: backend.admits_link_arrivals(conversation, now_ms),
       },
       Self::IsWaitingForDevice { conversation } => ChatAnswer::Flag {
         value: backend.is_waiting_for_device(conversation),

@@ -45,6 +45,8 @@ wire_enum! {
     BackgroundNotFound => "background_not_found",
     CallNotFound => "call_not_found",
     MeetingNotFound => "meeting_not_found",
+    /// The organizer published no signed list of who may let guests in yet (e2ee.md §4.6).
+    MeetingAdmittersNotFound => "meeting_admitters_not_found",
     BotNotFound => "bot_not_found",
     AvatarNotFound => "avatar_not_found",
     SpaceImageNotFound => "space_image_not_found",
@@ -305,6 +307,7 @@ mod tests {
       ErrorCode::BackgroundNotFound,
       ErrorCode::CallNotFound,
       ErrorCode::MeetingNotFound,
+      ErrorCode::MeetingAdmittersNotFound,
       ErrorCode::BotNotFound,
       ErrorCode::AvatarNotFound,
       ErrorCode::SpaceImageNotFound,

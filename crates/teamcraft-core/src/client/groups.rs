@@ -1152,9 +1152,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .await?;
     let group_devices = self.group_device_ids(conversation)?;
     let group_users: BTreeSet<UserId> = self.group_users(conversation)?.into_iter().collect();
+    // A guest's device adds further devices of its own user only: the members refuse a guest's
+    // commit that touches anybody else (e2ee.md §4.6, "What a guest may commit", #1077), so
+    // committing another member's new device here would split the group. The members add it.
+    let maybe_only = if self.is_seen_as_guest().await? {
+      Some(self.account.user_id)
+    } else {
+      None
+    };
     let mut key_packages = Vec::new();
     let mut recipients = Vec::new();
     for member in &members.members {
+      if maybe_only.is_some_and(|only| only != member.user.id) {
+        continue;
+      }
       // Only further devices of users in the group go in without a signed change. A user the
       // server still lists but who has no device here is being removed (the server's membership
       // goes after the MLS removal) or not added yet: claiming their key packages would waste them.
@@ -1516,6 +1527,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     if message.kind == MlsMessageKind::Commit {
       self.refresh_channel_roles_for_commit(conversation).await;
+      if let Some(signer) = teamcraft_crypto::mls::users_named_in_change(message.payload.as_slice()).last() {
+        let signer = convert::user_from_crypto(*signer)?;
+        self
+          .refresh_meeting_admitters_for_commit(conversation, signer)
+          .await;
+      }
     }
     let authority = self.group_authority(conversation, at_ms)?;
     let group = self
@@ -1775,6 +1792,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // This device's own decision to commit; the members check the commit at the server's time.
       // With the channel roles it has just read, as they will judge it.
       self.refresh_channel_roles_for_commit(conversation).await;
+      let me = self.account.user_id;
+      self.refresh_meeting_admitters_for_commit(conversation, me).await;
       let authority = self.group_authority(conversation, self.now_ms())?;
       let group = self
         .groups
@@ -3134,15 +3153,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .like_before_v1_0_9(self.is_checking_as_before_v1_0_9);
     if is_meeting_chat {
       // In a meeting chat only the roster's members manage others: a guest the server calls a
-      // member still doesn't (the organizer is in the roster like any member).
-      authority = authority.for_meeting_chat(
-        workspace
-          .roster
-          .members
-          .iter()
-          .map(|member| member.user_id)
-          .chain(maybe_organizer),
-      );
+      // member still doesn't (the organizer is in the roster like any member). The admitters the
+      // organizer signed let guests in besides (#1103).
+      authority = authority
+        .for_meeting_chat(
+          workspace
+            .roster
+            .members
+            .iter()
+            .map(|member| member.user_id)
+            .chain(maybe_organizer),
+        )
+        .with_meeting_admitters(self.meeting_admitters_at(conversation, at_ms)?);
     }
     Ok(authority)
   }
@@ -3431,6 +3453,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     request: &[u8],
   ) -> Result<bool, CoreError> {
     if !self.has_group(conversation)? {
+      return Ok(true);
+    }
+    // Adding back another user's device is a commit the members refuse from a guest (e2ee.md
+    // §4.6, "What a guest may commit", #1077): left to them, who queued the request as well.
+    if user != self.account.user_id && self.is_seen_as_guest().await? {
+      tracing::info!(conversation_id = %conversation, "left a rejoin request to the members: this user is a guest");
       return Ok(true);
     }
     // Another member may have answered meanwhile.

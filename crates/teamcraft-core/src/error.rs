@@ -51,6 +51,8 @@ pub enum CoreError {
   Membership(#[from] MembershipError),
   #[error("device list: {0}")]
   DeviceList(#[from] teamcraft_crypto::device_list::DeviceListError),
+  #[error("meeting admitters: {0}")]
+  MeetingAdmitters(#[from] teamcraft_crypto::meeting_admitters::MeetingAdmittersError),
   #[error("channel roles: {0}")]
   ChannelRoles(#[from] crate::channel_roles::ChannelRoleError),
   #[error("this device is not enrolled yet")]
@@ -364,10 +366,11 @@ pub enum GuestRefusal {
   /// The server offers another identity key for the guest than the one pinned before.
   #[error("the guest's identity key changed while they were let in")]
   KeyChanged,
-  /// Only the meeting organizer's devices let guests into the encryption: a guest accepts a
-  /// welcome from nobody else (the fingerprint in the link).
-  #[error("only the organizer's devices can let guests in")]
-  NotOrganizer,
+  /// Only the meeting organizer's devices and those of the admitters the organizer signed let
+  /// guests into the encryption: a guest accepts a welcome from nobody else (the fingerprint in the
+  /// link, and the admitters it signed).
+  #[error("only the organizer's devices and the admitters the organizer named can let guests in")]
+  NotAnAdmitter,
   /// The key the server presents for the guest is not the one their page reported with its device.
   #[error("the guest's identity key is not the one their device reported")]
   NotTheKnockingKey,

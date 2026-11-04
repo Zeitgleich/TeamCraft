@@ -486,11 +486,17 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn end_writes(&self) -> Result<(), StoreError> {
+    // The group may be rolled back: the cache may then hold writes the disk doesn't. That holds for
+    // a panic out of the inner store too (its catalog flush rolls the group back and resumes the
+    // panic), which skips everything after the call; the guard forgets the cache on the way out
+    // (issue #1201). The cache doesn't follow lost writes by itself (`MessageCache::follow_disk`),
+    // so a client reopened on this store after the panic would read the rolled-back messages.
+    let mut guard = ForgetOnFailure {
+      messages: &self.messages,
+      is_armed: true,
+    };
     let ended = self.inner.end_writes();
-    if ended.is_err() {
-      // The group may have been rolled back: the cache may hold writes the disk doesn't.
-      self.cache().forget_all();
-    }
+    guard.is_armed = ended.is_err();
     ended
   }
 
@@ -508,6 +514,27 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
 
   fn lost_deletes(&self, table: Table) -> Vec<String> {
     self.inner.lost_deletes(table)
+  }
+}
+
+/// Forgets the message cache when dropped while armed: [`TrackedStore::end_writes`] disarms it
+/// once the group committed, and an error or a panic leaves it armed. A drop guard rather than
+/// `catch_unwind`, which the browser build (panics abort there) can't use anyway.
+struct ForgetOnFailure<'a> {
+  messages: &'a Mutex<MessageCache>,
+  is_armed: bool,
+}
+
+impl Drop for ForgetOnFailure<'_> {
+  fn drop(&mut self) {
+    if self.is_armed {
+      // Invariant-free data, as in `TrackedStore::cache`.
+      self
+        .messages
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .forget_all();
+    }
   }
 }
 

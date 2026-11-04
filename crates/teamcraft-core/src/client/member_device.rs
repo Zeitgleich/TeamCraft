@@ -607,11 +607,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<bool, CoreError> {
     // A guest holds the organizer's key from the link, which no server saw. The group is accepted
     // only if the device that added the guest (the welcome's sender) is a device the organizer's
-    // identity key signed: a group the server made with devices of its own, even one holding the
-    // organizer's published key package, comes from one of those and fails here. A guest device
-    // with no anchor joins nothing, and one that joins by external commit (no welcome sender)
-    // neither. The check looks at the sender, not at where a leaf sits in the tree.
-    // e2ee.md §4.6, "Meeting guests".
+    // identity key signed, or a device of an admitter that key signed for the meeting (#1103): a
+    // group the server made with devices of its own, even one holding the organizer's published
+    // key package, comes from neither and fails here. A guest device with no anchor joins nothing,
+    // and one that joins by external commit (no welcome sender) neither. The check looks at the
+    // sender, not at where a leaf sits in the tree. e2ee.md §4.6, "Meeting guests".
     if self.is_guest_device()? {
       let Some(anchor) = self.guest_organizer_anchor(conversation)? else {
         tracing::warn!(conversation_id = %conversation, "a guest's device was offered a group without the organizer's key from a link; dropped");
@@ -621,11 +621,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         tracing::warn!(conversation_id = %conversation, "a guest's device was offered a group without a welcome from the organizer; dropped");
         return Ok(false);
       };
-      let is_organizers = group
-        .verified_member(sender, directory)?
-        .is_some_and(|device| device.identity_key().fingerprint().to_string() == anchor);
-      if !is_organizers {
-        tracing::warn!(conversation_id = %conversation, "the guest's welcome did not come from the organizer's key in the link; dropped");
+      let Some(device) = group.verified_member(sender, directory)? else {
+        tracing::warn!(conversation_id = %conversation, "the guest's welcome came from no member of the group; dropped");
+        return Ok(false);
+      };
+      let is_organizers = device.identity_key().fingerprint().to_string() == anchor;
+      if !is_organizers
+        && !self
+          .is_signed_admitters_device(conversation, &anchor, &device)
+          .await?
+      {
+        tracing::warn!(conversation_id = %conversation, "the guest's welcome came neither from the organizer's key in the link nor from an admitter it signed; dropped");
         return Ok(false);
       }
     }

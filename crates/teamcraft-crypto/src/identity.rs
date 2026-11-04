@@ -96,6 +96,8 @@ pub enum IdentityError {
   InvalidPublicKey,
   #[error("device certificate is for a different device key than the presented one")]
   DeviceKeyMismatch,
+  #[error("an identity key fingerprint is 64 hex digits")]
+  InvalidFingerprint,
   #[error("encoding failed: {0}")]
   Encoding(#[from] tls_codec::Error),
 }
@@ -208,6 +210,26 @@ impl fmt::Debug for IdentityPublicKey {
 impl IdentityFingerprint {
   pub fn as_bytes(&self) -> &[u8; 32] {
     &self.0
+  }
+}
+
+/// The fingerprint from its hex form (64 digits, either case), as a meeting link's `v` carries it.
+impl std::str::FromStr for IdentityFingerprint {
+  type Err = IdentityError;
+
+  fn from_str(hex: &str) -> Result<Self, Self::Err> {
+    let digits = hex.as_bytes();
+    if digits.len() != 64 {
+      return Err(IdentityError::InvalidFingerprint);
+    }
+    let mut bytes = [0u8; 32];
+    let (pairs, _) = digits.as_chunks::<2>();
+    for (byte, [high, low]) in bytes.iter_mut().zip(pairs) {
+      let high = hex_digit(*high).ok_or(IdentityError::InvalidFingerprint)?;
+      let low = hex_digit(*low).ok_or(IdentityError::InvalidFingerprint)?;
+      *byte = (high << 4) | low;
+    }
+    Ok(Self(bytes))
   }
 }
 
@@ -468,6 +490,12 @@ fn hex(bytes: &[u8]) -> String {
   bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn hex_digit(digit: u8) -> Option<u8> {
+  char::from(digit)
+    .to_digit(16)
+    .and_then(|value| u8::try_from(value).ok())
+}
+
 #[cfg(test)]
 mod tests {
   use rand_core::OsRng;
@@ -522,6 +550,26 @@ mod tests {
     assert_eq!(first.fingerprint(), first.fingerprint());
     assert_ne!(first.fingerprint(), second.fingerprint());
     assert_eq!(first.fingerprint().to_string().len(), 64);
+  }
+
+  #[test]
+  fn fingerprints_read_back_from_hex_in_either_case() {
+    let fingerprint = IdentityKeyPair::generate(&mut OsRng).public_key().fingerprint();
+    let hex = fingerprint.to_string();
+    assert_eq!(hex.parse::<IdentityFingerprint>().unwrap(), fingerprint);
+    assert_eq!(
+      hex.to_ascii_uppercase().parse::<IdentityFingerprint>().unwrap(),
+      fingerprint
+    );
+    for bad in [
+      "",
+      "ab",
+      &hex[1..],
+      &format!("{hex}0"),
+      &format!("zz{}", &hex[2..]),
+    ] {
+      assert!(bad.parse::<IdentityFingerprint>().is_err(), "{bad}");
+    }
   }
 
   #[test]

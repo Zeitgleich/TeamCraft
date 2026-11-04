@@ -32,6 +32,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .routes(routes!(handlers::put_guest_device_handler))
     .routes(routes!(handlers::knock_by_link_handler))
     .routes(routes!(handlers::mark_guest_admitter_handler))
+    .routes(routes!(handlers::get_meeting_admitters_handler, handlers::put_meeting_admitters_handler))
     .routes(routes!(handlers::renew_meeting_link_handler))
     .routes(routes!(handlers::get_lobby_entry_handler))
     .routes(routes!(handlers::admit_guest_handler))

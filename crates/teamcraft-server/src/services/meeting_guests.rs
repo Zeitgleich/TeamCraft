@@ -257,19 +257,27 @@ pub async fn knock(
   }
 }
 
-/// The guests waiting for a decision (hosts only).
+/// The guests waiting for a decision: all of them for hosts; for the other members of a meeting
+/// without a lobby, those who came with the meeting link, whom their devices let in by themselves
+/// where the organizer signed so (#1103, e2ee.md §4.6, "Meeting guests").
 pub async fn list_lobby(
   state: &AppState,
   caller: &AuthenticatedUser,
   id: MeetingId,
 ) -> Result<ListLobbyResponse, ApiError> {
-  let meeting = host_meeting(state, caller, id).await?;
-  let waiting = state.database.list_waiting(meeting.id).await?;
+  let (meeting, role) = lobby_meeting(state, caller, id).await?;
+  let by_link = state.database.lobby_by_link(meeting.id).await?;
+  let waiting: Vec<LobbyRow> = state
+    .database
+    .list_waiting(meeting.id)
+    .await?
+    .into_iter()
+    .filter(|row| role == LobbyRole::Host || by_link.contains(&row.user))
+    .collect();
   let users = state
     .database
     .get_users(&waiting.iter().map(|row| row.user).collect::<Vec<_>>())
     .await?;
-  let by_link = state.database.lobby_by_link(meeting.id).await?;
   let mut fingerprints = state.database.knock_fingerprints(meeting.id).await?;
   let with_devices = state
     .database
@@ -290,7 +298,10 @@ pub async fn list_lobby(
       })
     })
     .collect();
-  Ok(ListLobbyResponse { entries })
+  Ok(ListLobbyResponse {
+    entries,
+    is_host: role == LobbyRole::Host,
+  })
 }
 
 /// One guest's lobby entry, also after they were let in (hosts only).
@@ -552,14 +563,21 @@ pub async fn end_removed_guests(
   Ok(())
 }
 
-/// Lets a waiting guest into the meeting chat (hosts only).
+/// Lets a waiting guest into the meeting chat: hosts anybody; the other members of a meeting
+/// without a lobby whoever came with the meeting link (#1103), as the organizer's device does by
+/// itself. The encryption is the members' devices' own decision (e2ee.md §4.6, "Meeting guests").
 pub async fn admit(
   state: &AppState,
   caller: &AuthenticatedUser,
   id: MeetingId,
   guest: UserId,
 ) -> Result<(), ApiError> {
-  let meeting = host_meeting(state, caller, id).await?;
+  let (meeting, role) = lobby_meeting(state, caller, id).await?;
+  if role == LobbyRole::LinkAdmitter && !state.database.lobby_by_link(meeting.id).await?.contains(&guest) {
+    return Err(ApiError::Forbidden(
+      "only hosts let in who came without the meeting link".into(),
+    ));
+  }
   admit_guest(state, &meeting, guest, caller.user.id).await
 }
 
@@ -650,15 +668,30 @@ async fn admit_guest(
   Ok(())
 }
 
-/// Tells the hosts that somebody waits.
+/// Tells the hosts that somebody waits; in a meeting without a lobby also the chat's other members
+/// (no guests), whose devices may let people of the link in (#1103).
 async fn announce_waiting(
   state: &AppState,
   meeting: &StoredMeeting,
   guest: &AuthenticatedUser,
 ) -> Result<(), ApiError> {
-  let hosts = state.database.meeting_host_ids(meeting).await?;
+  let mut told = state.database.meeting_host_ids(meeting).await?;
+  if !meeting.has_lobby {
+    let members = state
+      .database
+      .conversation_member_ids(meeting.conversation)
+      .await?;
+    let members = state.database.get_users(&members).await?;
+    told.extend(
+      members
+        .iter()
+        .filter(|user| user.kind != UserKind::Guest && !told.contains(&user.id))
+        .map(|user| user.id)
+        .collect::<Vec<_>>(),
+    );
+  }
   state.hub.publish(
-    hosts,
+    told,
     &GatewayEvent::LobbyJoin {
       meeting_id: meeting.id,
       user: user_summary(state, &guest.user),
@@ -763,6 +796,43 @@ async fn host_meeting(
     return Err(ApiError::Conflict("the meeting is not scheduled".into()));
   }
   Ok(meeting)
+}
+
+/// How the caller may act on a meeting's lobby.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LobbyRole {
+  /// Organizer or chat admin: decides on everybody.
+  Host,
+  /// Another member (no guest) of a meeting without a lobby: may let in those who came with the
+  /// meeting link, as the organizer's device does by itself (#1103).
+  LinkAdmitter,
+}
+
+/// The meeting and the caller's [`LobbyRole`] in it. Guests and members of a meeting with a lobby
+/// who don't host it get "forbidden", strangers "not found" ([`host_meeting`]).
+async fn lobby_meeting(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: MeetingId,
+) -> Result<(StoredMeeting, LobbyRole), ApiError> {
+  match host_meeting(state, caller, id).await {
+    Ok(meeting) => Ok((meeting, LobbyRole::Host)),
+    Err(ApiError::Forbidden(reason)) => {
+      let meeting = state
+        .database
+        .get_meeting(id)
+        .await?
+        .ok_or_else(ApiError::meeting_not_found)?;
+      if is_guest(caller) || meeting.has_lobby {
+        return Err(ApiError::Forbidden(reason));
+      }
+      if meeting.status != MeetingStatus::Scheduled.as_str() {
+        return Err(ApiError::Conflict("the meeting is not scheduled".into()));
+      }
+      Ok((meeting, LobbyRole::LinkAdmitter))
+    },
+    Err(error) => Err(error),
+  }
 }
 
 /// Guests may stay until the meeting's end plus the grace time.

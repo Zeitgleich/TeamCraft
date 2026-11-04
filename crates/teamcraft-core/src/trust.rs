@@ -44,6 +44,9 @@ pub(crate) struct WorkspaceAuthority {
   /// In a meeting chat: the users the signed roster vouches for. Anybody else in the group is
   /// treated as a guest, whatever the server says their kind is.
   maybe_vouched_in_meeting: Option<HashSet<crypto::UserId>>,
+  /// In a meeting chat: the admitters the organizer signed (#1103). Though the roster doesn't
+  /// vouch for them, they let people in and take the guests out again.
+  meeting_admitters: HashSet<crypto::UserId>,
   self_join: AdminSelfJoin,
   is_public_channel: bool,
   /// The admins of the channel's signed role log (e2ee.md §4.6.1), once anything is signed for it;
@@ -127,6 +130,7 @@ impl WorkspaceAuthority {
       admins: admins.into_iter().map(convert::user).collect(),
       guests: HashSet::new(),
       maybe_vouched_in_meeting: None,
+      meeting_admitters: HashSet::new(),
       self_join,
       is_public_channel: false,
       maybe_signed_channel_admins: None,
@@ -148,6 +152,14 @@ impl WorkspaceAuthority {
     if !vouched.is_empty() {
       self.maybe_vouched_in_meeting = Some(vouched);
     }
+    self
+  }
+
+  /// For a meeting chat: the admitters the organizer signed and this device verified, in force at
+  /// the commit's time (e2ee.md §4.6, "Meeting guests"). They may add people, and remove guests
+  /// besides themselves, also where the roster doesn't vouch for them.
+  pub(crate) fn with_meeting_admitters(mut self, admitters: impl IntoIterator<Item = UserId>) -> Self {
+    self.meeting_admitters = admitters.into_iter().map(convert::user).collect();
     self
   }
 
@@ -189,11 +201,13 @@ impl MembershipAuthority for WorkspaceAuthority {
       .as_ref()
       .is_some_and(|vouched| !vouched.contains(&actor));
     if self.guests.contains(&actor) || is_unvouched {
+      // A guest is never an admitter, whatever a list says.
+      let is_admitter = !self.guests.contains(&actor) && self.meeting_admitters.contains(&actor);
       return match *action {
         MembershipAction::RemoveUser { user_id } | MembershipAction::RemoveDevice { user_id, .. } => {
-          user_id == actor
+          user_id == actor || (is_admitter && self.guests.contains(&user_id))
         },
-        MembershipAction::AddUser { .. } => false,
+        MembershipAction::AddUser { .. } => is_admitter,
       };
     }
     if self.members.contains(&actor) {
@@ -458,6 +472,33 @@ mod tests {
     assert!(!public.is_authorized(stranger, conversation, &add(other)));
     let private = WorkspaceAuthority::new([member], Vec::<UserId>::new(), AdminSelfJoin::Visible);
     assert!(!private.is_authorized(stranger, conversation, &add(stranger)));
+  }
+
+  /// #1103: in a meeting chat, an admitter the organizer signed adds people and takes guests out,
+  /// though the roster doesn't vouch for them; members off the list and guests still manage nobody
+  /// but themselves, and a guest on a list is no admitter.
+  #[test]
+  fn signed_meeting_admitters_let_guests_in_and_out() {
+    let (organizer, bob, carol, gus) = (admin(1), admin(2), admin(3), admin(4));
+    let conversation = crypto::ConversationId::new(9);
+    let user = convert::user;
+    let authority = WorkspaceAuthority::new(
+      [organizer, bob, carol, gus].map(user),
+      Vec::<UserId>::new(),
+      AdminSelfJoin::Visible,
+    )
+    .with_guests([gus])
+    .for_meeting_chat([organizer])
+    .with_meeting_admitters([bob, gus]);
+    let remove = |target| MembershipAction::RemoveUser { user_id: target };
+
+    assert!(authority.is_authorized(user(bob), conversation, &add(crypto::UserId::new(77))));
+    assert!(authority.is_authorized(user(bob), conversation, &remove(user(gus))));
+    assert!(!authority.is_authorized(user(bob), conversation, &remove(user(carol))));
+    assert!(!authority.is_authorized(user(carol), conversation, &add(crypto::UserId::new(77))));
+    assert!(!authority.is_authorized(user(gus), conversation, &add(crypto::UserId::new(77))));
+    assert!(authority.is_authorized(user(gus), conversation, &remove(user(gus))));
+    assert!(authority.is_authorized(user(organizer), conversation, &remove(user(carol))));
   }
 
   /// A roster admin with the ID `id`.

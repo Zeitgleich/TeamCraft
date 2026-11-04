@@ -1416,3 +1416,258 @@ mod scope_and_leaving {
     rig.app.stop().await;
   }
 }
+
+mod admitters {
+  use base64::Engine as _;
+  use base64::engine::general_purpose::STANDARD;
+  use rand_core::OsRng;
+  use teamcraft_crypto::identity::IdentityKeyPair;
+  use teamcraft_crypto::ids::{ConversationId, MeetingId};
+  use teamcraft_crypto::meeting_admitters::{AdmittersDraft, LinkAdmission};
+
+  use super::*;
+
+  #[tokio::test]
+  async fn the_organizer_publishes_admitters_that_members_and_admitted_guests_read() {
+    let rig = rig!();
+    let app = &rig.app;
+    let (alice, bob, eve) = (owner(), member("bob"), member("eve"));
+    let (meeting, chat) = rig.meeting_with(&alice, &bob, false).await;
+    let path = format!("/conversations/{chat}/meeting-admitters");
+    let organizer = IdentityKeyPair::generate(&mut OsRng);
+    let missing = app.get(&alice, &path).await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+    assert_eq!(missing.body["error_code"], "meeting_admitters_not_found");
+
+    let first = statement(&organizer, &meeting, &chat, 5);
+    assert_eq!(
+      app.put(&alice, &path, json!({"statement": first})).await.status,
+      StatusCode::NO_CONTENT
+    );
+
+    // Members of the chat read it as it was published; strangers don't learn the meeting exists.
+    let read = app.get(&bob, &path).await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(read.body["statement"], first.as_str());
+    assert_eq!(app.get(&eve, &path).await.status, StatusCode::NOT_FOUND);
+    // Only the organizer publishes.
+    assert_eq!(
+      app.put(&bob, &path, json!({"statement": first})).await.status,
+      StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+      app.put(&eve, &path, json!({"statement": first})).await.status,
+      StatusCode::NOT_FOUND
+    );
+
+    // A guest reads it once let in, never while waiting, and never publishes.
+    let token = rig.link_of(&alice, &meeting).await;
+    let (_, joined) = rig.join(&token, "Gus").await;
+    let guest_token = joined["guest_token"].as_str().unwrap().to_owned();
+    let as_guest = |method: Method, body: Option<Value>| {
+      let (rig, token, path) = (&rig, guest_token.clone(), path.clone());
+      async move { rig.request(Some(&token), method, &path, body).await }
+    };
+    assert_eq!(as_guest(Method::GET, None).await.0, StatusCode::NOT_FOUND);
+    rig.admit(&alice, &meeting, &joined).await;
+    let (status, body) = as_guest(Method::GET, None).await;
+    assert_eq!(
+      (status, body["statement"].as_str()),
+      (StatusCode::OK, Some(first.as_str()))
+    );
+    assert_eq!(
+      as_guest(Method::PUT, Some(json!({"statement": first}))).await.0,
+      StatusCode::FORBIDDEN
+    );
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_server_keeps_the_newest_and_refuses_malformed_admitters() {
+    let rig = rig!();
+    let app = &rig.app;
+    let (alice, bob) = (owner(), member("bob"));
+    let (meeting, chat) = rig.meeting_with(&alice, &bob, false).await;
+    let path = format!("/conversations/{chat}/meeting-admitters");
+    let organizer = IdentityKeyPair::generate(&mut OsRng);
+    let put = |statement: String| {
+      let (app, alice, path) = (&rig.app, alice.clone(), path.clone());
+      async move {
+        app
+          .put(&alice, &path, json!({"statement": statement}))
+          .await
+          .status
+      }
+    };
+    let newest = statement(&organizer, &meeting, &chat, 6);
+    assert_eq!(put(newest.clone()).await, StatusCode::NO_CONTENT);
+
+    // No rollback on the server: the same or an older sequence is refused, and the newest stays.
+    for sequence in [6, 5] {
+      assert_eq!(
+        put(statement(&organizer, &meeting, &chat, sequence)).await,
+        StatusCode::CONFLICT,
+        "{sequence}"
+      );
+    }
+    assert_eq!(app.get(&bob, &path).await.body["statement"], newest.as_str());
+
+    // Another meeting's or chat's list, a broken signature, garbage, and a sequence the database
+    // can't hold.
+    let mut tampered = STANDARD
+      .decode(statement(&organizer, &meeting, &chat, 9))
+      .unwrap();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 1;
+    for (bad, why) in [
+      (statement(&organizer, "1", &chat, 9), "another meeting"),
+      (statement(&organizer, &meeting, "1", 9), "another chat"),
+      (STANDARD.encode(tampered), "a broken signature"),
+      (STANDARD.encode([1, 2, 3]), "garbage"),
+      (
+        statement(&organizer, &meeting, &chat, u64::MAX),
+        "a sequence past i64",
+      ),
+    ] {
+      assert_eq!(put(bad).await, StatusCode::BAD_REQUEST, "{why}");
+    }
+    assert_eq!(app.get(&bob, &path).await.body["statement"], newest.as_str());
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn without_a_lobby_members_let_in_people_of_the_link_and_hear_them_knock() {
+    let rig = rig!();
+    let app = &rig.app;
+    let (alice, bob) = (owner(), member("bob"));
+    let bob_device = register_device(app, &bob).await;
+    let (meeting, _) = rig.meeting_with(&alice, &bob, false).await;
+    let mut bob_socket = ws::connect(app, &bob, &bob_device).await;
+    ws::events(&mut bob_socket, Duration::from_millis(300)).await;
+    let token = rig.link_of(&alice, &meeting).await;
+    let (_, by_link) = rig.join(&token, "Gus").await;
+    let one_time = rig.one_time_link(&alice, &meeting).await;
+    let (_, by_hand) = rig.join(&credential(&one_time), "Hanna").await;
+    let link_guest = by_link["user_id"].as_str().unwrap().to_owned();
+    let hand_guest = by_hand["user_id"].as_str().unwrap().to_owned();
+
+    let heard = events_of(&ws::events(&mut bob_socket, QUIET).await, "lobby_join");
+    assert!(
+      heard
+        .iter()
+        .any(|event| event["user"]["id"] == link_guest.as_str()),
+      "a member hears knocks in a meeting without a lobby: {heard:?}"
+    );
+    // Bob is no host: he sees only who came with the meeting link.
+    let lobby = app.get(&bob, &format!("/meetings/{meeting}/lobby")).await;
+    assert_eq!(lobby.status, StatusCode::OK, "{}", lobby.body);
+    assert_eq!(lobby.body["is_host"], false);
+    let listed: Vec<&str> = lobby.body["entries"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .filter_map(|entry| entry["user"]["id"].as_str())
+      .collect();
+    assert_eq!(listed, vec![link_guest.as_str()]);
+    assert_eq!(
+      app.get(&alice, &format!("/meetings/{meeting}/lobby")).await.body["is_host"],
+      true
+    );
+
+    let decide = |guest: String, decision: &'static str| {
+      let (app, bob, meeting) = (&rig.app, bob.clone(), meeting.clone());
+      async move {
+        app
+          .post(
+            &bob,
+            &format!("/meetings/{meeting}/lobby/{guest}/{decision}"),
+            json!({}),
+          )
+          .await
+          .status
+      }
+    };
+    assert_eq!(decide(hand_guest.clone(), "admit").await, StatusCode::FORBIDDEN);
+    assert_eq!(decide(link_guest, "admit").await, StatusCode::NO_CONTENT);
+    // Turning people away stays with the hosts.
+    assert_eq!(decide(hand_guest, "deny").await, StatusCode::FORBIDDEN);
+    rig.app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn with_a_lobby_only_hosts_see_and_decide() {
+    let rig = rig!();
+    let app = &rig.app;
+    let (alice, bob) = (owner(), member("bob"));
+    let (meeting, _) = rig.meeting_with(&alice, &bob, true).await;
+    let token = rig.link_of(&alice, &meeting).await;
+    let (_, joined) = rig.join(&token, "Gus").await;
+    let guest = joined["user_id"].as_str().unwrap();
+
+    assert_eq!(
+      app.get(&bob, &format!("/meetings/{meeting}/lobby")).await.status,
+      StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+      app
+        .post(
+          &bob,
+          &format!("/meetings/{meeting}/lobby/{guest}/admit"),
+          json!({})
+        )
+        .await
+        .status,
+      StatusCode::FORBIDDEN
+    );
+    rig.app.stop().await;
+  }
+
+  impl Rig {
+    /// Schedules a meeting of `organizer` with `invitee` and returns (meeting id, chat id).
+    async fn meeting_with(
+      &self,
+      organizer: &TestUser,
+      invitee: &TestUser,
+      has_lobby: bool,
+    ) -> (String, String) {
+      let invitee_id = user_id(&self.app, invitee).await;
+      let reply = self
+        .app
+        .post(
+          organizer,
+          "/meetings",
+          json!({
+            "title": "Sync", "starts_at": STARTS_AT, "ends_at": ENDS_AT, "has_lobby": has_lobby,
+            "invitees": [{"kind": "user", "user_id": invitee_id}],
+          }),
+        )
+        .await;
+      assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+      (
+        reply.id(),
+        reply.body["conversation_id"].as_str().unwrap().to_owned(),
+      )
+    }
+
+    /// The token of the meeting's link, as "Copy link" hands it out.
+    async fn link_of(&self, organizer: &TestUser, meeting: &str) -> String {
+      let reply = self.app.get(organizer, &format!("/meetings/{meeting}")).await;
+      link_token(reply.body["join_url"].as_str().unwrap())
+    }
+  }
+
+  /// A signed admitters statement for the meeting and chat (IDs as the API writes them), base64.
+  fn statement(organizer: &IdentityKeyPair, meeting: &str, chat: &str, sequence: u64) -> String {
+    let signed = AdmittersDraft {
+      meeting_id: MeetingId::new(meeting.parse().unwrap()),
+      conversation_id: ConversationId::new(chat.parse().unwrap()),
+      sequence,
+      expires_at_ms: u64::try_from(ENDS_AT).unwrap(),
+      link_admission: LinkAdmission::ByThemselves,
+      admitters: Vec::new(),
+    }
+    .sign(organizer)
+    .unwrap();
+    STANDARD.encode(signed.to_bytes().unwrap())
+  }
+}
