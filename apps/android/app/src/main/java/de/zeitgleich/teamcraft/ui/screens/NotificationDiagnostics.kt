@@ -303,14 +303,14 @@ private fun gapText(maybeGap: NotificationGap?): Int = when (maybeGap) {
   NotificationGap.NO_SESSION -> R.string.diagnostics_preview_no_session
   NotificationGap.NOT_DECRYPTED -> R.string.diagnostics_preview_not_decrypted
   NotificationGap.TIMED_OUT -> R.string.diagnostics_preview_timed_out
-  NotificationGap.NOT_SHOWABLE -> R.string.diagnostics_preview_not_showable
+  NotificationGap.NOT_SHOWABLE, NotificationGap.HIDDEN -> R.string.diagnostics_preview_not_showable
   NotificationGap.WORKSPACE_POLICY -> R.string.diagnostics_preview_policy
   NotificationGap.DEVICE_SETTING -> R.string.diagnostics_preview_setting
 }
 
 /** Shown less on purpose (a setting or policy, or nothing to show): not a fault. */
 private fun NotificationGap.isChosen(): Boolean =
-  this == NotificationGap.WORKSPACE_POLICY || this == NotificationGap.DEVICE_SETTING || this == NotificationGap.NOT_SHOWABLE
+  this == NotificationGap.WORKSPACE_POLICY || this == NotificationGap.DEVICE_SETTING || this == NotificationGap.NOT_SHOWABLE || this == NotificationGap.HIDDEN
 
 @StringRes
 private fun outcomeText(outcome: TestPushOutcome): Int = when (outcome) {

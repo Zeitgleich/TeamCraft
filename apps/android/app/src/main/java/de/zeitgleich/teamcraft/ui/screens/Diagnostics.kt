@@ -7,6 +7,7 @@ import android.widget.Toast
 import androidx.core.content.FileProvider
 import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.TeamCraftApplication
 import java.io.File
 import uniffi.teamcraft_ffi.diagnosticsText
 
@@ -25,7 +26,8 @@ fun exportDiagnostics(context: Context) {
   val shared = runCatching {
     val dir = File(context.cacheDir, DIAGNOSTICS_DIR).apply { mkdirs() }
     val file = File(dir, "teamcraft-diagnostics.txt")
-    file.writeText(diagnosticsText(BuildConfig.VERSION_NAME, osVersionLine()))
+    val pushPaths = TeamCraftApplication.graph(context).pushStats.summary()
+    file.writeText(diagnosticsText(BuildConfig.VERSION_NAME, osVersionLine()) + "\nNotification paths: $pushPaths\n")
     val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
     val intent = Intent(Intent.ACTION_SEND)
       .setType("text/plain")

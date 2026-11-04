@@ -24,6 +24,7 @@ mod bridge;
 #[cfg(feature = "browser")]
 mod cached_start;
 mod calls;
+mod client_outages;
 mod conversion;
 mod dependency_outages;
 mod deployed;

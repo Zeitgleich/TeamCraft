@@ -708,6 +708,26 @@ pub trait ChatBackend {
   fn can_sign_channel_roles(&self, _conversation: ConversationId) -> bool {
     false
   }
+  /// For a workspace admin whose signature here would vouch for roles this device can't vouch for:
+  /// what they look at, instead of signing one role. `None` for anybody else.
+  fn channel_roles_review(&self, _conversation: ConversationId) -> Option<crate::model::ChannelRolesReview> {
+    None
+  }
+  /// Signs exactly `roles`, as the workspace admin looked at them with the log at `at_cursor`
+  /// ([`crate::model::ChannelRolesReview::log_cursor`]); nothing changes on the server. Refused if
+  /// the log moved since.
+  fn sign_reviewed_channel_roles(
+    &self,
+    _conversation: ConversationId,
+    _roles: Vec<(UserId, crate::model::ChannelRole)>,
+    _at_cursor: u64,
+  ) {
+  }
+  /// Whether this device knows it can't verify part of the channel's role log: its signed roles
+  /// count for nothing until a workspace admin signs them again. The members section says so.
+  fn are_channel_roles_unverified(&self, _conversation: ConversationId) -> bool {
+    false
+  }
   /// The members of a space with their roles, as far as the user may see them.
   fn space_members(&self, _space: SpaceId) -> crate::model::SpaceRoster {
     crate::model::SpaceRoster::Loading

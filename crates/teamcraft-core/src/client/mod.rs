@@ -249,6 +249,10 @@ pub struct ClientSettings {
   pub signed_deletion_max_age: std::time::Duration,
   /// How far ahead of this device's clock a signed deletion may say it was signed.
   pub signed_deletion_clock_skew: std::time::Duration,
+  /// How far the dates of a channel role entry by somebody who has left the roster may lie outside
+  /// their tenure, for the clocks of the owner, the signer and the server (e2ee.md §4.6.1). Longer
+  /// gives a former admin that long after leaving on a device that hasn't read the log since.
+  pub role_tenure_clock_skew: std::time::Duration,
   /// More conversations than this claimed deleted within `suspect_deletion_window` are suspect,
   /// and the user is told once.
   pub suspect_deletion_count: usize,
@@ -439,6 +443,7 @@ impl Default for ClientSettings {
       deleted_conversation_retention: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       signed_deletion_max_age: std::time::Duration::from_secs(14 * 24 * 60 * 60),
       signed_deletion_clock_skew: std::time::Duration::from_secs(60 * 60),
+      role_tenure_clock_skew: std::time::Duration::from_secs(10 * 60),
       suspect_deletion_count: 5,
       suspect_deletion_percent: 50,
       suspect_deletion_window: std::time::Duration::from_secs(60 * 60),

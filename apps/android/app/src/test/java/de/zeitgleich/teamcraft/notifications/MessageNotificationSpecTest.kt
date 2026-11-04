@@ -8,6 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.teamcraft_ffi.NotificationContent
 import uniffi.teamcraft_ffi.NotificationGap
+import uniffi.teamcraft_ffi.NotificationSuppression
 import uniffi.teamcraft_ffi.PushNotificationKind
 
 class MessageNotificationSpecTest {
@@ -61,12 +62,12 @@ class MessageNotificationSpecTest {
 
   @Test
   fun aFilledInPlaceholderIsPostedForBridgesWithoutAlertingThePhone() {
-    val placeholder = direct(line("1000", "Alice", "New message").copy(isPlaceholder = true))
+    val placeholder = direct(line("1000", "Alice", "New message").copy(isPlaceholder = true, maybeArrivedAtMs = NOW))
     val filled = direct(line("1000", "Alice", "lunch?"))
-    assertEquals(NotificationAlerting.REFRESH, MessageNotificationSpecs.alerting(false, placeholder, filled))
-    assertEquals(NotificationAlerting.ALERT, MessageNotificationSpecs.alerting(true, placeholder, filled))
-    assertEquals(NotificationAlerting.SILENT, MessageNotificationSpecs.alerting(false, filled, filled))
-    assertEquals(NotificationAlerting.SILENT, MessageNotificationSpecs.alerting(false, null, filled))
+    assertEquals(NotificationAlerting.REFRESH, MessageNotificationSpecs.alerting(false, placeholder, filled, NOW))
+    assertEquals(NotificationAlerting.ALERT, MessageNotificationSpecs.alerting(true, placeholder, filled, NOW))
+    assertEquals(NotificationAlerting.SILENT, MessageNotificationSpecs.alerting(false, filled, filled, NOW))
+    assertEquals(NotificationAlerting.SILENT, MessageNotificationSpecs.alerting(false, null, filled, NOW))
   }
 
   @Test
@@ -212,7 +213,7 @@ class MessageNotificationSpecTest {
 
   @Test
   fun aPolicyOrSettingCutIsNotRetried() {
-    for (gap in listOf(NotificationGap.WORKSPACE_POLICY, NotificationGap.DEVICE_SETTING, NotificationGap.NOT_SHOWABLE, null)) {
+    for (gap in listOf(NotificationGap.WORKSPACE_POLICY, NotificationGap.DEVICE_SETTING, NotificationGap.NOT_SHOWABLE, NotificationGap.HIDDEN, null)) {
       val shown = PushDecisionTest.push(PushNotificationKind.MESSAGE).copy(maybeGap = gap)
       assertFalse(PushRetry.isWanted(shown, attempt = 1))
     }
@@ -223,7 +224,123 @@ class MessageNotificationSpecTest {
   @Test
   fun theRetriesWaitLonger() {
     assertEquals(30_000L, PushRetry.delayMs(1))
-    assertEquals(60_000L, PushRetry.delayMs(2))
+    assertEquals(120_000L, PushRetry.delayMs(2))
+    assertEquals(600_000L, PushRetry.delayMs(3))
+    assertEquals(3_600_000L, PushRetry.delayMs(PushRetry.MAX_ATTEMPTS))
+  }
+
+  @Test
+  fun aHoldHasABoundAndLongerInACar() {
+    assertEquals(20_000L, PushRetry.holdBoundMs(isInCar = false))
+    assertEquals(120_000L, PushRetry.holdBoundMs(isInCar = true))
+  }
+
+  /** Android Auto and bridges announce what alerts and isn't local-only: one alert, with the text. */
+  @Test
+  fun aHeldPlaceholderAlertsOnceItHasItsText() {
+    val filled = direct(line("1000", "Alice", "lunch?"))
+    assertEquals(NotificationAlerting.ALERT, MessageNotificationSpecs.alerting(false, held(NOW), filled, NOW))
+    assertEquals(NotificationAlerting.ALERT, MessageNotificationSpecs.alerting(false, held(NOW), filled, NOW, isInCar = true))
+  }
+
+  @Test
+  fun aPlaceholderThatAlertedStaysSilentOnThePhoneUnlessInACar() {
+    val alerted = direct(line("1000", "Alice", "New message").copy(isPlaceholder = true, maybeArrivedAtMs = NOW))
+    val filled = direct(line("1000", "Alice", "lunch?"))
+    assertEquals(NotificationAlerting.REFRESH, MessageNotificationSpecs.alerting(false, alerted, filled, NOW))
+    assertEquals(NotificationAlerting.ALERT, MessageNotificationSpecs.alerting(false, alerted, filled, NOW, isInCar = true))
+  }
+
+  /** A text that comes long after the message doesn't alert, in a car neither; bridges still get it. */
+  @Test
+  fun aLateTextNeverAlerts() {
+    val filled = direct(line("1000", "Alice", "lunch?"))
+    val late = NOW + 5 * 60_000L + 1
+    assertEquals(NotificationAlerting.REFRESH, MessageNotificationSpecs.alerting(false, held(NOW), filled, late))
+    assertEquals(NotificationAlerting.REFRESH, MessageNotificationSpecs.alerting(false, held(NOW), filled, late, isInCar = true))
+    // A restart: the clock it counts on began anew.
+    assertEquals(NotificationAlerting.REFRESH, MessageNotificationSpecs.alerting(false, held(NOW), filled, NOW - 1))
+  }
+
+  @Test
+  fun aSilentMessageOrAMuteKeepsAFilledInTextQuiet() {
+    val filled = direct(line("1000", "Alice", "lunch?"))
+    assertEquals(NotificationAlerting.REFRESH, MessageNotificationSpecs.alerting(false, held(NOW), filled, NOW, isSenderSilent = true))
+    assertEquals(NotificationAlerting.REFRESH, MessageNotificationSpecs.alerting(false, held(NOW), filled, NOW, isInCar = true, isSenderSilent = true))
+    assertEquals(NotificationAlerting.SILENT, MessageNotificationSpecs.alerting(false, held(NOW), filled, NOW, isSuppressed = true))
+  }
+
+  @Test
+  fun aHoldEndsByWhatIsKnownThen() {
+    val push = PushDecisionTest.push(PushNotificationKind.MESSAGE)
+    assertEquals(HoldEnd.ALERT, PushRetry.holdEnd(push, NOW, NOW, isAppVisible = false))
+    assertEquals(HoldEnd.ALERT, PushRetry.holdEnd(null, NOW, NOW, isAppVisible = false))
+    assertEquals(HoldEnd.DROP, PushRetry.holdEnd(push.copy(isRead = true), NOW, NOW, isAppVisible = false))
+    assertEquals(
+      HoldEnd.SILENT,
+      PushRetry.holdEnd(push.copy(maybeSuppression = NotificationSuppression.DO_NOT_DISTURB), NOW, NOW, isAppVisible = false),
+    )
+    assertEquals(HoldEnd.SILENT, PushRetry.holdEnd(push, NOW, NOW + 5 * 60_000L + 1, isAppVisible = false))
+    assertEquals(HoldEnd.SILENT, PushRetry.holdEnd(push, null, NOW, isAppVisible = false))
+    assertEquals(HoldEnd.SILENT, PushRetry.holdEnd(push, NOW, NOW, isAppVisible = true))
+  }
+
+  /** One re-post at most, and never a second alert for a post that got through. */
+  @Test
+  fun aLostPostIsPostedAgainAsWhatGotLost() {
+    val alerted = PostConfirm().after(10, NotificationAlerting.ALERT)
+    assertEquals(null, alerted.repostAs(10))
+    assertEquals(NotificationAlerting.ALERT, alerted.repostAs(9))
+
+    val thenSilent = alerted.after(11, NotificationAlerting.SILENT)
+    assertEquals(null, thenSilent.repostAs(11))
+    assertEquals(NotificationAlerting.ALERT, thenSilent.repostAs(9))
+    // The alert got through and only the silent update didn't: no second alert.
+    assertEquals(NotificationAlerting.SILENT, thenSilent.repostAs(10))
+
+    val refreshed = PostConfirm().after(20, NotificationAlerting.REFRESH).after(21, NotificationAlerting.SILENT)
+    assertEquals(NotificationAlerting.REFRESH, refreshed.repostAs(19))
+    assertEquals(NotificationAlerting.SILENT, refreshed.repostAs(20))
+    assertEquals(null, refreshed.repostAs(22))
+  }
+
+  @Test
+  fun aBurstShowsOneQuietNote() {
+    assertTrue(PushRetry.isQuietNoteDue(null, NOW))
+    assertFalse(PushRetry.isQuietNoteDue(NOW, NOW + 59_999))
+    assertTrue(PushRetry.isQuietNoteDue(NOW, NOW + 60_000))
+  }
+
+  @Test
+  fun aRepeatDoesNotBringBackALineThatWent() {
+    val line = line("1000", "Alice", "lunch?")
+    assertTrue(NotificationLines.isGone(emptyList(), line, isDuplicate = true))
+    assertFalse(NotificationLines.isGone(listOf(line), line, isDuplicate = true))
+    assertFalse(NotificationLines.isGone(emptyList(), line, isDuplicate = false))
+  }
+
+  /** Every gap has its counted path; only a placeholder may get a text later. */
+  @Test
+  fun everyGapIsCountedOnItsOwnPath() {
+    val push = PushDecisionTest.push(PushNotificationKind.MESSAGE)
+    val paths = NotificationGap.entries.associateWith { PushPath.of(push.copy(maybeGap = it)) }
+    assertEquals(PushPath.PLACEHOLDER_NO_SESSION, paths[NotificationGap.NO_SESSION])
+    assertEquals(PushPath.PLACEHOLDER_NOT_DECRYPTED, paths[NotificationGap.NOT_DECRYPTED])
+    assertEquals(PushPath.PLACEHOLDER_TIMED_OUT, paths[NotificationGap.TIMED_OUT])
+    assertEquals(PushPath.NOT_SHOWABLE, paths[NotificationGap.NOT_SHOWABLE])
+    assertEquals(PushPath.HIDDEN, paths[NotificationGap.HIDDEN])
+    assertEquals(PushPath.LIMITED, paths[NotificationGap.WORKSPACE_POLICY])
+    assertEquals(PushPath.LIMITED, paths[NotificationGap.DEVICE_SETTING])
+    assertEquals(PushPath.SHOWN, PushPath.of(push))
+  }
+
+  @Test
+  fun aLineThatWasNoMessageGoesAndATextStays() {
+    val placeholder = line("1000", "Alice", "New message").copy(isPlaceholder = true)
+    val text = line("2000", "Alice", "lunch?")
+    assertEquals(listOf(text), NotificationLines.withoutPlaceholder(listOf(placeholder, text), "1000"))
+    assertEquals(listOf(placeholder, text), NotificationLines.withoutPlaceholder(listOf(placeholder, text), "2000"))
+    assertTrue(NotificationLines.withoutPlaceholder(listOf(placeholder), "1000").isEmpty())
   }
 
   @Test
@@ -311,6 +428,11 @@ class MessageNotificationSpecTest {
 
     fun build(entry: ConversationNotification, privacy: MessagePrivacy, isAlerting: Boolean = true) =
       MessageNotificationSpecs.conversation(entry, privacy, isAlerting, LABELS)
+
+    const val NOW = 1_000_000L
+
+    fun held(arrivedAtMs: Long) =
+      direct(line("1000", "Alice", "New message").copy(isPlaceholder = true, isAlertHeld = true, maybeArrivedAtMs = arrivedAtMs))
 
     fun direct(vararg lines: NotificationLine) =
       ConversationNotification(conversationId = CONVERSATION, isVerified = true, isDirect = true, lines = lines.toList())

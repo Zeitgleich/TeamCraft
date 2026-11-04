@@ -142,6 +142,13 @@ struct State {
   broken_member_lists: HashSet<ConversationId>,
   /// Conversations whose read position writes answer 503.
   failing_read_positions: HashSet<ConversationId>,
+  /// Reads of the workspace logs answer 503: all of them, or only those from the start.
+  failing_workspace_log: Option<WorkspaceLogFailure>,
+  /// Reads of role logs of these channels answer 503.
+  failing_role_logs: HashSet<ConversationId>,
+  role_log_reads: HashMap<ConversationId, usize>,
+  /// The next append to a role log answers 409, as if another admin got there first.
+  is_next_role_append_in_conflict: bool,
   /// `PUT read-position` requests that arrived, to check that queued ones are sent once.
   read_position_writes: u64,
   /// Meetings cancelled through the API, in order.
@@ -422,6 +429,13 @@ struct KeyPackages {
   maybe_last_resort: Option<StoredKeyPackage>,
 }
 
+/// Which reads of the workspace logs fail ([`FakeServer::fail_workspace_log`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceLogFailure {
+  Every,
+  RosterFromTheStart,
+}
+
 /// A key package with its expiry on the server's clock.
 #[derive(Clone)]
 struct StoredKeyPackage {
@@ -647,6 +661,36 @@ impl FakeServer {
     } else {
       state.broken_member_lists.remove(&conversation);
     }
+  }
+
+  /// Makes reads of the channel's role log answer 503 (or work again).
+  pub fn fail_role_log(&self, conversation: ConversationId, is_failing: bool) {
+    let mut state = self.lock();
+    if is_failing {
+      state.failing_role_logs.insert(conversation);
+    } else {
+      state.failing_role_logs.remove(&conversation);
+    }
+  }
+
+  /// The next append to a role log answers 409, as if another admin got there first.
+  pub fn conflict_next_role_append(&self) {
+    self.lock().is_next_role_append_in_conflict = true;
+  }
+
+  /// How many requests read the channel's role log so far.
+  pub fn role_log_reads(&self, conversation: ConversationId) -> usize {
+    self
+      .lock()
+      .role_log_reads
+      .get(&conversation)
+      .copied()
+      .unwrap_or(0)
+  }
+
+  /// Makes reads of the workspace logs answer 503 (`None`: work again).
+  pub fn fail_workspace_log(&self, maybe_failure: Option<WorkspaceLogFailure>) {
+    self.lock().failing_workspace_log = maybe_failure;
   }
 
   /// Makes writes of the conversation's read position answer 503 (or work again).
@@ -4527,6 +4571,14 @@ impl ServerApi for FakeServerApi {
   ) -> Result<ListWorkspaceLogResponse, ApiError> {
     self.with(|state, _| {
       let after = query.maybe_after.unwrap_or(0);
+      let is_failing = match state.failing_workspace_log {
+        Some(WorkspaceLogFailure::Every) => true,
+        Some(WorkspaceLogFailure::RosterFromTheStart) => after == 0 && *kind == WorkspaceLogKind::Roster,
+        None => false,
+      };
+      if is_failing {
+        return Err(ApiError::status(503, ErrorCode::Unavailable, "try again later"));
+      }
       let limit = query
         .maybe_limit
         .map_or(PAGE_SIZE, |limit| limit as usize)
@@ -4598,6 +4650,10 @@ impl ServerApi for FakeServerApi {
     query: &teamcraft_proto::ListChannelRoleLogQuery,
   ) -> Result<teamcraft_proto::ListChannelRoleLogResponse, ApiError> {
     self.with(|state, me| {
+      *state.role_log_reads.entry(conversation).or_default() += 1;
+      if state.failing_role_logs.contains(&conversation) {
+        return Err(ApiError::status(503, ErrorCode::Unavailable, "try again later"));
+      }
       if state.lacks_role_log {
         return Err(ApiError::Status {
           status: 404,
@@ -4647,6 +4703,7 @@ impl ServerApi for FakeServerApi {
     request: &teamcraft_proto::AppendChannelRoleLogRequest,
   ) -> Result<teamcraft_proto::ChannelRoleLogEntryResponse, ApiError> {
     self.with(|state, me| {
+      let is_in_conflict = std::mem::take(&mut state.is_next_role_append_in_conflict);
       if state.lacks_role_log {
         return Err(ApiError::Status {
           status: 404,
@@ -4689,7 +4746,7 @@ impl ServerApi for FakeServerApi {
           "the document names another channel or version",
         ));
       }
-      if request.expected_version != current {
+      if is_in_conflict || request.expected_version != current {
         return Err(ApiError::status(
           409,
           ErrorCode::VersionConflict,
