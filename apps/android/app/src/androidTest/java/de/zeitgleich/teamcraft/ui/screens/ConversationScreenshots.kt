@@ -29,6 +29,7 @@ import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.Reaction
 import de.zeitgleich.teamcraft.core.User
+import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.MainActivity
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
@@ -40,7 +41,7 @@ private const val CONVERSATION = "c1"
 
 /**
  * Screenshots of a conversation (#315, #309) in light and dark: image previews, the composer, the
- * attach sheet, the image viewer and landscape. Placeholder data only. Like [MainScreenScreenshots]
+ * attach sheet and landscape. Placeholder data only. Like [MainScreenScreenshots]
  * it runs only when asked for (`-e screenshots true`) and writes PNGs to the app's external files
  * directory (`screenshots/`).
  */
@@ -56,10 +57,6 @@ class ConversationScreenshots {
         ConversationSample(viewModel)
         AttachSheet(rememberAttachmentPickers(viewModel) {}, onDismiss = {})
       }
-    }
-    shoot("viewer-dark", isDark = true) { viewModel ->
-      ConversationSample(viewModel)
-      ImageViewer(images = imageFiles(), startFileId = "f-portrait", onDownload = {}, onDismiss = {})
     }
     shoot("conversation-landscape-light", isDark = false, isLandscape = true) { viewModel -> ConversationSample(viewModel) }
   }
@@ -110,7 +107,8 @@ class ConversationScreenshots {
           snapshot = SNAPSHOT,
           messages = messages(),
           extras = extras(),
-          maybeFirstUnread = null,
+          firstUnread = FirstUnread.None,
+          sentCount = 0,
           onOpenThread = {},
           maybeOnReply = {},
           onLongPress = {},
