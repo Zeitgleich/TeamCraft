@@ -47,8 +47,6 @@ retention-days = Days
 retention-messages = Messages
 retention-pinned = Keep pinned messages
 retention-actions = Actions
-retention-forever = Keep all
-retention-invalid = Enter a whole number from 1 up to the instance limit, or leave empty.
 
 ## Device approval, linking and key changes
 leave-pending = Leaving this conversation. It finishes when a member's device has removed you from the encrypted group.

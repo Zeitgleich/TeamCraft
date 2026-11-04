@@ -23,7 +23,7 @@ pub fn RosterBanner() -> impl IntoView {
   if state.read(|backend| backend.my_role()) == Role::Owner
     && state.read(|backend| backend.can_sign_workspace())
   {
-    state.read(|backend| backend.admin_refresh());
+    state.read(|backend| backend.admin_refresh_section(AdminSection::Security));
   }
   let standing = Memo::new(move |_| current_standing(state));
   move || {

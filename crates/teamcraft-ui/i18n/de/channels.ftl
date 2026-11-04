@@ -47,8 +47,6 @@ retention-days = Tage
 retention-messages = Nachrichten
 retention-pinned = Angeheftete Nachrichten behalten
 retention-actions = Aktionen
-retention-forever = Alles behalten
-retention-invalid = Gib eine ganze Zahl von 1 bis zum Limit der Instanz ein oder lass das Feld leer.
 
 ## Geräte-Freigabe, Verknüpfung und Schlüsseländerungen
 leave-pending = Du verlässt diese Unterhaltung. Das ist abgeschlossen, sobald das Gerät eines Mitglieds dich aus der verschlüsselten Gruppe entfernt hat.

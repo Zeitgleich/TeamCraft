@@ -32,8 +32,8 @@ use teamcraft_client_api::actions::{
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, PresencePolicy};
 
 use crate::admin::{
-  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter, DeviceInfo,
-  PolicyBlocker, Retention, SelfJoinOutcome, SettingsTestKind,
+  AdminChannel, AdminLoad, AdminSection, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter,
+  DeviceInfo, PolicyBlocker, Retention, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
@@ -1532,6 +1532,32 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     if let Some(admin) = &self.maybe_admin {
       admin.queue_refresh();
     }
+  }
+
+  fn admin_refresh_section(&self, section: AdminSection) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.queue_refresh_section(section);
+    }
+  }
+
+  fn admin_load_devices(&self, user: UserId) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.load_devices(user);
+    }
+  }
+
+  fn admin_channels_truncated(&self) -> bool {
+    self
+      .maybe_admin
+      .as_ref()
+      .is_some_and(AdminLive::is_channel_list_truncated)
+  }
+
+  fn admin_users_truncated(&self) -> bool {
+    self
+      .maybe_admin
+      .as_ref()
+      .is_some_and(AdminLive::is_user_list_truncated)
   }
 
   fn policy_edit_blocker(&self) -> Option<PolicyBlocker> {

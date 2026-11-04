@@ -1442,6 +1442,43 @@ MLS_STORAGE_CHANNELS=100 cargo test -p teamcraft-core --all-features --test suit
   of a version before 1.0.9 itself, which was estimated at 5 to 6 times the state at the worst
   moment. No release build was measured here; the ratios of a save are what to take from the table.
 
+### Administration console: requests of an open console (issue #1217)
+
+An open console used up the address's rate limit (`ip_requests_per_minute = 1200`, shared by everybody
+behind the address): every 30 s it read about ten lists and then, for each of the first 100 channels,
+its members and its retention, plus the devices of every user. Measured with the real web client in
+headless Chromium on the Retention page, signed in as an owner, 220 channels in one space,
+the dev stack's four users, a debug server; the page's API requests counted from the
+browser's network events (`tests/e2e/tests/suite/admin_console_requests.rs`, run once against the
+web build of `main` and once against the change). The app's own catch-up as a new device (about
+1,300 requests) is waited out first and not counted.
+
+| What                                                   | Before    | After |
+|--------------------------------------------------------|-----------|-------|
+| Opening the console, API requests                      | about 215 | 14    |
+| Open console, requests per minute (100 s, 3 refreshes) | 385       | 7.2   |
+| Of those, per channel (members, retention)             | 360       | 0     |
+| Share of the address's 1,200 a minute                  | 32 %      | 0.6 % |
+
+What changed:
+
+- `GET /admin/conversations` carries each channel's owner and effective retention, computed in the
+  same query (docs/admin.md §3.1.2). An older server omits both; the console then reads them per
+  channel for the first 100 channels, only on the Channels and Retention pages, and at most every
+  ten minutes.
+- The timer (30 s, while the console is visible) reads the open section's data only: Retention is
+  spaces, channels and the policy (3 lists, 6 requests with the second page), the audit log is read
+  on the Audit page only. The whole console loads once when it opens and after the admin's own
+  changes.
+- Devices load when a user's details open. Lists are read in pages of 200, up to 1,000 entries, and
+  say so when they are cut (follow-up: #1241).
+- A 429 stops the console's reads until `Retry-After` (the body's `retry_after_secs`) has passed.
+
+The unit tests (`admin_live.rs`, `mod requests`) hold the cap against a fake server with 450 channels
+and 300 users: opening reads 26 requests (10 lists, 3 further pages, the audit log, 12 spaces'
+members), and no section's refresh exceeds 8, so at most 16 a minute; none is per channel or per
+user. The browser test asserts at most 80 requests when opening and 30 a minute while open.
+
 ### Desktop on Linux: idle (issue #399)
 
 The 1.0.2 desktop app on Linux (WebKitGTK 2.54) grew while nobody touched it. Measured on the

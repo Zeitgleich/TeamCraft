@@ -18,6 +18,8 @@ mod acceptance_spaces;
 mod acceptance_threads;
 mod accounts;
 mod admin;
+#[cfg(feature = "browser")]
+mod admin_console_requests;
 mod bridge;
 #[cfg(feature = "browser")]
 mod cached_start;

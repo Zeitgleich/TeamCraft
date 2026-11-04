@@ -272,6 +272,23 @@ policy-updates-invalid-url = Gib eine Adresse ein, die mit https:// beginnt.
 policy-updates-defaults = Auf die Standardwerte zurücksetzen
 admin-retention-title = Aufbewahrung
 admin-retention-subtitle = Die letzten N Tage und/oder N Nachrichten behalten, je nachdem, was strenger ist. Kanaleigentümer können weniger wählen, bis zu { $days } Tagen.
+admin-retention-limited = Nur die letzten behalten
+admin-retention-unit-days = { $count ->
+    [one] Tag
+   *[other] Tage
+  }
+admin-retention-unit-messages = { $count ->
+    [one] Nachricht
+   *[other] Nachrichten
+  }
+admin-retention-choice-days = { $channel }: wie lange Nachrichten behalten werden
+admin-retention-choice-messages = { $channel }: wie viele Nachrichten behalten werden
+admin-retention-error-days = Gib eine ganze Zahl von Tagen von 1 bis { $max } ein.
+admin-retention-error-messages = Gib eine ganze Zahl von Nachrichten von 1 bis { $max } ein.
+admin-list-cut = Diese Liste ist abgeschnitten: Die Konsole zeigt die ersten 1000 Einträge, die Instanz hat mehr.
+admin-error-rate-limited = Der Server hat zu viele Anfragen von dieser Netzwerkadresse erhalten. Die Konsole pausiert und versucht es gleich erneut.
+admin-error-read-failed = Einige Daten konnten nicht geladen werden. Die Konsole versucht es gleich erneut.
+admin-error-unreachable = Der Server war nicht erreichbar. Die Konsole versucht es gleich erneut.
 admin-audit-title = Audit-Protokoll
 admin-audit-subtitle = Admin-Aktionen, Wiederherstellungen und Geräteänderungen. Nur Metadaten, nie Nachrichteninhalte.
 audit-filter-action = Aktion
