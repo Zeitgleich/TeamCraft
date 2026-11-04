@@ -311,6 +311,13 @@ pub enum MessageContent {
   },
   /// Replaces the conversation's bookmarks bar for everyone (the newest message wins).
   Bookmarks { items: Vec<BookmarkItem> },
+  /// An edit of the channel's shared page (e2ee.md §4.11): a Yjs update the core keeps
+  /// ([`crate::canvas`]) but never reads; `is_snapshot` when it holds the whole page.
+  Canvas {
+    update: teamcraft_proto::Base64Bytes,
+    #[serde(default, skip_serializing_if = "is_false")]
+    is_snapshot: bool,
+  },
   /// A change to the conversation, announced by whoever made it (shown as a system message).
   Event { event: ConversationEvent },
   /// Adds or removes the sender's reaction to another message (e2ee.md §4.4: reactions are
@@ -1365,6 +1372,7 @@ impl StoredMessage {
           | MessageContent::Delete { .. }
           | MessageContent::Pin { .. }
           | MessageContent::Bookmarks { .. }
+          | MessageContent::Canvas { .. }
           | MessageContent::IndexSegment { .. }
           | MessageContent::IntegrationSource { .. }
           | MessageContent::Notetaker { .. }

@@ -571,7 +571,8 @@ Plaintext metadata: conversation ID, sender user and device, timestamp, message 
 and client message ID, thread ID, `content_key_id`, size, **list of mentioned user IDs** (needed for notifications, §7), the "urgent"
 flag. Reactions are encrypted messages, so not even reaction counts are visible.
 
-Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts.
+Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts, a
+channel's shared notes (§4.11).
 
 Typing indicators are plaintext metadata too: a `typing` gateway frame tells the server that a user
 types in a conversation, and for a reply in which thread (thread IDs are visible metadata anyway), never
@@ -2342,6 +2343,94 @@ People made members for the import and switched back to guests afterwards keep w
 keys are in their key bag, a member who becomes a guest isn't removed from a conversation, and no
 device re-adds or re-shares because of the switch. A waiting addition of such a person is committed
 from the join on once they are a guest, and gets the import's keys if the import grant names them.
+
+### 4.11 A channel's shared notes (issue #1221)
+
+A channel of a space has one page of notes (the "Notes" tab of its header: headings, paragraphs,
+bulleted and numbered lists, checklists) that its members edit together. It is end-to-end
+encrypted like the channel's messages, and the server learns nothing it doesn't learn from a
+message: every change of the page *is* a message.
+
+**Data model: a Yjs document (`yrs`).** The page is one Yjs document: an array of blocks, each a
+map with an ID, a kind, a check mark and its text as a Yjs text
+(`teamcraft-client-api::canvas`). An edit is a Yjs update. Any set of updates gives the same page
+on every device, in any order and any number of times: concurrent typing in one block merges
+character by character, concurrent changes of a block's kind or check mark end with the same one
+winning everywhere, a block deleted on one device while another typed into it stays deleted.
+Offline edits are updates like any other and merge when they arrive.
+
+Three approaches were weighed. Their cost on the web is the code the browser downloads: a release
+`wasm32-unknown-unknown` build of a probe that creates, edits, encodes and merges a document
+(`opt-level = "z"`, LTO, one codegen unit, `panic = "abort"`, no wasm-opt), compared with the same
+probe doing only the `serde_json` part (2026-11-04):
+
+| Approach                                       | Wasm added   | gzip -9 added | Concurrent typing in one block      |
+|------------------------------------------------|--------------|---------------|-------------------------------------|
+| `yrs` 0.28.0 (Yjs)                             | +219,420 B   | +80,589 B     | merges per character                |
+| `automerge` 0.6.1                              | +930,498 B   | +284,962 B    | merges per character                |
+| Own op log, last writer wins per block         | a few kB     | a few kB      | one side's typing in the block lost |
+
+Neither CRDT breaks the budget of a signed-in first visit (10 MB gzip for now, docs/performance.md,
+"Web bundle size"), and the editor doesn't count towards it anyway (below). `yrs` costs less than a
+third of `automerge` and speaks the Yjs format, which has editors and tooling around it. The op
+log would cost nothing, but it loses typing exactly where a meeting's notes are written: several
+people in the same agenda item. So `yrs`.
+
+**Where the CRDT runs.** Only the page's editor decodes the document. On the web it is a wasm
+chunk of its own (`areas::canvas`, chunk `canvas`), loaded when the Notes tab first opens, so the
+app's first visit doesn't grow by `yrs`. Measured on the release bundle of this change (CI web-size
+job): the `canvas` chunk is 243,842 B (about 104 kB gzip -9), and a signed-in first visit grew by
+26.0 kB gzip -9 (the tab, the backend calls and the stylesheet, no CRDT). The client core keeps a channel's updates as opaque bytes
+in its encrypted store (`teamcraft-core::canvas`, `canvas/{conversation}` next to the bookmarks)
+and never reads them; the editor merges them (`merge_updates_v1`, lossless, also for updates that
+still wait for others) and hands the merge back when the list grows beyond 32 updates, which the
+core takes only if no update arrived meanwhile. The editor always brings its document up to the
+whole set of updates merged into one: applied one by one out of order, yrs 0.28 left some waiting
+for predecessors that had arrived and two devices showed different pages (a randomized test in
+`canvas.rs` found it; with the merged set they agree).
+
+**Transport: a hidden message.** An edit is a `canvas` message (`MessageContent::Canvas { update,
+is_snapshot }`), encrypted with the channel's content key and signed by the sending device like
+any message (§4.4), sent through the outbox, delivered live through the gateway. The server sees an
+ordinary message of the channel: sender, device, time, size; no mentions, never urgent, nothing
+that says it is a page. Clients don't list it and it counts as nothing unread (like reactions,
+pins and bookmarks). The editor applies an edit at once and sends the edits of a burst of typing
+as one update: after 600 ms without typing, at most 2 s after the first. An edit not sent yet when
+the app is killed in that moment is lost; once handed to the core it is in the outbox and goes out
+when the device is back online, and the page shows it after a reload.
+
+**Snapshots.** Every 50th update (counted per device since the last snapshot it saw) the editor
+that sends the next edit sends the whole page instead (`is_snapshot`): the document built afresh
+from all updates, without the text deleted from it, only when no update it depends on is missing,
+only from a device that holds the channel's history back to its start (`older_history` complete),
+and only up to 512 KiB (with base64 and encryption below the server's 1 MiB per message). A larger
+page sends none until snapshots move to attachments.
+
+**History access.** The updates are messages, so the page follows the history rules of §4.3: a
+member added with full history reads every update; a member added from the join on reads the
+updates sent after the join, and the page as a whole from the next snapshot on. Decision: the page
+is the channel's present, like its topic and bookmarks, so a later member gets its current text
+with the next snapshot; text deleted before that never reaches them, because a snapshot carries no
+deleted text. Retention deletes old update messages like any others; a device that hadn't read them
+then relies on a snapshot sent since.
+
+**A device catching up.** A device holds only the history it read (§9). While the Notes tab is
+open, the device reads the channel's older history a page at a time (at most 20 pages per opening),
+since the page's updates are in it; the page shows what it has meanwhile and says that earlier
+changes are loading.
+
+**Who may edit.** Editing needs the right to post (`create_post`, `Conversation::can_post`; not in
+an archived channel): the server refuses the message of anybody else, the editor is read-only for
+them, and the core refuses to keep or send an edit for them. A malicious server can't forge or
+change edits (it holds no content key, and edits are signed); like any message it could withhold
+some, and the page then lacks them until they arrive.
+
+**Not in this step** (issue #1245): version history and restore, presence on the page, quotes,
+code, links, mentions, embedded files, more pages per channel and pages for DMs and meetings, the
+notetaker writing its summary onto the meeting's page, "Pin to page", search over pages, the
+mobile apps, a snapshot when a member joins, stopping the history read at the newest snapshot, and
+not waking phones for page edits: today a page edit is a message like a reaction, so a phone of a
+member whose level is "all" gets a push for it (docs/notifications.md, "Push routing").
 
 ## 5. Adding a device (Threema/WhatsApp style)
 

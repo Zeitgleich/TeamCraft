@@ -218,6 +218,8 @@ struct State {
   workspace_events: HashMap<MessageId, WorkspaceEvent>,
   /// Who types where (tests set it; the demo has nobody typing).
   typing: Vec<crate::model::TypingNow>,
+  /// Channels' shared pages as the updates the editor sent (the demo's only editor is the user).
+  canvases: HashMap<ConversationId, teamcraft_client_api::canvas::CanvasState>,
 }
 
 impl MockBackend {
@@ -295,6 +297,7 @@ impl MockBackend {
       )],
       workspace_events: HashMap::new(),
       typing: Vec::new(),
+      canvases: HashMap::new(),
     };
     state.seed_messages(now);
     state.refresh_space_badges();
@@ -355,6 +358,46 @@ impl MockBackend {
 }
 
 impl ChatBackend for MockBackend {
+  fn canvas(&self, conversation: ConversationId) -> teamcraft_client_api::canvas::CanvasState {
+    self
+      .state
+      .borrow()
+      .canvases
+      .get(&conversation)
+      .cloned()
+      .unwrap_or_default()
+  }
+
+  /// Kept like the core keeps them: where the user may post.
+  fn edit_canvas(&self, conversation: ConversationId, update: Vec<u8>, is_snapshot: bool) {
+    let mut state = self.state.borrow_mut();
+    let may_post = state
+      .conversations
+      .iter()
+      .any(|conv| conv.id == conversation && conv.can_post && !conv.is_archived);
+    if !may_post {
+      return;
+    }
+    let canvas = state.canvases.entry(conversation).or_default();
+    canvas.updates.push(update.into());
+    canvas.revision += 1;
+    canvas.updates_since_snapshot = if is_snapshot {
+      0
+    } else {
+      canvas.updates_since_snapshot.saturating_add(1)
+    };
+  }
+
+  fn compact_canvas(&self, conversation: ConversationId, revision: u64, merged: Vec<u8>) {
+    let mut state = self.state.borrow_mut();
+    if let Some(canvas) = state.canvases.get_mut(&conversation)
+      && canvas.revision == revision
+    {
+      canvas.updates = vec![merged.into()];
+      canvas.revision += 1;
+    }
+  }
+
   fn typing_now(&self) -> Vec<crate::model::TypingNow> {
     self.state.borrow().typing.clone()
   }
