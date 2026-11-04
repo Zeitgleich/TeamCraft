@@ -38,7 +38,8 @@ the change, and people taken off the list are removed from the group.
    §8.2) the notetaker's bot account is invited like a member, so it is in the chat's group before
    any call, and the organizer's device puts a standing `join` request into the chat after setting
    it up; unticking it in the edit dialog sends a `stop` first. During a call, "Add notetaker" lets
-   the organizer add it as an invitee then (one call's `join`).
+   the organizer add it as an invitee then (one call's `join`); an invitee's "Add notetaker" moves
+   the call into a room of theirs with the notetaker (step 7, e2ee.md §8.2, "In every call").
 2. **Change / cancel** (`PATCH` / `DELETE /meetings/{id}`, organizer only): SEQUENCE increases,
    the event is replaced or deleted, staying invitees get an update, new ones an invitation,
    removed ones and everybody on cancellation a CANCEL. The chat of a cancelled meeting is archived
@@ -142,7 +143,11 @@ the change, and people taken off the list are removed from the group.
    see it. If the server refuses the move (409), the adding app cancels the room it just made.
    Web, desktop, iOS and Android all do this. "Add notetaker" in a DM or group DM call is such a
    move with the notetaker as the added one: it isn't rung but asked in with a request in the
-   room, and the others' banner says where the audio goes (e2ee.md §8.2, "In every call").
+   room, and the others' banner says where the audio goes (e2ee.md §8.2, "In every call"). So is
+   "Add notetaker" in a channel call of a user who doesn't manage the channel's members and in the
+   call of a meeting the user doesn't organize: for it the server moves the call of any
+   conversation (the room must be another one), and the conversation, like the DM, doesn't
+   change.
 
    | Condition                   | What happens                                                                                                                                                                                                                 |
    |-----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
