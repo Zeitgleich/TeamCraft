@@ -587,6 +587,17 @@ pub async fn tray_update(
   }
 }
 
+/// Desktop only: the tray menu and icon state (an empty menu brings back the shell's plain one).
+pub async fn tray_menu_set(model: &teamcraft_client_api::tray_menu::TrayMenuModel) {
+  if !is_available() {
+    return;
+  }
+  let args = serde_json::json!({ "model": model });
+  if let Err(error) = call::<()>("tray_menu_set", &args).await {
+    tracing::debug!(%error, "could not update the tray menu");
+  }
+}
+
 /// Desktop only: zooms the webview (percent, 100 = normal).
 pub async fn set_zoom(percent: u16) {
   if !is_available() {

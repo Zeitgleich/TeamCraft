@@ -119,6 +119,7 @@ pub mod tab_handover;
 pub mod text_preview;
 pub mod toast_motion;
 pub mod toast_timer;
+pub mod tray_menu;
 pub mod unread_divider;
 pub mod video_controls;
 pub mod video_quality;

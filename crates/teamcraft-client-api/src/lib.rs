@@ -47,6 +47,7 @@ pub mod settings_sync;
 pub mod sign_in_look;
 pub mod sign_in_page;
 pub mod snapshot_changes;
+pub mod tray_menu;
 pub mod updates;
 pub mod video_playback;
 pub mod video_stats;
