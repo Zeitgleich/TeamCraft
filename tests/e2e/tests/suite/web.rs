@@ -611,7 +611,7 @@ pub(crate) async fn type_until_kept(page: &Page, selector: &str, text: &str) {
 
 /// Signs in again in another tab, if the tab did not restore the session itself; Keycloak still has
 /// it, so no form comes up.
-async fn sign_in_again(page: &Page) {
+pub(crate) async fn sign_in_again(page: &Page) {
   let deadline = Instant::now() + WAIT;
   loop {
     let text = body_text(page).await;

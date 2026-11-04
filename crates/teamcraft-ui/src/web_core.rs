@@ -907,26 +907,27 @@ fn watch_focus() {
 fn on_takeover_request(ends_call: bool) -> Option<Blocker> {
   match answer_takeover(crate::web_calls::is_in_call(), ends_call) {
     TakeoverAnswer::Refuse(blocker) => Some(blocker),
-    TakeoverAnswer::HandOver { ends_call } => {
-      wasm_bindgen_futures::spawn_local(hand_over(ends_call));
+    TakeoverAnswer::HandOver { .. } => {
+      wasm_bindgen_futures::spawn_local(hand_over());
       None
     },
   }
 }
 
-/// Lets another tab run the app: ends the call (when the user agreed), stores the drafts and waits
-/// for IndexedDB to have the outbox, then stops the core, whose lock goes to the waiting tab. This
-/// tab then follows it and says so.
-async fn hand_over(ends_call: bool) {
+/// Lets another tab run the app: stops the calls (ending a call the user agreed to end), stores the
+/// drafts and waits for IndexedDB to have the outbox, then stops the core, whose lock goes to the
+/// waiting tab. This tab then follows it and says so.
+async fn hand_over() {
   let Some(user) = RUNNING.with(|running| match &*running.borrow() {
     Some(Running::Owner { user, .. }) => Some(*user),
     _ => None,
   }) else {
     return;
   };
-  if ends_call {
-    crate::web_calls::end_call().await;
-  }
+  // The calls stop with the core here: a running call ends (the user agreed, else there is none
+  // and the takeover would have been refused), a ringtone stops, and the call module starts again
+  // only when this tab is the active one again (#440).
+  crate::web_calls::stop_calls().await;
   persist_drafts().await;
   let flushed = Box::pin(ask(Request::Flush));
   match select(flushed, Box::pin(platform::sleep(HANDOVER_FLUSH_TIMEOUT))).await {

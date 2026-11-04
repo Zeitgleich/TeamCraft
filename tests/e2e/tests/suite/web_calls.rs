@@ -21,7 +21,9 @@ use teamcraft_media::call_engine::CallEngineEvent;
 use teamcraft_media::call_resilience::CallTransport;
 use teamcraft_proto::VideoTrackKind;
 
-use crate::web::{Rig, WEB_ORIGIN, sign_in_as_alice, wait_for_element, wait_for_text};
+use crate::web::{
+  Rig, WEB_ORIGIN, click_text, sign_in_again, sign_in_as_alice, wait_for_element, wait_for_text,
+};
 
 /// Fake devices that answer `getUserMedia` without a prompt.
 pub(crate) const MEDIA_ARGS: [&str; 3] = [
@@ -380,6 +382,78 @@ async fn sharing_the_screen_shows_a_small_live_preview_of_it() {
     })
     .await;
   rig.finish().await;
+}
+
+/// #440 (e2ee.md §8, "Calls and browser tabs"): calls run in the account's active tab (#744) and
+/// move with it, without a reload. A second tab that took the app over calls with the same device;
+/// the first tab, which stopped its call module when it handed the app away, calls again after
+/// taking it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn calls_move_with_the_active_tab() {
+  let Some(mut rig) = start_rig().await else {
+    return;
+  };
+  let certificate_hash = rig.stack.maybe_sfu.as_ref().unwrap().certificate_hash;
+  let first = rig.browser.page.clone();
+  sign_in_and_join_the_channel(&mut rig, &first).await;
+  // The call module started in the first tab (it loads a moment after the app).
+  wait_until_true(&first, "navigator.mediaDevices.ondevicechange !== null").await;
+
+  let second = rig
+    .browser
+    .new_page(&format!("{WEB_ORIGIN}/?backend=server"))
+    .await;
+  wait_for_text(&second, "TeamCraft is already open in another tab").await;
+  click_text(&second, "Use here").await;
+  wait_for_text(&first, "TeamCraft was opened in another tab").await;
+  // The tab that handed the app away stopped its call module, listeners included.
+  wait_until_true(&first, "navigator.mediaDevices.ondevicechange === null").await;
+  sign_in_again(&second).await;
+  wait_for_text(&second, "browser-channel").await;
+  call_and_leave(&mut rig, &second, certificate_hash).await;
+
+  first.bring_to_front().await.unwrap();
+  click_text(&first, "Use here").await;
+  wait_for_text(&second, "TeamCraft was opened in another tab").await;
+  wait_for_text(&first, "browser-channel").await;
+  call_and_leave(&mut rig, &first, certificate_hash).await;
+  rig.finish().await;
+}
+
+/// The browser in `page` starts a video call in the test channel, Carol joins it natively until
+/// the DAVE group with the browser stands, then both leave.
+async fn call_and_leave(rig: &mut Rig, page: &Page, certificate_hash: [u8; 32]) {
+  // Input goes to the tab in front.
+  page.bring_to_front().await.unwrap();
+  click_text(page, "browser-channel").await;
+  click_selector(page, "button[aria-label='Start video call']").await;
+  wait_for_element(page, ".prejoin").await;
+  click_selector(page, ".prejoin-actions .btn-primary").await;
+  wait_for_element(page, ".call-screen").await;
+
+  let mut carol_call = join_call(&mut rig.carol, rig.channel, certificate_hash, 550.0).await;
+  let mut is_secured = false;
+  let deadline = tokio::time::Instant::now() + SETUP_TIMEOUT;
+  while let Ok(Some(event)) = tokio::time::timeout_at(deadline, carol_call.next_event()).await {
+    assert!(
+      !matches!(
+        event,
+        CallEngineEvent::UntrustedRoster | CallEngineEvent::UnauthenticatedKeys | CallEngineEvent::Error(_)
+      ),
+      "{event:?}"
+    );
+    if matches!(event, CallEngineEvent::Secured { .. }) {
+      is_secured = true;
+      break;
+    }
+  }
+  carol_call.leave().await.expect("leaving the call");
+  assert!(
+    is_secured,
+    "the DAVE group with the browser was never established"
+  );
+  click_selector(page, ".call-screen .leave-btn").await;
+  wait_until_true(page, "document.querySelector('.call-screen') === null").await;
 }
 
 /// A rig with calls, whose browser has fake devices.
