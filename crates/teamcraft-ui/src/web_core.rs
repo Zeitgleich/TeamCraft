@@ -1231,6 +1231,10 @@ struct Core {
   store_health: StoreHealth,
   /// The flush [`Self::check_store`] waits for, while IndexedDB is still writing.
   maybe_flush: Option<Flush>,
+  /// The sync waits while IndexedDB fails and too much waits for it (issue #1201): no gateway
+  /// frames are read, no connect or catch-up runs, no upkeep. Set and cleared by
+  /// [`Self::check_store`].
+  is_sync_paused: bool,
   /// When to compare the browser's push subscription with the registration next; `None` when
   /// nothing is due (e2ee.md §7).
   maybe_push_check_at_ms: Option<i64>,
@@ -1312,6 +1316,7 @@ impl Core {
       typing: TypingAnnouncer::default(),
       store_health: StoreHealth::Saved,
       maybe_flush: None,
+      is_sync_paused: false,
       maybe_push_check_at_ms: None,
       maybe_last_security: None,
       snapshots: RefCell::new(SnapshotCache::new(now_ms().unsigned_abs())),
@@ -1411,10 +1416,27 @@ impl Core {
   /// is not saved is lost on reload (e2ee.md §9.4). Never waits: after a large catch-up IndexedDB
   /// can take minutes to write everything, and a loop waiting for that sends no heartbeats, so the
   /// server drops the connection. The flush runs on and is looked at again on the next turn.
+  ///
+  /// Writes that fail are kept in memory until they go through, never dropped (the disk must stay a
+  /// prefix of the writes) or refused. With the quota full they pile up, one per record the sync
+  /// writes: once too many wait ([`IndexedDbStore::is_backlogged`]) the sync pauses, and goes on
+  /// when a batch went through (issue #1201). Meanwhile the user still reads what is stored and can
+  /// write; the storage banner stays up. The server keeps what the sync didn't fetch: the connection,
+  /// which nothing reads while paused, runs out of heartbeat answers and is dropped; the next one
+  /// catches up.
   fn check_store(&mut self) {
     let Some(store) = self.store.as_ref() else {
       return;
     };
+    let is_backlogged = store.inner().is_backlogged();
+    if is_backlogged != self.is_sync_paused {
+      if is_backlogged {
+        tracing::warn!("too many local writes wait for storage space; pausing the sync");
+      } else {
+        tracing::info!("local writes go through again; resuming the sync");
+      }
+      self.is_sync_paused = is_backlogged;
+    }
     let flush = self.maybe_flush.get_or_insert_with(|| {
       let store = store.clone();
       Box::pin(async move { store.inner().flush().await })
@@ -1441,8 +1463,10 @@ impl Core {
 
   async fn next_wake(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Wake {
     // The connection's deadlines count only once there is a client to connect.
+    // A connect waits while the sync is paused: its due attempt must not wake the loop for nothing.
+    let is_waiting_to_connect = self.is_sync_paused && !self.connection.is_connected();
     let deadline = match (&self.client, self.connection.next_deadline_ms()) {
-      (Some(_), Some(connection)) => connection.min(self.next_tick_ms),
+      (Some(_), Some(connection)) if !is_waiting_to_connect => connection.min(self.next_tick_ms),
       _ => self.next_tick_ms,
     };
     // While a file goes up, the UI reads its progress again every so often.
@@ -1456,6 +1480,7 @@ impl Core {
       None => deadline,
     };
     let until_tick_ms = deadline.saturating_sub(now_ms()).max(0);
+    let is_reading = !self.is_sync_paused;
     let Self {
       connection,
       link,
@@ -1463,7 +1488,14 @@ impl Core {
       downloads,
       ..
     } = self;
-    let frame = Box::pin(connection.receive());
+    // While the sync is paused, what the server sends waits in the connection.
+    let frame = Box::pin(async move {
+      if is_reading {
+        connection.receive().await
+      } else {
+        std::future::pending().await
+      }
+    });
     let linked = Box::pin(async {
       match link {
         Some(run) => run.future.as_mut().await,
@@ -2757,6 +2789,10 @@ impl Core {
   /// which the sync fills as it goes (`sync_reads`), and requests that need the client wait for
   /// the end of the connect.
   async fn connect(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) {
+    // A connect's sync would only add to what waits for storage space ([`Self::check_store`]).
+    if self.is_sync_paused {
+      return;
+    }
     if self.maybe_last_security.is_none() && self.client.is_some() {
       self.maybe_last_security = self.security_snapshot().ok();
     }
@@ -2842,6 +2878,9 @@ impl Core {
     let Some(client) = self.client.as_mut() else {
       return;
     };
+    if self.is_sync_paused {
+      return;
+    }
     // The upkeep may resync many conversations; heartbeats go on meanwhile.
     if self.connection.keep_alive(now, self.upkeep.tick(client)).await {
       notify_changed();

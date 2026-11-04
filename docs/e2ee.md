@@ -3610,7 +3610,13 @@ saved on this device. Without that, memory and disk would diverge silently and t
 roll the MLS state back. One batch of writes runs at a time, and a batch goes with the writes of the
 one that failed before it: a later write never commits without an earlier one, so what a page that
 dies leaves is always a prefix of the writes (#840). A record that can't be sealed fails its batch
-the same way. A newer version of the app that upgrades the database (`versionchange`) gets
+the same way. Failed writes are retried with backoff (1 s, doubled with every batch that fails, up to
+30 s), not with every flush: new writes wait with them, and the batch that goes when the backoff ran
+out takes everything. As they can be neither dropped nor refused they pile up with a full quota, one
+per record written; past 2,000 records waiting for the disk the web core pauses the sync (it reads no
+gateway frames and runs no connect, catch-up or upkeep; the server keeps what it holds, the next
+connection catches up) until a batch went through. The user still reads and writes meanwhile, and the
+storage banner stays up (#1201). A newer version of the app that upgrades the database (`versionchange`) gets
 it: the old page closes its connection, stops writing and asks for a reload.
 
 **Journal (native).** Both SQLite stores write ahead (`journal_mode = WAL`) with

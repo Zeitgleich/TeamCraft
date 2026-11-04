@@ -10,10 +10,19 @@
 //! stop the next: with two running, the second would commit without the first, and what survives the
 //! page would no longer be a prefix of the writes (issue #840). A record whose seal fails fails its
 //! batch the same way: nothing of the batch is written, and it is issued again until it goes through.
+//!
+//! Failed writes are neither dropped (the prefix) nor refused (the cache took them already), so with
+//! the quota full they pile up, one per record written (issue #1201). They are issued again with
+//! backoff ([`RETRY_MIN`] doubling up to [`RETRY_MAX`]), not with every batch: while it runs, new
+//! writes wait with them, and the batch that goes when it ran out takes everything along. Past
+//! [`DEFAULT_MAX_UNSAVED`] records that wait for the disk, [`Writes::is_backlogged`] asks the store's
+//! owner to stop writing what it can fetch again later (the web core pauses the sync) until a batch
+//! went through.
 // Natively only the tests use it; the browser store uses all of it.
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use super::StoreError;
 use super::sealed::LazySeal;
@@ -23,9 +32,15 @@ pub(crate) const MAX_QUEUED_BYTES: usize = 8 * 1024 * 1024;
 /// Queued this much when the batch delay ends, the batch waits a little longer to take the next
 /// rewrite of its large record along (#326: the MLS state was one such record until #424).
 pub(crate) const LARGE_BATCH_BYTES: usize = 1024 * 1024;
+/// How long writes wait after a batch failed before they are issued again; doubled with every
+/// batch that fails after it, up to [`RETRY_MAX`].
+pub(crate) const RETRY_MIN: Duration = Duration::from_secs(1);
+pub(crate) const RETRY_MAX: Duration = Duration::from_secs(30);
+/// Records waiting for the disk while its writes fail beyond which [`Writes::is_backlogged`] says so.
+/// Each holds its sealed value in memory: a few MB for ordinary messages.
+pub(crate) const DEFAULT_MAX_UNSAVED: usize = 2_000;
 
 /// Writes that have not committed yet, by record key.
-#[derive(Default)]
 pub(crate) struct Writes {
   pub(crate) next_sequence: u32,
   open: HashMap<String, OpenWrite>,
@@ -47,6 +62,43 @@ pub(crate) struct Writes {
   /// Depth of the open group of writes ([`crate::store::LocalStore::begin_writes`]): the size limit
   /// doesn't issue a batch in the middle of one.
   pub(crate) group_depth: u32,
+  /// Batches that failed since one last committed: the retry backoff grows with them.
+  failed_batches: u32,
+  /// When the last batch was issued (milliseconds of the caller's clock).
+  maybe_last_issue_ms: Option<i64>,
+  /// The last [`Self::take_next_batch`] held the writes back for the retry backoff.
+  is_holding: bool,
+  /// A timer runs that issues what the retry backoff holds back once it ran out.
+  is_retry_scheduled: bool,
+  /// [`Self::is_backlogged`] beyond this many records waiting for the disk.
+  pub(crate) max_unsaved: usize,
+  /// The retry backoff: the first delay, doubled with every batch that fails, up to the second.
+  pub(crate) retry_backoff: (Duration, Duration),
+}
+
+impl Default for Writes {
+  fn default() -> Self {
+    Self {
+      next_sequence: 0,
+      open: HashMap::new(),
+      queued: Vec::new(),
+      queued_bytes: 0,
+      is_scheduled: false,
+      next_batch: 0,
+      batches: HashMap::new(),
+      maybe_running_batch: None,
+      last_ended_batch: 0,
+      maybe_last_failure: None,
+      is_closed: false,
+      group_depth: 0,
+      failed_batches: 0,
+      maybe_last_issue_ms: None,
+      is_holding: false,
+      is_retry_scheduled: false,
+      max_unsaved: DEFAULT_MAX_UNSAVED,
+      retry_backoff: (RETRY_MIN, RETRY_MAX),
+    }
+  }
 }
 
 /// A record's bytes, sealed when its batch is issued.
@@ -131,22 +183,66 @@ impl Writes {
     self.group_depth == 0 && self.is_over_limit()
   }
 
-  /// The keys of the next batch, with every failed write if anything new is queued; the queue starts
-  /// over. `None` if there is nothing to issue, or a batch may not be issued now: one is running
-  /// (when it ended, the store asks again), or a group of writes is open. Groups run synchronously,
-  /// so the only group still open here is one a panic ended (in the browser a panic doesn't unwind):
-  /// what it wrote so far must never reach the disk.
-  pub(crate) fn take_next_batch(&mut self) -> Option<Vec<String>> {
+  /// The keys of the next batch, with every failed write if anything new is queued or `is_flush`;
+  /// the queue starts over. `None` if there is nothing to issue, or a batch may not be issued now:
+  /// one is running (when it ended, the store asks again), a group of writes is open, or a batch
+  /// failed and the retry backoff hasn't run out at `now_ms` (writes wait, the failed ones and new
+  /// ones alike: the next batch takes them all). Groups run synchronously, so the only group still
+  /// open here is one a panic ended (in the browser a panic doesn't unwind): what it wrote so far
+  /// must never reach the disk.
+  pub(crate) fn take_next_batch(&mut self, now_ms: i64, is_flush: bool) -> Option<Vec<String>> {
     if self.maybe_running_batch.is_some() || self.group_depth > 0 {
       return None;
     }
-    // Writes that failed go with every batch: a later write never commits without them, so what
-    // is on disk stays a prefix of what was written.
-    if self.has_queued() {
-      self.retry_failed();
+    if self.failed_batches > 0 {
+      if self.retry_in(now_ms).is_some() {
+        self.is_holding = true;
+        return None;
+      }
+      // Writes that failed go with every batch: a later write never commits without them, so
+      // what is on disk stays a prefix of what was written.
+      if self.has_queued() || is_flush {
+        self.retry_failed();
+      }
     }
+    self.is_holding = false;
     let keys = self.take_queued();
-    (!keys.is_empty()).then_some(keys)
+    if keys.is_empty() {
+      return None;
+    }
+    self.maybe_last_issue_ms = Some(now_ms);
+    Some(keys)
+  }
+
+  /// How long the retry backoff after the failed batches still runs at `now_ms`; `None` once it
+  /// ran out (or no batch failed).
+  pub(crate) fn retry_in(&self, now_ms: i64) -> Option<Duration> {
+    let last_issue = self.maybe_last_issue_ms.filter(|_| self.failed_batches > 0)?;
+    let doublings = self.failed_batches.saturating_sub(1).min(16);
+    let (first, longest) = self.retry_backoff;
+    let delay = first.saturating_mul(1 << doublings).min(longest);
+    // A clock set back doesn't hold the writes for longer than the backoff.
+    let elapsed = Duration::from_millis(now_ms.saturating_sub(last_issue).max(0).unsigned_abs());
+    let left = delay.saturating_sub(elapsed);
+    (now_ms >= last_issue && !left.is_zero()).then_some(left)
+  }
+
+  /// Whether writes wait for the retry backoff with no timer yet to issue them when it ran out
+  /// ([`Self::retry_in`]); the caller schedules one. Once per backoff: the batch it issues starts
+  /// over.
+  pub(crate) fn needs_retry_timer(&mut self) -> bool {
+    let needs = self.is_holding && self.has_queued() && !self.is_retry_scheduled;
+    if needs {
+      self.is_retry_scheduled = true;
+    }
+    needs
+  }
+
+  /// Whether so many records wait for the disk while its writes fail ([`Self::max_unsaved`]) that
+  /// the store's owner should stop writing what it can fetch again later. A batch that commits
+  /// ends it: every failed write goes with the next batch.
+  pub(crate) fn is_backlogged(&self) -> bool {
+    self.failed_batches > 0 && self.open.len() >= self.max_unsaved
   }
 
   /// Puts the writes of `keys` into a transaction through `send` and starts the batch; its number
@@ -181,6 +277,7 @@ impl Writes {
       for key in keys {
         self.fail_open(key, failure);
       }
+      self.note_failed_batch();
       return Err(failure);
     }
     Ok(self.start_batch(carried))
@@ -225,12 +322,13 @@ impl Writes {
   /// The keys of the next batch; the queue starts over.
   fn take_queued(&mut self) -> Vec<String> {
     self.is_scheduled = false;
+    self.is_retry_scheduled = false;
     self.queued_bytes = 0;
     std::mem::take(&mut self.queued)
   }
 
   /// Queues every failed write again, with its latest value.
-  pub(crate) fn retry_failed(&mut self) {
+  fn retry_failed(&mut self) {
     let failed: Vec<String> = self
       .open
       .iter()
@@ -306,16 +404,20 @@ impl Writes {
   }
 
   /// Whether nothing written before [`Self::last_batch_due`] said `batch` is still on its way: that
-  /// batch ended, or nothing is running or queued (a batch that couldn't start fails its writes).
+  /// batch ended, or nothing is running or queued (a batch that couldn't start fails its writes), or
+  /// what is queued waits for the retry backoff.
   pub(crate) fn is_past(&self, maybe_batch: Option<u32>) -> bool {
-    let is_idle = self.maybe_running_batch.is_none() && !self.has_queued();
+    // Writes held back for the retry backoff aren't on their way either.
+    let is_idle = self.maybe_running_batch.is_none() && (!self.has_queued() || self.is_holding);
     // Batch numbers wrap, so "ended" is a distance, not a comparison.
     is_idle || maybe_batch.is_none_or(|batch| self.last_ended_batch.wrapping_sub(batch) < u32::MAX / 2)
   }
 
-  /// Only the latest write of a record closes it; an older one committing changes nothing.
+  /// Only the latest write of a record closes it; an older one committing changes nothing. The disk
+  /// takes writes again: the backoff starts over.
   pub(crate) fn committed(&mut self, batch: u32) {
     self.ended(batch);
+    self.failed_batches = 0;
     for (key, sequence) in self.batches.remove(&batch).unwrap_or_default() {
       if self
         .open
@@ -338,6 +440,11 @@ impl Writes {
         self.maybe_last_failure = Some(failure);
       }
     }
+    self.note_failed_batch();
+  }
+
+  fn note_failed_batch(&mut self) {
+    self.failed_batches = self.failed_batches.saturating_add(1);
   }
 
   fn ended(&mut self, batch: u32) {
@@ -357,13 +464,17 @@ impl Writes {
     }
   }
 
-  pub(crate) fn fail_queued(&mut self, key: &str, failure: WriteFailure) {
-    if let Some(write) = self.open.get_mut(key)
-      && write.state == WriteState::Queued
-    {
-      write.state = WriteState::Failed;
-      self.maybe_last_failure = Some(failure);
+  /// The batch of `keys` couldn't even start (no transaction): its queued writes failed.
+  pub(crate) fn fail_unsent(&mut self, keys: &[String], failure: WriteFailure) {
+    for key in keys {
+      if let Some(write) = self.open.get_mut(key)
+        && write.state == WriteState::Queued
+      {
+        write.state = WriteState::Failed;
+        self.maybe_last_failure = Some(failure);
+      }
     }
+    self.note_failed_batch();
   }
 
   /// The reason writes are failing while any failed write is open.
@@ -455,14 +566,15 @@ mod tests {
     assert!(matches!(writes.failure(), Err(StoreError::Database(_))));
 
     // Still failing: reported again, still nothing on disk.
-    writes.retry_failed();
-    issue_batch(&mut writes, &mut disk);
+    assert!(
+      !flush_batch(&mut writes, &mut disk),
+      "it fails before it goes out"
+    );
     assert!(disk.committed.is_empty());
     assert!(writes.failure().is_err());
 
     is_sealable.set(true);
-    writes.retry_failed();
-    issue_batch(&mut writes, &mut disk);
+    assert!(flush_batch(&mut writes, &mut disk));
     writes.committed(disk.last_batch());
     disk.commit_last();
     assert_eq!(disk.committed.len(), 3, "the whole batch");
@@ -571,9 +683,8 @@ mod tests {
 
       writes.committed(disk.last_batch());
       disk.commit_last();
-      for key in writes.take_next_batch().unwrap() {
-        writes.fail_queued(&key, WriteFailure::Closed);
-      }
+      let keys = writes.take_next_batch(disk.now_ms, false).unwrap();
+      writes.fail_unsent(&keys, WriteFailure::Closed);
       assert!(writes.is_past(due));
       assert!(writes.failure().is_err());
     }
@@ -592,13 +703,176 @@ mod tests {
     let batch = writes.start_batch(vec![("mls".into(), sequence)]);
     writes.aborted(batch, WriteFailure::QuotaExceeded);
     assert!(matches!(writes.failure(), Err(StoreError::QuotaExceeded)));
-    writes.retry_failed();
-    assert_eq!(writes.take_queued(), vec!["mls".to_string()]);
+    assert_eq!(
+      writes.take_next_batch(i64::MAX, true),
+      Some(vec!["mls".to_string()])
+    );
     assert!(matches!(writes.issue("mls"), Ok(Some(Issue::Put { sealed, .. })) if sealed == b"state"));
     assert_eq!(seals.get(), 1, "sealed once, kept for the retry");
   }
 
   const MIB: usize = 1024 * 1024;
+
+  fn millis(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap()
+  }
+
+  /// Issue #1201: with the quota full every loop turn's flush sent every failed write again, and
+  /// so did every new batch. Now they wait out a backoff, new writes with them, and go together.
+  mod backoff {
+    use super::*;
+
+    #[test]
+    fn failed_writes_are_issued_again_after_a_growing_delay_not_on_every_flush() {
+      let mut writes = Writes::default();
+      let mut disk = Disk::default();
+      writes.queue("first".into(), Some(sealed(b"1")), 1);
+      assert!(issue_batch_now(&mut writes, &mut disk, false));
+      let issued_at = disk.now_ms;
+      writes.aborted(disk.last_batch(), WriteFailure::QuotaExceeded);
+      disk.abort_last();
+
+      disk.now_ms = issued_at + millis(RETRY_MIN) - 1;
+      assert!(
+        !issue_batch_now(&mut writes, &mut disk, true),
+        "a flush waits too"
+      );
+      writes.queue("second".into(), Some(sealed(b"2")), 1);
+      assert!(
+        !issue_batch_now(&mut writes, &mut disk, false),
+        "and so do new writes"
+      );
+      assert!(matches!(writes.failure(), Err(StoreError::QuotaExceeded)));
+      assert!(
+        writes.is_past(writes.last_batch_due()),
+        "a flush doesn't wait for what waits for the backoff"
+      );
+
+      disk.now_ms = issued_at + millis(RETRY_MIN);
+      assert!(issue_batch_now(&mut writes, &mut disk, false));
+      let mut carried = disk.batches.last().unwrap().1.clone();
+      carried.sort();
+      assert_eq!(carried, ["first", "second"], "everything, in one batch");
+
+      // Each batch that fails doubles the delay, up to the longest.
+      let mut expected = RETRY_MIN;
+      for _ in 0..8 {
+        let issued_at = disk.now_ms;
+        writes.aborted(disk.last_batch(), WriteFailure::QuotaExceeded);
+        disk.abort_last();
+        expected = (expected * 2).min(RETRY_MAX);
+        disk.now_ms = issued_at + millis(expected) - 1;
+        assert!(!issue_batch_now(&mut writes, &mut disk, true));
+        disk.now_ms = issued_at + millis(expected);
+        assert!(issue_batch_now(&mut writes, &mut disk, true));
+      }
+      assert_eq!(expected, RETRY_MAX);
+
+      // Space again: the batch commits, and the next failure starts over at the shortest delay.
+      writes.committed(disk.last_batch());
+      disk.commit_last();
+      assert!(writes.failure().is_ok());
+      writes.queue("third".into(), Some(sealed(b"3")), 1);
+      assert!(issue_batch_now(&mut writes, &mut disk, false));
+      let issued_at = disk.now_ms;
+      writes.aborted(disk.last_batch(), WriteFailure::QuotaExceeded);
+      disk.abort_last();
+      disk.now_ms = issued_at + millis(RETRY_MIN);
+      assert!(issue_batch_now(&mut writes, &mut disk, true));
+    }
+
+    /// A flush that waits for a batch which then aborts doesn't wait for the batch after it while
+    /// that waits for the backoff.
+    #[test]
+    fn a_flush_does_not_wait_for_writes_held_back() {
+      let mut writes = Writes::default();
+      let mut disk = Disk::default();
+      writes.queue("first".into(), Some(sealed(b"1")), 1);
+      assert!(issue_batch_now(&mut writes, &mut disk, false));
+      writes.queue("second".into(), Some(sealed(b"2")), 1);
+      let due = writes.last_batch_due();
+      writes.aborted(disk.last_batch(), WriteFailure::QuotaExceeded);
+      disk.abort_last();
+      assert!(!issue_batch_now(&mut writes, &mut disk, false));
+      assert!(writes.is_past(due));
+      assert!(disk.committed.is_empty());
+    }
+
+    #[test]
+    fn many_records_waiting_for_a_failing_disk_ask_for_backpressure_until_a_batch_commits() {
+      let mut writes = Writes {
+        max_unsaved: 3,
+        ..Writes::default()
+      };
+      let mut disk = Disk::default();
+      for key in ["a", "b", "c"] {
+        writes.queue(key.into(), Some(sealed(b"1")), 1);
+      }
+      assert!(!writes.is_backlogged(), "nothing failed: just a large batch");
+      assert!(issue_batch(&mut writes, &mut disk));
+      writes.aborted(disk.last_batch(), WriteFailure::QuotaExceeded);
+      disk.abort_last();
+      assert!(writes.is_backlogged());
+
+      // Retried and failed again: still.
+      assert!(flush_batch(&mut writes, &mut disk));
+      assert!(writes.is_backlogged(), "also while the retry runs");
+      writes.aborted(disk.last_batch(), WriteFailure::QuotaExceeded);
+      disk.abort_last();
+      writes.queue("d".into(), Some(sealed(b"1")), 1);
+      assert!(writes.is_backlogged());
+
+      assert!(issue_batch(&mut writes, &mut disk));
+      writes.committed(disk.last_batch());
+      disk.commit_last();
+      assert!(!writes.is_backlogged(), "drained");
+      assert_eq!(disk.committed.len(), 4, "nothing dropped");
+    }
+
+    /// New writes held back go when the backoff ran out, without waiting for a flush: one timer.
+    #[test]
+    fn writes_held_back_get_one_timer_for_the_end_of_the_backoff() {
+      let mut writes = Writes::default();
+      let mut disk = Disk::default();
+      writes.queue("first".into(), Some(sealed(b"1")), 1);
+      assert!(issue_batch_now(&mut writes, &mut disk, false));
+      writes.aborted(disk.last_batch(), WriteFailure::QuotaExceeded);
+      disk.abort_last();
+      assert!(!issue_batch_now(&mut writes, &mut disk, true));
+      assert!(
+        !writes.needs_retry_timer(),
+        "only failed writes: the next flush retries"
+      );
+
+      writes.queue("second".into(), Some(sealed(b"2")), 1);
+      assert!(!issue_batch_now(&mut writes, &mut disk, false));
+      assert!(writes.needs_retry_timer());
+      assert_eq!(writes.retry_in(disk.now_ms), Some(RETRY_MIN));
+      assert!(!issue_batch_now(&mut writes, &mut disk, true));
+      assert!(!writes.needs_retry_timer(), "one is running");
+
+      disk.now_ms += millis(RETRY_MIN);
+      assert_eq!(writes.retry_in(disk.now_ms), None);
+      assert!(issue_batch_now(&mut writes, &mut disk, false), "the timer's turn");
+      writes.aborted(disk.last_batch(), WriteFailure::QuotaExceeded);
+      disk.abort_last();
+      writes.queue("third".into(), Some(sealed(b"3")), 1);
+      assert!(!issue_batch_now(&mut writes, &mut disk, false));
+      assert!(writes.needs_retry_timer(), "the next backoff gets its own");
+      assert_eq!(writes.retry_in(disk.now_ms), Some(RETRY_MIN * 2));
+    }
+
+    #[test]
+    fn a_few_failed_writes_ask_for_no_backpressure() {
+      let mut writes = Writes::default();
+      let mut disk = Disk::default();
+      writes.queue("a".into(), Some(sealed(b"1")), 1);
+      assert!(issue_batch(&mut writes, &mut disk));
+      writes.aborted(disk.last_batch(), WriteFailure::QuotaExceeded);
+      assert!(!writes.is_backlogged());
+      assert!(writes.failure().is_err(), "but the banner is up");
+    }
+  }
 
   fn lazy(seals: &Rc<Cell<u32>>, bytes: &'static [u8]) -> RecordValue {
     let seals = seals.clone();
@@ -628,6 +902,8 @@ mod tests {
   struct Disk {
     committed: BTreeSet<String>,
     batches: Vec<(u32, Vec<String>)>,
+    /// The time the store issues its batches at.
+    now_ms: i64,
   }
 
   impl Disk {
@@ -644,10 +920,22 @@ mod tests {
     }
   }
 
-  /// Issues a batch as the store does, through the same code, with the disk in the transaction's
-  /// place. Whether one went out.
+  /// Issues a batch as the store's timer does, past any retry backoff, through the same code, with
+  /// the disk in the transaction's place. Whether one went out.
   fn issue_batch(writes: &mut Writes, disk: &mut Disk) -> bool {
-    let Some(keys) = writes.take_next_batch() else {
+    disk.now_ms += millis(RETRY_MAX);
+    issue_batch_now(writes, disk, false)
+  }
+
+  /// [`issue_batch`] as a flush does: the failed writes go also when nothing new is queued.
+  fn flush_batch(writes: &mut Writes, disk: &mut Disk) -> bool {
+    disk.now_ms += millis(RETRY_MAX);
+    issue_batch_now(writes, disk, true)
+  }
+
+  /// Issues a batch at the disk's time, without waiting for any backoff to run out.
+  fn issue_batch_now(writes: &mut Writes, disk: &mut Disk, is_flush: bool) -> bool {
+    let Some(keys) = writes.take_next_batch(disk.now_ms, is_flush) else {
       return false;
     };
     let mut sent = Vec::new();
@@ -667,12 +955,12 @@ mod tests {
     let mut writes = Writes::default();
     writes.queue("first".into(), Some(sealed(b"1")), 1);
     writes.queue("second".into(), Some(sealed(b"2")), 1);
-    let keys = writes.take_next_batch().unwrap();
+    let keys = writes.take_next_batch(0, false).unwrap();
     let refused = writes.fill_batch(&keys, |_, _| Err(WriteFailure::QuotaExceeded));
     assert_eq!(refused, Err(WriteFailure::QuotaExceeded));
     assert!(matches!(writes.failure(), Err(StoreError::QuotaExceeded)));
-    // Not running: the next batch can go, and it takes both along.
+    // Not running: once the backoff ran out, the next batch can go, and it takes both along.
     writes.queue("third".into(), Some(sealed(b"3")), 1);
-    assert_eq!(writes.take_next_batch().unwrap().len(), 3);
+    assert_eq!(writes.take_next_batch(millis(RETRY_MIN), false).unwrap().len(), 3);
   }
 }
