@@ -988,8 +988,8 @@ mod tests {
     );
   }
 
-  /// A client that only knows the fields of the version before role signing, for a test's own eyes:
-  /// these are the fields it reads and signs.
+  /// Not a real older client: a struct with the fields of the version before role signing, which shows
+  /// what serde does with the new ones, and documents signed without them.
   mod older_clients {
     use super::*;
     use crate::role_signing::ProviderMark;

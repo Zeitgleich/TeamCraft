@@ -62,10 +62,11 @@ async fn note_role_change(
   let is_admin = identity.role.includes(&Role::Admin);
   if is_admin && !was_admin {
     super::role_evidence::note_role_regained(state, user).await;
-  } else if was_admin && identity.role < previous {
-    if let Some(token) = &identity.maybe_provider_token {
-      super::role_evidence::note_role_loss(state, token.as_str(), user).await;
-    }
+  } else if was_admin
+    && identity.role < previous
+    && let Some(token) = &identity.maybe_provider_token
+  {
+    super::role_evidence::note_role_loss(state, token.as_str(), user).await;
   }
 }
 

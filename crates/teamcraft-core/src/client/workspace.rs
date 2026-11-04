@@ -1163,6 +1163,40 @@ fn commit_rank(candidates: &[(DeviceId, bool)], own: DeviceId, new_device: Devic
   u32::try_from(ahead).unwrap_or(u32::MAX)
 }
 
+/// An owner's edit by hand stands against the provider until a token says the same (e2ee.md §3.1.3):
+/// writes that down for everybody whose role `members` changes.
+fn note_edits_by_hand(document: &mut RosterDocument, members: &[RosterMember]) {
+  use crate::role_signing::{HandRole, ProviderMark};
+
+  let mut edits: Vec<(UserId, HandRole)> = Vec::new();
+  for member in members {
+    let is_same = document
+      .members
+      .iter()
+      .any(|old| old.user_id == member.user_id && old.role == member.role);
+    if !is_same {
+      let hand = match member.role {
+        RosterRole::Owner => HandRole::Owner,
+        _ => HandRole::Admin,
+      };
+      edits.push((member.user_id, hand));
+    }
+  }
+  for old in &document.members {
+    if !members.iter().any(|member| member.user_id == old.user_id) {
+      edits.push((old.user_id, HandRole::Removed));
+    }
+  }
+  for (user, hand) in edits {
+    let mark = document.provider_marks.entry(user).or_insert(ProviderMark {
+      maybe_subject: None,
+      issued_at: 0,
+      maybe_by_hand: None,
+    });
+    mark.maybe_by_hand = Some(hand);
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use teamcraft_proto::Snowflake;
@@ -1197,39 +1231,5 @@ mod tests {
 
   fn device(raw: i64) -> DeviceId {
     DeviceId::from_snowflake(Snowflake::new(raw).unwrap())
-  }
-}
-
-/// An owner's edit by hand stands against the provider until a token says the same (e2ee.md §3.1.3):
-/// writes that down for everybody whose role `members` changes.
-fn note_edits_by_hand(document: &mut RosterDocument, members: &[RosterMember]) {
-  use crate::role_signing::{HandRole, ProviderMark};
-
-  let mut edits: Vec<(UserId, HandRole)> = Vec::new();
-  for member in members {
-    let is_same = document
-      .members
-      .iter()
-      .any(|old| old.user_id == member.user_id && old.role == member.role);
-    if !is_same {
-      let hand = match member.role {
-        RosterRole::Owner => HandRole::Owner,
-        _ => HandRole::Admin,
-      };
-      edits.push((member.user_id, hand));
-    }
-  }
-  for old in &document.members {
-    if !members.iter().any(|member| member.user_id == old.user_id) {
-      edits.push((old.user_id, HandRole::Removed));
-    }
-  }
-  for (user, hand) in edits {
-    let mark = document.provider_marks.entry(user).or_insert(ProviderMark {
-      maybe_subject: None,
-      issued_at: 0,
-      maybe_by_hand: None,
-    });
-    mark.maybe_by_hand = Some(hand);
   }
 }
