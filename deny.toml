@@ -21,6 +21,10 @@ ignore = [
   # Unmaintained, no known vulnerability. Proc macro used by Leptos (either_of, reactive_graph) for
   # the UI. Remove once Leptos drops it. https://rustsec.org/advisories/RUSTSEC-2024-0436
   { id = "RUSTSEC-2024-0436", reason = "unmaintained proc macro via Leptos, no vulnerability" },
+  # smallstr (unmaintained, no known vulnerability) via yrs 0.28, the CRDT of a channel's shared notes
+  # (e2ee.md §4.11): small strings inside the document. Revisit when yrs moves off it.
+  # https://rustsec.org/advisories/RUSTSEC-2026-0215
+  { id = "RUSTSEC-2026-0215", reason = "unmaintained, via yrs (channel notes), no vulnerability" },
   # Unmaintained proc-macro error helpers, compile time only: glib-macros (GTK stack of the Tauri
   # desktop shell) and hax-lib-macros (libcrux via openmls). No runtime code.
   { id = "RUSTSEC-2024-0370", reason = "unmaintained compile-time proc macro via glib/hax-lib" },

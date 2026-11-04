@@ -30,6 +30,9 @@ psl = "2"
 oauth2 = { version = "5", default-features = false }
 # The ID token's claims are base64url JSON (login hint, src/oidc_login.rs).
 base64.workspace = true
+# A channel's shared page (src/canvas.rs, e2ee.md §4.11): the Yjs CRDT. Only the page's editor links
+# it (its own wasm chunk on the web); the core keeps the updates as opaque bytes.
+yrs = "0.28"
 
 
 [dev-dependencies]

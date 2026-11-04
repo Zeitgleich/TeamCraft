@@ -34,6 +34,7 @@ use crate::components::call_prejoin::PreJoinScreen;
 use crate::components::call_screen::CallScreen;
 use crate::components::calls_unavailable::CallsUnavailableDialog;
 use crate::components::calls_view::CallsView;
+use crate::components::canvas_view::CanvasView;
 use crate::components::composer_toolbar::{ActiveFormats, FormatAction, FormatToolbarPanel};
 use crate::components::date_jump::{DateJumpMenu, DateJumpPanel};
 use crate::components::directory_view::DirectoryView;
@@ -237,6 +238,8 @@ areas! {
   /// Activity (#752): its list in the sidebar's place and its main column.
   activity_list(_unit: ()) => activity: view! { <ActivitySidebar /> };
   activity_home(_unit: ()) => activity: view! { <ActivityHome /> };
+  /// A channel's shared page (#1221) with the CRDT it is edited with: loads when its tab opens.
+  canvas(conversation: ConversationId) => canvas: view! { <CanvasView conversation=conversation /> };
   /// The log view of an integration channel: its toolbar and the filtered log.
   integration_feed(conversation: ConversationId) => log: view! { <IntegrationFeed conversation=conversation /> };
 }
