@@ -504,7 +504,7 @@ async fn the_shared_history_changes_nothing_about_the_line() {
 /// alone lists can't approve; once a signed admin confirms the role, approving works and every
 /// member takes the add in.
 #[tokio::test]
-async fn an_owner_only_the_server_lists_cannot_approve_until_a_signed_admin_confirms() {
+async fn an_owner_only_the_server_lists_cannot_approve_until_a_signed_admin_sets_their_role() {
   let (server, mut alice, mut bob, mut carol, mut dave, channel) = setup(AdminSelfJoin::OwnerApproval).await;
   let (bob_id, dave_id) = (bob.client.user_id(), dave.client.user_id());
   server.set_channel_role_unsigned(channel, dave_id, teamcraft_proto::ChannelRole::Admin);
@@ -524,42 +524,66 @@ async fn an_owner_only_the_server_lists_cannot_approve_until_a_signed_admin_conf
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
   assert!(!bob.client.has_group(channel).unwrap());
 
-  carol.client.confirm_channel_role(channel, dave_id).await.unwrap();
+  // No way to sign what the server says as it stands: Carol sets the role, at the action.
+  for role in [
+    teamcraft_proto::ChannelRole::Moderator,
+    teamcraft_proto::ChannelRole::Admin,
+  ] {
+    carol
+      .client
+      .set_channel_role(channel, dave_id, role)
+      .await
+      .unwrap();
+  }
   dave.client.approve_admin_join(channel, bob_id).await.unwrap();
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
   assert!(bob.client.has_group(channel).unwrap());
   assert_eq!(lines(&carol, channel), vec![(bob_id, By::Approved(dave_id))]);
 }
 
-/// Migration: a channel from before signed roles has no signed admin, so nobody approves until an
-/// admin the server lists signs their own role (founding the log); the other members then take the
-/// add in. Nothing was locked out for good, and the channel's other roles stay as they were.
+/// Migration: a channel from before signed roles has no signed admin. The admin the server lists
+/// approves all the same, nobody asks them for anything: their app founds the log on the way, and the
+/// other members take the add in.
 #[tokio::test]
-async fn a_channel_from_before_signed_roles_approves_once_its_owner_signed() {
+async fn a_channel_from_before_signed_roles_is_founded_when_its_owner_approves() {
   let (server, mut alice, mut bob, mut carol, mut dave, channel) =
     setup_in(AdminSelfJoin::OwnerApproval, HistoryPolicy::FromJoin, true).await;
   let (bob_id, carol_id) = (bob.client.user_id(), carol.client.user_id());
   server.set_role_log_lacking(false);
+  dave.client.sync_channel_roles(channel).await.unwrap();
   bob.client.request_admin_join(channel).await.unwrap();
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
   assert!(!carol.client.channel_role_state(channel).unwrap().is_signed());
 
+  carol.client.approve_admin_join(channel, bob_id).await.unwrap();
+  assert_eq!(
+    carol.client.verified_channel_role(channel, carol_id).unwrap(),
+    teamcraft_proto::ChannelRole::Admin
+  );
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  assert!(bob.client.has_group(channel).unwrap());
+  assert_eq!(lines(&dave, channel), vec![(bob_id, By::Approved(carol_id))]);
+}
+
+/// A member the server doesn't list as the channel's admin founds nothing by approving: no entry, and
+/// the refusal they saw before.
+#[tokio::test]
+async fn a_member_of_a_channel_from_before_signed_roles_cannot_approve() {
+  let (server, mut alice, mut bob, mut carol, mut dave, channel) =
+    setup_in(AdminSelfJoin::OwnerApproval, HistoryPolicy::FromJoin, true).await;
+  let bob_id = bob.client.user_id();
+  server.set_role_log_lacking(false);
+  bob.client.request_admin_join(channel).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
   assert!(matches!(
-    carol.client.approve_admin_join(channel, bob_id).await,
+    dave.client.approve_admin_join(channel, bob_id).await,
     Err(CoreError::JoinRequestNotApprovable(
       JoinRequestRefusal::OwnerRoleNotSigned
     ))
   ));
-
-  carol
-    .client
-    .confirm_channel_role(channel, carol_id)
-    .await
-    .unwrap();
-  carol.client.approve_admin_join(channel, bob_id).await.unwrap();
-  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
-  assert!(bob.client.has_group(channel).unwrap());
-  assert_eq!(lines(&dave, channel), vec![(bob_id, By::Approved(carol_id))]);
+  assert_eq!(server.role_log(channel).len(), 0);
+  assert!(!bob.client.has_group(channel).unwrap());
 }
 
 /// The lines `peer` lists in `channel`, oldest first. Each one stems from a commit.

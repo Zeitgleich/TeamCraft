@@ -373,42 +373,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// Whether this user signs the channel's roles in a way members accept: an admin of the fresh
   /// workspace roster, a signed channel admin, or, while nothing is signed, an admin the server
   /// lists, who founds the log (e2ee.md §4.6.1).
-  pub(crate) fn ui_can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
-    let members: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
-      self.store_ref(),
-      Table::Members,
-      &conversation.to_string(),
-    ));
-    let is_listed_admin = members
-      .into_iter()
-      .flat_map(|list| list.members)
-      .any(|member| member.user.id == self.me_id() && member.role == teamcraft_proto::ChannelRole::Admin);
-    let workspace: crate::workspace::WorkspaceState = self.read(
-      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
-        .map(Option::unwrap_or_default),
-    );
-    let signed: crate::channel_roles::ChannelRoleState = self.read(
-      records::get_json(
-        self.store_ref(),
-        Table::Workspace,
-        &crate::client::channel_roles_key(conversation),
-      )
-      .map(Option::unwrap_or_default),
-    );
-    let max_age_ms =
-      i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
-    let authorities = signed.signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms);
-    // A workspace admin signs nothing here but a list they reviewed (`ui_channel_roles_review`).
-    if signed.must_review_before_vouching() && authorities.iter().any(is_workspace_authority) {
-      return false;
-    }
-    authorities
-      .into_iter()
-      .any(|authority| authority != crate::channel_roles::SignerAuthority::Founder || is_listed_admin)
-  }
-
-  /// For a workspace admin whose signature here would vouch for a snapshot this device can't vouch
-  /// for: what they review (e2ee.md §4.6.1). `None` for anybody else.
+  /// For a workspace admin, where a look helps: this device can't vouch for the snapshot, or the
+  /// server lists a role above member nobody confirmed (a space admin's change, or a real admin a
+  /// founding left out), which nothing else can repair (e2ee.md §4.6.1). Nobody is asked to:
+  /// it is there when they open the channel's members. `None` for anybody else.
   pub(crate) fn ui_channel_roles_review(
     &self,
     conversation: ConversationId,
@@ -431,7 +399,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms)
       .iter()
       .any(is_workspace_authority);
-    (signed.must_review_before_vouching() && is_vouching).then(|| {
+    let members: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
+      self.store_ref(),
+      Table::Members,
+      &conversation.to_string(),
+    ));
+    let lists_a_role_nobody_confirmed = signed.is_signed()
+      && members.into_iter().flat_map(|list| list.members).any(|member| {
+        member.user.kind == teamcraft_proto::UserKind::Member
+          && member.role != teamcraft_proto::ChannelRole::Member
+          && signed.role_of(member.user.id) != member.role
+      });
+    (is_vouching && (signed.must_review_before_vouching() || lists_a_role_nobody_confirmed)).then(|| {
       teamcraft_client_api::model::ChannelRolesReview {
         log_cursor: signed.cursor,
         snapshot: signed

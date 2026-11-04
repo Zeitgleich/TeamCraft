@@ -624,14 +624,6 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     Memo::new(move |_| scheme.with(|scheme| actor.with(|actor| can_manage_channel_roles(scheme, actor))));
   // The members and the signed roles are read afresh while the section is open (e2ee.md §4.6.1).
   Effect::new(move |_| state.write(|backend| backend.refresh_channel_roles(conversation)));
-  let can_sign_roles = Memo::new(move |_| {
-    roles.track();
-    state.read(|backend| backend.can_sign_channel_roles(conversation))
-  });
-  let are_roles_unverified = Memo::new(move |_| {
-    roles.track();
-    state.read(|backend| backend.are_channel_roles_unverified(conversation))
-  });
   let roles_review = Memo::new(move |_| {
     roles.track();
     state.read(|backend| backend.channel_roles_review(conversation))
@@ -648,27 +640,24 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
       </Show>
     </div>
     <p class="hint">{move || if can_manage_roles.get() { i18n.t("channel-roles-hint") } else { i18n.t("channel-roles-read-only") }}</p>
-    // Somebody who can do something about it reads that in the review instead.
-    <Show when=move || are_roles_unverified.get() && roles_review.with(Option::is_none) fallback=|| ()>
-      <p class="hint">{move || i18n.t("channel-roles-unverified")}</p>
-    </Show>
     {move || roles_review.get().is_some().then(|| view! {
       <ChannelRolesReviewPanel conversation=conversation roles=roles users=members review=roles_review />
     })}
     <ChannelJoinRequests conversation=conversation />
     <ul class="settings-member-list">
       <For each=move || members.get() key=|user| user.id let:user>
-        <ChannelMemberRow conversation=conversation user=user roles=roles access=access space_roster=space_roster admin_count=admin_count can_sign_roles=can_sign_roles />
+        <ChannelMemberRow conversation=conversation user=user roles=roles access=access space_roster=space_roster admin_count=admin_count />
       </For>
     </ul>
   }
 }
 
-/// A workspace admin's way to sign a channel's roles where this device can't vouch for them: their
-/// signature counts for every role it lists on every member's device, so they sign the whole list
-/// as they see it, never one role on top of a snapshot they didn't see (e2ee.md §4.6.1). The list is
-/// the server's word and names are its directory's, so what this device's snapshot doesn't have is
-/// marked, and somebody without a name can't be signed.
+/// A workspace admin's look at a channel's roles where this device can't vouch for them or the
+/// server lists one nobody confirmed. It asks nothing of them: it is there when they open the
+/// members. Confirming counts for every role listed on every member's device, so it is the whole
+/// list as they see it (e2ee.md §4.6.1). The list is the server's word and names are its directory's,
+/// so what this device's snapshot doesn't have is marked, somebody who would lose a role is named,
+/// and somebody without a name can't be confirmed.
 #[component]
 fn ChannelRolesReviewPanel(
   conversation: ConversationId,
@@ -696,6 +685,19 @@ fn ChannelRolesReviewPanel(
     maybe_signed_at_cursor.get().is_some() && maybe_signed_at_cursor.get() != cursor
   });
   let has_new = Memo::new(move |_| rows.with(|list| list.iter().any(|row| row.is_new)));
+  // Who this device has a role for and the list doesn't name: confirming takes it from them.
+  let dropped = Memo::new(move |_| {
+    let snapshot = review.with(|maybe| {
+      maybe
+        .as_ref()
+        .map(|found| found.snapshot.clone())
+        .unwrap_or_default()
+    });
+    let names = rows.with(|list| {
+      users.with(|known| dropped_role_names(list, known, &snapshot, &i18n.t("channel-roles-review-unknown")))
+    });
+    names.join(", ")
+  });
   // The button that opened the list is gone: the focus goes with the content.
   let list_ref = NodeRef::<leptos::html::Ul>::new();
   Effect::new(move |_| {
@@ -734,6 +736,9 @@ fn ChannelRolesReviewPanel(
         </ul>
         <Show when=move || has_new.get() fallback=|| ()>
           <p class="hint">{move || i18n.t("channel-roles-review-new-hint")}</p>
+        </Show>
+        <Show when=move || dropped.with(|names| !names.is_empty()) fallback=|| ()>
+          <p class="hint">{move || i18n.t_with("channel-roles-review-dropped", &[("names", dropped.get().as_str())])}</p>
         </Show>
         {move || refusal.get().map(|key| view! { <p role="alert" class="hint">{move || i18n.t(key)}</p> })}
         <Show when=move || has_changed_since.get() fallback=|| ()>
@@ -801,8 +806,27 @@ fn role_review_rows(
     .collect()
 }
 
-/// Why this list can't be signed (an i18n key): nobody signs a role for somebody they can't see, and
-/// a channel keeps an admin.
+/// Who has a role on this device that the list no longer names, as far as anybody knows who that is.
+fn dropped_role_names(
+  rows: &[RoleReviewRow],
+  users: &[User],
+  snapshot: &[(UserId, ChannelRole)],
+  unknown: &str,
+) -> Vec<String> {
+  snapshot
+    .iter()
+    .filter(|(user, _)| !rows.iter().any(|row| row.user == *user))
+    .map(|(user, _)| {
+      users
+        .iter()
+        .find(|known| known.id == *user)
+        .map_or_else(|| unknown.to_owned(), |known| known.display_name.clone())
+    })
+    .collect()
+}
+
+/// Why this list can't be confirmed (an i18n key): nobody confirms a role for somebody they can't
+/// see, and a channel keeps an admin.
 fn role_review_refusal(rows: &[RoleReviewRow]) -> Option<&'static str> {
   if rows.iter().any(|row| row.maybe_name.is_none()) {
     return Some("channel-roles-review-unknown-refused");
@@ -821,8 +845,6 @@ fn ChannelMemberRow(
   access: ChannelAccess,
   space_roster: Memo<SpaceRoster>,
   admin_count: Memo<usize>,
-  /// Whether the user signs roles members accept (a signed channel admin, a workspace admin).
-  can_sign_roles: Memo<bool>,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
@@ -830,15 +852,6 @@ fn ChannelMemberRow(
   let is_me = id == state.me().id;
   let is_confirming = RwSignal::new(false);
   let pending = PendingAction::new();
-  let signing = PendingAction::new();
-  // An admin or moderator only the server lists: said, and signable by those who can.
-  let is_unsigned = Memo::new(move |_| {
-    roles.with(|list| {
-      list
-        .iter()
-        .any(|member| member.user == id && !member.is_role_signed)
-    })
-  });
   // Who appointed the role, only where the verified role log says so (e2ee.md §4.6.1).
   let appointer = Memo::new(move |_| {
     roles.with(|list| {
@@ -930,18 +943,6 @@ fn ChannelMemberRow(
           .into_any(),
         }
       })}
-      <Show when=move || is_unsigned.get() fallback=|| ()>
-        <span class="badge badge-warn" title=move || i18n.t("channel-role-unsigned-hint")>{move || i18n.t("channel-role-unsigned")}</span>
-        <Show when=move || !is_me && can_sign_roles.get() fallback=|| ()>
-          <PendingButton
-            class="btn btn-small"
-            pending=signing
-            on_click=move |_| signing.run(|| state.write(|backend| backend.confirm_channel_role(conversation, id)))
-          >
-            {move || i18n.t("channel-role-sign")}
-          </PendingButton>
-        </Show>
-      </Show>
       {(!is_me).then(|| view! {
         <Show
           when=move || is_confirming.get()
@@ -972,7 +973,6 @@ fn ChannelMemberRow(
         </Show>
       })}
       <FailureNote pending=pending />
-      <FailureNote pending=signing />
     </li>
   }
 }
@@ -2336,7 +2336,6 @@ mod tests {
       ChannelMember {
         user: id(raw),
         role,
-        is_role_signed: false,
         maybe_appointer: None,
       }
     }
@@ -2366,6 +2365,22 @@ mod tests {
         vec![(id(1), false), (id(2), true), (id(3), true)],
         "somebody it doesn't name, a role it doesn't give, and no members"
       );
+    }
+
+    /// The server leaving somebody out is what a reviewer must see: it takes the role from them.
+    #[test]
+    fn who_the_list_leaves_out_is_named() {
+      let rows = [row(1, ChannelRole::Admin, Some("Alice"))];
+      let snapshot = [
+        (id(1), ChannelRole::Admin),
+        (id(2), ChannelRole::Admin),
+        (id(3), ChannelRole::Moderator),
+      ];
+      assert_eq!(
+        dropped_role_names(&rows, &[], &snapshot, "Unknown person"),
+        vec!["Unknown person".to_owned(), "Unknown person".to_owned()]
+      );
+      assert!(dropped_role_names(&rows, &[], &snapshot[..1], "Unknown person").is_empty());
     }
 
     #[test]

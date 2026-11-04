@@ -1133,6 +1133,15 @@ impl FakeServer {
     }
   }
 
+  /// The server lists somebody as a member with `role` whom nobody added to the encryption group.
+  pub fn list_member_unsigned(&self, conversation: ConversationId, user: UserId, role: ChannelRole) {
+    let mut state = self.lock();
+    let floor = state.peek_id();
+    if let Some(entry) = state.conversations.get_mut(&conversation) {
+      entry.members.insert(user, (role, floor));
+    }
+  }
+
   /// Group information the server holds for the conversation's current epoch although no member
   /// published it: a member or the server planting information nobody can join.
   pub fn plant_group_info(&self, conversation: ConversationId, group_info: &[u8]) {

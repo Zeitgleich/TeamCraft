@@ -378,17 +378,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         user,
         role,
       } => self.set_channel_role(conversation, user, role).await.map(|_| ()),
-      // Asked for explicitly: a role this user can't sign is a failure the user sees, not silence.
-      CoreCommand::ConfirmChannelRole { conversation, user } => {
-        match self.confirm_channel_role(conversation, user).await? {
-          super::RoleSigning::Signed => Ok(()),
-          super::RoleSigning::Unsigned | super::RoleSigning::ReviewOutdated => {
-            Err(CoreError::InvalidRequest(
-              "this role can't be signed in a way the channel's members accept".into(),
-            ))
-          },
-        }
-      },
       CoreCommand::SignReviewedChannelRoles {
         conversation,
         roles,

@@ -31,6 +31,12 @@ pub struct ChannelRolesDocument {
   pub prev_hash: Base64Bytes,
   /// When the signer's device signed it (its own clock; shown, never used to decide).
   pub signed_at_ms: i64,
+  /// Whether this snapshot, or one it builds on, took somebody's role from the server's member list
+  /// at a channel's first sight (e2ee.md §4.6.1, "Founding at first sight"): nobody looked at those
+  /// roles, so even a workspace admin's signature on it doesn't vouch for them. It never anchors
+  /// the channel and is never a checkpoint.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_server_listed_roles: bool,
 }
 
 /// One person's role in a [`ChannelRolesDocument`].
@@ -136,6 +142,7 @@ mod tests {
       }],
       prev_hash: Base64Bytes::new(vec![0; 3]),
       signed_at_ms: 1_000,
+      has_server_listed_roles: false,
     };
     let json = serde_json::to_value(&document).unwrap();
     assert_eq!(

@@ -414,10 +414,6 @@ pub enum CoreCommand {
     role: teamcraft_proto::ChannelRole,
   },
   /// Signs the role the server lists for a member (e2ee.md §4.6.1).
-  ConfirmChannelRole {
-    conversation: ConversationId,
-    user: UserId,
-  },
   /// Signs exactly the roles a workspace admin looked at (e2ee.md §4.6.1).
   SignReviewedChannelRoles {
     conversation: ConversationId,
@@ -2891,16 +2887,8 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     });
   }
 
-  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
-    self.command(CoreCommand::ConfirmChannelRole { conversation, user });
-  }
-
   fn refresh_channel_roles(&self, conversation: ConversationId) {
     self.command(CoreCommand::RefreshChannelRoles { conversation });
-  }
-
-  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
-    self.ui_can_sign_channel_roles(conversation)
   }
 
   fn channel_roles_review(
@@ -2921,18 +2909,6 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       roles,
       at_cursor,
     });
-  }
-
-  fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {
-    let signed: crate::channel_roles::ChannelRoleState = self.read(
-      records::get_json(
-        &self.store,
-        Table::Workspace,
-        &crate::client::channel_roles_key(conversation),
-      )
-      .map(Option::unwrap_or_default),
-    );
-    signed.has_unverified_stretch()
   }
 
   fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {
@@ -3468,28 +3444,24 @@ fn placeholder_view(unreadable: Unreadable) -> Placeholder {
   }
 }
 
-/// A channel member as the UI shows them: the server's role, marked when no signed assignment
-/// backs it (e2ee.md §4.6.1), with who appointed it only where the verified log says so (#877).
+/// A channel member as the UI shows them: the server's role, with who appointed it only where the
+/// verified log says so (#877).
 fn channel_member_view(
   signed: &crate::channel_roles::ChannelRoleState,
   user: UserId,
   server_role: teamcraft_proto::ChannelRole,
   is_guest: bool,
 ) -> teamcraft_client_api::model::ChannelMember {
-  let verified = signed.role_of(user);
-  let effective = crate::channel_roles::effective_role(&verified, &server_role, is_guest);
-  let is_role_signed = server_role == teamcraft_proto::ChannelRole::Member || effective == server_role;
   // The line says how the role shown came about: only the role the verified log gives, on a member
   // who isn't a guest (a guest is a member whatever is signed).
-  let is_shown_role_verified = !is_guest && verified == server_role;
+  let is_shown_role_verified = !is_guest && signed.role_of(user) == server_role;
   teamcraft_client_api::model::ChannelMember {
     user,
-    maybe_appointer: if is_role_signed && is_shown_role_verified {
+    maybe_appointer: if is_shown_role_verified {
       role_appointer(signed, user)
     } else {
       None
     },
-    is_role_signed,
     role: server_role,
   }
 }
@@ -3549,7 +3521,6 @@ mod tests {
     fn a_verified_role_names_who_appointed_it() {
       let state = state_with(AppointmentAuthority::WorkspaceAdmin, true);
       let view = channel_member_view(&state, id(2), ChannelRole::Admin, false);
-      assert!(view.is_role_signed);
       assert_eq!(
         view.maybe_appointer,
         Some(RoleAppointer {
@@ -3580,7 +3551,6 @@ mod tests {
     fn a_role_only_the_server_lists_names_nobody() {
       // The server says Bob is an admin, the verified log says he isn't: unverified, so no claim.
       let view = channel_member_view(&ChannelRoleState::default(), id(2), ChannelRole::Admin, false);
-      assert!(!view.is_role_signed);
       assert_eq!(view.maybe_appointer, None);
       // Not even when a stale appointment of the same user is around.
       let mut state = state_with(AppointmentAuthority::ChannelAdmin, true);
@@ -3629,19 +3599,16 @@ mod tests {
       }
     }
 
-    /// The log has a stretch this device can't verify: the role shows as the server lists it, marked
-    /// as not signed, with nobody named.
+    /// The log has a stretch this device can't verify: the role shows as the server lists it, with
+    /// nobody named.
     #[test]
-    fn an_unverified_stretch_shows_every_role_as_not_signed() {
+    fn an_unverified_stretch_shows_the_role_and_names_nobody() {
       let mut state = state_with(AppointmentAuthority::WorkspaceAdmin, true);
       state.maybe_unverified_from = Some(2);
       state.is_workspace_anchored = false;
       let view = channel_member_view(&state, id(2), ChannelRole::Admin, false);
       assert_eq!(view.role, ChannelRole::Admin);
-      assert!(!view.is_role_signed);
       assert_eq!(view.maybe_appointer, None);
-      // Somebody without a role is nothing to mark.
-      assert!(channel_member_view(&state, id(3), ChannelRole::Member, false).is_role_signed);
     }
 
     /// Bob (2) is a signed admin, appointed by user 9 on `authority`.

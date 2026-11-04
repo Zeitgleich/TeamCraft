@@ -15,8 +15,10 @@
 //!   key that snapshot names for them; their entry must build on exactly that snapshot.
 //! - **The founder**: while nothing was accepted yet, an entry whose signer names themselves as
 //!   admin, with the identity key this device pinned for them (trust on first use, like the
-//!   workspace root of trust). Channels created from this version on are founded by their creator;
-//!   older channels by the first admin who changes a role.
+//!   workspace root of trust). A channel is founded by its creator; an older one by the first app
+//!   the server lists as its admin that sees it without a log, naming who the server lists then, if
+//!   they are in this device's encryption group. That is trust in the server at first sight: such a
+//!   snapshot is marked, and never anchors (e2ee.md §4.6.1, "Founding at first sight").
 //!
 //! An entry that fails any check is skipped, not fatal: honest signers build on the last entry they
 //! accepted, so a junk entry can't block the log. Only an entry from somebody entitled to sign that
@@ -111,6 +113,10 @@ pub struct ChannelRoleState {
   /// Hashes of entries about this channel this device refused, newest last.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub skipped_hashes: Vec<Base64Bytes>,
+  /// Whether the snapshot goes back to roles taken from the server's list at first sight
+  /// ([`ChannelRolesDocument::has_server_listed_roles`]), until a workspace admin's reviewed list.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_server_listed_roles: bool,
 }
 
 /// The accepted head of a channel's role log; sent along inside the channel's encrypted messages.
@@ -296,6 +302,15 @@ impl ChannelRoleState {
     self.version > 0 || self.has_unverified_stretch()
   }
 
+  /// Whether this device may take the channel for one without a log and found it from what the
+  /// server lists: it read nothing but an empty log, and no member's message showed it a head. A
+  /// log it refused entries of, or was told of, stays as it is: only a workspace admin's list ends
+  /// that, so a server that hides a log can't get an honest signature on a second one from a device
+  /// that knows better.
+  pub fn is_unfounded(&self) -> bool {
+    !self.is_signed() && self.cursor == 0 && self.maybe_alarm.is_none() && self.maybe_ahead.is_none()
+  }
+
   pub fn head(&self) -> Option<ChannelRolesHead> {
     let hash = self.maybe_head_hash.clone()?;
     Some(ChannelRolesHead {
@@ -433,6 +448,7 @@ impl ChannelRoleState {
       assignments,
       prev_hash: self.head_or_zero(),
       signed_at_ms,
+      has_server_listed_roles: self.has_server_listed_roles,
     })
   }
 
@@ -468,6 +484,7 @@ impl ChannelRoleState {
       assignments,
       prev_hash: Base64Bytes::new(REVIEWED_PREV_HASH.to_vec()),
       signed_at_ms,
+      has_server_listed_roles: false,
     })
   }
 
@@ -487,12 +504,19 @@ impl ChannelRoleState {
     check_snapshot(version, &document.assignments)?;
     let continues = document.prev_hash == self.head_or_zero();
     match authority {
-      // A checkpoint by the workspace's admins replaces whatever this device had.
-      SignerAuthority::Workspace { .. } if !continues => return Ok(()),
-      SignerAuthority::Workspace { .. } => {},
-      SignerAuthority::ChannelAdmin | SignerAuthority::FormerWorkspace { .. } if !continues => {
+      // A checkpoint by the workspace's admins replaces whatever this device had. Not with roles
+      // nobody looked at: those only ever build on what a device has.
+      SignerAuthority::Workspace { .. } if !continues && !document.has_server_listed_roles => {
+        return Ok(());
+      },
+      SignerAuthority::Workspace { .. }
+      | SignerAuthority::ChannelAdmin
+      | SignerAuthority::FormerWorkspace { .. }
+        if !continues =>
+      {
         return Err(ChannelRoleError::BrokenChain { version });
       },
+      SignerAuthority::Workspace { .. } => {},
       SignerAuthority::FormerWorkspace { .. } => {},
       SignerAuthority::ChannelAdmin => {
         if self.role_of(signer) != ChannelRole::Admin {
@@ -548,7 +572,8 @@ impl ChannelRoleState {
     // A workspace admin founding a channel passes as its founder (nobody changes their own role
     // otherwise), and it is a workspace admin's word all the same. It anchors only on what a purge
     // itself would take from that admin (`signed_deletion`): the server sets the entry's time.
-    let is_by_workspace_admin = verifier.workspace.heads.maybe_roster_signed_at_ms.is_some()
+    let is_by_workspace_admin = !document.has_server_listed_roles
+      && verifier.workspace.heads.maybe_roster_signed_at_ms.is_some()
       && verifier
         .workspace
         .is_roster_fresh(verifier.now_ms, verifier.roster_max_age_ms)
@@ -595,6 +620,7 @@ impl ChannelRoleState {
     self.version = version;
     self.maybe_head_hash = Some(Base64Bytes::new(hash.to_vec()));
     let previous_assignments = std::mem::replace(&mut self.assignments, document.assignments);
+    let has_server_listed_roles = document.has_server_listed_roles;
     match maybe_authority {
       _ if is_by_workspace_admin => self.is_workspace_anchored = true,
       // A claim, a roster admin on a roster too old to anchor anything, or somebody who left and
@@ -608,10 +634,16 @@ impl ChannelRoleState {
       // A channel admin carries on what the snapshot they build on was.
       Some(SignerAuthority::ChannelAdmin) | None => {},
     }
+    // Roles nobody looked at aren't anything to anchor on, whoever signed.
+    if has_server_listed_roles {
+      self.has_server_listed_roles = true;
+      self.is_workspace_anchored = false;
+    }
     // Only a checkpoint this device could anchor on says what holds today.
     if is_by_workspace_admin {
       self.maybe_unverified_from = None;
       self.has_former_admin_entry = false;
+      self.has_server_listed_roles = false;
     } else if matches!(maybe_authority, Some(SignerAuthority::FormerWorkspace { .. })) {
       self.has_former_admin_entry = true;
     }
@@ -1171,6 +1203,102 @@ mod tests {
       );
       assert!(world.apply(&mut state, next).is_empty());
       assert!(state.is_workspace_anchored, "a channel admin carries it on");
+    }
+
+    /// e2ee.md §4.6.1, "Founding at first sight": a workspace admin's app that founds a channel from
+    /// the server's list saw none of it, so its signature anchors nothing, and nor does its next
+    /// role change on that snapshot. A list they looked at does.
+    #[test]
+    fn roles_from_the_servers_list_anchor_nothing_until_a_workspace_admin_looked() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = ChannelRoleState::default();
+      let mut founding = admin.document(
+        &state,
+        &[(&admin, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      founding.has_server_listed_roles = true;
+      assert!(world.apply(&mut state, admin.signed(founding)).is_empty());
+      assert_eq!(state.role_of(bob.user_id), ChannelRole::Admin);
+      assert!(!state.is_workspace_anchored);
+      assert!(state.has_server_listed_roles);
+
+      let next = state
+        .next_document(
+          conversation(CHANNEL),
+          &[(alice.user_id, ChannelRole::Moderator)],
+          &BTreeMap::from([(alice.user_id, [1; 32])]),
+          NOW_MS,
+        )
+        .unwrap();
+      assert!(next.has_server_listed_roles, "the mark carries on");
+      assert!(world.apply(&mut state, admin.signed(next)).is_empty());
+      assert!(!state.is_workspace_anchored);
+      assert_eq!(
+        state.appointment_of(alice.user_id),
+        None,
+        "nothing claimed either"
+      );
+
+      let mut reviewed = admin.document(&state, &[(&bob, ChannelRole::Admin)]);
+      reviewed.prev_hash = Base64Bytes::new(REVIEWED_PREV_HASH.to_vec());
+      assert!(world.apply(&mut state, admin.signed(reviewed)).is_empty());
+      assert!(state.is_workspace_anchored);
+      assert!(!state.has_server_listed_roles);
+    }
+
+    /// A signature on the server's list is never a checkpoint: replayed against a device with a log,
+    /// it can't put the server's list in place of the roles there, so it strips nobody.
+    #[test]
+    fn roles_from_the_servers_list_replace_nothing_a_device_has() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(&world, &alice, &[]);
+      let before = state.assignments.clone();
+      let mut replayed = admin.document(&ChannelRoleState::default(), &[(&bob, ChannelRole::Admin)]);
+      replayed.version = state.cursor + 1;
+      replayed.has_server_listed_roles = true;
+      assert_eq!(world.apply(&mut state, admin.signed(replayed)).len(), 1);
+      assert_eq!(state.assignments, before);
+      assert_eq!(state.role_of(alice.user_id), ChannelRole::Admin);
+      assert!(!state.has_server_listed_roles);
+    }
+
+    #[test]
+    fn only_a_device_that_saw_no_log_and_no_head_takes_a_channel_for_unfounded() {
+      assert!(ChannelRoleState::default().is_unfounded());
+      let head = ChannelRolesHead {
+        version: 3,
+        hash: Base64Bytes::new(vec![1; 32]),
+      };
+      for state in [
+        ChannelRoleState {
+          version: 1,
+          cursor: 1,
+          ..ChannelRoleState::default()
+        },
+        // It looked at entries and took none: there is a log, whoever wrote it.
+        ChannelRoleState {
+          cursor: 1,
+          ..ChannelRoleState::default()
+        },
+        ChannelRoleState {
+          cursor: 1,
+          maybe_unverified_from: Some(1),
+          ..ChannelRoleState::default()
+        },
+        // A member's message named a head the server doesn't show.
+        ChannelRoleState {
+          maybe_ahead: Some(head.clone()),
+          ..ChannelRoleState::default()
+        },
+        ChannelRoleState {
+          maybe_alarm: Some("held back".into()),
+          ..ChannelRoleState::default()
+        },
+      ] {
+        assert!(!state.is_unfounded(), "{state:?}");
+      }
     }
   }
 
@@ -2745,6 +2873,7 @@ mod tests {
         assignments,
         prev_hash: state.head_or_zero(),
         signed_at_ms: NOW_MS,
+        has_server_listed_roles: false,
       }
     }
 

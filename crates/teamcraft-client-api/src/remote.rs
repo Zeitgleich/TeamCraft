@@ -1046,10 +1046,6 @@ pub enum ChatAction {
     user: UserId,
     role: crate::model::ChannelRole,
   },
-  ConfirmChannelRole {
-    conversation: ConversationId,
-    user: UserId,
-  },
   SignReviewedChannelRoles {
     conversation: ConversationId,
     roles: Vec<(UserId, crate::model::ChannelRole)>,
@@ -1402,7 +1398,6 @@ impl ChatAction {
         user,
         role,
       } => backend.set_channel_role(conversation, user, role),
-      Self::ConfirmChannelRole { conversation, user } => backend.confirm_channel_role(conversation, user),
       Self::SignReviewedChannelRoles {
         conversation,
         roles,
@@ -1531,12 +1526,6 @@ pub enum ChatQuery {
     conversation: ConversationId,
   },
   CanManageIntegrationSources,
-  CanSignChannelRoles {
-    conversation: ConversationId,
-  },
-  AreChannelRolesUnverified {
-    conversation: ConversationId,
-  },
   ChannelRolesReview {
     conversation: ConversationId,
   },
@@ -1696,14 +1685,6 @@ pub enum ChatAnswer {
   CanManageIntegrationSources {
     #[serde(default)]
     can_manage: bool,
-  },
-  CanSignChannelRoles {
-    #[serde(default)]
-    can_sign: bool,
-  },
-  AreChannelRolesUnverified {
-    #[serde(default)]
-    is_unverified: bool,
   },
   ChannelRolesReview {
     #[serde(default)]
@@ -1909,12 +1890,6 @@ impl ChatQuery {
       },
       Self::CanManageIntegrationSources => ChatAnswer::CanManageIntegrationSources {
         can_manage: backend.can_manage_integration_sources(),
-      },
-      Self::CanSignChannelRoles { conversation } => ChatAnswer::CanSignChannelRoles {
-        can_sign: backend.can_sign_channel_roles(conversation),
-      },
-      Self::AreChannelRolesUnverified { conversation } => ChatAnswer::AreChannelRolesUnverified {
-        is_unverified: backend.are_channel_roles_unverified(conversation),
       },
       Self::ChannelRolesReview { conversation } => ChatAnswer::ChannelRolesReview {
         maybe_review: backend.channel_roles_review(conversation),

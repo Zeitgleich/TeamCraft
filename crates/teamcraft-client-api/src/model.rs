@@ -251,11 +251,6 @@ impl Space {
 pub struct ChannelMember {
   pub user: UserId,
   pub role: ChannelRole,
-  /// Whether this device verified a signed assignment of `role` (e2ee.md §4.6.1). `false` only for
-  /// an admin or moderator whose role is the server's word alone: members don't count it for
-  /// anything that needs a signed role, and the UI says so.
-  #[serde(default = "is_true")]
-  pub is_role_signed: bool,
   /// Who appointed `role`, as the signed role log this device verified says (issue #877). `None`
   /// where nothing verified says it: a member, a role only the server lists, a founder's own claim
   /// or a log accepted before this was recorded. Never the server's word.
@@ -288,10 +283,6 @@ pub enum AppointerAuthority {
   WorkspaceOwner,
   WorkspaceAdmin,
   ChannelAdmin,
-}
-
-fn is_true() -> bool {
-  true
 }
 
 /// A source of the integration bridge that posts into a channel, announced in the app
