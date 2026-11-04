@@ -26,8 +26,10 @@ use crate::i18n::use_i18n;
 use crate::reactive::use_interval_while_visible;
 use crate::state::use_app_state;
 
-/// How often the console reloads from the server while it is open and the page is visible: admins
-/// watch audit entries and device lists change, nobody else needs the requests.
+/// How often the console reloads the data of the open section while it is open and the page is
+/// visible: admins watch audit entries and device lists change, nobody else needs the requests.
+/// Only that section's lists are read (a few requests), never the whole console: the address's rate
+/// limit is shared with every colleague behind it (issue #1217, docs/performance.md "Admin console").
 const REFRESH_MS: u64 = 30_000;
 
 /// Administration inside the normal client. Everything here is metadata: admins can manage rooms
@@ -36,9 +38,12 @@ const REFRESH_MS: u64 = 30_000;
 pub fn AdminConsole(section: AdminSection) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  // Backends that read the server fetch fresh data when the console opens and while it stays open.
-  state.read(|backend| backend.admin_refresh());
-  use_interval_while_visible(REFRESH_MS, move || state.read(|backend| backend.admin_refresh()));
+  // Backends that read the server fetch fresh data when the console opens (everything the first
+  // time, then what this section shows) and while it stays open.
+  state.read(|backend| backend.admin_refresh_section(section));
+  use_interval_while_visible(REFRESH_MS, move || {
+    state.read(|backend| backend.admin_refresh_section(section))
+  });
   let maybe_error = Memo::new(move |_| state.read(|backend| backend.admin_error()));
 
   let nav_item = move |target: AdminSection, icon: IconName| {
@@ -141,5 +146,17 @@ pub fn SectionHeader(
         <span>{move || i18n.t("admin-metadata-only")}</span>
       </span>
     </header>
+  }
+}
+
+/// Says that a list ends before the instance's last entry: the console reads a bounded number of
+/// pages, and an admin must not take the end of the list for the end of the instance.
+#[component]
+pub fn ListCutNotice(#[prop(into)] is_cut: Signal<bool>) -> impl IntoView {
+  let i18n = use_i18n();
+  move || {
+    is_cut
+      .get()
+      .then(|| view! { <p class="muted-text small" role="status">{i18n.t("admin-list-cut")}</p> })
   }
 }

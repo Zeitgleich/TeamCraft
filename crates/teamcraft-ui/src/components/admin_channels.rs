@@ -5,7 +5,7 @@ use teamcraft_proto::{ChannelModeration, HistoryPolicy, Permission};
 use crate::admin::{AdminChannel, AdminLoad, SelfJoinOutcome, format_bytes};
 use crate::channel_access::ChannelAccess;
 use crate::clock::{format_relative, now_ms};
-use crate::components::admin_console::SectionHeader;
+use crate::components::admin_console::{ListCutNotice, SectionHeader};
 use crate::components::admin_spaces::{LoadNotice, SpacesPanel};
 use crate::components::channel_view::UnconfirmedRemovalActions;
 use crate::components::icons::{Icon, IconName};
@@ -389,6 +389,7 @@ pub fn ChannelsSection() -> impl IntoView {
         <Show when=move || visible.get().is_empty() fallback=|| ()>
           <p class="empty-state">{move || i18n.t("admin-empty")}</p>
         </Show>
+        <ListCutNotice is_cut=Signal::derive(move || state.read(|backend| backend.admin_channels_truncated())) />
         </Show>
       </div>
       <aside class="detail-pane" aria-label=move || i18n.t("admin-detail-label")>

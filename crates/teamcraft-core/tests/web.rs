@@ -9,6 +9,7 @@ mod common;
 
 use std::ops::ControlFlow;
 use std::rc::Rc;
+use std::time::Duration;
 
 use common::{PASSPHRASE, clock, options, settings};
 use openmls_traits::OpenMlsProvider as _;
@@ -103,6 +104,8 @@ async fn a_refused_write_is_reported_and_written_once_there_is_space() {
   let name = database_name();
   let key = SymmetricKey::generate(&mut OsRng);
   let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  // Retried with every flush (the backoff has a test of its own).
+  store.set_retry_backoff(Duration::ZERO, Duration::ZERO);
   refuse_puts(true);
   store.put(Table::Users, "1", b"one").unwrap();
   assert!(matches!(store.flush().await, Err(StoreError::QuotaExceeded)));
@@ -114,6 +117,49 @@ async fn a_refused_write_is_reported_and_written_once_there_is_space() {
   drop(store);
   let reopened = IndexedDbStore::open(&name, &key).await.unwrap();
   assert_eq!(reopened.get(Table::Users, "1").unwrap(), Some(b"one".to_vec()));
+}
+
+/// Issue #1201: with the quota full the failed writes wait out a backoff instead of going again with
+/// every flush (which then doesn't wait for them), and past the limit the store asks for backpressure
+/// until they went through. Nothing is dropped.
+#[wasm_bindgen_test]
+async fn failed_writes_back_off_and_the_backlog_ends_once_they_went_through() {
+  const BACKOFF: Duration = Duration::from_millis(300);
+  let name = database_name();
+  let key = SymmetricKey::generate(&mut OsRng);
+  let store = IndexedDbStore::open(&name, &key).await.unwrap();
+  store.flush().await.unwrap();
+  store.set_max_unsaved_writes(3);
+  store.set_retry_backoff(BACKOFF, BACKOFF);
+
+  refuse_puts(true);
+  for index in 0..3 {
+    store.put(Table::Users, &index.to_string(), b"x").unwrap();
+  }
+  assert!(matches!(store.flush().await, Err(StoreError::QuotaExceeded)));
+  assert!(store.is_backlogged());
+
+  refuse_puts(false);
+  store.put(Table::Users, "3", b"x").unwrap();
+  assert!(
+    matches!(store.flush().await, Err(StoreError::QuotaExceeded)),
+    "within the backoff nothing goes again, and the flush says why"
+  );
+  assert!(store.is_backlogged());
+  let other = IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap();
+  assert_eq!(other.get(Table::Users, "3").unwrap(), None, "held back too");
+
+  teamcraft_core::platform::sleep(BACKOFF + Duration::from_millis(50)).await;
+  store.flush().await.unwrap();
+  assert!(!store.is_backlogged());
+  let reopened = IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap();
+  for index in 0..4 {
+    assert_eq!(
+      reopened.get(Table::Users, &index.to_string()).unwrap(),
+      Some(b"x".to_vec()),
+      "{index}"
+    );
+  }
 }
 
 /// A key store that can't be read is an error, never "no key": that would end the session.
@@ -502,6 +548,7 @@ async fn a_batch_after_one_that_aborts_never_commits_without_it() {
   let key = SymmetricKey::generate(&mut OsRng);
   let store = IndexedDbStore::open(&name, &key).await.unwrap();
   store.flush().await.unwrap();
+  store.set_retry_backoff(Duration::ZERO, Duration::ZERO);
 
   abort_next_write_transaction();
   store.put(Table::Users, "first", b"1").unwrap();
@@ -533,6 +580,7 @@ async fn a_record_that_does_not_seal_holds_its_batch_back() {
   let key = SymmetricKey::generate(&mut OsRng);
   let store = IndexedDbStore::open(&name, &key).await.unwrap();
   store.flush().await.unwrap();
+  store.set_retry_backoff(Duration::ZERO, Duration::ZERO);
 
   let is_sealable = std::rc::Rc::new(std::cell::Cell::new(false));
   store.put(Table::Users, "before", b"1").unwrap();

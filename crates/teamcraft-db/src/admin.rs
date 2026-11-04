@@ -51,6 +51,11 @@ pub struct AdminConversationRow {
   pub created_at: OffsetDateTime,
   /// Creation time of the newest message, derived from its Snowflake ID.
   pub maybe_last_message_millis: Option<i64>,
+  /// The first channel admin by display name: the channel's owner. `None`: nobody is admin.
+  pub maybe_owner: Option<UserId>,
+  /// The channel's own retention, then its space's (the inputs of the effective retention).
+  pub own_retention: crate::retention::StoredRetention,
+  pub space_retention: crate::retention::StoredRetention,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,7 +164,8 @@ impl Database {
     let rows = sqlx::query!(
       r#"SELECT t.id AS "id!", t.space_id, t.name, t.visibility AS "visibility!", t.is_archived AS "is_archived!",
                 t.created_at AS "created_at!", t.member_count AS "member_count!", t.guest_count AS "guest_count!",
-                t.message_count AS "message_count!", t.last_message_id, t.storage_bytes AS "storage_bytes!"
+                t.message_count AS "message_count!", t.last_message_id, t.storage_bytes AS "storage_bytes!",
+                t.owner_id, t.own_age_days, t.own_messages, t.space_age_days, t.space_messages
          FROM (
            SELECT c.id, c.space_id, c.name, c.visibility, c.archived_at IS NOT NULL AS is_archived, c.created_at,
                   (SELECT count(*) FROM memberships m WHERE m.conversation_id = c.id) AS member_count,
@@ -171,7 +177,14 @@ impl Database {
                   ((SELECT COALESCE(sum(a.size_bytes), 0) FROM attachments a
                      WHERE a.conversation_id = c.id AND a.completed_at IS NOT NULL)
                    + (SELECT COALESCE(sum(s.size_bytes), 0) FROM index_segments s
-                     WHERE s.conversation_id = c.id))::bigint AS storage_bytes
+                     WHERE s.conversation_id = c.id))::bigint AS storage_bytes,
+                  -- Owner and retention come with the list: one request instead of two per channel.
+                  (SELECT m.user_id FROM memberships m JOIN users u ON u.id = m.user_id
+                    WHERE m.conversation_id = c.id AND m.role = 'admin'
+                    ORDER BY u.display_name, u.id LIMIT 1) AS owner_id,
+                  c.retention_max_age_days AS own_age_days, c.retention_max_messages AS own_messages,
+                  (SELECT sp.retention_max_age_days FROM spaces sp WHERE sp.id = c.space_id) AS space_age_days,
+                  (SELECT sp.retention_max_messages FROM spaces sp WHERE sp.id = c.space_id) AS space_messages
            FROM conversations c
            WHERE c.kind = 'channel' AND c.deleted_at IS NULL
              AND ($1::bigint IS NULL OR c.space_id = $1)
@@ -219,6 +232,15 @@ impl Database {
           maybe_last_message_millis: row
             .last_message_id
             .map(|id| (id >> 22) + teamcraft_proto::SNOWFLAKE_EPOCH_MS),
+          maybe_owner: from_db_opt(row.owner_id)?,
+          own_retention: crate::retention::StoredRetention {
+            maybe_max_age_days: row.own_age_days,
+            maybe_max_messages: row.own_messages,
+          },
+          space_retention: crate::retention::StoredRetention {
+            maybe_max_age_days: row.space_age_days,
+            maybe_max_messages: row.space_messages,
+          },
         })
       })
       .collect()

@@ -3,7 +3,7 @@ use teamcraft_proto::Role;
 
 use crate::admin::{AdminUser, DeviceInfo};
 use crate::clock::{format_date_time, format_relative, now_ms};
-use crate::components::admin_console::SectionHeader;
+use crate::components::admin_console::{ListCutNotice, SectionHeader};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
@@ -114,7 +114,7 @@ pub fn UsersSection() -> impl IntoView {
             </tr>
           </thead>
           <tbody>
-            <For each=move || shown.get() key=|entry| (entry.user.id, entry.is_active, entry.devices.len()) let:entry>
+            <For each=move || shown.get() key=|entry| (entry.user.id, entry.is_active, entry.device_count) let:entry>
               <UserRow entry=entry selected=selected now=now guests=tab.get_untracked() == UserTab::Guests />
             </For>
           </tbody>
@@ -122,6 +122,7 @@ pub fn UsersSection() -> impl IntoView {
         <Show when=move || shown.get().is_empty() fallback=|| ()>
           <p class="empty-state">{move || i18n.t("admin-empty")}</p>
         </Show>
+        <ListCutNotice is_cut=Signal::derive(move || state.read(|backend| backend.admin_users_truncated())) />
       </div>
       <aside class="detail-pane" aria-label=move || i18n.t("admin-detail-label")>
         {move || match detail_key.with(Option::is_some).then(|| selected_user.get_untracked()).flatten() {
@@ -180,7 +181,7 @@ fn UserRow(entry: AdminUser, selected: RwSignal<Option<UserId>>, now: i64, guest
         </button>
       </th>
       <td><span class="badge">{move || i18n.t(role)}</span></td>
-      <td class="num">{entry.devices.len()}</td>
+      <td class="num">{entry.device_count}</td>
       <td>{seen}</td>
       {if guests {
         guest_cells.into_any()
@@ -196,6 +197,9 @@ fn UserDetail(entry: AdminUser, devices: Memo<Vec<DeviceInfo>>, now: i64) -> imp
   let state = use_app_state();
   let i18n = use_i18n();
   let user_id = entry.user.id;
+  // The list carries the count only; the devices load now, once per user (issue #1217).
+  state.read(|backend| backend.admin_load_devices(user_id));
+  let device_count = entry.device_count;
   let by_id = items_by_key(devices.into(), |device: &DeviceInfo| device.id);
   let pending_device = RwSignal::new(None::<DeviceId>);
   let confirm_deactivate = RwSignal::new(false);
@@ -283,7 +287,7 @@ fn UserDetail(entry: AdminUser, devices: Memo<Vec<DeviceInfo>>, now: i64) -> imp
           }
         }
       </For>
-      <Show when=move || devices.with(Vec::is_empty) fallback=|| ()>
+      <Show when=move || device_count == 0 && devices.with(Vec::is_empty) fallback=|| ()>
         <li class="muted-text">{move || i18n.t("admin-no-devices")}</li>
       </Show>
     </ul>

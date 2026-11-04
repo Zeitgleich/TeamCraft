@@ -272,6 +272,23 @@ policy-updates-invalid-url = Enter an address that starts with https://.
 policy-updates-defaults = Back to the defaults
 admin-retention-title = Retention
 admin-retention-subtitle = Keep the last N days and/or N messages, whichever is stricter. Channel owners can choose less, up to { $days } days.
+admin-retention-limited = Keep only the last
+admin-retention-unit-days = { $count ->
+    [one] day
+   *[other] days
+  }
+admin-retention-unit-messages = { $count ->
+    [one] message
+   *[other] messages
+  }
+admin-retention-choice-days = { $channel }: how long to keep messages
+admin-retention-choice-messages = { $channel }: how many messages to keep
+admin-retention-error-days = Enter a whole number of days from 1 to { $max }.
+admin-retention-error-messages = Enter a whole number of messages from 1 to { $max }.
+admin-list-cut = This list is cut: the console shows the first 1000 entries, and the instance has more.
+admin-error-rate-limited = The server received too many requests from this network address. The console pauses and tries again shortly.
+admin-error-read-failed = Some data could not be loaded. The console tries again shortly.
+admin-error-unreachable = The server could not be reached. The console tries again shortly.
 admin-audit-title = Audit log
 admin-audit-subtitle = Admin actions, recoveries and device changes. Metadata only, never message content.
 audit-filter-action = Action
