@@ -140,7 +140,9 @@ the change, and people taken off the list are removed from the group.
    never moves the device again, and the end of the call clears the announcements made for it (also
    those a failed follow left behind) and the device's note of the call's ID. The DM keeps its members and history, and the added people never
    see it. If the server refuses the move (409), the adding app cancels the room it just made.
-   Web, desktop, iOS and Android all do this.
+   Web, desktop, iOS and Android all do this. "Add notetaker" in a DM or group DM call is such a
+   move with the notetaker as the added one: it isn't rung but asked in with a request in the
+   room, and the others' banner says where the audio goes (e2ee.md §8.2, "In every call").
 
    | Condition                   | What happens                                                                                                                                                                                                                 |
    |-----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
