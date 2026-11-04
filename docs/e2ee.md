@@ -2311,7 +2311,9 @@ people in the same agenda item. So `yrs`.
 
 **Where the CRDT runs.** Only the page's editor decodes the document. On the web it is a wasm
 chunk of its own (`areas::canvas`, chunk `canvas`), loaded when the Notes tab first opens, so the
-app's first visit doesn't grow by `yrs`. The client core keeps a channel's updates as opaque bytes
+app's first visit doesn't grow by `yrs`. Measured on the release bundle of this change (CI web-size
+job): the `canvas` chunk is 243,842 B (about 104 kB gzip -9), and a signed-in first visit grew by
+26.0 kB gzip -9 (the tab, the backend calls and the stylesheet, no CRDT). The client core keeps a channel's updates as opaque bytes
 in its encrypted store (`teamcraft-core::canvas`, `canvas/{conversation}` next to the bookmarks)
 and never reads them; the editor merges them (`merge_updates_v1`, lossless, also for updates that
 still wait for others) and hands the merge back when the list grows beyond 32 updates, which the
