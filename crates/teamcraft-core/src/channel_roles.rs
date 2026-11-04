@@ -759,17 +759,20 @@ impl IdentityDirectory for KeyDirectory {
 
 #[cfg(test)]
 mod tests {
+  use std::cell::RefCell;
+
   use rand_core::OsRng;
   use teamcraft_crypto::identity::{DeviceKeyPair, IdentityKeyPair, SignedDeviceCertificate};
   use teamcraft_crypto::workspace::sign_log_entry;
-  use teamcraft_proto::{Id, Snowflake, UnixMillis};
+  use teamcraft_proto::{Id, Snowflake, UnixMillis, WorkspaceLogEntryResponse, WorkspaceLogKind};
 
   use super::*;
   use crate::workspace::{LogHeads, RosterDocument, RosterMember};
 
   const CHANNEL: i64 = 900;
   const NOW_MS: i64 = 1_000_000;
-  const MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+  const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+  const MAX_AGE_MS: i64 = 30 * DAY_MS;
 
   mod accepted {
     use super::*;
@@ -1465,6 +1468,40 @@ mod tests {
     }
   }
 
+  /// Issue #1260: a device that reads the log late, after a workspace admin who signed in it left
+  /// the roster.
+  mod late_reader {
+    use super::*;
+
+    /// With nobody hostile: Eve, a second workspace admin, demotes Alice and makes Bob an admin, Bob
+    /// carries on, Eve leaves the roster, and only then this device reads the log.
+    #[test]
+    fn a_departed_signer_leaves_no_demoted_admin_anchored() {
+      let story = Story::new();
+      let mut world = story.world();
+      let mut reader = story.first_read(&world);
+      assert!(reader.is_workspace_anchored);
+
+      let (demotion, carried_on, on_time) = story.demotion(&world, &reader);
+      story.eve_leaves(&mut world);
+      world.apply(&mut reader, demotion);
+      world.apply(&mut reader, carried_on);
+
+      assert_eq!(
+        reader.role_of(story.alice.user_id),
+        ChannelRole::Member,
+        "the demotion counts"
+      );
+      assert_eq!(reader.role_of(story.bob.user_id), ChannelRole::Admin);
+      assert_eq!(
+        reader.head(),
+        on_time.head(),
+        "the same log as a device that was there"
+      );
+      assert!(!reader.is_workspace_anchored, "nothing it can justify today");
+    }
+  }
+
   struct Person {
     user_id: UserId,
     identity: IdentityKeyPair,
@@ -1618,6 +1655,144 @@ mod tests {
         pinned: &self.pinned,
       };
       state.apply_entries(vec![entry], &verifier)
+    }
+  }
+
+  /// The roster log as a real device verifies it: an owner signs every version, chained.
+  struct RosterLog {
+    owner: Person,
+    version: u64,
+    maybe_head: Option<Base64Bytes>,
+  }
+
+  impl RosterLog {
+    fn new(owner: Person) -> Self {
+      Self {
+        owner,
+        version: 0,
+        maybe_head: None,
+      }
+    }
+
+    /// The next roster, holding the owner and `admins`, verified by `world`'s device.
+    fn publish(&mut self, world: &mut World, admins: &[&Person], signed_at_ms: i64) {
+      if self.version == 0 {
+        world.workspace = WorkspaceState::default();
+      }
+      let entry = self.next_entry(admins, signed_at_ms);
+      world.workspace.apply_entries(vec![entry]).unwrap();
+    }
+
+    fn next_entry(&mut self, admins: &[&Person], signed_at_ms: i64) -> WorkspaceLogEntryResponse {
+      self.version += 1;
+      let mut members = vec![RosterMember {
+        user_id: self.owner.user_id,
+        role: RosterRole::Owner,
+        identity_key: self.owner.key(),
+      }];
+      members.extend(admins.iter().map(|person| RosterMember {
+        user_id: person.user_id,
+        role: RosterRole::Admin,
+        identity_key: person.key(),
+      }));
+      let document = RosterDocument {
+        version: self.version,
+        members,
+        maybe_org_recovery_key: None,
+        maybe_prev_hash: Some(
+          self
+            .maybe_head
+            .clone()
+            .unwrap_or_else(|| Base64Bytes::new(vec![0; HASH_BYTES])),
+        ),
+        maybe_signed_at_ms: Some(signed_at_ms),
+      };
+      let payload = serde_json::to_vec(&document).unwrap();
+      let signature = sign_log_entry(
+        &self.owner.device,
+        &self.owner.certificate,
+        WorkspaceLog::Roster,
+        self.version,
+        &payload,
+      )
+      .unwrap();
+      let hash = log_entry_hash(WorkspaceLog::Roster, self.version, &payload, &signature).unwrap();
+      self.maybe_head = Some(Base64Bytes::new(hash.to_vec()));
+      WorkspaceLogEntryResponse {
+        kind: WorkspaceLogKind::Roster,
+        version: self.version,
+        payload: Base64Bytes::new(payload),
+        signature: Base64Bytes::new(signature),
+        maybe_signer_device_id: None,
+        created_at: UnixMillis(signed_at_ms),
+      }
+    }
+  }
+
+  /// The people of the late reader's tests: Olivia owns the workspace, Frank and Eve are workspace
+  /// admins, Alice a channel admin Frank appointed, Bob a member until Eve appoints him.
+  struct Story {
+    olivia: RefCell<RosterLog>,
+    frank: Person,
+    eve: Person,
+    alice: Person,
+    bob: Person,
+  }
+
+  impl Story {
+    fn new() -> Self {
+      Self {
+        olivia: RefCell::new(RosterLog::new(Person::new(7))),
+        frank: Person::new(8),
+        eve: Person::new(9),
+        alice: Person::new(1),
+        bob: Person::new(2),
+      }
+    }
+
+    /// A device that verified the roster with both admins, a day before the entries.
+    fn world(&self) -> World {
+      let mut world = World::new(&[&self.alice, &self.bob, &self.frank, &self.eve], &[]);
+      self
+        .olivia
+        .borrow_mut()
+        .publish(&mut world, &[&self.frank, &self.eve], NOW_MS - DAY_MS);
+      world
+    }
+
+    /// The channel as Frank founded it, read on time: anchored, with Alice an admin.
+    fn first_read(&self, world: &World) -> ChannelRoleState {
+      founded(world, &self.frank, &[(&self.alice, ChannelRole::Admin)])
+    }
+
+    /// Eve demotes Alice and appoints Bob, who signs the next entry: both entries and the state of
+    /// a device that was there.
+    fn demotion(
+      &self,
+      world: &World,
+      state: &ChannelRoleState,
+    ) -> (
+      ChannelRoleLogEntryResponse,
+      ChannelRoleLogEntryResponse,
+      ChannelRoleState,
+    ) {
+      let mut on_time = state.clone();
+      let roles = [(&self.frank, ChannelRole::Admin), (&self.bob, ChannelRole::Admin)];
+      let demotion = self.eve.entry(&on_time, &roles);
+      assert!(world.apply(&mut on_time, demotion.clone()).is_empty());
+      assert_eq!(on_time.role_of(self.alice.user_id), ChannelRole::Member);
+      let carried_on = self.bob.entry(&on_time, &roles);
+      assert!(world.apply(&mut on_time, carried_on.clone()).is_empty());
+      (demotion, carried_on, on_time)
+    }
+
+    /// The next roster leaves Eve out, a day after the entries, and a day later this device reads.
+    fn eve_leaves(&self, world: &mut World) {
+      self
+        .olivia
+        .borrow_mut()
+        .publish(world, &[&self.frank], NOW_MS + DAY_MS);
+      world.now_ms = NOW_MS + 2 * DAY_MS;
     }
   }
 
