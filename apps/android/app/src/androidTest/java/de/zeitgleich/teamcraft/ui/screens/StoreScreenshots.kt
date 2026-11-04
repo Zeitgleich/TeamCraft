@@ -43,6 +43,7 @@ import de.zeitgleich.teamcraft.ui.AppState
 import de.zeitgleich.teamcraft.ui.ChatListEntry
 import de.zeitgleich.teamcraft.ui.ChatPreview
 import de.zeitgleich.teamcraft.ui.ChatTab
+import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.MainActivity
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.PreviewContent
@@ -191,7 +192,8 @@ class StoreScreenshots {
           snapshot = snapshot(),
           messages = channelMessages(),
           extras = channelExtras(),
-          maybeFirstUnread = null,
+          firstUnread = FirstUnread.None,
+          sentCount = 0,
           onOpenThread = {},
           maybeOnReply = {},
           onLongPress = {},
@@ -221,7 +223,8 @@ class StoreScreenshots {
           snapshot = snapshot(),
           messages = threadMessages(),
           extras = emptyMap(),
-          maybeFirstUnread = null,
+          firstUnread = FirstUnread.None,
+          sentCount = 0,
           onOpenThread = null,
           maybeOnReply = null,
           onLongPress = {},
