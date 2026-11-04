@@ -388,6 +388,13 @@ impl ChannelRoleState {
     !self.is_signed() && self.cursor == 0 && self.maybe_alarm.is_none() && self.maybe_ahead.is_none()
   }
 
+  /// Whether an admin the server lists may act by the rule of a channel nobody signed: this device
+  /// accepted nothing, and nothing told it of a log it isn't shown. Entries it refused don't count, or
+  /// a junk entry would lock the owner out; a head in a member's message does, as a real log exists.
+  pub fn may_act_as_unsigned(&self) -> bool {
+    !self.is_signed() && self.maybe_alarm.is_none() && self.maybe_ahead.is_none()
+  }
+
   /// The key the accepted snapshot names for `user`.
   pub fn snapshot_key_of(&self, user: UserId) -> Option<[u8; 32]> {
     self
@@ -660,8 +667,12 @@ impl ChannelRoleState {
     // itself would take from that admin (`signed_deletion`): the server sets the entry's time.
     // Roles nobody looked at aren't anything to anchor on, whoever signed. That goes on through an
     // older client's entry too, which doesn't carry the mark on: only a reviewed list ends it.
+    // An anchor takes a workspace admin who knows what they vouch for. Their ordinary entry changes one
+    // role, and every key in it may check while the roles are a colluding founder's: so it only carries
+    // on an anchor. It takes a list they looked at, or their own founding, which names what they chose.
     let may_anchor = !document.has_server_listed_roles
       && (!self.has_server_listed_roles || is_reviewed(&document))
+      && (self.is_workspace_anchored || is_reviewed(&document) || !self.is_signed())
       && !names_another_key_than_pinned(&document, verifier.pinned);
     let is_by_workspace_admin = may_anchor
       && verifier.workspace.heads.maybe_roster_signed_at_ms.is_some()
@@ -1312,7 +1323,7 @@ mod tests {
       assert!(world.apply(&mut state, promote).is_empty());
       assert!(!state.is_workspace_anchored, "a founded admin adds no trust");
 
-      let checkpoint = admin.entry(&state, &[(&bob, ChannelRole::Admin)]);
+      let checkpoint = admin.reviewed(&state, &[(&bob, ChannelRole::Admin)]);
       assert!(world.apply(&mut state, checkpoint).is_empty());
       assert!(state.is_workspace_anchored);
       let next = bob.entry(
@@ -1525,6 +1536,81 @@ mod tests {
         };
         assert_eq!(same.standing(), RoleKeyStanding::Checked);
       }
+    }
+
+    /// Third review of #1286: a founder and the server made the roles up; a workspace admin changes
+    /// one, and every key in it checks. Only a list they looked at anchors that.
+    #[test]
+    fn a_workspace_admins_ordinary_entry_anchors_nothing_new() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(&world, &bob, &[]);
+      let ordinary = admin.entry(
+        &state,
+        &[(&bob, ChannelRole::Admin), (&alice, ChannelRole::Moderator)],
+      );
+      assert!(world.apply(&mut state, ordinary).is_empty());
+      assert_eq!(
+        state.role_of(alice.user_id),
+        ChannelRole::Moderator,
+        "it counts for roles"
+      );
+      assert!(!state.is_workspace_anchored);
+
+      let mut reviewed = admin.document(&state, &[(&alice, ChannelRole::Admin)]);
+      reviewed.prev_hash = Base64Bytes::new(REVIEWED_PREV_HASH.to_vec());
+      assert!(world.apply(&mut state, admin.signed(reviewed)).is_empty());
+      assert!(state.is_workspace_anchored);
+      let next = admin.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Moderator)],
+      );
+      assert!(world.apply(&mut state, next).is_empty());
+      assert!(state.is_workspace_anchored, "on an anchor it carries on");
+    }
+
+    /// A workspace admin's own founding of a channel with nothing signed anchors, as it names what
+    /// they chose.
+    #[test]
+    fn a_workspace_admins_own_founding_anchors() {
+      let admin = Person::new(9);
+      let world = World::new(&[&admin], &[&admin]);
+      let mut state = ChannelRoleState::default();
+      let founding = admin.entry(&state, &[(&admin, ChannelRole::Admin)]);
+      assert!(world.apply(&mut state, founding).is_empty());
+      assert!(state.is_workspace_anchored);
+    }
+
+    /// Third review of #1286: a device told of a log it isn't shown knows there is one.
+    #[test]
+    fn only_a_device_told_of_no_log_acts_as_on_an_unsigned_channel() {
+      assert!(ChannelRoleState::default().may_act_as_unsigned());
+      let junk_only = ChannelRoleState {
+        cursor: 1,
+        ..ChannelRoleState::default()
+      };
+      assert!(
+        junk_only.may_act_as_unsigned(),
+        "the repair for a junk entry stays"
+      );
+      let head = ChannelRolesHead {
+        version: 3,
+        hash: Base64Bytes::new(vec![1; 32]),
+      };
+      assert!(
+        !ChannelRoleState {
+          maybe_ahead: Some(head),
+          ..ChannelRoleState::default()
+        }
+        .may_act_as_unsigned()
+      );
+      assert!(
+        !ChannelRoleState {
+          maybe_alarm: Some("held back".into()),
+          ..ChannelRoleState::default()
+        }
+        .may_act_as_unsigned()
+      );
     }
 
     #[test]
@@ -1966,7 +2052,7 @@ mod tests {
       let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
       let world = World::new(&[&alice, &bob], &[&admin]);
       let mut state = founded(&world, &alice, &[]);
-      let appoint = admin.entry(
+      let appoint = admin.reviewed(
         &state,
         &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
       );
@@ -1992,7 +2078,7 @@ mod tests {
       let mut world = World::new(&[&alice, &bob], &[&owner]);
       world.workspace.roster.members[0].role = RosterRole::Owner;
       let mut state = founded(&world, &alice, &[]);
-      let appoint = owner.entry(
+      let appoint = owner.reviewed(
         &state,
         &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
       );
@@ -2262,7 +2348,7 @@ mod tests {
       assert!(!reader.is_workspace_anchored);
       assert_eq!(reader.appointment_of(story.bob.user_id), None, "not claimed");
 
-      let checkpoint = story.frank.entry(
+      let checkpoint = story.frank.reviewed(
         &reader,
         &[
           (&story.frank, ChannelRole::Admin),
@@ -2594,7 +2680,7 @@ mod tests {
         let story = Story::new();
         let mut world = story.world();
         let mut reader = stretched(&story, &mut world);
-        let checkpoint = story.frank.entry(
+        let checkpoint = story.frank.reviewed(
           &reader,
           &[
             (&story.frank, ChannelRole::Admin),
@@ -3140,6 +3226,17 @@ mod tests {
         signed_at_ms: NOW_MS,
         has_server_listed_roles: false,
       }
+    }
+
+    /// A list this person looked at, holding exactly `roles`: a checkpoint, if they may sign one.
+    fn reviewed(
+      &self,
+      state: &ChannelRoleState,
+      roles: &[(&Person, ChannelRole)],
+    ) -> ChannelRoleLogEntryResponse {
+      let mut document = self.document(state, roles);
+      document.prev_hash = Base64Bytes::new(REVIEWED_PREV_HASH.to_vec());
+      self.signed(document)
     }
 
     fn entry(

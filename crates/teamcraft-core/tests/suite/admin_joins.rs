@@ -586,6 +586,36 @@ async fn a_junk_entry_does_not_lock_the_owner_of_an_unsigned_channel_out() {
   assert_eq!(lines(&dave, channel), vec![(bob_id, By::Approved(carol_id))]);
 }
 
+/// Third review: a device told of a log it isn't shown knows there is one, so its listed admin
+/// doesn't act as on an unsigned channel; the junk repair above doesn't reach this far.
+#[tokio::test]
+async fn an_alarm_keeps_the_listed_admin_from_approving_on_an_unsigned_view() {
+  let (server, mut alice, mut bob, mut carol, mut dave, channel) =
+    setup_in(AdminSelfJoin::OwnerApproval, HistoryPolicy::FromJoin, true).await;
+  let bob_id = bob.client.user_id();
+  server.set_role_log_lacking(false);
+  server.plant_role_log_entry(channel, b"junk".to_vec(), vec![0; 64]);
+  bob.client.request_admin_join(channel).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  carol.client.sync_channel_roles(channel).await.unwrap();
+  let key = format!("channel_roles/{channel}");
+  let stored = carol.store.get(Table::Workspace, &key).unwrap().unwrap();
+  let mut state: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+  state["alarm"] = serde_json::json!("another member has entry 3");
+  carol
+    .store
+    .put(Table::Workspace, &key, &serde_json::to_vec(&state).unwrap())
+    .unwrap();
+
+  assert!(matches!(
+    carol.client.approve_admin_join(channel, bob_id).await,
+    Err(CoreError::JoinRequestNotApprovable(
+      JoinRequestRefusal::OwnerRoleNotSigned
+    ))
+  ));
+  assert!(!bob.client.has_group(channel).unwrap());
+}
+
 /// A member the server doesn't list as the channel's admin founds nothing by approving: no entry, and
 /// the refusal they saw before.
 #[tokio::test]

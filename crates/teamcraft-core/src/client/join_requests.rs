@@ -106,7 +106,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if self.verified_channel_role(conversation, self.user_id())? != ChannelRole::Admin {
       self.found_at_first_sight(conversation).await?;
     }
-    let is_nobody_signed = !self.channel_role_state(conversation)?.is_signed();
+    let is_nobody_signed = self.channel_role_state(conversation)?.may_act_as_unsigned();
     let is_listed_admin = self.server_channel_role(conversation, self.user_id())? == Some(ChannelRole::Admin);
     if self.verified_channel_role(conversation, self.user_id())? != ChannelRole::Admin
       && !(is_nobody_signed && is_listed_admin)

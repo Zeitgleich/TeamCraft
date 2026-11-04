@@ -75,7 +75,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .map(Option::unwrap_or_default),
     );
     state.role_of(self.me_id()) == ChannelRole::Admin
-      || (!state.is_signed() && maybe_listed == Some(&ChannelRole::Admin))
+      || (state.may_act_as_unsigned() && maybe_listed == Some(&ChannelRole::Admin))
   }
 
   fn verified_workspace(&self) -> WorkspaceState {

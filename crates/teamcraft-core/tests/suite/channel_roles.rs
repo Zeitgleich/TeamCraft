@@ -547,6 +547,49 @@ mod whose_key_a_role_names {
     settle(&mut [&mut alice, &mut bob, &mut carol, &mut owner]).await;
   }
 
+  /// Third review: a colluding member founds a channel from before signed roles, unmarked, with the
+  /// server listing them. A workspace admin in the group makes one ordinary change, and every key
+  /// checks. That counts for roles, but it anchors nothing: Mallory, in the group, can't purge at once.
+  #[tokio::test]
+  async fn a_workspace_admins_ordinary_change_anchors_no_colluding_founder() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = trio(&server).await;
+    let (alice_id, bob_id, carol_id) = ids(&alice, &bob, &carol);
+    let mut owner = outside_owner(&server).await;
+    let channel = old_channel(&server, &mut alice, &mut bob, &mut carol).await;
+    let ui = backend_of(&owner);
+    ui.join_channel(channel);
+    run_commands(&mut owner, &ui).await;
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut owner]).await;
+
+    // Bob, the colluding member: the server lists him, and he founds it by hand, without the mark.
+    server.set_channel_role_unsigned(channel, bob_id, ChannelRole::Admin);
+    assert_eq!(
+      bob
+        .client
+        .sign_channel_roles(channel, &[(bob_id, ChannelRole::Admin)], true)
+        .await
+        .unwrap(),
+      RoleSigning::Signed
+    );
+    assert_eq!(
+      owner
+        .client
+        .sign_channel_roles(channel, &[(carol_id, ChannelRole::Moderator)], false)
+        .await
+        .unwrap(),
+      RoleSigning::Signed,
+      "every key checks"
+    );
+
+    alice.client.sync_channel_roles(channel).await.unwrap();
+    let state = alice.client.channel_role_state(channel).unwrap();
+    assert_eq!(state.role_of(bob_id), ChannelRole::Admin);
+    assert_eq!(state.role_of(alice_id), ChannelRole::Member);
+    assert!(!state.is_workspace_anchored, "nothing Bob can purge at once with");
+    assert_eq!(state.appointment_of(carol_id), None);
+  }
+
   /// Follow-up review: the server forges a founding that names its key for Alice, and an outside
   /// workspace admin's device takes it, pinning that key on the way. Ordinary change or confirm, it
   /// signs nothing: it can't check a key on a snapshot nobody anchored. Bob, who has Alice's real pin,

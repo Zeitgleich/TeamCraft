@@ -270,7 +270,8 @@ admin in is an owner's own membership change.
   channel from before signed roles the owner's app founds the log on the way. An owner the server
   alone lists on a signed channel sees the request with why members wouldn't accept the admin and can
   only decline, until a signed admin or a workspace admin sets their role again (for when nobody can,
-  §2.5). On a channel where nothing is signed yet, and that can't be founded, they approve all the same. A
+  §2.5). On a channel where this device took nothing but junk they approve all the same, unless it was
+  told of a real log by a member's head. A
   channel nobody signed yet keeps the rule of before for members, so older apps in the
   group are not split off; what an approval can do is limited by the checks below. The server tells
   them (gateway `admin_join_request_update`) and their apps show the request at the top of

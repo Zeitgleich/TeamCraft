@@ -1285,8 +1285,8 @@ holds:
     of them being ahead can only refuse. Such a person needs no place in the group.
   - an `admin` of the signed snapshot this device accepted last (§4.6.1), verified against the key that
     snapshot names, who is in this device's group, **if that snapshot goes back to a workspace admin's
-    entry** (`is_workspace_anchored`): one of theirs was accepted since the last founding, while this
-    device's newest roster carried a signing time and was fresh at this device's time (not at the entry's,
+    entry** (`is_workspace_anchored`): their own founding or a list they looked at (§4.6.1, "What anchors")
+    was accepted since the last founding, while this device's newest roster carried a signing time and was fresh at this device's time (not at the entry's,
     which the server sets; an entry that passes for roles without this takes the anchor away, as does one by
     somebody who has left the roster, or a stretch of the log this device can't verify, §4.6.1), and channel
     admins building on it carry it on. Moderators, members, space admins and custom schemes aren't signed
@@ -1296,8 +1296,8 @@ holds:
   That claim is trust on first use (§4.6.1): a member and the server together can make one up for a channel
   from before signed roles, or for a device with no role state, which would otherwise purge every member at
   once. The cost: every channel created by somebody who isn't a workspace admin is founder-rooted, so its
-  channel admin's real deletion takes the retention on the members' devices, until a workspace admin signs a
-  role entry in that channel. The owner chose this cost. Their device still signs, in case a verifying device has that entry by then.
+  channel admin's real deletion takes the retention on the members' devices, until a workspace admin has looked
+  at that channel's roles and confirmed them (§4.6.1, "What anchors"); nothing prompts them to. The owner chose this cost. Their device still signs, in case a verifying device has that entry by then.
 - **The device is its user's.** The signing device must be on the signer's signed device list, read then
   from the server (the newer of it and the stored one), failing closed: no list, or none readable, refuses.
   A certificate alone has no expiry and outlives a device's removal. A removal the server withholds from this
@@ -1919,7 +1919,28 @@ workspace roster (admin.md §2.3):
     from the server, and its confirm is a checkpoint new devices accept. What limits that on a new
     device: an entry naming another key than the one it pinned for somebody counts for the role but
     doesn't anchor (`names_another_key_than_pinned`), so it purges nothing on such a key. A new device
-    with no pin for that person can't tell, and takes the anchor.
+    with no pin for that person can't tell, and takes the anchor on such a checkpoint. In the meantime
+    a key an old client signed counts as a channel admin's on every new device: it can appoint, strip
+    and lock people out with further role entries, not purge, until a workspace admin's list replaces it;
+  - an honest key rotation fails closed: a device whose pin is still the old key takes the role under
+    the new one but no anchor, and its admin's deletion takes the retention until the pin is updated
+    and a list is confirmed.
+
+  **What anchors.** Checking keys says nothing about roles, and the mark is voluntary: a colluding
+  member can found a channel from before signed roles unmarked, with the server listing them, or on a
+  public channel an account the server made self-joins. A workspace admin's ordinary entry there changes
+  one role and every key in it checks. So a device anchors only on (`may_anchor`) a snapshot already
+  anchored, which it carries on; a list a workspace admin looked at; or a workspace admin's own founding
+  of a channel with nothing signed, which names what they chose. A workspace admin's ordinary entry on
+  an unanchored snapshot counts for roles and anchors nothing, on any device.
+
+  **What that means on a member-founded channel until a workspace admin reviews it,** whether it was
+  created by somebody who isn't a workspace admin or founded by hand: nobody is asked, and these differ.
+  A channel admin's deletion takes the retention on the members' devices instead of purging at once (a
+  workspace admin's own deletion still purges). No "Appointed by" line shows, as it claims only what is
+  anchored. A stretch ends only with a list, as a workspace admin's ordinary entry no longer does.
+  Everything else works: roles, role changes, approving a join under `owner_approval`, chat, and
+  integration sources and the notetaker, which read the roster.
 
   Nobody is pinned from the server for this, and a role change for such a person stands on the server
   alone. The person who changed it is told, if they sign roles here. A key this device has seen differ
@@ -1945,9 +1966,10 @@ workspace roster (admin.md §2.3):
   recovers, so this doesn't pass by itself. The repair: a workspace owner temporarily sets
   `admin_self_join` to `visible`, a workspace admin joins, looks at the roles and confirms, and the owner
   sets it back; everybody sees the join. A new device of the owner helps only where the log is clean by
-  then. A channel with **nothing signed** on this device (only junk, or an alarm before any log) isn't
-  stuck: its listed admin approves, as every member may add there, without a signature on the way
-  (`approve_admin_join_sharing`), and the admin who got in can then look at the roles.
+  then. A channel where this device took **nothing but junk** isn't stuck: its listed admin approves, as
+  every member may add there, without a signature on the way (`approve_admin_join_sharing`), and the admin
+  who got in can then look at the roles. That stops at a device with an alarm or a member's newer head
+  (`may_act_as_unsigned`), which knows a real log exists: there it is the repair above too.
 - **Using a role.** The role that counts is the signed one, capped by the server's: the server can
   take a role away (it can withhold anything anyway) but never grant one, and an instance guest is
   a member whatever is signed. Apps show the role the server lists, and nobody is ever shown a
@@ -2049,15 +2071,18 @@ workspace roster (admin.md §2.3):
   to hide those. A workspace admin's look at the roles is always there in the members section, so they
   can act wherever they are in the group. The alarm is per device: it comes from heads in messages, so a
   workspace admin outside the channel only hears of it from a member who tells them, and a server can
-  withhold messages as it can withhold anything. **It clears in one way only:** a device applies a list a
+  withhold messages as it can withhold anything. So a server can raise the banner to steer a workspace
+  admin to the panel; what it can get there is a confirm naming an account in the group, which takes that
+  human's click on a row marked "New". **It clears in one way only:** a device applies a list a
   workspace admin looked at, on a fresh roster, naming no key against this device's pins. A later read
   showing the logs agree doesn't clear it, as this device can't tell which one the others hold.
 
   Nothing else trusts the server's list: after a log's first entry, no app ever signs a role because
   the server lists it. On a channel with a log this device took nothing from (a junk entry is enough),
   or told of one by a head, nobody signs anything here, and the look at the roles offers a workspace
-  admin the way out: only their list ends it. The admin the server lists can still approve a join there,
-  as every member may add while nothing is signed. So a server can hold up founding that way, which is
+  admin the way out: only their list ends it. Unless this device was told of a log by a head, the admin
+  the server lists can still approve a join there, as every member may add while nothing is signed. So a
+  server can hold up founding that way, which is
   denial of service, with a repair.
 
   A workspace admin outside the group can't check the list against the group, so their change on a
@@ -2082,7 +2107,7 @@ workspace roster (admin.md §2.3):
   | Decision (code)                                                             | Who judges            | A late reader before this                                                                                        | How bad                                                                                 | A late reader now                                                                                                                                                                    |
   |-----------------------------------------------------------------------------|-----------------------|------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
   | Purge at once by a channel admin (`signed_deletion`)                        | Each device           | Keeps the anchor, so a demoted admin of the old snapshot purges the channel on it                                | High: destroys history, not undoable                                                    | No anchor: the deletion takes the retention. A workspace admin's signature purges as before                                                                                          |
-  | `is_workspace_anchored` itself (`apply_entry`)                              | Each device           | Stays true for a snapshot it can no longer justify                                                               | The root of the purge and the line below                                                | Goes on any entry by somebody who left and on any unverified stretch; only a workspace admin's entry on a fresh roster brings it back, and that admin's device won't sign one unseen |
+  | `is_workspace_anchored` itself (`apply_entry`)                              | Each device           | Stays true for a snapshot it can no longer justify                                                               | The root of the purge and the line below                                                | Goes on any entry by somebody who left and on any unverified stretch; only a workspace admin's list on a fresh roster brings it back, and that admin's device won't sign one unseen |
   | Approving an admin's join (`approve_admin_join`, `may_approve_as_owner`)    | The approver's device | The demoted owner may approve; the new owner is told their role isn't signed                                     | Medium: the real owner is locked out, the old one's commit is refused by everybody else | Follows the log; during a stretch nobody approves, with the existing refusal                                                                                                         |
   | Members merging that addition (`member_may`)                                | Every member          | Merges the demoted owner's commit and refuses the new owner's                                                    | Medium: the one decision members must share                                             | Follows the log; during a stretch nobody counts (`Some(empty)`, never the unsigned rule). Devices can still differ here, below                                                       |
   | The next role entry (`apply_entry`, `signing_authorities`)                  | Each device           | Everything built on the skipped entry is skipped for good; the demoted admin's app keeps signing on the old head | Medium: silent, and never heals without a checkpoint                                    | Follows the log; during a stretch only a workspace admin's checkpoint counts or is signed, and only a list they reviewed                                                             |
@@ -2108,7 +2133,7 @@ workspace roster (admin.md §2.3):
     needs no clock: an entry this device didn't see then isn't older than that roster, unless the server held it back.
     The server's date can only take an entry away, and this device's clock isn't read at all.
   - **It never counts for the anchor.** It replaces the snapshot, so the anchor goes, and comes back only with a
-    workspace admin's entry on a fresh roster. So a device that catches up shows no appointer line and its purges take
+    workspace admin's reviewed list on a fresh roster. So a device that catches up shows no appointer line and its purges take
     the retention, without anything else being said: being away for weeks is normal. A device that read the log on
     time keeps its anchor.
   - **A workspace admin's signature doesn't pass it on unseen.** Every member takes a workspace admin's entry as
@@ -2145,9 +2170,9 @@ workspace roster (admin.md §2.3):
     that accepted nothing yet: **it does not drop to "unsigned", where every member may act**. Under `owner_approval` an
     admin's addition is then refused on this device whoever commits it (it falls out and is added back, §4.6), and nobody
     here approves or signs but a workspace admin who reviewed. A workspace admin's deletion still purges, and chat isn't
-    touched. Only a workspace admin's members section says so, as above; a refused action says why in words. A workspace
-    admin's next entry on a fresh roster on this device's head ends it, as does a list they looked at, which is the
-    only one that does on a device on another head; either anchors the channel. Mobile apps have the refusals through the core
+    touched. Only a workspace admin's members section says so, as above; a refused action says why in words. A list a
+    workspace admin looked at, on a fresh roster, ends it and anchors the channel; an ordinary entry doesn't, as the
+    stretch took the anchor away. Mobile apps have the refusals through the core
     but not the look at the roles yet (issue #1262).
   - **After a removal** each device reads every channel's log it knows, a few per upkeep pass, so an entry the server shows
     later can't pass for one from before: it closes the window below for devices online then. A failed read waits five
