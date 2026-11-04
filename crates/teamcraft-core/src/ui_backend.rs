@@ -2832,14 +2832,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       .flat_map(|list| list.members)
       .map(|member| {
         let is_guest = member.user.kind == teamcraft_proto::UserKind::Guest;
-        // The server's role, marked when no signed assignment backs it (e2ee.md §4.6.1).
-        let verified = signed.role_of(member.user.id);
-        let effective = crate::channel_roles::effective_role(&verified, &member.role, is_guest);
-        teamcraft_client_api::model::ChannelMember {
-          user: member.user.id,
-          is_role_signed: member.role == teamcraft_proto::ChannelRole::Member || effective == member.role,
-          role: member.role,
-        }
+        channel_member_view(&signed, member.user.id, member.role, is_guest)
       })
       .collect()
   }
@@ -3403,6 +3396,50 @@ fn placeholder_view(unreadable: Unreadable) -> Placeholder {
   }
 }
 
+/// A channel member as the UI shows them: the server's role, marked when no signed assignment
+/// backs it (e2ee.md §4.6.1), with who appointed it only where the verified log says so (#877).
+fn channel_member_view(
+  signed: &crate::channel_roles::ChannelRoleState,
+  user: UserId,
+  server_role: teamcraft_proto::ChannelRole,
+  is_guest: bool,
+) -> teamcraft_client_api::model::ChannelMember {
+  let verified = signed.role_of(user);
+  let effective = crate::channel_roles::effective_role(&verified, &server_role, is_guest);
+  let is_role_signed = server_role == teamcraft_proto::ChannelRole::Member || effective == server_role;
+  teamcraft_client_api::model::ChannelMember {
+    user,
+    maybe_appointer: if is_role_signed {
+      role_appointer(signed, user)
+    } else {
+      None
+    },
+    is_role_signed,
+    role: server_role,
+  }
+}
+
+/// The signer of the entry that gave `user` their verified role, with the authority it held.
+fn role_appointer(
+  signed: &crate::channel_roles::ChannelRoleState,
+  user: UserId,
+) -> Option<teamcraft_client_api::model::RoleAppointer> {
+  use crate::channel_roles::SignerAuthority;
+  use teamcraft_client_api::model::{AppointerAuthority, RoleAppointer};
+  let appointment = signed.appointment_of(user)?;
+  let authority = match appointment.authority {
+    SignerAuthority::Workspace { is_owner: true } => AppointerAuthority::WorkspaceOwner,
+    SignerAuthority::Workspace { is_owner: false } => AppointerAuthority::WorkspaceAdmin,
+    SignerAuthority::ChannelAdmin => AppointerAuthority::ChannelAdmin,
+    // A founder's claim is trust on first use, not somebody's appointment.
+    SignerAuthority::Founder => return None,
+  };
+  Some(RoleAppointer {
+    user: appointment.by,
+    authority,
+  })
+}
+
 fn presence_status(state: PresenceState) -> PresenceStatus {
   match state {
     PresenceState::Online => PresenceStatus::Online,
@@ -3424,6 +3461,87 @@ mod tests {
   use super::*;
   use crate::clock::ManualClock;
   use crate::store::MemoryStore;
+
+  mod channel_member_views {
+    use teamcraft_client_api::model::{AppointerAuthority, RoleAppointer};
+    use teamcraft_proto::{Base64Bytes, ChannelRole, ChannelRoleAssignment};
+
+    use super::*;
+    use crate::channel_roles::{ChannelRoleState, RoleAppointment, SignerAuthority};
+
+    #[test]
+    fn a_verified_role_names_who_appointed_it() {
+      let state = state_with(SignerAuthority::Workspace { is_owner: false });
+      let view = channel_member_view(&state, id(2), ChannelRole::Admin, false);
+      assert!(view.is_role_signed);
+      assert_eq!(
+        view.maybe_appointer,
+        Some(RoleAppointer {
+          user: id(9),
+          authority: AppointerAuthority::WorkspaceAdmin,
+        })
+      );
+    }
+
+    #[test]
+    fn the_authority_tells_owners_workspace_admins_and_channel_admins_apart() {
+      for (authority, expected) in [
+        (
+          SignerAuthority::Workspace { is_owner: true },
+          AppointerAuthority::WorkspaceOwner,
+        ),
+        (SignerAuthority::ChannelAdmin, AppointerAuthority::ChannelAdmin),
+      ] {
+        let view = channel_member_view(&state_with(authority), id(2), ChannelRole::Admin, false);
+        assert_eq!(view.maybe_appointer.map(|found| found.authority), Some(expected));
+      }
+    }
+
+    #[test]
+    fn a_role_only_the_server_lists_names_nobody() {
+      // The server says Bob is an admin, the verified log says he isn't: unverified, so no claim.
+      let view = channel_member_view(&ChannelRoleState::default(), id(2), ChannelRole::Admin, false);
+      assert!(!view.is_role_signed);
+      assert_eq!(view.maybe_appointer, None);
+      // Not even when a stale appointment of the same user is around.
+      let mut state = state_with(SignerAuthority::ChannelAdmin);
+      state.assignments.clear();
+      let view = channel_member_view(&state, id(2), ChannelRole::Admin, false);
+      assert_eq!(view.maybe_appointer, None);
+    }
+
+    #[test]
+    fn a_founders_claim_and_a_guest_name_nobody() {
+      let founded = state_with(SignerAuthority::Founder);
+      assert_eq!(
+        channel_member_view(&founded, id(2), ChannelRole::Admin, false).maybe_appointer,
+        None
+      );
+      // A guest is a member whatever is signed.
+      let signed = state_with(SignerAuthority::ChannelAdmin);
+      let guest = channel_member_view(&signed, id(2), ChannelRole::Admin, true);
+      assert!(!guest.is_role_signed);
+      assert_eq!(guest.maybe_appointer, None);
+    }
+
+    /// Bob (2) is a signed admin, appointed by user 9 on `authority`.
+    fn state_with(authority: SignerAuthority) -> ChannelRoleState {
+      ChannelRoleState {
+        version: 1,
+        assignments: vec![ChannelRoleAssignment {
+          user_id: id(2),
+          role: ChannelRole::Admin,
+          identity_key: Base64Bytes::new(vec![1; 32]),
+        }],
+        appointments: vec![RoleAppointment {
+          user_id: id(2),
+          by: id(9),
+          authority,
+        }],
+        ..ChannelRoleState::default()
+      }
+    }
+  }
 
   #[test]
   fn the_viewer_cap_the_ui_checks_is_the_one_the_core_enforces() {

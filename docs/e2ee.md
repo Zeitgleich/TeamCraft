@@ -1742,7 +1742,7 @@ workspace roster (admin.md §2.3):
   restricting commits is §4.6.2 (issue #878), not implemented.
 - **Workspace admins and channel admins.** `role_rules` lets a workspace admin of the fresh roster
   sign any snapshot, so a workspace admin can appoint a channel admin who then approves a workspace
-  admin's join. This is kept on purpose: orphaned channels need it (admin.md §2.5); a policy switch for it is tracked as a follow-up.
+  admin's join. This is kept on purpose: orphaned channels need it (admin.md §2.5), and there is no policy switch for it (issue #877). Instead each device records, per accepted snapshot, who signed the entry that set each role and on what authority (`ChannelRoleState::appointments`, local state, not part of the signed document), and the channel's member list shows "Appointed by … workspace admin" from it.
 
 Residual risks: the founding entry of a channel is trust on first use, so a hostile server together
 with a member of a channel from before signed roles can make that member its first signed admin

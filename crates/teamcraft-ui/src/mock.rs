@@ -655,6 +655,7 @@ impl ChatBackend for MockBackend {
             ChannelRole::Member
           }),
         is_role_signed: true,
+        maybe_appointer: None,
       })
       .collect()
   }

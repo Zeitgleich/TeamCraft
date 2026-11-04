@@ -72,6 +72,10 @@ pub struct ChannelRoleState {
   /// decision that destroys history asks this (e2ee.md §4.6, "A signed deletion purges at once").
   #[serde(default)]
   pub is_workspace_anchored: bool,
+  /// Who appointed each role of the accepted snapshot. Empty for a snapshot accepted before this
+  /// was recorded: nothing is claimed then.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub appointments: Vec<RoleAppointment>,
 }
 
 /// The accepted head of a channel's role log; sent along inside the channel's encrypted messages.
@@ -81,8 +85,19 @@ pub struct ChannelRolesHead {
   pub hash: Base64Bytes,
 }
 
+/// Who signed the entry that gave a user their role in the accepted snapshot, and on what authority
+/// this device accepted it (issue #877). Recorded only from a verified entry, never from the
+/// server's word; local state, not part of the signed document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoleAppointment {
+  pub user_id: UserId,
+  /// The signer of the entry that set the role.
+  pub by: UserId,
+  pub authority: SignerAuthority,
+}
+
 /// On what authority an entry was (or would be) signed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignerAuthority {
   /// An owner or admin of the fresh, verified workspace roster.
   Workspace { is_owner: bool },
@@ -133,6 +148,20 @@ impl ChannelRoleState {
       .iter()
       .find(|assignment| assignment.user_id == user)
       .map_or(ChannelRole::Member, |assignment| assignment.role.clone())
+  }
+
+  /// Who appointed `user` to the role the accepted snapshot gives them, as this device verified
+  /// the signing entry; `None` for a member, for a snapshot accepted before this was recorded, and
+  /// for a founder's claim (trust on first use: nothing a workspace admin or a channel admin
+  /// signed, so the UI doesn't present it as an appointment).
+  pub fn appointment_of(&self, user: UserId) -> Option<&RoleAppointment> {
+    if self.role_of(user) == ChannelRole::Member {
+      return None;
+    }
+    self
+      .appointments
+      .iter()
+      .find(|appointment| appointment.user_id == user && appointment.authority != SignerAuthority::Founder)
   }
 
   /// The users the accepted snapshot makes admins.
@@ -332,7 +361,14 @@ impl ChannelRoleState {
     // workspace admin founding a channel signs as its founder, for example.
     let mut outcome = Err(ChannelRoleError::Unauthorized { version });
     let mut maybe_authority = None;
+    let mut maybe_signer = None;
     let signers = self.verify_signer(entry, &document, verifier);
+    // The workspace admin behind the signature, if the roster vouches for it: they appointed what
+    // the entry changes even where it passes as a founder's.
+    let maybe_workspace_signer = signers
+      .iter()
+      .copied()
+      .find(|(_, authority)| matches!(authority, SignerAuthority::Workspace { .. }));
     // A workspace admin founding a channel passes as its founder (nobody changes their own role
     // otherwise), and it is a workspace admin's word all the same. It anchors only on what a purge
     // itself would take from that admin (`signed_deletion`): the server sets the entry's time.
@@ -347,6 +383,7 @@ impl ChannelRoleState {
       outcome = self.check_document(&document, verifier.conversation, signer, authority);
       if outcome.is_ok() {
         maybe_authority = Some(authority);
+        maybe_signer = Some((signer, authority));
         break;
       }
     }
@@ -361,6 +398,11 @@ impl ChannelRoleState {
       version,
       reason: error.to_string(),
     })?;
+    let maybe_appointer = match (maybe_signer, maybe_workspace_signer) {
+      (Some((_, SignerAuthority::Founder)), Some(workspace)) => Some(workspace),
+      (accepted, _) => accepted,
+    };
+    self.appointments = self.next_appointments(&document.assignments, maybe_appointer);
     self.version = version;
     self.maybe_head_hash = Some(Base64Bytes::new(hash.to_vec()));
     self.assignments = document.assignments;
@@ -375,6 +417,34 @@ impl ChannelRoleState {
       Some(SignerAuthority::ChannelAdmin) | None => {},
     }
     Ok(())
+  }
+
+  /// The appointments after an entry: a role the entry changed or added was appointed by its
+  /// signer; one it left as it was keeps what this device recorded (nothing, for a snapshot from
+  /// before appointments were recorded).
+  fn next_appointments(
+    &self,
+    next: &[ChannelRoleAssignment],
+    maybe_appointer: Option<(UserId, SignerAuthority)>,
+  ) -> Vec<RoleAppointment> {
+    next
+      .iter()
+      .filter_map(|assignment| {
+        let user_id = assignment.user_id;
+        if self.role_of(user_id) == assignment.role {
+          return self
+            .appointments
+            .iter()
+            .find(|appointment| appointment.user_id == user_id)
+            .copied();
+        }
+        maybe_appointer.map(|(by, authority)| RoleAppointment {
+          user_id,
+          by,
+          authority,
+        })
+      })
+      .collect()
   }
 
   /// Who signed the entry and on what authorities the signature holds: the workspace roster, this
@@ -1054,6 +1124,130 @@ mod tests {
         state.signing_authorities(admin.user_id, &world.workspace, NOW_MS, MAX_AGE_MS),
         vec![SignerAuthority::Workspace { is_owner: false }]
       );
+    }
+  }
+
+  mod appointers {
+    use super::*;
+
+    #[test]
+    fn a_founders_own_claim_is_no_appointment() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = World::new(&[&alice, &bob], &[]);
+      let state = founded(&world, &alice, &[(&bob, ChannelRole::Moderator)]);
+      assert_eq!(state.appointment_of(alice.user_id), None);
+      // The founding entry also named Bob, but a founder's entry is trust on first use too.
+      assert_eq!(state.appointment_of(bob.user_id), None);
+    }
+
+    #[test]
+    fn a_channel_admin_is_named_as_appointer_of_the_roles_they_changed_only() {
+      let (alice, bob, carol) = (Person::new(1), Person::new(2), Person::new(3));
+      let world = World::new(&[&alice, &bob, &carol], &[]);
+      let mut state = founded(&world, &alice, &[(&bob, ChannelRole::Moderator)]);
+      let promote = alice.entry(
+        &state,
+        &[
+          (&alice, ChannelRole::Admin),
+          (&bob, ChannelRole::Moderator),
+          (&carol, ChannelRole::Admin),
+        ],
+      );
+      assert!(world.apply(&mut state, promote).is_empty());
+      assert_eq!(
+        state.appointment_of(carol.user_id),
+        Some(&RoleAppointment {
+          user_id: carol.user_id,
+          by: alice.user_id,
+          authority: SignerAuthority::ChannelAdmin,
+        })
+      );
+      assert_eq!(
+        state.appointment_of(bob.user_id),
+        None,
+        "Bob's role was not changed"
+      );
+    }
+
+    #[test]
+    fn a_workspace_admin_is_named_and_the_appointment_outlives_later_entries() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(&world, &alice, &[]);
+      let appoint = admin.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, appoint).is_empty());
+      let by_workspace = RoleAppointment {
+        user_id: bob.user_id,
+        by: admin.user_id,
+        authority: SignerAuthority::Workspace { is_owner: false },
+      };
+      assert_eq!(state.appointment_of(bob.user_id), Some(&by_workspace));
+
+      // Alice, a channel admin, then makes Bob a moderator's peer: nothing changes for Bob.
+      let more = alice.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, more).is_empty());
+      assert_eq!(state.appointment_of(bob.user_id), Some(&by_workspace));
+    }
+
+    #[test]
+    fn a_workspace_owner_is_named_as_an_owner() {
+      let (alice, bob, owner) = (Person::new(1), Person::new(2), Person::new(9));
+      let mut world = World::new(&[&alice, &bob], &[&owner]);
+      world.workspace.roster.members[0].role = RosterRole::Owner;
+      let mut state = founded(&world, &alice, &[]);
+      let appoint = owner.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, appoint).is_empty());
+      assert_eq!(
+        state.appointment_of(bob.user_id).map(|found| found.authority),
+        Some(SignerAuthority::Workspace { is_owner: true })
+      );
+    }
+
+    #[test]
+    fn a_workspace_admin_founding_a_channel_counts_as_a_workspace_admin_not_a_claim() {
+      let admin = Person::new(9);
+      let world = World::new(&[&admin], &[&admin]);
+      let state = founded(&world, &admin, &[]);
+      assert_eq!(
+        state.appointment_of(admin.user_id).map(|found| found.authority),
+        Some(SignerAuthority::Workspace { is_owner: false })
+      );
+    }
+
+    #[test]
+    fn a_skipped_entry_appoints_nobody() {
+      let (alice, bob, stranger) = (Person::new(1), Person::new(2), Person::new(5));
+      let world = World::new(&[&alice, &bob, &stranger], &[]);
+      let mut state = founded(&world, &alice, &[]);
+      let before = state.clone();
+      let forged = stranger.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&stranger, ChannelRole::Admin)],
+      );
+      assert!(!world.apply(&mut state, forged).is_empty());
+      assert_eq!(state.appointment_of(stranger.user_id), None);
+      assert_eq!(state.appointments, before.appointments);
+    }
+
+    #[test]
+    fn a_snapshot_from_before_appointments_were_recorded_claims_nothing() {
+      let alice = Person::new(1);
+      let json = format!(
+        r#"{{"version":1,"assignments":[{{"user_id":"{}","role":"admin","identity_key":"AAAA"}}],"cursor":1}}"#,
+        alice.user_id
+      );
+      let state: ChannelRoleState = serde_json::from_str(&json).expect("an older stored state");
+      assert_eq!(state.role_of(alice.user_id), ChannelRole::Admin);
+      assert_eq!(state.appointment_of(alice.user_id), None);
     }
   }
 

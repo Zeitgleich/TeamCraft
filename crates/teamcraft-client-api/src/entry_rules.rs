@@ -257,6 +257,7 @@ mod tests {
       user,
       role,
       is_role_signed: true,
+      maybe_appointer: None,
     }
   }
 

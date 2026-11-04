@@ -379,6 +379,24 @@ remaining members. The admin doesn't need to be a member for that. A workspace a
 what makes the new owner count on members' apps (e2ee.md §4.6.1); the console's assignment doesn't
 sign it yet (a follow-up of issue #380), so until then the new owner's role shows as not signed.
 
+**Decision (issue #877): workspace admins keep appointing channel admins.** There is no instance policy
+that limits them to channels without an admin: an orphaned channel needs exactly this, and a switch
+would have to be exempt for it. Instead the channel's member list says who appointed a role, so
+nobody is surprised that a workspace admin, not a channel admin, made an owner:
+
+- The line "Appointed by Alice, workspace admin" (or "workspace owner", or "channel admin") sits next
+  to the role of a channel's owner or moderator. It reads only the signed role log this device
+  verified (`teamcraft-core::channel_roles`: the signer and the authority the entry was accepted
+  under), never the server's list.
+- It shows nothing where nothing verified says so: a role only the server lists (marked "Not
+  signed", as before), a log this device accepted before appointments were recorded, and the
+  founder's own claim, which is trust on first use and not anybody's appointment (e2ee.md §4.6.1).
+- A role an entry left as it was keeps its appointer; a later entry by someone else doesn't take it
+  over. A checkpoint of a workspace admin that re-anchors a device names that admin for the roles
+  this device had not accepted before.
+- Whoever sees the roles sees this line; it adds no information about people they can't see already.
+  Mobile apps have no channel member list yet; they follow with it (v1.1).
+
 ## 3. Admin features
 
 ### 3.1 Spaces and channels

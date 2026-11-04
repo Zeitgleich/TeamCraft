@@ -9,7 +9,7 @@ use teamcraft_client_api::actions::{
   BrowsableChannel, BrowseJoin, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace,
   SpaceChanges,
 };
-use teamcraft_client_api::model::{ChannelMember, ChannelRole};
+use teamcraft_client_api::model::{AppointerAuthority, ChannelMember, ChannelRole};
 use teamcraft_client_api::role_rules::{
   RoleTarget, SpaceStanding, assignable_roles, can_manage_channel_roles,
 };
@@ -675,6 +675,15 @@ fn ChannelMemberRow(
         .any(|member| member.user == id && !member.is_role_signed)
     })
   });
+  // Who appointed the role, only where the verified role log says so (e2ee.md §4.6.1).
+  let appointer = Memo::new(move |_| {
+    roles.with(|list| {
+      list
+        .iter()
+        .find(|member| member.user == id)
+        .and_then(|member| member.maybe_appointer)
+    })
+  });
   let name = user.display_name.clone();
   let is_guest = user.is_guest;
   // Until the member list is loaded the role is unknown: nothing is offered.
@@ -736,6 +745,18 @@ fn ChannelMemberRow(
         },
         _ => ().into_any(),
       }}
+      {move || appointer.get().map(|appointer| {
+        let appointer_name = state.read(|backend| backend.user(appointer.user)).map(|found| found.display_name);
+        let key = appointed_by_key(appointer.authority, appointer_name.is_some());
+        view! {
+          <span class="muted-text">
+            {move || match &appointer_name {
+              Some(name) => i18n.t_with(key, &[("name", name.as_str())]),
+              None => i18n.t(key),
+            }}
+          </span>
+        }
+      })}
       <Show when=move || is_unsigned.get() fallback=|| ()>
         <span class="badge badge-warn" title=move || i18n.t("channel-role-unsigned-hint")>{move || i18n.t("channel-role-unsigned")}</span>
         <Show when=move || !is_me && can_sign_roles.get() fallback=|| ()>
@@ -780,6 +801,19 @@ fn ChannelMemberRow(
       <FailureNote pending=pending />
       <FailureNote pending=signing />
     </li>
+  }
+}
+
+/// The text key for "appointed by": a workspace admin's signature is told apart from a channel
+/// admin's. Without a name (the signer left the directory) it says only what they were.
+fn appointed_by_key(authority: AppointerAuthority, has_name: bool) -> &'static str {
+  match (authority, has_name) {
+    (AppointerAuthority::WorkspaceOwner, true) => "channel-role-appointed-by-owner",
+    (AppointerAuthority::WorkspaceOwner, false) => "channel-role-appointed-by-owner-unnamed",
+    (AppointerAuthority::WorkspaceAdmin, true) => "channel-role-appointed-by-workspace-admin",
+    (AppointerAuthority::WorkspaceAdmin, false) => "channel-role-appointed-by-workspace-admin-unnamed",
+    (AppointerAuthority::ChannelAdmin, true) => "channel-role-appointed-by-channel-admin",
+    (AppointerAuthority::ChannelAdmin, false) => "channel-role-appointed-by-channel-admin-unnamed",
   }
 }
 
@@ -2083,6 +2117,50 @@ fn CategoryRow(space: SpaceId, category: CategoryInfo) -> impl IntoView {
 
 #[cfg(test)]
 mod tests {
+  use teamcraft_client_api::model::AppointerAuthority;
+
+  use super::appointed_by_key;
+
+  #[test]
+  fn a_workspace_admin_is_told_apart_from_a_channel_admin() {
+    let keys: Vec<&str> = [
+      AppointerAuthority::WorkspaceOwner,
+      AppointerAuthority::WorkspaceAdmin,
+      AppointerAuthority::ChannelAdmin,
+    ]
+    .into_iter()
+    .flat_map(|authority| {
+      [
+        appointed_by_key(authority, true),
+        appointed_by_key(authority, false),
+      ]
+    })
+    .collect();
+    let distinct: std::collections::HashSet<&&str> = keys.iter().collect();
+    assert_eq!(distinct.len(), 6);
+    assert!(appointed_by_key(AppointerAuthority::WorkspaceAdmin, true).contains("workspace-admin"));
+    assert!(appointed_by_key(AppointerAuthority::ChannelAdmin, false).contains("channel-admin"));
+  }
+
+  #[test]
+  fn every_key_has_text_in_every_language() {
+    for lang in ["en", "de"] {
+      let source =
+        std::fs::read_to_string(format!("{}/i18n/{lang}/channels.ftl", env!("CARGO_MANIFEST_DIR")))
+          .expect("the channels bundle");
+      for authority in [
+        AppointerAuthority::WorkspaceOwner,
+        AppointerAuthority::WorkspaceAdmin,
+        AppointerAuthority::ChannelAdmin,
+      ] {
+        for has_name in [true, false] {
+          let key = appointed_by_key(authority, has_name);
+          assert!(source.contains(&format!("\n{key} = ")), "{lang} lacks {key}");
+        }
+      }
+    }
+  }
+
   use teamcraft_proto::SpaceResponse;
 
   use super::*;
