@@ -109,5 +109,15 @@ cargo deny check
   when the whole CI passed; without it CI is skipped and it passes at once. So auto-merge
   (`gh pr merge --auto --squash`) waits for CI exactly when the pull request asked for it. Admins
   bypass the rule (batch merges); the nightly workflow marks its bump commit (docs/release.md).
+  A head commit gets one CI run: it starts on `opened`, `synchronize` and `reopened`, not on labels,
+  because `ci-gate` is judged across all runs on the head and a cancelled duplicate could leave it
+  blocked for hours (#1207). `plan` reads the labels live and, on `opened`, after 15 s, so
+  `gh pr create --label ci` needs nothing else, and an unlabelled pull request's gate passes after
+  about half a minute. A `ci` label added later re-runs that run (`ci-label.yml`; the same for Web
+  size, Android, iOS, Images and mobile CodeQL). Add it at opening or with auto-merge off: a pull
+  request without it merges once `ci-gate` passes. `arm` is read when a run starts: add it at opening,
+  or re-run CI by hand. A fork's pull request needs that re-run by hand after the `ci` label too. A
+  cancelled run reports `ci-gate (cancelled run)`, which isn't the required check, so it shows no red
+  and passes nothing: a head whose only run was cancelled by hand stays blocked until it is re-run.
 - Commit messages: imperative subject line (≤ 72 chars), body explains *why*. Sign off with
   `git commit -s` (Developer Certificate of Origin, as in CalCraft).
