@@ -11,6 +11,7 @@ scripts/e2e.sh                 # everything: dev stack, builds, web client, test
 scripts/e2e.sh --no-browser    # without the web client build and Chromium
 scripts/e2e.sh -- calls::      # arguments after -- go to the test binary (name filter, --ignored, ...)
 scripts/e2e.sh --down          # stop the dev stack afterwards
+scripts/e2e.sh --prebuilt-web  # use the web client already in target/e2e-web (or $E2E_WEB_DIR)
 ```
 
 The crate is empty without its `e2e` feature, so `cargo test --workspace` stays fast and needs no
@@ -21,7 +22,8 @@ Docker. With the feature, a missing dev stack makes every test **skip** (a messa
 ## What it covers
 
 Each test starts its own server with a fresh Postgres database (`teamcraft_e2e_<random>` in the dev
-Postgres, dropped afterwards), so tests are independent and run in parallel (about 15 s for all).
+Postgres, dropped afterwards), so tests are independent and run in parallel (15 to 25 minutes for all on a
+four-core runner, most of it the browser tests, which share two ports).
 
 | File                    | Flow                                                                                                                                        |
 |-------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
@@ -95,9 +97,10 @@ build output are kept in the Docker volumes `teamcraft-e2e-web-cargo` and `teamc
 them to reclaim the disk space). The server under test serves
 that directory as its web client (`[web] static_dir`).
 
-The dev realm registers `http://127.0.0.1:8082/*` as the web client's redirect URI, so the browser tests
-start their server on **port 8082** and take turns, also across test processes and checkouts (a lock
-file in the temp directory). Its default Content-Security-Policy allows only
+The dev realm registers `http://127.0.0.1:8082/*` and `:8083/*` as the web client's redirect URIs, so the
+browser tests start their server on one of those and take turns per port, also across test processes and
+checkouts (a lock file in the temp directory). Tests on the two ports run at the same time; `perf.rs` holds
+both, as it measures. Its default Content-Security-Policy allows only
 `https:` for `connect-src`; the tests widen it to the plain-http dev Keycloak.
 
 ## Running by hand
@@ -128,8 +131,15 @@ them all as configuration), which is also why none of these variables carries th
 
 ## CI
 
-`.github/workflows/e2e.yml` runs `scripts/e2e.sh` on demand (`workflow_dispatch`) and nightly. On failure
-it uploads the screenshots and the process logs. The regular CI workflow doesn't run it.
+`.github/workflows/e2e.yml` runs `scripts/e2e.sh` on demand (`workflow_dispatch`) and nightly: one job
+builds the web client (about 25 minutes, mostly its link-time optimization), a second one takes that build,
+compiles the rest and runs the tests (about 30 minutes), each within its own time limit. On failure it
+uploads the screenshots and the logs of the server, SFU and bridge, not Chromium's profiles. The regular CI
+workflow doesn't run it.
+
+`.github/workflows/scheduled-runs.yml` keeps one open issue per red scheduled workflow on `main`
+(`Scheduled run is red: <workflow>`), comments on it each time it fails again and closes it after the next
+green run, so a red night shows up in the issue list.
 
 ## Adding a test
 
