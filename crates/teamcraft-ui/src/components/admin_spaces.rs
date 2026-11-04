@@ -6,7 +6,7 @@ use leptos::prelude::*;
 
 use teamcraft_proto::JoinPolicy;
 
-use crate::admin::{AdminLoad, AdminSpace, AdminSpaceChanges};
+use crate::admin::{AdminLoad, AdminSpace, AdminSpaceChanges, admin_error_i18n_key};
 use crate::clock::{format_relative, now_ms};
 use crate::components::icons::{Icon, IconName};
 use crate::components::skeleton::ListSkeleton;
@@ -32,7 +32,12 @@ pub fn LoadNotice(#[prop(into)] load: Signal<AdminLoad>) -> impl IntoView {
     AdminLoad::Failed(reason) => view! {
       <div class="empty-state is-rich" role="alert">
         <p>{move || i18n.t("admin-load-failed")}</p>
-        <p class="muted-text small" translate="no">{reason}</p>
+        <p class="muted-text small">
+          {match admin_error_i18n_key(&reason) {
+            Some(key) => i18n.t(key),
+            None => reason,
+          }}
+        </p>
         <button class="btn" on:click=move |_| state.read(|backend| backend.admin_refresh())>
           {move || i18n.t("data-retry")}
         </button>

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use futures_util::future::{join, join3, join5};
+use futures_util::future::{join, join5};
 use futures_util::stream::{self, StreamExt};
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
@@ -19,7 +19,7 @@ use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminConversationSummary, AdminDeviceResponse,
   AdminInstanceResponse, AdminMailSettingsResponse, AdminSpaceSummary, AdminUserSummary,
   AnnouncementResponse, AssignChannelOwnerRequest, AuditEntryResponse, BrandAssetSlot, ChannelModeration,
-  ConversationVisibility, CreateBrandRequest, GetAnnouncementResponse, HistoryPolicy,
+  ConversationVisibility, CreateBrandRequest, ErrorBody, ErrorCode, GetAnnouncementResponse, HistoryPolicy,
   ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersResponse,
   ListAuditResponse, ListConversationMembersResponse, ListSpaceMembersResponse, PermissionSchemeResponse,
   RetentionSetting, RetentionStatusResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
@@ -30,10 +30,12 @@ use teamcraft_proto::{
 };
 
 use crate::admin::{
-  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditAction, AuditEntry, AuditFilter,
-  DeviceInfo, DeviceVerification, Retention, SettingsTestKind,
+  AdminChannel, AdminLoad, AdminSection, AdminSpace, AdminSpaceChanges, AdminUser, AuditAction, AuditEntry,
+  AuditFilter, DeviceInfo, DeviceVerification, RATE_LIMITED_CODE, READ_FAILED_CODE, Retention,
+  SettingsTestKind, UNREACHABLE_CODE,
 };
 use crate::auth::{ApiMethod, Authenticator, BinaryBody};
+use crate::clock::now_ms;
 use crate::model::{
   ConversationId, ConversationKind, CustomStatus, PresenceStatus, User, UserId, id_from_raw, raw_id,
 };
@@ -41,10 +43,22 @@ use crate::server_backend::hue_from_seed;
 
 const REFRESH_DELAY: Duration = Duration::from_millis(500);
 const LIST_LIMIT: u32 = 200;
-/// Channels beyond this many get no per-channel details (owner, retention) until the list shrinks.
-const DETAIL_LIMIT: usize = 100;
-/// Requests in flight at once when the details of many channels or users are read.
+/// Pages of channels (and of users) one refresh reads: 1000 entries. Beyond that the console says
+/// the list is cut (issue #1217) instead of ending silently.
+const MAX_LIST_PAGES: usize = 5;
+/// Servers from before the list carried owner and retention (`maybe_retention` absent): only this
+/// many channels get them, one request each, so an old server isn't flooded.
+const LEGACY_DETAIL_LIMIT: usize = 100;
+/// Requests in flight at once when the details of many channels are read from such a server.
 const DETAIL_CONCURRENCY: usize = 8;
+/// How long the per-channel details read from such a server stay as they are before the next
+/// look: on the pages that show them, not on every refresh.
+const LEGACY_DETAIL_TTL_MS: i64 = 10 * 60 * 1000;
+/// The shortest and the longest the console stays quiet after the server refused it with 429.
+const MIN_BACKOFF_SECS: u64 = 1;
+const MAX_BACKOFF_SECS: u64 = 120;
+/// Without a `retry_after_secs` in the refusal.
+const DEFAULT_BACKOFF_SECS: u64 = 30;
 /// Signing and publishing happens in the core; the server shows the result after this long.
 const PUBLISH_SETTLE: Duration = Duration::from_millis(1500);
 
@@ -59,6 +73,13 @@ pub struct AdminLive {
   /// A refresh is running; another request meanwhile makes it run once more, never in parallel.
   is_refreshing: Rc<Cell<bool>>,
   is_refresh_wanted_again: Rc<Cell<bool>>,
+  /// What the next refresh reads: the union of what was asked for since the last one.
+  wanted: Rc<Cell<Reads>>,
+  /// The server refused with 429; nothing is read before this time (ms since the epoch).
+  quiet_until: Rc<Cell<i64>>,
+  /// The console has read everything once this session; from then on opening a section reads that
+  /// section's data only.
+  has_read_all: Rc<Cell<bool>>,
 }
 
 /// What the last refresh returned.
@@ -66,7 +87,15 @@ pub struct AdminLive {
 pub struct AdminData {
   load: AdminLoad,
   channels: Vec<AdminChannel>,
+  /// The lists end before the last entry (more pages than [`MAX_LIST_PAGES`]).
+  is_channel_list_truncated: bool,
   users: Vec<AdminUser>,
+  is_user_list_truncated: bool,
+  /// Devices of the users whose details were opened; refreshed with the console.
+  devices: HashMap<UserId, Vec<AdminDeviceResponse>>,
+  /// Owner and retention of channels, read one by one from a server that doesn't send them in the
+  /// list, with the time they were read.
+  legacy_details: HashMap<ConversationId, (i64, ChannelDetails)>,
   audit: Vec<AuditEntry>,
   policy: WorkspacePolicy,
   policy_version: u64,
@@ -102,6 +131,9 @@ impl AdminLive {
       refresh_queued: Rc::new(Cell::new(false)),
       is_refreshing: Rc::new(Cell::new(false)),
       is_refresh_wanted_again: Rc::new(Cell::new(false)),
+      wanted: Rc::new(Cell::new(Reads::NONE)),
+      quiet_until: Rc::new(Cell::new(0)),
+      has_read_all: Rc::new(Cell::new(false)),
     }
   }
 
@@ -114,7 +146,38 @@ impl AdminLive {
   }
 
   pub fn users(&self) -> Vec<AdminUser> {
-    self.data.borrow().users.clone()
+    let data = self.data.borrow();
+    data
+      .users
+      .iter()
+      .map(|user| match data.devices.get(&user.user.id) {
+        Some(devices) => AdminUser {
+          devices: devices_from_wire(devices),
+          ..user.clone()
+        },
+        None => user.clone(),
+      })
+      .collect()
+  }
+
+  pub fn is_channel_list_truncated(&self) -> bool {
+    self.data.borrow().is_channel_list_truncated
+  }
+
+  pub fn is_user_list_truncated(&self) -> bool {
+    self.data.borrow().is_user_list_truncated
+  }
+
+  /// Loads the devices of `user` once; they stay cached and current with the refreshes.
+  pub fn load_devices(&self, user: UserId) {
+    if self.data.borrow().devices.contains_key(&user) {
+      return;
+    }
+    self.load(
+      format!("devices:{user}"),
+      format!("/api/v1/admin/users/{user}/devices"),
+      Loaded::Devices(user),
+    );
   }
 
   pub fn audit(&self) -> Vec<AuditEntry> {
@@ -249,7 +312,7 @@ impl AdminLive {
       },
       Ok(response) => Some(format!(
         "{path}: {}",
-        refusal_of(&String::from_utf8_lossy(&response.body), response.status)
+        self.refusal_of(&String::from_utf8_lossy(&response.body), response.status)
       )),
       Err(error) => Some(error.to_string()),
     };
@@ -465,6 +528,7 @@ impl AdminLive {
   }
 
   pub fn assign_channel_owner(&self, channel: ConversationId, user: UserId) {
+    self.data.borrow_mut().legacy_details.remove(&channel);
     if let Ok(body) = serde_json::to_string(&AssignChannelOwnerRequest { user_id: user }) {
       self.send(
         ApiMethod::Post,
@@ -498,8 +562,9 @@ impl AdminLive {
     teamcraft_client_api::admin::role_holders(&self.data.borrow().users)
   }
 
-  /// Fetches everything now; a part that fails keeps its previous value and shows its error. Only
-  /// one refresh runs at a time (the console polls); a request meanwhile reruns it once.
+  /// Fetches what was asked for now; a part that fails keeps its previous value and shows its error.
+  /// Only one refresh runs at a time (the console polls); a request meanwhile reruns it once. While
+  /// the server asks the console to wait (429), nothing is read until then.
   pub async fn refresh(&self) {
     if self.is_refreshing.replace(true) {
       self.is_refresh_wanted_again.set(true);
@@ -507,11 +572,21 @@ impl AdminLive {
     }
     loop {
       self.is_refresh_wanted_again.set(false);
+      if let Some(wait) = self.time_to_quiet_end() {
+        // The wanted reads stay; one refresh follows when the server allows again.
+        self.queue_refresh_after(wait);
+        break;
+      }
       // The reading and its wire types are in the console's chunk (`areas::admin_refresh`): an
       // admin's first visit doesn't load them.
       match crate::areas::admin_refresh(self.clone()).await {
         Ok(refresh) => refresh.await,
         Err(error) => self.chunk_failed(&error.to_string()),
+      }
+      // Refused meanwhile: the same reads follow once the server allows.
+      if let Some(wait) = self.time_to_quiet_end() {
+        self.queue_refresh_after(wait);
+        break;
       }
       // async-ok: a Cell, not a signal.
       if !self.is_refresh_wanted_again.get() {
@@ -526,86 +601,105 @@ impl AdminLive {
   /// read would.
   fn chunk_failed(&self, error: &str) {
     tracing::warn!(%error, "the administration console's data did not load");
+    let detail = format!("{UNREACHABLE_CODE}:");
     {
       let mut data = self.data.borrow_mut();
       if data.load != AdminLoad::Loaded {
-        data.load = AdminLoad::Failed(error.to_owned());
+        data.load = AdminLoad::Failed(detail.clone());
       }
-      data.maybe_error = Some(error.to_owned());
+      data.maybe_error = Some(detail);
     }
     self.changed();
   }
 
   /// The lists first and all at once, so the console shows spaces and channels after one round
-  /// trip; the per-channel and per-user details follow with bounded concurrency (not one request
-  /// after the other: work proportional to the instance size on open).
+  /// trip. Only what was asked for is read (`Reads`): the timer asks for the open section's data,
+  /// not for everything. The lists carry owner and retention of every channel; devices load when a
+  /// user's details open.
   pub(crate) async fn refresh_once(&self) {
+    let mut reads = self.wanted.replace(Reads::NONE);
+    // The first load didn't finish (or failed): the lists are read again whatever section asks.
+    // So is everything the first time, and when nothing in particular was asked for.
+    // async-ok: a Cell, not a signal.
+    if reads == Reads::NONE || self.data.borrow().load != AdminLoad::Loaded || !self.has_read_all.get() {
+      reads = Reads::ALL;
+    }
     let mut errors: Vec<String> = Vec::new();
     let ((spaces, conversations, users, policy, announcement), (instance, brands, mail, calendar, runtime)) =
       join(
         join5(
-          self.fetch_result::<ListAdminSpacesResponse>("/api/v1/admin/spaces".to_owned()),
-          self.fetch_result::<ListAdminConversationsResponse>(format!(
-            "/api/v1/admin/conversations?limit={LIST_LIMIT}"
-          )),
-          self.fetch_result::<ListAdminUsersResponse>(format!(
-            "/api/v1/admin/users?status=all&limit={LIST_LIMIT}"
-          )),
-          self.fetch_result::<WorkspacePolicyResponse>("/api/v1/workspace/policy".to_owned()),
-          self.fetch_result::<GetAnnouncementResponse>("/api/v1/announcement".to_owned()),
+          self.fetch_if::<ListAdminSpacesResponse>(reads.has(Reads::SPACES), "/api/v1/admin/spaces"),
+          self.read_conversations_if(reads.has(Reads::CONVERSATIONS)),
+          self.read_users_if(reads.has(Reads::USERS)),
+          self.fetch_if::<WorkspacePolicyResponse>(reads.has(Reads::POLICY), "/api/v1/workspace/policy"),
+          self.fetch_if::<GetAnnouncementResponse>(reads.has(Reads::ANNOUNCEMENT), "/api/v1/announcement"),
         ),
         join5(
-          self.fetch_result::<AdminInstanceResponse>("/api/v1/admin/instance".to_owned()),
-          self.fetch_result::<AdminBrandsResponse>("/api/v1/admin/brands".to_owned()),
-          self.fetch_result::<AdminMailSettingsResponse>("/api/v1/admin/settings/mail".to_owned()),
-          self.fetch_result::<AdminCalendarSettingsResponse>("/api/v1/admin/settings/calendar".to_owned()),
-          self.fetch_result::<RuntimeSettingsResponse>("/api/v1/admin/settings".to_owned()),
+          self.fetch_if::<AdminInstanceResponse>(reads.has(Reads::INSTANCE), "/api/v1/admin/instance"),
+          self.fetch_if::<AdminBrandsResponse>(reads.has(Reads::BRANDS), "/api/v1/admin/brands"),
+          self.fetch_if::<AdminMailSettingsResponse>(reads.has(Reads::MAIL), "/api/v1/admin/settings/mail"),
+          self.fetch_if::<AdminCalendarSettingsResponse>(
+            reads.has(Reads::CALENDAR),
+            "/api/v1/admin/settings/calendar",
+          ),
+          self.fetch_if::<RuntimeSettingsResponse>(reads.has(Reads::RUNTIME), "/api/v1/admin/settings"),
         ),
       )
       .await;
-    let spaces = settle(spaces, &mut errors);
-    let conversations = settle(conversations, &mut errors);
-    let users = settle(users, &mut errors);
-    let policy = settle(policy, &mut errors);
-    let announcement = settle(announcement, &mut errors);
-    let instance = settle(instance, &mut errors);
-    let brands = settle(brands, &mut errors);
-    let mail = settle(mail, &mut errors);
-    let calendar = settle(calendar, &mut errors);
-    let runtime = settle(runtime, &mut errors);
+    let spaces = settle(spaces, &mut errors).flatten();
+    let conversations = settle(conversations, &mut errors).flatten();
+    let users = settle(users, &mut errors).flatten();
+    let policy = settle(policy, &mut errors).flatten();
+    let announcement = settle(announcement, &mut errors).flatten();
+    let instance = settle(instance, &mut errors).flatten();
+    let brands = settle(brands, &mut errors).flatten();
+    let mail = settle(mail, &mut errors).flatten();
+    let calendar = settle(calendar, &mut errors).flatten();
+    let runtime = settle(runtime, &mut errors).flatten();
 
-    let space_names: HashMap<SpaceId, String> = spaces
-      .as_ref()
-      .map(|spaces| {
-        spaces
-          .spaces
-          .iter()
-          .map(|space| (space.id, space.name.clone()))
-          .collect()
-      })
-      .unwrap_or_default();
-    let policy_default_history = policy.as_ref().map_or(HistoryPolicy::Full, |policy| {
-      policy.policy.history_default.clone()
-    });
+    // What the lists are combined with: read now, or as the last refresh left it.
+    let space_names: HashMap<SpaceId, String> = match &spaces {
+      Some(spaces) => spaces
+        .spaces
+        .iter()
+        .map(|space| (space.id, space.name.clone()))
+        .collect(),
+      None => self
+        .data
+        .borrow()
+        .spaces
+        .iter()
+        .map(|space| (space.id, space.name.clone()))
+        .collect(),
+    };
+    let (policy_default_history, keeps_pinned) = match &policy {
+      Some(policy) => (
+        policy.policy.history_default.clone(),
+        policy.policy.retention.keep_pinned,
+      ),
+      None => {
+        let data = self.data.borrow();
+        (
+          data.policy.history_default.clone(),
+          data.policy.retention.keep_pinned,
+        )
+      },
+    };
 
-    // Show the lists now, with what the summaries carry; owners and retention fill in below.
+    // Show the lists now; a server that doesn't send owner and retention in them is asked below.
     {
       let mut data = self.data.borrow_mut();
       let is_first_load = data.load != AdminLoad::Loaded;
       if is_first_load {
         if let Some(list) = &conversations {
-          data.channels = list
-            .conversations
-            .iter()
-            .map(|summary| {
-              channel_from_wire(
-                summary,
-                &space_names,
-                ChannelDetails::default(),
-                policy_default_history.clone(),
-              )
-            })
-            .collect();
+          let channels = channels_of(
+            &list.items,
+            &space_names,
+            &data.legacy_details,
+            &policy_default_history,
+            keeps_pinned,
+          );
+          data.channels = channels;
         }
         if let Some(spaces) = &spaces {
           data.spaces = spaces.spaces.iter().map(space_from_wire).collect();
@@ -618,67 +712,69 @@ impl AdminLive {
     }
     self.changed();
 
-    let mut reload_errors = Vec::new();
-    self.reload_cached(&mut reload_errors).await;
-    errors.extend(reload_errors);
-
-    let summaries: Vec<&AdminConversationSummary> = conversations
-      .as_ref()
-      .map(|list| list.conversations.iter().collect())
-      .unwrap_or_default();
-    let user_summaries: Vec<&AdminUserSummary> = users
-      .as_ref()
-      .map(|list| list.users.iter().collect())
-      .unwrap_or_default();
-    let (details, space_memberships, devices) = join3(
-      stream::iter(summaries.iter().enumerate().map(|(index, summary)| async move {
-        if index < DETAIL_LIMIT {
-          self.channel_details(summary).await
-        } else {
-          ChannelDetails::default()
-        }
-      }))
-      .buffered(DETAIL_CONCURRENCY)
-      .collect::<Vec<_>>(),
-      async {
-        match &spaces {
-          Some(spaces) => self.space_memberships(&spaces.spaces).await,
-          None => HashMap::new(),
-        }
+    // The server asked to wait: keep what the lists gave and read nothing more until it allows.
+    if !self.is_quiet() {
+      let mut reload_errors = Vec::new();
+      self.reload_cached(reads, &mut reload_errors).await;
+      errors.extend(reload_errors);
+    }
+    if let Some(list) = &conversations
+      && reads.has(Reads::LEGACY_DETAILS)
+      && !self.is_quiet()
+    {
+      self.read_legacy_details(&list.items).await;
+    }
+    let space_memberships = match &spaces {
+      Some(spaces) if reads.has(Reads::MEMBERSHIPS) && !self.is_quiet() => {
+        Some(self.space_memberships(&spaces.spaces).await)
       },
-      stream::iter(user_summaries.iter().map(|summary| self.devices_of(summary.id)))
-        .buffered(DETAIL_CONCURRENCY)
-        .collect::<Vec<_>>(),
-    )
-    .await;
-    let channels: Vec<AdminChannel> = summaries
-      .iter()
-      .zip(details)
-      .map(|(summary, details)| {
-        channel_from_wire(summary, &space_names, details, policy_default_history.clone())
-      })
-      .collect();
-    let admin_users: Vec<AdminUser> = user_summaries
-      .iter()
-      .zip(devices)
-      .map(|(summary, devices)| {
-        let names = space_memberships.get(&summary.id).cloned().unwrap_or_default();
-        user_from_wire(summary, devices, names)
-      })
-      .collect();
-    let audit_path = audit_path(self.data.borrow().audit_filter);
-    let audit = settle(
-      self.fetch_result::<ListAuditResponse>(audit_path).await,
-      &mut errors,
-    );
+      _ => None,
+    };
+    let audit = if reads.has(Reads::AUDIT) && !self.is_quiet() {
+      let audit_path = audit_path(self.data.borrow().audit_filter);
+      settle(
+        self.fetch_result::<ListAuditResponse>(audit_path).await,
+        &mut errors,
+      )
+    } else {
+      None
+    };
 
     {
       let mut data = self.data.borrow_mut();
-      if conversations.is_some() {
+      if let Some(list) = &conversations {
+        let channels = channels_of(
+          &list.items,
+          &space_names,
+          &data.legacy_details,
+          &policy_default_history,
+          keeps_pinned,
+        );
         data.channels = channels;
+        data.is_channel_list_truncated = list.is_truncated;
       }
-      if users.is_some() {
-        data.users = admin_users;
+      if let Some(list) = &users {
+        let previous: HashMap<UserId, Vec<String>> = data
+          .users
+          .iter()
+          .map(|user| (user.user.id, user.space_names.clone()))
+          .collect();
+        data.users = list
+          .items
+          .iter()
+          .map(|summary| {
+            let names = match &space_memberships {
+              Some(memberships) => memberships.get(&summary.id).cloned().unwrap_or_default(),
+              None => previous.get(&summary.id).cloned().unwrap_or_default(),
+            };
+            user_from_wire(summary, names)
+          })
+          .collect();
+        data.is_user_list_truncated = list.is_truncated;
+      } else if let Some(memberships) = &space_memberships {
+        for user in &mut data.users {
+          user.space_names = memberships.get(&user.user.id).cloned().unwrap_or_default();
+        }
       }
       if let Some(policy) = policy {
         data.policy = policy.policy;
@@ -716,19 +812,38 @@ impl AdminLive {
       if data.load != AdminLoad::Loaded && spaces.is_some() && conversations.is_some() {
         data.load = AdminLoad::Loaded;
       }
+      // A refusal to wait for is what the admin should see first, not a failure it caused.
+      errors.sort_by_key(|error| !error.starts_with(RATE_LIMITED_CODE));
       data.maybe_error = errors.into_iter().next();
+    }
+    // Refused meanwhile: the same reads are wanted again when the server allows.
+    if self.is_quiet() {
+      self.wanted.set(self.wanted.get() | reads); // async-ok: a Cell, not a signal.
+    } else if reads == Reads::ALL {
+      self.has_read_all.set(true); // async-ok: a Cell, not a signal.
     }
     self.changed();
   }
 
-  /// Schedules a refresh soon; calls while one is scheduled collapse into it.
+  /// Schedules a refresh of everything soon; calls while one is scheduled collapse into it. For the
+  /// admin's own changes, opening the console and the retry button.
   pub fn queue_refresh(&self) {
-    self.queue_refresh_after(REFRESH_DELAY);
+    self.queue_reads(Reads::ALL, REFRESH_DELAY);
+  }
+
+  /// The console's timer: reads what `section` shows and nothing else.
+  pub fn queue_refresh_section(&self, section: AdminSection) {
+    self.queue_reads(Reads::of(section), REFRESH_DELAY);
   }
 
   /// A refresh after the core had time to sign and publish a policy.
   pub fn queue_refresh_after_publish(&self) {
-    self.queue_refresh_after(PUBLISH_SETTLE);
+    self.queue_reads(Reads::ALL, PUBLISH_SETTLE);
+  }
+
+  fn queue_reads(&self, reads: Reads, delay: Duration) {
+    self.wanted.set(self.wanted.get() | reads);
+    self.queue_refresh_after(delay);
   }
 
   fn queue_refresh_after(&self, delay: Duration) {
@@ -744,6 +859,24 @@ impl AdminLive {
       },
       delay,
     );
+  }
+
+  /// The server answered 429: no read starts for `seconds` (its `Retry-After`).
+  fn back_off(&self, seconds: u64) {
+    let seconds = seconds.clamp(MIN_BACKOFF_SECS, MAX_BACKOFF_SECS);
+    let until = now_ms() + i64::try_from(seconds).unwrap_or(0) * 1000;
+    self.quiet_until.set(self.quiet_until.get().max(until));
+  }
+
+  fn is_quiet(&self) -> bool {
+    self.time_to_quiet_end().is_some()
+  }
+
+  /// How long the console still waits, with a second of margin so the retry doesn't land on the
+  /// last moment of the refusal.
+  fn time_to_quiet_end(&self) -> Option<Duration> {
+    let left = self.quiet_until.get() - now_ms();
+    (left > 0).then(|| Duration::from_millis(u64::try_from(left).unwrap_or(0) + 1000))
   }
 
   pub fn set_user_active(&self, user: UserId, is_active: bool) {
@@ -764,6 +897,7 @@ impl AdminLive {
   }
 
   pub fn set_channel_retention(&self, channel: ConversationId, retention: Retention) {
+    self.data.borrow_mut().legacy_details.remove(&channel);
     let request = SetRetentionRequest {
       retention: RetentionSetting {
         maybe_max_age_days: retention.maybe_days,
@@ -779,6 +913,15 @@ impl AdminLive {
     }
   }
 
+  /// [`refusal_text`], and a 429 also makes the console wait.
+  fn refusal_of(&self, body: &str, status: u16) -> String {
+    let text = refusal_text(body, status);
+    if text.starts_with(RATE_LIMITED_CODE) {
+      self.back_off(retry_after_of(body));
+    }
+    text
+  }
+
   fn changed(&self) {
     let notify = self.notify.borrow().clone();
     if let Some(notify) = notify {
@@ -786,17 +929,52 @@ impl AdminLive {
     }
   }
 
-  async fn channel_details(&self, summary: &AdminConversationSummary) -> ChannelDetails {
+  /// Owner and retention of channels from a server that doesn't send them in the list: one request
+  /// each for the first [`LEGACY_DETAIL_LIMIT`] channels, with bounded concurrency, and again only
+  /// after [`LEGACY_DETAIL_TTL_MS`] (or after the admin changed that channel). The pages that show
+  /// them ask for this; the timer on the other pages doesn't.
+  async fn read_legacy_details(&self, summaries: &[AdminConversationSummary]) {
+    let now = now_ms();
+    let wanted: Vec<&AdminConversationSummary> = {
+      let data = self.data.borrow();
+      summaries
+        .iter()
+        .take(LEGACY_DETAIL_LIMIT)
+        .filter(|summary| summary.maybe_retention.is_none())
+        .filter(|summary| {
+          data
+            .legacy_details
+            .get(&summary.id)
+            .is_none_or(|(read_at, _)| now - read_at > LEGACY_DETAIL_TTL_MS)
+        })
+        .collect()
+    };
+    let read = stream::iter(wanted.into_iter().map(|summary| async move {
+      if self.is_quiet() {
+        return None;
+      }
+      Some((summary.id, self.channel_details(summary.id).await))
+    }))
+    .buffered(DETAIL_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+    let mut data = self.data.borrow_mut();
+    for (channel, details) in read.into_iter().flatten() {
+      data.legacy_details.insert(channel, (now, details));
+    }
+  }
+
+  async fn channel_details(&self, channel: ConversationId) -> ChannelDetails {
     let mut ignored = Vec::new();
     let members = self
       .fetch::<ListConversationMembersResponse>(
-        &format!("/api/v1/admin/conversations/{}/members", summary.id),
+        &format!("/api/v1/admin/conversations/{channel}/members"),
         &mut ignored,
       )
       .await;
     let retention = self
       .fetch::<RetentionStatusResponse>(
-        &format!("/api/v1/conversations/{}/retention", summary.id),
+        &format!("/api/v1/conversations/{channel}/retention"),
         &mut ignored,
       )
       .await;
@@ -808,7 +986,7 @@ impl AdminLive {
           .find(|member| member.role == teamcraft_proto::ChannelRole::Admin)
           .map(|member| member.user.id)
       }),
-      maybe_retention: retention,
+      maybe_retention: retention.map(|status| status.effective),
     }
   }
 
@@ -816,6 +994,9 @@ impl AdminLive {
     let mut memberships: HashMap<UserId, Vec<String>> = HashMap::new();
     let mut ignored = Vec::new();
     for space in spaces {
+      if self.is_quiet() {
+        break;
+      }
       let path = format!("/api/v1/admin/spaces/{}/members", space.id);
       if let Some(list) = self.fetch::<ListSpaceMembersResponse>(&path, &mut ignored).await {
         for member in list.members {
@@ -829,37 +1010,51 @@ impl AdminLive {
     memberships
   }
 
-  async fn devices_of(&self, user: UserId) -> Vec<AdminDeviceResponse> {
-    let mut ignored = Vec::new();
-    self
-      .fetch::<ListAdminDevicesResponse>(&format!("/api/v1/admin/users/{user}/devices"), &mut ignored)
-      .await
-      .map(|list| list.devices)
-      .unwrap_or_default()
-  }
-
-  /// Re-reads the on-demand data that is cached, so changes of other admins show up.
-  async fn reload_cached(&self, errors: &mut Vec<String>) {
-    let (scopes, channels): (Vec<Option<SpaceId>>, Vec<ConversationId>) = {
+  /// Re-reads the on-demand data that is cached, so changes of other admins show up: only the kinds
+  /// the open section shows (`reads`), and only what was looked at before.
+  async fn reload_cached(&self, reads: Reads, errors: &mut Vec<String>) {
+    let (scopes, channels, users): (Vec<Option<SpaceId>>, Vec<ConversationId>, Vec<UserId>) = {
       let data = self.data.borrow();
       (
         data.schemes.keys().copied().collect(),
         data.moderation.keys().copied().collect(),
+        data.devices.keys().copied().collect(),
       )
     };
-    for scope in scopes {
-      let path = match scope {
-        Some(space) => format!("/api/v1/admin/spaces/{space}/permission-scheme"),
-        None => "/api/v1/admin/permission-scheme".to_owned(),
-      };
-      if let Some(scheme) = self.fetch::<PermissionSchemeResponse>(&path, errors).await {
-        self.data.borrow_mut().schemes.insert(scope, scheme);
+    if reads.has(Reads::CACHED_SCHEMES) {
+      for scope in scopes {
+        if self.is_quiet() {
+          return;
+        }
+        let path = match scope {
+          Some(space) => format!("/api/v1/admin/spaces/{space}/permission-scheme"),
+          None => "/api/v1/admin/permission-scheme".to_owned(),
+        };
+        if let Some(scheme) = self.fetch::<PermissionSchemeResponse>(&path, errors).await {
+          self.data.borrow_mut().schemes.insert(scope, scheme);
+        }
       }
     }
-    for channel in channels {
-      let path = format!("/api/v1/admin/conversations/{channel}/moderation");
-      if let Some(moderation) = self.fetch::<ChannelModeration>(&path, errors).await {
-        self.data.borrow_mut().moderation.insert(channel, moderation);
+    if reads.has(Reads::CACHED_MODERATION) {
+      for channel in channels {
+        if self.is_quiet() {
+          return;
+        }
+        let path = format!("/api/v1/admin/conversations/{channel}/moderation");
+        if let Some(moderation) = self.fetch::<ChannelModeration>(&path, errors).await {
+          self.data.borrow_mut().moderation.insert(channel, moderation);
+        }
+      }
+    }
+    if reads.has(Reads::CACHED_DEVICES) {
+      for user in users {
+        if self.is_quiet() {
+          return;
+        }
+        let path = format!("/api/v1/admin/users/{user}/devices");
+        if let Some(list) = self.fetch::<ListAdminDevicesResponse>(&path, errors).await {
+          self.data.borrow_mut().devices.insert(user, list.devices);
+        }
       }
     }
   }
@@ -896,6 +1091,12 @@ impl AdminLive {
           let members = list.members.into_iter().map(|member| member.user.id).collect();
           Box::new(move |data: &mut AdminData| drop(data.members.insert(channel, members))) as Store
         }),
+      Loaded::Devices(user) => self
+        .fetch::<ListAdminDevicesResponse>(&path, &mut errors)
+        .await
+        .map(|list| {
+          Box::new(move |data: &mut AdminData| drop(data.devices.insert(user, list.devices))) as Store
+        }),
       Loaded::Notetaker => self
         .fetch::<teamcraft_proto::AdminNotetakerResponse>(&path, &mut errors)
         .await
@@ -916,16 +1117,101 @@ impl AdminLive {
     settle(self.fetch_result(path.to_owned()).await, errors)
   }
 
-  async fn fetch_result<T: serde::de::DeserializeOwned>(&self, path: String) -> Result<T, String> {
-    let response = self
-      .auth
-      .api_get(&path)
-      .await
-      .map_err(|error| error.to_string())?;
-    if response.status != 200 {
-      return Err(format!("{path}: {}", response.status));
+  /// Like [`Self::fetch_result`], and `Ok(None)` without a request when `is_wanted` is false.
+  async fn fetch_if<T: serde::de::DeserializeOwned>(
+    &self,
+    is_wanted: bool,
+    path: &str,
+  ) -> Result<Option<T>, String> {
+    if !is_wanted {
+      return Ok(None);
     }
-    serde_json::from_str(&response.body).map_err(|error| format!("{path}: {error}"))
+    self.fetch_result(path.to_owned()).await.map(Some)
+  }
+
+  /// The channel list, page after page up to [`MAX_LIST_PAGES`].
+  async fn read_conversations_if(
+    &self,
+    is_wanted: bool,
+  ) -> Result<Option<Listed<AdminConversationSummary>>, String> {
+    if !is_wanted {
+      return Ok(None);
+    }
+    let mut items = Vec::new();
+    let mut maybe_after: Option<ConversationId> = None;
+    for _ in 0..MAX_LIST_PAGES {
+      let mut path = format!("/api/v1/admin/conversations?limit={LIST_LIMIT}");
+      if let Some(after) = maybe_after {
+        path.push_str(&format!("&after={after}"));
+      }
+      let page: ListAdminConversationsResponse = self.fetch_result(path).await?;
+      maybe_after = page.conversations.last().map(|summary| summary.id);
+      items.extend(page.conversations);
+      if !page.has_more || maybe_after.is_none() {
+        return Ok(Some(Listed {
+          items,
+          is_truncated: false,
+        }));
+      }
+    }
+    Ok(Some(Listed {
+      items,
+      is_truncated: true,
+    }))
+  }
+
+  /// The user list, page after page up to [`MAX_LIST_PAGES`].
+  async fn read_users_if(&self, is_wanted: bool) -> Result<Option<Listed<AdminUserSummary>>, String> {
+    if !is_wanted {
+      return Ok(None);
+    }
+    let mut items = Vec::new();
+    let mut maybe_after: Option<UserId> = None;
+    for _ in 0..MAX_LIST_PAGES {
+      let mut path = format!("/api/v1/admin/users?status=all&limit={LIST_LIMIT}");
+      if let Some(after) = maybe_after {
+        path.push_str(&format!("&after={after}"));
+      }
+      let page: ListAdminUsersResponse = self.fetch_result(path).await?;
+      maybe_after = page.users.last().map(|summary| summary.id);
+      items.extend(page.users);
+      if !page.has_more || maybe_after.is_none() {
+        return Ok(Some(Listed {
+          items,
+          is_truncated: false,
+        }));
+      }
+    }
+    Ok(Some(Listed {
+      items,
+      is_truncated: true,
+    }))
+  }
+
+  /// A GET of the console. A failure is a short code the console words itself (never the path or
+  /// the status); a 429 also makes the console wait for the server's `Retry-After`.
+  async fn fetch_result<T: serde::de::DeserializeOwned>(&self, path: String) -> Result<T, String> {
+    let response = self.auth.api_get(&path).await.map_err(|error| {
+      tracing::warn!(%error, %path, "an administration read did not get an answer");
+      format!("{UNREACHABLE_CODE}:")
+    })?;
+    if response.status != 200 {
+      tracing::warn!(status = response.status, %path, "an administration read was refused");
+      return Err(self.read_failure(response.status, &response.body));
+    }
+    serde_json::from_str(&response.body).map_err(|error| {
+      tracing::warn!(%error, %path, "an administration answer could not be read");
+      format!("{READ_FAILED_CODE}:malformed")
+    })
+  }
+
+  fn read_failure(&self, status: u16, body: &str) -> String {
+    if status == 429 {
+      let seconds = retry_after_of(body);
+      self.back_off(seconds);
+      return format!("{RATE_LIMITED_CODE}:{seconds}");
+    }
+    format!("{READ_FAILED_CODE}:{status}")
   }
 
   /// Like [`Self::send`], and an answer of type `T` replaces the cached copy at once, so the form
@@ -953,7 +1239,10 @@ impl AdminLive {
         }
         None
       },
-      Ok(response) => Some(format!("{path}: {}", refusal_of(&response.body, response.status))),
+      Ok(response) => Some(format!(
+        "{path}: {}",
+        self.refusal_of(&response.body, response.status)
+      )),
       Err(error) => Some(error.to_string()),
     };
     self.data.borrow_mut().maybe_error = message;
@@ -988,7 +1277,7 @@ impl AdminLive {
         }),
       Ok(response) => SettingsTestResponse {
         is_ok: false,
-        maybe_error: Some(refusal_of(&response.body, response.status)),
+        maybe_error: Some(self.refusal_of(&response.body, response.status)),
       },
       Err(error) => SettingsTestResponse {
         is_ok: false,
@@ -1013,7 +1302,10 @@ impl AdminLive {
   async fn send_now(&self, method: ApiMethod, path: String, maybe_body: Option<String>) {
     let message = match self.auth.api_request(method, &path, maybe_body).await {
       Ok(response) if response.status < 300 => None,
-      Ok(response) => Some(format!("{path}: {}", refusal_of(&response.body, response.status))),
+      Ok(response) => Some(format!(
+        "{path}: {}",
+        self.refusal_of(&response.body, response.status)
+      )),
       Err(error) => Some(error.to_string()),
     };
     self.data.borrow_mut().maybe_error = message;
@@ -1131,6 +1423,7 @@ pub enum Loaded {
   Scheme(Option<SpaceId>),
   Moderation(ConversationId),
   Members(ConversationId),
+  Devices(UserId),
   Notetaker,
 }
 
@@ -1156,11 +1449,132 @@ impl Stored {
   }
 }
 
-/// Per-channel details that need their own requests.
-#[derive(Default)]
+/// What a refresh reads, as a set. The console asks for everything when it opens and after the
+/// admin's own change, and for the open section's data on its timer (issue #1217).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Reads(u32);
+
+impl Reads {
+  const NONE: Reads = Reads(0);
+  const SPACES: Reads = Reads(1 << 0);
+  const CONVERSATIONS: Reads = Reads(1 << 1);
+  const USERS: Reads = Reads(1 << 2);
+  const POLICY: Reads = Reads(1 << 3);
+  const ANNOUNCEMENT: Reads = Reads(1 << 4);
+  const INSTANCE: Reads = Reads(1 << 5);
+  const BRANDS: Reads = Reads(1 << 6);
+  const MAIL: Reads = Reads(1 << 7);
+  const CALENDAR: Reads = Reads(1 << 8);
+  const RUNTIME: Reads = Reads(1 << 9);
+  const AUDIT: Reads = Reads(1 << 10);
+  /// One request per space: which spaces each user is in.
+  const MEMBERSHIPS: Reads = Reads(1 << 11);
+  /// One request per channel, from servers that don't send owner and retention in the list.
+  const LEGACY_DETAILS: Reads = Reads(1 << 12);
+  const CACHED_SCHEMES: Reads = Reads(1 << 13);
+  const CACHED_MODERATION: Reads = Reads(1 << 14);
+  const CACHED_DEVICES: Reads = Reads(1 << 15);
+  const ALL: Reads = Reads((1 << 16) - 1);
+
+  fn has(self, part: Reads) -> bool {
+    self.0 & part.0 == part.0
+  }
+
+  /// What the section shows. Sections that read no list of their own show the policy, which is one
+  /// small request.
+  fn of(section: AdminSection) -> Reads {
+    match section {
+      AdminSection::Channels => {
+        Self::SPACES | Self::CONVERSATIONS | Self::USERS | Self::LEGACY_DETAILS | Self::CACHED_MODERATION
+      },
+      AdminSection::Users => Self::USERS | Self::SPACES | Self::CACHED_DEVICES,
+      AdminSection::Permissions => Self::SPACES | Self::CACHED_SCHEMES,
+      AdminSection::Retention => Self::SPACES | Self::CONVERSATIONS | Self::POLICY | Self::LEGACY_DETAILS,
+      AdminSection::Audit => Self::AUDIT | Self::SPACES | Self::CONVERSATIONS | Self::USERS,
+      AdminSection::Announcement => Self::ANNOUNCEMENT,
+      AdminSection::Brands => Self::BRANDS,
+      AdminSection::Mail => Self::MAIL,
+      AdminSection::Calendar => Self::CALENDAR,
+      AdminSection::Settings => Self::RUNTIME,
+      AdminSection::Instance => Self::INSTANCE,
+      // The owners and admins to propose for the roster come from the user list.
+      AdminSection::Security | AdminSection::People => Self::POLICY | Self::USERS,
+      AdminSection::Backgrounds
+      | AdminSection::Updates
+      | AdminSection::Integrations
+      | AdminSection::Notetaker
+      | AdminSection::Import => Self::POLICY,
+    }
+  }
+}
+
+impl std::ops::BitOr for Reads {
+  type Output = Reads;
+
+  fn bitor(self, other: Reads) -> Reads {
+    Reads(self.0 | other.0)
+  }
+}
+
+/// A list read page by page; `is_truncated` when more pages were left than one refresh reads.
+struct Listed<T> {
+  items: Vec<T>,
+  is_truncated: bool,
+}
+
+/// A channel's owner and effective retention: from the list, or read one by one from a server whose
+/// list doesn't carry them.
+#[derive(Clone, Default)]
 struct ChannelDetails {
   maybe_owner: Option<UserId>,
-  maybe_retention: Option<RetentionStatusResponse>,
+  maybe_retention: Option<RetentionSetting>,
+}
+
+/// What the list says; for a server that sent neither field, what was read for the channel.
+fn details_of(
+  summary: &AdminConversationSummary,
+  legacy: &HashMap<ConversationId, (i64, ChannelDetails)>,
+) -> ChannelDetails {
+  if summary.maybe_retention.is_some() {
+    return ChannelDetails {
+      maybe_owner: summary.maybe_owner_user_id,
+      maybe_retention: summary.maybe_retention,
+    };
+  }
+  legacy
+    .get(&summary.id)
+    .map(|(_, details)| details.clone())
+    .unwrap_or_default()
+}
+
+fn channels_of(
+  summaries: &[AdminConversationSummary],
+  space_names: &HashMap<SpaceId, String>,
+  legacy: &HashMap<ConversationId, (i64, ChannelDetails)>,
+  history: &HistoryPolicy,
+  keeps_pinned: bool,
+) -> Vec<AdminChannel> {
+  summaries
+    .iter()
+    .map(|summary| {
+      channel_from_wire(
+        summary,
+        space_names,
+        details_of(summary, legacy),
+        history.clone(),
+        keeps_pinned,
+      )
+    })
+    .collect()
+}
+
+/// Seconds to wait after a 429, from the body's `retry_after_secs` (the header's value).
+fn retry_after_of(body: &str) -> u64 {
+  serde_json::from_str::<ErrorBody>(body)
+    .ok()
+    .and_then(|error| error.maybe_retry_after_secs)
+    .unwrap_or(DEFAULT_BACKOFF_SECS)
+    .clamp(MIN_BACKOFF_SECS, MAX_BACKOFF_SECS)
 }
 
 fn preview_key(id: &str, slot: &BrandAssetSlot) -> String {
@@ -1200,10 +1614,18 @@ fn preview_data_url(maybe_content_type: Option<&str>, bytes: &[u8]) -> Option<St
   Some(format!("data:{content_type};base64,{}", STANDARD.encode(bytes)))
 }
 
-fn refusal_of(body: &str, status: u16) -> String {
-  serde_json::from_str::<teamcraft_proto::ErrorBody>(body)
-    .map(|error| error.message)
-    .unwrap_or_else(|_| status.to_string())
+/// Why a change was refused, for the banner: `rate_limited:{seconds}` for a 429 (the console words
+/// it), else the server's message.
+fn refusal_text(body: &str, status: u16) -> String {
+  let parsed = serde_json::from_str::<ErrorBody>(body);
+  let is_rate_limited = status == 429
+    || parsed
+      .as_ref()
+      .is_ok_and(|e| e.error_code == ErrorCode::RateLimited);
+  if is_rate_limited {
+    return format!("{RATE_LIMITED_CODE}:{}", retry_after_of(body));
+  }
+  parsed.map_or_else(|_| status.to_string(), |error| error.message)
 }
 
 // ---- Mappings (pure, tested) ------------------------------------------------------------------------
@@ -1237,22 +1659,16 @@ fn channel_from_wire(
   space_names: &HashMap<SpaceId, String>,
   details: ChannelDetails,
   history: HistoryPolicy,
+  keeps_pinned: bool,
 ) -> AdminChannel {
-  let retention = details.maybe_retention.map_or(
-    Retention {
-      maybe_days: None,
-      maybe_max_messages: None,
-      keeps_pinned: true,
-    },
-    |status| Retention {
-      maybe_days: status.effective.maybe_max_age_days,
-      maybe_max_messages: status
-        .effective
-        .maybe_max_messages
-        .and_then(|count| u32::try_from(count).ok()),
-      keeps_pinned: status.keep_pinned,
-    },
-  );
+  let setting = details.maybe_retention.unwrap_or_default();
+  let retention = Retention {
+    maybe_days: setting.maybe_max_age_days,
+    maybe_max_messages: setting
+      .maybe_max_messages
+      .and_then(|count| u32::try_from(count).ok()),
+    keeps_pinned,
+  };
   AdminChannel {
     id: summary.id,
     space_name: summary
@@ -1277,11 +1693,7 @@ fn channel_from_wire(
   }
 }
 
-fn user_from_wire(
-  summary: &AdminUserSummary,
-  devices: Vec<AdminDeviceResponse>,
-  space_names: Vec<String>,
-) -> AdminUser {
+fn user_from_wire(summary: &AdminUserSummary, space_names: Vec<String>) -> AdminUser {
   let username = summary.maybe_username.clone().unwrap_or_default();
   let role = summary
     .maybe_oidc_role
@@ -1308,26 +1720,33 @@ fn user_from_wire(
       maybe_email: None,
     },
     role,
-    devices: devices
-      .into_iter()
-      .filter(|device| !device.is_revoked)
-      .map(|device| DeviceInfo {
-        id: device.id,
-        name: device.name,
-        platform: String::new(),
-        last_seen: device.maybe_last_seen_at.unwrap_or(device.created_at).0,
-        is_current: false,
-        // Admins see the server's list; verifying is for the user's own devices.
-        verification: DeviceVerification::Unknown,
-        maybe_push: None,
-      })
-      .collect(),
+    device_count: summary.device_count,
+    // Loaded when the user's details open (`AdminLive::load_devices`).
+    devices: Vec::new(),
     last_seen: summary.maybe_last_seen_at.unwrap_or(summary.created_at).0,
     space_names,
     is_active: !summary.is_deactivated,
     is_in_chats: summary.conversation_count > 0 || summary.space_count > 0 || summary.device_count > 0,
     maybe_guest: None,
   }
+}
+
+/// The devices an admin sees: the server's list without the revoked ones.
+fn devices_from_wire(devices: &[AdminDeviceResponse]) -> Vec<DeviceInfo> {
+  devices
+    .iter()
+    .filter(|device| !device.is_revoked)
+    .map(|device| DeviceInfo {
+      id: device.id,
+      name: device.name.clone(),
+      platform: String::new(),
+      last_seen: device.maybe_last_seen_at.unwrap_or(device.created_at).0,
+      is_current: false,
+      // Admins see the server's list; verifying is for the user's own devices.
+      verification: DeviceVerification::Unknown,
+      maybe_push: None,
+    })
+    .collect()
 }
 
 /// Maps the server's action names to the console's wording; unknown ones keep their name.
@@ -1515,12 +1934,16 @@ mod tests {
         created_at: UnixMillis(1000),
       },
     ];
-    let user = user_from_wire(&summary, devices, vec!["Space A".into()]);
+    let user = user_from_wire(&summary, vec!["Space A".into()]);
     assert_eq!(user.role, Role::Admin);
     assert!(!user.is_active);
     assert!(user.is_in_chats);
-    assert_eq!(user.devices.len(), 1);
-    assert_eq!(user.devices[0].last_seen, 5000);
+    // The list carries the count; the devices load with the user's details, revoked ones left out.
+    assert_eq!(user.device_count, 2);
+    assert!(user.devices.is_empty());
+    let loaded = devices_from_wire(&devices);
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].last_seen, 5000);
     assert_eq!(user.last_seen, 1000);
   }
 
@@ -1606,15 +2029,12 @@ mod tests {
       storage_bytes: 2048,
       created_at: UnixMillis(100),
       maybe_last_activity_at: None,
+      maybe_owner_user_id: None,
+      maybe_retention: None,
     };
-    let status = RetentionStatusResponse {
-      own: RetentionSetting::default(),
-      effective: RetentionSetting {
-        maybe_max_age_days: Some(30),
-        maybe_max_messages: None,
-      },
-      limit: RetentionSetting::default(),
-      keep_pinned: false,
+    let status = RetentionSetting {
+      maybe_max_age_days: Some(30),
+      maybe_max_messages: None,
     };
     let names = HashMap::from([(id_from_raw(4), "Space A".to_owned())]);
     let channel = channel_from_wire(
@@ -1625,6 +2045,7 @@ mod tests {
         maybe_retention: Some(status),
       },
       HistoryPolicy::Full,
+      false,
     );
     assert_eq!(channel.space_name, "Space A");
     assert_eq!(channel.retention.maybe_days, Some(30));
@@ -1635,5 +2056,439 @@ mod tests {
       "the storage column shows what the server counted"
     );
     assert_eq!(channel.maybe_owner, Some(id_from_raw(1)));
+  }
+
+  mod requests {
+    //! What the console asks the server for (issue #1217): an open console on a large instance must
+    //! stay far below the address's rate limit, whatever the number of channels and users.
+
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    use teamcraft_proto::{JoinPolicy, WorkspacePolicy};
+
+    use super::*;
+    use crate::auth::{ApiResponse, AuthError, LocalFuture, SignInLook};
+
+    const CHANNELS: u64 = 450;
+    const USERS: u64 = 300;
+    const SPACES: u64 = 12;
+    /// The server's rate limit per address and minute (`ip_requests_per_minute`).
+    const IP_REQUESTS_PER_MINUTE: usize = 1200;
+    /// The console's timer.
+    const REFRESHES_PER_MINUTE: usize = 2;
+
+    #[test]
+    fn opening_the_console_on_a_large_instance_reads_the_lists_and_nothing_per_channel_or_user() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+
+      let paths = server.paths();
+      // Ten lists, the further pages of channels (2) and users (1), the audit log, and one request
+      // per space: 26 requests in all, once, where the console used to make about 650.
+      assert!(
+        paths.len() <= 10 + 3 + 1 + SPACES as usize,
+        "{} requests: {paths:?}",
+        paths.len()
+      );
+      assert_no_detail_requests(&paths);
+      assert_eq!(
+        live.channels().len(),
+        CHANNELS as usize,
+        "every page of channels is read"
+      );
+      assert_eq!(live.users().len(), USERS as usize);
+      assert!(!live.is_channel_list_truncated());
+      assert_eq!(live.channels()[7].maybe_owner, Some(id_from_raw(8)));
+      assert_eq!(live.channels()[7].retention.maybe_days, Some(30));
+    }
+
+    #[test]
+    fn the_timer_reads_only_what_the_open_section_shows() {
+      for section in AdminSection::ALL {
+        let server = FakeServer::new();
+        let live = AdminLive::new(server.clone());
+        block_on(live.refresh_once());
+        server.clear();
+
+        live.wanted.set(Reads::of(section));
+        block_on(live.refresh_once());
+        let paths = server.paths();
+        assert_no_detail_requests(&paths);
+        assert!(
+          paths.len() <= 8,
+          "{section:?}: {} requests: {paths:?}",
+          paths.len()
+        );
+        if section != AdminSection::Audit {
+          assert!(
+            !paths.iter().any(|path| path.contains("/audit")),
+            "{section:?}: {paths:?}"
+          );
+        }
+      }
+    }
+
+    #[test]
+    fn an_open_console_stays_far_below_the_rate_limit_of_the_address() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+      // The slowest section to refresh: the one with the most lists.
+      let busiest = AdminSection::ALL
+        .into_iter()
+        .map(|section| {
+          server.clear();
+          live.wanted.set(Reads::of(section));
+          block_on(live.refresh_once());
+          server.paths().len()
+        })
+        .max()
+        .unwrap_or(0);
+      let per_minute = busiest * REFRESHES_PER_MINUTE;
+      // Before: about 2 * min(channels, 100) + one per user + one per space per refresh.
+      assert!(
+        per_minute * 20 <= IP_REQUESTS_PER_MINUTE,
+        "{per_minute} requests per minute of an open console"
+      );
+    }
+
+    #[test]
+    fn a_server_without_owner_and_retention_in_the_list_is_asked_per_channel_once() {
+      let server = FakeServer::legacy();
+      let live = AdminLive::new(server.clone());
+      live.wanted.set(Reads::of(AdminSection::Retention));
+      block_on(live.refresh_once());
+      let first = server.paths();
+      let per_channel = first
+        .iter()
+        .filter(|path| {
+          (path.contains("/members") && !path.contains("/spaces/")) || path.ends_with("/retention")
+        })
+        .count();
+      assert_eq!(
+        per_channel,
+        2 * LEGACY_DETAIL_LIMIT,
+        "owner and retention of the first channels"
+      );
+      assert_eq!(live.channels()[3].retention.maybe_days, Some(30));
+      assert_eq!(live.channels()[3].maybe_owner, Some(id_from_raw(4)));
+
+      // The next look finds them cached; another section doesn't ask at all.
+      server.clear();
+      live.wanted.set(Reads::of(AdminSection::Retention));
+      block_on(live.refresh_once());
+      assert_no_detail_requests(&server.paths());
+      server.clear();
+      live.wanted.set(Reads::of(AdminSection::Announcement));
+      block_on(live.refresh_once());
+      assert_eq!(server.paths(), vec!["/api/v1/announcement".to_owned()]);
+    }
+
+    #[test]
+    fn a_refusal_with_a_wait_stops_the_reading_and_is_worded_for_the_banner() {
+      let server = FakeServer::new();
+      server.refuse_everything_with(
+        429,
+        r#"{"error_code":"rate_limited","message":"too many","retry_after_secs":42}"#,
+      );
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+
+      // Only the first round of lists went out; nothing followed once the server said to wait.
+      assert!(server.paths().len() <= 10, "{:?}", server.paths());
+      assert!(live.is_quiet());
+      let detail = live.maybe_error().unwrap_or_default();
+      assert_eq!(detail, "rate_limited:42");
+      assert_eq!(
+        crate::admin::admin_error_i18n_key(&detail),
+        Some("admin-error-rate-limited")
+      );
+      // The same reads are wanted again once the server allows.
+      assert!(live.wanted.get().has(Reads::ALL));
+    }
+
+    #[test]
+    fn the_wait_comes_from_the_refusal_and_stays_within_bounds() {
+      assert_eq!(
+        retry_after_of(r#"{"error_code":"rate_limited","message":"m","retry_after_secs":7}"#),
+        7
+      );
+      assert_eq!(
+        retry_after_of(r#"{"error_code":"rate_limited","message":"m","retry_after_secs":0}"#),
+        MIN_BACKOFF_SECS
+      );
+      assert_eq!(
+        retry_after_of(r#"{"error_code":"rate_limited","message":"m","retry_after_secs":99999}"#),
+        MAX_BACKOFF_SECS
+      );
+      assert_eq!(retry_after_of("<html>busy</html>"), DEFAULT_BACKOFF_SECS);
+      assert_eq!(refusal_text("<html>", 429), "rate_limited:30");
+      assert_eq!(refusal_text("<html>", 502), "502");
+    }
+
+    #[test]
+    fn a_list_longer_than_the_pages_read_says_so() {
+      let server = FakeServer::with_channels(MAX_LIST_PAGES as u64 * u64::from(LIST_LIMIT) + 50);
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+      assert_eq!(live.channels().len(), MAX_LIST_PAGES * LIST_LIMIT as usize);
+      assert!(live.is_channel_list_truncated());
+    }
+
+    fn assert_no_detail_requests(paths: &[String]) {
+      let per_object = paths.iter().filter(|path| {
+        path.contains("/members") && !path.contains("/spaces/")
+          || path.ends_with("/retention")
+          || path.ends_with("/devices")
+      });
+      assert_eq!(per_object.count(), 0, "per channel or per user: {paths:?}");
+    }
+
+    /// A server with a large instance that answers the console's reads and records them.
+    #[derive(Clone)]
+    struct FakeServer {
+      inner: Rc<FakeInner>,
+    }
+
+    struct FakeInner {
+      requests: RefCell<Vec<String>>,
+      channels: u64,
+      is_legacy: bool,
+      maybe_refusal: RefCell<Option<(u16, String)>>,
+    }
+
+    impl FakeServer {
+      fn new() -> Rc<Self> {
+        Self::build(CHANNELS, false)
+      }
+
+      fn legacy() -> Rc<Self> {
+        Self::build(CHANNELS, true)
+      }
+
+      fn with_channels(channels: u64) -> Rc<Self> {
+        Self::build(channels, false)
+      }
+
+      fn build(channels: u64, is_legacy: bool) -> Rc<Self> {
+        Rc::new(Self {
+          inner: Rc::new(FakeInner {
+            requests: RefCell::new(Vec::new()),
+            channels,
+            is_legacy,
+            maybe_refusal: RefCell::new(None),
+          }),
+        })
+      }
+
+      fn paths(&self) -> Vec<String> {
+        self.inner.requests.borrow().clone()
+      }
+
+      fn clear(&self) {
+        self.inner.requests.borrow_mut().clear();
+      }
+
+      fn refuse_everything_with(&self, status: u16, body: &str) {
+        *self.inner.maybe_refusal.borrow_mut() = Some((status, body.to_owned()));
+      }
+
+      fn answer(&self, path: &str) -> (u16, String) {
+        if let Some((status, body)) = self.inner.maybe_refusal.borrow().clone() {
+          return (status, body);
+        }
+        let json = |value: &dyn erased::Json| (200, value.to_json());
+        if path == "/api/v1/admin/spaces" {
+          return json(&ListAdminSpacesResponse {
+            spaces: (1..=SPACES).map(space).collect(),
+          });
+        }
+        if path.starts_with("/api/v1/admin/conversations?") {
+          let (items, has_more) = page(path, self.inner.channels, |n| {
+            conversation(n, self.inner.is_legacy)
+          });
+          return json(&ListAdminConversationsResponse {
+            conversations: items,
+            has_more,
+          });
+        }
+        if path.starts_with("/api/v1/admin/users?") {
+          let (items, has_more) = page(path, USERS, user);
+          return json(&ListAdminUsersResponse {
+            users: items,
+            has_more,
+          });
+        }
+        if path == "/api/v1/workspace/policy" {
+          return json(&WorkspacePolicyResponse {
+            version: 1,
+            policy: WorkspacePolicy::default(),
+            maybe_entry: None,
+          });
+        }
+        if path.starts_with("/api/v1/admin/audit") {
+          return json(&ListAuditResponse {
+            entries: Vec::new(),
+            has_more: false,
+          });
+        }
+        if path.starts_with("/api/v1/admin/spaces/") && path.ends_with("/members") {
+          return json(&ListSpaceMembersResponse { members: Vec::new() });
+        }
+        if path.starts_with("/api/v1/admin/conversations/") && path.ends_with("/members") {
+          let number = id_in(path);
+          return (
+            200,
+            format!(
+              r#"{{"members":[{{"user":{},"role":"admin"}}]}}"#,
+              serde_json::to_string(&user_summary_json(number)).unwrap_or_default()
+            ),
+          );
+        }
+        if path.starts_with("/api/v1/conversations/") && path.ends_with("/retention") {
+          return (
+            200,
+            r#"{"own":{},"effective":{"max_age_days":30},"limit":{},"keep_pinned":true}"#.to_owned(),
+          );
+        }
+        // Lists the test doesn't model: the console copes with a refusal.
+        (404, "{}".to_owned())
+      }
+    }
+
+    impl Authenticator for FakeServer {
+      fn restore(&self) -> LocalFuture<'_, Result<bool, AuthError>> {
+        Box::pin(async { Ok(true) })
+      }
+
+      fn login(&self, _look: SignInLook) -> LocalFuture<'_, Result<(), AuthError>> {
+        Box::pin(async { Ok(()) })
+      }
+
+      fn logout(&self) -> LocalFuture<'_, Result<(), AuthError>> {
+        Box::pin(async { Ok(()) })
+      }
+
+      fn api_request(
+        &self,
+        _method: ApiMethod,
+        path: &str,
+        _maybe_body: Option<String>,
+      ) -> LocalFuture<'_, Result<ApiResponse, AuthError>> {
+        self.inner.requests.borrow_mut().push(path.to_owned());
+        let (status, body) = self.answer(path);
+        Box::pin(async move { Ok(ApiResponse { status, body }) })
+      }
+    }
+
+    /// Serialization behind one name, so `answer` can return any response type.
+    mod erased {
+      pub trait Json {
+        fn to_json(&self) -> String;
+      }
+
+      impl<T: serde::Serialize> Json for T {
+        fn to_json(&self) -> String {
+          serde_json::to_string(self).unwrap_or_default()
+        }
+      }
+    }
+
+    /// The page of `total` numbered entries a list request asks for: `limit` entries after `after`.
+    fn page<T>(path: &str, total: u64, make: impl Fn(u64) -> T) -> (Vec<T>, bool) {
+      let query = |name: &str| {
+        path
+          .split(['?', '&'])
+          .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+          .and_then(|value| value.parse::<u64>().ok())
+      };
+      let limit = query("limit").unwrap_or(50);
+      // IDs are the numbers 1.. in order, so "after" is the last number of the previous page.
+      let first = query("after").unwrap_or(0) + 1;
+      let last = (first + limit - 1).min(total);
+      let items = (first..=last).map(&make).collect();
+      (items, last < total)
+    }
+
+    fn id_in(path: &str) -> u64 {
+      path
+        .split('/')
+        .find_map(|part| part.parse::<u64>().ok())
+        .unwrap_or(0)
+    }
+
+    fn space(number: u64) -> AdminSpaceSummary {
+      AdminSpaceSummary {
+        id: id_from_raw(number),
+        name: format!("Space {number}"),
+        join_policy: JoinPolicy::InviteOnly,
+        is_archived: false,
+        member_count: 10,
+        guest_count: 0,
+        channel_count: 30,
+        created_at: UnixMillis(1000),
+      }
+    }
+
+    fn conversation(number: u64, is_legacy: bool) -> AdminConversationSummary {
+      AdminConversationSummary {
+        id: id_from_raw(number),
+        maybe_space_id: Some(id_from_raw(number % SPACES + 1)),
+        maybe_name: Some(format!("channel-{number}")),
+        visibility: ConversationVisibility::Public,
+        is_archived: false,
+        member_count: 5,
+        guest_count: 0,
+        message_count: 100,
+        storage_bytes: 0,
+        created_at: UnixMillis(1000),
+        maybe_last_activity_at: None,
+        maybe_owner_user_id: (!is_legacy).then(|| id_from_raw(number)),
+        maybe_retention: (!is_legacy).then_some(RetentionSetting {
+          maybe_max_age_days: Some(30),
+          maybe_max_messages: None,
+        }),
+      }
+    }
+
+    fn user(number: u64) -> AdminUserSummary {
+      AdminUserSummary {
+        id: id_from_raw(number),
+        maybe_username: Some(format!("person{number}")),
+        display_name: format!("Person {number}"),
+        kind: UserKind::Member,
+        maybe_oidc_role: None,
+        is_deactivated: false,
+        is_deleted: false,
+        maybe_deactivation_reason: None,
+        device_count: 2,
+        space_count: 1,
+        conversation_count: 3,
+        maybe_last_seen_at: None,
+        created_at: UnixMillis(1000),
+      }
+    }
+
+    fn user_summary_json(number: u64) -> serde_json::Value {
+      serde_json::json!({
+        "id": serde_json::to_value(id_from_raw::<UserId>(number)).unwrap_or_default(),
+        "display_name": format!("Person {number}"),
+        "kind": "member",
+      })
+    }
+
+    /// Runs a future whose steps are all ready (the fake server answers at once).
+    fn block_on<F: Future>(future: F) -> F::Output {
+      let mut future = pin!(future);
+      let mut context = Context::from_waker(Waker::noop());
+      loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+          return output;
+        }
+      }
+    }
   }
 }

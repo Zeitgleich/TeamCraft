@@ -32,8 +32,8 @@ use teamcraft_client_api::actions::{
 use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, PresencePolicy};
 
 use crate::admin::{
-  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter, DeviceInfo,
-  PolicyBlocker, Retention, SelfJoinOutcome, SettingsTestKind,
+  AdminChannel, AdminLoad, AdminSection, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter,
+  DeviceInfo, PolicyBlocker, Retention, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
@@ -341,6 +341,18 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     bookmarks: Vec<teamcraft_client_api::model::Bookmark>,
   ) {
     self.chat.set_bookmarks(conversation, bookmarks);
+  }
+
+  fn canvas(&self, conversation: ConversationId) -> teamcraft_client_api::canvas::CanvasState {
+    self.chat.canvas(conversation)
+  }
+
+  fn edit_canvas(&self, conversation: ConversationId, update: Vec<u8>, is_snapshot: bool) {
+    self.chat.edit_canvas(conversation, update, is_snapshot);
+  }
+
+  fn compact_canvas(&self, conversation: ConversationId, revision: u64, merged: Vec<u8>) {
+    self.chat.compact_canvas(conversation, revision, merged);
   }
 
   fn remove_member(&self, conversation: ConversationId, user: UserId) {
@@ -1551,6 +1563,32 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     if let Some(admin) = &self.maybe_admin {
       admin.queue_refresh();
     }
+  }
+
+  fn admin_refresh_section(&self, section: AdminSection) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.queue_refresh_section(section);
+    }
+  }
+
+  fn admin_load_devices(&self, user: UserId) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.load_devices(user);
+    }
+  }
+
+  fn admin_channels_truncated(&self) -> bool {
+    self
+      .maybe_admin
+      .as_ref()
+      .is_some_and(AdminLive::is_channel_list_truncated)
+  }
+
+  fn admin_users_truncated(&self) -> bool {
+    self
+      .maybe_admin
+      .as_ref()
+      .is_some_and(AdminLive::is_user_list_truncated)
   }
 
   fn policy_edit_blocker(&self) -> Option<PolicyBlocker> {

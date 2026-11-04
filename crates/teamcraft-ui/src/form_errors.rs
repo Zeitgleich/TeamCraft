@@ -46,7 +46,7 @@ impl FormErrors {
   /// Shows `found` after a refused submit and moves the focus to the first invalid field inside
   /// the element `container_id`. From now on [`Self::follow`] keeps the errors in step with the
   /// input.
-  pub fn refuse(&self, container_id: &'static str, found: FieldErrors) {
+  pub fn refuse(&self, container_id: impl Into<String>, found: FieldErrors) {
     self.errors.set(found);
     self.was_refused.set(true);
     focus_first_invalid(container_id);

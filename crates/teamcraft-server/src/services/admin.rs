@@ -12,8 +12,8 @@ use teamcraft_proto::{
   DeactivateUserRequest, DeactivationReason, DeviceId, GatewayEvent, Id, ListAdminConversationsQuery,
   ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersQuery,
   ListAdminUsersResponse, ListAuditQuery, ListAuditResponse, ListConversationMembersResponse,
-  ListSpaceMembersResponse, Permission, PushProvider, PushProviderState, PushProviderStatus, SfuStatus,
-  SpaceId, StorageStatus, Target, UnixMillis, UserId,
+  ListSpaceMembersResponse, Permission, PushProvider, PushProviderState, PushProviderStatus, RetentionPolicy,
+  SfuStatus, SpaceId, StorageStatus, Target, UnixMillis, UserId,
 };
 use time::OffsetDateTime;
 
@@ -90,8 +90,12 @@ pub async fn list_conversations(
     .await?;
   let has_more = rows.len() > limit as usize;
   rows.truncate(limit as usize);
+  let (_, policy, _) = super::workspace::current_policy(state).await?;
   Ok(ListAdminConversationsResponse {
-    conversations: rows.iter().map(conversation_summary).collect(),
+    conversations: rows
+      .iter()
+      .map(|row| conversation_summary(row, &policy.retention))
+      .collect(),
     has_more,
   })
 }
@@ -640,7 +644,7 @@ fn space_summary(row: &AdminSpaceRow) -> AdminSpaceSummary {
   }
 }
 
-fn conversation_summary(row: &AdminConversationRow) -> AdminConversationSummary {
+fn conversation_summary(row: &AdminConversationRow, policy: &RetentionPolicy) -> AdminConversationSummary {
   AdminConversationSummary {
     id: row.id,
     maybe_space_id: row.maybe_space,
@@ -653,6 +657,12 @@ fn conversation_summary(row: &AdminConversationRow) -> AdminConversationSummary 
     storage_bytes: u64::try_from(row.storage_bytes).unwrap_or(0),
     created_at: unix_millis(row.created_at),
     maybe_last_activity_at: row.maybe_last_message_millis.map(UnixMillis),
+    maybe_owner_user_id: row.maybe_owner,
+    maybe_retention: Some(super::retention::effective_setting(
+      row.own_retention,
+      row.space_retention,
+      policy,
+    )),
   }
 }
 

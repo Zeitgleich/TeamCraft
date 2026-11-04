@@ -44,6 +44,12 @@ impl From<Vec<u8>> for Base64Bytes {
   }
 }
 
+impl AsRef<[u8]> for Base64Bytes {
+  fn as_ref(&self) -> &[u8] {
+    &self.0
+  }
+}
+
 impl Serialize for Base64Bytes {
   fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_str(&STANDARD.encode(&self.0))

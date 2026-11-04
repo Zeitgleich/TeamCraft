@@ -423,6 +423,26 @@ conversation and keeps its messages for a while, since nobody signs it yet (e2ee
 are in the audit log (`channel_deleted`, `channel_deleted_last_member`, `space_deleted`; a space leave
 names the channels it deleted in `space_member_removed`).
 
+#### 3.1.2 What the console reads (issue #1217)
+
+The console is a client of this API, so it counts against the address's rate limit
+(`ip_requests_per_minute`, shared by everybody behind the same address). It keeps its requests
+independent of the size of the instance:
+
+- `GET /admin/conversations` carries each channel's `owner_user_id` (its first channel admin by
+  display name; absent for an orphaned channel) and `retention` (the effective value, as in
+  `GET /conversations/{id}/retention`), so a list is one request per page of 200 channels, not two
+  more per channel. Both fields are optional: an older server omits them, and the console then
+  asks per channel for the first 100 channels, on the Channels and Retention pages only and at most
+  every ten minutes. Older consoles ignore the fields.
+- The open page refreshes the data of its section every 30 s (a few requests), not the whole
+  console. The whole console loads once when it opens and after the admin's own changes.
+- The devices of a user load when their details open, not for every user on every refresh
+  (`device_count` in the list is the count shown in the table).
+- Lists are read page by page (`after`) up to 1000 entries; a longer list says it is cut.
+- A 429 is honoured: the console reads nothing until `Retry-After` has passed (`retry_after_secs`
+  in the body, for browsers behind proxies that strip headers), then reads once more.
+
 ### 3.2 Users and guests
 
 | Feature                                                                                                          | Prio |

@@ -95,6 +95,10 @@ pub struct GuestInfo {
 pub struct AdminUser {
   pub user: User,
   pub role: Role,
+  /// How many devices the account has (the server's count, in the list). The devices themselves
+  /// load when the user's details open, see [`AdminBackend::admin_load_devices`].
+  pub device_count: u32,
+  /// Empty until loaded; `device_count` says whether that means none.
   pub devices: Vec<DeviceInfo>,
   pub last_seen: TimestampMs,
   pub space_names: Vec<String>,
@@ -578,10 +582,29 @@ pub fn admin_error_i18n_key(detail: &str) -> Option<&'static str> {
   if detail.contains(&format!("{ROSTER_KEY_UNUSABLE_CODE}:")) {
     return Some("admin-error-roster-key-unusable");
   }
+  if detail.contains(&format!("{RATE_LIMITED_CODE}:")) {
+    return Some("admin-error-rate-limited");
+  }
+  if detail.contains(&format!("{UNREACHABLE_CODE}:")) {
+    return Some("admin-error-unreachable");
+  }
+  if detail.contains(&format!("{READ_FAILED_CODE}:")) {
+    return Some("admin-error-read-failed");
+  }
   detail
     .contains(&format!("{NOT_AN_OWNER_CODE}:"))
     .then_some("admin-error-not-an-owner")
 }
+
+/// Starts the detail of a request the server refused with 429 (`rate_limited:{seconds}`).
+pub const RATE_LIMITED_CODE: &str = "rate_limited";
+
+/// Starts the detail of a read that never got an answer (`admin_unreachable:`).
+pub const UNREACHABLE_CODE: &str = "admin_unreachable";
+
+/// Starts the detail of a read the server answered with something else than data
+/// (`admin_read_failed:{status}`).
+pub const READ_FAILED_CODE: &str = "admin_read_failed";
 
 /// Stable code that starts the core's refusal to sign a roster or policy for a non-owner.
 pub const NOT_AN_OWNER_CODE: &str = "not_an_owner";
@@ -797,6 +820,19 @@ mod tests {
       Some("admin-error-last-owner")
     );
     assert_eq!(admin_error_i18n_key("server answered 500: oops"), None);
+    // Reads the console words itself, never with their path or status.
+    assert_eq!(
+      admin_error_i18n_key("rate_limited:12"),
+      Some("admin-error-rate-limited")
+    );
+    assert_eq!(
+      admin_error_i18n_key("admin_read_failed:500"),
+      Some("admin-error-read-failed")
+    );
+    assert_eq!(
+      admin_error_i18n_key("admin_unreachable:"),
+      Some("admin-error-unreachable")
+    );
     assert_eq!(
       admin_error_i18n_key("not_an_owner: only owners sign the roster"),
       Some("admin-error-not-an-owner")
@@ -1152,6 +1188,7 @@ mod tests {
           maybe_email: None,
         },
         role,
+        device_count: 0,
         devices: Vec::new(),
         last_seen: 0,
         space_names: Vec::new(),

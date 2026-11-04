@@ -223,6 +223,54 @@ mod settings {
   }
 
   #[tokio::test]
+  async fn the_admin_list_carries_owner_and_effective_retention_of_every_channel() {
+    let app = app!();
+    let (alice, bob) = (owner(), admin());
+    let (channel, device) = channel_of_alice(&app, &alice).await;
+    let space = app.get(&alice, "/spaces").await.body["spaces"][0]["id"]
+      .as_str()
+      .unwrap()
+      .to_owned();
+    let inherits = create_channel(&app, &alice, &space, "inherits", "private").await;
+    sign_policy(&app, &alice, &device, 0, |p| {
+      p["retention"]["default"] = json!({"max_age_days": 30});
+      p["retention"]["limit"] = json!({"max_age_days": 90});
+    })
+    .await;
+    set_retention(&app, &alice, &channel, json!({"max_age_days": 7})).await;
+    app
+      .put(
+        &alice,
+        &format!("/spaces/{space}/retention"),
+        json!({"retention": {"max_messages": 500}}),
+      )
+      .await;
+
+    let listed = app.get(&bob, "/admin/conversations").await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    let alice_id = user_id(&app, &alice).await;
+    let entries = listed.body["conversations"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+      let id = entry["id"].as_str().unwrap();
+      // The bulk value is the one the per-channel read reports as effective.
+      let single = app.get(&alice, &format!("/conversations/{id}/retention")).await;
+      assert_eq!(entry["retention"], single.body["effective"], "channel {id}");
+      assert_eq!(entry["owner_user_id"], json!(alice_id), "channel {id}");
+    }
+    let by_id = |wanted: &str| entries.iter().find(|e| e["id"] == wanted).unwrap();
+    assert_eq!(
+      by_id(&channel)["retention"],
+      json!({"max_age_days": 7, "max_messages": 500})
+    );
+    assert_eq!(
+      by_id(&inherits)["retention"],
+      json!({"max_age_days": 30, "max_messages": 500})
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn the_workspace_limit_caps_what_owners_can_choose() {
     let app = app!();
     let alice = owner();

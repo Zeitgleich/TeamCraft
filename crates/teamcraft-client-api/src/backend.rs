@@ -635,6 +635,17 @@ pub trait ChatBackend {
   fn add_member_with_history(&self, _conversation: ConversationId, _user: UserId, _history: HistoryPolicy) {}
   /// Replaces the conversation's bookmarks bar (links and files shown under the header).
   fn set_bookmarks(&self, _conversation: ConversationId, _bookmarks: Vec<crate::model::Bookmark>) {}
+  /// The channel's shared page as the updates this device holds (e2ee.md §4.11); the page's
+  /// editor reads them with [`crate::canvas::CanvasDoc`].
+  fn canvas(&self, _conversation: ConversationId) -> crate::canvas::CanvasState {
+    crate::canvas::CanvasState::default()
+  }
+  /// Sends an edit of the channel's page (a Yjs update; `is_snapshot`: the whole page) as an
+  /// encrypted, hidden message and keeps it at once. Refused where the user may not post.
+  fn edit_canvas(&self, _conversation: ConversationId, _update: Vec<u8>, _is_snapshot: bool) {}
+  /// Replaces the page's updates with `merged` (all of them as one), if the list is still the one
+  /// of `revision`: the editor compacts what the core can't read.
+  fn compact_canvas(&self, _conversation: ConversationId, _revision: u64, _merged: Vec<u8>) {}
   /// Removes a person from a conversation (and rotates its keys).
   fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.
@@ -988,6 +999,24 @@ pub trait AdminBackend {
 
   /// Called when the console opens: backends that read the server fetch fresh data now.
   fn admin_refresh(&self) {}
+  /// The console's timer: reads only what the open section shows, not everything (issue #1217:
+  /// the whole console on a timer used up the address's rate limit). Backends without the
+  /// distinction read everything.
+  fn admin_refresh_section(&self, _section: crate::admin::AdminSection) {
+    self.admin_refresh();
+  }
+  /// Loads the devices of a user, once the console shows them; they arrive with the next change
+  /// notification and stay current with the console's refreshes.
+  fn admin_load_devices(&self, _user: UserId) {}
+  /// Whether the channel list ends before the instance's last channel (the console reads a bounded
+  /// number of pages).
+  fn admin_channels_truncated(&self) -> bool {
+    false
+  }
+  /// Whether the user list ends before the instance's last account.
+  fn admin_users_truncated(&self) -> bool {
+    false
+  }
 
   /// Spaces by name, for the permission scheme scopes.
   fn admin_spaces(&self) -> Vec<AdminSpace> {

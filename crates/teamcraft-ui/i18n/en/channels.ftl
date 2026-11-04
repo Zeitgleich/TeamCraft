@@ -15,6 +15,24 @@ channel-empty-title = No messages yet
 channel-tabs = Conversation views
 channel-tab-messages = Messages
 channel-tab-files = Files & links
+channel-tab-notes = Notes
+
+## A channel's shared notes (Notes tab)
+canvas-page-label = Shared notes
+canvas-toolbar = Block style
+canvas-kind-paragraph = Text
+canvas-kind-heading = Heading
+canvas-kind-bullet = Bulleted list
+canvas-kind-numbered = Numbered list
+canvas-kind-check = Checklist
+canvas-check-label = Done
+canvas-placeholder = Write notes for this channel. Start a line with # for a heading, - for a list or [] for a checklist.
+canvas-encrypted = Everyone in the channel sees and edits these notes; they are end-to-end encrypted like its messages.
+canvas-read-only = You can read them; only members who may post here can change them.
+canvas-loading-history = Loading earlier changes…
+canvas-history-failed = Some earlier changes could not be loaded yet.
+canvas-empty-title = No notes yet
+canvas-empty = Members who may post here can write notes for the whole channel.
 members-button-label = { $count ->
     [one] Show members, { $count } member
    *[other] Show members, { $count } members
@@ -47,8 +65,6 @@ retention-days = Days
 retention-messages = Messages
 retention-pinned = Keep pinned messages
 retention-actions = Actions
-retention-forever = Keep all
-retention-invalid = Enter a whole number from 1 up to the instance limit, or leave empty.
 
 ## Device approval, linking and key changes
 leave-pending = Leaving this conversation. It finishes when a member's device has removed you from the encrypted group.
