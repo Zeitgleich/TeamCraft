@@ -143,13 +143,17 @@ mod tests {
   fn an_entry_round_trips_and_its_bytes_are_not_readable_sealed() {
     let sealer = sealer(1);
     let key = MediaKey::Avatar(id::<UserId>(1));
-    let sealed = sealer.seal(&key, &media("v1"), 5).expect("seal");
+    // Long enough that random ciphertext can't contain it by chance, as two bytes sometimes did.
+    let version = "version-of-the-picture";
+    let sealed = sealer.seal(&key, &media(version), 5).expect("seal");
     assert!(
       !sealed.windows(PICTURE.len()).any(|window| window == PICTURE),
       "the picture is encrypted at rest"
     );
     assert!(
-      !sealed.windows(2).any(|window| window == b"v1"),
+      !sealed
+        .windows(version.len())
+        .any(|window| window == version.as_bytes()),
       "so is its version"
     );
     let (opened, written_ms) = sealer.open(&key, &sealed).expect("open");
@@ -160,7 +164,7 @@ mod tests {
         opened.content_type.as_str(),
         opened.bytes.expose_secret()
       ),
-      ("v1", "image/png", PICTURE)
+      (version, "image/png", PICTURE)
     );
   }
 
