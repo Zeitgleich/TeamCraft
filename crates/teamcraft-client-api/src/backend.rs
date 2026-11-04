@@ -705,6 +705,10 @@ pub trait ChatBackend {
   fn channel_roles_review(&self, _conversation: ConversationId) -> Option<crate::model::ChannelRolesReview> {
     None
   }
+  /// The channels where this device and a member's disagree about the signed roles.
+  fn channel_role_alarms(&self) -> Vec<ConversationId> {
+    Vec::new()
+  }
   /// Signs exactly `roles`, as the workspace admin looked at them with the log at `at_cursor`
   /// ([`crate::model::ChannelRolesReview::log_cursor`]); nothing changes on the server. Refused if
   /// the log moved since.

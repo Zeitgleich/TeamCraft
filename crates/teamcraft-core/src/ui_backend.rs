@@ -2898,6 +2898,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_channel_roles_review(conversation)
   }
 
+  fn channel_role_alarms(&self) -> Vec<ConversationId> {
+    self.ui_channel_role_alarms()
+  }
+
   fn sign_reviewed_channel_roles(
     &self,
     conversation: ConversationId,

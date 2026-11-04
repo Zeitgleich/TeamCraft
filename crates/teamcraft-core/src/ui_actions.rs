@@ -404,22 +404,59 @@ impl<S: LocalStore> CoreChatBackend<S> {
       Table::Members,
       &conversation.to_string(),
     ));
-    let lists_a_role_nobody_confirmed = signed.is_signed()
+    let lists_a_role_nobody_confirmed = !signed.is_unfounded()
       && members.into_iter().flat_map(|list| list.members).any(|member| {
         member.user.kind == teamcraft_proto::UserKind::Member
           && member.role != teamcraft_proto::ChannelRole::Member
           && signed.role_of(member.user.id) != member.role
       });
-    (is_vouching && (signed.must_review_before_vouching() || lists_a_role_nobody_confirmed)).then(|| {
-      teamcraft_client_api::model::ChannelRolesReview {
-        log_cursor: signed.cursor,
-        snapshot: signed
-          .assignments
-          .iter()
-          .map(|assignment| (assignment.user_id, assignment.role.clone()))
-          .collect(),
-      }
+    let is_needed = signed.must_review_before_vouching()
+      || lists_a_role_nobody_confirmed
+      || signed.maybe_alarm.is_some()
+      // A log this device took nothing from: only such a list gets it out.
+      || (!signed.is_signed() && signed.cursor > 0);
+    let standings: std::collections::BTreeMap<UserId, crate::channel_roles::RoleKeyStanding> = self.read(
+      records::get_json(
+        self.store_ref(),
+        Table::Workspace,
+        &crate::client::role_key_standings_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    (is_vouching && is_needed).then(|| teamcraft_client_api::model::ChannelRolesReview {
+      log_cursor: signed.cursor,
+      key_marks: standings
+        .into_iter()
+        .map(|(user, standing)| {
+          use crate::channel_roles::RoleKeyStanding;
+          use teamcraft_client_api::model::RoleKeyMark;
+          let mark = match standing {
+            RoleKeyStanding::Checked => RoleKeyMark::Checked,
+            RoleKeyStanding::Changed => RoleKeyMark::Changed,
+            RoleKeyStanding::Uncheckable | RoleKeyStanding::Unknown => RoleKeyMark::Uncheckable,
+          };
+          (user, mark)
+        })
+        .collect(),
+      snapshot: signed
+        .assignments
+        .iter()
+        .map(|assignment| (assignment.user_id, assignment.role.clone()))
+        .collect(),
     })
+  }
+
+  /// The channels where this device and a member's disagree about the signed roles.
+  pub(crate) fn ui_channel_role_alarms(&self) -> Vec<ConversationId> {
+    let alarmed: std::collections::BTreeSet<ConversationId> = self.read(
+      records::get_json(
+        self.store_ref(),
+        Table::Workspace,
+        crate::client::channel_roles_alarmed_key(),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    alarmed.into_iter().collect()
   }
 
   fn source_authority(&self) -> Option<SourceAuthority> {

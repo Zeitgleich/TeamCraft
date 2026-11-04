@@ -377,7 +377,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         user,
         role,
-      } => self.set_channel_role(conversation, user, role).await.map(|_| ()),
+      } => match self.set_channel_role(conversation, user, role).await? {
+        // A workspace admin whose device can't stand behind it hears so; the server's change stands.
+        super::RoleSigning::Unsigned if self.could_vouch_for_channel_roles(conversation)? => {
+          Err(CoreError::RoleChangeNotConfirmed)
+        },
+        _ => Ok(()),
+      },
       CoreCommand::SignReviewedChannelRoles {
         conversation,
         roles,
@@ -398,7 +404,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::RefreshMembers { conversation } => self.refresh_members(conversation).await,
       CoreCommand::RefreshChannelRoles { conversation } => {
         self.refresh_members(conversation).await?;
-        self.sync_channel_roles(conversation).await
+        self.sync_channel_roles(conversation).await?;
+        self.note_role_key_standings(conversation).await
       },
       CoreCommand::RemoveSpaceMember { space, user } => self.remove_space_member(space, user).await,
       CoreCommand::RevokeSpaceInvite { space, invite } => self.revoke_space_invite(space, invite).await,

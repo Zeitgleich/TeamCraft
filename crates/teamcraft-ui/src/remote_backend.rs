@@ -1789,6 +1789,13 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn channel_role_alarms(&self) -> Vec<ConversationId> {
+    match self.ask(ChatQuery::ChannelRoleAlarms) {
+      Some(ChatAnswer::ChannelRoleAlarms { conversations }) => conversations,
+      _ => Vec::new(),
+    }
+  }
+
   fn sign_reviewed_channel_roles(
     &self,
     conversation: ConversationId,

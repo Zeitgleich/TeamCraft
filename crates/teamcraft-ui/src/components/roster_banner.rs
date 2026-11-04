@@ -69,6 +69,11 @@ fn banner_line(i18n: I18n, state: AppState) -> Option<(String, bool)> {
   {
     return Some((expired_line(i18n, state, &owners), false));
   }
+  // Members' devices disagree about a channel's roles: an admin of the verified roster, not whom the
+  // server calls one, can look (e2ee.md §4.6.1). Everybody else reads it in the channel's members.
+  if let Some(line) = role_alarm_line(i18n, state) {
+    return Some((line, false));
+  }
   // Only an owner can do something about a contradiction or another provider: an owner of the verified
   // roster, not whom the server calls one, so that a server can't hide this from them.
   let status = state.read(|backend| backend.owner_roster())?;
@@ -91,6 +96,27 @@ fn banner_line(i18n: I18n, state: AppState) -> Option<(String, bool)> {
     | RoleSigningIssue::ReportedGone { .. }
     | RoleSigningIssue::AwaitingOwner => None,
   }
+}
+
+/// What a workspace admin of the verified roster hears about a channel whose role logs disagree.
+fn role_alarm_line(i18n: I18n, state: AppState) -> Option<String> {
+  let me = state.read(|backend| backend.me().id);
+  let status = state.read(|backend| backend.owner_roster())?;
+  if !status.owners.iter().any(|owner| owner.user == me) && !status.admins.contains(&me) {
+    return None;
+  }
+  let conversation = state
+    .read(|backend| backend.channel_role_alarms())
+    .into_iter()
+    .next()?;
+  Some(
+    state
+      .read(|backend| backend.conversation(conversation))
+      .map_or_else(
+        || i18n.t("channel-roles-alarm-banner-unnamed"),
+        |info| i18n.t_with("channel-roles-alarm-banner", &[("channel", &info.name)]),
+      ),
+  )
 }
 
 /// That admin rights lapsed, and whom to ask: by name, or just "an owner" where this device knows no

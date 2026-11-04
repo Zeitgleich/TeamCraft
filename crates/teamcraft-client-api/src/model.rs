@@ -267,6 +267,21 @@ pub struct ChannelRolesReview {
   /// The roles this device's own snapshot gives. The list to sign comes from the member list, the
   /// server's word, so a row it doesn't have here is marked.
   pub snapshot: Vec<(UserId, ChannelRole)>,
+  /// What this device can check of each listed person's key. Somebody not named here isn't checked
+  /// yet, and can't be confirmed.
+  #[serde(default)]
+  pub key_marks: Vec<(UserId, RoleKeyMark)>,
+}
+
+/// What a device can say about the key a confirmed role would name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RoleKeyMark {
+  /// As the signed roles have it, or checked against the encryption group or the roster.
+  Checked,
+  /// This device saw another key for the person than the signed roles name.
+  Changed,
+  /// This device can't check it: confirming is refused.
+  Uncheckable,
 }
 
 /// The verified signer of the entry that gave a channel member their role.

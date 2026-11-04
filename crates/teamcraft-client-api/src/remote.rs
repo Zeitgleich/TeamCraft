@@ -1529,6 +1529,7 @@ pub enum ChatQuery {
   ChannelRolesReview {
     conversation: ConversationId,
   },
+  ChannelRoleAlarms,
   SpaceInvites {
     space: SpaceId,
   },
@@ -1689,6 +1690,10 @@ pub enum ChatAnswer {
   ChannelRolesReview {
     #[serde(default)]
     maybe_review: Option<crate::model::ChannelRolesReview>,
+  },
+  ChannelRoleAlarms {
+    #[serde(default)]
+    conversations: Vec<ConversationId>,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -1893,6 +1898,9 @@ impl ChatQuery {
       },
       Self::ChannelRolesReview { conversation } => ChatAnswer::ChannelRolesReview {
         maybe_review: backend.channel_roles_review(conversation),
+      },
+      Self::ChannelRoleAlarms => ChatAnswer::ChannelRoleAlarms {
+        conversations: backend.channel_role_alarms(),
       },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
         roster: backend.space_members(space),

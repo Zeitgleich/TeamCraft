@@ -242,6 +242,7 @@ tab-close-hint = Du kannst diesen Tab jetzt schließen.
 # Errors at a form field (forms.md)
 form-error-name = Gib einen Namen ein.
 error-last-channel-admin = Ernenne zuerst in den Kanaleinstellungen jemand anderen zum Kanal-Admin oder lösche den Kanal.
+error-role-change-not-confirmed = Die Rolle wurde geändert, aber dieses Gerät konnte sie für die Mitglieder des Kanals nicht bestätigen, ihre Apps zählen sie also noch nicht. Sieh dir die Rollen bei den Mitgliedern des Kanals an.
 error-last-member = Sonst ist niemand in diesem Kanal, daher wird er beim Verlassen gelöscht. Wähle zum Bestätigen „Verlassen“ in seinem Menü.
 error-import-in-progress = In diesen Kanal läuft gerade ein Import. Lösche ihn, sobald der Import fertig ist.
 error-space-has-hidden-channels = Dieser Space enthält private Kanäle, in denen du nicht bist. Bitte einen Workspace-Admin, ihn zu löschen.

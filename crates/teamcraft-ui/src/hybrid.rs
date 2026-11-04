@@ -853,6 +853,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.channel_roles_review(conversation)
   }
 
+  fn channel_role_alarms(&self) -> Vec<ConversationId> {
+    self.chat.channel_role_alarms()
+  }
+
   fn sign_reviewed_channel_roles(
     &self,
     conversation: ConversationId,

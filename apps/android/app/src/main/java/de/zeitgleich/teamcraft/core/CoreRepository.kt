@@ -67,6 +67,8 @@ class CoreRepository(
     val storageKey = server.address.storageKey
     val account = "${server.address.origin} $subject"
     maybeCore?.takeIf { maybeAccount == account }?.let { return it }
+    maybeTokens?.maybeCore = null
+    maybeTokens = null
     maybeCore?.let {
       it.close()
       onAccountClosed()
@@ -89,6 +91,7 @@ class CoreRepository(
       )
     }
     tokens.maybeCore = core
+    maybeTokens = tokens
     core.noteIdToken(auth.idToken())
     maybeCore = core
     maybeAccount = account
@@ -98,12 +101,17 @@ class CoreRepository(
 
   /** Closes the core; local data stays (it belongs to the account, not the session). */
   suspend fun close() = lock.withLock {
+    maybeTokens?.maybeCore = null
+    maybeTokens = null
     maybeCore?.close()
     onAccountClosed()
     maybeCore = null
     maybeAccount = null
     connection.value = null
   }
+
+  /** The token source of the open core, so it stops talking to that core when it closes. */
+  private var maybeTokens: Tokens? = null
 
   private fun databaseKey(storageKey: String, subject: String): ByteArray =
     SealedFile(File(context.filesDir, StoragePaths.databaseKeyFile(storageKey, subject)), KeystoreBox(DATABASE_KEY_ALIAS))
@@ -120,8 +128,9 @@ class CoreRepository(
      */
     override fun accessToken(): String? = runBlocking {
       NetworkTrust.awaitTrustedCertificates()
-      if (maybeCore?.takeIdTokenRequest() == true) auth.refreshTokensSoon()
-      auth.accessToken().also { maybeCore?.noteIdToken(auth.idToken()) }
+      // A core closed in between throws: nothing to tell it then, and the token is still good.
+      if (runCatching { maybeCore?.takeIdTokenRequest() }.getOrNull() == true) auth.refreshTokensSoon()
+      auth.accessToken().also { runCatching { maybeCore?.noteIdToken(auth.idToken()) } }
     }
   }
 

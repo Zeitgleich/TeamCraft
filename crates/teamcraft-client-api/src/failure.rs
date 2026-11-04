@@ -14,6 +14,8 @@ const CALL_PREFIX: &str = "call_";
 /// Prefixes of a failure where something on the network answered instead of the server.
 const CAPTIVE_PORTAL_PREFIX: &str = "captive_portal";
 const UNTRUSTED_CERTIFICATE_PREFIX: &str = "untrusted_certificate";
+/// What marks a role change the server took and this device couldn't confirm.
+const ROLE_CHANGE_NOT_CONFIRMED_PREFIX: &str = "role_change_not_confirmed";
 /// Prefix of a system notification that could not be shown on this device: `notification_<failure>`.
 const NOTIFICATION_PREFIX: &str = "notification_";
 /// Prefix of a device link that failed ([`LinkFailure`]): `link_<failure>`.
@@ -34,6 +36,8 @@ pub enum FailureKind {
   Server(ErrorCode),
   /// The server could not be reached.
   Network,
+  /// A role changed on the server, but this device can't confirm it for the channel's members.
+  RoleChangeNotConfirmed,
   /// A call could not use this device's microphone, camera or screen, or the browser lacks what
   /// calls need.
   Call(CallFailure),
@@ -343,6 +347,7 @@ impl ActionFailure {
       NETWORK_PREFIX => Some(FailureKind::Network),
       CAPTIVE_PORTAL_PREFIX => Some(FailureKind::CaptivePortal),
       UNTRUSTED_CERTIFICATE_PREFIX => Some(FailureKind::UntrustedCertificate),
+      ROLE_CHANGE_NOT_CONFIRMED_PREFIX => Some(FailureKind::RoleChangeNotConfirmed),
       _ => None,
     };
     if let Some(kind) = maybe_kind {
@@ -378,6 +383,7 @@ impl ActionFailure {
       FailureKind::Link(failure) => format!("{LINK_PREFIX}{}: {}", failure.as_str(), self.detail),
       FailureKind::CaptivePortal => format!("{CAPTIVE_PORTAL_PREFIX}: {}", self.detail),
       FailureKind::UntrustedCertificate => format!("{UNTRUSTED_CERTIFICATE_PREFIX}: {}", self.detail),
+      FailureKind::RoleChangeNotConfirmed => format!("{ROLE_CHANGE_NOT_CONFIRMED_PREFIX}: {}", self.detail),
       FailureKind::Other => self.detail.clone(),
     }
   }

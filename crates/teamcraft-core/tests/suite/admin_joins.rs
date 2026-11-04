@@ -950,6 +950,8 @@ async fn stretch_setup() -> StretchWorld {
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave, &mut eve]).await;
   bob.client.request_admin_join(channel).await.unwrap();
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave, &mut eve]).await;
+  // Eve isn't in the group: she signs for people she can check by their attested keys.
+  eve.has_attested_keys_of(&server, &[bob_id, carol.client.user_id(), dave.client.user_id()]);
   eve.client.sync_channel_roles(channel).await.unwrap();
   carol.client.sync_channel_roles(channel).await.unwrap();
   dave.client.sync_channel_roles(channel).await.unwrap();

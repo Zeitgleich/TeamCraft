@@ -448,6 +448,392 @@ mod founding_at_first_sight {
   }
 }
 
+/// The review of #1286: what a workspace admin's signature may say about somebody's key.
+mod whose_key_a_role_names {
+  use super::*;
+
+  /// Finding 1: a workspace admin outside the group is about to confirm a list with somebody they
+  /// never met. Their first pin would be whatever the server says, and that key anchored would be
+  /// a channel admin of the server's own. Nothing is signed, and the panel says so.
+  #[tokio::test]
+  async fn an_outside_workspace_admin_confirms_no_key_it_can_t_check() {
+    let server = FakeServer::new();
+    let world = anchored_with_outside_owner(&server).await;
+    let (mut alice, mut bob, mut carol, mut owner, channel) = world;
+    let carol_id = carol.client.user_id();
+    let before = server.role_log(channel).len();
+    // The server lists Carol, whom the snapshot doesn't name and this device never pinned.
+    server.set_channel_role_unsigned(channel, carol_id, ChannelRole::Admin);
+
+    let ui = refreshed_ui(&mut owner, channel).await;
+    let review = ui.channel_roles_review(channel).unwrap();
+    assert!(
+      review
+        .key_marks
+        .contains(&(carol_id, teamcraft_client_api::model::RoleKeyMark::Uncheckable)),
+      "{:?}",
+      review.key_marks
+    );
+    let roles = [
+      (alice.client.user_id(), ChannelRole::Admin),
+      (carol_id, ChannelRole::Admin),
+    ];
+    let signing = owner
+      .client
+      .sign_reviewed_channel_roles(channel, &roles, review.log_cursor)
+      .await
+      .unwrap();
+    assert_eq!(signing, RoleSigning::Unsigned);
+    assert_eq!(server.role_log(channel).len(), before);
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut owner]).await;
+  }
+
+  /// Finding 1, the swap: the server puts its own key in place of Alice's. A workspace admin outside
+  /// the group confirms the list, and the key signed stays the one the anchored snapshot names, and
+  /// the row says this device saw another. Everybody keeps verifying the real Alice.
+  #[tokio::test]
+  async fn a_swapped_key_is_marked_and_never_signed() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, mut owner, channel) = anchored_with_outside_owner(&server).await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    let real_key = owner
+      .client
+      .channel_role_state(channel)
+      .unwrap()
+      .snapshot_key_of(bob_id)
+      .unwrap();
+
+    // What a first pin from the server looks like: the server's key, unattested.
+    server.replace_identity_key(bob_id, vec![9; 32]);
+    teamcraft_core::records::pin_identity(
+      &owner.store,
+      bob_id,
+      &teamcraft_core::records::PinnedIdentity {
+        public_key: [9; 32],
+        maybe_changed_to: None,
+        is_attested: false,
+      },
+    )
+    .unwrap();
+    server.set_channel_role_unsigned(channel, bob_id, ChannelRole::Admin);
+
+    let ui = refreshed_ui(&mut owner, channel).await;
+    let review = ui.channel_roles_review(channel).unwrap();
+    assert!(
+      review
+        .key_marks
+        .contains(&(bob_id, teamcraft_client_api::model::RoleKeyMark::Changed)),
+      "{:?}",
+      review.key_marks
+    );
+
+    let roles = [(alice_id, ChannelRole::Admin), (bob_id, ChannelRole::Admin)];
+    assert_eq!(
+      owner
+        .client
+        .sign_reviewed_channel_roles(channel, &roles, review.log_cursor)
+        .await
+        .unwrap(),
+      RoleSigning::Signed
+    );
+    carol.client.sync_channel_roles(channel).await.unwrap();
+    let state = carol.client.channel_role_state(channel).unwrap();
+    assert_eq!(state.role_of(bob_id), ChannelRole::Admin);
+    assert_eq!(
+      state.snapshot_key_of(bob_id),
+      Some(real_key),
+      "the server's key is in nobody's snapshot"
+    );
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut owner]).await;
+  }
+
+  /// Finding 1, the same root: a workspace admin's ordinary role change on somebody they can't check
+  /// stays the server's, and they are told, in the app's command.
+  #[tokio::test]
+  async fn an_outside_workspace_admin_s_change_on_somebody_unchecked_is_not_signed_and_says_so() {
+    let server = FakeServer::new();
+    let (_alice, _bob, carol, mut owner, channel) = anchored_with_outside_owner(&server).await;
+    let carol_id = carol.client.user_id();
+    let before = server.role_log(channel).len();
+    let signing = owner
+      .client
+      .set_channel_role(channel, carol_id, ChannelRole::Moderator)
+      .await
+      .unwrap();
+    assert_eq!(signing, RoleSigning::Unsigned);
+    assert_eq!(server.role_log(channel).len(), before);
+    assert!(
+      owner.client.could_vouch_for_channel_roles(channel).unwrap(),
+      "so the app's command reports it (`RoleChangeNotConfirmed`)"
+    );
+  }
+
+  /// A workspace admin in the group checks against it: the same change signs.
+  #[tokio::test]
+  async fn a_workspace_admin_in_the_group_signs_who_the_group_holds() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = trio(&server).await;
+    let (alice_id, _, carol_id) = ids(&alice, &bob, &carol);
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+    carol.client.full_sync().await.unwrap();
+    let channel = channel_with_everybody(&server, &mut alice, &mut [&mut bob, &mut carol]).await;
+    assert_eq!(
+      alice
+        .client
+        .set_channel_role(channel, carol_id, ChannelRole::Moderator)
+        .await
+        .unwrap(),
+      RoleSigning::Signed
+    );
+  }
+
+  /// Finding 2: one junk entry used to get an unmarked entry out of a workspace admin. Nothing is
+  /// signed on a log this device took nothing from, other than a list they looked at.
+  #[tokio::test]
+  async fn a_junk_entry_gets_no_workspace_admin_s_signature() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = trio(&server).await;
+    let (alice_id, bob_id, carol_id) = ids(&alice, &bob, &carol);
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+    carol.client.full_sync().await.unwrap();
+    let channel = old_channel(&server, &mut alice, &mut bob, &mut carol).await;
+    server.plant_role_log_entry(channel, b"junk".to_vec(), vec![0; 64]);
+
+    let signing = alice
+      .client
+      .set_channel_role(channel, bob_id, ChannelRole::Admin)
+      .await
+      .unwrap();
+    assert_eq!(signing, RoleSigning::Unsigned);
+    assert_eq!(server.role_log(channel).len(), 1, "only the junk");
+    alice.client.found_listed_channels().await.unwrap();
+    assert_eq!(server.role_log(channel).len(), 1, "no founding either");
+
+    // Only a list she looked at gets it out.
+    let ui = refreshed_ui(&mut alice, channel).await;
+    let review = ui.channel_roles_review(channel).unwrap();
+    let roles = [(alice_id, ChannelRole::Admin), (carol_id, ChannelRole::Moderator)];
+    assert_eq!(
+      alice
+        .client
+        .sign_reviewed_channel_roles(channel, &roles, review.log_cursor)
+        .await
+        .unwrap(),
+      RoleSigning::Signed
+    );
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    let state = bob.client.channel_role_state(channel).unwrap();
+    assert_eq!(state.role_of(alice_id), ChannelRole::Admin);
+    assert!(state.is_workspace_anchored);
+  }
+
+  /// Finding 2: an ordinary workspace admin's entry on another head (their view is what a junk entry
+  /// or a fork made it) strips nobody on a device with a log. Only a reviewed list is a checkpoint.
+  #[tokio::test]
+  async fn an_ordinary_entry_on_another_head_replaces_nothing() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = trio(&server).await;
+    let (alice_id, bob_id, carol_id) = ids(&alice, &bob, &carol);
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+    carol.client.full_sync().await.unwrap();
+    let channel = channel_with_everybody(&server, &mut alice, &mut [&mut bob, &mut carol]).await;
+    alice
+      .client
+      .set_channel_role(channel, bob_id, ChannelRole::Admin)
+      .await
+      .unwrap();
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    let before = server.role_log(channel).len();
+
+    // Alice's device is on a head of its own, as a junk entry or a fork could have made it.
+    forget_roles_on(&alice, channel, |state| {
+      state["head_hash"] = serde_json::json!("AQID");
+    });
+    assert_eq!(
+      alice
+        .client
+        .sign_channel_roles(channel, &[(carol_id, ChannelRole::Admin)], false)
+        .await
+        .unwrap(),
+      RoleSigning::Signed
+    );
+    assert_eq!(server.role_log(channel).len(), before + 1);
+
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    let state = bob.client.channel_role_state(channel).unwrap();
+    assert_eq!(state.role_of(alice_id), ChannelRole::Admin, "not stripped");
+    assert_eq!(state.role_of(bob_id), ChannelRole::Admin, "not stripped");
+    assert_eq!(state.role_of(carol_id), ChannelRole::Member, "not taken");
+  }
+
+  /// Finding 3: an older client's ordinary entry doesn't carry the mark on. A device that knows the
+  /// mark keeps it and doesn't anchor: only a reviewed list ends it.
+  #[tokio::test]
+  async fn an_older_clients_entry_doesn_t_end_the_mark() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = trio(&server).await;
+    let (alice_id, bob_id, carol_id) = ids(&alice, &bob, &carol);
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+    carol.client.full_sync().await.unwrap();
+    let channel = old_channel(&server, &mut alice, &mut bob, &mut carol).await;
+    alice.client.found_listed_channels().await.unwrap();
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    assert!(
+      bob
+        .client
+        .channel_role_state(channel)
+        .unwrap()
+        .has_server_listed_roles
+    );
+
+    // What an older client's device would sign: its state has no idea of the mark.
+    forget_roles_on(&alice, channel, |state| {
+      state.as_object_mut().unwrap().remove("has_server_listed_roles");
+    });
+    assert_eq!(
+      alice
+        .client
+        .sign_channel_roles(channel, &[(bob_id, ChannelRole::Moderator)], false)
+        .await
+        .unwrap(),
+      RoleSigning::Signed
+    );
+    let document: teamcraft_proto::ChannelRolesDocument =
+      serde_json::from_slice(server.role_log(channel).last().unwrap().payload.as_slice()).unwrap();
+    assert!(!document.has_server_listed_roles, "no mark on this entry");
+
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    let state = bob.client.channel_role_state(channel).unwrap();
+    assert_eq!(
+      state.role_of(bob_id),
+      ChannelRole::Moderator,
+      "it counts for the role"
+    );
+    assert!(state.has_server_listed_roles, "the mark stays");
+    assert!(!state.is_workspace_anchored, "no anchor");
+    assert_eq!(state.role_of(carol_id), ChannelRole::Moderator);
+  }
+
+  /// Finding 4: a contradiction reaches this device's person, and a workspace admin who can look.
+  #[tokio::test]
+  async fn an_alarm_reaches_the_app_and_a_reviewed_list_ends_it() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = trio(&server).await;
+    let (alice_id, bob_id, _) = ids(&alice, &bob, &carol);
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+    carol.client.full_sync().await.unwrap();
+    let channel = channel_with_everybody(&server, &mut alice, &mut [&mut bob, &mut carol]).await;
+    alice.client.sync_channel_roles(channel).await.unwrap();
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    let alarm = serde_json::json!("another member verified a different entry");
+    forget_roles_on(&bob, channel, |state| state["alarm"] = alarm.clone());
+    forget_roles_on(&alice, channel, |state| state["alarm"] = alarm.clone());
+    // The state's writer keeps the list the UI reads: the next read writes it.
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    alice.client.sync_channel_roles(channel).await.unwrap();
+
+    let bob_ui = refreshed_ui(&mut bob, channel).await;
+    assert_eq!(bob_ui.channel_role_alarms(), vec![channel]);
+    assert!(
+      bob_ui.channel_roles_review(channel).is_none(),
+      "he can't look, only tell"
+    );
+    let alice_ui = refreshed_ui(&mut alice, channel).await;
+    let review = alice_ui.channel_roles_review(channel).expect("she can look");
+
+    let roles = [(alice_id, ChannelRole::Admin)];
+    alice
+      .client
+      .sign_reviewed_channel_roles(channel, &roles, review.log_cursor)
+      .await
+      .unwrap();
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    assert!(backend_of(&alice).channel_role_alarms().is_empty());
+    assert!(backend_of(&bob).channel_role_alarms().is_empty());
+    assert_eq!(
+      bob.client.channel_role_state(channel).unwrap().role_of(bob_id),
+      ChannelRole::Member
+    );
+  }
+
+  /// A channel of Alice, a workspace admin, with Bob and Carol in it: its log is anchored and names
+  /// Alice and Bob. Olivia owns the workspace and isn't in the channel's group; she has read the log.
+  async fn anchored_with_outside_owner(server: &FakeServer) -> (Peer, Peer, Peer, Peer, ConversationId) {
+    let (mut alice, mut bob, mut carol) = trio(server).await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    let mut owner = outside_owner(server).await;
+    let owner_id = owner.client.user_id();
+    owner
+      .client
+      .publish_roster(&[(owner_id, RosterRole::Owner), (alice_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    for peer in [&mut alice, &mut bob, &mut carol] {
+      peer.client.full_sync().await.unwrap();
+    }
+    let channel = channel_with_everybody(server, &mut alice, &mut [&mut bob, &mut carol]).await;
+    alice
+      .client
+      .set_channel_role(channel, bob_id, ChannelRole::Moderator)
+      .await
+      .unwrap();
+    owner.client.sync_channel_roles(channel).await.unwrap();
+    let state = owner.client.channel_role_state(channel).unwrap();
+    assert!(state.is_workspace_anchored);
+    assert_eq!(state.role_of(bob_id), ChannelRole::Moderator);
+    (alice, bob, carol, owner, channel)
+  }
+
+  async fn outside_owner(server: &FakeServer) -> Peer {
+    let mut owner = Peer::enroll(server, "Olivia").await;
+    let owner_id = owner.client.user_id();
+    owner
+      .client
+      .publish_roster(&[(owner_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    server.set_admin(owner_id);
+    owner
+  }
+
+  /// Edits this device's stored role state, as a device in that state would have it.
+  fn forget_roles_on(peer: &Peer, channel: ConversationId, edit: impl FnOnce(&mut serde_json::Value)) {
+    let key = format!("channel_roles/{channel}");
+    let stored = peer.store.get(Table::Workspace, &key).unwrap().unwrap();
+    let mut state: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    edit(&mut state);
+    peer
+      .store
+      .put(Table::Workspace, &key, &serde_json::to_vec(&state).unwrap())
+      .unwrap();
+  }
+}
+
 /// A workspace admin of the signed roster appoints Bob: Alice's device, which verified the entry,
 /// names the admin and the authority (the name is the member directory's).
 #[tokio::test]
@@ -784,6 +1170,7 @@ async fn a_failed_roster_read_leaves_the_entries_unread() {
     .unwrap();
   server.set_admin(dave_id);
   dave.client.full_sync().await.unwrap();
+  dave.has_attested_keys_of(&server, &[carol_id]);
   let signing = dave
     .client
     .sign_channel_roles(channel, &[(carol_id, ChannelRole::Moderator)], false)
@@ -1149,6 +1536,11 @@ impl<'a> LateWorld<'a> {
     )
     .await;
     let bob_id = self.bob.client.user_id();
+    // Eve isn't in the group: she signs for people she can check by their attested keys.
+    self.eve.has_attested_keys_of(
+      self.server,
+      &[self.alice.client.user_id(), bob_id, self.carol.client.user_id()],
+    );
     let signing = self
       .eve
       .client

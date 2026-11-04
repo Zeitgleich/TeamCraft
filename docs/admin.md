@@ -385,7 +385,10 @@ message, would keep a real join quiet. So the line is derived where the join hap
 When the last owner of a private channel leaves the company, an admin assigns a new owner from the
 remaining members. The admin doesn't need to be a member for that. A workspace admin's signature is
 what makes the new owner count on members' apps (e2ee.md §4.6.1); the console's assignment doesn't
-sign it yet (a follow-up of issue #380), so until then the new owner's role is the server's word.
+sign it yet (a follow-up of issue #380), so until then the new owner's role is the server's word. An
+admin who isn't in the channel's encryption group can't vouch for the key of somebody they can't check
+(e2ee.md §4.6.1, "Whose key a role names"): on a channel with a log, a workspace admin in the group
+signs it.
 
 **Decision (issue #877): workspace admins keep appointing channel admins.** There is no instance policy
 that limits them to channels without an admin: an orphaned channel needs exactly this, and a switch

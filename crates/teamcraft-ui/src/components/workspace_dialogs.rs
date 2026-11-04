@@ -9,7 +9,9 @@ use teamcraft_client_api::actions::{
   BrowsableChannel, BrowseJoin, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace,
   SpaceChanges,
 };
-use teamcraft_client_api::model::{AppointerAuthority, ChannelMember, ChannelRole, ChannelRolesReview};
+use teamcraft_client_api::model::{
+  AppointerAuthority, ChannelMember, ChannelRole, ChannelRolesReview, RoleKeyMark,
+};
 use teamcraft_client_api::role_rules::{
   RoleTarget, SpaceStanding, assignable_roles, can_manage_channel_roles,
 };
@@ -628,6 +630,11 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     roles.track();
     state.read(|backend| backend.channel_roles_review(conversation))
   });
+  let has_role_alarm = Memo::new(move |_| {
+    state
+      .read(|backend| backend.channel_role_alarms())
+      .contains(&conversation)
+  });
   view! {
     <div class="settings-row">
       <span class="muted-text">{move || i18n.t_count("members-count", members.with(Vec::len))}</span>
@@ -640,6 +647,9 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
       </Show>
     </div>
     <p class="hint">{move || if can_manage_roles.get() { i18n.t("channel-roles-hint") } else { i18n.t("channel-roles-read-only") }}</p>
+    <Show when=move || has_role_alarm.get() fallback=|| ()>
+      <p class="hint" role="status">{move || i18n.t("channel-roles-alarm")}</p>
+    </Show>
     {move || roles_review.get().is_some().then(|| view! {
       <ChannelRolesReviewPanel conversation=conversation roles=roles users=members review=roles_review />
     })}
@@ -657,7 +667,8 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
 /// members. Confirming counts for every role listed on every member's device, so it is the whole
 /// list as they see it (e2ee.md §4.6.1). The list is the server's word and names are its directory's,
 /// so what this device's snapshot doesn't have is marked, somebody who would lose a role is named,
-/// and somebody without a name can't be confirmed.
+/// and somebody without a name can't be confirmed, nor a key this device can't check. What is
+/// confirmed is the list as it stood when they opened it: if it moved since, they look again.
 #[component]
 fn ChannelRolesReviewPanel(
   conversation: ConversationId,
@@ -669,22 +680,32 @@ fn ChannelRolesReviewPanel(
   let i18n = use_i18n();
   let is_reviewing = RwSignal::new(false);
   let signing = PendingAction::new();
-  let maybe_signed_at_cursor = RwSignal::new(None::<u64>);
-  let rows = Memo::new(move |_| {
-    let snapshot = review.with(|maybe| {
+  let live_rows = Memo::new(move |_| {
+    let (snapshot, marks) = review.with(|maybe| {
       maybe
         .as_ref()
-        .map(|found| found.snapshot.clone())
+        .map(|found| (found.snapshot.clone(), found.key_marks.clone()))
         .unwrap_or_default()
     });
-    roles.with(|list| users.with(|known| role_review_rows(list, known, &snapshot)))
+    roles.with(|list| users.with(|known| role_review_rows(list, known, &snapshot, &marks)))
   });
-  let refusal = Memo::new(move |_| rows.with(|list| role_review_refusal(list)));
+  let live_cursor = Memo::new(move |_| review.with(|maybe| maybe.as_ref().map(|found| found.log_cursor)));
+  // The list and the log as they stood when the admin opened it: that's what they confirm.
+  let shown_rows = RwSignal::new(Vec::<RoleReviewRow>::new());
+  let shown_cursor = RwSignal::new(None::<u64>);
+  let open_review = move || {
+    shown_rows.set(live_rows.get_untracked());
+    shown_cursor.set(live_cursor.get_untracked());
+    is_reviewing.set(true);
+  };
+  let refusal = Memo::new(move |_| shown_rows.with(|list| role_review_refusal(list)));
   let has_changed_since = Memo::new(move |_| {
-    let cursor = review.with(|maybe| maybe.as_ref().map(|found| found.log_cursor));
-    maybe_signed_at_cursor.get().is_some() && maybe_signed_at_cursor.get() != cursor
+    is_reviewing.get()
+      && (shown_cursor.get() != live_cursor.get() || shown_rows.with(|list| *list != live_rows.get()))
   });
-  let has_new = Memo::new(move |_| rows.with(|list| list.iter().any(|row| row.is_new)));
+  let has_new = Memo::new(move |_| shown_rows.with(|list| list.iter().any(|row| row.is_new)));
+  let has_changed_key =
+    Memo::new(move |_| shown_rows.with(|list| list.iter().any(|row| row.key_mark == RoleKeyMark::Changed)));
   // Who this device has a role for and the list doesn't name: confirming takes it from them.
   let dropped = Memo::new(move |_| {
     let snapshot = review.with(|maybe| {
@@ -693,7 +714,7 @@ fn ChannelRolesReviewPanel(
         .map(|found| found.snapshot.clone())
         .unwrap_or_default()
     });
-    let names = rows.with(|list| {
+    let names = shown_rows.with(|list| {
       users.with(|known| dropped_role_names(list, known, &snapshot, &i18n.t("channel-roles-review-unknown")))
     });
     names.join(", ")
@@ -713,14 +734,14 @@ fn ChannelRolesReviewPanel(
         when=move || is_reviewing.get()
         fallback=move || view! {
           <div class="role-review-actions">
-            <button type="button" class="btn btn-small" on:click=move |_| is_reviewing.set(true)>
+            <button type="button" class="btn btn-small" on:click=move |_| open_review()>
               {move || i18n.t("channel-roles-review-action")}
             </button>
           </div>
         }
       >
         <ul class="settings-member-list role-review-list" tabindex="-1" node_ref=list_ref>
-          <For each=move || rows.get() key=|row| row.clone() let:row>
+          <For each=move || shown_rows.get() key=|row| row.clone() let:row>
             <li class="settings-member">
               {match row.maybe_name.clone() {
                 Some(name) => view! { <bdi class="member-name" translate="no">{name}</bdi> }.into_any(),
@@ -730,12 +751,20 @@ fn ChannelRolesReviewPanel(
               {row.is_new.then(|| view! {
                 <span class="badge badge-warn">{move || i18n.t("channel-roles-review-new")}</span>
               })}
+              {match row.key_mark {
+                RoleKeyMark::Checked => None,
+                RoleKeyMark::Changed => Some(view! { <span class="badge badge-warn">{move || i18n.t("channel-roles-review-key-changed")}</span> }.into_any()),
+                RoleKeyMark::Uncheckable => Some(view! { <span class="badge badge-warn">{move || i18n.t("channel-roles-review-key-uncheckable")}</span> }.into_any()),
+              }}
               <span class="badge">{move || i18n.t(channel_role_key(&row.role))}</span>
             </li>
           </For>
         </ul>
         <Show when=move || has_new.get() fallback=|| ()>
           <p class="hint">{move || i18n.t("channel-roles-review-new-hint")}</p>
+        </Show>
+        <Show when=move || has_changed_key.get() fallback=|| ()>
+          <p class="hint">{move || i18n.t("channel-roles-review-key-changed-hint")}</p>
         </Show>
         <Show when=move || dropped.with(|names| !names.is_empty()) fallback=|| ()>
           <p class="hint">{move || i18n.t_with("channel-roles-review-dropped", &[("names", dropped.get().as_str())])}</p>
@@ -748,13 +777,12 @@ fn ChannelRolesReviewPanel(
           <PendingButton
             class="btn btn-small btn-primary"
             pending=signing
-            is_disabled=Signal::derive(move || refusal.get().is_some())
+            is_disabled=Signal::derive(move || refusal.get().is_some() || has_changed_since.get())
             on_click=move |_| {
-              let Some(at_cursor) = review.with(|maybe| maybe.as_ref().map(|found| found.log_cursor)) else {
+              let Some(at_cursor) = shown_cursor.get_untracked() else {
                 return;
               };
-              maybe_signed_at_cursor.set(Some(at_cursor));
-              let reviewed: Vec<_> = rows.with(|list| {
+              let reviewed: Vec<_> = shown_rows.with_untracked(|list| {
                 list.iter().map(|row| (row.user, row.role.clone())).collect()
               });
               signing.run(move || {
@@ -764,6 +792,9 @@ fn ChannelRolesReviewPanel(
           >
             {move || i18n.t("channel-roles-review-confirm")}
           </PendingButton>
+          <Show when=move || has_changed_since.get() fallback=|| ()>
+            <button type="button" class="btn btn-small" on:click=move |_| open_review()>{move || i18n.t("channel-roles-review-action")}</button>
+          </Show>
           <button type="button" class="btn btn-small" on:click=move |_| is_reviewing.set(false)>{move || i18n.t("cancel")}</button>
         </div>
         <FailureNote pending=signing />
@@ -781,6 +812,7 @@ struct RoleReviewRow {
   maybe_name: Option<String>,
   /// This device's snapshot doesn't give this person this role: the server's word alone.
   is_new: bool,
+  key_mark: RoleKeyMark,
 }
 
 /// The admins and moderators the member list shows, against this device's snapshot.
@@ -788,6 +820,7 @@ fn role_review_rows(
   roles: &[ChannelMember],
   users: &[User],
   snapshot: &[(UserId, ChannelRole)],
+  key_marks: &[(UserId, RoleKeyMark)],
 ) -> Vec<RoleReviewRow> {
   roles
     .iter()
@@ -802,11 +835,25 @@ fn role_review_rows(
       is_new: !snapshot
         .iter()
         .any(|(user, role)| *user == member.user && *role == member.role),
+      // Not looked at yet counts as what it is: not checked.
+      key_mark: key_marks
+        .iter()
+        .find(|(user, _)| *user == member.user)
+        .map_or(RoleKeyMark::Uncheckable, |(_, mark)| *mark),
     })
     .collect()
 }
 
-/// Who has a role on this device that the list no longer names, as far as anybody knows who that is.
+fn role_rank(role: &ChannelRole) -> u8 {
+  match role {
+    ChannelRole::Admin => 2,
+    ChannelRole::Moderator => 1,
+    ChannelRole::Member | ChannelRole::Unknown(_) => 0,
+  }
+}
+
+/// Who has a role on this device that the list takes away or lowers, as far as anybody knows who
+/// that is.
 fn dropped_role_names(
   rows: &[RoleReviewRow],
   users: &[User],
@@ -815,7 +862,12 @@ fn dropped_role_names(
 ) -> Vec<String> {
   snapshot
     .iter()
-    .filter(|(user, _)| !rows.iter().any(|row| row.user == *user))
+    .filter(|(user, role)| {
+      rows
+        .iter()
+        .find(|row| row.user == *user)
+        .is_none_or(|row| role_rank(&row.role) < role_rank(role))
+    })
     .map(|(user, _)| {
       users
         .iter()
@@ -830,6 +882,9 @@ fn dropped_role_names(
 fn role_review_refusal(rows: &[RoleReviewRow]) -> Option<&'static str> {
   if rows.iter().any(|row| row.maybe_name.is_none()) {
     return Some("channel-roles-review-unknown-refused");
+  }
+  if rows.iter().any(|row| row.key_mark == RoleKeyMark::Uncheckable) {
+    return Some("channel-roles-review-uncheckable-refused");
   }
   if !rows.iter().any(|row| row.role == ChannelRole::Admin) {
     return Some("channel-roles-review-no-admin");
@@ -2332,6 +2387,24 @@ mod tests {
       UserId::from_snowflake(Snowflake::new(raw).unwrap())
     }
 
+    fn named(raw: i64, name: &str) -> User {
+      User {
+        id: id(raw),
+        username: name.to_lowercase(),
+        display_name: name.into(),
+        presence: crate::model::PresenceStatus::Online,
+        maybe_custom_status: None,
+        avatar_hue: 0,
+        is_guest: false,
+        is_bot: false,
+        maybe_organization: None,
+        is_deactivated: false,
+        is_deleted: false,
+        device_setup: crate::model::DeviceSetup::Unknown,
+        maybe_email: None,
+      }
+    }
+
     fn member(raw: i64, role: ChannelRole) -> ChannelMember {
       ChannelMember {
         user: id(raw),
@@ -2346,6 +2419,7 @@ mod tests {
         role,
         maybe_name: name.map(str::to_owned),
         is_new: false,
+        key_mark: RoleKeyMark::Checked,
       }
     }
 
@@ -2358,12 +2432,48 @@ mod tests {
         member(4, ChannelRole::Member),
       ];
       let snapshot = [(id(1), ChannelRole::Admin), (id(3), ChannelRole::Admin)];
-      let rows = role_review_rows(&roles, &[], &snapshot);
+      let rows = role_review_rows(&roles, &[], &snapshot, &[]);
       let new: Vec<_> = rows.iter().map(|row| (row.user, row.is_new)).collect();
       assert_eq!(
         new,
         vec![(id(1), false), (id(2), true), (id(3), true)],
         "somebody it doesn't name, a role it doesn't give, and no members"
+      );
+    }
+
+    /// A key this device can't check can't be confirmed, and neither can one it hasn't looked at.
+    #[test]
+    fn a_key_this_device_can_t_check_can_not_be_confirmed() {
+      let roles = [member(1, ChannelRole::Admin), member(2, ChannelRole::Admin)];
+      let users = [named(1, "Alice"), named(2, "Bob")];
+      let marks = [(id(1), RoleKeyMark::Checked)];
+      let rows = role_review_rows(&roles, &users, &[], &marks);
+      assert_eq!(rows[1].key_mark, RoleKeyMark::Uncheckable);
+      assert_eq!(
+        role_review_refusal(&rows),
+        Some("channel-roles-review-uncheckable-refused")
+      );
+      let marks = [(id(1), RoleKeyMark::Checked), (id(2), RoleKeyMark::Changed)];
+      let rows = role_review_rows(&roles, &users, &[], &marks);
+      assert_eq!(
+        role_review_refusal(&rows),
+        None,
+        "a changed key is marked, not refused"
+      );
+    }
+
+    /// The server lowering somebody is as much for the reviewer to see as leaving them out.
+    #[test]
+    fn who_the_list_lowers_is_named() {
+      let rows = [
+        row(1, ChannelRole::Moderator, Some("Alice")),
+        row(2, ChannelRole::Admin, Some("Bob")),
+      ];
+      let snapshot = [(id(1), ChannelRole::Admin), (id(2), ChannelRole::Moderator)];
+      let users = [named(1, "Alice"), named(2, "Bob")];
+      assert_eq!(
+        dropped_role_names(&rows, &users, &snapshot, "Unknown person"),
+        vec!["Alice".to_owned()]
       );
     }
 

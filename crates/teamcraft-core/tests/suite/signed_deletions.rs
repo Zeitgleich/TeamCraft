@@ -352,6 +352,7 @@ mod false_claims {
 
     clock.advance(31 * 24 * 60 * 60 * 1000);
     let mallory_id = mallory.client.user_id();
+    eve.has_attested_keys_of(&server, &[mallory_id]);
     assert_eq!(
       eve
         .client
@@ -742,6 +743,8 @@ async fn late_reader_world(
       .unwrap()
       .is_workspace_anchored
   );
+  // Eve isn't in the group: she signs for people she can check by their attested keys.
+  eve.has_attested_keys_of(server, &[bob.client.user_id(), mallory.client.user_id()]);
   eve.client.sync_channel_roles(channel).await.unwrap();
   (alice, eve, bob, mallory, channel, clock)
 }
