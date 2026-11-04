@@ -584,7 +584,10 @@ mod tests {
       meta,
     };
     let with_files = MessageMeta {
-      attachments: vec![attachment("a.png", "image/png"), attachment("b.pdf", "application/pdf")],
+      attachments: vec![
+        attachment("a.png", "image/png"),
+        attachment("b.pdf", "application/pdf"),
+      ],
       ..MessageMeta::default()
     };
     assert_eq!(

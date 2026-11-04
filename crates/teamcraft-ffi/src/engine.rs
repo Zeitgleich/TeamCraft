@@ -30,7 +30,9 @@ use teamcraft_core::notify_rules::{load_mention_preferences, save_mention_prefer
 use teamcraft_core::pending_work::PendingWork;
 use teamcraft_core::prefetch::{load_segment_prefetch, save_segment_prefetch};
 use teamcraft_core::push_guard;
-use teamcraft_core::push_preview::{PreviewGap, PushPreview, push_preview, save_device_push_content};
+use teamcraft_core::push_preview::{
+  PreviewGap, PushPreview, is_read, push_preview, save_device_push_content,
+};
 use teamcraft_core::records;
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{
@@ -1180,7 +1182,7 @@ impl Engine {
         tracing::debug!("read position not refreshed for a push");
       }
     }
-    let is_read = push_preview::is_read(&self.store, &preview.wake_up);
+    let is_read = is_read(&self.store, &preview.wake_up);
     let now_ms = SystemClock.now_ms();
     let store = &self.store;
     // A retry is the same push again: counting it would skew the received count and the delay.

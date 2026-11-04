@@ -20,6 +20,7 @@ import org.junit.runner.RunWith
 import de.zeitgleich.teamcraft.calls.IncomingCallNotifier
 import de.zeitgleich.teamcraft.calls.IncomingRing
 import de.zeitgleich.teamcraft.notifications.AvatarCache
+import de.zeitgleich.teamcraft.notifications.HoldEnd
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationChannels
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
@@ -44,6 +45,8 @@ class NotificationsOnDeviceTest {
         .grantRuntimePermission(context.packageName, Manifest.permission.POST_NOTIFICATIONS)
     }
     notifier = notifier()
+    // The system drops updates of an app that posts over about 5 a second: tests don't add up.
+    SystemClock.sleep(RATE_LIMIT_REST_MS)
     notifier.clearAll()
   }
 
@@ -84,6 +87,7 @@ class NotificationsOnDeviceTest {
     notifier.dismiss(OTHER_CONVERSATION)
 
     // Read on another device up to the first message: one line stays.
+    SystemClock.sleep(RATE_LIMIT_REST_MS)
     notifier.removeRead(CONVERSATION, maybeThreadId = null, maybeUpToMessageId = "1000", maybeBadge = 1u)
     eventually {
       val updated = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(active(CONVERSATION)!!.notification)
@@ -169,8 +173,8 @@ class NotificationsOnDeviceTest {
   @Test
   fun aPlaceholderThatAlertedIsFilledInSilentlyAndMirrored() {
     notifier.show(placeholder("1000"), isAlerting = true, payload = PAYLOAD)
-    assertTrue(notifier.releaseHeldAlert(placeholder("1000")))
-    assertFalse(notifier.releaseHeldAlert(placeholder("1000")))
+    assertTrue(notifier.endHold(PAYLOAD, HoldEnd.ALERT))
+    assertFalse(notifier.endHold(PAYLOAD, HoldEnd.ALERT))
     eventually {
       val released = active(CONVERSATION)!!.notification
       assertTrue(isLocalOnly(released))
@@ -192,7 +196,7 @@ class NotificationsOnDeviceTest {
   fun inACarALateTextAlerts() {
     val inCar = notifier(isInCar = true)
     inCar.show(placeholder("1000"), isAlerting = true, payload = PAYLOAD)
-    assertTrue(inCar.releaseHeldAlert(placeholder("1000")))
+    assertTrue(inCar.endHold(PAYLOAD, HoldEnd.ALERT))
     assertTrue(inCar.fillIn(message("1000", text = "lunch?")))
     eventually {
       val filled = active(CONVERSATION)!!.notification
@@ -201,17 +205,75 @@ class NotificationsOnDeviceTest {
     }
   }
 
+  /** A second object reads what the first stored; a real process death needs a shell (see the PR). */
   @Test
-  fun aPlaceholderAndItsHoldOutliveTheProcess() {
+  fun aPlaceholderAndItsHoldAreReadBackFromTheStore() {
     notifier.show(placeholder("1000"), isAlerting = true, payload = PAYLOAD)
     eventually { assertTrue(isSilent(active(CONVERSATION)!!.notification)) }
 
     val restarted = notifier()
     assertEquals(listOf(PAYLOAD.toList()), restarted.placeholderPayloads().map { it.toList() })
-    restarted.releaseEarlierHolds()
+    assertEquals(listOf(PAYLOAD.toList()), restarted.heldLines().map { it.payload.toList() })
+    assertTrue(restarted.endHold(PAYLOAD, HoldEnd.ALERT))
     eventually { assertFalse(isSilent(active(CONVERSATION)!!.notification)) }
     assertTrue(restarted.fillIn(message("1000", text = "lunch?")))
     eventually { assertFalse(isLocalOnly(active(CONVERSATION)!!.notification)) }
+  }
+
+  @Test
+  fun anUrgentMessageIsNotHeld() {
+    notifier.show(placeholder("1000").copy(isUrgent = true), isAlerting = true, payload = PAYLOAD)
+    eventually {
+      val shown = active(CONVERSATION)!!.notification
+      assertFalse(isSilent(shown))
+      assertTrue(isLocalOnly(shown))
+    }
+    assertTrue(notifier.heldLines().isEmpty())
+  }
+
+  @Test
+  fun aHoldEndsSilentlyOrWithTheLineGone() {
+    notifier.show(placeholder("1000"), isAlerting = true, payload = PAYLOAD)
+    assertTrue(notifier.endHold(PAYLOAD, HoldEnd.SILENT))
+    eventually { assertTrue(isSilent(active(CONVERSATION)!!.notification)) }
+    assertTrue(notifier.placeholderPayloads().isNotEmpty())
+
+    notifier.show(placeholder("2000"), isAlerting = true, payload = OTHER_PAYLOAD)
+    assertTrue(notifier.endHold(OTHER_PAYLOAD, HoldEnd.DROP))
+    assertEquals(listOf(PAYLOAD.toList()), notifier.placeholderPayloads().map { it.toList() })
+  }
+
+  /** The message was read on another device before the text came. */
+  @Test
+  fun aLineReadElsewhereGoesInsteadOfBeingFilledIn() {
+    notifier.show(placeholder("1000"), isAlerting = true, payload = PAYLOAD)
+    assertTrue(notifier.applyRead(message("1000", text = "lunch?").copy(isRead = true)))
+    eventually { assertNull(active(CONVERSATION)) }
+    assertFalse(notifier.applyRead(message("1000", text = "lunch?").copy(isRead = true)))
+  }
+
+  /** A repeat of a wake-up (a job after its run) doesn't bring back a notification read meanwhile. */
+  @Test
+  fun aRepeatDoesNotResurrectAReadMessage() {
+    assertFalse(notifier.show(message("1000", text = "lunch?").copy(isDuplicate = true), isAlerting = false))
+    assertNull(active(CONVERSATION))
+  }
+
+  /** A real burst: the system sheds updates over its rate; the text still ends up shown. */
+  @Test
+  fun aFilledInTextSurvivesABurstOfUpdates() {
+    notifier.show(placeholder("1000"), isAlerting = true, payload = PAYLOAD)
+    eventually { assertTrue(isLocalOnly(active(CONVERSATION)!!.notification)) }
+    repeat(UPDATE_BURST) { notifier.repostAll() }
+    assertTrue(notifier.fillIn(message("1000", text = "lunch?")))
+    eventually(timeoutMs = 5_000) { assertFalse(isLocalOnly(active(CONVERSATION)!!.notification)) }
+  }
+
+  @Test
+  fun aFilledInMentionMovesToTheMentionsChannel() {
+    notifier.show(placeholder("1000"), isAlerting = true, payload = PAYLOAD)
+    assertTrue(notifier.fillIn(message("1000", text = "lunch, Bob?").copy(isMention = true)))
+    eventually { assertEquals(NotificationChannels.MENTIONS, active(CONVERSATION)!!.notification.channelId) }
   }
 
   @Test
@@ -244,6 +306,10 @@ class NotificationsOnDeviceTest {
       assertEquals(NotificationChannels.OTHER, note.channelId)
     }
     eventually(timeoutMs = 10_000) { assertTrue(system.activeNotifications.none { it.tag == "quiet_note" }) }
+    // A burst: within the gap nothing goes up again.
+    notifier.showQuietNote()
+    SystemClock.sleep(500)
+    assertTrue(system.activeNotifications.none { it.tag == "quiet_note" })
   }
 
   @Test
@@ -313,6 +379,7 @@ class NotificationsOnDeviceTest {
     maybeBadge = 1u,
     maybeSentAtMs = null,
     isDuplicate = false,
+    isRead = false,
     maybeSuppression = null,
   )
 
@@ -320,6 +387,9 @@ class NotificationsOnDeviceTest {
     const val CONVERSATION = "4242"
     const val OTHER_CONVERSATION = "4343"
     const val POLL_MS = 50L
+    const val RATE_LIMIT_REST_MS = 1_200L
+    const val UPDATE_BURST = 20
     val PAYLOAD = byteArrayOf(1, 2, 3)
+    val OTHER_PAYLOAD = byteArrayOf(4, 5, 6)
   }
 }

@@ -32,6 +32,7 @@ import de.zeitgleich.teamcraft.ui.ShareShortcuts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.NotificationAttachmentKind
 import uniffi.teamcraft_ffi.NotificationGap
@@ -160,8 +161,32 @@ class MessageNotifier(
       )
       post(entry, alerting)
       postSummary()
+      confirmLater(entry, alerting)
       return true
     }
+  }
+
+  /**
+   * Android drops updates of an app that posts more than about 5 notifications a second, without
+   * saying so: a burst of messages (each posts its conversation, the summary and maybe a picture)
+   * could leave the shade on "New message" while this class counts it as filled in. So a filled-in
+   * text is looked at once more, and posted again if the system doesn't show it.
+   */
+  private fun confirmLater(entry: ConversationNotification, alerting: NotificationAlerting) {
+    scope.launch {
+      delay(POST_CONFIRM_MS)
+      synchronized(lock) {
+        if (shown().conversations[entry.conversationId] == entry && !isShowingNewest(entry)) post(entry, alerting)
+      }
+    }
+  }
+
+  private fun isShowingNewest(entry: ConversationNotification): Boolean {
+    val system = context.getSystemService(NotificationManager::class.java) ?: return true
+    val shown = runCatching { system.activeNotifications }.getOrNull() ?: return true
+    val maybeNotification = shown.firstOrNull { it.id == MESSAGE_ID && it.tag == entry.conversationId }?.notification
+    val isLocalOnly = maybeNotification?.let { it.flags and Notification.FLAG_LOCAL_ONLY != 0 } ?: return true
+    return isLocalOnly == (entry.lines.lastOrNull { !it.isOwn }?.isPlaceholder == true)
   }
 
   /**
@@ -797,6 +822,7 @@ class MessageNotifier(
     private const val UNREADABLE_TAG = "unreadable"
     private const val QUIET_NOTE_TAG = "quiet_note"
     private const val QUIET_NOTE_MS = 3_000L
+    private const val POST_CONFIRM_MS = 1_500L
     private const val GROUP_MESSAGES = "de.zeitgleich.teamcraft.MESSAGES"
     private const val SELF_KEY = "self"
     private const val URI_SCHEME = "teamcraft-conversation"
