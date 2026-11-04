@@ -648,7 +648,8 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
       </Show>
     </div>
     <p class="hint">{move || if can_manage_roles.get() { i18n.t("channel-roles-hint") } else { i18n.t("channel-roles-read-only") }}</p>
-    <Show when=move || are_roles_unverified.get() fallback=|| ()>
+    // Somebody who can do something about it reads that in the review instead.
+    <Show when=move || are_roles_unverified.get() && roles_review.with(Option::is_none) fallback=|| ()>
       <p class="hint">{move || i18n.t("channel-roles-unverified")}</p>
     </Show>
     {move || roles_review.get().is_some().then(|| view! {
@@ -694,61 +695,75 @@ fn ChannelRolesReviewPanel(
     let cursor = review.with(|maybe| maybe.as_ref().map(|found| found.log_cursor));
     maybe_signed_at_cursor.get().is_some() && maybe_signed_at_cursor.get() != cursor
   });
+  let has_new = Memo::new(move |_| rows.with(|list| list.iter().any(|row| row.is_new)));
+  // The button that opened the list is gone: the focus goes with the content.
+  let list_ref = NodeRef::<leptos::html::Ul>::new();
+  Effect::new(move |_| {
+    if let Some(list) = list_ref.get() {
+      let _ = list.focus();
+    }
+  });
   view! {
-    <p class="hint">{move || i18n.t("channel-roles-review-hint")}</p>
-    <Show
-      when=move || is_reviewing.get()
-      fallback=move || view! {
-        <div class="settings-row">
-          <button type="button" class="btn btn-small" on:click=move |_| is_reviewing.set(true)>
-            {move || i18n.t("channel-roles-review-action")}
-          </button>
+    <section class="role-review" aria-labelledby="role-review-title">
+      <h4 id="role-review-title" class="join-requests-title">{move || i18n.t("channel-roles-review-title")}</h4>
+      <p class="hint">{move || i18n.t("channel-roles-review-hint")}</p>
+      <Show
+        when=move || is_reviewing.get()
+        fallback=move || view! {
+          <div class="role-review-actions">
+            <button type="button" class="btn btn-small" on:click=move |_| is_reviewing.set(true)>
+              {move || i18n.t("channel-roles-review-action")}
+            </button>
+          </div>
+        }
+      >
+        <ul class="settings-member-list role-review-list" tabindex="-1" node_ref=list_ref>
+          <For each=move || rows.get() key=|row| row.clone() let:row>
+            <li class="settings-member">
+              {match row.maybe_name.clone() {
+                Some(name) => view! { <bdi class="member-name" translate="no">{name}</bdi> }.into_any(),
+                None => view! { <span class="member-name muted-text">{move || i18n.t("channel-roles-review-unknown")}</span> }.into_any(),
+              }}
+              <span class="grow"></span>
+              {row.is_new.then(|| view! {
+                <span class="badge badge-warn">{move || i18n.t("channel-roles-review-new")}</span>
+              })}
+              <span class="badge">{move || i18n.t(channel_role_key(&row.role))}</span>
+            </li>
+          </For>
+        </ul>
+        <Show when=move || has_new.get() fallback=|| ()>
+          <p class="hint">{move || i18n.t("channel-roles-review-new-hint")}</p>
+        </Show>
+        {move || refusal.get().map(|key| view! { <p role="alert" class="hint">{move || i18n.t(key)}</p> })}
+        <Show when=move || has_changed_since.get() fallback=|| ()>
+          <p role="alert" class="hint">{move || i18n.t("channel-roles-review-changed")}</p>
+        </Show>
+        <div class="role-review-actions">
+          <PendingButton
+            class="btn btn-small btn-primary"
+            pending=signing
+            is_disabled=Signal::derive(move || refusal.get().is_some())
+            on_click=move |_| {
+              let Some(at_cursor) = review.with(|maybe| maybe.as_ref().map(|found| found.log_cursor)) else {
+                return;
+              };
+              maybe_signed_at_cursor.set(Some(at_cursor));
+              let reviewed: Vec<_> = rows.with(|list| {
+                list.iter().map(|row| (row.user, row.role.clone())).collect()
+              });
+              signing.run(move || {
+                state.write(|backend| backend.sign_reviewed_channel_roles(conversation, reviewed, at_cursor))
+              });
+            }
+          >
+            {move || i18n.t("channel-roles-review-confirm")}
+          </PendingButton>
+          <button type="button" class="btn btn-small" on:click=move |_| is_reviewing.set(false)>{move || i18n.t("cancel")}</button>
         </div>
-      }
-    >
-      <ul class="settings-member-list">
-        <For each=move || rows.get() key=|row| row.clone() let:row>
-          <li class="settings-member">
-            {match row.maybe_name.clone() {
-              Some(name) => view! { <bdi class="member-name" translate="no">{name}</bdi> }.into_any(),
-              None => view! { <span class="member-name muted-text">{move || i18n.t("channel-roles-review-unknown")}</span> }.into_any(),
-            }}
-            <span class="grow"></span>
-            {row.is_new.then(|| view! {
-              <span class="badge badge-warn" title=move || i18n.t("channel-roles-review-new-hint")>{move || i18n.t("channel-roles-review-new")}</span>
-            })}
-            <span class="badge">{move || i18n.t(channel_role_key(&row.role))}</span>
-          </li>
-        </For>
-      </ul>
-      {move || refusal.get().map(|key| view! { <p role="alert" class="hint">{move || i18n.t(key)}</p> })}
-      <Show when=move || has_changed_since.get() fallback=|| ()>
-        <p role="alert" class="hint">{move || i18n.t("channel-roles-review-changed")}</p>
+        <FailureNote pending=signing />
       </Show>
-      <div class="settings-row">
-        <PendingButton
-          class="btn btn-small btn-primary"
-          pending=signing
-          is_disabled=Signal::derive(move || refusal.get().is_some())
-          on_click=move |_| {
-            let Some(at_cursor) = review.with(|maybe| maybe.as_ref().map(|found| found.log_cursor)) else {
-              return;
-            };
-            maybe_signed_at_cursor.set(Some(at_cursor));
-            let reviewed: Vec<_> = rows.with(|list| {
-              list.iter().map(|row| (row.user, row.role.clone())).collect()
-            });
-            signing.run(move || {
-              state.write(|backend| backend.sign_reviewed_channel_roles(conversation, reviewed, at_cursor))
-            });
-          }
-        >
-          {move || i18n.t("channel-roles-review-confirm")}
-        </PendingButton>
-        <button type="button" class="btn btn-small" on:click=move |_| is_reviewing.set(false)>{move || i18n.t("cancel")}</button>
-      </div>
-      <FailureNote pending=signing />
-    </Show>
+    </section>
   }
 }
 
@@ -2309,7 +2324,7 @@ mod tests {
   }
 
   mod role_review {
-    use teamcraft_proto::Snowflake;
+    use teamcraft_proto::{Id, Snowflake};
 
     use super::*;
 
@@ -2384,6 +2399,7 @@ mod tests {
           std::fs::read_to_string(format!("{}/i18n/{lang}/channels.ftl", env!("CARGO_MANIFEST_DIR")))
             .expect("the channels bundle");
         for key in [
+          "channel-roles-review-title",
           "channel-roles-review-new",
           "channel-roles-review-new-hint",
           "channel-roles-review-unknown",

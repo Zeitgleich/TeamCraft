@@ -1788,8 +1788,8 @@ workspace roster (admin.md §2.3):
     it holds into an anchor on every device: an appointee of a demoted admin, or a demoted owner, could then purge. Such
     a device (`must_review_before_vouching`) signs no ordinary entry, in whatever role this user acts: "Sign role" and
     the role select don't sign, and the server's change stands unsigned. The channel's members section tells them
-    "Your signature counts for every role in this channel on every member's device, and this device can't vouch for them
-    itself. Check them before you sign." and offers "Review and sign roles", which lists every admin and moderator the
+    "This device can't vouch for the roles here. Your signature would count for all of them on every member's device, so
+    check them first." and offers "Review and sign roles", which lists every admin and moderator the
     member list shows, by name and role, with "Sign exactly these roles" and Cancel. That list is the server's word and
     the names its directory's, so a role this device's own snapshot doesn't give that person is marked "New"; a person
     the member list doesn't name, or a list without an admin, can't be signed. What they see is what is signed
