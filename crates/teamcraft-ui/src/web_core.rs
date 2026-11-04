@@ -191,6 +191,10 @@ struct WebTokens {
   slot: Rc<RefCell<TokenSlot>>,
   /// Signs the proofs of a bound token; set before the token it goes with.
   maybe_prover: Rc<RefCell<Option<Arc<DpopProver>>>>,
+  /// The session's newest ID token, for role signing (e2ee.md §3.1.3).
+  maybe_id_token: Rc<RefCell<Option<String>>>,
+  /// The core wrote what the next ID token should name.
+  wants_new_id_token: Rc<std::cell::Cell<bool>>,
   /// Cuts the wait of [`keep_token_fresh`] for a first token short: the network may be back.
   maybe_wake: Rc<RefCell<Option<oneshot::Sender<()>>>>,
 }
@@ -209,6 +213,8 @@ impl WebTokens {
     Self {
       slot: Rc::new(RefCell::new(slot)),
       maybe_prover: Rc::default(),
+      maybe_id_token: Rc::default(),
+      wants_new_id_token: Rc::default(),
       maybe_wake: Rc::default(),
     }
   }
@@ -253,6 +259,14 @@ impl AccessTokenSource for WebTokens {
 
   fn dpop_prover(&self) -> Option<Arc<DpopProver>> {
     self.maybe_prover.borrow().clone()
+  }
+
+  fn id_token(&self) -> Option<String> {
+    self.maybe_id_token.borrow().clone()
+  }
+
+  fn ask_for_new_id_token(&self) {
+    self.wants_new_id_token.set(true);
   }
 }
 
@@ -757,6 +771,7 @@ async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), 
         .map_err(|error: AuthError| error.to_string())?;
       let tokens = WebTokens::new(TokenSlot::Ready(first));
       tokens.set_prover(auth.dpop_prover().await);
+      *tokens.maybe_id_token.borrow_mut() = auth.id_token();
       tokens
     };
     let (sender, receiver) = mpsc::unbounded();
@@ -907,26 +922,27 @@ fn watch_focus() {
 fn on_takeover_request(ends_call: bool) -> Option<Blocker> {
   match answer_takeover(crate::web_calls::is_in_call(), ends_call) {
     TakeoverAnswer::Refuse(blocker) => Some(blocker),
-    TakeoverAnswer::HandOver { ends_call } => {
-      wasm_bindgen_futures::spawn_local(hand_over(ends_call));
+    TakeoverAnswer::HandOver { .. } => {
+      wasm_bindgen_futures::spawn_local(hand_over());
       None
     },
   }
 }
 
-/// Lets another tab run the app: ends the call (when the user agreed), stores the drafts and waits
-/// for IndexedDB to have the outbox, then stops the core, whose lock goes to the waiting tab. This
-/// tab then follows it and says so.
-async fn hand_over(ends_call: bool) {
+/// Lets another tab run the app: stops the calls (ending a call the user agreed to end), stores the
+/// drafts and waits for IndexedDB to have the outbox, then stops the core, whose lock goes to the
+/// waiting tab. This tab then follows it and says so.
+async fn hand_over() {
   let Some(user) = RUNNING.with(|running| match &*running.borrow() {
     Some(Running::Owner { user, .. }) => Some(*user),
     _ => None,
   }) else {
     return;
   };
-  if ends_call {
-    crate::web_calls::end_call().await;
-  }
+  // The calls stop with the core here: a running call ends (the user agreed, else there is none
+  // and the takeover would have been refused), a ringtone stops, and the call module starts again
+  // only when this tab is the active one again (#440).
+  crate::web_calls::stop_calls().await;
   persist_drafts().await;
   let flushed = Box::pin(ask(Request::Flush));
   match select(flushed, Box::pin(platform::sleep(HANDOVER_FLUSH_TIMEOUT))).await {
@@ -1039,6 +1055,10 @@ fn keep_token_fresh(auth: Rc<dyn Authenticator>, tokens: WebTokens, alive: std::
         Ok(token) => {
           // The key goes first: the token needs it.
           tokens.set_prover(auth.dpop_prover().await);
+          if tokens.wants_new_id_token.take() {
+            auth.refresh_id_token().await;
+          }
+          *tokens.maybe_id_token.borrow_mut() = auth.id_token();
           // async-ok: the core's copy of the token, not a signal.
           if tokens.set(token)
             && let Err(error) = send(Request::NetworkChanged)
@@ -1922,7 +1942,7 @@ impl Core {
       },
       // A message shows at once: it is answered when it is in the outbox, and sent afterwards
       // while the UI reads it (`send_queued`).
-      Request::Action(action, reply) if action.is_new_message() => {
+      Request::Action(action, reply) if action.is_outbox_write() => {
         let result = match self.backend.as_ref() {
           Some(backend) => {
             queue_send(backend, *action);
@@ -3056,7 +3076,7 @@ impl SyncReads<'_> {
     let request = match request {
       Request::Snapshot(_) | Request::SnapshotChanges(..) => return self.answer_snapshot(request),
       // Never held back by a sync or an upload: the message shows at once and goes out after.
-      Request::Action(action, reply) if action.is_new_message() => {
+      Request::Action(action, reply) if action.is_outbox_write() => {
         queue_send(self.backend, *action);
         self.has_queued_sends.set(true);
         drop(reply.send(Ok(())));
@@ -3153,7 +3173,7 @@ impl SyncReads<'_> {
   }
 }
 
-/// Writes a new message ([`ChatAction::is_new_message`]) into the outbox; the loop sends it.
+/// Writes a change ([`ChatAction::is_outbox_write`]) into the outbox; the loop sends it.
 fn queue_send(backend: &CoreChatBackend<Store>, action: ChatAction) {
   if let Some(unhandled) = action.apply_to(backend) {
     tracing::warn!(?unhandled, "chat action not handled");

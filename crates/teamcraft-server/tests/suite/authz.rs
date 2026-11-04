@@ -33,6 +33,10 @@ const PUBLIC: &[(&str, &str)] = &[
   // Installing the web app: the browser fetches the manifest without credentials.
   ("get", "/api/v1/brand/manifest.webmanifest"),
   ("get", "/api/v1/brand/assets/{slot}"),
+  // Android and Apple fetch these from the app's link hosts without credentials, to decide whether
+  // an app may open a link; they name only the apps' public identifiers (docs/app-links.md).
+  ("get", "/.well-known/assetlinks.json"),
+  ("get", "/.well-known/apple-app-site-association"),
   // The link's token is the credential.
   ("post", "/api/v1/meetings/join"),
   // Local accounts sign in here: the one-time activation token or the password and the TOTP code
@@ -199,6 +203,8 @@ async fn every_operation_needs_a_valid_token_unless_it_is_on_the_public_list() {
     .await
     .unwrap();
 
+  // Every wrong route is reported at once: stopping at the first leaves the rest unchecked (#1280).
+  let mut wrong = Vec::new();
   let mut checked = 0;
   for (method, path, operation) in operations(&document) {
     let url = fill(&path, &scene);
@@ -206,20 +212,18 @@ async fn every_operation_needs_a_valid_token_unless_it_is_on_the_public_list() {
     if is_secured(&operation) {
       for token in [None, Some("not-a-token"), Some("tcb_not_a_bot"), Some("a.b.c")] {
         let (status, _) = send(&app, &method, &url, token).await;
-        assert_eq!(
-          status,
-          StatusCode::UNAUTHORIZED,
-          "{method} {path} with token {token:?}"
-        );
+        if status != StatusCode::UNAUTHORIZED {
+          wrong.push(format!("{method} {path} with token {token:?}: {status}"));
+        }
       }
       checked += 1;
-    } else {
-      assert!(
-        PUBLIC.contains(&(verb.as_str(), path.as_str())),
+    } else if !PUBLIC.contains(&(verb.as_str(), path.as_str())) {
+      wrong.push(format!(
         "{method} {path} has no security and is not on the public list: add security or justify it"
-      );
+      ));
     }
   }
+  assert!(wrong.is_empty(), "{}", wrong.join("\n"));
   assert!(checked > 100);
 
   // Internal endpoints answer without their bearer token (or with a wrong one) with 401, or 503
@@ -253,6 +257,7 @@ async fn admin_operations_reject_members_and_guests() {
     .await
     .unwrap();
 
+  let mut wrong = Vec::new();
   let mut checked = 0;
   for (method, path, _) in operations(&document) {
     if !path.starts_with("/api/v1/admin/") {
@@ -260,15 +265,13 @@ async fn admin_operations_reject_members_and_guests() {
     }
     for user in [&scene.eve, &scene.gina] {
       let (status, _) = send(&app, &method, &fill(&path, &scene), Some(&app.token(user))).await;
-      assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "{method} {path} as {}",
-        user.username
-      );
+      if status != StatusCode::FORBIDDEN {
+        wrong.push(format!("{method} {path} as {}: {status}", user.username));
+      }
     }
     checked += 1;
   }
+  assert!(wrong.is_empty(), "{}", wrong.join("\n"));
   assert!(checked >= 14, "only {checked} admin operations found");
   app.stop().await;
 }
@@ -287,6 +290,7 @@ async fn outsiders_cannot_touch_conversations_spaces_or_meetings_they_are_not_pa
     .await
     .unwrap();
 
+  let mut wrong = Vec::new();
   let mut checked = 0;
   for (method, path, _) in operations(&document) {
     let scoped = ["{conversation_id}", "{space_id}", "{meeting_id}"]
@@ -303,14 +307,16 @@ async fn outsiders_cannot_touch_conversations_spaces_or_meetings_they_are_not_pa
       let (status, body) = send(&app, &method, &fill(&path, &scene), Some(&app.token(user))).await;
       let ok = status.is_client_error() && status != StatusCode::UNAUTHORIZED
         || status == StatusCode::SERVICE_UNAVAILABLE && body["error_code"] == "unavailable";
-      assert!(
-        ok,
-        "{method} {path} as outsider {}: {status} {body}",
-        user.username
-      );
+      if !ok {
+        wrong.push(format!(
+          "{method} {path} as outsider {}: {status} {body}",
+          user.username
+        ));
+      }
     }
     checked += 1;
   }
+  assert!(wrong.is_empty(), "{}", wrong.join("\n"));
   assert!(checked >= 40, "only {checked} scoped operations found");
   app.stop().await;
 }

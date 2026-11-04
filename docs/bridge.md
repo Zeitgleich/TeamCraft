@@ -332,7 +332,7 @@ after the first display (only their hashes are kept).
 
 ## Sources
 
-A source is a token that posts into one channel. Channel admins manage them in the app; the bridge
+A source is a token that posts into one channel. Workspace admins manage them in the app; the bridge
 reads them from the channel itself (e2ee.md §13.1):
 
 1. "Add source" (workspace admins) generates the token in the app (256 random bits, `tcs_...`) and sends an encrypted,
@@ -347,8 +347,8 @@ reads them from the channel itself (e2ee.md §13.1):
    and when; to replace a leaked URL, revoke the source and add a new one.
 
 Who may: **workspace admins** of the verified roster (admin.md §2.3). Channel roles are signed
-now (e2ee.md §4.6.1), but the bridge doesn't read the channels' role logs yet (a follow-up of issue
-#380), so channel admins don't count here and the app offers "Add source" only to workspace
+now (e2ee.md §4.6.1), but channel admins don't count here, for the reasons in e2ee.md §13.1.1
+(issue #879, design), and the app offers "Add source" only to workspace
 admins. The creator must also be a member of the channel, and stay an
 admin: a creator who loses the role or leaves takes their sources out of force. Admins and the
 source's creator may revoke; changes from anybody else are ignored before they are stored. The

@@ -178,6 +178,7 @@ impl TokenCache {
         server_url,
         token,
         valid_for,
+        ..
       }) => {
         let token = token.expose_secret().to_owned();
         self.remember(Some(CachedToken {
@@ -252,6 +253,18 @@ impl AccessTokenSource for ServerTokens {
       .maybe_prover_source
       .as_ref()
       .and_then(|source| source())
+  }
+
+  /// While a sign-in or refresh holds the session there is none to give; the next round looks again.
+  fn id_token(&self) -> Option<String> {
+    match self.cache.maybe_source.as_ref().map(|source| source()) {
+      Some(TokenPeek::Ready {
+        server_url,
+        maybe_id_token,
+        ..
+      }) if server_url == self.server_url => maybe_id_token.map(|token| token.expose_secret().to_owned()),
+      _ => None,
+    }
   }
 }
 
@@ -1492,7 +1505,7 @@ impl Core {
       },
       // A message shows at once: it is answered when it is in the outbox and sent afterwards
       // (`send_queued`).
-      Request::Action(action, reply) if action.is_new_message() => {
+      Request::Action(action, reply) if action.is_outbox_write() => {
         let result = match self.backend.as_ref() {
           Some(backend) => {
             if let Some(unhandled) = action.apply_to(backend) {
@@ -2701,7 +2714,7 @@ impl ReadsWhileBusy<'_> {
       },
       // Typing arriving while the client is busy would go out late: dropped.
       Request::Action(action, reply) if action.typing_place().is_some() => drop(reply.send(Ok(()))),
-      Request::Action(action, reply) if action.is_new_message() => {
+      Request::Action(action, reply) if action.is_outbox_write() => {
         let Some(backend) = self.backend else {
           drop(reply.send(Err(not_set_up())));
           return Answered::Done;
@@ -2954,6 +2967,7 @@ mod tests {
               server_url: SERVER.into(),
               token: SecretString::from("token-a"),
               valid_for,
+              maybe_id_token: None,
             }
           }
         })),

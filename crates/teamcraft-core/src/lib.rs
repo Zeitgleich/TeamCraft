@@ -41,6 +41,7 @@ pub mod push_text;
 pub mod read_state;
 pub mod records;
 pub mod retry;
+pub mod role_signing;
 pub mod row_badge;
 pub mod runner;
 #[cfg(not(target_arch = "wasm32"))]

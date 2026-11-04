@@ -6,7 +6,7 @@ use crate::auth::{DpopGuard, Revocations, TokenValidator};
 use secrecy::SecretString;
 
 use teamcraft_crypto::server_secret::SettingsSealingKey;
-use teamcraft_proto::{AppLinkSettings, TokenBindingSettings};
+use teamcraft_proto::{AppLinkSettings, HealthAlertSettings, TokenBindingSettings};
 
 use crate::brand::BrandStore;
 use crate::config::{
@@ -83,6 +83,8 @@ pub struct AppState {
   pub image_decodes: Arc<tokio::sync::Semaphore>,
   /// What `GET /metrics` shows, with the listener on (`[metrics]`).
   pub metrics: Arc<crate::metrics::ServerMetrics>,
+  /// The health checks and the alerts raised from them (issue #213).
+  pub health: Arc<crate::health::HealthMonitor>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.
@@ -118,6 +120,8 @@ pub struct Settings {
   pub token_binding: TokenBindingSettings,
   /// Which apps may open this server's links; only ever changed in the admin console.
   pub app_links: AppLinkSettings,
+  /// When health checks raise alerts; only ever changed in the admin console.
+  pub health_alerts: HealthAlertSettings,
   /// Meeting invitations: most invitees and the mail texts.
   pub meeting_mail: MeetingMailConfig,
   /// The mail server of the configuration file (`[mail.smtp]`, else `[meetings.smtp]`).

@@ -85,8 +85,8 @@ struct Host {
   maybe_media: RefCell<Option<Media>>,
   /// Lists the devices again when the browser says they changed (kept for as long as the host):
   /// `devicechange`, and a camera or microphone permission that changed.
-  _on_device_change: Closure<dyn FnMut()>,
-  /// The `PermissionStatus` objects that call `_on_device_change`, kept so they stay alive.
+  on_device_change: Closure<dyn FnMut()>,
+  /// The `PermissionStatus` objects that call `on_device_change`, kept so they stay alive.
   permission_statuses: RefCell<Vec<JsValue>>,
   /// Where the page serves the AudioWorklet module.
   worklet_url: String,
@@ -244,7 +244,7 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
     callbacks,
     state: RefCell::new(State::default()),
     maybe_media: RefCell::new(None),
-    _on_device_change: on_device_change,
+    on_device_change,
     permission_statuses: RefCell::new(Vec::new()),
     worklet_url,
     last_sent: RefCell::new(String::new()),
@@ -1415,6 +1415,33 @@ impl Host {
   }
 }
 
+/// The module stopped: the page signed out, or its tab handed the app to another tab and may start
+/// the module again when it takes the app back (#440). The browser must not call the dropped
+/// closure on the next device or permission change; a handler a newer host set stays.
+impl Drop for Host {
+  fn drop(&mut self) {
+    let handler: &JsValue = self.on_device_change.as_ref();
+    let mut targets: Vec<(JsValue, &str)> = media_devices_object()
+      .map(|devices| (devices, "ondevicechange"))
+      .into_iter()
+      .collect();
+    targets.extend(
+      self
+        .permission_statuses
+        .get_mut()
+        .drain(..)
+        .map(|status| (status, "onchange")),
+    );
+    for (target, property) in targets {
+      let property = JsValue::from_str(property);
+      if Reflect::get(&target, &property).is_ok_and(|current| current == *handler) {
+        // A target that refuses the write keeps the handler; nothing more to do then.
+        let _ = Reflect::set(&target, &property, &JsValue::NULL);
+      }
+    }
+  }
+}
+
 /// Owns the call: applies controls and turns engine events into the call view.
 async fn run_media(
   mut call: WebCall,
@@ -1705,13 +1732,17 @@ async fn call_promise(function: &Function, argument: &JsValue) -> Result<JsValue
 
 /// `navigator.mediaDevices.ondevicechange`: devices plugged in or out.
 fn watch_device_changes(callback: &Closure<dyn FnMut()>) {
-  let maybe_devices = web_sys::window()
-    .and_then(|window| Reflect::get(&window.navigator(), &JsValue::from_str("mediaDevices")).ok())
-    .filter(|devices| devices.is_object());
-  if let Some(devices) = maybe_devices {
+  if let Some(devices) = media_devices_object() {
     // Without the property (old browsers) the lists are read at joins only.
     let _ = Reflect::set(&devices, &JsValue::from_str("ondevicechange"), callback.as_ref());
   }
+}
+
+/// `navigator.mediaDevices`; `None` where the page has none (an insecure origin, old browsers).
+fn media_devices_object() -> Option<JsValue> {
+  web_sys::window()
+    .and_then(|window| Reflect::get(&window.navigator(), &JsValue::from_str("mediaDevices")).ok())
+    .filter(|devices| devices.is_object())
 }
 
 fn function(object: &JsValue, name: &str) -> Result<Function, JsValue> {
@@ -1766,7 +1797,7 @@ async fn watch_permissions(host: Weak<Host>) {
     let _ = Reflect::set(
       &status,
       &JsValue::from_str("onchange"),
-      host._on_device_change.as_ref(),
+      host.on_device_change.as_ref(),
     );
     host.permission_statuses.borrow_mut().push(status);
   }

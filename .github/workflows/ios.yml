@@ -18,7 +18,8 @@ on:
       - "Cargo.lock"
       - ".github/workflows/ios.yml"
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    # No `labeled`: ci-label.yml re-runs this when the `ci` label comes after opening.
+    types: [opened, synchronize, reopened]
     paths:
       - "apps/ios/**"
       - "crates/teamcraft-ffi/**"
@@ -47,8 +48,8 @@ jobs:
   build-and-test:
     # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
     # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases.
-    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci')
+    # releases. A re-run keeps the first attempt's payload, so it counts as asked for.
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci') || github.run_attempt > 1
     # macOS 26 image: Xcode 26 (its default) with the iOS 26 SDK and simulators.
     runs-on: macos-26
     timeout-minutes: 90

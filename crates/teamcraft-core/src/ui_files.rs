@@ -7,7 +7,7 @@ use teamcraft_client_api::actions::{
   ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId, UserId};
-use teamcraft_proto::{AttachmentId, Base64Bytes};
+use teamcraft_proto::{AttachmentId, Base64Bytes, ClientMessageId};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::client::disk_downloads::{DownloadRecord, DownloadStatus, download_records};
@@ -158,14 +158,21 @@ impl<S: LocalStore> CoreChatBackend<S> {
     body: &str,
     meta: MessageMeta,
     files: Vec<OutgoingFile>,
+    maybe_id: Option<ClientMessageId>,
   ) {
+    // The same action again (a retry after a lost answer): its files are stored or going up already.
+    if let Some(id) = maybe_id
+      && matches!(self.store_ref().message(conversation, id), Ok(Some(_)))
+    {
+      return;
+    }
     let mentions = self.mentions_in(conversation, body);
     let content = MessageContent::Text {
       body: body.to_string(),
       mentions,
       meta,
     };
-    let Some(id) = self.enqueue(conversation, maybe_thread, content) else {
+    let Some(id) = self.enqueue_as(conversation, maybe_thread, content, maybe_id) else {
       return;
     };
     let upload = PendingUpload {

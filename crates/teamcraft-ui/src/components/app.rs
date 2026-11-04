@@ -175,6 +175,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   }
   if tauri::is_available() {
     sync_tray(state, i18n);
+    crate::tray_menu::start(state, i18n);
   } else {
     sync_favicon(state);
   }
@@ -1395,6 +1396,11 @@ fn follow_moved_calls(state: AppState) {
     }
     call.move_offer.set(maybe_offer.clone());
     if let Some(offer) = maybe_offer.filter(|offer| offer.is_requested_here) {
+      // "Add notetaker" moved the call: the core asked the notetaker into the room.
+      let maybe_bot = state.read(|backend| backend.notetaker_policy().and_then(|policy| policy.maybe_bot));
+      if maybe_bot.is_some_and(|bot| offer.added.contains(&bot)) {
+        call.notetaker_asked_in.set(Some(offer.to));
+      }
       state.follow_call_move(offer.from, offer.to, pending);
     }
   });

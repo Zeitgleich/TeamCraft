@@ -4,14 +4,15 @@
 use std::collections::HashMap;
 
 use teamcraft_proto::{
-  ALL_PERMISSIONS, AdminBrandsResponse, AdminCalendarSettingsResponse, AdminInstanceResponse,
-  AdminMailSettingsResponse, AdminSelfJoin as AdminSelfJoinWire, AnnouncementResponse, BrandAssetSlot,
-  ChannelModeration, CreateBrandRequest, GuestPolicy, HistoryPolicy, OverrideEffect, Permission,
-  PermissionScheme, PermissionSchemeResponse, PushProvider, PushProviderState, PushProviderStatus, Role,
-  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SchemeOverride,
-  SchemeRole, SchemeRoleResponse, SendTestMailRequest, SessionPolicy, SetAnnouncementRequest,
-  SettingsTestResponse, SfuStatus, StorageStatus, TestPushOutcome, UnixMillis, UpdateBrandRequest,
-  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
+  ALL_PERMISSIONS, AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse,
+  AdminInstanceResponse, AdminMailSettingsResponse, AdminSelfJoin as AdminSelfJoinWire, AnnouncementResponse,
+  BrandAssetSlot, ChannelModeration, CreateBrandRequest, GuestPolicy, HealthAlertResponse, HealthCheckId,
+  HealthCheckResponse, HealthCheckStatus, HistoryPolicy, OverrideEffect, Permission, PermissionScheme,
+  PermissionSchemeResponse, PushProvider, PushProviderState, PushProviderStatus, Role, RuntimeSettingsKey,
+  RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SchemeOverride, SchemeRole,
+  SchemeRoleResponse, SendTestMailRequest, SessionPolicy, SetAnnouncementRequest, SettingsTestResponse,
+  SfuStatus, StorageStatus, TestPushOutcome, UnixMillis, UpdateBrandRequest, UpdateCalendarSettingsRequest,
+  UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use super::{MockBackend, dm_first, id_from_raw};
@@ -182,10 +183,12 @@ impl AdminBackend for MockBackend {
       maybe_expires_at: Some(self.now + 27 * DAY),
       recommended_minimum: self.ops.borrow().policy.owners.recommended_minimum,
       warning_lead_ms: 7 * DAY,
+      is_signing_manual: false,
+      maybe_signing_problem: None,
     })
   }
 
-  fn set_workspace_policy(&self, policy: WorkspacePolicy, _genesis: Vec<crate::admin::RosterEntry>) {
+  fn set_workspace_policy(&self, policy: WorkspacePolicy) {
     let mut ops = self.ops.borrow_mut();
     ops.policy_version += 1;
     let detail = format!("policy version {}", ops.policy_version);
@@ -523,6 +526,52 @@ impl AdminBackend for MockBackend {
     let mut ops = self.ops.borrow_mut();
     ops.settings.reset_runtime(key.clone());
     ops.record(self.now, AuditAction::SettingsChanged, key.as_str(), "reset");
+  }
+
+  fn health_status(&self) -> Option<AdminHealthResponse> {
+    let check = |check, status, value| HealthCheckResponse {
+      check,
+      status,
+      maybe_failing_since: None,
+      maybe_value: value,
+    };
+    let hours = 3_600;
+    Some(AdminHealthResponse {
+      checks: vec![
+        check(HealthCheckId::Database, HealthCheckStatus::Ok, None),
+        check(HealthCheckId::ObjectStorage, HealthCheckStatus::Ok, None),
+        check(HealthCheckId::IdentityProvider, HealthCheckStatus::Ok, None),
+        check(HealthCheckId::PushGateway, HealthCheckStatus::NotConfigured, None),
+        check(HealthCheckId::PushService, HealthCheckStatus::Ok, None),
+        check(HealthCheckId::MediaServer, HealthCheckStatus::Ok, Some(4)),
+        check(HealthCheckId::OidcSync, HealthCheckStatus::Ok, Some(1_200)),
+        check(HealthCheckId::Retention, HealthCheckStatus::NoData, None),
+        check(
+          HealthCheckId::PartitionMaintenance,
+          HealthCheckStatus::Ok,
+          Some(2 * hours),
+        ),
+        HealthCheckResponse {
+          maybe_failing_since: Some(UnixMillis(self.now - 14 * 60_000)),
+          ..check(HealthCheckId::Backup, HealthCheckStatus::Alert, Some(40 * hours))
+        },
+        check(HealthCheckId::Certificate, HealthCheckStatus::Ok, Some(52)),
+        check(HealthCheckId::DiskSpace, HealthCheckStatus::Ok, Some(41)),
+      ],
+      alerts: vec![HealthAlertResponse {
+        check: HealthCheckId::Backup,
+        raised_at: UnixMillis(self.now - 4 * 60_000),
+        maybe_resolved_at: None,
+      }],
+      is_alerting_enabled: true,
+      hold_secs: 600,
+      started_at: UnixMillis(self.now - 26 * hours * 1000),
+      maybe_checked_at: Some(UnixMillis(self.now - 12_000)),
+    })
+  }
+
+  fn health_alert_count(&self) -> usize {
+    1
   }
 
   fn instance_status(&self) -> Option<AdminInstanceResponse> {
@@ -1230,7 +1279,7 @@ mod tests {
     assert_eq!(backend.admin_join_channel(channel), SelfJoinOutcome::Joined);
     let (_, mut policy) = backend.workspace_policy();
     policy.admin_self_join = AdminSelfJoinWire::Disabled;
-    backend.set_workspace_policy(policy, Vec::new());
+    backend.set_workspace_policy(policy);
     assert_eq!(backend.admin_join_channel(channel), SelfJoinOutcome::Disabled);
     assert_eq!(backend.workspace_policy().0, 13);
   }

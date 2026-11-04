@@ -253,6 +253,14 @@ impl ServerMetrics {
     self.http.clone()
   }
 
+  /// When the job last succeeded since the start, if it has.
+  pub fn job_last_success(&self, job: BackgroundJob) -> Option<OffsetDateTime> {
+    match self.job_last_success.with_label_values(&[job.label()]).get() {
+      0 => None,
+      seconds => OffsetDateTime::from_unix_timestamp(seconds).ok(),
+    }
+  }
+
   /// A background job finished without an error at `now`.
   pub fn job_succeeded(&self, job: BackgroundJob, now: OffsetDateTime) {
     self
@@ -410,7 +418,7 @@ pub fn route_class(path: &str) -> &'static str {
     "auth" => "auth",
     "calls" | "notetaker" => "calls",
     "device-links" | "devices" | "push" => "devices",
-    "org-recovery" => "e2ee",
+    "org-recovery" | "role-evidence" => "e2ee",
     "gateway" | "rendezvous" => "gateway",
     "meetings" => "meetings",
     "brand" | "client-compatibility" | "openapi.json" | "server-info" => "public",

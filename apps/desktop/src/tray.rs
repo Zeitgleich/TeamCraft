@@ -20,15 +20,18 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use serde::Deserialize;
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, State, Wry};
+use tauri::{AppHandle, Emitter, Manager, State, Wry};
+use teamcraft_client_api::tray_menu::{
+  TRAY_ACTION_EVENT, TrayAction, TrayCallState, TrayEntry, TrayMenuModel,
+};
 use teamcraft_client_api::window_chrome::TrayIconStyle;
 
 pub const MAIN_WINDOW: &str = "main";
 const TRAY_ID: &str = "main";
-const MENU_SHOW: &str = "show";
-const MENU_QUIT: &str = "quit";
+/// The id of a header (a menu line that cannot be chosen).
+const MENU_HEADER: &str = "header";
 /// Zoom limits; the UI offers steps between them.
 const MIN_ZOOM: f64 = 0.5;
 const MAX_ZOOM: f64 = 2.0;
@@ -37,6 +40,9 @@ const MAX_ZOOM: f64 = 2.0;
 const DOT_SIZE: u32 = 16;
 /// The unread dot's colour.
 const DOT_COLOR: [u8; 3] = [0xd9, 0x3f, 0x3f];
+/// The dot of a call, bottom right: green while in a call, orange with the microphone off.
+const CALL_DOT_COLOR: [u8; 3] = [0x2e, 0xa0, 0x43];
+const MUTED_DOT_COLOR: [u8; 3] = [0xe0, 0x8a, 0x1e];
 /// The tray dot's diameter as a share of the tray icon's side.
 const TRAY_DOT_SHARE: f32 = 0.5;
 /// The transparent ring around the tray dot that sets it off the glyph, as a share of its radius.
@@ -60,6 +66,9 @@ enum MenuLanguage {
 /// tray icon exists.
 pub struct TrayMenu {
   labels: Mutex<MenuLabels>,
+  /// The menu the UI sent (`tray_menu_set`); `None` while the default one (open, quit) shows, as
+  /// before sign-in. Text updates leave a UI-built menu alone: it comes in the UI's language.
+  maybe_model: Mutex<Option<TrayMenuModel>>,
   /// Appindicator menus do not reflect `set_text`; there the menu is rebuilt instead.
   #[cfg(not(target_os = "linux"))]
   show: MenuItem<Wry>,
@@ -88,6 +97,8 @@ enum HostState {
 #[derive(Default)]
 pub struct LastUnread {
   count: Mutex<Option<u32>>,
+  /// The call the icon shows (`tray_menu_set`).
+  call_state: Mutex<TrayCallState>,
   /// Linux: held while a launcher update is sent, so updates go out in order (each sends the
   /// latest count).
   #[cfg(target_os = "linux")]
@@ -123,15 +134,15 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
   }
   let name = app.package_info().name.clone();
   let labels = default_labels(system_language());
-  let (menu, _show, _quit) = build_menu(app, &labels)?;
+  let (menu, _show, _quit) = build_default_menu(app, &labels)?;
   let mut builder = TrayIconBuilder::with_id(TRAY_ID)
     .menu(&menu)
     .tooltip(&name)
     .show_menu_on_left_click(false)
-    .on_menu_event(|app, event| match event.id().as_ref() {
-      MENU_SHOW => show_main_window(app),
-      MENU_QUIT => app.exit(0),
-      _ => {},
+    .on_menu_event(|app, event| {
+      if let Some(action) = TrayAction::from_id(event.id().as_ref()) {
+        run_action(app, action);
+      }
     })
     .on_tray_icon_event(|tray, event| {
       if let TrayIconEvent::Click {
@@ -143,7 +154,7 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
         show_main_window(tray.app_handle());
       }
     });
-  builder = builder.icon(tray_icon(current_style(app.handle()), false));
+  builder = builder.icon(tray_icon(current_style(app.handle()), false, TrayCallState::Idle));
   // macOS draws the menu bar icon as a template in the bar's own colour.
   #[cfg(target_os = "macos")]
   {
@@ -154,6 +165,7 @@ pub fn install(app: &tauri::App) -> tauri::Result<()> {
   watch_tray_host(app);
   app.manage(TrayMenu {
     labels: Mutex::new(labels),
+    maybe_model: Mutex::new(None),
     #[cfg(not(target_os = "linux"))]
     show: _show,
     #[cfg(not(target_os = "linux"))]
@@ -223,14 +235,144 @@ pub fn reveal_without_host(app: &AppHandle) {
 #[cfg(not(target_os = "linux"))]
 pub fn reveal_without_host(_app: &AppHandle) {}
 
-fn build_menu(
+fn build_default_menu(
   manager: &impl Manager<Wry>,
   labels: &MenuLabels,
 ) -> tauri::Result<(Menu<Wry>, MenuItem<Wry>, MenuItem<Wry>)> {
-  let show = MenuItem::with_id(manager, MENU_SHOW, &labels.show, true, None::<&str>)?;
-  let quit = MenuItem::with_id(manager, MENU_QUIT, &labels.quit, true, None::<&str>)?;
+  let show = MenuItem::with_id(
+    manager,
+    TrayAction::OpenApp.id(),
+    &labels.show,
+    true,
+    None::<&str>,
+  )?;
+  let quit = MenuItem::with_id(manager, TrayAction::Quit.id(), &labels.quit, true, None::<&str>)?;
   let menu = Menu::with_items(manager, &[&show, &quit])?;
   Ok((menu, show, quit))
+}
+
+/// The menu the UI described. Items without an action are headers.
+fn build_model_menu(manager: &impl Manager<Wry>, entries: &[TrayEntry]) -> tauri::Result<Menu<Wry>> {
+  let items = build_items(manager, entries)?;
+  let refs: Vec<&dyn IsMenuItem<Wry>> = items.iter().map(AsRef::as_ref).collect();
+  Menu::with_items(manager, &refs)
+}
+
+fn build_items(
+  manager: &impl Manager<Wry>,
+  entries: &[TrayEntry],
+) -> tauri::Result<Vec<Box<dyn IsMenuItem<Wry>>>> {
+  let mut items: Vec<Box<dyn IsMenuItem<Wry>>> = Vec::with_capacity(entries.len());
+  for entry in entries {
+    let item: Box<dyn IsMenuItem<Wry>> = match entry {
+      TrayEntry::Separator => Box::new(tauri::menu::PredefinedMenuItem::separator(manager)?),
+      TrayEntry::Item {
+        maybe_action: None,
+        label,
+        ..
+      } => Box::new(MenuItem::with_id(
+        manager,
+        MENU_HEADER,
+        label,
+        false,
+        None::<&str>,
+      )?),
+      TrayEntry::Item {
+        maybe_action: Some(action),
+        label,
+        maybe_checked: None,
+      } => Box::new(MenuItem::with_id(
+        manager,
+        action.id(),
+        label,
+        true,
+        None::<&str>,
+      )?),
+      TrayEntry::Item {
+        maybe_action: Some(action),
+        label,
+        maybe_checked: Some(is_checked),
+      } => Box::new(CheckMenuItem::with_id(
+        manager,
+        action.id(),
+        label,
+        true,
+        *is_checked,
+        None::<&str>,
+      )?),
+      TrayEntry::Submenu { label, entries } => {
+        let children = build_items(manager, entries)?;
+        let refs: Vec<&dyn IsMenuItem<Wry>> = children.iter().map(AsRef::as_ref).collect();
+        Box::new(Submenu::with_items(manager, label, true, &refs)?)
+      },
+    };
+    items.push(item);
+  }
+  Ok(items)
+}
+
+/// What a chosen menu item does: the shell's own actions here, the rest as an event for the main
+/// window (which does what the matching control in the window does).
+fn run_action(app: &AppHandle, action: TrayAction) {
+  if action.shows_window() {
+    show_main_window(app);
+  }
+  match action {
+    TrayAction::OpenApp => {},
+    TrayAction::Quit => app.exit(0),
+    TrayAction::CheckForUpdates => {
+      show_main_window(app);
+      crate::updates::check_now(app);
+    },
+    other => {
+      if let Err(error) = app.emit_to(MAIN_WINDOW, TRAY_ACTION_EVENT, other.id()) {
+        tracing::debug!(%error, "could not hand the tray action to the window");
+      }
+    },
+  }
+}
+
+/// The menu and icon state from the UI: its status, call and general entries, in its language. An
+/// empty menu (the UI is gone, sign-in) brings back the default one. Without a tray icon: nothing.
+#[tauri::command(rename_all = "snake_case")]
+pub fn tray_menu_set(app: AppHandle, last_unread: State<'_, LastUnread>, model: TrayMenuModel) {
+  *last_unread
+    .call_state
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner) = model.call_state;
+  refresh_icon(&app);
+  let Some(menu) = app.try_state::<TrayMenu>() else {
+    return;
+  };
+  let mut current = menu
+    .maybe_model
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
+  let next = (!model.entries.is_empty()).then_some(model);
+  if *current == next {
+    return;
+  }
+  let result = match &next {
+    Some(model) => build_model_menu(&app, &model.entries),
+    None => {
+      let labels = menu
+        .labels
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+      build_default_menu(&app, &labels).map(|(menu, ..)| menu)
+    },
+  };
+  *current = next;
+  drop(current);
+  // Replacing the menu works on every platform; Linux shows a menu as it was when it was set.
+  let result = result.and_then(|new_menu| match app.tray_by_id(TRAY_ID) {
+    Some(tray) => tray.set_menu(Some(new_menu)),
+    None => Ok(()),
+  });
+  if let Err(error) = result {
+    tracing::debug!(%error, "could not update the tray menu");
+  }
 }
 
 fn default_labels(language: MenuLanguage) -> MenuLabels {
@@ -339,15 +481,13 @@ pub fn tray_update(app: AppHandle, last_unread: State<'_, LastUnread>, update: T
     *last = Some(unread);
     drop(last);
     set_badge(&app, unread);
-    if had_unread != (unread > 0)
-      && let Some(tray) = app.tray_by_id(TRAY_ID)
-    {
-      set_icon(&tray, current_style(&app), unread > 0);
+    if had_unread != (unread > 0) {
+      refresh_icon(&app);
     }
   }
 }
 
-/// Shows the tray icon in the style just chosen in the settings, keeping the unread dot.
+/// Shows the tray icon in the style just chosen in the settings, keeping the unread and call dots.
 pub fn refresh_icon(app: &AppHandle) {
   let Some(tray) = app.tray_by_id(TRAY_ID) else {
     return;
@@ -359,11 +499,17 @@ pub fn refresh_icon(app: &AppHandle) {
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .is_some_and(|count| count > 0)
   });
-  set_icon(&tray, current_style(app), has_unread);
+  let call_state = app.try_state::<LastUnread>().map_or(TrayCallState::Idle, |last| {
+    *last
+      .call_state
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  });
+  set_icon(&tray, current_style(app), has_unread, call_state);
 }
 
-fn set_icon(tray: &tauri::tray::TrayIcon, style: TrayIconStyle, has_unread: bool) {
-  if let Err(error) = tray.set_icon(Some(tray_icon(style, has_unread))) {
+fn set_icon(tray: &tauri::tray::TrayIcon, style: TrayIconStyle, has_unread: bool, call_state: TrayCallState) {
+  if let Err(error) = tray.set_icon(Some(tray_icon(style, has_unread, call_state))) {
     tracing::debug!(%error, "could not change the tray icon");
   }
   // A new image drops the template flag, and macOS then draws it black in a dark menu bar (#632).
@@ -392,7 +538,15 @@ fn update_tray(app: &AppHandle, menu: &TrayMenu, update: &TrayUpdate) {
     .unwrap_or_else(std::sync::PoisonError::into_inner);
   let mut results = Vec::new();
   if *current != labels {
-    results.push(apply_labels(app, menu, &labels));
+    // A menu built by the UI is already in its language; only the default one has these texts.
+    let has_model = menu
+      .maybe_model
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .is_some();
+    if !has_model {
+      results.push(apply_labels(app, menu, &labels));
+    }
     *current = labels;
   }
   if let Some(tray) = app.tray_by_id(TRAY_ID) {
@@ -406,7 +560,7 @@ fn update_tray(app: &AppHandle, menu: &TrayMenu, update: &TrayUpdate) {
 /// Linux (StatusNotifier) shows a menu as it was when it was set, so it is replaced.
 #[cfg(target_os = "linux")]
 fn apply_labels(app: &AppHandle, _menu: &TrayMenu, labels: &MenuLabels) -> tauri::Result<()> {
-  let (new_menu, _, _) = build_menu(app, labels)?;
+  let (new_menu, _, _) = build_default_menu(app, labels)?;
   match app.tray_by_id(TRAY_ID) {
     Some(tray) => tray.set_menu(Some(new_menu)),
     None => Ok(()),
@@ -464,9 +618,24 @@ fn set_badge(app: &AppHandle, _unread: u32) {
 /// The tray icon in `style`, with the unread dot while anything is unread. The app icon is too
 /// detailed at tray size; the mark (icons/tray*.png, scripts/brand/icons.py) is not. macOS always
 /// uses its template icon, which the menu bar colours itself.
-fn tray_icon(style: TrayIconStyle, has_unread: bool) -> Image<'static> {
-  let icon = icon_for(style);
-  if has_unread { with_unread_dot(&icon) } else { icon }
+fn tray_icon(style: TrayIconStyle, has_unread: bool, call_state: TrayCallState) -> Image<'static> {
+  let mut icon = icon_for(style);
+  if let Some(color) = call_dot_color(call_state) {
+    icon = with_dot(&icon, Corner::BottomRight, color);
+  }
+  if has_unread {
+    icon = with_dot(&icon, Corner::TopRight, DOT_COLOR);
+  }
+  icon
+}
+
+/// The call dot's colour; none while idle.
+fn call_dot_color(call_state: TrayCallState) -> Option<[u8; 3]> {
+  match call_state {
+    TrayCallState::Idle => None,
+    TrayCallState::InCall => Some(CALL_DOT_COLOR),
+    TrayCallState::Muted => Some(MUTED_DOT_COLOR),
+  }
 }
 
 #[cfg(target_os = "macos")]
@@ -483,14 +652,26 @@ fn icon_for(style: TrayIconStyle) -> Image<'static> {
   }
 }
 
-/// `icon` with the unread dot in its top right, set off the glyph by a transparent ring.
-fn with_unread_dot(icon: &Image<'_>) -> Image<'static> {
+/// Where on the icon a dot sits.
+#[derive(Clone, Copy)]
+enum Corner {
+  TopRight,
+  BottomRight,
+}
+
+/// `icon` with a dot in a right-hand corner, set off the glyph by a transparent ring.
+fn with_dot(icon: &Image<'_>, corner: Corner, color: [u8; 3]) -> Image<'static> {
   let (width, height) = (icon.width(), icon.height());
   let radius = width.min(height) as f32 * TRAY_DOT_SHARE / 2.0;
+  let y = match corner {
+    Corner::TopRight => radius,
+    Corner::BottomRight => height as f32 - radius,
+  };
   let dot = Dot {
-    center: (width as f32 - radius, radius),
+    center: (width as f32 - radius, y),
     radius,
     gap: radius * TRAY_DOT_GAP_SHARE,
+    color,
   };
   let mut rgba = icon.rgba().to_vec();
   dot.paint(&mut rgba, width);
@@ -505,6 +686,7 @@ fn unread_dot() -> Image<'static> {
     center: (radius, radius),
     radius,
     gap: 0.0,
+    color: DOT_COLOR,
   };
   let mut rgba = vec![0; (DOT_SIZE * DOT_SIZE * 4) as usize];
   dot.paint(&mut rgba, DOT_SIZE);
@@ -517,6 +699,7 @@ struct Dot {
   radius: f32,
   /// Width of the ring around the dot that is cleared to transparent.
   gap: f32,
+  color: [u8; 3],
 }
 
 impl Dot {
@@ -537,7 +720,7 @@ impl Dot {
         pixel.copy_from_slice(&[0, 0, 0, 0]);
         continue;
       }
-      for (channel, dot) in pixel.iter_mut().zip(DOT_COLOR) {
+      for (channel, dot) in pixel.iter_mut().zip(self.color) {
         let mixed = (f32::from(dot) * covered + f32::from(*channel) * below * (1.0 - covered)) / alpha;
         *channel = mixed.round() as u8;
       }
@@ -567,7 +750,7 @@ mod tests {
   fn every_style_has_its_own_square_icon() {
     let icons: Vec<Image<'_>> = TrayIconStyle::CHOICES
       .iter()
-      .map(|style| tray_icon(*style, false))
+      .map(|style| tray_icon(*style, false, TrayCallState::Idle))
       .collect();
     for icon in &icons {
       assert!(
@@ -579,7 +762,10 @@ mod tests {
     {
       assert_ne!(icons[0].rgba(), icons[1].rgba(), "white differs from colour");
       assert_ne!(icons[1].rgba(), icons[2].rgba(), "black differs from white");
-      assert_eq!(tray_icon(TrayIconStyle::Unknown, false).rgba(), icons[0].rgba());
+      assert_eq!(
+        tray_icon(TrayIconStyle::Unknown, false, TrayCallState::Idle).rgba(),
+        icons[0].rgba()
+      );
     }
   }
 
@@ -591,8 +777,8 @@ mod tests {
   }
 
   fn assert_unread_dot(style: TrayIconStyle) {
-    let plain = tray_icon(style, false);
-    let unread = tray_icon(style, true);
+    let plain = tray_icon(style, false, TrayCallState::Idle);
+    let unread = tray_icon(style, true, TrayCallState::Idle);
     assert_eq!((unread.width(), unread.height()), (plain.width(), plain.height()));
     let width = plain.width() as usize;
     let pixel = |image: &Image<'_>, x: usize, y: usize| {
@@ -613,12 +799,42 @@ mod tests {
   }
 
   #[test]
+  fn a_call_puts_a_dot_bottom_right_that_says_if_the_microphone_is_off() {
+    for style in TrayIconStyle::CHOICES {
+      let plain = tray_icon(style, false, TrayCallState::Idle);
+      let in_call = tray_icon(style, false, TrayCallState::InCall);
+      let muted = tray_icon(style, false, TrayCallState::Muted);
+      let width = plain.width() as usize;
+      let radius = (plain.width() as f32 * TRAY_DOT_SHARE / 2.0) as usize;
+      let (x, y) = (width - radius, plain.height() as usize - radius);
+      let pixel = |image: &Image<'_>| {
+        let start = (y * width + x) * 4;
+        image.rgba()[start..start + 4].to_vec()
+      };
+      assert_eq!(
+        pixel(&in_call),
+        [CALL_DOT_COLOR[0], CALL_DOT_COLOR[1], CALL_DOT_COLOR[2], 255]
+      );
+      assert_eq!(
+        pixel(&muted),
+        [MUTED_DOT_COLOR[0], MUTED_DOT_COLOR[1], MUTED_DOT_COLOR[2], 255]
+      );
+      assert_ne!(pixel(&plain), pixel(&in_call));
+      // The unread dot stays top right next to it.
+      let both = tray_icon(style, true, TrayCallState::InCall);
+      let top = (radius * width + width - radius) * 4;
+      assert_eq!(&both.rgba()[top..top + 3], &DOT_COLOR);
+    }
+  }
+
+  #[test]
   fn the_ring_around_the_dot_is_transparent() {
     let mut rgba = [255_u8; 9 * 9 * 4].to_vec();
     let dot = Dot {
       center: (4.5, 4.5),
       radius: 2.0,
       gap: 2.0,
+      color: DOT_COLOR,
     };
     dot.paint(&mut rgba, 9);
     let alpha = |x: usize, y: usize| rgba[(y * 9 + x) * 4 + 3];

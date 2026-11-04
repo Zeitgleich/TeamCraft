@@ -1290,10 +1290,60 @@ get worse either: before, the core also started only after `GET /me`.
   in, so a start stays at one keychain read (e2ee.md §9.7). `CoreHost::start` doesn't wait for a token
   until the account is confirmed. Covered by tests (`token_expiry::cached_account`), not measured
   in the app.
-- **Left of #778:** a pending message reaches the UI mirror after one answer of the core, not in the
-  same frame (it needs an ID the UI picks and the core keeps), and live events don't move the
-  remembered sync heads (a head moved by an event says nothing about what came before it, so it needs
-  proof that the connection had no gap). Both on their own: they don't touch the sign-in.
+- **Left of #778:** live events don't move the remembered sync heads (a head moved by an event says
+  nothing about what came before it, so it needs proof that the connection had no gap). The rest is in
+  the next section.
+
+#### Own changes show at once (issue #778)
+
+A sent message reached the UI's mirror only after the core had answered, and then after two more
+round trips (what changed, the page of messages): a request and an answer through the shell on
+desktop, through the core's loop in the page on the web. On the web an edit, a delete, a reaction or
+a pin waited for the end of a connection that was being made, and read markers still do.
+
+Now the UI picks the message's ID (`OutgoingMessage::maybe_client_message_id`), puts the row into the
+feed in the same call (`RemoteChat::show_pending`), and the core keeps that ID, so its answer
+replaces the row in place (`pending_message_id` is the one function that derives the row's ID from the
+client ID, for both). A send the core refuses takes the row back, and the
+same ID sent twice is one message, also when the first has been sent by then. A message that needs
+more than its text for its row (a reply's quote, files, urgency, silent) appears with the core's
+answer as before. Edits, deletes, reactions, pins and forwards are outbox writes like a new message
+(`ChatAction::is_outbox_write`): the core answers once they are stored and sends them afterwards,
+also while a connection or an upload holds the client.
+
+Web client (release build), a small workspace, debug server, local machine, November 2026. The test
+types a message and presses Enter, 20 times; the page notes when the key event happened and when the
+row with the text was added to the DOM. The second line reloads the page, so that the fresh session's
+full sync starts, holds back the reads of the connection by 6 s each, and clicks a quick reaction
+once the sync has started.
+
+```sh
+PENDING_ECHO_RUNS=20 E2E_REQUIRED=1 cargo test -p teamcraft-e2e --features browser --test suite -- \
+  --nocapture pending_echo::
+```
+
+| What                                                    | Before                | After                 | Budget      |
+|---------------------------------------------------------|-----------------------|-----------------------|-------------|
+| Enter until the pending row is in the DOM, median / p95 | 35.0 / 43.9 ms        | 9.6 / 41.1 ms         | one frame   |
+| Reaction while the connection waits, until its chip     | 18,063 ms             | 45 ms                 | one frame   |
+
+"Before" is `main` 4167ebd6 with the same test (three more runs: medians 35.6, 36.7, 36.9 ms, p95 43 to
+52 ms, one 213 ms). The p95 of "after" is its first send, with the page's code still being compiled;
+the other 19 are 8.0 to 11.9 ms. The row is in the DOM in the same task as the key event; what is left
+is the framework's work.
+
+- **No work per conversation** on the way: a plain message reads neither the user directory nor the
+  members unless it contains an `@`, and a reply, a pin, a save or an edit of a message the server
+  numbered finds its target by one keyed read instead of reading the conversation. Nothing else on
+  the send path changed, so the other budgets (channel switch, memory, idle) are as measured above;
+  `perf.rs` was not run for this change.
+- **Left:** read markers during a connection (they need the client's account data), reactions and
+  edits still read the conversation to find their target and its reactions (a keyed lookup for
+  reactions needs an index of them), a reply, files and urgent messages show with the core's answer,
+  and live events still don't move the sync heads. Covered by tests: `chosen_ids::*` (core),
+  `pending_rows::*` (UI mirror), `changes_that_live_in_the_outbox_answer_before_the_network`
+  (client API) and the browser test above, which also sends offline, reloads the page with the
+  message queued and checks that it goes out once when the network is back.
 
 #### Coming back to 300 channels: no work per conversation (issue #714)
 

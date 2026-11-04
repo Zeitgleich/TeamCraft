@@ -7,7 +7,7 @@
 //! server's role list (admin.md §2.3): a request for anything but a private, unarchived channel
 //! (a DM, a meeting chat, an unknown conversation) isn't shown at all.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use teamcraft_client_api::activity::{JoinRequest, JoinRequestStanding};
 use teamcraft_client_api::model::{ConversationId, UserId};
@@ -34,21 +34,19 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
     let workspace = self.verified_workspace();
     let is_roster_fresh = workspace.is_roster_fresh(self.now_ms(), ROSTER_MAX_AGE_MS);
-    let channels: HashSet<ConversationId> = self
+    let channels: HashMap<ConversationId, ChannelRole> = self
       .conversations_raw()
       .into_iter()
-      .filter(|conversation| {
-        conversation.maybe_my_membership.is_some() && is_open_private_channel(conversation)
-      })
-      .map(|conversation| conversation.id)
+      .filter(is_open_private_channel)
+      .filter_map(|conversation| Some((conversation.id, conversation.maybe_my_membership?.role)))
       .collect();
     requests_to_decide(
       self.me_id(),
       &requests,
       &workspace,
       is_roster_fresh,
-      |conversation| channels.contains(&conversation),
-      |conversation| self.is_my_role_signed_admin(conversation),
+      |conversation| channels.contains_key(&conversation),
+      |conversation| self.may_approve_as_owner(conversation, channels.get(&conversation)),
     )
   }
 
@@ -63,9 +61,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  /// Whether the channel's signed roles make this user an admin: only then members take in the
-  /// admin this user approves (e2ee.md §4.6.1). The server's member list doesn't count.
-  fn is_my_role_signed_admin(&self, conversation: ConversationId) -> bool {
+  /// Whether the channel's signed roles make this user an admin, the only case in which members take
+  /// in the admin they approve (e2ee.md §4.6.1); or nothing is signed here as far as this device knows
+  /// and the server lists them its admin: approving founds the log if it can, and every member may
+  /// add on such a channel.
+  fn may_approve_as_owner(&self, conversation: ConversationId, maybe_listed: Option<&ChannelRole>) -> bool {
     let state: crate::channel_roles::ChannelRoleState = self.read(
       records::get_json(
         self.store_ref(),
@@ -75,6 +75,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .map(Option::unwrap_or_default),
     );
     state.role_of(self.me_id()) == ChannelRole::Admin
+      || (state.may_act_as_unsigned() && maybe_listed == Some(&ChannelRole::Admin))
   }
 
   fn verified_workspace(&self) -> WorkspaceState {
@@ -87,7 +88,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
 /// The requests of others (the server lists the user's own too) for conversations
 /// `is_my_private_channel` accepts (private, unarchived channels the user is in), each with what
-/// the owner may do (`is_signed_admin`: whether this user's role in the channel is a signed admin).
+/// the owner may do (`may_approve`: whether approving would work for this user in that channel).
 /// None while the verified policy doesn't ask for an owner's approval: then they
 /// are moot, and the server closes them anyway.
 pub fn requests_to_decide(
@@ -96,7 +97,7 @@ pub fn requests_to_decide(
   workspace: &WorkspaceState,
   is_roster_fresh: bool,
   is_my_private_channel: impl Fn(ConversationId) -> bool,
-  is_signed_admin: impl Fn(ConversationId) -> bool,
+  may_approve: impl Fn(ConversationId) -> bool,
 ) -> Vec<JoinRequest> {
   if workspace.policy.admin_self_join != AdminSelfJoin::OwnerApproval {
     return Vec::new();
@@ -113,7 +114,7 @@ pub fn requests_to_decide(
       expires_at: request.expires_at.0,
       standing: if !is_roster_fresh || !workspace.is_admin(request.user.id) {
         JoinRequestStanding::NotAnAdmin
-      } else if is_signed_admin(request.conversation_id) {
+      } else if may_approve(request.conversation_id) {
         JoinRequestStanding::Approvable
       } else {
         JoinRequestStanding::OwnerRoleNotSigned

@@ -124,6 +124,15 @@ pub struct FakeGateway {
 
 #[derive(Default)]
 struct State {
+  /// The identity provider's tokens each user's app holds (e2ee.md §3.1.3).
+  provider_tokens: HashMap<UserId, String>,
+  provider_access_tokens: HashMap<UserId, String>,
+  /// What users published, newest per user.
+  role_evidence: BTreeMap<UserId, String>,
+  /// What a hostile server adds to the list.
+  forged_role_evidence: Vec<teamcraft_proto::RoleEvidenceEntry>,
+  withdrawn_roles: Vec<teamcraft_proto::WithdrawnRole>,
+  role_losses: Vec<teamcraft_proto::RoleLossEntry>,
   next_id: i64,
   /// See [`FakeServer::challenge_first_frames`].
   first_frame_challenges: usize,
@@ -880,6 +889,65 @@ impl FakeServer {
     self.lock().key_bags.remove(&user);
   }
 
+  /// The ID token `user`'s app holds now, as if it just refreshed.
+  pub fn set_provider_token(&self, user: UserId, token: impl Into<String>) {
+    self.lock().provider_tokens.insert(user, token.into());
+  }
+
+  /// The access token `user`'s app holds now.
+  pub fn set_provider_access_token(&self, user: UserId, token: impl Into<String>) {
+    self.lock().provider_access_tokens.insert(user, token.into());
+  }
+
+  /// What `user` published last.
+  pub fn role_evidence_of(&self, user: UserId) -> Option<String> {
+    self.lock().role_evidence.get(&user).cloned()
+  }
+
+  /// Puts a token in the owners' list as if `user` had published it, with this key: what a hostile
+  /// server can do.
+  pub fn forge_role_evidence(&self, user: UserId, token: impl Into<String>, public_key: Vec<u8>) {
+    self
+      .lock()
+      .forged_role_evidence
+      .push(teamcraft_proto::RoleEvidenceEntry {
+        user_id: user,
+        token: token.into(),
+        public_key: Base64Bytes::new(public_key),
+      });
+  }
+
+  /// The server keeps this expired access token of `user`, seen on a request of theirs.
+  pub fn add_role_loss(&self, user: UserId, token: impl Into<String>) {
+    self.lock().role_losses.push(teamcraft_proto::RoleLossEntry {
+      user_id: user,
+      token: token.into(),
+    });
+  }
+
+  /// The server reports these people's roles gone.
+  pub fn set_withdrawn_roles(&self, withdrawn: Vec<teamcraft_proto::WithdrawnRole>) {
+    self.lock().withdrawn_roles = withdrawn;
+  }
+
+  /// Forgets everything published: what a server that holds evidence back shows.
+  pub fn clear_role_evidence(&self) {
+    let mut state = self.lock();
+    state.role_evidence.clear();
+    state.forged_role_evidence.clear();
+  }
+
+  /// The server pretends no roster or policy was ever signed.
+  pub fn clear_workspace_logs(&self) {
+    let mut state = self.lock();
+    state.log_mut(&WorkspaceLogKind::Roster).clear();
+    state.log_mut(&WorkspaceLogKind::Policy).clear();
+  }
+
+  pub fn workspace_log_len(&self, kind: &WorkspaceLogKind) -> usize {
+    self.lock().log_mut(kind).len()
+  }
+
   pub fn replace_identity_key(&self, user: UserId, public_key: Vec<u8>) {
     if let Some(entry) = self.lock().identity_keys.get_mut(&user) {
       entry.public_key = Base64Bytes::new(public_key);
@@ -1062,6 +1130,15 @@ impl FakeServer {
       && let Some(held) = entry.members.get_mut(&user)
     {
       held.0 = role;
+    }
+  }
+
+  /// The server lists somebody as a member with `role` whom nobody added to the encryption group.
+  pub fn list_member_unsigned(&self, conversation: ConversationId, user: UserId, role: ChannelRole) {
+    let mut state = self.lock();
+    let floor = state.peek_id();
+    if let Some(entry) = state.conversations.get_mut(&conversation) {
+      entry.members.insert(user, (role, floor));
     }
   }
 
@@ -4561,6 +4638,55 @@ impl ServerApi for FakeServerApi {
         .get(&me)
         .cloned()
         .ok_or_else(|| ApiError::status(404, ErrorCode::KeyBagNotFound, "no key bag"))
+    })
+  }
+
+  fn provider_tokens(&self) -> Option<super::ProviderTokens> {
+    let state = self.server.lock();
+    state
+      .provider_tokens
+      .get(&self.user)
+      .map(|id_token| super::ProviderTokens {
+        id_token: id_token.clone(),
+        access_token: state
+          .provider_access_tokens
+          .get(&self.user)
+          .cloned()
+          .unwrap_or_else(|| "h.e30.s".to_owned()),
+        maybe_prover: None,
+      })
+  }
+
+  async fn put_role_evidence(
+    &self,
+    request: &teamcraft_proto::PutRoleEvidenceRequest,
+  ) -> Result<(), ApiError> {
+    self.with(|state, user| {
+      state.role_evidence.insert(user, request.token.clone());
+      let everyone: Vec<UserId> = state.users.keys().copied().collect();
+      state.publish(everyone, &GatewayEvent::RoleEvidenceUpdate);
+      Ok(())
+    })
+  }
+
+  async fn list_role_evidence(&self) -> Result<teamcraft_proto::ListRoleEvidenceResponse, ApiError> {
+    self.with(|state, _| {
+      let mut entries = Vec::new();
+      for (user, token) in &state.role_evidence {
+        if let Some(key) = state.identity_keys.get(user) {
+          entries.push(teamcraft_proto::RoleEvidenceEntry {
+            user_id: *user,
+            token: token.clone(),
+            public_key: key.public_key.clone(),
+          });
+        }
+      }
+      entries.extend(state.forged_role_evidence.iter().cloned());
+      Ok(teamcraft_proto::ListRoleEvidenceResponse {
+        entries,
+        withdrawn: state.withdrawn_roles.clone(),
+        role_losses: state.role_losses.clone(),
+      })
     })
   }
 

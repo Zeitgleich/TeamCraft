@@ -459,6 +459,13 @@ pub fn update_status(app: AppHandle, host: State<'_, Arc<UpdateHost>>) -> Update
 }
 
 /// "Check now".
+/// Checks for an update now, as the tray's "Check for updates" does.
+pub fn check_now(app: &AppHandle) {
+  if let Some(host) = app.try_state::<Arc<UpdateHost>>() {
+    host.wake.notify_one();
+  }
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn update_check(host: State<'_, Arc<UpdateHost>>) {
   host.wake.notify_one();

@@ -67,10 +67,13 @@ class CoreRepository(
     val storageKey = server.address.storageKey
     val account = "${server.address.origin} $subject"
     maybeCore?.takeIf { maybeAccount == account }?.let { return it }
+    maybeTokens?.maybeCore = null
+    maybeTokens = null
     maybeCore?.let {
       it.close()
       onAccountClosed()
     }
+    val tokens = Tokens(auth)
     val core = withContext(Dispatchers.IO) {
       TeamCraft(
         AppConfig(
@@ -80,13 +83,16 @@ class CoreRepository(
           databaseKey = databaseKey(storageKey, subject),
           pushGatewayUrl = BuildConfig.PUSH_GATEWAY_URL.ifEmpty { null },
         ),
-        Tokens(auth),
+        tokens,
         Changes {
           changes.update { it + 1 }
           connection.value = maybeCore?.connectionState()
         },
       )
     }
+    tokens.maybeCore = core
+    maybeTokens = tokens
+    core.noteIdToken(auth.idToken())
     maybeCore = core
     maybeAccount = account
     connection.value = core.connectionState()
@@ -95,6 +101,8 @@ class CoreRepository(
 
   /** Closes the core; local data stays (it belongs to the account, not the session). */
   suspend fun close() = lock.withLock {
+    maybeTokens?.maybeCore = null
+    maybeTokens = null
     maybeCore?.close()
     onAccountClosed()
     maybeCore = null
@@ -102,18 +110,27 @@ class CoreRepository(
     connection.value = null
   }
 
+  /** The token source of the open core, so it stops talking to that core when it closes. */
+  private var maybeTokens: Tokens? = null
+
   private fun databaseKey(storageKey: String, subject: String): ByteArray =
     SealedFile(File(context.filesDir, StoragePaths.databaseKeyFile(storageKey, subject)), KeystoreBox(DATABASE_KEY_ALIAS))
       .readOrCreate(DATABASE_KEY_LENGTH)
 
   private class Tokens(private val auth: AuthRepository) : TokenProvider {
+    /** The core this supplies, once it is open: it also gets the ID token that came along. */
+    @Volatile var maybeCore: TeamCraft? = null
+
     /**
      * Called on the core's own token thread, never on one that reads. Every authenticated request
      * of the core passes here, so reading what the store holds doesn't wait for the device's CAs.
+     * The ID token goes along for the owners' apps to verify (e2ee.md §3.1.3).
      */
     override fun accessToken(): String? = runBlocking {
       NetworkTrust.awaitTrustedCertificates()
-      auth.accessToken()
+      // A core closed in between throws: nothing to tell it then, and the token is still good.
+      if (runCatching { maybeCore?.takeIdTokenRequest() }.getOrNull() == true) auth.refreshTokensSoon()
+      auth.accessToken().also { runCatching { maybeCore?.noteIdToken(auth.idToken()) } }
     }
   }
 

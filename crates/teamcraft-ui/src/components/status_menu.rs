@@ -41,6 +41,8 @@ pub fn StatusMenu() -> impl IntoView {
   let session = use_session();
   let me = Memo::new(move |_| state.me());
   let is_admin = Memo::new(move |_| state.read(|backend| backend.my_role()).includes(&Role::Admin));
+  // Alerts of the health checks, told to admins: the entry says so and opens the health page.
+  let health_alerts = Memo::new(move |_| state.read(|backend| backend.health_alert_count()));
   // The workspace may switch statuses off (PLAN.md §4): then there is nothing to set.
   let are_statuses_enabled =
     Memo::new(move |_| state.read(|backend| backend.presence_policy()).statuses_enabled);
@@ -73,12 +75,7 @@ pub fn StatusMenu() -> impl IntoView {
   };
 
   let set_presence_until = move |presence: PresenceStatus, maybe_until: Option<TimestampMs>| {
-    state.write(|backend| backend.set_presence_until(presence, maybe_until));
-    let maybe_dnd_until = maybe_until.filter(|_| presence == PresenceStatus::DoNotDisturb);
-    state
-      .settings
-      .prefs
-      .update(|prefs| prefs.notifications.maybe_dnd_until = maybe_dnd_until);
+    state.set_presence_until(presence, maybe_until);
     state.close_overlay();
     focus_account_button();
   };
@@ -240,10 +237,20 @@ pub fn StatusMenu() -> impl IntoView {
           class="menu-item"
           role="menuitem"
           tabindex="-1"
-          on:click=move |_| state.open_admin(AdminSection::Channels)
+          on:click=move |_| {
+            state
+              .open_admin(
+                if health_alerts.get_untracked() > 0 { AdminSection::Health } else { AdminSection::Channels },
+              )
+          }
         >
           <Icon name=IconName::Shield />
           <span class="menu-label">{move || i18n.t("menu-administration")}</span>
+          <Show when=move || { health_alerts.get() > 0 } fallback=|| ()>
+            <span class="badge-count" role="img" aria-label=move || i18n.t_count("health-alerts-badge", health_alerts.get())>
+              {move || health_alerts.get()}
+            </span>
+          </Show>
         </button>
       </Show>
       <Show when=|| crate::profiles::use_profiles().is_some() fallback=|| ()>

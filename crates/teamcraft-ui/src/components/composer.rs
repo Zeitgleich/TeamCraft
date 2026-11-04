@@ -521,6 +521,7 @@ pub fn Composer(
       .map(|target| target.message);
     state.reply_target.set(None);
     let mut message = OutgoingMessage {
+      maybe_client_message_id: None,
       conversation,
       maybe_thread,
       body,

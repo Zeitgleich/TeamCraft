@@ -206,6 +206,18 @@ class AuthRepository(
     }
   }
 
+  /** The session's newest ID token, for the role evidence (`null`: a local session, or signed out). */
+  fun idToken(): String? {
+    val session = session() ?: return null
+    return synchronized(this) { if (session.maybeLocal == null) session.state.idToken else null }
+  }
+
+  /** The next [accessToken] refreshes first: an ID token naming something just written is wanted. */
+  fun refreshTokensSoon() {
+    val session = session() ?: return
+    synchronized(this) { session.state.needsTokenRefresh = true }
+  }
+
   /** Ends the active server's session; the server stays selected. */
   fun signOut() {
     session()?.let(::signOut)

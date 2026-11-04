@@ -11,7 +11,7 @@ use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
 use teamcraft_proto::{
   CallId, CallJoinTokenResponse, CallRosterEntry, CallStateResponse, ConversationId, ConversationKind,
   CreateCallJoinTokenRequest, CreateInstantMeetingRequest, DeviceId, GatewayEvent, IdempotencyKey,
-  MoveCallRequest, UserId,
+  MoveCallRequest, NotetakerRequest, NotetakerScope, UserId,
 };
 
 use super::Client;
@@ -210,6 +210,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// the call's verified group, never the server's member list of either conversation. Only then
   /// does the server tell everybody in the call to switch over (`call_move`) and ring the added
   /// people, so they find the group when they join. The DM itself doesn't change.
+  ///
+  /// The notetaker of the verified policy among `added` ("Add notetaker" in a DM call, e2ee.md
+  /// §8.2, "In every call") doesn't ring: it is asked into the meeting's call with a `join`
+  /// `this_call` there, sent after the commit that put it into the group, if the policy lets the
+  /// user ask it in.
   pub async fn move_call_to_meeting(
     &mut self,
     from: ConversationId,
@@ -244,9 +249,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !self.has_group(meeting)? {
       return Err(CoreError::CallEncryptionPending(meeting));
     }
+    let maybe_notetaker = crate::notetaker::notetaker_policy(&self.store)
+      .and_then(|policy| policy.active_bot())
+      .filter(|bot| rung.contains(bot));
     let request = MoveCallRequest {
       to_conversation_id: meeting,
-      ring_user_ids: rung.clone(),
+      // The notetaker answers requests, not rings.
+      ring_user_ids: rung
+        .iter()
+        .copied()
+        .filter(|user| Some(*user) != maybe_notetaker)
+        .collect(),
     };
     // A second move of the same call (somebody else added people at the same time) is refused
     // with a conflict: everybody follows the first one.
@@ -265,7 +278,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     note_call_move(&self.store, from, meeting, &record)?;
     self.enqueue(from, None, MessageContent::Event { event })?;
+    if maybe_notetaker.is_some() {
+      self.ask_notetaker_in(meeting)?;
+    }
     self.flush_outbox().await?;
+    Ok(())
+  }
+
+  /// Queues a `join` `this_call` for the notetaker in `conversation` and takes it into this
+  /// device's ledger, if the verified policy lets the user ask it in; nothing otherwise (the
+  /// notetaker would drop it anyway).
+  fn ask_notetaker_in(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let me = self.user_id();
+    let now_ms = self.now_ms();
+    if !crate::notetaker::NotetakerAuthority::from_store(&self.store, now_ms, [me])?.may_invite(me) {
+      tracing::debug!(conversation_id = %conversation, "the policy doesn't let this user ask the notetaker in");
+      return Ok(());
+    }
+    let content = MessageContent::Notetaker {
+      request: NotetakerRequest::Join {
+        scope: NotetakerScope::ThisCall,
+      },
+    };
+    super::messaging::apply_control(&self.store, conversation, me, &content, now_ms)?;
+    self.enqueue(conversation, None, content)?;
     Ok(())
   }
 

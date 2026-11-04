@@ -56,7 +56,7 @@ const HELD_BACK: Duration = Duration::from_secs(1);
 /// token has always run out, so a start has to refresh it, as after every night. It also keeps the
 /// gateway from connecting on an old token while the test pretends there is no network: DevTools can
 /// block requests, but not the page's WebSocket.
-const CLOCK_RUNS_ON: &str = "try { \
+pub(crate) const CLOCK_RUNS_ON: &str = "try { \
     const hours = Number(localStorage.getItem('e2e-clock-hours') || 0) + 1; \
     localStorage.setItem('e2e-clock-hours', hours); \
     const realNow = Date.now.bind(Date); \
@@ -596,27 +596,27 @@ async fn deactivation_while_offline_ends_the_session(
   assert!(!text.contains(CHANNEL) && !text.contains(MESSAGE), "{text}");
 }
 
-async fn add_script(page: &Page, source: &str) {
+pub(crate) async fn add_script(page: &Page, source: &str) {
   page
     .execute(AddScriptToEvaluateOnNewDocumentParams::new(source))
     .await
     .unwrap();
 }
 
-async fn block_the_network(page: &Page) {
+pub(crate) async fn block_the_network(page: &Page) {
   let patterns = BLOCKED_URLS.map(|url| BlockPattern::new(url, true));
   let params = SetBlockedUrLsParams::builder().url_patterns(patterns).build();
   page.execute(params).await.unwrap();
 }
 
-async fn unblock_the_network(page: &Page) {
+pub(crate) async fn unblock_the_network(page: &Page) {
   let params = SetBlockedUrLsParams::builder()
     .url_patterns(Vec::<BlockPattern>::new())
     .build();
   page.execute(params).await.unwrap();
 }
 
-async fn wait_until_gone(page: &Page, selector: &str) {
+pub(crate) async fn wait_until_gone(page: &Page, selector: &str) {
   let deadline = Instant::now() + Duration::from_secs(60);
   while page.find_element(selector).await.is_ok() {
     assert!(Instant::now() < deadline, "{selector} is still there");
@@ -625,19 +625,19 @@ async fn wait_until_gone(page: &Page, selector: &str) {
 }
 
 /// Requests paused in the page until dropped through [`Self::stop`].
-struct Interception {
+pub(crate) struct Interception {
   is_running: Arc<AtomicBool>,
 }
 
 impl Interception {
-  async fn stop(self, page: &Page) {
+  pub(crate) async fn stop(self, page: &Page) {
     self.is_running.store(false, Ordering::SeqCst);
     page.execute(FetchDisableParams::default()).await.unwrap();
   }
 }
 
 /// Starts pausing the requests of `patterns`; `handle` answers each.
-async fn intercept<F, Fut>(page: &Page, patterns: &[&str], handle: F) -> Interception
+pub(crate) async fn intercept<F, Fut>(page: &Page, patterns: &[&str], handle: F) -> Interception
 where
   F: Fn(Page, Arc<EventRequestPaused>) -> Fut + Send + Sync + 'static,
   Fut: Future<Output = ()> + Send + 'static,
@@ -673,7 +673,7 @@ where
 }
 
 /// Every request to the server's API and the identity provider comes back a second late.
-async fn hold_back(page: &Page) -> Interception {
+pub(crate) async fn hold_back(page: &Page) -> Interception {
   intercept(page, &API_PATTERNS, |page, event| async move {
     tokio::time::sleep(HELD_BACK).await;
     // The page may have gone meanwhile.

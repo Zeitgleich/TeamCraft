@@ -17,10 +17,10 @@ use teamcraft_client_api::calls::{
 use teamcraft_proto::OrgBackgroundId;
 
 use teamcraft_proto::{
-  AdminBrandsResponse, AdminCalendarSettingsResponse, AdminInstanceResponse, AdminMailSettingsResponse,
-  AnnouncementResponse, BrandAssetSlot, ChannelModeration, CreateBrandRequest, PermissionSchemeResponse,
-  Role, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange,
-  SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest,
+  AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
+  AdminMailSettingsResponse, AnnouncementResponse, BrandAssetSlot, ChannelModeration, CreateBrandRequest,
+  PermissionSchemeResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection,
+  SchemeChange, SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest,
   UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
@@ -166,15 +166,26 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     // rest must be read again (after a reconnect). Applied before the UI re-reads. The first
     // snapshot is taken before deciding about the poll, so a chat with a core never starts it.
     live.observe(self.chat.live_snapshot());
+    if let Some(admin) = &self.maybe_admin {
+      // Once at the start: an alert raised while the admin was away shows in the badges.
+      admin.queue_health_count();
+    }
     // No core, so no gateway: polling is the only way to see new counts. Stops for good once a
     // snapshot shows a core (a shell that reports its live state only later).
     let is_rest_only = RwSignal::new(!live.is_core_fed());
     let observer = live.clone();
     // Weak: the chat keeps this notifier, which must not keep the chat alive after sign-out.
     let chat = Rc::downgrade(&self.chat);
+    let maybe_admin = self.maybe_admin.clone();
     self.chat.set_change_notifier(Rc::new(move || {
       if let Some(chat) = chat.upgrade() {
-        observer.observe(chat.live_snapshot());
+        let follow_up = observer.observe(chat.live_snapshot());
+        // Pushed by the server (and after a reconnect, which may have missed it): no polling.
+        if follow_up.needs_health
+          && let Some(admin) = &maybe_admin
+        {
+          admin.health_changed();
+        }
       }
       if is_rest_only.try_get_untracked() == Some(true) && observer.is_core_fed() {
         is_rest_only.set(false);
@@ -835,15 +846,15 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.channel_roles(conversation)
   }
 
-  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
-    self.chat.can_sign_channel_roles(conversation)
-  }
-
   fn channel_roles_review(
     &self,
     conversation: ConversationId,
   ) -> Option<teamcraft_client_api::model::ChannelRolesReview> {
     self.chat.channel_roles_review(conversation)
+  }
+
+  fn channel_role_alarms(&self) -> Vec<ConversationId> {
+    self.chat.channel_role_alarms()
   }
 
   fn sign_reviewed_channel_roles(
@@ -855,14 +866,6 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self
       .chat
       .sign_reviewed_channel_roles(conversation, roles, at_cursor);
-  }
-
-  fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {
-    self.chat.are_channel_roles_unverified(conversation)
-  }
-
-  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
-    self.chat.confirm_channel_role(conversation, user);
   }
 
   fn refresh_channel_roles(&self, conversation: ConversationId) {
@@ -1387,20 +1390,15 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
-  fn set_workspace_policy(
-    &self,
-    policy: WorkspacePolicy,
-    genesis: Vec<teamcraft_client_api::admin::RosterEntry>,
-  ) {
+  fn set_workspace_policy(&self, policy: WorkspacePolicy) {
     let Some(admin) = &self.maybe_admin else {
       return;
     };
-    // Only the roster the owner confirmed with IDs and keys, never the server's role holders as
-    // they come (#265).
-    let (owners, admins) = teamcraft_client_api::admin::roster_by_role(&genesis);
     // The editor started from what the server showed; the core signs only if that is also what it
     // verified itself (a compromised server could show altered fields).
-    self.chat.publish_policy(admin.policy(), policy, owners, admins);
+    self
+      .chat
+      .publish_policy(admin.policy(), policy, Vec::new(), Vec::new());
     admin.queue_refresh_after_publish();
   }
 
@@ -1480,6 +1478,14 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     if let Some(admin) = &self.maybe_admin {
       admin.clear_announcement();
     }
+  }
+
+  fn health_status(&self) -> Option<AdminHealthResponse> {
+    self.maybe_admin.as_ref().and_then(AdminLive::health)
+  }
+
+  fn health_alert_count(&self) -> usize {
+    self.maybe_admin.as_ref().map_or(0, AdminLive::open_alert_count)
   }
 
   fn instance_status(&self) -> Option<AdminInstanceResponse> {
@@ -1631,19 +1637,6 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
       Some(admin) => admin.roster_candidates(),
       None => (Vec::new(), Vec::new()),
     }
-  }
-
-  fn admin_genesis_roster(&self) -> Option<Vec<teamcraft_client_api::admin::RosterEntry>> {
-    let admin = self.maybe_admin.as_ref()?;
-    if self.policy_edit_blocker().is_some() || self.chat.owner_roster().is_some() {
-      return None;
-    }
-    let (owners, admins) = admin.roster_candidates();
-    Some(teamcraft_client_api::admin::genesis_roster(
-      self.chat.me().id,
-      &owners,
-      &admins,
-    ))
   }
 
   fn admin_identity_keys(&self) -> teamcraft_client_api::remote::SecuritySnapshot {

@@ -19,15 +19,15 @@ use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, DownloadControl, DownloadEntry, FileInfo, LinkedMessage,
-  MediaAnchor, MediaPage, MessageExtras, NewChannel, NewSpace, OutgoingMessage, PermalinkTarget, SavedItem,
-  ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+  MediaAnchor, MediaPage, MessageExtras, MessagePriority, NewChannel, NewSpace, OutgoingMessage,
+  PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, GapEdge, HistoryGap, InviteId, JoinableSpace, Message,
-  MessageId, OlderHistory, PendingInvite, PresenceStatus, Space, SpaceId, SpaceRole, SpaceRoster, ThreadId,
-  ThreadSummary, UnseenReactions, User, UserId,
+  MessageId, MessageKind, OlderHistory, PendingInvite, PresenceStatus, Space, SpaceId, SpaceRole,
+  SpaceRoster, ThreadId, ThreadSummary, UnseenReactions, User, UserId, pending_message_id,
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
@@ -36,7 +36,7 @@ use teamcraft_client_api::remote::{
 };
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
-use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, WebPushKeyResponse};
+use teamcraft_proto::{BackgroundId, CategoryId, ClientMessageId, HistoryPolicy, WebPushKeyResponse};
 
 use crate::auth::Authenticator;
 use crate::auth::tauri::{call, listen, listen_text};
@@ -279,6 +279,14 @@ struct Feed {
   is_asking_gap: bool,
 }
 
+/// A row shown for a message the core has not answered for yet ([`RemoteChat::show_pending`]).
+#[derive(Clone, Copy, Debug)]
+struct PendingRow {
+  conversation: ConversationId,
+  maybe_thread: Option<ThreadId>,
+  id: MessageId,
+}
+
 /// Where the rows of a hole's page arrive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GapRows {
@@ -419,6 +427,37 @@ impl Feed {
     if is_before_reader {
       self.prepended += shift;
     }
+  }
+
+  /// Appends a message the user just sent, before the core has answered (issue #778). Only when
+  /// the feed reaches its newest message and nothing is moving: the row then sits where the core
+  /// will put it, and the core's answer replaces it in place (it has the same ID). Returns whether
+  /// the row was added.
+  fn push_pending(&mut self, message: Message) -> bool {
+    let is_at_newest = self.total == 0 || self.rows.contains_key(&(self.total - 1));
+    if !is_at_newest || self.is_moving || self.is_expecting_older || self.maybe_gap_rows.is_some() {
+      return false;
+    }
+    self.rows.insert(self.total, message);
+    self.total += 1;
+    true
+  }
+
+  /// Takes back a row of [`Self::push_pending`] the core refused; the rows after it move up.
+  fn withdraw_pending(&mut self, id: MessageId) {
+    let Some(index) = self
+      .rows
+      .iter()
+      .find_map(|(index, row)| (row.id == id).then_some(*index))
+    else {
+      return;
+    };
+    self.rows = std::mem::take(&mut self.rows)
+      .into_iter()
+      .filter(|(held, _)| *held != index)
+      .map(|(held, row)| (if held > index { held - 1 } else { held }, row))
+      .collect();
+    self.total = self.total.saturating_sub(1);
   }
 
   fn store(&mut self, window: MessageWindow) -> bool {
@@ -956,12 +995,21 @@ impl RemoteChat {
   /// Hands an action to the core. A failure is shown to the user (issue #322); a button waiting
   /// for the action keeps its ticket until the core answered.
   fn act(&self, action: ChatAction) {
+    self.act_showing(action, None);
+  }
+
+  /// [`Self::act`] for an action whose effect is already shown ([`Self::show_pending`]): a refusal
+  /// takes the row back.
+  fn act_showing(&self, action: ChatAction, maybe_pending: Option<PendingRow>) {
     let backend = self.clone();
     let maybe_ticket = ActionTicket::current();
     spawn_local(async move {
       let outcome = call::<()>("core_action", &json!({ "action": action })).await;
       *backend.maybe_error.borrow_mut() = outcome.as_ref().err().cloned();
       if let Err(error) = outcome {
+        if let Some(pending) = maybe_pending {
+          backend.withdraw_pending(pending);
+        }
         let failure = ActionFailure::from_wire(&error);
         if let Some(ticket) = &maybe_ticket {
           ticket.fail(failure.clone());
@@ -977,6 +1025,78 @@ impl RemoteChat {
       // Dropped only now, so the button stays pending until the change is visible.
       drop(maybe_ticket);
     });
+  }
+
+  /// Puts a plain message the user just sent into the mirror, in the same frame: its row is the
+  /// outbox message the core writes under the same client ID, so the core's answer replaces it in
+  /// place (issue #778). Messages whose row needs more than the text (a reply's quote, files,
+  /// urgency) appear with the core's answer.
+  fn show_pending(&self, message: &OutgoingMessage, id: ClientMessageId) -> Option<PendingRow> {
+    let is_plain = message.files.is_empty()
+      && message.maybe_reply_to.is_none()
+      && message.priority == MessagePriority::Normal
+      && !message.wants_acknowledgement
+      && !message.is_silent
+      && !message.also_send_to_channel
+      && !message.body.trim().is_empty();
+    if !is_plain {
+      return None;
+    }
+    let pending = PendingRow {
+      conversation: message.conversation,
+      maybe_thread: message.maybe_thread,
+      id: pending_message_id(id),
+    };
+    let is_shown = {
+      let mut mirror = self.mirror.borrow_mut();
+      let row = Message {
+        id: pending.id,
+        conversation: message.conversation,
+        author: mirror.snapshot.me.id,
+        kind: MessageKind::User,
+        sent_at: crate::clock::now_ms(),
+        body: message.body.clone(),
+        is_edited: false,
+        reactions: Vec::new(),
+        reply_count: 0,
+        maybe_thread: message.maybe_thread,
+        maybe_imported: None,
+        maybe_placeholder: None,
+      };
+      match message.maybe_thread {
+        Some(thread) => mirror
+          .threads
+          .get_mut(&(message.conversation, thread))
+          .map(|replies| replies.push(row))
+          .is_some(),
+        None => mirror
+          .feeds
+          .get_mut(&message.conversation)
+          .is_some_and(|feed| feed.push_pending(row)),
+      }
+    };
+    if is_shown {
+      self.changed();
+      Some(pending)
+    } else {
+      None
+    }
+  }
+
+  fn withdraw_pending(&self, pending: PendingRow) {
+    let mut mirror = self.mirror.borrow_mut();
+    match pending.maybe_thread {
+      Some(thread) => {
+        if let Some(replies) = mirror.threads.get_mut(&(pending.conversation, thread)) {
+          replies.retain(|row| row.id != pending.id);
+        }
+      },
+      None => {
+        if let Some(feed) = mirror.feeds.get_mut(&pending.conversation) {
+          feed.withdraw_pending(pending.id);
+        }
+      },
+    }
   }
 
   fn update_conversation(&self, conversation: ConversationId, change: impl FnOnce(&mut Conversation)) {
@@ -1013,8 +1133,13 @@ impl ChatBackend for RemoteChat {
     Some(self)
   }
 
-  fn send_message(&self, message: OutgoingMessage) {
-    self.act(ChatAction::SendMessage { message });
+  fn send_message(&self, mut message: OutgoingMessage) {
+    // The ID is the UI's, so the row can be shown before the core has answered (issue #778).
+    let id = *message
+      .maybe_client_message_id
+      .get_or_insert_with(ClientMessageId::random);
+    let maybe_pending = self.show_pending(&message, id);
+    self.act_showing(ChatAction::SendMessage { message }, maybe_pending);
   }
 
   fn message_extras(&self, conversation: ConversationId, messages: &[MessageId]) -> Vec<MessageExtras> {
@@ -1654,13 +1779,6 @@ impl ChatBackend for RemoteChat {
     }
   }
 
-  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
-    matches!(
-      self.ask(ChatQuery::CanSignChannelRoles { conversation }),
-      Some(ChatAnswer::CanSignChannelRoles { can_sign: true })
-    )
-  }
-
   fn channel_roles_review(
     &self,
     conversation: ConversationId,
@@ -1668,6 +1786,13 @@ impl ChatBackend for RemoteChat {
     match self.ask(ChatQuery::ChannelRolesReview { conversation }) {
       Some(ChatAnswer::ChannelRolesReview { maybe_review }) => maybe_review,
       _ => None,
+    }
+  }
+
+  fn channel_role_alarms(&self) -> Vec<ConversationId> {
+    match self.ask(ChatQuery::ChannelRoleAlarms) {
+      Some(ChatAnswer::ChannelRoleAlarms { conversations }) => conversations,
+      _ => Vec::new(),
     }
   }
 
@@ -1682,17 +1807,6 @@ impl ChatBackend for RemoteChat {
       roles,
       at_cursor,
     });
-  }
-
-  fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {
-    matches!(
-      self.ask(ChatQuery::AreChannelRolesUnverified { conversation }),
-      Some(ChatAnswer::AreChannelRolesUnverified { is_unverified: true })
-    )
-  }
-
-  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
-    self.act(ChatAction::ConfirmChannelRole { conversation, user });
   }
 
   fn refresh_channel_roles(&self, conversation: ConversationId) {
@@ -2588,6 +2702,184 @@ mod tests {
       );
       assert_eq!(feed.missing_pages(PAGE * 3 + 5, PAGE * 3 + 10), vec![3]);
       assert!(feed.missing_pages(10, 10).is_empty());
+    }
+  }
+
+  mod pending_rows {
+    use teamcraft_client_api::actions::OutgoingMessage;
+    use teamcraft_client_api::model::{is_pending, pending_message_id};
+
+    use super::refresh_plan::backend;
+    use super::*;
+
+    const CONVERSATION: u64 = 7;
+
+    #[test]
+    fn a_sent_message_is_in_the_feed_before_the_core_answers() {
+      let backend = backend_with_feed(&["a", "b"]);
+      let id = ClientMessageId::from_bytes([3; 16]);
+
+      let maybe_pending = backend.show_pending(&outgoing("hello", id), id);
+
+      assert!(maybe_pending.is_some());
+      assert_eq!(backend.message_count(id_from_raw(CONVERSATION)), 3);
+      let rows = backend.messages(id_from_raw(CONVERSATION), 0, 10);
+      let last = rows.last().expect("the new row");
+      assert_eq!(last.body, "hello");
+      assert_eq!(last.id, pending_message_id(id));
+      assert!(is_pending(last.id));
+      assert_eq!(last.author, backend.mirror.borrow().snapshot.me.id);
+    }
+
+    #[test]
+    fn the_cores_row_replaces_it_in_place() {
+      let mut feed = feed_with(&["a", "b"]);
+      let id = ClientMessageId::from_bytes([3; 16]);
+      let mut shown = window(3, &["a", "b", "hello"]).messages.remove(2);
+      shown.id = pending_message_id(id);
+      assert!(feed.push_pending(shown.clone()));
+
+      let mut from_core = shown;
+      from_core.sent_at = 5;
+      let mut answer = window(3, &["a", "b"]);
+      answer.messages.push(from_core.clone());
+
+      assert!(feed.apply(answer), "the row differs in its time");
+      assert_eq!(feed.total, 3);
+      assert_eq!(feed.rows.get(&2), Some(&from_core));
+    }
+
+    #[test]
+    fn a_message_at_the_end_of_an_empty_feed_is_the_first_row() {
+      let backend = backend();
+      backend
+        .mirror
+        .borrow_mut()
+        .feeds
+        .entry(id_from_raw(CONVERSATION))
+        .or_default();
+      let id = ClientMessageId::from_bytes([3; 16]);
+
+      assert!(backend.show_pending(&outgoing("hello", id), id).is_some());
+      assert_eq!(backend.message_count(id_from_raw(CONVERSATION)), 1);
+    }
+
+    #[test]
+    fn a_message_needing_more_than_its_text_waits_for_the_core() {
+      let backend = backend_with_feed(&["a"]);
+      let id = ClientMessageId::from_bytes([3; 16]);
+      let mut reply = outgoing("hello", id);
+      reply.maybe_reply_to = Some(id_from_raw(1));
+      let mut urgent = outgoing("hello", id);
+      urgent.priority = teamcraft_client_api::actions::MessagePriority::Urgent;
+      let mut file = outgoing("hello", id);
+      file.files.push(teamcraft_client_api::actions::OutgoingFile {
+        file_name: "a.txt".into(),
+        media_type: "text/plain".into(),
+        source: teamcraft_client_api::actions::FileSource::Bytes { bytes: vec![1] },
+        maybe_thumbnail: None,
+        maybe_duration_ms: None,
+      });
+      let blank = outgoing("   ", id);
+
+      for message in [reply, urgent, file, blank] {
+        assert!(backend.show_pending(&message, id).is_none());
+      }
+      assert_eq!(backend.message_count(id_from_raw(CONVERSATION)), 1);
+    }
+
+    #[test]
+    fn a_feed_not_at_its_newest_end_shows_nothing_early() {
+      // The reader jumped back in time: the newest rows are not held, so a row at the end would be
+      // alone among rows of another time.
+      let mut feed = Feed::default();
+      feed.apply(window(500, &["a", "b"]));
+      let id = ClientMessageId::from_bytes([3; 16]);
+      let row = window(1, &["x"]).messages.remove(0);
+
+      assert!(!feed.push_pending(row));
+      assert_eq!(feed.total, 500);
+      let _ = id;
+    }
+
+    #[test]
+    fn a_feed_in_motion_shows_nothing_early() {
+      let mut feed = feed_with(&["a", "b"]);
+      feed.is_moving = true;
+      let row = window(1, &["x"]).messages.remove(0);
+
+      assert!(!feed.push_pending(row));
+    }
+
+    #[test]
+    fn a_refused_message_goes_and_the_rows_after_it_move_up() {
+      let mut feed = feed_with(&["a", "b"]);
+      let mut first = window(1, &["x"]).messages.remove(0);
+      first.id = pending_message_id(ClientMessageId::from_bytes([1; 16]));
+      let mut second = window(1, &["y"]).messages.remove(0);
+      second.id = pending_message_id(ClientMessageId::from_bytes([2; 16]));
+      feed.push_pending(first.clone());
+      feed.push_pending(second.clone());
+
+      feed.withdraw_pending(first.id);
+
+      assert_eq!(feed.total, 3);
+      assert_eq!(feed.rows.get(&2), Some(&second));
+      assert_eq!(feed.rows.len(), 3);
+    }
+
+    #[test]
+    fn a_reply_goes_into_a_thread_that_is_held() {
+      let backend = backend();
+      let (conversation, thread) = (
+        id_from_raw(CONVERSATION),
+        crate::model::thread_id_of(id_from_raw(70)),
+      );
+      backend
+        .mirror
+        .borrow_mut()
+        .threads
+        .insert((conversation, thread), Vec::new());
+      let id = ClientMessageId::from_bytes([3; 16]);
+      let mut message = outgoing("in the thread", id);
+      message.maybe_thread = Some(thread);
+
+      let pending = backend.show_pending(&message, id).expect("shown");
+      assert_eq!(backend.thread(conversation, thread).len(), 1);
+
+      backend.withdraw_pending(pending);
+      assert!(backend.thread(conversation, thread).is_empty());
+    }
+
+    fn outgoing(body: &str, id: ClientMessageId) -> OutgoingMessage {
+      OutgoingMessage {
+        conversation: id_from_raw(CONVERSATION),
+        maybe_client_message_id: Some(id),
+        maybe_thread: None,
+        body: body.to_owned(),
+        maybe_reply_to: None,
+        priority: Default::default(),
+        wants_acknowledgement: false,
+        is_silent: false,
+        also_send_to_channel: false,
+        files: Vec::new(),
+      }
+    }
+
+    fn feed_with(bodies: &[&str]) -> Feed {
+      let mut feed = Feed::default();
+      feed.apply(window(bodies.len(), bodies));
+      feed
+    }
+
+    fn backend_with_feed(bodies: &[&str]) -> RemoteChat {
+      let backend = backend();
+      backend
+        .mirror
+        .borrow_mut()
+        .feeds
+        .insert(id_from_raw(CONVERSATION), feed_with(bodies));
+      backend
     }
   }
 

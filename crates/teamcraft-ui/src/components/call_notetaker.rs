@@ -2,18 +2,23 @@
 //! it is in the call, which says where the audio goes and lets those who may send it away, and the
 //! state behind the call screen's button and badge. "Add notetaker" also works where the notetaker
 //! is no member of the conversation yet: it adds it first, as adding people does, and asks it in
-//! once its membership commit is through, so the request is sent to a group it is in.
+//! once its membership commit is through, so the request is sent to a group it is in. A DM or group
+//! DM takes nobody more: there the call moves into a meeting room with everybody in it and the
+//! notetaker, which is asked in there (e2ee.md §8.2, "In every call").
 
 use std::time::Duration;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_proto::{ConversationId, HistoryPolicy, MeetingId, NotetakerRequest, NotetakerScope};
+use teamcraft_proto::{
+  ConversationId, HistoryPolicy, IdempotencyKey, MeetingId, NotetakerRequest, NotetakerScope,
+};
 
 use crate::channel_access::ChannelAccess;
+use crate::clock::now_ms;
 use crate::components::icons::{Icon, IconName};
 use crate::feedback::PendingAction;
-use crate::i18n::use_i18n;
+use crate::i18n::{I18n, use_i18n};
 use crate::meetings::MeetingsHub;
 use crate::model::UserId;
 use crate::notetaker::{NotetakerInCall, notetaker_in_call};
@@ -31,6 +36,23 @@ enum AddRoute {
   /// A meeting the user organizes: the bot becomes one of its invitees, which puts it into the
   /// meeting chat's group (e2ee.md §4.6, "Meeting chats").
   Meeting(MeetingId),
+  /// A DM or group DM, which takes nobody more: the call moves into a new meeting room with
+  /// everybody in it and the bot (docs/meetings.md, "A call becomes a meeting"), where the core
+  /// asks it in. The DM keeps its members and history; the bot never sees them.
+  MoveToRoom,
+}
+
+/// What the user can do in the conversation of the call, which decides the [`AddRoute`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConversationRights {
+  /// A meeting the user organizes.
+  OrganizesMeeting(MeetingId),
+  /// A channel of a space where the user manages members.
+  ManagesChannel { joins_space: bool },
+  /// A DM or group DM.
+  DirectLike,
+  /// Somebody else's meeting, a channel without member management, or a guest's view.
+  Other,
 }
 
 /// "Add notetaker" of one call: asks the notetaker in, adding it to the conversation first where
@@ -41,6 +63,11 @@ pub struct NotetakerInvite {
   conversation: ConversationId,
   maybe_route: Memo<Option<AddRoute>>,
   maybe_hub: Option<MeetingsHub>,
+  /// Who is in the call besides the user, for the room a DM call moves into.
+  participants: Memo<Vec<UserId>>,
+  i18n: I18n,
+  /// One key per call screen: a retry after a lost answer gets the same room, not a second one.
+  room_key: IdempotencyKey,
   pending: PendingAction,
   /// Asked in, until it is there or [`ASKED_NOTICE`] passed: the banner says it is coming.
   pub is_asked: RwSignal<bool>,
@@ -57,7 +84,7 @@ pub fn use_notetaker_in_call(
   let maybe_route = use_add_route(state, conversation, maybe_hub);
   let notetaker = Memo::new(move |_| {
     let others = participants.get();
-    let can_add_members = maybe_route.get().is_some();
+    let can_bring_in = maybe_route.get().is_some();
     state.read(|backend| {
       let policy = backend.notetaker_policy()?;
       let me = backend.me();
@@ -71,17 +98,29 @@ pub fn use_notetaker_in_call(
         backend.can_manage_integration_sources(),
         &member_ids,
         &others,
-        can_add_members,
+        can_bring_in,
       )
     })
+  });
+  let is_asked = RwSignal::new(false);
+  // Asked in from the DM call this one moved from: "joins in a moment" goes on here.
+  let asked_in = state.call.notetaker_asked_in;
+  Effect::new(move |_| {
+    if asked_in.get() == Some(conversation) {
+      asked_in.set(None);
+      show_asked(is_asked);
+    }
   });
   let invite = NotetakerInvite {
     state,
     conversation,
     maybe_route,
     maybe_hub,
+    participants,
+    i18n: use_i18n(),
+    room_key: IdempotencyKey::random(),
     pending: PendingAction::new(),
-    is_asked: RwSignal::new(false),
+    is_asked,
   };
   (notetaker, invite)
 }
@@ -134,14 +173,53 @@ impl NotetakerInvite {
           }
         });
       },
+      Some(AddRoute::MoveToRoom) => self.move_to_room(bot),
       None => {},
     }
   }
+
+  /// A DM or group DM call moves into a new meeting room with everybody in it and `bot`, as "Add
+  /// people" does; the core asks the bot in there once the move went through, and this device
+  /// follows at once (the others with a tap). The notice goes on in the room's call screen.
+  fn move_to_room(&self, bot: UserId) {
+    let Self {
+      state,
+      conversation,
+      maybe_hub,
+      participants,
+      i18n,
+      room_key,
+      ..
+    } = *self;
+    let me = state.me().id;
+    let in_call = people_in_call(&participants.get_untracked(), me);
+    let title = i18n.t("call-notetaker-room-title");
+    self.pending.run_and_then(
+      || {
+        state.write(|backend| {
+          backend.add_people_to_call(conversation, in_call, vec![bot], Some(title), room_key)
+        })
+      },
+      move || {
+        // The call screen shows the host controls of the new meeting.
+        if let Some(hub) = maybe_hub {
+          spawn_local(async move { hub.refresh(me, now_ms()).await });
+        }
+      },
+    );
+  }
 }
 
-/// Where the user can add the notetaker, reactive: a meeting the user organizes, or a channel of a
-/// space where the user manages members. Nowhere else: a DM takes nobody more (its call moves to a
-/// meeting room for that), and only the organizer changes a meeting's invitees.
+/// Everybody in the call, the user included, sorted: who the room a DM call moves into is for (the
+/// core keeps only members of the DM's group).
+fn people_in_call(others: &[UserId], me: UserId) -> Vec<UserId> {
+  let mut people: Vec<UserId> = others.iter().copied().chain([me]).collect();
+  people.sort_unstable();
+  people.dedup();
+  people
+}
+
+/// Where the user can bring the notetaker in, reactive (see [`add_route`]).
 fn use_add_route(
   state: AppState,
   conversation: ConversationId,
@@ -150,22 +228,40 @@ fn use_add_route(
   let access = ChannelAccess::new(state, conversation);
   Memo::new(move |_| {
     let me = state.me().id;
-    if let Some(meeting) = maybe_hub.and_then(|hub| hub.hosted_meeting_for(conversation, me)) {
-      return Some(AddRoute::Meeting(meeting));
-    }
-    let space = state
-      .read(|backend| backend.conversation(conversation))
-      .filter(|conversation| conversation.has_channel_settings())?
-      .maybe_space?;
-    access.can_add_members().then(|| {
-      let joins_space = state
-        .read(|backend| backend.spaces())
-        .into_iter()
-        .find(|found| found.id == space)
-        .is_some_and(|found| found.can_add_members || found.can_invite_guests);
-      AddRoute::Channel { joins_space }
-    })
+    let rights = if let Some(meeting) = maybe_hub.and_then(|hub| hub.hosted_meeting_for(conversation, me)) {
+      ConversationRights::OrganizesMeeting(meeting)
+    } else {
+      match state.read(|backend| backend.conversation(conversation)) {
+        Some(found) if found.kind.is_direct_like() => ConversationRights::DirectLike,
+        Some(found) if found.has_channel_settings() && access.can_add_members() => {
+          let joins_space = state
+            .read(|backend| backend.spaces())
+            .into_iter()
+            .find(|space| Some(space.id) == found.maybe_space)
+            .is_some_and(|space| space.can_add_members || space.can_invite_guests);
+          ConversationRights::ManagesChannel { joins_space }
+        },
+        _ => ConversationRights::Other,
+      }
+    };
+    // A call move needs the server's real calls; the demo has none.
+    let can_move = maybe_hub.is_some() && state.read(|backend| !backend.has_simulated_calls());
+    add_route(rights, can_move)
   })
+}
+
+/// Where the user can bring the notetaker in: a meeting the user organizes (as an invitee), a
+/// channel of a space where the user manages members (as from its integrations), a DM or group DM
+/// (its call moves into a meeting room, `can_move`: the app can move calls). Elsewhere it is
+/// offered only where it is a member already: only the organizer changes a meeting's invitees, and
+/// only who manages a channel's members adds one (e2ee.md §8.2, "In every call").
+fn add_route(rights: ConversationRights, can_move: bool) -> Option<AddRoute> {
+  match rights {
+    ConversationRights::OrganizesMeeting(meeting) => Some(AddRoute::Meeting(meeting)),
+    ConversationRights::ManagesChannel { joins_space } => Some(AddRoute::Channel { joins_space }),
+    ConversationRights::DirectLike => can_move.then_some(AddRoute::MoveToRoom),
+    ConversationRights::Other => None,
+  }
 }
 
 /// Adds `bot` to the invitees of `meeting` (which the user organizes) and the meeting chat's
@@ -196,6 +292,11 @@ fn ask_in(state: AppState, conversation: ConversationId, is_asked: RwSignal<bool
       },
     )
   });
+  show_asked(is_asked);
+}
+
+/// "Joins in a moment" until the notetaker is there or [`ASKED_NOTICE`] passed.
+fn show_asked(is_asked: RwSignal<bool>) {
   let _ = is_asked.try_set(true);
   set_timeout(
     move || {
@@ -278,5 +379,75 @@ pub fn NotetakerPreJoinNotice(conversation: ConversationId) -> impl IntoView {
         <span>{move || i18n.t("prejoin-notetaker")}</span>
       </p>
     </Show>
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::{NotetakerInviters, NotetakerPolicy};
+
+  use super::*;
+  use crate::model::id_from_raw;
+  use crate::notetaker::notetaker_in_call;
+
+  /// #1271: a DM and a group DM call bring the notetaker in by moving into a room, a meeting the
+  /// user organizes and a channel the user manages by adding it; elsewhere only a member is asked.
+  #[test]
+  fn the_route_follows_what_the_user_can_do_in_the_conversation() {
+    let meeting: MeetingId = id_from_raw(7);
+    assert_eq!(
+      add_route(ConversationRights::DirectLike, true),
+      Some(AddRoute::MoveToRoom)
+    );
+    assert_eq!(
+      add_route(ConversationRights::DirectLike, false),
+      None,
+      "the demo moves no calls"
+    );
+    assert_eq!(
+      add_route(ConversationRights::OrganizesMeeting(meeting), true),
+      Some(AddRoute::Meeting(meeting))
+    );
+    assert_eq!(
+      add_route(ConversationRights::ManagesChannel { joins_space: true }, true),
+      Some(AddRoute::Channel { joins_space: true })
+    );
+    assert_eq!(add_route(ConversationRights::Other, true), None);
+  }
+
+  /// "Add notetaker" in a 1:1 or group DM call, also one that runs already: offered to whoever
+  /// the policy lets ask it in, refused to anybody else.
+  #[test]
+  fn in_a_dm_call_the_policy_alone_decides() {
+    let (me, bob, bot): (UserId, UserId, UserId) = (id_from_raw(1), id_from_raw(2), id_from_raw(9));
+    let dm_members = [me, bob];
+    let can_bring_in = add_route(ConversationRights::DirectLike, true).is_some();
+    let members = policy(bot, NotetakerInviters::Members);
+    let offered = notetaker_in_call(&members, true, false, &dm_members, &[bob], can_bring_in).unwrap();
+    assert!(offered.can_invite && !offered.is_member);
+
+    let admins = policy(bot, NotetakerInviters::Admins);
+    let refused = notetaker_in_call(&admins, true, false, &dm_members, &[bob], can_bring_in).unwrap();
+    assert!(!refused.can_invite, "not an admin");
+    let admin = notetaker_in_call(&admins, true, true, &dm_members, &[bob], can_bring_in).unwrap();
+    assert!(admin.can_invite);
+    let guest = notetaker_in_call(&members, false, false, &dm_members, &[bob], can_bring_in).unwrap();
+    assert!(!guest.can_invite, "guests ask nobody in");
+  }
+
+  #[test]
+  fn the_room_is_for_everybody_in_the_call() {
+    let (me, bob, carol): (UserId, UserId, UserId) = (id_from_raw(1), id_from_raw(2), id_from_raw(3));
+    assert_eq!(people_in_call(&[carol, bob, me], me), vec![me, bob, carol]);
+    assert_eq!(people_in_call(&[], me), vec![me]);
+  }
+
+  fn policy(bot: UserId, inviters: NotetakerInviters) -> NotetakerPolicy {
+    NotetakerPolicy {
+      is_enabled: true,
+      maybe_bot: Some(bot),
+      inviters,
+      ..NotetakerPolicy::default()
+    }
   }
 }

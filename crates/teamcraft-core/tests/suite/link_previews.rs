@@ -42,6 +42,7 @@ async fn allowed_links_get_previews_and_receivers_follow_the_policy() {
 
   alice_ui.post_message(channel, None, "read https://docs.example.com/guide please");
   alice_ui.send_message(teamcraft_client_api::actions::OutgoingMessage {
+    maybe_client_message_id: None,
     conversation: channel,
     maybe_thread: None,
     body: "and https://elsewhere.example.org/x".into(),
@@ -66,6 +67,7 @@ async fn allowed_links_get_previews_and_receivers_follow_the_policy() {
   );
 
   alice_ui.send_message(teamcraft_client_api::actions::OutgoingMessage {
+    maybe_client_message_id: None,
     conversation: channel,
     maybe_thread: None,
     body: "read https://docs.example.com/guide please".into(),

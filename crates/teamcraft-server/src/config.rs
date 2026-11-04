@@ -84,6 +84,9 @@ pub struct Config {
   /// The optional `GET /metrics` listener (issue #213).
   #[serde(default)]
   pub metrics: crate::metrics::MetricsConfig,
+  /// Where the deployment's reports are and how often the health checks run (issue #213).
+  #[serde(default)]
+  pub health: crate::health::HealthConfig,
 }
 
 /// Where the settings key comes from: inline (base64, 32 bytes) or a file the server creates on

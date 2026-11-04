@@ -49,6 +49,7 @@ pub mod people;
 pub mod previews;
 mod read_ahead;
 mod removal;
+mod role_signing;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;
 mod self_add;
@@ -82,7 +83,7 @@ pub(crate) use catch_up::CATCHING_UP_PREFIX;
 pub use catch_up::{CatchUpFocus, is_catching_up};
 pub use channel_roles::RoleSigning;
 #[cfg(feature = "ui")]
-pub(crate) use channel_roles::channel_roles_key;
+pub(crate) use channel_roles::{channel_roles_alarmed_key, channel_roles_key, role_key_standings_key};
 pub use enroll::{
   EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment, parse_recovery_key,
 };
@@ -120,6 +121,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
 pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange, pending_action_count};
 pub use pending_add::{UserAddWait, pending_user_additions};
+pub use role_signing::{RoleSigningProblem, RoleSigningRecord, role_signing_record};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::SegmentPrefetch;
 pub use self_add::is_waiting_for_admission;
@@ -272,6 +274,20 @@ pub struct ClientSettings {
   /// (a server holding back a demotion gets at most this long, security review A6). Owners'
   /// clients re-sign the roster after half of it.
   pub workspace_max_age: std::time::Duration,
+  /// A token older than this, by the provider's own clock, puts nobody on the admin roster (e2ee.md
+  /// §3.1.3): the most an old token can be good for on a log a server holds back.
+  pub role_evidence_max_age: std::time::Duration,
+  /// How often an app publishes a new token, by the provider's clock, while the roster doesn't say
+  /// what its token says: enough to outlast `role_evidence_max_age` while no owner is around.
+  pub role_evidence_refresh: std::time::Duration,
+  /// How long the server's report that an admin's role or account is gone has to stand, by the
+  /// provider's clock, before an owner's app acts on it (e2ee.md §3.1.3).
+  pub role_report_grace: std::time::Duration,
+  /// How long after one removal on such a report the next can follow: a server that reports every
+  /// admin gone takes them off one at a time, at this pace, with the owners told.
+  pub role_report_interval: std::time::Duration,
+  /// How long role signing waits after a failed round; doubles up to 64 times this.
+  pub role_signing_retry: std::time::Duration,
   /// How long before `workspace_max_age` runs out the admin console warns that no owner signed.
   pub workspace_expiry_warning: std::time::Duration,
   /// The identity provider that attests identity keys; `None`: trust on first use.
@@ -359,6 +375,8 @@ pub struct Client<A, S> {
   heard_calls: HashMap<ConversationId, calls::HeardCall>,
   maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
+  /// Boxed: a client is moved around by value, and this is seldom touched.
+  role_signing: Box<role_signing::RoleSigningRun>,
   /// When the key packages were last checked ([`Client::renew_key_packages_if_due`]).
   last_key_package_check_ms: i64,
   /// When this device last tried to join each conversation's group as a further device (backs
@@ -460,6 +478,11 @@ impl Default for ClientSettings {
       link_previews: previews::LinkPreviewSettings::default(),
       device_add_max_rank: 3,
       workspace_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
+      role_evidence_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
+      role_evidence_refresh: std::time::Duration::from_secs(24 * 60 * 60),
+      role_report_grace: std::time::Duration::from_secs(7 * 24 * 60 * 60),
+      role_report_interval: std::time::Duration::from_secs(7 * 24 * 60 * 60),
+      role_signing_retry: std::time::Duration::from_secs(60),
       workspace_expiry_warning: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       maybe_attestation: None,
       accept_unsigned_messages: false,
@@ -534,6 +557,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       heard_calls: HashMap::new(),
       maybe_preview_fetcher,
       maybe_jwks_source,
+      role_signing: Default::default(),
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
       maybe_backlog_reads: None,

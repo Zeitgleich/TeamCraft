@@ -31,6 +31,12 @@ pub struct ChannelRolesDocument {
   pub prev_hash: Base64Bytes,
   /// When the signer's device signed it (its own clock; shown, never used to decide).
   pub signed_at_ms: i64,
+  /// Whether this snapshot, or one it builds on, took somebody's role from the server's member list
+  /// at a channel's first sight (e2ee.md §4.6.1, "Founding at first sight"): nobody looked at those
+  /// roles, so even a workspace admin's signature on it doesn't vouch for them. It never anchors
+  /// the channel and is never a checkpoint.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_server_listed_roles: bool,
 }
 
 /// One person's role in a [`ChannelRolesDocument`].
@@ -124,6 +130,26 @@ mod tests {
   use super::*;
   use crate::{Id, Snowflake};
 
+  /// The mark is signed, so it is part of the wire shape; an entry without it reads as before.
+  #[test]
+  fn the_mark_of_roles_from_the_servers_list_reads_as_absent_before_it_existed() {
+    let json = serde_json::json!({
+      "version": 1,
+      "conversation_id": "7",
+      "assignments": [],
+      "prev_hash": "AAA=",
+      "signed_at_ms": 1,
+    });
+    let before: ChannelRolesDocument = serde_json::from_value(json).unwrap();
+    assert!(!before.has_server_listed_roles);
+    let marked = serde_json::to_value(ChannelRolesDocument {
+      has_server_listed_roles: true,
+      ..before
+    })
+    .unwrap();
+    assert_eq!(marked["has_server_listed_roles"], serde_json::json!(true));
+  }
+
   #[test]
   fn the_signed_document_keeps_its_wire_shape() {
     let document = ChannelRolesDocument {
@@ -136,6 +162,7 @@ mod tests {
       }],
       prev_hash: Base64Bytes::new(vec![0; 3]),
       signed_at_ms: 1_000,
+      has_server_listed_roles: false,
     };
     let json = serde_json::to_value(&document).unwrap();
     assert_eq!(

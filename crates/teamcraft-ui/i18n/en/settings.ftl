@@ -623,3 +623,16 @@ settings-f-android_package_names = Android application IDs
 settings-f-android_cert_fingerprints = Android signing certificates (SHA-256)
 settings-f-apple_team_id = Apple team ID
 settings-f-apple_bundle_id = iOS bundle ID
+
+settings-unit-percent = %
+settings-group-health_alerts = Health alerts
+settings-group-health_alerts-hint = When the system health checks tell admins and owners. A check must fail without a break for the first time below before admins are told; an alert ends once the check has been fine for the second. A restart or a slow answer raises nothing.
+settings-f-hold_secs = A check must fail for
+settings-f-clear_secs = An alert ends after the check was fine for
+settings-f-backup_max_age_secs = The last backup is too old after
+settings-f-certificate_min_days = The certificate is too close to expiry with fewer than
+settings-f-disk_max_percent = The disk is too full above
+settings-error-health-minutes = Enter 1 to 1,440 minutes.
+settings-error-health-backup-hours = Enter 1 to 720 hours.
+settings-error-health-days = Enter 1 to 365 days.
+settings-error-health-percent = Enter 50 to 99 percent.

@@ -153,7 +153,8 @@ impl StackBuilder {
   }
 
   /// Listens on a fixed port. The dev realm only registers the web client's redirect URIs for
-  /// `http://127.0.0.1:8082/*`, so browser tests must use 8082.
+  /// `http://127.0.0.1:8082/*` and `:8083/*`, so browser tests must use one of those, under a
+  /// [`crate::browser::lease_web_port`].
   pub fn with_port(mut self, port: u16) -> Self {
     self.maybe_port = Some(port);
     self

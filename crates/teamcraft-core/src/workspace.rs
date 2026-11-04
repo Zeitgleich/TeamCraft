@@ -25,6 +25,7 @@ use teamcraft_proto::{
 
 use crate::convert;
 use crate::records;
+use crate::role_signing::{AutomaticChange, ProviderMark};
 use crate::store::{LocalStore, Table};
 
 /// Admin tenures a device keeps. Far beyond any instance's turnover; past it the oldest go and the
@@ -47,6 +48,13 @@ pub struct RosterDocument {
   /// When the owner signed it; owners re-sign regularly so clients can tell a stale roster.
   #[serde(rename = "signed_at_ms", default, skip_serializing_if = "Option::is_none")]
   pub maybe_signed_at_ms: Option<i64>,
+  /// The newest token of each person an owner's app acted on (e2ee.md §3.1.3), also of people no
+  /// longer listed, so an old token can't bring them back on any owner's device.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub provider_marks: BTreeMap<UserId, ProviderMark>,
+  /// What an owner's app changed in this version by itself and why: the audit line.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub automatic: Vec<AutomaticChange>,
 }
 
 /// The policy document as this client signs and reads it: the wire [`PolicyDocument`] plus the
@@ -119,6 +127,10 @@ pub struct WorkspaceState {
   /// somebody who has left the roster since (e2ee.md §4.6.1, "Reading the log late").
   #[serde(default)]
   pub admin_history: AdminHistory,
+  /// [`RosterDocument::provider_marks`], kept here too: they only move forward, also when an older
+  /// owner's app signs a roster that leaves them out.
+  #[serde(default)]
+  pub provider_marks: BTreeMap<UserId, ProviderMark>,
 }
 
 /// Every stretch somebody was an owner or admin of the verified roster, from this device's own
@@ -501,6 +513,7 @@ impl WorkspaceState {
       .owners_by_version
       .insert(document.version, owner_keys(&document));
     self.note_signature(signer.0, document.maybe_signed_at_ms);
+    self.keep_provider_marks(&document);
     let owners = owner_keys(&document);
     self
       .owner_signed_at_ms
@@ -548,8 +561,29 @@ impl WorkspaceState {
       self.owners_by_version.retain(|version, _| *version >= floor);
     }
     self.policy_version = entry.version;
+    // An older owner's app re-signs the policy without what it doesn't know; that says nothing about
+    // role signing, which only an entry naming it changes.
+    let maybe_role_signing = document
+      .policy
+      .maybe_role_signing
+      .clone()
+      .or_else(|| self.policy.maybe_role_signing.take());
     self.policy = document.policy;
+    self.policy.maybe_role_signing = maybe_role_signing;
     Ok(())
+  }
+
+  /// Takes over the marks of a verified roster; each only ever moves forward.
+  fn keep_provider_marks(&mut self, roster: &RosterDocument) {
+    for (user, mark) in &roster.provider_marks {
+      let is_newer = self
+        .provider_marks
+        .get(user)
+        .is_none_or(|known| known.issued_at <= mark.issued_at);
+      if is_newer {
+        self.provider_marks.insert(*user, mark.clone());
+      }
+    }
   }
 
   /// Remembers the newest signing time of an owner; documents without one tell nothing.
@@ -853,7 +887,40 @@ pub fn owner_roster_status(
     maybe_expires_at: status.maybe_expires_at_ms,
     recommended_minimum: status.recommended_minimum,
     warning_lead_ms: millis(warning_lead),
+    is_signing_manual: !teamcraft_proto::RoleSigningPolicy::is_automatic(
+      state.policy.maybe_role_signing.as_deref(),
+    ),
+    maybe_signing_problem: crate::client::role_signing_record(store)
+      .ok()
+      .and_then(|record| record.maybe_note)
+      .and_then(|problem| signing_problem(&problem)),
   })
+}
+
+/// What the console says about role signing.
+#[cfg(feature = "ui")]
+fn signing_problem(
+  problem: &crate::client::RoleSigningProblem,
+) -> Option<teamcraft_client_api::admin::RoleSigningIssue> {
+  use teamcraft_client_api::admin::RoleSigningIssue;
+
+  use crate::client::RoleSigningProblem;
+
+  match problem {
+    RoleSigningProblem::NoRoleClaim => Some(RoleSigningIssue::NoRoleClaim),
+    RoleSigningProblem::NoKeyClaim => Some(RoleSigningIssue::NoKeyClaim),
+    RoleSigningProblem::ProviderChanged { issuer } => Some(RoleSigningIssue::ProviderChanged {
+      issuer: issuer.clone(),
+    }),
+    RoleSigningProblem::Contradictory { users } => {
+      Some(RoleSigningIssue::Contradictory { users: users.clone() })
+    },
+    RoleSigningProblem::ReportedGone { users } => {
+      Some(RoleSigningIssue::ReportedGone { users: users.clone() })
+    },
+    RoleSigningProblem::AwaitingOwner => Some(RoleSigningIssue::AwaitingOwner),
+    RoleSigningProblem::Unknown => None,
+  }
 }
 
 /// The first roster's roles: the signer as owner (the root of trust, e2ee.md §11), then the owners
@@ -919,6 +986,98 @@ mod tests {
         (user(3), RosterRole::Admin),
       ]
     );
+  }
+
+  /// Not a real older client: a struct with the fields of the version before role signing, which shows
+  /// what serde does with the new ones, and documents signed without them.
+  mod older_clients {
+    use super::*;
+    use crate::role_signing::ProviderMark;
+
+    #[derive(Deserialize)]
+    struct OlderRoster {
+      version: u64,
+      members: Vec<RosterMember>,
+    }
+
+    #[test]
+    fn an_older_client_reads_a_roster_with_marks_and_verifies_its_signature() {
+      let alice = Owner::new(1);
+      let mut state = WorkspaceState::default();
+      let mut document = roster(1, &[&alice], None, &state);
+      document.provider_marks.insert(alice.user_id, mark("sub-a", 100));
+      let entry = alice.sign(WorkspaceLogKind::Roster, 1, &document);
+
+      // What it parses leaves the new fields out; the signature covers the bytes as they came.
+      let older: OlderRoster = serde_json::from_slice(entry.payload.as_slice()).unwrap();
+      assert_eq!((older.version, older.members.len()), (1, 1));
+      state.apply_entries(vec![entry]).unwrap();
+      assert_eq!(state.roster.version, 1);
+    }
+
+    #[test]
+    fn marks_survive_an_older_clients_roster_that_leaves_them_out() {
+      let alice = Owner::new(1);
+      let mut state = WorkspaceState::default();
+      let mut first = roster(1, &[&alice], None, &state);
+      first.provider_marks.insert(alice.user_id, mark("sub-a", 100));
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+
+      // Serialized without the new fields, as an older owner's app signs it.
+      let second = roster(2, &[&alice], None, &state);
+      assert!(second.provider_marks.is_empty());
+      assert!(!serde_json::to_string(&second).unwrap().contains("provider_marks"));
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &second)])
+        .unwrap();
+
+      assert_eq!(state.provider_marks[&alice.user_id].issued_at, 100);
+    }
+
+    #[test]
+    fn a_mark_moves_only_forward_whatever_a_roster_says() {
+      let alice = Owner::new(1);
+      let mut state = WorkspaceState::default();
+      let mut first = roster(1, &[&alice], None, &state);
+      first.provider_marks.insert(alice.user_id, mark("sub-a", 100));
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+      let mut older_mark = roster(2, &[&alice], None, &state);
+      older_mark.provider_marks.insert(alice.user_id, mark("sub-a", 50));
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &older_mark)])
+        .unwrap();
+
+      assert_eq!(state.provider_marks[&alice.user_id].issued_at, 100);
+    }
+
+    #[test]
+    fn a_new_device_reading_the_log_gets_the_same_marks() {
+      let alice = Owner::new(1);
+      let mut state = WorkspaceState::default();
+      let mut first = roster(1, &[&alice], None, &state);
+      first.provider_marks.insert(alice.user_id, mark("sub-a", 100));
+      let entry_1 = alice.sign(WorkspaceLogKind::Roster, 1, &first);
+      state.apply_entries(vec![entry_1.clone()]).unwrap();
+      let second = roster(2, &[&alice], None, &state);
+      let entry_2 = alice.sign(WorkspaceLogKind::Roster, 2, &second);
+
+      let mut fresh = WorkspaceState::default();
+      fresh.apply_entries(vec![entry_2, entry_1]).unwrap();
+
+      assert_eq!(fresh.provider_marks[&alice.user_id].issued_at, 100);
+    }
+
+    fn mark(subject: &str, issued_at: i64) -> ProviderMark {
+      ProviderMark {
+        maybe_subject: Some(subject.to_owned()),
+        issued_at,
+        maybe_by_hand: None,
+      }
+    }
   }
 
   #[test]
@@ -1348,6 +1507,7 @@ mod tests {
           .unwrap_or_else(|| Base64Bytes::new(vec![0; 32])),
       ),
       maybe_signed_at_ms,
+      ..RosterDocument::default()
     }
   }
 

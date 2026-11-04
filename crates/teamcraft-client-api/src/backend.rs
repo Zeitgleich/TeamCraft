@@ -8,12 +8,12 @@
 
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
-  AdminBrandsResponse, AdminCalendarSettingsResponse, AdminInstanceResponse, AdminMailSettingsResponse,
-  AnnouncementResponse, BackgroundId, BrandAssetSlot, CategoryId, ChannelModeration, CreateBrandRequest,
-  HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role, RuntimeSettingsKey,
-  RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest,
-  SettingsTestResponse, UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest,
-  WorkspacePolicy,
+  AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
+  AdminMailSettingsResponse, AnnouncementResponse, BackgroundId, BrandAssetSlot, CategoryId,
+  ChannelModeration, CreateBrandRequest, HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role,
+  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SendTestMailRequest,
+  SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest, UpdateCalendarSettingsRequest,
+  UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use crate::actions::{
@@ -698,20 +698,15 @@ pub trait ChatBackend {
   /// action. The core then signs the channel's new roles where the user can (issue #380).
   fn set_channel_role(&self, _conversation: ConversationId, _user: UserId, _role: crate::model::ChannelRole) {
   }
-  /// Signs the role the server lists for a member, whose role is the server's word only
-  /// ([`crate::model::ChannelMember::is_role_signed`]); nothing changes on the server.
-  fn confirm_channel_role(&self, _conversation: ConversationId, _user: UserId) {}
   /// Reads the channel's members and signed roles afresh (the members section opened).
   fn refresh_channel_roles(&self, _conversation: ConversationId) {}
-  /// Whether the user can sign the channel's roles in a way members accept: a signed channel
-  /// admin or an admin of the signed workspace roster.
-  fn can_sign_channel_roles(&self, _conversation: ConversationId) -> bool {
-    false
-  }
-  /// For a workspace admin whose signature here would vouch for roles this device can't vouch for:
-  /// what they look at, instead of signing one role. `None` for anybody else.
+  /// For a workspace admin: what they look at in the channel's members. `None` for anybody else.
   fn channel_roles_review(&self, _conversation: ConversationId) -> Option<crate::model::ChannelRolesReview> {
     None
+  }
+  /// The channels where this device and a member's disagree about the signed roles.
+  fn channel_role_alarms(&self) -> Vec<ConversationId> {
+    Vec::new()
   }
   /// Signs exactly `roles`, as the workspace admin looked at them with the log at `at_cursor`
   /// ([`crate::model::ChannelRolesReview::log_cursor`]); nothing changes on the server. Refused if
@@ -722,11 +717,6 @@ pub trait ChatBackend {
     _roles: Vec<(UserId, crate::model::ChannelRole)>,
     _at_cursor: u64,
   ) {
-  }
-  /// Whether this device knows it can't verify part of the channel's role log: its signed roles
-  /// count for nothing until a workspace admin signs them again. The members section says so.
-  fn are_channel_roles_unverified(&self, _conversation: ConversationId) -> bool {
-    false
   }
   /// The members of a space with their roles, as far as the user may see them.
   fn space_members(&self, _space: SpaceId) -> crate::model::SpaceRoster {
@@ -983,10 +973,9 @@ pub trait AdminBackend {
   fn admin_users(&self) -> Vec<AdminUser>;
   /// The signed workspace policy in force and its version (0: none was signed yet).
   fn workspace_policy(&self) -> (u64, WorkspacePolicy);
-  /// Signs and stores a new policy version. Only owners with signing keys can. `genesis` is the
-  /// first roster the owner confirmed ([`AdminBackend::admin_genesis_roster`]); it is signed only
-  /// while the workspace has no signed roster and ignored afterwards.
-  fn set_workspace_policy(&self, policy: WorkspacePolicy, genesis: Vec<crate::admin::RosterEntry>);
+  /// Signs and stores a new policy version. Only owners with signing keys can. While the workspace
+  /// has no signed roster the signer goes on the first one, alone.
+  fn set_workspace_policy(&self, policy: WorkspacePolicy);
   fn set_channel_retention(&self, channel: ConversationId, retention: Retention);
   fn remove_device(&self, user: UserId, device: DeviceId);
   /// Suspends (`false`) or reactivates (`true`) an account; memberships and devices stay.
@@ -1074,6 +1063,14 @@ pub trait AdminBackend {
   fn instance_status(&self) -> Option<AdminInstanceResponse> {
     None
   }
+  /// How the server's health checks stand, as of the last read; `None` while unknown. Admins only.
+  fn health_status(&self) -> Option<AdminHealthResponse> {
+    None
+  }
+  /// How many health checks are alerting (the badges of the admin console); 0 for non-admins.
+  fn health_alert_count(&self) -> usize {
+    0
+  }
   fn audit_filter(&self) -> AuditFilter {
     AuditFilter::default()
   }
@@ -1094,12 +1091,6 @@ pub trait AdminBackend {
   /// Signs `members` as the next roster on this device (owners only), unless the verified roster
   /// is no longer version `base_version`.
   fn admin_publish_roster(&self, _base_version: u64, _members: Vec<crate::admin::RosterEntry>) {}
-  /// The first roster to confirm before the first policy is signed, while this device verified
-  /// no roster yet (#265): the signer and the identity provider's role holders. `None` once a
-  /// roster is verified; later changes go through [`Self::admin_publish_roster`].
-  fn admin_genesis_roster(&self) -> Option<Vec<crate::admin::RosterEntry>> {
-    None
-  }
   /// The identity keys this device pinned, to show what an owner is about to vouch for.
   fn admin_identity_keys(&self) -> crate::remote::SecuritySnapshot {
     crate::remote::SecuritySnapshot::default()

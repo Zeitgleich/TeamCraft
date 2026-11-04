@@ -29,6 +29,10 @@ pub struct LiveMarks {
   /// The server refused this device's key bag as too large (once per run of the core).
   #[serde(default)]
   pub key_bag_refused: u64,
+  /// A health check raised or resolved an alert (admins only): the UI reads the health once, it
+  /// does not poll for it.
+  #[serde(default)]
+  pub health_alerts: u64,
 }
 
 /// How far another member of a DM has read, from `read_receipt` events.

@@ -146,10 +146,10 @@ policy-recovery-members = Für Mitglieder erlauben
 policy-recovery-guests = Für Gäste erlauben
 policy-recovery-approvals = Admins, die zustimmen müssen
 policy-owners = Eigentümer
-policy-owners-hint = Eigentümer signieren die Admin-Liste und diese Richtlinie. Behalte mindestens zwei: Verlässt der einzige Eigentümer die Organisation oder verliert alle Geräte und das Wiederherstellungs-Kit, kann niemand den Workspace mehr verwalten. Um einen Eigentümer zu ersetzen, füge zuerst den Nachfolger hinzu und entferne erst dann den bisherigen.
 policy-owners-unknown = Dieses Gerät hat noch keine Admin-Liste geprüft.
 policy-owners-last-signed = zuletzt signiert { $time }
 policy-owners-never-signed = auf diesem Gerät noch keine Signatur gesehen
+policy-owners-unnamed = Ein Workspace-Eigentümer
 policy-owners-valid-until = Die Admin-Rechte gelten auf den Geräten der Mitglieder bis { $time }. Die App eines Eigentümers signiert lange vorher von selbst neu, sobald sie geöffnet ist.
 policy-owners-too-few = { $count } von { $minimum } empfohlenen Eigentümern. Füge einen weiteren Eigentümer hinzu, damit der Workspace verwaltbar bleibt, wenn jemand geht oder seine Geräte verliert.
 policy-owners-expires-soon = Seit einer Weile hat kein Eigentümer signiert: Die Geräte der Mitglieder erkennen die Admins ab { $time } nicht mehr an. Ein Eigentümer muss TeamCraft vorher öffnen.
@@ -178,17 +178,8 @@ roster-reset = Änderungen verwerfen
 roster-idp-title = Der Identity Provider nennt Eigentümer oder Admins, die noch nicht in der signierten Admin-Liste stehen:
 roster-idp-sign = Diese Rollen prüfen und signieren
 roster-idp-hint = Hier wird niemand entfernt oder herabgestuft: die Rollenliste des Servers kann veraltet sein. Personen entfernst du selbst in der Liste oben.
-roster-standing-owner-unsigned = Deine Eigentümer-Rolle aus dem Identity Provider ist noch nicht signiert, daher behandeln die Apps der anderen dich als Mitglied: keine Admin-Aktionen, keine privaten Kanäle zum Beitreten, keine Integrationsquellen. Ein Eigentümer der signierten Admin-Liste ({ $owners }) muss sie signieren: Administration → Sicherheitsrichtlinie → Eigentümer → „Diese Rollen prüfen und signieren“.
-roster-standing-admin-unsigned = Deine Admin-Rolle aus dem Identity Provider ist noch nicht signiert, daher behandeln die Apps der anderen dich als Mitglied: keine Admin-Aktionen, keine privaten Kanäle zum Beitreten, keine Integrationsquellen. Ein Eigentümer der signierten Admin-Liste ({ $owners }) muss sie signieren: Administration → Sicherheitsrichtlinie → Eigentümer → „Diese Rollen prüfen und signieren“.
-roster-standing-expired-sign = Seit 30 Tagen hat kein Eigentümer die Admin-Liste signiert, daher ruhen die Admin-Rechte in allen Apps. Signiere sie jetzt neu: niemand wird hinzugefügt oder entfernt.
 roster-standing-expired-ask = Seit 30 Tagen hat kein Eigentümer die Admin-Liste signiert, daher ruhen die Admin-Rechte in allen Apps. Ein Eigentümer ({ $owners }) muss nur TeamCraft auf einem Gerät mit seinen Schlüsseln öffnen.
-roster-standing-none = Es ist noch keine Admin-Liste signiert, daher gilt in den Apps der anderen keine Admin-Rolle. Ein Eigentümer signiert die erste unter Administration → Sicherheitsrichtlinie.
-roster-standing-additions = { $count ->
-    [one] Der Identity Provider nennt einen Eigentümer oder Admin, der noch nicht in der signierten Admin-Liste steht: ohne deine Signatur hat er keine Admin-Rechte.
-   *[other] Der Identity Provider nennt { $count } Eigentümer oder Admins, die noch nicht in der signierten Admin-Liste stehen: ohne deine Signatur haben sie keine Admin-Rechte.
-}
 roster-standing-open = Eigentümer öffnen
-roster-standing-sign = Jetzt signieren
 roster-confirm-title = Prüfe jede Änderung vor dem Signieren
 roster-confirm-hint = Namen kommen vom Server und können gefälscht sein. Vergleiche Benutzer-ID und Schlüssel-Fingerprint mit der Person (zum Beispiel in einem Anruf), bevor du für sie bürgst.
 roster-confirm-id = Benutzer-ID { $id }
@@ -201,9 +192,6 @@ roster-confirm-changed-key = der Server zeigt inzwischen einen anderen Schlüsse
 roster-confirm-sign = Diese Änderungen signieren
 roster-confirm-cancel = Zurück
 roster-review = Prüfen und signieren
-roster-genesis-title = Prüfe die erste Admin-Liste vor dem Signieren
-roster-genesis-hint = Das ist die erste signierte Admin-Liste des Workspace: Die App jedes Mitglieds vertraut diesen Eigentümern und Admins. Die Liste stammt aus den Rollen im Identity Provider des Servers und kann gefälscht sein. Vergleiche jede Benutzer-ID und jeden Schlüssel-Fingerprint mit der Person, bevor du signierst, oder signiere nur dich selbst und füge die anderen später hinzu.
-roster-genesis-sign-alone = Nur mich als Eigentümer signieren
 policy-owners-minimum-hint = Bei weniger Eigentümern erscheint hier eine Warnung. 1 schaltet die Warnung ab.
 policy-owners-count = { $count ->
     [one] { $count } Eigentümer
@@ -828,3 +816,101 @@ notetaker-error-model = Modell-IDs sehen aus wie anbieter/modell, kleingeschrieb
 notetaker-error-language = Wähle eine Sprache.
 notetaker-error-prompt = Die Anweisungen sind leer oder länger als 8000 Zeichen.
 notetaker-error-other = Diese Einstellungen lassen sich nicht signieren. Lade die Seite neu und versuche es noch einmal.
+
+## Systemzustand (Issue #213)
+admin-nav-health = Systemzustand
+admin-health-title = Systemzustand
+admin-health-subtitle = Ob der Server, seine Dienste und seine Backups funktionieren. Nur Namen, Zustände und Zeiten: nichts aus einer Unterhaltung.
+health-loading = Prüfungen werden geladen …
+health-summary-ok = Alle Prüfungen sind in Ordnung.
+health-summary-failing = { $count ->
+    [one] Eine Prüfung schlägt fehl. Das ist noch keine Warnung.
+   *[other] { $count } Prüfungen schlagen fehl. Das sind noch keine Warnungen.
+}
+health-summary-alerts = { $count ->
+    [one] Eine Prüfung braucht Aufmerksamkeit.
+   *[other] { $count } Prüfungen brauchen Aufmerksamkeit.
+}
+health-alerting-on = { $count ->
+    [one] Warnungen sind an: Eine Prüfung muss eine Minute lang fehlschlagen, bevor Admins Bescheid bekommen.
+   *[other] Warnungen sind an: Eine Prüfung muss { $count } Minuten lang fehlschlagen, bevor Admins Bescheid bekommen.
+}
+health-alerting-off = Warnungen sind aus. Die Prüfungen werden hier trotzdem angezeigt.
+health-open-settings = In den Einstellungen ändern
+health-checks = Prüfungen
+health-checked = Geprüft { $when }.
+health-not-checked = Noch nicht geprüft.
+health-footnote = Diese Seite aktualisiert sich, wenn sich eine Warnung ändert, und alle 30 Sekunden, solange sie offen ist.
+health-alerts = Warnungen
+health-alerts-none = Seit dem Start des Servers gab es keine Warnungen.
+health-alerts-hint = Admins und Eigentümer sehen neue Warnungen hier und im Menü Administration. Die Liste beginnt neu, wenn der Server neu startet.
+health-alert-open = Ausgelöst { $raised }, noch offen.
+health-alert-resolved = Ausgelöst { $raised }, behoben { $resolved }.
+health-failing-since = Schlägt fehl seit { $when }.
+health-alerts-badge = { $count ->
+    [one] Eine Systemwarnung
+   *[other] { $count } Systemwarnungen
+}
+health-status-ok = In Ordnung
+health-status-failing = Fehlerhaft
+health-status-alert = Warnung
+health-status-no-data = Noch keine Daten
+health-status-not-configured = Nicht eingerichtet
+health-detail-backup = Letztes Backup { $when }.
+health-detail-report = Letzte Meldung { $when }.
+health-detail-job = Zuletzt gelaufen { $when }.
+health-detail-job-not-yet = Seit dem Start des Servers noch nicht gelaufen.
+health-detail-certificate = { $count ->
+    [one] Noch ein Tag bis zum Ablauf.
+   *[other] Noch { $count } Tage bis zum Ablauf.
+}
+health-detail-certificate-expired = Abgelaufen.
+health-detail-disk = { $percent } % belegt.
+health-check-database = Datenbank
+health-check-database-hint = Beantwortet die Abfragen des Servers.
+health-check-object_storage = Objektspeicher
+health-check-object_storage-hint = Speichert Anhänge. Aus, wenn keiner eingerichtet ist.
+health-check-identity_provider = Identitätsanbieter
+health-check-identity_provider-hint = Meldet Personen an und beantwortet die Anfragen des Servers.
+health-check-push_gateway = Push-Gateway
+health-check-push_gateway-hint = Stellt die Weckrufe für die Store-Apps zu. Aus, wenn keines eingerichtet ist.
+health-check-push_service = Push-Dienste
+health-check-push_service-hint = Die Dienste, an die der Server direkt sendet. Schlägt fehl, wenn der letzte Versuch eines Dienstes abgewiesen wurde.
+health-check-media_server = Medienserver
+health-check-media_server-hint = Meldet sich im Betrieb alle paar Sekunden beim Server.
+health-check-oidc_sync = Abgleich mit dem Identitätsanbieter
+health-check-oidc_sync-hint = Gleicht die Personen regelmäßig mit dem Identitätsanbieter ab. Überfällig nach drei verpassten Läufen.
+health-check-retention = Aufbewahrungsjob
+health-check-retention-hint = Löscht, was seine Aufbewahrungsfrist überschritten hat. Überfällig nach drei verpassten Läufen.
+health-check-partition_maintenance = Nachrichten-Partitionen
+health-check-partition_maintenance-hint = Legt den Speicher für die kommenden Monate im Voraus an. Überfällig nach drei verpassten Läufen.
+health-check-backup = Backup
+health-check-backup-hint = Wird vom Deployment gemeldet. Schlägt fehl, wenn das letzte Backup älter ist als das Limit in den Einstellungen.
+health-check-certificate = Zertifikat
+health-check-certificate-hint = Wird vom Deployment gemeldet. Schlägt fehl, wenn das ausgelieferte Zertifikat innerhalb des Limits in den Einstellungen abläuft.
+health-check-disk_space = Speicherplatz
+health-check-disk_space-hint = Wird vom Deployment gemeldet. Schlägt fehl, wenn die Platte voller ist als das Limit in den Einstellungen.
+policy-owners-hint = Eigentümer halten den Workspace in Ordnung, und ihre Apps signieren die Admin-Liste und diese Richtlinie von selbst. Behalte mindestens zwei: Verlässt der einzige Eigentümer die Organisation oder verliert alle Geräte und das Wiederherstellungs-Kit, kann niemand den Workspace mehr verwalten. Um einen Eigentümer zu ersetzen, füge zuerst den neuen hinzu.
+roster-standing-waiting = Deine Admin-Rolle gilt noch nicht. Sie gilt, sobald die App eines Eigentümers geöffnet war; du musst nichts tun.
+roster-by-hand = Admin-Liste von Hand ändern
+roster-signing-no-role-claim = Rollen können dem Identity Provider noch nicht von selbst folgen, weil seine ID-Tokens sie nicht enthalten. Dein Betreiber muss den Rollen-Mapper hinzufügen; siehe „Role signing“ in der Betriebsanleitung. Bis dahin änderst du Rollen unten von Hand.
+roster-signing-no-key-claim = Rollen können dem Identity Provider noch nicht von selbst folgen, weil er das Attribut mit den Identitätsschlüsseln nicht speichert. Dein Betreiber muss es einrichten; siehe „Role signing“ in der Betriebsanleitung. Bis dahin änderst du Rollen unten von Hand.
+roster-signing-provider-changed = Die Anmeldung dieser App kommt von einem anderen Identity Provider als dem, dem der Workspace vertraut, daher ändern sich Rollen nicht von selbst. Prüfe das unter Sicherheit.
+roster-signing-provider-changed-detail = Die Anmeldung dieser App kommt von { $issuer }, nicht von dem Identity Provider, dem der Workspace vertraut, daher ändern sich Rollen nicht von selbst. Wenn ihr absichtlich gewechselt habt, wähle unten „Dem Provider vertrauen, bei dem ich mich als Nächstes anmelde“.
+roster-signing-contradictory = Was der Identity Provider oder der Server über { $names } sagt, passt nicht zur Admin-Liste. Prüfe die Rolle beim Provider und ändere sie bei Bedarf unter Sicherheit von Hand.
+channel-roles-alarm-banner = Dieses Gerät und das eines anderen Mitglieds sehen unterschiedliche Rollen in { $channel }: Der Server zeigt den Leuten vielleicht verschiedene Listen. Sieh dir die Mitglieder des Kanals an.
+channel-roles-alarm-banner-unnamed = Dieses Gerät und das eines anderen Mitglieds sehen in einem Kanal unterschiedliche Rollen: Der Server zeigt den Leuten vielleicht verschiedene Listen.
+policy-role-signing = Wer Rollenänderungen signiert
+policy-role-signing-automatic = Die Apps der Eigentümer, nach dem Identity Provider (empfohlen)
+policy-role-signing-manual = Ein Eigentümer, von Hand
+policy-role-signing-hint = Automatisch heißt: Wer den Identity Provider kontrolliert, kann Admins ernennen, soweit er sich ohnehin als diese Personen anmelden kann. Alte Inhalte können Admins so oder so nicht lesen. Von Hand muss ein Eigentümer hier jede Änderung bestätigen.
+policy-role-owner-name = Eigentümer-Rolle beim Identity Provider
+policy-role-admin-name = Admin-Rolle beim Identity Provider
+policy-role-names-hint = Die Client-Rollen, die jemanden zum Eigentümer oder Admin machen. Ändere sie nur, wenn dein Identity Provider andere Namen verwendet.
+policy-role-name-empty = Gib den Namen der Rolle ein. Leer gespeichert gilt wieder der übliche Name.
+policy-role-provider = Vertrauter Identity Provider: { $issuer }
+policy-role-provider-reset = Dem Provider vertrauen, bei dem ich mich als Nächstes anmelde
+policy-role-provider-details = Einstellungen zum Identity Provider
+roster-signing-reported-gone = Der Server meldet, dass { $names } keine Admin-Rolle mehr hat. Wenn der Identity Provider nichts anderes sagt, verschwindet die Person in einigen Tagen von der Admin-Liste, immer eine nach der anderen. Wenn das falsch ist, prüfe den Server: Mehr ist nicht nötig.
+roster-signing-awaiting-owner = Der Identity Provider macht dich zum Eigentümer. Das gilt, sobald die App eines anderen Eigentümers geöffnet war. Ist kein anderer Eigentümer mehr da, bitte deinen Betreiber, dem früheren Eigentümer die Rolle kurz zurückzugeben.
+roster-standing-expired-ask-unnamed = Seit 30 Tagen hat kein Eigentümer die Admin-Liste signiert, daher ruhen die Admin-Rechte in allen Apps. Ein Eigentümer muss nur TeamCraft auf einem Gerät mit seinen Schlüsseln öffnen.

@@ -10,8 +10,13 @@
 //!
 //! Optional by design: Keycloak only stores the attribute if the realm's user profile declares it
 //! (or allows unmanaged attributes). Without that, enrollment proceeds with trust on first use.
+//!
+//! Owners and admins' apps write it by themselves: their roles in the signed roster rest on it (e2ee.md
+//! §3.1.3).
 
 use serde_json::Value;
+
+use crate::api::dpop::{DpopProver, signed_headers};
 
 /// The user attribute and claim name (dev realm mapper: dev/keycloak/teamcraft-dev-realm.json).
 pub const IDENTITY_KEY_ATTRIBUTE: &str = "tc_identity_key";
@@ -31,6 +36,9 @@ pub enum AttestationError {
   /// The realm's user profile doesn't allow the attribute; attestation is unavailable.
   #[error("the identity provider did not store the {IDENTITY_KEY_ATTRIBUTE} attribute")]
   AttributeNotStored,
+  /// The session is bound to a DPoP key this device can't use for the request.
+  #[error("could not sign the request to the identity provider")]
+  Proof,
 }
 
 /// Writes `claim` into the user's `tc_identity_key` attribute through the Keycloak account API of
@@ -39,10 +47,11 @@ pub async fn write_identity_attribute(
   http: &reqwest::Client,
   issuer: &str,
   access_token: &str,
+  maybe_prover: Option<&DpopProver>,
   claim: &str,
 ) -> Result<(), AttestationError> {
   let url = format!("{}/account", issuer.trim_end_matches('/'));
-  let mut account = get_account(http, &url, access_token).await?;
+  let mut account = get_account(http, &url, access_token, maybe_prover).await?;
   let attributes = account
     .as_object_mut()
     .ok_or_else(|| AttestationError::Decode("account is not an object".into()))?
@@ -54,9 +63,8 @@ pub async fn write_identity_attribute(
       Value::Array(vec![Value::String(claim.into())]),
     );
   }
-  let response = http
-    .post(&url)
-    .bearer_auth(access_token)
+  let response = authorized(http.post(&url), "POST", &url, access_token, maybe_prover)
+    .await?
     .json(&account)
     .send()
     .await
@@ -69,7 +77,7 @@ pub async fn write_identity_attribute(
     });
   }
   // Some realm settings accept the request but drop the attribute silently.
-  let stored = get_account(http, &url, access_token).await?;
+  let stored = get_account(http, &url, access_token, maybe_prover).await?;
   let is_stored = stored
     .pointer(&format!("/attributes/{IDENTITY_KEY_ATTRIBUTE}/0"))
     .and_then(Value::as_str)
@@ -81,14 +89,32 @@ pub async fn write_identity_attribute(
   }
 }
 
+/// `request` with the session's token, and its DPoP proof where the session is bound to a key.
+async fn authorized(
+  request: reqwest::RequestBuilder,
+  method: &str,
+  url: &str,
+  access_token: &str,
+  maybe_prover: Option<&DpopProver>,
+) -> Result<reqwest::RequestBuilder, AttestationError> {
+  let headers = signed_headers(maybe_prover, access_token, method, url)
+    .await
+    .map_err(|_| AttestationError::Proof)?;
+  let request = request.header("Authorization", headers.authorization);
+  Ok(match headers.maybe_proof {
+    Some(proof) => request.header("DPoP", proof.as_str()),
+    None => request,
+  })
+}
+
 async fn get_account(
   http: &reqwest::Client,
   url: &str,
   access_token: &str,
+  maybe_prover: Option<&DpopProver>,
 ) -> Result<Value, AttestationError> {
-  let response = http
-    .get(url)
-    .bearer_auth(access_token)
+  let response = authorized(http.get(url), "GET", url, access_token, maybe_prover)
+    .await?
     .header("Accept", "application/json")
     .send()
     .await

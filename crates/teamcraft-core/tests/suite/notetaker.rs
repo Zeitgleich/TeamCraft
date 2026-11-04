@@ -119,6 +119,134 @@ async fn the_refreshed_call_devices_include_a_member_added_since() {
   assert_eq!(refreshed.len(), 3, "the notetaker's device as well");
 }
 
+/// "Add notetaker" in a DM call (issue #1271, e2ee.md §8.2, "In every call"): the call moves into
+/// a meeting room with the people in it and the notetaker, which is asked in there and never sees
+/// the DM.
+mod in_a_dm_call {
+  use super::*;
+
+  #[tokio::test]
+  async fn the_notetaker_is_asked_into_the_room_and_not_rung() {
+    let (server, mut alice, mut bob, mut notetaker, dm) = dm_call(NotetakerInviters::Members).await;
+    let (alice_id, bob_id, bot) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      notetaker.client.user_id(),
+    );
+    let room = server.create_meeting_chat(alice_id, &[bob_id, bot]);
+
+    alice
+      .client
+      .move_call_to_meeting(dm, room, &[alice_id, bob_id], &[bot])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut notetaker]).await;
+
+    let moves = server.call_moves();
+    assert_eq!(moves.len(), 1);
+    assert!(moves[0].1.ring_user_ids.is_empty(), "the notetaker doesn't ring");
+    let ledger = NotetakerLedger::load(notetaker.store.as_ref(), room).unwrap();
+    let [request] = ledger.requests() else {
+      panic!("one request: {ledger:?}");
+    };
+    assert_eq!(request.by, alice_id);
+    let join = ledger.join_in_force(request.at_ms + 1, None).unwrap();
+    assert_eq!(join.scope, NotetakerScope::ThisCall);
+    // Everybody in the call and the notetaker; Bob's app checks the move against the DM's group.
+    assert_eq!(bob.client.prepare_call(room).await.unwrap().devices.len(), 3);
+    bob.client.accept_call_move(dm, room).await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn the_notetaker_never_sees_the_dm() {
+    let (server, mut alice, mut bob, mut notetaker, dm) = dm_call(NotetakerInviters::Members).await;
+    alice
+      .client
+      .send_text(dm, None, "before the notetaker")
+      .await
+      .unwrap();
+    let epoch = alice.client.mls_epoch(dm).unwrap();
+    let (alice_id, bob_id, bot) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      notetaker.client.user_id(),
+    );
+    let room = server.create_meeting_chat(alice_id, &[bob_id, bot]);
+
+    alice
+      .client
+      .move_call_to_meeting(dm, room, &[alice_id, bob_id], &[bot])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut notetaker]).await;
+
+    assert_eq!(alice.client.mls_epoch(dm).unwrap(), epoch, "no commit in the DM");
+    assert!(!notetaker.client.has_group(dm).unwrap(), "out of the DM's group");
+    assert!(notetaker.texts(dm).is_empty());
+    assert!(notetaker.texts(room).is_empty(), "a new room has no history");
+  }
+
+  #[tokio::test]
+  async fn anybody_in_the_room_sends_it_away() {
+    let (server, mut alice, mut bob, mut notetaker, dm) = dm_call(NotetakerInviters::Members).await;
+    let (alice_id, bob_id, bot) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      notetaker.client.user_id(),
+    );
+    let room = server.create_meeting_chat(alice_id, &[bob_id, bot]);
+    alice
+      .client
+      .move_call_to_meeting(dm, room, &[alice_id, bob_id], &[bot])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut notetaker]).await;
+
+    let bob_ui = backend_of(&bob);
+    bob_ui.request_notetaker(room, NotetakerRequest::Stop);
+    run_commands(&mut bob, &bob_ui).await;
+    settle(&mut [&mut alice, &mut bob, &mut notetaker]).await;
+
+    let ledger = NotetakerLedger::load(notetaker.store.as_ref(), room).unwrap();
+    assert_eq!(ledger.join_in_force(i64::MAX / 2, None), None);
+    assert!(ledger.last_stop_ms().is_some());
+  }
+
+  #[tokio::test]
+  async fn a_user_the_policy_does_not_allow_asks_nobody_in() {
+    // Admins only: Bob isn't one.
+    let (server, mut alice, mut bob, mut notetaker, dm) = dm_call(NotetakerInviters::Admins).await;
+    let (alice_id, bob_id, bot) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      notetaker.client.user_id(),
+    );
+    let room = server.create_meeting_chat(bob_id, &[alice_id, bot]);
+
+    bob
+      .client
+      .move_call_to_meeting(dm, room, &[alice_id, bob_id], &[bot])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut notetaker]).await;
+
+    let ledger = NotetakerLedger::load(notetaker.store.as_ref(), room).unwrap();
+    assert!(ledger.requests().is_empty(), "no join was sent");
+    let own = NotetakerLedger::load(bob.store.as_ref(), room).unwrap();
+    assert!(own.requests().is_empty());
+  }
+
+  /// [`setup_with`] without the notetaker in the channel, and Alice and Bob in a call of their DM.
+  async fn dm_call(inviters: NotetakerInviters) -> (FakeServer, Peer, Peer, Peer, ConversationId) {
+    let (server, mut alice, mut bob, notetaker, _channel) = setup_with(inviters, false).await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+    alice.client.prepare_call(dm).await.unwrap();
+    bob.client.prepare_call(dm).await.unwrap();
+    (server, alice, bob, notetaker, dm)
+  }
+}
+
 /// Alice (owner) signs a policy with Notetaker's account as the notetaker; all three are in a
 /// channel.
 async fn setup(inviters: NotetakerInviters) -> (FakeServer, Peer, Peer, Peer, ConversationId) {

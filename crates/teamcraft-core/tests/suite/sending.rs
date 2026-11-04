@@ -164,6 +164,7 @@ fn text(conversation: ConversationId, body: &str) -> OutgoingMessage {
 
 fn with_files(conversation: ConversationId, body: &str, files: Vec<OutgoingFile>) -> OutgoingMessage {
   OutgoingMessage {
+    maybe_client_message_id: None,
     conversation,
     maybe_thread: None,
     body: body.into(),

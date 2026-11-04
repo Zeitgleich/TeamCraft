@@ -19,7 +19,7 @@ pub struct NotetakerInCall {
   /// asks it in once its membership commit is in (e2ee.md §8.2).
   pub is_member: bool,
   /// "Add notetaker": on, allowed, not in the call yet, and a member of the conversation or one
-  /// the user can add there.
+  /// the user can bring in (add there, or move a DM call into a room with it).
   pub can_invite: bool,
   /// "Remove notetaker".
   pub can_stop: bool,
@@ -27,16 +27,17 @@ pub struct NotetakerInCall {
 
 /// The notetaker of `policy` in a call with `participants` (the others), for the user in a
 /// conversation with `member_ids`. `is_person`: the user is neither a guest nor a bot.
-/// `can_add_members`: the user can add the notetaker to the conversation (a channel where the
-/// user manages members, a meeting the user organizes; never a DM, which takes nobody more).
-/// `None` without a notetaker account in the policy.
+/// `can_bring_in`: the user can bring the notetaker into the call where it is no member (a
+/// channel where the user manages members, a meeting the user organizes, a DM or group DM whose
+/// call moves into a room with it; e2ee.md §8.2, "In every call"). `None` without a notetaker
+/// account in the policy.
 pub fn notetaker_in_call(
   policy: &NotetakerPolicy,
   is_person: bool,
   is_roster_admin: bool,
   member_ids: &[UserId],
   participants: &[UserId],
-  can_add_members: bool,
+  can_bring_in: bool,
 ) -> Option<NotetakerInCall> {
   // Its account counts as the notetaker even while the policy turns it off: it is still in the
   // call until it has left, and the notices stay until then.
@@ -50,7 +51,7 @@ pub fn notetaker_in_call(
     transcription_model: policy.transcription_model.clone(),
     is_present,
     is_member,
-    can_invite: may_invite && !is_present && (is_member || can_add_members),
+    can_invite: may_invite && !is_present && (is_member || can_bring_in),
     can_stop,
   })
 }

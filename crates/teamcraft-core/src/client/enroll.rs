@@ -220,6 +220,7 @@ impl PendingEnrollment {
       heard_calls: HashMap::new(),
       maybe_preview_fetcher,
       maybe_jwks_source,
+      role_signing: Default::default(),
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
       maybe_backlog_reads: None,

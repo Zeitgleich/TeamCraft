@@ -195,6 +195,10 @@ pub enum CoreError {
   /// A browser API failed or is missing (no service worker, permission denied, ...).
   #[error("browser: {0}")]
   Browser(String),
+  /// A workspace admin's role change stands on the server, but this device can't stand behind it, so
+  /// members' apps don't count it (e2ee.md §4.6.1).
+  #[error("the role changed on the server, but this device could not confirm it for the channel's members")]
+  RoleChangeNotConfirmed,
   /// The app asked for something that can't be done as asked (a caller bug or stale UI state).
   #[error("invalid request: {0}")]
   InvalidRequest(String),
@@ -298,6 +302,7 @@ impl CoreError {
       Self::PassphraseNotAllowed => {
         FailureKind::Server(teamcraft_proto::ErrorCode::RecoveryPassphraseNotAllowed)
       },
+      Self::RoleChangeNotConfirmed => FailureKind::RoleChangeNotConfirmed,
       _ => FailureKind::Other,
     };
     ActionFailure::new(kind, self.to_string())

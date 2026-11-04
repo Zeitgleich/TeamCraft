@@ -340,6 +340,7 @@ fn main() -> anyhow::Result<()> {
       shell_prefs::shell_prefs_get,
       shell_prefs::shell_prefs_set,
       tray::tray_update,
+      tray::tray_menu_set,
       tray::set_zoom,
       updates::update_status,
       updates::update_check,

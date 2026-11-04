@@ -154,6 +154,17 @@ pub trait Authenticator {
     })
   }
 
+  /// The newest ID token of the session, for role signing in the page's core (e2ee.md §3.1.3). `None`
+  /// until the provider sent one since the page loaded. Not a credential at the server.
+  fn id_token(&self) -> Option<String> {
+    None
+  }
+
+  /// Gets a new ID token now rather than at the next refresh: what it should name was just written.
+  fn refresh_id_token(&self) -> LocalFuture<'_, ()> {
+    Box::pin(async {})
+  }
+
   /// What signs DPoP proofs for the page's core, next to [`Self::access_token`]. The desktop shell
   /// signs itself.
   fn dpop_prover(&self) -> LocalFuture<'_, Option<Arc<DpopProver>>> {

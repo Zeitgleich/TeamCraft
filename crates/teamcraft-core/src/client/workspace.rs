@@ -422,7 +422,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         identity_key: Base64Bytes::new(identity.public_key.to_vec()),
       });
     }
-    let mut document = self.workspace()?.roster;
+    let state = self.workspace()?;
+    let mut document = state.roster.clone();
+    keep_newer_marks(&mut document, &state);
+    note_edits_by_hand(&mut document, &members, self.newest_provider_time());
     document.members = members;
     self.append_roster(document).await
   }
@@ -459,7 +462,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     policy: WorkspacePolicy,
   ) -> Result<(), CoreError> {
     self.sync_workspace().await?;
-    if self.workspace()?.policy != *base {
+    let mut verified = self.workspace()?.policy;
+    // This device keeps the role signing through an entry that doesn't name it (`apply_policy`), so
+    // what the server shows for such an entry isn't an altered draft, as long as the draft doesn't touch
+    // it (`publish_policy` keeps the verified one). An edit made from nothing is refused, which the
+    // console says: it can't tell what the owner saw from what is signed.
+    if base.maybe_role_signing.is_none()
+      && verified.maybe_role_signing.is_some()
+      && policy.maybe_role_signing.is_none()
+    {
+      verified.maybe_role_signing = None;
+    }
+    if verified != *base {
       return Err(CoreError::PolicyBaseMismatch);
     }
     self.publish_policy(policy).await
@@ -485,11 +499,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Signs and publishes a new workspace policy (owners only).
-  pub async fn publish_policy(&mut self, policy: WorkspacePolicy) -> Result<(), CoreError> {
+  pub async fn publish_policy(&mut self, mut policy: WorkspacePolicy) -> Result<(), CoreError> {
     self.sync_workspace().await?;
     let state = self.workspace()?;
     if state.roster.version > 0 && !self.is_verified_owner(&state) {
       return Err(CoreError::NotAnOwner);
+    }
+    if policy.maybe_role_signing.is_none() {
+      policy.maybe_role_signing = state.policy.maybe_role_signing.clone();
     }
     let document = ChainedPolicyDocument {
       version: state.policy_version + 1,
@@ -504,8 +521,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .await
   }
 
+  /// The provider's time of the newest token this device holds; 0 without one. Its own token, from its
+  /// own token endpoint: nothing here is the server's word.
+  fn newest_provider_time(&self) -> i64 {
+    self
+      .api
+      .provider_tokens()
+      .and_then(|tokens| teamcraft_crypto::attestation::unverified_claims(&tokens.id_token).ok())
+      .and_then(|claims| claims.maybe_issued_at)
+      .unwrap_or(0)
+  }
+
   /// Whether this user is an owner in the roster this device verified.
-  fn is_verified_owner(&self, state: &WorkspaceState) -> bool {
+  pub(crate) fn is_verified_owner(&self, state: &WorkspaceState) -> bool {
     state
       .roster
       .members
@@ -534,7 +562,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Signs `document` as the next roster version, then the current policy again under it, so a
   /// policy signed under an older roster (by an owner removed since) is refused (A7). A roster
   /// without an owner is never signed: nobody could change it again (admin.md §2.3).
-  async fn append_roster(&mut self, mut document: RosterDocument) -> Result<(), CoreError> {
+  async fn append_roster(&mut self, document: RosterDocument) -> Result<(), CoreError> {
+    self.append_roster_with(document, Vec::new()).await
+  }
+
+  /// [`Self::append_roster`] for what an owner's app does by itself, with the audit line.
+  pub(crate) async fn append_roster_automatically(
+    &mut self,
+    document: RosterDocument,
+    changes: Vec<crate::role_signing::AutomaticChange>,
+  ) -> Result<(), CoreError> {
+    self.append_roster_with(document, changes).await
+  }
+
+  async fn append_roster_with(
+    &mut self,
+    mut document: RosterDocument,
+    automatic: Vec<crate::role_signing::AutomaticChange>,
+  ) -> Result<(), CoreError> {
+    document.automatic = automatic;
     if document.owner_count() == 0 {
       return Err(CoreError::LastOwner);
     }
@@ -545,6 +591,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(CoreError::NotAnOwner);
     }
     document.version = state.roster.version + 1;
+    keep_newer_marks(&mut document, &state);
     document.maybe_prev_hash = Some(head_or_genesis(state.heads.maybe_roster_hash));
     document.maybe_signed_at_ms = Some(self.now_ms());
     let version = document.version;
@@ -552,7 +599,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .append_log(WorkspaceLogKind::Roster, WorkspaceLog::Roster, version, &document)
       .await?;
     let state = self.workspace()?;
-    if state.policy_version > 0 {
+    // An owner who just signed themselves off can't sign the policy any more: the next owner's round
+    // does it (`client/role_signing.rs`).
+    if state.policy_version > 0 && self.is_verified_owner(&state) {
       self.publish_policy(state.policy).await?;
     }
     Ok(())
@@ -1120,11 +1169,101 @@ fn commit_rank(candidates: &[(DeviceId, bool)], own: DeviceId, new_device: Devic
   u32::try_from(ahead).unwrap_or(u32::MAX)
 }
 
+/// Marks only move forward, also past what an older owner's app left out of its last entry.
+fn keep_newer_marks(document: &mut RosterDocument, state: &WorkspaceState) {
+  for (user, mark) in &state.provider_marks {
+    let is_newer = document
+      .provider_marks
+      .get(user)
+      .is_none_or(|known| known.issued_at < mark.issued_at);
+    if is_newer {
+      document.provider_marks.insert(*user, mark.clone());
+    }
+  }
+}
+
+/// An owner's edit by hand stands against the provider until a token issued after it says the same
+/// (e2ee.md §3.1.3): writes that down for everybody whose role `members` changes. `provider_now` is the
+/// floor: an older token, stored or replayed, can't settle the edit.
+fn note_edits_by_hand(document: &mut RosterDocument, members: &[RosterMember], provider_now: i64) {
+  use crate::role_signing::{HandRole, ProviderMark};
+
+  let mut edits: Vec<(UserId, HandRole)> = Vec::new();
+  for member in members {
+    let is_same = document
+      .members
+      .iter()
+      .any(|old| old.user_id == member.user_id && old.role == member.role);
+    if !is_same {
+      let hand = match member.role {
+        RosterRole::Owner => HandRole::Owner,
+        _ => HandRole::Admin,
+      };
+      edits.push((member.user_id, hand));
+    }
+  }
+  for old in &document.members {
+    if !members.iter().any(|member| member.user_id == old.user_id) {
+      edits.push((old.user_id, HandRole::Removed));
+    }
+  }
+  for (user, hand) in edits {
+    let mark = document.provider_marks.entry(user).or_insert(ProviderMark {
+      maybe_subject: None,
+      issued_at: 0,
+      maybe_by_hand: None,
+    });
+    mark.maybe_by_hand = Some(hand);
+    mark.issued_at = mark.issued_at.max(provider_now);
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use teamcraft_proto::Snowflake;
 
   use super::*;
+
+  mod edits_by_hand {
+    use std::collections::BTreeMap;
+
+    use crate::role_signing::{HandRole, ProviderMark};
+
+    use super::*;
+
+    #[test]
+    fn survive_a_roster_an_older_owners_app_signed_without_marks() {
+      let bob = UserId::from_snowflake(Snowflake::new(2).unwrap());
+      let state = WorkspaceState {
+        provider_marks: BTreeMap::from([(
+          bob,
+          ProviderMark {
+            maybe_subject: Some("sub-of-bob".to_owned()),
+            issued_at: 100,
+            maybe_by_hand: None,
+          },
+        )]),
+        ..WorkspaceState::default()
+      };
+      let mut document = RosterDocument {
+        members: vec![RosterMember {
+          user_id: bob,
+          role: RosterRole::Admin,
+          identity_key: Base64Bytes::new(vec![2; 32]),
+        }],
+        ..RosterDocument::default()
+      };
+
+      keep_newer_marks(&mut document, &state);
+      note_edits_by_hand(&mut document, &[], 200);
+      keep_newer_marks(&mut document, &state);
+
+      let mark = &document.provider_marks[&bob];
+      assert_eq!(mark.maybe_by_hand, Some(HandRole::Removed));
+      assert_eq!(mark.issued_at, 200, "the edit is the floor");
+      assert_eq!(mark.maybe_subject.as_deref(), Some("sub-of-bob"));
+    }
+  }
 
   #[test]
   fn online_devices_rank_before_offline_ones_and_order_varies_per_new_device() {

@@ -140,7 +140,10 @@ async fn a_device_holds_only_so_many_waiting_wake_ups() {
   for n in 1..=4 {
     send(&scene.app, &scene.alice, &scene.channel, &scene.alice_device, n).await;
   }
-  scene.fake.wait_for_attempts(1).await;
+  // The wake-ups are handled in the background and nothing shows the ones dropped, so wait for the
+  // queue to fill, then give any over the cap time to show up. Slow machines only make the second
+  // part weaker, never red; the pipeline runs on real sockets and Postgres, so paused time can't.
+  wait_until(|| async { scene.queued().await >= 2 }).await;
   tokio::time::sleep(Duration::from_millis(500)).await;
   assert_eq!(scene.queued().await, 2);
   scene.app.stop().await;

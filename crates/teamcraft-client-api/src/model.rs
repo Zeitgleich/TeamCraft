@@ -2,6 +2,7 @@
 //! shapes.
 
 use serde::{Deserialize, Serialize};
+use teamcraft_proto::ClientMessageId;
 use teamcraft_proto::Permission;
 pub use teamcraft_proto::{ChannelRole, InviteId, JoinPolicy, SpaceRole};
 pub use teamcraft_proto::{ConversationId, DeviceId, Id, MessageId, Snowflake, SpaceId, ThreadId, UserId};
@@ -28,6 +29,18 @@ pub const PENDING_ID_BIT: i64 = 1 << 62;
 /// Whether a message is still waiting in the outbox; the UI shows it as "sending".
 pub fn is_pending(id: MessageId) -> bool {
   id.snowflake().get() & PENDING_ID_BIT != 0
+}
+
+/// The ID a message in the outbox shows under: derived from its client ID, so a UI that picked the
+/// client ID can show the row before the core has answered, and the core's row replaces it in place.
+pub fn pending_message_id(client_message_id: ClientMessageId) -> MessageId {
+  let mut bytes = [0u8; 8];
+  bytes.copy_from_slice(&client_message_id.as_bytes()[..8]);
+  let raw = (i64::from_be_bytes(bytes) & (PENDING_ID_BIT - 1)) | PENDING_ID_BIT;
+  // Invariant: `raw` is positive (bit 63 is cleared above), so `Snowflake::new` accepts it.
+  Snowflake::new(raw)
+    .map(MessageId::from_snowflake)
+    .unwrap_or_else(|_| unreachable!("positive by construction"))
 }
 
 /// A thread is identified by its root message (proto: "ThreadId is the ID of its root message").
@@ -238,11 +251,6 @@ impl Space {
 pub struct ChannelMember {
   pub user: UserId,
   pub role: ChannelRole,
-  /// Whether this device verified a signed assignment of `role` (e2ee.md §4.6.1). `false` only for
-  /// an admin or moderator whose role is the server's word alone: members don't count it for
-  /// anything that needs a signed role, and the UI says so.
-  #[serde(default = "is_true")]
-  pub is_role_signed: bool,
   /// Who appointed `role`, as the signed role log this device verified says (issue #877). `None`
   /// where nothing verified says it: a member, a role only the server lists, a founder's own claim
   /// or a log accepted before this was recorded. Never the server's word.
@@ -256,9 +264,27 @@ pub struct ChannelMember {
 pub struct ChannelRolesReview {
   /// Where the role log stood: signing is refused once it moved on.
   pub log_cursor: u64,
+  /// This device can't vouch for what it has, or something contradicts it: the panel says so.
+  #[serde(default)]
+  pub needs_a_look: bool,
   /// The roles this device's own snapshot gives. The list to sign comes from the member list, the
   /// server's word, so a row it doesn't have here is marked.
   pub snapshot: Vec<(UserId, ChannelRole)>,
+  /// What this device can check of each listed person's key. Somebody not named here isn't checked
+  /// yet, and can't be confirmed.
+  #[serde(default)]
+  pub key_marks: Vec<(UserId, RoleKeyMark)>,
+}
+
+/// What a device can say about the key a confirmed role would name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RoleKeyMark {
+  /// As the signed roles have it, or checked against the encryption group or the roster.
+  Checked,
+  /// This device saw another key for the person than the signed roles name.
+  Changed,
+  /// This device can't check it: confirming is refused.
+  Uncheckable,
 }
 
 /// The verified signer of the entry that gave a channel member their role.
@@ -275,10 +301,6 @@ pub enum AppointerAuthority {
   WorkspaceOwner,
   WorkspaceAdmin,
   ChannelAdmin,
-}
-
-fn is_true() -> bool {
-  true
 }
 
 /// A source of the integration bridge that posts into a channel, announced in the app
@@ -894,6 +916,22 @@ pub struct ThreadSummary {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn an_outbox_message_shows_under_an_id_derived_from_its_client_id() {
+    let id = ClientMessageId::from_bytes([9; 16]);
+    let shown = pending_message_id(id);
+    assert!(is_pending(shown));
+    assert_eq!(shown, pending_message_id(id), "stable");
+    assert_ne!(shown, pending_message_id(ClientMessageId::from_bytes([8; 16])));
+    // Whatever the bytes: a positive snowflake with the pending bit.
+    assert!(is_pending(pending_message_id(ClientMessageId::from_bytes(
+      [255; 16]
+    ))));
+    assert!(is_pending(pending_message_id(ClientMessageId::from_bytes(
+      [0; 16]
+    ))));
+  }
 
   #[test]
   fn hex_colors_have_a_hue_and_everything_else_none() {

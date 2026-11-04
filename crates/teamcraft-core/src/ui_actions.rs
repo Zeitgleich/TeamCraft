@@ -8,7 +8,7 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::canvas::CanvasState;
 use teamcraft_client_api::model::{
   Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, PENDING_ID_BIT,
-  ThreadId, UserId,
+  ThreadId, UserId, is_pending,
 };
 use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
 use teamcraft_proto::{Base64Bytes, ClientMessageId, SourceChange, SourceId};
@@ -34,6 +34,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
     conversation: ConversationId,
     message: MessageId,
   ) -> Option<StoredMessage> {
+    // A message the server numbered is one keyed read, whatever the conversation's size (it is
+    // the common case: replies, pins, saves and edits of messages on screen). The rest (a message
+    // still in the outbox, a line this device placed itself) is looked for among all.
+    if !is_pending(message)
+      && let Ok(Some(stored)) = self.store_ref().message_by_server_id(conversation, message)
+    {
+      return Some(stored);
+    }
     self
       .all_messages(conversation)
       .into_iter()
@@ -120,6 +128,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         &message.body,
         meta,
         message.files,
+        message.maybe_client_message_id,
       );
       return;
     }
@@ -133,7 +142,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
       mentions,
       meta,
     };
-    if let Some(id) = self.enqueue(conversation, message.maybe_thread, content) {
+    let maybe_id = self.enqueue_as(
+      conversation,
+      message.maybe_thread,
+      content,
+      message.maybe_client_message_id,
+    );
+    if let Some(id) = maybe_id {
       self.queue_link_preview(conversation, id, &body);
     }
   }
@@ -358,42 +373,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// Whether this user signs the channel's roles in a way members accept: an admin of the fresh
   /// workspace roster, a signed channel admin, or, while nothing is signed, an admin the server
   /// lists, who founds the log (e2ee.md §4.6.1).
-  pub(crate) fn ui_can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
-    let members: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
-      self.store_ref(),
-      Table::Members,
-      &conversation.to_string(),
-    ));
-    let is_listed_admin = members
-      .into_iter()
-      .flat_map(|list| list.members)
-      .any(|member| member.user.id == self.me_id() && member.role == teamcraft_proto::ChannelRole::Admin);
-    let workspace: crate::workspace::WorkspaceState = self.read(
-      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
-        .map(Option::unwrap_or_default),
-    );
-    let signed: crate::channel_roles::ChannelRoleState = self.read(
-      records::get_json(
-        self.store_ref(),
-        Table::Workspace,
-        &crate::client::channel_roles_key(conversation),
-      )
-      .map(Option::unwrap_or_default),
-    );
-    let max_age_ms =
-      i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
-    let authorities = signed.signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms);
-    // A workspace admin signs nothing here but a list they reviewed (`ui_channel_roles_review`).
-    if signed.must_review_before_vouching() && authorities.iter().any(is_workspace_authority) {
-      return false;
-    }
-    authorities
-      .into_iter()
-      .any(|authority| authority != crate::channel_roles::SignerAuthority::Founder || is_listed_admin)
-  }
-
-  /// For a workspace admin whose signature here would vouch for a snapshot this device can't vouch
-  /// for: what they review (e2ee.md §4.6.1). `None` for anybody else.
+  /// For a workspace admin, always: their look at the channel's roles is the one thing that ends an
+  /// alarm or a stretch, or repairs a role nothing else can (e2ee.md §4.6.1). Nobody is asked to: it is
+  /// there when they open the channel's members, and says more where it would help. `None` for anybody
+  /// else.
   pub(crate) fn ui_channel_roles_review(
     &self,
     conversation: ConversationId,
@@ -416,16 +399,65 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms)
       .iter()
       .any(is_workspace_authority);
-    (signed.must_review_before_vouching() && is_vouching).then(|| {
-      teamcraft_client_api::model::ChannelRolesReview {
-        log_cursor: signed.cursor,
-        snapshot: signed
-          .assignments
-          .iter()
-          .map(|assignment| (assignment.user_id, assignment.role.clone()))
-          .collect(),
-      }
+    let members: Option<teamcraft_proto::ListConversationMembersResponse> = self.read(records::get_json(
+      self.store_ref(),
+      Table::Members,
+      &conversation.to_string(),
+    ));
+    let lists_a_role_nobody_confirmed = !signed.is_unfounded()
+      && members.into_iter().flat_map(|list| list.members).any(|member| {
+        member.user.kind == teamcraft_proto::UserKind::Member
+          && member.role != teamcraft_proto::ChannelRole::Member
+          && signed.role_of(member.user.id) != member.role
+      });
+    let needs_a_look = signed.must_review_before_vouching()
+      || lists_a_role_nobody_confirmed
+      || signed.maybe_alarm.is_some()
+      // A log this device took nothing from: only such a list gets it out.
+      || (!signed.is_signed() && signed.cursor > 0);
+    let standings: std::collections::BTreeMap<UserId, crate::channel_roles::RoleKeyStanding> = self.read(
+      records::get_json(
+        self.store_ref(),
+        Table::Workspace,
+        &crate::client::role_key_standings_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    is_vouching.then(|| teamcraft_client_api::model::ChannelRolesReview {
+      log_cursor: signed.cursor,
+      needs_a_look,
+      key_marks: standings
+        .into_iter()
+        .map(|(user, standing)| {
+          use crate::channel_roles::RoleKeyStanding;
+          use teamcraft_client_api::model::RoleKeyMark;
+          let mark = match standing {
+            RoleKeyStanding::Checked => RoleKeyMark::Checked,
+            RoleKeyStanding::Changed => RoleKeyMark::Changed,
+            RoleKeyStanding::Uncheckable | RoleKeyStanding::Unknown => RoleKeyMark::Uncheckable,
+          };
+          (user, mark)
+        })
+        .collect(),
+      snapshot: signed
+        .assignments
+        .iter()
+        .map(|assignment| (assignment.user_id, assignment.role.clone()))
+        .collect(),
     })
+  }
+
+  /// The channels where this device and a member's disagree about the signed roles.
+  pub(crate) fn ui_channel_role_alarms(&self) -> Vec<ConversationId> {
+    let alarmed: std::collections::BTreeSet<ConversationId> = self.read(
+      records::get_json(
+        self.store_ref(),
+        Table::Workspace,
+        crate::client::channel_roles_alarmed_key(),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    alarmed.into_iter().collect()
   }
 
   fn source_authority(&self) -> Option<SourceAuthority> {

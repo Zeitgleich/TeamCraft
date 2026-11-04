@@ -264,6 +264,8 @@ pub enum TokenPeek {
     server_url: String,
     token: SecretString,
     valid_for: Duration,
+    /// The provider's newest ID token this run, for role signing (e2ee.md §3.1.3).
+    maybe_id_token: Option<SecretString>,
   },
   /// No server, or nobody signed in to it.
   Unavailable,
@@ -342,6 +344,8 @@ struct Session {
   is_key_lost: bool,
   /// The DPoP key with what is known about the identity provider.
   maybe_provider_prover: Option<Arc<DpopProver>>,
+  /// The ID token of the provider's last answer; memory only, a refresh brings a new one.
+  maybe_id_token: Option<SecretString>,
 }
 
 /// One answer of the server to a signed request, read whole: the one more try may need its body.
@@ -1471,6 +1475,10 @@ impl<S: TokenStore> AuthService<S> {
         server_url: server.server_url,
         token,
         valid_for,
+        maybe_id_token: session
+          .maybe_id_token
+          .as_ref()
+          .map(|id_token| SecretString::from(id_token.expose_secret().to_owned())),
       },
       None => TokenPeek::Unavailable,
     }
@@ -1591,6 +1599,8 @@ impl<S: TokenStore> AuthService<S> {
         // Only the provider's refusal, or a key that is gone, ends the session; no answer keeps it
         // (issue #883). The stored token goes too, so the next start doesn't offer it again.
         session.maybe_tokens = None;
+        session.maybe_id_token = None;
+        session.maybe_id_token = None;
         session.is_expired = true;
         session.is_key_lost = matches!(error, AuthError::KeyLost);
         if let Err(error) = self.store.clear(&server.token_key()).await {
@@ -1726,6 +1736,9 @@ impl<S: TokenStore> AuthService<S> {
     let expires_at_ms = now_ms.saturating_add(ms(lifetime));
     session.is_expired = false;
     session.is_key_lost = false;
+    if let Some(id_token) = &response.extra_fields().maybe_id_token {
+      session.maybe_id_token = Some(SecretString::from(id_token.clone()));
+    }
     session.maybe_tokens = Some(Tokens {
       access: SecretString::from(response.access_token().secret().clone()),
       refresh: refresh.map(SecretString::from),
@@ -1746,6 +1759,7 @@ impl<S: TokenStore> AuthService<S> {
       Some(session) => {
         let mut current = self.session.lock().await;
         current.maybe_tokens = None;
+        current.maybe_id_token = None;
         current.maybe_local = Some(session);
         Ok(true)
       },
@@ -1771,6 +1785,7 @@ impl<S: TokenStore> AuthService<S> {
     }
     let mut session = self.session.lock().await;
     session.maybe_tokens = None;
+    session.maybe_id_token = None;
     session.is_expired = false;
     self.is_unconfirmed.store(false, Ordering::Release);
     session.maybe_local = Some(granted);

@@ -146,10 +146,10 @@ policy-recovery-members = Allow for members
 policy-recovery-guests = Allow for guests
 policy-recovery-approvals = Admins that must approve
 policy-owners = Owners
-policy-owners-hint = Owners sign the admin roster and this policy. Keep at least two: if the only owner leaves or loses all devices and the recovery kit, nobody can manage the workspace again. To replace an owner, add the successor first, then remove the old owner.
 policy-owners-unknown = This device has not verified an admin roster yet.
 policy-owners-last-signed = last signed { $time }
 policy-owners-never-signed = no signature seen on this device yet
+policy-owners-unnamed = A workspace owner
 policy-owners-valid-until = Admin rights stay valid on members' devices until { $time }. An owner's app signs again by itself well before that whenever it is open.
 policy-owners-too-few = { $count } of the recommended { $minimum } owners. Add another owner so the workspace can still be managed if one leaves or loses their devices.
 policy-owners-expires-soon = No owner has signed for a while: members' devices stop accepting the admins on { $time }. An owner needs to open TeamCraft before then.
@@ -178,17 +178,8 @@ roster-reset = Discard changes
 roster-idp-title = The identity provider lists owners or admins the signed roster doesn't have yet:
 roster-idp-sign = Review and sign these roles
 roster-idp-hint = Nobody is removed or demoted from here: the server's role list can be out of date. Remove people yourself in the list above.
-roster-standing-owner-unsigned = Your owner role from the identity provider isn't signed yet, so other people's apps treat you as a member: no admin actions, no private channels to join, no integration sources. An owner of the signed roster ({ $owners }) has to sign it: Administration → Security policy → Owners → "Review and sign these roles".
-roster-standing-admin-unsigned = Your admin role from the identity provider isn't signed yet, so other people's apps treat you as a member: no admin actions, no private channels to join, no integration sources. An owner of the signed roster ({ $owners }) has to sign it: Administration → Security policy → Owners → "Review and sign these roles".
-roster-standing-expired-sign = No owner signed the admin roster within 30 days, so admin rights are paused on every app. Sign it again now: nobody is added or removed.
 roster-standing-expired-ask = No owner signed the admin roster within 30 days, so admin rights are paused on every app. An owner ({ $owners }) only needs to open TeamCraft on a device with their keys.
-roster-standing-none = No admin roster is signed yet, so no admin role is in force on other people's apps. An owner signs the first one in Administration → Security policy.
-roster-standing-additions = { $count ->
-    [one] The identity provider lists one owner or admin the signed roster doesn't have yet: they have no admin rights until you sign them.
-   *[other] The identity provider lists { $count } owners or admins the signed roster doesn't have yet: they have no admin rights until you sign them.
-}
 roster-standing-open = Open owners
-roster-standing-sign = Sign now
 roster-confirm-title = Check every change before signing
 roster-confirm-hint = Names come from the server and can be faked. Compare the user ID and the key fingerprint with the person (for example in a call) before you vouch for them.
 roster-confirm-id = User ID { $id }
@@ -201,9 +192,6 @@ roster-confirm-changed-key = the server now shows a different key; accept or rej
 roster-confirm-sign = Sign these changes
 roster-confirm-cancel = Back
 roster-review = Review and sign
-roster-genesis-title = Check the first admin roster before signing
-roster-genesis-hint = This is the workspace's first signed roster: every member's app will trust these owners and admins. The list comes from the server's identity provider roles and can be faked. Compare each user ID and key fingerprint with the person before you sign, or sign yourself alone and add the others later.
-roster-genesis-sign-alone = Sign only me as owner
 policy-owners-minimum-hint = Fewer owners than this shows a warning here. 1 switches the warning off.
 policy-owners-count = { $count ->
     [one] { $count } owner
@@ -828,3 +816,101 @@ notetaker-error-model = Model IDs look like author/model, in lower case.
 notetaker-error-language = Choose a language.
 notetaker-error-prompt = The instructions are empty or longer than 8000 characters.
 notetaker-error-other = These settings can't be signed. Reload the page and try again.
+
+## System health (issue #213)
+admin-nav-health = System health
+admin-health-title = System health
+admin-health-subtitle = Whether the server, its backends and its backups are working. Names, states and times only: nothing from any conversation.
+health-loading = Loading the checks…
+health-summary-ok = All checks pass.
+health-summary-failing = { $count ->
+    [one] One check is failing. It is not an alert yet.
+   *[other] { $count } checks are failing. They are not alerts yet.
+}
+health-summary-alerts = { $count ->
+    [one] One check needs attention.
+   *[other] { $count } checks need attention.
+}
+health-alerting-on = { $count ->
+    [one] Alerts are on: a check must fail for a minute before admins are told.
+   *[other] Alerts are on: a check must fail for { $count } minutes before admins are told.
+}
+health-alerting-off = Alerts are off. The checks still show here.
+health-open-settings = Change in Settings
+health-checks = Checks
+health-checked = Checked { $when }.
+health-not-checked = Not checked yet.
+health-footnote = This page updates when an alert changes, and every 30 seconds while it is open.
+health-alerts = Alerts
+health-alerts-none = No alerts since the server started.
+health-alerts-hint = Admins and owners see new alerts here and on the Administration menu. The list starts again when the server restarts.
+health-alert-open = Raised { $raised }, still open.
+health-alert-resolved = Raised { $raised }, resolved { $resolved }.
+health-failing-since = Failing since { $when }.
+health-alerts-badge = { $count ->
+    [one] One health alert
+   *[other] { $count } health alerts
+}
+health-status-ok = OK
+health-status-failing = Failing
+health-status-alert = Alert
+health-status-no-data = No data yet
+health-status-not-configured = Not set up
+health-detail-backup = Last backup { $when }.
+health-detail-report = Last report { $when }.
+health-detail-job = Last ran { $when }.
+health-detail-job-not-yet = Has not run since the server started.
+health-detail-certificate = { $count ->
+    [one] One day until it expires.
+   *[other] { $count } days until it expires.
+}
+health-detail-certificate-expired = Expired.
+health-detail-disk = { $percent }% in use.
+health-check-database = Database
+health-check-database-hint = Answers the server's queries.
+health-check-object_storage = Object storage
+health-check-object_storage-hint = Holds attachments. Off when none is set up.
+health-check-identity_provider = Identity provider
+health-check-identity_provider-hint = Signs people in and answers the server's checks.
+health-check-push_gateway = Push gateway
+health-check-push_gateway-hint = Delivers wake-ups to the store apps. Off when none is set up.
+health-check-push_service = Push services
+health-check-push_service-hint = The services the server sends to directly. Fails when the last attempt of one was refused.
+health-check-media_server = Media server
+health-check-media_server-hint = Reports to the server every few seconds while it runs.
+health-check-oidc_sync = Identity provider sync
+health-check-oidc_sync-hint = Compares users with the identity provider on a schedule. Late after three missed runs.
+health-check-retention = Retention job
+health-check-retention-hint = Deletes what is past its retention. Late after three missed runs.
+health-check-partition_maintenance = Message partitions
+health-check-partition_maintenance-hint = Creates the storage for coming months ahead of time. Late after three missed runs.
+health-check-backup = Backup
+health-check-backup-hint = Reported by the deployment. Fails when the last backup is older than the limit in Settings.
+health-check-certificate = Certificate
+health-check-certificate-hint = Reported by the deployment. Fails when the served certificate expires within the limit in Settings.
+health-check-disk_space = Disk space
+health-check-disk_space-hint = Reported by the deployment. Fails when the disk is fuller than the limit in Settings.
+policy-owners-hint = Owners keep the workspace in order, and their apps sign the admin roster and this policy by themselves. Keep at least two: if the only owner leaves or loses all devices and the recovery kit, nobody can manage the workspace again. To replace an owner, add the new one first.
+roster-standing-waiting = Your admin role isn't in force yet. It will be as soon as an owner's app has been open; there's nothing you need to do.
+roster-by-hand = Change the roster by hand
+roster-signing-no-role-claim = Roles can't follow the identity provider by themselves yet, because its ID tokens don't carry them. Your operator needs to add the role mapper; see "Role signing" in the operations guide. Until then, change roles below by hand.
+roster-signing-no-key-claim = Roles can't follow the identity provider by themselves yet, because it doesn't keep the attribute with people's identity keys. Your operator needs to set it up; see "Role signing" in the operations guide. Until then, change roles below by hand.
+roster-signing-provider-changed = This app's sign-in comes from another identity provider than the workspace trusts, so roles aren't changed by themselves. Check it under Security.
+roster-signing-provider-changed-detail = This app's sign-in comes from { $issuer }, not from the identity provider the workspace trusts, so roles aren't changed by themselves. If you moved to a new provider on purpose, choose "Trust the provider I sign in with next" below.
+roster-signing-contradictory = What the identity provider or the server says about { $names } doesn't match the roster. Check their role at the provider and, if needed, change it by hand under Security.
+channel-roles-alarm-banner = This device and another member's see different roles in { $channel }: the server may be showing people different lists. Look at the channel's members.
+channel-roles-alarm-banner-unnamed = This device and another member's see different roles in a channel: the server may be showing people different lists.
+policy-role-signing = Who signs role changes
+policy-role-signing-automatic = Owners' apps, following the identity provider (recommended)
+policy-role-signing-manual = An owner, by hand
+policy-role-signing-hint = Automatic means whoever controls the identity provider can appoint admins, as far as they can already sign in as people. Admins can't read old content either way. By hand, an owner has to confirm every change here.
+policy-role-owner-name = Owner role at the identity provider
+policy-role-admin-name = Admin role at the identity provider
+policy-role-names-hint = The client roles that make somebody an owner or admin. Only change them if your identity provider uses other names.
+policy-role-name-empty = Enter the name of the role. Saved empty, it goes back to the usual name.
+policy-role-provider = Trusted identity provider: { $issuer }
+policy-role-provider-reset = Trust the provider I sign in with next
+policy-role-provider-details = Identity provider settings
+roster-signing-reported-gone = The server reports that { $names } no longer holds an admin role. Unless the identity provider says otherwise, they come off the roster in a few days, one at a time. If that's wrong, check the server: nothing else is needed.
+roster-signing-awaiting-owner = The identity provider makes you an owner. That's in force as soon as another owner's app has been open. If no other owner is left, ask your operator to give the former owner their role back for a moment.
+roster-standing-expired-ask-unnamed = No owner signed the admin roster within 30 days, so admin rights are paused on every app. An owner only needs to open TeamCraft on a device with their keys.

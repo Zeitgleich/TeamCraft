@@ -24,6 +24,7 @@ use teamcraft_server::dependencies::{Dependencies, DependencyOptions, TokioClock
 use teamcraft_server::drain::Drain;
 use teamcraft_server::error::ApiError;
 use teamcraft_server::gateway::{Hub, HubOptions};
+use teamcraft_server::health::{self, HealthMonitor, JobSchedule, JobSchedules};
 use teamcraft_server::listener::bind_listener;
 use teamcraft_server::logging;
 use teamcraft_server::meetings::mailer::Mailer;
@@ -242,6 +243,7 @@ async fn run() -> anyhow::Result<()> {
       push: push_settings(&config),
       token_binding: teamcraft_proto::TokenBindingSettings::default(),
       app_links: teamcraft_proto::AppLinkSettings::default(),
+      health_alerts: teamcraft_proto::HealthAlertSettings::default(),
       max_attachment_bytes: config
         .storage
         .as_ref()
@@ -272,6 +274,11 @@ async fn run() -> anyhow::Result<()> {
       config.limits.max_concurrent_image_decodes.max(1),
     )),
     metrics: Arc::new(ServerMetrics::new().context("setting up the metrics")?),
+    health: Arc::new(HealthMonitor::new(
+      config.health.clone(),
+      job_schedules(&config),
+      time::OffsetDateTime::now_utc(),
+    )),
   };
   with_startup_retries("loading the settings", startup_deadline, || {
     load_runtime_settings(&state)
@@ -302,6 +309,7 @@ async fn run() -> anyhow::Result<()> {
   spawn_background_sweeper(state.clone());
   spawn_partition_maintenance(state.clone(), config.server.partitions_ahead_months);
   spawn_derived_presence(state.clone());
+  health::spawn(state.clone());
   spawn_call_roster_sweeper(state.clone());
   // Before anybody asks for a join token: calls that ran on through this restart are taken over,
   // not opened a second time next to themselves (at most the SFU control timeout).
@@ -687,6 +695,9 @@ fn spawn_account_housekeeping(state: AppState) {
         },
         Err(error) => warn!(%error, "deleting expiring key packages failed"),
       }
+      if let Err(error) = teamcraft_server::services::role_evidence::prune(&state).await {
+        warn!(%error, "deleting old role evidence failed");
+      }
       match state.database.delete_expired_create_keys().await {
         Ok(0) => {},
         Ok(deleted) => info!(deleted, "deleted expired idempotency keys"),
@@ -742,6 +753,29 @@ fn spawn_email_digests(state: AppState) {
       }
     }
   });
+}
+
+/// When the jobs the health checks watch are expected to run, from the configuration.
+fn job_schedules(config: &Config) -> JobSchedules {
+  let every = |interval_secs: u64, initial_delay_secs: u64| JobSchedule {
+    interval: time::Duration::seconds(i64::try_from(interval_secs.max(1)).unwrap_or(i64::MAX)),
+    initial_delay: time::Duration::seconds(i64::try_from(initial_delay_secs).unwrap_or(i64::MAX)),
+  };
+  JobSchedules {
+    maybe_oidc_sync: config.oidc.sync.is_enabled.then(|| {
+      every(
+        config.oidc.sync.interval_secs,
+        config.oidc.sync.initial_delay_secs,
+      )
+    }),
+    maybe_retention: config.retention.is_enabled.then(|| {
+      every(
+        config.retention.interval_secs,
+        config.retention.initial_delay_secs,
+      )
+    }),
+    maybe_partition_maintenance: Some(every(PARTITION_MAINTENANCE_INTERVAL.as_secs(), 0)),
+  }
 }
 
 /// Settings of the OIDC sync, if enabled and complete.

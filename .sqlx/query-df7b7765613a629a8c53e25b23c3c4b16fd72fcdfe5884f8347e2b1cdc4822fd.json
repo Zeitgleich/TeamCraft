@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM role_losses WHERE user_id = $1 AND issued_at < $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "df7b7765613a629a8c53e25b23c3c4b16fd72fcdfe5884f8347e2b1cdc4822fd"
+}

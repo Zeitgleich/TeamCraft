@@ -142,6 +142,9 @@ pub enum GatewayEvent {
     kind: WorkspaceLogKind,
     version: u64,
   },
+  /// Somebody published newer role evidence (e2ee.md §3.1.3); sent to owners, whose apps read and
+  /// verify it.
+  RoleEvidenceUpdate,
   /// A channel's signed role log has a new entry (issue #380); fetch entries after the known
   /// version. Sent to the channel's members.
   ChannelRolesUpdate {
@@ -187,6 +190,9 @@ pub enum GatewayEvent {
   },
   /// The announcement banner changed or ended. Clients fetch it again.
   AnnouncementUpdate,
+  /// A health check raised an alert or one was resolved (docs/operations.md "Health and alerts").
+  /// Sent to the admins and owners only; no payload, they fetch `GET /api/v1/admin/health`.
+  HealthAlertUpdate,
   /// Something happened to a conversation (a member joined, the channel was archived, ...). Sent
   /// to its members; shown as a system message.
   SystemEvent {
@@ -580,6 +586,19 @@ mod tests {
       r#"{"type":"admin_join_request_update","conversation_id":"7","user_id":"9","change":"requested"}"#;
     assert_eq!(serde_json::to_string(&event).unwrap(), json);
     assert_eq!(serde_json::from_str::<GatewayEvent>(json).unwrap(), event);
+  }
+
+  #[test]
+  fn health_alert_update_carries_nothing_and_has_a_stable_wire_format() {
+    let json = r#"{"type":"health_alert_update"}"#;
+    assert_eq!(
+      serde_json::to_string(&GatewayEvent::HealthAlertUpdate).unwrap(),
+      json
+    );
+    assert_eq!(
+      serde_json::from_str::<GatewayEvent>(json).unwrap(),
+      GatewayEvent::HealthAlertUpdate
+    );
   }
 
   #[test]

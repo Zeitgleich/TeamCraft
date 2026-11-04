@@ -94,8 +94,10 @@ could add itself to every channel.
 - At setup, the **server owner's identity key** becomes the workspace root of trust. Every client pins
   it on first login (shown once, can be verified like a contact).
 - The **admin roster** (who is owner/admin) is a signed, append-only log: each change is signed by an
-  existing owner. Owners' clients sign changes automatically when they match the OIDC provider's
-  signed role claims (ARCHITECTURE.md §5.1.1).
+  existing owner. Owners' apps sign changes by themselves, with nobody asked, on ID tokens the identity
+  provider signed for that person and identity key (e2ee.md §3.1.3). The server carries the tokens and
+  can't forge one, so it can't appoint anybody. A signed policy setting can require an owner's hand
+  instead.
 - Each roster and policy entry names the hash of the previous entry of its log and when it was
   signed; a policy also names the roster version its signer was an owner in, and is checked against
   exactly that roster. Clients apply rosters before policies and refuse a policy naming an older
@@ -117,12 +119,14 @@ could add itself to every channel.
   (admin = owner, moderator) are a signed log per channel (e2ee.md §4.6.1): each entry is signed by
   a workspace admin or owner of the fresh roster, or by a channel admin of the previous signed
   entry, under the same role rules the UI and the server use; a channel's creator signs the first
-  entry. Roles only the server lists (channels from before, space admins' changes, older clients)
-  are shown as not signed and count for nothing that needs a signed role; an admin who can sign
-  confirms them in the channel's members section. A device that can't verify a stretch of the log
-  says so there and counts nobody as a channel admin until a workspace admin signs again. Such an
-  admin signs the whole list of roles after looking at it, never one role on top of a snapshot this
-  device can't vouch for (e2ee.md §4.6.1, "Reading the log late"). Space roles are not signed yet.
+  entry, and a channel from before is founded by the first app the server lists as its admin
+  (e2ee.md §4.6.1, "Founding at first sight"). Nobody signs by hand: a role is signed when somebody
+  who may sign changes it. Roles only the server lists (space admins' changes, older clients) count
+  for what the server enforces and for nothing that needs a signed role; the person is told when
+  they try. A device that can't verify a stretch of the log counts nobody as a channel admin until a
+  workspace admin looked at the roles again, in the channel's members section, where only they see
+  it. They confirm the whole list, never one role on top of a snapshot this device can't vouch for
+  (e2ee.md §4.6.1, "Reading the log late"). Space roles are not signed yet.
 - Member clients only commit membership changes that are signed by someone allowed to make them
   (admin, space admin, channel owner, or a member with `manage_members`). Unsigned or wrongly signed
   proposals are rejected and reported.
@@ -139,15 +143,12 @@ signature (freshness above).
   default 2; 1 switches the warning off).
 - **When an owner leaves, add the successor first, then remove the old owner.** Removing the last
   owner is refused, so a handover always passes through a roster with both.
-- **The first roster.** The first policy save in a workspace without a signed roster signs the
-  genesis roster too: the signer as first owner (the root of trust), proposed together with the
-  owners and admins the identity provider lists. That list comes from the server, so it goes
-  through the same confirmation as later edits (user ID, fingerprint, attested, trusted on first use
-  or own key) before anything is signed; the owner can also sign themselves alone and add the
-  others later. The core signs only the confirmed list (`publish_policy_with_genesis`) and ignores
-  it once a roster is verified.
-- **Editing the roster.** Administration → Security → Owners lists the signed roster. An owner on a
-  device with signing keys (desktop or web) can add a person as owner or admin, make an owner an
+- **The first roster.** The first owner's app signs it by itself, from its own provider token: that owner
+  alone, as the root of trust. Everybody else follows from their own tokens. Nobody is asked, and a
+  hostile server can't steer it (e2ee.md §3.1.3). On a realm without the role mapper, the first policy
+  save signs the first roster with the signer alone.
+- **Editing the roster by hand.** Rarely needed. Administration → Security → "Change the roster by hand"
+  lists the signed roster. An owner on a device with signing keys (desktop or web) can add a person as owner or admin, make an owner an
   admin or the other way round, or remove someone. The console shows the changes, refuses a roster
   without an owner, and signs the new version on the owner's device (`publish_roster`, then the
   current policy again under it). People need an identity key (they set up TeamCraft once) before
@@ -160,25 +161,29 @@ signature (freshness above).
 - **Concurrent edits.** The editor signs only if the verified roster is still the version it
   started from (`publish_roster_based_on`); if another owner signed meanwhile, nothing is signed
   (`roster_changed`) and the owner edits the new roster.
-- **Identity provider roles.** The `owner` and `admin` roles in the identity provider don't change
-  the signed roster by themselves: the server can't sign. When the provider lists owners or admins
-  the roster doesn't have, the console lists them (with each account, so two accounts with one name
-  differ), and an owner signs them through the same confirmation. This only adds people and
-  promotes admins to owners: it never removes or demotes anybody, because the server's role list is
-  the role each account last showed in a token and can lag behind the provider; removing someone
-  is the owner's explicit edit (issue #765). Deactivated accounts are never proposed.
-- **Unsigned roles are said, not hidden.** Admin rights hold only through the fresh signed roster,
-  so an admin or owner whose provider role nobody signed yet is a member on everybody else's app.
-  A banner above the app and on every console page says so, with the owners to ask; a signing
-  owner sees there that provider roles wait for their signature, and after the freshness window
-  ran out an owner signs the unchanged roster again from the banner. Actions refused for this
-  reason (integration sources, joining private channels) say it where they are.
+- **Identity provider roles.** The `owner` and `admin` roles in the identity provider are the source of
+  truth. A role given there is in force as soon as the person's app has published a token and an owner's
+  app has been open; a role taken away, as soon as a token of theirs showing it has expired and an owner's
+  app has been open, or, for somebody who never signs in again, when the server's report has stood for a week
+  (admins only, one a week per owner's device, shown only in the Security section meanwhile; an owner never goes on a report). e2ee.md §3.1.3 has the rules and what stays.
+  An owner's edit by hand stands until the provider says the same once. Nothing to confirm. On a realm where tokens can't prove it (no mapper) or under the manual policy, the people
+  the provider lists appear in "Change the roster by hand", to sign through the same confirmation. That
+  list is the server's word, so it only adds people and promotes admins to owners.
+- **Nothing is said in normal operation.** There are no banners or prompts about signing. An action
+  refused because a role isn't in force yet says so where it happens ("Your admin role isn't in force yet.
+  It will be as soon as an owner's app has been open; there's nothing you need to do."). A banner appears
+  only when a person really must act: every owner has been away for the whole freshness window, so
+  admin rights lapsed (to admins: which owner to ask to open TeamCraft), or evidence contradicts what is
+  signed or the provider isn't the signed one (to owners of the verified roster, with the way to the
+  console). The console's Security section also names admins the server reports gone, and tells somebody the
+  provider made an owner that they wait for another owner's app. What an operator
+  must do, the Security section says to those who see it (operations.md, "Role signing").
 - **Admins can't sign.** For admins the form is read-only; the core refuses to sign a roster or
   policy for anyone who isn't an owner of the verified roster (`not_an_owner`), and every client
   would refuse such an entry anyway.
 - **Keep an owner's app in use.** An owner's client signs the roster again by itself when half of
-  the 30 days have passed. The console warns a week before the window runs out (a client setting,
-  `workspace_expiry_warning`) and once it has: then an owner only needs to open TeamCraft.
+  the 30 days have passed, under either policy. The console warns a week before the window runs out (a
+  client setting, `workspace_expiry_warning`) and once it has: then an owner only needs to open TeamCraft.
 - **All owners lost** (every owner left, or lost all devices and the recovery kit): there is **no
   recovery path**, by decision (issue #188). A recovery by key shares or by re-rooting the trust
   would be one more way to take over a workspace, so there is none. What happens:
@@ -186,7 +191,7 @@ signature (freshness above).
     (`not_an_owner`), and an owner needs a device with the identity key.
   - Admins keep their authority on a client until the newest roster it holds is older than the
     freshness window (30 days by default, the client setting `workspace_max_age`). After that,
-    every client treats admins as members and the console shows the banner above; nobody can sign
+    every client treats admins as members and admins see the banner above; nobody can sign
     the unchanged roster again to extend it. Chat itself keeps working.
   - A new genesis roster is refused by every client that pinned the root of trust
     (`WorkspaceError::RootChanged`), also when the server offers it. A new device of a member takes
@@ -263,11 +268,13 @@ admin in is an owner's own membership change.
   and over.
 - **Who decides.** The channel's owners: members with the channel role `admin`. The server decides
   who is asked, but an owner's app approves only if its own verified channel roles (e2ee.md §4.6.1)
-  make that owner an admin, and members take the add in only from a signed channel admin. An owner
-  the server alone lists sees the request with "Your owner role in this channel isn't signed" and
-  can only decline, until a signed admin or a workspace admin signs the role ("Sign role" in the
-  channel's members; an owner of a channel from before signed roles signs their own, which founds
-  the log). A channel nobody signed yet keeps the rule of before for members, so older apps in the
+  make that owner an admin, and members take the add in only from a signed channel admin. On a
+  channel from before signed roles the owner's app founds the log on the way. An owner the server
+  alone lists on a signed channel sees the request with why members wouldn't accept the admin and can
+  only decline, until a signed admin or a workspace admin sets their role again (for when nobody can,
+  §2.5). On a channel where this device took nothing but junk they approve all the same, unless it was
+  told of a real log by a member's head. A
+  channel nobody signed yet keeps the rule of before for members, so older apps in the
   group are not split off; what an approval can do is limited by the checks below. The server tells
   them (gateway `admin_join_request_update`) and their apps show the request at the top of
   Activity, in the channel settings above the member list and as a system notification, each with
@@ -382,7 +389,13 @@ message, would keep a real join quiet. So the line is derived where the join hap
 When the last owner of a private channel leaves the company, an admin assigns a new owner from the
 remaining members. The admin doesn't need to be a member for that. A workspace admin's signature is
 what makes the new owner count on members' apps (e2ee.md §4.6.1); the console's assignment doesn't
-sign it yet (a follow-up of issue #380), so until then the new owner's role shows as not signed.
+sign it yet (a follow-up of issue #380), so until then the new owner's role is the server's word. An
+admin who isn't in the channel's encryption group can't vouch for the key of somebody they can't check
+(e2ee.md §4.6.1, "Whose key a role names"): on a channel with a log, a workspace admin in the group
+signs it. Under `owner_approval`, with no workspace admin in the group and no owner whose role counts,
+nobody can let one in. The repair: a workspace owner temporarily sets `admin_self_join` to `visible`, a
+workspace admin joins, checks the roles in the channel's members and confirms them, and the owner sets
+the policy back. Everybody in the channel sees the join.
 
 **Decision (issue #877): workspace admins keep appointing channel admins.** There is no instance policy
 that limits them to channels without an admin: an orphaned channel needs exactly this, and a switch
@@ -603,7 +616,16 @@ Admins can't read reported content unless a member shows it to them:
 | Storage usage (Postgres, S3) per space                                                                            | v1.x |
 | Audit log (metadata only), exportable                                                                             | v1   |
 | Push setup (APNs, FCM, UnifiedPush)                                                                               | v1   |
-| Backups status                                                                                                    | v1.x |
+| Backups status (a heartbeat from the deployment, System health page; operations.md "Health and alerts")           | v1.x |
+
+**System health** (issue #213, [operations.md](operations.md) "Health and alerts"). Administration →
+System health lists the server's checks (database, storage, identity provider, push, media server,
+jobs, and the backup, certificate and disk the deployment reports), each as OK, failing, alert, no
+data or not set up, and the alerts raised since the server started. Owners and admins see a count on
+the Administration menu when a check has failed for the hold time, pushed by the gateway
+(`health_alert_update`, to admins only), not polled. It carries names, states, times and numbers,
+never content. Only people who may manage the workspace can read it (`GET /api/v1/admin/health`), and
+the console shows the page only to them.
 
 ### 3.5 Call backgrounds
 
