@@ -1102,6 +1102,7 @@ fn demo_admin_users(now: TimestampMs, users: &[crate::model::User]) -> Vec<Admin
           expires_at: now + 12 * DAY,
         }),
         role,
+        device_count: devices.len() as u32,
         devices,
         last_seen,
         user,

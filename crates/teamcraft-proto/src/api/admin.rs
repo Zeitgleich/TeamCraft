@@ -6,8 +6,8 @@ use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
 use crate::{
-  AuditEntryId, ConversationId, ConversationVisibility, DeviceId, JoinPolicy, PushProvider, SpaceId,
-  UnixMillis, UserId, UserKind,
+  AuditEntryId, ConversationId, ConversationVisibility, DeviceId, JoinPolicy, PushProvider, RetentionSetting,
+  SpaceId, UnixMillis, UserId, UserKind,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -79,6 +79,16 @@ pub struct AdminConversationSummary {
   /// Time of the newest message, if there is one.
   #[serde(rename = "last_activity_at", default, skip_serializing_if = "Option::is_none")]
   pub maybe_last_activity_at: Option<UnixMillis>,
+  /// The channel's owner: its first channel admin by display name. Absent when nobody is admin
+  /// (an orphaned channel), and from servers older than the bulk read; there `retention` is
+  /// absent too, which tells a client to read owner and retention per channel.
+  #[serde(rename = "owner_user_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_owner_user_id: Option<UserId>,
+  /// What retention applies to the channel (its own, its space's or the default, cut down to the
+  /// workspace limit): the `effective` value of `GET /conversations/{id}/retention`. Absent from
+  /// older servers.
+  #[serde(rename = "retention", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_retention: Option<RetentionSetting>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

@@ -988,6 +988,24 @@ pub trait AdminBackend {
 
   /// Called when the console opens: backends that read the server fetch fresh data now.
   fn admin_refresh(&self) {}
+  /// The console's timer: reads only what the open section shows, not everything (issue #1217:
+  /// the whole console on a timer used up the address's rate limit). Backends without the
+  /// distinction read everything.
+  fn admin_refresh_section(&self, _section: crate::admin::AdminSection) {
+    self.admin_refresh();
+  }
+  /// Loads the devices of a user, once the console shows them; they arrive with the next change
+  /// notification and stay current with the console's refreshes.
+  fn admin_load_devices(&self, _user: UserId) {}
+  /// Whether the channel list ends before the instance's last channel (the console reads a bounded
+  /// number of pages).
+  fn admin_channels_truncated(&self) -> bool {
+    false
+  }
+  /// Whether the user list ends before the instance's last account.
+  fn admin_users_truncated(&self) -> bool {
+    false
+  }
 
   /// Spaces by name, for the permission scheme scopes.
   fn admin_spaces(&self) -> Vec<AdminSpace> {

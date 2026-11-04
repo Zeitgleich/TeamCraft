@@ -322,3 +322,16 @@
   margin-bottom: 12px;
   box-shadow: var(--shadow-card);
 }
+
+/* A retention limit: the choice, the number and its unit on one line; the field's error below. */
+.retention-limit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.retention-limit .field-error {
+  flex-basis: 100%;
+  margin: 0;
+}

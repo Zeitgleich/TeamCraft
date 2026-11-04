@@ -1,12 +1,13 @@
 use leptos::prelude::*;
 
 use crate::admin::{AdminChannel, Retention};
-use crate::components::admin_console::SectionHeader;
+use crate::components::admin_console::{ListCutNotice, SectionHeader};
+use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::use_i18n;
 use crate::model::ConversationKind;
 use crate::state::use_app_state;
 
-/// Instance maximum an owner may not exceed; a real value comes from the instance settings later.
+/// Instance maximum an owner may not exceed when the signed policy sets no limit of its own.
 const MAX_DAYS: u32 = 730;
 const MAX_MESSAGES: u32 = 1_000_000;
 
@@ -22,11 +23,12 @@ pub fn RetentionSection() -> impl IntoView {
       .filter(|c| c.kind != ConversationKind::Direct)
       .collect::<Vec<_>>()
   });
+  let limits = Limits::of_policy(state.read(|backend| backend.workspace_policy()).1.retention.limit);
 
   view! {
     <SectionHeader
       title=Signal::derive(move || i18n.t("admin-retention-title"))
-      subtitle=Signal::derive(move || i18n.t_with("admin-retention-subtitle", &[("days", &MAX_DAYS.to_string())]))
+      subtitle=Signal::derive(move || i18n.t_with("admin-retention-subtitle", &[("days", &limits.max_days.to_string())]))
     />
     <div class="table-wrap">
       <table class="data-table">
@@ -43,87 +45,124 @@ pub fn RetentionSection() -> impl IntoView {
         </thead>
         <tbody>
           <For each=move || channels.get() key=|channel| (channel.id, channel.retention) let:channel>
-            <RetentionRow channel=channel />
+            <RetentionRow channel=channel limits=limits />
           </For>
         </tbody>
       </table>
     </div>
+    <ListCutNotice is_cut=Signal::derive(move || state.read(|backend| backend.admin_channels_truncated())) />
   }
 }
 
 #[component]
-fn RetentionRow(channel: AdminChannel) -> impl IntoView {
+fn RetentionRow(channel: AdminChannel, limits: Limits) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let id = channel.id;
   let initial = channel.retention;
-  let days = RwSignal::new(
-    initial
-      .maybe_days
-      .map(|value| value.to_string())
-      .unwrap_or_default(),
-  );
-  let messages = RwSignal::new(
-    initial
-      .maybe_max_messages
-      .map(|value| value.to_string())
-      .unwrap_or_default(),
-  );
+  let name = channel.name.clone();
+  let errors = FormErrors::new();
+  let row_id = format!("retention-row-{id}");
+  let days_id = format!("retention-days-{id}");
+  let messages_id = format!("retention-messages-{id}");
+
+  let days = LimitField::new(initial.maybe_days.map(|value| value.to_string()));
+  let messages = LimitField::new(initial.maybe_max_messages.map(|value| value.to_string()));
   let keeps_pinned = RwSignal::new(initial.keeps_pinned);
 
-  // Blank means "keep everything"; anything else must be a whole number within the instance maximum.
-  let days_parsed = move || parse_limit(&days.get(), MAX_DAYS);
-  let messages_parsed = move || parse_limit(&messages.get(), MAX_MESSAGES);
-  let parsed = move || -> Result<Retention, &'static str> {
-    Ok(Retention {
-      maybe_days: days_parsed()?,
-      maybe_max_messages: messages_parsed()?,
-      keeps_pinned: keeps_pinned.get(),
-    })
+  // What the fields say now: each limit on its own, with the message of the field that is wrong.
+  let check = {
+    let (days_id, messages_id) = (days_id.clone(), messages_id.clone());
+    move || -> Result<Retention, FieldErrors> {
+      let parsed_days = days.parse(limits.max_days);
+      let parsed_messages = messages.parse(limits.max_messages);
+      let mut found = FieldErrors::new();
+      if parsed_days.is_err() {
+        found.push(
+          days_id.clone(),
+          i18n.t_with(
+            "admin-retention-error-days",
+            &[("max", &limits.max_days.to_string())],
+          ),
+        );
+      }
+      if parsed_messages.is_err() {
+        found.push(
+          messages_id.clone(),
+          i18n.t_with(
+            "admin-retention-error-messages",
+            &[("max", &limits.max_messages.to_string())],
+          ),
+        );
+      }
+      match (parsed_days, parsed_messages) {
+        (Ok(maybe_days), Ok(maybe_max_messages)) => Ok(Retention {
+          maybe_days,
+          maybe_max_messages,
+          keeps_pinned: keeps_pinned.get(),
+        }),
+        _ => Err(found),
+      }
+    }
   };
-  let is_dirty = move || parsed().is_ok_and(|retention| retention != initial) || parsed().is_err();
-  let error_id = format!("retention-error-{id}");
+  let is_dirty = {
+    let check = check.clone();
+    move || check().is_ok_and(|retention| retention != initial) || check().is_err()
+  };
+  // After a refused save the errors follow the input (forms.md); before it nothing is judged.
+  Effect::new({
+    let check = check.clone();
+    move |_| {
+      if let Err(found) = check() {
+        errors.follow(found);
+      } else {
+        errors.follow(FieldErrors::new());
+      }
+    }
+  });
+  let save = {
+    let (check, row_id) = (check.clone(), row_id.clone());
+    move |_| match check() {
+      Ok(retention) => {
+        errors.clear();
+        state.write(|backend| backend.set_channel_retention(id, retention));
+      },
+      Err(found) => errors.refuse(row_id.clone(), found),
+    }
+  };
 
   view! {
-    <tr>
+    <tr id=row_id>
       <th scope="row">
         <span class="row-name" translate="no">{format!("# {}", channel.name)}</span>
       </th>
       <td translate="no">{channel.space_name.clone()}</td>
       <td>
-        <label class="visually-hidden" for=format!("ret-days-{id}")>{move || i18n.t("retention-days")}</label>
-        <input
-          id=format!("ret-days-{id}")
-          class="input narrow"
-          inputmode="numeric"
-          autocomplete="off"
-          name="days"
-          placeholder=move || i18n.t("retention-forever")
-          aria-invalid=move || days_parsed().is_err().then_some("true")
-          aria-describedby={
-            let error_id = error_id.clone();
-            move || days_parsed().is_err().then(|| error_id.clone())
-          }
-          prop:value=move || days.get()
-          on:input=move |ev| days.set(event_target_value(&ev))
+        <LimitInput
+          field=days
+          input_id=days_id
+          errors=errors
+          unit_key="admin-retention-unit-days"
+          choice_label=Signal::derive({
+            let name = name.clone();
+            move || i18n.t_with("admin-retention-choice-days", &[("channel", &name)])
+          })
+          max=limits.max_days
+          is_everything_allowed=limits.is_forever_days_allowed
         />
       </td>
       <td>
-        <label class="visually-hidden" for=format!("ret-msgs-{id}")>{move || i18n.t("retention-messages")}</label>
-        <input
-          id=format!("ret-msgs-{id}")
-          class="input narrow"
-          inputmode="numeric"
-          autocomplete="off"
-          name="messages"
-          placeholder=move || i18n.t("retention-forever")
-          aria-invalid=move || messages_parsed().is_err().then_some("true")
-          aria-describedby={
-            let error_id = error_id.clone();
-            move || messages_parsed().is_err().then(|| error_id.clone())
-          }
-          prop:value=move || messages.get()
-          on:input=move |ev| messages.set(event_target_value(&ev))
+        <LimitInput
+          field=messages
+          input_id=messages_id
+          errors=errors
+          unit_key="admin-retention-unit-messages"
+          choice_label=Signal::derive({
+            let name = name.clone();
+            move || i18n.t_with("admin-retention-choice-messages", &[("channel", &name)])
+          })
+          max=limits.max_messages
+          is_everything_allowed=limits.is_forever_messages_allowed
         />
       </td>
       <td>
@@ -133,18 +172,7 @@ fn RetentionRow(channel: AdminChannel) -> impl IntoView {
         </label>
       </td>
       <td>
-        <span id=error_id class="field-error" role="alert">
-          {move || parsed().err().map(|key| i18n.t_with(key, &[("days", &MAX_DAYS.to_string())]))}
-        </span>
-        <button
-          class="btn btn-small btn-primary"
-          disabled=move || parsed().is_err() || !is_dirty()
-          on:click=move |_| {
-            if let Ok(retention) = parsed() {
-              state.write(|backend| backend.set_channel_retention(id, retention));
-            }
-          }
-        >
+        <button class="btn btn-small btn-primary" disabled=move || !is_dirty() on:click=save>
           {move || i18n.t("save")}
         </button>
       </td>
@@ -152,13 +180,116 @@ fn RetentionRow(channel: AdminChannel) -> impl IntoView {
   }
 }
 
-/// One limit as typed: blank keeps everything, otherwise a whole number from 1 to `max`.
-fn parse_limit(text: &str, max: u32) -> Result<Option<u32>, &'static str> {
-  let text = text.trim();
-  if text.is_empty() {
+/// One limit as a choice and a number: "keep everything" or "keep the last N", with its unit next
+/// to the number. The number stays visible (and disabled) while the choice is "keep everything", so
+/// the layout doesn't move.
+#[component]
+fn LimitInput(
+  field: LimitField,
+  input_id: String,
+  errors: FormErrors,
+  unit_key: &'static str,
+  #[prop(into)] choice_label: Signal<String>,
+  max: u32,
+  is_everything_allowed: bool,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let choice_id = format!("{input_id}-choice");
+  let unit = move || {
+    let count = field.text.get().trim().parse::<usize>().unwrap_or(0);
+    i18n.t_count(unit_key, count)
+  };
+
+  view! {
+    <div class="retention-limit">
+      <select
+        id=choice_id
+        class="input"
+        aria-label=move || choice_label.get()
+        on:change=move |ev| field.is_limited.set(event_target_value(&ev) == LIMITED)
+      >
+        <option value=EVERYTHING selected=move || !field.is_limited.get() disabled=!is_everything_allowed>
+          {move || i18n.t("admin-retention-forever")}
+        </option>
+        <option value=LIMITED selected=move || field.is_limited.get()>
+          {move || i18n.t("admin-retention-limited")}
+        </option>
+      </select>
+      <input
+        id=input_id.clone()
+        class="input narrow"
+        inputmode="numeric"
+        autocomplete="off"
+        min="1"
+        max=max.to_string()
+        aria-label=move || choice_label.get()
+        disabled=move || !field.is_limited.get()
+        aria-invalid=errors.invalid(input_id.clone())
+        aria-describedby=errors.described(input_id.clone())
+        prop:value=move || field.text.get()
+        on:input=move |ev| field.text.set(event_target_value(&ev))
+      />
+      <span class="muted-text small">{unit}</span>
+      <FieldError errors=errors field=input_id />
+    </div>
+  }
+}
+
+const EVERYTHING: &str = "everything";
+const LIMITED: &str = "limited";
+
+/// What one limit's fields hold.
+#[derive(Clone, Copy)]
+struct LimitField {
+  /// "Keep the last N" (otherwise "keep everything").
+  is_limited: RwSignal<bool>,
+  text: RwSignal<String>,
+}
+
+impl LimitField {
+  fn new(maybe_value: Option<String>) -> Self {
+    Self {
+      is_limited: RwSignal::new(maybe_value.is_some()),
+      text: RwSignal::new(maybe_value.unwrap_or_default()),
+    }
+  }
+
+  fn parse(&self, max: u32) -> Result<Option<u32>, &'static str> {
+    parse_limit(self.is_limited.get(), &self.text.get(), max)
+  }
+}
+
+/// How far the limits may go: the signed policy's limit where it sets one (and then "keep
+/// everything" isn't offered), else the console's own upper bound.
+#[derive(Clone, Copy)]
+struct Limits {
+  max_days: u32,
+  max_messages: u32,
+  is_forever_days_allowed: bool,
+  is_forever_messages_allowed: bool,
+}
+
+impl Limits {
+  fn of_policy(limit: teamcraft_proto::RetentionSetting) -> Self {
+    Self {
+      max_days: limit.maybe_max_age_days.unwrap_or(MAX_DAYS),
+      max_messages: limit
+        .maybe_max_messages
+        .and_then(|count| u32::try_from(count).ok())
+        .unwrap_or(MAX_MESSAGES),
+      is_forever_days_allowed: limit.maybe_max_age_days.is_none(),
+      is_forever_messages_allowed: limit.maybe_max_messages.is_none(),
+    }
+  }
+}
+
+/// One limit as chosen: "keep everything" is its own choice, not an empty field; "keep the last N"
+/// needs a whole number from 1 to `max`.
+fn parse_limit(is_limited: bool, text: &str, max: u32) -> Result<Option<u32>, &'static str> {
+  if !is_limited {
     return Ok(None);
   }
-  match text.parse::<u32>() {
+  match text.trim().parse::<u32>() {
     Ok(value) if (1..=max).contains(&value) => Ok(Some(value)),
     _ => Err("retention-invalid"),
   }
@@ -167,12 +298,30 @@ fn parse_limit(text: &str, max: u32) -> Result<Option<u32>, &'static str> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use teamcraft_proto::RetentionSetting;
 
   #[test]
-  fn each_limit_is_checked_on_its_own() {
-    assert_eq!(parse_limit(" ", 10), Ok(None));
-    assert_eq!(parse_limit("7", 10), Ok(Some(7)));
-    assert_eq!(parse_limit("0", 10), Err("retention-invalid"));
-    assert_eq!(parse_limit("11", 10), Err("retention-invalid"));
+  fn keeping_everything_is_a_choice_and_an_empty_number_is_an_error() {
+    assert_eq!(parse_limit(false, "", 10), Ok(None));
+    assert_eq!(parse_limit(false, "99", 10), Ok(None));
+    assert_eq!(parse_limit(true, " 7 ", 10), Ok(Some(7)));
+    assert_eq!(parse_limit(true, "", 10), Err("retention-invalid"));
+    assert_eq!(parse_limit(true, "0", 10), Err("retention-invalid"));
+    assert_eq!(parse_limit(true, "11", 10), Err("retention-invalid"));
+    assert_eq!(parse_limit(true, "1.5", 10), Err("retention-invalid"));
+  }
+
+  #[test]
+  fn the_policy_limit_caps_the_choices_and_takes_away_keeping_everything() {
+    let open = Limits::of_policy(RetentionSetting::default());
+    assert_eq!((open.max_days, open.max_messages), (MAX_DAYS, MAX_MESSAGES));
+    assert!(open.is_forever_days_allowed && open.is_forever_messages_allowed);
+    let limited = Limits::of_policy(RetentionSetting {
+      maybe_max_age_days: Some(90),
+      maybe_max_messages: None,
+    });
+    assert_eq!(limited.max_days, 90);
+    assert!(!limited.is_forever_days_allowed);
+    assert!(limited.is_forever_messages_allowed);
   }
 }
