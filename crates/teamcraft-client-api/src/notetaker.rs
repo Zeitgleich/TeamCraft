@@ -1,7 +1,8 @@
 //! The notetaker as the call screen sees it (e2ee.md §8.2): who it is comes from the verified
 //! policy, whether it is in the call from the participant list; never from what the server or the
 //! notetaker say about themselves. What the user may do is only what the screen offers: the
-//! notetaker decides on every request from its own copy of the signed data.
+//! notetaker decides on every request from its own copy of the signed data. Desktop, web and the
+//! mobile apps (through teamcraft-ffi) show the same.
 
 use teamcraft_proto::{NotetakerInviters, NotetakerPolicy};
 
@@ -19,7 +20,7 @@ pub struct NotetakerInCall {
   /// asks it in once its membership commit is in (e2ee.md §8.2).
   pub is_member: bool,
   /// "Add notetaker": on, allowed, not in the call yet, and a member of the conversation or one
-  /// the user can bring in (add there, or move a DM call into a room with it).
+  /// the user can bring in (add there, or move the call into a room with it).
   pub can_invite: bool,
   /// "Remove notetaker".
   pub can_stop: bool,
@@ -28,9 +29,9 @@ pub struct NotetakerInCall {
 /// The notetaker of `policy` in a call with `participants` (the others), for the user in a
 /// conversation with `member_ids`. `is_person`: the user is neither a guest nor a bot.
 /// `can_bring_in`: the user can bring the notetaker into the call where it is no member (a
-/// channel where the user manages members, a meeting the user organizes, a DM or group DM whose
-/// call moves into a room with it; e2ee.md §8.2, "In every call"). `None` without a notetaker
-/// account in the policy.
+/// channel where the user manages members, a meeting the user organizes, or any other call, which
+/// moves into a room with it; e2ee.md §8.2, "In every call"). `None` without a notetaker account in
+/// the policy.
 pub fn notetaker_in_call(
   policy: &NotetakerPolicy,
   is_person: bool,

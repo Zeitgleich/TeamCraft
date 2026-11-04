@@ -83,6 +83,40 @@ pub struct CallMoveInfo {
   pub is_requested_here: bool,
 }
 
+/// The notetaker in a call as the call screen shows it (e2ee.md §8.2): who it is comes from the
+/// verified policy, whether it is in the call from the call's participants, never from what the
+/// server or the notetaker say about themselves.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct NotetakerCallInfo {
+  /// The notetaker's account: its tile reads "Notetaker".
+  pub bot_user_id: String,
+  /// Where the audio goes, for the notice.
+  pub transcription_model: String,
+  /// It is in the call now: the notice shows for everybody.
+  pub is_present: bool,
+  /// It is a member of the call's conversation: "Add notetaker" asks it in there
+  /// (`ask_notetaker_in`). Otherwise the call moves into a room with it (`add_people_to_call` with
+  /// the notetaker as the added one).
+  pub is_member: bool,
+  /// "Add notetaker": the policy lets the user ask it in and it isn't in the call yet.
+  pub can_invite: bool,
+  /// "Remove notetaker" (`send_notetaker_away`).
+  pub can_stop: bool,
+}
+
+impl From<teamcraft_client_api::notetaker::NotetakerInCall> for NotetakerCallInfo {
+  fn from(notetaker: teamcraft_client_api::notetaker::NotetakerInCall) -> Self {
+    Self {
+      bot_user_id: notetaker.bot.to_string(),
+      transcription_model: notetaker.transcription_model,
+      is_present: notetaker.is_present,
+      is_member: notetaker.is_member,
+      can_invite: notetaker.can_invite,
+      can_stop: notetaker.can_stop,
+    }
+  }
+}
+
 /// Told about other devices' video in the call and their decoded frames (on decoder threads).
 #[uniffi::export(with_foreign)]
 pub trait VideoListener: Send + Sync {
@@ -1543,6 +1577,34 @@ mod tests {
 
   fn call(raw: i64) -> CallId {
     CallId::from_snowflake(Snowflake::new(raw).unwrap())
+  }
+
+  /// #1274: the apps read the notetaker as desktop and web do; where it is no member they can
+  /// still bring it in (the call moves into a room with it), for whoever the policy allows.
+  #[test]
+  fn the_apps_offer_the_notetaker_in_every_call_the_policy_allows() {
+    let (me, bob, bot) = (user(1), user(2), user(9));
+    let policy = teamcraft_proto::NotetakerPolicy {
+      is_enabled: true,
+      maybe_bot: Some(bot),
+      ..teamcraft_proto::NotetakerPolicy::default()
+    };
+    let offered: NotetakerCallInfo =
+      teamcraft_client_api::notetaker::notetaker_in_call(&policy, true, false, &[me, bob], &[bob], true)
+        .unwrap()
+        .into();
+    assert_eq!(offered.bot_user_id, bot.to_string());
+    assert!(offered.can_invite && !offered.is_member && !offered.is_present);
+
+    let admins_only = teamcraft_proto::NotetakerPolicy {
+      inviters: teamcraft_proto::NotetakerInviters::Admins,
+      ..policy
+    };
+    let refused: NotetakerCallInfo =
+      teamcraft_client_api::notetaker::notetaker_in_call(&admins_only, true, false, &[me, bob], &[bob], true)
+        .unwrap()
+        .into();
+    assert!(!refused.can_invite);
   }
 
   fn user(raw: i64) -> UserId {

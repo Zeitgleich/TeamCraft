@@ -108,6 +108,41 @@ impl Reads {
     }
   }
 
+  /// The notetaker in the call of `conversation_id` with `participants` (the others), as desktop
+  /// and web show it (`teamcraft_client_api::notetaker`). The mobile apps can move every call, so
+  /// the notetaker can be brought into any call where the policy lets the user ask it in.
+  pub(crate) fn notetaker_in_call(
+    &self,
+    conversation_id: &str,
+    participants: &[String],
+  ) -> Result<Option<crate::NotetakerCallInfo>, TeamCraftError> {
+    let conversation = parse_id(conversation_id)?;
+    let participants = participants
+      .iter()
+      .map(|id| parse_id(id))
+      .collect::<Result<Vec<_>, _>>()?;
+    let backend = self.backend()?;
+    let Some(policy) = backend.notetaker_policy() else {
+      return Ok(None);
+    };
+    let me = backend.me();
+    let member_ids = backend
+      .conversation(conversation)
+      .map(|found| found.member_ids)
+      .unwrap_or_default();
+    Ok(
+      teamcraft_client_api::notetaker::notetaker_in_call(
+        &policy,
+        !me.is_guest && !me.is_bot,
+        backend.can_manage_integration_sources(),
+        &member_ids,
+        &participants,
+        true,
+      )
+      .map(Into::into),
+    )
+  }
+
   fn security_snapshot(&self) -> Result<SecuritySnapshot, TeamCraftError> {
     let my_fingerprint = self.identity_fingerprint()?;
     let fingerprint = |key: [u8; 32]| IdentityPublicKey::from_bytes(key).fingerprint().to_string();

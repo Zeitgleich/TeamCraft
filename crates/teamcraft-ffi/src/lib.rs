@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 pub use calls::{
   CallEndReason, CallListener, CallMoveInfo, CallPhase, CallSession, CallStateInfo, EncodedVideoListener,
-  IncomingCallInfo, RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
+  IncomingCallInfo, NotetakerCallInfo, RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
 };
 pub use error::TeamCraftError;
 pub use http_fetch::{
@@ -883,10 +883,13 @@ impl TeamCraft {
   }
 
   /// "Add people" in the DM or group DM call of `conversation_id` (docs/meetings.md, "A call becomes
-  /// a meeting"): starts a meeting room with the people in the call (`in_call`, as the call shows
-  /// them) and `added`, founds its encryption with exactly them and moves the call there. The DM
-  /// itself doesn't change. `request_key` from [`new_request_key`], kept for retries of this one
-  /// action, gets the same room again. Returns the room's conversation; join its call next.
+  /// a meeting"), or "Add notetaker" in any call where the notetaker is no member: starts a meeting
+  /// room with the people in the call (`in_call`, as the call shows them) and `added`, founds its
+  /// encryption with exactly them and moves the call there. The conversation itself doesn't
+  /// change. The notetaker among `added` isn't rung but asked in there, if the policy lets the user
+  /// (e2ee.md §8.2, "In every call"). `request_key` from [`new_request_key`], kept for retries of
+  /// this one action, gets the same room again. Returns the room's conversation; join its call
+  /// next.
   pub async fn add_people_to_call(
     &self,
     conversation_id: String,
@@ -904,6 +907,45 @@ impl TeamCraft {
         })
       })
       .await
+  }
+
+  /// The notetaker in the call of `conversation_id` with `participant_user_ids` (the others in
+  /// the call, as the call engine verified them), for the call screen's "Add notetaker", notice and
+  /// "Remove notetaker" (e2ee.md §8.2). `None` without a notetaker in the verified policy. "Add
+  /// notetaker" is offered in every call to whoever the policy lets ask it in: where the notetaker
+  /// is a member it is asked in (`ask_notetaker_in`), anywhere else the call moves into a room with
+  /// it (`add_people_to_call` with the notetaker as the added one; "In every call").
+  pub async fn notetaker_in_call(
+    &self,
+    conversation_id: String,
+    participant_user_ids: Vec<String>,
+  ) -> Result<Option<NotetakerCallInfo>, TeamCraftError> {
+    self
+      .read(move |reads| reads.notetaker_in_call(&conversation_id, &participant_user_ids))
+      .await
+  }
+
+  /// Asks the notetaker into the call of `conversation_id`, where it is a member (a `join`
+  /// `this_call`, e2ee.md §8.2). The notetaker takes it only from a user the policy allows.
+  pub async fn ask_notetaker_in(&self, conversation_id: String) -> Result<(), TeamCraftError> {
+    let conversation = engine::parse_id(&conversation_id)?;
+    let action = ChatAction::RequestNotetaker {
+      conversation,
+      request: teamcraft_proto::NotetakerRequest::Join {
+        scope: teamcraft_proto::NotetakerScope::ThisCall,
+      },
+    };
+    self.act_locally(move |reads| reads.apply_action(action)).await
+  }
+
+  /// "Remove notetaker": sends it away from the call of `conversation_id` (a `stop`).
+  pub async fn send_notetaker_away(&self, conversation_id: String) -> Result<(), TeamCraftError> {
+    let conversation = engine::parse_id(&conversation_id)?;
+    let action = ChatAction::RequestNotetaker {
+      conversation,
+      request: teamcraft_proto::NotetakerRequest::Stop,
+    };
+    self.act_locally(move |reads| reads.apply_action(action)).await
   }
 
   /// The announced move of the call of `from_conversation_id` into `to_conversation_id` (after
