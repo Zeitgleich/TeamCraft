@@ -114,6 +114,9 @@ pub async fn append(
     tracing::warn!(%error, "could not close the admin join requests after a policy change");
   }
 
+  if kind == WorkspaceLogKind::Roster {
+    super::role_evidence::settle_after_roster(state, request.payload.as_slice()).await;
+  }
   let entries = state.database.list_workspace_log(&kind, version - 1, 1).await?;
   entries
     .first()

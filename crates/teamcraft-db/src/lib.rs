@@ -110,7 +110,7 @@ pub use profile::{StoredAvatar, StoredProfile, StoredWorkingHours};
 pub use push::{PushDeviceRow, PushRecipientRow};
 pub use push_retry::{NewPushRetry, PushRetryClaim, PushRetryRow};
 pub use retention::{RetentionTarget, StoredObject, StoredRetention};
-pub use role_evidence::{RoleStanding, StoredRoleEvidence};
+pub use role_evidence::{RoleStanding, StoredRoleEvidence, StoredRoleLoss};
 pub use server_settings::{StoredBrand, StoredBrandAsset, StoredSetting};
 pub use share_link::{NewShareLink, ShareLink, ShareTarget};
 pub use snowflake::{Clock, SnowflakeError, SnowflakeGenerator, SystemClock};

@@ -142,6 +142,44 @@ pub fn verify_role_evidence(
   })
 }
 
+/// What an access token of this client says about a person's roles: the evidence that somebody lost a
+/// role, kept by the server from the requests it saw (e2ee.md §3.1.3). Names no identity key, so it can
+/// only count for an account already noted. No role of this client means none, not "not said": unlike ID
+/// tokens, access tokens always carry them, or nobody could use TeamCraft at all.
+pub fn verify_role_loss(
+  token: &str,
+  jwks_json: &[u8],
+  expected: &AttestationExpectations<'_>,
+) -> Result<RoleEvidence, AttestationError> {
+  let claims = verified_claims(token, jwks_json)?;
+  let issuer = claims.get("iss").and_then(Value::as_str).unwrap_or_default();
+  if issuer.trim_end_matches('/') != expected.issuer.trim_end_matches('/') {
+    return Err(AttestationError::WrongIssuer(issuer.to_string()));
+  }
+  // Access tokens name the API in `aud`, and the client that asked in `azp`.
+  if claims.get("azp").and_then(Value::as_str) != Some(expected.audience) {
+    return Err(AttestationError::WrongAudience);
+  }
+  if let Some(kind) = claims.get("typ").and_then(Value::as_str)
+    && !kind.eq_ignore_ascii_case("Bearer")
+    && !kind.eq_ignore_ascii_case("DPoP")
+  {
+    return Err(AttestationError::WrongType(kind.to_string()));
+  }
+  Ok(RoleEvidence {
+    subject: claims
+      .get("sub")
+      .and_then(Value::as_str)
+      .unwrap_or_default()
+      .to_string(),
+    issued_at: claims
+      .get("iat")
+      .and_then(Value::as_i64)
+      .ok_or(AttestationError::NoIssueTime)?,
+    maybe_roles: Some(client_roles(&claims, expected.audience).unwrap_or_default()),
+  })
+}
+
 /// Reads a token's claims without checking its signature: see [`UnverifiedClaims`].
 pub fn unverified_claims(token: &str) -> Result<UnverifiedClaims, AttestationError> {
   if token.len() > MAX_TOKEN_BYTES {
@@ -460,6 +498,48 @@ mod tests {
       assert_eq!(claims.maybe_key_claim.as_deref(), Some("7:ab"));
       assert_eq!(claims.maybe_roles, Some(vec!["owner".to_string()]));
       assert!(unverified_claims("garbage").is_err());
+    }
+  }
+
+  mod role_loss {
+    use super::*;
+
+    #[test]
+    fn an_access_token_without_a_role_of_this_client_says_none() {
+      let provider = Provider::new();
+      let token = provider.token(json!({
+        "iss": ISSUER, "aud": "account", "azp": CLIENT, "typ": "Bearer", "sub": "abc", "iat": 7,
+        "resource_access": { "account": { "roles": ["manage-account"] } },
+      }));
+      let evidence = verify_role_loss(&token, &provider.jwks(), &expectations()).unwrap();
+      assert_eq!(evidence.subject, "abc");
+      assert_eq!(evidence.issued_at, 7);
+      assert_eq!(evidence.maybe_roles, Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_forged_token_or_one_of_another_client_or_kind_says_nothing() {
+      let provider = Provider::new();
+      let jwks = provider.jwks();
+      let claims =
+        |azp: &str, typ: &str| json!({ "iss": ISSUER, "azp": azp, "typ": typ, "sub": "abc", "iat": 7 });
+      assert!(verify_role_loss(&provider.token(claims(CLIENT, "DPoP")), &jwks, &expectations()).is_ok());
+      assert!(matches!(
+        verify_role_loss(
+          &Provider::new().token(claims(CLIENT, "Bearer")),
+          &jwks,
+          &expectations()
+        ),
+        Err(AttestationError::InvalidSignature)
+      ));
+      assert!(matches!(
+        verify_role_loss(&provider.token(claims("other", "Bearer")), &jwks, &expectations()),
+        Err(AttestationError::WrongAudience)
+      ));
+      assert!(matches!(
+        verify_role_loss(&provider.token(claims(CLIENT, "ID")), &jwks, &expectations()),
+        Err(AttestationError::WrongType(_))
+      ));
     }
   }
 

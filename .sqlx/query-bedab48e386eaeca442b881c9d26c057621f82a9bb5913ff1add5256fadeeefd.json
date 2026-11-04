@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM role_evidence WHERE user_id = $1 AND issued_at <= $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bedab48e386eaeca442b881c9d26c057621f82a9bb5913ff1add5256fadeeefd"
+}

@@ -161,9 +161,10 @@ signature (freshness above).
   (`roster_changed`) and the owner edits the new roster.
 - **Identity provider roles.** The `owner` and `admin` roles in the identity provider are the source of
   truth. A role given there is in force as soon as the person's app has published a token and an owner's
-  app has been open; a role taken away, as soon as the person's next token, or the server's report of a
-  deactivated account or a lost role, reaches an owner's app (e2ee.md §3.1.3, also what stays). Nothing
-  to confirm. On a realm where tokens can't prove it (no mapper) or under the manual policy, the people
+  app has been open; a role taken away, as soon as a token of theirs showing it has expired and an owner's
+  app has been open, or, for somebody who never signs in again, when the server's report has stood for a week
+  (admins only, one a week; an owner never goes on a report). e2ee.md §3.1.3 has the rules and what stays.
+  An owner's edit by hand stands until the provider says the same once. Nothing to confirm. On a realm where tokens can't prove it (no mapper) or under the manual policy, the people
   the provider lists appear in "Change the roster by hand", to sign through the same confirmation. That
   list is the server's word, so it only adds people and promotes admins to owners.
 - **Nothing is said in normal operation.** There are no banners or prompts about signing. An action
@@ -171,7 +172,9 @@ signature (freshness above).
   It will be as soon as an owner's app has been open; there's nothing you need to do."). A banner appears
   only when a person really must act: every owner has been away for the whole freshness window, so
   admin rights lapsed (to admins: which owner to ask to open TeamCraft), or evidence contradicts what is
-  signed or the provider isn't the signed one (to owners, with the way to the console). What an operator
+  signed or the provider isn't the signed one (to owners of the verified roster, with the way to the
+  console). The console's Security section also names admins the server reports gone, and tells somebody the
+  provider made an owner that they wait for another owner's app. What an operator
   must do, the Security section says to those who see it (operations.md, "Role signing").
 - **Admins can't sign.** For admins the form is read-only; the core refuses to sign a roster or
   policy for anyone who isn't an owner of the verified roster (`not_an_owner`), and every client

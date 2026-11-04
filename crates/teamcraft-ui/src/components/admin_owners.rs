@@ -150,7 +150,10 @@ fn RoleSigningSettings(policy: PolicyDraft) -> impl IntoView {
         <p class="muted-text small">
           {i18n.t_with("policy-role-provider", &[("issuer", &provider.issuer)])}
           " "
-          <button type="button" class="btn btn-small" on:click=move |_| edit(&|signing| signing.maybe_provider = None)>
+          <button type="button" class="btn btn-small" on:click=move |_| edit(&|signing| {
+            signing.maybe_provider = None;
+            signing.accepts_new_provider = true;
+          })>
             {i18n.t("policy-role-provider-reset")}
           </button>
         </p>
@@ -175,6 +178,11 @@ fn SigningNote(status: OwnerRosterStatus) -> impl IntoView {
       "roster-signing-contradictory",
       &[("names", &names(state, &users))],
     ),
+    RoleSigningIssue::ReportedGone { users } => i18n.t_with(
+      "roster-signing-reported-gone",
+      &[("names", &names(state, &users))],
+    ),
+    RoleSigningIssue::AwaitingOwner => i18n.t("roster-signing-awaiting-owner"),
   });
   text.map(|text| view! { <p class="auth-alert" role="status">{text}</p> })
 }

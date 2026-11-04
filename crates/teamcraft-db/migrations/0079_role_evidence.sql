@@ -7,3 +7,14 @@ CREATE TABLE role_evidence (
   issued_at   bigint      NOT NULL,
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- Access tokens with a lower role than the person had, seen on their requests: provider-signed evidence
+-- that needs nothing from them, and exists also when they have no role left. Handed out only once expired,
+-- so nobody who reads them holds a usable credential.
+CREATE TABLE role_losses (
+  user_id     bigint      PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+  token       text        NOT NULL,
+  issued_at   bigint      NOT NULL,
+  expires_at  bigint      NOT NULL,
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);

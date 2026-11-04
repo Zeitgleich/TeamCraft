@@ -309,8 +309,13 @@ pub enum RoleSigningIssue {
   NoKeyClaim,
   /// Tokens come from another provider than the signed policy names: an owner decides.
   ProviderChanged { issuer: String },
-  /// Evidence contradicts what is signed: an owner looks at these people.
+  /// Evidence contradicts what is signed, or the server reports an owner gone: an owner looks at these
+  /// people.
   Contradictory { users: Vec<UserId> },
+  /// The server reports these admins gone: they come off the roster in a while, one at a time.
+  ReportedGone { users: Vec<UserId> },
+  /// The provider makes this user an owner, and no owner's app has signed that yet.
+  AwaitingOwner,
 }
 
 /// An owner and the newest roster or policy signature of theirs this device verified.

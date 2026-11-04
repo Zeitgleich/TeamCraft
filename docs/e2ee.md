@@ -163,8 +163,9 @@ that it is an ID token, the claim `"<user id>:<fingerprint>"`, and that it has a
    apps (`role_evidence_update`) and shows the list only to owners (`GET /role-evidence`): tokens name
    people, with their e-mail address. While it waits, an app publishes again at most once a day
    (`role_evidence_refresh`), so its token stays recent.
-3. An owner's app the provider still calls owner verifies all of it and signs the next roster, in the
-   background. A roster it signs names what changed and on what evidence (`automatic`), which is the audit
+3. An owner's app verifies all of it and signs the next roster, in the background. That goes also for an owner the
+   provider no longer calls one, while they are on the roster, as otherwise a handover at the provider would deadlock: only
+   their app can sign the successor, and what it signs rests on tokens all the same. A roster it signs names what changed and on what evidence (`automatic`), which is the audit
    line; the server copies it into the audit log. Then it signs the current policy again under the new
    roster (as for every roster, A7).
 
@@ -180,6 +181,7 @@ event, once per gateway connection, and when its own role changed. Nothing runs 
 | Newer token with neither, of the known account                     | Off the roster, unless that leaves no owner                  |
 | Newer token with a lower role                                      | Demoted, unless that leaves no owner                         |
 | A token older than or as old as the person's mark                  | Nothing: this is what stops a replay after a demotion        |
+| A token that disagrees with an owner's edit by hand                | Nothing, until one agrees                                    |
 | A token more than `role_evidence_max_age` (30 days) old            | Puts nobody on the roster                                    |
 | No role claim at all                                               | Nothing, in either direction: the mapper may just be missing |
 | Another account than the one noted for this person                 | Nothing; contradictory, an owner hears of it                 |
@@ -194,8 +196,11 @@ token this device itself got from the provider, never against a device's or the 
 **Why the account is noted.** A user's ID and fingerprint are public, so a member can write somebody else's into
 their own attribute and get a real token that names them. With a role that token could speak for the other person,
 and without one it could demote them. The claim alone is not enough: the token's `sub` has to be the one noted
-for that person. An admin already on the roster when this arrived has no noted account until their first token
-with the role, and until then no token takes their role away; the server's report below still can.
+for that person. Noting takes a token that names the key the roster already has for them, or for somebody not on
+the roster the key this device pinned, if it pinned one; and one account can't be noted for two people. That leaves a
+hostile server with a provider admin able to put that admin's own key on the roster under the name of somebody this
+device never pinned: the role is one they hold anyway, only the name is wrong. An admin already on the roster when this
+arrived has no noted account until their first token with the role, and until then no token takes their role away.
 
 **Who sets what the tokens mean.** The signed policy has a `role_signing` group: the mode, the role names, and the
 provider (issuer and client ID).
@@ -203,9 +208,10 @@ provider (issuer and client ID).
 - **Role names** default to `owner` and `admin` and are never taken from the server: a server that could name them
   could call every member's role "admin". An instance whose realm uses other names sets them once in the console
   (Administration → Security), which is a signed policy like any other. Until then its tokens say neither.
-- **The provider** is pinned in the signed policy by the first owner's app that signs automatically, from the token
-  this device got from its own token endpoint, not from anything the server says. From then on another issuer stops
-  the owners' apps and an owner hears of it. A real move to a new provider is an owner's explicit choice in the console.
+- **The provider** is pinned in the signed policy by the first round of an owner's app after this version, whether or not
+  the realm has the mappers, from the token this device got from its own token endpoint. Every device also remembers the
+  issuer it used, so one that announces another before anything is pinned stops it. From then on another issuer stops the
+  owners' apps and an owner hears of it. A real move to a new provider is an owner's explicit choice in the console, signed.
 
 **The first roster.** The first owner's app signs it itself, from its own token, with nobody asked: that owner
 alone, then the provider pinned. Everybody else follows from their own tokens. A hostile server can't steer this:
@@ -214,22 +220,47 @@ that pinned a root (or whose user's other device did, through the key bag) never
 a genuine owner who never saw a root gets a second log in that owner's name, which every device that pinned the real root
 refuses (`RootChanged`). It never gets anybody appointed whom the provider didn't make an owner.
 
-**Removal without a dialog.** Somebody who never signs in again has no newer token. For them the server's report counts,
-for taking somebody off only: `GET /role-evidence` lists the people of the newest roster whose account is deactivated or
-deleted, or whose provider role is neither owner nor admin by the server's records (`[oidc.sync]` and the last token). This
-is the server's word, and that is fine in this one direction: a server can already keep anybody from doing anything, and
-the person's next token brings them back. The mark moves to this moment on the provider's clock, so a token from before
-can't. Rules: never the signing owner, never the last owner; an owner goes only with their account, not on a reported
-role change, so a lagging role list or a hostile server can't whittle the owners down.
+**Taking a role away.** Three sources, strongest first.
+
+- **What the server saw.** Whoever uses TeamCraft sends the server provider-signed access tokens, and those always carry the
+  client roles (nobody could sign in otherwise). When a token shows a lower role than the person had, or none, which the server
+  refuses, it keeps that token and hands it out **once it has expired**, as it is a credential until then. Owners' apps verify it
+  like any other (`verify_role_loss`), and it counts only for the account noted for that person and if newer than their mark. This
+  needs no mapper and nothing from the person, however unwilling. It is what makes the last client role work: **Keycloak's mapper
+  adds no claim when somebody has no role left in that client, and the server refuses their tokens**, so their own app could
+  publish nothing even with a claim that says the mapper exists (tried against the dev realm: the ID token has no
+  `resource_access`, the access token only `account`'s). The server can withhold this evidence, not forge it.
+- **The person's own newer ID token,** as in the table, published by their app.
+- **The server's report,** for somebody who never sends a token again: `GET /role-evidence` lists people of the newest roster whose
+  account is deactivated or deleted, or whose provider role is neither by the server's records. It is the server's word and is
+  limited so that it can't strip anybody quickly:
+  - **An owner never goes on a report.** It says "contradictory" to the owners, with no removal: if the last owner's device is lost
+    there is no recovery (admin.md §2.3.1).
+  - **An admin goes** only after the report has stood `role_report_grace` (7 days) by the provider's clock, and at most one per
+    `role_report_interval` (7 days) per owner's device. Until then the Security section names them. So a hostile server that reports
+    every admin gone takes one a week, in front of the owners, and each ended tenure is a stretch on channels that person signed.
+    What it costs it is that it keeps a report going for weeks, which an owner can see.
+  - **A newer token beats a report,** even while the report goes on. A token from before the report doesn't count. The server can hold
+    newer tokens back, so against a hostile server this is a repair only if it lets them through.
+  - **A role report doesn't touch** somebody who never had a token counted or whom an owner set by hand. A gone account does.
+  - Never the signing owner, never the last owner.
+
+**Edits by hand against the provider.** An owner's edit stands until the provider says the same once (`by_hand` in the mark). Removing
+somebody by hand holds against their tokens with the role, old or new; when a token first shows no role, the edit is settled and the
+provider leads again. Somebody added by hand without the role stays whatever tokens or role reports say, until a token gives them that
+role. So an owner's decision is never silently undone, and a realm can disagree with a roster for as long as the owner wants. Rosters
+signed before this have no marks: their people count as not noted, so a role report leaves them alone.
 
 What stays, honestly:
 
-- **Without `[oidc.sync]`** the server hears of a disabled account or a lost role only from the person's next token, so
-  somebody who never signs in again stays on the roster until an owner removes them by hand (Administration → Security →
-  Change the roster by hand). Their sign-in is dead at the provider either way, and an admin role needs a device that still
-  works.
-- **An owner demoted to admin who never signs in again** stays an owner on the roster: the report says nothing about a
-  role that is still admin or owner. Removing them is an owner's edit by hand.
+- **Somebody who never sends a token again, without `[oidc.sync]`:** the server has nothing to report. They stay on the roster until an
+  owner removes them by hand. Their sign-in is dead at the provider either way.
+- **An owner who never sends a token again:** stays an owner, whatever is reported, until another owner removes them by hand.
+- **Somebody from before tokens counted, with no token noted, who loses their role:** the evidence can't be tied to them, so only a gone
+  account's report or an owner's hand removes them.
+- **A demotion the server withholds** isn't bounded by freshness, as owners' apps keep re-signing: a hostile server that withholds the
+  evidence and doesn't report it keeps a demoted person on the roster for as long as it stays hostile. Withholding is all it can do, and
+  it needs that person's device to get any use from it.
 
 **Several owners at once** race on the log's version: one wins, the other gets `version_conflict`, reads the new roster on its
 next round and finds nothing left to do. **Admins can't sign** (`not_an_owner`), so an instance with only admins, or no owner
@@ -255,10 +286,10 @@ identity provider. Now:
 
 Instances that want the owner's look back set the policy to manual.
 
-**Residual risks.** The pin is trust on first use, like the workspace root: an owner whose device was sent to a fake provider
-before the pin, by a server that was already hostile, and who typed their password there (§3.1.1), pins that provider. It
-needs that owner's password on a fake page, and the workspace's other owners, whose apps then see another provider than the
-signed one, hear of it. A device that never saw a root has to believe the log it is shown, as before.
+**Residual risks.** The pin is trust on first use, like the workspace root. A server that is already hostile before an owner's app of
+this version first runs, and gets that owner to sign in on a look-alike provider, gets that provider pinned, and can then appoint anybody.
+A fake page accepts any password, so it takes only that owner signing in there (§3.1.1), on a device that has no record of another
+issuer. A device that never saw a root has to believe the log it is shown, as before.
 
 **Compatibility.** Older clients keep verifying rosters and policies: signatures cover the bytes, and serde skips what it
 doesn't know. They don't understand the marks and can't act on them, and an older owner's app that signs again leaves them out,

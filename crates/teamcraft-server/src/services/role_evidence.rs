@@ -8,7 +8,7 @@ use serde::Deserialize;
 use teamcraft_db::RoleStanding;
 use teamcraft_proto::{
   Base64Bytes, GatewayEvent, ListRoleEvidenceResponse, Permission, PutRoleEvidenceRequest, Role,
-  RoleEvidenceEntry, Target, UserId, WithdrawnReason, WithdrawnRole, WorkspaceLogKind,
+  RoleEvidenceEntry, RoleLossEntry, Target, UserId, WithdrawnReason, WithdrawnRole, WorkspaceLogKind,
 };
 
 use super::access::require;
@@ -19,11 +19,16 @@ use crate::state::AppState;
 /// As for the attestation of an identity key; ID tokens are a few kilobytes at most.
 const MAX_TOKEN_CHARS: usize = 16 * 1024;
 
+/// After this long nobody acts on a token any more; they name people, so they don't stay.
+const KEEP_DAYS: i32 = 60;
+
 /// The claims the server looks at. Not verified here.
 #[derive(Deserialize)]
 struct TokenOutline {
   sub: String,
   iat: i64,
+  #[serde(default)]
+  exp: i64,
 }
 
 /// Just enough of a roster document to know who is on it.
@@ -35,6 +40,18 @@ struct RosterOutline {
 #[derive(Deserialize)]
 struct RosterMemberOutline {
   user_id: UserId,
+}
+
+/// The marks of a roster document.
+#[derive(Deserialize)]
+struct RosterMarksOutline {
+  #[serde(default)]
+  provider_marks: std::collections::BTreeMap<UserId, MarkOutline>,
+}
+
+#[derive(Deserialize)]
+struct MarkOutline {
+  issued_at: i64,
 }
 
 /// Keeps the caller's token if it is newer than the one stored and tells the owners' apps.
@@ -67,10 +84,97 @@ pub async fn put(
     .put_role_evidence(caller.user.id, &request.token, outline.iat)
     .await?;
   if is_stored {
+    state
+      .database
+      .delete_older_role_loss(caller.user.id, outline.iat)
+      .await?;
     let owners = state.database.list_provider_owners().await?;
     state.hub.publish(owners, &GatewayEvent::RoleEvidenceUpdate);
   }
   Ok(())
+}
+
+/// A token the validator accepted, of somebody who now holds a lower role than they did, or none: the
+/// provider's own signature on that, which doesn't depend on them publishing anything. Kept for the
+/// owners' apps and handed out once it has expired, as it is still a credential until then. A failure
+/// here costs nothing the request depends on.
+pub async fn note_role_loss(state: &AppState, token: &str, user: UserId) {
+  if let Err(error) = keep_role_loss(state, token, user).await {
+    tracing::warn!(%error, "could not keep the evidence of a lost role");
+  }
+}
+
+async fn keep_role_loss(state: &AppState, token: &str, user: UserId) -> Result<(), ApiError> {
+  let Some(outline) = token_outline(token) else {
+    return Ok(());
+  };
+  let is_stored = state
+    .database
+    .put_role_loss(user, token, outline.iat, outline.exp)
+    .await?;
+  if !is_stored {
+    return Ok(());
+  }
+  // Owners' apps read it once it can be handed out. A restart loses this, and their reconnect reads it.
+  let waiting = outline.exp.saturating_sub(unix_now());
+  let later = state.clone();
+  tokio::spawn(async move {
+    tokio::time::sleep(std::time::Duration::from_secs(
+      u64::try_from(waiting).unwrap_or(0),
+    ))
+    .await;
+    match later.database.list_provider_owners().await {
+      Ok(owners) => later.hub.publish(owners, &GatewayEvent::RoleEvidenceUpdate),
+      Err(error) => tracing::warn!(%error, "could not tell the owners about a lost role"),
+    }
+  });
+  Ok(())
+}
+
+/// A token of an account with no TeamCraft role: the validator refused it after checking it. Only for
+/// somebody who had a role to lose.
+pub async fn note_refused_for_no_role(state: &AppState, token: &str) {
+  let Some(outline) = token_outline(token) else {
+    return;
+  };
+  let issuer = state.validator.issuer().to_owned();
+  let Ok(Some(user)) = state
+    .database
+    .find_user_by_oidc_subject(&issuer, &outline.sub)
+    .await
+  else {
+    return;
+  };
+  let had_a_role = matches!(
+    state.database.get_user_oidc_role(user).await,
+    Ok(Some(Some(role))) if matches!(role.as_str(), "owner" | "admin")
+  );
+  let is_on_roster = match roster_members(state).await {
+    Ok(members) => members.contains(&user),
+    Err(_) => false,
+  };
+  if had_a_role || is_on_roster {
+    note_role_loss(state, token, user).await;
+  }
+}
+
+/// `user` holds a role again: what showed them losing it is over.
+pub async fn note_role_regained(state: &AppState, user: UserId) {
+  if let Err(error) = state.database.delete_role_loss(user).await {
+    tracing::warn!(%error, "could not drop the evidence of a lost role");
+  }
+}
+
+/// A new signed roster took tokens into account up to its marks: those go, as they name people.
+pub async fn settle_after_roster(state: &AppState, payload: &[u8]) {
+  let Ok(outline) = serde_json::from_slice::<RosterMarksOutline>(payload) else {
+    return;
+  };
+  for (user, mark) in outline.provider_marks {
+    if let Err(error) = state.database.settle_role_evidence(user, mark.issued_at).await {
+      tracing::warn!(%error, "could not drop role evidence the roster took into account");
+    }
+  }
 }
 
 /// What the owners' apps read. Only for those the server takes for owners; everybody else has no
@@ -80,6 +184,17 @@ pub async fn list(
   caller: &AuthenticatedUser,
 ) -> Result<ListRoleEvidenceResponse, ApiError> {
   require(state, caller, Permission::SignWorkspace, &Target::Instance)?;
+  state.database.prune_role_evidence(KEEP_DAYS).await?;
+  let role_losses = state
+    .database
+    .list_role_losses(unix_now())
+    .await?
+    .into_iter()
+    .map(|loss| RoleLossEntry {
+      user_id: loss.user_id,
+      token: loss.token,
+    })
+    .collect();
   let entries = state
     .database
     .list_role_evidence()
@@ -94,6 +209,7 @@ pub async fn list(
   Ok(ListRoleEvidenceResponse {
     entries,
     withdrawn: withdrawn_roles(state).await?,
+    role_losses,
   })
 }
 
@@ -136,6 +252,10 @@ fn withdrawn_role(standing: &RoleStanding) -> Option<WithdrawnRole> {
     user_id: standing.user_id,
     reason,
   })
+}
+
+fn unix_now() -> i64 {
+  time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
 fn token_outline(token: &str) -> Option<TokenOutline> {

@@ -132,6 +132,7 @@ struct State {
   /// What a hostile server adds to the list.
   forged_role_evidence: Vec<teamcraft_proto::RoleEvidenceEntry>,
   withdrawn_roles: Vec<teamcraft_proto::WithdrawnRole>,
+  role_losses: Vec<teamcraft_proto::RoleLossEntry>,
   next_id: i64,
   /// See [`FakeServer::challenge_first_frames`].
   first_frame_challenges: usize,
@@ -914,6 +915,14 @@ impl FakeServer {
         token: token.into(),
         public_key: Base64Bytes::new(public_key),
       });
+  }
+
+  /// The server keeps this expired access token of `user`, seen on a request of theirs.
+  pub fn add_role_loss(&self, user: UserId, token: impl Into<String>) {
+    self.lock().role_losses.push(teamcraft_proto::RoleLossEntry {
+      user_id: user,
+      token: token.into(),
+    });
   }
 
   /// The server reports these people's roles gone.
@@ -4667,6 +4676,7 @@ impl ServerApi for FakeServerApi {
       Ok(teamcraft_proto::ListRoleEvidenceResponse {
         entries,
         withdrawn: state.withdrawn_roles.clone(),
+        role_losses: state.role_losses.clone(),
       })
     })
   }

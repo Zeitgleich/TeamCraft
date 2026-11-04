@@ -246,6 +246,7 @@ mod tests {
       is_exempt_from_session_policy: false,
       maybe_organization: None,
       token_binding: crate::auth::TokenBinding::ServerIssued,
+      maybe_provider_token: None,
     }
   }
 }

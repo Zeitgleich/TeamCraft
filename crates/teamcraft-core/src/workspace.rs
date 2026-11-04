@@ -888,7 +888,7 @@ pub fn owner_roster_status(
     recommended_minimum: status.recommended_minimum,
     warning_lead_ms: millis(warning_lead),
     is_signing_manual: !teamcraft_proto::RoleSigningPolicy::is_automatic(
-      state.policy.maybe_role_signing.as_ref(),
+      state.policy.maybe_role_signing.as_deref(),
     ),
     maybe_signing_problem: crate::client::role_signing_record(store)
       .ok()
@@ -915,6 +915,10 @@ fn signing_problem(
     RoleSigningProblem::Contradictory { users } => {
       Some(RoleSigningIssue::Contradictory { users: users.clone() })
     },
+    RoleSigningProblem::ReportedGone { users } => {
+      Some(RoleSigningIssue::ReportedGone { users: users.clone() })
+    },
+    RoleSigningProblem::AwaitingOwner => Some(RoleSigningIssue::AwaitingOwner),
     RoleSigningProblem::Unknown => None,
   }
 }
@@ -1071,6 +1075,7 @@ mod tests {
       ProviderMark {
         maybe_subject: Some(subject.to_owned()),
         issued_at,
+        maybe_by_hand: None,
       }
     }
   }

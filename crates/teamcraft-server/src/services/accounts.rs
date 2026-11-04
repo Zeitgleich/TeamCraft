@@ -13,7 +13,13 @@ pub async fn validate_presented_token(
   state: &AppState,
   presented: &PresentedToken<'_>,
 ) -> Result<TokenIdentity, AuthError> {
-  let mut identity = validate_token(state, presented.token).await?;
+  let validated = validate_token(state, presented.token).await;
+  // The provider signed that this account has no role left: the owners' apps need to hear (e2ee.md
+  // §3.1.3), and this is the one moment the token is at hand.
+  if matches!(validated, Err(AuthError::NoTeamcraftRole)) {
+    super::role_evidence::note_refused_for_no_role(state, presented.token).await;
+  }
+  let mut identity = validated?;
   enforce_dpop(state, presented, &identity.subject, &mut identity.token_binding)?;
   Ok(identity)
 }
@@ -43,6 +49,26 @@ async fn validate_token(state: &AppState, token: &str) -> Result<TokenIdentity, 
   state.validator.validate(token).await
 }
 
+/// This sign-in shows another role than the last: a lost one is evidence for the owners' apps, one given
+/// back ends that.
+async fn note_role_change(
+  state: &AppState,
+  identity: &TokenIdentity,
+  user: teamcraft_proto::UserId,
+  previous: &str,
+) {
+  let previous = Role::from(previous.to_owned());
+  let was_admin = matches!(previous, Role::Owner | Role::Admin);
+  let is_admin = identity.role.includes(&Role::Admin);
+  if is_admin && !was_admin {
+    super::role_evidence::note_role_regained(state, user).await;
+  } else if was_admin && identity.role < previous {
+    if let Some(token) = &identity.maybe_provider_token {
+      super::role_evidence::note_role_loss(state, token.as_str(), user).await;
+    }
+  }
+}
+
 /// The identity of a bot: a guest-level account under the server's own bot issuer.
 fn bot_identity(bot: &teamcraft_db::StoredBot) -> TokenIdentity {
   TokenIdentity {
@@ -61,6 +87,7 @@ fn bot_identity(bot: &teamcraft_db::StoredBot) -> TokenIdentity {
     is_exempt_from_session_policy: true,
     maybe_organization: None,
     token_binding: TokenBinding::ServerIssued,
+    maybe_provider_token: None,
   }
 }
 
@@ -83,6 +110,7 @@ pub fn guest_identity(invite_subject: String, display_name: String, issued_at: i
     is_exempt_from_session_policy: true,
     maybe_organization: None,
     token_binding: TokenBinding::ServerIssued,
+    maybe_provider_token: None,
   }
 }
 
@@ -122,6 +150,9 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
     )
     .await?;
   let user = synced.user;
+  if let Some(previous) = synced.maybe_previous_role.as_deref() {
+    note_role_change(state, &identity, user.id, previous).await;
+  }
   if user.is_deactivated {
     return Err(AuthError::AccountDeactivated.into());
   }

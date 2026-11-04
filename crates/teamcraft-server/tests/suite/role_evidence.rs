@@ -139,6 +139,110 @@ async fn an_older_token_does_not_replace_a_newer_one() {
 }
 
 #[tokio::test]
+async fn a_token_with_no_role_left_is_kept_and_handed_out_once_expired() {
+  let app = app!();
+  let (alice, bob) = (owner(), admin());
+  user_id(&app, &alice).await;
+  let bob_id = enroll(&app, &bob).await;
+
+  // Keycloak then signs a token without any TeamCraft role: the server refuses it, and keeps it.
+  let no_role = TestUser {
+    roles: vec!["offline_access".to_owned()],
+    ..admin()
+  };
+  let refused = app.get(&no_role, "/me").await;
+  assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+  // Still valid: not handed out, as it is a credential until it expires.
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert_eq!(listed.body["role_losses"], json!([]));
+
+  // By now it has expired (the test moves the row, not the clock).
+  sqlx::query("UPDATE role_losses SET expires_at = 1")
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert_eq!(listed.body["role_losses"][0]["user_id"], bob_id);
+
+  // The role comes back, and Bob's app publishes that: it is over.
+  let newer = time::OffsetDateTime::now_utc().unix_timestamp() + 60;
+  let published = app
+    .put(&bob, "/me/role-evidence", json!({"token": token(&bob, newer)}))
+    .await;
+  assert_eq!(published.status, StatusCode::NO_CONTENT, "{}", published.body);
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert_eq!(listed.body["role_losses"], json!([]), "bob holds his role again");
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn a_lower_role_on_a_request_is_kept_too_and_a_member_never_was_anything_to_lose() {
+  let app = app!();
+  let (alice, bob) = (owner(), admin());
+  user_id(&app, &alice).await;
+  enroll(&app, &bob).await;
+  let demoted = TestUser {
+    roles: vec!["member".to_owned()],
+    ..admin()
+  };
+  assert_eq!(app.get(&demoted, "/me").await.status, StatusCode::OK);
+  sqlx::query("UPDATE role_losses SET expires_at = 1")
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert_eq!(listed.body["role_losses"].as_array().unwrap().len(), 1);
+
+  // Somebody who never had a role to lose leaves nothing behind.
+  let carol = member("carol");
+  user_id(&app, &carol).await;
+  let refused = TestUser {
+    roles: vec!["offline_access".to_owned()],
+    ..member("carol")
+  };
+  assert_eq!(app.get(&refused, "/me").await.status, StatusCode::FORBIDDEN);
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert_eq!(listed.body["role_losses"].as_array().unwrap().len(), 1);
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn a_roster_that_took_tokens_into_account_drops_them() {
+  let app = app!();
+  let (alice, bob) = (owner(), admin());
+  let alice_id = enroll(&app, &alice).await;
+  let bob_id = enroll(&app, &bob).await;
+  let device = register_device(&app, &alice).await;
+  let published = app
+    .put(&bob, "/me/role-evidence", json!({"token": token(&bob, 100)}))
+    .await;
+  assert_eq!(published.status, StatusCode::NO_CONTENT, "{}", published.body);
+
+  let roster = serde_json::to_vec(&json!({
+    "version": 1,
+    "members": [{"user_id": alice_id, "role": "owner", "identity_key": "a2V5MQ=="}],
+    "provider_marks": { bob_id.as_str(): {"sub": "sub-bob", "issued_at": 100} },
+  }))
+  .unwrap();
+  let appended = app
+    .post(
+      &alice,
+      "/workspace/roster",
+      json!({
+        "expected_version": 0,
+        "payload": base64::engine::general_purpose::STANDARD.encode(&roster),
+        "signature": "c2ln",
+        "signer_device_id": device,
+      }),
+    )
+    .await;
+  assert!(appended.status.is_success(), "{}", appended.body);
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert!(entries(&listed.body).is_empty(), "{}", listed.body);
+  app.stop().await;
+}
+
+#[tokio::test]
 async fn people_who_lost_role_or_account_are_reported_for_the_roster_only() {
   let app = app!();
   let (alice, bob, carol) = (owner(), admin(), member("carol"));

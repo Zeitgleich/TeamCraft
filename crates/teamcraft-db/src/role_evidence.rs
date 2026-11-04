@@ -19,6 +19,13 @@ pub struct StoredRoleEvidence {
   pub public_key: Vec<u8>,
 }
 
+/// A token showing that somebody lost a role, expired by now.
+#[derive(Debug, Clone)]
+pub struct StoredRoleLoss {
+  pub user_id: UserId,
+  pub token: String,
+}
+
 /// What the server's records say about somebody on the roster.
 #[derive(Debug, Clone)]
 pub struct RoleStanding {
@@ -66,6 +73,108 @@ impl Database {
         })
       })
       .collect()
+  }
+
+  /// Keeps the token showing that `user` lost a role, if newer than the one stored. Returns whether it
+  /// was.
+  pub async fn put_role_loss(
+    &self,
+    user: UserId,
+    token: &str,
+    issued_at: i64,
+    expires_at: i64,
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"INSERT INTO role_losses (user_id, token, issued_at, expires_at) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id) DO UPDATE SET token = EXCLUDED.token, issued_at = EXCLUDED.issued_at,
+           expires_at = EXCLUDED.expires_at, updated_at = now()
+         WHERE role_losses.issued_at < EXCLUDED.issued_at"#,
+      to_db(user),
+      token,
+      issued_at,
+      expires_at,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
+  }
+
+  /// The tokens that have expired at `now` (seconds).
+  pub async fn list_role_losses(&self, now: i64) -> Result<Vec<StoredRoleLoss>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT user_id, token FROM role_losses WHERE expires_at <= $1
+         ORDER BY updated_at DESC LIMIT $2"#,
+      now,
+      MAX_EVIDENCE,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(StoredRoleLoss {
+          user_id: from_db(row.user_id)?,
+          token: row.token,
+        })
+      })
+      .collect()
+  }
+
+  /// `user` holds a role again: what showed them losing it is over.
+  pub async fn delete_role_loss(&self, user: UserId) -> Result<(), DbError> {
+    sqlx::query!("DELETE FROM role_losses WHERE user_id = $1", to_db(user))
+      .execute(self.pool())
+      .await?;
+    Ok(())
+  }
+
+  /// A token of `user` from `issued_at` is stored: a loss from before it is over.
+  pub async fn delete_older_role_loss(&self, user: UserId, issued_at: i64) -> Result<(), DbError> {
+    sqlx::query!(
+      "DELETE FROM role_losses WHERE user_id = $1 AND issued_at < $2",
+      to_db(user),
+      issued_at,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// The signed roster took tokens of `user` up to `issued_at` into account: they are of no more use,
+  /// and they name the person.
+  pub async fn settle_role_evidence(&self, user: UserId, issued_at: i64) -> Result<(), DbError> {
+    sqlx::query!(
+      "DELETE FROM role_evidence WHERE user_id = $1 AND issued_at <= $2",
+      to_db(user),
+      issued_at,
+    )
+    .execute(self.pool())
+    .await?;
+    sqlx::query!(
+      "DELETE FROM role_losses WHERE user_id = $1 AND issued_at <= $2",
+      to_db(user),
+      issued_at,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// Drops what nobody took up in `days`: no owner's app acts on tokens that old anyway.
+  pub async fn prune_role_evidence(&self, days: i32) -> Result<(), DbError> {
+    sqlx::query!(
+      "DELETE FROM role_evidence WHERE updated_at < now() - make_interval(days => $1)",
+      days,
+    )
+    .execute(self.pool())
+    .await?;
+    sqlx::query!(
+      "DELETE FROM role_losses WHERE updated_at < now() - make_interval(days => $1)",
+      days,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
   }
 
   /// The active accounts the provider makes owners, whose apps sign the roster.

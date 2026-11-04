@@ -280,6 +280,12 @@ pub struct ClientSettings {
   /// How often an app publishes a new token, by the provider's clock, while the roster doesn't say
   /// what its token says: enough to outlast `role_evidence_max_age` while no owner is around.
   pub role_evidence_refresh: std::time::Duration,
+  /// How long the server's report that an admin's role or account is gone has to stand, by the
+  /// provider's clock, before an owner's app acts on it (e2ee.md §3.1.3).
+  pub role_report_grace: std::time::Duration,
+  /// How long after one removal on such a report the next can follow: a server that reports every
+  /// admin gone takes them off one at a time, at this pace, with the owners told.
+  pub role_report_interval: std::time::Duration,
   /// How long role signing waits after a failed round; doubles up to 64 times this.
   pub role_signing_retry: std::time::Duration,
   /// How long before `workspace_max_age` runs out the admin console warns that no owner signed.
@@ -369,7 +375,8 @@ pub struct Client<A, S> {
   heard_calls: HashMap<ConversationId, calls::HeardCall>,
   maybe_preview_fetcher: Option<Box<dyn crate::link_preview::PreviewFetcher>>,
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
-  role_signing: role_signing::RoleSigningRun,
+  /// Boxed: a client is moved around by value, and this is seldom touched.
+  role_signing: Box<role_signing::RoleSigningRun>,
   /// When the key packages were last checked ([`Client::renew_key_packages_if_due`]).
   last_key_package_check_ms: i64,
   /// When this device last tried to join each conversation's group as a further device (backs
@@ -473,6 +480,8 @@ impl Default for ClientSettings {
       workspace_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       role_evidence_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       role_evidence_refresh: std::time::Duration::from_secs(24 * 60 * 60),
+      role_report_grace: std::time::Duration::from_secs(7 * 24 * 60 * 60),
+      role_report_interval: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       role_signing_retry: std::time::Duration::from_secs(60),
       workspace_expiry_warning: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       maybe_attestation: None,

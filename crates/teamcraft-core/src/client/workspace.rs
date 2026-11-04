@@ -423,6 +423,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       });
     }
     let mut document = self.workspace()?.roster;
+    note_edits_by_hand(&mut document, &members);
     document.members = members;
     self.append_roster(document).await
   }
@@ -460,9 +461,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<(), CoreError> {
     self.sync_workspace().await?;
     let mut verified = self.workspace()?.policy;
+    let mut policy = policy;
     // This device keeps the role signing through an entry that doesn't name it (`apply_policy`), so
-    // what the server shows for such an entry isn't an altered draft.
-    if base.maybe_role_signing.is_none() {
+    // what the server shows for such an entry isn't an altered draft. An edit made on that draft started
+    // from nothing, though: what is signed is what this device verified.
+    if base.maybe_role_signing.is_none() && verified.maybe_role_signing.is_some() {
+      policy.maybe_role_signing.clone_from(&verified.maybe_role_signing);
       verified.maybe_role_signing = None;
     }
     if verified != *base {
@@ -589,7 +593,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .append_log(WorkspaceLogKind::Roster, WorkspaceLog::Roster, version, &document)
       .await?;
     let state = self.workspace()?;
-    if state.policy_version > 0 {
+    // An owner who just signed themselves off can't sign the policy any more: the next owner's round
+    // does it (`client/role_signing.rs`).
+    if state.policy_version > 0 && self.is_verified_owner(&state) {
       self.publish_policy(state.policy).await?;
     }
     Ok(())
@@ -1191,5 +1197,39 @@ mod tests {
 
   fn device(raw: i64) -> DeviceId {
     DeviceId::from_snowflake(Snowflake::new(raw).unwrap())
+  }
+}
+
+/// An owner's edit by hand stands against the provider until a token says the same (e2ee.md §3.1.3):
+/// writes that down for everybody whose role `members` changes.
+fn note_edits_by_hand(document: &mut RosterDocument, members: &[RosterMember]) {
+  use crate::role_signing::{HandRole, ProviderMark};
+
+  let mut edits: Vec<(UserId, HandRole)> = Vec::new();
+  for member in members {
+    let is_same = document
+      .members
+      .iter()
+      .any(|old| old.user_id == member.user_id && old.role == member.role);
+    if !is_same {
+      let hand = match member.role {
+        RosterRole::Owner => HandRole::Owner,
+        _ => HandRole::Admin,
+      };
+      edits.push((member.user_id, hand));
+    }
+  }
+  for old in &document.members {
+    if !members.iter().any(|member| member.user_id == old.user_id) {
+      edits.push((old.user_id, HandRole::Removed));
+    }
+  }
+  for (user, hand) in edits {
+    let mark = document.provider_marks.entry(user).or_insert(ProviderMark {
+      maybe_subject: None,
+      issued_at: 0,
+      maybe_by_hand: None,
+    });
+    mark.maybe_by_hand = Some(hand);
   }
 }

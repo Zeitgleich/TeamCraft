@@ -101,7 +101,8 @@ impl Upkeep {
       }
     }
     // Roles follow the identity provider (e2ee.md §3.1.3); a local comparison while nothing changed.
-    match client.run_role_signing().await {
+    // Boxed: the round is deep, and this future would sit in every caller's stack.
+    match Box::pin(client.run_role_signing()).await {
       Ok(changed) => is_changed |= changed,
       // Paced by its own backoff, so this says it now and then at most: a person's rights may wait on it.
       Err(error) => tracing::warn!(%error, "roles not signed yet"),

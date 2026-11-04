@@ -27,6 +27,7 @@ const ISSUER: &str = "https://id.example.com/realms/company";
 const CLIENT: &str = "teamcraft";
 /// The provider's clock in these tests (seconds).
 const T0: i64 = 1_000_000;
+const WEEK: i64 = 7 * 24 * 60 * 60;
 
 mod first_roster {
   use super::*;
@@ -419,7 +420,56 @@ mod hostile_server {
   }
 
   #[tokio::test]
-  async fn the_servers_word_takes_an_admin_off_and_puts_nobody_on() {
+  async fn the_servers_word_can_not_strip_the_roster() {
+    // It reports every other owner and every admin gone, on and on.
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let mut dora = world.peer("Dora").await;
+    world.give_token(&bob, &["admin"], T0);
+    world.give_token(&dora, &["owner"], T0);
+    bob.client.run_role_signing().await.unwrap();
+    dora.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut dora]).await;
+    alice.client.run_role_signing().await.unwrap();
+    let (bob_id, dora_id) = (bob.client.user_id(), dora.client.user_id());
+    assert_eq!(role_of(&alice, bob_id), Some(RosterRole::Admin));
+    assert_eq!(role_of(&alice, dora_id), Some(RosterRole::Owner));
+
+    world.server.set_withdrawn_roles(vec![
+      WithdrawnRole {
+        user_id: bob_id,
+        reason: WithdrawnReason::RoleGone,
+      },
+      WithdrawnRole {
+        user_id: dora_id,
+        reason: WithdrawnReason::AccountGone,
+      },
+    ]);
+    world.give_token(&alice, &["owner"], T0 + 100);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+
+    // Nobody is off yet, and the owner hears of it.
+    assert_eq!(role_of(&alice, bob_id), Some(RosterRole::Admin));
+    assert_eq!(role_of(&alice, dora_id), Some(RosterRole::Owner));
+    assert!(matches!(
+      alice.client.role_signing_record().unwrap().maybe_note,
+      Some(RoleSigningProblem::Contradictory { .. })
+    ));
+
+    // Weeks of it: the admin goes, the owner never does.
+    world.give_token(&alice, &["owner"], T0 + WEEK + 200);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    assert_eq!(role_of(&alice, bob_id), None);
+    world.give_token(&alice, &["owner"], T0 + 20 * WEEK);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    assert_eq!(role_of(&alice, dora_id), Some(RosterRole::Owner));
+  }
+
+  #[tokio::test]
+  async fn a_newer_token_beats_a_report_that_goes_on() {
     let world = World::new();
     let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
     world.give_token(&bob, &["admin"], T0);
@@ -428,30 +478,251 @@ mod hostile_server {
     alice.client.run_role_signing().await.unwrap();
     settle(&mut [&mut alice, &mut bob]).await;
     let bob_id = bob.client.user_id();
-    assert_eq!(role_of(&alice, bob_id), Some(RosterRole::Admin));
-
     world.server.set_withdrawn_roles(vec![WithdrawnRole {
       user_id: bob_id,
-      reason: WithdrawnReason::AccountGone,
+      reason: WithdrawnReason::RoleGone,
     }]);
     world.give_token(&alice, &["owner"], T0 + 100);
     alice.client.note_role_evidence_update();
     alice.client.run_role_signing().await.unwrap();
-    assert_eq!(role_of(&alice, bob_id), None);
 
-    // Reporting the person back isn't enough, and the token still stored isn't either.
+    // Bob's token, issued after the report began, shows he still holds the role.
+    let token = world.provider.token(
+      &with_roles(&bob.client.identity_attestation_claim(), &["admin"], T0 + 200)
+        .with("sub", json!("sub-of-Bob")),
+    );
+    world.server.clear_role_evidence();
+    world
+      .server
+      .forge_role_evidence(bob_id, token, bob.client.identity_public_key_bytes().to_vec());
+    world.give_token(&alice, &["owner"], T0 + WEEK + 300);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+
+    assert_eq!(role_of(&alice, bob_id), Some(RosterRole::Admin));
+  }
+
+  #[tokio::test]
+  async fn the_servers_word_puts_nobody_on() {
+    let world = World::new();
+    let (mut alice, bob) = world.owner_and_peer("Bob").await;
+    world.server.set_withdrawn_roles(vec![WithdrawnRole {
+      user_id: bob.client.user_id(),
+      reason: WithdrawnReason::RoleGone,
+    }]);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
     world.server.set_withdrawn_roles(Vec::new());
     alice.client.note_role_evidence_update();
     alice.client.run_role_signing().await.unwrap();
-    assert_eq!(role_of(&alice, bob_id), None);
+    assert_eq!(role_of(&alice, bob.client.user_id()), None);
+  }
 
-    // Bob's next token is.
+  #[tokio::test]
+  async fn a_token_of_a_member_naming_an_unnoted_owner_under_her_key_changes_nothing() {
+    // Mallory's attribute says `Bob:MalloryKey`, and the server lists it under Bob. Bob is on the roster
+    // from before tokens counted.
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let mallory = world.peer("Mallory").await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
     settle(&mut [&mut alice, &mut bob]).await;
-    world.give_token(&bob, &["admin"], T0 + 200);
-    world.give_token(&alice, &["owner"], T0 + 200);
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    let claim = format!(
+      "{}:{}",
+      bob_id,
+      mallory
+        .client
+        .identity_attestation_claim()
+        .split(':')
+        .nth(1)
+        .unwrap()
+    );
+    let token = world
+      .provider
+      .token(&with_roles(&claim, &["admin"], T0 + 50).with("sub", json!("sub-of-Mallory")));
+    world
+      .server
+      .forge_role_evidence(bob_id, token, mallory.client.identity_public_key_bytes().to_vec());
+    let before = alice.client.workspace().unwrap().roster.members;
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+
+    assert_eq!(alice.client.workspace().unwrap().roster.members, before);
+    assert!(
+      !alice
+        .client
+        .workspace()
+        .unwrap()
+        .provider_marks
+        .contains_key(&bob_id)
+        || alice.client.workspace().unwrap().provider_marks[&bob_id]
+          .maybe_subject
+          .is_none()
+    );
+  }
+}
+
+mod the_pin {
+  use super::*;
+
+  #[tokio::test]
+  async fn an_owner_on_the_roster_pins_the_provider_also_without_the_mapper() {
+    let world = World::new();
+    let mut alice = world.peer("Alice").await;
+    let alice_id = alice.client.user_id();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    assert!(
+      alice
+        .client
+        .workspace()
+        .unwrap()
+        .policy
+        .maybe_role_signing
+        .is_none()
+    );
+
+    let claim = alice.client.identity_attestation_claim();
+    world
+      .server
+      .set_provider_token(alice_id, world.provider.token(&base_claims(&claim, T0)));
+    alice.client.run_role_signing().await.unwrap();
+
+    let signing = alice
+      .client
+      .workspace()
+      .unwrap()
+      .policy
+      .maybe_role_signing
+      .unwrap();
+    assert_eq!(signing.maybe_provider.unwrap().issuer, ISSUER);
+  }
+
+  #[tokio::test]
+  async fn a_device_does_not_take_another_issuer_than_it_used_before_for_the_first_pin() {
+    // No roster yet to pin under; the server now announces another issuer, which verifies against its
+    // own keys, and the owner signs in on its page.
+    let world = World::new();
+    let mut alice = world.peer("Alice").await;
+    let claim = alice.client.identity_attestation_claim();
+    let alice_id = alice.client.user_id();
+    world
+      .server
+      .set_provider_token(alice_id, world.provider.token(&base_claims(&claim, T0)));
+    alice.client.run_role_signing().await.unwrap();
+    let impostor = Arc::new(Provider::new());
+    alice.client.set_jwks_source(Box::new(Jwks(impostor.clone())));
+    world.server.set_provider_token(
+      alice_id,
+      impostor.token(&with_roles(&claim, &["owner"], T0 + 5).with("iss", json!("https://evil.example"))),
+    );
+
+    alice.client.run_role_signing().await.unwrap();
+
+    assert_eq!(alice.client.workspace().unwrap().roster.version, 0);
+    assert!(matches!(
+      alice.client.role_signing_record().unwrap().maybe_note,
+      Some(RoleSigningProblem::ProviderChanged { .. })
+    ));
+  }
+
+  #[tokio::test]
+  async fn a_move_an_owner_signed_takes_the_new_provider() {
+    let world = World::new();
+    let (mut alice, _bob) = world.owner_and_peer("Bob").await;
+    let mut policy = alice.client.workspace().unwrap().policy;
+    let mut signing = policy.maybe_role_signing.take().unwrap();
+    signing.maybe_provider = None;
+    signing.accepts_new_provider = true;
+    policy.maybe_role_signing = Some(signing);
+    alice.client.publish_policy(policy).await.unwrap();
+
+    let moved = Arc::new(Provider::new());
+    alice.client.set_jwks_source(Box::new(Jwks(moved.clone())));
+    let claim = alice.client.identity_attestation_claim();
+    world.server.set_provider_token(
+      alice.client.user_id(),
+      moved.token(&with_roles(&claim, &["owner"], T0 + 5).with("iss", json!("https://new.example"))),
+    );
+    alice.client.run_role_signing().await.unwrap();
+
+    let signing = alice
+      .client
+      .workspace()
+      .unwrap()
+      .policy
+      .maybe_role_signing
+      .unwrap();
+    assert_eq!(signing.maybe_provider.unwrap().issuer, "https://new.example");
+    assert!(!signing.accepts_new_provider);
+  }
+}
+
+mod by_hand {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_removal_by_hand_is_not_undone_by_a_token_stored_before_it() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    world.give_token(&bob, &["admin"], T0);
     bob.client.run_role_signing().await.unwrap();
     settle(&mut [&mut alice, &mut bob]).await;
     alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    // A newer token with the role reaches the server, and only then the owner removes him.
+    world.server.forge_role_evidence(
+      bob_id,
+      world.provider.token(
+        &with_roles(&bob.client.identity_attestation_claim(), &["admin"], T0 + 9)
+          .with("sub", json!("sub-of-Bob")),
+      ),
+      bob.client.identity_public_key_bytes().to_vec(),
+    );
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+
+    assert_eq!(role_of(&alice, bob_id), None);
+  }
+
+  #[tokio::test]
+  async fn somebody_added_by_hand_without_the_provider_role_stays() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    world.server.set_withdrawn_roles(vec![WithdrawnRole {
+      user_id: bob_id,
+      reason: WithdrawnReason::RoleGone,
+    }]);
+    world.give_token(&bob, &["member"], T0 + 10);
+    settle(&mut [&mut alice, &mut bob]).await;
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    world.give_token(&alice, &["owner"], T0 + 5 * WEEK);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+
     assert_eq!(role_of(&alice, bob_id), Some(RosterRole::Admin));
   }
 }
@@ -533,17 +804,97 @@ mod demotion {
   }
 
   #[tokio::test]
-  async fn an_owner_the_provider_no_longer_calls_owner_signs_nothing_by_itself() {
+  async fn the_last_owner_demoted_at_the_provider_stays_and_hears_about_it() {
     let world = World::new();
     let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
-    world.give_token(&bob, &["admin"], T0);
-    bob.client.run_role_signing().await.unwrap();
     world.give_token(&alice, &["admin"], T0 + 10);
     settle(&mut [&mut alice, &mut bob]).await;
-    let version = alice.client.workspace().unwrap().roster.version;
     alice.client.run_role_signing().await.unwrap();
-    assert_eq!(alice.client.workspace().unwrap().roster.version, version);
-    assert_eq!(role_of(&alice, bob.client.user_id()), None);
+    assert_eq!(role_of(&alice, alice.client.user_id()), Some(RosterRole::Owner));
+    assert!(matches!(
+      alice.client.role_signing_record().unwrap().maybe_note,
+      Some(RoleSigningProblem::Contradictory { .. })
+    ));
+  }
+
+  #[tokio::test]
+  async fn a_handover_at_the_provider_goes_through_the_old_owners_app() {
+    // Bob's owner role goes to Carol, who isn't a verified owner: only Bob's app can sign her.
+    let world = World::new();
+    let (mut bob, mut carol) = world.owner_and_peer("Carol").await;
+    let (bob_id, carol_id) = (bob.client.user_id(), carol.client.user_id());
+    world.give_token(&carol, &["owner"], T0 + 10);
+    carol.client.run_role_signing().await.unwrap();
+    assert_eq!(
+      carol.client.role_signing_record().unwrap().maybe_note,
+      Some(RoleSigningProblem::AwaitingOwner),
+      "she hears why nothing happened yet"
+    );
+    settle(&mut [&mut bob, &mut carol]).await;
+    world.give_token(&bob, &["member"], T0 + 20);
+    bob.client.note_role_evidence_update();
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut bob, &mut carol]).await;
+
+    assert_eq!(role_of(&carol, carol_id), Some(RosterRole::Owner));
+    assert_eq!(role_of(&carol, bob_id), None);
+
+    // Carol's app signs the policy under the new roster, which Bob couldn't any more.
+    carol.client.note_role_evidence_update();
+    carol.client.run_role_signing().await.unwrap();
+    let workspace = carol.client.workspace().unwrap();
+    assert_eq!(workspace.policy_roster_version, workspace.roster.version);
+    assert_eq!(carol.client.role_signing_record().unwrap().maybe_note, None);
+  }
+
+  #[tokio::test]
+  async fn somebody_with_no_role_left_is_taken_off_by_what_the_server_saw() {
+    // Keycloak's mapper adds no claim then, and the server refuses the person's tokens: their app can
+    // publish nothing, however honest. The server kept the access token it refused.
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    world.give_token(&bob, &["owner"], T0);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice.client.run_role_signing().await.unwrap();
+    let bob_id = bob.client.user_id();
+    assert_eq!(role_of(&alice, bob_id), Some(RosterRole::Owner));
+
+    world.server.add_role_loss(
+      bob_id,
+      world.provider.token(&no_role_claims("sub-of-Bob", T0 + 50)),
+    );
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+
+    assert_eq!(role_of(&alice, bob_id), None);
+  }
+
+  #[tokio::test]
+  async fn what_the_server_saw_counts_only_for_the_noted_account_and_when_newer() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    world.give_token(&bob, &["admin"], T0 + 20);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice.client.run_role_signing().await.unwrap();
+    let bob_id = bob.client.user_id();
+
+    for token in [
+      world.provider.token(&no_role_claims("sub-of-Mallory", T0 + 50)),
+      world.provider.token(&no_role_claims("sub-of-Bob", T0 + 10)),
+      Provider::new().token(&no_role_claims("sub-of-Bob", T0 + 50)),
+      // A role that isn't lower.
+      world
+        .provider
+        .token(&access_claims("sub-of-Bob", &["admin"], T0 + 50)),
+    ] {
+      world.server.add_role_loss(bob_id, token);
+    }
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+
+    assert_eq!(role_of(&alice, bob_id), Some(RosterRole::Admin));
   }
 }
 
@@ -639,10 +990,10 @@ mod manual {
     let world = World::new();
     let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
     let mut policy = alice.client.workspace().unwrap().policy;
-    policy.maybe_role_signing = Some(RoleSigningPolicy {
+    policy.maybe_role_signing = Some(Box::new(RoleSigningPolicy {
       mode: RoleSigningMode::Manual,
-      ..policy.maybe_role_signing.unwrap()
-    });
+      ..*policy.maybe_role_signing.unwrap()
+    }));
     alice.client.publish_policy(policy).await.unwrap();
     world.give_token(&bob, &["admin"], T0);
     bob.client.run_role_signing().await.unwrap();
@@ -667,10 +1018,10 @@ mod manual {
     let world = World::new();
     let (mut alice, _bob) = world.owner_and_peer("Bob").await;
     let mut policy = alice.client.workspace().unwrap().policy;
-    policy.maybe_role_signing = Some(RoleSigningPolicy {
+    policy.maybe_role_signing = Some(Box::new(RoleSigningPolicy {
       mode: RoleSigningMode::Manual,
-      ..policy.maybe_role_signing.unwrap()
-    });
+      ..*policy.maybe_role_signing.unwrap()
+    }));
     alice.client.publish_policy(policy).await.unwrap();
 
     let without = WorkspacePolicy {
@@ -732,6 +1083,21 @@ impl World {
         .token(&with_roles(&claim, roles, issued_at).with("sub", json!(format!("sub-of-{}", peer.name)))),
     );
   }
+}
+
+/// As Keycloak signs it for somebody with no client role left: `account`'s roles, none of this client.
+fn no_role_claims(subject: &str, issued_at: i64) -> Value {
+  json!({
+    "iss": ISSUER, "aud": "account", "azp": CLIENT, "typ": "Bearer", "sub": subject, "iat": issued_at,
+    "resource_access": { "account": { "roles": ["manage-account"] } },
+  })
+}
+
+fn access_claims(subject: &str, roles: &[&str], issued_at: i64) -> Value {
+  json!({
+    "iss": ISSUER, "aud": "account", "azp": CLIENT, "typ": "Bearer", "sub": subject, "iat": issued_at,
+    "resource_access": { CLIENT: { "roles": roles }, "account": { "roles": ["manage-account"] } },
+  })
 }
 
 fn base_claims(claim: &str, issued_at: i64) -> Value {

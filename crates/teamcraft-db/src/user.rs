@@ -52,6 +52,8 @@ pub struct PresencePreference {
 pub struct SyncedUser {
   pub user: User,
   pub is_awaiting_default_memberships: bool,
+  /// The role the provider gave at the last sign-in, when this sign-in changed it.
+  pub maybe_previous_role: Option<String>,
 }
 
 /// Filter of a directory search.
@@ -118,6 +120,7 @@ impl Database {
         },
       )?,
       is_awaiting_default_memberships: row.is_awaiting_defaults,
+      maybe_previous_role: None,
     })
   }
 
@@ -167,8 +170,15 @@ impl Database {
             },
           )?,
           is_awaiting_default_memberships: row.is_awaiting_defaults,
+          maybe_previous_role: None,
         });
       }
+      let maybe_previous_role = row
+        .oidc_role
+        .filter(|role| Some(role.as_str()) != identity.maybe_oidc_role);
+      let mut synced = self.upsert_oidc_user_flagged(identity, new_id).await?;
+      synced.maybe_previous_role = maybe_previous_role;
+      return Ok(synced);
     }
     self.upsert_oidc_user_flagged(identity, new_id).await
   }

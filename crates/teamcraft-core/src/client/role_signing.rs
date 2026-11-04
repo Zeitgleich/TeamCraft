@@ -9,10 +9,12 @@
 //! The server only carries the tokens. It can hold them back and it can report somebody gone, but
 //! nobody gets on the roster without a token the identity provider signed for that person and key.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::attestation::{
   AttestationError, AttestationExpectations, UnverifiedClaims, attestation_claim, unverified_claims,
-  unverified_client_roles, verify_role_evidence,
+  unverified_client_roles, verify_role_evidence, verify_role_loss,
 };
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_proto::{Base64Bytes, PutRoleEvidenceRequest, RoleProvider, RoleSigningPolicy, UserId};
@@ -42,6 +44,20 @@ pub struct RoleSigningRecord {
   /// The one thing a person should know about, if any.
   #[serde(rename = "note", default, skip_serializing_if = "Option::is_none")]
   pub maybe_note: Option<RoleSigningProblem>,
+  /// The provider this device got its tokens from before: a server that announces another one can't
+  /// make this device take it for the workspace's while no signed policy names one yet.
+  #[serde(rename = "seen_provider", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_seen_provider: Option<String>,
+  /// Since when, by the provider's clock, this device has seen the server report each person gone.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub reports: BTreeMap<UserId, i64>,
+  /// When this device last took somebody off on such a report.
+  #[serde(
+    rename = "last_report_removal",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_last_report_removal: Option<i64>,
 }
 
 /// The token this device published last.
@@ -70,8 +86,12 @@ pub enum RoleSigningProblem {
   NoKeyClaim,
   /// The provider's tokens come from another issuer or client than the signed policy names.
   ProviderChanged { issuer: String },
-  /// Evidence contradicts what is signed; somebody has to look.
+  /// Evidence contradicts what is signed, or the server reports an owner gone; somebody has to look.
   Contradictory { users: Vec<UserId> },
+  /// The server reports these admins gone. Nothing newer says otherwise, so they go in a while.
+  ReportedGone { users: Vec<UserId> },
+  /// The provider makes this user an owner, and no owner's app has signed that yet.
+  AwaitingOwner,
   #[serde(other)]
   Unknown,
 }
@@ -99,6 +119,9 @@ pub(crate) struct RoleSigningRun {
 struct WrittenAttribute {
   claim: String,
   maybe_token_issued_at: Option<i64>,
+  /// Whether it was written once more because a later token didn't name it: somebody may have
+  /// overwritten it. After that, it is the realm.
+  was_rewritten: bool,
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -164,13 +187,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let claims =
       unverified_claims(&tokens.id_token).map_err(|error| CoreError::Corrupt(error.to_string()))?;
     let state = self.workspace()?;
-    let Some(anchor) = self.anchor_for(&state, &claims) else {
-      // Another provider than the owners signed: nothing this device says or reads would count.
+    let maybe_anchor = self
+      .anchor_for(&state, &claims)
+      .filter(|_| self.is_the_provider_seen_before(&state, &claims).unwrap_or(false));
+    let Some(anchor) = maybe_anchor else {
+      // Another provider than the owners signed or this device knows: nothing it says or reads counts.
       self.set_problem(Some(RoleSigningProblem::ProviderChanged {
         issuer: claims.issuer.clone(),
       }))?;
       return Ok(true);
     };
+    self.remember_provider(&claims)?;
+    // Before anything else, mapper or not: without a pin, a server could later announce another issuer.
+    if self.is_verified_owner(&state)
+      && state
+        .policy
+        .maybe_role_signing
+        .as_deref()
+        .is_none_or(|policy| policy.maybe_provider.is_none())
+    {
+      self.pin_provider(&anchor).await?;
+    }
+    let state = self.workspace()?;
     let role = provider_role(claims.maybe_roles.as_deref(), &anchor);
     let my_entry = state
       .roster
@@ -178,9 +216,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .iter()
       .find(|member| member.user_id == self.account.user_id);
     if role == ProviderRole::NotSaid {
-      // The usual reason on an instance that updated: the mapper isn't there yet. Only people it
-      // concerns hear of it; a member's token without the claim is nothing to tell anybody.
-      if my_entry.is_some() || is_provider_admin(tokens, &anchor) {
+      // The usual reason on an instance that updated: the mapper isn't there yet, which the access token
+      // shows by still naming the role. Without it there, this person has no role left: the mapper
+      // adds no claim then. That is no problem of the realm; the server keeps the evidence.
+      if is_provider_admin(tokens, &anchor) {
         tracing::warn!(
           "the identity provider's ID tokens carry no client roles, so role changes can't be signed by \
            themselves: add the role mapper (docs/operations.md, \"Role signing\")"
@@ -201,18 +240,51 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.publish_own_evidence(tokens, &claims, &state, role).await?;
     self.clear_transient_problem()?;
     let is_role_news = self.role_signing.maybe_seen_role != Some(role);
-    self.role_signing.maybe_seen_role = Some(role);
     if !needs_evidence && !is_role_news {
       return Ok(false);
     }
-    self.sign_what_the_provider_says(tokens, &anchor, role).await
+    let is_changed = self.sign_what_the_provider_says(tokens, &anchor, role).await?;
+    self.role_signing.maybe_seen_role = Some(role);
+    Ok(is_changed)
+  }
+
+  /// `false` if no signed policy names a provider yet and this device got its tokens from another one
+  /// before: a server's `server-info` announcing a look-alike issuer shows as just that. An owner's
+  /// explicit move to a new provider says so in the signed policy.
+  fn is_the_provider_seen_before(
+    &self,
+    state: &WorkspaceState,
+    claims: &UnverifiedClaims,
+  ) -> Result<bool, CoreError> {
+    let maybe_policy = state.policy.maybe_role_signing.as_deref();
+    let is_decided =
+      maybe_policy.is_some_and(|policy| policy.maybe_provider.is_some() || policy.accepts_new_provider);
+    if is_decided {
+      return Ok(true);
+    }
+    let record = self.role_signing_record()?;
+    Ok(
+      record
+        .maybe_seen_provider
+        .as_deref()
+        .is_none_or(|seen| seen.trim_end_matches('/') == claims.issuer.trim_end_matches('/')),
+    )
+  }
+
+  fn remember_provider(&self, claims: &UnverifiedClaims) -> Result<(), CoreError> {
+    let mut record = self.role_signing_record()?;
+    if record.maybe_seen_provider.as_deref() == Some(claims.issuer.as_str()) {
+      return Ok(());
+    }
+    record.maybe_seen_provider = Some(claims.issuer.clone());
+    records::put_json(&self.store, Table::Workspace, ROLE_SIGNING_KEY, &record)
   }
 
   /// The provider whose tokens count here: the owners' signed word, or, while there is none, the
   /// provider this device itself got its token from. `None` when the token is from another provider
   /// than the signed one.
   fn anchor_for(&self, state: &WorkspaceState, claims: &UnverifiedClaims) -> Option<RoleProviderAnchor> {
-    let maybe_policy = state.policy.maybe_role_signing.as_ref();
+    let maybe_policy = state.policy.maybe_role_signing.as_deref();
     match RoleProviderAnchor::signed(maybe_policy) {
       Some(anchor) => {
         let is_same = anchor.issuer.trim_end_matches('/') == claims.issuer.trim_end_matches('/')
@@ -238,24 +310,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     claims: &UnverifiedClaims,
     expected: &str,
   ) -> Result<bool, CoreError> {
+    let mut is_rewrite = false;
     if let Some(written) = self
       .role_signing
       .maybe_written
       .as_ref()
       .filter(|written| written.claim == expected)
     {
-      // Written, and a later token still doesn't name it: the realm has no mapper for it.
-      if claims.maybe_issued_at > written.maybe_token_issued_at {
+      let is_later = claims.maybe_issued_at > written.maybe_token_issued_at;
+      if is_later && !written.was_rewritten {
+        // Somebody may have overwritten it since: once more.
+        is_rewrite = true;
+      } else if is_later {
+        // Written twice, and later tokens still don't name it: the realm has no mapper for it.
         tracing::warn!(
           "the identity provider's ID tokens don't carry the identity key, so role changes can't be \
            signed by themselves (docs/operations.md, \"Role signing\")"
         );
         self.set_problem(Some(RoleSigningProblem::NoKeyClaim))?;
         return Ok(true);
+      } else {
+        // The app's next refresh brings it. Nothing to do until then.
+        self.api.ask_for_new_id_token();
+        return Ok(false);
       }
-      // The app's next refresh brings it. Nothing to do until then.
-      self.api.ask_for_new_id_token();
-      return Ok(false);
     }
     let written = crate::attestation::write_identity_attribute(
       &crate::api::http_client(),
@@ -270,6 +348,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.role_signing.maybe_written = Some(WrittenAttribute {
           claim: expected.to_owned(),
           maybe_token_issued_at: claims.maybe_issued_at,
+          was_rewritten: is_rewrite,
         });
         self.api.ask_for_new_id_token();
         Ok(false)
@@ -367,16 +446,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     anchor: &RoleProviderAnchor,
     role: ProviderRole,
   ) -> Result<bool, CoreError> {
-    // Only somebody the provider itself still calls an owner signs by themselves.
-    if role != ProviderRole::Owner {
-      return Ok(false);
-    }
     self.sync_workspace().await?;
     let state = self.workspace()?;
-    if !RoleSigningPolicy::is_automatic(state.policy.maybe_role_signing.as_ref()) {
+    if !RoleSigningPolicy::is_automatic(state.policy.maybe_role_signing.as_deref()) {
       return Ok(false);
     }
+    // An owner of the roster signs also when the provider took the role away: that is how a handover
+    // gets through, as nobody else could sign the successor. What is signed still rests on tokens only,
+    // and their own departure with it. Everybody else has nothing to sign; a provider owner waits.
     if state.roster.version > 0 && !self.is_verified_owner(&state) {
+      if role == ProviderRole::Owner {
+        self.set_problem(Some(RoleSigningProblem::AwaitingOwner))?;
+      }
+      return Ok(false);
+    }
+    if state.roster.version == 0 && role != ProviderRole::Owner {
       return Ok(false);
     }
     let Some(jwks) = self.provider_keys(&anchor.issuer).await else {
@@ -397,10 +481,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(false);
       },
     };
-    if own.role != ProviderRole::Owner {
-      return Ok(false);
-    }
     if state.roster.version == 0 {
+      if own.role != ProviderRole::Owner {
+        return Ok(false);
+      }
       return self.sign_first_roster(own, anchor).await;
     }
     self.sign_next_roster(state, own, &jwks, anchor).await
@@ -432,6 +516,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       ProviderMark {
         maybe_subject: Some(own.subject),
         issued_at,
+        maybe_by_hand: None,
       },
     );
     let change = AutomaticChange {
@@ -467,7 +552,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Err(error) => tracing::debug!(user_id = %entry.user_id, %error, "role evidence refused"),
       }
     }
-    let max_age_secs = i64::try_from(self.settings.role_evidence_max_age.as_secs()).unwrap_or(i64::MAX);
+    statements.extend(role_loss_statements(&listed, &state, jwks, anchor));
+    let pinned: BTreeMap<UserId, [u8; 32]> = records::pinned_identities(&self.store)?
+      .into_iter()
+      .map(|(user, identity)| (user, identity.public_key))
+      .collect();
+    let secs = |duration: std::time::Duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX);
+    let mut record = self.role_signing_record()?;
     let plan = plan_roster(RosterPlanInput {
       roster: &state.roster,
       marks: &state.provider_marks,
@@ -475,14 +566,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       withdrawn: &listed.withdrawn,
       me: self.account.user_id,
       provider_now: own.issued_at,
-      max_evidence_age_secs: max_age_secs,
+      max_evidence_age_secs: secs(self.settings.role_evidence_max_age),
+      pinned: &pinned,
+      reports: &record.reports,
+      maybe_last_report_removal: record.maybe_last_report_removal,
+      report_grace_secs: secs(self.settings.role_report_grace),
+      report_interval_secs: secs(self.settings.role_report_interval),
     });
-    self.note_contradictions(&plan.contradicted)?;
-    let needs_pin = state
-      .policy
-      .maybe_role_signing
-      .as_ref()
-      .is_none_or(|policy| policy.maybe_provider.is_none());
+    record.reports.clone_from(&plan.reports);
+    record.maybe_last_report_removal = plan.maybe_last_report_removal;
+    records::put_json(&self.store, Table::Workspace, ROLE_SIGNING_KEY, &record)?;
+    self.note_what_people_should_know(&plan.contradicted, &plan.reported)?;
     let has_changes = plan.has_changes();
     if has_changes {
       for change in &plan.changes {
@@ -498,10 +592,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       document.provider_marks = plan.marks;
       self.append_roster_automatically(document, plan.changes).await?;
     }
-    if needs_pin {
-      self.pin_provider(anchor).await?;
+    // The owner before signed themselves off and couldn't sign the policy under this roster: until
+    // somebody does, they could still sign one that names an older roster (A7).
+    let state = self.workspace()?;
+    let is_policy_behind = state.policy_version > 0 && state.policy_roster_version < state.roster.version;
+    if is_policy_behind && self.is_verified_owner(&state) {
+      self.publish_policy(state.policy).await?;
     }
-    Ok(has_changes || needs_pin)
+    Ok(has_changes || is_policy_behind)
   }
 
   /// Writes the provider into the signed policy, so from now on the server's word doesn't count for
@@ -514,6 +612,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       issuer: anchor.issuer.clone(),
       client_id: anchor.client_id.clone(),
     });
+    signing.accepts_new_provider = false;
     policy.maybe_role_signing = Some(signing);
     self.publish_policy(policy).await
   }
@@ -526,20 +625,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  fn note_contradictions(&self, users: &[UserId]) -> Result<(), CoreError> {
-    let maybe_problem = (!users.is_empty()).then(|| RoleSigningProblem::Contradictory {
-      users: users.to_vec(),
-    });
-    if maybe_problem.is_some() {
-      tracing::warn!(count = users.len(), "role evidence contradicts the signed roster");
-    }
-    let mut record = self.role_signing_record()?;
-    let is_contradiction = matches!(record.maybe_note, Some(RoleSigningProblem::Contradictory { .. }));
-    if maybe_problem.is_some() || is_contradiction {
-      record.maybe_note = maybe_problem;
-      records::put_json(&self.store, Table::Workspace, ROLE_SIGNING_KEY, &record)?;
-    }
-    Ok(())
+  /// Says at most one thing: what needs a look first, then who is about to go on a report.
+  fn note_what_people_should_know(
+    &self,
+    contradicted: &[UserId],
+    reported: &[UserId],
+  ) -> Result<(), CoreError> {
+    let maybe_problem = if !contradicted.is_empty() {
+      tracing::warn!(
+        count = contradicted.len(),
+        "role evidence contradicts the signed roster"
+      );
+      Some(RoleSigningProblem::Contradictory {
+        users: contradicted.to_vec(),
+      })
+    } else if !reported.is_empty() {
+      Some(RoleSigningProblem::ReportedGone {
+        users: reported.to_vec(),
+      })
+    } else {
+      None
+    };
+    self.set_problem(maybe_problem)
   }
 
   fn set_problem(&self, maybe_problem: Option<RoleSigningProblem>) -> Result<(), CoreError> {
@@ -560,6 +667,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         RoleSigningProblem::NoRoleClaim
           | RoleSigningProblem::NoKeyClaim
           | RoleSigningProblem::ProviderChanged { .. }
+          | RoleSigningProblem::AwaitingOwner
       )
     ) {
       return self.set_problem(None);
@@ -590,6 +698,55 @@ fn is_provider_admin(tokens: &ProviderTokens, anchor: &RoleProviderAnchor) -> bo
     provider_role(maybe_roles.as_deref(), anchor),
     ProviderRole::Owner | ProviderRole::Admin
   )
+}
+
+/// The expired access tokens the server kept, as statements about people on the roster they show a
+/// lower role for. One that names no such thing, or doesn't verify, says nothing. They name no key: the
+/// plan only takes them for an account it already noted, under the key the roster has.
+fn role_loss_statements(
+  listed: &teamcraft_proto::ListRoleEvidenceResponse,
+  state: &WorkspaceState,
+  jwks: &[u8],
+  anchor: &RoleProviderAnchor,
+) -> Vec<ProviderStatement> {
+  let expected = AttestationExpectations {
+    issuer: &anchor.issuer,
+    audience: &anchor.client_id,
+  };
+  let mut statements = Vec::new();
+  for loss in &listed.role_losses {
+    let Some(member) = state
+      .roster
+      .members
+      .iter()
+      .find(|member| member.user_id == loss.user_id)
+    else {
+      continue;
+    };
+    let evidence = match verify_role_loss(&loss.token, jwks, &expected) {
+      Ok(evidence) => evidence,
+      Err(error) => {
+        tracing::debug!(user_id = %loss.user_id, %error, "role loss evidence refused");
+        continue;
+      },
+    };
+    let role = provider_role(evidence.maybe_roles.as_deref(), anchor);
+    let is_lower = match role {
+      ProviderRole::Neither => true,
+      ProviderRole::Admin => member.role == RosterRole::Owner,
+      _ => false,
+    };
+    if is_lower {
+      statements.push(ProviderStatement {
+        user_id: loss.user_id,
+        identity_key: member.identity_key.clone(),
+        subject: evidence.subject,
+        issued_at: evidence.issued_at,
+        role,
+      });
+    }
+  }
+  statements
 }
 
 /// What this device knows about role signing, from its store.

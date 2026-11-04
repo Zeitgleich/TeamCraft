@@ -563,9 +563,9 @@ pub struct WorkspacePolicy {
   pub import: crate::ImportPolicy,
   /// How the admin roster follows the identity provider (e2ee.md §3.1.3). Absent means automatic.
   /// A policy that doesn't name it doesn't change it: an older owner's app re-signs without it, so
-  /// clients keep the last one they verified.
+  /// clients keep the last one they verified. Boxed: every client future that holds a policy holds this.
   #[serde(rename = "role_signing", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_role_signing: Option<RoleSigningPolicy>,
+  pub maybe_role_signing: Option<Box<RoleSigningPolicy>>,
 }
 
 wire_enum! {
@@ -592,6 +592,10 @@ pub struct RoleSigningPolicy {
   /// owners' word, not the server's: the server can't point the apps at another issuer.
   #[serde(rename = "provider", default, skip_serializing_if = "Option::is_none")]
   pub maybe_provider: Option<RoleProvider>,
+  /// An owner moved to another provider on purpose: the next owner's app pins the one it signs in with,
+  /// also if it differs from the one that device used before.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub accepts_new_provider: bool,
 }
 
 /// The identity provider whose tokens can change the admin roster.
@@ -623,6 +627,7 @@ impl Default for RoleSigningPolicy {
       owner_role: default_owner_role(),
       admin_role: default_admin_role(),
       maybe_provider: None,
+      accepts_new_provider: false,
     }
   }
 }
@@ -645,10 +650,20 @@ pub struct PutRoleEvidenceRequest {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListRoleEvidenceResponse {
   pub entries: Vec<RoleEvidenceEntry>,
-  /// People of the newest roster the server says lost their role or account. The server's word:
-  /// enough to take somebody off, never to put anybody on (e2ee.md §3.1.3).
+  /// People of the newest roster the server says lost their role or account. The server's word: it
+  /// never puts anybody on, and takes an admin off only slowly (e2ee.md §3.1.3).
   #[serde(default)]
   pub withdrawn: Vec<WithdrawnRole>,
+  /// Access tokens the server saw, with a lower role than the person had, once they have expired.
+  #[serde(default)]
+  pub role_losses: Vec<RoleLossEntry>,
+}
+
+/// An expired access token of a person, showing that they lost a role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RoleLossEntry {
+  pub user_id: crate::UserId,
+  pub token: String,
 }
 
 /// The newest token of one person and the identity key the server has for them.

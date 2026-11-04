@@ -24,8 +24,9 @@ const WEB_ORIGIN: &str = "http://127.0.0.1:8083";
 const REALM: &str = "teamcraft-dev";
 const CLIENT: &str = "teamcraft";
 const PASSWORD: &str = "role-signing-dev-pass";
-/// The token lifetime of the dev realm plus a margin: a role change shows at the next refresh.
-const ROLE_CHANGE_WAIT: Duration = Duration::from_secs(420);
+/// Twice the token lifetime of the dev realm plus a margin: a role change shows at the next refresh, and
+/// evidence of a lost role goes out once that token has expired.
+const ROLE_CHANGE_WAIT: Duration = Duration::from_secs(780);
 const SIGN_WAIT: Duration = Duration::from_secs(180);
 
 /// What the app used to say about signing, on every page. None of it may come back in normal operation.
@@ -70,7 +71,9 @@ async fn an_owner_and_an_admin_get_their_rights_with_no_click_and_a_role_change_
   let suffix = std::process::id();
   let (owner_name, admin_name) = (format!("rs-owner-{suffix}"), format!("rs-admin-{suffix}"));
   let owner_id = keycloak.make_user(&owner_name, &["owner"]).await;
-  let admin_id = keycloak.make_user(&admin_name, &["admin", "member"]).await;
+  // Only `admin`: taking it leaves no client role at all, so Keycloak's mapper adds no claim and the
+  // server refuses the person's tokens. Only the server then sees what the provider signed.
+  let admin_id = keycloak.make_user(&admin_name, &["admin"]).await;
 
   let owner_browser = BrowserSession::launch().await.expect("a browser for the owner");
   let admin_browser = BrowserSession::launch().await.expect("a browser for the admin");

@@ -506,14 +506,17 @@ API or some other way for users to set the attribute (`crates/teamcraft-core/src
 **Role names.** The apps read `owner` and `admin`, whatever `[oidc.roles]` says, because they don't take the server's word
 for what a role means. If your realm calls them something else, an owner enters the names once under Administration → Security.
 
-**Without the mapper** nothing breaks and nobody is prompted: the roster stays as it is, re-signing for freshness goes on, and
-the Security section of the console says what is missing to those who see it, for owners with the way to change roles by hand.
+**Without the mapper** nothing breaks and nobody is prompted: the provider is still pinned, the roster stays as it is, re-signing for
+freshness goes on, and the Security section of the console says what is missing to those who see it, for owners with the way to change roles by hand.
 The apps log `the identity provider's ID tokens carry no client roles`. On an instance with no signed roster yet, the first
 owner signs themselves in by saving the policy once.
 
-**Taking people off without their next sign-in** needs the server to know: configure `[oidc.sync]` (the service account that
-already deactivates disabled users). Without it, somebody who never signs in again stays on the roster until an owner removes them
-by hand.
+**Taking people off.** A role removed in the realm counts as soon as the person's app or the server has a token that shows it. For
+somebody who never signs in again the server needs `[oidc.sync]` (the service account that already deactivates disabled users), and
+then an admin comes off after a week, one a week, named in the Security section meanwhile. An owner never comes off that way, and
+without `[oidc.sync]` nobody does: another owner removes them by hand. Keep two owners. **To hand over ownership,** move the role in the realm
+while the old owner still holds a client role, for example `member`: their app signs the successor. If they hold no role any more, the
+server refuses them and nobody can sign; give them `member` for a moment.
 
 **To check** a realm: `python3 dev/verify-realm.py` shows the checks against the dev realm; a token of your own decoded with any
 JWT tool should show `resource_access.<client>.roles` and `tc_identity_key` in the ID token.

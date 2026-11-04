@@ -6,7 +6,6 @@
 
 use leptos::prelude::*;
 use teamcraft_client_api::admin::{RoleSigningIssue, RosterStanding, roster_standing};
-use teamcraft_proto::Role;
 
 use crate::admin::AdminSection;
 use crate::clock::now_ms;
@@ -55,10 +54,7 @@ pub fn current_standing(state: AppState) -> RosterStanding {
 pub fn unsigned_reason(i18n: I18n, state: AppState) -> Option<String> {
   match current_standing(state) {
     RosterStanding::InForce => None,
-    RosterStanding::Expired { owners, .. } => Some(i18n.t_with(
-      "roster-standing-expired-ask",
-      &[("owners", &names(state, &owners))],
-    )),
+    RosterStanding::Expired { owners, .. } => Some(expired_line(i18n, state, &owners)),
     RosterStanding::NotSigned { .. } | RosterStanding::NoRoster => Some(i18n.t("roster-standing-waiting")),
   }
 }
@@ -71,17 +67,15 @@ fn banner_line(i18n: I18n, state: AppState) -> Option<(String, bool)> {
     owners,
   } = current_standing(state)
   {
-    let text = i18n.t_with(
-      "roster-standing-expired-ask",
-      &[("owners", &names(state, &owners))],
-    );
-    return Some((text, false));
+    return Some((expired_line(i18n, state, &owners), false));
   }
-  // Only an owner can do something about a contradiction or another provider.
-  if state.read(|backend| backend.my_role()) != Role::Owner {
+  // Only an owner can do something about a contradiction or another provider: an owner of the verified
+  // roster, not whom the server calls one, so that a server can't hide this from them.
+  let status = state.read(|backend| backend.owner_roster())?;
+  let me = state.read(|backend| backend.me().id);
+  if !status.owners.iter().any(|owner| owner.user == me) {
     return None;
   }
-  let status = state.read(|backend| backend.owner_roster())?;
   match status.maybe_signing_problem? {
     RoleSigningIssue::Contradictory { users } => Some((
       i18n.t_with(
@@ -91,9 +85,29 @@ fn banner_line(i18n: I18n, state: AppState) -> Option<(String, bool)> {
       true,
     )),
     RoleSigningIssue::ProviderChanged { .. } => Some((i18n.t("roster-signing-provider-changed"), true)),
-    // For the operator, in the console's Security section: nothing an owner does on every page.
-    RoleSigningIssue::NoRoleClaim | RoleSigningIssue::NoKeyClaim => None,
+    // In the console's Security section: nothing to say on every page.
+    RoleSigningIssue::NoRoleClaim
+    | RoleSigningIssue::NoKeyClaim
+    | RoleSigningIssue::ReportedGone { .. }
+    | RoleSigningIssue::AwaitingOwner => None,
   }
+}
+
+/// That admin rights lapsed, and whom to ask: by name, or just "an owner" where this device knows no
+/// name, as an ID tells nobody whom to ask.
+fn expired_line(i18n: I18n, state: AppState, owners: &[UserId]) -> String {
+  let known: Vec<UserId> = owners
+    .iter()
+    .copied()
+    .filter(|user| state.read(|backend| backend.user(*user)).is_some())
+    .collect();
+  if known.is_empty() {
+    return i18n.t("roster-standing-expired-ask-unnamed");
+  }
+  i18n.t_with(
+    "roster-standing-expired-ask",
+    &[("owners", &names(state, &known))],
+  )
 }
 
 /// People's names, for "ask …".
