@@ -80,4 +80,8 @@
     <item quantity="one">Mitglied</item>
     <item quantity="other">Mitglieder</item>
   </plurals>
+  <string name="call_join_failed_title">Anruf nicht verbunden</string>
+  <string name="call_join_failed">Der Beitritt zum Anruf hat nicht geklappt. Ruf aus der Unterhaltung zurück.</string>
+  <string name="call_join_failed_microphone">TeamCraft braucht das Mikrofon, um einem Anruf beizutreten. Erlaube es und ruf dann aus der Unterhaltung zurück.</string>
+  <string name="call_join_failed_network">Keine Verbindung zum Server. Prüf das Netzwerk und ruf dann aus der Unterhaltung zurück.</string>
 </resources>

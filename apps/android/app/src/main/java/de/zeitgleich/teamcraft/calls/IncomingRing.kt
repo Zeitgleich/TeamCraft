@@ -25,4 +25,11 @@ data class IncomingRing(
   /** What a second ring report does to this one: the same conversation adds the call's ID. */
   fun merged(other: IncomingRing): IncomingRing? =
     if (other.conversationId == conversationId) copy(maybeCallId = maybeCallId ?: other.maybeCallId, isVerified = isVerified || other.isVerified) else null
+
+  /**
+   * Whether the incoming-call screen opens right away. Android shows a ring's full-screen intent only
+   * while the phone is locked or its screen off; in use, it is a heads-up instead, and the app open
+   * in front would not show the ring at all (#1272). Unverified rings have no screen.
+   */
+  fun opensScreenAtOnce(isAppVisible: Boolean): Boolean = isVerified && isAppVisible
 }

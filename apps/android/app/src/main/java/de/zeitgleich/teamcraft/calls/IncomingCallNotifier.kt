@@ -41,6 +41,33 @@ class IncomingCallNotifier(private val context: Context) {
     manager.cancel(NOTIFICATION_ID)
   }
 
+  fun cancelJoinFailed() {
+    manager.cancel(JOIN_FAILED_NOTIFICATION_ID)
+  }
+
+  /**
+   * A join after answering failed while the call screen wasn't up (answered on a watch, in the car,
+   * or the screen couldn't open): says why instead of nothing (#1272). Tapping opens the app.
+   */
+  fun showJoinFailed(failure: JoinFailure) {
+    if (!canPost()) return
+    val text = context.getString(failure.text)
+    val notification = NotificationCompat.Builder(context, NotificationChannels.CALLS)
+      .setSmallIcon(R.drawable.ic_notification)
+      .setContentTitle(context.getString(R.string.call_join_failed_title))
+      .setContentText(text)
+      .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+      .setCategory(NotificationCompat.CATEGORY_ERROR)
+      .setContentIntent(openApp())
+      .setAutoCancel(true)
+      .build()
+    try {
+      manager.notify(JOIN_FAILED_NOTIFICATION_ID, notification)
+    } catch (denied: SecurityException) {
+      Log.w(TAG, "join failure not shown: permission missing")
+    }
+  }
+
   private fun callNotification(ring: IncomingRing): Notification {
     val caller = Person.Builder()
       .setName(ring.maybeCallerName ?: ring.displayName)
@@ -75,12 +102,7 @@ class IncomingCallNotifier(private val context: Context) {
    * (tapping opens it), so the server alone can't make the phone join a call.
    */
   private fun unverifiedNotification(ring: IncomingRing): Notification {
-    val open = PendingIntent.getActivity(
-      context,
-      REQUEST_OPEN,
-      Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-    )
+    val open = openApp()
     return NotificationCompat.Builder(context, NotificationChannels.INCOMING_CALLS)
       .setSmallIcon(R.drawable.ic_notification)
       .setContentTitle(ring.displayName)
@@ -93,6 +115,14 @@ class IncomingCallNotifier(private val context: Context) {
       .setTimeoutAfter(RING_TIMEOUT_MS)
       .build()
   }
+
+  private fun openApp(): PendingIntent =
+    PendingIntent.getActivity(
+      context,
+      REQUEST_OPEN,
+      Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
 
   private fun activityIntent(action: String, conversationId: String, requestCode: Int): PendingIntent =
     PendingIntent.getActivity(
@@ -113,6 +143,7 @@ class IncomingCallNotifier(private val context: Context) {
     /** How long a ring lasts at most on this device if nothing ends it before. */
     const val RING_TIMEOUT_MS = 45_000L
     private const val NOTIFICATION_ID = 2002
+    private const val JOIN_FAILED_NOTIFICATION_ID = 2003
     private const val REQUEST_SHOW = 10
     private const val REQUEST_ANSWER = 11
     private const val REQUEST_DECLINE = 12

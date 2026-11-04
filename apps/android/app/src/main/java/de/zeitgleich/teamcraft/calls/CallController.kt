@@ -13,6 +13,8 @@ import androidx.core.telecom.CallAttributesCompat
 import androidx.core.telecom.CallControlScope
 import androidx.core.telecom.CallEndpointCompat
 import androidx.core.telecom.CallsManager
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import java.nio.ByteBuffer
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -26,6 +28,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.CoreRepository
 import uniffi.teamcraft_ffi.CallEndReason
@@ -35,6 +38,7 @@ import uniffi.teamcraft_ffi.CallSession
 import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.CameraFrame
 import uniffi.teamcraft_ffi.IncomingCallInfo
+import uniffi.teamcraft_ffi.TeamCraftException
 import uniffi.teamcraft_ffi.VideoFrameRgba
 import uniffi.teamcraft_ffi.VideoListener
 import uniffi.teamcraft_ffi.VideoTrackInfo
@@ -75,6 +79,9 @@ class CallController(
   private val incomingNotifier = IncomingCallNotifier(context)
   /** The DM whose call this device left for a meeting room: its late states are not ours any more. */
   @Volatile private var maybeLeftConversation: String? = null
+  private val failure = MutableStateFlow<JoinFailure?>(null)
+  /** [CallActivity] is on screen; a failure it can't show goes to a notification. */
+  @Volatile private var isCallScreenVisible = false
 
   /** "Add people" and following a move of the call into a meeting room. */
   val moves = CallMoves(
@@ -106,6 +113,9 @@ class CallController(
   /** Joining a call (answered, not connected yet). */
   val isJoining: StateFlow<Boolean> = joining
 
+  /** Why the last join failed, until the user closed it; the call screen shows it. */
+  val joinFailure: StateFlow<JoinFailure?> = failure
+
   /** Registers with Telecom and listens for rings. Safe to call more than once. */
   suspend fun start() {
     if (isStarted) return
@@ -129,13 +139,17 @@ class CallController(
       ringing.value = maybeMerged
       // The device verified the ring only now: offer answering from here on.
       if (maybeMerged.isVerified && !current.isVerified) {
+        Log.i(TAG, "ring: verified by a second report")
         incomingNotifier.show(maybeMerged)
+        showIncomingIfInFront(maybeMerged)
         reportToTelecom(maybeMerged)
       }
       return
     }
     ringing.value = incoming
+    Log.i(TAG, "ring: shown (verified ${incoming.isVerified})")
     incomingNotifier.show(incoming)
+    showIncomingIfInFront(incoming)
     maybeRingTimeout?.cancel()
     maybeRingTimeout = scope.launch {
       delay(IncomingCallNotifier.RING_TIMEOUT_MS)
@@ -143,6 +157,23 @@ class CallController(
     }
     if (incoming.isVerified) reportToTelecom(incoming)
   }
+
+  /**
+   * The incoming-call screen over the app when it is in front: the full-screen intent only takes
+   * the screen of a locked phone (#1272). In the background the notification rings as before.
+   */
+  private fun showIncomingIfInFront(incoming: IncomingRing) {
+    if (!incoming.opensScreenAtOnce(isAppVisible())) return
+    Log.i(TAG, "ring: incoming-call screen opened over the app")
+    val intent = Intent(context, CallActivity::class.java)
+      .setAction(CallActivity.ACTION_SHOW_INCOMING)
+      .putExtra(CallActivity.EXTRA_CONVERSATION_ID, incoming.conversationId)
+      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { context.startActivity(intent) }.onFailure { Log.w(TAG, "ring: incoming-call screen not opened", it) }
+  }
+
+  private fun isAppVisible(): Boolean =
+    ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
 
   /** Lets headsets, car kits and Android Auto answer; only for rings the device verified. */
   private fun reportToTelecom(incoming: IncomingRing) {
@@ -157,29 +188,52 @@ class CallController(
     }
   }
 
+  /** Answers from the notification or the incoming-call screen. */
+  fun answer(conversationId: String) = answer(conversationId, AnswerSource.APP)
+
   /**
-   * Answers from the notification or the call screen. Also works when the ring is gone (the
-   * process restarted in between): joining needs only the conversation. The join is claimed before
-   * the ring is cleared, so the call screen goes straight from ringing to joining (it never sees an
-   * idle moment and closes), and a late duplicate ring can't ring again meanwhile.
+   * Also works when the ring is gone (the process restarted in between): joining needs only the
+   * conversation. The join is claimed before the ring is cleared, so the call screen goes straight
+   * from ringing to joining (it never sees an idle moment and closes), and a late duplicate ring
+   * can't ring again meanwhile. Returns at once ([startAnswer]): Telecom's answer callback must.
    */
-  fun answer(conversationId: String) {
-    if (maybeSession != null || !joining.compareAndSet(expect = false, update = true)) return
+  private fun answer(conversationId: String, source: AnswerSource) {
     val maybeCall = maybeTelecomCall
-    clearRing()
-    scope.launch {
-      if (maybeCall != null) {
-        runCatching { maybeCall.answer(CallAttributesCompat.CALL_TYPE_AUDIO_CALL) }
-          .onFailure { Log.w(TAG, "Telecom refused the answer", it) }
-        if (!join(conversationId, isClaimed = true)) endCall(maybeCall)
-      } else if (maybeTelecomJob?.isActive == true) {
-        // Telecom is still adding the ring: join without waiting for it.
-        if (!join(conversationId, isClaimed = true)) endCall(null)
-      } else {
-        options = CallOptions()
-        addTelecomCall(conversationId, displayNameOf(conversationId), CallAttributesCompat.DIRECTION_OUTGOING, isJoinClaimed = true)
-      }
+    val route = AnswerRoute.of(
+      source,
+      isInCall = maybeSession != null,
+      isJoining = joining.value,
+      hasTelecomCall = maybeCall != null,
+      isTelecomAdding = maybeTelecomJob?.isActive == true,
+    )
+    if (route == AnswerRoute.IGNORE || !joining.compareAndSet(expect = false, update = true)) {
+      Log.i(TAG, "answer ($source): ignored, already in or joining a call")
+      return
     }
+    Log.i(TAG, "answer ($source): $route")
+    failure.value = null
+    incomingNotifier.cancelJoinFailed()
+    clearRing()
+    startAnswer(
+      scope,
+      route,
+      object : AnswerSteps {
+        override suspend fun answerTelecomCall() {
+          runCatching { maybeCall?.answer(CallAttributesCompat.CALL_TYPE_AUDIO_CALL) }
+            .onFailure { Log.w(TAG, "Telecom refused the answer", it) }
+        }
+
+        override suspend fun join(): Boolean = this@CallController.join(conversationId, isClaimed = true)
+
+        override suspend fun addTelecomCall() {
+          options = CallOptions()
+          this@CallController.addTelecomCall(conversationId, displayNameOf(conversationId), CallAttributesCompat.DIRECTION_OUTGOING, isJoinClaimed = true)
+        }
+
+        // The Telecom call as it is now: one added meanwhile is ended too.
+        override suspend fun endCall() = this@CallController.endCall(maybeTelecomCall ?: maybeCall)
+      },
+    )
   }
 
   /** Declines on this device: stops ringing. The others keep ringing until they answer or it ends. */
@@ -205,6 +259,7 @@ class CallController(
   /** Starts (or joins) the conversation's call, with the choices of the pre-join dialog. */
   fun startCall(conversationId: String, displayName: String, callOptions: CallOptions = CallOptions()) {
     if (maybeSession != null || joining.value) return
+    failure.value = null
     options = callOptions
     addTelecomCall(conversationId, displayName, CallAttributesCompat.DIRECTION_OUTGOING)
   }
@@ -266,14 +321,17 @@ class CallController(
     val session = maybeSession
     when {
       session != null -> session.leave()
-      joining.value -> {
-        isJoinAbandoned = true
-        maybePendingJoin?.cancel()
-        // A join still waiting for the microphone permission gives up too.
-        maybePermission?.complete(false)
-      }
+      joining.value -> abandonJoin()
       else -> decline()
     }
+  }
+
+  /** Stops a join under way; one that finishes anyway leaves at once. */
+  private fun abandonJoin() {
+    isJoinAbandoned = true
+    maybePendingJoin?.cancel()
+    // A join still waiting for the microphone permission gives up too.
+    maybePermission?.complete(false)
   }
 
   /**
@@ -301,15 +359,29 @@ class CallController(
         callsManager.addCall(
           attributes,
           onAnswer = {
-            // Answered through Telecom: a headset, the car or Android Auto.
-            clearRing()
-            join(conversationId)
+            // Answered through Telecom: the system's call UI, a watch, a headset, the car. Telecom
+            // waits 5 s for this and tears the call down after; the join runs on its own (#1272).
+            Log.i(TAG, "Telecom: answered by the system")
+            answer(conversationId, AnswerSource.TELECOM)
           },
-          onDisconnect = { leave() },
+          onDisconnect = {
+            Log.i(TAG, "Telecom: disconnected by the system")
+            if (joining.value) abandonJoin()
+            leave()
+          },
           onSetActive = {},
           onSetInactive = { maybeSession?.setMuted(true) },
         ) {
           maybeTelecomCall = this
+          Log.i(TAG, "Telecom: call added")
+          if (direction == CallAttributesCompat.DIRECTION_INCOMING && (joining.value || maybeSession != null)) {
+            // Answered on the notification while Telecom was still adding the ring: without this the
+            // system keeps ringing it, and its missed-call disconnect would end the joined call.
+            launch {
+              runCatching { this@addCall.answer(CallAttributesCompat.CALL_TYPE_AUDIO_CALL) }
+                .onFailure { Log.w(TAG, "Telecom refused the answer", it) }
+            }
+          }
           if (direction == CallAttributesCompat.DIRECTION_OUTGOING) {
             isClaimPending = false
             launch {
@@ -359,18 +431,26 @@ class CallController(
   private suspend fun joinOnce(conversationId: String): Boolean {
     if (conversationId == maybeLeftConversation) maybeLeftConversation = null
     showCall()
-    if (!hasMicrophone() && !requestMicrophone()) return false
+    if (!hasMicrophone() && !requestMicrophone()) {
+      Log.i(TAG, "join: no microphone")
+      if (!isJoinAbandoned) report(JoinFailure.MICROPHONE)
+      return false
+    }
     // Receiving video needs Cisco's OpenH264; without it the call is audio-only for this device.
     VideoCodecInstaller.ensure(context)
     if (isJoinAbandoned) return false
     // Muted from the first frame (a muted call moving into a meeting room): no audio slips out.
     val isMuted = options.isMuted
+    Log.i(TAG, "join: connecting")
     val pending = scope.async { core.core().joinCall(conversationId, isMuted) }
     maybePendingJoin = pending
     val session = try {
       pending.await()
     } catch (error: Exception) {
-      if (error !is CancellationException) Log.w(TAG, "joining the call failed", error)
+      if (error !is CancellationException && !isJoinAbandoned) {
+        Log.w(TAG, "join: failed (${error.javaClass.simpleName})")
+        report(joinFailureOf(error))
+      }
       return false
     } finally {
       maybePendingJoin = null
@@ -381,6 +461,7 @@ class CallController(
       session.close()
       return false
     }
+    Log.i(TAG, "join: connected")
     maybeSession = session
     session.setStatusSounds(CallSoundPrefs.prefs(context).statusSounds)
     session.setVideoListener(Video())
@@ -457,19 +538,52 @@ class CallController(
   private fun showCall() {
     // The previous call's ended state would close the screen right away.
     if (state.value?.phase == CallPhase.ENDED) state.value = null
-    context.startActivity(Intent(context, CallActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    // Android may refuse this from the background (answered on a watch or in the car); the
+    // ongoing-call notification opens the screen then.
+    Log.i(TAG, "join: call screen asked for")
+    runCatching { context.startActivity(Intent(context, CallActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+      .onFailure { Log.w(TAG, "join: call screen not opened", it) }
+  }
+
+  /** [CallActivity] came on screen or left it. */
+  fun onCallScreenVisible(isVisible: Boolean) {
+    isCallScreenVisible = isVisible
+  }
+
+  /** The user closed the failure the call screen showed. */
+  fun dismissJoinFailure() {
+    failure.value = null
+  }
+
+  /** A failed join: the call screen shows why, or a notification when the screen isn't up. */
+  private fun report(joinFailure: JoinFailure) {
+    failure.value = joinFailure
+    if (!isCallScreenVisible) incomingNotifier.showJoinFailed(joinFailure)
+  }
+
+  private fun joinFailureOf(error: Exception): JoinFailure = when (error) {
+    is TeamCraftException.Network -> JoinFailure.NETWORK
+    is TeamCraftException.CallDeviceLimit -> JoinFailure.DEVICE_LIMIT
+    is TeamCraftException.CallEncryptionPending -> JoinFailure.ENCRYPTION_PENDING
+    else -> JoinFailure.OTHER
   }
 
   private fun hasMicrophone(): Boolean =
     ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
       PackageManager.PERMISSION_GRANTED
 
-  /** [CallActivity] asks the user (it is on screen by now); waits for the answer. */
+  /**
+   * [CallActivity] asks the user; waits for the answer, at most [MICROPHONE_WAIT_MS]: a screen that
+   * could not open (answered from the background) or an answer that came before this waits would
+   * otherwise keep the join, and every later ring, stuck.
+   */
   private suspend fun requestMicrophone(): Boolean {
     val answer = CompletableDeferred<Boolean>()
     maybePermission = answer
     return try {
-      answer.await()
+      // Granted before this started waiting.
+      if (hasMicrophone()) return true
+      withTimeoutOrNull(MICROPHONE_WAIT_MS) { answer.await() } ?: false
     } finally {
       maybePermission = null
     }
@@ -560,6 +674,8 @@ class CallController(
     const val CAMERA_FRAMERATE = 15
     /** Telecom needs an address per call; ours names the conversation. */
     const val URI_SCHEME = "teamcraft"
+    /** How long a join waits for the user to answer the microphone permission request. */
+    private const val MICROPHONE_WAIT_MS = 60_000L
   }
 }
 
