@@ -128,17 +128,14 @@ impl BrowserSession {
 
 /// Exclusive use of a web client port (one the dev realm registers as redirect URI: 8082, 8083)
 /// for as long as it is held, across every test process on the machine: other checkouts run the
-/// suite too, and a second server on the port fails to start.
+/// suite too, and a second server on the port fails to start. Each port is its own lane: browser
+/// tests on 8082 and 8083 run at the same time.
 pub struct WebPortLease {
-  _turn: tokio::sync::MutexGuard<'static, ()>,
   _file: std::fs::File,
 }
 
-static WEB_PORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 /// Waits until no other test (in this process or another) uses `port`.
 pub async fn lease_web_port(port: u16) -> WebPortLease {
-  let turn = WEB_PORT.lock().await;
   let path = std::env::temp_dir().join(format!("teamcraft-e2e-web-port-{port}.lock"));
   let file = std::fs::File::options()
     .create(true)
@@ -146,17 +143,15 @@ pub async fn lease_web_port(port: u16) -> WebPortLease {
     .write(true)
     .open(&path)
     .expect("opening the port lock file");
-  // An advisory lock, released when the file is closed (also when the test process dies).
+  // An advisory lock, released when the file is closed (also when the test process dies). It
+  // belongs to this open file, so it also keeps out other tests of this process.
   let file = tokio::task::spawn_blocking(move || {
     file.lock().expect("locking the port lock file");
     file
   })
   .await
   .expect("waiting for the port lock");
-  WebPortLease {
-    _turn: turn,
-    _file: file,
-  }
+  WebPortLease { _file: file }
 }
 
 /// `$E2E_ARTIFACTS`, else `target/e2e-artifacts` of the workspace.
