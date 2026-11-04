@@ -264,6 +264,9 @@ pub struct ChannelMember {
 pub struct ChannelRolesReview {
   /// Where the role log stood: signing is refused once it moved on.
   pub log_cursor: u64,
+  /// This device can't vouch for what it has, or something contradicts it: the panel says so.
+  #[serde(default)]
+  pub needs_a_look: bool,
   /// The roles this device's own snapshot gives. The list to sign comes from the member list, the
   /// server's word, so a row it doesn't have here is marked.
   pub snapshot: Vec<(UserId, ChannelRole)>,

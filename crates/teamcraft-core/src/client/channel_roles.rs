@@ -213,9 +213,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.sign_role_plan(conversation, &plan).await
   }
 
-  /// Whether this user could sign for the workspace here, so that a role change not signed is
-  /// something they should hear about: this device can't vouch for the snapshot or the key.
-  pub fn could_vouch_for_channel_roles(&self, conversation: ConversationId) -> Result<bool, CoreError> {
+  /// Whether this user signs roles here as a workspace admin or a signed channel admin, so that a role
+  /// change not signed is something they should hear about: this device can't vouch for the snapshot
+  /// or the key. Anybody else's change was the server's word all along.
+  pub fn could_sign_channel_roles(&self, conversation: ConversationId) -> Result<bool, CoreError> {
     let state = self.channel_role_state(conversation)?;
     let workspace = self.workspace()?;
     Ok(
@@ -227,7 +228,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.roster_max_age_ms(),
         )
         .iter()
-        .any(is_workspace_authority),
+        .any(|authority| *authority != SignerAuthority::Founder),
     )
   }
 
@@ -587,6 +588,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::info!(conversation_id = %conversation, "not vouching for roles nobody reviewed");
       return Ok(None);
     }
+    // ... and it would anchor the snapshot. On one that isn't yet, nothing says the keys in it are
+    // right: a first pin from the server can make a forged founding look fine to this device.
+    let is_vouching = authorities.iter().any(is_workspace_authority);
+    if is_vouching
+      && !state.is_workspace_anchored
+      && !self.can_check_kept_keys(conversation, &state, changes).await?
+    {
+      tracing::info!(conversation_id = %conversation, "not vouching for keys this device can't check");
+      return Ok(None);
+    }
     let mut maybe_refusal = None;
     for authority in authorities {
       if authority == SignerAuthority::Founder && !may_found {
@@ -606,8 +617,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .filter(|(_, role)| *role != ChannelRole::Member)
         .map(|(user, _)| *user)
         .collect();
+      // A workspace admin's signature vouches for the key too: the snapshot's only if it is anchored.
+      let may_go_by_snapshot = !is_vouching || state.is_workspace_anchored;
       let checked = self
-        .checked_role_keys(conversation, &state, &given_a_role, true)
+        .checked_role_keys(conversation, &state, &given_a_role, may_go_by_snapshot)
         .await?;
       if given_a_role.iter().any(|user| !checked.contains_key(user)) {
         tracing::info!(conversation_id = %conversation, "not signing a role for somebody whose key this device can't check");
@@ -687,6 +700,28 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       signature: Base64Bytes::new(signature),
       signer_device_id: self.account.device_id,
     })
+  }
+
+  /// Whether this device can check the key of everybody the next entry keeps from the snapshot, and
+  /// that it is the one the snapshot names: the entry repeats it, so it vouches for it.
+  async fn can_check_kept_keys(
+    &mut self,
+    conversation: ConversationId,
+    state: &ChannelRoleState,
+    changes: &[(UserId, ChannelRole)],
+  ) -> Result<bool, CoreError> {
+    let kept: Vec<UserId> = state
+      .assignments
+      .iter()
+      .map(|assignment| assignment.user_id)
+      .filter(|user| !changes.iter().any(|(changed, _)| changed == user))
+      .collect();
+    let checked = self.checked_role_keys(conversation, state, &kept, false).await?;
+    Ok(kept.iter().all(|user| {
+      checked
+        .get(user)
+        .is_some_and(|found| state.snapshot_key_of(*user) == Some(found.key))
+    }))
   }
 
   /// The keys this device stands behind for `users`, without those it can't (e2ee.md §4.6.1, "Whose

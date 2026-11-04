@@ -378,8 +378,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         user,
         role,
       } => match self.set_channel_role(conversation, user, role).await? {
-        // A workspace admin whose device can't stand behind it hears so; the server's change stands.
-        super::RoleSigning::Unsigned if self.could_vouch_for_channel_roles(conversation)? => {
+        // Somebody who signs roles here hears when their device can't; the server's change stands.
+        super::RoleSigning::Unsigned if self.could_sign_channel_roles(conversation)? => {
           Err(CoreError::RoleChangeNotConfirmed)
         },
         _ => Ok(()),

@@ -660,8 +660,9 @@ impl ChannelRoleState {
     // itself would take from that admin (`signed_deletion`): the server sets the entry's time.
     // Roles nobody looked at aren't anything to anchor on, whoever signed. That goes on through an
     // older client's entry too, which doesn't carry the mark on: only a reviewed list ends it.
-    let may_anchor =
-      !document.has_server_listed_roles && (!self.has_server_listed_roles || is_reviewed(&document));
+    let may_anchor = !document.has_server_listed_roles
+      && (!self.has_server_listed_roles || is_reviewed(&document))
+      && !names_another_key_than_pinned(&document, verifier.pinned);
     let is_by_workspace_admin = may_anchor
       && verifier.workspace.heads.maybe_roster_signed_at_ms.is_some()
       && verifier
@@ -1030,6 +1031,18 @@ impl ChannelRoleState {
       .clone()
       .unwrap_or_else(|| Base64Bytes::new(vec![0; HASH_BYTES]))
   }
+}
+
+/// Whether the document names a key for somebody other than the one this device pinned for them.
+/// An anchor lets its admins purge at once, so a device doesn't take one on a key it knows of another
+/// for: an older client's signature on a first pin from the server, or a real new key this device
+/// hasn't taken yet. It counts for the role either way; the anchor can wait.
+fn names_another_key_than_pinned<D: IdentityDirectory>(document: &ChannelRolesDocument, pinned: &D) -> bool {
+  document.assignments.iter().any(|assignment| {
+    pinned
+      .pinned_identity(convert::user(assignment.user_id))
+      .is_some_and(|key| key.as_bytes().as_slice() != assignment.identity_key.as_slice())
+  })
 }
 
 /// Whether the document is a list a workspace admin looked at.

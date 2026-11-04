@@ -700,8 +700,7 @@ pub trait ChatBackend {
   }
   /// Reads the channel's members and signed roles afresh (the members section opened).
   fn refresh_channel_roles(&self, _conversation: ConversationId) {}
-  /// For a workspace admin, where a look at the channel's roles helps: what they look at. `None` for
-  /// anybody else.
+  /// For a workspace admin: what they look at in the channel's members. `None` for anybody else.
   fn channel_roles_review(&self, _conversation: ConversationId) -> Option<crate::model::ChannelRolesReview> {
     None
   }

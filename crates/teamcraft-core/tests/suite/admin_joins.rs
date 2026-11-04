@@ -565,6 +565,27 @@ async fn a_channel_from_before_signed_roles_is_founded_when_its_owner_approves()
   assert_eq!(lines(&dave, channel), vec![(bob_id, By::Approved(carol_id))]);
 }
 
+/// Follow-up review, the near-deadlock: a junk entry leaves the channel without anything signed and
+/// without a way to found it. Its owner approves all the same, as every member may add there; the
+/// admin who gets in can then look at the roles. Nobody is stuck.
+#[tokio::test]
+async fn a_junk_entry_does_not_lock_the_owner_of_an_unsigned_channel_out() {
+  let (server, mut alice, mut bob, mut carol, mut dave, channel) =
+    setup_in(AdminSelfJoin::OwnerApproval, HistoryPolicy::FromJoin, true).await;
+  let (bob_id, carol_id) = (bob.client.user_id(), carol.client.user_id());
+  server.set_role_log_lacking(false);
+  server.plant_role_log_entry(channel, b"junk".to_vec(), vec![0; 64]);
+  bob.client.request_admin_join(channel).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+  carol.client.approve_admin_join(channel, bob_id).await.unwrap();
+  assert!(!carol.client.channel_role_state(channel).unwrap().is_signed());
+  assert_eq!(server.role_log(channel).len(), 1, "nothing signed on the way");
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  assert!(bob.client.has_group(channel).unwrap());
+  assert_eq!(lines(&dave, channel), vec![(bob_id, By::Approved(carol_id))]);
+}
+
 /// A member the server doesn't list as the channel's admin founds nothing by approving: no entry, and
 /// the refusal they saw before.
 #[tokio::test]

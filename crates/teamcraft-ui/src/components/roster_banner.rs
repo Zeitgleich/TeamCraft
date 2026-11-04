@@ -69,11 +69,13 @@ fn banner_line(i18n: I18n, state: AppState) -> Option<(String, bool)> {
   {
     return Some((expired_line(i18n, state, &owners), false));
   }
-  // Members' devices disagree about a channel's roles: an admin of the verified roster, not whom the
-  // server calls one, can look (e2ee.md §4.6.1). Everybody else reads it in the channel's members.
-  if let Some(line) = role_alarm_line(i18n, state) {
-    return Some((line, false));
-  }
+  // The owner's lines first: the server alone can raise the next one by showing a fork, and it must
+  // not be able to hide these with it.
+  owner_line(i18n, state).or_else(|| role_alarm_line(i18n, state).map(|line| (line, false)))
+}
+
+/// What only an owner can do something about.
+fn owner_line(i18n: I18n, state: AppState) -> Option<(String, bool)> {
   // Only an owner can do something about a contradiction or another provider: an owner of the verified
   // roster, not whom the server calls one, so that a server can't hide this from them.
   let status = state.read(|backend| backend.owner_roster())?;

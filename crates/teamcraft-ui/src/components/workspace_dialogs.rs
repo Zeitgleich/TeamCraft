@@ -704,6 +704,9 @@ fn ChannelRolesReviewPanel(
       && (shown_cursor.get() != live_cursor.get() || shown_rows.with(|list| *list != live_rows.get()))
   });
   let has_new = Memo::new(move |_| shown_rows.with(|list| list.iter().any(|row| row.is_new)));
+  // A device that knows no roles can't say whom a confirmed list takes one from.
+  let knows_no_roles =
+    Memo::new(move |_| review.with(|maybe| maybe.as_ref().is_some_and(|found| found.snapshot.is_empty())));
   let has_changed_key =
     Memo::new(move |_| shown_rows.with(|list| list.iter().any(|row| row.key_mark == RoleKeyMark::Changed)));
   // Who this device has a role for and the list doesn't name: confirming takes it from them.
@@ -729,7 +732,12 @@ fn ChannelRolesReviewPanel(
   view! {
     <section class="role-review" aria-labelledby="role-review-title">
       <h4 id="role-review-title" class="join-requests-title">{move || i18n.t("channel-roles-review-title")}</h4>
-      <p class="hint">{move || i18n.t("channel-roles-review-hint")}</p>
+      <p class="hint">
+        {move || {
+          let needs_a_look = review.with(|maybe| maybe.as_ref().is_some_and(|found| found.needs_a_look));
+          i18n.t(if needs_a_look { "channel-roles-review-hint" } else { "channel-roles-review-hint-quiet" })
+        }}
+      </p>
       <Show
         when=move || is_reviewing.get()
         fallback=move || view! {
@@ -762,6 +770,9 @@ fn ChannelRolesReviewPanel(
         </ul>
         <Show when=move || has_new.get() fallback=|| ()>
           <p class="hint">{move || i18n.t("channel-roles-review-new-hint")}</p>
+        </Show>
+        <Show when=move || knows_no_roles.get() fallback=|| ()>
+          <p class="hint">{move || i18n.t("channel-roles-review-knows-none")}</p>
         </Show>
         <Show when=move || has_changed_key.get() fallback=|| ()>
           <p class="hint">{move || i18n.t("channel-roles-review-key-changed-hint")}</p>

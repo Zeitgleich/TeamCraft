@@ -373,10 +373,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// Whether this user signs the channel's roles in a way members accept: an admin of the fresh
   /// workspace roster, a signed channel admin, or, while nothing is signed, an admin the server
   /// lists, who founds the log (e2ee.md §4.6.1).
-  /// For a workspace admin, where a look helps: this device can't vouch for the snapshot, or the
-  /// server lists a role above member nobody confirmed (a space admin's change, or a real admin a
-  /// founding left out), which nothing else can repair (e2ee.md §4.6.1). Nobody is asked to:
-  /// it is there when they open the channel's members. `None` for anybody else.
+  /// For a workspace admin, always: their look at the channel's roles is the one thing that ends an
+  /// alarm or a stretch, or repairs a role nothing else can (e2ee.md §4.6.1). Nobody is asked to: it is
+  /// there when they open the channel's members, and says more where it would help. `None` for anybody
+  /// else.
   pub(crate) fn ui_channel_roles_review(
     &self,
     conversation: ConversationId,
@@ -410,7 +410,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           && member.role != teamcraft_proto::ChannelRole::Member
           && signed.role_of(member.user.id) != member.role
       });
-    let is_needed = signed.must_review_before_vouching()
+    let needs_a_look = signed.must_review_before_vouching()
       || lists_a_role_nobody_confirmed
       || signed.maybe_alarm.is_some()
       // A log this device took nothing from: only such a list gets it out.
@@ -423,8 +423,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
       )
       .map(Option::unwrap_or_default),
     );
-    (is_vouching && is_needed).then(|| teamcraft_client_api::model::ChannelRolesReview {
+    is_vouching.then(|| teamcraft_client_api::model::ChannelRolesReview {
       log_cursor: signed.cursor,
+      needs_a_look,
       key_marks: standings
         .into_iter()
         .map(|(user, standing)| {

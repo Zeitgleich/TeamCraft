@@ -268,8 +268,9 @@ admin in is an owner's own membership change.
   who is asked, but an owner's app approves only if its own verified channel roles (e2ee.md §4.6.1)
   make that owner an admin, and members take the add in only from a signed channel admin. On a
   channel from before signed roles the owner's app founds the log on the way. An owner the server
-  alone lists on a channel that has a log sees the request with why members wouldn't accept the
-  admin and can only decline, until a signed admin or a workspace admin sets their role again. A
+  alone lists on a signed channel sees the request with why members wouldn't accept the admin and can
+  only decline, until a signed admin or a workspace admin sets their role again (for when nobody can,
+  §2.5). On a channel where nothing is signed yet, and that can't be founded, they approve all the same. A
   channel nobody signed yet keeps the rule of before for members, so older apps in the
   group are not split off; what an approval can do is limited by the checks below. The server tells
   them (gateway `admin_join_request_update`) and their apps show the request at the top of
@@ -388,7 +389,10 @@ what makes the new owner count on members' apps (e2ee.md §4.6.1); the console's
 sign it yet (a follow-up of issue #380), so until then the new owner's role is the server's word. An
 admin who isn't in the channel's encryption group can't vouch for the key of somebody they can't check
 (e2ee.md §4.6.1, "Whose key a role names"): on a channel with a log, a workspace admin in the group
-signs it.
+signs it. Under `owner_approval`, with no workspace admin in the group and no owner whose role counts,
+nobody can let one in. The repair: a workspace owner temporarily sets `admin_self_join` to `visible`, a
+workspace admin joins, checks the roles in the channel's members and confirms them, and the owner sets
+the policy back. Everybody in the channel sees the join.
 
 **Decision (issue #877): workspace admins keep appointing channel admins.** There is no instance policy
 that limits them to channels without an admin: an orphaned channel needs exactly this, and a switch

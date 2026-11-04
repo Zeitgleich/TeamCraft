@@ -62,8 +62,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   /// Whether the channel's signed roles make this user an admin, the only case in which members take
-  /// in the admin they approve (e2ee.md §4.6.1); or will, because the channel has no log yet and the
-  /// server lists them its admin: approving founds it.
+  /// in the admin they approve (e2ee.md §4.6.1); or nothing is signed here as far as this device knows
+  /// and the server lists them its admin: approving founds the log if it can, and every member may
+  /// add on such a channel.
   fn may_approve_as_owner(&self, conversation: ConversationId, maybe_listed: Option<&ChannelRole>) -> bool {
     let state: crate::channel_roles::ChannelRoleState = self.read(
       records::get_json(
@@ -74,7 +75,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .map(Option::unwrap_or_default),
     );
     state.role_of(self.me_id()) == ChannelRole::Admin
-      || (state.is_unfounded() && maybe_listed == Some(&ChannelRole::Admin))
+      || (!state.is_signed() && maybe_listed == Some(&ChannelRole::Admin))
   }
 
   fn verified_workspace(&self) -> WorkspaceState {
