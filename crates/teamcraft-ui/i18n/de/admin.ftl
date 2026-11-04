@@ -149,6 +149,7 @@ policy-owners = Eigentümer
 policy-owners-unknown = Dieses Gerät hat noch keine Admin-Liste geprüft.
 policy-owners-last-signed = zuletzt signiert { $time }
 policy-owners-never-signed = auf diesem Gerät noch keine Signatur gesehen
+policy-owners-unnamed = Ein Workspace-Eigentümer
 policy-owners-valid-until = Die Admin-Rechte gelten auf den Geräten der Mitglieder bis { $time }. Die App eines Eigentümers signiert lange vorher von selbst neu, sobald sie geöffnet ist.
 policy-owners-too-few = { $count } von { $minimum } empfohlenen Eigentümern. Füge einen weiteren Eigentümer hinzu, damit der Workspace verwaltbar bleibt, wenn jemand geht oder seine Geräte verliert.
 policy-owners-expires-soon = Seit einer Weile hat kein Eigentümer signiert: Die Geräte der Mitglieder erkennen die Admins ab { $time } nicht mehr an. Ein Eigentümer muss TeamCraft vorher öffnen.

@@ -30,8 +30,9 @@ const ROLE_CHANGE_WAIT: Duration = Duration::from_secs(780);
 const SIGN_WAIT: Duration = Duration::from_secs(180);
 
 /// What the app used to say about signing, on every page. None of it may come back in normal operation.
-const PROMPTS: [&str; 8] = [
+const PROMPTS: [&str; 9] = [
   "Sign now",
+  "Sign role",
   "isn't signed",
   "isn’t signed",
   "Review and sign",

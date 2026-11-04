@@ -71,6 +71,7 @@ class CoreRepository(
       it.close()
       onAccountClosed()
     }
+    val tokens = Tokens(auth)
     val core = withContext(Dispatchers.IO) {
       TeamCraft(
         AppConfig(
@@ -80,13 +81,15 @@ class CoreRepository(
           databaseKey = databaseKey(storageKey, subject),
           pushGatewayUrl = BuildConfig.PUSH_GATEWAY_URL.ifEmpty { null },
         ),
-        Tokens(auth),
+        tokens,
         Changes {
           changes.update { it + 1 }
           connection.value = maybeCore?.connectionState()
         },
       )
     }
+    tokens.maybeCore = core
+    core.noteIdToken(auth.idToken())
     maybeCore = core
     maybeAccount = account
     connection.value = core.connectionState()
@@ -107,13 +110,18 @@ class CoreRepository(
       .readOrCreate(DATABASE_KEY_LENGTH)
 
   private class Tokens(private val auth: AuthRepository) : TokenProvider {
+    /** The core this supplies, once it is open: it also gets the ID token that came along. */
+    @Volatile var maybeCore: TeamCraft? = null
+
     /**
      * Called on the core's own token thread, never on one that reads. Every authenticated request
      * of the core passes here, so reading what the store holds doesn't wait for the device's CAs.
+     * The ID token goes along for the owners' apps to verify (e2ee.md §3.1.3).
      */
     override fun accessToken(): String? = runBlocking {
       NetworkTrust.awaitTrustedCertificates()
-      auth.accessToken()
+      if (maybeCore?.takeIdTokenRequest() == true) auth.refreshTokensSoon()
+      auth.accessToken().also { maybeCore?.noteIdToken(auth.idToken()) }
     }
   }
 

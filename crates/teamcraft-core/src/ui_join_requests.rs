@@ -37,7 +37,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let channels: HashMap<ConversationId, ChannelRole> = self
       .conversations_raw()
       .into_iter()
-      .filter(|conversation| is_open_private_channel(conversation))
+      .filter(is_open_private_channel)
       .filter_map(|conversation| Some((conversation.id, conversation.maybe_my_membership?.role)))
       .collect();
     requests_to_decide(

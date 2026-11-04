@@ -203,10 +203,18 @@ fn OwnerList(status: OwnerRosterStatus) -> impl IntoView {
     .owners
     .iter()
     .map(|owner| {
+      // The console's own user list knows people the chat's directory doesn't.
       let name = state
-        .read(|backend| backend.user(owner.user))
-        .map(|user| user.display_name)
-        .unwrap_or_else(|| owner.user.to_string());
+        .read(|backend| {
+          backend.user(owner.user).or_else(|| {
+            backend
+              .admin_users()
+              .into_iter()
+              .map(|found| found.user)
+              .find(|user| user.id == owner.user)
+          })
+        })
+        .map_or_else(|| i18n.t("policy-owners-unnamed"), |user| user.display_name);
       let signed = match owner.maybe_last_signed_at {
         Some(at) => i18n.t_with(
           "policy-owners-last-signed",

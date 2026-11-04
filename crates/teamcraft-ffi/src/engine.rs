@@ -8,7 +8,8 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use teamcraft_client_api::backend::ChatBackend;
@@ -164,6 +165,8 @@ pub(crate) struct SyncSignals {
   /// by every read of a conversation's messages, as on the desktop; until it was, a conversation
   /// opened from a notification after a long absence waited for every other one (issue #972).
   pub(crate) catch_up_focus: CatchUpFocus,
+  /// The newest ID token the app handed over.
+  pub(crate) id_tokens: IdTokens,
 }
 
 /// The new device's wait in the relay ([`Engine::wait_for_link_peer`]): a task on the engine thread
@@ -275,10 +278,44 @@ impl PushReader {
   }
 }
 
+/// The newest ID token of the session, as the app hands it over ([`crate::TeamCraft::note_id_token`]),
+/// and whether the core would like a newer one. Apart from [`TokenProvider`], which the apps implement,
+/// so an app that doesn't hand one over yet keeps building and simply signs no roles (e2ee.md §3.1.3).
+#[derive(Clone, Default)]
+pub(crate) struct IdTokens {
+  maybe_token: Arc<Mutex<Option<String>>>,
+  is_new_one_wanted: Arc<AtomicBool>,
+}
+
+impl IdTokens {
+  pub(crate) fn note(&self, maybe_token: Option<String>) {
+    // Plain data: a panic elsewhere while it was locked leaves nothing half-changed.
+    *self.maybe_token.lock().unwrap_or_else(PoisonError::into_inner) = maybe_token;
+  }
+
+  fn current(&self) -> Option<String> {
+    self
+      .maybe_token
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()
+  }
+
+  fn ask_for_new_one(&self) {
+    self.is_new_one_wanted.store(true, Ordering::Relaxed);
+  }
+
+  /// Whether the core asked for a newer token since the last time this was called.
+  pub(crate) fn take_request(&self) -> bool {
+    self.is_new_one_wanted.swap(false, Ordering::Relaxed)
+  }
+}
+
 /// The app's [`TokenProvider`] as the core's token source.
 #[derive(Clone)]
 pub(crate) struct ForeignTokens {
   provider: Arc<dyn TokenProvider>,
+  id_tokens: IdTokens,
   /// The thread that asks the app for a token where a request shouldn't wait on its own thread.
   asks: std::sync::mpsc::Sender<oneshot::Sender<Result<String, ApiError>>>,
 }
@@ -550,7 +587,7 @@ impl Engine {
       own_jobs,
     )
     .map_err(OpenError::Failed)?;
-    let tokens = ForeignTokens::new(tokens).map_err(OpenError::Failed)?;
+    let tokens = ForeignTokens::new(tokens, signals.id_tokens.clone()).map_err(OpenError::Failed)?;
     let mut engine = Self {
       is_memory_constrained,
       server_url,
@@ -1669,7 +1706,7 @@ impl ForeignTokens {
   /// The asking thread lives as long as a clone of this: a token refresh in the app (AppAuth blocks
   /// for up to 10 s) holds it, never the engine thread with the sync loop (e2ee.md §7.2 is untouched:
   /// no keys go through here, only the access token).
-  fn new(provider: Arc<dyn TokenProvider>) -> Result<Self, TeamCraftError> {
+  fn new(provider: Arc<dyn TokenProvider>, id_tokens: IdTokens) -> Result<Self, TeamCraftError> {
     let (asks, asked) = std::sync::mpsc::channel::<oneshot::Sender<Result<String, ApiError>>>();
     let asking = provider.clone();
     std::thread::Builder::new()
@@ -1686,7 +1723,11 @@ impl ForeignTokens {
         }
       })
       .map_err(|error| TeamCraftError::Core(error.to_string()))?;
-    Ok(Self { provider, asks })
+    Ok(Self {
+      provider,
+      id_tokens,
+      asks,
+    })
   }
 }
 
@@ -1704,6 +1745,14 @@ impl AccessTokenSource for ForeignTokens {
       Ok(token) => token,
       Err(_) => self.access_token(),
     }
+  }
+
+  fn id_token(&self) -> Option<String> {
+    self.id_tokens.current()
+  }
+
+  fn ask_for_new_id_token(&self) {
+    self.id_tokens.ask_for_new_one();
   }
 }
 
@@ -1854,6 +1903,23 @@ mod tests {
   use std::time::{Duration, SystemTime};
 
   use super::*;
+
+  /// Issue #1276: what the app hands over reaches the core's token source; an app that hands over
+  /// nothing leaves it without one, and the core's wish for a new one is told once.
+  #[test]
+  fn the_app_s_id_token_reaches_the_core_and_its_wish_is_told_once() {
+    let id_tokens = IdTokens::default();
+    assert_eq!(id_tokens.current(), None);
+    id_tokens.note(Some("a.b.c".into()));
+    assert_eq!(id_tokens.clone().current().as_deref(), Some("a.b.c"));
+    id_tokens.note(None);
+    assert_eq!(id_tokens.current(), None);
+
+    assert!(!id_tokens.take_request());
+    id_tokens.ask_for_new_one();
+    assert!(id_tokens.clone().take_request());
+    assert!(!id_tokens.take_request());
+  }
 
   /// Issue #424 review, H2: a notification extension never catches a conversation up (it would
   /// advance the MLS state next to the app's copy); the app's idle client does.
@@ -2165,6 +2231,7 @@ mod tests {
         network: NetworkChanges::new(),
         connection: ConnectionStatus::new(),
         catch_up_focus: CatchUpFocus::default(),
+        id_tokens: Default::default(),
       };
       let start = EngineStart::new(config, Arc::new(Token), Arc::new(listener), signals).unwrap();
       let key_source = StaticKeySource::new(SymmetricKey::from_slice(&KEY).unwrap());

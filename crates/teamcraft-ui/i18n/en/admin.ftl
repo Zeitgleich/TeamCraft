@@ -149,6 +149,7 @@ policy-owners = Owners
 policy-owners-unknown = This device has not verified an admin roster yet.
 policy-owners-last-signed = last signed { $time }
 policy-owners-never-signed = no signature seen on this device yet
+policy-owners-unnamed = A workspace owner
 policy-owners-valid-until = Admin rights stay valid on members' devices until { $time }. An owner's app signs again by itself well before that whenever it is open.
 policy-owners-too-few = { $count } of the recommended { $minimum } owners. Add another owner so the workspace can still be managed if one leaves or loses their devices.
 policy-owners-expires-soon = No owner has signed for a while: members' devices stop accepting the admins on { $time }. An owner needs to open TeamCraft before then.

@@ -130,6 +130,26 @@ mod tests {
   use super::*;
   use crate::{Id, Snowflake};
 
+  /// The mark is signed, so it is part of the wire shape; an entry without it reads as before.
+  #[test]
+  fn the_mark_of_roles_from_the_servers_list_reads_as_absent_before_it_existed() {
+    let json = serde_json::json!({
+      "version": 1,
+      "conversation_id": "7",
+      "assignments": [],
+      "prev_hash": "AAA=",
+      "signed_at_ms": 1,
+    });
+    let before: ChannelRolesDocument = serde_json::from_value(json).unwrap();
+    assert!(!before.has_server_listed_roles);
+    let marked = serde_json::to_value(ChannelRolesDocument {
+      has_server_listed_roles: true,
+      ..before
+    })
+    .unwrap();
+    assert_eq!(marked["has_server_listed_roles"], serde_json::json!(true));
+  }
+
   #[test]
   fn the_signed_document_keeps_its_wire_shape() {
     let document = ChannelRolesDocument {
