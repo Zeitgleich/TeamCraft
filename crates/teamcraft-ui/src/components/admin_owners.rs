@@ -107,52 +107,55 @@ fn RoleSigningSettings(policy: PolicyDraft) -> impl IntoView {
       }
     />
     <p class="muted-text small">{move || i18n.t("policy-role-signing-hint")}</p>
-    <div class="field">
-      <label for="policy-role-owner">{move || i18n.t("policy-role-owner-name")}</label>
-      <input
-        id="policy-role-owner"
-        class="input"
-        translate="no"
-        aria-invalid=move || name_error(signing.get().owner_role).is_some().then_some("true")
-        aria-describedby=move || name_error(signing.get().owner_role).is_some().then(|| error_id("policy-role-owner"))
-        prop:value=move || signing.get().owner_role
-        on:input=move |ev| {
-          let name = event_target_value(&ev);
-          edit(&|signing| signing.owner_role.clone_from(&name));
-        }
-      />
-      {move || name_error(signing.get().owner_role).map(|text| view! {
-        <p id=error_id("policy-role-owner") class="field-error" role="alert">{text}</p>
+    <details class="roster-by-hand">
+      <summary>{move || i18n.t("policy-role-provider-details")}</summary>
+      <div class="field">
+        <label for="policy-role-owner">{move || i18n.t("policy-role-owner-name")}</label>
+        <input
+          id="policy-role-owner"
+          class="input"
+          translate="no"
+          aria-invalid=move || name_error(signing.get().owner_role).is_some().then_some("true")
+          aria-describedby=move || name_error(signing.get().owner_role).is_some().then(|| error_id("policy-role-owner"))
+          prop:value=move || signing.get().owner_role
+          on:input=move |ev| {
+            let name = event_target_value(&ev);
+            edit(&|signing| signing.owner_role.clone_from(&name));
+          }
+        />
+        {move || name_error(signing.get().owner_role).map(|text| view! {
+          <p id=error_id("policy-role-owner") class="field-error" role="alert">{text}</p>
+        })}
+      </div>
+      <div class="field">
+        <label for="policy-role-admin">{move || i18n.t("policy-role-admin-name")}</label>
+        <input
+          id="policy-role-admin"
+          class="input"
+          translate="no"
+          aria-invalid=move || name_error(signing.get().admin_role).is_some().then_some("true")
+          aria-describedby=move || name_error(signing.get().admin_role).is_some().then(|| error_id("policy-role-admin"))
+          prop:value=move || signing.get().admin_role
+          on:input=move |ev| {
+            let name = event_target_value(&ev);
+            edit(&|signing| signing.admin_role.clone_from(&name));
+          }
+        />
+        {move || name_error(signing.get().admin_role).map(|text| view! {
+          <p id=error_id("policy-role-admin") class="field-error" role="alert">{text}</p>
+        })}
+      </div>
+      <p class="muted-text small">{move || i18n.t("policy-role-names-hint")}</p>
+      {move || signing.get().maybe_provider.map(|provider| view! {
+        <p class="muted-text small">
+          {i18n.t_with("policy-role-provider", &[("issuer", &provider.issuer)])}
+          " "
+          <button type="button" class="btn btn-small" on:click=move |_| edit(&|signing| signing.maybe_provider = None)>
+            {i18n.t("policy-role-provider-reset")}
+          </button>
+        </p>
       })}
-    </div>
-    <div class="field">
-      <label for="policy-role-admin">{move || i18n.t("policy-role-admin-name")}</label>
-      <input
-        id="policy-role-admin"
-        class="input"
-        translate="no"
-        aria-invalid=move || name_error(signing.get().admin_role).is_some().then_some("true")
-        aria-describedby=move || name_error(signing.get().admin_role).is_some().then(|| error_id("policy-role-admin"))
-        prop:value=move || signing.get().admin_role
-        on:input=move |ev| {
-          let name = event_target_value(&ev);
-          edit(&|signing| signing.admin_role.clone_from(&name));
-        }
-      />
-      {move || name_error(signing.get().admin_role).map(|text| view! {
-        <p id=error_id("policy-role-admin") class="field-error" role="alert">{text}</p>
-      })}
-    </div>
-    <p class="muted-text small">{move || i18n.t("policy-role-names-hint")}</p>
-    {move || signing.get().maybe_provider.map(|provider| view! {
-      <p class="muted-text small">
-        {i18n.t_with("policy-role-provider", &[("issuer", &provider.issuer)])}
-        " "
-        <button type="button" class="btn btn-small" on:click=move |_| edit(&|signing| signing.maybe_provider = None)>
-          {i18n.t("policy-role-provider-reset")}
-        </button>
-      </p>
-    })}
+    </details>
   }
 }
 

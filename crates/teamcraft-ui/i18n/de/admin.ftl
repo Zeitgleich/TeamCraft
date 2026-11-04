@@ -907,3 +907,4 @@ policy-role-names-hint = Die Client-Rollen, die jemanden zum Eigentümer oder Ad
 policy-role-name-empty = Gib den Namen der Rolle ein. Leer gespeichert gilt wieder der übliche Name.
 policy-role-provider = Vertrauter Identity Provider: { $issuer }
 policy-role-provider-reset = Dem Provider vertrauen, bei dem ich mich als Nächstes anmelde
+policy-role-provider-details = Einstellungen zum Identity Provider

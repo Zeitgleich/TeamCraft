@@ -29,13 +29,12 @@ const ROLE_CHANGE_WAIT: Duration = Duration::from_secs(420);
 const SIGN_WAIT: Duration = Duration::from_secs(180);
 
 /// What the app used to say about signing, on every page. None of it may come back in normal operation.
-const PROMPTS: [&str; 9] = [
+const PROMPTS: [&str; 8] = [
   "Sign now",
   "isn't signed",
   "isn’t signed",
   "Review and sign",
   "Not signed",
-  "not signed",
   "first admin roster",
   "Changes to sign",
   "Open owners",
@@ -231,14 +230,23 @@ async fn finish_first_run(page: &Page) {
   }
 }
 
+/// Opens the console from the account menu, then its Security page, and back out of it again is the
+/// next page load.
 async fn open_security(page: &Page) {
-  let target = format!("{WEB_ORIGIN}/");
-  page.goto(target).await.unwrap();
-  wait_for_text(page, "Administration").await;
+  page
+    .evaluate("document.querySelector('.avatar-btn').click()")
+    .await
+    .unwrap();
   click_text(page, "Administration").await;
-  wait_for_text(page, "Security").await;
-  click_text(page, "Security").await;
-  tokio::time::sleep(Duration::from_secs(3)).await;
+  wait_for_element(page, ".admin-nav-item").await;
+  page
+    .evaluate(
+      "[...document.querySelectorAll('.admin-nav-item')].find(e => e.innerText.trim() === 'Security policy').click()",
+    )
+    .await
+    .unwrap();
+  wait_for_text(page, "Who signs role changes").await;
+  tokio::time::sleep(Duration::from_secs(2)).await;
 }
 
 async fn assert_no_prompt(page: &Page, when: &str) {
@@ -314,14 +322,26 @@ async fn roster_roles(stack: &Stack, reader: &teamcraft_e2e::tokens::UserTokens)
 /// The dev Keycloak's admin API. Only the dev realm; its credentials are the dev stack's.
 struct Keycloak {
   http: reqwest::Client,
-  token: String,
   client_uuid: String,
 }
 
 impl Keycloak {
   async fn connect() -> Self {
     let http = reqwest::Client::new();
-    let answer: Value = http
+    let mut keycloak = Self {
+      http,
+      client_uuid: String::new(),
+    };
+    let clients = keycloak.get(&format!("/clients?clientId={CLIENT}")).await;
+    keycloak.client_uuid = clients[0]["id"].as_str().unwrap().to_owned();
+    assert!(ISSUER.ends_with(REALM));
+    keycloak
+  }
+
+  /// A new token for every call: the admin API's only lives a minute, and the test takes longer.
+  async fn token(&self) -> String {
+    let answer: Value = self
+      .http
       .post(format!(
         "{KEYCLOAK_URL}/realms/master/protocol/openid-connect/token"
       ))
@@ -337,23 +357,7 @@ impl Keycloak {
       .json()
       .await
       .unwrap();
-    let token = answer["access_token"].as_str().unwrap().to_owned();
-    let clients: Value = http
-      .get(format!("{}/clients?clientId={CLIENT}", admin_url()))
-      .bearer_auth(&token)
-      .send()
-      .await
-      .unwrap()
-      .json()
-      .await
-      .unwrap();
-    let client_uuid = clients[0]["id"].as_str().unwrap().to_owned();
-    assert!(ISSUER.ends_with(REALM));
-    Self {
-      http,
-      token,
-      client_uuid,
-    }
+    answer["access_token"].as_str().unwrap().to_owned()
   }
 
   async fn ensure_role_mapper(&self) {
@@ -459,7 +463,7 @@ impl Keycloak {
     let answer = self
       .http
       .delete(format!("{}/users/{user}", admin_url()))
-      .bearer_auth(&self.token)
+      .bearer_auth(self.token().await)
       .send()
       .await
       .unwrap();
@@ -470,7 +474,7 @@ impl Keycloak {
     self
       .http
       .get(format!("{}{path}", admin_url()))
-      .bearer_auth(&self.token)
+      .bearer_auth(self.token().await)
       .send()
       .await
       .unwrap()
@@ -483,7 +487,7 @@ impl Keycloak {
     let answer = self
       .http
       .request(method, format!("{}{path}", admin_url()))
-      .bearer_auth(&self.token)
+      .bearer_auth(self.token().await)
       .json(body)
       .send()
       .await

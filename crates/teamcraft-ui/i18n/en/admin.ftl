@@ -907,3 +907,4 @@ policy-role-names-hint = The client roles that make somebody an owner or admin. 
 policy-role-name-empty = Enter the name of the role. Saved empty, it goes back to the usual name.
 policy-role-provider = Trusted identity provider: { $issuer }
 policy-role-provider-reset = Trust the provider I sign in with next
+policy-role-provider-details = Identity provider settings

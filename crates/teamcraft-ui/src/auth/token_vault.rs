@@ -328,6 +328,17 @@ mod tests {
     assert_eq!(adopted.access.expose_secret(), "access-2");
   }
 
+  /// The attribute the ID token should name was just written: only the provider can say so.
+  #[test]
+  fn a_forced_refresh_asks_the_provider_with_the_newest_refresh_token() {
+    let memory = tokens("alice", "access-1", Some("refresh-1"), NOW_MS);
+    let saved = tokens("alice", "access-2", Some("refresh-2"), NOW_MS + 300_000);
+    let RefreshPlan::Refresh { token, .. } = plan_refresh(Some(&memory), Some(saved), NOW_MS, true) else {
+      panic!("expected a refresh");
+    };
+    assert_eq!(token.expose_secret(), "refresh-2");
+  }
+
   /// Another tab rotated the refresh token: this tab must not use its old one.
   #[test]
   fn an_expired_saved_token_is_refreshed_with_the_saved_refresh_token() {
