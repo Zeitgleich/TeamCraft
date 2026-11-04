@@ -4393,8 +4393,8 @@ bridge decodes pictures for their thumbnails itself, off its loop and within a p
 
 #### 13.1.1 Channel admins managing sources (issue #879, design for review)
 
-**Status: design, not implemented.** Nothing below is in the code, and D1 to D3 at the end are the owner's to
-decide. It answers whether signed channel admins can manage sources, as the issue asks, with the bridge reading
+**Status: design, not implemented.** Nothing below is in the code. The owner chose option A (D1 at the end): #879
+waits for #878 and #1171, so D2 and D3 don't apply now. It answers whether signed channel admins can manage sources, as the issue asks, with the bridge reading
 role logs and judging at the message's server time. The short answer: not on the role log as it stands. The rule
 that is safe leaves out every channel a member created, the rule that covers them lets a hostile server and any
 member post as the bot, and the right place for this fact is one that issues #878 and #1171 are building. Worth doing then, not now.
@@ -4506,7 +4506,7 @@ A signed policy (D2) handles the bridge: a workspace admin switches it on once t
   count. Together they turn option A's "later" into the issue's whole promise, with a rule simple enough to explain:
   whoever the group says is admin.
 
-**The owner's decisions.**
+**The owner's decisions.** D1 is decided: option A, as recommended. D2 and D3 would apply only if B is chosen later.
 
 | No. | Decision                                   | Recommendation                                                                                                                                                                             | Alternatives                                                                                                       |
 |-----|--------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------|
