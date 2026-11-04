@@ -635,6 +635,17 @@ pub trait ChatBackend {
   fn add_member_with_history(&self, _conversation: ConversationId, _user: UserId, _history: HistoryPolicy) {}
   /// Replaces the conversation's bookmarks bar (links and files shown under the header).
   fn set_bookmarks(&self, _conversation: ConversationId, _bookmarks: Vec<crate::model::Bookmark>) {}
+  /// The channel's shared page as the updates this device holds (e2ee.md §4.11); the page's
+  /// editor reads them with [`crate::canvas::CanvasDoc`].
+  fn canvas(&self, _conversation: ConversationId) -> crate::canvas::CanvasState {
+    crate::canvas::CanvasState::default()
+  }
+  /// Sends an edit of the channel's page (a Yjs update; `is_snapshot`: the whole page) as an
+  /// encrypted, hidden message and keeps it at once. Refused where the user may not post.
+  fn edit_canvas(&self, _conversation: ConversationId, _update: Vec<u8>, _is_snapshot: bool) {}
+  /// Replaces the page's updates with `merged` (all of them as one), if the list is still the one
+  /// of `revision`: the editor compacts what the core can't read.
+  fn compact_canvas(&self, _conversation: ConversationId, _revision: u64, _merged: Vec<u8>) {}
   /// Removes a person from a conversation (and rotates its keys).
   fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.

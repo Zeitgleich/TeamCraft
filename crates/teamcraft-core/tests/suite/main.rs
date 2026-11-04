@@ -13,6 +13,7 @@ mod admin_joins;
 mod background_work;
 mod backgrounds;
 mod calls;
+mod canvas;
 mod catch_up;
 mod channel_deletion;
 mod channel_roles;

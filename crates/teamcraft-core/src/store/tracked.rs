@@ -560,8 +560,10 @@ fn classify(table: Table, key: &str) -> Change {
       conversation_of(key)
     },
     Table::Account if SHARED_ACCOUNT_RECORDS.contains(&key) => Change::Everything,
+    // A conversation's bookmarks bar and its shared page (e2ee.md §4.11).
     Table::Account => key
       .strip_prefix(BOOKMARKS_PREFIX)
+      .or_else(|| key.strip_prefix(crate::canvas::CANVAS_PREFIX))
       .map_or(Change::Nothing, conversation_of),
     // The presence log's head, a person's state, or their last seen (read by queries only).
     Table::Presence if key == crate::read_state::ANNOUNCED_PRESENCE_KEY => Change::Live,

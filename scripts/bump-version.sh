@@ -6,7 +6,8 @@
 #   scripts/bump-version.sh 1.0.9
 #   scripts/bump-version.sh 1.1.0 "Summary for the AppStream release entry."
 #
-# Only stable versions (MAJOR.MINOR.PATCH). Updates Cargo.lock with `cargo update --workspace`.
+# Only stable versions (MAJOR.MINOR.PATCH). Updates Cargo.lock and fuzz/Cargo.lock with `cargo update
+# --workspace`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -48,5 +49,7 @@ PY
 fi
 
 cargo update --workspace --quiet
+# fuzz/ has its own lockfile, which names the crates' version too; CI builds it --locked.
+cargo update --manifest-path fuzz/Cargo.toml --workspace --quiet
 scripts/check-versions.sh >/dev/null
 echo "version set to $version (build number $code)"

@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::areas::{self, Place, lazy_area};
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::channel_access::ChannelAccess;
 use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
@@ -40,15 +41,29 @@ enum ChannelTab {
   Messages,
   /// Everything shared in the conversation.
   Files,
+  /// The channel's shared page (#1221).
+  Notes,
 }
 
 impl ChannelTab {
-  const ALL: [Self; 2] = [Self::Messages, Self::Files];
+  /// The tabs of a channel of a space; DMs, group DMs, meeting chats and integration channels have
+  /// no page yet.
+  const CHANNEL: [Self; 3] = [Self::Messages, Self::Files, Self::Notes];
+  const OTHER: [Self; 2] = [Self::Messages, Self::Files];
+
+  fn all_of(conversation: &Conversation) -> &'static [Self] {
+    if has_page(conversation) {
+      &Self::CHANNEL
+    } else {
+      &Self::OTHER
+    }
+  }
 
   fn slug(self) -> &'static str {
     match self {
       Self::Messages => "messages",
       Self::Files => "files",
+      Self::Notes => "notes",
     }
   }
 
@@ -141,10 +156,27 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
             />
           }
             .into_any(),
+          ChannelTab::Notes => view! {
+            <div
+              class="channel-canvas"
+              role="tabpanel"
+              id=ChannelTab::Notes.panel_id()
+              aria-labelledby=ChannelTab::Notes.tab_id()
+            >
+              {lazy_area(Place::Pane, move || areas::canvas(conversation))}
+            </div>
+          }
+            .into_any(),
         }}
       </section>
     })
   }
+}
+
+/// Whether the conversation has a shared page (#1221): a channel of a space, not an integration
+/// channel's log.
+fn has_page(conversation: &Conversation) -> bool {
+  conversation.has_channel_settings() && conversation.kind != ConversationKind::Integration
 }
 
 /// The name a conversation is shown with: the notes to self have none of their own (#699).
@@ -767,23 +799,23 @@ fn ChannelHeader(
       </div>
       </div>
       <div class="header-row header-row-tabs">
-        <ChannelTabs tab=tab />
+        <ChannelTabs tab=tab tabs=info.get_untracked().as_ref().map_or(&ChannelTab::OTHER[..], ChannelTab::all_of) />
       </div>
     </header>
   }
 }
 
-/// Messages and Files, on the header's second row.
+/// Messages, Files and, in a channel, Notes, on the header's second row.
 #[component]
-fn ChannelTabs(tab: RwSignal<ChannelTab>) -> impl IntoView {
+fn ChannelTabs(tab: RwSignal<ChannelTab>, tabs: &'static [ChannelTab]) -> impl IntoView {
   let i18n = use_i18n();
-  let on_keydown =
-    move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, &ChannelTab::ALL, tab, ChannelTab::tab_id);
+  let on_keydown = move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, tabs, tab, ChannelTab::tab_id);
   view! {
     <div class="view-tabs header-tabs" role="tablist" aria-label=move || i18n.t("channel-tabs") on:keydown=on_keydown>
       <SlidingIndicator inset_px=8.0 />
-      {ChannelTab::ALL
-        .into_iter()
+      {tabs
+        .iter()
+        .copied()
         .map(|value| {
           view! {
             <button
@@ -853,6 +885,14 @@ fn ConversationMore(
             <Icon name=IconName::File />
             {move || if tab.get() == ChannelTab::Files { i18n.t("channel-tab-messages") } else { i18n.t("channel-tab-files") }}
           </button>
+          <Show when=move || info.get().is_some_and(|conv| has_page(&conv)) fallback=|| ()>
+            <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|_, _, tab| {
+              tab.update(|tab| *tab = if *tab == ChannelTab::Notes { ChannelTab::Messages } else { ChannelTab::Notes });
+            })>
+              <Icon name=IconName::List />
+              {move || if tab.get() == ChannelTab::Notes { i18n.t("channel-tab-messages") } else { i18n.t("channel-tab-notes") }}
+            </button>
+          </Show>
           <Show when=can_add_people fallback=|| ()>
             <button type="button" class="menu-item" role="menuitem" on:click=move |_| choose(|state, conversation, _| state.overlay.set(Overlay::AddToChannel(conversation)))>
               <Icon name=IconName::UserPlus />

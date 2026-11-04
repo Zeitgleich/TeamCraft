@@ -15,6 +15,24 @@ channel-empty-title = Noch keine Nachrichten
 channel-tabs = Ansichten der Unterhaltung
 channel-tab-messages = Nachrichten
 channel-tab-files = Dateien & Links
+channel-tab-notes = Notizen
+
+## Gemeinsame Notizen eines Kanals (Tab „Notizen“)
+canvas-page-label = Gemeinsame Notizen
+canvas-toolbar = Absatzformat
+canvas-kind-paragraph = Text
+canvas-kind-heading = Überschrift
+canvas-kind-bullet = Aufzählung
+canvas-kind-numbered = Nummerierte Liste
+canvas-kind-check = Checkliste
+canvas-check-label = Erledigt
+canvas-placeholder = Notizen für diesen Kanal. Beginne eine Zeile mit # für eine Überschrift, - für eine Liste oder [] für eine Checkliste.
+canvas-encrypted = Alle im Kanal sehen und bearbeiten diese Notizen; sie sind Ende-zu-Ende-verschlüsselt wie seine Nachrichten.
+canvas-read-only = Du kannst sie lesen; ändern können sie nur Mitglieder, die hier schreiben dürfen.
+canvas-loading-history = Frühere Änderungen werden geladen …
+canvas-history-failed = Einige frühere Änderungen konnten noch nicht geladen werden.
+canvas-empty-title = Noch keine Notizen
+canvas-empty = Mitglieder, die hier schreiben dürfen, können Notizen für den ganzen Kanal anlegen.
 members-button-label = { $count ->
     [one] Mitglieder anzeigen, { $count } Mitglied
    *[other] Mitglieder anzeigen, { $count } Mitglieder

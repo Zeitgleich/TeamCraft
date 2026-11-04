@@ -41,6 +41,7 @@ impl MessageContent {
       Self::Edit { body, .. } => body.len(),
       Self::IndexSegment { month, segment, .. } => month.len() + segment.heap_bytes(),
       Self::Bookmarks { items } => items.iter().map(BookmarkItem::heap_bytes).sum::<usize>(),
+      Self::Canvas { update, .. } => update.len(),
       Self::Event { event } => event.heap_bytes(),
       Self::Reaction { emoji, .. } => emoji.len(),
       Self::IntegrationSource { .. } | Self::Notetaker { .. } => SMALL_PART_ALLOWANCE_BYTES,
