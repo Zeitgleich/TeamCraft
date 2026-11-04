@@ -1179,6 +1179,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::Delete { .. }
       | MessageContent::Pin { .. }
       | MessageContent::Bookmarks { .. }
+      | MessageContent::Canvas { .. }
       | MessageContent::Event { .. }
       | MessageContent::Deleted
       | MessageContent::IndexSegment { .. }
@@ -2671,6 +2672,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn set_bookmarks(&self, conversation: ConversationId, bookmarks: Vec<Bookmark>) {
     self.ui_set_bookmarks(conversation, bookmarks);
+  }
+
+  fn canvas(&self, conversation: ConversationId) -> teamcraft_client_api::canvas::CanvasState {
+    self.ui_canvas(conversation)
+  }
+
+  fn edit_canvas(&self, conversation: ConversationId, update: Vec<u8>, is_snapshot: bool) {
+    self.ui_edit_canvas(conversation, update, is_snapshot);
+  }
+
+  fn compact_canvas(&self, conversation: ConversationId, revision: u64, merged: Vec<u8>) {
+    self.ui_compact_canvas(conversation, revision, merged);
   }
 
   fn remove_member(&self, conversation: ConversationId, user: UserId) {

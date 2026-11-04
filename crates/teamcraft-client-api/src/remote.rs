@@ -981,6 +981,19 @@ pub enum ChatAction {
     conversation: ConversationId,
     bookmarks: Vec<crate::model::Bookmark>,
   },
+  /// [`ChatBackend::edit_canvas`].
+  EditCanvas {
+    conversation: ConversationId,
+    update: teamcraft_proto::Base64Bytes,
+    #[serde(default)]
+    is_snapshot: bool,
+  },
+  /// [`ChatBackend::compact_canvas`].
+  CompactCanvas {
+    conversation: ConversationId,
+    revision: u64,
+    merged: teamcraft_proto::Base64Bytes,
+  },
   AddIntegrationSource {
     conversation: ConversationId,
     source: crate::model::NewIntegrationSource,
@@ -1319,6 +1332,16 @@ impl ChatAction {
         conversation,
         bookmarks,
       } => backend.set_bookmarks(conversation, bookmarks),
+      Self::EditCanvas {
+        conversation,
+        update,
+        is_snapshot,
+      } => backend.edit_canvas(conversation, update.into_vec(), is_snapshot),
+      Self::CompactCanvas {
+        conversation,
+        revision,
+        merged,
+      } => backend.compact_canvas(conversation, revision, merged.into_vec()),
       Self::AddIntegrationSource { conversation, source } => {
         backend.add_integration_source(conversation, source)
       },
@@ -1370,6 +1393,10 @@ pub enum ChatQuery {
     messages: Vec<MessageId>,
   },
   PinnedMessages {
+    conversation: ConversationId,
+  },
+  /// [`ChatBackend::canvas`].
+  Canvas {
     conversation: ConversationId,
   },
   SavedItems,
@@ -1559,6 +1586,10 @@ pub enum ChatAnswer {
   Messages {
     messages: Vec<Message>,
   },
+  Canvas {
+    #[serde(default)]
+    state: crate::canvas::CanvasState,
+  },
   SavedItems {
     items: Vec<SavedItem>,
   },
@@ -1699,6 +1730,9 @@ impl ChatQuery {
       },
       Self::PinnedMessages { conversation } => ChatAnswer::Messages {
         messages: backend.pinned_messages(conversation),
+      },
+      Self::Canvas { conversation } => ChatAnswer::Canvas {
+        state: backend.canvas(conversation),
       },
       Self::SavedItems => ChatAnswer::SavedItems {
         items: backend.saved_items(),

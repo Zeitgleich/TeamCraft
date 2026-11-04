@@ -788,6 +788,10 @@ fn apply_control_with(
   if let MessageContent::Bookmarks { items } = content {
     return records::put_json(store, Table::Account, &bookmarks_key(conversation), items);
   }
+  if let MessageContent::Canvas { update, is_snapshot } = content {
+    // Decrypted in the conversation's group, so `sender` is a member of it; the server let it post.
+    return crate::canvas::take_update(store, conversation, update, *is_snapshot);
+  }
   if let MessageContent::IntegrationSource { change } = content {
     // Decrypted in the conversation's group, so `sender` is a member of it; who may do what is
     // decided when the sources are used (integration_sources.rs).

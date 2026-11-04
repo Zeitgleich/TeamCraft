@@ -5,12 +5,13 @@ use teamcraft_client_api::actions::{
   ForwardedFrom, LinkPreview, LinkedMessage, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage,
   PermalinkTarget, ReplyPreview, SavedItem, WorkspaceEvent,
 };
+use teamcraft_client_api::canvas::CanvasState;
 use teamcraft_client_api::model::{
   Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, PENDING_ID_BIT,
   ThreadId, UserId,
 };
 use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
-use teamcraft_proto::{ClientMessageId, SourceChange, SourceId};
+use teamcraft_proto::{Base64Bytes, ClientMessageId, SourceChange, SourceId};
 
 use crate::client::previews::queue_preview;
 use crate::client::{apply_control, forward_content, imported_author_name, reply_ref, stored_account_data};
@@ -284,6 +285,43 @@ impl<S: LocalStore> CoreChatBackend<S> {
       })
       .collect();
     self.control(conversation, MessageContent::Bookmarks { items });
+  }
+
+  /// The channel's shared page as this device holds it (e2ee.md §4.11).
+  pub(crate) fn ui_canvas(&self, conversation: ConversationId) -> CanvasState {
+    let record = self.read(crate::canvas::load(self.store_ref(), conversation));
+    CanvasState {
+      revision: record.revision,
+      updates: record.updates,
+      updates_since_snapshot: record.updates_since_snapshot,
+    }
+  }
+
+  /// Keeps an edit of the page and sends it to the other members, where the user may post: the
+  /// server refuses the message of anybody else, and the editor is read-only for them.
+  pub(crate) fn ui_edit_canvas(&self, conversation: ConversationId, update: Vec<u8>, is_snapshot: bool) {
+    let may_post = self
+      .conversations_raw()
+      .iter()
+      .any(|response| response.id == conversation && response.may_post());
+    if !may_post {
+      tracing::warn!(%conversation, "a page edit where the user may not post was not sent");
+      return;
+    }
+    self.control(
+      conversation,
+      MessageContent::Canvas {
+        update: Base64Bytes::new(update),
+        is_snapshot,
+      },
+    );
+  }
+
+  /// Replaces the page's updates with the editor's merge of them, if none arrived meanwhile.
+  pub(crate) fn ui_compact_canvas(&self, conversation: ConversationId, revision: u64, merged: Vec<u8>) {
+    if let Err(error) = crate::canvas::compact(self.store_ref(), conversation, revision, merged) {
+      tracing::error!(%error, "could not compact the page");
+    }
   }
 
   /// The channel's sources in force as this device judges them (integration_sources.rs). The UI
