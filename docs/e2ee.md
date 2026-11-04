@@ -1922,8 +1922,8 @@ workspace roster (admin.md §2.3):
   six hours), or on the way when that person approves a join or changes a role. Nobody is asked.
   The entry names this user and everybody the server lists as admin or moderator then, if they are
   in **this device's MLS group** of the channel, are members of the instance (no guest, bot or
-  deactivated account), and this device has their identity key. It carries the signed mark
-  `has_server_listed_roles`.
+  deactivated account), and this device has their identity key, the one it pinned for them, which their
+  place in the group is verified against. It carries the signed mark `has_server_listed_roles`.
 
   This trusts the server at first sight, which is a decision and not an oversight: nothing signed
   says who a channel's admins were before there was a log, and the alternative, a co-owner who can
