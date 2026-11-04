@@ -2870,6 +2870,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_can_sign_channel_roles(conversation)
   }
 
+  fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {
+    let signed: crate::channel_roles::ChannelRoleState = self.read(
+      records::get_json(
+        &self.store,
+        Table::Workspace,
+        &crate::client::channel_roles_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    signed.has_unverified_stretch()
+  }
+
   fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {
     self.command(CoreCommand::SetSpaceRole { space, user, role });
   }
@@ -3568,6 +3580,21 @@ mod tests {
           None
         );
       }
+    }
+
+    /// The log has a stretch this device can't verify: the role shows as the server lists it, marked
+    /// as not signed, with nobody named.
+    #[test]
+    fn an_unverified_stretch_shows_every_role_as_not_signed() {
+      let mut state = state_with(AppointmentAuthority::WorkspaceAdmin, true);
+      state.maybe_unverified_from = Some(2);
+      state.is_workspace_anchored = false;
+      let view = channel_member_view(&state, id(2), ChannelRole::Admin, false);
+      assert_eq!(view.role, ChannelRole::Admin);
+      assert!(!view.is_role_signed);
+      assert_eq!(view.maybe_appointer, None);
+      // Somebody without a role is nothing to mark.
+      assert!(channel_member_view(&state, id(3), ChannelRole::Member, false).is_role_signed);
     }
 
     /// Bob (2) is a signed admin, appointed by user 9 on `authority`.

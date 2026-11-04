@@ -628,6 +628,10 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     roles.track();
     state.read(|backend| backend.can_sign_channel_roles(conversation))
   });
+  let are_roles_unverified = Memo::new(move |_| {
+    roles.track();
+    state.read(|backend| backend.are_channel_roles_unverified(conversation))
+  });
   view! {
     <div class="settings-row">
       <span class="muted-text">{move || i18n.t_count("members-count", members.with(Vec::len))}</span>
@@ -640,6 +644,9 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
       </Show>
     </div>
     <p class="hint">{move || if can_manage_roles.get() { i18n.t("channel-roles-hint") } else { i18n.t("channel-roles-read-only") }}</p>
+    <Show when=move || are_roles_unverified.get() fallback=|| ()>
+      <p class="hint">{move || i18n.t("channel-roles-unverified")}</p>
+    </Show>
     <ChannelJoinRequests conversation=conversation />
     <ul class="settings-member-list">
       <For each=move || members.get() key=|user| user.id let:user>

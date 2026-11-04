@@ -839,6 +839,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.can_sign_channel_roles(conversation)
   }
 
+  fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {
+    self.chat.are_channel_roles_unverified(conversation)
+  }
+
   fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
     self.chat.confirm_channel_role(conversation, user);
   }

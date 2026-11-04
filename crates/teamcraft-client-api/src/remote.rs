@@ -1512,6 +1512,9 @@ pub enum ChatQuery {
   CanSignChannelRoles {
     conversation: ConversationId,
   },
+  AreChannelRolesUnverified {
+    conversation: ConversationId,
+  },
   SpaceInvites {
     space: SpaceId,
   },
@@ -1672,6 +1675,10 @@ pub enum ChatAnswer {
   CanSignChannelRoles {
     #[serde(default)]
     can_sign: bool,
+  },
+  AreChannelRolesUnverified {
+    #[serde(default)]
+    is_unverified: bool,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -1876,6 +1883,9 @@ impl ChatQuery {
       },
       Self::CanSignChannelRoles { conversation } => ChatAnswer::CanSignChannelRoles {
         can_sign: backend.can_sign_channel_roles(conversation),
+      },
+      Self::AreChannelRolesUnverified { conversation } => ChatAnswer::AreChannelRolesUnverified {
+        is_unverified: backend.are_channel_roles_unverified(conversation),
       },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
         roster: backend.space_members(space),

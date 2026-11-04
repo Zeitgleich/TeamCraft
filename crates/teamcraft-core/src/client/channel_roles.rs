@@ -22,7 +22,7 @@ const CHANNEL_ROLES_KEY_PREFIX: &str = "channel_roles/";
 const CHANNEL_ROLES_AHEAD_KEY: &str = "channel_roles_ahead";
 /// Pages of a role log read in one sync; a log longer than this is read on in the next one.
 const MAX_ROLE_LOG_PAGES: usize = 100;
-/// Claimed founders whose identity keys are pinned before a channel's first entries are verified.
+/// Claimed signers whose identity keys are pinned before a channel's first entries are verified.
 const MAX_FOUNDER_CANDIDATES: usize = 16;
 
 /// What became of a role change on this device's side of the signature.
@@ -75,8 +75,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// older server) changes nothing.
   pub async fn sync_channel_roles(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     let mut state = self.channel_role_state(conversation)?;
-    let entries = match self.fetch_role_log(conversation, state.cursor).await {
-      Ok(entries) => entries,
+    state.prepare_read();
+    // Before the read, so an entry that arrives while it runs isn't judged by a newer roster.
+    let roster_at_read = self.workspace()?.roster.version;
+    let (entries, is_read_to_end) = match self.fetch_role_log(conversation, state.cursor).await {
+      Ok(read) => read,
       Err(CoreError::Api(error)) if error.is_not_found() || error.is_forbidden() => return Ok(()),
       Err(error) => return Err(error),
     };
@@ -85,25 +88,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if let Err(error) = self.sync_workspace().await {
         tracing::warn!(conversation_id = %conversation, %error, "verifying channel roles against the roster this device has");
       }
+      // A failed read leaves the entries unread, to be judged with the history next time.
+      self.complete_admin_history().await?;
       // A founder must hold the key this device pins for them; pin before verifying, or the
       // entry would be skipped for good.
-      let claimed = founder_candidates(&state, &entries);
-      let pinned = self.pin_identities(claimed).await?;
       let workspace = self.workspace()?;
+      let claimed = signers_to_pin(&state, &entries, workspace.admin_history.is_complete);
+      let pinned = self.pin_identities(claimed).await?;
       let verifier = RoleVerifier {
         conversation,
         workspace: &workspace,
         roster_max_age_ms: self.roster_max_age_ms(),
         now_ms: self.now_ms(),
+        tenure_clock_skew_ms: i64::try_from(self.settings.role_tenure_clock_skew.as_millis())
+          .unwrap_or(i64::MAX),
         pinned: &pinned,
       };
       for error in state.apply_entries(entries, &verifier) {
         tracing::warn!(conversation_id = %conversation, %error, "skipped a channel role entry");
       }
     }
+    if is_read_to_end {
+      state.note_read(roster_at_read);
+    }
     state.check_ahead();
     if let Some(alarm) = &state.maybe_alarm {
       tracing::error!(conversation_id = %conversation, %alarm, "channel role log alarm");
+    }
+    if let Some(from) = state.maybe_unverified_from {
+      tracing::warn!(conversation_id = %conversation, from, "this device can't verify a stretch of the channel's role log");
     }
     self.put_channel_role_state(conversation, &state)
   }
@@ -293,7 +306,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &self,
     conversation: ConversationId,
     after: u64,
-  ) -> Result<Vec<ChannelRoleLogEntryResponse>, CoreError> {
+  ) -> Result<(Vec<ChannelRoleLogEntryResponse>, bool), CoreError> {
     let mut entries = Vec::new();
     let mut cursor = after;
     for _ in 0..MAX_ROLE_LOG_PAGES {
@@ -313,10 +326,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let is_done = !page.has_more || page.entries.is_empty();
       entries.extend(page.entries);
       if is_done {
-        break;
+        return Ok((entries, true));
       }
     }
-    Ok(entries)
+    Ok((entries, false))
   }
 
   fn put_channel_role_state(
@@ -337,11 +350,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
-/// While nothing is accepted yet, who the new entries claim signed them (unverified): one of them
-/// may be the founder, whose key must be pinned before the entry is verified. Bounded, so a server
-/// can't make this device look up everybody.
-fn founder_candidates(state: &ChannelRoleState, entries: &[ChannelRoleLogEntryResponse]) -> BTreeSet<UserId> {
-  if state.is_signed() {
+/// Who the new entries claim signed them (unverified), where their keys are needed before the
+/// entries are verified: while nothing is accepted yet one of them may be the founder, and without
+/// the roster's history one of them may be an admin who left. Bounded, so a server can't make this
+/// device look up everybody.
+fn signers_to_pin(
+  state: &ChannelRoleState,
+  entries: &[ChannelRoleLogEntryResponse],
+  is_history_complete: bool,
+) -> BTreeSet<UserId> {
+  if state.is_signed() && is_history_complete {
     return BTreeSet::new();
   }
   entries

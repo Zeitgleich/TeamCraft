@@ -787,3 +787,51 @@ async fn setup_in(
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
   (server, alice, bob, carol, dave, channel)
 }
+
+/// Issue #1260: a device that can't verify a stretch of the role log counts nobody as the channel's
+/// owner. Its own owner approves nothing, and it doesn't take in another's approval either; it never
+/// falls back to the rule of an unsigned channel, where any member could.
+#[tokio::test]
+async fn during_an_unverified_stretch_of_the_role_log_nobody_lets_an_admin_in() {
+  let (_server, mut alice, mut bob, mut carol, mut dave, channel) = setup(AdminSelfJoin::OwnerApproval).await;
+  let bob_id = bob.client.user_id();
+  bob.client.request_admin_join(channel).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+  carol.client.sync_channel_roles(channel).await.unwrap();
+  edit_role_state(&carol, channel, |state| {
+    state["unverified_from"] = serde_json::json!(2);
+  });
+  assert!(matches!(
+    carol.client.approve_admin_join(channel, bob_id).await,
+    Err(CoreError::JoinRequestNotApprovable(
+      JoinRequestRefusal::OwnerRoleNotSigned
+    ))
+  ));
+  edit_role_state(&carol, channel, |state| {
+    state.as_object_mut().unwrap().remove("unverified_from");
+  });
+
+  dave.client.sync_channel_roles(channel).await.unwrap();
+  edit_role_state(&dave, channel, |state| {
+    state["unverified_from"] = serde_json::json!(2);
+  });
+  carol.client.approve_admin_join(channel, bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+  assert!(bob.client.has_group(channel).unwrap(), "the others took it in");
+  assert_eq!(lines(&carol, channel).len(), 1);
+  assert!(lines(&dave, channel).is_empty(), "this device didn't");
+}
+
+/// Changes the channel's role state as this device stored it.
+fn edit_role_state(peer: &Peer, channel: ConversationId, edit: impl FnOnce(&mut serde_json::Value)) {
+  let key = format!("channel_roles/{channel}");
+  let bytes = peer.store.get(Table::Workspace, &key).unwrap().unwrap();
+  let mut state: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+  edit(&mut state);
+  peer
+    .store
+    .put(Table::Workspace, &key, &serde_json::to_vec(&state).unwrap())
+    .unwrap();
+}

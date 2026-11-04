@@ -119,7 +119,9 @@ could add itself to every channel.
   entry, under the same role rules the UI and the server use; a channel's creator signs the first
   entry. Roles only the server lists (channels from before, space admins' changes, older clients)
   are shown as not signed and count for nothing that needs a signed role; an admin who can sign
-  confirms them in the channel's members section. Space roles are not signed yet.
+  confirms them in the channel's members section. A device that can't verify a stretch of the log
+  says so there and counts nobody as a channel admin until a workspace admin signs again (e2ee.md
+  §4.6.1, "Reading the log late"). Space roles are not signed yet.
 - Member clients only commit membership changes that are signed by someone allowed to make them
   (admin, space admin, channel owner, or a member with `manage_members`). Unsigned or wrongly signed
   proposals are rejected and reported.
@@ -396,7 +398,9 @@ nobody is surprised that a workspace admin, not a channel admin, made an owner:
   device's time and carries a signing time. A backdated entry, a stale or untimed roster and a
   founder's claim (trust on first use) show nothing, and neither does a channel admin's entry in a
   channel that doesn't go back to a workspace admin. The anchoring is judged by the roster this
-  device has now, so a device that was offline may show a line another doesn't.
+  device has now, so a device that was offline may show a line another doesn't: one that read an entry
+  only after its signer left the roster takes the role but shows no line until a workspace admin signs
+  again (e2ee.md §4.6.1, "Reading the log late").
 - It shows nothing where nothing verified says so: a role only the server lists (marked "Not
   signed", as before), a log accepted before appointments were recorded, somebody's own role, a
   guest, and any member whose role as the server lists it differs from the verified role (a space

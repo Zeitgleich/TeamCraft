@@ -1111,7 +1111,8 @@ holds:
     snapshot names, who is in this device's group, **if that snapshot goes back to a workspace admin's
     entry** (`is_workspace_anchored`): one of theirs was accepted since the last founding, while this
     device's newest roster carried a signing time and was fresh at this device's time (not at the entry's,
-    which the server sets; an entry that passes for roles without this takes the anchor away), and channel
+    which the server sets; an entry that passes for roles without this takes the anchor away, as does one by
+    somebody who has left the roster, or a stretch of the log this device can't verify, §4.6.1), and channel
     admins building on it carry it on. Moderators, members, space admins and custom schemes aren't signed
     facts and sign nothing that counts.
 
@@ -1686,6 +1687,8 @@ workspace roster (admin.md §2.3):
   - an owner or admin of the verified workspace roster, fresh at the entry's server time, may sign
     any snapshot, also one built on another head than this device's (a checkpoint that re-anchors
     a device that skipped an entry);
+  - somebody who has left that roster since counts for an entry dated inside their time on it, on this
+    device's head, and for roles only ("Reading the log late", below);
   - an admin of the snapshot this device accepted last, verified against the key that snapshot
     names for them, may sign the next snapshot built on exactly it;
   - **the founder**: while nothing was accepted yet, an entry whose signer names themselves admin,
@@ -1741,6 +1744,79 @@ workspace roster (admin.md §2.3):
   admin (§13.1). Both are tracked as follow-ups of #380 (restricting commits further, signed
   channel admins as source admins; a withheld demotion is tracked there as well). The design for
   restricting commits is §4.6.2 (issue #878), not implemented.
+- **Reading the log late (issue #1260).** A device reads a channel's log only when something asks for it, and
+  judges each entry against the roster it has then. If a workspace admin who signed an entry has left the roster
+  since, that entry and everything built on it used to be skipped: the device kept the old snapshot and its anchor,
+  with nobody hostile involved. A device reading from scratch, a new device or a new member's, had the same problem.
+  What read that state:
+
+  | Decision (code)                                                             | Who judges            | A late reader before this                                                                                                                   | How bad                                                                                 | A late reader now                                                                                                                     |
+  |-----------------------------------------------------------------------------|-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
+  | Purge at once by a channel admin (`signed_deletion`)                        | Each device           | Keeps the anchor, so a demoted admin of the old snapshot purges the channel on it                                                           | High: destroys history, not undoable                                                    | No anchor: the deletion takes the retention. A workspace admin's signature purges as before                                           |
+  | `is_workspace_anchored` itself (`apply_entry`)                              | Each device           | Stays true for a snapshot it can no longer justify                                                                                          | The root of the purge and the line below                                                | Goes on any entry by somebody who left and on any unverified stretch; only a workspace admin's entry on a fresh roster brings it back |
+  | Approving an admin's join (`approve_admin_join`, `is_my_role_signed_admin`) | The approver's device | The demoted owner may approve; the new owner is told their role isn't signed                                                                | Medium: the real owner is locked out, the old one's commit is refused by everybody else | Follows the log; during a stretch nobody approves, with the existing refusal                                                          |
+  | Members merging that addition (`member_may`)                                | Every member          | Merges the demoted owner's commit and refuses the new owner's, so this device falls out and comes back, or holds a group the others refused | Medium: the one decision members must share                                             | Follows the log, so it agrees with the others; during a stretch nobody counts (`Some(empty)`, never the unsigned rule)                |
+  | The next role entry (`apply_entry`, `signing_authorities`)                  | Each device           | Everything built on the skipped entry is skipped for good; the demoted admin's app keeps signing on the old head                            | Medium: silent, and never heals without a checkpoint                                    | Follows the log; during a stretch only a workspace admin's checkpoint counts or is signed                                             |
+  | Role display, the appointer line (`channel_member_view`, `appointment_of`)  | Each device           | Shows old roles as signed, with "Appointed by" for them                                                                                     | Low: a wrong label, capped by the server's list                                         | Follows the log; nothing is named until anchored again; during a stretch roles show as not signed, with one line above the list       |
+  | Integration sources, notetaker, import                                      | -                     | Nothing: they read the roster, not the role log                                                                                             | None today; #1259 would read it                                                         | Unchanged                                                                                                                             |
+
+  **Can a device verify such an entry without trusting the server's time? Not as proof.** `signed_at_ms` is the
+  signer's own word, and somebody who left can still sign with any date; naming a roster version in the document
+  wouldn't help, as they can name an old one. `created_at` is the server's word. Signed rosters do tell when a tenure
+  ended, by an owner's signature, and that bounds what those two claims may say. So:
+
+  - **A roster history.** From the signed roster log each device keeps who held which identity key as owner or admin,
+    from which roster to the first roster without them (`WorkspaceState::admin_history`, one tenure per stretch and
+    key, so leaving and coming back or a new key is a new tenure, at most 1024). A state from before this replays the
+    whole roster log once, when a role log first has new entries, and takes the result only if it ends on the head it
+    verified.
+  - **An entry by somebody who left counts for roles** if it verifies under the key of an ended tenure, builds on this
+    device's head, both its `signed_at_ms` and its `created_at` lie inside that tenure (`role_tenure_clock_skew`, client
+    setting, ten minutes, for the three clocks), and that tenure lasted at least until the roster this device held when
+    it last read the log to its end (`maybe_read_at_roster_version`). That last check needs no clock: an entry this
+    device didn't see then isn't older than that roster, unless the server held it back. The server's date can only
+    take an entry away, and this device's clock isn't read at all.
+  - **It never counts for the anchor.** It replaces the snapshot, so the anchor goes, and comes back only with a
+    workspace admin's entry on a fresh roster. So a device that catches up shows no appointer line and its purges take
+    the retention, without anything else being said: nothing is wrong, and being away for weeks is normal. A device
+    that read the log on time keeps its anchor.
+  - **What the server's date says first:** dated outside every tenure, the entry is an ordinary junk entry, skipped with
+    no other effect, or a demoted admin alone could trouble every device. A server that postdates a real entry gains what
+    withholding it gives.
+  - **An unverified stretch.** When a signer entitled to sign wrote something this device can't place, it knows it missed
+    part of the log, and from that entry on (`maybe_unverified_from`) it doesn't vouch for the snapshot: no anchor,
+    `role_of` says member for everybody and `admins()` nobody. That covers an entry the server dates inside a tenure but
+    which fails the other checks (a signer's clock far off, a backdated entry, another head), a channel admin of this
+    snapshot on a head this device lacks, an admin of this roster whose authority lapsed only by the roster's age, and
+    any pinned signer while the roster history is incomplete. A member, a stranger, junk or another channel's entry never
+    starts one. The channel counts as signed, also on a device that accepted nothing yet: **it does not drop to "unsigned", where every member may act**, so a
+    demoted admin gains nothing from it. Under `owner_approval` an admin's addition is then refused on this device
+    whoever commits it (it falls out and is added back, §4.6), and nobody here approves or signs but a workspace admin. A
+    workspace admin's deletion still purges, and chat isn't touched. The channel's members section says so in one line and
+    marks the roles as not signed; a workspace admin's next entry on a fresh roster ends it and anchors the channel.
+    Mobile apps have the refusals through the core but neither line nor mark yet (issue #1262).
+
+  **Compatibility.** No signed format and nothing on the server changes; the new state is local and additive. A state from
+  before this looks once more at what it skipped (it reads on from its head), and that one read has no roster to
+  bound it by, which is the residual risk below once more. Older clients go on skipping; they already
+  disagree with a device that read on time, so a newer device that catches up moves to where the others are and adds no
+  split. Bridges, notetakers and imports don't read the role log.
+
+  **The owner's decisions.** The code implements the recommendation of each.
+
+  | No. | Decision                                                      | Recommendation                                                                                                                                                                                  | Alternative                                                                                                                                                          |
+  |-----|---------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+  | L1  | Whether an entry by somebody who left counts for roles at all | Yes, as above: otherwise every new device of every channel such an admin ever signed in shows "couldn't be verified" and refuses approvals, and merges differ from the members who read on time | Fail closed only: simpler, and a demoted admin with a hostile server gets nothing, but a normal departure then needs a workspace admin to re-sign every such channel |
+  | L2  | Whether it can keep the anchor                                | Never: the dates are claims, and a purge can't be repaired. A device that was away pays with the speed of a purge until a workspace admin signs                                                 | Keep it when the tenure check passes: the purge stays fast on late readers, but a demoted admin with a hostile server could then purge on them                       |
+  | L3  | The merge rule during a stretch                               | Nobody counts: the old snapshot may name a demoted owner. The device falls out and comes back on such a commit, a rare thing in a rare state                                                    | Keep judging by the old snapshot: never falls out for it, and goes on taking a demoted owner's commit                                                                |
+  | L4  | Reading every channel's log when a roster removes an admin    | Not now: a burst per removal, against the budget of no idle network. It would close most of the residual risk below; heads and #1258's entries in the channel narrow it too                     | Read them, spread over time, on a roster that removes somebody                                                                                                       |
+
+  **Overlap with the open designs.** Both fit without depending on this. #876 (§4.6.3, PR #1258): a role entry carried in a
+  message would go through the same `apply_entry`, with the message's server time as `created_at`; its time limit on a
+  purge narrows the anchor further, and its proven alarm is another thing than a stretch: an alarm says members were shown
+  different logs, a stretch that this device can't place what it was shown. #879 (§13.1.1, PR #1259): channel admins as
+  source admins would read `admins()`, so a stretch takes sources out of force until a checkpoint, as that design asks of a
+  skipped entry, and its "Tried" case now ends with Bob a member at version 3 where nothing else changed.
 - **Workspace admins and channel admins.** `role_rules` lets a workspace admin of the fresh roster
   sign any snapshot, so a workspace admin can appoint a channel admin who then approves a workspace
   admin's join. This is kept on purpose: orphaned channels need it (admin.md §2.5), and there is no policy switch for it (issue #877). Instead each device records, per accepted snapshot, who signed the entry that set each role and on what authority (`ChannelRoleState::appointments`, local state, not part of the signed document), and the channel's member list shows "Appointed by … (workspace admin)" from it, only where the snapshot is workspace-anchored; the signer and authority are verified, the signer's display name is not.
@@ -1749,10 +1825,12 @@ Residual risks: the founding entry of a channel is trust on first use, so a host
 with a member of a channel from before signed roles can make that member its first signed admin
 before a real admin does (a workspace admin's checkpoint fixes it, and the real admins see the
 roles they hold shown as not signed). A demotion the server withholds is noticed only through the
-heads members exchange; channel roles have no freshness window like the roster's. A device that
-verifies a log from scratch judges a workspace admin's old entry by the roster it has now, so an
-entry by an admin who lost the role since is skipped there (and the entries built on it) until a
-workspace admin signs a checkpoint. The stage 2 rule holds only against honest clients: a member who
+heads members exchange; channel roles have no freshness window like the roster's. A demoted workspace
+admin together with a hostile server can date an entry back into their tenure: on a device that last
+read the log before they left, it counts for roles, as it would if that server had kept the new roster
+from the device, but never for the anchor, and members' heads expose it. A quiet channel's log may not
+have been read for long, so this reaches further than it sounds (L4 above); alone, without that server,
+they have the ten minutes of the clock setting after leaving, on such a device. The stage 2 rule holds only against honest clients: a member who
 commits an admin's addition anyway is refused by every honest device, and then adds them all back into
 its group with the admin in, unannounced (§4.6.2, finding 2).
 

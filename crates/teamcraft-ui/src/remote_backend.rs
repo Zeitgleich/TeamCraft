@@ -1661,6 +1661,13 @@ impl ChatBackend for RemoteChat {
     )
   }
 
+  fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {
+    matches!(
+      self.ask(ChatQuery::AreChannelRolesUnverified { conversation }),
+      Some(ChatAnswer::AreChannelRolesUnverified { is_unverified: true })
+    )
+  }
+
   fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
     self.act(ChatAction::ConfirmChannelRole { conversation, user });
   }

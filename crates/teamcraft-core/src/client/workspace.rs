@@ -360,6 +360,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// Reads the whole roster log once for a state from before the admin history was recorded
+  /// (e2ee.md §4.6.1, "Reading the log late"). Only when a channel's role log has new entries, which
+  /// is rare, and then a few small documents. A log that doesn't end on the head this device
+  /// verified leaves the history incomplete, which fails closed.
+  pub(crate) async fn complete_admin_history(&mut self) -> Result<(), CoreError> {
+    let mut state = self.workspace()?;
+    if state.admin_history.is_complete || state.roster.version == 0 {
+      return Ok(());
+    }
+    let entries = self.fetch_log(&WorkspaceLogKind::Roster, 0, None).await?;
+    if state.rebuild_admin_history(entries) {
+      records::put_json(&self.store, Table::Workspace, WORKSPACE_KEY, &state)?;
+    } else {
+      tracing::warn!("the server's roster log doesn't end on the head this device verified");
+    }
+    Ok(())
+  }
+
   /// Compares a member's workspace head (from a message) with this device's.
   pub(crate) fn note_workspace_head(&self, head: &WorkspaceHead) -> Result<(), CoreError> {
     let mut state = self.workspace()?;

@@ -8,12 +8,16 @@
 
 use crate::common;
 
+use std::sync::Arc;
+
 use common::{Peer, backend_of, run_commands, settle};
 use teamcraft_client_api::actions::NewChannel;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{AppointerAuthority, ChannelMember, RoleAppointer};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::RoleSigning;
+use teamcraft_core::clock::ManualClock;
+use teamcraft_core::store::{LocalStore, Table};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::{ChannelRole, ConversationId, SpaceId, UserId};
 
@@ -232,6 +236,254 @@ async fn a_workspace_admins_appointment_is_shown_with_its_signer_and_authority()
   assert_eq!(alice_ui.user(carol_id).unwrap().display_name, "Carol");
   // Alice's own role is her founding claim at most: nobody appointed her.
   assert_eq!(row(&alice_ui, channel, alice_id).maybe_appointer, None);
+}
+
+/// Issue #1260, through the client: Eve demotes Bob and leaves the roster, and Carol reads the log
+/// only then. She ends where everybody else is, only without the anchor.
+#[tokio::test]
+async fn a_late_reader_catches_up_after_a_signer_left_the_roster() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let channel = world.anchored_channel().await;
+  let (bob_id, carol_id) = (world.bob.client.user_id(), world.carol.client.user_id());
+
+  let signing = world
+    .eve
+    .client
+    .sign_channel_roles(
+      channel,
+      &[(bob_id, ChannelRole::Member), (carol_id, ChannelRole::Moderator)],
+      false,
+    )
+    .await
+    .unwrap();
+  assert_eq!(signing, RoleSigning::Signed);
+  world.alice.client.sync_channel_roles(channel).await.unwrap();
+  world.eve_leaves().await;
+  world.carol.client.sync_channel_roles(channel).await.unwrap();
+
+  let state = world.carol.client.channel_role_state(channel).unwrap();
+  assert_eq!(
+    state.head(),
+    world.alice.client.channel_role_state(channel).unwrap().head()
+  );
+  assert_eq!(state.role_of(bob_id), ChannelRole::Member, "the demotion counts");
+  assert!(!state.is_workspace_anchored);
+  assert!(!state.has_unverified_stretch());
+  let carol_ui = refreshed_ui(&mut world.carol, channel).await;
+  assert!(
+    !carol_ui.are_channel_roles_unverified(channel),
+    "no word in an ordinary channel"
+  );
+  assert_eq!(row(&carol_ui, channel, carol_id).maybe_appointer, None);
+}
+
+/// A device that read the log on the roster without Eve can't place her entry, which comes in late.
+/// It shows that, doesn't let the old snapshot's owner approve anything, and a workspace admin's
+/// entry repairs it. Chat goes on.
+#[tokio::test]
+async fn a_stretch_a_device_cannot_verify_fails_closed_until_a_checkpoint() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let channel = world.anchored_channel().await;
+  let (alice_id, bob_id) = (world.alice.client.user_id(), world.bob.client.user_id());
+
+  world.eve_leaves().await;
+  world.bob.client.sync_workspace().await.unwrap();
+  world.bob.client.sync_channel_roles(channel).await.unwrap();
+  assert!(
+    !world
+      .bob
+      .client
+      .channel_role_state(channel)
+      .unwrap()
+      .has_unverified_stretch()
+  );
+  // Eve's device hasn't heard yet, and her entry reaches the server moments after the new roster.
+  let signing = world
+    .eve
+    .client
+    .sign_channel_roles(channel, &[(bob_id, ChannelRole::Member)], false)
+    .await
+    .unwrap();
+  assert_eq!(signing, RoleSigning::Signed);
+  world.bob.client.sync_channel_roles(channel).await.unwrap();
+
+  let state = world.bob.client.channel_role_state(channel).unwrap();
+  assert!(state.has_unverified_stretch());
+  assert!(!state.is_workspace_anchored);
+  assert!(state.is_signed());
+  assert_eq!(state.admins(), Vec::new());
+  assert_eq!(
+    world.bob.client.verified_channel_role(channel, bob_id).unwrap(),
+    ChannelRole::Member,
+    "Bob counts for no approval"
+  );
+  let bob_ui = refreshed_ui(&mut world.bob, channel).await;
+  assert!(bob_ui.are_channel_roles_unverified(channel));
+  assert!(!row(&bob_ui, channel, bob_id).is_role_signed);
+  assert!(
+    !bob_ui.can_sign_channel_roles(channel),
+    "nor can he sign on a snapshot he can't vouch for"
+  );
+
+  // Chat isn't touched.
+  world
+    .alice
+    .client
+    .send_text(channel, None, "still here")
+    .await
+    .unwrap();
+  settle(&mut [&mut world.alice, &mut world.bob]).await;
+  world.bob.client.send_text(channel, None, "me too").await.unwrap();
+  world.bob.client.flush_outbox().await.unwrap();
+
+  // Alice, the workspace's owner, signs: the stretch is over.
+  let signing = world
+    .alice
+    .client
+    .sign_channel_roles(channel, &[(bob_id, ChannelRole::Admin)], false)
+    .await
+    .unwrap();
+  assert_eq!(signing, RoleSigning::Signed);
+  world.bob.client.sync_channel_roles(channel).await.unwrap();
+  let state = world.bob.client.channel_role_state(channel).unwrap();
+  assert!(!state.has_unverified_stretch());
+  assert!(state.is_workspace_anchored);
+  assert_eq!(state.role_of(alice_id), ChannelRole::Admin);
+}
+
+/// A device from before the admin history replays the roster log once, when it first needs it.
+#[tokio::test]
+async fn a_device_from_before_the_history_gets_it_from_the_roster_log() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let channel = world.anchored_channel().await;
+  let bob_id = world.bob.client.user_id();
+  forget_admin_history(&world.carol);
+
+  let signing = world
+    .eve
+    .client
+    .sign_channel_roles(channel, &[(bob_id, ChannelRole::Member)], false)
+    .await
+    .unwrap();
+  assert_eq!(signing, RoleSigning::Signed);
+  world.eve_leaves().await;
+  world.carol.client.sync_channel_roles(channel).await.unwrap();
+
+  let state = world.carol.client.channel_role_state(channel).unwrap();
+  assert_eq!(state.role_of(bob_id), ChannelRole::Member);
+  assert!(!state.has_unverified_stretch());
+  assert!(
+    stored_workspace(&world.carol)["admin_history"]["is_complete"]
+      .as_bool()
+      .unwrap()
+  );
+}
+
+/// The workspace state as this device stored it.
+fn stored_workspace(peer: &Peer) -> serde_json::Value {
+  let bytes = peer.store.get(Table::Workspace, "state").unwrap().unwrap();
+  serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Makes the stored workspace state look like one from before the admin history.
+fn forget_admin_history(peer: &Peer) {
+  let mut state = stored_workspace(peer);
+  state.as_object_mut().unwrap().remove("admin_history");
+  peer
+    .store
+    .put(Table::Workspace, "state", &serde_json::to_vec(&state).unwrap())
+    .unwrap();
+}
+
+/// Alice owns the workspace, Eve is a workspace admin, Bob and Carol are members; everybody's clock
+/// agrees with the server's, which dates the role entries.
+struct LateWorld<'a> {
+  server: &'a FakeServer,
+  clock: Arc<ManualClock>,
+  alice: Peer,
+  eve: Peer,
+  bob: Peer,
+  carol: Peer,
+}
+
+impl<'a> LateWorld<'a> {
+  async fn new(server: &'a FakeServer) -> Self {
+    let clock = Arc::new(ManualClock::new(server.server_now_ms()));
+    let enroll = async |name: &str| {
+      Peer::enroll_on_clock(
+        server.add_user(name),
+        name,
+        common::settings(),
+        Box::new(clock.clone()),
+      )
+      .await
+    };
+    let mut alice = enroll("Alice").await;
+    let mut eve = enroll("Eve").await;
+    let bob = enroll("Bob").await;
+    let carol = enroll("Carol").await;
+    let (alice_id, eve_id) = (alice.client.user_id(), eve.client.user_id());
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (eve_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    server.set_admin(eve_id);
+    eve.client.full_sync().await.unwrap();
+    Self {
+      server,
+      clock,
+      alice,
+      eve,
+      bob,
+      carol,
+    }
+  }
+
+  /// Alice's channel with Bob an admin Eve appointed; Bob and Carol read it, anchored.
+  async fn anchored_channel(&mut self) -> ConversationId {
+    self.bob.client.full_sync().await.unwrap();
+    self.carol.client.full_sync().await.unwrap();
+    let channel = channel_with_everybody(
+      self.server,
+      &mut self.alice,
+      &mut [&mut self.bob, &mut self.carol],
+    )
+    .await;
+    let bob_id = self.bob.client.user_id();
+    let signing = self
+      .eve
+      .client
+      .sign_channel_roles(channel, &[(bob_id, ChannelRole::Admin)], false)
+      .await
+      .unwrap();
+    assert_eq!(signing, RoleSigning::Signed);
+    self
+      .server
+      .set_channel_role_unsigned(channel, bob_id, ChannelRole::Admin);
+    for peer in [&mut self.bob, &mut self.carol] {
+      peer.client.sync_channel_roles(channel).await.unwrap();
+      let state = peer.client.channel_role_state(channel).unwrap();
+      assert!(state.is_workspace_anchored);
+      assert_eq!(state.role_of(bob_id), ChannelRole::Admin);
+    }
+    channel
+  }
+
+  /// The next roster leaves Eve out. Bob and Carol verify it when they next need to.
+  async fn eve_leaves(&mut self) {
+    let alice_id = self.alice.client.user_id();
+    self.clock.advance(1);
+    self
+      .alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+  }
 }
 
 async fn trio(server: &FakeServer) -> (Peer, Peer, Peer) {

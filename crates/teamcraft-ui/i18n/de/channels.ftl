@@ -155,6 +155,7 @@ channel-archive = Archivieren
 channel-archive-action = Diesen Kanal archivieren
 channel-roles-hint = Admins verwalten Mitglieder, Rollen und Einstellungen. Moderatoren entfernen Mitglieder und löschen Nachrichten.
 channel-roles-read-only = Nur Kanal-Admins ändern Rollen.
+channel-roles-unverified = Dieses Gerät konnte nicht jede Rollenänderung in diesem Kanal prüfen, die Rollen hier sind womöglich veraltet. Der Chat ist davon nicht betroffen. Ein Workspace-Admin kann das beheben, indem er hier eine Rolle signiert.
 channel-settings-read-only = Nur Kanal-Admins können das ändern.
 channel-role = Rolle
 channel-role-admin = Kanal-Admin
