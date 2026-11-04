@@ -12,8 +12,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::wire_enum::wire_enum;
 use crate::{
-  BrandAssetSlot, BrandColors, BrandLinks, ConversationId, NotificationLevel, SignInMethod, SpaceId,
-  UnixMillis,
+  BrandAssetSlot, BrandColors, BrandLinks, ConversationId, HealthAlertSettings, NotificationLevel,
+  SignInMethod, SpaceId, UnixMillis,
 };
 
 /// The application and bundle ID of the official apps.
@@ -80,6 +80,7 @@ wire_enum! {
     MeetingMail => "meeting_mail",
     TokenBinding => "token_binding",
     AppLinks => "app_links",
+    HealthAlerts => "health_alerts",
   }
 }
 
@@ -350,6 +351,9 @@ pub struct RuntimeSettingsResponse {
   /// Absent from older servers: the defaults, the official apps.
   #[serde(default)]
   pub app_links: AppLinkSettings,
+  /// Absent from older servers: the defaults.
+  #[serde(default)]
+  pub health_alerts: HealthAlertSettings,
   /// One entry per group.
   pub sources: Vec<RuntimeSettingsState>,
 }
@@ -378,6 +382,7 @@ pub enum RuntimeSettingsSection {
   MeetingMail(MeetingMailSettings),
   TokenBinding(TokenBindingSettings),
   AppLinks(AppLinkSettings),
+  HealthAlerts(HealthAlertSettings),
 }
 
 /// Which installed apps may open this server's links (docs/app-links.md): what
@@ -667,6 +672,7 @@ impl RuntimeSettingsSection {
       Self::MeetingMail(_) => RuntimeSettingsKey::MeetingMail,
       Self::TokenBinding(_) => RuntimeSettingsKey::TokenBinding,
       Self::AppLinks(_) => RuntimeSettingsKey::AppLinks,
+      Self::HealthAlerts(_) => RuntimeSettingsKey::HealthAlerts,
     }
   }
 }

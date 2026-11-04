@@ -8,12 +8,12 @@
 
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
-  AdminBrandsResponse, AdminCalendarSettingsResponse, AdminInstanceResponse, AdminMailSettingsResponse,
-  AnnouncementResponse, BackgroundId, BrandAssetSlot, CategoryId, ChannelModeration, CreateBrandRequest,
-  HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role, RuntimeSettingsKey,
-  RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest,
-  SettingsTestResponse, UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest,
-  WorkspacePolicy,
+  AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
+  AdminMailSettingsResponse, AnnouncementResponse, BackgroundId, BrandAssetSlot, CategoryId,
+  ChannelModeration, CreateBrandRequest, HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role,
+  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SendTestMailRequest,
+  SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest, UpdateCalendarSettingsRequest,
+  UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use crate::actions::{
@@ -1073,6 +1073,14 @@ pub trait AdminBackend {
   /// Media server, push providers and storage; `None` while unknown.
   fn instance_status(&self) -> Option<AdminInstanceResponse> {
     None
+  }
+  /// How the server's health checks stand, as of the last read; `None` while unknown. Admins only.
+  fn health_status(&self) -> Option<AdminHealthResponse> {
+    None
+  }
+  /// How many health checks are alerting (the badges of the admin console); 0 for non-admins.
+  fn health_alert_count(&self) -> usize {
+    0
   }
   fn audit_filter(&self) -> AuditFilter {
     AuditFilter::default()

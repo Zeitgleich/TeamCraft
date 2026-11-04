@@ -713,6 +713,8 @@ pub enum AdminSection {
   Retention,
   /// How the desktop apps update (docs/updates.md §4.4).
   Updates,
+  /// How the checks stand and the alerts raised (docs/operations.md, "Health and alerts").
+  Health,
   /// Media server, push providers, storage and telephony.
   Instance,
   /// Bots for the integration bridge (docs/bridge.md).
@@ -725,7 +727,7 @@ pub enum AdminSection {
 }
 
 impl AdminSection {
-  pub const ALL: [AdminSection; 18] = [
+  pub const ALL: [AdminSection; 19] = [
     Self::Channels,
     Self::Users,
     Self::Permissions,
@@ -739,6 +741,7 @@ impl AdminSection {
     Self::Settings,
     Self::Retention,
     Self::Updates,
+    Self::Health,
     Self::Instance,
     Self::Integrations,
     Self::Notetaker,
@@ -761,6 +764,7 @@ impl AdminSection {
       Self::Settings => "settings",
       Self::Retention => "retention",
       Self::Updates => "updates",
+      Self::Health => "health",
       Self::Instance => "instance",
       Self::Integrations => "integrations",
       Self::Notetaker => "notetaker",

@@ -94,6 +94,9 @@ pub struct LiveFollowUp {
   /// The gateway (re)connected: events in between may be lost, so read once.
   pub needs_resync: bool,
   pub needs_announcement: bool,
+  /// A health alert was raised or resolved, or the gateway reconnected: an admin's client reads
+  /// the health once.
+  pub needs_health: bool,
 }
 
 /// One refresh's answers from the server; `None` parts were not asked for or failed.
@@ -131,9 +134,9 @@ impl LiveServer {
 
   /// Takes the core's snapshot after a change it reported; reads from the server only what the
   /// snapshot says is due. `None` (no core) changes nothing.
-  pub fn observe(&self, maybe_live: Option<LiveSnapshot>) {
+  pub fn observe(&self, maybe_live: Option<LiveSnapshot>) -> LiveFollowUp {
     let Some(live) = maybe_live else {
-      return;
+      return LiveFollowUp::default();
     };
     let follow_up = self.state.borrow_mut().apply_snapshot(live);
     if follow_up.needs_resync {
@@ -142,6 +145,7 @@ impl LiveServer {
       let live = self.clone();
       spawn_local(async move { live.refresh_announcement().await });
     }
+    follow_up
   }
 
   /// Schedules a refresh soon; calls while one is scheduled collapse into it.
@@ -535,6 +539,7 @@ fn follow_up(maybe_last: Option<LiveMarks>, marks: LiveMarks) -> LiveFollowUp {
     Some(last) => LiveFollowUp {
       needs_resync: marks.connections != last.connections,
       needs_announcement: marks.announcements != last.announcements,
+      needs_health: marks.health_alerts != last.health_alerts || marks.connections != last.connections,
     },
   }
 }
@@ -738,7 +743,8 @@ mod tests {
         state.apply_snapshot(live(Some(&[]), reconnected)),
         LiveFollowUp {
           needs_resync: true,
-          needs_announcement: false
+          needs_announcement: false,
+          needs_health: true,
         }
       );
       assert_eq!(
@@ -753,6 +759,24 @@ mod tests {
         state
           .apply_snapshot(live(Some(&[]), announced))
           .needs_announcement
+      );
+    }
+
+    #[test]
+    fn a_health_alert_asks_for_one_read_of_the_health_and_nothing_else() {
+      let mut state = LiveState::default();
+      let first = LiveMarks::default();
+      state.apply_snapshot(live(Some(&[]), first));
+      let alerted = LiveMarks {
+        health_alerts: 1,
+        ..first
+      };
+      assert_eq!(
+        state.apply_snapshot(live(Some(&[]), alerted)),
+        LiveFollowUp {
+          needs_health: true,
+          ..LiveFollowUp::default()
+        }
       );
     }
 

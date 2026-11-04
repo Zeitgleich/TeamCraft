@@ -21,7 +21,7 @@ const MINUTE: u64 = 60;
 type Values = BTreeMap<&'static str, String>;
 
 /// Groups in the order of the page.
-const GROUPS: [&str; 12] = [
+const GROUPS: [&str; 13] = [
   "server_rules",
   "notifications",
   "email_digest",
@@ -34,6 +34,7 @@ const GROUPS: [&str; 12] = [
   "meeting_mail",
   "token_binding",
   "app_links",
+  "health_alerts",
 ];
 /// The sign-in methods an admin can choose, as the form's values: comma-separated, in order.
 const METHOD_CHOICES: [&str; 4] = ["sso,local", "local,sso", "sso", "local"];
@@ -53,6 +54,10 @@ enum Kind {
     unit: Option<&'static str>,
     /// Empty means none (off).
     is_optional: bool,
+    /// The smallest raw value the server takes.
+    min: u64,
+    /// What the field's own message says when the value is out of range, naming the range.
+    maybe_range_error: Option<&'static str>,
   },
   Text,
   Area,
@@ -90,6 +95,8 @@ const fn count(id: &'static str) -> FieldDef {
       max: u32::MAX as u64,
       unit: None,
       is_optional: false,
+      min: 0,
+      maybe_range_error: None,
     },
   }
 }
@@ -102,6 +109,29 @@ const fn amount(id: &'static str, scale: u64, max: u64, unit: &'static str) -> F
       max,
       unit: Some(unit),
       is_optional: false,
+      min: 0,
+      maybe_range_error: None,
+    },
+  }
+}
+
+/// Like [`amount`], with a smallest value the server takes and a message that names the range.
+const fn ranged(
+  id: &'static str,
+  scale: u64,
+  range: (u64, u64),
+  unit: &'static str,
+  range_error: &'static str,
+) -> FieldDef {
+  FieldDef {
+    id,
+    kind: Kind::Number {
+      scale,
+      max: range.1,
+      unit: Some(unit),
+      is_optional: false,
+      min: range.0,
+      maybe_range_error: Some(range_error),
     },
   }
 }
@@ -115,6 +145,8 @@ const fn optional_amount(id: &'static str, scale: u64, max: u64, unit: &'static 
       max,
       unit: Some(unit),
       is_optional: true,
+      min: 0,
+      maybe_range_error: None,
     },
   }
 }
@@ -139,6 +171,7 @@ const ENTRIES: &str = "settings-unit-entries";
 const MINUTES: &str = "settings-unit-minutes";
 const HOURS: &str = "settings-unit-hours";
 const DAYS: &str = "settings-unit-days";
+const PERCENT: &str = "settings-unit-percent";
 const MEGABYTES: &str = "settings-unit-mib";
 const U32_MAX: u64 = u32::MAX as u64;
 const U64_MAX: u64 = 9_000_000_000_000_000;
@@ -180,6 +213,44 @@ const APP_LINKS: &[FieldDef] = &[
   },
   text("apple_team_id"),
   text("apple_bundle_id"),
+];
+const HEALTH_ALERTS: &[FieldDef] = &[
+  flag("is_enabled"),
+  ranged(
+    "hold_secs",
+    MINUTE,
+    (MINUTE, 86_400),
+    MINUTES,
+    "settings-error-health-minutes",
+  ),
+  ranged(
+    "clear_secs",
+    MINUTE,
+    (MINUTE, 86_400),
+    MINUTES,
+    "settings-error-health-minutes",
+  ),
+  ranged(
+    "backup_max_age_secs",
+    3_600,
+    (3_600, 30 * 86_400),
+    HOURS,
+    "settings-error-health-backup-hours",
+  ),
+  ranged(
+    "certificate_min_days",
+    1,
+    (1, 365),
+    DAYS,
+    "settings-error-health-days",
+  ),
+  ranged(
+    "disk_max_percent",
+    1,
+    (50, 99),
+    PERCENT,
+    "settings-error-health-percent",
+  ),
 ];
 const NOTIFICATIONS: &[FieldDef] = &[
   flag("read_receipts_default"),
@@ -573,6 +644,7 @@ fn fields_of(slug: &str) -> &'static [FieldDef] {
     "meeting_mail" => MEETING_MAIL,
     "token_binding" => TOKEN_BINDING,
     "app_links" => APP_LINKS,
+    "health_alerts" => HEALTH_ALERTS,
     _ => &[],
   }
 }
@@ -592,6 +664,7 @@ fn group_json(key: &RuntimeSettingsKey, response: &RuntimeSettingsResponse) -> O
     RuntimeSettingsKey::MeetingMail => serde_json::to_value(&response.meeting_mail),
     RuntimeSettingsKey::TokenBinding => serde_json::to_value(&response.token_binding),
     RuntimeSettingsKey::AppLinks => serde_json::to_value(&response.app_links),
+    RuntimeSettingsKey::HealthAlerts => serde_json::to_value(&response.health_alerts),
     _ => return None,
   };
   value.ok()
@@ -692,9 +765,15 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
     Kind::Number {
       is_optional: true, ..
     } if typed.trim().is_empty() => Ok(Value::Null),
-    Kind::Number { scale, max, .. } => match parse_scaled(typed, scale) {
-      Some(raw) if raw <= max => Ok(json!(raw)),
-      _ => Err("admin-error-number"),
+    Kind::Number {
+      scale,
+      min,
+      max,
+      maybe_range_error,
+      ..
+    } => match parse_scaled(typed, scale) {
+      Some(raw) if raw >= min && raw <= max => Ok(json!(raw)),
+      _ => Err(maybe_range_error.unwrap_or("admin-error-number")),
     },
     Kind::Text | Kind::Area => Ok(Value::String(typed.trim_end().to_owned())),
     Kind::MapText => Ok(match typed.trim() {
@@ -940,8 +1019,16 @@ mod tests {
       "admin-error-ids".into(),
       "admin-error-invalid".into(),
     ];
-    for unit in [SECONDS, MINUTES, HOURS, DAYS, MEGABYTES] {
+    for unit in [SECONDS, MINUTES, HOURS, DAYS, MEGABYTES, PERCENT] {
       keys.push(unit.into());
+    }
+    for error in [
+      "settings-error-health-minutes",
+      "settings-error-health-backup-hours",
+      "settings-error-health-days",
+      "settings-error-health-percent",
+    ] {
+      keys.push(error.into());
     }
     for slug in GROUPS {
       keys.push(format!("settings-group-{slug}"));

@@ -828,3 +828,77 @@ notetaker-error-model = Modell-IDs sehen aus wie anbieter/modell, kleingeschrieb
 notetaker-error-language = Wähle eine Sprache.
 notetaker-error-prompt = Die Anweisungen sind leer oder länger als 8000 Zeichen.
 notetaker-error-other = Diese Einstellungen lassen sich nicht signieren. Lade die Seite neu und versuche es noch einmal.
+
+## Systemzustand (Issue #213)
+admin-nav-health = Systemzustand
+admin-health-title = Systemzustand
+admin-health-subtitle = Ob der Server, seine Dienste und seine Backups funktionieren. Nur Namen, Zustände und Zeiten: nichts aus einer Unterhaltung.
+health-loading = Prüfungen werden geladen …
+health-summary-ok = Alle Prüfungen sind in Ordnung.
+health-summary-failing = { $count ->
+    [one] Eine Prüfung schlägt fehl. Das ist noch keine Warnung.
+   *[other] { $count } Prüfungen schlagen fehl. Das sind noch keine Warnungen.
+}
+health-summary-alerts = { $count ->
+    [one] Eine Prüfung braucht Aufmerksamkeit.
+   *[other] { $count } Prüfungen brauchen Aufmerksamkeit.
+}
+health-alerting-on = { $count ->
+    [one] Warnungen sind an: Eine Prüfung muss eine Minute lang fehlschlagen, bevor Admins Bescheid bekommen.
+   *[other] Warnungen sind an: Eine Prüfung muss { $count } Minuten lang fehlschlagen, bevor Admins Bescheid bekommen.
+}
+health-alerting-off = Warnungen sind aus. Die Prüfungen werden hier trotzdem angezeigt.
+health-open-settings = In den Einstellungen ändern
+health-checks = Prüfungen
+health-checked = Geprüft { $when }.
+health-not-checked = Noch nicht geprüft.
+health-footnote = Diese Seite aktualisiert sich, wenn sich eine Warnung ändert, und alle 30 Sekunden, solange sie offen ist.
+health-alerts = Warnungen
+health-alerts-none = Seit dem Start des Servers gab es keine Warnungen.
+health-alerts-hint = Admins und Eigentümer sehen neue Warnungen hier und im Menü Administration. Die Liste beginnt neu, wenn der Server neu startet.
+health-alert-open = Ausgelöst { $raised }, noch offen.
+health-alert-resolved = Ausgelöst { $raised }, behoben { $resolved }.
+health-failing-since = Schlägt fehl seit { $when }.
+health-alerts-badge = { $count ->
+    [one] Eine Systemwarnung
+   *[other] { $count } Systemwarnungen
+}
+health-status-ok = In Ordnung
+health-status-failing = Fehlerhaft
+health-status-alert = Warnung
+health-status-no-data = Noch keine Daten
+health-status-not-configured = Nicht eingerichtet
+health-detail-backup = Letztes Backup { $when }.
+health-detail-report = Letzte Meldung { $when }.
+health-detail-job = Zuletzt gelaufen { $when }.
+health-detail-job-not-yet = Seit dem Start des Servers noch nicht gelaufen.
+health-detail-certificate = { $count ->
+    [one] Noch ein Tag bis zum Ablauf.
+   *[other] Noch { $count } Tage bis zum Ablauf.
+}
+health-detail-certificate-expired = Abgelaufen.
+health-detail-disk = { $percent } % belegt.
+health-check-database = Datenbank
+health-check-database-hint = Beantwortet die Abfragen des Servers.
+health-check-object_storage = Objektspeicher
+health-check-object_storage-hint = Speichert Anhänge. Aus, wenn keiner eingerichtet ist.
+health-check-identity_provider = Identitätsanbieter
+health-check-identity_provider-hint = Meldet Personen an und beantwortet die Anfragen des Servers.
+health-check-push_gateway = Push-Gateway
+health-check-push_gateway-hint = Stellt die Weckrufe für die Store-Apps zu. Aus, wenn keines eingerichtet ist.
+health-check-push_service = Push-Dienste
+health-check-push_service-hint = Die Dienste, an die der Server direkt sendet. Schlägt fehl, wenn der letzte Versuch eines Dienstes abgewiesen wurde.
+health-check-media_server = Medienserver
+health-check-media_server-hint = Meldet sich im Betrieb alle paar Sekunden beim Server.
+health-check-oidc_sync = Abgleich mit dem Identitätsanbieter
+health-check-oidc_sync-hint = Gleicht die Personen regelmäßig mit dem Identitätsanbieter ab. Überfällig nach drei verpassten Läufen.
+health-check-retention = Aufbewahrungsjob
+health-check-retention-hint = Löscht, was seine Aufbewahrungsfrist überschritten hat. Überfällig nach drei verpassten Läufen.
+health-check-partition_maintenance = Nachrichten-Partitionen
+health-check-partition_maintenance-hint = Legt den Speicher für die kommenden Monate im Voraus an. Überfällig nach drei verpassten Läufen.
+health-check-backup = Backup
+health-check-backup-hint = Wird vom Deployment gemeldet. Schlägt fehl, wenn das letzte Backup älter ist als das Limit in den Einstellungen.
+health-check-certificate = Zertifikat
+health-check-certificate-hint = Wird vom Deployment gemeldet. Schlägt fehl, wenn das ausgelieferte Zertifikat innerhalb des Limits in den Einstellungen abläuft.
+health-check-disk_space = Speicherplatz
+health-check-disk_space-hint = Wird vom Deployment gemeldet. Schlägt fehl, wenn die Platte voller ist als das Limit in den Einstellungen.

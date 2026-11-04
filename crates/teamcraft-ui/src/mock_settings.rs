@@ -221,6 +221,7 @@ impl SettingsMock {
       RuntimeSettingsSection::MeetingMail(values) => self.runtime.meeting_mail = values,
       RuntimeSettingsSection::TokenBinding(values) => self.runtime.token_binding = values,
       RuntimeSettingsSection::AppLinks(values) => self.runtime.app_links = values,
+      RuntimeSettingsSection::HealthAlerts(values) => self.runtime.health_alerts = values,
       // A section a newer wire version added; the mock has nothing to store.
       #[allow(unreachable_patterns)]
       _ => return,
@@ -243,6 +244,7 @@ impl SettingsMock {
       RuntimeSettingsKey::MeetingMail => self.runtime.meeting_mail = defaults.meeting_mail,
       RuntimeSettingsKey::TokenBinding => self.runtime.token_binding = defaults.token_binding,
       RuntimeSettingsKey::AppLinks => self.runtime.app_links = defaults.app_links,
+      RuntimeSettingsKey::HealthAlerts => self.runtime.health_alerts = defaults.health_alerts,
       _ => return,
     }
     self.set_source(key, SettingSource::Config);
@@ -326,6 +328,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
   RuntimeSettingsResponse {
     token_binding: TokenBindingSettings::default(),
     app_links: teamcraft_proto::AppLinkSettings::default(),
+    health_alerts: teamcraft_proto::HealthAlertSettings::default(),
     server_rules: ServerRulesSettings {
       invites_require_verified_email: true,
       default_spaces: Vec::new(),

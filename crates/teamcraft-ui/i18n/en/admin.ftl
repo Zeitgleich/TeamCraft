@@ -828,3 +828,77 @@ notetaker-error-model = Model IDs look like author/model, in lower case.
 notetaker-error-language = Choose a language.
 notetaker-error-prompt = The instructions are empty or longer than 8000 characters.
 notetaker-error-other = These settings can't be signed. Reload the page and try again.
+
+## System health (issue #213)
+admin-nav-health = System health
+admin-health-title = System health
+admin-health-subtitle = Whether the server, its backends and its backups are working. Names, states and times only: nothing from any conversation.
+health-loading = Loading the checks…
+health-summary-ok = All checks pass.
+health-summary-failing = { $count ->
+    [one] One check is failing. It is not an alert yet.
+   *[other] { $count } checks are failing. They are not alerts yet.
+}
+health-summary-alerts = { $count ->
+    [one] One check needs attention.
+   *[other] { $count } checks need attention.
+}
+health-alerting-on = { $count ->
+    [one] Alerts are on: a check must fail for a minute before admins are told.
+   *[other] Alerts are on: a check must fail for { $count } minutes before admins are told.
+}
+health-alerting-off = Alerts are off. The checks still show here.
+health-open-settings = Change in Settings
+health-checks = Checks
+health-checked = Checked { $when }.
+health-not-checked = Not checked yet.
+health-footnote = This page updates when an alert changes, and every 30 seconds while it is open.
+health-alerts = Alerts
+health-alerts-none = No alerts since the server started.
+health-alerts-hint = Admins and owners see new alerts here and on the Administration menu. The list starts again when the server restarts.
+health-alert-open = Raised { $raised }, still open.
+health-alert-resolved = Raised { $raised }, resolved { $resolved }.
+health-failing-since = Failing since { $when }.
+health-alerts-badge = { $count ->
+    [one] One health alert
+   *[other] { $count } health alerts
+}
+health-status-ok = OK
+health-status-failing = Failing
+health-status-alert = Alert
+health-status-no-data = No data yet
+health-status-not-configured = Not set up
+health-detail-backup = Last backup { $when }.
+health-detail-report = Last report { $when }.
+health-detail-job = Last ran { $when }.
+health-detail-job-not-yet = Has not run since the server started.
+health-detail-certificate = { $count ->
+    [one] One day until it expires.
+   *[other] { $count } days until it expires.
+}
+health-detail-certificate-expired = Expired.
+health-detail-disk = { $percent }% in use.
+health-check-database = Database
+health-check-database-hint = Answers the server's queries.
+health-check-object_storage = Object storage
+health-check-object_storage-hint = Holds attachments. Off when none is set up.
+health-check-identity_provider = Identity provider
+health-check-identity_provider-hint = Signs people in and answers the server's checks.
+health-check-push_gateway = Push gateway
+health-check-push_gateway-hint = Delivers wake-ups to the store apps. Off when none is set up.
+health-check-push_service = Push services
+health-check-push_service-hint = The services the server sends to directly. Fails when the last attempt of one was refused.
+health-check-media_server = Media server
+health-check-media_server-hint = Reports to the server every few seconds while it runs.
+health-check-oidc_sync = Identity provider sync
+health-check-oidc_sync-hint = Compares users with the identity provider on a schedule. Late after three missed runs.
+health-check-retention = Retention job
+health-check-retention-hint = Deletes what is past its retention. Late after three missed runs.
+health-check-partition_maintenance = Message partitions
+health-check-partition_maintenance-hint = Creates the storage for coming months ahead of time. Late after three missed runs.
+health-check-backup = Backup
+health-check-backup-hint = Reported by the deployment. Fails when the last backup is older than the limit in Settings.
+health-check-certificate = Certificate
+health-check-certificate-hint = Reported by the deployment. Fails when the served certificate expires within the limit in Settings.
+health-check-disk_space = Disk space
+health-check-disk_space-hint = Reported by the deployment. Fails when the disk is fuller than the limit in Settings.
