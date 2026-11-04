@@ -19,11 +19,13 @@ class PlaceholderWatcher(
   private val notifier: MessageNotifier,
   private val handler: PushHandler,
   private val scope: CoroutineScope,
+  /** Ends holds an earlier process left, which are past their bound by then. */
+  private val endDueHolds: suspend () -> Unit,
 ) {
   @OptIn(FlowPreview::class)
   fun start() {
     scope.launch {
-      notifier.releaseEarlierHolds()
+      endDueHolds()
       fillIn()
       core.changeCount.drop(1).debounce(DEBOUNCE_MS).collect { fillIn() }
     }

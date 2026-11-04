@@ -38,6 +38,8 @@ data class NotificationLine(
   @SerialName("payload") val maybePayload: String? = null,
   /** A placeholder that hasn't alerted yet: it does so when the text comes or the hold ends. */
   @SerialName("is_alert_held") val isAlertHeld: Boolean = false,
+  /** When a placeholder's wake-up came, on `elapsedRealtime`: a wrong clock doesn't move it. */
+  @SerialName("arrived_at_ms") val maybeArrivedAtMs: Long? = null,
 ) {
   val isOwn: Boolean get() = maybeSenderKey == null
 }
@@ -77,6 +79,10 @@ object NotificationLines {
     return if (keepsShown) lines else merge(lines, line)
   }
 
+  /** A repeat of a wake-up whose line is gone (read, swiped away): it stays gone. */
+  fun isGone(lines: List<NotificationLine>, line: NotificationLine, isDuplicate: Boolean): Boolean =
+    isDuplicate && line.maybeMessageId != null && lines.none { it.maybeMessageId == line.maybeMessageId }
+
   /**
    * The lines after a retry read the message of a placeholder line; `null` when there is nothing
    * to update: the line is gone (read, swiped away), already filled in, or still not readable.
@@ -98,10 +104,6 @@ object NotificationLines {
     val left = lines.filterNot { it.maybeMessageId == id && it.isPlaceholder }
     return if (left.any { !it.isOwn }) left else emptyList()
   }
-
-  /** The lines with `id`'s held alert given up: it alerts now, without the text. */
-  fun withAlertReleased(lines: List<NotificationLine>, id: String): List<NotificationLine> =
-    lines.map { if (it.maybeMessageId == id) it.copy(isAlertHeld = false) else it }
 
   /**
    * The lines left after the conversation was read on another device up to `maybeUpToMessageId`

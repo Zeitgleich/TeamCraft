@@ -19,7 +19,7 @@ use crate::client::decrypt_content;
 use crate::error::CoreError;
 use crate::people_names::shown_name;
 use crate::records;
-use crate::store::{AttachmentRef, LocalStore, MessageContent, MessageMeta, Table};
+use crate::store::{AttachmentRef, ConversationEvent, LocalStore, MessageContent, MessageMeta, Table};
 
 pub(crate) const PUSH_KEY_RECORD: &str = "push_key";
 const PUSH_SESSION_RECORD: &str = "push_session";
@@ -298,13 +298,13 @@ async fn preview_content<A: ServerApi>(
     .ok()
     .flatten();
   if let Some(message) = local {
-    return readable_preview(&message.content);
+    return readable_preview(store, &message.content);
   }
   let Some(api) = maybe_api else {
     return (Err(PreviewGap::NoSession), false, false);
   };
   match fetch_and_decrypt(store, api, wake_up, message_id).await {
-    Ok(content) => readable_preview(&content),
+    Ok(content) => readable_preview(store, &content),
     Err(error) => {
       // The class of failure only: what the store or the server said may name more than it should.
       tracing::info!(
@@ -319,8 +319,11 @@ async fn preview_content<A: ServerApi>(
 }
 
 /// What a message this device could read shows: a hidden change names [`PreviewGap::Hidden`].
-fn readable_preview(content: &MessageContent) -> (Result<PreviewContent, PreviewGap>, bool, bool) {
-  if is_hidden_change(content) {
+fn readable_preview(
+  store: &impl LocalStore,
+  content: &MessageContent,
+) -> (Result<PreviewContent, PreviewGap>, bool, bool) {
+  if is_hidden_change(content) && !adds_this_user(store, content) {
     return (Err(PreviewGap::Hidden), false, true);
   }
   (Ok(content_preview(content)), is_silent(content), true)
@@ -336,12 +339,44 @@ fn is_hidden_change(content: &MessageContent) -> bool {
     | MessageContent::IndexSegment { .. }
     | MessageContent::Pin { .. }
     | MessageContent::Bookmarks { .. }
+    // A hidden message by design (e2ee.md, "Transport: a hidden message"): an edit of the notes page.
+    | MessageContent::Canvas { .. }
     | MessageContent::Event { .. }
     | MessageContent::Reaction { .. }
     | MessageContent::IntegrationSource { .. }
     | MessageContent::Notetaker { .. } => true,
     MessageContent::Text { .. } | MessageContent::File { .. } | MessageContent::Unknown => false,
   }
+}
+
+/// Being added to a conversation is the one change the person it concerns should hear of: it stays
+/// a "New message" (no event text exists outside the app's own strings).
+fn adds_this_user(store: &impl LocalStore, content: &MessageContent) -> bool {
+  let MessageContent::Event {
+    event: ConversationEvent::MemberAdded { user, .. },
+  } = content
+  else {
+    return false;
+  };
+  records::load_account(store)
+    .ok()
+    .flatten()
+    .is_some_and(|account| account.user_id == *user)
+}
+
+/// Whether the read position this device knows has passed this wake-up's message: read elsewhere
+/// before its notification got its text. Top-level messages only: a thread's read position is not
+/// in the conversation's record, and a `dismiss` still takes such a line away.
+pub fn is_read(store: &impl LocalStore, wake_up: &PushWakeUp) -> bool {
+  let (Some(message), None) = (wake_up.maybe_message_id, wake_up.maybe_thread_id) else {
+    return false;
+  };
+  records::get_json::<ConversationResponse>(store, Table::Conversations, &wake_up.conversation_id.to_string())
+    .ok()
+    .flatten()
+    .and_then(|conversation| conversation.maybe_my_membership)
+    .and_then(|membership| membership.maybe_last_read_message_id)
+    .is_some_and(|last_read| last_read >= message)
 }
 
 /// Why a message could not be read, for the logs: no IDs, no text.
@@ -480,6 +515,20 @@ mod tests {
   use super::*;
   use teamcraft_proto::ConversationId;
 
+  fn attachment(name: &str, media_type: &str) -> AttachmentRef {
+    AttachmentRef {
+      attachment_id: teamcraft_proto::AttachmentId::from_snowflake(Snowflake::new(7).unwrap()),
+      key: teamcraft_proto::Base64Bytes::new(vec![1; 32]),
+      ciphertext_sha256: teamcraft_proto::Base64Bytes::new(vec![2; 32]),
+      file_name: name.into(),
+      media_type: media_type.into(),
+      size_bytes: 3,
+      maybe_thumbnail: None,
+      maybe_dimensions: None,
+      maybe_duration_ms: None,
+    }
+  }
+
   #[test]
   fn long_text_is_cut_at_a_character_boundary() {
     let long = "ä".repeat(MAX_PREVIEW_CHARS + 5);
@@ -529,24 +578,13 @@ mod tests {
 
   #[test]
   fn a_message_without_a_body_shows_what_it_carries() {
-    let picture = |name: &str, media_type: &str| AttachmentRef {
-      attachment_id: teamcraft_proto::AttachmentId::from_snowflake(Snowflake::new(7).unwrap()),
-      key: teamcraft_proto::Base64Bytes::new(vec![1; 32]),
-      ciphertext_sha256: teamcraft_proto::Base64Bytes::new(vec![2; 32]),
-      file_name: name.into(),
-      media_type: media_type.into(),
-      size_bytes: 3,
-      maybe_thumbnail: None,
-      maybe_dimensions: None,
-      maybe_duration_ms: None,
-    };
     let text = |body: &str, meta: MessageMeta| MessageContent::Text {
       body: body.into(),
       mentions: Vec::new(),
       meta,
     };
     let with_files = MessageMeta {
-      attachments: vec![picture("a.png", "image/png"), picture("b.pdf", "application/pdf")],
+      attachments: vec![attachment("a.png", "image/png"), attachment("b.pdf", "application/pdf")],
       ..MessageMeta::default()
     };
     assert_eq!(
@@ -599,13 +637,32 @@ mod tests {
         is_pinned: true,
       },
       MessageContent::Bookmarks { items: Vec::new() },
+      MessageContent::Event {
+        event: ConversationEvent::Renamed { name: "new".into() },
+      },
+      MessageContent::IndexSegment {
+        month: "2026-11".into(),
+        segment: attachment("segment", "application/octet-stream"),
+        message_count: 1,
+      },
+      MessageContent::Notetaker {
+        request: teamcraft_proto::NotetakerRequest::Stop,
+      },
+      MessageContent::IntegrationSource {
+        change: teamcraft_proto::SourceChange::Unknown,
+      },
+      MessageContent::Canvas {
+        update: teamcraft_proto::Base64Bytes::new(vec![1]),
+        is_snapshot: false,
+      },
     ];
+    let store = crate::store::MemoryStore::new();
     for content in &hidden {
-      assert_eq!(readable_preview(content).0, Err(PreviewGap::Hidden));
+      assert_eq!(readable_preview(&store, content).0, Err(PreviewGap::Hidden));
     }
     // A kind from a newer client may be a message: it still shows that something came.
     assert_eq!(
-      readable_preview(&MessageContent::Unknown).0,
+      readable_preview(&store, &MessageContent::Unknown).0,
       Ok(PreviewContent::Unavailable)
     );
   }

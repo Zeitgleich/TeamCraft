@@ -62,8 +62,8 @@ class CoreRepository(
 
   /** The core of the signed-in account, opened on first use (and again after a server change). */
   suspend fun core(): TeamCraft = lock.withLock {
-    val server = auth.server ?: throw IllegalStateException("no server")
-    val subject = auth.account ?: throw IllegalStateException("not signed in")
+    val server = auth.server ?: throw NotSignedInException("no server")
+    val subject = auth.account ?: throw NotSignedInException("not signed in")
     val storageKey = server.address.storageKey
     val account = "${server.address.origin} $subject"
     maybeCore?.takeIf { maybeAccount == account }?.let { return it }

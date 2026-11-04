@@ -14,11 +14,16 @@ class CarProjection(private val context: Context) {
   var isActive: Boolean = false
     private set
 
-  /** Starts following; on the main thread (the library's LiveData asks for that). */
-  fun start() {
+  /**
+   * Starts following; on the main thread (the library's LiveData asks for that). `onEnded`: the
+   * phone stopped projecting.
+   */
+  fun start(onEnded: () -> Unit) {
     runCatching {
       CarConnection(context).type.observeForever { type ->
+        val wasActive = isActive
         isActive = type == CarConnection.CONNECTION_TYPE_PROJECTION
+        if (wasActive && !isActive) onEnded()
       }
     }.onFailure {
       // Only the car's extra rule is lost: placeholders then alert as off the road.

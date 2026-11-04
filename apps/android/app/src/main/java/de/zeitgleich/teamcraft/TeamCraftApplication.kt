@@ -64,8 +64,8 @@ class AppGraph(context: Context) {
   val calls = CallController(context, core, scope)
   val pushStats = PushStats(context)
   val pushHandler = PushHandler(context, notifier, calls, pushStats)
-  val push = PushManager(context, core, pushHandler, mentionPrefs, notificationContent, carProjection, scope)
-  val placeholderWatcher = PlaceholderWatcher(core, notifier, pushHandler, scope)
+  val push = PushManager(context, core, pushHandler, mentionPrefs, notificationContent, carProjection, managedConfig, scope)
+  val placeholderWatcher = PlaceholderWatcher(core, notifier, pushHandler, scope, endDueHolds = { push.endHolds() })
   val segmentPrefetch = SegmentPrefetch(context)
   val readWatcher = ReadWatcher(core, notifier, scope)
   /** Admins asking to join a channel the user owns: notified while the app runs (#799). */
@@ -90,7 +90,7 @@ class TeamCraftApplication : Application() {
     // The core waits for these before it opens (issue #157).
     NetworkTrust.startInstalling(this, graph.scope)
     graph.segmentPrefetch.schedule()
-    graph.carProjection.start()
+    graph.carProjection.start { graph.scope.launch { graph.push.endHolds(isForced = true) } }
     graph.readWatcher.start()
     graph.placeholderWatcher.start()
     graph.joinRequestWatcher.start()

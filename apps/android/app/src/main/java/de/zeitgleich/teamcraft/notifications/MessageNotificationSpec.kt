@@ -210,22 +210,27 @@ object MessageNotificationSpecs {
    * got its text alerts now if it was held back, so the phone, bridges and Android Auto announce
    * one message once and with its text; if the phone already alerted for it, it stays silent
    * there ([NotificationAlerting.REFRESH]) unless the phone projects to a car, where being
-   * announced matters more than a second sound. Everything else is a silent update.
+   * announced matters more than a second sound. A text that comes late doesn't alert any more, and
+   * a muted one or one the sender sent silently never does. Everything else is a silent update.
    */
   fun alerting(
     isAlerting: Boolean,
     maybePrevious: ConversationNotification?,
     entry: ConversationNotification,
+    nowMs: Long,
     isInCar: Boolean = false,
+    isSenderSilent: Boolean = false,
+    isSuppressed: Boolean = false,
   ): NotificationAlerting {
     val read = maybePrevious?.lines.orEmpty().filter { before ->
       before.isPlaceholder && entry.lines.any { it.maybeMessageId == before.maybeMessageId && !it.isPlaceholder }
     }
+    val canStillAlert = read.filter { !PushRetry.isTooLateToAlert(it.maybeArrivedAtMs, nowMs) }
     return when {
       isAlerting -> NotificationAlerting.ALERT
-      read.any { it.isAlertHeld } -> NotificationAlerting.ALERT
-      read.isEmpty() -> NotificationAlerting.SILENT
-      isInCar -> NotificationAlerting.ALERT
+      read.isEmpty() || isSuppressed -> NotificationAlerting.SILENT
+      isSenderSilent || canStillAlert.isEmpty() -> NotificationAlerting.REFRESH
+      isInCar || canStillAlert.any { it.isAlertHeld } -> NotificationAlerting.ALERT
       else -> NotificationAlerting.REFRESH
     }
   }

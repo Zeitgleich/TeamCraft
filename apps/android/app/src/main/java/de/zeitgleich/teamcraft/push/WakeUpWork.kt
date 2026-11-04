@@ -34,6 +34,10 @@ object WakeUpWork {
   private const val KEY_IS_VISIBLE = "is_visible"
   private const val KEY_ATTEMPT = "attempt"
   private const val KEY_RETRY_OF = "retry_of"
+  private const val KEY_ARRIVED_AT = "arrived_at"
+  private const val RETRY_TAG = "wake-up-retry"
+  private const val HOLD_END_WORK = "wake-up-hold-end"
+  private const val HOLD_END_AGAIN_MS = 30_000L
   private const val WORK_PREFIX = "wake-up-"
   private const val RETRY_PREFIX = "wake-up-retry-"
   private const val WORK_BUDGET_MS = 60_000L
@@ -52,15 +56,42 @@ object WakeUpWork {
    * Opens the wake-up again after [PushRetry.delayMs] once a network is there; `attempt` 1 is the
    * first retry. One per payload and attempt.
    */
-  fun enqueueRetry(context: Context, payload: ByteArray, attempt: Int, unopened: RetryOf = RetryOf.PLACEHOLDER) {
+  fun enqueueRetry(
+    context: Context,
+    payload: ByteArray,
+    attempt: Int,
+    retryOf: RetryOf,
+    arrivedAtMs: Long,
+  ) {
     val encoded = Base64.getEncoder().encodeToString(payload)
     val request = OneTimeWorkRequestBuilder<RetryWorker>()
-      .setInputData(workDataOf(KEY_PAYLOAD to encoded, KEY_ATTEMPT to attempt, KEY_RETRY_OF to unopened.name))
+      .setInputData(workDataOf(KEY_PAYLOAD to encoded, KEY_ATTEMPT to attempt, KEY_RETRY_OF to retryOf.name, KEY_ARRIVED_AT to arrivedAtMs))
       .setInitialDelay(PushRetry.delayMs(attempt), TimeUnit.MILLISECONDS)
       .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+      .addTag(RETRY_TAG)
       .build()
     val name = RETRY_PREFIX + Integer.toHexString(encoded.hashCode()) + "-" + attempt
     WorkManager.getInstance(context).enqueueUniqueWork(name, ExistingWorkPolicy.KEEP, request)
+  }
+
+  /**
+   * The retries waiting now; one per chain, since a chain's next attempt is enqueued by the last.
+   * A query of WorkManager's own database, only when a chain starts, off the main thread.
+   */
+  fun pendingRetries(context: Context): Int =
+    runCatching { WorkManager.getInstance(context).getWorkInfosByTag(RETRY_TAG).get().count { !it.state.isFinished } }
+      .getOrDefault(0)
+
+  /**
+   * Ends the holds due after `delayMs`, with no network needed, also when the process died. One job;
+   * it looks again as long as a hold is left, and its time is a bound Doze can stretch: then the
+   * alert is silent when it ends ([PushRetry.holdEnd]).
+   */
+  fun scheduleHoldEnd(context: Context, delayMs: Long) {
+    val request = OneTimeWorkRequestBuilder<HoldEndWorker>()
+      .setInitialDelay(delayMs, TimeUnit.MILLISECONDS)
+      .build()
+    WorkManager.getInstance(context).enqueueUniqueWork(HOLD_END_WORK, ExistingWorkPolicy.KEEP, request)
   }
 
   private fun enqueue(context: Context, payload: ByteArray, isVisible: Boolean) {
@@ -79,7 +110,7 @@ object WakeUpWork {
       val encoded = inputData.getString(KEY_PAYLOAD) ?: return Result.failure()
       val payload = runCatching { Base64.getDecoder().decode(encoded) }.getOrNull() ?: return Result.failure()
       val isVisible = inputData.getBoolean(KEY_IS_VISIBLE, false)
-      val running = TeamCraftApplication.graph(applicationContext).push.startWakeUp(payload, isVisible)
+      val running = TeamCraftApplication.graph(applicationContext).push.resumeWakeUp(payload, isVisible)
       withTimeoutOrNull(WORK_BUDGET_MS) { running.await() }
       // One that did not open schedules its own retries (PushManager.onNotOpened).
       return Result.success()
@@ -104,10 +135,27 @@ object WakeUpWork {
       val payload = runCatching { Base64.getDecoder().decode(encoded) }.getOrNull() ?: return Result.failure()
       val attempt = inputData.getInt(KEY_ATTEMPT, PushRetry.MAX_ATTEMPTS)
       val retryOf = RetryOf.entries.firstOrNull { it.name == inputData.getString(KEY_RETRY_OF) } ?: RetryOf.PLACEHOLDER
+      // Missing only for a job from before this was kept: too old to alert.
+      val arrivedAtMs = inputData.getLong(KEY_ARRIVED_AT, -1)
       val push = TeamCraftApplication.graph(applicationContext).push
-      withTimeoutOrNull(WORK_BUDGET_MS) { push.retryWakeUp(payload, attempt, retryOf) }
-        ?: push.onRetryTimedOut(payload, attempt, retryOf)
+      withTimeoutOrNull(WORK_BUDGET_MS) { push.retryWakeUp(payload, attempt, retryOf, arrivedAtMs) }
+        ?: push.onRetryTimedOut(payload, attempt, retryOf, arrivedAtMs)
       // The next attempt, if any, is its own work: WorkManager's retry would not wait for a network.
+      return Result.success()
+    }
+  }
+
+  /** Ends the holds past their bound (see [scheduleHoldEnd]). */
+  class HoldEndWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
+    override suspend fun doWork(): Result {
+      val isHoldLeft = TeamCraftApplication.graph(applicationContext).push.endHolds()
+      if (isHoldLeft) {
+        val request = OneTimeWorkRequestBuilder<HoldEndWorker>()
+          .setInitialDelay(HOLD_END_AGAIN_MS, TimeUnit.MILLISECONDS)
+          .build()
+        // This job is still running under the name: the next one takes over when it ended.
+        WorkManager.getInstance(applicationContext).enqueueUniqueWork(HOLD_END_WORK, ExistingWorkPolicy.APPEND_OR_REPLACE, request)
+      }
       return Result.success()
     }
   }

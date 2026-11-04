@@ -84,6 +84,9 @@ enum class PushPath {
   /** A policy or setting shows less: as chosen. */
   LIMITED,
 
+  /** Read before it was opened, or before a later look: says nothing. */
+  ALREADY_READ,
+
   /** A kind this version doesn't know, from a newer client: says "New message", phone only. */
   NOT_SHOWABLE,
 
@@ -105,6 +108,9 @@ enum class PushPath {
 
   /** The last retry did not read it either; what the sync brings can still fill it. */
   GAVE_UP,
+
+  /** Too many chains of retries waited already: this wake-up got none. */
+  RETRY_CAPPED,
 
   /** The wake-up could not be opened at all: a generic "New message", or nothing when not visible. */
   UNREADABLE,

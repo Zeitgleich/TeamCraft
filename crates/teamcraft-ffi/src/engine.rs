@@ -292,6 +292,18 @@ async fn catch_up_for_push(
   Ok(())
 }
 
+/// What kind of error it was, for a log line that is exported: never its text.
+fn error_class(error: &TeamCraftError) -> &'static str {
+  match error {
+    TeamCraftError::Network(_) => "network",
+    TeamCraftError::SignedOut => "signed_out",
+    TeamCraftError::NotEnrolled => "not_enrolled",
+    TeamCraftError::Storage(_) => "storage",
+    TeamCraftError::Core(_) => "core",
+    _ => "other",
+  }
+}
+
 /// Starts the engine thread for `start` and waits until the store is open and readable: the client
 /// (the MLS state, which grows with the groups) opens after that, ahead of the first job, so what
 /// the store holds can be read at once. A process short of memory (the iOS notification extension)
@@ -1153,6 +1165,22 @@ impl Engine {
         "push opened"
       );
     }
+    // A later look asks the server how far this user has read: the sync doesn't run in the
+    // background, and a `dismiss` may come after this. Best effort; the store's position else.
+    if opening == PushOpening::Retry
+      && reader == PushReader::App
+      && let ClientSlot::Idle(client) = &mut self.client
+    {
+      let refreshed = tokio::time::timeout(
+        PUSH_FETCH_BUDGET,
+        client.push_refresh_conversation(preview.wake_up.conversation_id),
+      )
+      .await;
+      if !matches!(refreshed, Ok(Ok(()))) {
+        tracing::debug!("read position not refreshed for a push");
+      }
+    }
+    let is_read = push_preview::is_read(&self.store, &preview.wake_up);
     let now_ms = SystemClock.now_ms();
     let store = &self.store;
     // A retry is the same push again: counting it would skew the received count and the delay.
@@ -1168,6 +1196,7 @@ impl Engine {
     }
     let mut notification: PushNotification = preview.into();
     notification.is_duplicate = is_duplicate;
+    notification.is_read = is_read;
     notification.maybe_suppression = maybe_suppression.map(Into::into);
     if !notification.is_mention
       && let (Some(text), Ok(backend)) = (&notification.maybe_text, self.backend())
@@ -1232,7 +1261,9 @@ impl Engine {
     {
       let conversation = preview.wake_up.conversation_id;
       if let Err(error) = catch_up_for_push(client, conversation, deadline).await {
-        tracing::info!(target: LIFECYCLE, %error, conversation_id = %conversation, "push catch-up stopped");
+        // The class only: an error's text can carry what a server said.
+        let cause = error_class(&error);
+        tracing::info!(target: LIFECYCLE, cause, conversation_id = %conversation, "push catch-up stopped");
       }
       let caught_up = push_preview::<Api>(&self.store, None, payload).await?;
       // The store-only preview names `NoSession` while the message is still missing: then the first
