@@ -24,3 +24,6 @@ CREATE TABLE role_losses (
 -- The role the provider's last token showed. `oidc_role` is also set by the identity provider sync, and a
 -- token that shows a lower role has to be noticed also after the sync got there first.
 ALTER TABLE users ADD COLUMN oidc_role_seen text;
+-- For everybody who exists already: otherwise the column stays empty while their tokens match, and a role
+-- the sync lowers then reads as the role last seen, and no drop is noted.
+UPDATE users SET oidc_role_seen = oidc_role;

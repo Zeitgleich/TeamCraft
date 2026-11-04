@@ -203,7 +203,7 @@ a provider admin, on somebody with no account noted yet. It can put that admin's
 somebody this device never pinned, with a role the admin holds anyway. And it can list that admin's token, naming the
 victim's real user ID and key, under somebody on the roster with the same role, which notes the wrong account for them: their
 real tokens then read as contradictory, which the owners see, and that admin's later token without the role can remove
-them. The window closes for each person with their first token that counts. Somebody already on the roster when this arrived has
+them. The window closes for each person only with their first token that counts, and phones publish no tokens yet (below), so somebody who only uses a phone stays exposed until they use desktop or web. Somebody already on the roster when this arrived has
 no noted account until then, and until then no token takes their role away.
 
 **Who sets what the tokens mean.** The signed policy has a `role_signing` group: the mode, the role names, and the
@@ -237,6 +237,10 @@ refuses (`RootChanged`). It never gets anybody appointed whom the provider didn'
   adds no claim when somebody has no role left in that client, and the server refuses their tokens**, so their own app could
   publish nothing even with a claim that says the mapper exists (tried against the dev realm: the ID token has no
   `resource_access`, the access token only `account`'s). The server can withhold this evidence, not forge it.
+  It **lapses after 30 days** (`role_evidence_max_age`) if no owner's app was online to act on it; a newer token replaces it while the
+  person still sends requests, and otherwise only the server's report or an owner's hand is left. **A provider whose access tokens carry no
+  `typ` gives no such evidence** (they are refused, so that nothing else passes for one) and falls back to the person's ID tokens and the
+  server's report.
 - **The person's own newer ID token,** as in the table, published by their app.
   Kept tokens name people, so they go once a signed roster took them into account, and otherwise after 60 days, from the server's
   housekeeping job.

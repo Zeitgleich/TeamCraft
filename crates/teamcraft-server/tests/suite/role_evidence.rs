@@ -250,6 +250,53 @@ async fn a_loss_is_noticed_also_when_the_provider_sync_got_there_first() {
   app.stop().await;
 }
 
+/// The migration's own backfill, for a row as it stood when the column arrived.
+const SEEN_ROLE_BACKFILL: &str = "UPDATE users SET oidc_role_seen = oidc_role;";
+
+#[tokio::test]
+async fn a_loss_is_noticed_for_somebody_who_was_there_before_the_migration() {
+  let migration = include_str!("../../../teamcraft-db/migrations/0079_role_evidence.sql");
+  assert!(
+    migration.contains(SEEN_ROLE_BACKFILL),
+    "the migration fills the column in"
+  );
+  let app = app!();
+  let (alice, bob) = (owner(), admin());
+  user_id(&app, &alice).await;
+  let bob_id = enroll(&app, &bob).await;
+  sqlx::query("UPDATE users SET oidc_role_seen = NULL")
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+  sqlx::query(SEEN_ROLE_BACKFILL)
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+  // A token that matches changes nothing, then the sync lowers the role, then a token shows it.
+  assert_eq!(app.get(&bob, "/me").await.status, StatusCode::OK);
+  sqlx::query("UPDATE users SET oidc_role = 'member' WHERE id = $1")
+    .bind(bob_id.parse::<i64>().unwrap())
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+  let demoted = TestUser {
+    roles: vec!["member".to_owned()],
+    ..admin()
+  };
+  assert_eq!(app.get(&demoted, "/me").await.status, StatusCode::OK);
+  sqlx::query("UPDATE role_losses SET expires_at = 1")
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert_eq!(
+    listed.body["role_losses"][0]["user_id"], bob_id,
+    "{}",
+    listed.body
+  );
+  app.stop().await;
+}
+
 #[tokio::test]
 async fn a_lower_role_on_a_request_is_kept_too_and_a_member_never_was_anything_to_lose() {
   let app = app!();
