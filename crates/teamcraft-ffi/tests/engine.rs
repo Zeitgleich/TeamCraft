@@ -402,12 +402,19 @@ fn config_at(directory: &std::path::Path, key: [u8; 32], server_url: &str) -> Ap
 }
 
 fn temp_dir() -> PathBuf {
+  // nextest runs every test in its own process, where the thread ids repeat: the process id and a
+  // counter keep two tests from sharing a directory (one removed it under the other, or locked its
+  // database).
+  static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
   let nanos = std::time::SystemTime::now()
     .duration_since(std::time::UNIX_EPOCH)
     .unwrap()
     .as_nanos();
-  let directory =
-    std::env::temp_dir().join(format!("teamcraft-ffi-{nanos}-{:?}", std::thread::current().id()));
+  let directory = std::env::temp_dir().join(format!(
+    "teamcraft-ffi-{}-{nanos}-{}",
+    std::process::id(),
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+  ));
   std::fs::create_dir_all(&directory).unwrap();
   directory
 }
