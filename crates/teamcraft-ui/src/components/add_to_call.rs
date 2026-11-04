@@ -297,18 +297,26 @@ pub fn CallMoveBanner() -> impl IntoView {
       .read(|backend| backend.user(user))
       .map_or_else(|| i18n.t("left-in-group-unknown"), |user| user.display_name)
   };
+  // The notetaker as the verified policy names it (e2ee.md §8.2, "In every call").
+  let maybe_notetaker =
+    Memo::new(move |_| state.read(|backend| backend.notetaker_policy().and_then(|policy| policy.maybe_bot)));
   move || {
     let offer = call.move_offer.get().filter(|offer| !offer.is_requested_here)?;
-    let added = offer
-      .added
-      .iter()
-      .map(|user| name_of(*user))
-      .collect::<Vec<_>>()
-      .join(", ");
-    let text = i18n.t_with(
-      "call-move-offer",
-      &[("name", &name_of(offer.by)), ("added", &added)],
-    );
+    let text = if is_notetaker_move(&offer.added, maybe_notetaker.get()) {
+      // Where the audio will go, before the tap that takes the user there.
+      i18n.t_with("call-move-offer-notetaker", &[("name", &name_of(offer.by))])
+    } else {
+      let added = offer
+        .added
+        .iter()
+        .map(|user| name_of(*user))
+        .collect::<Vec<_>>()
+        .join(", ");
+      i18n.t_with(
+        "call-move-offer",
+        &[("name", &name_of(offer.by)), ("added", &added)],
+      )
+    };
     let (from, to) = (offer.from, offer.to);
     Some(view! {
       <div class="call-move-banner" role="status">
@@ -319,6 +327,11 @@ pub fn CallMoveBanner() -> impl IntoView {
       </div>
     })
   }
+}
+
+/// The move added nobody but the notetaker: "Add notetaker" in a DM call.
+fn is_notetaker_move(added: &[UserId], maybe_notetaker: Option<UserId>) -> bool {
+  maybe_notetaker.is_some_and(|bot| added == [bot])
 }
 
 /// Who goes where when people are added to a call.
@@ -386,6 +399,15 @@ mod tests {
     assert_eq!(AddPeople::of(false, Some((meeting, organizer)), me, true), None);
     assert_eq!(AddPeople::of(true, None, me, true), None);
     assert_eq!(AddPeople::of(false, None, me, false), None, "a channel's call");
+  }
+
+  #[test]
+  fn a_move_that_adds_only_the_notetaker_says_so() {
+    let (bot, carol): (UserId, UserId) = (id_from_raw(9), id_from_raw(3));
+    assert!(is_notetaker_move(&[bot], Some(bot)));
+    assert!(!is_notetaker_move(&[bot, carol], Some(bot)), "people too");
+    assert!(!is_notetaker_move(&[carol], Some(bot)));
+    assert!(!is_notetaker_move(&[bot], None), "no notetaker in the policy");
   }
 
   #[test]

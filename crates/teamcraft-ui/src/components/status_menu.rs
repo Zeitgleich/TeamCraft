@@ -73,12 +73,7 @@ pub fn StatusMenu() -> impl IntoView {
   };
 
   let set_presence_until = move |presence: PresenceStatus, maybe_until: Option<TimestampMs>| {
-    state.write(|backend| backend.set_presence_until(presence, maybe_until));
-    let maybe_dnd_until = maybe_until.filter(|_| presence == PresenceStatus::DoNotDisturb);
-    state
-      .settings
-      .prefs
-      .update(|prefs| prefs.notifications.maybe_dnd_until = maybe_dnd_until);
+    state.set_presence_until(presence, maybe_until);
     state.close_overlay();
     focus_account_button();
   };

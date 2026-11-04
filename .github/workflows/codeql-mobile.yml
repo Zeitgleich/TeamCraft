@@ -19,7 +19,8 @@ on:
       - "apps/ios/**"
       - ".github/workflows/codeql-mobile.yml"
   pull_request:
-    types: [opened, synchronize, reopened, labeled]
+    # No `labeled`: ci-label.yml re-runs this when the `ci` label comes after opening.
+    types: [opened, synchronize, reopened]
     paths:
       - "apps/android/**"
       - ".github/workflows/codeql-mobile.yml"
@@ -57,7 +58,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
-          HAS_CI_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci') }}
+          HAS_CI_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci') || github.run_attempt > 1 }}
         run: |
           kotlin='{"language":"java-kotlin","os":"ubuntu-latest","build":"android"}'
           swift='{"language":"swift","os":"macos-26","build":"ios"}'

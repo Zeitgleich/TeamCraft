@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ConversationId, MessageId, PushKind, ThreadId, UserId};
 
 use crate::error::CoreError;
-use crate::push_preview::{PreviewContent, PushPreview};
+use crate::push_preview::{PreviewContent, PreviewGap, PushPreview};
 use crate::records;
 use crate::store::{LocalStore, MessageEdge, Table};
 
@@ -62,6 +62,10 @@ pub fn remember(store: &impl LocalStore, preview: &PushPreview) -> Result<(), Co
   else {
     return Ok(());
   };
+  // A reaction or an edit shows nothing, so there is nothing to show again on opening.
+  if preview.maybe_gap == Some(PreviewGap::Hidden) {
+    return Ok(());
+  }
   let content = NotifiedContent::from(&preview.content);
   if preview.maybe_conversation_name.is_none()
     && preview.maybe_sender_name.is_none()

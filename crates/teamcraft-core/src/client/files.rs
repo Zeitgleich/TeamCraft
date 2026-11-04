@@ -3,7 +3,7 @@
 
 use std::pin::Pin;
 
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::attachment::{AttachmentKey, DEFAULT_CHUNK_SIZE, encrypt_attachment};
 use teamcraft_crypto::backup::Argon2Settings;
@@ -23,6 +23,7 @@ use super::upload_parts::{PartOutcome, PartTarget, PartsUpload, is_multipart};
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
 use crate::records;
+use crate::retry::{Jitter, JitterMode, RetryPolicy, millis};
 use crate::store::{AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageFilter, Table};
 use crate::transfers::TransferGuard;
 
@@ -151,9 +152,11 @@ pub enum RetryCause {
   StorageUnavailable,
 }
 
-/// How uploads that failed on the network are retried. Configurable; the defaults give up after
-/// about a minute of failures (2, 4, 8, 16 and 32 seconds apart) and leave the file to the user's
-/// "Retry", which says why it stopped (#742).
+/// How uploads and downloads that failed on the network are retried, on the shared policy
+/// ([`crate::retry`], #743). Configurable; the defaults give up after about a minute of failures
+/// (2, 4, 8, 16 and 32 seconds apart, each spread by jitter so devices that lost the storage together
+/// don't come back together) and leave the file to the user's "Retry", which says why it stopped
+/// (#742).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UploadRetrySettings {
   /// Wait after the first failed attempt; doubles with each further one.
@@ -162,6 +165,8 @@ pub struct UploadRetrySettings {
   pub retry_max: std::time::Duration,
   /// Failed attempts after which the file waits for the user (shown as failed, with "Retry").
   pub max_attempts: u32,
+  /// How the wait is spread; tests that step a clock by the backoff turn it off.
+  pub jitter: JitterMode,
 }
 
 /// Where an upload reads from.
@@ -183,6 +188,7 @@ impl Default for UploadRetrySettings {
       retry_after: std::time::Duration::from_secs(2),
       retry_max: std::time::Duration::from_secs(60),
       max_attempts: 6,
+      jitter: JitterMode::Equal,
     }
   }
 }
@@ -240,12 +246,12 @@ impl UploadRetry {
       *self = Self::Stalled { attempts, cause };
       return;
     }
-    let base = millis(settings.retry_after);
-    let ceiling = millis(settings.retry_max).max(base);
-    let doublings = attempts.saturating_sub(1).min(32);
-    let backoff = base.saturating_mul(1_i64 << doublings).min(ceiling);
-    let server_wait = maybe_server_wait.map_or(0, |wait| millis(wait).min(ceiling));
-    let wait = backoff.max(server_wait);
+    let policy = RetryPolicy::new(settings.retry_after, settings.retry_max).with_jitter(settings.jitter);
+    let wait = millis(policy.delay(
+      attempts.saturating_sub(1),
+      &mut Jitter::new(OsRng.next_u64()),
+      maybe_server_wait,
+    ));
     *self = Self::Waiting {
       attempts,
       retry_at_ms: now_ms.saturating_add(wait),
@@ -273,10 +279,6 @@ impl RetryCause {
   fn is_network(&self) -> bool {
     *self == Self::Network
   }
-}
-
-fn millis(duration: std::time::Duration) -> i64 {
-  i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 /// Largest file the browser saves: it holds the decrypted bytes in memory until the `<a download>`
@@ -893,10 +895,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // An expired access token is the app's to renew; it isn't the file's failure.
         if !error.is_sign_in_required() {
           let now = self.now_ms();
-          let maybe_server_wait = match &error {
-            CoreError::Api(api) => api.retry_after(),
-            _ => None,
-          };
+          let maybe_server_wait = crate::retry::server_wait(&error);
           upload.files[index].retry.record_failure_after(
             now,
             &self.settings.upload_retry,
@@ -1805,12 +1804,40 @@ mod tests {
   mod upload_retry {
     use super::*;
 
+    fn no_jitter() -> UploadRetrySettings {
+      UploadRetrySettings {
+        jitter: JitterMode::None,
+        ..UploadRetrySettings::default()
+      }
+    }
+
+    #[test]
+    fn jitter_spreads_the_wait_between_half_and_all_of_the_backoff() {
+      let settings = UploadRetrySettings::default();
+      let waits: std::collections::HashSet<i64> = (0..40)
+        .map(|_| {
+          let mut retry = UploadRetry::default();
+          retry.record_failure(0, &settings, RetryCause::StorageUnavailable);
+          match retry {
+            UploadRetry::Waiting { retry_at_ms, .. } => retry_at_ms,
+            other => panic!("still retrying: {other:?}"),
+          }
+        })
+        .collect();
+      assert!(
+        waits.iter().all(|wait| (1_000..=2_000).contains(wait)),
+        "first wait of 2 s, half to all of it: {waits:?}"
+      );
+      assert!(waits.len() > 1, "devices don't all come back at the same moment");
+    }
+
     #[test]
     fn waits_double_up_to_the_ceiling_and_stop_at_the_cap() {
       let settings = UploadRetrySettings {
         retry_after: std::time::Duration::from_secs(2),
         retry_max: std::time::Duration::from_secs(10),
         max_attempts: 5,
+        jitter: JitterMode::None,
       };
       let mut retry = UploadRetry::default();
       assert!(retry.is_due(0));
@@ -1843,7 +1870,7 @@ mod tests {
 
     #[test]
     fn the_defaults_give_up_after_about_a_minute_never_endlessly() {
-      let settings = UploadRetrySettings::default();
+      let settings = no_jitter();
       let mut retry = UploadRetry::default();
       let mut now = 0;
       let mut waited = 0;
@@ -1861,7 +1888,7 @@ mod tests {
 
     #[test]
     fn the_servers_retry_after_is_honoured_but_capped() {
-      let settings = UploadRetrySettings::default();
+      let settings = no_jitter();
       let wait_after = |maybe_server_wait: Option<u64>| {
         let mut retry = UploadRetry::default();
         retry.record_failure_after(

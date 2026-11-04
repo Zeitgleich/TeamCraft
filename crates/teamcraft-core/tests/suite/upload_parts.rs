@@ -222,6 +222,7 @@ async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
 
 fn with_file(conversation: ConversationId, name: &str, source: FileSource) -> OutgoingMessage {
   OutgoingMessage {
+    maybe_client_message_id: None,
     conversation,
     maybe_thread: None,
     body: String::new(),

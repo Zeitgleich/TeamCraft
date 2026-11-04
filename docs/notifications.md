@@ -302,8 +302,8 @@ presence `until`. Every client checks DND again at the device's own UTC offset.
 
 **Android.** Every high-priority wake-up shows or updates something, or FCM lowers the app's
 priority: a duplicate re-posts the conversation's notification silently, a ring the device suppresses
-leaves a silent "missed call" note, and only a message the device's own mute or DND check stops posts
-nothing (counted in the diagnostics). A wake-up that takes longer than 8 s continues as expedited work.
+leaves a silent "missed call" note, a hidden change updates what shows or leaves a short quiet note, and
+only a message the device's own mute or DND check stops posts nothing (counted in the diagnostics). A wake-up that takes longer than 8 s continues as expedited work.
 The app never asks to be exempted from battery optimisation (FCM high priority is delivered in Doze);
 with UnifiedPush it is the distributor that needs the exemption, and the diagnostics point there. A
 thread `dismiss` removes that thread's lines up to the message; a conversation `dismiss` removes the
@@ -328,12 +328,68 @@ audio, file name). How the core gets there, within `PUSH_PREVIEW_BUDGET` (7 s; F
 
 Whatever is known by then is shown: "New message" under the sender's name when the text could not be
 read, never nothing. `PushNotification.maybe_gap` says why less was shown (no session, not decrypted,
-timed out, not showable, workspace policy, device setting); the diagnostics show the last reason and
-the app logs it, never the content. A high-priority FCM wake-up that can't be opened at all shows a
-plain "New message". When the text could not be read in time (timed out, not decrypted, no session),
-the app opens the same wake-up again after 30 s and 60 s once a network is there
-(`notification_for_push_retry`, not counted as a received push) and fills the line in, silently and
-under the same notification ID; a notification read or swiped away meanwhile is not brought back.
+timed out, not showable, hidden, workspace policy, device setting); the diagnostics show the last
+reason and the app logs it, never the content.
+
+**Not every wake-up is a message (issue #1249).** Reactions, edits, deletes, pins, bookmarks, system
+notes, search index segments, edits of a channel's notes page and other changes to a conversation are encrypted messages like any
+other, so the server can't tell them apart and wakes the device for them too (routing only knows the
+recipient's settings). Once the device has read one, the core names it (`maybe_gap` hidden) and Android
+announces nothing: it updates the conversation's notification silently, or takes away a placeholder
+that stood for it. Being added to a conversation is the one change that still says "New message", to
+the person added only, as far as routing wakes them at all (a channel on the default "mentions" level
+doesn't, as before; the channel shows on the next sync). Requests to join a channel don't go through
+this path: they come over the gateway (`JoinRequestWatcher`), not as messages. Pictures and files without a caption are a text message with an empty body: they
+show their label like a single file. A kind only a newer client knows may be a message, so it
+keeps saying "New message" on the phone. Android only: iOS can't drop a notification without the
+filtering entitlement and doesn't read the gap yet, and a browser must show something for every push.
+
+| Android ends on                             | Says                     | Bridges, Auto | Later                                   |
+|---------------------------------------------|--------------------------|---------------|-----------------------------------------|
+| Text, or a file with or without a caption   | The message              | yes           | -                                       |
+| Sender-only setting, app lock, policy       | "New message from Alice" | yes           | - (chosen)                              |
+| Nothing setting or policy                   | "New message"            | yes           | - (chosen)                              |
+| Read before it was looked at (`is_read`)    | Nothing, its line goes   | no            | -                                       |
+| Reaction, edit, delete, other change        | Nothing new              | no            | -                                       |
+| A kind this version doesn't know            | "New message"            | no            | -                                       |
+| Not read in time: placeholder               | "New message"            | no            | Filled in (below)                       |
+| Didn't open at all (store, no account open) | "New message", no names  | no            | Replaced by the real one, up to 4 tries |
+
+`PushStats` counts these paths, and FCM messages delivered below the priority they were sent with
+(`FCM_DEPRIORITIZED`), and the app logs and exports them with the diagnostics ("Notification
+paths: SHOWN=12 HIDDEN=3"); each opened wake-up is also a line in the core's log (`push opened`: the
+gap, how long it ran, whether the client was idle, and why a fetch failed by class), so a phone's
+rates can be read off an export. Never content.
+
+**Filling a placeholder in.** When the text could not be read in time (timed out, not decrypted, no
+session), the app tries once more right away (`notification_for_push_retry`, not counted as a received
+push; at most 5 s), then opens the same wake-up again after 30 s, 2 min, 10 min and 1 h once a network
+is there. Only being signed out ends that chain: a failed attempt, a timeout or a closed core lead to
+the next one. Those are ordinary WorkManager jobs, so a dozing phone may run them in its next window,
+which is the reason for the try right away. A placeholder that went meanwhile costs no fetch. At most
+32 chains wait at a time (managed configuration `max_push_retry_chains`), so a broken store can't pile
+up jobs. Independently, while a placeholder shows, every change of the store and every start of the
+process look in the store (`notification_from_store`, no network): whatever the sync brought fills it
+in, however late. The sealed wake-up stays with the placeholder's line for this, so it survives a
+restart, and it goes with the line. A notification read or swiped away is not brought back, also not
+by the expedited job of a receiver that comes after its run: that one opens the wake-up as a later
+look (not counted again), and a repeat with no line left shows nothing. A placeholder that turned out
+to be a reaction or an edit goes. Android drops updates of an app that posts more than about 5
+notifications a second, without saying so (seen on the emulator, "Shedding" in the system log). Every
+message notification carries a rising revision: 1.5 s after a conversation's last post the system's
+copy is looked at, and what didn't get through is posted once more, alerting only if the post that
+alerted is what got lost. One gap stays: an alert dropped right before a silent post that gets through
+(a picture arriving) can't be told apart from one that went out, and isn't repeated.
+
+**A late look checks first.** Each later look, not the try right away with its tight bound (a text read
+must not be lost to the wait), asks the server how far the user has read, while the client is idle (the sync doesn't run in the background and a `dismiss` can be late), and `is_read` then
+takes the line away instead of filling it in. Thread messages rely on the `dismiss`: a thread's read
+position isn't in the conversation's record. A wake-up that opens only on a retry never rings: the
+ring is over, so it leaves a missed-call note and never reaches Telecom; no clock is involved, since
+the first retry is 30 s later and a ring lasts 30 s by default (`ring_timeout_secs`). With a longer
+configured ring, one still going is told as missed. The expedited job reopening a wake-up compares the
+server's send time with the device's clock over 45 s; a first delivery always rings, because the push
+service's time to live is the ring's own and a wrong clock must not silence a real call.
 
 **Android on watches (issue #739).** Wear OS and vendor bridges (Garmin Connect, Galaxy Wearable)
 mirror the phone's notifications. A message is posted once, after the wake-up was opened, and every
@@ -341,7 +397,7 @@ later change (more messages, a late decryption, an avatar, a setting) replaces i
 and ID with `setOnlyAlertOnce`, so a watch alerts once per message. The notification carries
 MessagingStyle (a `Person` per sender with name and avatar, conversation title, group conversation
 for channels and chats with several senders) and also plain title and text for bridges that read
-only those; it is not local-only, has the conversation's shortcut and `LocusId`, and offers reply
+only those; it is not local-only once it has its text, has the conversation's shortcut and `LocusId`, and offers reply
 (remote input), mark as read and mute. The group summary is posted only while two or more
 conversations show (bridges mirror a summary as a second notification), never alerts
 (`GROUP_ALERT_CHILDREN`), names the conversations ("Project A, Bob") or counts the messages when names
@@ -377,11 +433,54 @@ message and a loading line, until the store has the conversation and has caught 
 the header reads "Loading the conversation…". On iOS a tap opens such a conversation only when a
 record exists. On the network the focused conversation's members come before its content (#1015).
 
-**Watches and bands (Android).** A message the app couldn't read in time shows as "New message" and
-is filled in by a retry. That placeholder is posted local-only, so watch and band bridges (Wear OS,
-Garmin, Mi Band apps) don't mirror it. When the text arrives, the notification is posted again,
-bridged and without `setOnlyAlertOnce`, because bridges skip updates that carry it. It stays silent
-on the phone, so the band shows the message, never "New message".
+**Watches, bands and Android Auto (Android).** Watch and band bridges (Wear OS, Garmin, Mi Band apps)
+and Android Auto read what the phone posts. They must not get "New message" for a message that has
+more (#739, #1093), and Android Auto must get the text with an alert to announce it (#1250: MessagingStyle
+with a `Person`, reply with one `RemoteInput`, mark as read, both with their semantic actions and showing
+no UI; `NotificationsOnDeviceTest` pins these). The rule, in order:
+
+| When                                   | Phone                   | Bridges and Android Auto              |
+|----------------------------------------|-------------------------|---------------------------------------|
+| The text is read on the first try      | Alerts                  | Show it; Auto announces               |
+| Not read: placeholder, local-only      | Silent, the alert waits | Nothing                               |
+| Read during the hold                   | Alerts once, with text  | Show it; Auto announces               |
+| Hold ended without the text            | Alerts, "New message"   | Nothing                               |
+| Read after that                        | Silent update           | Show it as new; Auto may only list it |
+| Read within 5 min, projecting to a car | Alerts again            | Show it; Auto announces               |
+| Never read                             | Stays "New message"     | Nothing                               |
+
+A hold always ends: with the text; after any failed try; at its bound (20 s, in a car 2 min), which a
+job without a network constraint enforces, also after the process died; when the phone stops
+projecting; at the next process start. Urgent messages aren't held, they alert at once with the
+placeholder. How a hold ends looks at the state then, not just the time:
+
+| At the end of a hold                                    | What happens                |
+|---------------------------------------------------------|-----------------------------|
+| Read meanwhile                                          | The line goes               |
+| Muted or DND meanwhile                                  | Silent; a text fills in too |
+| Older than 5 min (Doze stretched the job, or a restart) | Silent                      |
+| The user is in the app                                  | Silent                      |
+| Otherwise                                               | The phone alerts            |
+
+Times on the device are on `elapsedRealtime`, so a wrong clock doesn't matter; a phone that restarted
+counts as too old. Past 5 min a text doesn't alert either, in a car neither: it is new to bridges and
+silent on the phone. A message the sender sent silently never alerts, and a keyword mention found in
+the text moves the notification to the mentions channel.
+
+Trade-offs: a message read only after the hold reaches a band as a new notification without the band
+buzzing out of step, but off the road Android Auto isn't told; a message nobody can read (a device
+that must re-link) is never announced in the car and shows only on the phone; an older line that stays
+a placeholder under a newer message with text does travel with the conversation's MessagingStyle. A
+filled-in notification is posted without `setOnlyAlertOnce`, because bridges skip updates that carry it.
+
+**FCM's rule for what shows nothing.** [FCM](https://firebase.google.com/docs/cloud-messaging/android-message-priority)
+may deprioritise an app's high-priority messages "if FCM detects a pattern" of them not leading to
+user-facing notifications, judged over 7 days per app instance; it publishes no threshold and doesn't
+ask for one notification per message. The server can't send hidden changes with normal priority,
+because it can't tell them apart, so a high-priority wake-up that was a hidden change, or was read
+already, with no notification to update shows a silent, local-only note ("Checking for new messages…")
+for 3 s on the low-importance channel, at most one a minute, so a burst shows one. UnifiedPush has no
+such rule and shows nothing.
 
 **iOS.** `call` arrives as a mutable alert through the notification service extension; without the
 filtering entitlement it shows as a time-sensitive "incoming call" alert with answer and decline, with

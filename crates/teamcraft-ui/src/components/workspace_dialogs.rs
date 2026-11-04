@@ -9,7 +9,7 @@ use teamcraft_client_api::actions::{
   BrowsableChannel, BrowseJoin, CategoryChoice, CategoryInfo, ChannelChanges, NewChannel, NewSpace,
   SpaceChanges,
 };
-use teamcraft_client_api::model::{AppointerAuthority, ChannelMember, ChannelRole};
+use teamcraft_client_api::model::{AppointerAuthority, ChannelMember, ChannelRole, ChannelRolesReview};
 use teamcraft_client_api::role_rules::{
   RoleTarget, SpaceStanding, assignable_roles, can_manage_channel_roles,
 };
@@ -628,6 +628,14 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     roles.track();
     state.read(|backend| backend.can_sign_channel_roles(conversation))
   });
+  let are_roles_unverified = Memo::new(move |_| {
+    roles.track();
+    state.read(|backend| backend.are_channel_roles_unverified(conversation))
+  });
+  let roles_review = Memo::new(move |_| {
+    roles.track();
+    state.read(|backend| backend.channel_roles_review(conversation))
+  });
   view! {
     <div class="settings-row">
       <span class="muted-text">{move || i18n.t_count("members-count", members.with(Vec::len))}</span>
@@ -640,6 +648,13 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
       </Show>
     </div>
     <p class="hint">{move || if can_manage_roles.get() { i18n.t("channel-roles-hint") } else { i18n.t("channel-roles-read-only") }}</p>
+    // Somebody who can do something about it reads that in the review instead.
+    <Show when=move || are_roles_unverified.get() && roles_review.with(Option::is_none) fallback=|| ()>
+      <p class="hint">{move || i18n.t("channel-roles-unverified")}</p>
+    </Show>
+    {move || roles_review.get().is_some().then(|| view! {
+      <ChannelRolesReviewPanel conversation=conversation roles=roles users=members review=roles_review />
+    })}
     <ChannelJoinRequests conversation=conversation />
     <ul class="settings-member-list">
       <For each=move || members.get() key=|user| user.id let:user>
@@ -647,6 +662,155 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
       </For>
     </ul>
   }
+}
+
+/// A workspace admin's way to sign a channel's roles where this device can't vouch for them: their
+/// signature counts for every role it lists on every member's device, so they sign the whole list
+/// as they see it, never one role on top of a snapshot they didn't see (e2ee.md §4.6.1). The list is
+/// the server's word and names are its directory's, so what this device's snapshot doesn't have is
+/// marked, and somebody without a name can't be signed.
+#[component]
+fn ChannelRolesReviewPanel(
+  conversation: ConversationId,
+  roles: Memo<Vec<ChannelMember>>,
+  users: Memo<Vec<User>>,
+  review: Memo<Option<ChannelRolesReview>>,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let is_reviewing = RwSignal::new(false);
+  let signing = PendingAction::new();
+  let maybe_signed_at_cursor = RwSignal::new(None::<u64>);
+  let rows = Memo::new(move |_| {
+    let snapshot = review.with(|maybe| {
+      maybe
+        .as_ref()
+        .map(|found| found.snapshot.clone())
+        .unwrap_or_default()
+    });
+    roles.with(|list| users.with(|known| role_review_rows(list, known, &snapshot)))
+  });
+  let refusal = Memo::new(move |_| rows.with(|list| role_review_refusal(list)));
+  let has_changed_since = Memo::new(move |_| {
+    let cursor = review.with(|maybe| maybe.as_ref().map(|found| found.log_cursor));
+    maybe_signed_at_cursor.get().is_some() && maybe_signed_at_cursor.get() != cursor
+  });
+  let has_new = Memo::new(move |_| rows.with(|list| list.iter().any(|row| row.is_new)));
+  // The button that opened the list is gone: the focus goes with the content.
+  let list_ref = NodeRef::<leptos::html::Ul>::new();
+  Effect::new(move |_| {
+    if let Some(list) = list_ref.get() {
+      let _ = list.focus();
+    }
+  });
+  view! {
+    <section class="role-review" aria-labelledby="role-review-title">
+      <h4 id="role-review-title" class="join-requests-title">{move || i18n.t("channel-roles-review-title")}</h4>
+      <p class="hint">{move || i18n.t("channel-roles-review-hint")}</p>
+      <Show
+        when=move || is_reviewing.get()
+        fallback=move || view! {
+          <div class="role-review-actions">
+            <button type="button" class="btn btn-small" on:click=move |_| is_reviewing.set(true)>
+              {move || i18n.t("channel-roles-review-action")}
+            </button>
+          </div>
+        }
+      >
+        <ul class="settings-member-list role-review-list" tabindex="-1" node_ref=list_ref>
+          <For each=move || rows.get() key=|row| row.clone() let:row>
+            <li class="settings-member">
+              {match row.maybe_name.clone() {
+                Some(name) => view! { <bdi class="member-name" translate="no">{name}</bdi> }.into_any(),
+                None => view! { <span class="member-name muted-text">{move || i18n.t("channel-roles-review-unknown")}</span> }.into_any(),
+              }}
+              <span class="grow"></span>
+              {row.is_new.then(|| view! {
+                <span class="badge badge-warn">{move || i18n.t("channel-roles-review-new")}</span>
+              })}
+              <span class="badge">{move || i18n.t(channel_role_key(&row.role))}</span>
+            </li>
+          </For>
+        </ul>
+        <Show when=move || has_new.get() fallback=|| ()>
+          <p class="hint">{move || i18n.t("channel-roles-review-new-hint")}</p>
+        </Show>
+        {move || refusal.get().map(|key| view! { <p role="alert" class="hint">{move || i18n.t(key)}</p> })}
+        <Show when=move || has_changed_since.get() fallback=|| ()>
+          <p role="alert" class="hint">{move || i18n.t("channel-roles-review-changed")}</p>
+        </Show>
+        <div class="role-review-actions">
+          <PendingButton
+            class="btn btn-small btn-primary"
+            pending=signing
+            is_disabled=Signal::derive(move || refusal.get().is_some())
+            on_click=move |_| {
+              let Some(at_cursor) = review.with(|maybe| maybe.as_ref().map(|found| found.log_cursor)) else {
+                return;
+              };
+              maybe_signed_at_cursor.set(Some(at_cursor));
+              let reviewed: Vec<_> = rows.with(|list| {
+                list.iter().map(|row| (row.user, row.role.clone())).collect()
+              });
+              signing.run(move || {
+                state.write(|backend| backend.sign_reviewed_channel_roles(conversation, reviewed, at_cursor))
+              });
+            }
+          >
+            {move || i18n.t("channel-roles-review-confirm")}
+          </PendingButton>
+          <button type="button" class="btn btn-small" on:click=move |_| is_reviewing.set(false)>{move || i18n.t("cancel")}</button>
+        </div>
+        <FailureNote pending=signing />
+      </Show>
+    </section>
+  }
+}
+
+/// One role in the list a workspace admin reviews.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct RoleReviewRow {
+  user: UserId,
+  role: ChannelRole,
+  /// `None`: the member list names nobody for this role, so nobody can look at who it is.
+  maybe_name: Option<String>,
+  /// This device's snapshot doesn't give this person this role: the server's word alone.
+  is_new: bool,
+}
+
+/// The admins and moderators the member list shows, against this device's snapshot.
+fn role_review_rows(
+  roles: &[ChannelMember],
+  users: &[User],
+  snapshot: &[(UserId, ChannelRole)],
+) -> Vec<RoleReviewRow> {
+  roles
+    .iter()
+    .filter(|member| member.role != ChannelRole::Member)
+    .map(|member| RoleReviewRow {
+      user: member.user,
+      role: member.role.clone(),
+      maybe_name: users
+        .iter()
+        .find(|user| user.id == member.user && !user.display_name.trim().is_empty())
+        .map(|user| user.display_name.clone()),
+      is_new: !snapshot
+        .iter()
+        .any(|(user, role)| *user == member.user && *role == member.role),
+    })
+    .collect()
+}
+
+/// Why this list can't be signed (an i18n key): nobody signs a role for somebody they can't see, and
+/// a channel keeps an admin.
+fn role_review_refusal(rows: &[RoleReviewRow]) -> Option<&'static str> {
+  if rows.iter().any(|row| row.maybe_name.is_none()) {
+    return Some("channel-roles-review-unknown-refused");
+  }
+  if !rows.iter().any(|row| row.role == ChannelRole::Admin) {
+    return Some("channel-roles-review-no-admin");
+  }
+  None
 }
 
 #[component]
@@ -2157,6 +2321,96 @@ mod tests {
     assert_eq!(distinct.len(), 6);
     assert!(appointer_authority_key(AppointerAuthority::WorkspaceAdmin).contains("workspace-admin"));
     assert!(appointer_unnamed_key(AppointerAuthority::ChannelAdmin).contains("channel-admin"));
+  }
+
+  mod role_review {
+    use teamcraft_proto::{Id, Snowflake};
+
+    use super::*;
+
+    fn id(raw: i64) -> UserId {
+      UserId::from_snowflake(Snowflake::new(raw).unwrap())
+    }
+
+    fn member(raw: i64, role: ChannelRole) -> ChannelMember {
+      ChannelMember {
+        user: id(raw),
+        role,
+        is_role_signed: false,
+        maybe_appointer: None,
+      }
+    }
+
+    fn row(raw: i64, role: ChannelRole, name: Option<&str>) -> RoleReviewRow {
+      RoleReviewRow {
+        user: id(raw),
+        role,
+        maybe_name: name.map(str::to_owned),
+        is_new: false,
+      }
+    }
+
+    #[test]
+    fn who_this_device_s_snapshot_does_not_have_in_that_role_is_marked_new() {
+      let roles = [
+        member(1, ChannelRole::Admin),
+        member(2, ChannelRole::Admin),
+        member(3, ChannelRole::Moderator),
+        member(4, ChannelRole::Member),
+      ];
+      let snapshot = [(id(1), ChannelRole::Admin), (id(3), ChannelRole::Admin)];
+      let rows = role_review_rows(&roles, &[], &snapshot);
+      let new: Vec<_> = rows.iter().map(|row| (row.user, row.is_new)).collect();
+      assert_eq!(
+        new,
+        vec![(id(1), false), (id(2), true), (id(3), true)],
+        "somebody it doesn't name, a role it doesn't give, and no members"
+      );
+    }
+
+    #[test]
+    fn somebody_the_member_list_has_no_name_for_can_not_be_signed() {
+      let rows = [
+        row(1, ChannelRole::Admin, Some("Alice")),
+        row(2, ChannelRole::Moderator, None),
+      ];
+      assert_eq!(
+        role_review_refusal(&rows),
+        Some("channel-roles-review-unknown-refused")
+      );
+    }
+
+    #[test]
+    fn a_list_without_an_admin_can_not_be_signed_and_a_full_one_can() {
+      let moderators = [row(2, ChannelRole::Moderator, Some("Bob"))];
+      assert_eq!(
+        role_review_refusal(&moderators),
+        Some("channel-roles-review-no-admin")
+      );
+      assert_eq!(role_review_refusal(&[]), Some("channel-roles-review-no-admin"));
+      let full = [row(1, ChannelRole::Admin, Some("Alice"))];
+      assert_eq!(role_review_refusal(&full), None);
+    }
+
+    #[test]
+    fn every_review_text_is_there_in_every_language() {
+      for lang in ["en", "de"] {
+        let source =
+          std::fs::read_to_string(format!("{}/i18n/{lang}/channels.ftl", env!("CARGO_MANIFEST_DIR")))
+            .expect("the channels bundle");
+        for key in [
+          "channel-roles-review-title",
+          "channel-roles-review-new",
+          "channel-roles-review-new-hint",
+          "channel-roles-review-unknown",
+          "channel-roles-review-unknown-refused",
+          "channel-roles-review-no-admin",
+          "channel-roles-review-changed",
+        ] {
+          assert!(source.contains(&format!("\n{key} = ")), "{lang} lacks {key}");
+        }
+      }
+    }
   }
 
   #[test]

@@ -972,6 +972,7 @@ fn on_message_action(
       }
       state.write(|backend| {
         backend.send_message(OutgoingMessage {
+          maybe_client_message_id: None,
           conversation,
           maybe_thread: None,
           body: text,

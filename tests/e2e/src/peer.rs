@@ -44,6 +44,17 @@ impl Peer {
 impl<S: LocalStore + Clone> Peer<S> {
   /// Enrolls the dev user's first device on `store` and connects its gateway.
   pub async fn enroll_with_store(stack: &Stack, user: &str, device_name: &str, store: S) -> Peer<S> {
+    Self::enroll_with_settings(stack, user, device_name, store, ClientSettings::default()).await
+  }
+
+  /// [`Self::enroll_with_store`] with client settings of the test's own (short retry waits).
+  pub async fn enroll_with_settings(
+    stack: &Stack,
+    user: &str,
+    device_name: &str,
+    store: S,
+    settings: ClientSettings,
+  ) -> Peer<S> {
     let tokens = stack.tokens(user);
     let api = HttpServerApi::new(stack.base_url.clone(), tokens.clone());
     let mut client = PendingEnrollment::new()
@@ -51,7 +62,7 @@ impl<S: LocalStore + Clone> Peer<S> {
         api,
         store.clone(),
         Box::new(SystemClock),
-        ClientSettings::default(),
+        settings,
         enrollment_options(device_name),
       )
       .await

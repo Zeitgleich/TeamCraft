@@ -642,6 +642,45 @@ impl TeamCraft {
       .await
   }
 
+  /// [`Self::notification_for_push_retry`] for a later look with time to spare: also asks the server
+  /// how far the user has read, which can take seconds on a slow link.
+  pub async fn notification_for_late_push(
+    &self,
+    payload: Vec<u8>,
+    utc_offset_minutes: i16,
+  ) -> Result<PushNotification, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(engine.notification_for_push(
+          payload,
+          utc_offset_minutes,
+          PushOpening::LateLook,
+          PushReader::App,
+        ))
+      })
+      .await
+  }
+
+  /// [`Self::notification_for_push`] from what the store holds, without the network: whether the
+  /// sync brought the message of a notification that still shows a placeholder (issue #1249). The
+  /// gap names [`NotificationGap::NoSession`] while the store doesn't have it.
+  pub async fn notification_from_store(
+    &self,
+    payload: Vec<u8>,
+    utc_offset_minutes: i16,
+  ) -> Result<PushNotification, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(engine.notification_for_push(
+          payload,
+          utc_offset_minutes,
+          PushOpening::StoreOnly,
+          PushReader::App,
+        ))
+      })
+      .await
+  }
+
   /// What the newest notification showed of a conversation (its name, the notified message),
   /// while this device hasn't caught it up yet: the conversation screen shows it at once instead of
   /// an empty screen without a name (issue #1065). `None` once the store has it all.

@@ -26,13 +26,13 @@ use teamcraft_client_api::model::{
   HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue, Message,
   MessageKind, OlderHistory, PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction,
   SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary,
-  TimestampMs, TypingNow, UnseenReactions, User, UserId, hue_from_hex,
+  TimestampMs, TypingNow, UnseenReactions, User, UserId, hue_from_hex, pending_message_id,
 };
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   AttachmentId, ClientMessageId, ConversationKind as ConversationKindProto, ConversationResponse,
   ConversationVisibility, Id, InviteId, JoinPolicy, ListConversationMembersResponse, ListInvitesResponse,
-  MessageId, NotificationLevel, PresenceState, Snowflake, SpaceResponse, SpaceRole, UserKind, UserSummary,
+  MessageId, NotificationLevel, PresenceState, SpaceResponse, SpaceRole, UserKind, UserSummary,
 };
 use teamcraft_proto::{BackgroundId, OrgBackgroundId};
 use teamcraft_proto::{
@@ -417,6 +417,12 @@ pub enum CoreCommand {
   ConfirmChannelRole {
     conversation: ConversationId,
     user: UserId,
+  },
+  /// Signs exactly the roles a workspace admin looked at (e2ee.md §4.6.1).
+  SignReviewedChannelRoles {
+    conversation: ConversationId,
+    roles: Vec<(UserId, teamcraft_proto::ChannelRole)>,
+    at_cursor: u64,
   },
   /// A conversation's members, for a member list that has none yet.
   RefreshMembers {
@@ -1560,6 +1566,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
   /// `@username` mentions of conversation members in a message body.
   pub(crate) fn mentions_in(&self, conversation: ConversationId, body: &str) -> Vec<UserId> {
+    // Most messages mention nobody: sending them reads neither the user directory nor the members.
+    if !body.contains('@') {
+      return Vec::new();
+    }
     let users = self.summaries();
     let members = self.members(conversation);
     let mut mentions: Vec<UserId> = body
@@ -1588,12 +1598,35 @@ impl<S: LocalStore> CoreChatBackend<S> {
     maybe_thread: Option<ThreadId>,
     content: MessageContent,
   ) -> Option<ClientMessageId> {
+    self.enqueue_as(conversation, maybe_thread, content, None)
+  }
+
+  /// [`Self::enqueue`] under the ID the UI picked and already shows the row by (issue #778). A
+  /// message of that ID that is stored already (the same action twice, a retry after a lost answer)
+  /// is not written again: it may be sent or confirmed by now.
+  pub(crate) fn enqueue_as(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+    content: MessageContent,
+    maybe_id: Option<ClientMessageId>,
+  ) -> Option<ClientMessageId> {
     let draft = Draft {
       conversation_id: conversation,
       maybe_thread_id: maybe_thread,
       content,
     };
-    match records::enqueue_message(&self.store, self.me, self.clock.now_ms(), draft) {
+    let written = match maybe_id {
+      Some(id) => match self.store.message(conversation, id) {
+        Ok(Some(_)) => return Some(id),
+        Ok(None) => {
+          records::enqueue_message_as(&self.store, self.me, self.clock.now_ms(), draft, id).map(|()| id)
+        },
+        Err(error) => Err(CoreError::from(error)),
+      },
+      None => records::enqueue_message(&self.store, self.me, self.clock.now_ms(), draft),
+    };
+    match written {
       Ok(id) => {
         self.command(CoreCommand::FlushOutbox);
         Some(id)
@@ -2870,6 +2903,38 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_can_sign_channel_roles(conversation)
   }
 
+  fn channel_roles_review(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::model::ChannelRolesReview> {
+    self.ui_channel_roles_review(conversation)
+  }
+
+  fn sign_reviewed_channel_roles(
+    &self,
+    conversation: ConversationId,
+    roles: Vec<(UserId, teamcraft_proto::ChannelRole)>,
+    at_cursor: u64,
+  ) {
+    self.command(CoreCommand::SignReviewedChannelRoles {
+      conversation,
+      roles,
+      at_cursor,
+    });
+  }
+
+  fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {
+    let signed: crate::channel_roles::ChannelRoleState = self.read(
+      records::get_json(
+        &self.store,
+        Table::Workspace,
+        &crate::client::channel_roles_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    signed.has_unverified_stretch()
+  }
+
   fn set_space_role(&self, space: SpaceId, user: UserId, role: SpaceRole) {
     self.command(CoreCommand::SetSpaceRole { space, user, role });
   }
@@ -3390,13 +3455,7 @@ pub(crate) fn ui_message_id(message: &StoredMessage) -> MessageId {
   if let Some(at) = message.line_position() {
     return at;
   }
-  let mut bytes = [0u8; 8];
-  bytes.copy_from_slice(&message.client_message_id.as_bytes()[..8]);
-  let raw = (i64::from_be_bytes(bytes) & (PENDING_ID_BIT - 1)) | PENDING_ID_BIT;
-  // Invariant: `raw` is positive (bit 63 cleared above), so `Snowflake::new` accepts it.
-  Snowflake::new(raw)
-    .map(MessageId::from_snowflake)
-    .unwrap_or_else(|_| unreachable!("positive by construction"))
+  pending_message_id(message.client_message_id)
 }
 
 /// What the apps show for a message this device can't read (issue #888).
@@ -3568,6 +3627,21 @@ mod tests {
           None
         );
       }
+    }
+
+    /// The log has a stretch this device can't verify: the role shows as the server lists it, marked
+    /// as not signed, with nobody named.
+    #[test]
+    fn an_unverified_stretch_shows_every_role_as_not_signed() {
+      let mut state = state_with(AppointmentAuthority::WorkspaceAdmin, true);
+      state.maybe_unverified_from = Some(2);
+      state.is_workspace_anchored = false;
+      let view = channel_member_view(&state, id(2), ChannelRole::Admin, false);
+      assert_eq!(view.role, ChannelRole::Admin);
+      assert!(!view.is_role_signed);
+      assert_eq!(view.maybe_appointer, None);
+      // Somebody without a role is nothing to mark.
+      assert!(channel_member_view(&state, id(3), ChannelRole::Member, false).is_role_signed);
     }
 
     /// Bob (2) is a signed admin, appointed by user 9 on `authority`.
@@ -4159,6 +4233,93 @@ mod tests {
         },
       ]
     );
+  }
+
+  mod chosen_ids {
+    use super::*;
+    use teamcraft_client_api::actions::MessagePriority;
+    use teamcraft_client_api::model::pending_message_id;
+
+    #[test]
+    fn a_message_keeps_the_id_the_ui_showed_its_row_by() {
+      let (backend, conversation) = backend();
+      let chosen = ClientMessageId::from_bytes([7; 16]);
+
+      backend.send_message(outgoing(conversation, "hello", Some(chosen)));
+
+      let shown = backend.messages(conversation, 0, 10);
+      assert_eq!(shown.len(), 1);
+      assert_eq!(shown[0].id, pending_message_id(chosen));
+      assert_eq!(shown[0].body, "hello");
+    }
+
+    #[test]
+    fn the_same_id_twice_is_one_message() {
+      let (backend, conversation) = backend();
+      let chosen = ClientMessageId::from_bytes([7; 16]);
+
+      backend.send_message(outgoing(conversation, "hello", Some(chosen)));
+      backend.send_message(outgoing(conversation, "hello", Some(chosen)));
+
+      assert_eq!(backend.message_count(conversation), 1);
+      assert_eq!(records::outbox(backend.store_ref()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_message_already_sent_is_not_queued_again() {
+      let (backend, conversation) = backend();
+      let chosen = ClientMessageId::from_bytes([7; 16]);
+      backend.send_message(outgoing(conversation, "hello", Some(chosen)));
+      // What a flush does once the server took it: the outbox entry goes, the message stays.
+      let entry = records::outbox(backend.store_ref()).unwrap().remove(0);
+      backend
+        .store_ref()
+        .delete(
+          Table::Outbox,
+          &records::outbox_key(conversation, entry.client_message_id),
+        )
+        .unwrap();
+
+      backend.send_message(outgoing(conversation, "hello", Some(chosen)));
+
+      assert!(records::outbox(backend.store_ref()).unwrap().is_empty());
+      assert_eq!(backend.message_count(conversation), 1);
+    }
+
+    #[test]
+    fn without_an_id_every_message_gets_its_own() {
+      let (backend, conversation) = backend();
+
+      backend.send_message(outgoing(conversation, "one", None));
+      backend.send_message(outgoing(conversation, "two", None));
+
+      assert_eq!(backend.message_count(conversation), 2);
+    }
+
+    fn backend() -> (CoreChatBackend<std::sync::Arc<MemoryStore>>, ConversationId) {
+      let store = std::sync::Arc::new(MemoryStore::new());
+      let backend = CoreChatBackend::new(store, id::<UserId>(1), Box::new(ManualClock::new(1_000)));
+      (backend, id::<ConversationId>(10))
+    }
+
+    fn outgoing(
+      conversation: ConversationId,
+      body: &str,
+      maybe_client_message_id: Option<ClientMessageId>,
+    ) -> OutgoingMessage {
+      OutgoingMessage {
+        conversation,
+        maybe_client_message_id,
+        maybe_thread: None,
+        body: body.to_owned(),
+        maybe_reply_to: None,
+        priority: MessagePriority::Normal,
+        wants_acknowledgement: false,
+        is_silent: false,
+        also_send_to_channel: false,
+        files: Vec::new(),
+      }
+    }
   }
 
   #[test]

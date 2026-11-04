@@ -24,6 +24,7 @@ mod bridge;
 #[cfg(feature = "browser")]
 mod cached_start;
 mod calls;
+mod client_outages;
 mod conversion;
 mod dependency_outages;
 mod deployed;
@@ -41,6 +42,8 @@ mod messaging;
 mod mfa;
 mod moderator;
 mod network_conditions;
+#[cfg(feature = "browser")]
+mod pending_echo;
 #[cfg(feature = "browser")]
 mod perf;
 mod retention_limits;

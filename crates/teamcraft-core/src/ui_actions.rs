@@ -8,7 +8,7 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::canvas::CanvasState;
 use teamcraft_client_api::model::{
   Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, PENDING_ID_BIT,
-  ThreadId, UserId,
+  ThreadId, UserId, is_pending,
 };
 use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
 use teamcraft_proto::{Base64Bytes, ClientMessageId, SourceChange, SourceId};
@@ -34,6 +34,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
     conversation: ConversationId,
     message: MessageId,
   ) -> Option<StoredMessage> {
+    // A message the server numbered is one keyed read, whatever the conversation's size (it is
+    // the common case: replies, pins, saves and edits of messages on screen). The rest (a message
+    // still in the outbox, a line this device placed itself) is looked for among all.
+    if !is_pending(message)
+      && let Ok(Some(stored)) = self.store_ref().message_by_server_id(conversation, message)
+    {
+      return Some(stored);
+    }
     self
       .all_messages(conversation)
       .into_iter()
@@ -120,6 +128,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         &message.body,
         meta,
         message.files,
+        message.maybe_client_message_id,
       );
       return;
     }
@@ -133,7 +142,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
       mentions,
       meta,
     };
-    if let Some(id) = self.enqueue(conversation, message.maybe_thread, content) {
+    let maybe_id = self.enqueue_as(
+      conversation,
+      message.maybe_thread,
+      content,
+      message.maybe_client_message_id,
+    );
+    if let Some(id) = maybe_id {
       self.queue_link_preview(conversation, id, &body);
     }
   }
@@ -382,10 +397,50 @@ impl<S: LocalStore> CoreChatBackend<S> {
     );
     let max_age_ms =
       i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
-    signed
-      .signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms)
+    let authorities = signed.signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms);
+    // A workspace admin signs nothing here but a list they reviewed (`ui_channel_roles_review`).
+    if signed.must_review_before_vouching() && authorities.iter().any(is_workspace_authority) {
+      return false;
+    }
+    authorities
       .into_iter()
       .any(|authority| authority != crate::channel_roles::SignerAuthority::Founder || is_listed_admin)
+  }
+
+  /// For a workspace admin whose signature here would vouch for a snapshot this device can't vouch
+  /// for: what they review (e2ee.md §4.6.1). `None` for anybody else.
+  pub(crate) fn ui_channel_roles_review(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::model::ChannelRolesReview> {
+    let workspace: crate::workspace::WorkspaceState = self.read(
+      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
+        .map(Option::unwrap_or_default),
+    );
+    let signed: crate::channel_roles::ChannelRoleState = self.read(
+      records::get_json(
+        self.store_ref(),
+        Table::Workspace,
+        &crate::client::channel_roles_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    let max_age_ms =
+      i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    let is_vouching = signed
+      .signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms)
+      .iter()
+      .any(is_workspace_authority);
+    (signed.must_review_before_vouching() && is_vouching).then(|| {
+      teamcraft_client_api::model::ChannelRolesReview {
+        log_cursor: signed.cursor,
+        snapshot: signed
+          .assignments
+          .iter()
+          .map(|assignment| (assignment.user_id, assignment.role.clone()))
+          .collect(),
+      }
+    })
   }
 
   fn source_authority(&self) -> Option<SourceAuthority> {
@@ -759,4 +814,8 @@ fn workspace_event(event: &ConversationEvent, stored: &StoredMessage) -> Option<
     | ConversationEvent::CallMoved { .. }
     | ConversationEvent::Unknown => return None,
   })
+}
+
+fn is_workspace_authority(authority: &crate::channel_roles::SignerAuthority) -> bool {
+  matches!(authority, crate::channel_roles::SignerAuthority::Workspace { .. })
 }

@@ -172,7 +172,7 @@ impl WorkspaceAuthority {
   /// The channel's signed admins. From then on, under `owner_approval`, a member lets an admin in
   /// only if it is one of them (e2ee.md §4.6.1, issue #380). Pass `None` while nothing is signed
   /// for the channel: it keeps the rule of before, so a channel nobody signed yet doesn't refuse
-  /// every approval.
+  /// every approval. An empty list isn't that: during an unverified stretch of the log nobody counts.
   pub(crate) fn with_signed_channel_admins(
     mut self,
     maybe_admins: Option<impl IntoIterator<Item = UserId>>,
@@ -298,6 +298,12 @@ mod tests {
     let signed = authority(AdminSelfJoin::OwnerApproval, Some(vec![owner_user]));
     assert!(signed.is_authorized(owner, conversation, &add(admin_target)));
     assert!(!signed.is_authorized(member, conversation, &add(admin_target)));
+    // An unverified stretch of the log: the channel is still signed, and nobody counts (e2ee.md
+    // §4.6.1, "Reading the log late"). Not the rule of an unsigned channel, where every member may.
+    let stretch = authority(AdminSelfJoin::OwnerApproval, Some(Vec::new()));
+    assert!(!stretch.is_authorized(owner, conversation, &add(admin_target)));
+    assert!(!stretch.is_authorized(member, conversation, &add(admin_target)));
+    assert!(stretch.is_authorized(member, conversation, &add(crypto::UserId::new(7))));
     // Everything else a member does is untouched: ordinary adds, removals.
     assert!(signed.is_authorized(member, conversation, &add(crypto::UserId::new(7))));
     assert!(signed.is_authorized(

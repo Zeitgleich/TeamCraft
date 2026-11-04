@@ -7,8 +7,11 @@
 //! verifies the others' with the device key, which never leaves the core (e2ee.md §8). The contract
 //! is `teamcraft_client_api::page_calls`.
 //!
-//! Calls run in the tab that runs the client core ([`crate::web_core::runs_here`]); other tabs of
-//! the same account say so instead of offering calls.
+//! Calls run in the account's active tab, the one that runs the client core
+//! ([`crate::web_core::runs_here`], #744). Inactive tabs show no app and so no calls; nothing signs
+//! for them over the tab channel (e2ee.md §8, "Calls and browser tabs"). Calls move with the app:
+//! a tab that takes it over mounts the app and loads the call module, one that hands it away stops
+//! the module ([`stop_calls`]), all without a reload (#440).
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -138,8 +141,10 @@ pub fn is_in_call() -> bool {
   current().is_some_and(|host| host.was_in_call.get())
 }
 
-/// Leaves the call this page is in, before another tab takes over (the user agreed).
-pub async fn end_call() {
+/// Stops the call module before another tab takes the app over (#744, #440): leaves the call this
+/// page is in (the user agreed), stops a ringtone and lets go of the page's callbacks. The module
+/// starts again with the app when this tab becomes the active one again, without a reload.
+pub async fn stop_calls() {
   let Some(module) = current().and_then(|host| host.loaded_module()) else {
     return;
   };

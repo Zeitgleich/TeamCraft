@@ -1050,6 +1050,11 @@ pub enum ChatAction {
     conversation: ConversationId,
     user: UserId,
   },
+  SignReviewedChannelRoles {
+    conversation: ConversationId,
+    roles: Vec<(UserId, crate::model::ChannelRole)>,
+    at_cursor: u64,
+  },
   RefreshChannelRoles {
     conversation: ConversationId,
   },
@@ -1099,10 +1104,22 @@ fn history_from_join() -> HistoryPolicy {
 }
 
 impl ChatAction {
-  /// A new message: the host answers it once it is in the outbox and sends it afterwards, so the
-  /// message shows at once, also while a sync or an upload holds the client.
-  pub fn is_new_message(&self) -> bool {
-    matches!(self, Self::SendMessage { .. } | Self::PostMessage { .. })
+  /// A change that is written to the outbox and sent from there: a new message, an edit, a delete,
+  /// a reaction, a pin, a forward. The host answers it once it is in the outbox and sends it
+  /// afterwards, so it shows at once, also while a sync or an upload holds the client (issue
+  /// #778). Nothing of it needs the network or the client's keys to be shown: the outbox entry
+  /// is the user's intent, kept across restarts and sent in order.
+  pub fn is_outbox_write(&self) -> bool {
+    matches!(
+      self,
+      Self::SendMessage { .. }
+        | Self::PostMessage { .. }
+        | Self::EditMessage { .. }
+        | Self::DeleteMessage { .. }
+        | Self::ToggleReaction { .. }
+        | Self::ForwardMessage { .. }
+        | Self::SetPinned { .. }
+    )
   }
 
   /// Where a typing announcement is: its conversation, and the thread for a reply. It is passing
@@ -1386,6 +1403,11 @@ impl ChatAction {
         role,
       } => backend.set_channel_role(conversation, user, role),
       Self::ConfirmChannelRole { conversation, user } => backend.confirm_channel_role(conversation, user),
+      Self::SignReviewedChannelRoles {
+        conversation,
+        roles,
+        at_cursor,
+      } => backend.sign_reviewed_channel_roles(conversation, roles, at_cursor),
       Self::RefreshChannelRoles { conversation } => backend.refresh_channel_roles(conversation),
       Self::RemoveSpaceMember { space, user } => backend.remove_space_member(space, user),
       Self::RevokeSpaceInvite { space, invite } => backend.revoke_space_invite(space, invite),
@@ -1510,6 +1532,12 @@ pub enum ChatQuery {
   },
   CanManageIntegrationSources,
   CanSignChannelRoles {
+    conversation: ConversationId,
+  },
+  AreChannelRolesUnverified {
+    conversation: ConversationId,
+  },
+  ChannelRolesReview {
     conversation: ConversationId,
   },
   SpaceInvites {
@@ -1672,6 +1700,14 @@ pub enum ChatAnswer {
   CanSignChannelRoles {
     #[serde(default)]
     can_sign: bool,
+  },
+  AreChannelRolesUnverified {
+    #[serde(default)]
+    is_unverified: bool,
+  },
+  ChannelRolesReview {
+    #[serde(default)]
+    maybe_review: Option<crate::model::ChannelRolesReview>,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -1877,6 +1913,12 @@ impl ChatQuery {
       Self::CanSignChannelRoles { conversation } => ChatAnswer::CanSignChannelRoles {
         can_sign: backend.can_sign_channel_roles(conversation),
       },
+      Self::AreChannelRolesUnverified { conversation } => ChatAnswer::AreChannelRolesUnverified {
+        is_unverified: backend.are_channel_roles_unverified(conversation),
+      },
+      Self::ChannelRolesReview { conversation } => ChatAnswer::ChannelRolesReview {
+        maybe_review: backend.channel_roles_review(conversation),
+      },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
         roster: backend.space_members(space),
       },
@@ -1955,6 +1997,44 @@ impl ChatQuery {
 mod tests {
   use super::*;
   use crate::model::id_from_raw;
+
+  #[test]
+  fn changes_that_live_in_the_outbox_answer_before_the_network() {
+    let (conversation, message) = (id_from_raw(7), id_from_raw(70));
+    let in_the_outbox = [
+      ChatAction::EditMessage {
+        conversation,
+        message,
+        body: "x".into(),
+      },
+      ChatAction::DeleteMessage {
+        conversation,
+        message,
+      },
+      ChatAction::ToggleReaction {
+        conversation,
+        message,
+        emoji: "+1".into(),
+      },
+      ChatAction::SetPinned {
+        conversation,
+        message,
+        is_pinned: true,
+      },
+      ChatAction::PostMessage {
+        conversation,
+        maybe_thread: None,
+        body: "x".into(),
+      },
+    ];
+    for action in in_the_outbox {
+      assert!(action.is_outbox_write(), "{action:?}");
+    }
+    // Reads of the server, structure changes and read markers need the client.
+    assert!(!ChatAction::MarkRead { conversation }.is_outbox_write());
+    assert!(!ChatAction::LoadOlderHistory { conversation }.is_outbox_write());
+    assert!(!ChatAction::OpenDm { user: id_from_raw(2) }.is_outbox_write());
+  }
 
   #[test]
   fn older_history_keeps_its_wire_names() {

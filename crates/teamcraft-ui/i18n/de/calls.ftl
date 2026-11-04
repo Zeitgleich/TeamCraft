@@ -49,6 +49,7 @@ call-invite-hint = Die gewählten Personen werden zum Meeting eingeladen, bekomm
 call-invited = { $names } eingeladen. Unter „Meetings“ können sie beitreten.
 call-share-link-hint = Nur die Organisatorin oder der Organisator kann Personen zu diesem Meeting einladen. Teile stattdessen den Link des Meetings: Wer ihn öffnet, bittet um Einlass und kommt herein, sobald die Organisatorin oder der Organisator zustimmt.
 call-move-offer = { $name } hat den Anruf in einen Meetingraum verschoben und { $added } hinzugefügt.
+call-move-offer-notetaker = { $name } hat den Notetaker hinzugefügt. Der Anruf geht in einem Meetingraum weiter, wo das Gesprochene für ein Transkript an OpenRouter gesendet wird. Dein Ton erreicht ihn erst, wenn du dort beitrittst.
 call-move-join = Meetingraum beitreten
 call-effects = Hintergrundeffekte
 effects-system-hint = macOS kann eigene Videoeffekte darüberlegen (Porträt, Hintergrund, Studiolicht). Ist einer davon an, wähle hier „Keiner“, damit sie sich nicht addieren.
@@ -332,6 +333,7 @@ calls-loading = Anrufe werden geladen
 ## Notetaker (e2ee.md §8.2)
 call-notetaker-add = Notetaker hinzufügen
 call-notetaker-remove = Notetaker entfernen
+call-notetaker-room-title = Anruf mit Notetaker
 call-notetaker-joining = Der Notetaker wird hinzugefügt. Solange er im Anruf ist, wird der Ton für das Transkript an OpenRouter gesendet.
 call-notetaker-banner = Der Notetaker erstellt ein Transkript dieses Anrufs. Dazu wird das Gesprochene an OpenRouter ({ $model }) gesendet und ist damit nicht Ende-zu-Ende-verschlüsselt. Zusammenfassung und Transkript erscheinen danach im Chat.
 call-notetaker-badge = Notetaker im Anruf – Ton geht an OpenRouter

@@ -102,6 +102,7 @@ const COMMANDS: &[&str] = &[
   "shell_prefs_get",
   "shell_prefs_set",
   "tray_update",
+  "tray_menu_set",
   "set_zoom",
   "update_status",
   "update_check",

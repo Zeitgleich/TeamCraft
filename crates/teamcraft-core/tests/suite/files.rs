@@ -24,6 +24,7 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::files::{UploadRetrySettings, UploadStep};
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::downloads::{DownloadPriority, Downloads};
+use teamcraft_core::retry::JitterMode;
 use teamcraft_core::ui_backend::CoreCommand;
 use teamcraft_core::upkeep::{Upkeep, UploadMode};
 use teamcraft_core::{ClientSettings, MAX_VIEWER_BYTES};
@@ -491,6 +492,7 @@ async fn refused_uploads_reuse_their_slot_back_off_and_stall_until_retried() {
     retry_after: Duration::from_secs(2),
     retry_max: Duration::from_secs(10),
     max_attempts: 3,
+    jitter: JitterMode::None,
   };
   let client_settings = ClientSettings {
     upload_retry: retry.clone(),
@@ -766,6 +768,7 @@ async fn one_file_for_bob(
 
 fn with_files(conversation: ConversationId, body: &str, files: Vec<OutgoingFile>) -> OutgoingMessage {
   OutgoingMessage {
+    maybe_client_message_id: None,
     conversation,
     maybe_thread: None,
     body: body.into(),

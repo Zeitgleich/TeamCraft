@@ -21,6 +21,7 @@ use teamcraft_core::client::disk_downloads::{DownloadStatus, download_record, do
 use teamcraft_core::client::files::UploadRetrySettings;
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::downloads::{DownloadControl, Downloads, OpenRequest};
+use teamcraft_core::retry::JitterMode;
 use teamcraft_proto::{AttachmentId, ConversationId, MessageId};
 
 const MIB: u64 = 1024 * 1024;
@@ -267,6 +268,7 @@ impl Setup {
         retry_after: Duration::from_secs(2),
         retry_max: Duration::from_secs(10),
         max_attempts: 3,
+        jitter: JitterMode::None,
       },
       maybe_upload_staging_dir: Some(staging),
       maybe_download_dir: Some(directory.clone()),
@@ -288,6 +290,7 @@ impl Setup {
     settle(&mut [&mut alice, &mut bob]).await;
     let alice_ui = backend_of(&alice);
     alice_ui.send_message(OutgoingMessage {
+      maybe_client_message_id: None,
       conversation: channel,
       maybe_thread: None,
       body: String::new(),
