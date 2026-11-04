@@ -586,7 +586,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::SpaceUpdate { .. }
       | GatewayEvent::SpaceMemberAdd { .. }
       | GatewayEvent::SpaceMemberRemove { .. } => self.refresh_spaces().await,
-      GatewayEvent::WorkspaceUpdate { .. } => self.sync_workspace_and_recovery().await,
+      GatewayEvent::WorkspaceUpdate { kind, .. } => {
+        // After a handover the new owner has the policy to sign under the new roster, and the previous
+        // owner could otherwise still sign one naming an older roster (A7).
+        if kind == teamcraft_proto::WorkspaceLogKind::Roster {
+          self.note_role_evidence_update();
+        }
+        self.sync_workspace_and_recovery().await
+      },
       GatewayEvent::RoleEvidenceUpdate => {
         self.note_role_evidence_update();
         Ok(())

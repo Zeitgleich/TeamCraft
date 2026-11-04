@@ -27,7 +27,7 @@ use crate::error::CoreError;
 use crate::records;
 use crate::role_signing::{
   AutomaticBasis, AutomaticChange, AutomaticChangeKind, ProviderMark, ProviderRole, ProviderStatement,
-  RoleProviderAnchor, RosterPlanInput, plan_roster, provider_role,
+  RoleProviderAnchor, RosterPlanInput, plan_roster, provider_role, role_loss_statement,
 };
 use crate::store::{LocalStore, Table};
 use crate::workspace::{RosterDocument, RosterMember, RosterRole, WorkspaceState};
@@ -712,9 +712,8 @@ fn is_provider_admin(tokens: &ProviderTokens, anchor: &RoleProviderAnchor) -> bo
   )
 }
 
-/// The expired access tokens the server kept, as statements about people on the roster they show a
-/// lower role for. One that names no such thing, or doesn't verify, says nothing. They name no key: the
-/// plan only takes them for an account it already noted, under the key the roster has.
+/// The expired access tokens the server kept, as statements about people on the roster
+/// ([`role_loss_statement`]). One that doesn't verify says nothing.
 fn role_loss_statements(
   listed: &teamcraft_proto::ListRoleEvidenceResponse,
   state: &WorkspaceState,
@@ -743,20 +742,13 @@ fn role_loss_statements(
       },
     };
     let role = provider_role(evidence.maybe_roles.as_deref(), anchor);
-    let is_lower = match role {
-      ProviderRole::Neither => true,
-      ProviderRole::Admin => member.role == RosterRole::Owner,
-      _ => false,
-    };
-    if is_lower {
-      statements.push(ProviderStatement {
-        user_id: loss.user_id,
-        identity_key: member.identity_key.clone(),
-        subject: evidence.subject,
-        issued_at: evidence.issued_at,
-        role,
-      });
-    }
+    statements.extend(role_loss_statement(
+      member,
+      state.provider_marks.get(&loss.user_id),
+      evidence.subject,
+      evidence.issued_at,
+      role,
+    ));
   }
   statements
 }

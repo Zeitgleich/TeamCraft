@@ -52,8 +52,10 @@ pub struct PresencePreference {
 pub struct SyncedUser {
   pub user: User,
   pub is_awaiting_default_memberships: bool,
-  /// The role the provider gave at the last sign-in, when this sign-in changed it.
+  /// The role the provider's last token showed, when this one shows another.
   pub maybe_previous_role: Option<String>,
+  /// A token showing that this account lost a role is kept (role evidence).
+  pub has_role_loss: bool,
 }
 
 /// Filter of a directory search.
@@ -81,8 +83,8 @@ impl Database {
     new_id: UserId,
   ) -> Result<SyncedUser, DbError> {
     let row = sqlx::query!(
-      r#"INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, idp_display_name, kind, oidc_role, organization)
-         VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $10)
+      r#"INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, idp_display_name, kind, oidc_role, oidc_role_seen, organization)
+         VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $8, $10)
          ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE
            SET username = EXCLUDED.username,
                email = EXCLUDED.email,
@@ -90,6 +92,7 @@ impl Database {
                idp_display_name = EXCLUDED.idp_display_name,
                kind = EXCLUDED.kind,
                oidc_role = EXCLUDED.oidc_role,
+               oidc_role_seen = EXCLUDED.oidc_role,
                organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END
          RETURNING id, username, display_name, kind, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!", deleted_at IS NOT NULL AS "is_deleted!",
                    default_memberships_at IS NULL AS "is_awaiting_defaults!""#,
@@ -121,6 +124,7 @@ impl Database {
       )?,
       is_awaiting_default_memberships: row.is_awaiting_defaults,
       maybe_previous_role: None,
+      has_role_loss: false,
     })
   }
 
@@ -138,8 +142,9 @@ impl Database {
     new_id: UserId,
   ) -> Result<SyncedUser, DbError> {
     let existing = sqlx::query!(
-      r#"SELECT id, username, email, display_name, COALESCE(idp_display_name, display_name) AS "idp_display_name!", kind, oidc_role, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!", deleted_at IS NOT NULL AS "is_deleted!",
-                default_memberships_at IS NULL AS "is_awaiting_defaults!"
+      r#"SELECT id, username, email, display_name, COALESCE(idp_display_name, display_name) AS "idp_display_name!", kind, oidc_role, COALESCE(oidc_role_seen, oidc_role) AS seen_role, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!", deleted_at IS NOT NULL AS "is_deleted!",
+                default_memberships_at IS NULL AS "is_awaiting_defaults!",
+                EXISTS (SELECT 1 FROM role_losses WHERE role_losses.user_id = users.id) AS "has_role_loss!"
          FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2"#,
       identity.issuer,
       identity.subject,
@@ -154,6 +159,7 @@ impl Database {
         && row.idp_display_name == identity.display_name
         && row.kind == identity.kind.as_str()
         && row.oidc_role.as_deref() == identity.maybe_oidc_role
+        && row.seen_role.as_deref() == identity.maybe_oidc_role
         && (!identity.should_sync_organization || row.organization.as_deref() == identity.maybe_organization);
       if is_unchanged {
         return Ok(SyncedUser {
@@ -171,13 +177,15 @@ impl Database {
           )?,
           is_awaiting_default_memberships: row.is_awaiting_defaults,
           maybe_previous_role: None,
+          has_role_loss: row.has_role_loss,
         });
       }
       let maybe_previous_role = row
-        .oidc_role
+        .seen_role
         .filter(|role| Some(role.as_str()) != identity.maybe_oidc_role);
       let mut synced = self.upsert_oidc_user_flagged(identity, new_id).await?;
       synced.maybe_previous_role = maybe_previous_role;
+      synced.has_role_loss = row.has_role_loss;
       return Ok(synced);
     }
     self.upsert_oidc_user_flagged(identity, new_id).await

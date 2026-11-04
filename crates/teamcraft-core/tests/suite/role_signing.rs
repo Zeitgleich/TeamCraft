@@ -701,6 +701,55 @@ mod by_hand {
   }
 
   #[tokio::test]
+  async fn an_older_token_can_not_settle_an_edit_by_hand() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    world.give_token(&bob, &["admin"], T0);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    world.give_token(&alice, &["owner"], T0 + 100);
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    assert_eq!(
+      alice.client.workspace().unwrap().provider_marks[&bob_id].issued_at,
+      T0 + 100,
+      "the floor is the edit"
+    );
+
+    // A token from before the edit, without the role, would settle it, and a later one bring him back.
+    let claim = bob.client.identity_attestation_claim();
+    let key = bob.client.identity_public_key_bytes().to_vec();
+    world.server.forge_role_evidence(
+      bob_id,
+      world
+        .provider
+        .token(&with_roles(&claim, &["member"], T0 + 50).with("sub", json!("sub-of-Bob"))),
+      key.clone(),
+    );
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    world.server.clear_role_evidence();
+    world.server.forge_role_evidence(
+      bob_id,
+      world
+        .provider
+        .token(&with_roles(&claim, &["admin"], T0 + 200).with("sub", json!("sub-of-Bob"))),
+      key,
+    );
+    world.give_token(&alice, &["owner"], T0 + 200);
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+
+    assert_eq!(role_of(&alice, bob_id), None);
+  }
+
+  #[tokio::test]
   async fn somebody_added_by_hand_without_the_provider_role_stays() {
     let world = World::new();
     let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
@@ -839,8 +888,8 @@ mod demotion {
     assert_eq!(role_of(&carol, carol_id), Some(RosterRole::Owner));
     assert_eq!(role_of(&carol, bob_id), None);
 
-    // Carol's app signs the policy under the new roster, which Bob couldn't any more.
-    carol.client.note_role_evidence_update();
+    // Carol's app signs the policy under the new roster, which Bob couldn't any more, on the roster's
+    // own event, with nothing else to wake it.
     carol.client.run_role_signing().await.unwrap();
     let workspace = carol.client.workspace().unwrap();
     assert_eq!(workspace.policy_roster_version, workspace.roster.version);
@@ -868,6 +917,40 @@ mod demotion {
     alice.client.run_role_signing().await.unwrap();
 
     assert_eq!(role_of(&alice, bob_id), None);
+  }
+
+  #[tokio::test]
+  async fn the_server_can_not_demote_an_owner_with_no_noted_account_with_somebody_elses_token() {
+    // An owner from before tokens counted. The server lists a provider admin's expired access token
+    // under them.
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    // The hand edit is what marks him here; a roster from before has no mark at all.
+    world.server.add_role_loss(
+      bob_id,
+      world
+        .provider
+        .token(&access_claims("sub-of-Mallory", &["admin"], T0 + 50)),
+    );
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+
+    assert_eq!(role_of(&alice, bob_id), Some(RosterRole::Owner));
+    let workspace = alice.client.workspace().unwrap();
+    assert!(
+      workspace
+        .provider_marks
+        .get(&bob_id)
+        .is_none_or(|mark| mark.maybe_subject.is_none()),
+      "nothing is noted for him"
+    );
   }
 
   #[tokio::test]
@@ -1040,6 +1123,38 @@ mod manual {
       .await
       .unwrap();
     assert_eq!(role_of(&alice, bob_id), Some(RosterRole::Admin));
+  }
+
+  #[tokio::test]
+  async fn an_edit_of_role_signing_from_a_draft_the_server_stripped_is_refused() {
+    let world = World::new();
+    let (mut alice, _bob) = world.owner_and_peer("Bob").await;
+    let verified = alice.client.workspace().unwrap().policy;
+    let stripped = WorkspacePolicy {
+      maybe_role_signing: None,
+      ..verified.clone()
+    };
+    let edited = WorkspacePolicy {
+      maybe_role_signing: Some(Box::new(RoleSigningPolicy {
+        owner_role: "chief".into(),
+        ..RoleSigningPolicy::default()
+      })),
+      ..verified.clone()
+    };
+    assert!(matches!(
+      alice.client.publish_policy_based_on(&stripped, edited).await,
+      Err(teamcraft_core::CoreError::PolicyBaseMismatch)
+    ));
+    // Not touching it goes through and keeps what is verified.
+    alice
+      .client
+      .publish_policy_based_on(&stripped, stripped.clone())
+      .await
+      .unwrap();
+    assert_eq!(
+      alice.client.workspace().unwrap().policy.maybe_role_signing,
+      verified.maybe_role_signing
+    );
   }
 
   #[tokio::test]

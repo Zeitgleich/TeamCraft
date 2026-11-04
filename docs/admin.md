@@ -163,7 +163,7 @@ signature (freshness above).
   truth. A role given there is in force as soon as the person's app has published a token and an owner's
   app has been open; a role taken away, as soon as a token of theirs showing it has expired and an owner's
   app has been open, or, for somebody who never signs in again, when the server's report has stood for a week
-  (admins only, one a week; an owner never goes on a report). e2ee.md §3.1.3 has the rules and what stays.
+  (admins only, one a week per owner's device, shown only in the Security section meanwhile; an owner never goes on a report). e2ee.md §3.1.3 has the rules and what stays.
   An owner's edit by hand stands until the provider says the same once. Nothing to confirm. On a realm where tokens can't prove it (no mapper) or under the manual policy, the people
   the provider lists appear in "Change the roster by hand", to sign through the same confirmation. That
   list is the server's word, so it only adds people and promotes admins to owners.

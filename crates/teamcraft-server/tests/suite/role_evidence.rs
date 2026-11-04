@@ -176,6 +176,81 @@ async fn a_token_with_no_role_left_is_kept_and_handed_out_once_expired() {
 }
 
 #[tokio::test]
+async fn the_role_returning_before_anything_is_signed_ends_the_loss() {
+  // A refused token changes nothing in the server's records, so nothing but the token itself tells.
+  let app = app!();
+  let (alice, bob) = (owner(), admin());
+  user_id(&app, &alice).await;
+  enroll(&app, &bob).await;
+  let no_role = TestUser {
+    roles: vec!["offline_access".to_owned()],
+    ..admin()
+  };
+  assert_eq!(app.get(&no_role, "/me").await.status, StatusCode::FORBIDDEN);
+  // An accepted token with the role, same as before as far as the records go.
+  assert_eq!(app.get(&bob, "/me").await.status, StatusCode::OK);
+  sqlx::query("UPDATE role_losses SET expires_at = 1")
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert_eq!(listed.body["role_losses"], json!([]));
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn an_owner_demoted_to_admin_stays_on_file_while_they_hold_admin() {
+  let app = app!();
+  let alice = owner();
+  let dora = TestUser::new("dora", &["owner"]);
+  user_id(&app, &alice).await;
+  enroll(&app, &dora).await;
+  let demoted = TestUser {
+    roles: vec!["admin".to_owned()],
+    ..dora.clone()
+  };
+  assert_eq!(app.get(&demoted, "/me").await.status, StatusCode::OK);
+  assert_eq!(app.get(&demoted, "/me").await.status, StatusCode::OK);
+  sqlx::query("UPDATE role_losses SET expires_at = 1")
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert_eq!(listed.body["role_losses"].as_array().unwrap().len(), 1);
+  // The owner role coming back ends it.
+  assert_eq!(app.get(&dora, "/me").await.status, StatusCode::OK);
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert_eq!(listed.body["role_losses"], json!([]));
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn a_loss_is_noticed_also_when_the_provider_sync_got_there_first() {
+  let app = app!();
+  let (alice, bob) = (owner(), admin());
+  user_id(&app, &alice).await;
+  let bob_id = enroll(&app, &bob).await;
+  // What the sync does when the provider says Bob has a lower role.
+  sqlx::query("UPDATE users SET oidc_role = 'member' WHERE id = $1")
+    .bind(bob_id.parse::<i64>().unwrap())
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+  let demoted = TestUser {
+    roles: vec!["member".to_owned()],
+    ..admin()
+  };
+  assert_eq!(app.get(&demoted, "/me").await.status, StatusCode::OK);
+  sqlx::query("UPDATE role_losses SET expires_at = 1")
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+  let listed = app.get(&alice, "/role-evidence").await;
+  assert_eq!(listed.body["role_losses"][0]["user_id"], bob_id);
+  app.stop().await;
+}
+
+#[tokio::test]
 async fn a_lower_role_on_a_request_is_kept_too_and_a_member_never_was_anything_to_lose() {
   let app = app!();
   let (alice, bob) = (owner(), admin());

@@ -160,10 +160,8 @@ pub fn verify_role_loss(
   if claims.get("azp").and_then(Value::as_str) != Some(expected.audience) {
     return Err(AttestationError::WrongAudience);
   }
-  if let Some(kind) = claims.get("typ").and_then(Value::as_str)
-    && !kind.eq_ignore_ascii_case("Bearer")
-    && !kind.eq_ignore_ascii_case("DPoP")
-  {
+  let kind = claims.get("typ").and_then(Value::as_str).unwrap_or_default();
+  if !kind.eq_ignore_ascii_case("Bearer") && !kind.eq_ignore_ascii_case("DPoP") {
     return Err(AttestationError::WrongType(kind.to_string()));
   }
   Ok(RoleEvidence {
@@ -538,6 +536,11 @@ mod tests {
       ));
       assert!(matches!(
         verify_role_loss(&provider.token(claims(CLIENT, "ID")), &jwks, &expectations()),
+        Err(AttestationError::WrongType(_))
+      ));
+      let untyped = json!({ "iss": ISSUER, "azp": CLIENT, "sub": "abc", "iat": 7 });
+      assert!(matches!(
+        verify_role_loss(&provider.token(untyped), &jwks, &expectations()),
         Err(AttestationError::WrongType(_))
       ));
     }

@@ -98,25 +98,28 @@ pub async fn put(
 /// provider's own signature on that, which doesn't depend on them publishing anything. Kept for the
 /// owners' apps and handed out once it has expired, as it is still a credential until then. A failure
 /// here costs nothing the request depends on.
-pub async fn note_role_loss(state: &AppState, token: &str, user: UserId) {
-  if let Err(error) = keep_role_loss(state, token, user).await {
+pub async fn note_role_loss(state: &AppState, token: &str, user: UserId, lost_to: &str) {
+  if let Err(error) = keep_role_loss(state, token, user, lost_to).await {
     tracing::warn!(%error, "could not keep the evidence of a lost role");
   }
 }
 
-async fn keep_role_loss(state: &AppState, token: &str, user: UserId) -> Result<(), ApiError> {
+async fn keep_role_loss(state: &AppState, token: &str, user: UserId, lost_to: &str) -> Result<(), ApiError> {
   let Some(outline) = token_outline(token) else {
     return Ok(());
   };
+  // The validator still takes a token this long past its expiry.
+  let leeway = i64::try_from(state.validator.leeway_secs()).unwrap_or(i64::MAX);
+  let usable_until = outline.exp.saturating_add(leeway);
   let is_stored = state
     .database
-    .put_role_loss(user, token, outline.iat, outline.exp)
+    .put_role_loss(user, token, outline.iat, usable_until, lost_to)
     .await?;
   if !is_stored {
     return Ok(());
   }
   // Owners' apps read it once it can be handed out. A restart loses this, and their reconnect reads it.
-  let waiting = outline.exp.saturating_sub(unix_now());
+  let waiting = usable_until.saturating_sub(unix_now());
   let later = state.clone();
   tokio::spawn(async move {
     tokio::time::sleep(std::time::Duration::from_secs(
@@ -154,13 +157,23 @@ pub async fn note_refused_for_no_role(state: &AppState, token: &str) {
     Err(_) => false,
   };
   if had_a_role || is_on_roster {
-    note_role_loss(state, token, user).await;
+    note_role_loss(state, token, user, "none").await;
   }
 }
 
-/// `user` holds a role again: what showed them losing it is over.
-pub async fn note_role_regained(state: &AppState, user: UserId) {
-  if let Err(error) = state.database.delete_role_loss(user).await {
+/// A token holding `role` was accepted: a loss of it from before is over. Without this, the old loss could
+/// still take somebody off who has long had the role back.
+pub async fn note_role_held(state: &AppState, user: UserId, role: &Role, issued_at: i64) {
+  let lost_to: &[&str] = match role {
+    Role::Owner => &["none", "guest", "member", "admin"],
+    Role::Admin => &["none", "guest", "member"],
+    _ => return,
+  };
+  if let Err(error) = state
+    .database
+    .delete_regained_role_loss(user, issued_at, lost_to)
+    .await
+  {
     tracing::warn!(%error, "could not drop the evidence of a lost role");
   }
 }
@@ -177,6 +190,12 @@ pub async fn settle_after_roster(state: &AppState, payload: &[u8]) {
   }
 }
 
+/// Drops tokens nobody took up in [`KEEP_DAYS`], from the server's housekeeping: they name people.
+pub async fn prune(state: &AppState) -> Result<(), ApiError> {
+  state.database.prune_role_evidence(KEEP_DAYS).await?;
+  Ok(())
+}
+
 /// What the owners' apps read. Only for those the server takes for owners; everybody else has no
 /// use for other people's tokens, which name them, with their e-mail address.
 pub async fn list(
@@ -184,7 +203,6 @@ pub async fn list(
   caller: &AuthenticatedUser,
 ) -> Result<ListRoleEvidenceResponse, ApiError> {
   require(state, caller, Permission::SignWorkspace, &Target::Instance)?;
-  state.database.prune_role_evidence(KEEP_DAYS).await?;
   let role_losses = state
     .database
     .list_role_losses(unix_now())

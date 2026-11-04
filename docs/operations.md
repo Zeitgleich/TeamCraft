@@ -513,7 +513,7 @@ owner signs themselves in by saving the policy once.
 
 **Taking people off.** A role removed in the realm counts as soon as the person's app or the server has a token that shows it. For
 somebody who never signs in again the server needs `[oidc.sync]` (the service account that already deactivates disabled users), and
-then an admin comes off after a week, one a week, named in the Security section meanwhile. An owner never comes off that way, and
+then an admin comes off after a week, one a week per owner's device, named meanwhile only in the Security section. An owner never comes off that way, and
 without `[oidc.sync]` nobody does: another owner removes them by hand. Keep two owners. **To hand over ownership,** move the role in the realm
 while the old owner still holds a client role, for example `member`: their app signs the successor. If they hold no role any more, the
 server refuses them and nobody can sign; give them `member` for a moment.

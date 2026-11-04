@@ -49,24 +49,19 @@ async fn validate_token(state: &AppState, token: &str) -> Result<TokenIdentity, 
   state.validator.validate(token).await
 }
 
-/// This sign-in shows another role than the last: a lost one is evidence for the owners' apps, one given
-/// back ends that.
-async fn note_role_change(
+/// This token shows a lower role than the last one: it is evidence for the owners' apps.
+async fn note_role_drop(
   state: &AppState,
   identity: &TokenIdentity,
   user: teamcraft_proto::UserId,
   previous: &str,
 ) {
   let previous = Role::from(previous.to_owned());
-  let was_admin = matches!(previous, Role::Owner | Role::Admin);
-  let is_admin = identity.role.includes(&Role::Admin);
-  if is_admin && !was_admin {
-    super::role_evidence::note_role_regained(state, user).await;
-  } else if was_admin
+  if matches!(previous, Role::Owner | Role::Admin)
     && identity.role < previous
     && let Some(token) = &identity.maybe_provider_token
   {
-    super::role_evidence::note_role_loss(state, token.as_str(), user).await;
+    super::role_evidence::note_role_loss(state, token.as_str(), user, identity.role.as_str()).await;
   }
 }
 
@@ -152,7 +147,11 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
     .await?;
   let user = synced.user;
   if let Some(previous) = synced.maybe_previous_role.as_deref() {
-    note_role_change(state, &identity, user.id, previous).await;
+    note_role_drop(state, &identity, user.id, previous).await;
+  }
+  // The flag comes with the sign-in read: nobody without a loss on file costs anything.
+  if synced.has_role_loss {
+    super::role_evidence::note_role_held(state, user.id, &identity.role, identity.issued_at).await;
   }
   if user.is_deactivated {
     return Err(AuthError::AccountDeactivated.into());

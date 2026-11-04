@@ -182,7 +182,7 @@ event, once per gateway connection, and when its own role changed. Nothing runs 
 | Newer token with a lower role                                      | Demoted, unless that leaves no owner                         |
 | A token older than or as old as the person's mark                  | Nothing: this is what stops a replay after a demotion        |
 | A token that disagrees with an owner's edit by hand                | Nothing, until one agrees                                    |
-| A token more than `role_evidence_max_age` (30 days) old            | Puts nobody on the roster                                    |
+| A token more than `role_evidence_max_age` (30 days) old            | Changes nothing: puts nobody on, takes nobody off            |
 | No role claim at all                                               | Nothing, in either direction: the mapper may just be missing |
 | Another account than the one noted for this person                 | Nothing; contradictory, an owner hears of it                 |
 | The first token of somebody already on the roster, with their role | Notes their account (one roster write), changes nothing else |
@@ -197,10 +197,14 @@ token this device itself got from the provider, never against a device's or the 
 their own attribute and get a real token that names them. With a role that token could speak for the other person,
 and without one it could demote them. The claim alone is not enough: the token's `sub` has to be the one noted
 for that person. Noting takes a token that names the key the roster already has for them, or for somebody not on
-the roster the key this device pinned, if it pinned one; and one account can't be noted for two people. That leaves a
-hostile server with a provider admin able to put that admin's own key on the roster under the name of somebody this
-device never pinned: the role is one they hold anyway, only the name is wrong. An admin already on the roster when this
-arrived has no noted account until their first token with the role, and until then no token takes their role away.
+the roster the key this device pinned, if it pinned one; one account can't be noted for two people; and a token that
+would be the first to speak for somebody can't lower their role. That leaves two things for a hostile server together with
+a provider admin, on somebody with no account noted yet. It can put that admin's own key on the roster under the name of
+somebody this device never pinned, with a role the admin holds anyway. And it can list that admin's token, naming the
+victim's real user ID and key, under somebody on the roster with the same role, which notes the wrong account for them: their
+real tokens then read as contradictory, which the owners see, and that admin's later token without the role can remove
+them. The window closes for each person with their first token that counts. Somebody already on the roster when this arrived has
+no noted account until then, and until then no token takes their role away.
 
 **Who sets what the tokens mean.** The signed policy has a `role_signing` group: the mode, the role names, and the
 provider (issuer and client ID).
@@ -227,27 +231,31 @@ refuses (`RootChanged`). It never gets anybody appointed whom the provider didn'
   refuses, it keeps that token (the first one; a later one replaces it only a day on, or the person's refreshes would keep
   the evidence from ever expiring) and hands it out **once it has expired**, as it is a credential until then. An app with no role
   left knocks once per token while the roster lists its user, as an idle app sends nothing; one that doesn't is seen at its next request. Owners' apps verify it
-  like any other (`verify_role_loss`), and it counts only for the account noted for that person and if newer than their mark. This
+  like any other (`verify_role_loss`), and it counts only for the account noted for that person, if newer than their mark and
+  not older than `role_evidence_max_age`. It never notes an account itself. This
   needs no mapper and nothing from the person, however unwilling. It is what makes the last client role work: **Keycloak's mapper
   adds no claim when somebody has no role left in that client, and the server refuses their tokens**, so their own app could
   publish nothing even with a claim that says the mapper exists (tried against the dev realm: the ID token has no
   `resource_access`, the access token only `account`'s). The server can withhold this evidence, not forge it.
 - **The person's own newer ID token,** as in the table, published by their app.
+  Kept tokens name people, so they go once a signed roster took them into account, and otherwise after 60 days, from the server's
+  housekeeping job.
 - **The server's report,** for somebody who never sends a token again: `GET /role-evidence` lists people of the newest roster whose
   account is deactivated or deleted, or whose provider role is neither by the server's records. It is the server's word and is
   limited so that it can't strip anybody quickly:
   - **An owner never goes on a report.** It says "contradictory" to the owners, with no removal: if the last owner's device is lost
     there is no recovery (admin.md §2.3.1).
   - **An admin goes** only after the report has stood `role_report_grace` (7 days) by the provider's clock, and at most one per
-    `role_report_interval` (7 days) per owner's device. Until then the Security section names them. So a hostile server that reports
-    every admin gone takes one a week, in front of the owners, and each ended tenure is a stretch on channels that person signed.
+    `role_report_interval` (7 days) **per owner's device**: each device keeps its own count, so several owners' devices can each take
+    one. Until then the Security section of the console names them, and nothing else does. So a hostile server that reports every
+    admin gone takes about one a week per owner's device, seen only by whoever opens that section, and each ended tenure is a stretch on channels that person signed.
     What it costs it is that it keeps a report going for weeks, which an owner can see.
   - **A newer token beats a report,** even while the report goes on. A token from before the report doesn't count. The server can hold
     newer tokens back, so against a hostile server this is a repair only if it lets them through.
   - **A role report doesn't touch** somebody who never had a token counted or whom an owner set by hand. A gone account does.
   - Never the signing owner, never the last owner.
 
-**Edits by hand against the provider.** An owner's edit stands until the provider says the same once (`by_hand` in the mark). Removing
+**Edits by hand against the provider.** An owner's edit stands until a token issued after it says the same (`by_hand` in the mark, whose time the edit sets). Removing
 somebody by hand holds against their tokens with the role, old or new; when a token first shows no role, the edit is settled and the
 provider leads again. Somebody added by hand without the role stays whatever tokens or role reports say, until a token gives them that
 role. So an owner's decision is never silently undone, and a realm can disagree with a roster for as long as the owner wants. Rosters
@@ -280,7 +288,7 @@ identity provider. Now:
 
 | Who is compromised                    | What they gain                                                                                                                                                                                                                                        |
 |---------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| The server alone                      | Nobody appointed. It can withhold evidence and report people gone, which their next token repairs. On the roster: nothing it can sign                                                                                                                 |
+| The server alone                      | Nobody appointed. It can withhold evidence and report people gone: no owner ever, admins slowly (above), and it can hold back the token that would repair that. Replaying a real dip the provider took back works for at most `role_evidence_max_age`. On the roster: nothing it can sign                                                                                                                 |
 | The provider alone                    | It can make anybody an admin or owner **as far as it can get them a token with their real key** (it can sign in as them). Admin rights don't read old content (admin.md): they get management, a visible self-join, an announced removal, and the roster |
 | The provider and an account's device  | The same, with that device's keys. As today: such a person could sign as themselves anyway                                                                                                                                                           |
 | The server and an old token           | A token of somebody since demoted, replayed on a log the server holds back from a device, works there for at most `role_evidence_max_age`; members' heads expose the fork, as for any withheld entry                                                  |

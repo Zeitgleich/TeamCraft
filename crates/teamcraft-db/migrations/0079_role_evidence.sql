@@ -16,5 +16,11 @@ CREATE TABLE role_losses (
   token       text        NOT NULL,
   issued_at   bigint      NOT NULL,
   expires_at  bigint      NOT NULL,
+  -- The role the token shows: 'none', or the lower one.
+  lost_to     text        NOT NULL,
   updated_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- The role the provider's last token showed. `oidc_role` is also set by the identity provider sync, and a
+-- token that shows a lower role has to be noticed also after the sync got there first.
+ALTER TABLE users ADD COLUMN oidc_role_seen text;

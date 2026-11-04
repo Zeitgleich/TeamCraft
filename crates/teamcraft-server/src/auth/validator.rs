@@ -174,6 +174,11 @@ impl TokenValidator {
   }
 
   /// The issuer tokens must come from.
+  /// How long past its expiry a token is still accepted.
+  pub fn leeway_secs(&self) -> u64 {
+    self.options.leeway_secs
+  }
+
   pub fn issuer(&self) -> &str {
     &self.options.issuer
   }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, idp_display_name, kind, oidc_role, organization)\n         VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $10)\n         ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE\n           SET username = EXCLUDED.username,\n               email = EXCLUDED.email,\n               display_name = COALESCE(users.display_name_override, EXCLUDED.display_name),\n               idp_display_name = EXCLUDED.idp_display_name,\n               kind = EXCLUDED.kind,\n               oidc_role = EXCLUDED.oidc_role,\n               organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END\n         RETURNING id, username, display_name, kind, created_at, organization, deactivated_at IS NOT NULL AS \"is_deactivated!\", deleted_at IS NOT NULL AS \"is_deleted!\",\n                   default_memberships_at IS NULL AS \"is_awaiting_defaults!\"",
+  "query": "INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, idp_display_name, kind, oidc_role, oidc_role_seen, organization)\n         VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $8, $10)\n         ON CONFLICT (oidc_issuer, oidc_subject) DO UPDATE\n           SET username = EXCLUDED.username,\n               email = EXCLUDED.email,\n               display_name = COALESCE(users.display_name_override, EXCLUDED.display_name),\n               idp_display_name = EXCLUDED.idp_display_name,\n               kind = EXCLUDED.kind,\n               oidc_role = EXCLUDED.oidc_role,\n               oidc_role_seen = EXCLUDED.oidc_role,\n               organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END\n         RETURNING id, username, display_name, kind, created_at, organization, deactivated_at IS NOT NULL AS \"is_deactivated!\", deleted_at IS NOT NULL AS \"is_deleted!\",\n                   default_memberships_at IS NULL AS \"is_awaiting_defaults!\"",
   "describe": {
     "columns": [
       {
@@ -114,5 +114,5 @@
       null
     ]
   },
-  "hash": "58fa9cb45af6ab84c09086ca0c2f970a8f66de3e93f6909f6bf0114b1ff36f99"
+  "hash": "07f4f13ec6ca116eda366063aef2f6a6ac6c3f9debd64706b3306385d25319fa"
 }

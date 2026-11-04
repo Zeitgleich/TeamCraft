@@ -84,16 +84,18 @@ impl Database {
     token: &str,
     issued_at: i64,
     expires_at: i64,
+    lost_to: &str,
   ) -> Result<bool, DbError> {
     let result = sqlx::query!(
-      r#"INSERT INTO role_losses (user_id, token, issued_at, expires_at) VALUES ($1, $2, $3, $4)
+      r#"INSERT INTO role_losses (user_id, token, issued_at, expires_at, lost_to) VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (user_id) DO UPDATE SET token = EXCLUDED.token, issued_at = EXCLUDED.issued_at,
-           expires_at = EXCLUDED.expires_at, updated_at = now()
+           expires_at = EXCLUDED.expires_at, lost_to = EXCLUDED.lost_to, updated_at = now()
          WHERE role_losses.issued_at < EXCLUDED.issued_at - 86400"#,
       to_db(user),
       token,
       issued_at,
       expires_at,
+      lost_to,
     )
     .execute(self.pool())
     .await?;
@@ -121,11 +123,23 @@ impl Database {
       .collect()
   }
 
-  /// `user` holds a role again: what showed them losing it is over.
-  pub async fn delete_role_loss(&self, user: UserId) -> Result<(), DbError> {
-    sqlx::query!("DELETE FROM role_losses WHERE user_id = $1", to_db(user))
-      .execute(self.pool())
-      .await?;
+  /// A token of `user` from `issued_at` was accepted and holds a higher role than any of `lost_to`: a
+  /// loss from before it is over.
+  pub async fn delete_regained_role_loss(
+    &self,
+    user: UserId,
+    issued_at: i64,
+    lost_to: &[&str],
+  ) -> Result<(), DbError> {
+    let lost_to: Vec<String> = lost_to.iter().map(|role| (*role).to_owned()).collect();
+    sqlx::query!(
+      "DELETE FROM role_losses WHERE user_id = $1 AND issued_at <= $2 AND lost_to = ANY($3)",
+      to_db(user),
+      issued_at,
+      &lost_to,
+    )
+    .execute(self.pool())
+    .await?;
     Ok(())
   }
 

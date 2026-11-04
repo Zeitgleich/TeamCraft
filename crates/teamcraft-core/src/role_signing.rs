@@ -14,9 +14,10 @@
 //!   from the provider.
 //! - An ID token without the role claim says nothing: the realm may just not map roles into ID tokens.
 //! - A person's account at the provider (`sub`) is noted the first time a token counts, and only a token
-//!   naming the key the roster already has for them, or this device pinned, can note it. A token of
-//!   another account can't speak for them, so nobody can demote somebody with a token of their own that
-//!   names the other person's user ID and key, both of which are public.
+//!   naming the key the roster already has for them, or this device pinned, can note it, and it can't
+//!   lower their role while doing so. A token of another account can't speak for them, so nobody can
+//!   demote somebody with a token of their own that names the other person's user ID and key, both of
+//!   which are public.
 //! - The server's word alone never takes an owner off and never puts anybody on. It takes an admin off
 //!   only after standing for a while, one at a time, with a note to the owners, and a newer token beats
 //!   it (e2ee.md §3.1.3).
@@ -219,6 +220,33 @@ pub fn provider_role(maybe_roles: Option<&[String]>, anchor: &RoleProviderAnchor
   }
 }
 
+/// An expired access token the server kept, as a statement about somebody on the roster, if it shows a
+/// lower role than they hold and comes from the account noted for them. It names no key and the server
+/// says whose it is, so it can never be what first ties an account to a person.
+pub fn role_loss_statement(
+  member: &RosterMember,
+  maybe_mark: Option<&ProviderMark>,
+  subject: String,
+  issued_at: i64,
+  role: ProviderRole,
+) -> Option<ProviderStatement> {
+  let is_lower = match role {
+    ProviderRole::Neither => true,
+    ProviderRole::Admin => member.role == RosterRole::Owner,
+    ProviderRole::Owner | ProviderRole::NotSaid => false,
+  };
+  let is_the_noted_account = maybe_mark
+    .and_then(|mark| mark.maybe_subject.as_deref())
+    .is_some_and(|noted| noted == subject);
+  (is_lower && is_the_noted_account).then(|| ProviderStatement {
+    user_id: member.user_id,
+    identity_key: member.identity_key.clone(),
+    subject,
+    issued_at,
+    role,
+  })
+}
+
 /// The next roster and marks. Applied in the same way by every owner's app, so several of them
 /// arrive at the same document and the loser of the version race finds nothing left to do.
 pub fn plan_roster(input: RosterPlanInput<'_>) -> RosterPlan {
@@ -301,6 +329,19 @@ fn apply_role(plan: &mut RosterPlan, statement: &ProviderStatement, input: &Rost
     .members
     .iter()
     .position(|member| member.user_id == statement.user_id);
+  // User ID and key are public, and whose token this is the server's word until an account is noted: a
+  // token that would be the first to speak for somebody doesn't get to lower them.
+  let is_first = plan
+    .marks
+    .get(&statement.user_id)
+    .is_none_or(|mark| mark.maybe_subject.is_none());
+  if is_first
+    && wanted == RosterRole::Admin
+    && maybe_member.is_some_and(|index| plan.members[index].role == RosterRole::Owner)
+  {
+    plan.contradicted.push(statement.user_id);
+    return;
+  }
   let is_role_change = maybe_member.is_none_or(|index| plan.members[index].role != wanted);
   let is_key_change =
     maybe_member.is_some_and(|index| plan.members[index].identity_key != statement.identity_key);
@@ -358,6 +399,11 @@ fn apply_removal(plan: &mut RosterPlan, statement: &ProviderStatement, input: &R
   }
   let hand = mark.maybe_by_hand;
   if is_news(plan, statement, input) != Some(true) {
+    return;
+  }
+  // A real dip the provider took back could otherwise be replayed for ever: marks don't move on tokens
+  // that say what the roster says.
+  if input.provider_now.saturating_sub(statement.issued_at) > input.max_evidence_age_secs {
     return;
   }
   let maybe_index = plan
@@ -738,6 +784,20 @@ mod tests {
     }
 
     #[test]
+    fn a_dip_too_old_to_tell_takes_nobody_off_owners_included() {
+      for role in [RosterRole::Admin, RosterRole::Owner] {
+        let mut signed = roster();
+        signed.members.push(member(bob(), role.clone()));
+        let marks = marked(bob(), "sub-2", NOW - 2 * MAX_AGE);
+        let old = statement(bob(), ProviderRole::Neither, NOW - MAX_AGE - 1);
+        let plan = planned(&signed, &marks, std::slice::from_ref(&old), &[]);
+        assert_eq!(role_of(&plan, bob()), Some(role.clone()));
+        let recent = statement(bob(), ProviderRole::Neither, NOW - MAX_AGE);
+        assert_eq!(role_of(&planned(&signed, &marks, &[recent], &[]), bob()), None);
+      }
+    }
+
+    #[test]
     fn an_old_loss_does_not_win_over_a_newer_token_with_the_role() {
       let mut signed = roster();
       signed.members.push(member(bob(), RosterRole::Admin));
@@ -1031,6 +1091,69 @@ mod tests {
 
   mod noting_the_account {
     use super::*;
+
+    #[test]
+    fn a_first_token_can_not_lower_an_owner_even_naming_their_real_key() {
+      // A provider admin's attribute says `Bob:BobKey`, both public, and the server lists it under Bob.
+      let mut signed = roster();
+      signed.members.push(member(bob(), RosterRole::Owner));
+      let token = ProviderStatement {
+        subject: "sub-of-mallory".into(),
+        ..statement(bob(), ProviderRole::Admin, NOW)
+      };
+      let plan = planned(&signed, &no_marks(), &[token], &[]);
+      assert!(!plan.has_changes());
+      assert_eq!(role_of(&plan, bob()), Some(RosterRole::Owner));
+      assert!(
+        !plan.marks.contains_key(&bob()),
+        "her account isn't noted for him"
+      );
+      assert_eq!(plan.contradicted, vec![bob()]);
+    }
+
+    #[test]
+    fn what_the_server_saw_is_no_statement_for_an_account_nobody_noted() {
+      let owner = member(bob(), RosterRole::Owner);
+      let noted_bob = noted("sub-2", NOW - 10);
+      let floor = ProviderMark {
+        maybe_subject: None,
+        ..noted("x", NOW - 10)
+      };
+      for (maybe_mark, subject) in [
+        (None, "sub-of-mallory"),
+        (Some(&floor), "sub-of-mallory"),
+        (Some(&noted_bob), "sub-of-mallory"),
+      ] {
+        assert_eq!(
+          role_loss_statement(&owner, maybe_mark, subject.to_owned(), NOW, ProviderRole::Admin),
+          None
+        );
+      }
+      let lower = role_loss_statement(
+        &owner,
+        Some(&noted_bob),
+        "sub-2".to_owned(),
+        NOW,
+        ProviderRole::Admin,
+      )
+      .unwrap();
+      let mut signed = roster();
+      signed.members.push(owner);
+      let plan = planned(&signed, &marked(bob(), "sub-2", NOW - 10), &[lower], &[]);
+      assert_eq!(role_of(&plan, bob()), Some(RosterRole::Admin));
+    }
+
+    #[test]
+    fn what_the_server_saw_is_no_statement_unless_it_is_lower() {
+      let admin = member(bob(), RosterRole::Admin);
+      let mark = noted("sub-2", NOW - 10);
+      for role in [ProviderRole::Admin, ProviderRole::Owner, ProviderRole::NotSaid] {
+        assert_eq!(
+          role_loss_statement(&admin, Some(&mark), "sub-2".to_owned(), NOW, role),
+          None
+        );
+      }
+    }
 
     #[test]
     fn a_token_naming_another_key_notes_nobody_on_the_roster() {

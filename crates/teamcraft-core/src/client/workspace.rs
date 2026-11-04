@@ -422,8 +422,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         identity_key: Base64Bytes::new(identity.public_key.to_vec()),
       });
     }
-    let mut document = self.workspace()?.roster;
-    note_edits_by_hand(&mut document, &members);
+    let state = self.workspace()?;
+    let mut document = state.roster.clone();
+    keep_newer_marks(&mut document, &state);
+    note_edits_by_hand(&mut document, &members, self.newest_provider_time());
     document.members = members;
     self.append_roster(document).await
   }
@@ -461,12 +463,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<(), CoreError> {
     self.sync_workspace().await?;
     let mut verified = self.workspace()?.policy;
-    let mut policy = policy;
     // This device keeps the role signing through an entry that doesn't name it (`apply_policy`), so
-    // what the server shows for such an entry isn't an altered draft. An edit made on that draft started
-    // from nothing, though: what is signed is what this device verified.
-    if base.maybe_role_signing.is_none() && verified.maybe_role_signing.is_some() {
-      policy.maybe_role_signing.clone_from(&verified.maybe_role_signing);
+    // what the server shows for such an entry isn't an altered draft, as long as the draft doesn't touch
+    // it (`publish_policy` keeps the verified one). An edit made from nothing is refused, which the
+    // console says: it can't tell what the owner saw from what is signed.
+    if base.maybe_role_signing.is_none()
+      && verified.maybe_role_signing.is_some()
+      && policy.maybe_role_signing.is_none()
+    {
       verified.maybe_role_signing = None;
     }
     if verified != *base {
@@ -515,6 +519,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self
       .append_log(WorkspaceLogKind::Policy, WorkspaceLog::Policy, version, &document)
       .await
+  }
+
+  /// The provider's time of the newest token this device holds; 0 without one. Its own token, from its
+  /// own token endpoint: nothing here is the server's word.
+  fn newest_provider_time(&self) -> i64 {
+    self
+      .api
+      .provider_tokens()
+      .and_then(|tokens| teamcraft_crypto::attestation::unverified_claims(&tokens.id_token).ok())
+      .and_then(|claims| claims.maybe_issued_at)
+      .unwrap_or(0)
   }
 
   /// Whether this user is an owner in the roster this device verified.
@@ -576,16 +591,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(CoreError::NotAnOwner);
     }
     document.version = state.roster.version + 1;
-    // Marks only move forward, also past what an older owner's app left out of its last entry.
-    for (user, mark) in &state.provider_marks {
-      let is_newer = document
-        .provider_marks
-        .get(user)
-        .is_none_or(|known| known.issued_at < mark.issued_at);
-      if is_newer {
-        document.provider_marks.insert(*user, mark.clone());
-      }
-    }
+    keep_newer_marks(&mut document, &state);
     document.maybe_prev_hash = Some(head_or_genesis(state.heads.maybe_roster_hash));
     document.maybe_signed_at_ms = Some(self.now_ms());
     let version = document.version;
@@ -1163,9 +1169,23 @@ fn commit_rank(candidates: &[(DeviceId, bool)], own: DeviceId, new_device: Devic
   u32::try_from(ahead).unwrap_or(u32::MAX)
 }
 
-/// An owner's edit by hand stands against the provider until a token says the same (e2ee.md §3.1.3):
-/// writes that down for everybody whose role `members` changes.
-fn note_edits_by_hand(document: &mut RosterDocument, members: &[RosterMember]) {
+/// Marks only move forward, also past what an older owner's app left out of its last entry.
+fn keep_newer_marks(document: &mut RosterDocument, state: &WorkspaceState) {
+  for (user, mark) in &state.provider_marks {
+    let is_newer = document
+      .provider_marks
+      .get(user)
+      .is_none_or(|known| known.issued_at < mark.issued_at);
+    if is_newer {
+      document.provider_marks.insert(*user, mark.clone());
+    }
+  }
+}
+
+/// An owner's edit by hand stands against the provider until a token issued after it says the same
+/// (e2ee.md §3.1.3): writes that down for everybody whose role `members` changes. `provider_now` is the
+/// floor: an older token, stored or replayed, can't settle the edit.
+fn note_edits_by_hand(document: &mut RosterDocument, members: &[RosterMember], provider_now: i64) {
   use crate::role_signing::{HandRole, ProviderMark};
 
   let mut edits: Vec<(UserId, HandRole)> = Vec::new();
@@ -1194,6 +1214,7 @@ fn note_edits_by_hand(document: &mut RosterDocument, members: &[RosterMember]) {
       maybe_by_hand: None,
     });
     mark.maybe_by_hand = Some(hand);
+    mark.issued_at = mark.issued_at.max(provider_now);
   }
 }
 
@@ -1202,6 +1223,47 @@ mod tests {
   use teamcraft_proto::Snowflake;
 
   use super::*;
+
+  mod edits_by_hand {
+    use std::collections::BTreeMap;
+
+    use crate::role_signing::{HandRole, ProviderMark};
+
+    use super::*;
+
+    #[test]
+    fn survive_a_roster_an_older_owners_app_signed_without_marks() {
+      let bob = UserId::from_snowflake(Snowflake::new(2).unwrap());
+      let state = WorkspaceState {
+        provider_marks: BTreeMap::from([(
+          bob,
+          ProviderMark {
+            maybe_subject: Some("sub-of-bob".to_owned()),
+            issued_at: 100,
+            maybe_by_hand: None,
+          },
+        )]),
+        ..WorkspaceState::default()
+      };
+      let mut document = RosterDocument {
+        members: vec![RosterMember {
+          user_id: bob,
+          role: RosterRole::Admin,
+          identity_key: Base64Bytes::new(vec![2; 32]),
+        }],
+        ..RosterDocument::default()
+      };
+
+      keep_newer_marks(&mut document, &state);
+      note_edits_by_hand(&mut document, &[], 200);
+      keep_newer_marks(&mut document, &state);
+
+      let mark = &document.provider_marks[&bob];
+      assert_eq!(mark.maybe_by_hand, Some(HandRole::Removed));
+      assert_eq!(mark.issued_at, 200, "the edit is the floor");
+      assert_eq!(mark.maybe_subject.as_deref(), Some("sub-of-bob"));
+    }
+  }
 
   #[test]
   fn online_devices_rank_before_offline_ones_and_order_varies_per_new_device() {
