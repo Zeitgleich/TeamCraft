@@ -1182,7 +1182,7 @@ Residual risks:
 - A workspace admin whose demotion the server withholds still counts until the roster they know gets too old
   (`workspace_max_age`, 30 days), without being in the group, wherever the demotion is held back. Heads members
   exchange raise the alarm that refuses a purge, if somebody has seen it. A demoted channel admin needs the same
-  withholding and to be still in the group.
+  withholding and to be still in the group, and has no time limit at all (§4.6.3, design, D1).
 - A workspace admin's routine role entry anchors the whole snapshot it re-signs, so a founder's forged admin it
   carries along counts from then on.
 - **The name an admin sees is the server's word.** The signature binds the channel's ID, the epoch and the time,
@@ -1739,7 +1739,7 @@ workspace roster (admin.md §2.3):
   may sign membership changes (security review A11), since custom permission schemes and space
   admins are not signed facts and would be locked out. Integration sources still need a workspace
   admin (§13.1). Both are tracked as follow-ups of #380 (restricting commits further, signed
-  channel admins as source admins; a withheld demotion is tracked there as well). The design for
+  channel admins as source admins; a withheld demotion is §4.6.3). The design for
   restricting commits is §4.6.2 (issue #878), not implemented.
 - **Workspace admins and channel admins.** `role_rules` lets a workspace admin of the fresh roster
   sign any snapshot, so a workspace admin can appoint a channel admin who then approves a workspace
@@ -1749,7 +1749,8 @@ Residual risks: the founding entry of a channel is trust on first use, so a host
 with a member of a channel from before signed roles can make that member its first signed admin
 before a real admin does (a workspace admin's checkpoint fixes it, and the real admins see the
 roles they hold shown as not signed). A demotion the server withholds is noticed only through the
-heads members exchange; channel roles have no freshness window like the roster's. A device that
+heads members exchange; channel roles have no freshness window like the roster's, and §4.6.3 (issue
+#876, not implemented) says why a window can't simply be added and what to do instead. A device that
 verifies a log from scratch judges a workspace admin's old entry by the roster it has now, so an
 entry by an admin who lost the role since is skipped there (and the entries built on it) until a
 workspace admin signs a checkpoint. The stage 2 rule holds only against honest clients: a member who
@@ -1999,6 +2000,184 @@ both sides hold the same extensions; a joiner's welcome carries them; a package 
 can't be added (`InsufficientCapabilities`); an empty extension list turns it off; today's clients refuse
 the switch (`UnsupportedProposal`) and an empty commit (`MissingSignedChange`); a commit from a group
 founded alone fails on decryption.
+
+### 4.6.3 Noticing a withheld channel role change (issue #876, design for review)
+
+**Status: design, not implemented.** Nothing below is in the code, and D1 to D4 at the end are the owner's
+to decide. It answers whether channel roles need a freshness window like the roster's
+(`workspace_max_age`, admin.md §2.3). The short answer: not as a window on the roles. One decision can use a
+time limit, the rest can't, and what helps most is that the entry reaches the members another way.
+
+**The threat.** A hostile server keeps an entry of the role log away from some or all devices, so a demoted
+channel admin stays an admin there. It takes the server to do it; a member alone can't. What that gives,
+decision by decision:
+
+| Decision (code)                                             | Who judges             | What the withheld demotion gives                                                                       | Can a time limit help                                         |
+|-------------------------------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------|---------------------------------------------------------------|
+| Purge at once by a channel admin (`signed_deletion`)        | Each device for itself | Destroys the channel's history on every member's device, in a workspace-anchored channel. Not undoable | **Yes**: refusing costs only speed, the retention still holds |
+| A channel admin's self-join approval (`approve_admin_join`) | The approver's device  | An honest former owner, who isn't told either, approves in good faith                                  | No: it would only break the owner back from a holiday         |
+| Members merging that addition (`member_may`)                | Every member, alike    | A workspace admin gets in, with the line "approved by". No more than any member can do, see below      | No: see "Why not on commits"                                  |
+| The next role entry (`apply_entry`)                         | Each device, in step   | The demoted admin keeps signing, and can make somebody else an admin                                   | No: a quiet channel's admin could never change a role again   |
+| Role display, the appointer line (`channel_member_view`)    | Each device            | A wrong label. The server's list caps it, and that server lists the old role anyway                    | No: it could only nag                                         |
+| Integration sources, notetaker, import                      | –                      | Nothing: these read the roster, not the role log                                                       | –                                                             |
+
+The purge isn't in the issue, and it is the only one of these that can't be repaired afterwards. The merge rule
+matters less than it looks: a member with a modified client and that server already get an admin past
+`owner_approval`, unannounced (§4.6.2, finding 2). A former owner has no more power than that; they only get
+a line that looks right.
+
+**What noticing is worth today.** Heads in messages (§4.6.1) have three gaps:
+
+- **A quiet channel carries nothing.** Only text messages carry a head (`messaging.rs`). If nobody who saw the
+  demotion writes, nobody compares anything, and the person who signed it is often the only one who saw it.
+- **An alarm reaches nobody.** A channel's `maybe_alarm` is a log line. It refuses a purge and does nothing
+  else: nobody sees it, and `approve_admin_join` doesn't read it.
+- **An alarm isn't evidence.** A head is a member's claim, so a modified client can send a made-up one, and the
+  alarm never goes away. Today that costs only the speed of a purge. It rules out making the alarm stronger as
+  it stands: any member could then block approvals and scare everybody.
+
+A device that is ahead learns nothing from a member's older head (`note_head` ignores it), and it shouldn't
+raise an alarm over one: a device doesn't read the role log when it connects, so an honest one that was
+offline can really be behind.
+
+**Why not the issue's first option: a "still valid" checkpoint by any channel admin.** The format would be
+fine: an entry with an unchanged snapshot is an ordinary entry that today's clients accept, and it keeps the
+anchor and the appointments (tried, below). The trouble is who signs it.
+
+- **The person concerned holds a signing key.** The roster's window works because owners sign it and the admins
+  it bounds don't. Here the demoted admin is an admin of the very snapshot to be refreshed, and their app,
+  shown the old log, signs like any other. The window then bounds nothing.
+- **Leaving out their own signature doesn't close it.** A third admin's app, shown the same old log, signs in
+  good faith. So can a member the demoted admin just promoted (tried, below).
+- **It needs an admin online and costs traffic.** It is a write per channel per half window, and each one has
+  every online member's device read the log. That is 300 entries a fortnight for somebody who owns 300 channels,
+  against the budget "no network while idle". A channel whose only admin is on holiday just goes stale.
+
+**Why not the second option: an old snapshot counts as unsigned.** Quiet channels are normal, so without
+checkpoints nearly every channel goes stale, and with them it inherits all of the above. And "unsigned" means
+"every member may commit" in today's rule (`maybe_signed_admins`), so a stale channel would get weaker, not
+stronger; it would have to mean "nobody may", which locks out the real owner.
+
+**Why not on commits at all.** Whether a commit is merged must be the same on every member, or the group splits.
+
+- A device's own clock differs between members, so it can't decide this (§4.6, "Server time for merge
+  decisions").
+- The commit's server time is the word of the very party that withholds: it sets the time just inside the
+  window. The roster's freshness lives with that as one check among several; here it would be all the rule
+  rests on.
+- Older clients have no such rule. They merge what newer ones refuse, and the newer ones fall out and come back.
+  That is the split this must not cause.
+
+The answer for commits already exists: in a strict channel (§4.6.2) a role change is in the group context, so the
+server can delay the commit but can't let a member follow the group without it. Until then, `owner_approval` in a
+channel that isn't strict stays open to a withheld demotion, as it is to a modified client.
+
+**The proposal.** Three parts, none of which changes a signed format.
+
+1. **The entry travels in the channel too (D2).** Whoever signs a role entry and is in the group sends it,
+   right after the append, as a hidden encrypted message (`MessageContent::ChannelRolesEntry`, a control message
+   like `IntegrationSource`, through the outbox, so it survives going offline). A device verifies it with the same
+   `apply_entry` checks, with the message's server time as the entry's:
+   - The next version, valid: accepted, also if the log doesn't show it. The demotion holds, not just the alarm.
+   - Valid, but the log doesn't show it after a read: a **proven** alarm. Somebody allowed to sign signed it, so no
+     member can make one up.
+   - Two valid entries for one version: a proven alarm too, and the first one seen stays.
+   - A version further on, which this device can't verify yet: treated like a newer head today, read the log.
+   - Anything else: skipped, without an alarm.
+
+   This gives nobody new power: a member can only pass on what an entitled signer signed, and replays are below the
+   cursor. To hold a demotion back now, the server has to drop that message, and every later message of the signer
+   too, since those still carry the head. It can tell which one to drop from the timing, so this isn't proof
+   against it: it turns "don't serve one log entry" into "silence a person in the channel", which people notice.
+2. **A proven alarm is said (D3).** The channel's member list shows one line, only then, never because of age: "This
+   device was shown different role changes than other members of this channel. Roles here may be out of date."
+   `approve_admin_join` refuses while one stands, with its own refusal the UI words at the button. No banner and
+   no notification. A workspace admin's entry ends it (it re-anchors the device, §4.6.1). The unproven alarm from
+   heads stays what it is: it refuses a purge and logs.
+3. **A time limit on the purge, and only there (D1).** A channel admin's signature purges at once only if somebody
+   **else** signed an entry this device accepted within `channel_roles_max_age` (client setting, default 30 days,
+   next to `workspace_max_age`). Otherwise the deletion is a claim: hidden at once, history kept for the retention,
+   and undone if the server lists the channel again. That path exists already, so nothing else changes: chat,
+   approvals, role changes and the display don't look at the age, and an old snapshot is never called anything.
+   A workspace admin's signature stays as it is, under the roster's window.
+
+**Whose clock decides the limit.** Each device for itself, since a purge isn't a decision members must share and
+refusing costs only speed.
+
+- **The start** is the entry's `signed_at_ms`, the other signer's clock, capped at this device's clock when it
+  accepted the entry, so a signer's clock running ahead buys nothing. Not the entry's `created_at`: the server sets
+  that, and a later time would be freshness it made up. `signed_at_ms` is shown only today; this makes it count
+  for this one purpose, without touching the document.
+- **The end** is the latest of this device's clock, the deletion's `signed_at_ms` and the newest server time this
+  device saw (as for imports, §4.10). Each of them being ahead can only refuse; a server that holds its time back
+  gains nothing.
+- **No extra leeway:** an hour's skew against 30 days decides little, and the wrong side costs a retention, not a
+  channel. A device whose clock is behind and which hasn't heard from the server lately accepts for longer, on
+  that device only. That is the same reasoning as the signed deletion's own age (§4.6).
+
+**What a false alarm costs.**
+
+| Situation                                  | What happens                                                                                                          |
+|--------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
+| No role change for months                  | Nothing shown, nothing refused. A channel admin's deletion takes the retention on members' devices                    |
+| The only admin on holiday for weeks        | Chat, members and display as ever. They approve and change roles when back, without re-signing anything               |
+| The only admin deletes their quiet channel | Hidden everywhere at once; history stays on members' devices for the retention. A workspace admin's purge still works |
+| A member sends a made-up head              | As today: this device's purge takes the retention. No line, no refused approval                                       |
+| A device offline for weeks comes back      | It reads the hidden messages, sees newer versions and reads the log. No alarm unless the log leaves them out          |
+| The server drops one message by accident   | The signer's next text message carries the head, as today, and the log has the entry                                  |
+
+**What stays undetectable.**
+
+- **Holding back everything.** A server that drops the entries and every message of those who know looks like an
+  outage or a silent colleague. There is nothing to compare, and no window helps: a member never told of anything
+  can't tell. Only talking to each other outside the channel shows it.
+- **Lying about time.** The server sets IDs and `created_at`, so nothing here starts from them, and the purge's end
+  can only be pushed towards refusing. It can still date a commit as it likes, which is why no commit decision uses
+  a limit.
+- **Use inside the window.** A demoted admin with that server can purge for up to 30 days after the last signature
+  by somebody else. The limit ends this; it doesn't prevent it.
+- **Other signers on the same old log.** A second admin's real role change, or a member the demoted admin promoted,
+  counts as "somebody else" (tried, below). It shows in the member list and leaves entries a later head exposes.
+- **A demotion by a workspace admin who isn't in the group.** They can't send the message. The first member who
+  accepts the entry doesn't send it on, so the gap of today stays for this case until a member writes.
+- **`owner_approval` outside strict channels:** merges stay as they are. Noticing is all there is.
+
+**Older clients.** No signed document changes, and the server changes nothing. An older client keeps the hidden
+message as unknown (`#[serde(other)]`, hidden, as for §13.1), sends none, and purges as it does today, so a mixed
+channel doesn't split: every part of this is one device's own decision, and none of it touches what is merged.
+Older signers' entries reach the others through the log and heads as before.
+
+**The owner's decisions.**
+
+| No. | Decision                                       | Recommendation                                                                                                                             | Alternatives                                                                                                                                                                                                                  |
+|-----|------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| D1  | A time limit on a channel admin's purge        | Yes, without checkpoints. Nearly every deletion by a channel admin then takes the retention: a narrowing of #1135 that only speed pays for | Add automatic checkpoints by other admins' apps: keeps the speed where two admins are active, at the traffic above and with the third-admin gap. Or no limit: keep the speed, accept the risk until strict channels and #1171 |
+| D2  | How the entry reaches members                  | The signed entry in a hidden message: it applies, and its alarm is proof                                                                   | Only the head in a hidden message: smaller, but the alarm stays a claim and D3 can't rest on it. Or nothing: a quiet channel stays blind                                                                                      |
+| D3  | What a proven alarm does                       | One line in the member list, shown to everybody there, and approvals refused                                                               | Admins only: a member's device has the same evidence, and they can ask. Or a notification: louder than a rare thing most people can't act on deserves                                                                         |
+| D4  | Commits: no limit, strict channels answer them | Accept it, and close #876 with parts 1 to 3                                                                                                | "Stale means nobody may" on the merge rule: it splits from older clients and is judged at a time the server chooses, for very little                                                                                          |
+
+**What implementing it takes** (moderate, once decided):
+
+- `teamcraft-core`: the control message and its handling (a log read still compares what the log shows at a version
+  accepted from a message), the local record of who signed recently and when (additive state: without one, a
+  device takes the retention), the limit in `verified_by_channel_admin`, proven alarms apart from claimed ones, the
+  refusal in `approve_admin_join`, `channel_roles_max_age`.
+- Clients: the line in the member list and the refusal's wording, through i18n, where the list is shown.
+- Tests, with an injected clock and no sleeping:
+
+| Decision             | Stale snapshot                     | Withheld demotion                                         | Offline admin                        | Clock skew                                                              | Older client                            |
+|----------------------|------------------------------------|-----------------------------------------------------------|--------------------------------------|-------------------------------------------------------------------------|-----------------------------------------|
+| Purge at once        | Takes the retention past the limit | Own signature, a stale other's: retention; within: purges | Other admin away: retention          | Each of the three times ahead refuses; a signer's future date is capped | Old state, no record: retention         |
+| Approval             | Unaffected by age                  | Proven alarm refuses; a claimed head doesn't              | Back after weeks: approves unchanged | Not read                                                                | Hidden message from a newer one ignored |
+| Merging the addition | Unaffected by age (pins D4)        | Unchanged; an entry from the message applies first        | Unaffected                           | Not read                                                                | New and old merge alike                 |
+| Next role entry      | Unaffected by age                  | Fork of two signed entries: proven alarm, first one stays | Back after weeks: signs unchanged    | Not read                                                                | Older signer through the log            |
+| Display              | Nothing shown by age               | The line only on a proven alarm                           | Unaffected                           | Not read                                                                | Nothing new shown                       |
+
+**Tried.** In a throwaway test against `ChannelRoleState`, not kept in the tree: with Bob's demotion of Alice shown
+only to Bob's device, Carol's device accepts Alice's own entry with the unchanged snapshot, and then a third admin's,
+with version up by one and assignments, appointments and anchor unchanged, and Alice still an admin there. It also
+accepts Alice promoting Dave, then Dave's entry. Bob's device, given Carol's older head, doesn't change. The hidden
+message, the limit and everything end to end were not tried.
 
 ### 4.7 Converting a channel between private and public
 
