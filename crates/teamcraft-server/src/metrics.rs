@@ -418,7 +418,7 @@ pub fn route_class(path: &str) -> &'static str {
     "auth" => "auth",
     "calls" | "notetaker" => "calls",
     "device-links" | "devices" | "push" => "devices",
-    "org-recovery" => "e2ee",
+    "org-recovery" | "role-evidence" => "e2ee",
     "gateway" | "rendezvous" => "gateway",
     "meetings" => "meetings",
     "brand" | "client-compatibility" | "openapi.json" | "server-info" => "public",

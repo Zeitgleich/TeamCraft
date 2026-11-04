@@ -217,8 +217,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .find(|member| member.user_id == self.account.user_id);
     if role == ProviderRole::NotSaid {
       // The usual reason on an instance that updated: the mapper isn't there yet, which the access token
-      // shows by still naming the role. Without it there, this person has no role left: the mapper
-      // adds no claim then. That is no problem of the realm; the server keeps the evidence.
+      // shows by still naming the role. Only people it concerns hear of it.
       if is_provider_admin(tokens, &anchor) {
         tracing::warn!(
           "the identity provider's ID tokens carry no client roles, so role changes can't be signed by \
@@ -226,6 +225,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         );
         self.set_problem(Some(RoleSigningProblem::NoRoleClaim))?;
         return Ok(true);
+      }
+      // Without it there, this person has no role left: the mapper adds no claim then. Whatever goes to
+      // the server now is refused, and the server keeps the access token as the evidence. An app that sits
+      // idle sends nothing, so it knocks once per token, for as long as the roster lists them.
+      if my_entry.is_some()
+        && let Err(error) = self
+          .api
+          .put_role_evidence(&PutRoleEvidenceRequest {
+            token: tokens.id_token.clone(),
+          })
+          .await
+      {
+        tracing::debug!(%error, "the server refused this token, as it should for no role");
       }
       return Ok(false);
     }

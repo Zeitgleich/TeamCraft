@@ -940,6 +940,36 @@ mod degraded {
   }
 
   #[tokio::test]
+  async fn somebody_with_no_role_left_hears_no_false_note_and_shows_the_server_their_token() {
+    // Keycloak's mapper adds no claim once the last client role is gone. The access token shows it.
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    world.give_token(&bob, &["admin"], T0);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let bob_id = bob.client.user_id();
+    let claim = bob.client.identity_attestation_claim();
+    world
+      .server
+      .set_provider_token(bob_id, world.provider.token(&base_claims(&claim, T0 + 50)));
+    world.server.set_provider_access_token(
+      bob_id,
+      world.provider.token(&no_role_claims("sub-of-Bob", T0 + 50)),
+    );
+    let calls = world.server.rest_call_count(bob_id);
+
+    bob.client.run_role_signing().await.unwrap();
+
+    assert_eq!(bob.client.role_signing_record().unwrap().maybe_note, None);
+    assert!(
+      world.server.rest_call_count(bob_id) > calls,
+      "an idle app would send nothing"
+    );
+  }
+
+  #[tokio::test]
   async fn once_the_mapper_is_there_the_note_goes_and_the_roster_follows() {
     let world = World::new();
     let mut alice = world.peer("Alice").await;
