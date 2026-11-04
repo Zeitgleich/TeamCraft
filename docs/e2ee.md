@@ -3405,6 +3405,29 @@ A rejoin prepares again, so the trusted roster follows membership changes; so do
 to the conversation during the call (§8.2, "Membership"): the module asks the page's `roster`
 callback, and the page refreshes its authenticator with the core's devices.
 
+**Calls and browser tabs** (#440). Only the account's active tab runs the core (§9.4), so only it
+holds the signer, prepares joins and runs the call module. Inactive tabs show no app, so they have
+no call to sign for, and nothing signs for them: the tab channel (`BroadcastChannel`) carries no
+call key binding, join token or verified device list in either direction. A relay where an inactive
+tab asks the owner to sign its DAVE key was weighed and left out:
+
+- It would turn the owner into a signing service for messages on a channel that every document of
+  the origin can post to, with no sender authentication. The owner could only check what a message
+  claims (a call of a conversation it knows, a fresh key, a short `not_after`), not that the key
+  belongs to a call module the user started in a tab of this account; a binding is enough to put a
+  key into the call as this device (step 3).
+- The media keys would live in a second page next to the one with the device key, and two pages of
+  one device would compete for its single place in a call (a device's new connection replaces its
+  old one, "Lost connections" below).
+- Since #744 there is nobody to call from: only one tab shows the app.
+
+Calls move with the app instead, without a reload. The tab that takes the app over mounts it afresh
+and loads the call module, which prepares and signs with that tab's core. The tab that hands it
+away stops the module before its core stops: a running call ends (the takeover waits for the user
+to agree to that), a ringtone stops, and the module drops the page's callbacks and its device and
+permission listeners. Its keys go with the call: the fresh DAVE key pair, the prepared bindings and
+the verified roster are per call and per page, and a later call in either tab prepares anew.
+
 **The SFU's certificate.** Clients reach the SFU over TLS (QUIC). Normally its certificate chains to
 a trusted root. For test and development setups with a short-lived self-signed certificate, the
 server can hand out its SHA-256 with the join token (`[calls] sfu_certificate_sha256`, several while
@@ -3788,7 +3811,8 @@ So exactly one core owns a device's store at a time:
   channel to hand over and waits for the lock. The owner refuses while it is in a call (the user can
   then end the call and ask again); otherwise it has the composers store their drafts, waits for
   IndexedDB to hold everything written (the outbox included, at most 5 s), stops its core, which
-  releases the lock, and shows "TeamCraft was opened in another tab". Every inactive tab waits for
+  releases the lock, and shows "TeamCraft was opened in another tab". Calls move with the app
+  (§8, "Calls and browser tabs"): the new active tab offers them at once. Every inactive tab waits for
   the lock, so when the active tab closes, crashes or is discarded one of them takes over by
   itself: the tab that gets the lock holds a roll call on the channel (150 ms; only live tabs
   answer) and keeps it only if it should run the app — the tab where "Use here" was pressed, else
