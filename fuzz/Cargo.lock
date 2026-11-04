@@ -5156,7 +5156,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-bridge"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "axum",
@@ -5180,7 +5180,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-client-api"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "base64 0.23.1",
  "oauth2",
@@ -5196,7 +5196,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-core"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "base64 0.23.1",
  "futures-channel",
@@ -5234,7 +5234,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-crypto"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -5269,7 +5269,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-db"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "sqlx",
  "teamcraft-proto",
@@ -5297,7 +5297,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-net"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "futures-util",
  "thiserror 2.0.21",
@@ -5306,7 +5306,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-ops"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "axum",
  "prometheus",
@@ -5318,7 +5318,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-proto"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "base64 0.23.1",
  "rand_core 0.6.4",
@@ -5331,7 +5331,7 @@ dependencies = [
 
 [[package]]
 name = "teamcraft-server"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
