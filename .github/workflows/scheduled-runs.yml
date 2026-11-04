@@ -1,0 +1,41 @@
+name: Scheduled runs
+
+# Scheduled workflows run on no pull request and mail only the person who last touched their cron,
+# so a red one can go unnoticed for days (#1281). This keeps one open issue per red workflow on
+# `main`: opened at the first failure, commented on at the next ones, closed by the next green run.
+on:
+  workflow_run:
+    workflows: [E2E, Desktop cache, Nightly release, CodeQL, CodeQL mobile]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  track:
+    if: ${{ github.event.workflow_run.event == 'schedule' && contains(fromJSON('["success", "failure", "timed_out", "startup_failure"]'), github.event.workflow_run.conclusion) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open, comment on or close the workflow's issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          title="Scheduled run is red: $WORKFLOW"
+          number="$(gh issue list --state open --search "in:title \"$title\"" \
+            --json number,title --jq "map(select(.title == \"$title\")) | first | .number // empty")"
+          if [ "$CONCLUSION" = "success" ]; then
+            if [ -n "$number" ]; then gh issue close "$number" --comment "Green again: $RUN_URL"; fi
+          elif [ -n "$number" ]; then
+            gh issue comment "$number" --body "Red again ($CONCLUSION): $RUN_URL"
+          else
+            gh issue create --title "$title" --body "The scheduled workflow $WORKFLOW ended with $CONCLUSION on main: $RUN_URL
+
+          This issue is kept by .github/workflows/scheduled-runs.yml and closes itself after the next green run."
+          fi

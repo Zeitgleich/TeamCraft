@@ -46,8 +46,10 @@ use teamcraft_proto::{ConversationId, HistoryPolicy, SpaceId, UserId};
 
 use crate::web::{TEST_CSP, click_text, type_until_kept, wait_for_element, wait_for_text};
 
-/// Not the browser tests' 8082, so both can run at once (the dev realm registers both).
 const PORT: u16 = 8083;
+/// The other port the dev realm registers. This test holds it as well: what it measures (times,
+/// CPU, memory) shouldn't depend on a second Chromium running next to it.
+const OTHER_BROWSER_TESTS_PORT: u16 = 8082;
 const WEB_ORIGIN: &str = "http://127.0.0.1:8083";
 const IMAGES: [&[u8]; 3] = [
   include_bytes!("../../../../assets/backgrounds/lake-morning.jpg"),
@@ -205,7 +207,7 @@ struct Rig {
   alice: Peer,
   /// A second writer, so conversations have more than one author.
   bob: Peer,
-  _turn: WebPortLease,
+  _turn: [WebPortLease; 2],
 }
 
 /// Every number of one run (written as JSON as-is).
@@ -367,7 +369,10 @@ impl Rig {
       .with_env("TEAMCRAFT_SECURITY__RATE_LIMITS__IS_ENABLED", "false")
       // More connections than the harness default: the seeding peers and the browser in parallel.
       .with_env("TEAMCRAFT_DATABASE__MAX_CONNECTIONS", "16");
-    let turn = lease_web_port(PORT).await;
+    let turn = [
+      lease_web_port(PORT).await,
+      lease_web_port(OTHER_BROWSER_TESTS_PORT).await,
+    ];
     let stack = builder.start().await?;
     let browser = BrowserSession::launch_for_measurements().await?;
     let alice = Peer::enroll(&stack, "alice").await;

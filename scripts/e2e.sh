@@ -5,6 +5,7 @@
 #   scripts/e2e.sh                  # everything, including the browser tests
 #   scripts/e2e.sh --no-browser     # without the web client build and Chromium
 #   scripts/e2e.sh --down           # stop the dev stack afterwards
+#   scripts/e2e.sh --prebuilt-web   # use the web client already in target/e2e-web (or $E2E_WEB_DIR)
 #   scripts/e2e.sh -- calls::       # arguments after -- go to the test binary (a name filter, --ignored, ...)
 #
 # Needs Docker with Compose, python3 (dev tokens), a Rust toolchain and, for the browser tests, Chrome
@@ -17,12 +18,14 @@ cd "$root"
 compose=(docker compose -f docker-compose.dev.yml)
 features="browser"
 is_down=false
+has_prebuilt_web=false
 test_args=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-browser) features="e2e" ;;
     --down) is_down=true ;;
+    --prebuilt-web) has_prebuilt_web=true ;;
     --) shift; test_args=("$@"); break ;;
     -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
@@ -68,7 +71,10 @@ wait_until "Mailpit" 60 curl -sf http://127.0.0.1:8025/api/v1/info
 step "Server, SFU and bridge"
 SQLX_OFFLINE=true cargo build -p teamcraft-server -p teamcraft-sfu -p teamcraft-bridge
 
-if [ "$features" = "browser" ]; then
+if $has_prebuilt_web; then
+  web_dir="${E2E_WEB_DIR:-$root/target/e2e-web}"
+  if [ ! -f "$web_dir/index.html" ]; then echo "no web client in $web_dir" >&2; exit 1; fi
+elif [ "$features" = "browser" ]; then
   step "Web client (trunk in a container)"
   tests/e2e/web/build.sh
 fi

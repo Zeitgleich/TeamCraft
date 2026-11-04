@@ -2,7 +2,7 @@ name: E2E
 
 # The end-to-end suite starts the dev stack (Keycloak, Postgres, Garage, Mailpit), the real server,
 # SFU and bridge, and drives them with headless clients and Chromium (tests/e2e/README.md). It takes
-# a few minutes and needs containers, so it doesn't run on every push.
+# about an hour of runner time and needs containers, so it doesn't run on every push.
 on:
   workflow_dispatch:
   schedule:
@@ -15,7 +15,24 @@ permissions:
   contents: read
 
 jobs:
+  # The web client as it ships, with its link-time optimization: 25 minutes on a four-core runner
+  # that grew with the app. In its own job they don't come out of the tests' time limit (#1281).
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the web client (trunk in a container)
+        run: tests/e2e/web/build.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-web
+          path: target/e2e-web
+          if-no-files-found: error
+          retention-days: 2
+
   e2e:
+    needs: [web]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -26,21 +43,31 @@ jobs:
         run: >
           sudo apt-get update && sudo apt-get install -y
           libasound2-dev libclang-dev cmake pkg-config libssl-dev
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: e2e-web
+          path: target/e2e-web
       - name: Run the suite
-        # Starts the dev stack, builds server, SFU, bridge and the web client, runs the tests.
-        # The runner's Google Chrome drives the browser tests. Ends before the job does, so the
-        # screenshots and process logs below are still uploaded when it runs out of time.
+        # Starts the dev stack, builds server, SFU and bridge, runs the tests. The runner's Google
+        # Chrome drives the browser tests. Ends before the job does, so the screenshots and process
+        # logs below are still uploaded when it runs out of time.
         timeout-minutes: 52
-        run: scripts/e2e.sh
+        run: scripts/e2e.sh --prebuilt-web
+      - name: Collect the process logs
+        # The logs of the server, SFU and bridge of failed tests stay in the temp directory, next to
+        # the profiles of the Chromium that are left after a timeout. Those are not wanted, and they
+        # change while they are read: a file that vanishes during the upload fails it (#1281).
+        if: failure()
+        run: |
+          mkdir -p target/e2e-artifacts/processes
+          find /tmp -maxdepth 1 -type d -name 'teamcraft-e2e-*' ! -name 'teamcraft-e2e-chrome-*' \
+            -exec cp -r {} target/e2e-artifacts/processes/ \; || true
       - name: Failure screenshots and process logs
-        # The logs of the server, SFU and bridge of failed tests stay in the temp directory.
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e-artifacts
-          path: |
-            target/e2e-artifacts
-            /tmp/teamcraft-e2e-*
+          path: target/e2e-artifacts
           if-no-files-found: ignore
       - name: Dev stack logs
         if: failure()
