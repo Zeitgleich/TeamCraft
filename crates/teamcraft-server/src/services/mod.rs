@@ -49,6 +49,7 @@ pub mod presence;
 pub mod profiles;
 pub mod push_diagnostics;
 pub mod retention;
+pub mod role_evidence;
 pub mod runtime_settings;
 pub mod session;
 pub mod shares;

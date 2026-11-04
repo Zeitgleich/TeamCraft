@@ -68,6 +68,25 @@ pub struct TokenIdentity {
   pub maybe_organization: Option<String>,
   /// Whether the token is bound to a device's key.
   pub token_binding: TokenBinding,
+  /// The token itself, where it comes from the identity provider: its signature is evidence when it
+  /// shows a lost role (e2ee.md §3.1.3).
+  pub maybe_provider_token: Option<ProviderTokenText>,
+}
+
+/// A provider's token as it came. Prints as nothing: it is a credential.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderTokenText(std::sync::Arc<str>);
+
+impl ProviderTokenText {
+  pub fn as_str(&self) -> &str {
+    &self.0
+  }
+}
+
+impl std::fmt::Debug for ProviderTokenText {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("[redacted]")
+  }
 }
 
 /// Who a back-channel logout token ends sessions of.
@@ -155,6 +174,11 @@ impl TokenValidator {
   }
 
   /// The issuer tokens must come from.
+  /// How long past its expiry a token is still accepted.
+  pub fn leeway_secs(&self) -> u64 {
+    self.options.leeway_secs
+  }
+
   pub fn issuer(&self) -> &str {
     &self.options.issuer
   }
@@ -317,6 +341,7 @@ impl TokenValidator {
       is_exempt_from_session_policy: false,
       maybe_organization,
       token_binding,
+      maybe_provider_token: Some(ProviderTokenText(token.into())),
     })
   }
 }

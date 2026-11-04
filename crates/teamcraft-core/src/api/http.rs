@@ -137,6 +137,14 @@ pub trait AccessTokenSource {
   fn dpop_prover(&self) -> Option<Arc<DpopProver>> {
     None
   }
+
+  /// The session's newest ID token, where the app hands it over (role signing, e2ee.md §3.1.3).
+  fn id_token(&self) -> Option<String> {
+    None
+  }
+
+  /// An ID token that names what was just written to the provider would be welcome soon.
+  fn ask_for_new_id_token(&self) {}
 }
 
 /// A fixed token (tests, command-line tools).
@@ -1292,6 +1300,33 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get("/me/key-bag").await
   }
 
+  fn provider_tokens(&self) -> Option<super::ProviderTokens> {
+    let id_token = self.tokens.id_token()?;
+    let access_token = self.tokens.access_token().ok()?;
+    Some(super::ProviderTokens {
+      id_token,
+      access_token,
+      maybe_prover: self.tokens.dpop_prover(),
+    })
+  }
+
+  fn ask_for_new_id_token(&self) {
+    self.tokens.ask_for_new_id_token();
+  }
+
+  async fn put_role_evidence(
+    &self,
+    request: &teamcraft_proto::PutRoleEvidenceRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(Method::PUT, "/me/role-evidence", Some(request))
+      .await
+  }
+
+  async fn list_role_evidence(&self) -> Result<teamcraft_proto::ListRoleEvidenceResponse, ApiError> {
+    self.get("/role-evidence").await
+  }
+
   async fn list_workspace_log(
     &self,
     kind: &WorkspaceLogKind,
@@ -2147,7 +2182,7 @@ impl fmt::Debug for HttpRendezvous {
 /// upload on a slow link is slow, not dead. Instead a connection is dropped when it stops making
 /// progress (robustness.md, "Network loss and change").
 #[cfg(not(target_arch = "wasm32"))]
-fn http_client() -> reqwest::Client {
+pub(crate) fn http_client() -> reqwest::Client {
   match http_client_builder().build() {
     Ok(client) => client,
     // Only a reqwest/rustls version mismatch can cause this; the default client still works for
@@ -2249,7 +2284,7 @@ const MAX_REDIRECTS: usize = 10;
 
 /// The browser's `fetch` has its own timeouts and connection handling.
 #[cfg(target_arch = "wasm32")]
-fn http_client() -> reqwest::Client {
+pub(crate) fn http_client() -> reqwest::Client {
   reqwest::Client::new()
 }
 

@@ -695,6 +695,9 @@ fn spawn_account_housekeeping(state: AppState) {
         },
         Err(error) => warn!(%error, "deleting expiring key packages failed"),
       }
+      if let Err(error) = teamcraft_server::services::role_evidence::prune(&state).await {
+        warn!(%error, "deleting old role evidence failed");
+      }
       match state.database.delete_expired_create_keys().await {
         Ok(0) => {},
         Ok(deleted) => info!(deleted, "deleted expired idempotency keys"),

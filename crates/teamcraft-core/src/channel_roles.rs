@@ -2897,6 +2897,7 @@ mod tests {
             .unwrap_or_else(|| Base64Bytes::new(vec![0; HASH_BYTES])),
         ),
         maybe_signed_at_ms: Some(signed_at_ms),
+        ..RosterDocument::default()
       };
       let payload = serde_json::to_vec(&document).unwrap();
       let signature = sign_log_entry(

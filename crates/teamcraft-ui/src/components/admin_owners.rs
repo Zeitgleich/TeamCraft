@@ -3,13 +3,16 @@
 //! (admin.md §2.3, issue #188).
 
 use leptos::prelude::*;
+use teamcraft_proto::{RoleSigningMode, RoleSigningPolicy};
 
 use crate::admin::{
-  OwnerRosterStatus, OwnerWarning, RosterChange, RosterEntry, RosterRoleChoice, idp_roster_proposal,
-  normalized_roster, roster_changes, roster_problem, signed_roster,
+  OwnerRosterStatus, OwnerWarning, RoleSigningIssue, RosterChange, RosterEntry, RosterRoleChoice,
+  idp_roster_proposal, normalized_roster, roster_changes, roster_problem, signed_roster,
 };
 use crate::clock::{format_date_time, now_ms};
 use crate::components::admin_policy::{PolicyDraft, SelectRow};
+use crate::components::roster_banner::names;
+use crate::form_errors::error_id;
 use crate::i18n::{I18n, use_i18n};
 use crate::model::UserId;
 use crate::state::use_app_state;
@@ -41,11 +44,18 @@ pub fn OwnersPanel(policy: PolicyDraft) -> impl IntoView {
       <legend>{move || i18n.t("policy-owners")}</legend>
       <p class="muted-text small">{move || i18n.t("policy-owners-hint")}</p>
       {move || match roster.get() {
-        Some(status) => view! {
-          <OwnerList status=status.clone() />
-          <RosterEditor status=status />
-        }
-        .into_any(),
+        Some(status) => {
+          let is_open = status.is_signing_manual;
+          view! {
+            <OwnerList status=status.clone() />
+            <SigningNote status=status.clone() />
+            <details class="roster-by-hand" open=is_open>
+              <summary>{i18n.t("roster-by-hand")}</summary>
+              <RosterEditor status=status />
+            </details>
+          }
+          .into_any()
+        },
         None => view! { <p class="muted-text small">{i18n.t("policy-owners-unknown")}</p> }.into_any(),
       }}
       <SelectRow
@@ -59,8 +69,122 @@ pub fn OwnersPanel(policy: PolicyDraft) -> impl IntoView {
         }
       />
       <p class="muted-text small">{move || i18n.t("policy-owners-minimum-hint")}</p>
+      <RoleSigningSettings policy=policy />
     </fieldset>
   }
+}
+
+/// Who signs role changes (e2ee.md §3.1.3): the signed policy's choice, automatic unless an owner wants
+/// every change by hand, and the role names at the identity provider where they aren't the usual ones.
+#[component]
+fn RoleSigningSettings(policy: PolicyDraft) -> impl IntoView {
+  let i18n = use_i18n();
+  let draft = policy.draft;
+  let signing = Memo::new(move |_| draft.get().maybe_role_signing.unwrap_or_default());
+  let mode_options = Signal::derive(move || {
+    vec![
+      ("automatic".to_owned(), i18n.t("policy-role-signing-automatic")),
+      ("manual".to_owned(), i18n.t("policy-role-signing-manual")),
+    ]
+  });
+  let edit = move |change: &dyn Fn(&mut RoleSigningPolicy)| {
+    policy.edit(|p| {
+      let mut signing = p.maybe_role_signing.take().unwrap_or_default();
+      change(&mut signing);
+      p.maybe_role_signing = Some(signing);
+    });
+  };
+  let name_error = move |name: String| name.trim().is_empty().then(|| i18n.t("policy-role-name-empty"));
+
+  view! {
+    <SelectRow
+      id="policy-role-signing"
+      label=Signal::derive(move || i18n.t("policy-role-signing"))
+      options=mode_options
+      selected=Signal::derive(move || signing.get().mode.as_str().to_owned())
+      on_select=move |value: String| {
+        edit(&|signing| signing.mode = RoleSigningMode::from(value.clone()));
+      }
+    />
+    <p class="muted-text small">{move || i18n.t("policy-role-signing-hint")}</p>
+    <details class="roster-by-hand">
+      <summary>{move || i18n.t("policy-role-provider-details")}</summary>
+      <div class="field">
+        <label for="policy-role-owner">{move || i18n.t("policy-role-owner-name")}</label>
+        <input
+          id="policy-role-owner"
+          class="input"
+          translate="no"
+          aria-invalid=move || name_error(signing.get().owner_role).is_some().then_some("true")
+          aria-describedby=move || name_error(signing.get().owner_role).is_some().then(|| error_id("policy-role-owner"))
+          prop:value=move || signing.get().owner_role
+          on:input=move |ev| {
+            let name = event_target_value(&ev);
+            edit(&|signing| signing.owner_role.clone_from(&name));
+          }
+        />
+        {move || name_error(signing.get().owner_role).map(|text| view! {
+          <p id=error_id("policy-role-owner") class="field-error" role="alert">{text}</p>
+        })}
+      </div>
+      <div class="field">
+        <label for="policy-role-admin">{move || i18n.t("policy-role-admin-name")}</label>
+        <input
+          id="policy-role-admin"
+          class="input"
+          translate="no"
+          aria-invalid=move || name_error(signing.get().admin_role).is_some().then_some("true")
+          aria-describedby=move || name_error(signing.get().admin_role).is_some().then(|| error_id("policy-role-admin"))
+          prop:value=move || signing.get().admin_role
+          on:input=move |ev| {
+            let name = event_target_value(&ev);
+            edit(&|signing| signing.admin_role.clone_from(&name));
+          }
+        />
+        {move || name_error(signing.get().admin_role).map(|text| view! {
+          <p id=error_id("policy-role-admin") class="field-error" role="alert">{text}</p>
+        })}
+      </div>
+      <p class="muted-text small">{move || i18n.t("policy-role-names-hint")}</p>
+      {move || signing.get().maybe_provider.map(|provider| view! {
+        <p class="muted-text small">
+          {i18n.t_with("policy-role-provider", &[("issuer", &provider.issuer)])}
+          " "
+          <button type="button" class="btn btn-small" on:click=move |_| edit(&|signing| {
+            signing.maybe_provider = None;
+            signing.accepts_new_provider = true;
+          })>
+            {i18n.t("policy-role-provider-reset")}
+          </button>
+        </p>
+      })}
+    </details>
+  }
+}
+
+/// What keeps role changes from being signed by themselves, in words the operator or the owner can act
+/// on; nothing when all works.
+#[component]
+fn SigningNote(status: OwnerRosterStatus) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let text = status.maybe_signing_problem.map(|problem| match problem {
+    RoleSigningIssue::NoRoleClaim => i18n.t("roster-signing-no-role-claim"),
+    RoleSigningIssue::NoKeyClaim => i18n.t("roster-signing-no-key-claim"),
+    RoleSigningIssue::ProviderChanged { issuer } => {
+      i18n.t_with("roster-signing-provider-changed-detail", &[("issuer", &issuer)])
+    },
+    RoleSigningIssue::Contradictory { users } => i18n.t_with(
+      "roster-signing-contradictory",
+      &[("names", &names(state, &users))],
+    ),
+    RoleSigningIssue::ReportedGone { users } => i18n.t_with(
+      "roster-signing-reported-gone",
+      &[("names", &names(state, &users))],
+    ),
+    RoleSigningIssue::AwaitingOwner => i18n.t("roster-signing-awaiting-owner"),
+  });
+  text.map(|text| view! { <p class="auth-alert" role="status">{text}</p> })
 }
 
 /// The warnings first, then each owner with their last signature and the roster's expiry.
@@ -131,7 +255,18 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
   let (idp_owners, idp_admins) = state.read(|backend| backend.admin_role_holders());
   // Additions and promotions only: removals are the owner's explicit edit (issue #765).
   let from_roles = idp_roster_proposal(&signed.get_value(), &idp_owners, &idp_admins);
-  let idp_changes = roster_changes(&signed.get_value(), &from_roles);
+  // Owners' apps sign these by themselves unless the policy wants them by hand or the provider's tokens
+  // can't prove them: only then is there something to do here.
+  let is_by_hand = status.is_signing_manual
+    || matches!(
+      status.maybe_signing_problem,
+      Some(RoleSigningIssue::NoRoleClaim | RoleSigningIssue::NoKeyClaim)
+    );
+  let idp_changes = if is_by_hand {
+    roster_changes(&signed.get_value(), &from_roles)
+  } else {
+    Vec::new()
+  };
   let name_of = move |user: UserId| account_label(state, user);
   let changes = Memo::new(move |_| roster_changes(&signed.get_value(), &draft.get()));
   let problem = Memo::new(move |_| roster_problem(&draft.get()));
@@ -290,7 +425,6 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
               members=members
               on_cancel=Callback::new(move |()| confirming.set(None))
               on_confirm=Callback::new(move |()| confirm())
-              maybe_on_sign_alone=None
             />
           }
         })
@@ -300,16 +434,14 @@ fn RosterEditor(status: OwnerRosterStatus) -> impl IntoView {
 }
 
 /// The confirmation before an owner signs a roster: every change with the user ID and the pinned
-/// key's fingerprint, attested, trusted on first use or the owner's own (review #263). The first
-/// roster goes through it too, with `signed` empty (#265); `maybe_on_sign_alone` then offers to
-/// sign the signer alone and add the others later.
+/// key's fingerprint, attested, trusted on first use or the owner's own (review #263). Only for what an
+/// owner edits by hand.
 #[component]
-pub(crate) fn RosterConfirm(
+fn RosterConfirm(
   signed: Vec<RosterEntry>,
   members: Vec<RosterEntry>,
   on_cancel: Callback<()>,
   on_confirm: Callback<()>,
-  maybe_on_sign_alone: Option<Callback<()>>,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
@@ -330,19 +462,7 @@ pub(crate) fn RosterConfirm(
       }
     })
     .collect_view();
-  let is_genesis = signed.is_empty();
-  let (title_key, hint_key) = if is_genesis {
-    ("roster-genesis-title", "roster-genesis-hint")
-  } else {
-    ("roster-confirm-title", "roster-confirm-hint")
-  };
-  let sign_alone = maybe_on_sign_alone.map(|on_sign_alone| {
-    view! {
-      <button type="button" class="btn" on:click=move |_| on_sign_alone.run(())>
-        {i18n.t("roster-genesis-sign-alone")}
-      </button>
-    }
-  });
+  let (title_key, hint_key) = ("roster-confirm-title", "roster-confirm-hint");
 
   view! {
     <div class="roster-confirm" role="dialog" aria-label=i18n.t(title_key)>
@@ -352,7 +472,6 @@ pub(crate) fn RosterConfirm(
       <button type="button" class="btn" on:click=move |_| on_cancel.run(())>
         {i18n.t("roster-confirm-cancel")}
       </button>
-      {sign_alone}
       <button type="button" class="btn btn-primary" on:click=move |_| on_confirm.run(())>
         {i18n.t("roster-confirm-sign")}
       </button>

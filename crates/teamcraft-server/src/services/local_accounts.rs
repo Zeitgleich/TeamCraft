@@ -583,6 +583,7 @@ pub async fn validate_session_token(
     is_exempt_from_session_policy: true,
     maybe_organization: None,
     token_binding: TokenBinding::ServerIssued,
+    maybe_provider_token: None,
   }))
 }
 

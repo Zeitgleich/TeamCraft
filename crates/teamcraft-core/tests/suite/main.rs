@@ -58,6 +58,7 @@ mod push_guard;
 mod queries;
 mod recovery_kit;
 mod removal_followups;
+mod role_signing;
 mod runner;
 mod search;
 mod sending;

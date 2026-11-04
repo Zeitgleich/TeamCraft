@@ -76,6 +76,21 @@
           }
         },
         {
+          "name": "client roles in ID token",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "usermodel.clientRoleMapping.clientId": "teamcraft",
+            "claim.name": "resource_access.${client_id}.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        },
+        {
           "name": "tc_identity_key",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-usermodel-attribute-mapper",

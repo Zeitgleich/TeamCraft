@@ -302,7 +302,7 @@ async fn identity_attribute_can_be_attested_or_reports_why_not() {
     return;
   }
   let token = dev_token("carol");
-  let result = write_identity_attribute(&reqwest::Client::new(), ISSUER, &token, "00ff").await;
+  let result = write_identity_attribute(&reqwest::Client::new(), ISSUER, &token, None, "00ff").await;
   // The dev realm neither grants the public client access to the account API nor declares
   // tc_identity_key in its user profile; every "not available" outcome means enrolling without
   // attestation (crate README).

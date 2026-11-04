@@ -142,6 +142,9 @@ pub enum GatewayEvent {
     kind: WorkspaceLogKind,
     version: u64,
   },
+  /// Somebody published newer role evidence (e2ee.md §3.1.3); sent to owners, whose apps read and
+  /// verify it.
+  RoleEvidenceUpdate,
   /// A channel's signed role log has a new entry (issue #380); fetch entries after the known
   /// version. Sent to the channel's members.
   ChannelRolesUpdate {

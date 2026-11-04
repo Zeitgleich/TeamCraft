@@ -473,6 +473,57 @@ make someone an owner.
   not help, and a new first owner is refused by every client (`RootChanged`). The only way out is
   [setting up again](#setting-up-again). Details: admin.md §2.3.1.
 
+### Role signing
+
+Owners' apps keep the admin roster following the identity provider by themselves (e2ee.md §3.1.3). Updating needs
+no action in the apps. **The realm has to give the apps what they verify**, once, and only on instances where
+that isn't there yet. `Zeitgleich/teamcraft-deploy` does it for the realm it runs; for any other Keycloak:
+
+| What                                                 | Where in Keycloak                                                                                                                                                                                       |
+|------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Client roles in the ID token (new)                   | Client → Client scopes → the client's dedicated scope → Add mapper → "User Client Role": client ID your client, token claim name `resource_access.${client_id}.roles`, multivalued, "Add to ID token" on |
+| Identity key in the ID token                         | Same scope → "User Attribute": user attribute and token claim name `tc_identity_key`, "Add to ID token" on                                                                                              |
+| The attribute itself                                 | Realm settings → User profile: attribute `tc_identity_key`, users may view and edit, admins may view                                                                                                    |
+| Account API for users                                | Keep the client's default `account` audience and the users' default `manage-account` role                                                                                                               |
+
+Or with `kcadm.sh`, for the client's internal ID `$CLIENT` in realm `$REALM`:
+
+```sh
+kcadm.sh create clients/$CLIENT/protocol-mappers/models -r $REALM \
+  -s name='client roles in ID token' -s protocol=openid-connect \
+  -s protocolMapper=oidc-usermodel-client-role-mapper \
+  -s 'config."usermodel.clientRoleMapping.clientId"='$CLIENT_ID \
+  -s 'config."claim.name"=resource_access.${client_id}.roles' \
+  -s 'config."jsonType.label"=String' -s 'config.multivalued=true' \
+  -s 'config."id.token.claim"=true' -s 'config."access.token.claim"=false' \
+  -s 'config."userinfo.token.claim"=false'
+```
+
+ID tokens may be signed with RS256 (Keycloak's default), ES256 or EdDSA. The server refuses ID tokens as access
+tokens, whatever they carry. Another provider needs the same three things under the same claim names, and an account
+API or some other way for users to set the attribute (`crates/teamcraft-core/src/attestation.rs` is the Keycloak flavour).
+
+**Role names.** The apps read `owner` and `admin`, whatever `[oidc.roles]` says, because they don't take the server's word
+for what a role means. If your realm calls them something else, an owner enters the names once under Administration → Security.
+
+**Without the mapper** nothing breaks and nobody is prompted: the provider is still pinned, the roster stays as it is, re-signing for
+freshness goes on, and the Security section of the console says what is missing to those who see it, for owners with the way to change roles by hand.
+The apps log `the identity provider's ID tokens carry no client roles`. On an instance with no signed roster yet, the first
+owner signs themselves in by saving the policy once.
+
+**Taking people off.** A role removed in the realm counts as soon as the person's app or the server has a token that shows it. For
+somebody who never signs in again the server needs `[oidc.sync]` (the service account that already deactivates disabled users), and
+then an admin comes off after a week, one a week per owner's device, named meanwhile only in the Security section. An owner never comes off that way, and
+without `[oidc.sync]` nobody does: another owner removes them by hand. Keep two owners. **To hand over ownership,** move the role in the realm
+while the old owner still holds a client role, for example `member`: their app signs the successor. If they hold no role any more, the
+server refuses them and nobody can sign; give them `member` for a moment.
+
+**To check** a realm: `python3 dev/verify-realm.py` shows the checks against the dev realm; a token of your own decoded with any
+JWT tool should show `resource_access.<client>.roles` and `tc_identity_key` in the ID token.
+
+**Manual instead of automatic:** Administration → Security → "Who signs role changes". Whoever controls the provider can appoint
+admins under the automatic default (e2ee.md §3.1.3); manual gives every change to an owner's hand.
+
 ### Setting up again
 
 Only when no owner can be brought back. It starts a new workspace; the old one's history is not

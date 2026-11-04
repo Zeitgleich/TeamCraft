@@ -296,7 +296,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// stored session makes the next connect resume instead of syncing, so a failed sync would
   /// otherwise leave its gap unfilled forever.
   async fn sync_fresh_session(&mut self, session_id: String) -> Result<(), CoreError> {
-    self.full_sync().await?;
+    // Boxed: this future is large, and it would sit in everything that connects, up to the app's tasks.
+    Box::pin(self.full_sync()).await?;
     self.sync.maybe_gateway_session = Some(GatewaySession {
       session_id,
       last_seq: 0,
@@ -585,7 +586,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::SpaceUpdate { .. }
       | GatewayEvent::SpaceMemberAdd { .. }
       | GatewayEvent::SpaceMemberRemove { .. } => self.refresh_spaces().await,
-      GatewayEvent::WorkspaceUpdate { .. } => self.sync_workspace_and_recovery().await,
+      GatewayEvent::WorkspaceUpdate { kind, .. } => {
+        // After a handover the new owner has the policy to sign under the new roster, and the previous
+        // owner could otherwise still sign one naming an older roster (A7).
+        if kind == teamcraft_proto::WorkspaceLogKind::Roster {
+          self.note_role_evidence_update();
+        }
+        self.sync_workspace_and_recovery().await
+      },
+      GatewayEvent::RoleEvidenceUpdate => {
+        self.note_role_evidence_update();
+        Ok(())
+      },
       GatewayEvent::ChannelRolesUpdate { conversation_id, .. } => {
         self.sync_channel_roles(conversation_id).await
       },

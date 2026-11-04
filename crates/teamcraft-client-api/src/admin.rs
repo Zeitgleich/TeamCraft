@@ -291,6 +291,31 @@ pub struct OwnerRosterStatus {
   pub recommended_minimum: u8,
   /// How long before [`Self::maybe_expires_at`] the console starts warning.
   pub warning_lead_ms: i64,
+  /// The signed policy has owners sign every change by hand (e2ee.md §3.1.3).
+  #[serde(default)]
+  pub is_signing_manual: bool,
+  /// What keeps roles from following the identity provider by themselves, if anything.
+  #[serde(rename = "signing_problem", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_signing_problem: Option<RoleSigningIssue>,
+}
+
+/// What keeps the roster from following the identity provider by itself (e2ee.md §3.1.3).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "issue", rename_all = "snake_case")]
+pub enum RoleSigningIssue {
+  /// ID tokens carry no client roles: for the operator (the realm needs the mapper).
+  NoRoleClaim,
+  /// The provider doesn't take the identity key attribute: for the operator.
+  NoKeyClaim,
+  /// Tokens come from another provider than the signed policy names: an owner decides.
+  ProviderChanged { issuer: String },
+  /// Evidence contradicts what is signed, or the server reports an owner gone: an owner looks at these
+  /// people.
+  Contradictory { users: Vec<UserId> },
+  /// The server reports these admins gone: they come off the roster in a while, one at a time.
+  ReportedGone { users: Vec<UserId> },
+  /// The provider makes this user an owner, and no owner's app has signed that yet.
+  AwaitingOwner,
 }
 
 /// An owner and the newest roster or policy signature of theirs this device verified.
@@ -424,34 +449,6 @@ pub fn role_holders(users: &[AdminUser]) -> (Vec<UserId>, Vec<UserId>) {
   (owners, admins)
 }
 
-/// The first roster, proposed for the owner's confirmation before the first policy is signed
-/// (#265): the signer as owner (the root of trust), then the identity provider's role holders as
-/// the server reports them. Nothing in it is trusted until the owner confirms each entry.
-pub fn genesis_roster(me: UserId, owners: &[UserId], admins: &[UserId]) -> Vec<RosterEntry> {
-  let signer = RosterEntry {
-    user: me,
-    role: RosterRoleChoice::Owner,
-  };
-  let mut entries = vec![signer];
-  entries.extend(roster_from_roles(owners, admins));
-  normalized_roster(&entries)
-}
-
-/// A roster split by role: (owners, admins).
-pub fn roster_by_role(entries: &[RosterEntry]) -> (Vec<UserId>, Vec<UserId>) {
-  let with_role = |wanted: RosterRoleChoice| {
-    entries
-      .iter()
-      .filter(|entry| entry.role == wanted)
-      .map(|entry| entry.user)
-      .collect()
-  };
-  (
-    with_role(RosterRoleChoice::Owner),
-    with_role(RosterRoleChoice::Admin),
-  )
-}
-
 /// What signing `proposed` would change compared with `signed`, in a stable order.
 pub fn roster_changes(signed: &[RosterEntry], proposed: &[RosterEntry]) -> Vec<RosterChange> {
   let role_in = |roster: &[RosterEntry], user: UserId| {
@@ -489,8 +486,8 @@ pub fn roster_problem(proposed: &[RosterEntry]) -> Option<RosterProblem> {
 }
 
 /// Where the signed-in user's admin role stands, as member clients see it (admin.md §2.3, issue
-/// #765). Only the signed, fresh roster gives admin authority; the identity provider's role alone
-/// gives none, and the UI says so wherever it matters.
+/// #765). Only the signed, fresh roster gives admin authority, and owners' apps keep it following
+/// the identity provider by themselves (issue #1276): the UI says so only where an action is refused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RosterStanding {
   /// Nothing to point out: no admin role, or one the fresh signed roster holds.
@@ -500,11 +497,8 @@ pub enum RosterStanding {
   /// No owner signed the roster within the accepted age: admin rights are paused for everybody.
   /// `can_sign`: the user is an owner of the roster and can sign it again here.
   Expired { can_sign: bool, owners: Vec<UserId> },
-  /// The workspace has no signed roster yet; the first policy save of an owner signs it.
+  /// The workspace has no signed roster yet; the first owner's app signs it by itself.
   NoRoster,
-  /// The user is a signed owner and the identity provider lists people the roster doesn't have:
-  /// they get no admin rights until this owner signs them.
-  AdditionsToSign { count: usize },
 }
 
 impl RosterStanding {
@@ -518,13 +512,11 @@ impl RosterStanding {
 }
 
 /// The standing of `me` with the server role `server_role` against the verified roster in
-/// `maybe_status` at `now`. `idp_owners` and `idp_admins` are the provider's role holders (empty
-/// where this client doesn't know them); `can_sign` whether this device holds signing keys.
+/// `maybe_status` at `now`. `can_sign` whether this device holds signing keys.
 pub fn roster_standing(
   me: UserId,
   server_role: &Role,
   maybe_status: Option<&OwnerRosterStatus>,
-  (idp_owners, idp_admins): (&[UserId], &[UserId]),
   can_sign: bool,
   now: TimestampMs,
 ) -> RosterStanding {
@@ -547,13 +539,6 @@ pub fn roster_standing(
       can_sign: is_owner && can_sign,
       owners,
     };
-  }
-  if is_owner && can_sign {
-    let signed = signed_roster(status);
-    let count = roster_changes(&signed, &idp_roster_proposal(&signed, idp_owners, idp_admins)).len();
-    if count > 0 {
-      return RosterStanding::AdditionsToSign { count };
-    }
   }
   RosterStanding::InForce
 }
@@ -895,29 +880,6 @@ mod tests {
     }
 
     #[test]
-    fn the_genesis_roster_starts_with_the_signer_and_lists_every_role_holder() {
-      // A hostile server reports a look-alike (5) as owner and demotes the signer to admin: the
-      // signer stays owner, and the look-alike is listed for confirmation, not signed silently.
-      let proposed = genesis_roster(user(1), &[user(5), user(2)], &[user(1), user(3)]);
-      assert_eq!(proposed, vec![owner(1), owner(5), owner(2), admin(3)]);
-      let to_confirm = roster_changes(&[], &proposed);
-      assert_eq!(to_confirm.len(), 4, "every entry is shown for confirmation");
-      assert!(to_confirm.contains(&RosterChange::Add {
-        user: user(5),
-        role: RosterRoleChoice::Owner
-      }));
-      assert_eq!(
-        roster_by_role(&proposed),
-        (vec![user(1), user(5), user(2)], vec![user(3)])
-      );
-      assert_eq!(
-        genesis_roster(user(1), &[], &[]),
-        vec![owner(1)],
-        "the signer alone"
-      );
-    }
-
-    #[test]
     fn identity_provider_roles_become_a_roster() {
       let proposed = roster_from_roles(&[user(2)], &[user(2), user(4)]);
       assert_eq!(
@@ -936,6 +898,8 @@ mod tests {
         recommended_minimum: 2,
         warning_lead_ms: 0,
         unverifiable_owners: Vec::new(),
+        is_signing_manual: false,
+        maybe_signing_problem: None,
       };
       assert_eq!(
         roster_changes(&signed_roster(&status), &proposed),
@@ -959,22 +923,22 @@ mod tests {
       fn members_and_fresh_signed_admins_have_nothing_to_see() {
         let status = roster(&[1], &[2], Some(NOW + 1));
         assert_eq!(
-          standing(9, Role::Member, Some(&status), &[], true),
+          standing(9, Role::Member, Some(&status), true),
           RosterStanding::InForce
         );
-        assert_eq!(standing(9, Role::Guest, None, &[], true), RosterStanding::InForce);
+        assert_eq!(standing(9, Role::Guest, None, true), RosterStanding::InForce);
         assert_eq!(
-          standing(2, Role::Admin, Some(&status), &[], true),
+          standing(2, Role::Admin, Some(&status), true),
           RosterStanding::InForce
         );
         assert_eq!(
-          standing(1, Role::Owner, Some(&status), &[], true),
+          standing(1, Role::Owner, Some(&status), true),
           RosterStanding::InForce
         );
         // A roster from before signing times doesn't expire.
         let unexpiring = roster(&[1], &[], None);
         assert_eq!(
-          standing(1, Role::Owner, Some(&unexpiring), &[], true),
+          standing(1, Role::Owner, Some(&unexpiring), true),
           RosterStanding::InForce
         );
       }
@@ -982,7 +946,7 @@ mod tests {
       #[test]
       fn a_provider_role_nobody_signed_is_not_in_force() {
         let status = roster(&[1, 2], &[], Some(NOW + 1));
-        let standing = standing(3, Role::Owner, Some(&status), &[], true);
+        let standing = standing(3, Role::Owner, Some(&status), true);
         assert_eq!(
           standing,
           RosterStanding::NotSigned {
@@ -997,7 +961,7 @@ mod tests {
       fn an_expired_roster_pauses_everybody_and_owners_can_sign_again() {
         let status = roster(&[1], &[2], Some(NOW));
         assert_eq!(
-          standing(1, Role::Owner, Some(&status), &[], true),
+          standing(1, Role::Owner, Some(&status), true),
           RosterStanding::Expired {
             can_sign: true,
             owners: vec![user(1)]
@@ -1005,46 +969,30 @@ mod tests {
         );
         // Without signing keys on this device, or as an admin: ask an owner.
         assert!(matches!(
-          standing(1, Role::Owner, Some(&status), &[], false),
+          standing(1, Role::Owner, Some(&status), false),
           RosterStanding::Expired { can_sign: false, .. }
         ));
         assert!(matches!(
-          standing(2, Role::Admin, Some(&status), &[], true),
+          standing(2, Role::Admin, Some(&status), true),
           RosterStanding::Expired { can_sign: false, .. }
         ));
       }
 
       #[test]
       fn no_roster_yet_is_said_to_admins() {
-        assert_eq!(
-          standing(1, Role::Owner, None, &[], true),
-          RosterStanding::NoRoster
-        );
-        assert_eq!(
-          standing(1, Role::Admin, None, &[], true),
-          RosterStanding::NoRoster
-        );
+        assert_eq!(standing(1, Role::Owner, None, true), RosterStanding::NoRoster);
+        assert_eq!(standing(1, Role::Admin, None, true), RosterStanding::NoRoster);
       }
 
       #[test]
-      fn a_signing_owner_is_told_about_provider_roles_to_sign() {
+      fn role_holders_the_roster_lacks_are_nothing_for_an_owner_to_do() {
         let status = roster(&[1], &[2], Some(NOW + 1));
         assert_eq!(
-          standing(1, Role::Owner, Some(&status), &[3, 4], true),
-          RosterStanding::AdditionsToSign { count: 2 }
-        );
-        // Signed already, or no keys to sign with here: nothing to do on this device.
-        assert_eq!(
-          standing(1, Role::Owner, Some(&status), &[1], true),
+          standing(1, Role::Owner, Some(&status), true),
           RosterStanding::InForce
         );
         assert_eq!(
-          standing(1, Role::Owner, Some(&status), &[3], false),
-          RosterStanding::InForce
-        );
-        // Admins can't sign; their own role is in force.
-        assert_eq!(
-          standing(2, Role::Admin, Some(&status), &[3], true),
+          standing(2, Role::Admin, Some(&status), true),
           RosterStanding::InForce
         );
       }
@@ -1053,11 +1001,9 @@ mod tests {
         me: i64,
         role: Role,
         maybe_status: Option<&OwnerRosterStatus>,
-        idp_owners: &[i64],
         can_sign: bool,
       ) -> RosterStanding {
-        let owners: Vec<UserId> = idp_owners.iter().map(|raw| user(*raw)).collect();
-        roster_standing(user(me), &role, maybe_status, (&owners, &[]), can_sign, NOW)
+        roster_standing(user(me), &role, maybe_status, can_sign, NOW)
       }
 
       fn roster(owners: &[i64], admins: &[i64], maybe_expires_at: Option<TimestampMs>) -> OwnerRosterStatus {
@@ -1075,6 +1021,8 @@ mod tests {
           maybe_expires_at,
           recommended_minimum: 1,
           warning_lead_ms: 0,
+          is_signing_manual: false,
+          maybe_signing_problem: None,
         }
       }
     }
@@ -1128,6 +1076,8 @@ mod tests {
         maybe_expires_at: None,
         recommended_minimum: 2,
         warning_lead_ms: 0,
+        is_signing_manual: false,
+        maybe_signing_problem: None,
       };
       let signed = signed_roster(&status);
       assert_eq!(signed, vec![owner(1), owner(2), admin(3)]);
@@ -1289,6 +1239,8 @@ mod tests {
         maybe_expires_at,
         recommended_minimum: minimum,
         warning_lead_ms: 7 * DAY_MS,
+        is_signing_manual: false,
+        maybe_signing_problem: None,
       }
     }
   }

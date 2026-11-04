@@ -54,6 +54,8 @@ pub struct BrowserAuth {
   /// Set while a local account (guest) is signed in instead of an identity provider account.
   local: RefCell<Option<LocalSession>>,
   tokens: RefCell<Option<Tokens>>,
+  /// The ID token of the provider's last answer; memory only, a refresh brings a new one.
+  maybe_id_token: RefCell<Option<String>>,
   sign_in: RefCell<Option<SignIn>>,
   discovery: RefCell<Option<Discovery>>,
   /// The issuer and client the tokens in memory were saved for, while they come from the cached start
@@ -159,6 +161,7 @@ impl BrowserAuth {
       config,
       local: RefCell::new(None),
       tokens: RefCell::new(None),
+      maybe_id_token: RefCell::new(None),
       sign_in: RefCell::new(None),
       discovery: RefCell::new(None),
       maybe_cached_provider: RefCell::new(None),
@@ -370,6 +373,9 @@ impl BrowserAuth {
       .request_async(&http)
       .await
       .map_err(map_token_error)?;
+    self
+      .maybe_id_token
+      .replace(response.extra_fields().maybe_id_token.clone());
     self.tokens.replace(Some(tokens_from(&response, None, None)));
     self.note_unbound_sign_in(&response).await;
     if let Some(hint) = response.extra_fields().login_hint() {
@@ -388,11 +394,16 @@ impl BrowserAuth {
   /// are taken over instead (refresh-token rotation). `NotSignedIn` when there is nothing to renew
   /// with or the provider refused it (expired or revoked).
   async fn refresh(&self) -> Result<(), AuthError> {
+    self.refresh_when(false).await
+  }
+
+  /// `is_forced`: asks the provider even if the tokens are still fresh.
+  async fn refresh_when(&self, is_forced: bool) -> Result<(), AuthError> {
     let sign_in = self.sign_in().await?;
     self.drop_tokens_of_another_provider(&sign_in);
     let _turn = token_vault::refresh_turn().await;
     let maybe_saved = token_vault::load(&sign_in.issuer, &sign_in.client_id).await;
-    let plan = token_vault::plan_refresh(self.tokens.borrow().as_ref(), maybe_saved, now_ms());
+    let plan = token_vault::plan_refresh(self.tokens.borrow().as_ref(), maybe_saved, now_ms(), is_forced);
     let (refresh, maybe_subject, maybe_bound_key, is_shared) = match plan {
       RefreshPlan::Adopt(tokens) => {
         self.tokens.replace(Some(tokens));
@@ -440,6 +451,9 @@ impl BrowserAuth {
         self
           .tokens
           .replace(Some(tokens_from(&response, Some(refresh), maybe_subject)));
+        if let Some(id_token) = &response.extra_fields().maybe_id_token {
+          self.maybe_id_token.replace(Some(id_token.clone()));
+        }
         if is_shared {
           self.share_tokens(&sign_in).await;
         }
@@ -901,6 +915,18 @@ impl Authenticator for BrowserAuth {
 
   fn access_token(&self) -> LocalFuture<'_, Result<String, AuthError>> {
     Box::pin(BrowserAuth::access_token(self))
+  }
+
+  fn id_token(&self) -> Option<String> {
+    self.maybe_id_token.borrow().clone()
+  }
+
+  fn refresh_id_token(&self) -> LocalFuture<'_, ()> {
+    Box::pin(async {
+      if let Err(error) = self.refresh_when(true).await {
+        tracing::debug!(%error, "no new ID token yet");
+      }
+    })
   }
 
   /// `None` if there is no key or its store can't be read now. The core then holds a bound token back
