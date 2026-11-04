@@ -8,7 +8,7 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::canvas::CanvasState;
 use teamcraft_client_api::model::{
   Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, PENDING_ID_BIT,
-  ThreadId, UserId,
+  ThreadId, UserId, is_pending,
 };
 use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
 use teamcraft_proto::{Base64Bytes, ClientMessageId, SourceChange, SourceId};
@@ -34,6 +34,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
     conversation: ConversationId,
     message: MessageId,
   ) -> Option<StoredMessage> {
+    // A message the server numbered is one keyed read, whatever the conversation's size (it is
+    // the common case: replies, pins, saves and edits of messages on screen). The rest (a message
+    // still in the outbox, a line this device placed itself) is looked for among all.
+    if !is_pending(message)
+      && let Ok(Some(stored)) = self.store_ref().message_by_server_id(conversation, message)
+    {
+      return Some(stored);
+    }
     self
       .all_messages(conversation)
       .into_iter()
@@ -120,6 +128,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         &message.body,
         meta,
         message.files,
+        message.maybe_client_message_id,
       );
       return;
     }
@@ -133,7 +142,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
       mentions,
       meta,
     };
-    if let Some(id) = self.enqueue(conversation, message.maybe_thread, content) {
+    let maybe_id = self.enqueue_as(
+      conversation,
+      message.maybe_thread,
+      content,
+      message.maybe_client_message_id,
+    );
+    if let Some(id) = maybe_id {
       self.queue_link_preview(conversation, id, &body);
     }
   }

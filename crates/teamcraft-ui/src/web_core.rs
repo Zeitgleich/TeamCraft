@@ -1922,7 +1922,7 @@ impl Core {
       },
       // A message shows at once: it is answered when it is in the outbox, and sent afterwards
       // while the UI reads it (`send_queued`).
-      Request::Action(action, reply) if action.is_new_message() => {
+      Request::Action(action, reply) if action.is_outbox_write() => {
         let result = match self.backend.as_ref() {
           Some(backend) => {
             queue_send(backend, *action);
@@ -3056,7 +3056,7 @@ impl SyncReads<'_> {
     let request = match request {
       Request::Snapshot(_) | Request::SnapshotChanges(..) => return self.answer_snapshot(request),
       // Never held back by a sync or an upload: the message shows at once and goes out after.
-      Request::Action(action, reply) if action.is_new_message() => {
+      Request::Action(action, reply) if action.is_outbox_write() => {
         queue_send(self.backend, *action);
         self.has_queued_sends.set(true);
         drop(reply.send(Ok(())));
@@ -3153,7 +3153,7 @@ impl SyncReads<'_> {
   }
 }
 
-/// Writes a new message ([`ChatAction::is_new_message`]) into the outbox; the loop sends it.
+/// Writes a change ([`ChatAction::is_outbox_write`]) into the outbox; the loop sends it.
 fn queue_send(backend: &CoreChatBackend<Store>, action: ChatAction) {
   if let Some(unhandled) = action.apply_to(backend) {
     tracing::warn!(?unhandled, "chat action not handled");
