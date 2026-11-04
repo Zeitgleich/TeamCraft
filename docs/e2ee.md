@@ -4151,8 +4151,8 @@ the bridge hashes the token of each request and compares it with every known has
 **Trust rule.** The server sees ciphertext only and can't write in the channel's group, so it can
 neither create nor alter a source. Who may manage sources is decided from signed data only: the
 verified workspace roster (admin.md §2.3). Channel roles are signed now (§4.6.1), but they don't
-count here yet: the bridge and every member would have to read each channel's role log before
-taking in an announcement, which is a follow-up of issue #380. So a server can't promote a channel
+count here: every bridge reads a role log late, where a founder's claim is trust on first use
+(§13.1.1, issue #879, design). So a server can't promote a channel
 member into a source admin. Each member device (the bridge included) keeps a bounded ledger per channel
 (`teamcraft-core::integration_sources`):
 
@@ -4190,6 +4190,148 @@ upload the files wait as plaintext in the bridge's spool directory, on the bridg
 readable by its user only (`0700`, checked at start) and deleted once the request is answered. The
 bridge decodes pictures for their thumbnails itself, off its loop and within a pixel limit
 (`ClientSettings::makes_thumbnails` off for the core).
+
+#### 13.1.1 Channel admins managing sources (issue #879, design for review)
+
+**Status: design, not implemented.** Nothing below is in the code, and D1 to D3 at the end are the owner's to
+decide. It answers whether signed channel admins can manage sources, as the issue asks, with the bridge reading
+role logs and judging at the message's server time. The short answer: not on the role log as it stands. The rule
+that is safe leaves out every channel a member created, the rule that covers them lets a hostile server and any
+member post as the bot, and the right place for this fact is one that issues #878 and #1171 are building. Worth doing then, not now.
+
+**What it would gain.** A channel admin connects a webhook without asking a workspace admin. Today's friction is
+larger than the asking: the workspace admin has to be in the channel's group and stay there, since a creator who
+leaves takes their sources out of force. In a private channel that means reading along for as long as the webhook
+runs. Against that, adding a source is rare, and it needs a bot in the channel and a bridge that somebody runs
+anyway.
+
+**What is at stake.** A source lets whoever holds its token post into the channel as the bot, from anywhere on the
+internet, without a device: up to 600 a minute out of the bridge's shared 12000, with files that land in the bridge's
+spool and pictures it decodes. People read the bot's messages as what the machine said. App sources have no alert
+mentions yet (docs/bridge.md, "Limits"), so nobody gets paged by one. The person is in the group anyway and can post
+in their own name; what they gain is the bot's name. Nothing here reads a message or changes who is in the group.
+That is a lower stake than a purge (§4.6) or a commit (§4.6.2), and it is why an imperfect rule is thinkable at all.
+
+**Five things in today's code.**
+
+1. **Only the bridge decides.** The ledger on a member's device fills the list in channel settings, and nothing else
+   reads it. No merge decision depends on it, so devices that disagree can't split a group, and members don't need to
+   read role logs for safety, contrary to what the issue assumes. They need it for the list to be right: a source only
+   the bridge counts is one nobody can see or revoke.
+2. **Every bridge reads the role log late.** A channel is founded when it is created, and a bot joins later; the app
+   offers "Add source" only then. So the bridge meets the log with no state, where a founder's claim is trust on first
+   use. A hostile server shows it a founding entry signed by **any member of the channel**, leaves out the real
+   log, and that member is a signed admin on the bridge (tried, below). §13.1's rule "a server can't promote a channel
+   member into a source admin" would become "not without one member", and the role log's own residual risk (§4.6.1)
+   would no longer be limited to channels from before signed roles. A forged founder and a real member's channel look
+   alike on the bridge: both are founder-rooted.
+3. **A late reader can be behind with nobody hostile.** It judges a workspace admin's old entry by today's roster. If
+   that admin has left since, the entry is skipped and so is everything built on it (§4.6.1, residual risks). What
+   §4.6.1 doesn't say: the device keeps the older snapshot **and its anchor**. In the test below, with an honest server,
+   a member sees Bob demoted and the late reader sees him as a workspace-anchored admin, at version 1 with cursor 3,
+   until a workspace admin signs a checkpoint.
+4. **A withheld demotion has no end on a bridge.** The roster has `workspace_max_age`, the role log has nothing, and an
+   anchor doesn't help (tried, below). The bridge hears a role change only from the gateway event, or for a commit under
+   `owner_approval`. It has its own loop and doesn't run `Upkeep`, so it never calls `check_channel_roles_heads`, and it
+   doesn't read logs when it connects. A head it does compare gives a log line nobody reads. It can't do more: such an
+   alarm is a member's claim (§4.6.3), and any member could switch off a channel's sources with a made-up head.
+5. **What is refused is gone.** A change from somebody who isn't a manager is dropped before the ledger, to keep a
+   member from filling it. That works for the roster, which every device has. A role entry can come after the
+   announcement it justifies, so a new channel admin's source would be dropped for good on a bridge that read the message
+   first. Their **revocation** too: a leaked token keeps working, which is the wrong way to fail. The look back through
+   history doesn't repair it either, since it runs once and messages already read aren't taken in again.
+
+**Verifying at the message's server time doesn't hold.** The server sets a message's time and ID and a role entry's
+`created_at`, so which came first is the server's word, between the two things the withheld demotion is about. It dates
+a demoted admin's announcement just before the demotion, and it passes. A device would also have to keep every older
+snapshot with its time, to answer a question whose answer the server chooses. The ledger's existing check at the
+message's time is only a filter against filling it; what bounds a source is the second check, in force **now**
+(`SourceLedger::active`), which no time in a message can move. A rule for channel admins should use that one alone: a
+source counts while its creator is an admin of what this device accepted, whenever it was announced. That loses
+nothing: somebody promoted later could announce the same source again.
+
+**Older clients.** A client that doesn't know the rule refuses, which is the safe side, and nobody splits.
+
+| Who is older | What happens to a channel admin's announcement                                                                                                                                                                                       |
+|--------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| A bridge     | Dropped before the ledger, so the token is refused with a 404. The app has shown the URL as if all were well and can't tell the bridge's version. After the bridge is updated the announcement stays lost, and has to be added again |
+| A member     | Dropped. The source works but isn't in that member's list, and an older workspace admin can't revoke what they can't see. It stays missing after they update                                                                         |
+
+A signed policy (D2) handles the bridge: a workspace admin switches it on once the bridge is updated.
+
+**The options.**
+
+| Option                                    | Who counts                                            | What it delivers                                                                                                                                                  | What it costs                                                                                                  |
+|-------------------------------------------|-------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------|
+| A. Wait for the group to say who is admin | Workspace admins now; a strict channel's admins later | Nothing today. Later everything: a role in the group context (§4.6.2) needs no log, no first-use trust, and can't be withheld from a member who follows the group | The workspace admin stays in the channel until then. Depends on #878 and, for channels' first owners, on #1171 |
+| B. Channel admins of an anchored snapshot | `is_workspace_anchored`, as for a purge (§4.6)        | One delegation: a workspace admin signs a channel admin once, needn't stay in the group, and can leave afterwards. A channel created by a member still has to ask | A withheld demotion (below). Everything under "What B takes", most of it thrown away once A arrives            |
+| C. Any signed channel admin               | The accepted snapshot, founder or not                 | The issue's promise, for every channel                                                                                                                            | Server and any member post as the bot, on every bridge, by finding 2. Not recommended                          |
+
+**If B is built, the rules:**
+
+| Who                                                | Add, rename                               | Revoke    | In force on the bridge |
+|----------------------------------------------------|-------------------------------------------|-----------|------------------------|
+| Workspace admin of the fresh roster, in the group  | Yes                                       | Any       | Yes, as today          |
+| Channel admin, anchored snapshot, in the group     | Yes                                       | Any       | While all of it holds  |
+| Channel admin, founder-rooted                      | No: the app says to ask for a signed role | Their own | No                     |
+| Moderator, member, space admin, custom scheme      | No                                        | Their own | No                     |
+| Guest, bot                                         | No                                        | No        | No                     |
+| A channel admin since demoted, or out of the group | No                                        | Their own | No                     |
+
+- **Judged now, by the bridge.** A channel admin counts only if the last entry the bridge looked at is one it accepted
+  (`version == cursor`). A skipped entry takes channel admins' sources out of force until a workspace admin's
+  checkpoint, closing finding 3 for sources; a workspace admin's sources don't depend on it. The server can force this,
+  but it can withhold everything anyway.
+- **What a withheld demotion leaves.** A demoted admin who is still in the group, with the server, keeps their sources and
+  can add more, on that bridge, with no time limit, until someone removes them from the group. It takes both of them, and
+  costs what is under "What is at stake". Honest members see the demotion, so the sources vanish from their list while the bridge
+  serves them: the list shows sources this device knows but doesn't count, with Revoke. §4.6.3's hidden entry (#1258, D2)
+  makes this much harder if it is built, as the bridge would apply a demotion from the channel; a proven alarm (D3 there)
+  could then take channel admins' sources out of force, which an unproven one must not.
+- **Claims, not drops.** Changes from a group member who isn't a manager at the moment go into a small separate part of
+  the ledger, bounded per sender and per channel, never in force by themselves. So order doesn't matter, and a member still
+  can't crowd out anybody's sources. A revocation from somebody who is a manager when it is judged counts, and stays final.
+- **Reading.** The bridge reads each of its channels' logs when it connects (one request per channel, from its cursor)
+  and on the gateway event, and runs `check_channel_roles_heads` in its loop. Members read theirs when the panel opens, as
+  today. A failed read leaves the copy as it is, and sources in force stay so. That is the side a withheld read falls on.
+
+**How this relates to the other designs.**
+
+- **#1258 (§4.6.3)** says integration sources have nothing to lose because they read the roster. That stays true under A.
+  B would change that row, and would depend on §4.6.3's D2 for the withheld demotion to be more than a residual risk. This
+  section doesn't decide anything there.
+- **#878 (§4.6.2)** puts roles into the group context, which is what the bridge wants: it is in the group, so it can't be
+  shown a different context and still read the channel. Only workspace signers turn a channel strict for now.
+- **#1171** would bind a channel's founder to its group from the start. It is what lets a channel created by a member
+  count. Together they turn option A's "later" into the issue's whole promise, with a rule simple enough to explain:
+  whoever the group says is admin.
+
+**The owner's decisions.**
+
+| No. | Decision                                   | Recommendation                                                                                                                                                                             | Alternatives                                                                                                       |
+|-----|--------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------|
+| D1  | Which option                               | A: keep #879 open, depending on #878 and #1171. A rare action doesn't justify a bridge reading logs, a second ledger part and a weaker §13.1 for a stopgap                                 | B now, if workspace admins sitting in private channels for a webhook hurts more than it looks. C isn't recommended |
+| D2  | If B: switched on how                      | A signed policy `source_managers` (workspace admins by default), an additive field, in the admin console: on once the bridge is updated, and a workspace that doesn't want it never has it | Always on: simpler, and channel admins' tokens are refused without a word on an older bridge                       |
+| D3  | If B: accept the withheld demotion for now | Yes, with §4.6.3's D2 as its answer; no time limit, since a quiet channel's webhook would stop working for no reason                                                                       | Build on §4.6.3 first and take the risk not at all                                                                 |
+
+**What B takes** (moderate: several hundred lines and their tests, once decided):
+
+- `teamcraft-core`: claims in the ledger, channel admins in `SourceAuthority`, a per-channel "may this user manage" next
+  to the roster's, kept apart from `can_manage_integration_sources`, which the notetaker also reads and stays the roster's.
+- `teamcraft-bridge`: reading logs on connect, heads in the loop.
+- Clients: the action per channel, the list with sources not in force, the wording, through i18n; only those allowed see it.
+- Tests with an injected clock and no sleeping: each row of the table above; a withheld demotion (keeps counting on the
+  bridge, is gone from the member's list and revocable there); a member's forged founder (doesn't count); a skipped entry
+  (out of force until a checkpoint); an announcement and a revocation read before the role entry; an older bridge's
+  behaviour pinned; a restart of the bridge (the ledger, claims and role state come back from the store, and a role change
+  missed while it was down is read at connect).
+
+**Tried.** In a throwaway test against `ChannelRoleState`, not kept in the tree: a state with nothing accepted takes a
+member's own founding entry, with the real founder's role gone and `is_workspace_anchored` false, exactly as a real member's
+channel looks. A log of a workspace admin's entry, a second workspace admin's and a channel admin's demotion of Bob, read
+from nothing after the second admin left the roster, skips the last two and ends with Bob an admin, anchored, at version 1
+and cursor 3, while a device that was there shows him as a member. With a demotion withheld, an anchored device accepts the
+demoted admin's own next entry and stays anchored. Nothing was tried with a bridge or end to end.
 
 ## 14. Open questions
 
