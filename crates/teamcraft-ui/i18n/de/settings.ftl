@@ -623,3 +623,16 @@ settings-f-android_package_names = Android-Anwendungs-IDs
 settings-f-android_cert_fingerprints = Android-Signaturzertifikate (SHA-256)
 settings-f-apple_team_id = Apple-Team-ID
 settings-f-apple_bundle_id = iOS-Bundle-ID
+
+settings-unit-percent = %
+settings-group-health_alerts = Systemwarnungen
+settings-group-health_alerts-hint = Wann die Prüfungen des Systemzustands Admins und Eigentümer benachrichtigen. Eine Prüfung muss die erste Zeit unten ununterbrochen fehlschlagen, bevor sie zählt, und eine Warnung endet, sobald die Prüfung die zweite Zeit lang in Ordnung war. Ein Neustart oder eine langsame Antwort löst nichts aus.
+settings-f-hold_secs = Eine Prüfung muss fehlschlagen für
+settings-f-clear_secs = Eine Warnung endet, wenn die Prüfung in Ordnung war für
+settings-f-backup_max_age_secs = Das letzte Backup ist zu alt nach
+settings-f-certificate_min_days = Das Zertifikat läuft zu bald ab bei weniger als
+settings-f-disk_max_percent = Die Platte ist zu voll über
+settings-error-health-minutes = Gib 1 bis 1.440 Minuten ein.
+settings-error-health-backup-hours = Gib 1 bis 720 Stunden ein.
+settings-error-health-days = Gib 1 bis 365 Tage ein.
+settings-error-health-percent = Gib 50 bis 99 Prozent ein.

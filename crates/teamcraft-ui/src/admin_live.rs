@@ -17,7 +17,7 @@ use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminConversationSummary, AdminDeviceResponse,
-  AdminInstanceResponse, AdminMailSettingsResponse, AdminSpaceSummary, AdminUserSummary,
+  AdminHealthResponse, AdminInstanceResponse, AdminMailSettingsResponse, AdminSpaceSummary, AdminUserSummary,
   AnnouncementResponse, AssignChannelOwnerRequest, AuditEntryResponse, BrandAssetSlot, ChannelModeration,
   ConversationVisibility, CreateBrandRequest, ErrorBody, ErrorCode, GetAnnouncementResponse, HistoryPolicy,
   ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersResponse,
@@ -42,6 +42,7 @@ use crate::model::{
 use crate::server_backend::hue_from_seed;
 
 const REFRESH_DELAY: Duration = Duration::from_millis(500);
+const HEALTH_PATH: &str = "/api/v1/admin/health";
 const LIST_LIMIT: u32 = 200;
 /// Pages of channels (and of users) one refresh reads: 1000 entries. Beyond that the console says
 /// the list is cut (issue #1217) instead of ending silently.
@@ -80,6 +81,13 @@ pub struct AdminLive {
   /// The console has read everything once this session; from then on opening a section reads that
   /// section's data only.
   has_read_all: Rc<Cell<bool>>,
+  /// The section the console showed last: a health event refreshes the open health page, and only
+  /// counts the alerts otherwise.
+  maybe_open_section: Rc<Cell<Option<AdminSection>>>,
+  /// How many health checks were alerting at the last read, for the badges. Read without the
+  /// console's chunk: a number out of one small answer.
+  open_alert_count: Rc<Cell<usize>>,
+  is_health_count_queued: Rc<Cell<bool>>,
 }
 
 /// What the last refresh returned.
@@ -102,6 +110,7 @@ pub struct AdminData {
   spaces: Vec<AdminSpace>,
   announcement: Option<AnnouncementResponse>,
   instance: Option<AdminInstanceResponse>,
+  health: Option<AdminHealthResponse>,
   brands: Option<AdminBrandsResponse>,
   mail: Option<AdminMailSettingsResponse>,
   /// Loaded when the console shows the notetaker page.
@@ -134,6 +143,9 @@ impl AdminLive {
       wanted: Rc::new(Cell::new(Reads::NONE)),
       quiet_until: Rc::new(Cell::new(0)),
       has_read_all: Rc::new(Cell::new(false)),
+      maybe_open_section: Rc::new(Cell::new(None)),
+      open_alert_count: Rc::new(Cell::new(0)),
+      is_health_count_queued: Rc::new(Cell::new(false)),
     }
   }
 
@@ -220,6 +232,15 @@ impl AdminLive {
 
   pub fn instance(&self) -> Option<AdminInstanceResponse> {
     self.data.borrow().instance.clone()
+  }
+
+  pub fn health(&self) -> Option<AdminHealthResponse> {
+    self.data.borrow().health.clone()
+  }
+
+  /// How many health checks are alerting, as of the last read.
+  pub fn open_alert_count(&self) -> usize {
+    self.open_alert_count.get()
   }
 
   pub fn audit_filter(&self) -> AuditFilter {
@@ -625,7 +646,10 @@ impl AdminLive {
       reads = Reads::ALL;
     }
     let mut errors: Vec<String> = Vec::new();
-    let ((spaces, conversations, users, policy, announcement), (instance, brands, mail, calendar, runtime)) =
+    let (
+      ((spaces, conversations, users, policy, announcement), (instance, brands, mail, calendar, runtime)),
+      health,
+    ) = join(
       join(
         join5(
           self.fetch_if::<ListAdminSpacesResponse>(reads.has(Reads::SPACES), "/api/v1/admin/spaces"),
@@ -644,14 +668,17 @@ impl AdminLive {
           ),
           self.fetch_if::<RuntimeSettingsResponse>(reads.has(Reads::RUNTIME), "/api/v1/admin/settings"),
         ),
-      )
-      .await;
+      ),
+      self.fetch_if::<AdminHealthResponse>(reads.has(Reads::HEALTH), HEALTH_PATH),
+    )
+    .await;
     let spaces = settle(spaces, &mut errors).flatten();
     let conversations = settle(conversations, &mut errors).flatten();
     let users = settle(users, &mut errors).flatten();
     let policy = settle(policy, &mut errors).flatten();
     let announcement = settle(announcement, &mut errors).flatten();
     let instance = settle(instance, &mut errors).flatten();
+    let health = settle(health, &mut errors).flatten();
     let brands = settle(brands, &mut errors).flatten();
     let mail = settle(mail, &mut errors).flatten();
     let calendar = settle(calendar, &mut errors).flatten();
@@ -789,6 +816,10 @@ impl AdminLive {
       if instance.is_some() {
         data.instance = instance;
       }
+      if let Some(health) = health {
+        self.open_alert_count.set(health.open_alert_count()); // async-ok: a Cell, not a signal.
+        data.health = Some(health);
+      }
       if brands.is_some() {
         data.brands = brands;
       }
@@ -833,7 +864,67 @@ impl AdminLive {
 
   /// The console's timer: reads what `section` shows and nothing else.
   pub fn queue_refresh_section(&self, section: AdminSection) {
+    self.maybe_open_section.set(Some(section));
     self.queue_reads(Reads::of(section), REFRESH_DELAY);
+  }
+
+  /// The server told the admin that an alert was raised or resolved (or the connection came back,
+  /// so the news may have been missed): the open health page reads the checks, anywhere else only
+  /// the number for the badges is read. One small request either way, never a poll.
+  pub fn health_changed(&self) {
+    if self.maybe_open_section.get() == Some(AdminSection::Health) {
+      self.queue_reads(Reads::HEALTH, REFRESH_DELAY);
+    } else {
+      self.queue_health_count();
+    }
+  }
+
+  /// Reads how many checks are alerting, for the badges. Calls while one is scheduled collapse.
+  pub fn queue_health_count(&self) {
+    if self.is_health_count_queued.replace(true) {
+      return;
+    }
+    let live = self.clone();
+    set_timeout(
+      move || {
+        // async-ok: a Cell, not a signal.
+        live.is_health_count_queued.set(false);
+        spawn_local(async move { live.read_health_count().await });
+      },
+      REFRESH_DELAY,
+    );
+  }
+
+  async fn read_health_count(&self) {
+    if let Some(wait) = self.time_to_quiet_end() {
+      self.is_health_count_queued.set(true); // async-ok: a Cell, not a signal.
+      let live = self.clone();
+      set_timeout(
+        move || {
+          // async-ok: a Cell, not a signal.
+          live.is_health_count_queued.set(false);
+          spawn_local(async move { live.read_health_count().await });
+        },
+        wait,
+      );
+      return;
+    }
+    let count = match self.auth.api_get(HEALTH_PATH).await {
+      Ok(response) if response.status == 200 => alerting_checks(&response.body),
+      Ok(response) => {
+        self.read_failure(response.status, &response.body);
+        None
+      },
+      Err(error) => {
+        tracing::debug!(%error, "the health count could not be read");
+        None
+      },
+    };
+    if let Some(count) = count
+      && self.open_alert_count.replace(count) != count
+    {
+      self.changed();
+    }
   }
 
   /// A refresh after the core had time to sign and publish a policy.
@@ -1449,6 +1540,19 @@ impl Stored {
   }
 }
 
+/// The number of checks whose status is `alert`, from the health answer, without the wire types:
+/// `None` for an answer that is not one.
+fn alerting_checks(body: &str) -> Option<usize> {
+  let value: serde_json::Value = serde_json::from_str(body).ok()?;
+  let checks = value.get("checks")?.as_array()?;
+  Some(
+    checks
+      .iter()
+      .filter(|check| check.get("status").and_then(serde_json::Value::as_str) == Some("alert"))
+      .count(),
+  )
+}
+
 /// What a refresh reads, as a set. The console asks for everything when it opens and after the
 /// admin's own change, and for the open section's data on its timer (issue #1217).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1474,7 +1578,8 @@ impl Reads {
   const CACHED_SCHEMES: Reads = Reads(1 << 13);
   const CACHED_MODERATION: Reads = Reads(1 << 14);
   const CACHED_DEVICES: Reads = Reads(1 << 15);
-  const ALL: Reads = Reads((1 << 16) - 1);
+  const HEALTH: Reads = Reads(1 << 16);
+  const ALL: Reads = Reads((1 << 17) - 1);
 
   fn has(self, part: Reads) -> bool {
     self.0 & part.0 == part.0
@@ -1497,6 +1602,7 @@ impl Reads {
       AdminSection::Calendar => Self::CALENDAR,
       AdminSection::Settings => Self::RUNTIME,
       AdminSection::Instance => Self::INSTANCE,
+      AdminSection::Health => Self::HEALTH,
       // The owners and admins to propose for the roster come from the user list.
       AdminSection::Security | AdminSection::People => Self::POLICY | Self::USERS,
       AdminSection::Backgrounds
@@ -2086,10 +2192,10 @@ mod tests {
       block_on(live.refresh_once());
 
       let paths = server.paths();
-      // Ten lists, the further pages of channels (2) and users (1), the audit log, and one request
-      // per space: 26 requests in all, once, where the console used to make about 650.
+      // Eleven lists, the further pages of channels (2) and users (1), the audit log, and one
+      // request per space: 27 requests in all, once, where the console used to make about 650.
       assert!(
-        paths.len() <= 10 + 3 + 1 + SPACES as usize,
+        paths.len() <= 11 + 3 + 1 + SPACES as usize,
         "{} requests: {paths:?}",
         paths.len()
       );
@@ -2128,7 +2234,81 @@ mod tests {
             "{section:?}: {paths:?}"
           );
         }
+        // The health is read by its own page, and nothing else is read for it (issue #213).
+        let reads_health = paths.iter().any(|path| path == HEALTH_PATH);
+        assert_eq!(
+          reads_health,
+          section == AdminSection::Health,
+          "{section:?}: {paths:?}"
+        );
+        if section == AdminSection::Health {
+          assert_eq!(paths, [HEALTH_PATH], "one small request");
+        }
       }
+    }
+
+    #[test]
+    fn the_timer_the_tests_assume_is_the_one_the_console_runs() {
+      assert_eq!(
+        REFRESHES_PER_MINUTE as u64,
+        60_000 / crate::components::admin_console::REFRESH_MS
+      );
+    }
+
+    #[test]
+    fn the_health_page_shows_what_it_read_and_counts_the_alerts_for_the_badges() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+      let health = live.health().expect("read with the console");
+      assert_eq!(health.checks.len(), 3);
+      assert_eq!(live.open_alert_count(), 2);
+    }
+
+    #[test]
+    fn an_alert_pushed_while_another_page_is_open_costs_one_small_read_and_no_console_reads() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+      live.maybe_open_section.set(Some(AdminSection::Channels));
+      live.open_alert_count.set(0);
+      server.clear();
+
+      block_on(live.read_health_count());
+
+      assert_eq!(server.paths(), [HEALTH_PATH]);
+      assert_eq!(live.open_alert_count(), 2);
+    }
+
+    #[test]
+    fn the_count_for_the_badges_is_left_alone_when_the_answer_is_refused() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      live.open_alert_count.set(3);
+      server.refuse_everything_with(
+        429,
+        r#"{"error_code":"rate_limited","message":"x","retry_after_secs":5}"#,
+      );
+
+      block_on(live.read_health_count());
+
+      assert_eq!(
+        live.open_alert_count(),
+        3,
+        "a refusal says nothing about the alerts"
+      );
+      assert!(live.is_quiet(), "and the console waits, as for any read");
+    }
+
+    #[test]
+    fn the_alert_count_is_read_from_the_checks_and_nothing_else() {
+      assert_eq!(
+        alerting_checks(r#"{"checks":[{"status":"alert"},{"status":"ok"},{"status":"alert"}]}"#),
+        Some(2)
+      );
+      assert_eq!(alerting_checks(r#"{"checks":[]}"#), Some(0));
+      assert_eq!(alerting_checks("<html>login</html>"), None);
+      assert_eq!(alerting_checks(r#"{"checks":"later"}"#), None);
     }
 
     #[test]
@@ -2197,8 +2377,8 @@ mod tests {
       let live = AdminLive::new(server.clone());
       block_on(live.refresh_once());
 
-      // Only the first round of lists went out; nothing followed once the server said to wait.
-      assert!(server.paths().len() <= 10, "{:?}", server.paths());
+      // Only the first round of reads went out (the eleven lists); nothing followed once the server said to wait.
+      assert!(server.paths().len() <= 11, "{:?}", server.paths());
       assert!(live.is_quiet());
       let detail = live.maybe_error().unwrap_or_default();
       assert_eq!(detail, "rate_limited:42");
@@ -2328,6 +2508,13 @@ mod tests {
             policy: WorkspacePolicy::default(),
             maybe_entry: None,
           });
+        }
+        if path == HEALTH_PATH {
+          return (
+            200,
+            r#"{"checks":[{"check":"database","status":"ok"},{"check":"backup","status":"alert","failing_since":1,"value":172800},{"check":"certificate","status":"alert","value":3}],"alerts":[],"is_alerting_enabled":true,"hold_secs":600,"started_at":1}"#
+              .to_owned(),
+          );
         }
         if path.starts_with("/api/v1/admin/audit") {
           return json(&ListAuditResponse {

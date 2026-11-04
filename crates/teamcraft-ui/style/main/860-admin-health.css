@@ -1,0 +1,69 @@
+/* The system health page of the admin console (issue #213) and its badges. */
+
+.health-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.health-summary .icon { flex: none; margin-top: 2px; color: var(--online); }
+.health-summary p { margin: 2px 0 0; }
+.health-summary-alert {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+.health-summary-alert .icon { color: var(--danger); }
+
+.health-checks,
+.health-alert-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.health-check {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border);
+}
+.health-check:first-child { border-top: 0; }
+.health-check-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.health-check .badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.health-check .badge .icon { width: 12px; height: 12px; }
+.badge-health-ok { background: var(--accent-soft); color: var(--accent-strong); }
+.badge-health-failing { background: var(--warn-soft); color: var(--warn-text); }
+.badge-health-alert { background: var(--danger); color: var(--on-danger); }
+.badge-health-no-data,
+.badge-health-not-configured { background: var(--surface-3); color: var(--text-muted); }
+.health-check-not-configured .health-check-text > strong { color: var(--text-muted); }
+
+.health-alert-list li { padding: 8px 0; border-top: 1px solid var(--border); }
+.health-alert-list li:first-child { border-top: 0; }
+
+.admin-nav-item .badge-count { margin-inline-start: auto; }
+.menu-item .badge-count { margin-inline-start: auto; }
+
+.admin-content .instance-card + .instance-card { margin-top: 16px; }
+
+@media (max-width: 480px) {
+  .health-check { flex-direction: column-reverse; align-items: flex-start; gap: 6px; }
+}

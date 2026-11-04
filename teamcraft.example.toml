@@ -121,6 +121,17 @@ listen_addrs = ["127.0.0.1:9464", "[::1]:9464"]
 # How often the database size and the queued push wake-ups are read: never per request or scrape.
 database_check_interval_secs = 60
 
+# Health checks and alerts for admins (docs/operations.md, "Health and alerts", issue #213). When alerts
+# are raised and what counts as too old or too full are settings in Administration → Settings.
+[health]
+# Where the deployment writes its reports: backup_last_success, certificate_not_after and
+# disk_used_percent, one number each. Unset: those three checks show as not set up.
+# heartbeat_dir = "/var/lib/teamcraft/heartbeat"
+# How often the checks are evaluated (they cost no query).
+check_interval_secs = 30
+# After a start, checks that need history give no verdict for this long, so a restart raises nothing.
+startup_grace_secs = 300
+
 # Rules only the server enforces (PLAN.md §12, §13). Seed of Administration → Settings → server rules;
 # guest rules there and in the signed policy win over guests_dm_start.
 [policy]

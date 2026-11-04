@@ -601,7 +601,16 @@ Admins can't read reported content unless a member shows it to them:
 | Storage usage (Postgres, S3) per space                                                                            | v1.x |
 | Audit log (metadata only), exportable                                                                             | v1   |
 | Push setup (APNs, FCM, UnifiedPush)                                                                               | v1   |
-| Backups status                                                                                                    | v1.x |
+| Backups status (a heartbeat from the deployment, System health page; operations.md "Health and alerts")           | v1.x |
+
+**System health** (issue #213, [operations.md](operations.md) "Health and alerts"). Administration →
+System health lists the server's checks (database, storage, identity provider, push, media server,
+jobs, and the backup, certificate and disk the deployment reports), each as OK, failing, alert, no
+data or not set up, and the alerts raised since the server started. Owners and admins see a count on
+the Administration menu when a check has failed for the hold time, pushed by the gateway
+(`health_alert_update`, to admins only), not polled. It carries names, states, times and numbers,
+never content. Only people who may manage the workspace can read it (`GET /api/v1/admin/health`), and
+the console shows the page only to them.
 
 ### 3.5 Call backgrounds
 

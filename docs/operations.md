@@ -112,6 +112,7 @@ exists; clients can still read what they have stored locally.
   is waited for within `[database] startup_wait_secs` instead of exiting into a crash loop.
 - Logs are structured `tracing` output on stderr (`RUST_LOG` / `[logging]`). They never contain
   tokens, keys or message content (checked by tests); IDs of public objects are logged.
+- Built-in alerts for the failures that matter: see "Health and alerts" below.
 - Watch: 5xx rate, 429 rate (rate limits, `docs/performance.md`), database connection saturation
   (`[database] max_connections`), disk of Postgres (message partitions), gateway connections.
 
@@ -176,6 +177,86 @@ the last values stay, and the timestamp of `database_check` shows how old they a
 at 0 with the process, which Prometheus handles, and everything is per instance.
 
 The endpoint can't tell you that the server is down: probe `/readyz` from outside as well.
+
+## Health and alerts
+
+The server watches a fixed list of checks and tells owners and admins inside the app when one
+keeps failing (issue #213). Administration → **System health** shows the checks, and the
+Administration menu shows a count of open alerts. Names, states, times and one number per check:
+nothing from any conversation, no addresses, no error texts.
+
+| Check                   | Fails when                                                                      | Set up                                   |
+|-------------------------|---------------------------------------------------------------------------------|------------------------------------------|
+| `database`              | the database's breaker is down                                                  | always                                   |
+| `object_storage`        | the storage's breaker is down                                                   | with `[storage]`                         |
+| `identity_provider`     | the identity provider's breaker is down                                         | always                                   |
+| `push_gateway`          | the push gateway's breaker is down                                              | with a push gateway                      |
+| `push_service`          | the last attempt of a direct push service (APNs, FCM, Web Push) was refused     | with one of them                         |
+| `media_server`          | the SFU has not reported for 2 minutes                                          | with `[calls]` and SFU reports           |
+| `oidc_sync`             | the sync missed three runs (`[oidc.sync] interval_secs`)                        | with `[oidc.sync]`                       |
+| `retention`             | the job missed three runs (`[retention] interval_secs`)                         | with `[retention] enabled`               |
+| `partition_maintenance` | the job missed three runs (every 12 hours)                                      | always                                   |
+| `backup`                | the last backup is older than the limit (36 hours)                              | the deployment's heartbeat, see below    |
+| `certificate`           | the served certificate expires within the limit (14 days)                       | the deployment's heartbeat, see below    |
+| `disk_space`            | the disk is fuller than the limit (85 %)                                        | the deployment's heartbeat, see below    |
+
+**When a failure becomes an alert.** A background task evaluates the checks every
+`[health] check_interval_secs` (30). It reads what the server keeps anyway (breakers, push results,
+when jobs last ran) and three small files: no database query and no call to a backend, so a slow
+dependency cannot slow it down. A failing check shows as *Failing*; it becomes an *Alert* only after
+failing for the hold time **without a break** (default 10 minutes). It ends only after the check has
+been fine for the clear time (default 5 minutes). So:
+
+- a restart raises nothing: breakers start closed, jobs are measured from the start plus their first
+  delay plus `[health] startup_grace_secs` (300), and the media server gets the same grace;
+- a slow or flaky dependency raises nothing unless it keeps failing: one good answer starts the
+  hold again, and a breaker needs `failure_threshold` failures in a row to count as down at all;
+- a frozen process or a clock jump (more than four intervals between two evaluations) forgets what
+  was counted instead of adding the pause to the hold;
+- a breaker that is probing again (`recovering`) changes nothing until the next call decides.
+
+Known limit: a direct push service whose last attempt failed stays failing until its next
+attempt succeeds. On an instance that sends no push for the whole hold time after one failure, that
+shows as an alert, and it ends with the next successful send.
+
+**Who is told, and how.** Raising or resolving an alert sends the gateway event `health_alert_update`
+to the instance's owners and admins and nobody else. It has no payload: the console reads
+`GET /api/v1/admin/health` once when told (and once after the gateway reconnects, and once at the
+start), so nothing polls. The System health page itself reloads every 30 seconds while it is open and
+the page is visible; every other page reads nothing for it. Alerts are kept in memory (the last 50);
+a restart starts the list again, and a failure that lasts is raised again after the hold time.
+Delivery by e-mail or to a webhook is not part of this yet (#213).
+
+**Settings** (Administration → Settings → Health alerts; the configuration file only names paths):
+
+| Setting                | Default  | Meaning                                                      |
+|------------------------|----------|--------------------------------------------------------------|
+| `is_enabled`           | on       | Off: the checks still show, nobody is told                   |
+| `hold_secs`            | 10 min   | How long a check must fail before it is an alert (1 min up)  |
+| `clear_secs`           | 5 min    | How long it must be fine before the alert ends (1 min up)    |
+| `backup_max_age_secs`  | 36 hours | The backup is too old after this (1 hour to 30 days)         |
+| `certificate_min_days` | 14       | Too close to expiry with fewer days (1 to 365)               |
+| `disk_max_percent`     | 85       | Too full above this (50 to 99)                               |
+
+**What the deployment reports.** The server cannot see its backups, its certificate or the disk
+from inside its container. With `[health] heartbeat_dir = "/path"` it reads three files there at
+every evaluation, each holding one number as text (a trailing newline and a decimal are fine):
+
+| File                    | Content                                                          | Written by the deployment                 |
+|-------------------------|------------------------------------------------------------------|-------------------------------------------|
+| `backup_last_success`   | Unix time in seconds when the last backup finished successfully  | the backup job, after each success        |
+| `certificate_not_after` | Unix time in seconds when the served certificate expires         | a probe of the public endpoint, daily     |
+| `disk_used_percent`     | Percent of the busiest data disk in use, 0 to 100                | a cron job, at least every 15 minutes     |
+
+Without the directory these three checks show as *Not set up*. With it, a file that is not there yet
+shows as *No data yet* (the deployment should write `backup_last_success` once at install time and after
+every backup, so that a backup that never works is still found) and one that is not a number as well.
+A timestamp a little in the future (clock skew) counts as just now. The files are read-only for the
+server, at most 64 bytes each. The deployment repository has to write them and mount the directory
+into the server container; that is tracked as a follow-up of #213.
+
+An external probe of `/readyz` stays part of the story: the built-in alerts cannot tell you that
+the server itself is down.
 
 ## Reverse proxy and network
 

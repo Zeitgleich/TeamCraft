@@ -5,10 +5,11 @@
 use serde_json::json;
 use teamcraft_db::StoredSetting;
 use teamcraft_proto::{
-  AppLinkSettings, DpopPolicy, EmailDigestSettings, IntegrationSettings, LimitSettings, LocalAccountSettings,
-  MailTextSettings, MeetingMailSettings, NotificationLevel, NotificationRuntimeSettings, Permission,
-  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState,
-  ServerRulesSettings, SettingSource, ShareSettings, SignInMethod, SignInPageSettings, Target,
+  AppLinkSettings, DpopPolicy, EmailDigestSettings, HealthAlertSettings, IntegrationSettings, LimitSettings,
+  LocalAccountSettings, MailTextSettings, MeetingMailSettings, NotificationLevel,
+  NotificationRuntimeSettings, Permission, RuntimeSettingsKey, RuntimeSettingsResponse,
+  RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource, ShareSettings,
+  SignInMethod, SignInPageSettings, Target,
 };
 use tracing::{error, warn};
 
@@ -21,7 +22,7 @@ use crate::state::{AppState, Settings};
 
 /// Prefix of the rows in `server_settings`.
 const NAME_PREFIX: &str = "settings.";
-const ALL_KEYS: [RuntimeSettingsKey; 12] = [
+const ALL_KEYS: [RuntimeSettingsKey; 13] = [
   RuntimeSettingsKey::ServerRules,
   RuntimeSettingsKey::Notifications,
   RuntimeSettingsKey::EmailDigest,
@@ -34,6 +35,7 @@ const ALL_KEYS: [RuntimeSettingsKey; 12] = [
   RuntimeSettingsKey::MeetingMail,
   RuntimeSettingsKey::TokenBinding,
   RuntimeSettingsKey::AppLinks,
+  RuntimeSettingsKey::HealthAlerts,
 ];
 const MAX_TEXT_CHARS: usize = 5000;
 /// Longest help text of the sign-in page, per language.
@@ -50,6 +52,12 @@ const MAX_INTERVAL_SECS: u64 = 86_400;
 const MAX_REMOVAL_DAYS: u64 = 3_650;
 /// Longest time an admin's request to join a private channel may stay open (a quarter).
 const MAX_ADMIN_JOIN_REQUEST_DAYS: u64 = 90;
+
+/// Shortest time a check must fail before it raises an alert, and be fine before it ends one: below
+/// this a flapping check would page people all night.
+const MIN_ALERT_HOLD_SECS: u64 = 60;
+/// Longest backup age an admin can allow: a month.
+const MAX_BACKUP_AGE_SECS: u64 = 30 * 86_400;
 
 /// Fewest proofs remembered: fewer would turn normal use into 503s.
 const MIN_REPLAY_CACHE_ENTRIES: u64 = 1000;
@@ -199,6 +207,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
   match section {
     RuntimeSettingsSection::TokenBinding(values) => settings.token_binding = values.clone(),
     RuntimeSettingsSection::AppLinks(values) => settings.app_links = values.clone(),
+    RuntimeSettingsSection::HealthAlerts(values) => settings.health_alerts = values.clone(),
     RuntimeSettingsSection::ServerRules(rules) => {
       settings.policy.invites_require_verified_email = rules.invites_require_verified_email;
       settings.policy.default_spaces.clone_from(&rules.default_spaces);
@@ -309,6 +318,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
   RuntimeSettingsResponse {
     token_binding: settings.token_binding.clone(),
     app_links: settings.app_links.clone(),
+    health_alerts: settings.health_alerts.clone(),
     server_rules: ServerRulesSettings {
       invites_require_verified_email: settings.policy.invites_require_verified_email,
       default_spaces: settings.policy.default_spaces.clone(),
@@ -420,6 +430,7 @@ fn check_token_binding_is_safe(
 fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
   match section {
     RuntimeSettingsSection::AppLinks(values) => check_app_links(values),
+    RuntimeSettingsSection::HealthAlerts(values) => check_health_alerts(values),
     RuntimeSettingsSection::TokenBinding(values) => {
       if matches!(values.dpop_policy, DpopPolicy::Unknown(_)) {
         return Err(ApiError::InvalidRequest(
@@ -627,6 +638,35 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
   }
 }
 
+/// A hold and a clear time long enough not to flap, thresholds that can be met.
+fn check_health_alerts(values: &HealthAlertSettings) -> Result<(), ApiError> {
+  check_range(
+    "hold_secs",
+    values.hold_secs,
+    MIN_ALERT_HOLD_SECS,
+    MAX_INTERVAL_SECS,
+  )?;
+  check_range(
+    "clear_secs",
+    values.clear_secs,
+    MIN_ALERT_HOLD_SECS,
+    MAX_INTERVAL_SECS,
+  )?;
+  check_range(
+    "backup_max_age_secs",
+    values.backup_max_age_secs,
+    3600,
+    MAX_BACKUP_AGE_SECS,
+  )?;
+  check_range(
+    "certificate_min_days",
+    u64::from(values.certificate_min_days),
+    1,
+    365,
+  )?;
+  check_range("disk_max_percent", u64::from(values.disk_max_percent), 50, 99)
+}
+
 /// At least one known method, each once; short help texts; an https help link.
 /// What goes into a file another company's servers read: nothing but well-formed identifiers.
 fn check_app_links(values: &AppLinkSettings) -> Result<(), ApiError> {
@@ -793,6 +833,7 @@ mod tests {
       RuntimeSettingsSection::MeetingMail(original.meeting_mail.clone()),
       RuntimeSettingsSection::TokenBinding(original.token_binding.clone()),
       RuntimeSettingsSection::AppLinks(original.app_links.clone()),
+      RuntimeSettingsSection::HealthAlerts(original.health_alerts.clone()),
     ];
     assert_eq!(sections.len(), ALL_KEYS.len());
     let mut applied = Settings::default();
@@ -836,8 +877,47 @@ mod tests {
       RuntimeSettingsSection::MailTexts(defaults.mail_texts),
       RuntimeSettingsSection::MeetingMail(defaults.meeting_mail),
       RuntimeSettingsSection::AppLinks(defaults.app_links),
+      RuntimeSettingsSection::HealthAlerts(defaults.health_alerts),
     ] {
       assert!(validate(&section).is_ok(), "{}", section.key());
+    }
+  }
+
+  #[test]
+  fn health_alert_settings_refuse_values_that_would_flap_or_never_fire() {
+    let good = HealthAlertSettings::default();
+    assert!(check_health_alerts(&good).is_ok());
+    for refused in [
+      HealthAlertSettings {
+        hold_secs: 10,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        hold_secs: 0,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        clear_secs: 59,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        backup_max_age_secs: 60,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        certificate_min_days: 0,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        disk_max_percent: 100,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        disk_max_percent: 10,
+        ..good.clone()
+      },
+    ] {
+      assert!(check_health_alerts(&refused).is_err(), "{refused:?}");
     }
   }
 

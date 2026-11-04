@@ -7,13 +7,13 @@ use teamcraft_db::{
   UserStatusFilter,
 };
 use teamcraft_proto::{
-  AdminConversationSummary, AdminDeviceResponse, AdminInstanceResponse, AdminSpaceSummary, AdminUserStatus,
-  AdminUserSummary, AuditEntryId, AuditEntryResponse, ConversationId, ConversationKind,
-  DeactivateUserRequest, DeactivationReason, DeviceId, GatewayEvent, Id, ListAdminConversationsQuery,
-  ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersQuery,
-  ListAdminUsersResponse, ListAuditQuery, ListAuditResponse, ListConversationMembersResponse,
-  ListSpaceMembersResponse, Permission, PushProvider, PushProviderState, PushProviderStatus, RetentionPolicy,
-  SfuStatus, SpaceId, StorageStatus, Target, UnixMillis, UserId,
+  AdminConversationSummary, AdminDeviceResponse, AdminHealthResponse, AdminInstanceResponse,
+  AdminSpaceSummary, AdminUserStatus, AdminUserSummary, AuditEntryId, AuditEntryResponse, ConversationId,
+  ConversationKind, DeactivateUserRequest, DeactivationReason, DeviceId, GatewayEvent, Id,
+  ListAdminConversationsQuery, ListAdminConversationsResponse, ListAdminDevicesResponse,
+  ListAdminSpacesResponse, ListAdminUsersQuery, ListAdminUsersResponse, ListAuditQuery, ListAuditResponse,
+  ListConversationMembersResponse, ListSpaceMembersResponse, Permission, PushProvider, PushProviderState,
+  PushProviderStatus, RetentionPolicy, SfuStatus, SpaceId, StorageStatus, Target, UnixMillis, UserId,
 };
 use time::OffsetDateTime;
 
@@ -774,6 +774,13 @@ pub async fn assign_channel_owner(
     },
   );
   Ok(())
+}
+
+/// How the checks stand and the alerts raised since the server started (docs/operations.md,
+/// "Health and alerts"). The last evaluation of the background task: no query, no backend call.
+pub fn health_status(state: &AppState, caller: &AuthenticatedUser) -> Result<AdminHealthResponse, ApiError> {
+  require(state, caller, Permission::ManageWorkspace, &Target::Instance)?;
+  Ok(state.health.response(&state.settings.get().health_alerts))
 }
 
 /// What the instance runs on: media server, push providers and storage (admin.md §3.4).

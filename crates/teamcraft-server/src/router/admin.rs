@@ -34,6 +34,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
       handlers::admin_set_channel_moderation_handler
     ))
     .routes(routes!(handlers::admin_assign_channel_owner_handler))
+    .routes(routes!(handlers::admin_health_handler))
     .routes(routes!(handlers::admin_instance_handler))
     .routes(routes!(handlers::admin_reissue_local_activation_handler))
     .routes(routes!(

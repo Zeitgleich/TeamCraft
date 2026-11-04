@@ -17,10 +17,10 @@ use teamcraft_client_api::calls::{
 use teamcraft_proto::OrgBackgroundId;
 
 use teamcraft_proto::{
-  AdminBrandsResponse, AdminCalendarSettingsResponse, AdminInstanceResponse, AdminMailSettingsResponse,
-  AnnouncementResponse, BrandAssetSlot, ChannelModeration, CreateBrandRequest, PermissionSchemeResponse,
-  Role, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange,
-  SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest,
+  AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
+  AdminMailSettingsResponse, AnnouncementResponse, BrandAssetSlot, ChannelModeration, CreateBrandRequest,
+  PermissionSchemeResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection,
+  SchemeChange, SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest,
   UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
@@ -166,15 +166,26 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     // rest must be read again (after a reconnect). Applied before the UI re-reads. The first
     // snapshot is taken before deciding about the poll, so a chat with a core never starts it.
     live.observe(self.chat.live_snapshot());
+    if let Some(admin) = &self.maybe_admin {
+      // Once at the start: an alert raised while the admin was away shows in the badges.
+      admin.queue_health_count();
+    }
     // No core, so no gateway: polling is the only way to see new counts. Stops for good once a
     // snapshot shows a core (a shell that reports its live state only later).
     let is_rest_only = RwSignal::new(!live.is_core_fed());
     let observer = live.clone();
     // Weak: the chat keeps this notifier, which must not keep the chat alive after sign-out.
     let chat = Rc::downgrade(&self.chat);
+    let maybe_admin = self.maybe_admin.clone();
     self.chat.set_change_notifier(Rc::new(move || {
       if let Some(chat) = chat.upgrade() {
-        observer.observe(chat.live_snapshot());
+        let follow_up = observer.observe(chat.live_snapshot());
+        // Pushed by the server (and after a reconnect, which may have missed it): no polling.
+        if follow_up.needs_health
+          && let Some(admin) = &maybe_admin
+        {
+          admin.health_changed();
+        }
       }
       if is_rest_only.try_get_untracked() == Some(true) && observer.is_core_fed() {
         is_rest_only.set(false);
@@ -1480,6 +1491,14 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     if let Some(admin) = &self.maybe_admin {
       admin.clear_announcement();
     }
+  }
+
+  fn health_status(&self) -> Option<AdminHealthResponse> {
+    self.maybe_admin.as_ref().and_then(AdminLive::health)
+  }
+
+  fn health_alert_count(&self) -> usize {
+    self.maybe_admin.as_ref().map_or(0, AdminLive::open_alert_count)
   }
 
   fn instance_status(&self) -> Option<AdminInstanceResponse> {

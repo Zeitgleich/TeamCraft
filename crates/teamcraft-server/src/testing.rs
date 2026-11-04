@@ -566,6 +566,11 @@ impl TestApp {
         settings.limits.max_concurrent_image_decodes.max(1),
       )),
       metrics: Arc::new(crate::metrics::ServerMetrics::new().unwrap()),
+      health: Arc::new(crate::health::HealthMonitor::new(
+        crate::health::HealthConfig::default(),
+        crate::health::JobSchedules::default(),
+        time::OffsetDateTime::now_utc(),
+      )),
       settings: Arc::new(SettingsCell::new(settings)),
     };
 

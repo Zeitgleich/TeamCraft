@@ -7,6 +7,7 @@ use crate::components::admin_backgrounds::BackgroundsSection;
 use crate::components::admin_brands::BrandsSection;
 use crate::components::admin_calendar::CalendarSection;
 use crate::components::admin_channels::ChannelsSection;
+use crate::components::admin_health::HealthSection;
 use crate::components::admin_import::ImportSection;
 use crate::components::admin_instance::InstanceSection;
 use crate::components::admin_integrations::IntegrationsSection;
@@ -30,7 +31,7 @@ use crate::state::use_app_state;
 /// visible: admins watch audit entries and device lists change, nobody else needs the requests.
 /// Only that section's lists are read (a few requests), never the whole console: the address's rate
 /// limit is shared with every colleague behind it (issue #1217, docs/performance.md "Admin console").
-const REFRESH_MS: u64 = 30_000;
+pub(crate) const REFRESH_MS: u64 = 30_000;
 
 /// Administration inside the normal client. Everything here is metadata: admins can manage rooms
 /// without reading them (admin.md §2).
@@ -45,6 +46,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
     state.read(|backend| backend.admin_refresh_section(section))
   });
   let maybe_error = Memo::new(move |_| state.read(|backend| backend.admin_error()));
+  let alerts = Memo::new(move |_| state.read(|backend| backend.health_alert_count()));
 
   let nav_item = move |target: AdminSection, icon: IconName| {
     view! {
@@ -56,6 +58,16 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
         >
           <Icon name=icon />
           <span>{move || i18n.t(&format!("admin-nav-{}", target.slug()))}</span>
+          {(target == AdminSection::Health)
+            .then(|| {
+              view! {
+                <Show when=move || { alerts.get() > 0 } fallback=|| ()>
+                  <span class="badge-count" role="img" aria-label=move || i18n.t_count("health-alerts-badge", alerts.get())>
+                    {move || alerts.get()}
+                  </span>
+                </Show>
+              }
+            })}
         </button>
       </li>
     }
@@ -83,6 +95,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           {nav_item(AdminSection::Settings, IconName::Sliders)}
           {nav_item(AdminSection::Retention, IconName::Clock)}
           {nav_item(AdminSection::Updates, IconName::Download)}
+          {nav_item(AdminSection::Health, IconName::Activity)}
           {nav_item(AdminSection::Instance, IconName::Monitor)}
           {nav_item(AdminSection::Integrations, IconName::Terminal)}
           {nav_item(AdminSection::Notetaker, IconName::Compose)}
@@ -115,6 +128,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           AdminSection::Mail => view! { <MailSection /> }.into_any(),
           AdminSection::Calendar => view! { <CalendarSection /> }.into_any(),
           AdminSection::Settings => view! { <SettingsSection /> }.into_any(),
+          AdminSection::Health => view! { <HealthSection /> }.into_any(),
           AdminSection::Instance => view! { <InstanceSection /> }.into_any(),
           AdminSection::Retention => view! { <RetentionSection /> }.into_any(),
           AdminSection::Updates => view! { <UpdatesPolicySection /> }.into_any(),

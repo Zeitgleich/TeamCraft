@@ -235,6 +235,17 @@ mod read_state_events {
   }
 
   #[tokio::test]
+  async fn health_alert_updates_move_their_own_mark() {
+    let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let server = FakeServer::new();
+    let mut alice = enroll(&server, "Alice", &clock).await;
+    server.publish_event(&[alice.client.user_id()], &GatewayEvent::HealthAlertUpdate);
+    settle(&mut [&mut alice]).await;
+    let marks = read_state::marks(alice.store.as_ref()).unwrap();
+    assert_eq!((marks.health_alerts, marks.announcements), (1, 0));
+  }
+
+  #[tokio::test]
   async fn receipts_and_acknowledgements_are_stored() {
     let clock = Arc::new(ManualClock::new(1_800_000_000_000));
     let server = FakeServer::new();

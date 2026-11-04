@@ -637,6 +637,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.sync_account_data().await
       },
       GatewayEvent::KeyBagUpdate { .. } => Ok(()),
+      // The UI (the admin console's) reads the health itself; the mark tells it to now.
+      GatewayEvent::HealthAlertUpdate => {
+        read_state::update_marks(&self.store, |marks| marks.health_alerts += 1)
+      },
       // The UI reads the meetings itself (reminders, the meetings view); the mark tells it to now.
       // A knock too: the UI reads the lobbies with the list, and the organizer's device lets in
       // guests of the meeting link by itself in meetings without a lobby (e2ee.md §4.6).

@@ -35,6 +35,7 @@ mod gateway;
 mod guests;
 mod hardening;
 mod health;
+mod health_alerts;
 mod identity;
 mod import;
 mod integration_channels;
