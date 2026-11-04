@@ -241,8 +241,20 @@ pub(crate) enum PushOpening {
   Received,
   /// The app opens it again because the first try could not read the message in time.
   Retry,
+  /// A later look, minutes on, with time to spare: it asks the server how far the user has read.
+  /// Not for a try with a tight bound ([`Self::Retry`]): the answer costs up to
+  /// [`PUSH_FETCH_BUDGET`], and a text already read must not be lost to that wait.
+  LateLook,
   /// The app looks whether the sync stored the message meanwhile: no network, nothing that waits.
   StoreOnly,
+}
+
+impl PushOpening {
+  /// Whether this opening asks the server for the read position: only a late look of the app's own
+  /// client, while it isn't syncing (the gateway keeps it fresh then).
+  fn refreshes_read_position(self, reader: PushReader, is_client_idle: bool) -> bool {
+    self == Self::LateLook && reader == PushReader::App && is_client_idle
+  }
 }
 
 /// Who opens a push: the app, whose client may catch the conversation up, or a notification
@@ -1169,8 +1181,8 @@ impl Engine {
     }
     // A later look asks the server how far this user has read: the sync doesn't run in the
     // background, and a `dismiss` may come after this. Best effort; the store's position else.
-    if opening == PushOpening::Retry
-      && reader == PushReader::App
+    let is_client_idle = matches!(self.client, ClientSlot::Idle(_));
+    if opening.refreshes_read_position(reader, is_client_idle)
       && let ClientSlot::Idle(client) = &mut self.client
     {
       let refreshed = tokio::time::timeout(
@@ -1845,6 +1857,17 @@ mod tests {
 
   /// Issue #424 review, H2: a notification extension never catches a conversation up (it would
   /// advance the MLS state next to the app's copy); the app's idle client does.
+  #[test]
+  fn only_a_late_look_of_the_apps_idle_client_asks_for_the_read_position() {
+    assert!(PushOpening::LateLook.refreshes_read_position(PushReader::App, true));
+    assert!(!PushOpening::LateLook.refreshes_read_position(PushReader::App, false));
+    assert!(!PushOpening::LateLook.refreshes_read_position(PushReader::Extension, true));
+    // The try right away has a tight bound: a text read must not wait for this (issue #1249).
+    assert!(!PushOpening::Retry.refreshes_read_position(PushReader::App, true));
+    assert!(!PushOpening::Received.refreshes_read_position(PushReader::App, true));
+    assert!(!PushOpening::StoreOnly.refreshes_read_position(PushReader::App, true));
+  }
+
   #[test]
   fn only_the_apps_idle_client_catches_a_push_up() {
     assert!(PushReader::App.catches_up(true, true));

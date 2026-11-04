@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.push
 
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -191,6 +192,37 @@ class WakeUpRetriesTest {
     assertEquals(1, world.holdEndJobs)
   }
 
+  /**
+   * A slow link: the read position costs up to 4 s more, which the try right away hasn't got, and a
+   * text read must not be thrown away for it. So that try never asks; the later ones do.
+   */
+  @Test
+  fun theTryRightAwayKeepsATextReadOnASlowLink() = runBlocking {
+    world.hold()
+    world.openAgain = {
+      delay(SLOW_FETCH_MS)
+      text
+    }
+
+    world.retries.readSoon(PAYLOAD, placeholder)
+
+    assertEquals(listOf(PushPath.FILLED_HOLD), world.filled)
+    assertEquals(1, world.openedSoon)
+    assertEquals(0, world.opened)
+    assertTrue(world.holdEnds.isEmpty())
+  }
+
+  @Test
+  fun aLaterTryAsksHowFarTheUserHasRead() = runBlocking {
+    world.hold()
+    world.openAgain = { text }
+
+    world.retries.retry(PAYLOAD, attempt = 1, RetryOf.PLACEHOLDER, NOW)
+
+    assertEquals(1, world.opened)
+    assertEquals(0, world.openedSoon)
+  }
+
   @Test
   fun theTryRightAwayReleasesAfterAFailureButNotInACar() = runBlocking {
     world.hold()
@@ -249,6 +281,7 @@ class WakeUpRetriesTest {
     var pending = 0
     val maxChains = 3
     var opened = 0
+    var openedSoon = 0
     var gaveUp = 0
     var capped = 0
     var holdEndJobs = 0
@@ -261,7 +294,12 @@ class WakeUpRetriesTest {
 
     val retries = WakeUpRetries(
       opener = object : WakeUpOpener {
-        override suspend fun openAgain(payload: ByteArray): PushNotification {
+        override suspend fun openSoon(payload: ByteArray): PushNotification {
+          openedSoon += 1
+          return openAgain()
+        }
+
+        override suspend fun openLate(payload: ByteArray): PushNotification {
           opened += 1
           return openAgain()
         }
@@ -323,6 +361,7 @@ class WakeUpRetriesTest {
 
   private companion object {
     const val NOW = 1_000_000L
+    const val SLOW_FETCH_MS = 50L
     val PAYLOAD = byteArrayOf(1, 2, 3)
   }
 }

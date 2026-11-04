@@ -38,7 +38,7 @@ class WakeUpRetries(
     startChain(payload, RetryOf.PLACEHOLDER)
     scheduler.scheduleHoldEnd(PushRetry.holdBoundMs(isInCar()) + HOLD_END_MARGIN_MS)
     val maybeAgain = withTimeoutOrNull(PushRetry.HOLD_TRY_MS) {
-      catching { opener.openAgain(payload) }.getOrNull()
+      catching { opener.openSoon(payload) }.getOrNull()
     }
     if (isSigningOut()) return
     maybeAgain?.let { target.handleRetry(it, PushPath.FILLED_HOLD) }
@@ -58,7 +58,7 @@ class WakeUpRetries(
   suspend fun retry(payload: ByteArray, attempt: Int, retryOf: RetryOf, arrivedAtMs: Long) {
     if (isSigningOut()) return
     if (retryOf == RetryOf.PLACEHOLDER && !target.hasPlaceholderFor(payload)) return
-    catching { opener.openAgain(payload) }
+    catching { opener.openLate(payload) }
       .onSuccess { opened ->
         if (isSigningOut()) return
         when (retryOf) {
@@ -143,8 +143,11 @@ class WakeUpRetries(
 
 /** Opens a wake-up that was opened before: not counted as received. */
 interface WakeUpOpener {
-  /** May fetch and catch up. */
-  suspend fun openAgain(payload: ByteArray): PushNotification
+  /** May fetch and catch up; for a try with a tight bound, so it doesn't ask for the read position. */
+  suspend fun openSoon(payload: ByteArray): PushNotification
+
+  /** May fetch and catch up, and asks the server how far the user has read: can take seconds more. */
+  suspend fun openLate(payload: ByteArray): PushNotification
 
   /** Only what the store holds; no network. */
   suspend fun fromStore(payload: ByteArray): PushNotification

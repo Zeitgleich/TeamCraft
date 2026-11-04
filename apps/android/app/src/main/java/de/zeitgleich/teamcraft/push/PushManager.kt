@@ -42,11 +42,18 @@ class PushManager(
 
   private val retries = WakeUpRetries(
     opener = object : WakeUpOpener {
-      override suspend fun openAgain(payload: ByteArray): PushNotification {
+      override suspend fun openSoon(payload: ByteArray): PushNotification {
         val core = core.core()
         core.setMentionSettings(mentionPrefs.settings.value)
         core.setNotificationContent(contentPrefs.content.value)
         return core.notificationForPushRetry(payload, utcOffsetMinutes())
+      }
+
+      override suspend fun openLate(payload: ByteArray): PushNotification {
+        val core = core.core()
+        core.setMentionSettings(mentionPrefs.settings.value)
+        core.setNotificationContent(contentPrefs.content.value)
+        return core.notificationForLatePush(payload, utcOffsetMinutes())
       }
 
       override suspend fun fromStore(payload: ByteArray): PushNotification =
@@ -200,7 +207,7 @@ class PushManager(
       core.setNotificationContent(contentPrefs.content.value)
       when (kind) {
         WakeUpRun.FIRST -> core.notificationForPush(payload, utcOffsetMinutes())
-        WakeUpRun.RESUMED -> core.notificationForPushRetry(payload, utcOffsetMinutes())
+        WakeUpRun.RESUMED -> core.notificationForLatePush(payload, utcOffsetMinutes())
       }
     }
       // Checked again: sign-out may have started while the wake-up was being opened.

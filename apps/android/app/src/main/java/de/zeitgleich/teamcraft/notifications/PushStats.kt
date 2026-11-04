@@ -118,6 +118,9 @@ enum class PushPath {
 
   /** A wake-up that could not be opened at first opened on a retry. */
   OPENED_LATE,
+
+  /** FCM delivered a message with a lower priority than the server sent it with. */
+  FCM_DEPRIORITIZED,
   ;
 
   companion object {

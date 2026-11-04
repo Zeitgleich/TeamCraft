@@ -10,12 +10,14 @@ import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.SystemClock
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.StyleSpan
 import android.util.Log
 import java.util.Base64
+import java.util.concurrent.atomic.AtomicLong
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
@@ -31,6 +33,7 @@ import de.zeitgleich.teamcraft.ui.MainActivity
 import de.zeitgleich.teamcraft.ui.ShareShortcuts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -64,6 +67,11 @@ class MessageNotifier(
 
   /** The summary last posted, so an unchanged one is not posted (and mirrored) again. */
   private var maybeLastSummary: SummarySpec? = null
+
+  /** Rises with every post; from the clock, so a new process stays above the old one's. */
+  private val revisions = AtomicLong(System.currentTimeMillis())
+  private val confirms = HashMap<String, PostConfirm>()
+  private val confirmJobs = HashMap<String, Job>()
 
   /** When the last quiet note went up, so a burst shows one. */
   private var maybeLastQuietNoteAtMs: Long? = null
@@ -161,32 +169,8 @@ class MessageNotifier(
       )
       post(entry, alerting)
       postSummary()
-      confirmLater(entry, alerting)
       return true
     }
-  }
-
-  /**
-   * Android drops updates of an app that posts more than about 5 notifications a second, without
-   * saying so: a burst of messages (each posts its conversation, the summary and maybe a picture)
-   * could leave the shade on "New message" while this class counts it as filled in. So a filled-in
-   * text is looked at once more, and posted again if the system doesn't show it.
-   */
-  private fun confirmLater(entry: ConversationNotification, alerting: NotificationAlerting) {
-    scope.launch {
-      delay(POST_CONFIRM_MS)
-      synchronized(lock) {
-        if (shown().conversations[entry.conversationId] == entry && !isShowingNewest(entry)) post(entry, alerting)
-      }
-    }
-  }
-
-  private fun isShowingNewest(entry: ConversationNotification): Boolean {
-    val system = context.getSystemService(NotificationManager::class.java) ?: return true
-    val shown = runCatching { system.activeNotifications }.getOrNull() ?: return true
-    val maybeNotification = shown.firstOrNull { it.id == MESSAGE_ID && it.tag == entry.conversationId }?.notification
-    val isLocalOnly = maybeNotification?.let { it.flags and Notification.FLAG_LOCAL_ONLY != 0 } ?: return true
-    return isLocalOnly == (entry.lines.lastOrNull { !it.isOwn }?.isPlaceholder == true)
   }
 
   /**
@@ -520,16 +504,56 @@ class MessageNotifier(
   private fun post(entry: ConversationNotification, alerting: NotificationAlerting) {
     if (!canPost()) return
     val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), entry.isVerified)
-    val isAlerting = alerting == NotificationAlerting.ALERT
-    val spec = MessageNotificationSpecs.conversation(entry, privacy, isAlerting, labels())
-      ?.let { if (alerting == NotificationAlerting.REFRESH) it.copy(alerting = alerting) else it }
-      ?: return
-    postSafely(entry.conversationId, MESSAGE_ID, build(spec))
+    val spec = spec(entry, privacy, alerting) ?: return
+    val revision = revisions.incrementAndGet()
+    postSafely(entry.conversationId, MESSAGE_ID, build(spec, revision))
+    confirmLater(entry.conversationId, revision, alerting)
     spec.maybeShortcut?.let(::pushShortcut)
     if (privacy.showsNames) fetchAvatars(entry)
   }
 
-  private fun build(spec: MessageNotificationSpec): Notification {
+  private fun spec(entry: ConversationNotification, privacy: MessagePrivacy, alerting: NotificationAlerting) =
+    MessageNotificationSpecs.conversation(entry, privacy, alerting == NotificationAlerting.ALERT, labels())
+      ?.let { if (alerting == NotificationAlerting.REFRESH) it.copy(alerting = alerting) else it }
+
+  /**
+   * Android drops updates of an app that posts more than about 5 notifications a second, without
+   * saying so: in a burst (each message posts its conversation, the summary, maybe a picture) the
+   * shade could stay on "New message", or an alert go missing, while this class counts it as done.
+   * So once a conversation's posts have stopped for a moment, the system's copy is looked at, and
+   * what didn't get through is posted once more ([PostConfirm]). Never again after that: no loop.
+   * Caller holds [lock].
+   */
+  private fun confirmLater(conversationId: String, revision: Long, alerting: NotificationAlerting) {
+    confirms[conversationId] = (confirms[conversationId] ?: PostConfirm()).after(revision, alerting)
+    confirmJobs.remove(conversationId)?.cancel()
+    confirmJobs[conversationId] = scope.launch {
+      delay(POST_CONFIRM_MS)
+      synchronized(lock) { confirm(conversationId) }
+    }
+  }
+
+  private fun confirm(conversationId: String) {
+    confirmJobs.remove(conversationId)
+    val pending = confirms.remove(conversationId) ?: return
+    // Gone meanwhile, read or swiped away: nothing to bring back.
+    val entry = shown().conversations[conversationId] ?: return
+    val activeRevision = activeRevision(conversationId) ?: return
+    val alerting = pending.repostAs(activeRevision) ?: return
+    val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), entry.isVerified)
+    val spec = spec(entry, privacy, alerting) ?: return
+    Log.i(TAG, "a notification update did not get through; posted again: $alerting")
+    postSafely(conversationId, MESSAGE_ID, build(spec, revisions.incrementAndGet()))
+  }
+
+  private fun activeRevision(conversationId: String): Long? {
+    val system = context.getSystemService(NotificationManager::class.java) ?: return null
+    val active = runCatching { system.activeNotifications }.getOrNull() ?: return null
+    return active.firstOrNull { it.id == MESSAGE_ID && it.tag == conversationId }
+      ?.notification?.extras?.getLong(EXTRA_REVISION, 0)
+  }
+
+  private fun build(spec: MessageNotificationSpec, revision: Long): Notification {
     val isAlerting = spec.alerting == NotificationAlerting.ALERT
     val builder = NotificationCompat.Builder(context, spec.channel)
       .setSmallIcon(R.drawable.ic_notification)
@@ -547,6 +571,7 @@ class MessageNotifier(
       .setLocalOnly(spec.isLocalOnly)
       .setGroup(GROUP_MESSAGES)
       .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+      .addExtras(Bundle().apply { putLong(EXTRA_REVISION, revision) })
       .setContentIntent(openIntent(spec.conversationId))
       .setDeleteIntent(actionIntent(NotificationActionReceiver.ACTION_DISMISSED, spec.conversationId, isMutable = false))
       // The lock screen names the sender but not the text unless the user unlocks.
@@ -823,6 +848,7 @@ class MessageNotifier(
     private const val QUIET_NOTE_TAG = "quiet_note"
     private const val QUIET_NOTE_MS = 3_000L
     private const val POST_CONFIRM_MS = 1_500L
+    private const val EXTRA_REVISION = "de.zeitgleich.teamcraft.REVISION"
     private const val GROUP_MESSAGES = "de.zeitgleich.teamcraft.MESSAGES"
     private const val SELF_KEY = "self"
     private const val URI_SCHEME = "teamcraft-conversation"

@@ -285,6 +285,25 @@ class MessageNotificationSpecTest {
     assertEquals(HoldEnd.SILENT, PushRetry.holdEnd(push, NOW, NOW, isAppVisible = true))
   }
 
+  /** One re-post at most, and never a second alert for a post that got through. */
+  @Test
+  fun aLostPostIsPostedAgainAsWhatGotLost() {
+    val alerted = PostConfirm().after(10, NotificationAlerting.ALERT)
+    assertEquals(null, alerted.repostAs(10))
+    assertEquals(NotificationAlerting.ALERT, alerted.repostAs(9))
+
+    val thenSilent = alerted.after(11, NotificationAlerting.SILENT)
+    assertEquals(null, thenSilent.repostAs(11))
+    assertEquals(NotificationAlerting.ALERT, thenSilent.repostAs(9))
+    // The alert got through and only the silent update didn't: no second alert.
+    assertEquals(NotificationAlerting.SILENT, thenSilent.repostAs(10))
+
+    val refreshed = PostConfirm().after(20, NotificationAlerting.REFRESH).after(21, NotificationAlerting.SILENT)
+    assertEquals(NotificationAlerting.REFRESH, refreshed.repostAs(19))
+    assertEquals(NotificationAlerting.SILENT, refreshed.repostAs(20))
+    assertEquals(null, refreshed.repostAs(22))
+  }
+
   @Test
   fun aBurstShowsOneQuietNote() {
     assertTrue(PushRetry.isQuietNoteDue(null, NOW))

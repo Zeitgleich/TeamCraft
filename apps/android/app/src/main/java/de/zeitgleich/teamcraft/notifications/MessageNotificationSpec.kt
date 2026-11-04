@@ -81,6 +81,32 @@ enum class NotificationAlerting {
   REFRESH,
 }
 
+/**
+ * What was posted for a conversation and not seen through yet (see [MessageNotifier]): Android drops
+ * updates of an app posting over about 5 a second. Each post has a rising revision the notification
+ * carries, so the system's copy tells what got through. One re-post at most, and it alerts only if
+ * the post that alerted is what got lost.
+ */
+data class PostConfirm(
+  val latestRevision: Long = 0,
+  val maybeAlertRevision: Long? = null,
+  val maybeRefreshRevision: Long? = null,
+) {
+  fun after(revision: Long, alerting: NotificationAlerting): PostConfirm = copy(
+    latestRevision = revision,
+    maybeAlertRevision = if (alerting == NotificationAlerting.ALERT) revision else maybeAlertRevision,
+    maybeRefreshRevision = if (alerting == NotificationAlerting.REFRESH) revision else maybeRefreshRevision,
+  )
+
+  /** How to post again when the system shows `activeRevision`; `null`: the newest post got through. */
+  fun repostAs(activeRevision: Long): NotificationAlerting? = when {
+    activeRevision >= latestRevision -> null
+    maybeAlertRevision?.let { activeRevision < it } == true -> NotificationAlerting.ALERT
+    maybeRefreshRevision?.let { activeRevision < it } == true -> NotificationAlerting.REFRESH
+    else -> NotificationAlerting.SILENT
+  }
+}
+
 enum class MessageAction {
   REPLY,
   MARK_READ,

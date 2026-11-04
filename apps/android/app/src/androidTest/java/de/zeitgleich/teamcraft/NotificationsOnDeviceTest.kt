@@ -270,6 +270,26 @@ class NotificationsOnDeviceTest {
   }
 
   @Test
+  fun anAlertAtTheEndOfAHoldSurvivesABurstOfUpdates() {
+    notifier.show(placeholder("1000"), isAlerting = true, payload = PAYLOAD)
+    eventually { assertTrue(isSilent(active(CONVERSATION)!!.notification)) }
+    repeat(UPDATE_BURST) { notifier.repostAll() }
+    assertTrue(notifier.endHold(PAYLOAD, HoldEnd.ALERT))
+    eventually(timeoutMs = 5_000) { assertFalse(isSilent(active(CONVERSATION)!!.notification)) }
+  }
+
+  /** The newest line had its text all along: only the system's revision shows the older one's fill. */
+  @Test
+  fun anOlderLinesTextSurvivesABurstOfUpdates() {
+    notifier.show(placeholder("1000"), isAlerting = true, payload = PAYLOAD)
+    notifier.show(message("2000", text = "newer"), isAlerting = false)
+    eventually { assertEquals(2, messages().size) }
+    repeat(UPDATE_BURST) { notifier.repostAll() }
+    assertTrue(notifier.fillIn(message("1000", text = "lunch?")))
+    eventually(timeoutMs = 5_000) { assertEquals(listOf("lunch?", "newer"), messages()) }
+  }
+
+  @Test
   fun aFilledInMentionMovesToTheMentionsChannel() {
     notifier.show(placeholder("1000"), isAlerting = true, payload = PAYLOAD)
     assertTrue(notifier.fillIn(message("1000", text = "lunch, Bob?").copy(isMention = true)))
@@ -346,6 +366,10 @@ class NotificationsOnDeviceTest {
     AvatarCache(context) { error("no core in this test") },
     isInCar = { isInCar },
   )
+
+  private fun messages() =
+    NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(active(CONVERSATION)!!.notification)
+      ?.messages.orEmpty().map { it.text.toString() }
 
   private fun isLocalOnly(notification: Notification) = notification.flags and Notification.FLAG_LOCAL_ONLY != 0
 

@@ -4,6 +4,7 @@ import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
 import kotlinx.coroutines.runBlocking
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.notifications.PushPath
 import uniffi.teamcraft_ffi.PushService
 
 /** FCM data messages: decrypt and notify in the app (e2ee.md §7, Android row). */
@@ -18,6 +19,10 @@ class FcmService : FirebaseMessagingService() {
     // Whatever takes longer continues as expedited work.
     // Withdrawals are sent with normal priority and show nothing; the others must show something.
     val isVisible = message.originalPriority == RemoteMessage.PRIORITY_HIGH
+    // FCM lowered it: counted, so a diagnostics export shows it (notifications.md).
+    if (message.priority != message.originalPriority) {
+      TeamCraftApplication.graph(this).pushStats.record(PushPath.FCM_DEPRIORITIZED)
+    }
     runBlocking { WakeUpWork.handle(this@FcmService, payload, isVisible) }
   }
 }

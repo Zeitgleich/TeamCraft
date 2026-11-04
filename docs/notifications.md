@@ -355,7 +355,8 @@ filtering entitlement and doesn't read the gap yet, and a browser must show some
 | Not read in time: placeholder               | "New message"            | no            | Filled in (below)                       |
 | Didn't open at all (store, no account open) | "New message", no names  | no            | Replaced by the real one, up to 4 tries |
 
-`PushStats` counts these paths and the app logs and exports them with the diagnostics ("Notification
+`PushStats` counts these paths, and FCM messages delivered below the priority they were sent with
+(`FCM_DEPRIORITIZED`), and the app logs and exports them with the diagnostics ("Notification
 paths: SHOWN=12 HIDDEN=3"); each opened wake-up is also a line in the core's log (`push opened`: the
 gap, how long it ran, whether the client was idle, and why a fetch failed by class), so a phone's
 rates can be read off an export. Never content.
@@ -374,11 +375,14 @@ restart, and it goes with the line. A notification read or swiped away is not br
 by the expedited job of a receiver that comes after its run: that one opens the wake-up as a later
 look (not counted again), and a repeat with no line left shows nothing. A placeholder that turned out
 to be a reaction or an edit goes. Android drops updates of an app that posts more than about 5
-notifications a second, without saying so (seen on the emulator, "Shedding" in the system log), so a
-filled-in text is checked once 1.5 s later and posted again if the system doesn't show it.
+notifications a second, without saying so (seen on the emulator, "Shedding" in the system log). Every
+message notification carries a rising revision: 1.5 s after a conversation's last post the system's
+copy is looked at, and what didn't get through is posted once more, alerting only if the post that
+alerted is what got lost. One gap stays: an alert dropped right before a silent post that gets through
+(a picture arriving) can't be told apart from one that went out, and isn't repeated.
 
-**A late look checks first.** Each later look asks the server how far the user has read, while the
-client is idle (the sync doesn't run in the background and a `dismiss` can be late), and `is_read` then
+**A late look checks first.** Each later look, not the try right away with its tight bound (a text read
+must not be lost to the wait), asks the server how far the user has read, while the client is idle (the sync doesn't run in the background and a `dismiss` can be late), and `is_read` then
 takes the line away instead of filling it in. Thread messages rely on the `dismiss`: a thread's read
 position isn't in the conversation's record. A wake-up that opens only on a retry never rings: the
 ring is over, so it leaves a missed-call note and never reaches Telecom; no clock is involved, since
