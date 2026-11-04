@@ -137,6 +137,32 @@ async fn an_owner_and_an_admin_get_their_rights_with_no_click_and_a_role_change_
   .await;
   print_consoles();
   if let Err(panic) = scenario {
+    let probe = stack.tokens("alice");
+    let answer: Value = stack
+      .http
+      .get(format!("{}/api/v1/role-evidence", stack.base_url))
+      .bearer_auth(probe.token_async().await)
+      .send()
+      .await
+      .unwrap()
+      .json()
+      .await
+      .unwrap();
+    eprintln!(
+      "evidence entries: {}",
+      answer["entries"].as_array().map_or(0, Vec::len)
+    );
+    eprintln!("withdrawn: {}", answer["withdrawn"]);
+    for loss in answer["role_losses"].as_array().into_iter().flatten() {
+      eprintln!(
+        "role loss of {}: {}",
+        loss["user_id"],
+        jwt_payload(loss["token"].as_str().unwrap())
+      );
+    }
+    for line in admin_console.lock().unwrap().iter().rev().take(12) {
+      eprintln!("admin's console, newest first: {line}");
+    }
     for line in stack.server_log().lines().filter(|line| is_about_roles(line)) {
       eprintln!("server: {line}");
     }
@@ -153,6 +179,17 @@ async fn an_owner_and_an_admin_get_their_rights_with_no_click_and_a_role_change_
   owner_browser.close().await;
   admin_browser.close().await;
   stack.stop().await;
+}
+
+/// The claims of a token, for a test's failure message.
+fn jwt_payload(token: &str) -> String {
+  use base64::Engine as _;
+
+  let part = token.split('.').nth(1).unwrap_or_default();
+  base64::engine::general_purpose::URL_SAFE_NO_PAD
+    .decode(part)
+    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+    .unwrap_or_default()
 }
 
 fn is_about_roles(line: &str) -> bool {

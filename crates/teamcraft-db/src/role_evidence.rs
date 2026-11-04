@@ -75,8 +75,9 @@ impl Database {
       .collect()
   }
 
-  /// Keeps the token showing that `user` lost a role, if newer than the one stored. Returns whether it
-  /// was.
+  /// Keeps the token showing that `user` lost a role, unless one is stored already that isn't a day
+  /// older. A token that always made way for the next would never expire, and only an expired one is
+  /// handed out, while the person's app refreshes every few minutes. Returns whether it was kept.
   pub async fn put_role_loss(
     &self,
     user: UserId,
@@ -88,7 +89,7 @@ impl Database {
       r#"INSERT INTO role_losses (user_id, token, issued_at, expires_at) VALUES ($1, $2, $3, $4)
          ON CONFLICT (user_id) DO UPDATE SET token = EXCLUDED.token, issued_at = EXCLUDED.issued_at,
            expires_at = EXCLUDED.expires_at, updated_at = now()
-         WHERE role_losses.issued_at < EXCLUDED.issued_at"#,
+         WHERE role_losses.issued_at < EXCLUDED.issued_at - 86400"#,
       to_db(user),
       token,
       issued_at,

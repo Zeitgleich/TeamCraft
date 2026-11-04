@@ -224,7 +224,9 @@ refuses (`RootChanged`). It never gets anybody appointed whom the provider didn'
 
 - **What the server saw.** Whoever uses TeamCraft sends the server provider-signed access tokens, and those always carry the
   client roles (nobody could sign in otherwise). When a token shows a lower role than the person had, or none, which the server
-  refuses, it keeps that token and hands it out **once it has expired**, as it is a credential until then. Owners' apps verify it
+  refuses, it keeps that token (the first one; a later one replaces it only a day on, or the person's refreshes would keep
+  the evidence from ever expiring) and hands it out **once it has expired**, as it is a credential until then. An app with no role
+  left knocks once per token while the roster lists its user, as an idle app sends nothing; one that doesn't is seen at its next request. Owners' apps verify it
   like any other (`verify_role_loss`), and it counts only for the account noted for that person and if newer than their mark. This
   needs no mapper and nothing from the person, however unwilling. It is what makes the last client role work: **Keycloak's mapper
   adds no claim when somebody has no role left in that client, and the server refuses their tokens**, so their own app could

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO role_losses (user_id, token, issued_at, expires_at) VALUES ($1, $2, $3, $4)\n         ON CONFLICT (user_id) DO UPDATE SET token = EXCLUDED.token, issued_at = EXCLUDED.issued_at,\n           expires_at = EXCLUDED.expires_at, updated_at = now()\n         WHERE role_losses.issued_at < EXCLUDED.issued_at - 86400",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5f1193d24854b169076881f9ae48aa8e7aaf6c0e20522daf79567df481df9f91"
+}
