@@ -11,9 +11,10 @@ use crate::common;
 use common::{Peer, backend_of, run_commands, settle};
 use teamcraft_client_api::actions::NewChannel;
 use teamcraft_client_api::backend::ChatBackend;
-use teamcraft_client_api::model::ChannelMember;
+use teamcraft_client_api::model::{AppointerAuthority, ChannelMember, RoleAppointer};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::RoleSigning;
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::{ChannelRole, ConversationId, SpaceId, UserId};
 
 #[tokio::test]
@@ -190,6 +191,47 @@ async fn a_channel_from_before_signed_roles_is_founded_by_its_first_admin_who_ch
     bob.client.verified_channel_role(channel, alice_id).unwrap(),
     ChannelRole::Admin
   );
+}
+
+/// A workspace admin of the signed roster appoints Bob: Alice's device, which verified the entry,
+/// names the admin and the authority (the name is the member directory's).
+#[tokio::test]
+async fn a_workspace_admins_appointment_is_shown_with_its_signer_and_authority() {
+  let server = FakeServer::new();
+  let (mut alice, mut bob, mut carol) = trio(&server).await;
+  let (alice_id, bob_id, carol_id) = ids(&alice, &bob, &carol);
+  // Alice owns the workspace and Carol is one of its admins, both on the signed roster.
+  alice
+    .client
+    .publish_roster(&[(alice_id, RosterRole::Owner), (carol_id, RosterRole::Admin)])
+    .await
+    .unwrap();
+  server.set_admin(carol_id);
+  for peer in [&mut bob, &mut carol] {
+    peer.client.full_sync().await.unwrap();
+  }
+  let channel = channel_with_everybody(&server, &mut alice, &mut [&mut bob, &mut carol]).await;
+
+  let signing = carol
+    .client
+    .set_channel_role(channel, bob_id, ChannelRole::Admin)
+    .await
+    .unwrap();
+  assert_eq!(signing, RoleSigning::Signed);
+
+  let alice_ui = refreshed_ui(&mut alice, channel).await;
+  let appointed = row(&alice_ui, channel, bob_id);
+  assert_eq!(appointed.role, ChannelRole::Admin);
+  assert_eq!(
+    appointed.maybe_appointer,
+    Some(RoleAppointer {
+      user: carol_id,
+      authority: AppointerAuthority::WorkspaceAdmin,
+    })
+  );
+  assert_eq!(alice_ui.user(carol_id).unwrap().display_name, "Carol");
+  // Alice's own role is her founding claim at most: nobody appointed her.
+  assert_eq!(row(&alice_ui, channel, alice_id).maybe_appointer, None);
 }
 
 async fn trio(server: &FakeServer) -> (Peer, Peer, Peer) {
