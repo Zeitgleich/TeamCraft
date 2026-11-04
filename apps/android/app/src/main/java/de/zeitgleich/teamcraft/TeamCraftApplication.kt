@@ -29,6 +29,8 @@ import de.zeitgleich.teamcraft.notifications.JoinRequestWatcher
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
+import de.zeitgleich.teamcraft.notifications.CarProjection
+import de.zeitgleich.teamcraft.notifications.PlaceholderWatcher
 import de.zeitgleich.teamcraft.notifications.PushHandler
 import de.zeitgleich.teamcraft.notifications.PushStats
 import de.zeitgleich.teamcraft.notifications.ReadWatcher
@@ -56,12 +58,14 @@ class AppGraph(context: Context) {
     avatars.clear()
   })
   val notificationContent = NotificationContentPrefs(context)
-  val notifier = MessageNotifier(context, notificationContent, avatars)
+  val carProjection = CarProjection(context)
+  val notifier = MessageNotifier(context, notificationContent, avatars, isInCar = carProjection::isActive)
   val mentionPrefs = MentionPrefs(context)
   val calls = CallController(context, core, scope)
   val pushStats = PushStats(context)
   val pushHandler = PushHandler(context, notifier, calls, pushStats)
-  val push = PushManager(context, core, pushHandler, mentionPrefs, notificationContent, scope)
+  val push = PushManager(context, core, pushHandler, mentionPrefs, notificationContent, carProjection, managedConfig, scope)
+  val placeholderWatcher = PlaceholderWatcher(core, notifier, pushHandler, scope, endDueHolds = { push.endHolds() })
   val segmentPrefetch = SegmentPrefetch(context)
   val readWatcher = ReadWatcher(core, notifier, scope)
   /** Admins asking to join a channel the user owns: notified while the app runs (#799). */
@@ -86,7 +90,9 @@ class TeamCraftApplication : Application() {
     // The core waits for these before it opens (issue #157).
     NetworkTrust.startInstalling(this, graph.scope)
     graph.segmentPrefetch.schedule()
+    graph.carProjection.start { graph.scope.launch { graph.push.endHolds(isForced = true) } }
     graph.readWatcher.start()
+    graph.placeholderWatcher.start()
     graph.joinRequestWatcher.start()
     graph.network.start()
     // Older versions staged uploads in the cache, never deleted; the core's staging folder replaced it.

@@ -1,19 +1,25 @@
 package de.zeitgleich.teamcraft.push
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.core.CoreRepository
+import de.zeitgleich.teamcraft.core.NotSignedInException
+import de.zeitgleich.teamcraft.notifications.CarProjection
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
 import de.zeitgleich.teamcraft.notifications.PushHandler
 import de.zeitgleich.teamcraft.notifications.PushRetry
+import de.zeitgleich.teamcraft.server.ManagedConfig
 import uniffi.teamcraft_ffi.PushNotification
 import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.TeamCraftException
@@ -28,9 +34,48 @@ class PushManager(
   private val handler: PushHandler,
   private val mentionPrefs: MentionPrefs,
   private val contentPrefs: NotificationContentPrefs,
+  private val car: CarProjection,
+  private val managedConfig: ManagedConfig,
   private val scope: CoroutineScope,
 ) {
   private val backends: List<PushBackend> = PushBackends.all()
+
+  private val retries = WakeUpRetries(
+    opener = object : WakeUpOpener {
+      override suspend fun openSoon(payload: ByteArray): PushNotification {
+        val core = core.core()
+        core.setMentionSettings(mentionPrefs.settings.value)
+        core.setNotificationContent(contentPrefs.content.value)
+        return core.notificationForPushRetry(payload, utcOffsetMinutes())
+      }
+
+      override suspend fun openLate(payload: ByteArray): PushNotification {
+        val core = core.core()
+        core.setMentionSettings(mentionPrefs.settings.value)
+        core.setNotificationContent(contentPrefs.content.value)
+        return core.notificationForLatePush(payload, utcOffsetMinutes())
+      }
+
+      override suspend fun fromStore(payload: ByteArray): PushNotification =
+        core.core().notificationFromStore(payload, utcOffsetMinutes())
+    },
+    target = handler,
+    scheduler = object : RetryScheduler {
+      override fun enqueueRetry(payload: ByteArray, attempt: Int, retryOf: RetryOf, arrivedAtMs: Long) =
+        WakeUpWork.enqueueRetry(context, payload, attempt, retryOf, arrivedAtMs)
+
+      override fun scheduleHoldEnd(delayMs: Long) = WakeUpWork.scheduleHoldEnd(context, delayMs)
+
+      override fun pendingChains(): Int = WakeUpWork.pendingRetries(context)
+
+      override fun maxChains(): Int = managedConfig.maxPushRetryChains()
+    },
+    isInCar = car::isActive,
+    isAppVisible = { ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) },
+    isSigningOut = { isSigningOut },
+    elapsedNow = SystemClock::elapsedRealtime,
+    log = { Log.i(TAG, it) },
+  )
 
   /** Wake-ups being opened, by payload: a hand-over to [WakeUpWork] waits for the same run. */
   private val running = ConcurrentHashMap<String, Deferred<Unit>>()
@@ -120,12 +165,21 @@ class PushManager(
    * Starts opening a wake-up in the app's scope (or returns the run already going for the same
    * payload), so it isn't cancelled when a receiver's time is up.
    */
-  fun startWakeUp(payload: ByteArray, isVisible: Boolean): Deferred<Unit> {
+  fun startWakeUp(payload: ByteArray, isVisible: Boolean): Deferred<Unit> = run(payload, isVisible, WakeUpRun.FIRST)
+
+  /**
+   * The expedited job a receiver left: waits for the run still going, or, when that is over (the job
+   * came after it, or the process died), opens the wake-up as a later look: it isn't counted again,
+   * a line gone meanwhile stays gone, and a ring in it may be over.
+   */
+  fun resumeWakeUp(payload: ByteArray, isVisible: Boolean): Deferred<Unit> = run(payload, isVisible, WakeUpRun.RESUMED)
+
+  private fun run(payload: ByteArray, isVisible: Boolean, kind: WakeUpRun): Deferred<Unit> {
     val key = payload.contentHashCode().toString() + ":" + payload.size
     val run = running.computeIfAbsent(key) {
       scope.async(start = CoroutineStart.LAZY) {
         try {
-          onWakeUp(payload, isVisible)
+          onWakeUp(payload, isVisible, kind)
         } finally {
           running.remove(key)
         }
@@ -140,58 +194,58 @@ class PushManager(
    * the push service delivered it as one that must show something (FCM high priority: never a
    * withdrawal); if it can't be opened at all, a plain "New message" is shown instead of nothing.
    */
-  suspend fun onWakeUp(payload: ByteArray, isVisible: Boolean) {
+  private suspend fun onWakeUp(payload: ByteArray, isVisible: Boolean, kind: WakeUpRun) {
     if (isSigningOut) return
-    val core = runCatching { core.core() }.getOrElse {
+    val core = catching { core.core() }.getOrElse {
       Log.w(TAG, "wake-up while no account is open: ${it.javaClass.simpleName}")
-      if (isVisible && !isSigningOut) handler.handleUnreadable() else handler.recordUnreadable()
+      onNotOpened(payload, isVisible, isSignedOut = it is NotSignedInException)
       return
     }
-    runCatching {
+    catching {
       // Keywords and the first name are matched on the device (the server can't read the text).
       core.setMentionSettings(mentionPrefs.settings.value)
       core.setNotificationContent(contentPrefs.content.value)
-      core.notificationForPush(payload, utcOffsetMinutes())
+      when (kind) {
+        WakeUpRun.FIRST -> core.notificationForPush(payload, utcOffsetMinutes())
+        WakeUpRun.RESUMED -> core.notificationForLatePush(payload, utcOffsetMinutes())
+      }
     }
       // Checked again: sign-out may have started while the wake-up was being opened.
       .onSuccess {
-        if (isSigningOut) return@onSuccess
-        handler.handle(it)
-        scheduleRetry(payload, it, attempt = 1)
+        if (isSigningOut) return
+        val isRingOver = kind == WakeUpRun.RESUMED && PushRetry.isRingOver(it.maybeSentAtMs, System.currentTimeMillis())
+        handler.handle(it, payload, isVisible, isRingOver)
+        if (handler.isPlaceholderShowing(it) && PushRetry.isWanted(it, attempt = 1)) retries.readSoon(payload, it)
       }
       .onFailure {
         Log.w(TAG, "wake-up could not be opened: ${it.javaClass.simpleName}")
-        if (isVisible && !isSigningOut) handler.handleUnreadable() else handler.recordUnreadable()
+        onNotOpened(payload, isVisible, isSignedOut = false)
       }
   }
 
   /**
-   * Opens a wake-up again whose message was shown as a placeholder ([PushRetry]) and fills in the
-   * notification, silently and under the same ID; schedules the next attempt while it still can't
-   * be read. Shows nothing new: a notification read or swiped away meanwhile stays gone.
+   * Not opened: says "New message" if it must show something, and tries again later, since what
+   * kept it from opening (a busy or locked store, a process just starting) may pass. Without this
+   * the message would stay unknown until the app is opened.
    */
-  suspend fun retryWakeUp(payload: ByteArray, attempt: Int) {
-    if (isSigningOut) return
-    val core = runCatching { core.core() }.getOrNull() ?: return
-    runCatching {
-      core.setMentionSettings(mentionPrefs.settings.value)
-      core.setNotificationContent(contentPrefs.content.value)
-      core.notificationForPushRetry(payload, utcOffsetMinutes())
-    }
-      .onSuccess {
-        if (isSigningOut) return@onSuccess
-        handler.handleRetry(it)
-        scheduleRetry(payload, it, attempt = attempt + 1)
-      }
-      .onFailure { Log.w(TAG, "wake-up retry failed: ${it.javaClass.simpleName}") }
+  private fun onNotOpened(payload: ByteArray, isVisible: Boolean, isSignedOut: Boolean) {
+    val wasAnnounced = isVisible && !isSigningOut
+    if (wasAnnounced) handler.handleUnreadable() else handler.recordUnreadable()
+    if (!isSigningOut && !isSignedOut) retries.afterNotOpened(payload, wasAnnounced)
   }
 
-  private fun scheduleRetry(payload: ByteArray, shown: PushNotification, attempt: Int) {
-    if (!PushRetry.isWanted(shown, attempt) || !handler.isShowing(shown.conversationId)) return
-    // The gap is logged, never the content (notifications.md, "Mobile push delivery").
-    Log.i(TAG, "message not read in time (${shown.maybeGap}); retry $attempt scheduled")
-    WakeUpWork.enqueueRetry(context, payload, attempt)
+  /** A retry of [WakeUpRetries]. */
+  suspend fun retryWakeUp(payload: ByteArray, attempt: Int, retryOf: RetryOf, arrivedAtMs: Long) {
+    retries.retry(payload, attempt, retryOf, arrivedAtMs)
   }
+
+  /** A retry didn't finish in its worker's time. */
+  fun onRetryTimedOut(payload: ByteArray, attempt: Int, retryOf: RetryOf, arrivedAtMs: Long) {
+    retries.onTimedOut(payload, attempt, retryOf, arrivedAtMs)
+  }
+
+  /** Ends the holds past their bound, or all of them; returns whether any is left. */
+  suspend fun endHolds(isForced: Boolean = false): Boolean = retries.endHolds(isForced)
 
   private companion object {
     const val TAG = "TeamCraftPush"
@@ -201,4 +255,10 @@ class PushManager(
     fun utcOffsetMinutes(): Short =
       (TimeZone.getDefault().getOffset(System.currentTimeMillis()) / MS_PER_MINUTE).toShort()
   }
+}
+
+/** How a run of a wake-up opens it. */
+private enum class WakeUpRun {
+  FIRST,
+  RESUMED,
 }

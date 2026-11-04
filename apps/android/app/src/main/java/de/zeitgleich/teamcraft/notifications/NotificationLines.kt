@@ -32,8 +32,14 @@ data class NotificationLine(
   @SerialName("sender_name") val senderName: String = "",
   val text: String,
   @SerialName("sent_at_ms") val sentAtMs: Long,
-  /** Shown before its text could be read ("New message" under the sender): a retry fills it in. */
+  /** Shows "New message" for a message that has more: never mirrored to bridges (see the spec). */
   @SerialName("is_placeholder") val isPlaceholder: Boolean = false,
+  /** The sealed wake-up (Base64) of a placeholder, to read the message later, also after a restart. */
+  @SerialName("payload") val maybePayload: String? = null,
+  /** A placeholder that hasn't alerted yet: it does so when the text comes or the hold ends. */
+  @SerialName("is_alert_held") val isAlertHeld: Boolean = false,
+  /** When a placeholder's wake-up came, on `elapsedRealtime`: a wrong clock doesn't move it. */
+  @SerialName("arrived_at_ms") val maybeArrivedAtMs: Long? = null,
 ) {
   val isOwn: Boolean get() = maybeSenderKey == null
 }
@@ -73,6 +79,10 @@ object NotificationLines {
     return if (keepsShown) lines else merge(lines, line)
   }
 
+  /** A repeat of a wake-up whose line is gone (read, swiped away): it stays gone. */
+  fun isGone(lines: List<NotificationLine>, line: NotificationLine, isDuplicate: Boolean): Boolean =
+    isDuplicate && line.maybeMessageId != null && lines.none { it.maybeMessageId == line.maybeMessageId }
+
   /**
    * The lines after a retry read the message of a placeholder line; `null` when there is nothing
    * to update: the line is gone (read, swiped away), already filled in, or still not readable.
@@ -84,6 +94,15 @@ object NotificationLines {
     val shown = lines.firstOrNull { it.maybeMessageId == id } ?: return null
     if (!shown.isPlaceholder) return null
     return merge(lines, line)
+  }
+
+  /**
+   * The lines left after a placeholder turned out to be no message (a reaction, an edit): the
+   * line goes; a line with text stays. The user's own replies go once nothing else is left.
+   */
+  fun withoutPlaceholder(lines: List<NotificationLine>, id: String): List<NotificationLine> {
+    val left = lines.filterNot { it.maybeMessageId == id && it.isPlaceholder }
+    return if (left.any { !it.isOwn }) left else emptyList()
   }
 
   /**

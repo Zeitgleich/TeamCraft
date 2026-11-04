@@ -470,8 +470,11 @@ pub enum NotificationGap {
   NotDecrypted,
   /// Fetching took longer than the notification's time budget.
   TimedOut,
-  /// Not a text or a file.
+  /// Of a kind this version doesn't know (from a newer client): it may be a message.
   NotShowable,
+  /// A reaction, edit, delete or another change to the conversation: no message to announce. Added
+  /// with #1249; a client that ignores it shows "New message" as it did before.
+  Hidden,
   /// The workspace policy shows less.
   WorkspacePolicy,
   /// This device's setting shows less.
@@ -549,6 +552,9 @@ pub struct PushNotification {
   pub maybe_sent_at_ms: Option<i64>,
   /// The message was shown before: don't post or alert again (urgent repeats are never duplicates).
   pub is_duplicate: bool,
+  /// The read position this device knows has passed the message: read elsewhere before it got
+  /// looked at. Android takes the line away; a client that ignores it shows it as before.
+  pub is_read: bool,
   /// The device's own check of mutes and DND says: show nothing (iOS without the filtering
   /// entitlement: show it silently).
   pub maybe_suppression: Option<NotificationSuppression>,
@@ -763,6 +769,7 @@ impl From<PushPreview> for PushNotification {
       maybe_badge: wake_up.maybe_badge,
       maybe_sent_at_ms: wake_up.maybe_sent_at.map(|at| at.0),
       is_duplicate: false,
+      is_read: false,
       maybe_suppression: None,
       conversation_id: preview.wake_up.conversation_id.to_string(),
       maybe_message_id: preview.wake_up.maybe_message_id.map(|id| id.to_string()),
@@ -831,6 +838,7 @@ impl From<PreviewGap> for NotificationGap {
       PreviewGap::NotDecrypted => Self::NotDecrypted,
       PreviewGap::TimedOut => Self::TimedOut,
       PreviewGap::NotShowable => Self::NotShowable,
+      PreviewGap::Hidden => Self::Hidden,
       PreviewGap::WorkspacePolicy => Self::WorkspacePolicy,
       PreviewGap::DeviceSetting => Self::DeviceSetting,
     }

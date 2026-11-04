@@ -10,10 +10,14 @@ import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
+import android.os.SystemClock
 import android.text.SpannableString
 import android.text.Spanned
 import android.text.style.StyleSpan
 import android.util.Log
+import java.util.Base64
+import java.util.concurrent.atomic.AtomicLong
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.Person
@@ -29,9 +33,12 @@ import de.zeitgleich.teamcraft.ui.MainActivity
 import de.zeitgleich.teamcraft.ui.ShareShortcuts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.NotificationAttachmentKind
+import uniffi.teamcraft_ffi.NotificationGap
 import uniffi.teamcraft_ffi.PushNotification
 
 /**
@@ -40,14 +47,19 @@ import uniffi.teamcraft_ffi.PushNotification
  * or more conversations show, with "reply" and "mark as read" actions that work without opening the
  * app (Android Auto and Wear OS need them). A message is posted once, after its wake-up was opened;
  * every later change replaces the notification under the same ID without alerting again, so a watch
- * sees one notification per message (issue #739). What it shows is [MessageNotificationSpecs]; the
- * lines survive a process restart ([NotificationStore]).
+ * sees one notification per message (issue #739). A message not read yet is a placeholder on the
+ * phone only, and its alert waits a moment for the text (notifications.md, "Watches, bands and
+ * Android Auto"). What it shows is [MessageNotificationSpecs]; the lines survive a process restart
+ * ([NotificationStore]).
  */
 class MessageNotifier(
   private val context: Context,
   private val contentPrefs: NotificationContentPrefs,
   private val avatars: AvatarCache,
   private val store: NotificationStore = NotificationStore(context),
+  /** Whether the phone projects to a car now (Android Auto). */
+  private val isInCar: () -> Boolean = { false },
+  private val elapsedNow: () -> Long = SystemClock::elapsedRealtime,
 ) {
   private val manager = NotificationManagerCompat.from(context)
   private val lock = Any()
@@ -55,60 +67,243 @@ class MessageNotifier(
 
   /** The summary last posted, so an unchanged one is not posted (and mirrored) again. */
   private var maybeLastSummary: SummarySpec? = null
+
+  /** Rises with every post; from the clock, so a new process stays above the old one's. */
+  private val revisions = AtomicLong(System.currentTimeMillis())
+  private val confirms = HashMap<String, PostConfirm>()
+  private val confirmJobs = HashMap<String, Job>()
+
+  /** When the last quiet note went up, so a burst shows one. */
+  private var maybeLastQuietNoteAtMs: Long? = null
   private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
   init {
     NotificationChannels.create(context)
   }
 
-  /** Adds a pushed message to its conversation's notification (see [PushDecision.ShowMessage]). */
-  fun show(notification: PushNotification, isAlerting: Boolean) {
-    val line = line(notification)
-    val isMention = notification.isMention || notification.isUrgent
+  /**
+   * Adds a pushed message to its conversation's notification (see [PushDecision.ShowMessage]). A
+   * placeholder that should alert posts silently first: its alert waits for the text ([endHold] ends
+   * the wait); not an urgent one, which alerts at once. `payload` is kept with a placeholder to read
+   * it later. Returns whether a notification for it is up; a repeat of a wake-up whose line went
+   * (read, swiped away) doesn't bring it back.
+   */
+  fun show(notification: PushNotification, isAlerting: Boolean, payload: ByteArray? = null): Boolean {
+    val holdsAlert = isAlerting && PushRetry.isPlaceholder(notification) && !notification.isUrgent
+    val line = line(notification, payload).copy(isAlertHeld = holdsAlert)
     synchronized(lock) {
       val shown = shown()
       val previous = shown.conversations[notification.conversationId]
-      val entry = ConversationNotification(
-        conversationId = notification.conversationId,
-        maybeTitle = title(notification) ?: previous?.maybeTitle,
-        isVerified = notification.isConversationVerified,
-        isMention = isMention,
-        isDirect = notification.isDirect,
-        lines = NotificationLines.withWakeUp(previous?.lines.orEmpty(), line, notification.isDuplicate),
-      )
+      if (NotificationLines.isGone(previous?.lines.orEmpty(), line, notification.isDuplicate)) return false
+      val entry = entry(notification, previous, NotificationLines.withWakeUp(previous?.lines.orEmpty(), line, notification.isDuplicate))
       val badge = notification.maybeBadge?.toInt() ?: shown.maybeBadge
       update(shown.copy(conversations = shown.conversations + (entry.conversationId to entry), maybeBadge = badge))
-      post(entry, MessageNotificationSpecs.alerting(isAlerting, previous, entry))
+      val alerting = MessageNotificationSpecs.alerting(
+        isAlerting = isAlerting && !holdsAlert,
+        maybePrevious = previous,
+        entry = entry,
+        nowMs = elapsedNow(),
+        isInCar = isInCar(),
+        isSenderSilent = notification.isSilent,
+      )
+      post(entry, alerting)
+      postSummary()
+      return true
+    }
+  }
+
+  /**
+   * A wake-up that could not be opened before opened now ([showUnreadable] said "New message" or
+   * nothing): the real notification takes over. It alerts only if nothing did for it yet;
+   * otherwise it is new to bridges and silent on the phone.
+   */
+  fun showOpenedLate(notification: PushNotification, isAlerting: Boolean, payload: ByteArray) {
+    val line = line(notification, payload)
+    synchronized(lock) {
+      val shown = shown()
+      val previous = shown.conversations[notification.conversationId]
+      val entry = entry(notification, previous, NotificationLines.merge(previous?.lines.orEmpty(), line))
+      val badge = notification.maybeBadge?.toInt() ?: shown.maybeBadge
+      update(shown.copy(conversations = shown.conversations + (entry.conversationId to entry), maybeBadge = badge))
+      val alerting = when {
+        isAlerting -> NotificationAlerting.ALERT
+        line.isPlaceholder -> NotificationAlerting.SILENT
+        else -> NotificationAlerting.REFRESH
+      }
+      post(entry, alerting)
+      manager.cancel(UNREADABLE_TAG, OTHER_ID)
       postSummary()
     }
   }
 
   /**
-   * A retry read a message that was shown as a placeholder ([PushRetry]): fills in its line under
-   * the same ID, silently on the phone but mirrored again to watches and bands
-   * ([NotificationAlerting.REFRESH]). Does nothing when the notification is gone or already complete.
+   * A later look read a message that was shown as a placeholder ([PushRetry]): fills in its line
+   * under the same ID. It alerts if the placeholder had not (one alert, with the text, everywhere);
+   * otherwise silently on the phone but mirrored again to watches and bands
+   * ([NotificationAlerting.REFRESH]). Does nothing when the notification is gone or already
+   * complete. `isSuppressed`: muted or DND by now, so nothing but the text changes. Carries what only
+   * the text could tell: a keyword mention, a message the sender sent silently. Returns whether it
+   * filled anything in.
    */
-  fun fillIn(notification: PushNotification) {
-    val line = line(notification)
+  fun fillIn(notification: PushNotification, isSuppressed: Boolean = false): Boolean {
+    val line = line(notification, null)
     synchronized(lock) {
       val shown = shown()
-      val previous = shown.conversations[notification.conversationId] ?: return
-      val lines = NotificationLines.filledIn(previous.lines, line) ?: return
+      val previous = shown.conversations[notification.conversationId] ?: return false
+      val lines = NotificationLines.filledIn(previous.lines, line) ?: return false
       val entry = previous.copy(
         maybeTitle = title(notification) ?: previous.maybeTitle,
         isVerified = previous.isVerified || notification.isConversationVerified,
+        isMention = previous.isMention || notification.isMention || notification.isUrgent,
         lines = lines,
       )
       update(shown.copy(conversations = shown.conversations + (entry.conversationId to entry)))
-      post(entry, NotificationAlerting.REFRESH)
+      val alerting = MessageNotificationSpecs.alerting(
+        isAlerting = false,
+        maybePrevious = previous,
+        entry = entry,
+        nowMs = elapsedNow(),
+        isInCar = isInCar(),
+        isSenderSilent = notification.isSilent,
+        isSuppressed = isSuppressed,
+      )
+      post(entry, alerting)
       postSummary()
+      return true
     }
+  }
+
+  /**
+   * A wake-up that was no message (a reaction, an edit): takes away a placeholder that stood for
+   * it, and otherwise re-posts the conversation's notification silently. Returns whether a
+   * notification of this conversation was there to update.
+   */
+  fun applyHiddenChange(notification: PushNotification): Boolean {
+    synchronized(lock) {
+      val shown = shown()
+      val withBadge = notification.maybeBadge?.let { shown.copy(maybeBadge = it.toInt()) } ?: shown
+      val entry = withBadge.conversations[notification.conversationId]
+      if (entry == null) {
+        update(withBadge)
+        return false
+      }
+      val lines = notification.maybeMessageId?.let { NotificationLines.withoutPlaceholder(entry.lines, it) } ?: entry.lines
+      if (lines.isEmpty()) {
+        update(withBadge.copy(conversations = withBadge.conversations - entry.conversationId))
+        manager.cancel(entry.conversationId, MESSAGE_ID)
+      } else {
+        val updated = entry.copy(lines = lines)
+        update(withBadge.copy(conversations = withBadge.conversations + (entry.conversationId to updated)))
+        post(updated, NotificationAlerting.SILENT)
+      }
+      postSummary()
+      return true
+    }
+  }
+
+  /**
+   * The message was read before this wake-up got looked at: its line and the ones it read go, as
+   * with a `dismiss`. Returns whether a notification of this conversation was there.
+   */
+  fun applyRead(notification: PushNotification): Boolean {
+    val isThere = synchronized(lock) { notification.conversationId in shown().conversations }
+    if (isThere) {
+      removeRead(notification.conversationId, notification.maybeThreadId, notification.maybeMessageId, notification.maybeBadge)
+    }
+    return isThere
+  }
+
+  /** Ends the hold of the placeholder of this wake-up as `end` says. Returns whether one was held. */
+  fun endHold(payload: ByteArray, end: HoldEnd): Boolean {
+    val encoded = Base64.getEncoder().encodeToString(payload)
+    synchronized(lock) {
+      val shown = shown()
+      val entry = shown.conversations.values.firstOrNull { entry ->
+        entry.lines.any { it.maybePayload == encoded && it.isAlertHeld }
+      } ?: return false
+      val lines = entry.lines.map { if (it.maybePayload == encoded) it.copy(isAlertHeld = false) else it }
+      if (end == HoldEnd.DROP) {
+        val id = entry.lines.first { it.maybePayload == encoded }.maybeMessageId
+        val left = id?.let { NotificationLines.withoutPlaceholder(lines, it) } ?: lines
+        if (left.isEmpty()) {
+          update(shown.copy(conversations = shown.conversations - entry.conversationId))
+          manager.cancel(entry.conversationId, MESSAGE_ID)
+          postSummary()
+          return true
+        }
+        val updated = entry.copy(lines = left)
+        update(shown.copy(conversations = shown.conversations + (updated.conversationId to updated)))
+        post(updated, NotificationAlerting.SILENT)
+        return true
+      }
+      val updated = entry.copy(lines = lines)
+      update(shown.copy(conversations = shown.conversations + (updated.conversationId to updated)))
+      post(updated, if (end == HoldEnd.ALERT) NotificationAlerting.ALERT else NotificationAlerting.SILENT)
+      return true
+    }
+  }
+
+  /** The placeholders whose alert is held now. */
+  fun heldLines(): List<HeldLine> = synchronized(lock) {
+    shown().conversations.values.flatMap { it.lines }
+      .filter { it.isAlertHeld }
+      .mapNotNull { line ->
+        val payload = line.maybePayload ?: return@mapNotNull null
+        runCatching { Base64.getDecoder().decode(payload) }.getOrNull()?.let { HeldLine(it, line.maybeArrivedAtMs) }
+      }
+  }
+
+  /** Whether a placeholder of this wake-up shows now. */
+  fun hasPlaceholderFor(payload: ByteArray): Boolean {
+    val encoded = Base64.getEncoder().encodeToString(payload)
+    return synchronized(lock) {
+      shown().conversations.values.any { entry -> entry.lines.any { it.isPlaceholder && it.maybePayload == encoded } }
+    }
+  }
+
+  /** Whether this notification's message still shows as a placeholder. */
+  fun isPlaceholderShowing(notification: PushNotification): Boolean = synchronized(lock) {
+    shown().conversations[notification.conversationId]?.lines.orEmpty()
+      .any { it.maybeMessageId == notification.maybeMessageId && it.isPlaceholder }
+  }
+
+  /** The sealed wake-ups of the placeholders shown now, to look for their messages again. */
+  fun placeholderPayloads(): List<ByteArray> = synchronized(lock) {
+    shown().conversations.values.flatMap { it.lines }
+      .mapNotNull { line -> line.maybePayload?.takeIf { line.isPlaceholder } }
+      .mapNotNull { encoded -> runCatching { Base64.getDecoder().decode(encoded) }.getOrNull() }
+  }
+
+  /**
+   * A high-priority wake-up that turned out to have nothing to announce, and no notification to
+   * update: FCM lowers the priority of apps with a pattern of high-priority messages that show
+   * nothing, so a short quiet note shows and goes by itself. Never mirrored, no sound, and a burst
+   * shows one ([PushRetry.isQuietNoteDue]).
+   */
+  fun showQuietNote() {
+    if (!canPost()) return
+    val nowMs = elapsedNow()
+    synchronized(lock) {
+      if (!PushRetry.isQuietNoteDue(maybeLastQuietNoteAtMs, nowMs)) return
+      maybeLastQuietNoteAtMs = nowMs
+    }
+    val notification = NotificationCompat.Builder(context, NotificationChannels.OTHER)
+      .setSmallIcon(R.drawable.ic_notification)
+      .setContentTitle(context.getString(R.string.push_fetching))
+      .setCategory(NotificationCompat.CATEGORY_STATUS)
+      .setSilent(true)
+      .setLocalOnly(true)
+      .setTimeoutAfter(QUIET_NOTE_MS)
+      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+      .build()
+    postSafely(QUIET_NOTE_TAG, OTHER_ID, notification)
   }
 
   /**
    * A wake-up that could not be opened at all (no push key, a broken store): FCM lowers the
    * priority of apps whose high-priority messages show nothing, and a message must never go
-   * unnoticed, so this says "New message" without naming anything.
+   * unnoticed, so this says "New message" without naming anything. On the phone only, as every
+   * "New message" that may still get its text: a retry replaces it ([showOpenedLate]).
    */
   fun showUnreadable() {
     if (!canPost()) return
@@ -118,10 +313,16 @@ class MessageNotifier(
       .setContentText(context.getString(R.string.notification_new_message))
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
       .setAutoCancel(true)
+      .setLocalOnly(true)
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
       .setContentIntent(launchIntent())
       .build()
     postSafely(UNREADABLE_TAG, OTHER_ID, notification)
+  }
+
+  /** The generic notification of a wake-up that could not be opened goes. */
+  fun cancelUnreadable() {
+    manager.cancel(UNREADABLE_TAG, OTHER_ID)
   }
 
   /** Adds the user's own reply to the conversation's notification (Android Auto expects this). */
@@ -234,11 +435,25 @@ class MessageNotifier(
     }
   }
 
-  private fun line(notification: PushNotification): NotificationLine {
+  private fun entry(
+    notification: PushNotification,
+    maybePrevious: ConversationNotification?,
+    lines: List<NotificationLine>,
+  ) = ConversationNotification(
+    conversationId = notification.conversationId,
+    maybeTitle = title(notification) ?: maybePrevious?.maybeTitle,
+    isVerified = notification.isConversationVerified,
+    isMention = notification.isMention || notification.isUrgent,
+    isDirect = notification.isDirect,
+    lines = lines,
+  )
+
+  private fun line(notification: PushNotification, maybePayload: ByteArray?): NotificationLine {
     val text = text(notification)
     val sentAtMs = notification.maybeMessageId?.let(NotificationLines::sentAtMs)
       ?: notification.maybeSentAtMs
       ?: System.currentTimeMillis()
+    val isRetried = PushRetry.isPlaceholder(notification)
     return NotificationLine(
       maybeMessageId = notification.maybeMessageId,
       maybeThreadId = notification.maybeThreadId,
@@ -246,7 +461,10 @@ class MessageNotifier(
       senderName = text.senderName,
       text = text.text,
       sentAtMs = sentAtMs,
-      isPlaceholder = PushRetry.isPlaceholder(notification),
+      // A kind this version can't show stays "New message", so it is one for bridges too.
+      isPlaceholder = isRetried || notification.maybeGap == NotificationGap.NOT_SHOWABLE,
+      maybePayload = maybePayload?.takeIf { isRetried }?.let { Base64.getEncoder().encodeToString(it) },
+      maybeArrivedAtMs = elapsedNow().takeIf { isRetried },
     )
   }
 
@@ -286,16 +504,56 @@ class MessageNotifier(
   private fun post(entry: ConversationNotification, alerting: NotificationAlerting) {
     if (!canPost()) return
     val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), entry.isVerified)
-    val isAlerting = alerting == NotificationAlerting.ALERT
-    val spec = MessageNotificationSpecs.conversation(entry, privacy, isAlerting, labels())
-      ?.let { if (alerting == NotificationAlerting.REFRESH) it.copy(alerting = alerting) else it }
-      ?: return
-    postSafely(entry.conversationId, MESSAGE_ID, build(spec))
+    val spec = spec(entry, privacy, alerting) ?: return
+    val revision = revisions.incrementAndGet()
+    postSafely(entry.conversationId, MESSAGE_ID, build(spec, revision))
+    confirmLater(entry.conversationId, revision, alerting)
     spec.maybeShortcut?.let(::pushShortcut)
     if (privacy.showsNames) fetchAvatars(entry)
   }
 
-  private fun build(spec: MessageNotificationSpec): Notification {
+  private fun spec(entry: ConversationNotification, privacy: MessagePrivacy, alerting: NotificationAlerting) =
+    MessageNotificationSpecs.conversation(entry, privacy, alerting == NotificationAlerting.ALERT, labels())
+      ?.let { if (alerting == NotificationAlerting.REFRESH) it.copy(alerting = alerting) else it }
+
+  /**
+   * Android drops updates of an app that posts more than about 5 notifications a second, without
+   * saying so: in a burst (each message posts its conversation, the summary, maybe a picture) the
+   * shade could stay on "New message", or an alert go missing, while this class counts it as done.
+   * So once a conversation's posts have stopped for a moment, the system's copy is looked at, and
+   * what didn't get through is posted once more ([PostConfirm]). Never again after that: no loop.
+   * Caller holds [lock].
+   */
+  private fun confirmLater(conversationId: String, revision: Long, alerting: NotificationAlerting) {
+    confirms[conversationId] = (confirms[conversationId] ?: PostConfirm()).after(revision, alerting)
+    confirmJobs.remove(conversationId)?.cancel()
+    confirmJobs[conversationId] = scope.launch {
+      delay(POST_CONFIRM_MS)
+      synchronized(lock) { confirm(conversationId) }
+    }
+  }
+
+  private fun confirm(conversationId: String) {
+    confirmJobs.remove(conversationId)
+    val pending = confirms.remove(conversationId) ?: return
+    // Gone meanwhile, read or swiped away: nothing to bring back.
+    val entry = shown().conversations[conversationId] ?: return
+    val activeRevision = activeRevision(conversationId) ?: return
+    val alerting = pending.repostAs(activeRevision) ?: return
+    val privacy = MessagePrivacy.of(contentPrefs.content.value, isAppLockOn(), entry.isVerified)
+    val spec = spec(entry, privacy, alerting) ?: return
+    Log.i(TAG, "a notification update did not get through; posted again: $alerting")
+    postSafely(conversationId, MESSAGE_ID, build(spec, revisions.incrementAndGet()))
+  }
+
+  private fun activeRevision(conversationId: String): Long? {
+    val system = context.getSystemService(NotificationManager::class.java) ?: return null
+    val active = runCatching { system.activeNotifications }.getOrNull() ?: return null
+    return active.firstOrNull { it.id == MESSAGE_ID && it.tag == conversationId }
+      ?.notification?.extras?.getLong(EXTRA_REVISION, 0)
+  }
+
+  private fun build(spec: MessageNotificationSpec, revision: Long): Notification {
     val isAlerting = spec.alerting == NotificationAlerting.ALERT
     val builder = NotificationCompat.Builder(context, spec.channel)
       .setSmallIcon(R.drawable.ic_notification)
@@ -308,10 +566,12 @@ class MessageNotifier(
       .setAutoCancel(true)
       .setOnlyAlertOnce(spec.alerting == NotificationAlerting.SILENT)
       .setSilent(!isAlerting)
-      // Bridged to watches (Wear OS, vendor apps) once it has the text: never "New message".
+      // Bridged to watches (Wear OS, vendor apps) and Android Auto once it has the text: never
+      // "New message".
       .setLocalOnly(spec.isLocalOnly)
       .setGroup(GROUP_MESSAGES)
       .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
+      .addExtras(Bundle().apply { putLong(EXTRA_REVISION, revision) })
       .setContentIntent(openIntent(spec.conversationId))
       .setDeleteIntent(actionIntent(NotificationActionReceiver.ACTION_DISMISSED, spec.conversationId, isMutable = false))
       // The lock screen names the sender but not the text unless the user unlocks.
@@ -585,6 +845,10 @@ class MessageNotifier(
     private const val TEST_TAG = "test"
     private const val QUIET_CALL_TAG = "quiet_call"
     private const val UNREADABLE_TAG = "unreadable"
+    private const val QUIET_NOTE_TAG = "quiet_note"
+    private const val QUIET_NOTE_MS = 3_000L
+    private const val POST_CONFIRM_MS = 1_500L
+    private const val EXTRA_REVISION = "de.zeitgleich.teamcraft.REVISION"
     private const val GROUP_MESSAGES = "de.zeitgleich.teamcraft.MESSAGES"
     private const val SELF_KEY = "self"
     private const val URI_SCHEME = "teamcraft-conversation"
@@ -592,3 +856,6 @@ class MessageNotifier(
     private const val TAG = "TeamCraftNotify"
   }
 }
+
+/** A placeholder whose alert is held: its sealed wake-up, and when it came (`elapsedRealtime`). */
+class HeldLine(val payload: ByteArray, val maybeArrivedAtMs: Long?)

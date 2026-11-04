@@ -20,4 +20,10 @@
     android:description="@string/restriction_trust_user_certificates_description"
     android:restrictionType="bool"
     android:defaultValue="false" />
+  <restriction
+    android:key="max_push_retry_chains"
+    android:title="@string/restriction_max_push_retry_chains_title"
+    android:description="@string/restriction_max_push_retry_chains_description"
+    android:restrictionType="integer"
+    android:defaultValue="32" />
 </restrictions>
