@@ -72,3 +72,4 @@ pub use permission::{
 };
 pub use rendezvous::{RENDEZVOUS_PATH, RendezvousClientMessage, RendezvousServerMessage};
 pub use role::Role;
+fn   broken( ) {}
