@@ -74,4 +74,8 @@
     <item quantity="one">member</item>
     <item quantity="other">members</item>
   </plurals>
+  <string name="call_join_failed_title">Couldn\'t join the call</string>
+  <string name="call_join_failed">Joining the call didn\'t work. Call back from the conversation.</string>
+  <string name="call_join_failed_microphone">TeamCraft needs the microphone to join a call. Allow it, then call back from the conversation.</string>
+  <string name="call_join_failed_network">No connection to the server. Check the network, then call back from the conversation.</string>
 </resources>

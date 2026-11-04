@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.util.Log
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.activity.ComponentActivity
@@ -93,12 +94,15 @@ class CallActivity : ComponentActivity() {
         val maybeState by calls.callState.collectAsStateWithLifecycle()
         val maybeRing by calls.incomingRing.collectAsStateWithLifecycle()
         val isJoining by calls.isJoining.collectAsStateWithLifecycle()
-        val isIdle = maybeRing == null && !isJoining && (maybeState == null || maybeState?.phase == CallPhase.ENDED)
+        val maybeFailure by calls.joinFailure.collectAsStateWithLifecycle()
+        val isIdle = maybeRing == null && !isJoining && maybeFailure == null &&
+          (maybeState == null || maybeState?.phase == CallPhase.ENDED)
         LaunchedEffect(isIdle) {
-          // Declined, rang out, or the call ended.
+          // Declined, rang out, the call ended, or the user closed why joining failed.
           if (isIdle) finish()
         }
         val ring = maybeRing
+        val failure = maybeFailure
         if (ring != null && maybeState == null && !isJoining) {
           IncomingCallScreen(
             ring = ring,
@@ -108,11 +112,23 @@ class CallActivity : ComponentActivity() {
             },
             onDecline = { calls.decline() },
           )
+        } else if (failure != null && !isJoining) {
+          JoinFailedScreen(failure, onClose = { calls.dismissJoinFailure() })
         } else {
           CallScreen(calls, maybeState)
         }
       }
     }
+  }
+
+  override fun onStart() {
+    super.onStart()
+    calls.onCallScreenVisible(true)
+  }
+
+  override fun onStop() {
+    calls.onCallScreenVisible(false)
+    super.onStop()
   }
 
   override fun onNewIntent(intent: Intent) {
@@ -124,9 +140,13 @@ class CallActivity : ComponentActivity() {
   /** "Answer" on the incoming-call notification opens this screen with the conversation. */
   private fun handle(intent: Intent?) {
     if (intent?.action != ACTION_ANSWER) return
-    val conversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID) ?: return
     // Handled once: a recreated activity must not answer again.
     intent.action = null
+    val conversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID) ?: run {
+      Log.w(TAG, "call screen: answer without a conversation")
+      return
+    }
+    Log.i(TAG, "call screen: answer from the notification")
     requestMicrophoneIfMissing()
     calls.answer(conversationId)
   }
@@ -143,6 +163,23 @@ class CallActivity : ComponentActivity() {
     const val ACTION_SHOW_INCOMING = "de.zeitgleich.teamcraft.calls.SHOW_INCOMING"
     const val ACTION_ANSWER = "de.zeitgleich.teamcraft.calls.ANSWER"
     const val EXTRA_CONVERSATION_ID = "conversation_id"
+    private const val TAG = "TeamCraftCalls"
+  }
+}
+
+/** Why answering didn't get into the call, until the user closes it (#1272). */
+@Composable
+private fun JoinFailedScreen(failure: JoinFailure, onClose: () -> Unit) {
+  Surface(modifier = Modifier.fillMaxSize()) {
+    Column(
+      modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(32.dp),
+      verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+      horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+      Text(stringResource(R.string.call_join_failed_title), style = MaterialTheme.typography.headlineSmall)
+      Text(stringResource(failure.text), style = MaterialTheme.typography.bodyLarge)
+      Button(onClick = onClose) { Text(stringResource(R.string.close)) }
+    }
   }
 }
 
