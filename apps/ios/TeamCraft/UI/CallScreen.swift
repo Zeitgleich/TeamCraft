@@ -6,7 +6,8 @@ import SwiftUI
 /// round controls at the bottom and the self-view as a corner picture that can be thrown to
 /// another corner. A tap on the stage hides or shows the chrome. The system's call UI (lock
 /// screen, CarPlay) drives the same CallKit actions. DM and group DM calls can add people, which
-/// moves the call into a meeting room (docs/meetings.md, "A call becomes a meeting").
+/// moves the call into a meeting room (docs/meetings.md, "A call becomes a meeting"), and every
+/// call can get the notetaker for whoever the policy lets ask it in (e2ee.md §8.2, "In every call").
 struct CallScreen: View {
   @Environment(AppModel.self) private var model
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -15,6 +16,10 @@ struct CallScreen: View {
   /// The call is in a DM or group DM.
   @State private var canAddPeople = false
   @State private var isAddingPeople = false
+  /// The notetaker of the verified policy in this call; read again when somebody comes or goes.
+  @State private var maybeNotetaker: NotetakerCallInfo?
+  /// One per call screen: a retry of "Add notetaker" gets the same room.
+  @State private var notetakerKey = newRequestKey()
   @State private var areControlsShown = true
   @State private var isEncryptionShown = false
   @State private var maybeConnectedAt: Date?
@@ -59,11 +64,27 @@ struct CallScreen: View {
     } message: { failure in
       Text(failure.message)
     }
+    .alert(
+      "call_notetaker_add", isPresented: notetakerFailureBinding, presenting: model.calls.maybeNotetakerFailure
+    ) { _ in
+      Button("done", role: .cancel) {}
+    } message: { failure in
+      Text(failure.message)
+    }
     .sheet(isPresented: $isAddingPeople) { AddPeopleView(conversationId: call.conversationId) }
     .sheet(isPresented: $isEncryptionShown) { encryptionSheet }
     .task(id: call.conversationId) {
       let kind = await model.conversations().first { $0.id == call.conversationId }?.kind
       canAddPeople = kind == .direct || kind == .group
+    }
+    .onChange(of: call.conversationId) {
+      // Another call (the room a move led to): its own key.
+      notetakerKey = newRequestKey()
+    }
+    .task(id: NotetakerKey(conversationId: call.conversationId, participants: call.participantUserIds)) {
+      maybeNotetaker = await model.notetakerInCall(
+        conversationId: call.conversationId, participants: call.participantUserIds)
+      if maybeNotetaker?.isPresent == true { model.calls.notetakerArrived() }
     }
     .onChange(of: call.phase, initial: true) {
       // The clock starts with the first connection and runs through reconnects.
@@ -230,6 +251,7 @@ struct CallScreen: View {
       Spacer(minLength: 0)
       VStack(spacing: 12) {
         statusHint
+        notetakerBanner
         if let offer = model.calls.maybeMoveOffer { moveBanner(offer) }
       }
       .padding(.horizontal, 16)
@@ -337,10 +359,30 @@ struct CallScreen: View {
       }
       Spacer(minLength: 0)
       AudioRouteButton().frame(width: Self.controlSize, height: Self.controlSize)
-      if canAddPeople && call.phase == .connected && model.calls.maybeMoveOffer == nil && !model.calls.isMoving {
+      if isAddingPeopleOffered && isAddingNotetakerOffered {
+        // Both in one menu, so the bar keeps its room on small phones.
+        Spacer(minLength: 0)
+        Menu {
+          Button("call_add_people", systemImage: "person.badge.plus") { interact { isAddingPeople = true } }
+          Button("call_notetaker_add", systemImage: "note.text.badge.plus") { interact { addNotetaker() } }
+        } label: {
+          Image(systemName: "plus")
+            .font(.title2)
+            .foregroundStyle(.white)
+            .frame(width: Self.controlSize, height: Self.controlSize)
+            .background(Color.white.opacity(0.16), in: Circle())
+            .contentShape(Circle())
+        }
+        .accessibilityLabel(Text("more"))
+      } else if isAddingPeopleOffered {
         Spacer(minLength: 0)
         RoundControl(system: "person.badge.plus", isActive: false, label: "call_add_people") {
           interact { isAddingPeople = true }
+        }
+      } else if isAddingNotetakerOffered {
+        Spacer(minLength: 0)
+        RoundControl(system: "note.text.badge.plus", isActive: false, label: "call_notetaker_add") {
+          interact { addNotetaker() }
         }
       }
       Spacer(minLength: 0)
@@ -356,10 +398,58 @@ struct CallScreen: View {
     }
   }
 
+  /// "Add people": a DM or group DM call that isn't moving.
+  private var isAddingPeopleOffered: Bool {
+    canAddPeople && call.phase == .connected && model.calls.maybeMoveOffer == nil && !model.calls.isMoving
+  }
+
+  /// "Add notetaker": the policy lets the user ask it in, it isn't in the call or on its way, and
+  /// the call isn't moving.
+  private var isAddingNotetakerOffered: Bool {
+    maybeNotetaker?.canInvite == true && call.phase == .connected && model.calls.maybeMoveOffer == nil
+      && !model.calls.isMoving && !model.calls.isAddingNotetaker && !model.calls.isNotetakerAsked
+  }
+
+  private func addNotetaker() {
+    guard let notetaker = maybeNotetaker else { return }
+    let conversationId = call.conversationId
+    Task { await model.calls.addNotetaker(conversationId: conversationId, notetaker: notetaker, requestKey: notetakerKey) }
+  }
+
+  /// The notetaker's notice (e2ee.md §8.2, "Everybody sees it"): while it is in the call, where the
+  /// audio goes and, for whoever may, "Remove notetaker"; while it was asked in, that it is coming.
+  @ViewBuilder
+  private var notetakerBanner: some View {
+    if let notetaker = maybeNotetaker, notetaker.isPresent {
+      VStack(spacing: 12) {
+        Label {
+          Text("call_notetaker_banner \(notetaker.transcriptionModel)")
+        } icon: {
+          Image(systemName: "note.text")
+        }
+        if notetaker.canStop {
+          Button("call_notetaker_remove") { model.calls.sendNotetakerAway(conversationId: call.conversationId) }
+            .buttonStyle(.bordered)
+        }
+      }
+      .notetakerNotice()
+    } else if model.calls.isNotetakerAsked || model.calls.isAddingNotetaker {
+      Label {
+        Text("call_notetaker_joining")
+      } icon: {
+        Image(systemName: "note.text")
+      }
+      .notetakerNotice()
+    }
+  }
+
   /// Somebody moved the call into a meeting room: who, whom they added, and the way over.
   private func moveBanner(_ offer: CallMoveOffer) -> some View {
     VStack(spacing: 12) {
-      if offer.addedNames.isEmpty {
+      if offer.isNotetakerOnly {
+        // Where the audio will go, before the tap that takes the user there.
+        Text("call_moved_by \(offer.byName) notetaker")
+      } else if offer.addedNames.isEmpty {
         Text("call_moved_by \(offer.byName)")
       } else {
         Text("call_moved_by \(offer.byName) added \(ListFormatter.localizedString(byJoining: offer.addedNames))")
@@ -424,6 +514,11 @@ struct CallScreen: View {
     Binding(get: { model.calls.maybeMoveFailure != nil }, set: { if !$0 { model.calls.dismissMoveFailure() } })
   }
 
+  private var notetakerFailureBinding: Binding<Bool> {
+    Binding(
+      get: { model.calls.maybeNotetakerFailure != nil }, set: { if !$0 { model.calls.dismissNotetakerFailure() } })
+  }
+
   private var cameraDeniedBinding: Binding<Bool> {
     Binding(get: { model.calls.isCameraDenied }, set: { if !$0 { model.calls.dismissCameraDenied() } })
   }
@@ -443,6 +538,24 @@ private struct StagePerson: Identifiable {
   let isSpeaking: Bool
   let isRejoining: Bool
   let isMuted: Bool
+}
+
+/// Reads the notetaker again for another call or other people in it.
+private struct NotetakerKey: Hashable {
+  let conversationId: String
+  let participants: [String]
+}
+
+extension View {
+  /// The look of the notetaker's notice on the call stage.
+  fileprivate func notetakerNotice() -> some View {
+    self
+      .foregroundStyle(.white)
+      .multilineTextAlignment(.center)
+      .padding()
+      .frame(maxWidth: .infinity)
+      .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+  }
 }
 
 private struct AutoHideKey: Hashable {

@@ -1105,13 +1105,36 @@ final class AppModel {
     try await core().joinCall(conversationId: conversationId, isMuted: isMuted)
   }
 
-  /// "Add people" in a DM or group DM call: the meeting room the call moves into
-  /// (docs/meetings.md, "A call becomes a meeting"). The same `requestKey` gets the same room.
-  func addPeopleToCall(conversationId: String, inCall: [String], added: [String], requestKey: String)
-    async throws -> String
-  {
+  /// "Add people" in a DM or group DM call, or "Add notetaker" where the notetaker is no member:
+  /// the meeting room the call moves into (docs/meetings.md, "A call becomes a meeting"). The same
+  /// `requestKey` gets the same room.
+  func addPeopleToCall(
+    conversationId: String, inCall: [String], added: [String], maybeTitle: String? = nil, requestKey: String
+  ) async throws -> String {
     try await core().addPeopleToCall(
-      conversationId: conversationId, inCall: inCall, added: added, maybeTitle: nil, requestKey: requestKey)
+      conversationId: conversationId, inCall: inCall, added: added, maybeTitle: maybeTitle, requestKey: requestKey)
+  }
+
+  /// The notetaker in the call of `conversationId` with `participants` (the others), as the
+  /// verified policy names it (e2ee.md §8.2); `nil` without one or when it can't be read.
+  func notetakerInCall(conversationId: String, participants: [String]) async -> NotetakerCallInfo? {
+    try? await core().notetakerInCall(conversationId: conversationId, participantUserIds: participants)
+  }
+
+  /// Asks the notetaker into the call of `conversationId`, where it is a member.
+  func askNotetakerIn(conversationId: String) async throws {
+    try await core().askNotetakerIn(conversationId: conversationId)
+  }
+
+  /// "Remove notetaker" in the call of `conversationId`.
+  func sendNotetakerAway(conversationId: String) async throws {
+    try await core().sendNotetakerAway(conversationId: conversationId)
+  }
+
+  /// The user's own ID once the account is ready.
+  var maybeUserId: String? {
+    if case .ready(let account) = phase { return account.userId }
+    return nil
   }
 
   /// Who moved the call and whom they added, once the DM's encrypted announcement is in (`nil`

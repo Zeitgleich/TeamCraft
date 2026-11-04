@@ -36,14 +36,18 @@ struct ActiveCall: Identifiable, Equatable {
   var isOnHold = false
 }
 
-/// A move of the call into a meeting room that somebody else announced in the DM's encryption group
-/// (docs/meetings.md, "A call becomes a meeting"); the call screen offers to follow it.
+/// A move of the call into a meeting room that somebody else announced in the conversation's
+/// encryption group (docs/meetings.md, "A call becomes a meeting"); the call screen offers to
+/// follow it.
 struct CallMoveOffer: Equatable {
   let fromConversationId: String
   let toConversationId: String
   let byName: String
   /// The added people this device knows by name.
   let addedNames: [String]
+  /// It added nobody but the notetaker ("Add notetaker", e2ee.md §8.2): the banner says where the
+  /// audio goes.
+  var isNotetakerOnly = false
 }
 
 /// A move of the call from a DM into a meeting room, as the server or this device announced it.
@@ -76,6 +80,8 @@ final class CallManager: NSObject, @unchecked Sendable {
   /// How long a switch into a meeting room waits for the core to report the DM call's end before
   /// joining anyway (one call at a time keeps audio and its end sounds apart).
   private static let leaveTimeout: Duration = .seconds(5)
+  /// How long "being added" shows after asking, if the notetaker doesn't come.
+  private static let notetakerAskedNotice: Duration = .seconds(90)
 
   /// Main-thread state; the in-call screen observes it.
   private(set) var activeCall: ActiveCall?
@@ -95,6 +101,12 @@ final class CallManager: NSObject, @unchecked Sendable {
   private(set) var isMoving = false
   /// Why following a move failed (the call stays where it is).
   private(set) var maybeMoveFailure: AppFailure?
+  /// "Add notetaker" runs (asking it in, or moving the call into a room with it).
+  private(set) var isAddingNotetaker = false
+  /// The notetaker was asked in: the screen says it is coming until it is there, for a while.
+  private(set) var isNotetakerAsked = false
+  /// Why "Add notetaker" failed (the call goes on unchanged).
+  private(set) var maybeNotetakerFailure: AppFailure?
   /// Local picture and sender of the camera.
   @ObservationIgnored let camera = CameraStreamer()
 
@@ -210,6 +222,55 @@ final class CallManager: NSObject, @unchecked Sendable {
     noteAnnouncedMove(CallMove(from: conversationId, to: room))
   }
 
+  /// "Add notetaker" in the call of `conversationId` (e2ee.md §8.2, "In every call"): where the
+  /// notetaker is a member, it is asked in; anywhere else the call moves into a meeting room with
+  /// everybody in it and the notetaker, which the core asks in there (it isn't rung), and this
+  /// device follows. A retry with the same `requestKey` gets the same room.
+  @MainActor
+  func addNotetaker(conversationId: String, notetaker: NotetakerCallInfo, requestKey: String) async {
+    guard activeCall?.conversationId == conversationId, notetaker.canInvite, !isAddingNotetaker else { return }
+    isAddingNotetaker = true
+    maybeNotetakerFailure = nil
+    defer { isAddingNotetaker = false }
+    do {
+      if notetaker.isMember {
+        try await AppModel.shared.askNotetakerIn(conversationId: conversationId)
+      } else {
+        guard let me = AppModel.shared.maybeUserId else { return }
+        // The people in the call and the user; the core keeps only members of the group.
+        let inCall = Array(Set((activeCall?.participantUserIds ?? []) + [me])).sorted()
+        let room = try await AppModel.shared.addPeopleToCall(
+          conversationId: conversationId, inCall: inCall, added: [notetaker.botUserId],
+          maybeTitle: String(localized: "call_notetaker_room_title"), requestKey: requestKey)
+        noteAnnouncedMove(CallMove(from: conversationId, to: room))
+      }
+    } catch {
+      maybeNotetakerFailure = AppFailure(CoreFailure(error))
+      return
+    }
+    isNotetakerAsked = true
+    Task { @MainActor in
+      try? await Task.sleep(for: Self.notetakerAskedNotice)
+      isNotetakerAsked = false
+    }
+  }
+
+  /// The notetaker is in the call: "being added" has done its job.
+  @MainActor
+  func notetakerArrived() {
+    isNotetakerAsked = false
+  }
+
+  /// "Remove notetaker" in the call of `conversationId`.
+  @MainActor
+  func sendNotetakerAway(conversationId: String) {
+    Task { try? await AppModel.shared.sendNotetakerAway(conversationId: conversationId) }
+  }
+
+  func dismissNotetakerFailure() {
+    maybeNotetakerFailure = nil
+  }
+
   /// The user tapped "Join the meeting room" on the offered move.
   @MainActor
   func joinMovedCall() {
@@ -251,11 +312,13 @@ final class CallManager: NSObject, @unchecked Sendable {
       return
     }
     let names = await AppModel.shared.displayNames()
+    let maybeBot = await AppModel.shared.notetakerInCall(conversationId: move.from, participants: [])?.botUserId
     guard maybeAnnouncedMove == move else { return }
     maybeMoveOffer = CallMoveOffer(
       fromConversationId: move.from, toConversationId: move.to,
       byName: names[info.byUserId] ?? String(localized: "call_move_someone"),
-      addedNames: info.addedUserIds.map { names[$0] ?? String(localized: "call_move_someone") })
+      addedNames: info.addedUserIds.map { names[$0] ?? String(localized: "call_move_someone") },
+      isNotetakerOnly: maybeBot.map { info.addedUserIds == [$0] } ?? false)
   }
 
   /// Checks the move in the core, then switches the call over. A refused move is dropped (the
@@ -488,6 +551,8 @@ final class CallManager: NSObject, @unchecked Sendable {
       self.maybeAnnouncedMove = nil
       self.maybeMoveOffer = nil
       self.maybeMoveFailure = nil
+      self.isNotetakerAsked = false
+      self.maybeNotetakerFailure = nil
       self.activeCall = nil
     }
   }
