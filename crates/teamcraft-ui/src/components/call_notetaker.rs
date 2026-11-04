@@ -2,9 +2,10 @@
 //! it is in the call, which says where the audio goes and lets those who may send it away, and the
 //! state behind the call screen's button and badge. "Add notetaker" also works where the notetaker
 //! is no member of the conversation yet: it adds it first, as adding people does, and asks it in
-//! once its membership commit is through, so the request is sent to a group it is in. A DM or group
-//! DM takes nobody more: there the call moves into a meeting room with everybody in it and the
-//! notetaker, which is asked in there (e2ee.md §8.2, "In every call").
+//! once its membership commit is through, so the request is sent to a group it is in. Where the
+//! user can't add it (a DM or group DM, which takes nobody more, a channel whose members the user
+//! doesn't manage, a meeting the user doesn't organize), the call moves into a meeting room with
+//! everybody in it and the notetaker, which is asked in there (e2ee.md §8.2, "In every call").
 
 use std::time::Duration;
 
@@ -36,9 +37,9 @@ enum AddRoute {
   /// A meeting the user organizes: the bot becomes one of its invitees, which puts it into the
   /// meeting chat's group (e2ee.md §4.6, "Meeting chats").
   Meeting(MeetingId),
-  /// A DM or group DM, which takes nobody more: the call moves into a new meeting room with
+  /// A conversation the user can't add the bot to: the call moves into a new meeting room with
   /// everybody in it and the bot (docs/meetings.md, "A call becomes a meeting"), where the core
-  /// asks it in. The DM keeps its members and history; the bot never sees them.
+  /// asks it in. The conversation keeps its members and history; the bot never sees them.
   MoveToRoom,
 }
 
@@ -49,10 +50,9 @@ enum ConversationRights {
   OrganizesMeeting(MeetingId),
   /// A channel of a space where the user manages members.
   ManagesChannel { joins_space: bool },
-  /// A DM or group DM.
-  DirectLike,
-  /// Somebody else's meeting, a channel without member management, or a guest's view.
-  Other,
+  /// A DM or group DM (which takes nobody more), a channel whose members the user doesn't manage,
+  /// or a meeting somebody else organizes: the user can't add anybody there.
+  CannotAdd,
 }
 
 /// "Add notetaker" of one call: asks the notetaker in, adding it to the conversation first where
@@ -178,8 +178,8 @@ impl NotetakerInvite {
     }
   }
 
-  /// A DM or group DM call moves into a new meeting room with everybody in it and `bot`, as "Add
-  /// people" does; the core asks the bot in there once the move went through, and this device
+  /// The call moves into a new meeting room with everybody in it and `bot`, as "Add people" does
+  /// in a DM call; the core asks the bot in there once the move went through, and this device
   /// follows at once (the others with a tap). The notice goes on in the room's call screen.
   fn move_to_room(&self, bot: UserId) {
     let Self {
@@ -210,8 +210,8 @@ impl NotetakerInvite {
   }
 }
 
-/// Everybody in the call, the user included, sorted: who the room a DM call moves into is for (the
-/// core keeps only members of the DM's group).
+/// Everybody in the call, the user included, sorted: who the room the call moves into is for (the
+/// core keeps only members of the conversation's group).
 fn people_in_call(others: &[UserId], me: UserId) -> Vec<UserId> {
   let mut people: Vec<UserId> = others.iter().copied().chain([me]).collect();
   people.sort_unstable();
@@ -232,7 +232,6 @@ fn use_add_route(
       ConversationRights::OrganizesMeeting(meeting)
     } else {
       match state.read(|backend| backend.conversation(conversation)) {
-        Some(found) if found.kind.is_direct_like() => ConversationRights::DirectLike,
         Some(found) if found.has_channel_settings() && access.can_add_members() => {
           let joins_space = state
             .read(|backend| backend.spaces())
@@ -241,7 +240,7 @@ fn use_add_route(
             .is_some_and(|space| space.can_add_members || space.can_invite_guests);
           ConversationRights::ManagesChannel { joins_space }
         },
-        _ => ConversationRights::Other,
+        _ => ConversationRights::CannotAdd,
       }
     };
     // A call move needs the server's real calls; the demo has none.
@@ -251,16 +250,15 @@ fn use_add_route(
 }
 
 /// Where the user can bring the notetaker in: a meeting the user organizes (as an invitee), a
-/// channel of a space where the user manages members (as from its integrations), a DM or group DM
-/// (its call moves into a meeting room, `can_move`: the app can move calls). Elsewhere it is
-/// offered only where it is a member already: only the organizer changes a meeting's invitees, and
-/// only who manages a channel's members adds one (e2ee.md §8.2, "In every call").
+/// channel of a space where the user manages members (as from its integrations). Anywhere else
+/// (a DM or group DM, a channel whose members somebody else manages, a meeting somebody else
+/// organizes) its call moves into a meeting room with the notetaker, `can_move`: the app can move
+/// calls; the call stays where it is for those who don't follow (e2ee.md §8.2, "In every call").
 fn add_route(rights: ConversationRights, can_move: bool) -> Option<AddRoute> {
   match rights {
     ConversationRights::OrganizesMeeting(meeting) => Some(AddRoute::Meeting(meeting)),
     ConversationRights::ManagesChannel { joins_space } => Some(AddRoute::Channel { joins_space }),
-    ConversationRights::DirectLike => can_move.then_some(AddRoute::MoveToRoom),
-    ConversationRights::Other => None,
+    ConversationRights::CannotAdd => can_move.then_some(AddRoute::MoveToRoom),
   }
 }
 
@@ -390,17 +388,18 @@ mod tests {
   use crate::model::id_from_raw;
   use crate::notetaker::notetaker_in_call;
 
-  /// #1271: a DM and a group DM call bring the notetaker in by moving into a room, a meeting the
-  /// user organizes and a channel the user manages by adding it; elsewhere only a member is asked.
+  /// #1271, #1274: a meeting the user organizes and a channel the user manages bring the
+  /// notetaker in by adding it; every other call (a DM or group DM, a channel somebody else
+  /// manages, a meeting somebody else organizes) by moving into a room with it.
   #[test]
   fn the_route_follows_what_the_user_can_do_in_the_conversation() {
     let meeting: MeetingId = id_from_raw(7);
     assert_eq!(
-      add_route(ConversationRights::DirectLike, true),
+      add_route(ConversationRights::CannotAdd, true),
       Some(AddRoute::MoveToRoom)
     );
     assert_eq!(
-      add_route(ConversationRights::DirectLike, false),
+      add_route(ConversationRights::CannotAdd, false),
       None,
       "the demo moves no calls"
     );
@@ -412,7 +411,6 @@ mod tests {
       add_route(ConversationRights::ManagesChannel { joins_space: true }, true),
       Some(AddRoute::Channel { joins_space: true })
     );
-    assert_eq!(add_route(ConversationRights::Other, true), None);
   }
 
   /// "Add notetaker" in a 1:1 or group DM call, also one that runs already: offered to whoever
@@ -421,7 +419,7 @@ mod tests {
   fn in_a_dm_call_the_policy_alone_decides() {
     let (me, bob, bot): (UserId, UserId, UserId) = (id_from_raw(1), id_from_raw(2), id_from_raw(9));
     let dm_members = [me, bob];
-    let can_bring_in = add_route(ConversationRights::DirectLike, true).is_some();
+    let can_bring_in = add_route(ConversationRights::CannotAdd, true).is_some();
     let members = policy(bot, NotetakerInviters::Members);
     let offered = notetaker_in_call(&members, true, false, &dm_members, &[bob], can_bring_in).unwrap();
     assert!(offered.can_invite && !offered.is_member);
@@ -433,6 +431,67 @@ mod tests {
     assert!(admin.can_invite);
     let guest = notetaker_in_call(&members, false, false, &dm_members, &[bob], can_bring_in).unwrap();
     assert!(!guest.can_invite, "guests ask nobody in");
+  }
+
+  /// #1274: in the call of a channel whose members the user doesn't manage, or of a meeting the
+  /// user doesn't organize, "Add notetaker" is offered to whoever the policy lets ask it in (the
+  /// call moves into a room), also mid-call, and refused to anybody else.
+  #[test]
+  fn in_a_channel_or_meeting_the_user_cannot_add_to_the_policy_alone_decides() {
+    let (me, bob, carol, bot): (UserId, UserId, UserId, UserId) =
+      (id_from_raw(1), id_from_raw(2), id_from_raw(3), id_from_raw(9));
+    // The channel's or meeting chat's members, without the notetaker; Bob and Carol in the call.
+    let conversation_members = [me, bob, carol];
+    let route = add_route(ConversationRights::CannotAdd, true);
+    assert_eq!(route, Some(AddRoute::MoveToRoom));
+    let can_bring_in = route.is_some();
+    let in_call = [bob, carol];
+
+    let members = policy(bot, NotetakerInviters::Members);
+    let offered = notetaker_in_call(
+      &members,
+      true,
+      false,
+      &conversation_members,
+      &in_call,
+      can_bring_in,
+    )
+    .unwrap();
+    assert!(offered.can_invite && !offered.is_member);
+    let admins = policy(bot, NotetakerInviters::Admins);
+    let refused = notetaker_in_call(
+      &admins,
+      true,
+      false,
+      &conversation_members,
+      &in_call,
+      can_bring_in,
+    )
+    .unwrap();
+    assert!(!refused.can_invite, "not an admin");
+    let guest = notetaker_in_call(
+      &members,
+      false,
+      false,
+      &conversation_members,
+      &in_call,
+      can_bring_in,
+    )
+    .unwrap();
+    assert!(!guest.can_invite, "guests ask nobody in");
+    let present = notetaker_in_call(
+      &members,
+      true,
+      false,
+      &conversation_members,
+      &[bob, bot],
+      can_bring_in,
+    )
+    .unwrap();
+    assert!(
+      !present.can_invite && present.is_present,
+      "it is in the call already"
+    );
   }
 
   #[test]

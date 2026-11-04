@@ -1,4 +1,5 @@
-//! A DM call that grows moves into a meeting (`--features integration`, needs `DATABASE_URL`).
+//! A DM call that grows moves into a meeting, and so does any call that gets the notetaker where
+//! the user can't add it (`--features integration`, needs `DATABASE_URL`).
 #![cfg(feature = "integration")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -264,25 +265,104 @@ async fn only_people_in_the_call_move_it_and_only_into_their_own_meeting() {
     outsider.body
   );
 
-  // A channel call doesn't move: it can take more people itself.
-  let channel = channel_with(app, &[]).await;
-  let alice_id = user_id(app, alice).await;
-  let alice_device = register_device(app, alice).await;
-  let channel_call = join_token(app, alice, &channel, &alice_device).await;
-  report(app, "joined", &channel_call, &alice_id, &alice_device).await;
-  let from_channel = app
+  scene.app.stop().await;
+}
+
+/// "Add notetaker" in the channel call of a member who doesn't manage the channel (e2ee.md §8.2,
+/// "In every call"): the call moves into a room of theirs, and the channel's members hear of it.
+#[tokio::test]
+async fn a_channel_call_moves_for_a_member_who_does_not_manage_the_channel() {
+  let Some(scene) = dm_call().await else { return };
+  let Scene {
+    app,
+    bob,
+    ids: [alice_id, bob_id, _],
+    devices: [alice_device, bob_device, _],
+    ..
+  } = &scene;
+  let channel = channel_with(app, &[bob]).await;
+  let call = join_token(app, bob, &channel, bob_device).await;
+  report(app, "joined", &call, bob_id, bob_device).await;
+  let mut alice_socket = ws::connect(app, &scene.alice, alice_device).await;
+  ws::events(&mut alice_socket, QUIET).await;
+  let room = app
+    .post(bob, "/meetings/instant", json!({"invitees": [alice_id]}))
+    .await
+    .body["conversation_id"]
+    .as_str()
+    .unwrap()
+    .to_owned();
+
+  let moved = app
+    .post(
+      bob,
+      &format!("/conversations/{channel}/call/move"),
+      json!({"to_conversation_id": room}),
+    )
+    .await;
+
+  assert_eq!(moved.status, StatusCode::NO_CONTENT, "{}", moved.body);
+  let events = call_events(&ws::events(&mut alice_socket, QUIET).await);
+  let moves: Vec<_> = events.iter().filter(|e| e["type"] == "call_move").collect();
+  assert_eq!(moves.len(), 1, "{events:?}");
+  assert_eq!(moves[0]["conversation_id"], channel.as_str());
+  assert_eq!(moves[0]["to_conversation_id"], room.as_str());
+  scene.app.stop().await;
+}
+
+/// "Add notetaker" in the call of a meeting the user is invited to but doesn't organize: the call
+/// moves into a room of the invitee's. Never into the conversation it is in.
+#[tokio::test]
+async fn a_meeting_call_moves_for_an_invitee_and_never_into_itself() {
+  let Some(scene) = dm_call().await else { return };
+  let Scene {
+    app,
+    alice,
+    bob,
+    ids: [alice_id, bob_id, _],
+    devices: [alice_device, bob_device, _],
+    ..
+  } = &scene;
+  let meeting = app
+    .post(alice, "/meetings/instant", json!({"invitees": [bob_id]}))
+    .await
+    .body["conversation_id"]
+    .as_str()
+    .unwrap()
+    .to_owned();
+  let call = join_token(app, bob, &meeting, bob_device).await;
+  report(app, "joined", &call, bob_id, bob_device).await;
+  report(app, "joined", &call, alice_id, alice_device).await;
+
+  let into_itself = app
     .post(
       alice,
-      &format!("/conversations/{channel}/call/move"),
-      json!({"to_conversation_id": alices_room}),
+      &format!("/conversations/{meeting}/call/move"),
+      json!({"to_conversation_id": meeting}),
     )
     .await;
   assert_eq!(
-    from_channel.status,
+    into_itself.status,
     StatusCode::BAD_REQUEST,
     "{}",
-    from_channel.body
+    into_itself.body
   );
+
+  let bobs_room = app
+    .post(bob, "/meetings/instant", json!({"invitees": [alice_id]}))
+    .await
+    .body["conversation_id"]
+    .as_str()
+    .unwrap()
+    .to_owned();
+  let moved = app
+    .post(
+      bob,
+      &format!("/conversations/{meeting}/call/move"),
+      json!({"to_conversation_id": bobs_room}),
+    )
+    .await;
+  assert_eq!(moved.status, StatusCode::NO_CONTENT, "{}", moved.body);
   scene.app.stop().await;
 }
 

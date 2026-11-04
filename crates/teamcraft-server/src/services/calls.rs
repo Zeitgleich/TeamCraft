@@ -1358,10 +1358,13 @@ async fn ring_meeting_invitees(
   }
 }
 
-/// Somebody in a DM or group DM call added people: the call moves into the meeting chat the caller
-/// just started for it (docs/meetings.md, "A call becomes a meeting"). Everybody in the call is told
-/// to switch over, the added people ring in the meeting. The DM itself doesn't change. A repeat
-/// tells them again and rings anew, which is what a retry after a lost answer needs.
+/// Somebody in a call added people: the call moves into the meeting chat the caller just started
+/// for it (docs/meetings.md, "A call becomes a meeting"). Everybody in the call is told to switch
+/// over, the added people ring in the meeting. The conversation itself doesn't change. A repeat
+/// tells them again and rings anew, which is what a retry after a lost answer needs. Any kind of
+/// conversation: "Add people" moves DM and group DM calls, "Add notetaker" also channel calls of
+/// users who don't manage the channel's members and calls of meetings they don't organize (e2ee.md
+/// §8.2, "In every call"). Moving changes nobody's membership; each device follows on its own.
 pub async fn move_call(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -1373,12 +1376,9 @@ pub async fn move_call(
   if !access.is_member() {
     return Err(ApiError::Forbidden("only members can move the call".into()));
   }
-  if !matches!(
-    access.view.conversation.kind,
-    ConversationKind::Dm | ConversationKind::Group
-  ) {
+  if request.to_conversation_id == conversation_id {
     return Err(ApiError::InvalidRequest(
-      "only DM and group DM calls move into a meeting".into(),
+      "a call moves into another conversation".into(),
     ));
   }
   let Some(call_id) = calls.running_call(conversation_id) else {

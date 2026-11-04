@@ -929,6 +929,102 @@
         }
       }
     },
+    "call_notetaker_add": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add notetaker"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notetaker hinzufügen"
+          }
+        }
+      }
+    },
+    "call_notetaker_remove": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove notetaker"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notetaker entfernen"
+          }
+        }
+      }
+    },
+    "call_notetaker_room_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Call with notetaker"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anruf mit Notetaker"
+          }
+        }
+      }
+    },
+    "call_notetaker_joining": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The notetaker is being added. While it is in the call, the audio is sent to OpenRouter for the transcript."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Notetaker wird hinzugefügt. Solange er im Anruf ist, wird der Ton für das Transkript an OpenRouter gesendet."
+          }
+        }
+      }
+    },
+    "call_notetaker_banner %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The notetaker is making a transcript of this call. For this, what is said is sent to OpenRouter (%@), so it is not end-to-end encrypted. The summary and the transcript will be posted in the chat afterwards."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Notetaker erstellt ein Transkript dieses Anrufs. Dazu wird das Gesprochene an OpenRouter (%@) gesendet und ist damit nicht Ende-zu-Ende-verschlüsselt. Zusammenfassung und Transkript erscheinen danach im Chat."
+          }
+        }
+      }
+    },
+    "call_moved_by %@ notetaker": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ added the notetaker. The call goes on in a meeting room, where what is said is sent to OpenRouter for a transcript. Your audio reaches it only once you join there."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat den Notetaker hinzugefügt. Der Anruf geht in einem Besprechungsraum weiter, wo das Gesprochene für ein Transkript an OpenRouter gesendet wird. Dein Ton erreicht ihn erst, wenn du dort beitrittst."
+          }
+        }
+      }
+    },
     "call_encryption_pending": {
       "localizations": {
         "en": {
