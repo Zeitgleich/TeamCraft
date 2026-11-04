@@ -31,6 +31,15 @@ pub fn core_retry_after(error: &CoreError) -> Option<Duration> {
   }
 }
 
+/// What the server asked a failed transfer to wait: the `Retry-After` header, else the error body's
+/// `retry_after_secs`.
+pub fn server_wait(error: &CoreError) -> Option<Duration> {
+  match error {
+    CoreError::Api(api) => api.retry_after().or_else(|| retry_after(api)),
+    _ => None,
+  }
+}
+
 /// Milliseconds for the core's `i64` clock.
 pub fn millis(duration: Duration) -> i64 {
   i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)

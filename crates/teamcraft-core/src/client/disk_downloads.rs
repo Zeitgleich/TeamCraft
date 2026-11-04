@@ -239,9 +239,12 @@ pub(super) fn record_finish(
     Err(error) => {
       let reason = failure_of(error);
       if is_retried(reason) {
-        record
-          .retry
-          .record_failure_after(now_ms, settings, RetryCause::of(error), retry_after(error));
+        record.retry.record_failure_after(
+          now_ms,
+          settings,
+          RetryCause::of(error),
+          crate::retry::server_wait(error),
+        );
       }
       // The card says why either way (#742) and offers its retry; a waiting one also comes back
       // by itself.
@@ -282,15 +285,6 @@ fn is_retried(reason: TransferFailure) -> bool {
     reason,
     TransferFailure::Network | TransferFailure::StorageUnavailable
   )
-}
-
-fn retry_after(error: &CoreError) -> Option<std::time::Duration> {
-  match error {
-    CoreError::Api(crate::api::ApiError::Status {
-      maybe_retry_after, ..
-    }) => *maybe_retry_after,
-    _ => None,
-  }
 }
 
 fn save(store: &impl LocalStore, record: &DownloadRecord) -> Result<(), CoreError> {
@@ -744,7 +738,10 @@ mod tests {
   }
 
   fn settings() -> UploadRetrySettings {
-    UploadRetrySettings::default()
+    UploadRetrySettings {
+      jitter: crate::retry::JitterMode::None,
+      ..UploadRetrySettings::default()
+    }
   }
 
   fn network_error() -> Result<String, CoreError> {

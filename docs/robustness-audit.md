@@ -146,13 +146,17 @@ relays that cut or stall the real dependencies in the nightly e2e suite, same na
 | Server: no storage sweep during an outage; clock skew test               | Server         |
 | E2E: fault injection for storage, identity provider and Postgres         | Server (tests) |
 | Server: database breaker around requests, request deadline               | Server         |
+| Uploads and downloads on the shared retry policy; client e2e outages     | Clients, tests |
 
 Client retry loops on the shared policy: gateway reconnect, offline queue (both honour
-`Retry-After`), removals, rejoin requests; on the server the startup waits and the push retry queue.
-Not moved: file uploads (`core/client/files.rs`, reworked by #748 at the same time) and call
-reconnects (`teamcraft-media` `call_resilience.rs`, #688); update checks only spread a schedule.
-Open from #743: cached avatars and pictures across restarts during an outage, queued downloads, and
-the web core's own loop after a clock jump (`ui/web_core.rs`, #747 at the same time). On the server,
+`Retry-After`), removals, rejoin requests, and since the last change file uploads and downloads
+(`UploadRetry`: capped exponential backoff with equal jitter, `Retry-After` from the header or the
+error body as the lower bound); on the server the startup waits and the push retry queue. Not moved:
+call reconnects (`teamcraft-media` `call_resilience.rs`, #688); update checks only spread a schedule.
+Open from #743: queued downloads of pictures that were never cached (a preview shows "unavailable" with
+a Retry button instead of trying again on its own), the nightly scenarios for the other dependencies
+(identity provider as seen from a client, SFU restart, captive portal, clock skew), and the web core's
+own loop after a clock jump (`ui/web_core.rs`, #747 at the same time). On the server,
 still not behind a breaker or retried by design: queries (only the handler knows whether repeating is
 safe; clients retry after `Retry-After`), the identity provider's admin API (a periodic background
 sync that tries again at its next interval) and CalDAV. The identity provider's `Retry-After` is a
