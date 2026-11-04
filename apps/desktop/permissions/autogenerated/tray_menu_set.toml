@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tray-menu-set"
+description = "Enables the tray_menu_set command without any pre-configured scope."
+commands.allow = ["tray_menu_set"]
+
+[[permission]]
+identifier = "deny-tray-menu-set"
+description = "Denies the tray_menu_set command without any pre-configured scope."
+commands.deny = ["tray_menu_set"]

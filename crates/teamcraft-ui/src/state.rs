@@ -13,7 +13,8 @@ use crate::backend::Backend;
 use crate::calls::CallState;
 use crate::lightbox::MediaKey;
 use crate::model::{
-  Conversation, ConversationId, MessageId, SpaceId, ThreadId, TimestampMs, User, UserId, id_from_raw,
+  Conversation, ConversationId, MessageId, PresenceStatus, SpaceId, ThreadId, TimestampMs, User, UserId,
+  id_from_raw,
 };
 use crate::navigation::{Step, divider_index, next_unread};
 use crate::prefs::SidebarSort;
@@ -948,6 +949,17 @@ impl AppState {
         });
       },
     );
+  }
+
+  /// Sets the presence, with the time a do-not-disturb ends (also kept in the notification
+  /// settings, which the notifier follows). The status menu and the tray menu share this.
+  pub fn set_presence_until(&self, presence: PresenceStatus, maybe_until: Option<TimestampMs>) {
+    self.write(|backend| backend.set_presence_until(presence, maybe_until));
+    let maybe_dnd_until = maybe_until.filter(|_| presence == PresenceStatus::DoNotDisturb);
+    self
+      .settings
+      .prefs
+      .update(|prefs| prefs.notifications.maybe_dnd_until = maybe_dnd_until);
   }
 
   /// Answers a ringing call on this device: opens its conversation and joins. The in-app card and
