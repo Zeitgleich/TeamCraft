@@ -1779,13 +1779,6 @@ impl ChatBackend for RemoteChat {
     }
   }
 
-  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
-    matches!(
-      self.ask(ChatQuery::CanSignChannelRoles { conversation }),
-      Some(ChatAnswer::CanSignChannelRoles { can_sign: true })
-    )
-  }
-
   fn channel_roles_review(
     &self,
     conversation: ConversationId,
@@ -1793,6 +1786,13 @@ impl ChatBackend for RemoteChat {
     match self.ask(ChatQuery::ChannelRolesReview { conversation }) {
       Some(ChatAnswer::ChannelRolesReview { maybe_review }) => maybe_review,
       _ => None,
+    }
+  }
+
+  fn channel_role_alarms(&self) -> Vec<ConversationId> {
+    match self.ask(ChatQuery::ChannelRoleAlarms) {
+      Some(ChatAnswer::ChannelRoleAlarms { conversations }) => conversations,
+      _ => Vec::new(),
     }
   }
 
@@ -1807,17 +1807,6 @@ impl ChatBackend for RemoteChat {
       roles,
       at_cursor,
     });
-  }
-
-  fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {
-    matches!(
-      self.ask(ChatQuery::AreChannelRolesUnverified { conversation }),
-      Some(ChatAnswer::AreChannelRolesUnverified { is_unverified: true })
-    )
-  }
-
-  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
-    self.act(ChatAction::ConfirmChannelRole { conversation, user });
   }
 
   fn refresh_channel_roles(&self, conversation: ConversationId) {

@@ -69,9 +69,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// approval, the fresh verified roster lists the person as an admin, and the conversation is a
   /// private, unarchived channel this device knows and is in the group of, and this user's own
   /// channel role is a signed admin (a role only the server lists isn't: members would refuse the
-  /// add). A request the server
-  /// makes up for a DM, a meeting chat or an unknown conversation adds nobody. Somebody already in
-  /// the group (another owner was first) is neither added nor announced again.
+  /// add). A channel from before signed roles is founded on the way (e2ee.md §4.6.1, "Founding at
+  /// first sight"); where it can't be, on a log this device took nothing from, the admin the server
+  /// lists still approves, as nothing signed says otherwise and every member may add there. A request the server makes up for a DM, a meeting chat or an unknown
+  /// conversation adds nobody. Somebody already in the group (another owner was first) is neither
+  /// added nor announced again.
   pub async fn approve_admin_join_sharing(
     &mut self,
     conversation: ConversationId,
@@ -102,6 +104,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // from an owner only the server lists: read the log first, then judge by what is signed.
     self.sync_channel_roles(conversation).await?;
     if self.verified_channel_role(conversation, self.user_id())? != ChannelRole::Admin {
+      self.found_at_first_sight(conversation).await?;
+    }
+    let is_nobody_signed = self.channel_role_state(conversation)?.may_act_as_unsigned();
+    let is_listed_admin = self.server_channel_role(conversation, self.user_id())? == Some(ChannelRole::Admin);
+    if self.verified_channel_role(conversation, self.user_id())? != ChannelRole::Admin
+      && !(is_nobody_signed && is_listed_admin)
+    {
       return Err(CoreError::JoinRequestNotApprovable(
         JoinRequestRefusal::OwnerRoleNotSigned,
       ));

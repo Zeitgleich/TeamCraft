@@ -28,6 +28,29 @@ pub struct Peer {
 }
 
 impl Peer {
+  /// This device holds `users`' real keys as attested by the identity provider, as with attestation
+  /// configured: it can sign a role for them without being in a group with them.
+  pub fn has_attested_keys_of(
+    &self,
+    server: &teamcraft_core::api::fake::FakeServer,
+    users: &[teamcraft_proto::UserId],
+  ) {
+    for user in users {
+      let response = server.identity_key_of(*user).unwrap();
+      let public_key = <[u8; 32]>::try_from(response.public_key.as_slice()).unwrap();
+      teamcraft_core::records::pin_identity(
+        &self.store,
+        *user,
+        &teamcraft_core::records::PinnedIdentity {
+          public_key,
+          maybe_changed_to: None,
+          is_attested: true,
+        },
+      )
+      .unwrap();
+    }
+  }
+
   pub async fn enroll(server: &FakeServer, name: &str) -> Self {
     Self::enroll_as(server.add_user(name), name).await
   }

@@ -89,6 +89,8 @@ pub struct TeamCraft {
   /// Network changes the app reports; the sync loop (and later calls) listen.
   network: NetworkChanges,
   connection: ConnectionStatus,
+  /// The ID token the app handed over last.
+  id_tokens: engine::IdTokens,
   /// What the app last reported about its use; input repeats at most every 30 s (issue #472).
   activity: Mutex<ActivityReports>,
 }
@@ -126,6 +128,20 @@ impl TeamCraft {
   ) -> Result<Arc<Self>, TeamCraftError> {
     logging::install();
     outcome(LifecycleStep::Open, Self::open(config, tokens, listener))
+  }
+
+  /// The session's newest ID token, for the role evidence of workspace owners and admins (e2ee.md
+  /// §3.1.3). Call it after sign-in and whenever a refresh brought a new one; `None` when there is
+  /// none. Cheap and never waits. An app that never calls it signs no roles from this device.
+  pub fn note_id_token(&self, id_token: Option<String>) {
+    self.id_tokens.note(id_token);
+  }
+
+  /// Whether the core asked for a newer ID token since the last call: an attribute it should name
+  /// was just written at the identity provider. The app then refreshes its tokens when it next can
+  /// and hands the new one to [`Self::note_id_token`].
+  pub fn take_id_token_request(&self) -> bool {
+    self.id_tokens.take_request()
   }
 
   /// The network changed (Android `NetworkCallback`, iOS `NWPathMonitor`) or the app came back
@@ -1153,10 +1169,12 @@ impl TeamCraft {
   ) -> Result<Arc<Self>, TeamCraftError> {
     let network = NetworkChanges::new();
     let connection = ConnectionStatus::new();
+    let id_tokens = engine::IdTokens::default();
     let signals = engine::SyncSignals {
       network: network.clone(),
       connection: connection.clone(),
       catch_up_focus: Default::default(),
+      id_tokens: id_tokens.clone(),
     };
     let start = engine::EngineStart::new(config, tokens, listener, signals)?;
     let recovery = Arc::new(Mutex::new(None));
@@ -1173,6 +1191,7 @@ impl TeamCraft {
       recovery,
       network,
       connection,
+      id_tokens,
       activity: Mutex::default(),
     }))
   }

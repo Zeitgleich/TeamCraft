@@ -12,7 +12,10 @@ use teamcraft_proto::{
 
 use super::Client;
 use crate::api::ServerApi;
-use crate::channel_roles::{ChannelRoleState, ChannelRolesHead, RoleVerifier, SignerAuthority};
+use crate::channel_roles::{
+  ChannelRoleState, ChannelRolesHead, CheckedRoleKey, RoleKeyEvidence, RoleKeyStanding, RoleVerifier,
+  SignerAuthority,
+};
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
@@ -33,6 +36,17 @@ const ROLE_LOG_READ_RETRY_MAX_MS: i64 = 6 * 60 * 60 * 1000;
 const MAX_ROLE_LOG_PAGES: usize = 100;
 /// Claimed founders whose identity keys are pinned before a channel's first entries are verified.
 const MAX_FOUNDER_CANDIDATES: usize = 16;
+/// The channels without a log this device waits with founding, in [`Table::Workspace`].
+const CHANNEL_ROLES_FIRST_SIGHT_KEY: &str = "channel_roles_first_sight";
+/// The channels where a member's device and this one disagree, in [`Table::Workspace`].
+const CHANNEL_ROLES_ALARMED_KEY: &str = "channel_roles_alarmed";
+/// What a workspace admin's device can check of a channel's listed keys, in [`Table::Workspace`].
+const ROLE_KEY_STANDINGS_KEY_PREFIX: &str = "channel_role_keys/";
+/// How many channels are founded in one upkeep pass, so an update is no burst.
+const FOUNDINGS_PER_PASS: usize = 4;
+/// How long the conversations aren't looked through again once none is left to found. Founding
+/// asks nothing of a device that isn't a channel's admin; this only bounds the local read.
+const FIRST_SIGHT_SWEEP_MS: i64 = 60 * 60 * 1000;
 
 /// What a signature is to say.
 enum RolePlan<'a> {
@@ -46,6 +60,21 @@ enum RolePlan<'a> {
     roles: &'a [(UserId, ChannelRole)],
     at_cursor: u64,
   },
+  /// A person acting on `changes`, in the app: a channel still without a log is founded on the way.
+  Action { changes: &'a [(UserId, ChannelRole)] },
+  /// Nobody acting: found the channel if it has no log and the server lists this user its admin.
+  FirstSight,
+}
+
+/// How far the channels without a log are, for the upkeep.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct FirstSightSweep {
+  /// When the conversations are looked through again.
+  #[serde(default)]
+  not_before_ms: i64,
+  /// Channels where founding failed or was refused, each with when it is tried again.
+  #[serde(default)]
+  waiting: BTreeMap<ConversationId, DueRoleRead>,
 }
 
 /// A channel's log read due after a removal, with how it went so far.
@@ -63,8 +92,8 @@ pub enum RoleSigning {
   /// Signed and stored: every member verifies it.
   Signed,
   /// Not signed: this user can't sign it in a way members would accept (a role that is the
-  /// server's word only, a space admin, a custom scheme). The server's change stands, and members
-  /// see the role as not signed.
+  /// server's word only, a space admin, a custom scheme). The server's change stands; where a signed
+  /// role is needed, the person is told when they act.
   Unsigned,
   /// Not signed: the log moved on since the workspace admin looked at this list, so another admin's
   /// change may be missing from it. They look again; it is never signed for them.
@@ -184,6 +213,110 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.sign_role_plan(conversation, &plan).await
   }
 
+  /// Whether this user signs roles here as a workspace admin or a signed channel admin, so that a role
+  /// change not signed is something they should hear about: this device can't vouch for the snapshot
+  /// or the key. Anybody else's change was the server's word all along.
+  pub fn could_sign_channel_roles(&self, conversation: ConversationId) -> Result<bool, CoreError> {
+    let state = self.channel_role_state(conversation)?;
+    let workspace = self.workspace()?;
+    Ok(
+      state
+        .signing_authorities(
+          self.account.user_id,
+          &workspace,
+          self.now_ms(),
+          self.roster_max_age_ms(),
+        )
+        .iter()
+        .any(|authority| *authority != SignerAuthority::Founder),
+    )
+  }
+
+  /// Signs a role somebody just changed in the app. A channel still without a log is founded on
+  /// the way, from the roles the server lists now ([`Self::first_sight_roles`]).
+  pub(crate) async fn sign_action_roles(
+    &mut self,
+    conversation: ConversationId,
+    changes: &[(UserId, ChannelRole)],
+  ) -> Result<RoleSigning, CoreError> {
+    Box::pin(self.sign_role_plan(conversation, &RolePlan::Action { changes })).await
+  }
+
+  /// Founds the channel if its log is empty and the server lists this user its admin (e2ee.md
+  /// §4.6.1, "Founding at first sight"). `Unsigned` whenever nothing was founded here, also because
+  /// somebody else got there first.
+  pub(crate) async fn found_at_first_sight(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<RoleSigning, CoreError> {
+    Box::pin(self.sign_role_plan(conversation, &RolePlan::FirstSight)).await
+  }
+
+  /// Founds the logs of channels from before signed roles that the server lists this user the admin
+  /// of, a few per upkeep pass. Local reads only while there is nothing to do, at most once in
+  /// [`FIRST_SIGHT_SWEEP_MS`]; a channel that fails or is refused waits, later and later.
+  pub async fn found_listed_channels(&mut self) -> Result<(), CoreError> {
+    let mut sweep: FirstSightSweep =
+      records::get_json(&self.store, Table::Workspace, CHANNEL_ROLES_FIRST_SIGHT_KEY)?.unwrap_or_default();
+    let now = self.now_ms();
+    if sweep.not_before_ms > now {
+      return Ok(());
+    }
+    let due = self.channels_to_found(&sweep, now)?;
+    let is_all_of_them = due.len() <= FOUNDINGS_PER_PASS;
+    for conversation in due.into_iter().take(FOUNDINGS_PER_PASS) {
+      let outcome = self.found_at_first_sight(conversation).await;
+      if let Err(error) = &outcome {
+        tracing::debug!(conversation_id = %conversation, %error, "channel not founded yet");
+      }
+      // Whoever founded it, there is a log now; anything else is tried again later.
+      if self.channel_role_state(conversation)?.is_signed() {
+        sweep.waiting.remove(&conversation);
+      } else {
+        let wait = sweep.waiting.entry(conversation).or_default();
+        wait.failures = wait.failures.saturating_add(1);
+        wait.not_before_ms = now.saturating_add(role_read_retry_ms(wait.failures));
+      }
+    }
+    if is_all_of_them {
+      sweep.not_before_ms = now.saturating_add(FIRST_SIGHT_SWEEP_MS);
+    }
+    records::put_json(
+      &self.store,
+      Table::Workspace,
+      CHANNEL_ROLES_FIRST_SIGHT_KEY,
+      &sweep,
+    )
+  }
+
+  /// The open channels the server lists this user the admin of, that this device has no log of, is
+  /// in the encryption group of, and isn't waiting with.
+  fn channels_to_found(
+    &mut self,
+    sweep: &FirstSightSweep,
+    now: i64,
+  ) -> Result<Vec<ConversationId>, CoreError> {
+    let mut due = Vec::new();
+    for conversation in self.cached_conversations()?.into_values() {
+      let is_listed_admin = conversation
+        .maybe_my_membership
+        .as_ref()
+        .is_some_and(|membership| membership.role == ChannelRole::Admin);
+      if conversation.kind != ConversationKind::Channel || conversation.is_archived || !is_listed_admin {
+        continue;
+      }
+      let id = conversation.id;
+      let is_waiting = sweep
+        .waiting
+        .get(&id)
+        .is_some_and(|wait| wait.not_before_ms > now);
+      if !is_waiting && self.channel_role_state(id)?.is_unfounded() && self.has_group(id)? {
+        due.push(id);
+      }
+    }
+    Ok(due)
+  }
+
   async fn sign_role_plan(
     &mut self,
     conversation: ConversationId,
@@ -192,12 +325,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     for attempt in 0..2 {
       self.sync_channel_roles(conversation).await?;
       let maybe_request = match *plan {
-        RolePlan::Changes { changes, may_found } => self.role_entry(conversation, changes, may_found).await?,
+        RolePlan::Changes { changes, may_found } => {
+          self.role_entry(conversation, changes, may_found, false).await?
+        },
         RolePlan::Reviewed { roles, at_cursor } => {
           if self.channel_role_state(conversation)?.cursor != at_cursor {
             return Ok(RoleSigning::ReviewOutdated);
           }
           self.reviewed_role_entry(conversation, roles).await?
+        },
+        RolePlan::Action { changes } => self.action_role_entry(conversation, changes).await?,
+        RolePlan::FirstSight => {
+          if self.channel_role_state(conversation)?.is_unfounded() {
+            self.action_role_entry(conversation, &[]).await?
+          } else {
+            None
+          }
         },
       };
       let Some(request) = maybe_request else {
@@ -228,6 +371,78 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     })
   }
 
+  /// The signed entry for what somebody just did. On a channel without a log it founds the log, with
+  /// the roles the server lists now and `changes`, or nothing if this device can't check that list;
+  /// otherwise it is an ordinary entry, founding only for an admin the server lists.
+  async fn action_role_entry(
+    &mut self,
+    conversation: ConversationId,
+    changes: &[(UserId, ChannelRole)],
+  ) -> Result<Option<AppendChannelRoleLogRequest>, CoreError> {
+    let me = self.account.user_id;
+    let state = self.channel_role_state(conversation)?;
+    if !state.is_unfounded() {
+      // There is a log this device took nothing from, or it was told of one: signing here would found
+      // a second one, and a workspace admin's signature would say more than anybody saw. Only a list
+      // a workspace admin looked at ends this (`role_entry` refuses too).
+      if !state.is_signed() {
+        return Ok(None);
+      }
+      return self.role_entry(conversation, changes, false, false).await;
+    }
+    let Some(mut roles) = self.first_sight_roles(conversation).await? else {
+      tracing::info!(conversation_id = %conversation, "not in this channel's group: left to an admin who is");
+      return Ok(None);
+    };
+    let is_listed_admin = self.server_channel_role(conversation, me)? == Some(ChannelRole::Admin);
+    // Nothing to do on anybody's behalf unless the server lists this user the channel's admin.
+    if changes.is_empty() && !is_listed_admin {
+      return Ok(None);
+    }
+    roles.retain(|(user, _)| !changes.iter().any(|(changed, _)| changed == user));
+    roles.extend_from_slice(changes);
+    self.role_entry(conversation, &roles, is_listed_admin, true).await
+  }
+
+  /// Who the server lists above member, of the people in this device's encryption group of the
+  /// channel, which the server can't add anybody to by itself; `None` without a group. Members only:
+  /// a guest stays a member whatever is signed, a deactivated account signs nothing.
+  async fn first_sight_roles(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Option<Vec<(UserId, ChannelRole)>>, CoreError> {
+    if !self.has_group(conversation)? {
+      return Ok(None);
+    }
+    self.refresh_members(conversation).await?;
+    let in_group: BTreeSet<UserId> = self.group_users(conversation)?.into_iter().collect();
+    let stored: Option<teamcraft_proto::ListConversationMembersResponse> =
+      records::get_json(&self.store, Table::Members, &conversation.to_string())?;
+    let listed: Vec<(UserId, ChannelRole)> = stored
+      .into_iter()
+      .flat_map(|list| list.members)
+      .filter(|member| {
+        matches!(member.role, ChannelRole::Admin | ChannelRole::Moderator)
+          && member.user.kind == teamcraft_proto::UserKind::Member
+          && !member.user.is_deactivated
+          && !member.user.is_deleted
+          && in_group.contains(&member.user.id)
+      })
+      .map(|member| (member.user.id, member.role))
+      .take(teamcraft_proto::MAX_CHANNEL_ROLE_ASSIGNMENTS)
+      .collect();
+    // Somebody whose key this device can't check is left out, not everybody with them.
+    let state = self.channel_role_state(conversation)?;
+    let users: Vec<UserId> = listed.iter().map(|(user, _)| *user).collect();
+    let keys = self.checked_role_keys(conversation, &state, &users, true).await?;
+    Ok(Some(
+      listed
+        .into_iter()
+        .filter(|(user, _)| keys.contains_key(user))
+        .collect(),
+    ))
+  }
+
   /// Signs the first entry of a channel this device just created: its creator as admin.
   pub(crate) async fn found_channel_roles(&mut self, conversation: ConversationId) {
     let me = self.account.user_id;
@@ -239,7 +454,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Ok(RoleSigning::Unsigned | RoleSigning::ReviewOutdated) => {
         tracing::info!(conversation_id = %conversation, "the new channel's roles stay unsigned for now");
       },
-      // The channel works without; its first admin who changes a role founds the log.
+      // The channel works without; its admin's upkeep founds the log (`found_listed_channels`).
       Err(error) => {
         tracing::warn!(conversation_id = %conversation, %error, "could not sign the new channel's roles");
       },
@@ -351,6 +566,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     changes: &[(UserId, ChannelRole)],
     may_found: bool,
+    is_first_sight: bool,
   ) -> Result<Option<AppendChannelRoleLogRequest>, CoreError> {
     let maybe_response: Option<teamcraft_proto::ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
@@ -359,6 +575,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let me = self.account.user_id;
     let state = self.channel_role_state(conversation)?;
+    if !state.is_signed() && state.cursor > 0 {
+      tracing::info!(conversation_id = %conversation, "this channel has a log this device took nothing from: not signing on it");
+      return Ok(None);
+    }
     let workspace = self.workspace()?;
     let authorities = state.signing_authorities(me, &workspace, self.now_ms(), self.roster_max_age_ms());
     // Every member takes this user's signature as a workspace admin's, whatever authority it is
@@ -368,17 +588,50 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::info!(conversation_id = %conversation, "not vouching for roles nobody reviewed");
       return Ok(None);
     }
+    // ... and it would anchor the snapshot. On one that isn't yet, nothing says the keys in it are
+    // right: a first pin from the server can make a forged founding look fine to this device.
+    let is_vouching = authorities.iter().any(is_workspace_authority);
+    if is_vouching
+      && !state.is_workspace_anchored
+      && !self.can_check_kept_keys(conversation, &state, changes).await?
+    {
+      tracing::info!(conversation_id = %conversation, "not vouching for keys this device can't check");
+      return Ok(None);
+    }
     let mut maybe_refusal = None;
     for authority in authorities {
       if authority == SignerAuthority::Founder && !may_found {
+        continue;
+      }
+      // Nothing is signed yet as far as this device knows: a workspace admin's ordinary entry would
+      // anchor it, so it comes only with a founding this device can stand behind.
+      if is_workspace_authority(&authority) && !state.is_signed() && !may_found && !is_first_sight {
         continue;
       }
       let mut changes = changes.to_vec();
       if authority == SignerAuthority::Founder && !changes.iter().any(|(user, _)| *user == me) {
         changes.push((me, ChannelRole::Admin));
       }
-      let keys = self.identity_keys(changes.iter().map(|(user, _)| *user)).await?;
-      let document = state.next_document(conversation, &changes, &keys, self.now_ms())?;
+      let given_a_role: Vec<UserId> = changes
+        .iter()
+        .filter(|(_, role)| *role != ChannelRole::Member)
+        .map(|(user, _)| *user)
+        .collect();
+      // A workspace admin's signature vouches for the key too: the snapshot's only if it is anchored.
+      let may_go_by_snapshot = !is_vouching || state.is_workspace_anchored;
+      let checked = self
+        .checked_role_keys(conversation, &state, &given_a_role, may_go_by_snapshot)
+        .await?;
+      if given_a_role.iter().any(|user| !checked.contains_key(user)) {
+        tracing::info!(conversation_id = %conversation, "not signing a role for somebody whose key this device can't check");
+        return Ok(None);
+      }
+      let keys = checked
+        .into_iter()
+        .map(|(user, found)| (user, found.key))
+        .collect();
+      let mut document = state.next_document(conversation, &changes, &keys, self.now_ms())?;
+      document.has_server_listed_roles |= is_first_sight;
       match state.check_document(&document, conversation, me, authority) {
         Ok(()) => return Ok(Some(self.signed_role_entry(&document)?)),
         Err(error) => maybe_refusal = Some(error),
@@ -407,7 +660,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(authority) = maybe_authority else {
       return Ok(None);
     };
-    let keys = self.identity_keys(roles.iter().map(|(user, _)| *user)).await?;
+    // A reviewed list vouches for every key in it, so an unanchored snapshot's are no reason.
+    let given_a_role: Vec<UserId> = roles
+      .iter()
+      .filter(|(_, role)| *role != ChannelRole::Member)
+      .map(|(user, _)| *user)
+      .collect();
+    let checked = self
+      .checked_role_keys(conversation, &state, &given_a_role, state.is_workspace_anchored)
+      .await?;
+    if given_a_role.iter().any(|user| !checked.contains_key(user)) {
+      tracing::info!(conversation_id = %conversation, "not confirming a role for somebody whose key this device can't check");
+      return Ok(None);
+    }
+    let keys: BTreeMap<UserId, [u8; 32]> = checked
+      .into_iter()
+      .map(|(user, found)| (user, found.key))
+      .collect();
     let document = state.reviewed_document(conversation, roles, &keys, self.now_ms())?;
     state.check_document(&document, conversation, me, authority)?;
     Ok(Some(self.signed_role_entry(&document)?))
@@ -433,19 +702,136 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     })
   }
 
-  /// Identity keys as this device pins them (pinning first where needed).
-  async fn identity_keys(
-    &self,
-    users: impl IntoIterator<Item = UserId>,
-  ) -> Result<BTreeMap<UserId, [u8; 32]>, CoreError> {
-    let users: Vec<UserId> = users.into_iter().collect();
-    self.pin_identities(users.iter().copied()).await?;
+  /// Whether this device can check the key of everybody the next entry keeps from the snapshot, and
+  /// that it is the one the snapshot names: the entry repeats it, so it vouches for it.
+  async fn can_check_kept_keys(
+    &mut self,
+    conversation: ConversationId,
+    state: &ChannelRoleState,
+    changes: &[(UserId, ChannelRole)],
+  ) -> Result<bool, CoreError> {
+    let kept: Vec<UserId> = state
+      .assignments
+      .iter()
+      .map(|assignment| assignment.user_id)
+      .filter(|user| !changes.iter().any(|(changed, _)| changed == user))
+      .collect();
+    let checked = self.checked_role_keys(conversation, state, &kept, false).await?;
+    Ok(kept.iter().all(|user| {
+      checked
+        .get(user)
+        .is_some_and(|found| state.snapshot_key_of(*user) == Some(found.key))
+    }))
+  }
+
+  /// The keys this device stands behind for `users`, without those it can't (e2ee.md §4.6.1, "Whose
+  /// key a role names"). `may_go_by_snapshot`: whether what the accepted snapshot names counts.
+  async fn checked_role_keys(
+    &mut self,
+    conversation: ConversationId,
+    state: &ChannelRoleState,
+    users: &[UserId],
+    may_go_by_snapshot: bool,
+  ) -> Result<BTreeMap<UserId, CheckedRoleKey>, CoreError> {
+    Ok(
+      self
+        .role_key_evidence(conversation, state, users, may_go_by_snapshot)
+        .await?
+        .into_iter()
+        .filter_map(|(user, evidence)| Some((user, evidence.checked()?)))
+        .collect(),
+    )
+  }
+
+  /// What this device knows of each of `users`' keys. A first pin is whatever the server says, so
+  /// nobody is pinned for this unless an attestation can then check it.
+  async fn role_key_evidence(
+    &mut self,
+    conversation: ConversationId,
+    state: &ChannelRoleState,
+    users: &[UserId],
+    may_go_by_snapshot: bool,
+  ) -> Result<BTreeMap<UserId, RoleKeyEvidence>, CoreError> {
+    if self.settings.maybe_attestation.is_some() {
+      self.pin_identities(users.iter().copied()).await?;
+    }
+    let in_group: BTreeSet<UserId> = if self.has_group(conversation)? {
+      self.group_users(conversation)?.into_iter().collect()
+    } else {
+      BTreeSet::new()
+    };
     let pinned = records::pinned_identities(&self.store)?;
+    let workspace = self.workspace()?;
+    let me = self.account.user_id;
+    let own_key = *self.account.identity_public_key().as_bytes();
     Ok(
       users
-        .into_iter()
-        .filter_map(|user| Some((user, pinned.get(&user)?.public_key)))
+        .iter()
+        .map(|user| {
+          let maybe_pin = pinned.get(user);
+          let maybe_roster_key = workspace
+            .roster
+            .members
+            .iter()
+            .find(|member| member.user_id == *user)
+            .and_then(|member| <[u8; 32]>::try_from(member.identity_key.as_slice()).ok());
+          let evidence = RoleKeyEvidence {
+            maybe_snapshot: state.snapshot_key_of(*user).filter(|_| may_go_by_snapshot),
+            maybe_pinned: maybe_pin.map(|pin| pin.public_key),
+            maybe_signed: if *user == me {
+              Some(own_key)
+            } else {
+              maybe_roster_key
+            },
+            is_attested: maybe_pin.is_some_and(|pin| pin.is_attested),
+            is_in_group: in_group.contains(user),
+            is_said_to_have_changed: maybe_pin.is_some_and(|pin| pin.maybe_changed_to.is_some()),
+          };
+          (*user, evidence)
+        })
         .collect(),
+    )
+  }
+
+  /// For a workspace admin's look at the channel's roles: what this device can check of the keys of
+  /// everybody the server lists. A device that can't sign for the workspace leaves nothing here.
+  pub(crate) async fn note_role_key_standings(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<(), CoreError> {
+    let state = self.channel_role_state(conversation)?;
+    let workspace = self.workspace()?;
+    let can_vouch = state
+      .signing_authorities(
+        self.account.user_id,
+        &workspace,
+        self.now_ms(),
+        self.roster_max_age_ms(),
+      )
+      .iter()
+      .any(is_workspace_authority);
+    if !can_vouch {
+      return Ok(());
+    }
+    let stored: Option<teamcraft_proto::ListConversationMembersResponse> =
+      records::get_json(&self.store, Table::Members, &conversation.to_string())?;
+    let listed: Vec<UserId> = stored
+      .into_iter()
+      .flat_map(|list| list.members)
+      .filter(|member| member.role != ChannelRole::Member)
+      .map(|member| member.user.id)
+      .collect();
+    let standings: BTreeMap<UserId, RoleKeyStanding> = self
+      .role_key_evidence(conversation, &state, &listed, state.is_workspace_anchored)
+      .await?
+      .into_iter()
+      .map(|(user, evidence)| (user, evidence.standing()))
+      .collect();
+    records::put_json(
+      &self.store,
+      Table::Workspace,
+      &role_key_standings_key(conversation),
+      &standings,
     )
   }
 
@@ -489,6 +875,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Table::Workspace,
       &channel_roles_key(conversation),
       state,
+    )?;
+    let mut alarmed: BTreeSet<ConversationId> =
+      records::get_json(&self.store, Table::Workspace, CHANNEL_ROLES_ALARMED_KEY)?.unwrap_or_default();
+    let is_changed = if state.maybe_alarm.is_some() {
+      alarmed.insert(conversation)
+    } else {
+      alarmed.remove(&conversation)
+    };
+    if is_changed {
+      records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_ALARMED_KEY, &alarmed)?;
+    }
+    Ok(())
+  }
+
+  /// The role the stored member list (the server's word) gives `user`.
+  pub(crate) fn server_channel_role(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+  ) -> Result<Option<ChannelRole>, CoreError> {
+    let stored: Option<teamcraft_proto::ListConversationMembersResponse> =
+      records::get_json(&self.store, Table::Members, &conversation.to_string())?;
+    Ok(
+      stored
+        .into_iter()
+        .flat_map(|list| list.members)
+        .find(|member| member.user.id == user)
+        .map(|member| member.role),
     )
   }
 
@@ -522,6 +936,15 @@ fn role_read_retry_ms(failures: u32) -> i64 {
 
 fn is_workspace_authority(authority: &SignerAuthority) -> bool {
   matches!(authority, SignerAuthority::Workspace { .. })
+}
+
+/// Where the channels with an alarm about their role logs are kept, for the UI.
+pub(crate) fn channel_roles_alarmed_key() -> &'static str {
+  CHANNEL_ROLES_ALARMED_KEY
+}
+
+pub(crate) fn role_key_standings_key(conversation: ConversationId) -> String {
+  format!("{ROLE_KEY_STANDINGS_KEY_PREFIX}{conversation}")
 }
 
 pub(crate) fn channel_roles_key(conversation: ConversationId) -> String {

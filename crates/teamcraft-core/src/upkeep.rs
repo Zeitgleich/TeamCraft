@@ -187,6 +187,9 @@ async fn check_workspace<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>)
   if let Err(error) = client.read_due_channel_roles().await {
     tracing::debug!(%error, "channel role logs due after a removal not read yet");
   }
+  if let Err(error) = client.found_listed_channels().await {
+    tracing::debug!(%error, "channels without a role log not founded yet");
+  }
 }
 
 /// Sends what is waiting: file uploads, then link previews, then the outbox (a message with files

@@ -5,8 +5,8 @@
 //! under the rules of [`teamcraft_proto::role_rules`], checked against signed data only:
 //!
 //! - **Workspace admins and owners** of the verified roster, fresh at the entry's server time, may
-//!   sign any snapshot. Their entry may name another head than this device's (a checkpoint that
-//!   re-anchors a device that skipped an entry).
+//!   sign any snapshot built on this device's head. Only a list one of them looked at may name no
+//!   head at all ([`REVIEWED_PREV_HASH`]): that checkpoint re-anchors a device whatever it had.
 //! - **Somebody who has left the roster since**, for an entry on this device's head that both its
 //!   signing time and its server time date inside their tenure, if this device didn't read the log
 //!   after that tenure ended. It counts for roles, never for the anchor: the dates are claims
@@ -15,8 +15,10 @@
 //!   key that snapshot names for them; their entry must build on exactly that snapshot.
 //! - **The founder**: while nothing was accepted yet, an entry whose signer names themselves as
 //!   admin, with the identity key this device pinned for them (trust on first use, like the
-//!   workspace root of trust). Channels created from this version on are founded by their creator;
-//!   older channels by the first admin who changes a role.
+//!   workspace root of trust). A channel is founded by its creator; an older one by the first app
+//!   the server lists as its admin that sees it without a log, naming who the server lists then, if
+//!   they are in this device's encryption group. That is trust in the server at first sight: such a
+//!   snapshot is marked, and never anchors (e2ee.md §4.6.1, "Founding at first sight").
 //!
 //! An entry that fails any check is skipped, not fatal: honest signers build on the last entry they
 //! accepted, so a junk entry can't block the log. Only an entry from somebody entitled to sign that
@@ -53,6 +55,83 @@ const HASH_BYTES: usize = 32;
 /// on every device it is a checkpoint, which vouches for each role it lists and doesn't build on
 /// whatever a device had (e2ee.md §4.6.1, "Reading the log late").
 const REVIEWED_PREV_HASH: [u8; HASH_BYTES] = [0xff; HASH_BYTES];
+/// A signer's device stands behind a person's identity key only for one of these reasons (review of
+/// #1286): a first pin is whatever the server says, so a snapshot naming it would give the server a
+/// channel admin of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RoleKeyStanding {
+  /// The key is the snapshot's, or one this device can check.
+  Checked,
+  /// As `Checked`, but this device has seen another key for the person than the snapshot names.
+  Changed,
+  /// Nothing here says this key is theirs: not in this device's group, not attested, not on the
+  /// roster, and no snapshot to go by. Never signed.
+  Uncheckable,
+  #[serde(other)]
+  Unknown,
+}
+
+/// The key to sign for somebody, and whether it differs from what this device saw before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckedRoleKey {
+  pub key: [u8; 32],
+  pub is_changed: bool,
+}
+
+/// What a device knows about one person's key when it is about to sign a role for them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RoleKeyEvidence {
+  /// The key the accepted snapshot names; `None` also where that snapshot can't be gone by.
+  pub maybe_snapshot: Option<[u8; 32]>,
+  /// The key this device pinned, whoever told it.
+  pub maybe_pinned: Option<[u8; 32]>,
+  /// A key that needs nobody's word: this user's own, or the verified roster's.
+  pub maybe_signed: Option<[u8; 32]>,
+  /// The identity provider attested the pin.
+  pub is_attested: bool,
+  /// The person is in this device's MLS group of the channel, whose credentials verify against
+  /// the pin: a wrong pin would not have let them in.
+  pub is_in_group: bool,
+  /// The server now says another key than the pin.
+  pub is_said_to_have_changed: bool,
+}
+
+impl RoleKeyEvidence {
+  /// The key to sign, or `None` if this device can't stand behind any: a person the snapshot names
+  /// keeps its key unless this device can check another one.
+  pub fn checked(&self) -> Option<CheckedRoleKey> {
+    let maybe_verified = self.maybe_signed.or(if self.is_attested || self.is_in_group {
+      self.maybe_pinned
+    } else {
+      None
+    });
+    match (self.maybe_snapshot, maybe_verified) {
+      (Some(snapshot), Some(verified)) => Some(CheckedRoleKey {
+        key: verified,
+        is_changed: snapshot != verified,
+      }),
+      (Some(snapshot), None) => Some(CheckedRoleKey {
+        key: snapshot,
+        is_changed: self.is_said_to_have_changed
+          || self.maybe_pinned.is_some_and(|pinned| pinned != snapshot),
+      }),
+      (None, Some(verified)) => Some(CheckedRoleKey {
+        key: verified,
+        is_changed: self.is_said_to_have_changed,
+      }),
+      (None, None) => None,
+    }
+  }
+
+  pub fn standing(&self) -> RoleKeyStanding {
+    match self.checked() {
+      None => RoleKeyStanding::Uncheckable,
+      Some(checked) if checked.is_changed => RoleKeyStanding::Changed,
+      Some(_) => RoleKeyStanding::Checked,
+    }
+  }
+}
+
 /// Hashes of refused entries a device remembers, to tell an entry built on one (it missed
 /// something) from one built on a head nobody was shown (a fork or junk).
 const MAX_SKIPPED_HASHES: usize = 64;
@@ -111,6 +190,10 @@ pub struct ChannelRoleState {
   /// Hashes of entries about this channel this device refused, newest last.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub skipped_hashes: Vec<Base64Bytes>,
+  /// Whether the snapshot goes back to roles taken from the server's list at first sight
+  /// ([`ChannelRolesDocument::has_server_listed_roles`]), until a workspace admin's reviewed list.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_server_listed_roles: bool,
 }
 
 /// The accepted head of a channel's role log; sent along inside the channel's encrypted messages.
@@ -296,6 +379,31 @@ impl ChannelRoleState {
     self.version > 0 || self.has_unverified_stretch()
   }
 
+  /// Whether this device may take the channel for one without a log and found it from what the
+  /// server lists: it read nothing but an empty log, and no member's message showed it a head. A
+  /// log it refused entries of, or was told of, stays as it is: only a workspace admin's list ends
+  /// that, so a server that hides a log can't get an honest signature on a second one from a device
+  /// that knows better.
+  pub fn is_unfounded(&self) -> bool {
+    !self.is_signed() && self.cursor == 0 && self.maybe_alarm.is_none() && self.maybe_ahead.is_none()
+  }
+
+  /// Whether an admin the server lists may act by the rule of a channel nobody signed: this device
+  /// accepted nothing, and nothing told it of a log it isn't shown. Entries it refused don't count, or
+  /// a junk entry would lock the owner out; a head in a member's message does, as a real log exists.
+  pub fn may_act_as_unsigned(&self) -> bool {
+    !self.is_signed() && self.maybe_alarm.is_none() && self.maybe_ahead.is_none()
+  }
+
+  /// The key the accepted snapshot names for `user`.
+  pub fn snapshot_key_of(&self, user: UserId) -> Option<[u8; 32]> {
+    self
+      .assignments
+      .iter()
+      .find(|assignment| assignment.user_id == user)
+      .and_then(|assignment| <[u8; 32]>::try_from(assignment.identity_key.as_slice()).ok())
+  }
+
   pub fn head(&self) -> Option<ChannelRolesHead> {
     let hash = self.maybe_head_hash.clone()?;
     Some(ChannelRolesHead {
@@ -433,6 +541,7 @@ impl ChannelRoleState {
       assignments,
       prev_hash: self.head_or_zero(),
       signed_at_ms,
+      has_server_listed_roles: self.has_server_listed_roles,
     })
   }
 
@@ -468,6 +577,7 @@ impl ChannelRoleState {
       assignments,
       prev_hash: Base64Bytes::new(REVIEWED_PREV_HASH.to_vec()),
       signed_at_ms,
+      has_server_listed_roles: false,
     })
   }
 
@@ -487,12 +597,19 @@ impl ChannelRoleState {
     check_snapshot(version, &document.assignments)?;
     let continues = document.prev_hash == self.head_or_zero();
     match authority {
-      // A checkpoint by the workspace's admins replaces whatever this device had.
-      SignerAuthority::Workspace { .. } if !continues => return Ok(()),
-      SignerAuthority::Workspace { .. } => {},
-      SignerAuthority::ChannelAdmin | SignerAuthority::FormerWorkspace { .. } if !continues => {
+      // A checkpoint by the workspace's admins replaces whatever this device had. Only a list one of
+      // them looked at: anything else names a head, and only builds on it (review of #1286).
+      SignerAuthority::Workspace { .. } if is_reviewed(document) && !document.has_server_listed_roles => {
+        return Ok(());
+      },
+      SignerAuthority::Workspace { .. }
+      | SignerAuthority::ChannelAdmin
+      | SignerAuthority::FormerWorkspace { .. }
+        if !continues =>
+      {
         return Err(ChannelRoleError::BrokenChain { version });
       },
+      SignerAuthority::Workspace { .. } => {},
       SignerAuthority::FormerWorkspace { .. } => {},
       SignerAuthority::ChannelAdmin => {
         if self.role_of(signer) != ChannelRole::Admin {
@@ -548,7 +665,17 @@ impl ChannelRoleState {
     // A workspace admin founding a channel passes as its founder (nobody changes their own role
     // otherwise), and it is a workspace admin's word all the same. It anchors only on what a purge
     // itself would take from that admin (`signed_deletion`): the server sets the entry's time.
-    let is_by_workspace_admin = verifier.workspace.heads.maybe_roster_signed_at_ms.is_some()
+    // Roles nobody looked at aren't anything to anchor on, whoever signed. That goes on through an
+    // older client's entry too, which doesn't carry the mark on: only a reviewed list ends it.
+    // An anchor takes a workspace admin who knows what they vouch for. Their ordinary entry changes one
+    // role, and every key in it may check while the roles are a colluding founder's: so it only carries
+    // on an anchor. It takes a list they looked at, or their own founding, which names what they chose.
+    let may_anchor = !document.has_server_listed_roles
+      && (!self.has_server_listed_roles || is_reviewed(&document))
+      && (self.is_workspace_anchored || is_reviewed(&document) || !self.is_signed())
+      && !names_another_key_than_pinned(&document, verifier.pinned);
+    let is_by_workspace_admin = may_anchor
+      && verifier.workspace.heads.maybe_roster_signed_at_ms.is_some()
       && verifier
         .workspace
         .is_roster_fresh(verifier.now_ms, verifier.roster_max_age_ms)
@@ -595,6 +722,8 @@ impl ChannelRoleState {
     self.version = version;
     self.maybe_head_hash = Some(Base64Bytes::new(hash.to_vec()));
     let previous_assignments = std::mem::replace(&mut self.assignments, document.assignments);
+    let has_server_listed_roles = document.has_server_listed_roles;
+    let was_reviewed = is_reviewed_hash(&document.prev_hash);
     match maybe_authority {
       _ if is_by_workspace_admin => self.is_workspace_anchored = true,
       // A claim, a roster admin on a roster too old to anchor anything, or somebody who left and
@@ -608,10 +737,19 @@ impl ChannelRoleState {
       // A channel admin carries on what the snapshot they build on was.
       Some(SignerAuthority::ChannelAdmin) | None => {},
     }
+    if !is_by_workspace_admin && (has_server_listed_roles || self.has_server_listed_roles) {
+      self.has_server_listed_roles = true;
+      self.is_workspace_anchored = false;
+    }
     // Only a checkpoint this device could anchor on says what holds today.
     if is_by_workspace_admin {
       self.maybe_unverified_from = None;
       self.has_former_admin_entry = false;
+      self.has_server_listed_roles = false;
+      // Somebody who can look looked: what the members disagreed about is settled by this list.
+      if was_reviewed {
+        self.maybe_alarm = None;
+      }
     } else if matches!(maybe_authority, Some(SignerAuthority::FormerWorkspace { .. })) {
       self.has_former_admin_entry = true;
     }
@@ -688,7 +826,9 @@ impl ChannelRoleState {
       .ok()
       .and_then(|device| convert::user_from_crypto(device.user_id()).ok())
     };
-    let at_ms = entry.created_at.0;
+    // The server sets the date, and a date in the future must not make a fresh roster look old: an
+    // entry can't be newer than this device's now.
+    let at_ms = entry.created_at.0.min(verifier.now_ms);
     if verifier
       .workspace
       .is_roster_fresh(at_ms, verifier.roster_max_age_ms)
@@ -796,13 +936,13 @@ impl ChannelRoleState {
         .iter()
         .any(|(_, authority)| *authority == SignerAuthority::ChannelAdmin);
     // An admin the roster names, whose authority lapsed only because this roster is too old.
-    let is_on_a_stale_roster = !verifier
-      .workspace
-      .is_roster_fresh(entry.created_at.0, verifier.roster_max_age_ms)
-      && is_signature_valid(
-        entry,
-        &KeyDirectory::from_keys(roster_admin_keys(verifier.workspace)),
-      );
+    let is_on_a_stale_roster = !verifier.workspace.is_roster_fresh(
+      entry.created_at.0.min(verifier.now_ms),
+      verifier.roster_max_age_ms,
+    ) && is_signature_valid(
+      entry,
+      &KeyDirectory::from_keys(roster_admin_keys(verifier.workspace)),
+    );
     // Without the roster's history a departed admin can't be told from any other pinned key.
     let history = &verifier.workspace.admin_history;
     let is_unknown_past = !history.is_complete
@@ -902,6 +1042,27 @@ impl ChannelRoleState {
       .clone()
       .unwrap_or_else(|| Base64Bytes::new(vec![0; HASH_BYTES]))
   }
+}
+
+/// Whether the document names a key for somebody other than the one this device pinned for them.
+/// An anchor lets its admins purge at once, so a device doesn't take one on a key it knows of another
+/// for: an older client's signature on a first pin from the server, or a real new key this device
+/// hasn't taken yet. It counts for the role either way; the anchor can wait.
+fn names_another_key_than_pinned<D: IdentityDirectory>(document: &ChannelRolesDocument, pinned: &D) -> bool {
+  document.assignments.iter().any(|assignment| {
+    pinned
+      .pinned_identity(convert::user(assignment.user_id))
+      .is_some_and(|key| key.as_bytes().as_slice() != assignment.identity_key.as_slice())
+  })
+}
+
+/// Whether the document is a list a workspace admin looked at.
+fn is_reviewed(document: &ChannelRolesDocument) -> bool {
+  is_reviewed_hash(&document.prev_hash)
+}
+
+fn is_reviewed_hash(prev_hash: &Base64Bytes) -> bool {
+  prev_hash.as_slice() == REVIEWED_PREV_HASH.as_slice()
 }
 
 /// The role to act on: the verified one, but never more than the server lists (the server can
@@ -1125,13 +1286,13 @@ mod tests {
     }
 
     #[test]
-    fn a_workspace_admin_signs_any_snapshot_even_on_another_head() {
+    fn a_list_a_workspace_admin_looked_at_replaces_what_a_device_has() {
       let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
       let world = World::new(&[&alice, &bob], &[&admin]);
       let mut state = founded(&world, &alice, &[]);
-      // Built on a head this device never accepted: a checkpoint that re-anchors it.
+      // A checkpoint: it names no head, and re-anchors the device.
       let mut stale = state.clone();
-      stale.maybe_head_hash = Some(Base64Bytes::new(vec![7; 32]));
+      stale.maybe_head_hash = Some(Base64Bytes::new(REVIEWED_PREV_HASH.to_vec()));
       let checkpoint = admin.entry(&stale, &[(&bob, ChannelRole::Admin)]);
       assert!(world.apply(&mut state, checkpoint).is_empty());
       assert_eq!(state.role_of(bob.user_id), ChannelRole::Admin);
@@ -1162,7 +1323,7 @@ mod tests {
       assert!(world.apply(&mut state, promote).is_empty());
       assert!(!state.is_workspace_anchored, "a founded admin adds no trust");
 
-      let checkpoint = admin.entry(&state, &[(&bob, ChannelRole::Admin)]);
+      let checkpoint = admin.reviewed(&state, &[(&bob, ChannelRole::Admin)]);
       assert!(world.apply(&mut state, checkpoint).is_empty());
       assert!(state.is_workspace_anchored);
       let next = bob.entry(
@@ -1171,6 +1332,322 @@ mod tests {
       );
       assert!(world.apply(&mut state, next).is_empty());
       assert!(state.is_workspace_anchored, "a channel admin carries it on");
+    }
+
+    /// e2ee.md §4.6.1, "Founding at first sight": a workspace admin's app that founds a channel from
+    /// the server's list saw none of it, so its signature anchors nothing, and nor does its next
+    /// role change on that snapshot. A list they looked at does.
+    #[test]
+    fn roles_from_the_servers_list_anchor_nothing_until_a_workspace_admin_looked() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = ChannelRoleState::default();
+      let mut founding = admin.document(
+        &state,
+        &[(&admin, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      founding.has_server_listed_roles = true;
+      assert!(world.apply(&mut state, admin.signed(founding)).is_empty());
+      assert_eq!(state.role_of(bob.user_id), ChannelRole::Admin);
+      assert!(!state.is_workspace_anchored);
+      assert!(state.has_server_listed_roles);
+
+      let next = state
+        .next_document(
+          conversation(CHANNEL),
+          &[(alice.user_id, ChannelRole::Moderator)],
+          &BTreeMap::from([(alice.user_id, [1; 32])]),
+          NOW_MS,
+        )
+        .unwrap();
+      assert!(next.has_server_listed_roles, "the mark carries on");
+      assert!(world.apply(&mut state, admin.signed(next)).is_empty());
+      assert!(!state.is_workspace_anchored);
+      assert_eq!(
+        state.appointment_of(alice.user_id),
+        None,
+        "nothing claimed either"
+      );
+
+      let mut reviewed = admin.document(&state, &[(&bob, ChannelRole::Admin)]);
+      reviewed.prev_hash = Base64Bytes::new(REVIEWED_PREV_HASH.to_vec());
+      assert!(world.apply(&mut state, admin.signed(reviewed)).is_empty());
+      assert!(state.is_workspace_anchored);
+      assert!(!state.has_server_listed_roles);
+    }
+
+    /// A signature on the server's list is never a checkpoint: replayed against a device with a log,
+    /// it can't put the server's list in place of the roles there, so it strips nobody.
+    #[test]
+    fn roles_from_the_servers_list_replace_nothing_a_device_has() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(&world, &alice, &[]);
+      let before = state.assignments.clone();
+      let mut replayed = admin.document(&ChannelRoleState::default(), &[(&bob, ChannelRole::Admin)]);
+      replayed.version = state.cursor + 1;
+      replayed.has_server_listed_roles = true;
+      assert_eq!(world.apply(&mut state, admin.signed(replayed)).len(), 1);
+      assert_eq!(state.assignments, before);
+      assert_eq!(state.role_of(alice.user_id), ChannelRole::Admin);
+      assert!(!state.has_server_listed_roles);
+    }
+
+    /// Review of #1286, finding 2: only a list somebody looked at replaces what a device has.
+    #[test]
+    fn an_ordinary_workspace_entry_on_another_head_is_no_checkpoint() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(&world, &alice, &[]);
+      let before = state.assignments.clone();
+      let elsewhere = admin.document(&ChannelRoleState::default(), &[(&bob, ChannelRole::Admin)]);
+      let mut entry = elsewhere;
+      entry.version = state.cursor + 1;
+      assert_eq!(world.apply(&mut state, admin.signed(entry)).len(), 1);
+      assert_eq!(state.assignments, before);
+      assert!(!state.is_workspace_anchored);
+
+      let mut reviewed = admin.document(&state, &[(&bob, ChannelRole::Admin)]);
+      reviewed.prev_hash = Base64Bytes::new(REVIEWED_PREV_HASH.to_vec());
+      assert!(world.apply(&mut state, admin.signed(reviewed)).is_empty());
+      assert_eq!(state.role_of(alice.user_id), ChannelRole::Member, "this one does");
+      assert!(state.is_workspace_anchored);
+    }
+
+    /// Review of #1286, finding 3: an older client doesn't carry the mark on, and that ends nothing.
+    #[test]
+    fn an_older_clients_entry_on_marked_roles_neither_anchors_nor_ends_the_mark() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = ChannelRoleState::default();
+      let mut founding = alice.document(&state, &[(&alice, ChannelRole::Admin)]);
+      founding.has_server_listed_roles = true;
+      assert!(world.apply(&mut state, alice.signed(founding)).is_empty());
+
+      let older = admin.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, older).is_empty());
+      assert_eq!(state.role_of(bob.user_id), ChannelRole::Admin);
+      assert!(state.has_server_listed_roles);
+      assert!(!state.is_workspace_anchored);
+      assert_eq!(state.appointment_of(bob.user_id), None);
+    }
+
+    /// Review of #1286, finding 4: the server dating a workspace admin's entry in the future makes
+    /// no fresh roster look old, so it strips nobody on this device.
+    #[test]
+    fn an_entry_dated_in_the_future_starts_no_stretch_on_a_fresh_roster() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(&world, &alice, &[]);
+      let mut entry = admin.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      entry.created_at = UnixMillis(NOW_MS + 365 * DAY_MS);
+      assert!(world.apply(&mut state, entry).is_empty());
+      assert!(!state.has_unverified_stretch());
+      assert_eq!(state.role_of(alice.user_id), ChannelRole::Admin);
+      assert_eq!(state.role_of(bob.user_id), ChannelRole::Admin);
+    }
+
+    /// Review of #1286, finding 1: every way a device could come by a key, and what it signs.
+    mod whose_key_is_signed {
+      use super::*;
+
+      const SNAPSHOT: [u8; 32] = [1; 32];
+      const PINNED: [u8; 32] = [2; 32];
+      const ROSTER: [u8; 32] = [3; 32];
+
+      #[test]
+      fn a_first_pin_is_nobodys_word() {
+        let evidence = RoleKeyEvidence {
+          maybe_pinned: Some(PINNED),
+          ..RoleKeyEvidence::default()
+        };
+        assert_eq!(evidence.checked(), None);
+        assert_eq!(evidence.standing(), RoleKeyStanding::Uncheckable);
+        assert_eq!(RoleKeyEvidence::default().checked(), None);
+      }
+
+      #[test]
+      fn the_group_an_attestation_or_the_roster_check_a_key() {
+        for evidence in [
+          RoleKeyEvidence {
+            maybe_pinned: Some(PINNED),
+            is_in_group: true,
+            ..RoleKeyEvidence::default()
+          },
+          RoleKeyEvidence {
+            maybe_pinned: Some(PINNED),
+            is_attested: true,
+            ..RoleKeyEvidence::default()
+          },
+        ] {
+          assert_eq!(
+            evidence.checked(),
+            Some(CheckedRoleKey {
+              key: PINNED,
+              is_changed: false
+            })
+          );
+        }
+        let roster = RoleKeyEvidence {
+          maybe_pinned: Some(PINNED),
+          maybe_signed: Some(ROSTER),
+          ..RoleKeyEvidence::default()
+        };
+        assert_eq!(roster.checked().map(|found| found.key), Some(ROSTER));
+      }
+
+      #[test]
+      fn a_person_the_snapshot_names_keeps_its_key_unless_another_is_checked() {
+        let unchecked = RoleKeyEvidence {
+          maybe_snapshot: Some(SNAPSHOT),
+          maybe_pinned: Some(PINNED),
+          ..RoleKeyEvidence::default()
+        };
+        assert_eq!(
+          unchecked.checked(),
+          Some(CheckedRoleKey {
+            key: SNAPSHOT,
+            is_changed: true
+          }),
+          "the server's swap is marked and not signed"
+        );
+        let checked = RoleKeyEvidence {
+          is_in_group: true,
+          ..unchecked
+        };
+        assert_eq!(
+          checked.checked(),
+          Some(CheckedRoleKey {
+            key: PINNED,
+            is_changed: true
+          }),
+          "a real new key, which the group holds, marked for whoever looks"
+        );
+        let same = RoleKeyEvidence {
+          maybe_snapshot: Some(SNAPSHOT),
+          maybe_pinned: Some(SNAPSHOT),
+          ..RoleKeyEvidence::default()
+        };
+        assert_eq!(same.standing(), RoleKeyStanding::Checked);
+      }
+    }
+
+    /// Third review of #1286: a founder and the server made the roles up; a workspace admin changes
+    /// one, and every key in it checks. Only a list they looked at anchors that.
+    #[test]
+    fn a_workspace_admins_ordinary_entry_anchors_nothing_new() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(&world, &bob, &[]);
+      let ordinary = admin.entry(
+        &state,
+        &[(&bob, ChannelRole::Admin), (&alice, ChannelRole::Moderator)],
+      );
+      assert!(world.apply(&mut state, ordinary).is_empty());
+      assert_eq!(
+        state.role_of(alice.user_id),
+        ChannelRole::Moderator,
+        "it counts for roles"
+      );
+      assert!(!state.is_workspace_anchored);
+
+      let mut reviewed = admin.document(&state, &[(&alice, ChannelRole::Admin)]);
+      reviewed.prev_hash = Base64Bytes::new(REVIEWED_PREV_HASH.to_vec());
+      assert!(world.apply(&mut state, admin.signed(reviewed)).is_empty());
+      assert!(state.is_workspace_anchored);
+      let next = admin.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Moderator)],
+      );
+      assert!(world.apply(&mut state, next).is_empty());
+      assert!(state.is_workspace_anchored, "on an anchor it carries on");
+    }
+
+    /// A workspace admin's own founding of a channel with nothing signed anchors, as it names what
+    /// they chose.
+    #[test]
+    fn a_workspace_admins_own_founding_anchors() {
+      let admin = Person::new(9);
+      let world = World::new(&[&admin], &[&admin]);
+      let mut state = ChannelRoleState::default();
+      let founding = admin.entry(&state, &[(&admin, ChannelRole::Admin)]);
+      assert!(world.apply(&mut state, founding).is_empty());
+      assert!(state.is_workspace_anchored);
+    }
+
+    /// Third review of #1286: a device told of a log it isn't shown knows there is one.
+    #[test]
+    fn only_a_device_told_of_no_log_acts_as_on_an_unsigned_channel() {
+      assert!(ChannelRoleState::default().may_act_as_unsigned());
+      let junk_only = ChannelRoleState {
+        cursor: 1,
+        ..ChannelRoleState::default()
+      };
+      assert!(
+        junk_only.may_act_as_unsigned(),
+        "the repair for a junk entry stays"
+      );
+      let head = ChannelRolesHead {
+        version: 3,
+        hash: Base64Bytes::new(vec![1; 32]),
+      };
+      assert!(
+        !ChannelRoleState {
+          maybe_ahead: Some(head),
+          ..ChannelRoleState::default()
+        }
+        .may_act_as_unsigned()
+      );
+      assert!(
+        !ChannelRoleState {
+          maybe_alarm: Some("held back".into()),
+          ..ChannelRoleState::default()
+        }
+        .may_act_as_unsigned()
+      );
+    }
+
+    #[test]
+    fn only_a_device_that_saw_no_log_and_no_head_takes_a_channel_for_unfounded() {
+      assert!(ChannelRoleState::default().is_unfounded());
+      let head = ChannelRolesHead {
+        version: 3,
+        hash: Base64Bytes::new(vec![1; 32]),
+      };
+      for state in [
+        ChannelRoleState {
+          version: 1,
+          cursor: 1,
+          ..ChannelRoleState::default()
+        },
+        // It looked at entries and took none: there is a log, whoever wrote it.
+        ChannelRoleState {
+          cursor: 1,
+          ..ChannelRoleState::default()
+        },
+        ChannelRoleState {
+          cursor: 1,
+          maybe_unverified_from: Some(1),
+          ..ChannelRoleState::default()
+        },
+        // A member's message named a head the server doesn't show.
+        ChannelRoleState {
+          maybe_ahead: Some(head.clone()),
+          ..ChannelRoleState::default()
+        },
+        ChannelRoleState {
+          maybe_alarm: Some("held back".into()),
+          ..ChannelRoleState::default()
+        },
+      ] {
+        assert!(!state.is_unfounded(), "{state:?}");
+      }
     }
   }
 
@@ -1575,7 +2052,7 @@ mod tests {
       let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
       let world = World::new(&[&alice, &bob], &[&admin]);
       let mut state = founded(&world, &alice, &[]);
-      let appoint = admin.entry(
+      let appoint = admin.reviewed(
         &state,
         &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
       );
@@ -1601,7 +2078,7 @@ mod tests {
       let mut world = World::new(&[&alice, &bob], &[&owner]);
       world.workspace.roster.members[0].role = RosterRole::Owner;
       let mut state = founded(&world, &alice, &[]);
-      let appoint = owner.entry(
+      let appoint = owner.reviewed(
         &state,
         &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
       );
@@ -1738,10 +2215,10 @@ mod tests {
         state.appointment_of(bob.user_id).map(|found| found.by),
         Some(first.user_id)
       );
-      // This device skipped a demotion and re-appointment in between: the checkpoint names another
-      // head, and lists Bob as the device already has him.
+      // This device skipped a demotion and re-appointment in between: the checkpoint names no head,
+      // and lists Bob as the device already has him.
       let mut stale = state.clone();
-      stale.maybe_head_hash = Some(Base64Bytes::new(vec![7; 32]));
+      stale.maybe_head_hash = Some(Base64Bytes::new(REVIEWED_PREV_HASH.to_vec()));
       let checkpoint = second.entry(&stale, &roles);
       assert!(world.apply(&mut state, checkpoint).is_empty());
       assert_eq!(
@@ -1871,7 +2348,7 @@ mod tests {
       assert!(!reader.is_workspace_anchored);
       assert_eq!(reader.appointment_of(story.bob.user_id), None, "not claimed");
 
-      let checkpoint = story.frank.entry(
+      let checkpoint = story.frank.reviewed(
         &reader,
         &[
           (&story.frank, ChannelRole::Admin),
@@ -2177,7 +2654,7 @@ mod tests {
           "the one who can end it can sign"
         );
         let mut stale = reader.clone();
-        stale.maybe_head_hash = Some(Base64Bytes::new(vec![7; HASH_BYTES]));
+        stale.maybe_head_hash = Some(Base64Bytes::new(REVIEWED_PREV_HASH.to_vec()));
         let checkpoint = story.frank.entry(
           &stale,
           &[
@@ -2203,7 +2680,7 @@ mod tests {
         let story = Story::new();
         let mut world = story.world();
         let mut reader = stretched(&story, &mut world);
-        let checkpoint = story.frank.entry(
+        let checkpoint = story.frank.reviewed(
           &reader,
           &[
             (&story.frank, ChannelRole::Admin),
@@ -2572,8 +3049,10 @@ mod tests {
       #[test]
       fn an_admin_of_this_roster_who_is_too_old_to_judge_them() {
         let story = Story::new();
-        let world = story.world();
+        let mut world = story.world();
         let mut reader = story.first_read(&world);
+        // Time really passed: a date only the server claims wouldn't make this roster old.
+        world.now_ms = NOW_MS + MAX_AGE_MS;
         let entry = story.eve.entry(
           &reader,
           &[
@@ -2745,7 +3224,19 @@ mod tests {
         assignments,
         prev_hash: state.head_or_zero(),
         signed_at_ms: NOW_MS,
+        has_server_listed_roles: false,
       }
+    }
+
+    /// A list this person looked at, holding exactly `roles`: a checkpoint, if they may sign one.
+    fn reviewed(
+      &self,
+      state: &ChannelRoleState,
+      roles: &[(&Person, ChannelRole)],
+    ) -> ChannelRoleLogEntryResponse {
+      let mut document = self.document(state, roles);
+      document.prev_hash = Base64Bytes::new(REVIEWED_PREV_HASH.to_vec());
+      self.signed(document)
     }
 
     fn entry(

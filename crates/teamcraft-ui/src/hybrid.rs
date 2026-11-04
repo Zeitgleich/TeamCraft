@@ -846,15 +846,15 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.channel_roles(conversation)
   }
 
-  fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
-    self.chat.can_sign_channel_roles(conversation)
-  }
-
   fn channel_roles_review(
     &self,
     conversation: ConversationId,
   ) -> Option<teamcraft_client_api::model::ChannelRolesReview> {
     self.chat.channel_roles_review(conversation)
+  }
+
+  fn channel_role_alarms(&self) -> Vec<ConversationId> {
+    self.chat.channel_role_alarms()
   }
 
   fn sign_reviewed_channel_roles(
@@ -866,14 +866,6 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self
       .chat
       .sign_reviewed_channel_roles(conversation, roles, at_cursor);
-  }
-
-  fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {
-    self.chat.are_channel_roles_unverified(conversation)
-  }
-
-  fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
-    self.chat.confirm_channel_role(conversation, user);
   }
 
   fn refresh_channel_roles(&self, conversation: ConversationId) {

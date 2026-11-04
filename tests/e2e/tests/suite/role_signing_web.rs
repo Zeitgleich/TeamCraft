@@ -11,9 +11,13 @@ use std::time::{Duration, Instant};
 
 use chromiumoxide::page::Page;
 use futures_util::FutureExt as _;
+use reqwest::StatusCode;
 use serde_json::{Value, json};
+use teamcraft_core::store::{LocalStore, Table};
 use teamcraft_e2e::Stack;
 use teamcraft_e2e::browser::{BrowserSession, lease_web_port, web_dir};
+use teamcraft_e2e::peer::Peer;
+use teamcraft_e2e::scenario::{channel_with, space_with};
 use teamcraft_e2e::stack::{ISSUER, KEYCLOAK_URL};
 
 use crate::web::{TEST_CSP, body_text, click_text, shot, type_until_kept, wait_for_element, wait_for_text};
@@ -30,8 +34,9 @@ const ROLE_CHANGE_WAIT: Duration = Duration::from_secs(780);
 const SIGN_WAIT: Duration = Duration::from_secs(180);
 
 /// What the app used to say about signing, on every page. None of it may come back in normal operation.
-const PROMPTS: [&str; 8] = [
+const PROMPTS: [&str; 9] = [
   "Sign now",
+  "Sign role",
   "isn't signed",
   "isn’t signed",
   "Review and sign",
@@ -179,6 +184,219 @@ async fn an_owner_and_an_admin_get_their_rights_with_no_click_and_a_role_change_
   owner_browser.close().await;
   admin_browser.close().await;
   stack.stop().await;
+}
+
+/// The look a workspace admin gets at a channel's roles, rendered (e2ee.md §4.6.1): marks, the refusal,
+/// a list that moves while they look, the confirm through the real server, and the alarm's line and
+/// banner. The real web client and server, with core clients as the other members.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_workspace_admin_sees_a_channels_roles_with_their_marks_and_the_alarm() {
+  let Some(web_dir) = web_dir() else {
+    assert!(
+      std::env::var("E2E_REQUIRED").map_or(true, |value| value != "1"),
+      "no web build: run tests/e2e/web/build.sh"
+    );
+    eprintln!("skipping: no web build (tests/e2e/web/build.sh)");
+    return;
+  };
+  let _turn = lease_web_port(PORT).await;
+  let Some(stack) = Stack::builder()
+    .with_port(PORT)
+    .with_web_dir(web_dir)
+    .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP)
+    .with_env(
+      "TEAMCRAFT_SECURITY__PUBLIC_ORIGINS",
+      &format!(r#"["{WEB_ORIGIN}"]"#),
+    )
+    .start()
+    .await
+  else {
+    return;
+  };
+  let keycloak = Keycloak::connect().await;
+  keycloak.ensure_role_mapper().await;
+  keycloak.delete_users_of_earlier_runs().await;
+  let owner_name = format!("rs-owner-{}", std::process::id());
+  let keycloak_owner = keycloak.make_user(&owner_name, &["owner"]).await;
+  let browser = BrowserSession::launch().await.expect("a browser for the owner");
+  let page = browser.new_page(WEB_ORIGIN).await;
+
+  first_sign_in(&page, &owner_name).await;
+  let mut alice = Peer::enroll(&stack, "alice").await;
+  let mut bob = Peer::enroll(&stack, "bob").await;
+  let carol = stack.tokens("carol");
+  let owner_id = wait_for_owner_id(&stack, &carol).await;
+  let carol_id = stack.user_id(&carol).await;
+
+  let space = space_with(&stack, &alice, "Role look", &[(&bob, "member")]).await;
+  stack
+    .add_space_member(&alice.tokens, &space.to_string(), &owner_id, "member")
+    .await;
+  stack
+    .add_space_member(&alice.tokens, &space.to_string(), &carol_id, "member")
+    .await;
+  let channel = channel_with(&mut alice, space, "role-look", &mut [&mut bob]).await;
+  alice
+    .client
+    .add_member(channel, owner_id.parse().expect("a user ID"))
+    .await
+    .expect("adding the owner to the group");
+
+  // The server's word only: Bob an admin, and Carol, who has no keys and isn't in the group, a moderator.
+  let members = format!("/conversations/{channel}/members");
+  stack
+    .patch(
+      &alice.tokens,
+      &format!("{members}/{}", bob.user_id()),
+      json!({"role": "admin"}),
+    )
+    .await
+    .expect(StatusCode::NO_CONTENT);
+  stack
+    .post(
+      &alice.tokens,
+      &members,
+      json!({"user_id": carol_id, "role": "moderator"}),
+    )
+    .await;
+
+  wait_for_element(&page, ".space-btn[aria-label^=\"Role look\"]").await;
+  page
+    .evaluate("document.querySelector('.space-btn[aria-label^=\"Role look\"]').click()")
+    .await
+    .unwrap();
+  wait_for_text(&page, "role-look").await;
+  click_text(&page, "role-look").await;
+  wait_for_element(&page, ".channel-header").await;
+  tokio::time::sleep(Duration::from_secs(3)).await;
+  page
+    .evaluate("document.querySelector('[aria-label=\"Channel settings\"]').click()")
+    .await
+    .unwrap();
+  click_text(&page, "Members").await;
+  wait_for_text(&page, "Check roles").await;
+  shot(&page, "role-look-1-members").await;
+  assert_no_prompt(&page, "the members section").await;
+
+  click_text(&page, "Check roles").await;
+  wait_for_text(&page, "Confirm exactly these roles").await;
+  shot(&page, "role-look-2-marks").await;
+  let text = body_text(&page).await;
+  for expected in ["New", "Can't check", "This device can't check"] {
+    assert!(text.contains(expected), "the panel says {expected:?}:\n{text}");
+  }
+  assert!(
+    is_confirm_disabled(&page).await,
+    "a key nobody can check can't be confirmed"
+  );
+
+  // The list moves while they look: what they saw isn't what they could confirm any more.
+  stack
+    .patch(
+      &alice.tokens,
+      &format!("{members}/{carol_id}"),
+      json!({"role": "member"}),
+    )
+    .await
+    .expect(StatusCode::NO_CONTENT);
+  wait_for_text(&page, "changed while you were looking").await;
+  shot(&page, "role-look-3-list-moved").await;
+  assert!(is_confirm_disabled(&page).await, "not while the list moved");
+
+  // They look again, and confirm through the real server.
+  let log = format!("/conversations/{channel}/role-log");
+  let entries_before = role_log_length(&stack, &alice, &log).await;
+  let reopen = "[...document.querySelectorAll('.role-review-actions button')]\
+    .find(button => button.innerText.trim() === 'Check roles').click()";
+  page.evaluate(reopen).await.unwrap();
+  tokio::time::sleep(Duration::from_secs(1)).await;
+  assert!(!is_confirm_disabled(&page).await, "this list can be confirmed");
+  shot(&page, "role-look-4-can-confirm").await;
+  click_text(&page, "Confirm exactly these roles").await;
+  let deadline = Instant::now() + SIGN_WAIT;
+  while role_log_length(&stack, &alice, &log).await == entries_before {
+    assert!(
+      Instant::now() < deadline,
+      "the confirmed list never reached the log"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+  }
+  tokio::time::sleep(Duration::from_secs(2)).await;
+  shot(&page, "role-look-5-confirmed").await;
+
+  // A member's device shows another head for the same version: the alarm, in words, twice.
+  alice
+    .client
+    .sync_channel_roles(channel)
+    .await
+    .expect("reading the log");
+  let key = format!("channel_roles/{channel}");
+  let stored = alice
+    .store
+    .get(Table::Workspace, &key)
+    .unwrap()
+    .expect("Alice's roles");
+  let mut state: Value = serde_json::from_slice(&stored).unwrap();
+  state["head_hash"] = json!("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA=");
+  alice
+    .store
+    .put(Table::Workspace, &key, &serde_json::to_vec(&state).unwrap())
+    .unwrap();
+  alice
+    .client
+    .send_text(channel, None, "a head from another log")
+    .await
+    .expect("sending");
+  wait_for_text(&page, "Tell a workspace admin").await;
+  wait_for_text(&page, "Look at the channel's members").await;
+  shot(&page, "role-look-6-alarm").await;
+
+  keycloak.delete_user(&keycloak_owner).await;
+  browser.close().await;
+  stack.stop().await;
+}
+
+/// The owner's user ID, once their app signed the first roster.
+async fn wait_for_owner_id(stack: &Stack, reader: &teamcraft_e2e::tokens::UserTokens) -> String {
+  use base64::Engine as _;
+
+  wait_for_roster(stack, reader, &["owner"], "the owner on the roster").await;
+  let response: Value = stack
+    .http
+    .get(format!("{}/api/v1/workspace/roster", stack.base_url))
+    .bearer_auth(reader.token_async().await)
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+  let entry = response["entries"]
+    .as_array()
+    .and_then(|entries| entries.last())
+    .unwrap();
+  let payload = base64::engine::general_purpose::STANDARD
+    .decode(entry["payload"].as_str().unwrap())
+    .unwrap();
+  let document: Value = serde_json::from_slice(&payload).unwrap();
+  document["members"][0]["user_id"].as_str().unwrap().to_owned()
+}
+
+async fn is_confirm_disabled(page: &Page) -> bool {
+  page
+    .evaluate(
+      "[...document.querySelectorAll('.role-review-actions button')]\
+        .find(button => button.innerText.includes('Confirm exactly')).disabled",
+    )
+    .await
+    .unwrap()
+    .into_value::<bool>()
+    .unwrap()
+}
+
+async fn role_log_length(stack: &Stack, peer: &Peer, path: &str) -> usize {
+  let reply = stack.get(&peer.tokens, path).await.expect(StatusCode::OK);
+  reply.body["entries"].as_array().map_or(0, Vec::len)
 }
 
 /// The claims of a token, for a test's failure message.

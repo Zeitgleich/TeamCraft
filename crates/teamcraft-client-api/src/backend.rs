@@ -698,20 +698,15 @@ pub trait ChatBackend {
   /// action. The core then signs the channel's new roles where the user can (issue #380).
   fn set_channel_role(&self, _conversation: ConversationId, _user: UserId, _role: crate::model::ChannelRole) {
   }
-  /// Signs the role the server lists for a member, whose role is the server's word only
-  /// ([`crate::model::ChannelMember::is_role_signed`]); nothing changes on the server.
-  fn confirm_channel_role(&self, _conversation: ConversationId, _user: UserId) {}
   /// Reads the channel's members and signed roles afresh (the members section opened).
   fn refresh_channel_roles(&self, _conversation: ConversationId) {}
-  /// Whether the user can sign the channel's roles in a way members accept: a signed channel
-  /// admin or an admin of the signed workspace roster.
-  fn can_sign_channel_roles(&self, _conversation: ConversationId) -> bool {
-    false
-  }
-  /// For a workspace admin whose signature here would vouch for roles this device can't vouch for:
-  /// what they look at, instead of signing one role. `None` for anybody else.
+  /// For a workspace admin: what they look at in the channel's members. `None` for anybody else.
   fn channel_roles_review(&self, _conversation: ConversationId) -> Option<crate::model::ChannelRolesReview> {
     None
+  }
+  /// The channels where this device and a member's disagree about the signed roles.
+  fn channel_role_alarms(&self) -> Vec<ConversationId> {
+    Vec::new()
   }
   /// Signs exactly `roles`, as the workspace admin looked at them with the log at `at_cursor`
   /// ([`crate::model::ChannelRolesReview::log_cursor`]); nothing changes on the server. Refused if
@@ -722,11 +717,6 @@ pub trait ChatBackend {
     _roles: Vec<(UserId, crate::model::ChannelRole)>,
     _at_cursor: u64,
   ) {
-  }
-  /// Whether this device knows it can't verify part of the channel's role log: its signed roles
-  /// count for nothing until a workspace admin signs them again. The members section says so.
-  fn are_channel_roles_unverified(&self, _conversation: ConversationId) -> bool {
-    false
   }
   /// The members of a space with their roles, as far as the user may see them.
   fn space_members(&self, _space: SpaceId) -> crate::model::SpaceRoster {

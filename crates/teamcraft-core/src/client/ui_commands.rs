@@ -377,17 +377,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         conversation,
         user,
         role,
-      } => self.set_channel_role(conversation, user, role).await.map(|_| ()),
-      // Asked for explicitly: a role this user can't sign is a failure the user sees, not silence.
-      CoreCommand::ConfirmChannelRole { conversation, user } => {
-        match self.confirm_channel_role(conversation, user).await? {
-          super::RoleSigning::Signed => Ok(()),
-          super::RoleSigning::Unsigned | super::RoleSigning::ReviewOutdated => {
-            Err(CoreError::InvalidRequest(
-              "this role can't be signed in a way the channel's members accept".into(),
-            ))
-          },
-        }
+      } => match self.set_channel_role(conversation, user, role).await? {
+        // Somebody who signs roles here hears when their device can't; the server's change stands.
+        super::RoleSigning::Unsigned if self.could_sign_channel_roles(conversation)? => {
+          Err(CoreError::RoleChangeNotConfirmed)
+        },
+        _ => Ok(()),
       },
       CoreCommand::SignReviewedChannelRoles {
         conversation,
@@ -409,7 +404,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::RefreshMembers { conversation } => self.refresh_members(conversation).await,
       CoreCommand::RefreshChannelRoles { conversation } => {
         self.refresh_members(conversation).await?;
-        self.sync_channel_roles(conversation).await
+        self.sync_channel_roles(conversation).await?;
+        self.note_role_key_standings(conversation).await
       },
       CoreCommand::RemoveSpaceMember { space, user } => self.remove_space_member(space, user).await,
       CoreCommand::RevokeSpaceInvite { space, invite } => self.revoke_space_invite(space, invite).await,

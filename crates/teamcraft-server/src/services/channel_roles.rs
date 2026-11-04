@@ -297,6 +297,7 @@ mod tests {
         .collect(),
       prev_hash: Base64Bytes::new(vec![0; 32]),
       signed_at_ms: 0,
+      has_server_listed_roles: false,
     };
     serde_json::to_vec(&document).unwrap()
   }

@@ -69,6 +69,13 @@ fn banner_line(i18n: I18n, state: AppState) -> Option<(String, bool)> {
   {
     return Some((expired_line(i18n, state, &owners), false));
   }
+  // The owner's lines first: the server alone can raise the next one by showing a fork, and it must
+  // not be able to hide these with it.
+  owner_line(i18n, state).or_else(|| role_alarm_line(i18n, state).map(|line| (line, false)))
+}
+
+/// What only an owner can do something about.
+fn owner_line(i18n: I18n, state: AppState) -> Option<(String, bool)> {
   // Only an owner can do something about a contradiction or another provider: an owner of the verified
   // roster, not whom the server calls one, so that a server can't hide this from them.
   let status = state.read(|backend| backend.owner_roster())?;
@@ -91,6 +98,27 @@ fn banner_line(i18n: I18n, state: AppState) -> Option<(String, bool)> {
     | RoleSigningIssue::ReportedGone { .. }
     | RoleSigningIssue::AwaitingOwner => None,
   }
+}
+
+/// What a workspace admin of the verified roster hears about a channel whose role logs disagree.
+fn role_alarm_line(i18n: I18n, state: AppState) -> Option<String> {
+  let me = state.read(|backend| backend.me().id);
+  let status = state.read(|backend| backend.owner_roster())?;
+  if !status.owners.iter().any(|owner| owner.user == me) && !status.admins.contains(&me) {
+    return None;
+  }
+  let conversation = state
+    .read(|backend| backend.channel_role_alarms())
+    .into_iter()
+    .next()?;
+  Some(
+    state
+      .read(|backend| backend.conversation(conversation))
+      .map_or_else(
+        || i18n.t("channel-roles-alarm-banner-unnamed"),
+        |info| i18n.t_with("channel-roles-alarm-banner", &[("channel", &info.name)]),
+      ),
+  )
 }
 
 /// That admin rights lapsed, and whom to ask: by name, or just "an owner" where this device knows no

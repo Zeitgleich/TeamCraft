@@ -251,11 +251,6 @@ impl Space {
 pub struct ChannelMember {
   pub user: UserId,
   pub role: ChannelRole,
-  /// Whether this device verified a signed assignment of `role` (e2ee.md §4.6.1). `false` only for
-  /// an admin or moderator whose role is the server's word alone: members don't count it for
-  /// anything that needs a signed role, and the UI says so.
-  #[serde(default = "is_true")]
-  pub is_role_signed: bool,
   /// Who appointed `role`, as the signed role log this device verified says (issue #877). `None`
   /// where nothing verified says it: a member, a role only the server lists, a founder's own claim
   /// or a log accepted before this was recorded. Never the server's word.
@@ -269,9 +264,27 @@ pub struct ChannelMember {
 pub struct ChannelRolesReview {
   /// Where the role log stood: signing is refused once it moved on.
   pub log_cursor: u64,
+  /// This device can't vouch for what it has, or something contradicts it: the panel says so.
+  #[serde(default)]
+  pub needs_a_look: bool,
   /// The roles this device's own snapshot gives. The list to sign comes from the member list, the
   /// server's word, so a row it doesn't have here is marked.
   pub snapshot: Vec<(UserId, ChannelRole)>,
+  /// What this device can check of each listed person's key. Somebody not named here isn't checked
+  /// yet, and can't be confirmed.
+  #[serde(default)]
+  pub key_marks: Vec<(UserId, RoleKeyMark)>,
+}
+
+/// What a device can say about the key a confirmed role would name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RoleKeyMark {
+  /// As the signed roles have it, or checked against the encryption group or the roster.
+  Checked,
+  /// This device saw another key for the person than the signed roles name.
+  Changed,
+  /// This device can't check it: confirming is refused.
+  Uncheckable,
 }
 
 /// The verified signer of the entry that gave a channel member their role.
@@ -288,10 +301,6 @@ pub enum AppointerAuthority {
   WorkspaceOwner,
   WorkspaceAdmin,
   ChannelAdmin,
-}
-
-fn is_true() -> bool {
-  true
 }
 
 /// A source of the integration bridge that posts into a channel, announced in the app

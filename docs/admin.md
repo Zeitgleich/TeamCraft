@@ -119,12 +119,14 @@ could add itself to every channel.
   (admin = owner, moderator) are a signed log per channel (e2ee.md §4.6.1): each entry is signed by
   a workspace admin or owner of the fresh roster, or by a channel admin of the previous signed
   entry, under the same role rules the UI and the server use; a channel's creator signs the first
-  entry. Roles only the server lists (channels from before, space admins' changes, older clients)
-  are shown as not signed and count for nothing that needs a signed role; an admin who can sign
-  confirms them in the channel's members section. A device that can't verify a stretch of the log
-  says so there and counts nobody as a channel admin until a workspace admin signs again. Such an
-  admin signs the whole list of roles after looking at it, never one role on top of a snapshot this
-  device can't vouch for (e2ee.md §4.6.1, "Reading the log late"). Space roles are not signed yet.
+  entry, and a channel from before is founded by the first app the server lists as its admin
+  (e2ee.md §4.6.1, "Founding at first sight"). Nobody signs by hand: a role is signed when somebody
+  who may sign changes it. Roles only the server lists (space admins' changes, older clients) count
+  for what the server enforces and for nothing that needs a signed role; the person is told when
+  they try. A device that can't verify a stretch of the log counts nobody as a channel admin until a
+  workspace admin looked at the roles again, in the channel's members section, where only they see
+  it. They confirm the whole list, never one role on top of a snapshot this device can't vouch for
+  (e2ee.md §4.6.1, "Reading the log late"). Space roles are not signed yet.
 - Member clients only commit membership changes that are signed by someone allowed to make them
   (admin, space admin, channel owner, or a member with `manage_members`). Unsigned or wrongly signed
   proposals are rejected and reported.
@@ -264,11 +266,13 @@ admin in is an owner's own membership change.
   and over.
 - **Who decides.** The channel's owners: members with the channel role `admin`. The server decides
   who is asked, but an owner's app approves only if its own verified channel roles (e2ee.md §4.6.1)
-  make that owner an admin, and members take the add in only from a signed channel admin. An owner
-  the server alone lists sees the request with "Your owner role in this channel isn't signed" and
-  can only decline, until a signed admin or a workspace admin signs the role ("Sign role" in the
-  channel's members; an owner of a channel from before signed roles signs their own, which founds
-  the log). A channel nobody signed yet keeps the rule of before for members, so older apps in the
+  make that owner an admin, and members take the add in only from a signed channel admin. On a
+  channel from before signed roles the owner's app founds the log on the way. An owner the server
+  alone lists on a signed channel sees the request with why members wouldn't accept the admin and can
+  only decline, until a signed admin or a workspace admin sets their role again (for when nobody can,
+  §2.5). On a channel where this device took nothing but junk they approve all the same, unless it was
+  told of a real log by a member's head. A
+  channel nobody signed yet keeps the rule of before for members, so older apps in the
   group are not split off; what an approval can do is limited by the checks below. The server tells
   them (gateway `admin_join_request_update`) and their apps show the request at the top of
   Activity, in the channel settings above the member list and as a system notification, each with
@@ -383,7 +387,13 @@ message, would keep a real join quiet. So the line is derived where the join hap
 When the last owner of a private channel leaves the company, an admin assigns a new owner from the
 remaining members. The admin doesn't need to be a member for that. A workspace admin's signature is
 what makes the new owner count on members' apps (e2ee.md §4.6.1); the console's assignment doesn't
-sign it yet (a follow-up of issue #380), so until then the new owner's role shows as not signed.
+sign it yet (a follow-up of issue #380), so until then the new owner's role is the server's word. An
+admin who isn't in the channel's encryption group can't vouch for the key of somebody they can't check
+(e2ee.md §4.6.1, "Whose key a role names"): on a channel with a log, a workspace admin in the group
+signs it. Under `owner_approval`, with no workspace admin in the group and no owner whose role counts,
+nobody can let one in. The repair: a workspace owner temporarily sets `admin_self_join` to `visible`, a
+workspace admin joins, checks the roles in the channel's members and confirms them, and the owner sets
+the policy back. Everybody in the channel sees the join.
 
 **Decision (issue #877): workspace admins keep appointing channel admins.** There is no instance policy
 that limits them to channels without an admin: an orphaned channel needs exactly this, and a switch
