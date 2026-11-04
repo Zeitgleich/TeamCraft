@@ -25,6 +25,8 @@ use crate::workspace::{
 };
 
 pub(crate) const WORKSPACE_KEY: &str = "state";
+/// Pages of a workspace log read in one go; a longer log is read on in the next sync.
+const MAX_WORKSPACE_LOG_PAGES: usize = 1000;
 /// Where [`PendingChange::RevocationCheck`]s wait in the pending queue, before the device ID.
 pub(crate) const REVOCATION_CHECK_KEY_PREFIX: &str = "revocation_check/";
 
@@ -345,14 +347,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     );
     let mut entries = roster?;
     entries.extend(policy?);
+    let ended_before = state.admin_history.ended_count();
     if let Err(error) = state.apply_entries(entries) {
       tracing::error!(%error, "rejected workspace log entry");
     }
+    let has_an_admin_left = state.admin_history.ended_count() > ended_before;
     state.check_ahead();
     if let Some(alarm) = &state.maybe_alarm {
       tracing::error!(%alarm, "workspace log alarm");
     }
     records::put_json(&self.store, Table::Workspace, WORKSPACE_KEY, &state)?;
+    if has_an_admin_left {
+      self.queue_channel_role_reads()?;
+    }
     // Addresses the server showed under an earlier policy are not shown under this one.
     if !state.policy.directory.shows_email {
       self.drop_cached_emails()?;
@@ -363,19 +370,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Reads the whole roster log once for a state from before the admin history was recorded
   /// (e2ee.md §4.6.1, "Reading the log late"). Only when a channel's role log has new entries, which
   /// is rare, and then a few small documents. A log that doesn't end on the head this device
-  /// verified leaves the history incomplete, which fails closed.
+  /// verified leaves the history incomplete, which fails closed; it is read again only once there
+  /// is a newer roster.
   pub(crate) async fn complete_admin_history(&mut self) -> Result<(), CoreError> {
     let mut state = self.workspace()?;
-    if state.admin_history.is_complete || state.roster.version == 0 {
+    if state.admin_history.is_complete
+      || state.roster.version == 0
+      || state.admin_history.maybe_replayed_at == Some(state.roster.version)
+    {
       return Ok(());
     }
     let entries = self.fetch_log(&WorkspaceLogKind::Roster, 0, None).await?;
-    if state.rebuild_admin_history(entries) {
-      records::put_json(&self.store, Table::Workspace, WORKSPACE_KEY, &state)?;
-    } else {
+    if !state.rebuild_admin_history(entries) {
       tracing::warn!("the server's roster log doesn't end on the head this device verified");
     }
-    Ok(())
+    records::put_json(&self.store, Table::Workspace, WORKSPACE_KEY, &state)
   }
 
   /// Compares a member's workspace head (from a message) with this device's.
@@ -989,7 +998,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<Vec<WorkspaceLogEntryResponse>, CoreError> {
     let mut entries = Vec::new();
     let mut cursor = after;
-    loop {
+    for _ in 0..MAX_WORKSPACE_LOG_PAGES {
       let page = match maybe_first.take() {
         Some(first) => first?,
         None => {
@@ -1012,9 +1021,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let is_empty = page.entries.is_empty();
       entries.extend(page.entries);
       if !has_more || is_empty {
-        return Ok(entries);
+        break;
       }
     }
+    Ok(entries)
   }
 
   async fn append_log(

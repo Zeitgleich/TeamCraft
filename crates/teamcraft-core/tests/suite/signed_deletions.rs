@@ -381,7 +381,7 @@ mod false_claims {
   #[tokio::test]
   async fn a_channel_admin_appointed_by_a_departed_signer_purges_nothing_on_a_late_reader() {
     let server = FakeServer::new();
-    let (mut alice, mut eve, mut bob, mallory, channel) = late_reader_world(&server).await;
+    let (mut alice, mut eve, mut bob, mallory, channel, clock) = late_reader_world(&server).await;
     let mallory_id = mallory.client.user_id();
 
     assert_eq!(
@@ -392,6 +392,8 @@ mod false_claims {
         .unwrap(),
       RoleSigning::Signed
     );
+    // An hour on; the server's clock doesn't move with the test's.
+    clock.advance(60 * 60 * 1000);
     let alice_id = alice.client.user_id();
     alice
       .client
@@ -417,8 +419,10 @@ mod false_claims {
   #[tokio::test]
   async fn a_workspace_admin_still_purges_during_an_unverified_stretch() {
     let server = FakeServer::new();
-    let (mut alice, mut eve, mut bob, mallory, channel) = late_reader_world(&server).await;
+    let (mut alice, mut eve, mut bob, mallory, channel, clock) = late_reader_world(&server).await;
     let alice_id = alice.client.user_id();
+    // The owner's clock runs ahead of the server's: Eve's entry still passes as dated in her tenure.
+    clock.advance(60 * 60 * 1000);
     alice
       .client
       .publish_roster(&[(alice_id, RosterRole::Owner)])
@@ -709,7 +713,9 @@ mod deleting_a_space {
 
 /// Alice owns the workspace and Eve is an admin of it; Alice's channel holds Bob and Mallory, and
 /// everybody's clock agrees with the server's, which dates the role entries.
-async fn late_reader_world(server: &FakeServer) -> (Peer, Peer, Peer, Peer, ConversationId) {
+async fn late_reader_world(
+  server: &FakeServer,
+) -> (Peer, Peer, Peer, Peer, ConversationId, Arc<ManualClock>) {
   let clock = Arc::new(ManualClock::new(server.server_now_ms()));
   let enroll = async |name: &str| {
     Peer::enroll_on_clock(
@@ -737,7 +743,7 @@ async fn late_reader_world(server: &FakeServer) -> (Peer, Peer, Peer, Peer, Conv
       .is_workspace_anchored
   );
   eve.client.sync_channel_roles(channel).await.unwrap();
-  (alice, eve, bob, mallory, channel)
+  (alice, eve, bob, mallory, channel, clock)
 }
 
 async fn two(server: &FakeServer) -> (Peer, Peer) {

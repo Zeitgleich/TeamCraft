@@ -120,8 +120,9 @@ could add itself to every channel.
   entry. Roles only the server lists (channels from before, space admins' changes, older clients)
   are shown as not signed and count for nothing that needs a signed role; an admin who can sign
   confirms them in the channel's members section. A device that can't verify a stretch of the log
-  says so there and counts nobody as a channel admin until a workspace admin signs again (e2ee.md
-  §4.6.1, "Reading the log late"). Space roles are not signed yet.
+  says so there and counts nobody as a channel admin until a workspace admin signs again. Such an
+  admin signs the whole list of roles after looking at it, never one role on top of a snapshot this
+  device can't vouch for (e2ee.md §4.6.1, "Reading the log late"). Space roles are not signed yet.
 - Member clients only commit membership changes that are signed by someone allowed to make them
   (admin, space admin, channel owner, or a member with `manage_members`). Unsigned or wrongly signed
   proposals are rejected and reported.

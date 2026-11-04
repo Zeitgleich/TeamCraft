@@ -20,10 +20,25 @@ use crate::store::{LocalStore, Table};
 const CHANNEL_ROLES_KEY_PREFIX: &str = "channel_roles/";
 /// The channels where a member showed a newer head than this device's, in [`Table::Workspace`].
 const CHANNEL_ROLES_AHEAD_KEY: &str = "channel_roles_ahead";
+/// The channels whose role logs are read after an admin left the roster, in [`Table::Workspace`].
+const CHANNEL_ROLES_DUE_KEY: &str = "channel_roles_due";
+/// How many of those are read in one upkeep pass, so a removal is no burst.
+const ROLE_LOG_READS_PER_PASS: usize = 4;
 /// Pages of a role log read in one sync; a log longer than this is read on in the next one.
 const MAX_ROLE_LOG_PAGES: usize = 100;
-/// Claimed signers whose identity keys are pinned before a channel's first entries are verified.
+/// Claimed founders whose identity keys are pinned before a channel's first entries are verified.
 const MAX_FOUNDER_CANDIDATES: usize = 16;
+
+/// What a signature is to say.
+enum RolePlan<'a> {
+  /// This device's snapshot with some changes: only where it can vouch for the rest.
+  Changes {
+    changes: &'a [(UserId, ChannelRole)],
+    may_found: bool,
+  },
+  /// Exactly these roles, which a workspace admin looked at.
+  Reviewed(&'a [(UserId, ChannelRole)]),
+}
 
 /// What became of a role change on this device's side of the signature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,17 +99,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(error) => return Err(error),
     };
     if !entries.is_empty() {
-      // A workspace admin's entry is judged against the newest roster the server shows.
-      if let Err(error) = self.sync_workspace().await {
-        tracing::warn!(conversation_id = %conversation, %error, "verifying channel roles against the roster this device has");
-      }
-      // A failed read leaves the entries unread, to be judged with the history next time.
+      // Entries are judged against the newest roster the server shows, with its history. A failed
+      // read leaves them unread, to be judged next time: judged on an old roster they would be
+      // refused for good, and could end up as a stretch only a workspace admin can end.
+      self.sync_workspace().await?;
       self.complete_admin_history().await?;
       // A founder must hold the key this device pins for them; pin before verifying, or the
       // entry would be skipped for good.
-      let workspace = self.workspace()?;
-      let claimed = signers_to_pin(&state, &entries, workspace.admin_history.is_complete);
+      let claimed = founder_candidates(&state, &entries);
       let pinned = self.pin_identities(claimed).await?;
+      let workspace = self.workspace()?;
       let verifier = RoleVerifier {
         conversation,
         workspace: &workspace,
@@ -131,9 +145,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     changes: &[(UserId, ChannelRole)],
     may_found: bool,
   ) -> Result<RoleSigning, CoreError> {
+    let plan = RolePlan::Changes { changes, may_found };
+    self.sign_role_plan(conversation, &plan).await
+  }
+
+  /// Signs exactly `roles`, which a workspace admin looked at and confirmed: the way out of an
+  /// unverified stretch and off a snapshot resting on somebody who left, where this device won't
+  /// vouch for what it has (`ChannelRoleState::must_review_before_vouching`). `Unsigned` for anybody
+  /// who isn't an admin of the fresh roster.
+  pub async fn sign_reviewed_channel_roles(
+    &mut self,
+    conversation: ConversationId,
+    roles: &[(UserId, ChannelRole)],
+  ) -> Result<RoleSigning, CoreError> {
+    self
+      .sign_role_plan(conversation, &RolePlan::Reviewed(roles))
+      .await
+  }
+
+  async fn sign_role_plan(
+    &mut self,
+    conversation: ConversationId,
+    plan: &RolePlan<'_>,
+  ) -> Result<RoleSigning, CoreError> {
     for attempt in 0..2 {
       self.sync_channel_roles(conversation).await?;
-      let Some(request) = self.role_entry(conversation, changes, may_found).await? else {
+      let maybe_request = match *plan {
+        RolePlan::Changes { changes, may_found } => self.role_entry(conversation, changes, may_found).await?,
+        RolePlan::Reviewed(roles) => self.reviewed_role_entry(conversation, roles).await?,
+      };
+      let Some(request) = maybe_request else {
         return Ok(RoleSigning::Unsigned);
       };
       match self.api.append_channel_role_log(conversation, &request).await {
@@ -223,6 +264,40 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
+  /// After an admin left the roster: reads each channel's role log this device knows, a few per
+  /// upkeep pass, so entries the server shows later can't pass for ones from before the removal
+  /// (e2ee.md §4.6.1, "Reading the log late"). A local read while nothing is due, which is nearly
+  /// always; a failure stays due for the next pass.
+  pub async fn read_due_channel_roles(&mut self) -> Result<(), CoreError> {
+    let mut due: BTreeSet<ConversationId> =
+      records::get_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY)?.unwrap_or_default();
+    if due.is_empty() {
+      return Ok(());
+    }
+    let batch: Vec<ConversationId> = due.iter().copied().take(ROLE_LOG_READS_PER_PASS).collect();
+    for conversation in batch {
+      let result = self.sync_channel_roles(conversation).await;
+      if result.is_ok() {
+        due.remove(&conversation);
+      }
+      records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY, &due)?;
+      result?;
+    }
+    Ok(())
+  }
+
+  /// Marks every channel this device has role state for as due. Runs when a verified roster ends an
+  /// admin's tenure, which is rare.
+  pub(crate) fn queue_channel_role_reads(&self) -> Result<(), CoreError> {
+    let due: BTreeSet<ConversationId> = self
+      .store
+      .list_prefix(Table::Workspace, CHANNEL_ROLES_KEY_PREFIX)?
+      .into_iter()
+      .filter_map(|(key, _)| key.strip_prefix(CHANNEL_ROLES_KEY_PREFIX)?.parse().ok())
+      .collect();
+    records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY, &due)
+  }
+
   fn channel_roles_ahead(&self) -> Result<BTreeSet<ConversationId>, CoreError> {
     Ok(records::get_json(&self.store, Table::Workspace, CHANNEL_ROLES_AHEAD_KEY)?.unwrap_or_default())
   }
@@ -244,6 +319,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let state = self.channel_role_state(conversation)?;
     let workspace = self.workspace()?;
     let authorities = state.signing_authorities(me, &workspace, self.now_ms(), self.roster_max_age_ms());
+    // Every member takes this user's signature as a workspace admin's, whatever authority it is
+    // signed on, and it would vouch for the whole snapshot. Nobody asked for that here, and a device
+    // that nobody is looking at (an import) has nobody to ask: it stays unsigned.
+    if state.must_review_before_vouching() && authorities.iter().any(is_workspace_authority) {
+      tracing::info!(conversation_id = %conversation, "not vouching for roles nobody reviewed");
+      return Ok(None);
+    }
     let mut maybe_refusal = None;
     for authority in authorities {
       if authority == SignerAuthority::Founder && !may_found {
@@ -264,6 +346,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::info!(conversation_id = %conversation, %error, "not signing a role change members would refuse");
     }
     Ok(None)
+  }
+
+  /// The signed request for exactly `roles`, or `None` when this user isn't an admin of the fresh
+  /// roster: only such a signature is a checkpoint.
+  async fn reviewed_role_entry(
+    &mut self,
+    conversation: ConversationId,
+    roles: &[(UserId, ChannelRole)],
+  ) -> Result<Option<AppendChannelRoleLogRequest>, CoreError> {
+    let me = self.account.user_id;
+    let state = self.channel_role_state(conversation)?;
+    let workspace = self.workspace()?;
+    let maybe_authority = state
+      .signing_authorities(me, &workspace, self.now_ms(), self.roster_max_age_ms())
+      .into_iter()
+      .find(is_workspace_authority);
+    let Some(authority) = maybe_authority else {
+      return Ok(None);
+    };
+    let keys = self.identity_keys(roles.iter().map(|(user, _)| *user)).await?;
+    let document = state.reviewed_document(conversation, roles, &keys, self.now_ms())?;
+    state.check_document(&document, conversation, me, authority)?;
+    Ok(Some(self.signed_role_entry(&document)?))
   }
 
   fn signed_role_entry(
@@ -350,16 +455,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
-/// Who the new entries claim signed them (unverified), where their keys are needed before the
-/// entries are verified: while nothing is accepted yet one of them may be the founder, and without
-/// the roster's history one of them may be an admin who left. Bounded, so a server can't make this
-/// device look up everybody.
-fn signers_to_pin(
-  state: &ChannelRoleState,
-  entries: &[ChannelRoleLogEntryResponse],
-  is_history_complete: bool,
-) -> BTreeSet<UserId> {
-  if state.is_signed() && is_history_complete {
+/// While nothing is accepted yet, who the new entries claim signed them (unverified): one of them
+/// may be the founder, whose key must be pinned before the entry is verified. Bounded, so a server
+/// can't make this device look up everybody.
+fn founder_candidates(state: &ChannelRoleState, entries: &[ChannelRoleLogEntryResponse]) -> BTreeSet<UserId> {
+  if state.is_signed() {
     return BTreeSet::new();
   }
   entries
@@ -368,6 +468,10 @@ fn signers_to_pin(
     .filter_map(|user| crate::convert::user_from_crypto(user).ok())
     .take(MAX_FOUNDER_CANDIDATES)
     .collect()
+}
+
+fn is_workspace_authority(authority: &SignerAuthority) -> bool {
+  matches!(authority, SignerAuthority::Workspace { .. })
 }
 
 pub(crate) fn channel_roles_key(conversation: ConversationId) -> String {

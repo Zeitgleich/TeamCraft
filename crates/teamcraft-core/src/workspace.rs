@@ -131,6 +131,10 @@ pub struct AdminHistory {
   pub is_complete: bool,
   #[serde(default)]
   pub tenures: Vec<AdminTenure>,
+  /// The roster version of the last replay that stayed incomplete: the next one waits for a newer
+  /// roster, so a server's short log or a history past the bound isn't read again and again.
+  #[serde(rename = "replayed_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_replayed_at: Option<u64>,
 }
 
 /// One stretch of one identity key on the roster: a new key, or coming back, is a new tenure.
@@ -251,6 +255,15 @@ impl RosterDocument {
 }
 
 impl AdminHistory {
+  /// How many tenures have ended: when it grows, an admin left.
+  pub fn ended_count(&self) -> usize {
+    self
+      .tenures
+      .iter()
+      .filter(|tenure| tenure.maybe_until.is_some())
+      .count()
+  }
+
   /// Tenures of `user` that have ended, in the order they began.
   pub fn ended_tenures_of(&self, user: UserId) -> impl Iterator<Item = &AdminTenure> + '_ {
     self
@@ -426,6 +439,7 @@ impl WorkspaceState {
     if is_same_log {
       self.admin_history = replay.admin_history;
     }
+    self.admin_history.maybe_replayed_at = Some(up_to);
     is_same_log
   }
 
@@ -1123,7 +1137,8 @@ mod tests {
       older.admin_history = AdminHistory::default();
 
       assert!(older.rebuild_admin_history(entries));
-      assert_eq!(older.admin_history, complete.admin_history);
+      assert!(older.admin_history.is_complete);
+      assert_eq!(older.admin_history.tenures, complete.admin_history.tenures);
     }
 
     #[test]
@@ -1140,7 +1155,13 @@ mod tests {
       let stranger = Owner::new(4);
       let (_, forged) = three_versions(&stranger, &bob);
       assert!(!state.rebuild_admin_history(forged));
-      assert_eq!(state.admin_history, AdminHistory::default());
+      assert!(!state.admin_history.is_complete);
+      assert!(state.admin_history.tenures.is_empty());
+      assert_eq!(
+        state.admin_history.maybe_replayed_at,
+        Some(3),
+        "not asked again at this roster"
+      );
     }
 
     #[test]

@@ -382,10 +382,38 @@ impl<S: LocalStore> CoreChatBackend<S> {
     );
     let max_age_ms =
       i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
-    signed
-      .signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms)
+    let authorities = signed.signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms);
+    // A workspace admin signs nothing here but a list they reviewed (`ui_must_review_channel_roles`).
+    if signed.must_review_before_vouching() && authorities.iter().any(is_workspace_authority) {
+      return false;
+    }
+    authorities
       .into_iter()
       .any(|authority| authority != crate::channel_roles::SignerAuthority::Founder || is_listed_admin)
+  }
+
+  /// Whether this user is a workspace admin whose signature here would vouch for a snapshot this
+  /// device can't vouch for: they sign only the list they look at (e2ee.md §4.6.1).
+  pub(crate) fn ui_must_review_channel_roles(&self, conversation: ConversationId) -> bool {
+    let workspace: crate::workspace::WorkspaceState = self.read(
+      records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
+        .map(Option::unwrap_or_default),
+    );
+    let signed: crate::channel_roles::ChannelRoleState = self.read(
+      records::get_json(
+        self.store_ref(),
+        Table::Workspace,
+        &crate::client::channel_roles_key(conversation),
+      )
+      .map(Option::unwrap_or_default),
+    );
+    let max_age_ms =
+      i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
+    signed.must_review_before_vouching()
+      && signed
+        .signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms)
+        .iter()
+        .any(is_workspace_authority)
   }
 
   fn source_authority(&self) -> Option<SourceAuthority> {
@@ -759,4 +787,8 @@ fn workspace_event(event: &ConversationEvent, stored: &StoredMessage) -> Option<
     | ConversationEvent::CallMoved { .. }
     | ConversationEvent::Unknown => return None,
   })
+}
+
+fn is_workspace_authority(authority: &crate::channel_roles::SignerAuthority) -> bool {
+  matches!(authority, crate::channel_roles::SignerAuthority::Workspace { .. })
 }

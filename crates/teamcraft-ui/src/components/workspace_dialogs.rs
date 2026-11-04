@@ -632,6 +632,10 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     roles.track();
     state.read(|backend| backend.are_channel_roles_unverified(conversation))
   });
+  let must_review_roles = Memo::new(move |_| {
+    roles.track();
+    state.read(|backend| backend.must_review_channel_roles(conversation))
+  });
   view! {
     <div class="settings-row">
       <span class="muted-text">{move || i18n.t_count("members-count", members.with(Vec::len))}</span>
@@ -647,12 +651,94 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     <Show when=move || are_roles_unverified.get() fallback=|| ()>
       <p class="hint">{move || i18n.t("channel-roles-unverified")}</p>
     </Show>
+    <Show when=move || must_review_roles.get() fallback=|| ()>
+      <ChannelRolesReview conversation=conversation roles=roles users=members />
+    </Show>
     <ChannelJoinRequests conversation=conversation />
     <ul class="settings-member-list">
       <For each=move || members.get() key=|user| user.id let:user>
         <ChannelMemberRow conversation=conversation user=user roles=roles access=access space_roster=space_roster admin_count=admin_count can_sign_roles=can_sign_roles />
       </For>
     </ul>
+  }
+}
+
+/// A workspace admin's way to sign a channel's roles where this device can't vouch for them: their
+/// signature counts for every role it lists on every member's device, so they sign the whole list
+/// as they see it, never one role on top of a snapshot they didn't see (e2ee.md §4.6.1).
+#[component]
+fn ChannelRolesReview(
+  conversation: ConversationId,
+  roles: Memo<Vec<ChannelMember>>,
+  users: Memo<Vec<User>>,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let is_reviewing = RwSignal::new(false);
+  let signing = PendingAction::new();
+  let listed = Memo::new(move |_| {
+    roles.with(|list| {
+      list
+        .iter()
+        .filter(|member| member.role != ChannelRole::Member)
+        .cloned()
+        .collect::<Vec<_>>()
+    })
+  });
+  let has_admin =
+    Memo::new(move |_| listed.with(|list| list.iter().any(|member| member.role == ChannelRole::Admin)));
+  let name_of = move |id: UserId| {
+    users
+      .with(|list| {
+        list
+          .iter()
+          .find(|user| user.id == id)
+          .map(|user| user.display_name.clone())
+      })
+      .unwrap_or_default()
+  };
+  view! {
+    <p class="hint">{move || i18n.t("channel-roles-review-hint")}</p>
+    <Show
+      when=move || is_reviewing.get()
+      fallback=move || view! {
+        <div class="settings-row">
+          <button type="button" class="btn btn-small" on:click=move |_| is_reviewing.set(true)>
+            {move || i18n.t("channel-roles-review-action")}
+          </button>
+        </div>
+      }
+    >
+      <ul class="settings-member-list">
+        <For each=move || listed.get() key=|member| (member.user, channel_role_value(&member.role)) let:member>
+          <li class="settings-member">
+            <bdi class="member-name" translate="no">{name_of(member.user)}</bdi>
+            <span class="grow"></span>
+            <span class="badge">{move || i18n.t(channel_role_key(&member.role))}</span>
+          </li>
+        </For>
+      </ul>
+      <Show when=move || !has_admin.get() fallback=|| ()>
+        <p role="alert" class="hint">{move || i18n.t("channel-roles-review-no-admin")}</p>
+      </Show>
+      <div class="settings-row">
+        <PendingButton
+          class="btn btn-small btn-primary"
+          pending=signing
+          is_disabled=Signal::derive(move || !has_admin.get())
+          on_click=move |_| {
+            let reviewed: Vec<_> = listed.with(|list| {
+              list.iter().map(|member| (member.user, member.role.clone())).collect()
+            });
+            signing.run(move || state.write(|backend| backend.sign_reviewed_channel_roles(conversation, reviewed)));
+          }
+        >
+          {move || i18n.t("channel-roles-review-confirm")}
+        </PendingButton>
+        <button type="button" class="btn btn-small" on:click=move |_| is_reviewing.set(false)>{move || i18n.t("cancel")}</button>
+      </div>
+      <FailureNote pending=signing />
+    </Show>
   }
 }
 

@@ -1050,6 +1050,10 @@ pub enum ChatAction {
     conversation: ConversationId,
     user: UserId,
   },
+  SignReviewedChannelRoles {
+    conversation: ConversationId,
+    roles: Vec<(UserId, crate::model::ChannelRole)>,
+  },
   RefreshChannelRoles {
     conversation: ConversationId,
   },
@@ -1386,6 +1390,9 @@ impl ChatAction {
         role,
       } => backend.set_channel_role(conversation, user, role),
       Self::ConfirmChannelRole { conversation, user } => backend.confirm_channel_role(conversation, user),
+      Self::SignReviewedChannelRoles { conversation, roles } => {
+        backend.sign_reviewed_channel_roles(conversation, roles);
+      },
       Self::RefreshChannelRoles { conversation } => backend.refresh_channel_roles(conversation),
       Self::RemoveSpaceMember { space, user } => backend.remove_space_member(space, user),
       Self::RevokeSpaceInvite { space, invite } => backend.revoke_space_invite(space, invite),
@@ -1513,6 +1520,9 @@ pub enum ChatQuery {
     conversation: ConversationId,
   },
   AreChannelRolesUnverified {
+    conversation: ConversationId,
+  },
+  MustReviewChannelRoles {
     conversation: ConversationId,
   },
   SpaceInvites {
@@ -1679,6 +1689,10 @@ pub enum ChatAnswer {
   AreChannelRolesUnverified {
     #[serde(default)]
     is_unverified: bool,
+  },
+  MustReviewChannelRoles {
+    #[serde(default)]
+    must_review: bool,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -1886,6 +1900,9 @@ impl ChatQuery {
       },
       Self::AreChannelRolesUnverified { conversation } => ChatAnswer::AreChannelRolesUnverified {
         is_unverified: backend.are_channel_roles_unverified(conversation),
+      },
+      Self::MustReviewChannelRoles { conversation } => ChatAnswer::MustReviewChannelRoles {
+        must_review: backend.must_review_channel_roles(conversation),
       },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
         roster: backend.space_members(space),

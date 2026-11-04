@@ -387,6 +387,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           )),
         }
       },
+      CoreCommand::SignReviewedChannelRoles { conversation, roles } => {
+        match self.sign_reviewed_channel_roles(conversation, &roles).await? {
+          super::RoleSigning::Signed => Ok(()),
+          super::RoleSigning::Unsigned => Err(CoreError::InvalidRequest(
+            "these roles can't be signed in a way the channel's members accept".into(),
+          )),
+        }
+      },
       CoreCommand::RefreshMembers { conversation } => self.refresh_members(conversation).await,
       CoreCommand::RefreshChannelRoles { conversation } => {
         self.refresh_members(conversation).await?;

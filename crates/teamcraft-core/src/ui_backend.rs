@@ -418,6 +418,11 @@ pub enum CoreCommand {
     conversation: ConversationId,
     user: UserId,
   },
+  /// Signs exactly the roles a workspace admin looked at (e2ee.md §4.6.1).
+  SignReviewedChannelRoles {
+    conversation: ConversationId,
+    roles: Vec<(UserId, teamcraft_proto::ChannelRole)>,
+  },
   /// A conversation's members, for a member list that has none yet.
   RefreshMembers {
     conversation: ConversationId,
@@ -2868,6 +2873,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn can_sign_channel_roles(&self, conversation: ConversationId) -> bool {
     self.ui_can_sign_channel_roles(conversation)
+  }
+
+  fn must_review_channel_roles(&self, conversation: ConversationId) -> bool {
+    self.ui_must_review_channel_roles(conversation)
+  }
+
+  fn sign_reviewed_channel_roles(
+    &self,
+    conversation: ConversationId,
+    roles: Vec<(UserId, teamcraft_proto::ChannelRole)>,
+  ) {
+    self.command(CoreCommand::SignReviewedChannelRoles { conversation, roles });
   }
 
   fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {

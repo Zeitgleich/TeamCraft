@@ -839,6 +839,18 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.can_sign_channel_roles(conversation)
   }
 
+  fn must_review_channel_roles(&self, conversation: ConversationId) -> bool {
+    self.chat.must_review_channel_roles(conversation)
+  }
+
+  fn sign_reviewed_channel_roles(
+    &self,
+    conversation: ConversationId,
+    roles: Vec<(UserId, teamcraft_client_api::model::ChannelRole)>,
+  ) {
+    self.chat.sign_reviewed_channel_roles(conversation, roles);
+  }
+
   fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {
     self.chat.are_channel_roles_unverified(conversation)
   }

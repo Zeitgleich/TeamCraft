@@ -49,6 +49,13 @@ use crate::workspace::{AdminTenure, RosterRole, WorkspaceState};
 
 /// Length of an entry hash and of the zero hash a first entry names.
 const HASH_BYTES: usize = 32;
+/// What a snapshot a workspace admin reviewed names as its previous entry: no hash of anything, so
+/// on every device it is a checkpoint, which vouches for each role it lists and doesn't build on
+/// whatever a device had (e2ee.md §4.6.1, "Reading the log late").
+const REVIEWED_PREV_HASH: [u8; HASH_BYTES] = [0xff; HASH_BYTES];
+/// Hashes of refused entries a device remembers, to tell an entry built on one (it missed
+/// something) from one built on a head nobody was shown (a fork or junk).
+const MAX_SKIPPED_HASHES: usize = 64;
 
 /// What this device verified of one channel's role log.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,7 +92,8 @@ pub struct ChannelRoleState {
   pub appointments: Vec<RoleAppointment>,
   /// The roster version this device held when it last read the log to its end. An entry the log
   /// shows only now can't have been signed on an older roster than that, unless the server held it
-  /// back. `None`: not recorded yet, which bounds nothing.
+  /// back. 0 for a device that had read nothing, which bounds nothing. `None`: a state from before
+  /// this was recorded, whose last read nobody knows, so an entry by somebody who left isn't placed.
   #[serde(
     rename = "read_at_roster_version",
     default,
@@ -96,6 +104,13 @@ pub struct ChannelRoleState {
   /// checkpoint ends it. See [`Self::has_unverified_stretch`].
   #[serde(rename = "unverified_from", default, skip_serializing_if = "Option::is_none")]
   pub maybe_unverified_from: Option<u64>,
+  /// Whether the snapshot rests on an entry by somebody who has left the roster, taken on their and
+  /// the server's dates. See [`Self::must_review_before_vouching`].
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_former_admin_entry: bool,
+  /// Hashes of entries about this channel this device refused, newest last.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub skipped_hashes: Vec<Base64Bytes>,
 }
 
 /// The accepted head of a channel's role log; sent along inside the channel's encrypted messages.
@@ -190,8 +205,8 @@ pub enum ChannelRoleError {
 enum FormerAdmin {
   /// Not the signature of anybody whose tenure ended.
   NotOne,
-  /// The server dates it outside their tenure: an entry made since, with no standing whatever it
-  /// claims. Nothing to act on, or a demoted admin could trouble every device with one.
+  /// The server dates it outside their tenure, or the roster that ended it has no date: no standing
+  /// whatever it claims. Nothing to act on, or a demoted admin could trouble every device with one.
   OutsideTenure,
   /// It holds: the entry counts for roles.
   Within { signer: UserId, is_owner: bool },
@@ -217,6 +232,15 @@ impl ChannelRoleState {
   /// admin's checkpoint ends it (e2ee.md §4.6.1, "Reading the log late").
   pub fn has_unverified_stretch(&self) -> bool {
     self.maybe_unverified_from.is_some()
+  }
+
+  /// Whether a workspace admin's signature on this device's snapshot would say more than this device
+  /// knows. Every member takes a workspace admin's entry as vouching for each role it lists, and it
+  /// anchors them; so during a stretch, or on a snapshot that rests on somebody who left, such an
+  /// admin signs only a list they looked at ([`Self::reviewed_document`]), never this snapshot with
+  /// one change, or the signature would launder what it never saw into an anchor.
+  pub fn must_review_before_vouching(&self) -> bool {
+    self.has_unverified_stretch() || self.has_former_admin_entry
   }
 
   /// What the accepted snapshot says of `user`, whether or not this device can vouch for it today.
@@ -288,6 +312,9 @@ impl ChannelRoleState {
     verifier: &RoleVerifier<'_, D>,
   ) -> Vec<ChannelRoleError> {
     entries.sort_by_key(|entry| entry.version);
+    if self.maybe_read_at_roster_version.is_none() && self.version == 0 {
+      self.maybe_read_at_roster_version = Some(0);
+    }
     let mut skipped = Vec::new();
     for entry in entries {
       if entry.version <= self.cursor {
@@ -302,8 +329,8 @@ impl ChannelRoleState {
     skipped
   }
 
-  /// Before a read: a state from before reads were recorded may have skipped entries it would take
-  /// or mark now, so it looks at them once more. Nothing older than its head counts again.
+  /// Before a read: a state from before reads were recorded may have skipped entries it would mark
+  /// now, so it looks at them once more. Nothing older than its head counts again.
   pub fn prepare_read(&mut self) {
     if self.maybe_read_at_roster_version.is_none() {
       self.cursor = self.cursor.min(self.version);
@@ -409,6 +436,41 @@ impl ChannelRoleState {
     })
   }
 
+  /// The document for a list of roles a workspace admin reviewed: exactly `roles` (`Member` names
+  /// nobody), with a [checkpoint's](REVIEWED_PREV_HASH) place on every device.
+  pub fn reviewed_document(
+    &self,
+    conversation: ConversationId,
+    roles: &[(UserId, ChannelRole)],
+    keys: &BTreeMap<UserId, [u8; 32]>,
+    signed_at_ms: i64,
+  ) -> Result<ChannelRolesDocument, ChannelRoleError> {
+    let version = self.cursor + 1;
+    let mut assignments = Vec::new();
+    for (user, role) in roles {
+      if *role == ChannelRole::Member {
+        continue;
+      }
+      let key = keys.get(user).ok_or(ChannelRoleError::Snapshot {
+        version,
+        reason: "no identity key for a person given a role",
+      })?;
+      assignments.push(ChannelRoleAssignment {
+        user_id: *user,
+        role: role.clone(),
+        identity_key: Base64Bytes::new(key.to_vec()),
+      });
+    }
+    assignments.sort_by_key(|assignment| assignment.user_id);
+    Ok(ChannelRolesDocument {
+      version,
+      conversation_id: conversation,
+      assignments,
+      prev_hash: Base64Bytes::new(REVIEWED_PREV_HASH.to_vec()),
+      signed_at_ms,
+    })
+  }
+
   /// The checks every member makes on a document built on this device's head, before the
   /// signature: what [`Self::apply_entries`] would refuse is never signed.
   pub fn check_document(
@@ -501,11 +563,6 @@ impl ChannelRoleState {
         break;
       }
     }
-    if outcome.is_err() && self.shows_a_gap(entry, &document, &signers, &former, verifier) {
-      self.maybe_unverified_from.get_or_insert(version);
-      self.is_workspace_anchored = false;
-    }
-    outcome?;
     let hash = log_entry_hash(
       WorkspaceLog::ChannelRoles,
       version,
@@ -516,6 +573,16 @@ impl ChannelRoleState {
       version,
       reason: error.to_string(),
     })?;
+    if outcome.is_err() {
+      if self.shows_a_gap(entry, &document, &signers, &former, verifier) {
+        self.maybe_unverified_from.get_or_insert(version);
+        self.is_workspace_anchored = false;
+      }
+      if document.conversation_id == verifier.conversation {
+        self.remember_skipped(&hash);
+      }
+    }
+    outcome?;
     let maybe_appointer = match (maybe_signer, maybe_workspace_signer) {
       (Some((_, SignerAuthority::Founder)), Some(workspace)) => Some(workspace),
       (accepted, _) => accepted,
@@ -544,6 +611,9 @@ impl ChannelRoleState {
     // Only a checkpoint this device could anchor on says what holds today.
     if is_by_workspace_admin {
       self.maybe_unverified_from = None;
+      self.has_former_admin_entry = false;
+    } else if matches!(maybe_authority, Some(SignerAuthority::FormerWorkspace { .. })) {
+      self.has_former_admin_entry = true;
     }
     self.appointments =
       self.next_appointments(&previous, &previous_assignments, maybe_appointer, is_checkpoint);
@@ -656,9 +726,11 @@ impl ChannelRoleState {
 
   /// Whether the entry's signer left the roster, and what that comes to. Neither date proves
   /// anything alone: the signer sets one and the server the other. So an entry counts only if both
-  /// fall inside the tenure, and the server's date can only take that away. What the roster's
-  /// versions add needs no clock: an entry this device didn't see when it read the log holding
-  /// roster R isn't older than R, so a tenure over by then doesn't cover it.
+  /// fall inside the tenure, and the server's date can only take that away. It gets no leeway at
+  /// the end of a tenure: every device judges by the same signed end, so an entry after it is junk
+  /// on all of them alike. What the roster's versions add needs no clock: an entry this device
+  /// didn't see when it read the log holding roster R isn't older than R, so a tenure over by then
+  /// doesn't cover it.
   fn judge_former_admin<D: IdentityDirectory>(
     &self,
     entry: &ChannelRoleLogEntryResponse,
@@ -672,20 +744,24 @@ impl ChannelRoleState {
       return FormerAdmin::NotOne;
     };
     let may_place = !self.has_unverified_stretch() && document.prev_hash == self.head_or_zero();
-    let read_at = self.maybe_read_at_roster_version.unwrap_or(0);
     let skew = verifier.tenure_clock_skew_ms;
     let mut verdict = FormerAdmin::NotOne;
     for tenure in verifier.workspace.admin_history.ended_tenures_of(signer) {
       if !is_signed_with(entry, signer, tenure) {
         continue;
       }
-      if !dates_inside(tenure, entry.created_at.0, skew) {
+      if !may_be_appended_at(tenure, entry.created_at.0, skew) {
         if matches!(verdict, FormerAdmin::NotOne) {
           verdict = FormerAdmin::OutsideTenure;
         }
         continue;
       }
-      if may_place && dates_inside(tenure, document.signed_at_ms, skew) && outlasts(tenure, read_at) {
+      if may_place
+        && may_be_signed_at(tenure, document.signed_at_ms, skew)
+        && self
+          .maybe_read_at_roster_version
+          .is_some_and(|read_at| outlasts(tenure, read_at))
+      {
         return FormerAdmin::Within {
           signer,
           is_owner: tenure.is_owner,
@@ -698,8 +774,9 @@ impl ChannelRoleState {
 
   /// Whether a refused entry shows this device missed part of the log: it comes from somebody
   /// entitled to sign, about this channel, in a valid shape. A member, a stranger or junk never
-  /// counts, or anybody could take away a channel's anchor; a server can, with a real signature,
-  /// and that costs a purge its speed, no more than withholding does.
+  /// counts, or anybody could take away a channel's anchor. Neither does a fork: a channel admin on
+  /// a head nobody showed this device. What can still start one is listed in e2ee.md §4.6.1,
+  /// "Reading the log late".
   fn shows_a_gap<D: IdentityDirectory>(
     &self,
     entry: &ChannelRoleLogEntryResponse,
@@ -713,8 +790,8 @@ impl ChannelRoleState {
     {
       return false;
     }
-    // A channel admin of this snapshot built on a head this device doesn't have.
-    let is_on_another_head = document.prev_hash != self.head_or_zero()
+    // A channel admin of this snapshot built on an entry this device refused.
+    let is_on_a_refused_entry = self.skipped_hashes.contains(&document.prev_hash)
       && signers
         .iter()
         .any(|(_, authority)| *authority == SignerAuthority::ChannelAdmin);
@@ -732,7 +809,7 @@ impl ChannelRoleState {
       && verifier.workspace.roster.version > 0
       && is_signature_valid(entry, verifier.pinned);
     matches!(former, FormerAdmin::Unplaceable)
-      || is_on_another_head
+      || is_on_a_refused_entry
       || is_on_a_stale_roster
       || is_unknown_past
   }
@@ -803,6 +880,13 @@ impl ChannelRoleState {
     Ok(())
   }
 
+  fn remember_skipped(&mut self, hash: &[u8; HASH_BYTES]) {
+    self.skipped_hashes.push(Base64Bytes::new(hash.to_vec()));
+    if self.skipped_hashes.len() > MAX_SKIPPED_HASHES {
+      self.skipped_hashes.remove(0);
+    }
+  }
+
   /// The admins of the accepted snapshot this device vouches for: none during an unverified
   /// stretch.
   fn admin_assignments(&self) -> impl Iterator<Item = &ChannelRoleAssignment> + '_ {
@@ -865,28 +949,36 @@ fn is_signature_valid(entry: &ChannelRoleLogEntryResponse, directory: &impl Iden
   .is_ok()
 }
 
-/// Whether a date lies inside the tenure, by the signing times of the rosters that began and ended
-/// it. A roster without a signing time bounds nothing at the start, and at the end it dates nothing
-/// inside: [`outlasts`] can't hold for a tenure whose end can't be dated.
-fn dates_inside(tenure: &AdminTenure, at_ms: i64, skew_ms: i64) -> bool {
-  let is_after_start = tenure
-    .maybe_from_ms
-    .is_none_or(|from| at_ms >= from.saturating_sub(skew_ms));
-  let is_before_end = tenure
-    .maybe_until
-    .as_ref()
-    .and_then(|until| until.maybe_at_ms)
-    .is_none_or(|until| at_ms <= until.saturating_add(skew_ms));
-  is_after_start && is_before_end
+/// Whether the signer may have dated the entry so: inside the tenure, by the signing times of the
+/// rosters that began and ended it, with leeway for their clocks. A roster without a signing time
+/// bounds nothing at the start, and at the end it dates nothing inside: it proves no tenure over.
+fn may_be_signed_at(tenure: &AdminTenure, at_ms: i64, skew_ms: i64) -> bool {
+  is_after_start(tenure, at_ms, skew_ms)
+    && tenure_end_ms(tenure).is_some_and(|until| at_ms <= until.saturating_add(skew_ms))
 }
 
-/// Whether the signer was still on the roster this device held when it last read the log, or later,
-/// and the roster that ended the tenure says when.
+/// Whether the server may have dated the entry so: like [`may_be_signed_at`], without leeway at the
+/// end. A demoted admin's entry after the roster that removed them is junk on every device alike.
+fn may_be_appended_at(tenure: &AdminTenure, at_ms: i64, skew_ms: i64) -> bool {
+  is_after_start(tenure, at_ms, skew_ms) && tenure_end_ms(tenure).is_some_and(|until| at_ms <= until)
+}
+
+fn is_after_start(tenure: &AdminTenure, at_ms: i64, skew_ms: i64) -> bool {
+  tenure
+    .maybe_from_ms
+    .is_none_or(|from| at_ms >= from.saturating_sub(skew_ms))
+}
+
+fn tenure_end_ms(tenure: &AdminTenure) -> Option<i64> {
+  tenure.maybe_until.as_ref()?.maybe_at_ms
+}
+
+/// Whether the signer was still on the roster this device held when it last read the log, or later.
 fn outlasts(tenure: &AdminTenure, read_at_roster_version: u64) -> bool {
   tenure
     .maybe_until
     .as_ref()
-    .is_some_and(|until| until.maybe_at_ms.is_some() && until.version > read_at_roster_version)
+    .is_some_and(|until| until.version > read_at_roster_version)
 }
 
 /// A snapshot names everybody once, with a known role above member and a usable key, and keeps
@@ -1795,34 +1887,161 @@ mod tests {
       );
     }
 
+    /// What a workspace admin's signature would launder (e2ee.md §4.6.1, "Reading the log late").
+    mod vouching {
+      use super::*;
+
+      /// Variant A: Mallory and a hostile server date an entry back, appointing Zed. The workspace
+      /// admin's device takes it on first read without a word. Her ordinary signature would make Zed
+      /// an anchored admin on every device, so it must not be offered.
+      #[test]
+      fn a_snapshot_resting_on_somebody_who_left_must_be_reviewed() {
+        let story = Story::new();
+        let mut world = story.world();
+        let mut device = story.first_read(&world);
+        story.eve_leaves(&mut world);
+        let entry = story.eve.entry(
+          &device,
+          &[
+            (&story.frank, ChannelRole::Admin),
+            (&story.bob, ChannelRole::Admin),
+          ],
+        );
+        assert!(world.apply(&mut device, entry).is_empty());
+        assert!(device.must_review_before_vouching());
+        // A channel admin carrying on doesn't end it.
+        let next = story.bob.entry(
+          &device,
+          &[
+            (&story.frank, ChannelRole::Admin),
+            (&story.bob, ChannelRole::Admin),
+          ],
+        );
+        assert!(world.apply(&mut device, next).is_empty());
+        assert!(device.must_review_before_vouching());
+        // A workspace admin's entry does: the reader then rests on that.
+        let reviewed = story.frank.signed(
+          device
+            .reviewed_document(
+              conversation(CHANNEL),
+              &[(story.frank.user_id, ChannelRole::Admin)],
+              &BTreeMap::from([(story.frank.user_id, key_bytes(&story.frank))]),
+              NOW_MS,
+            )
+            .unwrap(),
+        );
+        assert!(
+          world
+            .apply(&mut device, at_server_time(reviewed, world.now_ms))
+            .is_empty()
+        );
+        assert!(!device.must_review_before_vouching());
+        assert!(device.is_workspace_anchored);
+        assert_eq!(device.admins(), vec![story.frank.user_id]);
+      }
+
+      /// Variant B, honest: the device is in a stretch and its snapshot names Alice, demoted. What was
+      /// reviewed is signed exactly, with no role from the old snapshot, wherever a device stands.
+      #[test]
+      fn a_reviewed_list_is_signed_exactly_and_is_a_checkpoint_on_every_device() {
+        let story = Story::new();
+        let mut world = story.world();
+        let mut stretched = story.first_read(&world);
+        let (demotion, _, on_time) = story.demotion(&world, &stretched);
+        story.eve_leaves(&mut world);
+        stretched.note_read(world.workspace.roster.version);
+        assert_eq!(world.apply(&mut stretched, demotion).len(), 1);
+        assert!(stretched.must_review_before_vouching());
+
+        let roles = [
+          (story.frank.user_id, ChannelRole::Admin),
+          (story.bob.user_id, ChannelRole::Moderator),
+          (story.alice.user_id, ChannelRole::Member),
+        ];
+        let keys = BTreeMap::from([
+          (story.frank.user_id, key_bytes(&story.frank)),
+          (story.bob.user_id, key_bytes(&story.bob)),
+        ]);
+        for mut device in [stretched, on_time] {
+          // The log's next version for this device, as the server would number it for both.
+          let document = device
+            .reviewed_document(conversation(CHANNEL), &roles, &keys, world.now_ms)
+            .unwrap();
+          assert_eq!(document.assignments.len(), 2, "nobody the list doesn't name");
+          let entry = at_server_time(story.frank.signed(document), world.now_ms);
+          assert!(world.apply(&mut device, entry).is_empty());
+          assert_eq!(device.role_of(story.alice.user_id), ChannelRole::Member);
+          assert_eq!(device.role_of(story.bob.user_id), ChannelRole::Moderator);
+          assert!(device.is_workspace_anchored);
+          assert!(!device.has_unverified_stretch());
+          assert_eq!(
+            device.appointment_of(story.bob.user_id).map(|found| found.by),
+            Some(story.frank.user_id),
+            "the reviewer vouches for every role"
+          );
+        }
+      }
+    }
+
     mod a_demoted_admin {
       use super::*;
 
-      /// Eve signs after leaving, with an old date of her choice. The server dates the entry when it
-      /// came: no standing, and no way to trouble anybody either.
+      /// Eve signs after leaving, with an old date of her choice, and the server still lets her
+      /// append (she is a channel admin it lists). It dates the entry when it came, even a moment
+      /// after the roster that removed her: junk on every device, read since or not.
       #[test]
-      fn alone_can_neither_sign_nor_trouble_a_device() {
+      fn after_the_roster_that_removed_her_is_junk_on_every_device() {
         let story = Story::new();
         let mut world = story.world();
-        let mut reader = story.first_read(&world);
+        let first = story.first_read(&world);
         story.eve_leaves(&mut world);
-        let before = reader.clone();
+        let mut read_since = first.clone();
+        read_since.note_read(world.workspace.roster.version);
 
         let mut document = story.eve.document(
-          &reader,
+          &first,
           &[
             (&story.eve, ChannelRole::Admin),
             (&story.frank, ChannelRole::Admin),
           ],
         );
         document.signed_at_ms = NOW_MS;
-        let entry = at_server_time(story.eve.signed(document), world.now_ms);
-        assert_eq!(world.apply(&mut reader, entry).len(), 1);
+        let entry = at_server_time(story.eve.signed(document), NOW_MS + DAY_MS + 1);
+        for mut reader in [first.clone(), read_since] {
+          assert_eq!(world.apply(&mut reader, entry.clone()).len(), 1);
+          assert_eq!(reader.head(), first.head());
+          assert_eq!(reader.admins(), first.admins());
+          assert!(reader.is_workspace_anchored);
+          assert!(!reader.has_unverified_stretch());
+        }
+      }
 
-        assert_eq!(reader.head(), before.head());
-        assert_eq!(reader.admins(), before.admins());
-        assert!(reader.is_workspace_anchored);
-        assert!(!reader.has_unverified_stretch());
+      /// The owner's clock runs ahead, so the roster that removes Eve says later than it was signed.
+      /// In that gap her entry passes as dated inside: a device that read the log since can't place
+      /// it, one that didn't takes it. They disagree (residual risk, e2ee.md §4.6.1).
+      #[test]
+      fn in_the_gap_of_an_owners_clock_running_ahead_splits_devices() {
+        let story = Story::new();
+        let mut world = story.world();
+        let first = story.first_read(&world);
+        story.eve_leaves(&mut world);
+        let mut read_since = first.clone();
+        read_since.note_read(world.workspace.roster.version);
+        let mut late = first.clone();
+        late.note_read(1);
+
+        let entry = story.eve.entry(
+          &first,
+          &[
+            (&story.frank, ChannelRole::Admin),
+            (&story.bob, ChannelRole::Admin),
+          ],
+        );
+        assert_eq!(world.apply(&mut read_since, entry.clone()).len(), 1);
+        assert!(world.apply(&mut late, entry).is_empty());
+
+        assert!(read_since.has_unverified_stretch());
+        assert_eq!(late.role_of(story.bob.user_id), ChannelRole::Admin);
       }
 
       /// With a server that dates her backdated entry back too. This device read the log on the
@@ -2145,7 +2364,7 @@ mod tests {
         );
         let end = NOW_MS + DAY_MS;
         document.signed_at_ms = end + SKEW_MS;
-        let entry = at_server_time(story.eve.signed(document), end + SKEW_MS);
+        let entry = at_server_time(story.eve.signed(document), end);
         story.eve_leaves(&mut world);
         assert!(world.apply(&mut reader, entry).is_empty());
         assert_eq!(reader.role_of(story.bob.user_id), ChannelRole::Admin);
@@ -2240,6 +2459,56 @@ mod tests {
     mod what_is_no_gap {
       use super::*;
 
+      /// A random head, and an older head of this very log (a stale device's fork): nothing shows
+      /// that this device missed anything, and a channel admin can't start a stretch this way.
+      #[test]
+      fn a_channel_admin_on_a_head_nobody_showed_this_device() {
+        let story = Story::new();
+        let world = story.world();
+        let mut reader = story.first_read(&world);
+        let older = reader.clone();
+        let roles = [
+          (&story.frank, ChannelRole::Admin),
+          (&story.alice, ChannelRole::Admin),
+        ];
+        let next = story.alice.entry(&reader, &roles);
+        assert!(world.apply(&mut reader, next).is_empty());
+        let mut random = reader.clone();
+        random.maybe_head_hash = Some(Base64Bytes::new(vec![5; HASH_BYTES]));
+
+        for stale in [random, older] {
+          let mut base = stale;
+          base.cursor = reader.cursor;
+          let entry = story.alice.entry(&base, &roles);
+          let mut probe = reader.clone();
+          assert!(matches!(
+            world.apply(&mut probe, entry).as_slice(),
+            [ChannelRoleError::BrokenChain { .. }]
+          ));
+          assert!(!probe.has_unverified_stretch());
+          assert!(probe.is_workspace_anchored);
+        }
+      }
+
+      /// A roster that dates no end proves no tenure over: an entry against it has no standing, and
+      /// a demoted admin can't use the missing date to trouble a device for ever.
+      #[test]
+      fn a_departure_on_a_roster_without_a_signing_time() {
+        let story = Story::new();
+        let mut world = story.world();
+        let mut reader = story.first_read(&world);
+        let (demotion, ..) = story.demotion(&world, &reader);
+        story.eve_leaves(&mut world);
+        for tenure in &mut world.workspace.admin_history.tenures {
+          if let Some(until) = &mut tenure.maybe_until {
+            until.maybe_at_ms = None;
+          }
+        }
+        assert_eq!(world.apply(&mut reader, demotion).len(), 1);
+        assert_eq!(reader.version, 1);
+        assert!(!reader.has_unverified_stretch());
+      }
+
       /// None of these can take away a channel's anchor: otherwise anybody could.
       #[test]
       fn junk_members_strangers_and_other_channels_change_nothing() {
@@ -2278,20 +2547,24 @@ mod tests {
     mod what_is_a_gap {
       use super::*;
 
+      /// A member accepted an entry this device refused, and built on it: it did miss something.
       #[test]
-      fn a_channel_admin_built_on_a_head_this_device_lacks() {
+      fn a_channel_admin_built_on_an_entry_this_device_refused() {
         let story = Story::new();
         let world = story.world();
         let mut reader = story.first_read(&world);
+        let roles = [
+          (&story.frank, ChannelRole::Admin),
+          (&story.alice, ChannelRole::Admin),
+        ];
+        let refused = story.bob.entry(&reader, &roles);
+        let refused_hash = entry_hash(&refused);
+        assert_eq!(world.apply(&mut reader, refused).len(), 1);
+        assert!(!reader.has_unverified_stretch());
+
         let mut other = reader.clone();
-        other.maybe_head_hash = Some(Base64Bytes::new(vec![5; HASH_BYTES]));
-        let entry = story.alice.entry(
-          &other,
-          &[
-            (&story.frank, ChannelRole::Admin),
-            (&story.alice, ChannelRole::Admin),
-          ],
-        );
+        other.maybe_head_hash = Some(refused_hash);
+        let entry = story.alice.entry(&other, &roles);
         assert_eq!(world.apply(&mut reader, entry).len(), 1);
         assert!(reader.has_unverified_stretch());
       }
@@ -2334,23 +2607,6 @@ mod tests {
         assert_eq!(reader.version, 1);
       }
 
-      /// A roster that dates no end proves no tenure over, so nothing is dated inside it.
-      #[test]
-      fn a_departure_on_a_roster_without_a_signing_time() {
-        let story = Story::new();
-        let mut world = story.world();
-        let mut reader = story.first_read(&world);
-        let (demotion, ..) = story.demotion(&world, &reader);
-        story.eve_leaves(&mut world);
-        for tenure in &mut world.workspace.admin_history.tenures {
-          if let Some(until) = &mut tenure.maybe_until {
-            until.maybe_at_ms = None;
-          }
-        }
-        assert_eq!(world.apply(&mut reader, demotion).len(), 1);
-        assert!(reader.has_unverified_stretch());
-      }
-
       /// Without the roster's history a departed admin looks like any member, so anybody's key
       /// counts: it fails closed. Junk still doesn't.
       #[test]
@@ -2385,29 +2641,27 @@ mod tests {
         assert_eq!(state.maybe_read_at_roster_version, Some(4));
       }
 
-      /// A device that skipped entries before this build looks at them once more: it heals, and
-      /// doesn't read them a second time.
+      /// A device from before this build doesn't know when it last read the log, so it can't place
+      /// an entry by somebody who left: it looks at what it skipped once more and fails closed, and
+      /// the stale anchor it kept is gone.
       #[test]
-      fn a_state_from_before_looks_at_what_it_skipped_once() {
+      fn a_state_from_before_looks_at_what_it_skipped_once_and_fails_closed() {
         let story = Story::new();
         let mut world = story.world();
         let first = story.first_read(&world);
-        let (demotion, carried_on, on_time) = story.demotion(&world, &first);
+        let (demotion, carried_on, _) = story.demotion(&world, &first);
         story.eve_leaves(&mut world);
-        let json = serde_json::to_value(&first).unwrap();
-        let mut reader: ChannelRoleState = serde_json::from_value(json).unwrap();
-        assert_eq!(
-          reader.maybe_read_at_roster_version, None,
-          "as an older build left it"
-        );
+        let mut reader = first;
+        reader.maybe_read_at_roster_version = None;
         reader.cursor = 3;
 
         reader.prepare_read();
         assert_eq!(reader.cursor, 1);
-        assert!(world.apply(&mut reader, demotion).is_empty());
-        assert!(world.apply(&mut reader, carried_on).is_empty());
+        assert_eq!(world.apply(&mut reader, demotion).len(), 1);
+        assert_eq!(world.apply(&mut reader, carried_on).len(), 1);
         reader.note_read(world.workspace.roster.version);
-        assert_eq!(reader.head(), on_time.head());
+        assert!(reader.has_unverified_stretch());
+        assert!(!reader.is_workspace_anchored);
 
         reader.cursor = 9;
         reader.prepare_read();
@@ -2741,6 +2995,21 @@ mod tests {
     let entry = founder.entry(&state, &roles);
     assert!(world.apply(&mut state, entry).is_empty());
     state
+  }
+
+  fn key_bytes(person: &Person) -> [u8; 32] {
+    *person.identity.public_key().as_bytes()
+  }
+
+  fn entry_hash(entry: &ChannelRoleLogEntryResponse) -> Base64Bytes {
+    let hash = log_entry_hash(
+      WorkspaceLog::ChannelRoles,
+      entry.version,
+      entry.payload.as_slice(),
+      entry.signature.as_slice(),
+    )
+    .unwrap();
+    Base64Bytes::new(hash.to_vec())
   }
 
   /// The entry as the server dates it.
