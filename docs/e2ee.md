@@ -3560,9 +3560,10 @@ to whoever the policy lets ask it in, where it is a member or where that user ca
 of a space where the user manages members (the bot goes in from its join on, into the space as a
 guest first where needed, as from the channel's integrations), or a meeting the user organizes (the
 bot becomes an invitee, which puts it into the meeting chat's group). A DM takes nobody more, so
-there it is offered only where the notetaker is a member. The button first adds the bot through
-that normal member-add path, and sends the `join` only once the addition is through: the request
-then goes out after the commit that put the bot into the group, in an epoch it can read.
+there the call moves into a room with the notetaker ("In every call" below). The button first
+adds the bot through that normal member-add path, and sends the `join` only once the addition is
+through: the request then goes out after the commit that put the bot into the group, in an epoch
+it can read.
 
 Members only accept DAVE keys of devices that are on their trusted roster (§8, step 4), which they
 took from the conversation's group when they prepared their join. A device added since (the
@@ -3576,6 +3577,58 @@ verify, puts one on the roster. Desktop, web (through the page's `roster` callba
 `teamcraft_client_api::page_calls`) and the mobile apps' core do this; an app from before this
 change ends the call when such a device joins, and the notetaker's join notice asks its people to
 join again.
+
+**In every call (issue #1271).** "Add notetaker" is to work in every call, also one that runs
+already, for everybody the policy lets ask it in (`inviters`), and the notetaker transcribes from
+its join on. Where it is a member, or the user can add it (above), that is how it comes in. The
+other calls need a way for the bot into the call of a conversation it isn't in and the user can't
+put it into: a 1:1 DM above all, which must not turn into a group, and a group DM. Two ways were
+weighed:
+
+| Question                       | (a) The call moves into a room with the notetaker                                                                                   | (b) The bot joins the DM's group for the call                                                                                      |
+|--------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| How                            | "A call becomes a meeting" (meetings.md, step 7): a meeting room whose group holds the people in the call and the bot, `join` there | A member-add commit in the DM's group, a removal commit after the call                                                             |
+| The DM                         | Unchanged: no commit, same members and history                                                                                      | A 1:1 is a group for a while; the server refuses a third member in a DM, so it needs an exception to who may change a group (§4.6) |
+| What the bot reads             | Only the new room: no history, and only what is written there                                                                       | Everything written in the DM while it is in, more than the audio the policy sends it                                               |
+| Afterwards                     | Nothing to undo; the room keeps the summary                                                                                         | A device has to remove it; one that is offline or gone leaves the bot in the DM for good                                           |
+| Whose audio it hears           | Only of those who followed the move with a tap; the others stay in the DM's call                                                    | Everybody in the call from the commit on; the banner is the only notice                                                            |
+| New trust, protocol and server | None: the move's checks (announced in the DM's group, the room holds nobody else) and endpoints as they are                         | A temporary membership, its removal protocol, a server exception for DMs                                                           |
+
+**(a) it is**: it adds no party, no trust and no server change, keeps the DM as it is, and gives
+everybody in the call a choice before the notetaker hears them. A sibling "call notes"
+conversation that only receives the summary while the call stays in the DM was no option: the bot
+can only hear a call it is a member of (above), so the call has to be where the bot is.
+
+- **The button.** In a DM or group DM call "Add notetaker" shows for whoever the policy lets ask it
+  in (guests and bots never), at the start or later. It does what "Add people" does with the
+  notetaker's account (`add_people_to_call`): an instant meeting room titled "Call with notetaker"
+  whose group the user's device founds with everybody in the call (as far as they are in the DM's
+  group) and the bot, then the move. The bot isn't rung (`ring_user_ids` leaves it out: it answers
+  requests, not rings). After the move went through, the core sends a `join` `this_call` in the
+  room, after the commit that put the bot in, so the bot can read it; under a policy that doesn't
+  let the user ask it in, no `join` goes out. Picking the notetaker's account in "Add people" does
+  the same.
+- **The others.** The move is announced in the DM's group as any move; the call screen of everybody
+  else in the call says that the notetaker was added, that the call goes on in a room where what is
+  said goes to OpenRouter, and that their audio reaches it only once they join there; their app
+  checks the move as always before it follows on their tap. The user's own device follows at once
+  and says the notetaker joins in a moment.
+- **In the room** it is an ordinary call with the notetaker: banner, badge and tile for everybody,
+  and a `stop` from anybody `can_anyone_stop` allows, the requester, inviters and admins (the room's
+  host controls too). It transcribes from its join on; the call in the room starts with the move.
+- **The summary** goes into the room's chat, whose members are exactly the people of the call and
+  the notetaker. The DM shows nothing of it (the move announcement is hidden there).
+- **What the bot never sees**: the DM (it is in no commit there) and anything from before its join:
+  the room is new. Nothing leaves beyond what the policy already sends: the audio of the room's
+  call, as in any call with the notetaker.
+
+Channels where the user doesn't manage members and meetings the user doesn't organize keep asking
+the notetaker in only where it is a member, for now. They would take the same route (the server's
+move accepting channel and meeting calls), but a channel's call is open to every member, who
+would not find the room, and a meeting's guests without an account can't follow; the follow-up
+(#1274) decides between that and asking a channel admin or the organizer, who can add the bot.
+The mobile apps follow a move that adds the notetaker like any other and see its join message and
+participant in the room, but have no "Add notetaker" button yet (also #1274).
 
 **Everybody sees it.**
 

@@ -277,6 +277,9 @@ pub struct CallState {
   pub is_deafened: RwSignal<bool>,
   /// An announced move of this call into a meeting room the user hasn't followed yet.
   pub move_offer: RwSignal<Option<MoveOffer>>,
+  /// The meeting room this device's DM call moved into to have the notetaker in it (e2ee.md
+  /// §8.2, "In every call"): its call screen says the notetaker joins in a moment.
+  pub notetaker_asked_in: RwSignal<Option<ConversationId>>,
   /// Asks for the camera choice: the call screen's camera menu, or the pre-join screen's camera
   /// field (the "Choose camera" of a camera error, #819).
   pub is_camera_menu_open: RwSignal<bool>,
@@ -326,6 +329,7 @@ impl CallState {
       has_hand_raised: RwSignal::new(false),
       is_deafened: RwSignal::new(false),
       move_offer: RwSignal::new(None),
+      notetaker_asked_in: RwSignal::new(None),
       is_camera_menu_open: RwSignal::new(false),
       is_audio_menu_open: RwSignal::new(false),
       maybe_audio_offer: RwSignal::new(None),
