@@ -81,10 +81,12 @@ pub struct CallRosterEntry {
   pub device_id: DeviceId,
 }
 
-/// Body of `POST /api/v1/conversations/{conversation_id}/call/move`: a DM or group DM call moves
-/// into a meeting room because somebody added people to it (docs/meetings.md, "A call becomes a
-/// meeting"). The caller is in the call and organizes the meeting; everybody in the call is told to
-/// switch over (`call_move`), and the added people are rung in the meeting.
+/// Body of `POST /api/v1/conversations/{conversation_id}/call/move`: a call moves into a meeting
+/// room because somebody added people to it (docs/meetings.md, "A call becomes a meeting"): a DM or
+/// group DM call for "Add people", any call for "Add notetaker" where the user can't add the
+/// notetaker to the conversation (e2ee.md §8.2, "In every call"). The caller is in the call and
+/// organizes the meeting; everybody in the call is told to switch over (`call_move`), and the
+/// added people are rung in the meeting.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct MoveCallRequest {
   /// The meeting chat the call moves into.

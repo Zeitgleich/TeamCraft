@@ -247,6 +247,116 @@ mod in_a_dm_call {
   }
 }
 
+/// "Add notetaker" in a call of a conversation the user can't add the notetaker to (issue #1274,
+/// e2ee.md §8.2, "In every call"): a channel whose members somebody else manages, a meeting
+/// somebody else organizes. The call moves into a room of the user's with the people in it and the
+/// notetaker, as from a DM; the conversation itself gets no commit and the notetaker never sees it.
+mod in_a_call_the_user_cannot_add_to {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_channel_member_moves_the_call_to_the_notetaker() {
+    let (server, mut alice, mut bob, mut notetaker, channel) = channel_call(NotetakerInviters::Members).await;
+    let epoch = alice.client.mls_epoch(channel).unwrap();
+
+    let room = bob_moves_with_notetaker(&server, &mut alice, &mut bob, &mut notetaker, channel).await;
+
+    let ledger = NotetakerLedger::load(notetaker.store.as_ref(), room).unwrap();
+    let [request] = ledger.requests() else {
+      panic!("one request: {ledger:?}");
+    };
+    assert_eq!(request.by, bob.client.user_id());
+    assert!(ledger.join_in_force(request.at_ms + 1, None).is_some());
+    assert!(
+      server.call_moves()[0].1.ring_user_ids.is_empty(),
+      "the notetaker doesn't ring"
+    );
+    assert_eq!(
+      alice.client.mls_epoch(channel).unwrap(),
+      epoch,
+      "no commit in the channel"
+    );
+    assert!(
+      !notetaker.client.has_group(channel).unwrap(),
+      "out of the channel's group"
+    );
+    // Alice, who manages the channel, checks the move against its group before she follows.
+    alice.client.accept_call_move(channel, room).await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn under_admins_only_a_channel_member_asks_nobody_in() {
+    let (server, mut alice, mut bob, mut notetaker, channel) = channel_call(NotetakerInviters::Admins).await;
+
+    let room = bob_moves_with_notetaker(&server, &mut alice, &mut bob, &mut notetaker, channel).await;
+
+    let ledger = NotetakerLedger::load(notetaker.store.as_ref(), room).unwrap();
+    assert!(ledger.requests().is_empty(), "no join was sent");
+  }
+
+  #[tokio::test]
+  async fn an_invitee_moves_the_meeting_call_to_the_notetaker() {
+    let (server, mut alice, mut bob, mut notetaker, _channel) =
+      setup_with(NotetakerInviters::Members, false).await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    // Alice organizes the meeting; Bob is invited and can't change who is.
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id]);
+    alice
+      .client
+      .set_up_meeting_chat(meeting, &[bob_id])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+    alice.client.prepare_call(meeting).await.unwrap();
+    bob.client.prepare_call(meeting).await.unwrap();
+
+    let room = bob_moves_with_notetaker(&server, &mut alice, &mut bob, &mut notetaker, meeting).await;
+
+    let ledger = NotetakerLedger::load(notetaker.store.as_ref(), room).unwrap();
+    let [request] = ledger.requests() else {
+      panic!("one request: {ledger:?}");
+    };
+    assert_eq!(request.by, bob_id);
+    assert!(
+      !notetaker.client.has_group(meeting).unwrap(),
+      "out of the meeting chat's group"
+    );
+    alice.client.accept_call_move(meeting, room).await.unwrap();
+  }
+
+  /// Bob starts a room with Alice and the notetaker and moves the call of `from` into it.
+  async fn bob_moves_with_notetaker(
+    server: &FakeServer,
+    alice: &mut Peer,
+    bob: &mut Peer,
+    notetaker: &mut Peer,
+    from: ConversationId,
+  ) -> ConversationId {
+    let (alice_id, bob_id, bot) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      notetaker.client.user_id(),
+    );
+    let room = server.create_meeting_chat(bob_id, &[alice_id, bot]);
+    bob
+      .client
+      .move_call_to_meeting(from, room, &[alice_id, bob_id], &[bot])
+      .await
+      .unwrap();
+    settle(&mut [alice, bob, notetaker]).await;
+    room
+  }
+
+  /// [`setup_with`] without the notetaker in the channel, which Alice manages, and Alice and Bob
+  /// in its call.
+  async fn channel_call(inviters: NotetakerInviters) -> (FakeServer, Peer, Peer, Peer, ConversationId) {
+    let (server, mut alice, mut bob, notetaker, channel) = setup_with(inviters, false).await;
+    alice.client.prepare_call(channel).await.unwrap();
+    bob.client.prepare_call(channel).await.unwrap();
+    (server, alice, bob, notetaker, channel)
+  }
+}
+
 /// Alice (owner) signs a policy with Notetaker's account as the notetaker; all three are in a
 /// channel.
 async fn setup(inviters: NotetakerInviters) -> (FakeServer, Peer, Peer, Peer, ConversationId) {

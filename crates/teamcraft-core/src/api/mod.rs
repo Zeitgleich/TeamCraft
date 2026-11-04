@@ -468,7 +468,7 @@ pub trait ServerApi {
     conversation: ConversationId,
   ) -> impl Future<Output = Result<MeetingAdmittersResponse, ApiError>>;
 
-  /// Moves the conversation's DM call into a meeting the user started for it (docs/meetings.md).
+  /// Moves the conversation's call into a meeting the user started for it (docs/meetings.md).
   fn move_call(
     &self,
     conversation: ConversationId,
