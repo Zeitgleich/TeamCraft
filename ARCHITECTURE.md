@@ -255,19 +255,20 @@ guest  = "external"
   include everything a member can do.
 - Users of the realm **without** any of these roles can't use TeamCraft – the server rejects their tokens,
   so the rest of the realm (e.g. customers of other apps using the same realm) stays out.
-- Mappers on `teamcraft`: client roles → `resource_access.teamcraft.roles`, group membership →
-  `groups` (optional: Keycloak groups like `/project-a` → automatic membership in space "Project A"), user
-  attribute `tc_identity_key` → ID token claim (e2ee.md §3.1).
+- Mappers on `teamcraft`: client roles → `resource_access.teamcraft.roles`, in the access token **and in
+  the ID token** (e2ee.md §3.1.3), group membership → `groups` (optional: Keycloak groups like `/project-a`
+  → automatic membership in space "Project A"), user attribute `tc_identity_key` → ID token claim (e2ee.md
+  §3.1).
 - User profile attribute `tc_identity_key`: editable by the user (written by the client through the
   account API at enrollment), viewable by admins, not editable by the TeamCraft service account.
 - **Deprovisioning:** Keycloak calls `teamcraft-server` via OIDC back-channel logout when sessions end
   (a logout token with `sid` ends that device's session only, so the user's other devices stay signed in);
   the service account additionally polls for disabled users and role changes (every few minutes) and
   triggers removal from all groups (docs/admin.md §3.2).
-- **Roles and the admin roster:** Keycloak roles decide who *should* be admin; the cryptographic admin
-  roster (docs/admin.md §2.3) follows automatically – an owner's client signs roster changes that match
-  the Keycloak-signed role claims. A compromised VPS can't promote anyone without a matching
-  Keycloak-signed token.
+- **Roles and the admin roster:** Keycloak roles decide who is admin; the cryptographic admin roster
+  (docs/admin.md §2.3) follows by itself – an owner's app verifies each person's ID token against Keycloak
+  and signs (e2ee.md §3.1.3). A compromised VPS can't promote anyone without a matching Keycloak-signed
+  token. Whoever controls Keycloak can appoint admins; a signed policy can require an owner's hand instead.
 
 ### 5.2 Permissions
 

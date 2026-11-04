@@ -164,8 +164,8 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
    the core.
 4. `epoch_conflict` has the epoch only in the text; non-member admins parse it to post proposals
    (being fixed).
-5. **Dev realm:** no account API access for the public client and no `tc_identity_key` user-profile
-   attribute, so attestation is unavailable in dev (being fixed).
+5. **Dev realm:** fixed; it has the account API access, the `tc_identity_key` attribute and the role
+   mapper role signing needs (`dev/verify-realm.py`).
 6. **Org recovery:** no endpoints for sealed shares, recovery requests with approvals, or handing a
    user's wrapped backup keys to the approving admins.
 7. **Search segments:** stored through the attachment endpoints and announced in messages; a segment

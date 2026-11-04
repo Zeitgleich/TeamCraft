@@ -7,13 +7,18 @@
 //! token against the identity provider's own signing keys (JWKS, fetched from the configured
 //! issuer, never through the TeamCraft server) before it pins a colleague's identity key.
 //!
-//! Supported signature algorithms: ES256 and EdDSA (Ed25519), so no RSA implementation is needed.
-//! The token's expiry is not checked: the attestation is a statement about a key, kept as long as
-//! the key is.
+//! Supported signature algorithms: RS256 (what identity providers sign with unless told otherwise),
+//! ES256 and EdDSA (Ed25519). The token's expiry is not checked: the attestation is a statement
+//! about a key, kept as long as the key is.
+//!
+//! [`verify_role_evidence`] reads more out of the same token: the roles the provider gave the person
+//! when it issued the token, and when that was (e2ee.md §3.1.3, issue #1276). Owners' apps sign the
+//! admin roster on that evidence.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::Verifier as _;
+use rsa_sha2::Digest as _;
 use serde_json::Value;
 
 use crate::identity::IdentityPublicKey;
@@ -23,6 +28,10 @@ use crate::ids::UserId;
 pub const ATTESTATION_CLAIM: &str = "tc_identity_key";
 /// Longest token accepted (bytes); ID tokens are a few kilobytes at most.
 const MAX_TOKEN_BYTES: usize = 16 * 1024;
+/// RSA keys outside this range aren't taken: shorter ones are weak, longer ones cost a device a lot
+/// of work for a signature a hostile server can make it check.
+const MIN_RSA_BITS: usize = 2048;
+const MAX_RSA_BITS: usize = 8192;
 
 /// What a token must state to attest an identity key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +46,32 @@ pub struct AttestationExpectations<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedAttestation {
   pub subject: String,
+}
+
+/// What the identity provider said about a person in a token that passed every check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoleEvidence {
+  pub subject: String,
+  /// The token's `iat`: the provider's clock, seconds since the epoch. Evidence is ordered by this
+  /// alone, never by a device's clock or the server's word.
+  pub issued_at: i64,
+  /// The client roles in the token (`resource_access.<client>.roles`). `None` when the token has no
+  /// such claim, which says nothing about the person: the realm may simply not map roles into ID
+  /// tokens.
+  pub maybe_roles: Option<Vec<String>>,
+}
+
+/// What a token claims, before anybody checked its signature. Only for a token this device got
+/// from the provider itself, to see what it still has to do; decisions take [`verify_role_evidence`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UnverifiedClaims {
+  pub issuer: String,
+  pub audience: Vec<String>,
+  /// The client the token was issued to, if it says (`azp`).
+  pub maybe_authorized_party: Option<String>,
+  pub maybe_issued_at: Option<i64>,
+  pub maybe_key_claim: Option<String>,
+  pub maybe_roles: Option<Vec<String>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +90,11 @@ pub enum AttestationError {
   WrongAudience,
   #[error("the token attests another user or identity key")]
   WrongClaim,
+  /// Not an ID token: an access or logout token names no key on purpose.
+  #[error("the token is of the type {0}, not an ID token")]
+  WrongType(String),
+  #[error("the token doesn't say when it was issued")]
+  NoIssueTime,
 }
 
 /// The claim value for `user`'s identity key.
@@ -71,6 +111,83 @@ pub fn verify_attestation(
   user: UserId,
   identity: &IdentityPublicKey,
 ) -> Result<VerifiedAttestation, AttestationError> {
+  let claims = verified_claims(token, jwks_json)?;
+  check_claims(&claims, expected, user, identity)
+}
+
+/// [`verify_attestation`], and what else the token says: the roles and the time of issue, for
+/// signing the admin roster (e2ee.md §3.1.3). Only ID tokens count here.
+pub fn verify_role_evidence(
+  token: &str,
+  jwks_json: &[u8],
+  expected: &AttestationExpectations<'_>,
+  user: UserId,
+  identity: &IdentityPublicKey,
+) -> Result<RoleEvidence, AttestationError> {
+  let claims = verified_claims(token, jwks_json)?;
+  let verified = check_claims(&claims, expected, user, identity)?;
+  if let Some(kind) = claims.get("typ").and_then(Value::as_str)
+    && !kind.eq_ignore_ascii_case("ID")
+  {
+    return Err(AttestationError::WrongType(kind.to_string()));
+  }
+  let issued_at = claims
+    .get("iat")
+    .and_then(Value::as_i64)
+    .ok_or(AttestationError::NoIssueTime)?;
+  Ok(RoleEvidence {
+    subject: verified.subject,
+    issued_at,
+    maybe_roles: client_roles(&claims, expected.audience),
+  })
+}
+
+/// Reads a token's claims without checking its signature: see [`UnverifiedClaims`].
+pub fn unverified_claims(token: &str) -> Result<UnverifiedClaims, AttestationError> {
+  if token.len() > MAX_TOKEN_BYTES {
+    return Err(AttestationError::Malformed);
+  }
+  let payload = token.split('.').nth(1).ok_or(AttestationError::Malformed)?;
+  let claims = decode_json(payload)?;
+  let audience = match claims.get("aud") {
+    Some(Value::String(audience)) => vec![audience.clone()],
+    Some(Value::Array(audiences)) => audiences
+      .iter()
+      .filter_map(Value::as_str)
+      .map(str::to_string)
+      .collect(),
+    _ => Vec::new(),
+  };
+  let maybe_authorized_party = claims.get("azp").and_then(Value::as_str).map(str::to_string);
+  let maybe_roles = maybe_authorized_party
+    .iter()
+    .chain(audience.iter())
+    .find_map(|client| client_roles(&claims, client));
+  Ok(UnverifiedClaims {
+    issuer: claims
+      .get("iss")
+      .and_then(Value::as_str)
+      .unwrap_or_default()
+      .to_string(),
+    audience,
+    maybe_authorized_party,
+    maybe_issued_at: claims.get("iat").and_then(Value::as_i64),
+    maybe_key_claim: key_claim(&claims).map(str::to_string),
+    maybe_roles,
+  })
+}
+
+/// The roles of `client` in a token, without checking its signature: see [`UnverifiedClaims`].
+pub fn unverified_client_roles(token: &str, client: &str) -> Option<Vec<String>> {
+  if token.len() > MAX_TOKEN_BYTES {
+    return None;
+  }
+  let claims = decode_json(token.split('.').nth(1)?).ok()?;
+  client_roles(&claims, client)
+}
+
+/// The JSON claims of a token signed by a key of `jwks_json`.
+fn verified_claims(token: &str, jwks_json: &[u8]) -> Result<Value, AttestationError> {
   if token.len() > MAX_TOKEN_BYTES {
     return Err(AttestationError::Malformed);
   }
@@ -102,7 +219,7 @@ pub fn verify_attestation(
     .any(|key| verify_with(algorithm, key, signed, &signature).unwrap_or(false));
   if !is_verified {
     return Err(match algorithm {
-      "ES256" | "EdDSA" => {
+      "RS256" | "ES256" | "EdDSA" => {
         if keys.is_empty() {
           AttestationError::UnknownKey
         } else {
@@ -112,7 +229,7 @@ pub fn verify_attestation(
       other => AttestationError::UnsupportedAlgorithm(other.to_string()),
     });
   }
-  check_claims(&claims, expected, user, identity)
+  Ok(claims)
 }
 
 fn check_claims(
@@ -125,6 +242,13 @@ fn check_claims(
   if issuer.trim_end_matches('/') != expected.issuer.trim_end_matches('/') {
     return Err(AttestationError::WrongIssuer(issuer.to_string()));
   }
+  // Keycloak names the client in `azp` too; a token issued to another client with this one in its
+  // audience isn't this client's token (the server's validator draws the same line).
+  if let Some(authorized) = claims.get("azp").and_then(Value::as_str)
+    && authorized != expected.audience
+  {
+    return Err(AttestationError::WrongAudience);
+  }
   let is_for_us = match claims.get("aud") {
     Some(Value::String(audience)) => audience == expected.audience,
     Some(Value::Array(audiences)) => audiences
@@ -135,13 +259,7 @@ fn check_claims(
   if !is_for_us {
     return Err(AttestationError::WrongAudience);
   }
-  let claim = match claims.get(ATTESTATION_CLAIM) {
-    Some(Value::String(value)) => Some(value.as_str()),
-    // Multivalued user attributes arrive as arrays.
-    Some(Value::Array(values)) => values.first().and_then(Value::as_str),
-    _ => None,
-  };
-  if claim != Some(attestation_claim(user, identity).as_str()) {
+  if key_claim(claims) != Some(attestation_claim(user, identity).as_str()) {
     return Err(AttestationError::WrongClaim);
   }
   Ok(VerifiedAttestation {
@@ -151,6 +269,31 @@ fn check_claims(
       .unwrap_or_default()
       .to_string(),
   })
+}
+
+fn key_claim(claims: &Value) -> Option<&str> {
+  match claims.get(ATTESTATION_CLAIM) {
+    Some(Value::String(value)) => Some(value.as_str()),
+    // Multivalued user attributes arrive as arrays.
+    Some(Value::Array(values)) => values.first().and_then(Value::as_str),
+    _ => None,
+  }
+}
+
+/// `resource_access.<client>.roles`, where the server's validator reads the roles of access tokens.
+fn client_roles(claims: &Value, client: &str) -> Option<Vec<String>> {
+  let roles = claims
+    .get("resource_access")?
+    .get(client)?
+    .get("roles")?
+    .as_array()?;
+  Some(
+    roles
+      .iter()
+      .filter_map(Value::as_str)
+      .map(str::to_string)
+      .collect(),
+  )
 }
 
 /// `Ok(false)` for a key of another type than the algorithm needs.
@@ -189,6 +332,21 @@ fn verify_with(
         ed25519_dalek::Signature::from_slice(signature).map_err(|_| AttestationError::InvalidSignature)?;
       Ok(key.verify_strict(signed, &signature).is_ok())
     },
+    ("RS256", Some("RSA"), _) => {
+      let modulus = rsa::BigUint::from_bytes_be(&field("n")?);
+      let exponent = rsa::BigUint::from_bytes_be(&field("e")?);
+      if !(MIN_RSA_BITS..=MAX_RSA_BITS).contains(&modulus.bits()) {
+        return Err(AttestationError::UnknownKey);
+      }
+      let key = rsa::RsaPublicKey::new_with_max_size(modulus, exponent, MAX_RSA_BITS)
+        .map_err(|_| AttestationError::UnknownKey)?;
+      let digest = rsa_sha2::Sha256::digest(signed);
+      Ok(
+        key
+          .verify(rsa::Pkcs1v15Sign::new::<rsa_sha2::Sha256>(), &digest, signature)
+          .is_ok(),
+      )
+    },
     _ => Ok(false),
   }
 }
@@ -226,6 +384,175 @@ mod tests {
     }));
     let verified = verify_attestation(&token, &provider.jwks(), &expectations(), ALICE, &identity).unwrap();
     assert_eq!(verified.subject, "abc");
+  }
+
+  mod role_evidence {
+    use super::*;
+
+    #[test]
+    fn says_who_has_which_role_and_when() {
+      let provider = Provider::new();
+      let identity = IdentityKeyPair::generate(&mut OsRng).public_key();
+      let token = provider.token(json!({
+        "iss": ISSUER, "aud": CLIENT, "azp": CLIENT, "sub": "abc", "typ": "ID", "iat": 1_000,
+        "resource_access": { CLIENT: { "roles": ["admin", "member"] }, "other": { "roles": ["owner"] } },
+        ATTESTATION_CLAIM: attestation_claim(ALICE, &identity),
+      }));
+      let evidence =
+        verify_role_evidence(&token, &provider.jwks(), &expectations(), ALICE, &identity).unwrap();
+      assert_eq!(evidence.subject, "abc");
+      assert_eq!(evidence.issued_at, 1_000);
+      assert_eq!(
+        evidence.maybe_roles,
+        Some(vec!["admin".to_string(), "member".to_string()])
+      );
+    }
+
+    #[test]
+    fn a_token_without_the_role_claim_says_nothing_about_roles() {
+      let provider = Provider::new();
+      let identity = IdentityKeyPair::generate(&mut OsRng).public_key();
+      // Roles of another client don't count either.
+      let token = provider.token(json!({
+        "iss": ISSUER, "aud": CLIENT, "sub": "abc", "iat": 1_000,
+        "resource_access": { "other": { "roles": ["owner"] } },
+        ATTESTATION_CLAIM: attestation_claim(ALICE, &identity),
+      }));
+      let evidence =
+        verify_role_evidence(&token, &provider.jwks(), &expectations(), ALICE, &identity).unwrap();
+      assert_eq!(evidence.maybe_roles, None);
+    }
+
+    #[test]
+    fn only_a_dated_id_token_of_this_client_counts() {
+      let provider = Provider::new();
+      let identity = IdentityKeyPair::generate(&mut OsRng).public_key();
+      let jwks = provider.jwks();
+      let check = |claims: Value| {
+        verify_role_evidence(&provider.token(claims), &jwks, &expectations(), ALICE, &identity)
+      };
+      let claim = attestation_claim(ALICE, &identity);
+      assert!(matches!(
+        check(json!({ "iss": ISSUER, "aud": CLIENT, "sub": "abc", ATTESTATION_CLAIM: claim })),
+        Err(AttestationError::NoIssueTime)
+      ));
+      assert!(matches!(
+        check(json!({ "iss": ISSUER, "aud": CLIENT, "typ": "Bearer", "iat": 1, ATTESTATION_CLAIM: claim })),
+        Err(AttestationError::WrongType(_))
+      ));
+      assert!(matches!(
+        check(json!({ "iss": ISSUER, "aud": CLIENT, "azp": "other", "iat": 1, ATTESTATION_CLAIM: claim })),
+        Err(AttestationError::WrongAudience)
+      ));
+    }
+
+    #[test]
+    fn a_device_can_read_its_own_token_before_anything_is_checked() {
+      let provider = Provider::new();
+      let token = provider.token(json!({
+        "iss": ISSUER, "aud": [CLIENT, "account"], "iat": 5,
+        "resource_access": { CLIENT: { "roles": ["owner"] } },
+        ATTESTATION_CLAIM: ["7:ab"],
+      }));
+      let claims = unverified_claims(&token).unwrap();
+      assert_eq!(claims.issuer, ISSUER);
+      assert_eq!(claims.maybe_issued_at, Some(5));
+      assert_eq!(claims.maybe_key_claim.as_deref(), Some("7:ab"));
+      assert_eq!(claims.maybe_roles, Some(vec!["owner".to_string()]));
+      assert!(unverified_claims("garbage").is_err());
+    }
+  }
+
+  mod rs256 {
+    use rsa::RsaPrivateKey;
+    use rsa::traits::PublicKeyParts as _;
+    use rsa_sha2::Sha256;
+
+    use super::*;
+
+    #[test]
+    fn a_token_signed_with_rsa_attests_the_key() {
+      let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+      let identity = IdentityKeyPair::generate(&mut OsRng).public_key();
+      let token = rsa_token(
+        &key,
+        &json!({
+          "iss": ISSUER, "aud": CLIENT, "sub": "abc", "iat": 9,
+          ATTESTATION_CLAIM: attestation_claim(ALICE, &identity),
+        }),
+      );
+      let jwks = rsa_jwks(&rsa::RsaPublicKey::from(&key));
+      let evidence = verify_role_evidence(&token, &jwks, &expectations(), ALICE, &identity).unwrap();
+      assert_eq!(evidence.issued_at, 9);
+    }
+
+    #[test]
+    fn another_key_a_tampered_token_and_a_short_key_are_refused() {
+      let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+      let identity = IdentityKeyPair::generate(&mut OsRng).public_key();
+      let claims = json!({
+        "iss": ISSUER, "aud": CLIENT, "sub": "abc", "iat": 9,
+        ATTESTATION_CLAIM: attestation_claim(ALICE, &identity),
+      });
+      let token = rsa_token(&key, &claims);
+      let other = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+      assert!(matches!(
+        verify_role_evidence(
+          &token,
+          &rsa_jwks(&rsa::RsaPublicKey::from(&other)),
+          &expectations(),
+          ALICE,
+          &identity
+        ),
+        Err(AttestationError::InvalidSignature)
+      ));
+      let mut parts: Vec<String> = token.split('.').map(str::to_string).collect();
+      let mut changed = claims.clone();
+      changed["resource_access"] = json!({ CLIENT: { "roles": ["owner"] } });
+      parts[1] = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&changed).unwrap());
+      assert!(matches!(
+        verify_role_evidence(
+          &parts.join("."),
+          &rsa_jwks(&rsa::RsaPublicKey::from(&key)),
+          &expectations(),
+          ALICE,
+          &identity
+        ),
+        Err(AttestationError::InvalidSignature)
+      ));
+      let short = RsaPrivateKey::new(&mut OsRng, 1024).unwrap();
+      let short_token = rsa_token(&short, &claims);
+      assert!(
+        verify_role_evidence(
+          &short_token,
+          &rsa_jwks(&rsa::RsaPublicKey::from(&short)),
+          &expectations(),
+          ALICE,
+          &identity
+        )
+        .is_err()
+      );
+    }
+
+    fn rsa_token(key: &RsaPrivateKey, claims: &Value) -> String {
+      let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256","kid":"k1"}"#);
+      let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap());
+      let input = format!("{header}.{payload}");
+      let digest = Sha256::digest(input.as_bytes());
+      let signature = key.sign(rsa::Pkcs1v15Sign::new::<Sha256>(), &digest).unwrap();
+      format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature))
+    }
+
+    fn rsa_jwks(key: &rsa::RsaPublicKey) -> Vec<u8> {
+      serde_json::to_vec(&json!({
+        "keys": [{
+          "kty": "RSA", "kid": "k1", "alg": "RS256",
+          "n": URL_SAFE_NO_PAD.encode(key.n().to_bytes_be()),
+          "e": URL_SAFE_NO_PAD.encode(key.e().to_bytes_be()),
+        }]
+      }))
+      .unwrap()
+    }
   }
 
   mod rejection {

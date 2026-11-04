@@ -191,6 +191,10 @@ struct WebTokens {
   slot: Rc<RefCell<TokenSlot>>,
   /// Signs the proofs of a bound token; set before the token it goes with.
   maybe_prover: Rc<RefCell<Option<Arc<DpopProver>>>>,
+  /// The session's newest ID token, for role signing (e2ee.md §3.1.3).
+  maybe_id_token: Rc<RefCell<Option<String>>>,
+  /// The core wrote what the next ID token should name.
+  wants_new_id_token: Rc<std::cell::Cell<bool>>,
   /// Cuts the wait of [`keep_token_fresh`] for a first token short: the network may be back.
   maybe_wake: Rc<RefCell<Option<oneshot::Sender<()>>>>,
 }
@@ -209,6 +213,8 @@ impl WebTokens {
     Self {
       slot: Rc::new(RefCell::new(slot)),
       maybe_prover: Rc::default(),
+      maybe_id_token: Rc::default(),
+      wants_new_id_token: Rc::default(),
       maybe_wake: Rc::default(),
     }
   }
@@ -253,6 +259,14 @@ impl AccessTokenSource for WebTokens {
 
   fn dpop_prover(&self) -> Option<Arc<DpopProver>> {
     self.maybe_prover.borrow().clone()
+  }
+
+  fn id_token(&self) -> Option<String> {
+    self.maybe_id_token.borrow().clone()
+  }
+
+  fn ask_for_new_id_token(&self) {
+    self.wants_new_id_token.set(true);
   }
 }
 
@@ -757,6 +771,7 @@ async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), 
         .map_err(|error: AuthError| error.to_string())?;
       let tokens = WebTokens::new(TokenSlot::Ready(first));
       tokens.set_prover(auth.dpop_prover().await);
+      *tokens.maybe_id_token.borrow_mut() = auth.id_token();
       tokens
     };
     let (sender, receiver) = mpsc::unbounded();
@@ -1040,6 +1055,10 @@ fn keep_token_fresh(auth: Rc<dyn Authenticator>, tokens: WebTokens, alive: std::
         Ok(token) => {
           // The key goes first: the token needs it.
           tokens.set_prover(auth.dpop_prover().await);
+          if tokens.wants_new_id_token.take() {
+            auth.refresh_id_token().await;
+          }
+          *tokens.maybe_id_token.borrow_mut() = auth.id_token();
           // async-ok: the core's copy of the token, not a signal.
           if tokens.set(token)
             && let Err(error) = send(Request::NetworkChanged)

@@ -14,6 +14,10 @@ ignore = [
   # Remove with the crypto major upgrades (#124, #163).
   # https://rustsec.org/advisories/RUSTSEC-2026-0387
   { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 only via p256/elliptic-curve 0.13; no patched 0.5 release, upgrade tracked in #163" },
+  # The Marvin timing attack on RSA decryption and signing. TeamCraft only ever verifies RSA signatures
+  # with public keys (identity provider tokens, teamcraft-crypto::attestation), which holds no secret.
+  # https://rustsec.org/advisories/RUSTSEC-2023-0071
+  { id = "RUSTSEC-2023-0071", reason = "rsa is used for signature verification with public keys only; no private key operations outside tests" },
   # Unmaintained TOML parser, no known vulnerability: askama (via uniffi_bindgen) reads UniFFI's own
   # template config with it while generating the mobile bindings at build time; nothing at runtime.
   # https://rustsec.org/advisories/RUSTSEC-2026-0374

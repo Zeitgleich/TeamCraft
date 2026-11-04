@@ -99,12 +99,7 @@ pub(crate) fn default_jwks_source(
 ) -> Option<Box<dyn JwksSource>> {
   #[cfg(not(target_arch = "wasm32"))]
   {
-    maybe_settings.map(|settings| {
-      Box::new(HttpJwksSource {
-        http: reqwest::Client::new(),
-        issuer: settings.issuer.trim_end_matches('/').to_string(),
-      }) as Box<dyn JwksSource>
-    })
+    maybe_settings.map(|settings| http_jwks_source(&settings.issuer))
   }
   #[cfg(target_arch = "wasm32")]
   {
@@ -113,13 +108,19 @@ pub(crate) fn default_jwks_source(
   }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+/// The signing keys of `issuer`, read from the issuer itself.
+pub(crate) fn http_jwks_source(issuer: &str) -> Box<dyn JwksSource> {
+  Box::new(HttpJwksSource {
+    http: crate::api::http_client(),
+    issuer: issuer.trim_end_matches('/').to_string(),
+  })
+}
+
 struct HttpJwksSource {
   http: reqwest::Client,
   issuer: String,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl JwksSource for HttpJwksSource {
   fn fetch(&self) -> Pin<Box<dyn Future<Output = Option<Vec<u8>>> + '_>> {
     Box::pin(async move {

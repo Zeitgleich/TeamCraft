@@ -26,6 +26,8 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .routes(routes!(handlers::list_welcomes_handler))
     .routes(routes!(handlers::put_my_device_list_handler))
     .routes(routes!(handlers::put_identity_key_handler))
+    .routes(routes!(handlers::put_role_evidence_handler))
+    .routes(routes!(handlers::list_role_evidence_handler))
     .routes(routes!(
       handlers::get_key_bag_handler,
       handlers::put_key_bag_handler

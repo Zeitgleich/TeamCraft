@@ -204,6 +204,14 @@ impl Authenticator for AccountGate {
     self.inner.access_token()
   }
 
+  fn id_token(&self) -> Option<String> {
+    self.inner.id_token()
+  }
+
+  fn refresh_id_token(&self) -> LocalFuture<'_, ()> {
+    self.inner.refresh_id_token()
+  }
+
   fn dpop_prover(&self) -> LocalFuture<'_, Option<std::sync::Arc<teamcraft_core::api::dpop::DpopProver>>> {
     self.inner.dpop_prover()
   }

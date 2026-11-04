@@ -459,7 +459,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     policy: WorkspacePolicy,
   ) -> Result<(), CoreError> {
     self.sync_workspace().await?;
-    if self.workspace()?.policy != *base {
+    let mut verified = self.workspace()?.policy;
+    // This device keeps the role signing through an entry that doesn't name it (`apply_policy`), so
+    // what the server shows for such an entry isn't an altered draft.
+    if base.maybe_role_signing.is_none() {
+      verified.maybe_role_signing = None;
+    }
+    if verified != *base {
       return Err(CoreError::PolicyBaseMismatch);
     }
     self.publish_policy(policy).await
@@ -485,11 +491,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Signs and publishes a new workspace policy (owners only).
-  pub async fn publish_policy(&mut self, policy: WorkspacePolicy) -> Result<(), CoreError> {
+  pub async fn publish_policy(&mut self, mut policy: WorkspacePolicy) -> Result<(), CoreError> {
     self.sync_workspace().await?;
     let state = self.workspace()?;
     if state.roster.version > 0 && !self.is_verified_owner(&state) {
       return Err(CoreError::NotAnOwner);
+    }
+    if policy.maybe_role_signing.is_none() {
+      policy.maybe_role_signing = state.policy.maybe_role_signing.clone();
     }
     let document = ChainedPolicyDocument {
       version: state.policy_version + 1,
@@ -505,7 +514,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Whether this user is an owner in the roster this device verified.
-  fn is_verified_owner(&self, state: &WorkspaceState) -> bool {
+  pub(crate) fn is_verified_owner(&self, state: &WorkspaceState) -> bool {
     state
       .roster
       .members
@@ -534,7 +543,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Signs `document` as the next roster version, then the current policy again under it, so a
   /// policy signed under an older roster (by an owner removed since) is refused (A7). A roster
   /// without an owner is never signed: nobody could change it again (admin.md §2.3).
-  async fn append_roster(&mut self, mut document: RosterDocument) -> Result<(), CoreError> {
+  async fn append_roster(&mut self, document: RosterDocument) -> Result<(), CoreError> {
+    self.append_roster_with(document, Vec::new()).await
+  }
+
+  /// [`Self::append_roster`] for what an owner's app does by itself, with the audit line.
+  pub(crate) async fn append_roster_automatically(
+    &mut self,
+    document: RosterDocument,
+    changes: Vec<crate::role_signing::AutomaticChange>,
+  ) -> Result<(), CoreError> {
+    self.append_roster_with(document, changes).await
+  }
+
+  async fn append_roster_with(
+    &mut self,
+    mut document: RosterDocument,
+    automatic: Vec<crate::role_signing::AutomaticChange>,
+  ) -> Result<(), CoreError> {
+    document.automatic = automatic;
     if document.owner_count() == 0 {
       return Err(CoreError::LastOwner);
     }
@@ -545,6 +572,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(CoreError::NotAnOwner);
     }
     document.version = state.roster.version + 1;
+    // Marks only move forward, also past what an older owner's app left out of its last entry.
+    for (user, mark) in &state.provider_marks {
+      let is_newer = document
+        .provider_marks
+        .get(user)
+        .is_none_or(|known| known.issued_at < mark.issued_at);
+      if is_newer {
+        document.provider_marks.insert(*user, mark.clone());
+      }
+    }
     document.maybe_prev_hash = Some(head_or_genesis(state.heads.maybe_roster_hash));
     document.maybe_signed_at_ms = Some(self.now_ms());
     let version = document.version;

@@ -22,11 +22,13 @@ mod xhr;
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
 pub use connect::black_hole;
+pub(crate) use http::http_client;
 pub use http::{
   AccessTokenSource, HttpGateway, HttpRendezvous, HttpServerApi, ProvenToken, StaticToken,
   change_web_push_subscription,
@@ -122,6 +124,17 @@ pub struct RangedBlob {
   /// sends the whole blob again.
   pub start: u64,
   pub pieces: BlobPieces,
+}
+
+/// The session's tokens from the identity provider, as an app hands them over. An ID token is no
+/// credential at the server; the access token is, and stays on this device and goes only to the
+/// provider. No `Debug`: both name the person.
+#[derive(Clone)]
+pub struct ProviderTokens {
+  pub id_token: String,
+  pub access_token: String,
+  /// Signs what goes to the provider, where the session is bound to a key.
+  pub maybe_prover: Option<Arc<dpop::DpopProver>>,
 }
 
 /// Everything the sync engine needs from the server.
@@ -573,6 +586,23 @@ pub trait ServerApi {
   fn put_key_bag(&self, request: &PutKeyBagRequest)
   -> impl Future<Output = Result<KeyBagResponse, ApiError>>;
   fn key_bag(&self) -> impl Future<Output = Result<KeyBagResponse, ApiError>>;
+
+  /// The session's tokens from the identity provider, for role signing (e2ee.md §3.1.3). `None` where
+  /// there is no such session (a local account, an app that doesn't hand them over).
+  fn provider_tokens(&self) -> Option<ProviderTokens> {
+    None
+  }
+  /// Asks the app to get a new ID token soon: the attribute it should name was just written.
+  fn ask_for_new_id_token(&self) {}
+  /// Publishes this user's newest ID token for the owners' apps.
+  fn put_role_evidence(
+    &self,
+    request: &teamcraft_proto::PutRoleEvidenceRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// What owners' apps verify (owners only).
+  fn list_role_evidence(
+    &self,
+  ) -> impl Future<Output = Result<teamcraft_proto::ListRoleEvidenceResponse, ApiError>>;
 
   /// Entries of the roster or policy log after `query.maybe_after`, oldest first.
   fn list_workspace_log(

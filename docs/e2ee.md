@@ -109,9 +109,9 @@ That makes it a second, independent trust anchor:
 - The client uploads this signed ID token to TeamCraft together with its identity key.
 - Other clients verify the token's signature against Keycloak's JWKS, fetched **directly from
   Keycloak**, not through the VPS (the discovery document's `jwks_uri` must be on the issuer's host),
-  and check issuer, audience and the claim before pinning a key. Implemented for ES256 and EdDSA ID
-  tokens (`teamcraft-crypto::attestation`); the realm's ID token signature algorithm must be one of
-  them. The token's expiry isn't checked: it attests a key, not a session.
+  and check issuer, audience and the claim before pinning a key. Implemented for RS256, ES256 and EdDSA
+  ID tokens (`teamcraft-crypto::attestation`). The token's expiry isn't checked: it attests a key, not
+  a session.
 - Configured per deployment (`ClientSettings::maybe_attestation`: issuer, client ID, required or
   not). When required, a key without a valid attestation isn't pinned at all; otherwise it is pinned
   as trust on first use and marked as not attested, so the UI can show it.
@@ -140,6 +140,134 @@ is outside the server's domain; discovery documents must match the announced iss
 and use https; ID tokens must carry the announced issuer and client (iOS, which reads them); refresh
 tokens are kept per origin, issuer and client. Fixed by binding tokens to the device with DPoP
 (§3.1.2), once clients send proofs and the policy is `required`.
+
+### 3.1.3 Roles follow the identity provider (issue #1276)
+
+Owners and admins never sign roles by hand, and normally don't know that role signing exists. The apps
+do it, on evidence the server can't forge. **The owner's decision, not up for debate here:** the identity
+provider is the source of truth for owner and admin roles, and whoever controls it can appoint admins.
+The server alone can't appoint anybody.
+
+**The evidence.** The same ID token as for attestation (§3.1), read for two more things: the client roles
+(`resource_access.<client>.roles`) and the time of issue (`iat`). `verify_role_evidence` checks the
+signature against the provider's own keys, fetched directly from the issuer, then issuer, audience, `azp`,
+that it is an ID token, the claim `"<user id>:<fingerprint>"`, and that it has an `iat`.
+
+**The flow**, on every app's upkeep path (`client/role_signing.rs`, `role_signing.rs`):
+
+1. An app of somebody whose token gives owner or admin, or who is on the roster, writes the
+   `tc_identity_key` attribute if the token doesn't name this identity key yet (the account API, with the
+   session's own token, also DPoP-bound). The next token names it.
+2. If the roster doesn't say what the token says, or nobody noted this person's account yet, the app
+   publishes the token (`PUT /me/role-evidence`). The server keeps the newest per person, tells the owners'
+   apps (`role_evidence_update`) and shows the list only to owners (`GET /role-evidence`): tokens name
+   people, with their e-mail address. While it waits, an app publishes again at most once a day
+   (`role_evidence_refresh`), so its token stays recent.
+3. An owner's app the provider still calls owner verifies all of it and signs the next roster, in the
+   background. A roster it signs names what changed and on what evidence (`automatic`), which is the audit
+   line; the server copies it into the audit log. Then it signs the current policy again under the new
+   roster (as for every roster, A7).
+
+Everything but the requests in 2 and 3 is a local comparison: a token refresh every few minutes costs no
+request while the roster already says what the token says. An owner's app reads the evidence after a gateway
+event, once per gateway connection, and when its own role changed. Nothing runs on a timer (robustness.md).
+
+**What a token can do** (`plan_roster`, all pure, all tested):
+
+| Evidence                                                           | Effect                                                       |
+|--------------------------------------------------------------------|--------------------------------------------------------------|
+| Newer token with owner or admin, of the known account              | On the roster, with the key the token names                  |
+| Newer token with neither, of the known account                     | Off the roster, unless that leaves no owner                  |
+| Newer token with a lower role                                      | Demoted, unless that leaves no owner                         |
+| A token older than or as old as the person's mark                  | Nothing: this is what stops a replay after a demotion        |
+| A token more than `role_evidence_max_age` (30 days) old            | Puts nobody on the roster                                    |
+| No role claim at all                                               | Nothing, in either direction: the mapper may just be missing |
+| Another account than the one noted for this person                 | Nothing; contradictory, an owner hears of it                 |
+| The first token of somebody already on the roster, with their role | Notes their account (one roster write), changes nothing else |
+
+**Freshness and replay, without anybody's clock.** Each person has a **mark** in the signed roster
+(`provider_marks`): their account (`sub`) and the `iat` of the newest token that counted. A token changes
+something only if its `iat` is later. Because the marks are signed and in the log, every owner's device has the
+same floor, also a new one, and they stay for people no longer listed. "How old" is judged against the newest
+token this device itself got from the provider, never against a device's or the server's clock.
+
+**Why the account is noted.** A user's ID and fingerprint are public, so a member can write somebody else's into
+their own attribute and get a real token that names them. With a role that token could speak for the other person,
+and without one it could demote them. The claim alone is not enough: the token's `sub` has to be the one noted
+for that person. An admin already on the roster when this arrived has no noted account until their first token
+with the role, and until then no token takes their role away; the server's report below still can.
+
+**Who sets what the tokens mean.** The signed policy has a `role_signing` group: the mode, the role names, and the
+provider (issuer and client ID).
+
+- **Role names** default to `owner` and `admin` and are never taken from the server: a server that could name them
+  could call every member's role "admin". An instance whose realm uses other names sets them once in the console
+  (Administration → Security), which is a signed policy like any other. Until then its tokens say neither.
+- **The provider** is pinned in the signed policy by the first owner's app that signs automatically, from the token
+  this device got from its own token endpoint, not from anything the server says. From then on another issuer stops
+  the owners' apps and an owner hears of it. A real move to a new provider is an owner's explicit choice in the console.
+
+**The first roster.** The first owner's app signs it itself, from its own token, with nobody asked: that owner
+alone, then the provider pinned. Everybody else follows from their own tokens. A hostile server can't steer this:
+it decides nothing about who is on it, a token that doesn't verify or doesn't say owner starts nothing, and a device
+that pinned a root (or whose user's other device did, through the key bag) never starts a new one. A server that hides the log from
+a genuine owner who never saw a root gets a second log in that owner's name, which every device that pinned the real root
+refuses (`RootChanged`). It never gets anybody appointed whom the provider didn't make an owner.
+
+**Removal without a dialog.** Somebody who never signs in again has no newer token. For them the server's report counts,
+for taking somebody off only: `GET /role-evidence` lists the people of the newest roster whose account is deactivated or
+deleted, or whose provider role is neither owner nor admin by the server's records (`[oidc.sync]` and the last token). This
+is the server's word, and that is fine in this one direction: a server can already keep anybody from doing anything, and
+the person's next token brings them back. The mark moves to this moment on the provider's clock, so a token from before
+can't. Rules: never the signing owner, never the last owner; an owner goes only with their account, not on a reported
+role change, so a lagging role list or a hostile server can't whittle the owners down.
+
+What stays, honestly:
+
+- **Without `[oidc.sync]`** the server hears of a disabled account or a lost role only from the person's next token, so
+  somebody who never signs in again stays on the roster until an owner removes them by hand (Administration → Security →
+  Change the roster by hand). Their sign-in is dead at the provider either way, and an admin role needs a device that still
+  works.
+- **An owner demoted to admin who never signs in again** stays an owner on the roster: the report says nothing about a
+  role that is still admin or owner. Removing them is an owner's edit by hand.
+
+**Several owners at once** race on the log's version: one wins, the other gets `version_conflict`, reads the new roster on its
+next round and finds nothing left to do. **Admins can't sign** (`not_an_owner`), so an instance with only admins, or no owner
+online, waits, quietly, for however long: the evidence stays recent as long as the waiting person's app is in use.
+
+**What a person sees: nothing, normally.** No banner, no dialog. See admin.md §2.3.1 for the rare cases.
+
+**Manual signing.** `role_signing.mode = manual` in the signed policy turns all of this off: an owner signs every
+change, as before, and the provider alone can't appoint anybody on such an instance. Re-signing for freshness stays
+automatic. Older owners' apps drop what they don't know when they sign a policy again, so a policy that doesn't name
+`role_signing` changes nothing: clients keep the last one they verified. Likewise for `provider_marks`.
+
+**What this trusts, and the trade-off.** Before, an owner's look at each change also protected against a compromised
+identity provider. Now:
+
+| Who is compromised                    | What they gain                                                                                                                                                                                                                                        |
+|---------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| The server alone                      | Nobody appointed. It can withhold evidence and report people gone, which their next token repairs. On the roster: nothing it can sign                                                                                                                 |
+| The provider alone                    | It can make anybody an admin or owner **as far as it can get them a token with their real key** (it can sign in as them). Admin rights don't read old content (admin.md): they get management, a visible self-join, an announced removal, and the roster |
+| The provider and an account's device  | The same, with that device's keys. As today: such a person could sign as themselves anyway                                                                                                                                                           |
+| The server and an old token           | A token of somebody since demoted, replayed on a log the server holds back from a device, works there for at most `role_evidence_max_age`; members' heads expose the fork, as for any withheld entry                                                  |
+| Server with the user's access token   | If the access token carries the `account` audience and isn't DPoP-bound, the server could write the attribute (security review, finding 15). It can't get an ID token from that, the person's own app rewrites the attribute and never publishes a token that names another key |
+
+Instances that want the owner's look back set the policy to manual.
+
+**Residual risks.** The pin is trust on first use, like the workspace root: an owner whose device was sent to a fake provider
+before the pin, by a server that was already hostile, and who typed their password there (§3.1.1), pins that provider. It
+needs that owner's password on a fake page, and the workspace's other owners, whose apps then see another provider than the
+signed one, hear of it. A device that never saw a root has to believe the log it is shown, as before.
+
+**Compatibility.** Older clients keep verifying rosters and policies: signatures cover the bytes, and serde skips what it
+doesn't know. They don't understand the marks and can't act on them, and an older owner's app that signs again leaves them out,
+which the clients keep through it. Nobody needs to update at the same moment and nothing splits. The new gateway event is unknown to
+older apps, which ignore it.
+
+**Mobile.** The logic is in the shared core and runs on the phones' upkeep too. Phones don't hand over an ID token yet, so they
+publish no evidence and sign nothing automatically (`ProviderTokens` is `None`); they keep re-signing for freshness as before. A phone-only
+admin is in force once their account has been open on desktop or web. Tracked in #1276.
 
 ### 3.1.2 Tokens bound to a device: DPoP (issue #120)
 

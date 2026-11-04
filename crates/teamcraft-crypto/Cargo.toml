@@ -49,6 +49,11 @@ tls_codec = { version = "0.5.0", features = ["derive", "std"] }
 # Device key agreement (rendezvous, key transfer).
 x25519-dalek = { version = "2.0.1", features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1.9.1", features = ["derive"] }
+# Checking identity provider tokens: RS256 is what providers sign with unless told otherwise (e2ee.md
+# §3.1.3). Only public-key verification runs here; RUSTSEC-2023-0071 concerns private-key use.
+rsa = { version = "0.9.10", default-features = false, features = ["std", "sha2"] }
+# The digest generation rsa 0.9 signs with (already in the tree through p256 0.13).
+rsa_sha2 = { package = "sha2", version = "0.10.9", features = ["oid"] }
 # Organization recovery (e2ee.md §6.3): HPKE (RFC 9180) to the org key, same hpke-rs as openmls uses.
 hpke-rs = "0.7.0"
 hpke-rs-crypto = "0.7.0"

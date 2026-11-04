@@ -100,6 +100,12 @@ impl Upkeep {
         tracing::debug!(%error, "abandoned device registrations not revoked yet");
       }
     }
+    // Roles follow the identity provider (e2ee.md §3.1.3); a local comparison while nothing changed.
+    match client.run_role_signing().await {
+      Ok(changed) => is_changed |= changed,
+      // Paced by its own backoff, so this says it now and then at most: a person's rights may wait on it.
+      Err(error) => tracing::warn!(%error, "roles not signed yet"),
+    }
     // Key packages expire; a device that runs for weeks renews them in time (e2ee.md §4.3).
     if let Err(error) = client.renew_key_packages_if_due().await {
       tracing::debug!(%error, "key packages not renewed yet");

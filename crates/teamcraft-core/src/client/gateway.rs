@@ -586,6 +586,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       | GatewayEvent::SpaceMemberAdd { .. }
       | GatewayEvent::SpaceMemberRemove { .. } => self.refresh_spaces().await,
       GatewayEvent::WorkspaceUpdate { .. } => self.sync_workspace_and_recovery().await,
+      GatewayEvent::RoleEvidenceUpdate => {
+        self.note_role_evidence_update();
+        Ok(())
+      },
       GatewayEvent::ChannelRolesUpdate { conversation_id, .. } => {
         self.sync_channel_roles(conversation_id).await
       },

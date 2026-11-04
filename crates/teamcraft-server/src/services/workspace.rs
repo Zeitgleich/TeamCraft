@@ -99,7 +99,7 @@ pub async fn append(
       _ => "policy_appended",
     },
     None::<AuditTarget<'_>>,
-    &json!({"version": version}),
+    &log_entry_details(&kind, version, request.payload.as_slice()),
   )
   .await?;
   state.hub.publish_all(&GatewayEvent::WorkspaceUpdate {
@@ -119,6 +119,21 @@ pub async fn append(
     .first()
     .map(entry_response)
     .ok_or_else(|| ApiError::Internal("appended entry missing".into()))
+}
+
+/// What the audit log says about a new entry. A roster an owner's app signed by itself names what
+/// changed and on what evidence, so somebody can follow it (e2ee.md §3.1.3); the app's word, as the
+/// server doesn't verify the signature, and every client checks the roster itself.
+fn log_entry_details(kind: &WorkspaceLogKind, version: u64, payload: &[u8]) -> serde_json::Value {
+  let maybe_automatic = (*kind == WorkspaceLogKind::Roster)
+    .then(|| serde_json::from_slice::<serde_json::Value>(payload).ok())
+    .flatten()
+    .and_then(|document| document.get("automatic").cloned())
+    .filter(|automatic| automatic.as_array().is_some_and(|changes| !changes.is_empty()));
+  match maybe_automatic {
+    Some(automatic) => json!({"version": version, "automatic": automatic}),
+    None => json!({"version": version}),
+  }
 }
 
 /// The genesis roster makes its signer the workspace root of trust (admin.md §2.3). Their identity

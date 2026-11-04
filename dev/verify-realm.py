@@ -5,6 +5,7 @@ Needs the running dev stack with a freshly imported realm. For user "alice" it v
 
   * the public client's access token can use Keycloak's account API (audience "account"),
   * the user can write the profile attribute tc_identity_key and gets it back as an ID token claim,
+  * the ID token carries the client roles (e2ee.md §3.1.3),
   * the server's service account can read users but cannot change that attribute.
 
 Exits non-zero with a message on the first failure. Resets the attribute at the end.
@@ -72,7 +73,10 @@ def main() -> None:
   check("account" in (claims(access).get("aud") if isinstance(claims(access).get("aud"), list) else [claims(access).get("aud")]),
         "access token has the account audience")
   set_attribute(access, ["fp:verify-realm"])
-  check(claims(token("alice", "id")).get("tc_identity_key") == "fp:verify-realm", "ID token carries tc_identity_key")
+  id_claims = claims(token("alice", "id"))
+  check(id_claims.get("tc_identity_key") == "fp:verify-realm", "ID token carries tc_identity_key")
+  check("owner" in id_claims.get("resource_access", {}).get("teamcraft", {}).get("roles", []),
+        "ID token carries the client roles")
 
   form = urllib.parse.urlencode({"grant_type": "client_credentials", "client_id": "teamcraft-server",
                                  "client_secret": "teamcraft-server-dev-secret"}).encode()

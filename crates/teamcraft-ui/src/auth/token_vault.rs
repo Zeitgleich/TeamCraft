@@ -119,15 +119,17 @@ impl Tokens {
 /// Decides a refresh: saved tokens of the same account win over this tab's own (another tab may
 /// have rotated the refresh token this tab still holds). Tokens of another account, or of an
 /// account this tab can't name, are never taken over nor overwritten. On start (`maybe_memory`
-/// is `None`) the saved tokens are the browser's last sign-in.
+/// is `None`) the saved tokens are the browser's last sign-in. `is_forced`: tokens that are still
+/// fresh won't do, the provider has to answer (for what it would say by now).
 pub(super) fn plan_refresh(
   maybe_memory: Option<&Tokens>,
   maybe_saved: Option<Tokens>,
   now_ms: i64,
+  is_forced: bool,
 ) -> RefreshPlan {
   let is_shared = match maybe_saved {
     Some(saved) if is_same_account(maybe_memory, &saved) => {
-      if saved.is_fresh(now_ms) {
+      if saved.is_fresh(now_ms) && !is_forced {
         return RefreshPlan::Adopt(saved);
       }
       let maybe_bound_key = token_bound_key(saved.access.expose_secret());
@@ -320,7 +322,7 @@ mod tests {
   fn a_fresh_saved_token_is_adopted_without_refreshing() {
     let memory = tokens("alice", "access-1", Some("refresh-1"), NOW_MS);
     let saved = tokens("alice", "access-2", Some("refresh-2"), NOW_MS + 300_000);
-    let RefreshPlan::Adopt(adopted) = plan_refresh(Some(&memory), Some(saved), NOW_MS) else {
+    let RefreshPlan::Adopt(adopted) = plan_refresh(Some(&memory), Some(saved), NOW_MS, false) else {
       panic!("expected the saved tokens");
     };
     assert_eq!(adopted.access.expose_secret(), "access-2");
@@ -332,7 +334,7 @@ mod tests {
     let memory = tokens("alice", "access-1", Some("refresh-1"), NOW_MS);
     let saved = tokens("alice", "access-2", Some("refresh-2"), NOW_MS + 10_000);
     assert_refresh(
-      plan_refresh(Some(&memory), Some(saved), NOW_MS),
+      plan_refresh(Some(&memory), Some(saved), NOW_MS, false),
       "refresh-2",
       true,
     );
@@ -346,19 +348,23 @@ mod tests {
     memory.maybe_subject = None;
     let saved = tokens("bob", "access-2", Some("refresh-2"), NOW_MS + 300_000);
     assert_refresh(
-      plan_refresh(Some(&memory), Some(saved), NOW_MS),
+      plan_refresh(Some(&memory), Some(saved), NOW_MS, false),
       "refresh-1",
       false,
     );
-    assert_refresh(plan_refresh(Some(&memory), None, NOW_MS), "refresh-1", false);
+    assert_refresh(
+      plan_refresh(Some(&memory), None, NOW_MS, false),
+      "refresh-1",
+      false,
+    );
   }
 
   #[test]
   fn on_start_the_saved_tokens_are_used() {
     let saved = tokens("alice", "access-2", Some("refresh-2"), NOW_MS);
-    assert_refresh(plan_refresh(None, Some(saved), NOW_MS), "refresh-2", true);
+    assert_refresh(plan_refresh(None, Some(saved), NOW_MS, false), "refresh-2", true);
     assert!(matches!(
-      plan_refresh(None, None, NOW_MS),
+      plan_refresh(None, None, NOW_MS, false),
       RefreshPlan::NotSignedIn
     ));
   }
@@ -368,7 +374,7 @@ mod tests {
     let memory = tokens("alice", "access-1", Some("refresh-1"), NOW_MS);
     let saved = tokens("bob", "access-2", Some("refresh-2"), NOW_MS + 300_000);
     assert_refresh(
-      plan_refresh(Some(&memory), Some(saved), NOW_MS),
+      plan_refresh(Some(&memory), Some(saved), NOW_MS, false),
       "refresh-1",
       false,
     );
@@ -377,10 +383,14 @@ mod tests {
   #[test]
   fn without_saved_tokens_the_tab_refreshes_its_own_and_shares_them() {
     let memory = tokens("alice", "access-1", Some("refresh-1"), NOW_MS);
-    assert_refresh(plan_refresh(Some(&memory), None, NOW_MS), "refresh-1", true);
+    assert_refresh(
+      plan_refresh(Some(&memory), None, NOW_MS, false),
+      "refresh-1",
+      true,
+    );
     let memory = tokens("alice", "access-1", None, NOW_MS);
     assert!(matches!(
-      plan_refresh(Some(&memory), None, NOW_MS),
+      plan_refresh(Some(&memory), None, NOW_MS, false),
       RefreshPlan::NotSignedIn
     ));
   }

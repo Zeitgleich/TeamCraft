@@ -561,6 +561,119 @@ pub struct WorkspacePolicy {
   /// Importing history from another chat (e2ee.md §4.10); off when absent.
   #[serde(default)]
   pub import: crate::ImportPolicy,
+  /// How the admin roster follows the identity provider (e2ee.md §3.1.3). Absent means automatic.
+  /// A policy that doesn't name it doesn't change it: an older owner's app re-signs without it, so
+  /// clients keep the last one they verified.
+  #[serde(rename = "role_signing", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_role_signing: Option<RoleSigningPolicy>,
+}
+
+wire_enum! {
+  /// Who signs changes of the admin roster.
+  pub enum RoleSigningMode {
+    /// Owners' apps sign what the identity provider's signed tokens say, with nobody asked.
+    Automatic => "automatic",
+    /// An owner signs every change in the console: the identity provider alone appoints nobody.
+    Manual => "manual",
+  }
+}
+
+/// How the admin roster follows the identity provider (e2ee.md §3.1.3), part of the signed policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RoleSigningPolicy {
+  pub mode: RoleSigningMode,
+  /// The client role that makes somebody an owner.
+  #[serde(default = "default_owner_role")]
+  pub owner_role: String,
+  /// The client role that makes somebody an admin.
+  #[serde(default = "default_admin_role")]
+  pub admin_role: String,
+  /// Whose tokens count. Set by the first owner's app that signs automatically and from then on the
+  /// owners' word, not the server's: the server can't point the apps at another issuer.
+  #[serde(rename = "provider", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_provider: Option<RoleProvider>,
+}
+
+/// The identity provider whose tokens can change the admin roster.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RoleProvider {
+  pub issuer: String,
+  /// The client the tokens are issued to; its client roles are read
+  /// (`resource_access.<client_id>.roles`).
+  pub client_id: String,
+}
+
+/// The role names a workspace uses unless its signed policy names others. Deliberately not taken
+/// from the server: a server that could name them could call every member's role "admin".
+pub const DEFAULT_OWNER_ROLE: &str = "owner";
+pub const DEFAULT_ADMIN_ROLE: &str = "admin";
+
+fn default_owner_role() -> String {
+  DEFAULT_OWNER_ROLE.to_owned()
+}
+
+fn default_admin_role() -> String {
+  DEFAULT_ADMIN_ROLE.to_owned()
+}
+
+impl Default for RoleSigningPolicy {
+  fn default() -> Self {
+    Self {
+      mode: RoleSigningMode::Automatic,
+      owner_role: default_owner_role(),
+      admin_role: default_admin_role(),
+      maybe_provider: None,
+    }
+  }
+}
+
+impl RoleSigningPolicy {
+  /// Whether owners' apps sign by themselves. A mode this version doesn't know doesn't.
+  pub fn is_automatic(maybe_policy: Option<&Self>) -> bool {
+    maybe_policy.is_none_or(|policy| policy.mode == RoleSigningMode::Automatic)
+  }
+}
+
+/// `PUT /api/v1/me/role-evidence`: the caller's newest ID token with their identity key and roles
+/// (e2ee.md §3.1.3). The server only keeps it for the owners' apps, which verify it themselves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PutRoleEvidenceRequest {
+  pub token: String,
+}
+
+/// `GET /api/v1/role-evidence` (owners only).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ListRoleEvidenceResponse {
+  pub entries: Vec<RoleEvidenceEntry>,
+  /// People of the newest roster the server says lost their role or account. The server's word:
+  /// enough to take somebody off, never to put anybody on (e2ee.md §3.1.3).
+  #[serde(default)]
+  pub withdrawn: Vec<WithdrawnRole>,
+}
+
+/// The newest token of one person and the identity key the server has for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RoleEvidenceEntry {
+  pub user_id: crate::UserId,
+  pub token: String,
+  pub public_key: Base64Bytes,
+}
+
+/// Somebody on the roster who, by the server's records, no longer holds the role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct WithdrawnRole {
+  pub user_id: crate::UserId,
+  pub reason: WithdrawnReason,
+}
+
+wire_enum! {
+  /// Why the server reports a person as [`WithdrawnRole`].
+  pub enum WithdrawnReason {
+    /// The account is deactivated or deleted.
+    AccountGone => "account_gone",
+    /// The provider gives the account neither owner nor admin any more.
+    RoleGone => "role_gone",
+  }
 }
 
 /// The JSON document a policy entry's `payload` must contain (and the owner signs).
@@ -593,6 +706,7 @@ impl Default for WorkspacePolicy {
       compliance_archive: ComplianceArchivePolicy {
         mode: ComplianceArchiveMode::Off,
       },
+      maybe_role_signing: None,
       session: SessionPolicy::default(),
       directory: DirectoryPolicy::default(),
       presence: PresencePolicy::default(),

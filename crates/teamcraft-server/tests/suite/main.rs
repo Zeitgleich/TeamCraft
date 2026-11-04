@@ -70,6 +70,7 @@ mod read_receipts;
 mod rendezvous;
 mod rest;
 mod retention;
+mod role_evidence;
 mod security;
 mod session_policy;
 mod shares;

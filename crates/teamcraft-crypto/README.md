@@ -84,7 +84,7 @@ certificate-based credential.
   packages (and a last-resort one) uploaded.
 - **Organization recovery** follows e2ee.md §6.3.1; the server endpoints for shares and recovery
   requests are still missing (see teamcraft-core's README).
-- **Not yet implemented:** share link password wrapping (§4.5.1), OIDC attestation verification
+- **Not yet implemented:** share link password wrapping (§4.5.1), 
   (§3.1).
 - **Review needed:** the rendezvous handshake (§5), org recovery (§6.3.1) and the recovery kit
   (§6.5) combine primitives in new ways; security.md asks for a review before relying on them.

@@ -47,6 +47,8 @@ mod pending_echo;
 #[cfg(feature = "browser")]
 mod perf;
 mod retention_limits;
+#[cfg(feature = "browser")]
+mod role_signing_web;
 mod server_robustness;
 mod sync_perf;
 mod threads_policy;
