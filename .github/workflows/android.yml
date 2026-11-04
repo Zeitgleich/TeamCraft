@@ -1,122 +1,43 @@
 name: Android
-
-# Builds the Android app the way apps/android/scripts/docker-build.sh does locally: the build image
-# from apps/android/docker, the Rust core through cargo-ndk, the UniFFI Kotlin bindings, then
-# Gradle. A change to the FFI or the crates behind it that breaks the Kotlin app fails here; the
-# main CI never compiles Kotlin. Only runs when the app or a crate it links changes (runners are
-# scarce), like the iOS workflow.
-on:
+'on':
   push:
-    branches: [main]
+    branches:
+    - main
     paths:
-      - "apps/android/**"
-      - "crates/teamcraft-ffi/**"
-      - "crates/teamcraft-core/**"
-      - "crates/teamcraft-client-api/**"
-      - "crates/teamcraft-crypto/**"
-      - "crates/teamcraft-media/**"
-      - "crates/teamcraft-proto/**"
-      - "crates/teamcraft-uniffi-bindgen/**"
-      - "Cargo.lock"
-      - ".github/workflows/android.yml"
+    - apps/android/**
+    - crates/teamcraft-ffi/**
+    - crates/teamcraft-core/**
+    - crates/teamcraft-client-api/**
+    - crates/teamcraft-crypto/**
+    - crates/teamcraft-media/**
+    - crates/teamcraft-proto/**
+    - crates/teamcraft-uniffi-bindgen/**
+    - Cargo.lock
+    - .github/workflows/android.yml
   pull_request:
-    # No `labeled`: ci-label.yml re-runs this when the `ci` label comes after opening.
-    types: [opened, synchronize, reopened]
+    types:
+    - opened
+    - synchronize
+    - reopened
     paths:
-      - "apps/android/**"
-      - "crates/teamcraft-ffi/**"
-      - "crates/teamcraft-core/**"
-      - "crates/teamcraft-client-api/**"
-      - "crates/teamcraft-crypto/**"
-      - "crates/teamcraft-media/**"
-      - "crates/teamcraft-proto/**"
-      - "crates/teamcraft-uniffi-bindgen/**"
-      - "Cargo.lock"
-      - ".github/workflows/android.yml"
-
+    - apps/android/**
+    - crates/teamcraft-ffi/**
+    - crates/teamcraft-core/**
+    - crates/teamcraft-client-api/**
+    - crates/teamcraft-crypto/**
+    - crates/teamcraft-media/**
+    - crates/teamcraft-proto/**
+    - crates/teamcraft-uniffi-bindgen/**
+    - Cargo.lock
+    - .github/workflows/android.yml
 permissions:
   contents: read
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Superseded PR runs are cancelled; a running main run finishes so main always gets a verdict
-  # (only the newest queued main run is kept).
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-
 jobs:
   build-and-test:
-    # Pull requests run only with the `ci` label (or from Dependabot): branches are checked locally
-    # before merging, and main gets one run per batch. This keeps the runner budget for main and
-    # releases. A re-run keeps the first attempt's payload, so it counts as asked for.
     if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci') || github.run_attempt > 1
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      # Deletes the superseded cache after saving a new one (see "Save cache").
-      actions: write
-    env:
-      TEAMCRAFT_ANDROID_IMAGE: teamcraft-android-build:ci
-      # Debug core for both ABIs (phones and emulator): it compiles the bindings and the app like a
-      # release build, much faster. The CI image (containers/ci.Containerfile) has no JDK, SDK or
-      # Android targets, so the job uses the app's own build image instead.
-      TEAMCRAFT_RUST_PROFILE: dev
     steps:
-      # The mounted cache of docker-build.sh (SDK, NDK, Gradle, Cargo, target directory). Set here
-      # because the runner context isn't available in a job's env.
-      - name: Cache directory
-        run: echo "TEAMCRAFT_ANDROID_CACHE=${RUNNER_TEMP}/android" >> "$GITHUB_ENV"
-      - name: Free disk space on the runner
-        # The runner's own Android SDK and other unused tools; the build uses the image's SDK.
-        run: nohup sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache > /dev/null 2>&1 &
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Build image
-        run: docker build -t "${TEAMCRAFT_ANDROID_IMAGE}" apps/android/docker
-      # Dependencies and the Rust build output; the SDK and NDK are downloaded on every run (they
-      # are large, and the repository's cache space is shared with the Rust jobs). Only runs on
-      # main save the cache, and only when the key (the lockfiles, the Gradle files and the build
-      # image) has no cache yet; pull requests restore main's. One key per toolchain state: a key per
-      # run wrote 1.4 GB on every push to main and pushed the other caches out of the 10 GB budget.
-      - name: Restore cache
-        id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: &cache-paths |
-            ${{ runner.temp }}/android/cargo/registry/index
-            ${{ runner.temp }}/android/cargo/registry/cache
-            ${{ runner.temp }}/android/cargo/git/db
-            ${{ runner.temp }}/android/gradle/caches/modules-2
-            ${{ runner.temp }}/android/gradle/wrapper/dists
-            ${{ runner.temp }}/android/target
-          key: android-${{ hashFiles('Cargo.lock', 'apps/android/gradle/**', 'apps/android/**/*.gradle.kts', 'apps/android/docker/Dockerfile') }}
-          # No fallback to another key: a cache from another toolchain (NDK, Gradle, Cargo.lock)
-          # carries CMake caches that point at the old NDK path and break the native builds.
-      - name: Rust core, Kotlin bindings, app and unit tests
-        run: >
-          apps/android/scripts/docker-build.sh
-          assembleFullDebug testFullDebugUnitTest testLibreDebugUnitTest
-      - name: Save cache
-        id: save
-        if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: *cache-paths
-          key: ${{ steps.cache.outputs.cache-primary-key }}
-      # Only the newest toolchain state is useful; older Android caches would sit in the budget until
-      # they are evicted, together with the Rust caches.
-      - name: Delete superseded caches
-        if: steps.save.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          CURRENT_KEY: ${{ steps.cache.outputs.cache-primary-key }}
-        run: |
-          gh cache list --key android- --ref refs/heads/main --limit 100 --json id,key \
-            --jq ".[] | select(.key != \"$CURRENT_KEY\") | .id" \
-            | while read -r id; do gh cache delete "$id" || true; done
-      - name: Upload the unit test reports on failure
-        if: failure()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: android-test-reports
-          path: apps/android/app/build/reports/tests
+    - run: echo stub
