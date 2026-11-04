@@ -144,6 +144,12 @@ jobs:
   # Tests in their own job: a fresh disk, and test binaries without debug info (every integration
   # test binary links the whole dependency tree). cargo-nextest runs every test in its own process
   # and in parallel across binaries; it does not run doctests, so those run separately.
+  #
+  # The tests behind the `integration` feature of teamcraft-server and teamcraft-db run here too.
+  # Naming the feature adds no build: teamcraft-bridge's dev-dependency already turns it on for the
+  # workspace, and the name keeps them in if that changes. They need Postgres and skip themselves
+  # without it, so TEST_DATABASE_REQUIRED makes a missing database a failure (#1280). The other crates'
+  # `integration` tests need a running server and Keycloak; scripts/e2e.sh has that stack.
   test:
     needs: [plan]
     if: needs.plan.outputs.run_ci == 'true'
@@ -166,10 +172,29 @@ jobs:
       # To reach the host's net.core.rmem_max below, which no container's network namespace has. A
       # runner is a throwaway VM with sudo anyway.
       options: --privileged --pid=host
+    # Same major version as docker-compose.dev.yml. A service can't be given a command, so the
+    # settings go through initdb: every parallel test server holds a pool of connections, and each
+    # test migrates a database of its own, which durability would only slow down.
+    services:
+      postgres:
+        image: postgres:18.6-alpine3.24@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+        env:
+          POSTGRES_USER: teamcraft
+          POSTGRES_PASSWORD: ci-only
+          POSTGRES_DB: teamcraft
+          POSTGRES_INITDB_ARGS: "-c max_connections=400 -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
+        options: >-
+          --tmpfs /var/lib/postgresql
+          --health-cmd "pg_isready -U teamcraft -d teamcraft"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
     env:
       SQLX_OFFLINE: "true"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_DEV_STRIP: "debuginfo"
+      DATABASE_URL: postgres://teamcraft:ci-only@postgres:5432/teamcraft
+      TEST_DATABASE_REQUIRED: "true"
     steps:
       - name: Let UDP sockets have the receive buffers they ask for
         # The SFU tests' calls ask for 4 MiB, as a deployed SFU should get (docs/operations.md).
@@ -189,7 +214,12 @@ jobs:
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
       - name: Test
-        run: cargo nextest run --workspace --profile ci
+        env:
+          # The test thread polls the whole test body, and in a debug build the futures of the bridge's
+          # end-to-end tests don't fit the default 2 MiB (as in scripts/e2e.sh). Set here, not on the
+          # job: rust-cache hashes the job's RUST* variables into its key, and would miss main's cache.
+          RUST_MIN_STACK: "16777216"
+        run: cargo nextest run --workspace --profile ci --features teamcraft-server/integration,teamcraft-db/integration
       - name: Doctests
         run: cargo test --workspace --doc
 

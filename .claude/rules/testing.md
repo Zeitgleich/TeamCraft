@@ -9,6 +9,9 @@
   (wasm) stay separate files in `tests/`.
 - Tests that need Postgres, Keycloak or S3 use the dev stack (`docker compose -f docker-compose.dev.yml`)
   and are behind the `integration` feature, so `cargo test --workspace` works without it.
+- CI's `test` job runs the Postgres tests against a service, and `TEST_DATABASE_REQUIRED` turns a
+  missing database into a failure. What else a test needs (S3, Mailpit, a running server) still
+  skips there: a new test that must not go unnoticed needs only Postgres.
 
 ## Test module layout
 

@@ -3,6 +3,9 @@
 //! Tests skip themselves (with a note on stderr) when `DATABASE_URL` is not set, so
 //! `cargo test --workspace --all-features` also works without the dev stack. Each test migrates its
 //! own database on the server named by `DATABASE_URL` and drops it at the end.
+//!
+//! CI sets `TEST_DATABASE_REQUIRED`: there a test without a database fails, because a suite that
+//! skips itself looks exactly like a suite that passed (#1280).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -15,6 +18,10 @@ pub use sqlx::{self, PgPool};
 
 use crate::{Database, DatabaseOptions};
 
+/// Not `TEAMCRAFT_...`: the server's configuration takes every variable with that prefix as a
+/// setting, and refuses the ones it doesn't know.
+const DATABASE_REQUIRED: &str = "TEST_DATABASE_REQUIRED";
+
 static DATABASE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 pub struct TestDatabase {
@@ -25,9 +32,13 @@ pub struct TestDatabase {
 }
 
 impl TestDatabase {
-  /// `None` (the test is skipped) when `DATABASE_URL` is not set.
+  /// `None` (the test is skipped) when `DATABASE_URL` is not set, unless `DATABASE_REQUIRED` is set.
   pub async fn create() -> Option<Self> {
     let Ok(admin_url) = std::env::var("DATABASE_URL") else {
+      assert!(
+        std::env::var_os(DATABASE_REQUIRED).is_none(),
+        "{DATABASE_REQUIRED} is set, so this test may not skip, but DATABASE_URL is not set"
+      );
       eprintln!("skipping: DATABASE_URL is not set");
       return None;
     };
