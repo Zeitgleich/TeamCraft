@@ -1050,6 +1050,11 @@ pub enum ChatAction {
     conversation: ConversationId,
     user: UserId,
   },
+  SignReviewedChannelRoles {
+    conversation: ConversationId,
+    roles: Vec<(UserId, crate::model::ChannelRole)>,
+    at_cursor: u64,
+  },
   RefreshChannelRoles {
     conversation: ConversationId,
   },
@@ -1386,6 +1391,11 @@ impl ChatAction {
         role,
       } => backend.set_channel_role(conversation, user, role),
       Self::ConfirmChannelRole { conversation, user } => backend.confirm_channel_role(conversation, user),
+      Self::SignReviewedChannelRoles {
+        conversation,
+        roles,
+        at_cursor,
+      } => backend.sign_reviewed_channel_roles(conversation, roles, at_cursor),
       Self::RefreshChannelRoles { conversation } => backend.refresh_channel_roles(conversation),
       Self::RemoveSpaceMember { space, user } => backend.remove_space_member(space, user),
       Self::RevokeSpaceInvite { space, invite } => backend.revoke_space_invite(space, invite),
@@ -1510,6 +1520,12 @@ pub enum ChatQuery {
   },
   CanManageIntegrationSources,
   CanSignChannelRoles {
+    conversation: ConversationId,
+  },
+  AreChannelRolesUnverified {
+    conversation: ConversationId,
+  },
+  ChannelRolesReview {
     conversation: ConversationId,
   },
   SpaceInvites {
@@ -1672,6 +1688,14 @@ pub enum ChatAnswer {
   CanSignChannelRoles {
     #[serde(default)]
     can_sign: bool,
+  },
+  AreChannelRolesUnverified {
+    #[serde(default)]
+    is_unverified: bool,
+  },
+  ChannelRolesReview {
+    #[serde(default)]
+    maybe_review: Option<crate::model::ChannelRolesReview>,
   },
   SpaceInvites {
     invites: Vec<crate::model::PendingInvite>,
@@ -1876,6 +1900,12 @@ impl ChatQuery {
       },
       Self::CanSignChannelRoles { conversation } => ChatAnswer::CanSignChannelRoles {
         can_sign: backend.can_sign_channel_roles(conversation),
+      },
+      Self::AreChannelRolesUnverified { conversation } => ChatAnswer::AreChannelRolesUnverified {
+        is_unverified: backend.are_channel_roles_unverified(conversation),
+      },
+      Self::ChannelRolesReview { conversation } => ChatAnswer::ChannelRolesReview {
+        maybe_review: backend.channel_roles_review(conversation),
       },
       Self::SpaceMembers { space } => ChatAnswer::SpaceMembers {
         roster: backend.space_members(space),

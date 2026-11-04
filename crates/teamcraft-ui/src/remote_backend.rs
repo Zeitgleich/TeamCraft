@@ -1661,6 +1661,36 @@ impl ChatBackend for RemoteChat {
     )
   }
 
+  fn channel_roles_review(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::model::ChannelRolesReview> {
+    match self.ask(ChatQuery::ChannelRolesReview { conversation }) {
+      Some(ChatAnswer::ChannelRolesReview { maybe_review }) => maybe_review,
+      _ => None,
+    }
+  }
+
+  fn sign_reviewed_channel_roles(
+    &self,
+    conversation: ConversationId,
+    roles: Vec<(UserId, teamcraft_client_api::model::ChannelRole)>,
+    at_cursor: u64,
+  ) {
+    self.act(ChatAction::SignReviewedChannelRoles {
+      conversation,
+      roles,
+      at_cursor,
+    });
+  }
+
+  fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {
+    matches!(
+      self.ask(ChatQuery::AreChannelRolesUnverified { conversation }),
+      Some(ChatAnswer::AreChannelRolesUnverified { is_unverified: true })
+    )
+  }
+
   fn confirm_channel_role(&self, conversation: ConversationId, user: UserId) {
     self.act(ChatAction::ConfirmChannelRole { conversation, user });
   }

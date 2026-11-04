@@ -376,6 +376,80 @@ mod false_claims {
     assert_hidden_with_history(&bob, channel);
   }
 
+  /// Issue #1260: Bob reads the log after Eve left the roster. He takes Mallory's appointment for
+  /// roles, but he can't justify the anchor any more: her deletion takes the retention.
+  #[tokio::test]
+  async fn a_channel_admin_appointed_by_a_departed_signer_purges_nothing_on_a_late_reader() {
+    let server = FakeServer::new();
+    let (mut alice, mut eve, mut bob, mallory, channel, clock) = late_reader_world(&server).await;
+    let mallory_id = mallory.client.user_id();
+
+    assert_eq!(
+      eve
+        .client
+        .sign_channel_roles(channel, &[(mallory_id, ChannelRole::Admin)], false)
+        .await
+        .unwrap(),
+      RoleSigning::Signed
+    );
+    // An hour on; the server's clock doesn't move with the test's.
+    clock.advance(60 * 60 * 1000);
+    let alice_id = alice.client.user_id();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    let roles = bob.client.channel_role_state(channel).unwrap();
+    assert_eq!(roles.role_of(mallory_id), ChannelRole::Admin);
+    assert!(!roles.is_workspace_anchored);
+
+    let epoch = epoch_of(&mut bob, channel);
+    let signed = mallory.client.sign_channel_deletion(channel, epoch).unwrap();
+    server.claim_signed_deletion(channel, signed);
+    server.hide_from(bob.client.user_id(), channel);
+    bob.client.full_sync().await.unwrap();
+
+    assert_hidden_with_history(&bob, channel);
+  }
+
+  /// Bob can't place Eve's entry at all. The channel's admins count for nothing on his device, but
+  /// a workspace admin's signature doesn't rest on them: Alice's deletion still purges.
+  #[tokio::test]
+  async fn a_workspace_admin_still_purges_during_an_unverified_stretch() {
+    let server = FakeServer::new();
+    let (mut alice, mut eve, mut bob, mallory, channel, clock) = late_reader_world(&server).await;
+    let alice_id = alice.client.user_id();
+    // The owner's clock runs ahead of the server's: Eve's entry still passes as dated in her tenure.
+    clock.advance(60 * 60 * 1000);
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    bob.client.sync_workspace().await.unwrap();
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    eve
+      .client
+      .sign_channel_roles(channel, &[(mallory.client.user_id(), ChannelRole::Admin)], false)
+      .await
+      .unwrap();
+    bob.client.sync_channel_roles(channel).await.unwrap();
+    assert!(
+      bob
+        .client
+        .channel_role_state(channel)
+        .unwrap()
+        .has_unverified_stretch()
+    );
+
+    alice.client.delete_channel(channel).await.unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    assert_purged(&bob, channel);
+  }
+
   /// A device its user removed still has a good certificate; the user's signed list decides.
   #[tokio::test]
   async fn a_device_its_owner_removed_purges_nothing() {
@@ -635,6 +709,41 @@ mod deleting_a_space {
     bob.client.full_sync().await.unwrap();
     assert_hidden_with_history(&bob, channel);
   }
+}
+
+/// Alice owns the workspace and Eve is an admin of it; Alice's channel holds Bob and Mallory, and
+/// everybody's clock agrees with the server's, which dates the role entries.
+async fn late_reader_world(
+  server: &FakeServer,
+) -> (Peer, Peer, Peer, Peer, ConversationId, Arc<ManualClock>) {
+  let clock = Arc::new(ManualClock::new(server.server_now_ms()));
+  let enroll = async |name: &str| {
+    Peer::enroll_on_clock(
+      server.add_user(name),
+      name,
+      common::settings(),
+      Box::new(clock.clone()),
+    )
+    .await
+  };
+  let mut alice = enroll("Alice").await;
+  let mut eve = enroll("Eve").await;
+  let mut bob = enroll("Bob").await;
+  let mut mallory = enroll("Mallory").await;
+  let channel = channel_with_history(&mut alice, &mut bob).await;
+  make_workspace_admin(server, &mut alice, &mut eve).await;
+  add(&mut alice, &mut bob, &mut mallory, channel).await;
+  bob.client.full_sync().await.unwrap();
+  bob.client.sync_channel_roles(channel).await.unwrap();
+  assert!(
+    bob
+      .client
+      .channel_role_state(channel)
+      .unwrap()
+      .is_workspace_anchored
+  );
+  eve.client.sync_channel_roles(channel).await.unwrap();
+  (alice, eve, bob, mallory, channel, clock)
 }
 
 async fn two(server: &FakeServer) -> (Peer, Peer) {

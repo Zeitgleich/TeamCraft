@@ -27,6 +27,10 @@ use crate::convert;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
+/// Admin tenures a device keeps. Far beyond any instance's turnover; past it the oldest go and the
+/// history counts as incomplete, which fails closed (e2ee.md §4.6.1, "Reading the log late").
+const MAX_ADMIN_TENURES: usize = 1024;
+
 /// The roster document an owner signs. A full snapshot per version, so verifying needs no deltas.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RosterDocument {
@@ -111,6 +115,50 @@ pub struct WorkspaceState {
   /// signing time the document names), for the admin console (issue #188).
   #[serde(default)]
   pub owner_signed_at_ms: BTreeMap<UserId, i64>,
+  /// Who held admin authority on which verified roster versions, to judge a channel role entry by
+  /// somebody who has left the roster since (e2ee.md §4.6.1, "Reading the log late").
+  #[serde(default)]
+  pub admin_history: AdminHistory,
+}
+
+/// Every stretch somebody was an owner or admin of the verified roster, from this device's own
+/// verification of the signed roster log. Local state; nothing here is the server's word.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminHistory {
+  /// Whether this goes back to the genesis roster. A state from before this was recorded has
+  /// nothing until [`WorkspaceState::rebuild_admin_history`] replayed the log.
+  #[serde(default)]
+  pub is_complete: bool,
+  #[serde(default)]
+  pub tenures: Vec<AdminTenure>,
+  /// The roster version of the last replay that stayed incomplete: the next one waits for a newer
+  /// roster, so a server's short log or a history past the bound isn't read again and again.
+  #[serde(rename = "replayed_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_replayed_at: Option<u64>,
+}
+
+/// One stretch of one identity key on the roster: a new key, or coming back, is a new tenure.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminTenure {
+  pub user_id: UserId,
+  pub identity_key: Base64Bytes,
+  /// The role when the tenure last changed.
+  pub is_owner: bool,
+  /// When the owner signed the roster that began it; `None` for a roster without a signing time.
+  #[serde(rename = "from_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_from_ms: Option<i64>,
+  /// The first roster without them; `None` while they are on the roster.
+  #[serde(rename = "until", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_until: Option<TenureEnd>,
+}
+
+/// The signed roster that ended a tenure.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TenureEnd {
+  pub version: u64,
+  /// When the owner signed it; `None` for a roster without a signing time, which proves no end.
+  #[serde(rename = "at_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_at_ms: Option<i64>,
 }
 
 /// The owners of the verified roster, as [`WorkspaceState::owner_status`] reports them.
@@ -203,6 +251,75 @@ impl RosterDocument {
   /// Owners with a usable identity key: only they can sign the next entry.
   pub fn owner_count(&self) -> usize {
     identities(self, |role| *role == RosterRole::Owner).len()
+  }
+}
+
+impl AdminHistory {
+  /// How many tenures have ended: when it grows, an admin left.
+  pub fn ended_count(&self) -> usize {
+    self
+      .tenures
+      .iter()
+      .filter(|tenure| tenure.maybe_until.is_some())
+      .count()
+  }
+
+  /// Tenures of `user` that have ended, in the order they began.
+  pub fn ended_tenures_of(&self, user: UserId) -> impl Iterator<Item = &AdminTenure> + '_ {
+    self
+      .tenures
+      .iter()
+      .filter(move |tenure| tenure.user_id == user && tenure.maybe_until.is_some())
+  }
+
+  /// Follows a verified roster: opens a tenure for each new owner or admin and ends the ones it
+  /// no longer lists. Does nothing while the history doesn't go back to the genesis roster: a
+  /// departure this device didn't follow can't be told from somebody who never was an admin.
+  fn record(&mut self, roster: &RosterDocument) {
+    if !self.is_complete {
+      return;
+    }
+    for tenure in &mut self.tenures {
+      if tenure.maybe_until.is_some() {
+        continue;
+      }
+      let maybe_member = roster.members.iter().find(|member| {
+        member.user_id == tenure.user_id
+          && member.identity_key == tenure.identity_key
+          && matches!(member.role, RosterRole::Owner | RosterRole::Admin)
+      });
+      match maybe_member {
+        Some(member) => tenure.is_owner = member.role == RosterRole::Owner,
+        None => {
+          tenure.maybe_until = Some(TenureEnd {
+            version: roster.version,
+            maybe_at_ms: roster.maybe_signed_at_ms,
+          });
+        },
+      }
+    }
+    for member in &roster.members {
+      let is_admin = matches!(member.role, RosterRole::Owner | RosterRole::Admin);
+      let is_open = self.tenures.iter().any(|tenure| {
+        tenure.maybe_until.is_none()
+          && tenure.user_id == member.user_id
+          && tenure.identity_key == member.identity_key
+      });
+      if is_admin && !is_open {
+        self.tenures.push(AdminTenure {
+          user_id: member.user_id,
+          identity_key: member.identity_key.clone(),
+          is_owner: member.role == RosterRole::Owner,
+          maybe_from_ms: roster.maybe_signed_at_ms,
+          maybe_until: None,
+        });
+      }
+    }
+    if self.tenures.len() > MAX_ADMIN_TENURES {
+      self.is_complete = false;
+      let excess = self.tenures.len() - MAX_ADMIN_TENURES;
+      self.tenures.drain(..excess);
+    }
   }
 }
 
@@ -302,6 +419,30 @@ impl WorkspaceState {
     result
   }
 
+  /// Fills in the admin history of a state from before it was recorded, by verifying the whole
+  /// roster log again from the root of trust. Taken only if that ends on the head this device
+  /// verified, so a server can't make up a past; otherwise the history stays incomplete and
+  /// this returns `false`.
+  pub fn rebuild_admin_history(&mut self, entries: Vec<WorkspaceLogEntryResponse>) -> bool {
+    let up_to = self.roster.version;
+    let mut replay = Self {
+      maybe_root: self.maybe_root.clone(),
+      ..Self::default()
+    };
+    let rosters = entries
+      .into_iter()
+      .filter(|entry| entry.kind == WorkspaceLogKind::Roster && entry.version <= up_to)
+      .collect();
+    let is_same_log = replay.apply_entries(rosters).is_ok()
+      && replay.roster.version == up_to
+      && replay.heads.maybe_roster_hash == self.heads.maybe_roster_hash;
+    if is_same_log {
+      self.admin_history = replay.admin_history;
+    }
+    self.admin_history.maybe_replayed_at = Some(up_to);
+    is_same_log
+  }
+
   fn apply_roster(&mut self, entry: &WorkspaceLogEntryResponse) -> Result<(), WorkspaceError> {
     let log = "roster";
     if entry.version <= self.roster.version {
@@ -350,6 +491,8 @@ impl WorkspaceState {
       self.maybe_root = Some(root);
     }
     self.heads.maybe_roster_hash = Some(entry_hash(log, WorkspaceLog::Roster, entry)?);
+    self.admin_history.is_complete |= is_genesis;
+    self.admin_history.record(&document);
     self.heads.is_roster_chained |= document.maybe_prev_hash.is_some();
     if document.maybe_signed_at_ms.is_some() {
       self.heads.maybe_roster_signed_at_ms = document.maybe_signed_at_ms;
@@ -926,6 +1069,121 @@ mod tests {
         state.apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &broken)]),
         Err(WorkspaceError::NoOwner { .. })
       ));
+    }
+  }
+
+  mod admin_history {
+    use super::*;
+
+    /// Roster versions 1 to 3: Alice alone, with Bob, alone again.
+    fn three_versions(alice: &Owner, bob: &Owner) -> (WorkspaceState, Vec<WorkspaceLogEntryResponse>) {
+      let mut state = WorkspaceState::default();
+      let mut entries = Vec::new();
+      let versions: [(&[&Owner], i64); 3] = [(&[alice], 1_000), (&[alice, bob], 2_000), (&[alice], 3_000)];
+      for (index, (owners, signed_at)) in versions.into_iter().enumerate() {
+        let version = u64::try_from(index).unwrap() + 1;
+        let document = roster(version, owners, Some(signed_at), &state);
+        let entry = alice.sign(WorkspaceLogKind::Roster, version, &document);
+        state.apply_entries(vec![entry.clone()]).unwrap();
+        entries.push(entry);
+      }
+      (state, entries)
+    }
+
+    #[test]
+    fn a_tenure_runs_from_the_roster_that_lists_somebody_to_the_first_that_does_not() {
+      let (alice, bob) = (Owner::new(1), Owner::new(2));
+      let (state, _) = three_versions(&alice, &bob);
+      assert!(state.admin_history.is_complete);
+      let ended: Vec<_> = state.admin_history.ended_tenures_of(bob.user_id).collect();
+      assert_eq!(ended.len(), 1);
+      assert_eq!(ended[0].maybe_from_ms, Some(2_000));
+      assert_eq!(
+        ended[0].maybe_until,
+        Some(TenureEnd {
+          version: 3,
+          maybe_at_ms: Some(3_000),
+        })
+      );
+      assert_eq!(state.admin_history.ended_tenures_of(alice.user_id).count(), 0);
+    }
+
+    #[test]
+    fn a_new_identity_key_ends_the_tenure_of_the_old_one() {
+      let (alice, bob, new_bob) = (Owner::new(1), Owner::new(2), Owner::new(2));
+      let mut state = WorkspaceState::default();
+      let first = roster(1, &[&alice, &bob], Some(1_000), &state);
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+      let second = roster(2, &[&alice, &new_bob], Some(2_000), &state);
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &second)])
+        .unwrap();
+      let ended: Vec<_> = state.admin_history.ended_tenures_of(bob.user_id).collect();
+      assert_eq!(ended.len(), 1);
+      assert_eq!(
+        ended[0].identity_key.as_slice(),
+        bob.identity.public_key().as_bytes()
+      );
+    }
+
+    #[test]
+    fn a_state_from_before_the_history_records_nothing_until_it_replayed_the_log() {
+      let (alice, bob) = (Owner::new(1), Owner::new(2));
+      let (complete, entries) = three_versions(&alice, &bob);
+      let json = serde_json::to_value(&complete).unwrap();
+      let mut older: WorkspaceState = serde_json::from_value(json).unwrap();
+      older.admin_history = AdminHistory::default();
+
+      assert!(older.rebuild_admin_history(entries));
+      assert!(older.admin_history.is_complete);
+      assert_eq!(older.admin_history.tenures, complete.admin_history.tenures);
+    }
+
+    #[test]
+    fn a_log_that_does_not_end_on_the_verified_head_leaves_the_history_incomplete() {
+      let (alice, bob) = (Owner::new(1), Owner::new(2));
+      let (mut state, entries) = three_versions(&alice, &bob);
+      state.admin_history = AdminHistory::default();
+
+      // Too short, and from another log.
+      assert!(!state.rebuild_admin_history(entries[..2].to_vec()));
+      let (_, other) = three_versions(&alice, &Owner::new(3));
+      assert!(!state.rebuild_admin_history(other));
+      // Signed by somebody else: the root of trust doesn't take it.
+      let stranger = Owner::new(4);
+      let (_, forged) = three_versions(&stranger, &bob);
+      assert!(!state.rebuild_admin_history(forged));
+      assert!(!state.admin_history.is_complete);
+      assert!(state.admin_history.tenures.is_empty());
+      assert_eq!(
+        state.admin_history.maybe_replayed_at,
+        Some(3),
+        "not asked again at this roster"
+      );
+    }
+
+    #[test]
+    fn past_the_bound_the_oldest_go_and_the_history_counts_as_incomplete() {
+      let mut history = AdminHistory {
+        is_complete: true,
+        ..AdminHistory::default()
+      };
+      for version in 1..=(MAX_ADMIN_TENURES + 1) {
+        let version = u64::try_from(version).unwrap();
+        history.record(&RosterDocument {
+          version,
+          members: vec![RosterMember {
+            user_id: UserId::from_snowflake(Snowflake::new(i64::try_from(version).unwrap()).unwrap()),
+            role: RosterRole::Admin,
+            identity_key: Base64Bytes::new(vec![1; 32]),
+          }],
+          ..RosterDocument::default()
+        });
+      }
+      assert_eq!(history.tenures.len(), MAX_ADMIN_TENURES);
+      assert!(!history.is_complete);
     }
   }
 

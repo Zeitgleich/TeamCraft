@@ -3,10 +3,13 @@
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
 
+use std::sync::Arc;
+
 #[cfg(feature = "ui")]
 use teamcraft_client_api::actions::WorkspaceEvent;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::workspace_admin::ChannelOptions;
+use teamcraft_core::clock::ManualClock;
 use teamcraft_core::records::{self, Draft, OutboxEntry};
 use teamcraft_core::store::{
   ConversationEvent, LocalStore, MessageContent, MessageFilter, StoredMessage, Table,
@@ -14,7 +17,7 @@ use teamcraft_core::store::{
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{CoreError, JoinRequestRefusal};
 use teamcraft_proto::{
-  AdminSelfJoin, ClientMessageId, ConversationId, HistoryPolicy, UserId, WorkspacePolicy,
+  AdminSelfJoin, ChannelRole, ClientMessageId, ConversationId, HistoryPolicy, UserId, WorkspacePolicy,
 };
 
 use crate::common::{self, Peer, settle};
@@ -786,4 +789,162 @@ async fn setup_in(
     .unwrap();
   settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
   (server, alice, bob, carol, dave, channel)
+}
+
+/// Issue #1260, through real entries. A device in a stretch counts nobody as the channel's owner, and
+/// never falls back to the rule of an unsigned channel: it refuses the commit another owner's device
+/// makes, falls out and is added back into the one group. The owner's device took the entry late.
+#[tokio::test]
+async fn a_device_in_a_stretch_refuses_an_approval_and_comes_back() {
+  let (_server, mut alice, mut bob, mut carol, mut dave, mut eve, channel, _) = stretch_setup().await;
+  let (bob_id, carol_id) = (bob.client.user_id(), carol.client.user_id());
+  let dave_device = dave.client.device_id();
+
+  // Dave read the log on the roster without Eve; her entry comes after that, dated before it.
+  dave.client.sync_workspace().await.unwrap();
+  dave.client.sync_channel_roles(channel).await.unwrap();
+  eve
+    .client
+    .sign_channel_roles(channel, &[(dave.client.user_id(), ChannelRole::Moderator)], false)
+    .await
+    .unwrap();
+  dave.client.sync_channel_roles(channel).await.unwrap();
+  let state = dave.client.channel_role_state(channel).unwrap();
+  assert!(state.has_unverified_stretch());
+  assert!(state.is_signed());
+  assert_eq!(state.admins(), Vec::new());
+
+  // Carol last read it before she knew: she takes the entry and stays an owner.
+  carol.client.sync_channel_roles(channel).await.unwrap();
+  assert_eq!(
+    carol.client.verified_channel_role(channel, carol_id).unwrap(),
+    ChannelRole::Admin
+  );
+  carol.client.approve_admin_join(channel, bob_id).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave, &mut eve]).await;
+
+  assert!(bob.client.has_group(channel).unwrap());
+  assert_eq!(lines(&carol, channel).len(), 1);
+  assert_eq!(
+    dave.client.mls_epoch(channel).unwrap(),
+    carol.client.mls_epoch(channel).unwrap(),
+    "one group: Dave fell out and was added back"
+  );
+  assert!(
+    carol
+      .client
+      .group_device_ids(channel)
+      .unwrap()
+      .contains(&dave_device)
+  );
+}
+
+/// The owner's own device in a stretch approves nothing.
+#[tokio::test]
+async fn an_owner_in_a_stretch_approves_nothing() {
+  let (_server, _alice, bob, mut carol, _dave, mut eve, channel, _) = stretch_setup().await;
+  carol.client.sync_workspace().await.unwrap();
+  carol.client.sync_channel_roles(channel).await.unwrap();
+  eve
+    .client
+    .sign_channel_roles(channel, &[(bob.client.user_id(), ChannelRole::Moderator)], false)
+    .await
+    .unwrap();
+  assert!(matches!(
+    carol
+      .client
+      .approve_admin_join(channel, bob.client.user_id())
+      .await,
+    Err(CoreError::JoinRequestNotApprovable(
+      JoinRequestRefusal::OwnerRoleNotSigned
+    ))
+  ));
+  assert!(
+    carol
+      .client
+      .channel_role_state(channel)
+      .unwrap()
+      .has_unverified_stretch()
+  );
+}
+
+type StretchWorld = (
+  FakeServer,
+  Peer,
+  Peer,
+  Peer,
+  Peer,
+  Peer,
+  ConversationId,
+  Arc<ManualClock>,
+);
+
+/// Under `owner_approval`: Alice owns the workspace, Bob and Eve are admins of it, Carol owns a private
+/// channel with Dave in it, Bob has asked to join, all clocks agree with the server's. Then Alice's
+/// next roster leaves Eve out, on a clock an hour ahead: Eve's device hasn't heard, and until then her
+/// entries pass as dated inside her tenure. Nobody has read the new roster but Alice.
+async fn stretch_setup() -> StretchWorld {
+  let server = FakeServer::new();
+  let clock = Arc::new(ManualClock::new(server.server_now_ms()));
+  let mut alice = enroll_on(&server, &clock, "Alice").await;
+  let mut bob = enroll_on(&server, &clock, "Bob").await;
+  let mut carol = enroll_on(&server, &clock, "Carol").await;
+  let mut dave = enroll_on(&server, &clock, "Dave").await;
+  let mut eve = enroll_on(&server, &clock, "Eve").await;
+  let (alice_id, bob_id, eve_id) = (alice.client.user_id(), bob.client.user_id(), eve.client.user_id());
+  alice
+    .client
+    .publish_roster(&[
+      (alice_id, RosterRole::Owner),
+      (bob_id, RosterRole::Admin),
+      (eve_id, RosterRole::Admin),
+    ])
+    .await
+    .unwrap();
+  alice
+    .client
+    .publish_policy(WorkspacePolicy {
+      admin_self_join: AdminSelfJoin::OwnerApproval,
+      history_default: HistoryPolicy::FromJoin,
+      ..WorkspacePolicy::default()
+    })
+    .await
+    .unwrap();
+  server.set_admin(bob_id);
+  server.set_admin(eve_id);
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave, &mut eve]).await;
+  let channel = carol
+    .client
+    .create_channel(carol.space().await, "private")
+    .await
+    .unwrap();
+  carol
+    .client
+    .add_member(channel, dave.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave, &mut eve]).await;
+  bob.client.request_admin_join(channel).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave, &mut eve]).await;
+  eve.client.sync_channel_roles(channel).await.unwrap();
+  carol.client.sync_channel_roles(channel).await.unwrap();
+  dave.client.sync_channel_roles(channel).await.unwrap();
+
+  clock.advance(60 * 60 * 1000);
+  alice
+    .client
+    .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Admin)])
+    .await
+    .unwrap();
+  (server, alice, bob, carol, dave, eve, channel, clock)
+}
+
+async fn enroll_on(server: &FakeServer, clock: &Arc<ManualClock>, name: &str) -> Peer {
+  Peer::enroll_on_clock(
+    server.add_user(name),
+    name,
+    common::settings(),
+    Box::new(clock.clone()),
+  )
+  .await
 }

@@ -250,6 +250,17 @@ pub struct ChannelMember {
   pub maybe_appointer: Option<RoleAppointer>,
 }
 
+/// What a workspace admin looks at before signing a channel's roles where this device can't vouch
+/// for them (e2ee.md §4.6.1, "Reading the log late").
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelRolesReview {
+  /// Where the role log stood: signing is refused once it moved on.
+  pub log_cursor: u64,
+  /// The roles this device's own snapshot gives. The list to sign comes from the member list, the
+  /// server's word, so a row it doesn't have here is marked.
+  pub snapshot: Vec<(UserId, ChannelRole)>,
+}
+
 /// The verified signer of the entry that gave a channel member their role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleAppointer {
