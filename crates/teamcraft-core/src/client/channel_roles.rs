@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
 use teamcraft_crypto::workspace::{WorkspaceLog, claimed_signer, sign_log_entry};
 use teamcraft_proto::{
   AppendChannelRoleLogRequest, Base64Bytes, ChannelRole, ChannelRoleLogEntryResponse, ChannelRolesDocument,
@@ -24,6 +25,10 @@ const CHANNEL_ROLES_AHEAD_KEY: &str = "channel_roles_ahead";
 const CHANNEL_ROLES_DUE_KEY: &str = "channel_roles_due";
 /// How many of those are read in one upkeep pass, so a removal is no burst.
 const ROLE_LOG_READS_PER_PASS: usize = 4;
+/// How long a failed one waits before it is read again, doubling up to the cap: one channel that
+/// keeps failing neither holds up the others nor asks the server every pass.
+const ROLE_LOG_READ_RETRY_MS: i64 = 5 * 60 * 1000;
+const ROLE_LOG_READ_RETRY_MAX_MS: i64 = 6 * 60 * 60 * 1000;
 /// Pages of a role log read in one sync; a log longer than this is read on in the next one.
 const MAX_ROLE_LOG_PAGES: usize = 100;
 /// Claimed founders whose identity keys are pinned before a channel's first entries are verified.
@@ -36,8 +41,20 @@ enum RolePlan<'a> {
     changes: &'a [(UserId, ChannelRole)],
     may_found: bool,
   },
-  /// Exactly these roles, which a workspace admin looked at.
-  Reviewed(&'a [(UserId, ChannelRole)]),
+  /// Exactly these roles, which a workspace admin looked at while the log stood at `at_cursor`.
+  Reviewed {
+    roles: &'a [(UserId, ChannelRole)],
+    at_cursor: u64,
+  },
+}
+
+/// A channel's log read due after a removal, with how it went so far.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct DueRoleRead {
+  #[serde(default)]
+  failures: u32,
+  #[serde(default)]
+  not_before_ms: i64,
 }
 
 /// What became of a role change on this device's side of the signature.
@@ -49,6 +66,9 @@ pub enum RoleSigning {
   /// server's word only, a space admin, a custom scheme). The server's change stands, and members
   /// see the role as not signed.
   Unsigned,
+  /// Not signed: the log moved on since the workspace admin looked at this list, so another admin's
+  /// change may be missing from it. They look again; it is never signed for them.
+  ReviewOutdated,
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -151,16 +171,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Signs exactly `roles`, which a workspace admin looked at and confirmed: the way out of an
   /// unverified stretch and off a snapshot resting on somebody who left, where this device won't
-  /// vouch for what it has (`ChannelRoleState::must_review_before_vouching`). `Unsigned` for anybody
-  /// who isn't an admin of the fresh roster.
+  /// vouch for what it has (`ChannelRoleState::must_review_before_vouching`). `at_cursor` is where
+  /// the log stood when they looked ([`ChannelRoleState::cursor`]); `ReviewOutdated` if it moved, or
+  /// moves on the way to the server. `Unsigned` for anybody who isn't an admin of the fresh roster.
   pub async fn sign_reviewed_channel_roles(
     &mut self,
     conversation: ConversationId,
     roles: &[(UserId, ChannelRole)],
+    at_cursor: u64,
   ) -> Result<RoleSigning, CoreError> {
-    self
-      .sign_role_plan(conversation, &RolePlan::Reviewed(roles))
-      .await
+    let plan = RolePlan::Reviewed { roles, at_cursor };
+    self.sign_role_plan(conversation, &plan).await
   }
 
   async fn sign_role_plan(
@@ -172,7 +193,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.sync_channel_roles(conversation).await?;
       let maybe_request = match *plan {
         RolePlan::Changes { changes, may_found } => self.role_entry(conversation, changes, may_found).await?,
-        RolePlan::Reviewed(roles) => self.reviewed_role_entry(conversation, roles).await?,
+        RolePlan::Reviewed { roles, at_cursor } => {
+          if self.channel_role_state(conversation)?.cursor != at_cursor {
+            return Ok(RoleSigning::ReviewOutdated);
+          }
+          self.reviewed_role_entry(conversation, roles).await?
+        },
       };
       let Some(request) = maybe_request else {
         return Ok(RoleSigning::Unsigned);
@@ -181,6 +207,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Ok(_) => {
           self.sync_channel_roles(conversation).await?;
           return Ok(RoleSigning::Signed);
+        },
+        // What somebody reviewed isn't signed again on a log they didn't see: read it, they look.
+        Err(error) if error.is_version_conflict() && matches!(plan, RolePlan::Reviewed { .. }) => {
+          self.sync_channel_roles(conversation).await?;
+          return Ok(RoleSigning::ReviewOutdated);
         },
         Err(error) if error.is_version_conflict() && attempt == 0 => continue,
         // A server from before signed channel roles: the server's change stands, unsigned.
@@ -205,7 +236,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .await
     {
       Ok(RoleSigning::Signed) => {},
-      Ok(RoleSigning::Unsigned) => {
+      Ok(RoleSigning::Unsigned | RoleSigning::ReviewOutdated) => {
         tracing::info!(conversation_id = %conversation, "the new channel's roles stay unsigned for now");
       },
       // The channel works without; its first admin who changes a role founds the log.
@@ -267,21 +298,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// After an admin left the roster: reads each channel's role log this device knows, a few per
   /// upkeep pass, so entries the server shows later can't pass for ones from before the removal
   /// (e2ee.md §4.6.1, "Reading the log late"). A local read while nothing is due, which is nearly
-  /// always; a failure stays due for the next pass.
+  /// always. A failure stays due, later and later, and doesn't hold up the other channels.
   pub async fn read_due_channel_roles(&mut self) -> Result<(), CoreError> {
-    let mut due: BTreeSet<ConversationId> =
+    let mut due: BTreeMap<ConversationId, DueRoleRead> =
       records::get_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY)?.unwrap_or_default();
     if due.is_empty() {
       return Ok(());
     }
-    let batch: Vec<ConversationId> = due.iter().copied().take(ROLE_LOG_READS_PER_PASS).collect();
+    let now = self.now_ms();
+    let batch: Vec<ConversationId> = due
+      .iter()
+      .filter(|(_, read)| read.not_before_ms <= now)
+      .map(|(conversation, _)| *conversation)
+      .take(ROLE_LOG_READS_PER_PASS)
+      .collect();
     for conversation in batch {
-      let result = self.sync_channel_roles(conversation).await;
-      if result.is_ok() {
+      if let Err(error) = self.sync_channel_roles(conversation).await {
+        tracing::debug!(conversation_id = %conversation, %error, "channel role log due after a removal not read yet");
+        if let Some(read) = due.get_mut(&conversation) {
+          read.failures = read.failures.saturating_add(1);
+          read.not_before_ms = now.saturating_add(role_read_retry_ms(read.failures));
+        }
+      } else {
         due.remove(&conversation);
       }
       records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY, &due)?;
-      result?;
     }
     Ok(())
   }
@@ -289,11 +330,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Marks every channel this device has role state for as due. Runs when a verified roster ends an
   /// admin's tenure, which is rare.
   pub(crate) fn queue_channel_role_reads(&self) -> Result<(), CoreError> {
-    let due: BTreeSet<ConversationId> = self
+    let due: BTreeMap<ConversationId, DueRoleRead> = self
       .store
       .list_prefix(Table::Workspace, CHANNEL_ROLES_KEY_PREFIX)?
       .into_iter()
       .filter_map(|(key, _)| key.strip_prefix(CHANNEL_ROLES_KEY_PREFIX)?.parse().ok())
+      .map(|conversation| (conversation, DueRoleRead::default()))
       .collect();
     records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_DUE_KEY, &due)
   }
@@ -468,6 +510,14 @@ fn founder_candidates(state: &ChannelRoleState, entries: &[ChannelRoleLogEntryRe
     .filter_map(|user| crate::convert::user_from_crypto(user).ok())
     .take(MAX_FOUNDER_CANDIDATES)
     .collect()
+}
+
+/// How long a role log read waits after its `failures`th failure.
+fn role_read_retry_ms(failures: u32) -> i64 {
+  let doublings = failures.saturating_sub(1).min(16);
+  ROLE_LOG_READ_RETRY_MS
+    .saturating_mul(1 << doublings)
+    .min(ROLE_LOG_READ_RETRY_MAX_MS)
 }
 
 fn is_workspace_authority(authority: &SignerAuthority) -> bool {

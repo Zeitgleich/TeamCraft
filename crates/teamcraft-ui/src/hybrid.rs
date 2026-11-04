@@ -839,16 +839,22 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.can_sign_channel_roles(conversation)
   }
 
-  fn must_review_channel_roles(&self, conversation: ConversationId) -> bool {
-    self.chat.must_review_channel_roles(conversation)
+  fn channel_roles_review(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::model::ChannelRolesReview> {
+    self.chat.channel_roles_review(conversation)
   }
 
   fn sign_reviewed_channel_roles(
     &self,
     conversation: ConversationId,
     roles: Vec<(UserId, teamcraft_client_api::model::ChannelRole)>,
+    at_cursor: u64,
   ) {
-    self.chat.sign_reviewed_channel_roles(conversation, roles);
+    self
+      .chat
+      .sign_reviewed_channel_roles(conversation, roles, at_cursor);
   }
 
   fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {

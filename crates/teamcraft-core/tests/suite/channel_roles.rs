@@ -350,11 +350,12 @@ async fn a_stretch_a_device_cannot_verify_fails_closed_until_a_checkpoint() {
     RoleSigning::Unsigned
   );
   let reviewed = [(alice_id, ChannelRole::Admin), (bob_id, ChannelRole::Admin)];
+  let at_cursor = world.alice.client.channel_role_state(channel).unwrap().cursor;
   assert_eq!(
     world
       .alice
       .client
-      .sign_reviewed_channel_roles(channel, &reviewed)
+      .sign_reviewed_channel_roles(channel, &reviewed, at_cursor)
       .await
       .unwrap(),
     RoleSigning::Signed
@@ -397,7 +398,7 @@ async fn a_workspace_admin_never_vouches_for_a_snapshot_resting_on_somebody_who_
   let before = server.role_log(channel).len();
 
   let alice_ui = world.ui_of_alice();
-  assert!(alice_ui.must_review_channel_roles(channel));
+  assert!(alice_ui.channel_roles_review(channel).is_some());
   assert!(!alice_ui.can_sign_channel_roles(channel));
   assert_eq!(
     world
@@ -413,17 +414,18 @@ async fn a_workspace_admin_never_vouches_for_a_snapshot_resting_on_somebody_who_
 
   // She looked and left Carol out.
   let reviewed = [(alice_id, ChannelRole::Admin), (bob_id, ChannelRole::Admin)];
+  let at_cursor = world.alice.client.channel_role_state(channel).unwrap().cursor;
   world
     .alice
     .client
-    .sign_reviewed_channel_roles(channel, &reviewed)
+    .sign_reviewed_channel_roles(channel, &reviewed, at_cursor)
     .await
     .unwrap();
   world.carol.client.sync_channel_roles(channel).await.unwrap();
   let state = world.carol.client.channel_role_state(channel).unwrap();
   assert_eq!(state.role_of(carol_id), ChannelRole::Member);
   assert!(state.is_workspace_anchored);
-  assert!(!world.ui_of_alice().must_review_channel_roles(channel));
+  assert!(world.ui_of_alice().channel_roles_review(channel).is_none());
 }
 
 /// Variant B, honest: the workspace admin's device is in a stretch and its snapshot names a demoted
@@ -467,15 +469,17 @@ async fn sign_role_during_a_stretch_does_not_re_sign_a_demoted_owner() {
   );
   assert_eq!(server.role_log(channel).len(), before);
   let alice_ui = world.ui_of_alice();
-  assert!(alice_ui.must_review_channel_roles(channel));
+  assert!(alice_ui.channel_roles_review(channel).is_some());
   assert!(!alice_ui.can_sign_channel_roles(channel));
 
+  let at_cursor = world.alice.client.channel_role_state(channel).unwrap().cursor;
   world
     .alice
     .client
     .sign_reviewed_channel_roles(
       channel,
       &[(alice_id, ChannelRole::Admin), (carol_id, ChannelRole::Moderator)],
+      at_cursor,
     )
     .await
     .unwrap();
@@ -611,12 +615,15 @@ async fn a_removal_has_the_channels_logs_read_a_few_at_a_time() {
     Some(roster)
   );
 
-  server.fail_role_log(true);
-  assert!(
-    world.carol.client.read_due_channel_roles().await.is_err(),
-    "stays due"
-  );
-  server.fail_role_log(false);
+  server.fail_role_log(channel, true);
+  world.carol.client.read_due_channel_roles().await.unwrap();
+  assert_eq!(due_role_reads(&world.carol).len(), 1, "stays due");
+  server.fail_role_log(channel, false);
+  // It waits for its retry, without asking the server.
+  let reads = server.role_log_reads(channel);
+  world.carol.client.read_due_channel_roles().await.unwrap();
+  assert_eq!(server.role_log_reads(channel), reads);
+  world.clock.advance(5 * 60 * 1000);
   world.carol.client.read_due_channel_roles().await.unwrap();
   assert_eq!(
     world
@@ -627,16 +634,11 @@ async fn a_removal_has_the_channels_logs_read_a_few_at_a_time() {
       .maybe_read_at_roster_version,
     Some(roster)
   );
-  let due = world
-    .carol
-    .store
-    .get(Table::Workspace, "channel_roles_due")
-    .unwrap()
-    .unwrap();
-  assert_eq!(
-    serde_json::from_slice::<Vec<ConversationId>>(&due).unwrap(),
-    Vec::new()
-  );
+  assert!(due_role_reads(&world.carol).is_empty());
+  // And then nothing is read any more.
+  let reads = server.role_log_reads(channel);
+  world.carol.client.read_due_channel_roles().await.unwrap();
+  assert_eq!(server.role_log_reads(channel), reads);
 }
 
 /// A replay that didn't end on the verified head isn't asked for again at the same roster: reading
@@ -671,6 +673,129 @@ async fn a_replay_that_stayed_incomplete_waits_for_a_newer_roster() {
   );
 }
 
+/// One channel that keeps failing holds up no other, and waits longer and longer.
+#[tokio::test]
+async fn a_failing_channel_does_not_starve_the_read_queue() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let mut channels = vec![world.anchored_channel().await];
+  let space = world.alice.space().await;
+  for name in ["a", "b", "c", "d", "e"] {
+    channels.push(world.alice.client.create_channel(space, name).await.unwrap());
+    let channel = *channels.last().unwrap();
+    world
+      .alice
+      .client
+      .add_member(channel, world.carol.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut world.alice, &mut world.carol]).await;
+    world.carol.client.sync_channel_roles(channel).await.unwrap();
+  }
+  world.eve_leaves().await;
+  world.carol.client.sync_workspace().await.unwrap();
+  // Whichever comes first in the queue fails for good.
+  let due = due_role_reads(&world.carol);
+  let carols_channels: Vec<ConversationId> = due.keys().copied().collect();
+  let failing = carols_channels[0];
+  server.fail_role_log(failing, true);
+  let base = server.role_log_reads(failing);
+
+  world.carol.client.read_due_channel_roles().await.unwrap();
+  world.carol.client.read_due_channel_roles().await.unwrap();
+  assert_eq!(
+    due_role_reads(&world.carol).keys().copied().collect::<Vec<_>>(),
+    vec![failing],
+    "the others got their turn"
+  );
+  assert_eq!(
+    server.role_log_reads(failing),
+    base + 1,
+    "one failure, then it waits"
+  );
+
+  world.clock.advance(5 * 60 * 1000);
+  world.carol.client.read_due_channel_roles().await.unwrap();
+  assert_eq!(server.role_log_reads(failing), base + 2);
+  world.clock.advance(5 * 60 * 1000);
+  world.carol.client.read_due_channel_roles().await.unwrap();
+  assert_eq!(server.role_log_reads(failing), base + 2, "the wait doubled");
+  world.clock.advance(5 * 60 * 1000);
+  world.carol.client.read_due_channel_roles().await.unwrap();
+  assert_eq!(server.role_log_reads(failing), base + 3);
+}
+
+/// What was reviewed isn't signed on a log the reviewer didn't see: not when the log moved since they
+/// looked, not when another admin gets there first. It goes back to them, and nothing is signed.
+#[tokio::test]
+async fn a_reviewed_list_is_not_signed_again_on_a_log_nobody_looked_at() {
+  let server = FakeServer::new();
+  let mut world = LateWorld::new(&server).await;
+  let channel = world.anchored_channel().await;
+  let (alice_id, bob_id, carol_id) = ids(&world.alice, &world.bob, &world.carol);
+  world
+    .eve
+    .client
+    .sign_channel_roles(channel, &[(carol_id, ChannelRole::Admin)], false)
+    .await
+    .unwrap();
+  world.eve_leaves().await;
+  world.alice.client.sync_channel_roles(channel).await.unwrap();
+  let reviewed = [(alice_id, ChannelRole::Admin), (bob_id, ChannelRole::Admin)];
+  let at_cursor = world.alice.client.channel_role_state(channel).unwrap().cursor;
+  let ui = world.ui_of_alice();
+  assert_eq!(ui.channel_roles_review(channel).unwrap().log_cursor, at_cursor);
+
+  // Another admin got there first, between the read and the append.
+  server.conflict_next_role_append();
+  let before = server.role_log(channel).len();
+  assert_eq!(
+    world
+      .alice
+      .client
+      .sign_reviewed_channel_roles(channel, &reviewed, at_cursor)
+      .await
+      .unwrap(),
+    RoleSigning::ReviewOutdated
+  );
+  assert_eq!(server.role_log(channel).len(), before);
+
+  // The log moved while she looked: an entry she didn't see.
+  let founding = server.role_log(channel).remove(0);
+  server.plant_role_log_entry(
+    channel,
+    founding.payload.as_slice().to_vec(),
+    founding.signature.as_slice().to_vec(),
+  );
+  let before = server.role_log(channel).len();
+  assert_eq!(
+    world
+      .alice
+      .client
+      .sign_reviewed_channel_roles(channel, &reviewed, at_cursor)
+      .await
+      .unwrap(),
+    RoleSigning::ReviewOutdated
+  );
+  assert_eq!(server.role_log(channel).len(), before);
+
+  // She looks again, and it goes through.
+  let at_cursor = world
+    .ui_of_alice()
+    .channel_roles_review(channel)
+    .unwrap()
+    .log_cursor;
+  assert_eq!(
+    world
+      .alice
+      .client
+      .sign_reviewed_channel_roles(channel, &reviewed, at_cursor)
+      .await
+      .unwrap(),
+    RoleSigning::Signed
+  );
+}
+
 /// A device from before the admin history replays the roster log once, when it first needs it.
 #[tokio::test]
 async fn a_device_from_before_the_history_gets_it_from_the_roster_log() {
@@ -697,6 +822,16 @@ async fn a_device_from_before_the_history_gets_it_from_the_roster_log() {
       .as_bool()
       .unwrap()
   );
+}
+
+/// The channels whose role logs are due, as this device stored them.
+fn due_role_reads(peer: &Peer) -> std::collections::BTreeMap<ConversationId, serde_json::Value> {
+  let bytes = peer
+    .store
+    .get(Table::Workspace, "channel_roles_due")
+    .unwrap()
+    .unwrap();
+  serde_json::from_slice(&bytes).unwrap()
 }
 
 /// The workspace state as this device stored it.

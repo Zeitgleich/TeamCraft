@@ -422,6 +422,7 @@ pub enum CoreCommand {
   SignReviewedChannelRoles {
     conversation: ConversationId,
     roles: Vec<(UserId, teamcraft_proto::ChannelRole)>,
+    at_cursor: u64,
   },
   /// A conversation's members, for a member list that has none yet.
   RefreshMembers {
@@ -2875,16 +2876,24 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.ui_can_sign_channel_roles(conversation)
   }
 
-  fn must_review_channel_roles(&self, conversation: ConversationId) -> bool {
-    self.ui_must_review_channel_roles(conversation)
+  fn channel_roles_review(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::model::ChannelRolesReview> {
+    self.ui_channel_roles_review(conversation)
   }
 
   fn sign_reviewed_channel_roles(
     &self,
     conversation: ConversationId,
     roles: Vec<(UserId, teamcraft_proto::ChannelRole)>,
+    at_cursor: u64,
   ) {
-    self.command(CoreCommand::SignReviewedChannelRoles { conversation, roles });
+    self.command(CoreCommand::SignReviewedChannelRoles {
+      conversation,
+      roles,
+      at_cursor,
+    });
   }
 
   fn are_channel_roles_unverified(&self, conversation: ConversationId) -> bool {

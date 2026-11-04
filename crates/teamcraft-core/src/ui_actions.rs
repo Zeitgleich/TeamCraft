@@ -383,7 +383,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let max_age_ms =
       i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
     let authorities = signed.signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms);
-    // A workspace admin signs nothing here but a list they reviewed (`ui_must_review_channel_roles`).
+    // A workspace admin signs nothing here but a list they reviewed (`ui_channel_roles_review`).
     if signed.must_review_before_vouching() && authorities.iter().any(is_workspace_authority) {
       return false;
     }
@@ -392,9 +392,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .any(|authority| authority != crate::channel_roles::SignerAuthority::Founder || is_listed_admin)
   }
 
-  /// Whether this user is a workspace admin whose signature here would vouch for a snapshot this
-  /// device can't vouch for: they sign only the list they look at (e2ee.md §4.6.1).
-  pub(crate) fn ui_must_review_channel_roles(&self, conversation: ConversationId) -> bool {
+  /// For a workspace admin whose signature here would vouch for a snapshot this device can't vouch
+  /// for: what they review (e2ee.md §4.6.1). `None` for anybody else.
+  pub(crate) fn ui_channel_roles_review(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::model::ChannelRolesReview> {
     let workspace: crate::workspace::WorkspaceState = self.read(
       records::get_json(self.store_ref(), Table::Workspace, crate::client::WORKSPACE_KEY)
         .map(Option::unwrap_or_default),
@@ -409,11 +412,20 @@ impl<S: LocalStore> CoreChatBackend<S> {
     );
     let max_age_ms =
       i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
-    signed.must_review_before_vouching()
-      && signed
-        .signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms)
-        .iter()
-        .any(is_workspace_authority)
+    let is_vouching = signed
+      .signing_authorities(self.me_id(), &workspace, self.now_ms(), max_age_ms)
+      .iter()
+      .any(is_workspace_authority);
+    (signed.must_review_before_vouching() && is_vouching).then(|| {
+      teamcraft_client_api::model::ChannelRolesReview {
+        log_cursor: signed.cursor,
+        snapshot: signed
+          .assignments
+          .iter()
+          .map(|assignment| (assignment.user_id, assignment.role.clone()))
+          .collect(),
+      }
+    })
   }
 
   fn source_authority(&self) -> Option<SourceAuthority> {

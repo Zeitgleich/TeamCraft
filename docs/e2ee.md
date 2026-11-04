@@ -1790,9 +1790,11 @@ workspace roster (admin.md §2.3):
     the role select don't sign, and the server's change stands unsigned. The channel's members section tells them
     "Your signature counts for every role in this channel on every member's device, and this device can't vouch for them
     itself. Check them before you sign." and offers "Review and sign roles", which lists every admin and moderator the
-    member list shows, by name and role, with "Sign exactly these roles" and Cancel; without an admin in the list it
-    says so and doesn't offer to sign. What they see is what is signed (`sign_reviewed_channel_roles`), as a checkpoint
-    on every device: the entry names no head, so the role rules that bind one role change don't bind it, as for any
+    member list shows, by name and role, with "Sign exactly these roles" and Cancel. That list is the server's word and
+    the names its directory's, so a role this device's own snapshot doesn't give that person is marked "New"; a person
+    the member list doesn't name, or a list without an admin, can't be signed. What they see is what is signed
+    (`sign_reviewed_channel_roles`), and only on the log they saw: if it moved since, or another admin gets there first,
+    nothing is signed and the panel says the roles changed and shows them anew. It is a checkpoint on every device: the entry names no head, so the role rules that bind one role change don't bind it, as for any
     checkpoint today. A device nobody is looking at (an import) has nobody to ask: it signs nothing, its server changes
     stand unsigned and it logs that. Phones can't review yet (#1262), so a workspace admin in this state signs from
     desktop or web.
@@ -1814,8 +1816,9 @@ workspace roster (admin.md §2.3):
     a fresh roster ends it and anchors the channel. Mobile apps have the refusals through the core but neither line nor
     mark yet (issue #1262).
   - **After a removal** each device reads every channel's log it knows, a few per upkeep pass, so an entry the server shows
-    later can't pass for one from before: it closes the window below for devices online then. A local read while nothing
-    is due, which is nearly always.
+    later can't pass for one from before: it closes the window below for devices online then. A failed read waits five
+    minutes, doubling up to six hours, and holds up no other channel. A local read while nothing is due, which is nearly
+    always.
 
   **What a demoted admin can still do.** Appending at all takes `ManageChannelRoles` on the server, which somebody it lists
   as a channel admin keeps after leaving the roster.

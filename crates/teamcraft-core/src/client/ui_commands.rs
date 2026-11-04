@@ -382,18 +382,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::ConfirmChannelRole { conversation, user } => {
         match self.confirm_channel_role(conversation, user).await? {
           super::RoleSigning::Signed => Ok(()),
-          super::RoleSigning::Unsigned => Err(CoreError::InvalidRequest(
-            "this role can't be signed in a way the channel's members accept".into(),
-          )),
+          super::RoleSigning::Unsigned | super::RoleSigning::ReviewOutdated => {
+            Err(CoreError::InvalidRequest(
+              "this role can't be signed in a way the channel's members accept".into(),
+            ))
+          },
         }
       },
-      CoreCommand::SignReviewedChannelRoles { conversation, roles } => {
-        match self.sign_reviewed_channel_roles(conversation, &roles).await? {
-          super::RoleSigning::Signed => Ok(()),
-          super::RoleSigning::Unsigned => Err(CoreError::InvalidRequest(
-            "these roles can't be signed in a way the channel's members accept".into(),
-          )),
-        }
+      CoreCommand::SignReviewedChannelRoles {
+        conversation,
+        roles,
+        at_cursor,
+      } => match self
+        .sign_reviewed_channel_roles(conversation, &roles, at_cursor)
+        .await?
+      {
+        super::RoleSigning::Signed => Ok(()),
+        // The panel shows the new list and says it changed (`ChannelRolesReview`).
+        super::RoleSigning::ReviewOutdated => Err(CoreError::InvalidRequest(
+          "the channel's roles changed while they were reviewed".into(),
+        )),
+        super::RoleSigning::Unsigned => Err(CoreError::InvalidRequest(
+          "these roles can't be signed in a way the channel's members accept".into(),
+        )),
       },
       CoreCommand::RefreshMembers { conversation } => self.refresh_members(conversation).await,
       CoreCommand::RefreshChannelRoles { conversation } => {
