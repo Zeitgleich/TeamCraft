@@ -48,6 +48,7 @@ four-core runner, most of it the browser tests, which share two ports).
 | `dependency_outages.rs` | Storage and identity provider cut or hanging, Postgres cut: 503 + Retry-After, `/readyz`, recovery                                          |
 | `server_robustness.rs`  | SIGTERM with clients connected, resume vs. full sync, expired window, retries, Postgres outage, a reader that stalls, RSS/CPU               |
 | `web.rs` (`browser`)    | The web client in headless Chromium: Keycloak login page, welcome screen, the channel list shows the account's channels                     |
+| `web_single_image.rs`   | One picture of an album in the web client: tile menu, a quote with its picture that opens it, a forward of it alone |
 
 The `acceptance_*` scenarios cover the v1 sections of PLAN.md one by one; what each proves, the known gaps
 and the bugs found are in [docs/acceptance.md](../../docs/acceptance.md).

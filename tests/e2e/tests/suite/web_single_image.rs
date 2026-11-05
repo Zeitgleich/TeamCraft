@@ -10,6 +10,7 @@ use teamcraft_e2e::scenario::space_with;
 use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::{ConversationId, UserId};
 
+use crate::pending_echo::type_into_composer;
 use crate::perf::sign_in_and_unlock;
 use crate::web::{TEST_CSP, click_text, shot, wait_for_element, wait_for_text};
 
@@ -51,7 +52,11 @@ async fn one_picture_of_an_album_is_replied_to_and_forwarded_alone() {
   let Some(stack) = Stack::builder()
     .with_port(PORT)
     .with_web_dir(web_dir)
-    .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP)
+    // The picture goes up from the page, to the dev stack's storage.
+    .with_env(
+      "TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY",
+      &TEST_CSP.replace("connect-src 'self'", "connect-src 'self' http://127.0.0.1:3900"),
+    )
     .start()
     .await
   else {
@@ -119,9 +124,7 @@ async fn shared_channel(
 async fn send_album(page: &Page) {
   page.evaluate(PICK_FOUR_PICTURES).await.unwrap();
   wait_for_text(page, "d.png").await;
-  let composer = wait_for_element(page, "[data-composer]").await;
-  composer.click().await.unwrap();
-  composer.type_str(CAPTION).await.unwrap();
+  let composer = type_into_composer(page, CAPTION).await;
   composer.press_key("Enter").await.unwrap();
   wait_until(
     page,
@@ -144,8 +147,7 @@ async fn reply_to_the_third_picture(page: &Page) {
   shot(page, "single-image-menu").await;
   click_text(page, "Reply to this image").await;
   wait_for_element(page, ".reply-banner img.quote-thumb").await;
-  let composer = wait_for_element(page, "[data-composer]").await;
-  composer.type_str(REPLY).await.unwrap();
+  let composer = type_into_composer(page, REPLY).await;
   composer.press_key("Enter").await.unwrap();
   wait_for_text(page, REPLY).await;
   wait_for_element(page, "button.msg-quote-image img.quote-thumb").await;
@@ -160,18 +162,21 @@ async fn forward_the_shown_picture_from_the_lightbox(page: &Page) {
   wait_until(
     page,
     "the lightbox shows the quoted picture",
-    "!!document.querySelector('[aria-haspopup=menu][aria-label=\"More\"]') && document.body.innerText.includes('c.png')",
+    "!!document.querySelector('.lightbox-menu-wrap') && document.body.innerText.includes('c.png')",
   )
   .await;
   page
-    .evaluate("[...document.querySelectorAll('[aria-haspopup=menu][aria-label=\"More\"]')].pop().click()")
+    .evaluate("document.querySelector('.lightbox-menu-wrap [aria-haspopup=menu]').click()")
     .await
     .unwrap();
   wait_for_text(page, "Reply to this image").await;
   shot(page, "single-image-lightbox-menu").await;
   click_text(page, "Forward this image").await;
   wait_for_element(page, ".forward-list").await;
-  click_text(page, "elsewhere").await;
+  page
+    .evaluate("[...document.querySelectorAll('.forward-item')].find(item => item.textContent.includes('elsewhere')).click()")
+    .await
+    .unwrap();
   page
     .evaluate("document.querySelector('.modal-foot button[type=submit]').click()")
     .await
