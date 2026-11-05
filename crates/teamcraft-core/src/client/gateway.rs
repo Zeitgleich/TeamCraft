@@ -121,6 +121,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// handshake runs, which can take minutes on a workspace that grew (issue #325); what arrives
   /// meanwhile comes back in [`GatewayStart::held`]. A rejected token comes back as an API error
   /// with status 401 ([`CoreError::is_sign_in_required`]).
+  /// Runs `answered` once the server answers the next [`Self::start_gateway`]'s `identify` or
+  /// `resume`: from then on events flow, while the catch-up may still take long (the status
+  /// shows connected meanwhile, not connecting).
+  pub fn on_gateway_answered(&mut self, answered: Box<dyn FnOnce() + Send>) {
+    self.maybe_on_answered = Some(answered);
+  }
+
   pub async fn start_gateway(
     &mut self,
     timing: GatewayTiming,
@@ -140,11 +147,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     // Answers no step took this time must not stand in for a later read.
     self.drop_read_ahead();
+    // A connection that failed before the answer leaves no hook for the next one.
+    self.maybe_on_answered = None;
     if outcome.is_ok() {
       self.maybe_last_heard_ms = Some(self.now_ms());
       self.note_older_history_connection()?;
     }
     outcome
+  }
+
+  fn report_answered(&mut self) {
+    if let Some(answered) = self.maybe_on_answered.take() {
+      answered();
+    }
   }
 
   /// The server refused the first frame's proof, which ends the connection: it had an old nonce (a
@@ -195,6 +210,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },);
       match answer? {
         GatewayServerMessage::Resumed { replayed } => {
+          self.report_answered();
           self.read_ahead = match maybe_read_ahead {
             Some(read_ahead) => read_ahead,
             None => self.read_resumed(known).await,
@@ -263,6 +279,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let session_id = match self.handshake_answer(&mut connection, handshake_timeout).await? {
       GatewayServerMessage::Ready { session_id, .. } => {
         self.trace_lap("identify answer");
+        self.report_answered();
         session_id
       },
       GatewayServerMessage::Error { error } => return Err(rejected(error)),
