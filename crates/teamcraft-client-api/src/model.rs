@@ -1043,6 +1043,7 @@ mod tests {
       maybe_permissions: Option<Vec<Permission>>,
     ) -> Conversation {
       Conversation {
+        maybe_draft_preview: None,
         id: id_from_raw(1),
         maybe_space: None,
         kind,

@@ -192,6 +192,10 @@ enum ChatQuery {
   case olderHistory(conversationId: String)
   /// The composer text left unsent here, from this or another device of the user.
   case draft(conversationId: String, maybeThreadId: String?)
+  /// Every draft of the user (#1220).
+  case drafts
+  /// The user's recent messages across the conversations (#1220).
+  case sentMessages
 
   var json: String {
     switch self {
@@ -225,6 +229,10 @@ enum ChatQuery {
       return jsonText([
         "kind": "draft", "conversation": conversation, "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(),
       ])
+    case .drafts:
+      return jsonText(["kind": "drafts"])
+    case .sentMessages:
+      return jsonText(["kind": "sent_messages"])
     }
   }
 }

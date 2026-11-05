@@ -40,7 +40,10 @@ read confirmation**. They apply to the next message and show next to the send bu
 - **Priority** (send options): mark a message *Important* or *Urgent*. Recipients of urgent messages can
   **Confirm read**; in DMs the server repeats the push every two minutes (default, up to five times)
   until they do. Urgent messages never break through do-not-disturb or a mute.
-- **Drafts** are kept per conversation and sync across your devices (encrypted).
+- **Drafts** are kept per conversation and thread and sync across your devices (encrypted). A pencil
+  marks a conversation or thread with a draft. **Drafts & sent** lists all your drafts, with a way
+  back to the composer and a delete that reaches all your devices, and your recent messages from the
+  conversations this device has. Files you attached but didn't send don't stay with a draft yet.
 
 ## Message menu
 

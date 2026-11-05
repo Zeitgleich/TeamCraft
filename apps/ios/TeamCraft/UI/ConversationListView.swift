@@ -11,6 +11,7 @@ struct ConversationListView: View {
   @State private var hasLoaded = false
   @State private var previews: [String: ChatPreview] = [:]
   @State private var selection: String?
+  @State private var isShowingDrafts = false
   @State private var query = ""
   @State private var hits: [SearchHitItem] = []
   @State private var isShowingSettings = false
@@ -79,6 +80,10 @@ struct ConversationListView: View {
             }
             .accessibilityLabel(Text("search_filters_title"))
           }
+          ToolbarItem(placement: .topBarLeading) {
+            Button { isShowingDrafts = true } label: { Image(systemName: "pencil.line") }
+              .accessibilityLabel(Text("drafts_title"))
+          }
           ToolbarItemGroup(placement: .topBarTrailing) {
             Button { maybeBrowseTab = .people } label: { Image(systemName: "square.and.pencil") }
               .accessibilityLabel(Text("new_chat"))
@@ -130,6 +135,12 @@ struct ConversationListView: View {
     .joinNoteAlert(model, isActive: maybeBrowseTab == nil)
     .sheet(isPresented: $isShowingSettings) { SettingsView(account: account) }
     .sheet(isPresented: $isShowingMeetings) { MeetingsView(account: account) }
+    .sheet(isPresented: $isShowingDrafts) {
+      DraftsAndSentView { place in
+        model.openedPlace = place
+        selection = place.conversationId
+      }
+    }
     .onChange(of: model.isShowingMeetingsFromLink) { _, isAsked in
       if isAsked {
         isShowingMeetings = true
@@ -597,7 +608,15 @@ struct ConversationRow: View {
 
   @ViewBuilder
   private var previewText: some View {
-    if let preview = maybePreview {
+    // A draft stands in for the newest message: it's what the user owes this conversation (#1220).
+    if let draft = conversation.maybeDraftPreview {
+      Label {
+        Text("draft_preview \(draft)")
+      } icon: {
+        Image(systemName: "pencil.line")
+      }
+      .labelStyle(.titleAndIcon)
+    } else if let preview = maybePreview {
       switch (preview.sender, preview.content) {
       case (_, .noText): Text("chat_preview_event")
       case (.none, .placeholder(let placeholder)): Text(PlaceholderLine.text(placeholder))
