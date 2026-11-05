@@ -264,19 +264,20 @@ pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, Api
   let hold_max_age =
     Duration::from_secs(u64::from(limits.scheduled_hold_retention_days).saturating_mul(86_400));
   // Holds whose sender left since can't be solved any more; they count from now for the purge.
-  for user in state
+  let departed = state
     .database
     .hold_departed_scheduled_messages(now, BATCH_SIZE)
-    .await?
-  {
+    .await?;
+  for user in departed.into_iter().collect::<HashSet<_>>() {
     tell_devices(state, user);
   }
   // The text's only copy outside the user's devices goes: they keep it to copy until dismissed.
-  for user in state
+  let purged = state
     .database
     .purge_dead_scheduled_messages(now, hold_max_age, BATCH_SIZE)
-    .await?
-  {
+    .await?;
+  // One event per person, however many of theirs went.
+  for user in purged.into_iter().collect::<HashSet<_>>() {
     tell_devices(state, user);
   }
   // Messages still under an old epoch, for a wake that got lost (a restart, a push service that

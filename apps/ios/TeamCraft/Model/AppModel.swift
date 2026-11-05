@@ -213,6 +213,10 @@ final class AppModel {
   /// The sign-in page came with the server check just now: the screen need not ask again.
   @ObservationIgnored private var isSignInPageFromCheck = false
   @ObservationIgnored private lazy var processLock = ProcessLock(fileURL: container.lockFileURL)
+  /// Who in this process holds the cross-process lock. The sync loop and short jobs (a push, sealing,
+  /// a prefetch) share the one `flock`; it is released when the last of them lets go, so no job frees
+  /// the lock under the sync loop and no job keeps it after it ended.
+  @ObservationIgnored private var lockHolders: Set<LockHolder> = []
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
   @ObservationIgnored private var maybeCore: TeamCraft?
   /// Pictures of spaces on disk, by version (AppModel+SpacePictures.swift).
@@ -421,9 +425,9 @@ final class AppModel {
     guard case .storeUnreadable(let problem, _) = phase, let core = maybeCore else { return }
     await busy {
       // The notification extension may have the old file open; the lock keeps it out meanwhile.
-      let lock = processLock
-      let hasLock = await Task.detached { lock.acquire(timeout: 5) }.value
-      defer { if hasLock { lock.release() } }
+      let holder = LockHolder.job(UUID())
+      let hasLock = await takeProcessLock(for: holder, timeout: 5)
+      defer { if hasLock { releaseProcessLock(for: holder) } }
       do {
         try await Task.detached { try core.resetStore() }.value
         await refreshAccountState()
@@ -763,21 +767,18 @@ final class AppModel {
   func sealScheduledMessages() async -> Bool {
     // A cold background launch has no phase yet: the core opens from the store, as for a push.
     guard let core = try? core(createsKey: false) else { return false }
-    // In the foreground the app holds the lock already; otherwise take it like the extension does.
-    // Asks the lock, not `isSyncing`: background expiry gives up the lock with the sync still marked.
-    let needsLock = !processLock.isHeld
-    if needsLock {
-      let lock = processLock
-      guard await Task.detached(operation: { lock.acquire(timeout: 5) }).value else { return false }
+    // Shares the lock with the sync loop in the foreground; otherwise takes it like the extension does,
+    // and releases exactly that hold when done (asleep with the lock held, iOS kills the app).
+    let isSealed = await withProcessLock {
+      do {
+        try await core.sealScheduledMessages()
+        return true
+      } catch {
+        AppLog.failure("sealing scheduled messages again", error)
+        return false
+      }
     }
-    defer { if needsLock && !isSyncing { processLock.release() } }
-    do {
-      try await core.sealScheduledMessages()
-      return true
-    } catch {
-      AppLog.failure("sealing scheduled messages again", error)
-      return false
-    }
+    return isSealed ?? false
   }
 
   func maxUploadBytes() async -> Int64? {
@@ -891,14 +892,12 @@ final class AppModel {
     guard let mode = try? await core.segmentPrefetch(), mode != .off else { return true }
     let isMetered = await NetworkPath.isMetered()
     guard mode == .always || !isMetered else { return true }
-    // The foreground app already holds the lock; otherwise take it like the extension does.
-    if !isSyncing {
-      let lock = processLock
-      guard await Task.detached(operation: { lock.acquire(timeout: 5) }).value else { return false }
+    // Shares the foreground app's lock; otherwise takes it like the extension does.
+    let isFetched = await withProcessLock {
+      (try? await core.prefetchSegments(isNetworkMetered: isMetered, maxTotalBytes: Self.segmentPrefetchCapBytes))
+        != nil
     }
-    defer { if !isSyncing { processLock.release() } }
-    return (try? await core.prefetchSegments(isNetworkMetered: isMetered, maxTotalBytes: Self.segmentPrefetchCapBytes))
-      != nil
+    return isFetched ?? false
   }
 
   // MARK: Scene and sync
@@ -927,7 +926,7 @@ final class AppModel {
       // The time is up before the flush ended (it waits less than the time granted, so this is
       // rare). The core can't be stopped synchronously; at least don't sleep holding the
       // shared-container lock, which the system punishes with a kill (0xdead10cc).
-      self?.processLock.release()
+      self?.dropProcessLock()
       self?.endBackgroundTask()
     }
   }
@@ -1041,14 +1040,11 @@ final class AppModel {
   /// extension couldn't open because the app held the store). `nil` if it can't be read.
   func openPush(_ sealed: Data) async -> PushNotification? {
     guard let core = try? core() else { return nil }
-    // In the foreground the app holds the lock already; otherwise take it like the extension does.
-    let needsLock = !isSyncing
-    if needsLock {
-      let lock = processLock
-      guard await Task.detached(operation: { lock.acquire(timeout: 5) }).value else { return nil }
+    // Shares the foreground app's lock; otherwise takes it like the extension does.
+    let maybeNotification = await withProcessLock {
+      try? await core.notificationForPush(payload: sealed, utcOffsetMinutes: PushClock.utcOffsetMinutes())
     }
-    defer { if needsLock && !isSyncing { processLock.release() } }
-    return try? await core.notificationForPush(payload: sealed, utcOffsetMinutes: PushClock.utcOffsetMinutes())
+    return maybeNotification ?? nil
   }
 
   /// A background (`content-available`) push: a `dismiss` removes what was read or ended elsewhere
@@ -1490,8 +1486,9 @@ final class AppModel {
   private func startSyncing() async {
     guard let core = try? core() else { return }
     if isSyncing {
-      // The background time ran out while syncing, which gave the lock up: take it back.
-      if !processLock.isHeld { _ = await acquireProcessLock() }
+      // The background time ran out while syncing, which gave the lock up: take it back. A job may
+      // hold it meanwhile; the sync loop then shares it and keeps it once the job is done.
+      if !lockHolders.contains(.sync) { _ = await acquireProcessLock() }
       return
     }
     // Never sync beside the extension: both would refresh the rotating refresh token, and the
@@ -1504,19 +1501,50 @@ final class AppModel {
       // Not syncing after all: the next foreground tries again (issue #1142).
       Self.syncLog.error("sync not started: \(String(describing: error), privacy: .public)")
       isSyncing = false
-      processLock.release()
+      releaseProcessLock(for: .sync)
     }
   }
 
-  /// Waits for the cross-process lock while the app is in the foreground; `false` once it left
-  /// (the next foreground tries again).
+  /// Waits for the cross-process lock for the sync loop while the app is in the foreground; `false`
+  /// once it left (the next foreground tries again).
   private func acquireProcessLock() async -> Bool {
-    let lock = processLock
     while UIApplication.shared.applicationState != .background {
-      if await Task.detached(operation: { lock.acquire(timeout: Self.lockWaitSeconds) }).value { return true }
+      if await takeProcessLock(for: .sync, timeout: Self.lockWaitSeconds) { return true }
       AppLog.setup.notice("waiting for the notification extension to release the store")
     }
     return false
+  }
+
+  /// Runs `operation` holding the cross-process lock, shared with whoever in this process holds it,
+  /// and lets go of exactly this hold afterwards. `nil`: the extension kept the lock.
+  private func withProcessLock<T>(_ operation: () async -> T) async -> T? {
+    let holder = LockHolder.job(UUID())
+    guard await takeProcessLock(for: holder, timeout: 5) else { return nil }
+    defer { releaseProcessLock(for: holder) }
+    return await operation()
+  }
+
+  /// Takes the lock for `holder`, or joins this process's hold of it.
+  private func takeProcessLock(for holder: LockHolder, timeout: TimeInterval) async -> Bool {
+    if !processLock.isHeld {
+      let lock = processLock
+      guard await Task.detached(operation: { lock.acquire(timeout: timeout) }).value else { return false }
+    }
+    lockHolders.insert(holder)
+    return true
+  }
+
+  /// `holder` is done; the lock goes once nobody in this process holds it.
+  private func releaseProcessLock(for holder: LockHolder) {
+    lockHolders.remove(holder)
+    if lockHolders.isEmpty { processLock.release() }
+  }
+
+  /// The background time ran out: the lock goes now, whoever holds it (0xdead10cc). The sync loop
+  /// takes it back in the foreground; a job still running finishes without it.
+  private func dropProcessLock() {
+    lockHolders.removeAll()
+    processLock.release()
   }
 
   /// Gives the sync loop the background time to send what is pending, leaving a margin to stop
@@ -1547,7 +1575,8 @@ final class AppModel {
     guard isSyncing else { return }
     isSyncing = false
     if let core = try? core() { try? await core.stop() }
-    processLock.release()
+    // A job still running keeps its hold; the lock goes when it is done.
+    releaseProcessLock(for: .sync)
   }
 
   /// Waits for `operation`, but no longer than `seconds`; a slower operation keeps running.
@@ -1634,4 +1663,10 @@ private final class ResumeOnce: @unchecked Sendable {
     lock.unlock()
     continuation?.resume()
   }
+}
+
+/// A holder of the cross-process lock inside the app: the sync loop, or one short job.
+private enum LockHolder: Hashable {
+  case sync
+  case job(UUID)
 }

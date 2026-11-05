@@ -208,7 +208,8 @@ after `limits.scheduled_hold_retention_days` (30). A hold of another kind whose 
 held for an old epoch, say) becomes `not_a_member` then and counts from there. The list states the date
 (`removes_at`) and the screens show it, the purge tells the owner's devices, and those keep the text,
 marked as removed by the server, until the user dismisses it: the server's copy was the only one outside
-the devices, so it can still be copied. A burst of commits makes one event and one push per sender and
+the devices, so it can still be copied. One cancelled on another device after its removal date but before
+the purge looks the same to a device and shows as removed there until dismissed. A burst of commits makes one event and one push per sender and
 conversation, a device reads the list at most every 5 s for events, and it opens only entries that changed.
 Commits themselves have no limit of their own: the general limit per user applies
 (`user_writes_per_minute`, 600).
