@@ -176,6 +176,8 @@ pub enum MainView {
   Search,
   /// Messages the user saved for later.
   Saved,
+  /// The user's drafts and sent messages (#1220).
+  Drafts,
   /// The files the user can see, of the selected space or across conversations.
   Files,
   /// Mentions, reactions to the user's messages and replies in their threads.
@@ -366,6 +368,8 @@ pub struct AppState {
   pub scroll_anchors: StoredValue<HashMap<ConversationId, usize>>,
   /// A message just opened from search, a link or the activity list; its row lights up briefly.
   pub highlighted: RwSignal<Option<MessageId>>,
+  /// The composer a draft was just opened for (#1220), until that composer took the focus.
+  opened_draft: StoredValue<Option<(ConversationId, Option<ThreadId>)>>,
   /// A message the composer asked to edit (↑ in the empty composer); its row opens the editor.
   pub edit_request: RwSignal<Option<MessageId>>,
   /// The page the settings dialog shows.
@@ -485,6 +489,7 @@ impl AppState {
       unread_marker: RwSignal::new(None),
       edit_request: RwSignal::new(None),
       highlighted: RwSignal::new(None),
+      opened_draft: StoredValue::new(None),
       scroll_anchors: StoredValue::new(HashMap::new()),
       settings_page: RwSignal::new(SettingsPage::Section(SettingsTab::DEFAULT)),
       linked_message: RwSignal::new(None),
@@ -734,6 +739,7 @@ impl AppState {
       MainView::Search
       | MainView::Meetings
       | MainView::Saved
+      | MainView::Drafts
       | MainView::Files
       | MainView::Calls
       | MainView::Directory => true,
@@ -998,6 +1004,7 @@ impl AppState {
       | MainView::Search
       | MainView::Meetings
       | MainView::Saved
+      | MainView::Drafts
       | MainView::Files
       | MainView::Activity
       | MainView::Calls
@@ -1616,6 +1623,31 @@ impl AppState {
     self.overlay.set(Overlay::None);
   }
 
+  pub fn open_drafts(&self) {
+    self.view.set(MainView::Drafts);
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
+  /// Opens the conversation or thread a draft belongs to, and its composer takes the focus even
+  /// where one otherwise waits for a tap (a phone's keyboard): the user came here to write.
+  pub fn open_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
+    self.opened_draft.set_value(Some((conversation, maybe_thread)));
+    self.open_conversation(conversation);
+    if let Some(thread) = maybe_thread {
+      self.open_thread(conversation, thread);
+    }
+  }
+
+  /// Whether this composer is the one [`Self::open_draft`] asked for; asks only once.
+  pub fn take_opened_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> bool {
+    let is_it = self.opened_draft.get_value() == Some((conversation, maybe_thread));
+    if is_it {
+      self.opened_draft.set_value(None);
+    }
+    is_it
+  }
+
   pub fn open_files(&self) {
     self.view.set(MainView::Files);
     self.panel.set(SidePanel::Closed);
@@ -1870,6 +1902,7 @@ impl AppState {
       MainView::Admin(section) => Route::Admin(section),
       MainView::Search => Route::Search,
       MainView::Saved => Route::Saved,
+      MainView::Drafts => Route::Drafts,
       MainView::Files => Route::Files,
       MainView::Activity if self.activity_filter.get() == ActivityFilter::Threads => Route::Threads,
       MainView::Activity => Route::Activity,
@@ -2096,6 +2129,7 @@ impl AppState {
       },
       Route::People => self.open_directory(),
       Route::Saved => self.open_saved(),
+      Route::Drafts => self.open_drafts(),
       Route::Files => self.open_files(),
       Route::Search => self.open_search(None),
       Route::Settings(page) => self.show_settings(page),
@@ -2363,6 +2397,7 @@ mod tests {
         Route::Meetings,
         Route::People,
         Route::Saved,
+        Route::Drafts,
         Route::Files,
         Route::Search,
         Route::Settings(SettingsPage::Section(SettingsTab::Security)),
@@ -2621,6 +2656,48 @@ mod tests {
       assert_eq!(state.maybe_scoped_space(), Some(second));
       assert_eq!(state.view.get(), MainView::Saved);
       assert_eq!(state.scoped_space_name(), Some(spaces[1].name.clone()));
+    }
+
+    #[test]
+    fn a_draft_opens_its_place_and_its_composer_takes_the_focus_once() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      let thread = teamcraft_client_api::model::id_from_raw::<ThreadId>(5);
+      state.open_drafts();
+      assert_eq!(state.view.get(), MainView::Drafts);
+      state.open_draft(channel, Some(thread));
+      assert_eq!(state.view.get(), MainView::Conversation(channel));
+      assert_eq!(
+        state.panel.get(),
+        SidePanel::Thread {
+          conversation: channel,
+          thread
+        }
+      );
+      assert!(
+        !state.take_opened_draft(channel, None),
+        "the conversation's composer stays out"
+      );
+      assert!(state.take_opened_draft(channel, Some(thread)));
+      assert!(!state.take_opened_draft(channel, Some(thread)), "only once");
+    }
+
+    #[test]
+    fn a_conversations_row_is_marked_until_its_draft_is_gone() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      let preview = |state: &AppState| {
+        state
+          .read(|backend| backend.conversation(channel))
+          .and_then(|conv| conv.maybe_draft_preview)
+      };
+      assert_eq!(preview(&state), None);
+      state.write(|backend| backend.set_draft(channel, None, "half a thought"));
+      assert_eq!(preview(&state).as_deref(), Some("half a thought"));
+      assert_eq!(state.read(|backend| backend.drafts(None)).len(), 1);
+      state.write(|backend| backend.set_draft(channel, None, ""));
+      assert_eq!(preview(&state), None);
+      assert!(state.read(|backend| backend.drafts(None)).is_empty());
     }
 
     #[test]

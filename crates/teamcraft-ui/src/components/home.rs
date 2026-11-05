@@ -14,6 +14,7 @@ use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::setup_checklist::SetupChecklist;
+use crate::components::sidebar::{DraftMark, draft_marker};
 use crate::components::sidebar::{
   EntriesDisclosure, EntriesToggle, GlobalEntries, ListFilter, ListFilterField, ListFilterToggle,
   SidebarItem, hold_unread_while_open,
@@ -438,6 +439,7 @@ fn DirectItem(#[prop(into)] conversation: Signal<Conversation>) -> impl IntoView
   let is_current = move || state.view.get() == MainView::Conversation(id);
   let is_muted = Memo::new(move |_| conversation.with(|conv| conv.is_muted));
   let is_unread = Memo::new(move |_| conversation.with(|conv| conv.unread_count > 0 && !conv.is_muted));
+  let has_draft = draft_marker(conversation, id);
   // DMs are addressed to the user, so every unread message counts (muted ones only mentions).
   let count = Memo::new(move |_| {
     conversation.with(|conv| {
@@ -501,8 +503,13 @@ fn DirectItem(#[prop(into)] conversation: Signal<Conversation>) -> impl IntoView
     } else {
       aria_name
     };
-    if is_muted.get() {
+    let label = if is_muted.get() {
       i18n.t_with("sidebar-item-muted-label", &[("label", &label)])
+    } else {
+      label
+    };
+    if has_draft.get() {
+      i18n.t_with("sidebar-item-draft-label", &[("label", &label)])
     } else {
       label
     }
@@ -537,6 +544,7 @@ fn DirectItem(#[prop(into)] conversation: Signal<Conversation>) -> impl IntoView
           .then(|| view! { <span class="sb-call" title=i18n.t("presence-in-call")><Icon name=IconName::Phone /></span> })
       }}
       {move || is_muted.get().then(|| view! { <span class="sb-muted-icon" title=i18n.t("sidebar-item-muted")><Icon name=IconName::BellOff /></span> })}
+      {move || has_draft.get().then(|| view! { <DraftMark /> })}
       {move || {
         let count = count.get();
         (count > 0).then(|| view! { <span class="badge-count" aria-hidden="true">{count}</span> })

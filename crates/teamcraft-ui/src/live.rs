@@ -971,6 +971,7 @@ mod tests {
 
   fn conversation(id: ConversationId) -> Conversation {
     Conversation {
+      maybe_draft_preview: None,
       id,
       maybe_space: None,
       kind: ConversationKind::Public,

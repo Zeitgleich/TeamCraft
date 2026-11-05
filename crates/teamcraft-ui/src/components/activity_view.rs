@@ -6,6 +6,8 @@ use leptos::prelude::*;
 use teamcraft_client_api::activity::{ActivityItem, ActivityKind};
 use teamcraft_client_api::list_load::{FIRST_SYNC_DEADLINE_MS, LoadingList};
 
+use std::collections::HashSet;
+
 use crate::activity_place::{ActivityFilter, summary_key, thread_summary_key};
 use crate::clock::{format_date_time, format_relative, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
@@ -14,8 +16,9 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::join_requests::ActivityJoinRequests;
 use crate::components::list_status::{ListPlaceholder, ListStatus};
 use crate::components::rich_text::RichText;
+use crate::components::sidebar::DraftMark;
 use crate::i18n::use_i18n;
-use crate::model::{Conversation, ThreadSummary, thread_id_of};
+use crate::model::{Conversation, ConversationId, ThreadId, ThreadSummary, thread_id_of};
 use crate::state::{MainView, SidePanel, use_app_state};
 
 /// Placeholder rows while the first sync brings the feed.
@@ -46,6 +49,17 @@ pub fn ActivitySidebar() -> impl IntoView {
       all.retain(|thread| thread.unread_replies > 0);
     }
     all
+  });
+  // Which threads hold a draft (#1220), only while their list is looked at.
+  let drafted_threads = Memo::new(move |_| {
+    if !filter.get().lists_threads() {
+      return HashSet::new();
+    }
+    state
+      .read(|backend| backend.drafts(None))
+      .into_iter()
+      .filter_map(|draft| draft.maybe_thread.map(|thread| (draft.conversation, thread)))
+      .collect::<HashSet<_>>()
   });
   // Join requests wait above the entries of "All" (they are no mention, reaction or reply).
   let shows_requests = move || filter.get() == ActivityFilter::All;
@@ -116,7 +130,7 @@ pub fn ActivitySidebar() -> impl IntoView {
             if filter.get().lists_threads() {
               view! {
                 <For each=move || threads.get() key=|thread| (thread.root.id, thread.reply_count, thread.unread_replies) let:thread>
-                  <ThreadRow thread=thread />
+                  <ThreadRow thread=thread drafted=drafted_threads />
                 </For>
               }
               .into_any()
@@ -241,7 +255,7 @@ fn ActivityRow(item: ActivityItem) -> impl IntoView {
 
 /// A thread the user follows: its new replies and where, the start of its first message.
 #[component]
-fn ThreadRow(thread: ThreadSummary) -> impl IntoView {
+fn ThreadRow(thread: ThreadSummary, drafted: Memo<HashSet<(ConversationId, ThreadId)>>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let locale = i18n.locale().tag();
@@ -252,6 +266,7 @@ fn ThreadRow(thread: ThreadSummary) -> impl IntoView {
     .unwrap_or_default();
   let (conversation, root) = (thread.conversation, thread.root.id);
   let thread_id = thread_id_of(root);
+  let has_draft = Memo::new(move |_| drafted.with(|threads| threads.contains(&(conversation, thread_id))));
   let unread = thread.unread_replies;
   let key = thread_summary_key(unread);
   let summary = move || i18n.t_count_with(key, unread as usize, &[("channel", &conversation_name)]);
@@ -282,6 +297,10 @@ fn ThreadRow(thread: ThreadSummary) -> impl IntoView {
           <span class="activity-excerpt"><RichText body=thread.root.body.clone() /></span>
           <time class="activity-time" title=absolute>{relative}</time>
         </span>
+        {move || has_draft.get().then(|| view! {
+          <DraftMark />
+          <span class="visually-hidden">{move || i18n.t("sidebar-item-draft")}</span>
+        })}
         {(unread > 0).then(|| view! {
           <span class="unread-dot" class:mention=thread.has_mention aria-hidden="true"></span>
           <span class="visually-hidden">{move || i18n.t("activity-unread-mark")}</span>

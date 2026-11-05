@@ -4,7 +4,7 @@
 //! tens of thousands of entries costs no memory and proves the message list only renders what is visible.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use teamcraft_proto::{BackgroundId, ErrorCode, HistoryPolicy};
 
@@ -14,6 +14,7 @@ use teamcraft_client_api::actions::{
 };
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
+use teamcraft_client_api::drafts::{DraftItem, SentItem};
 use teamcraft_client_api::privacy::{LastSeenVisibility, PrivacySettings};
 
 use crate::backend::ChatBackend;
@@ -204,6 +205,8 @@ struct State {
   next_background_id: u64,
   /// Messages the user saved for later.
   saved: HashSet<MessageId>,
+  /// The composers' unsent text with when it was last edited.
+  drafts: BTreeMap<(ConversationId, Option<ThreadId>), (String, TimestampMs)>,
   /// Share links the user created, by file.
   share_links: HashMap<String, ShareLink>,
   /// Open spaces the user isn't in yet.
@@ -275,6 +278,7 @@ impl MockBackend {
       backgrounds: Vec::new(),
       next_background_id: 1,
       saved: HashSet::new(),
+      drafts: BTreeMap::new(),
       share_links: HashMap::new(),
       joinable: vec![JoinableSpace {
         id: id_from_raw(3),
@@ -1021,6 +1025,79 @@ impl ChatBackend for MockBackend {
     };
   }
 
+  fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
+    let state = self.state.borrow();
+    state
+      .drafts
+      .get(&(conversation, maybe_thread))
+      .map(|(body, _)| body.clone())
+  }
+
+  fn set_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
+    let mut state = self.state.borrow_mut();
+    if body.is_empty() {
+      state.drafts.remove(&(conversation, maybe_thread));
+    } else {
+      state
+        .drafts
+        .insert((conversation, maybe_thread), (body.to_owned(), self.now));
+    }
+    if maybe_thread.is_none()
+      && let Some(entry) = state
+        .conversations
+        .iter_mut()
+        .find(|conv| conv.id == conversation)
+    {
+      entry.maybe_draft_preview = (!body.is_empty()).then(|| body.to_owned());
+    }
+  }
+
+  fn drafts(&self, maybe_space: Option<SpaceId>) -> Vec<DraftItem> {
+    let state = self.state.borrow();
+    state
+      .drafts
+      .iter()
+      .filter_map(|((conversation, maybe_thread), (body, edited_at))| {
+        let found = state.conversations.iter().find(|conv| conv.id == *conversation)?;
+        (maybe_space.is_none() || found.maybe_space == maybe_space).then(|| DraftItem {
+          conversation: *conversation,
+          maybe_thread: *maybe_thread,
+          conversation_name: found.name.clone(),
+          maybe_thread_root: None,
+          body: body.clone(),
+          edited_at: *edited_at,
+        })
+      })
+      .collect()
+  }
+
+  fn sent_messages(&self, maybe_space: Option<SpaceId>) -> Vec<SentItem> {
+    let state = self.state.borrow();
+    let me = self.me().id;
+    let mut sent: Vec<SentItem> = state
+      .conversations
+      .iter()
+      .filter(|conv| maybe_space.is_none() || conv.maybe_space == maybe_space)
+      .flat_map(|conv| {
+        let stored = state.messages.get(&conv.id).into_iter().flatten();
+        let replies = state.replies.get(&conv.id).into_iter().flatten();
+        stored.chain(replies).map(move |message| (conv, message))
+      })
+      .filter(|(_, message)| message.author == me)
+      .map(|(conv, message)| SentItem {
+        conversation: conv.id,
+        conversation_name: conv.name.clone(),
+        message: message.id,
+        maybe_thread: message.maybe_thread,
+        excerpt: message.body.clone(),
+        file_count: 0,
+        sent_at: message.sent_at,
+      })
+      .collect();
+    sent.sort_by_key(|item| std::cmp::Reverse(item.message));
+    sent
+  }
+
   fn saved_items(&self) -> Vec<SavedItem> {
     let state = self.state.borrow();
     state
@@ -1478,6 +1555,7 @@ fn demo_conversations() -> Vec<Conversation> {
                  topic: &str,
                  unread: u32,
                  mentions: u32| Conversation {
+    maybe_draft_preview: None,
     id,
     maybe_space: Some(space),
     kind,
@@ -1659,6 +1737,7 @@ fn demo_conversations() -> Vec<Conversation> {
   ];
   for (id, name, kind, members, unread, mentions) in dms {
     list.push(Conversation {
+      maybe_draft_preview: None,
       id: id_from_raw::<ConversationId>(id),
       maybe_space: None,
       kind,

@@ -1503,6 +1503,20 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn drafts(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::DraftItem> {
+    match self.ask(ChatQuery::Drafts { maybe_space }) {
+      Some(ChatAnswer::Drafts { drafts }) => drafts,
+      _ => Vec::new(),
+    }
+  }
+
+  fn sent_messages(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::SentItem> {
+    match self.ask(ChatQuery::SentMessages { maybe_space }) {
+      Some(ChatAnswer::SentMessages { sent }) => sent,
+      _ => Vec::new(),
+    }
+  }
+
   fn set_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
     self.act(ChatAction::SetDraft {
       conversation,

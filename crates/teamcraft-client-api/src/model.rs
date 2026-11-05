@@ -552,6 +552,10 @@ pub struct Conversation {
   /// the active conversations; its history stays readable.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub has_only_deactivated_others: bool,
+  /// The start of the unsent text in this conversation's own composer (#1220): the lists mark the
+  /// conversation with it. A thread's draft doesn't count here, the thread lists mark those.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_draft_preview: Option<String>,
 }
 
 impl Conversation {
