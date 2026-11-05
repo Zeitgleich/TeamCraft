@@ -1,33 +1,27 @@
-//! "Send later" as the clients see it (docs/scheduled-messages.md): a message waits in the user's
-//! encrypted account data until one of their devices is online at or after its time, and that device
-//! sends it like any other message. The rules every client shows and the core applies live here.
+//! "Send later" as the clients see it (docs/scheduled-messages.md): the server holds a message sealed
+//! by the sender's device and releases it at its time, on time unless the group changed and all the
+//! sender's devices stayed off. The server enforces the rules; these are the same rules for showing
+//! why before asking it, and what a held message's state means.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{ClientMessageId, ScheduledMessagePolicy};
+use teamcraft_proto::{ScheduledHoldReason, ScheduledMessageId, ScheduledMessagePolicy};
 
 use crate::actions::MessagePriority;
 use crate::model::{ConversationId, MessageId, ThreadId, TimestampMs};
 
-/// Messages one user can have waiting. They travel in the key bag, which is uploaded as a whole.
-pub const MAX_SCHEDULED_MESSAGES: usize = 50;
-/// The longest text of a scheduled message: with [`MAX_SCHEDULED_MESSAGES`] they stay well below the
-/// key bag's default limit of 1 MiB, also base64-encoded and encrypted.
-pub const MAX_SCHEDULED_BODY_BYTES: usize = 8 * 1024;
-
-const MS_PER_HOUR: i64 = 3_600_000;
-const MS_PER_DAY: i64 = 24 * MS_PER_HOUR;
+const MS_PER_DAY: i64 = 24 * 3_600_000;
 
 /// A message waiting for its time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledMessage {
-  /// Also the ID the message goes out with.
-  pub id: ClientMessageId,
+  pub id: ScheduledMessageId,
   pub conversation: ConversationId,
-  /// Empty when this device doesn't know the conversation ([`ScheduledStatus::Unavailable`]).
+  /// Empty when this device doesn't know the conversation.
   #[serde(default)]
   pub conversation_name: String,
   #[serde(default)]
   pub maybe_thread: Option<ThreadId>,
+  /// Empty when this device can't read it yet ([`ScheduledStatus::Unreadable`]).
   pub body: String,
   /// Server time.
   pub due_at: TimestampMs,
@@ -44,22 +38,29 @@ pub struct ScheduledMessage {
   pub also_send_to_channel: bool,
 }
 
-/// Where a scheduled message stands. Each one has its own line in every client: nothing waits
-/// silently.
+/// Where a held message stands. Each one has its own line in every client: nothing waits silently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduledStatus {
-  /// Its time hasn't come.
+  /// The server sends it at its time, whether the user's devices are on or not.
   Waiting,
-  /// Its time has come: it goes out as soon as one of the user's devices has a connection.
-  Due,
-  /// None of the user's devices was online for longer than the workspace's late limit after its
-  /// time. It may be stale by now, so it doesn't go out by itself: send it, change it or cancel it.
-  Missed,
-  /// The workspace switched scheduling off after it was written. Send it or cancel it.
+  /// The group changed since it was sealed and its time hasn't come. A device of the user seals it
+  /// again as soon as one is online; if none is by then, it goes out when one next is.
+  NeedsSealing,
+  /// Its time has come but the group changed: it goes out when a device of the user is next online.
+  Stale,
+  /// The workspace turned scheduling off. Send it or cancel it.
   PolicyOff,
-  /// This device doesn't know its conversation (the user left it, or it isn't loaded here yet).
-  Unavailable,
+  /// The user is no longer in the conversation, or their account is off: it won't go out.
+  NotAMember,
+  /// The user may no longer post there: it won't go out.
+  NoPermission,
+  /// The conversation was deleted.
+  ConversationGone,
+  /// The thread it answers is gone, or threads were turned off.
+  ThreadGone,
+  /// This device holds no key for it yet. It says nothing about the message going out.
+  Unreadable,
   /// From a newer version.
   #[serde(other)]
   Unknown,
@@ -98,12 +99,11 @@ pub enum ScheduleRefusal {
   /// The workspace doesn't allow scheduling.
   Disabled,
   EmptyBody,
-  BodyTooLong,
   /// The time is not in the future.
   NotInFuture,
   /// The time is further ahead than the workspace allows.
   BeyondHorizon,
-  /// [`MAX_SCHEDULED_MESSAGES`] are waiting already.
+  /// The user has as many waiting as the workspace allows.
   TooMany,
 }
 
@@ -124,13 +124,11 @@ impl ScheduleCheck<'_> {
     if !policy.is_enabled {
       found.push(ScheduleRefusal::Disabled);
     }
-    if self.is_new && self.waiting >= MAX_SCHEDULED_MESSAGES {
+    if self.is_new && self.waiting >= policy.max_per_user as usize {
       found.push(ScheduleRefusal::TooMany);
     }
     if self.body.trim().is_empty() {
       found.push(ScheduleRefusal::EmptyBody);
-    } else if self.body.len() > MAX_SCHEDULED_BODY_BYTES {
-      found.push(ScheduleRefusal::BodyTooLong);
     }
     if self.due_at <= self.server_now {
       found.push(ScheduleRefusal::NotInFuture);
@@ -146,27 +144,25 @@ pub fn latest_due(policy: &ScheduledMessagePolicy, server_now: TimestampMs) -> T
   server_now.saturating_add(i64::from(policy.max_horizon_days).saturating_mul(MS_PER_DAY))
 }
 
-/// Where a message with this time stands. `is_known` says whether this device knows its conversation.
+/// Where a held message stands, from what the server says and whether this device can read it.
 pub fn status_of(
-  due_at: TimestampMs,
-  server_now: TimestampMs,
-  policy: &ScheduledMessagePolicy,
-  is_known: bool,
+  maybe_hold: Option<&ScheduledHoldReason>,
+  is_epoch_current: bool,
+  is_readable: bool,
 ) -> ScheduledStatus {
-  if !is_known {
-    return ScheduledStatus::Unavailable;
-  }
-  if !policy.is_enabled {
-    return ScheduledStatus::PolicyOff;
-  }
-  if due_at > server_now {
-    return ScheduledStatus::Waiting;
-  }
-  let late_limit_ms = i64::from(policy.late_limit_hours).saturating_mul(MS_PER_HOUR);
-  if server_now.saturating_sub(due_at) > late_limit_ms {
-    ScheduledStatus::Missed
-  } else {
-    ScheduledStatus::Due
+  match maybe_hold {
+    Some(ScheduledHoldReason::StaleEpoch) => ScheduledStatus::Stale,
+    Some(ScheduledHoldReason::PolicyOff) => ScheduledStatus::PolicyOff,
+    Some(ScheduledHoldReason::NotAMember | ScheduledHoldReason::SenderInactive) => {
+      ScheduledStatus::NotAMember
+    },
+    Some(ScheduledHoldReason::NoPermission) => ScheduledStatus::NoPermission,
+    Some(ScheduledHoldReason::ConversationGone) => ScheduledStatus::ConversationGone,
+    Some(ScheduledHoldReason::ThreadGone) => ScheduledStatus::ThreadGone,
+    Some(ScheduledHoldReason::Unknown(_)) => ScheduledStatus::Unknown,
+    None if !is_readable => ScheduledStatus::Unreadable,
+    None if !is_epoch_current => ScheduledStatus::NeedsSealing,
+    None => ScheduledStatus::Waiting,
   }
 }
 
@@ -180,37 +176,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn follows_the_time() {
-      let policy = policy();
-      assert_eq!(status_of(NOW + 1, NOW, &policy, true), ScheduledStatus::Waiting);
-      assert_eq!(status_of(NOW, NOW, &policy, true), ScheduledStatus::Due);
-      assert_eq!(
-        status_of(NOW - 24 * MS_PER_HOUR, NOW, &policy, true),
-        ScheduledStatus::Due
-      );
-      assert_eq!(
-        status_of(NOW - 24 * MS_PER_HOUR - 1, NOW, &policy, true),
-        ScheduledStatus::Missed
-      );
+    fn waiting_needs_a_current_epoch_and_a_key() {
+      assert_eq!(status_of(None, true, true), ScheduledStatus::Waiting);
+      assert_eq!(status_of(None, false, true), ScheduledStatus::NeedsSealing);
+      assert_eq!(status_of(None, true, false), ScheduledStatus::Unreadable);
     }
 
     #[test]
-    fn a_policy_that_went_off_holds_it_back_whatever_the_time() {
-      let policy = ScheduledMessagePolicy {
-        is_enabled: false,
-        ..policy()
-      };
-      assert_eq!(status_of(NOW - 1, NOW, &policy, true), ScheduledStatus::PolicyOff);
-      assert_eq!(status_of(NOW + 1, NOW, &policy, true), ScheduledStatus::PolicyOff);
-    }
-
-    #[test]
-    fn an_unknown_conversation_says_so_first() {
-      let policy = policy();
-      assert_eq!(
-        status_of(NOW - 1, NOW, &policy, false),
-        ScheduledStatus::Unavailable
-      );
+    fn every_hold_has_its_status() {
+      for (hold, status) in [
+        (ScheduledHoldReason::StaleEpoch, ScheduledStatus::Stale),
+        (ScheduledHoldReason::PolicyOff, ScheduledStatus::PolicyOff),
+        (ScheduledHoldReason::NotAMember, ScheduledStatus::NotAMember),
+        (ScheduledHoldReason::SenderInactive, ScheduledStatus::NotAMember),
+        (ScheduledHoldReason::NoPermission, ScheduledStatus::NoPermission),
+        (
+          ScheduledHoldReason::ConversationGone,
+          ScheduledStatus::ConversationGone,
+        ),
+        (ScheduledHoldReason::ThreadGone, ScheduledStatus::ThreadGone),
+      ] {
+        assert_eq!(status_of(Some(&hold), false, true), status);
+      }
     }
 
     #[test]
@@ -263,18 +250,9 @@ mod tests {
     }
 
     #[test]
-    fn the_text_has_a_limit() {
-      let long = "x".repeat(MAX_SCHEDULED_BODY_BYTES + 1);
-      assert_eq!(
-        check(&long, NOW + 1).refusals(&policy()),
-        [ScheduleRefusal::BodyTooLong]
-      );
-    }
-
-    #[test]
     fn only_a_new_one_counts_against_the_cap() {
       let full = ScheduleCheck {
-        waiting: MAX_SCHEDULED_MESSAGES,
+        waiting: policy().max_per_user as usize,
         ..check("text", NOW + 1)
       };
       assert_eq!(full.refusals(&policy()), [ScheduleRefusal::TooMany]);

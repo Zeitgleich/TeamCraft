@@ -250,7 +250,7 @@ history-gap-failed = Nachrichten konnten nicht geladen werden.
 
 # Später senden (docs/scheduled-messages.md)
 schedule-heading = Später senden
-schedule-online-hint = Geht raus, sobald eines deiner Geräte zu dieser Zeit oder danach online ist.
+schedule-online-hint = Geht pünktlich raus, auch wenn deine Geräte aus sind, außer die Gruppe ändert sich und alle deine Geräte bleiben aus.
 schedule-write-first = Schreib zuerst etwas.
 schedule-no-files = Nachrichten mit Dateien können noch nicht warten: Sende sie jetzt.
 schedule-no-command = Befehle laufen sofort und lassen sich nicht planen.
@@ -260,10 +260,9 @@ schedule-monday = Montag früh
 schedule-custom = Zeit wählen
 schedule-custom-label = Senden um
 schedule-confirm = Planen
-schedule-done = Geplant für { $time }. Sie geht raus, sobald eines deiner Geräte dann oder später online ist.
+schedule-done = Geplant für { $time }.
 schedule-refused-off = Dein Workspace erlaubt keine geplanten Nachrichten.
 schedule-refused-empty = Schreib zuerst etwas.
-schedule-refused-long = Eine geplante Nachricht darf höchstens { $kib } KiB Text haben.
 schedule-refused-past = Wähle eine Zeit in der Zukunft.
 schedule-refused-far = { $count ->
     [one] Wähle eine Zeit höchstens 1 Tag im Voraus.
@@ -275,15 +274,19 @@ scheduled-count = { $count ->
     [one] 1 Nachricht wartet
    *[other] { $count } Nachrichten warten
 }
-scheduled-note = Deine eigenen Geräte heben sie verschlüsselt auf. Eine Nachricht geht raus, sobald eines davon zu ihrer Zeit oder danach online ist; sind alle aus, wartet sie auf das erste, das zurückkommt.
+scheduled-note = Der Server hebt sie verschlüsselt auf und sendet sie pünktlich, auch wenn deine Geräte aus sind. Nur wenn sich die Gruppe ändert (jemand kommt dazu oder geht) und alle deine Geräte aus bleiben, wartet eine Nachricht, bis eines zurück ist.
 scheduled-empty-title = Nichts geplant
 scheduled-empty = Nutze „Später senden“ im Sendemenü neben dem Senden-Knopf.
 scheduled-unknown-conversation = Unbekannte Unterhaltung
-scheduled-status-waiting = Wartet auf ihre Zeit.
-scheduled-status-due = Fällig: Geht raus, sobald eines deiner Geräte online ist.
-scheduled-status-missed = Ihre Zeit ist lange vorbei, deine Geräte waren aus. Sie könnte veraltet sein und bleibt deshalb hier, bis du entscheidest.
+scheduled-status-waiting = Geht pünktlich raus.
+scheduled-status-needs-sealing = Die Gruppe hat sich geändert. Eines deiner Geräte erneuert die Verschlüsselung von selbst; schafft es das rechtzeitig, geht sie pünktlich raus.
+scheduled-status-stale = Verspätet: Die Gruppe hat sich geändert, und keines deiner Geräte war an. Sie geht raus, sobald eines an ist.
 scheduled-status-policy-off = Dein Workspace hat geplante Nachrichten abgeschaltet. Sie bleibt hier, bis du sie sendest oder verwirfst.
-scheduled-status-unavailable = Dieses Gerät erreicht diese Unterhaltung nicht. Vielleicht hast du sie verlassen.
+scheduled-status-not-a-member = Du bist nicht mehr in dieser Unterhaltung, deshalb geht sie nicht raus.
+scheduled-status-no-permission = Du darfst hier nicht mehr schreiben, deshalb ging sie nicht raus.
+scheduled-status-conversation-gone = Diese Unterhaltung wurde gelöscht, deshalb geht sie nicht raus.
+scheduled-status-thread-gone = Der Thread, auf den sie antwortet, gibt es nicht mehr, deshalb ging sie nicht raus.
+scheduled-status-unreadable = Dieses Gerät kann sie noch nicht lesen. Sie geht trotzdem raus.
 scheduled-status-unknown = Deine App kann nicht sagen, was mit dieser Nachricht passiert. Aktualisiere sie.
 scheduled-send-now = Jetzt senden
 scheduled-edit = Bearbeiten
@@ -293,3 +296,4 @@ scheduled-cancel = Nachricht verwerfen
 scheduled-cancel-question = Diese Nachricht verwerfen? Niemand wird sie sehen.
 scheduled-cancel-confirm = Verwerfen
 scheduled-keep = Behalten
+schedule-refused-limit = Du hast so viele geplante Nachrichten, wie dein Workspace erlaubt. Sende oder verwirf zuerst eine.

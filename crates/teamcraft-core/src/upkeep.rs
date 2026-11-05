@@ -16,8 +16,8 @@ use crate::api::ServerApi;
 use crate::client::Client;
 use crate::store::LocalStore;
 
-/// How often scheduled messages are looked at: what the JSON of the account data costs, against a
-/// message going out a few seconds late.
+/// How often a device looks for scheduled messages to seal again: one local read, and a key change
+/// usually comes with a gateway event long before their time.
 #[cfg(feature = "ui")]
 const SCHEDULED_CHECK_MS: i64 = 15_000;
 
@@ -40,6 +40,9 @@ pub struct Upkeep {
   /// When scheduled messages were last looked at.
   #[cfg(feature = "ui")]
   last_scheduled_check_ms: i64,
+  /// The gateway connection the list of scheduled messages was read for.
+  #[cfg(feature = "ui")]
+  maybe_scheduled_connection: Option<u64>,
   uploads: UploadMode,
 }
 
@@ -65,6 +68,8 @@ impl Upkeep {
       last_local_check_ms: i64::MIN,
       #[cfg(feature = "ui")]
       last_scheduled_check_ms: i64::MIN,
+      #[cfg(feature = "ui")]
+      maybe_scheduled_connection: None,
       uploads: UploadMode::Inline,
     }
   }
@@ -133,7 +138,7 @@ impl Upkeep {
     }
     #[cfg(feature = "ui")]
     {
-      is_changed |= self.send_due_scheduled(client, now).await;
+      is_changed |= self.tend_scheduled(client, now).await;
     }
     let is_flushed = match self.uploads {
       UploadMode::Inline => flush(client).await,
@@ -142,27 +147,36 @@ impl Upkeep {
     is_changed | is_flushed
   }
 
-  /// Scheduled messages whose time has come (docs/scheduled-messages.md), checked every
-  /// [`SCHEDULED_CHECK_MS`]: a local read, and no request while none is due. A device whose clock jumps
-  /// (a resume, a corrected clock) checks at once.
+  /// Keeps this device's view of the scheduled messages (docs/scheduled-messages.md) and seals again
+  /// what the group left behind. The list is read once per gateway connection (events bring changes
+  /// in between); the check is a local read every [`SCHEDULED_CHECK_MS`] and no request while nothing
+  /// is stale.
   #[cfg(feature = "ui")]
-  async fn send_due_scheduled<A: ServerApi, S: LocalStore>(
+  async fn tend_scheduled<A: ServerApi, S: LocalStore>(
     &mut self,
     client: &mut Client<A, S>,
     now: i64,
   ) -> bool {
+    if let Some(connection) = client
+      .gateway_connections()
+      .filter(|connection| self.maybe_scheduled_connection != Some(*connection))
+    {
+      match client.refresh_scheduled().await {
+        Ok(()) => self.maybe_scheduled_connection = Some(connection),
+        Err(error) => tracing::debug!(%error, "scheduled messages not read yet"),
+      }
+    }
     if now >= self.last_scheduled_check_ms
       && now.saturating_sub(self.last_scheduled_check_ms) < SCHEDULED_CHECK_MS
     {
       return false;
     }
     self.last_scheduled_check_ms = now;
-    match client.send_due_scheduled().await {
-      Ok(sent) => sent > 0,
+    match client.seal_stale_scheduled().await {
+      Ok(sealed) => sealed > 0,
       Err(error) => {
-        // Offline, or the newest key bag couldn't be read: they stay "due" in the lists and the next
-        // check tries again.
-        tracing::debug!(%error, "due scheduled messages not sent yet");
+        // Offline: they stay as they are, and the list says what that means.
+        tracing::debug!(%error, "scheduled messages not sealed again yet");
         false
       },
     }

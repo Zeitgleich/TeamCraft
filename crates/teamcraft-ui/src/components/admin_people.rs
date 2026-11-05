@@ -13,8 +13,8 @@ use crate::i18n::use_i18n;
 const AWAY_MINUTES: [u32; 6] = [5, 10, 15, 30, 60, 0];
 /// What the console offers for how far ahead a message may be scheduled.
 const SCHEDULE_HORIZON_DAYS: [u32; 5] = [7, 30, 90, 365, 730];
-/// What the console offers for how late a scheduled message still goes out by itself.
-const SCHEDULE_LATE_HOURS: [u32; 5] = [1, 6, 24, 72, 168];
+/// What the console offers for how many messages one person can have waiting.
+const SCHEDULE_PER_USER: [u32; 5] = [10, 25, 50, 100, 500];
 const PRESET_DURATIONS: [u32; 6] = [0, 30, 60, 240, 480, 1440];
 const MAX_PRESETS: usize = 20;
 
@@ -175,19 +175,19 @@ pub fn PeopleSection() -> impl IntoView {
           }
         />
         <SelectRow
-          id="policy-scheduled-late"
-          label=Signal::derive(move || i18n.t("policy-scheduled-late"))
+          id="policy-scheduled-cap"
+          label=Signal::derive(move || i18n.t("policy-scheduled-cap"))
           options=Signal::derive(move || {
-            with_current(&SCHEDULE_LATE_HOURS, draft.get().scheduled_messages.late_limit_hours)
+            with_current(&SCHEDULE_PER_USER, draft.get().scheduled_messages.max_per_user)
               .into_iter()
-              .map(|hours| (hours.to_string(), i18n.t_count("policy-hours", hours as usize)))
+              .map(|count| (count.to_string(), count.to_string()))
               .collect()
           })
-          selected=Signal::derive(move || draft.get().scheduled_messages.late_limit_hours.to_string())
+          selected=Signal::derive(move || draft.get().scheduled_messages.max_per_user.to_string())
           disabled=Signal::derive(move || !draft.get().scheduled_messages.is_enabled)
           on_select=move |value: String| {
-            if let Ok(hours) = value.parse::<u32>() {
-              policy.edit(|p| p.scheduled_messages.late_limit_hours = hours);
+            if let Ok(count) = value.parse::<u32>() {
+              policy.edit(|p| p.scheduled_messages.max_per_user = count);
             }
           }
         />

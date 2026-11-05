@@ -1141,7 +1141,9 @@ internal fun Composer(
       isSilent = isSilent,
       alsoSendToChannel = alsoToChannel,
     )
-    viewModel.act(ChatActions.schedule(conversationId, emojiConvert(text.trim()), options, dueAtMs))
+    val body = text
+    // The server may refuse it: the text comes back, and the failure shows like any other.
+    viewModel.act(ChatActions.schedule(conversationId, emojiConvert(body.trim()), options, dueAtMs)) { text = body }
     viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
     text = ""
     priority = "normal"

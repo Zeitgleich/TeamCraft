@@ -770,6 +770,18 @@ MLS: the commits, welcomes and application messages of each group (opaque), and 
 i.e. its member devices' certificates, which the server knows anyway, and the epoch's external public
 key. It holds no secrets; a joiner still needs a credential every member accepts.
 
+**Scheduled messages** ([scheduled-messages.md](scheduled-messages.md), issue #203). The server holds
+a message sealed by the sender's device and releases it at its time. It therefore learns ahead of time
+what it otherwise learns at the send: that a ciphertext exists, its conversation, sender and device, due
+time, size, mentions and the urgent flag. It compares MLS epochs, not keys, since it doesn't know the
+current key: in the epoch of the seal no commit was accepted since, so nobody was removed; once the epoch
+moved, the message waits for a device of the sender to seal it again.
+
+**Accepted risk.** A compromised server working with somebody removed before the message's time can hand
+them the text, because they hold that key. The epoch check only stops an honest server. Before this
+feature, reaching a removed member took withholding a commit from the sender; for a message scheduled
+before the removal it doesn't. The product owner accepted this.
+
 **Message IDs.** The sending client generates a random 128-bit **client message ID** before encrypting.
 The AEAD associated data binds conversation ID, sender user and device, client message ID and
 `content_key_id`, so the server can't move a ciphertext to another conversation, attribute it to another
@@ -3433,11 +3445,6 @@ restored together with them on a new device.
   gateway event announces a new version.
 - The server sees that the key bag changed and its size, not what changed. Drafts make the key bag
   change while typing; clients upload at most once per sync round.
-- **Scheduled messages** ([scheduled-messages.md](scheduled-messages.md), issue #203): text,
-  conversation and time of a message waiting to be sent. No key is involved: the device that sends it
-  encrypts it then, under the content key current then, so the epoch rules of §4 apply as to any
-  message. The entry's ID is the message's client message ID, so several devices send one message.
-  Key bag answers carry the server's clock (`server_now`), for the moment of sending.
 - **Trust decisions travel too.** The identity keys the user's devices pinned and the workspace root
   of trust are account data. A new or linked device starts with them instead of trusting the server
   on first use again: it verifies colleagues' credentials with the inherited pins and refuses a
@@ -3781,6 +3788,9 @@ Details:
 - App and NSE still share the local database (App Group container + keychain access group). Like
   Threema's `ProcessCoordinator`, a cross-process lock ensures only one process syncs with the server at
   a time; Darwin notifications tell the other process to reload.
+- A commit in a conversation where the user holds scheduled messages wakes their devices with a sealed,
+  content-free push of its own kind, coalesced and rate limited (scheduled-messages.md, "The wake").
+  Android: high priority. iOS: silent, and iOS may defer or drop it.
 - Apple/Google see: that *a* push was sent to *a* device at time T. Nothing else. (Through a push
   gateway, the gateway sees the same, plus an opaque ID of the sending server; §7.1.)
 - The server decides *whether* to push using metadata it has anyway: membership, mute settings,

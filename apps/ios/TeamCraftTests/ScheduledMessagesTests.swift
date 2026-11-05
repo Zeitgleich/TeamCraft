@@ -17,7 +17,7 @@ final class ScheduledMessagesTests: XCTestCase {
   private func overview(serverNow: Int64, horizonDays: Int = 365) -> ScheduledOverview {
     ScheduledOverview(
       messages: [],
-      policy: SchedulePolicy(isEnabled: true, maxHorizonDays: horizonDays, lateLimitHours: 24),
+      policy: SchedulePolicy(isEnabled: true, maxHorizonDays: horizonDays, maxPerUser: 50),
       serverNow: serverNow)
   }
 
@@ -58,7 +58,7 @@ final class ScheduledMessagesTests: XCTestCase {
       from: """
         {"answer":"scheduled_messages","overview":{"messages":[{"id":"ab","conversation":"7",
         "conversation_name":"general","maybe_thread":null,"body":"later","due_at":5,"status":"on_the_moon",
-        "priority":"normal"}],"policy":{"is_enabled":true,"max_horizon_days":30,"late_limit_hours":24},
+        "priority":"normal"}],"policy":{"is_enabled":true,"max_horizon_days":30,"max_per_user":50},
         "server_now":3}}
         """)
     let overview = try XCTUnwrap(answer?.overview)
@@ -67,12 +67,15 @@ final class ScheduledMessagesTests: XCTestCase {
     XCTAssertEqual(overview.serverNow, 3)
   }
 
-  func testAWaitingMessageShowsAsDueOnceItsTimePassed() {
-    let message = ScheduledMessage(
-      id: "ab", conversation: "7", conversationName: nil, body: "later", dueAt: 10, status: .waiting)
-    XCTAssertEqual(message.shownStatus(nowMs: 9), .waiting)
-    XCTAssertEqual(message.shownStatus(nowMs: 10), .due)
-    XCTAssertFalse(message.needsAttention)
+  func testOnlyWhatWaitsForTheUserAsksForAttention() {
+    func message(_ status: ScheduledStatus) -> ScheduledMessage {
+      ScheduledMessage(id: "ab", conversation: "7", conversationName: nil, body: "later", dueAt: 10, status: status)
+    }
+    XCTAssertTrue(message(.notAMember).needsAttention)
+    XCTAssertFalse(message(.stale).needsAttention)
+    XCTAssertFalse(message(.notAMember).canGoOut)
+    XCTAssertTrue(message(.policyOff).canGoOut)
+    XCTAssertFalse(message(.policyOff).canEdit)
   }
 
   func testTheActionsHaveTheCoresShape() {

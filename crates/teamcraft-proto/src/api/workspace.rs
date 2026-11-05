@@ -525,34 +525,33 @@ impl Default for OwnerPolicy {
 pub const DEFAULT_SCHEDULE_HORIZON_DAYS: u32 = 365;
 /// The farthest horizon a workspace may set: the entries wait in the user's key bag until then.
 pub const MAX_SCHEDULE_HORIZON_DAYS: u32 = 3650;
-/// How late a scheduled message may still go out by itself in a new workspace.
-pub const DEFAULT_SCHEDULE_LATE_LIMIT_HOURS: u32 = 24;
-/// The longest late limit a workspace may set (30 days).
-pub const MAX_SCHEDULE_LATE_LIMIT_HOURS: u32 = 720;
+/// How many messages one user can have waiting in a new workspace.
+pub const DEFAULT_SCHEDULE_MAX_PER_USER: u32 = 50;
+/// The most a workspace may allow: each is a ciphertext the server keeps.
+pub const MAX_SCHEDULE_MAX_PER_USER: u32 = 1000;
 
-/// "Send later" (docs/scheduled-messages.md). Only the sender's own devices hold a scheduled message,
-/// so the server can't enforce any of this; member clients do, and an owner signs it.
+/// "Send later" (docs/scheduled-messages.md). The server holds these messages and enforces this; an
+/// owner signs it like the rest of the policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ScheduledMessagePolicy {
-  /// People may schedule messages. Off, those already scheduled wait for their owner to send or
-  /// cancel them.
+  /// People may schedule messages. Off, nothing new is taken and nothing goes out by itself: those
+  /// already waiting stay with their owner, who can send or cancel them.
   #[serde(default = "default_true")]
   pub is_enabled: bool,
   /// A message may be scheduled at most this many days ahead.
   #[serde(default = "default_schedule_horizon_days")]
   pub max_horizon_days: u32,
-  /// A message whose time passed longer ago than this (all of the sender's devices were off) doesn't
-  /// go out by itself: it may be stale by then, so its owner decides.
-  #[serde(default = "default_schedule_late_limit_hours")]
-  pub late_limit_hours: u32,
+  /// How many messages one user can have waiting.
+  #[serde(default = "default_schedule_max_per_user")]
+  pub max_per_user: u32,
 }
 
 fn default_schedule_horizon_days() -> u32 {
   DEFAULT_SCHEDULE_HORIZON_DAYS
 }
 
-fn default_schedule_late_limit_hours() -> u32 {
-  DEFAULT_SCHEDULE_LATE_LIMIT_HOURS
+fn default_schedule_max_per_user() -> u32 {
+  DEFAULT_SCHEDULE_MAX_PER_USER
 }
 
 impl Default for ScheduledMessagePolicy {
@@ -560,7 +559,7 @@ impl Default for ScheduledMessagePolicy {
     Self {
       is_enabled: true,
       max_horizon_days: DEFAULT_SCHEDULE_HORIZON_DAYS,
-      late_limit_hours: DEFAULT_SCHEDULE_LATE_LIMIT_HOURS,
+      max_per_user: DEFAULT_SCHEDULE_MAX_PER_USER,
     }
   }
 }
@@ -569,7 +568,7 @@ impl ScheduledMessagePolicy {
   /// Whether the limits are in their allowed ranges.
   pub fn is_valid(&self) -> bool {
     (1..=MAX_SCHEDULE_HORIZON_DAYS).contains(&self.max_horizon_days)
-      && (1..=MAX_SCHEDULE_LATE_LIMIT_HOURS).contains(&self.late_limit_hours)
+      && (1..=MAX_SCHEDULE_MAX_PER_USER).contains(&self.max_per_user)
   }
 }
 

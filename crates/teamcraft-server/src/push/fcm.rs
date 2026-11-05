@@ -233,7 +233,10 @@ impl PushSender for FcmSender {
 /// for a maintenance window); silent withdrawals may wait for it. Android lowers the priority of apps
 /// whose high-priority messages show nothing, so `dismiss` never goes out as `HIGH`.
 fn android_priority(message: &PushMessage) -> &'static str {
-  if message.kind.is_visible() && (message.urgency == Urgency::High || message.kind == PushKind::Call) {
+  // A wake to seal scheduled messages has to get through Doze before the message's time.
+  if message.kind == PushKind::ScheduledSeal
+    || (message.kind.is_visible() && (message.urgency == Urgency::High || message.kind == PushKind::Call))
+  {
     "HIGH"
   } else {
     "NORMAL"

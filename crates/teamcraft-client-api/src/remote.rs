@@ -4,10 +4,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use teamcraft_proto::ScheduledMessageId;
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
-  AttachmentId, BackgroundId, Base64Bytes, CallRosterEntry, CategoryId, ClientMessageId, HistoryPolicy,
-  OrgBackgroundId, SignInReason,
+  AttachmentId, BackgroundId, Base64Bytes, CallRosterEntry, CategoryId, HistoryPolicy, OrgBackgroundId,
+  SignInReason,
 };
 
 use crate::actions::{
@@ -832,15 +833,15 @@ pub enum ChatAction {
     due_at: TimestampMs,
   },
   UpdateScheduled {
-    id: ClientMessageId,
+    id: ScheduledMessageId,
     body: String,
     due_at: TimestampMs,
   },
   CancelScheduled {
-    id: ClientMessageId,
+    id: ScheduledMessageId,
   },
   SendScheduledNow {
-    id: ClientMessageId,
+    id: ScheduledMessageId,
   },
   Acknowledge {
     conversation: ConversationId,

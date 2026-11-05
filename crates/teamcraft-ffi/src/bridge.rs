@@ -199,6 +199,10 @@ pub(crate) fn needs_client(action: &ChatAction) -> bool {
       | ChatAction::AdminRemoveFromAllChats { .. }
       | ChatAction::AdminDeleteUser { .. }
       | ChatAction::AdminRemoveGroupLeftover { .. }
+      | ChatAction::ScheduleMessage { .. }
+      | ChatAction::UpdateScheduled { .. }
+      | ChatAction::CancelScheduled { .. }
+      | ChatAction::SendScheduledNow { .. }
   )
 }
 
@@ -206,6 +210,26 @@ impl Engine {
   /// Runs an action that [`needs_client`]; admin actions stay on desktop and web.
   pub(crate) async fn act(&mut self, action: ChatAction) -> Result<(), TeamCraftError> {
     match action {
+      ChatAction::ScheduleMessage { message, due_at } => {
+        self
+          .with_client(|client| Box::pin(async move { client.schedule_now_for(message, due_at).await }))
+          .await
+      },
+      ChatAction::UpdateScheduled { id, body, due_at } => {
+        self
+          .with_client(|client| Box::pin(async move { client.change_scheduled(id, body, due_at).await }))
+          .await
+      },
+      ChatAction::CancelScheduled { id } => {
+        self
+          .with_client(|client| Box::pin(async move { client.drop_scheduled(id).await }))
+          .await
+      },
+      ChatAction::SendScheduledNow { id } => {
+        self
+          .with_client(|client| Box::pin(async move { client.release_scheduled(id).await }))
+          .await
+      },
       ChatAction::CreateChannel { space, name } => {
         self
           .with_client(|client| {

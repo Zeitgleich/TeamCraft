@@ -48,7 +48,7 @@ pub use id::{
   AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId, DeviceId, Id,
   IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId,
   PushRetryId, RecoveryRequestId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS,
-  Snowflake, SpaceId, SystemEventId, ThreadId, UserGroupId, UserId,
+  ScheduledMessageId, Snowflake, SpaceId, SystemEventId, ThreadId, UserGroupId, UserId,
 };
 pub use import::{
   IMPORT_WORKER, ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,

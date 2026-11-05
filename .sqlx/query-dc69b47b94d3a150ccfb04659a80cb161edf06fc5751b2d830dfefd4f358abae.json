@@ -1,0 +1,193 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH claimed AS (\n           UPDATE scheduled_messages s\n           SET claimed_until = $1 + make_interval(secs => $2)\n           WHERE s.id IN (\n             SELECT id FROM scheduled_messages\n             WHERE hold_reason IS NULL AND due_at <= $1 AND (claimed_until IS NULL OR claimed_until <= $1)\n             ORDER BY due_at\n             LIMIT $3\n             FOR UPDATE SKIP LOCKED)\n           RETURNING s.*)\n         SELECT c.id, c.user_id, c.conversation_id, c.client_message_id, c.sender_device_id, c.thread_id,\n                c.mentioned_user_ids, c.is_urgent, c.content_key_id, c.ciphertext, c.mls_epoch, c.due_at,\n                c.version, c.hold_reason, COALESCE(h.epoch, 0) = c.mls_epoch AS \"is_epoch_current!\"\n         FROM claimed c\n         LEFT JOIN mls_epoch_heads h ON h.conversation_id = c.conversation_id\n         ORDER BY c.due_at, c.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "conversation_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "conversation_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "client_message_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "client_message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "sender_device_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "sender_device_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "thread_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "thread_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "mentioned_user_ids",
+        "type_info": "Int8Array",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "mentioned_user_ids"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "is_urgent",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "is_urgent"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "content_key_id",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "content_key_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "ciphertext",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "ciphertext"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "mls_epoch",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "mls_epoch"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "due_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "due_at"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "hold_reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "hold_reason"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "is_epoch_current!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Float8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "dc69b47b94d3a150ccfb04659a80cb161edf06fc5751b2d830dfefd4f358abae"
+}

@@ -195,6 +195,9 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::AdminJoinRequestNotFound => "error-admin-join-request-gone",
       ErrorCode::AdminJoinRequestTooSoon => "error-admin-join-request-too-soon",
       ErrorCode::CallDeviceLimit => "error-call-device-limit",
+      ErrorCode::ScheduledMessagesDisabled => "schedule-refused-off",
+      ErrorCode::ScheduledMessageLimit => "schedule-refused-limit",
+      ErrorCode::ScheduledTimeInvalid => "schedule-refused-past",
       // All `*_not_found` codes, including ones this version doesn't know yet.
       other if other.as_str().ends_with("_not_found") => "error-not-found",
       _ => "error-generic",

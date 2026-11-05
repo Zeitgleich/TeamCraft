@@ -29,7 +29,7 @@ use teamcraft_client_api::actions::{
   MessageExtras, NewChannel, NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
   ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
-use teamcraft_proto::{BackgroundId, CategoryId, ClientMessageId, HistoryPolicy, PresencePolicy};
+use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, PresencePolicy, ScheduledMessageId};
 
 use crate::admin::{
   AdminChannel, AdminLoad, AdminSection, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter,
@@ -678,15 +678,15 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.schedule_message(message, due_at);
   }
 
-  fn update_scheduled(&self, id: ClientMessageId, body: &str, due_at: TimestampMs) {
+  fn update_scheduled(&self, id: ScheduledMessageId, body: &str, due_at: TimestampMs) {
     self.chat.update_scheduled(id, body, due_at);
   }
 
-  fn cancel_scheduled(&self, id: ClientMessageId) {
+  fn cancel_scheduled(&self, id: ScheduledMessageId) {
     self.chat.cancel_scheduled(id);
   }
 
-  fn send_scheduled_now(&self, id: ClientMessageId) {
+  fn send_scheduled_now(&self, id: ScheduledMessageId) {
     self.chat.send_scheduled_now(id);
   }
 

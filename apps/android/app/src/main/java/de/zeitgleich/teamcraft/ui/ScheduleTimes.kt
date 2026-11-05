@@ -19,9 +19,6 @@ enum class ScheduleField { BODY, TIME }
  * (teamcraft-client-api `scheduled`). No Compose: unit tests cover them.
  */
 object ScheduleTimes {
-  /** Limits of the core; a form that passes these is taken. */
-  const val MAX_BODY_BYTES = 8 * 1024
-
   private const val HOUR_MS = 3_600_000L
   private const val DAY_MS = 24 * HOUR_MS
   private val MORNING: LocalTime = LocalTime.of(8, 0)
@@ -48,7 +45,6 @@ object ScheduleTimes {
   fun errors(body: String, dueAtMs: Long, overview: ScheduledOverview): FieldErrors<ScheduleField> = FieldErrors.of(
     ScheduleField.BODY to when {
       body.isBlank() -> R.string.schedule_error_empty
-      body.toByteArray().size > MAX_BODY_BYTES -> R.string.schedule_error_long
       else -> null
     },
     ScheduleField.TIME to timeError(dueAtMs, overview),

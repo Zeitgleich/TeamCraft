@@ -1,14 +1,10 @@
 import SwiftUI
 
-/// How often the open list looks at the clock: a message's time passing changes its line.
-private let clockRefreshSeconds: UInt64 = 30
-
 /// Everything waiting to be sent, soonest first, each with what happens next
 /// (docs/scheduled-messages.md).
 struct ScheduledMessagesView: View {
   @Environment(AppModel.self) private var model
   @State private var maybeOverview: ScheduledOverview?
-  @State private var nowMs = ScheduleTimes.ms(Date())
   @State private var maybeEditing: ScheduledMessage?
   @State private var maybeCancelling: ScheduledMessage?
 
@@ -27,12 +23,6 @@ struct ScheduledMessagesView: View {
     }
     .navigationTitle("scheduled_title")
     .task(id: model.changeCount) { maybeOverview = await model.scheduledOverview() }
-    .task {
-      while !Task.isCancelled {
-        try? await Task.sleep(nanoseconds: clockRefreshSeconds * 1_000_000_000)
-        nowMs = ScheduleTimes.ms(Date())
-      }
-    }
     .sheet(item: $maybeEditing) { message in
       if let overview = maybeOverview {
         ScheduledEditor(message: message, overview: overview)
@@ -60,7 +50,7 @@ struct ScheduledMessagesView: View {
       }
       Text(ScheduleTimes.date(ms: message.dueAt), format: .dateTime.weekday().day().month().hour().minute())
         .font(.subheadline.weight(.semibold))
-      Text(message.shownStatus(nowMs: nowMs).text)
+      Text(message.status.text)
         .font(.caption)
         .foregroundStyle(message.needsAttention ? Theme.danger : Theme.textMuted)
       Text(verbatim: message.body).lineLimit(4)
@@ -69,17 +59,21 @@ struct ScheduledMessagesView: View {
       Button("scheduled_cancel", role: .destructive) { maybeCancelling = message }
     }
     .contextMenu {
-      if message.status != .unavailable {
+      if message.canGoOut {
         Button("scheduled_send_now", systemImage: "paperplane") {
           Task { await model.perform(.sendScheduledNow(id: message.id)) }
         }
+      }
+      if message.canEdit {
         Button("scheduled_edit", systemImage: "pencil") { maybeEditing = message }
       }
       Button("scheduled_cancel", systemImage: "trash", role: .destructive) { maybeCancelling = message }
     }
     .accessibilityActions {
-      if message.status != .unavailable {
+      if message.canGoOut {
         Button("scheduled_send_now") { Task { await model.perform(.sendScheduledNow(id: message.id)) } }
+      }
+      if message.canEdit {
         Button("scheduled_edit") { maybeEditing = message }
       }
     }

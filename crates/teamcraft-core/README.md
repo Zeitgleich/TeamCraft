@@ -10,7 +10,7 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 |----------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `store`        | `LocalStore` trait; `SqlCipherStore` (desktop), `SealedStore` over IndexedDB (browser) or SQLite (Android, e2ee.md §9.1–§9.2), `MemoryStore`; key sources          |
 | `records`      | Typed records: account, sync cursors, outbox, pinned identities, openmls storage snapshot                                                                          |
-| `account_data` | Saved items, drafts, scheduled messages, saved searches and unread marks synced in the key bag (e2ee.md §6.4)                                                      |
+| `account_data` | Saved items, drafts, saved searches and unread marks synced in the key bag (e2ee.md §6.4)                                                                          |
 | `link_preview` | Finding links, the policy's domain list and reading page metadata (e2ee.md §12)                                                                                    |
 | `thumbnail`    | Small PNG previews of images, generated before upload                                                                                                              |
 | `api`          | `ServerApi` + `GatewayConnection`; `HttpServerApi` (reqwest, tokio-tungstenite / browser WebSocket; Mozilla roots on Android), `fake::FakeServer`                  |

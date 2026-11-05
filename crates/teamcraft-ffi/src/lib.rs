@@ -831,6 +831,20 @@ impl TeamCraft {
     self.act_locally(move |reads| reads.apply_action(action)).await
   }
 
+  /// A push said a message the user scheduled needs sealing again (docs/scheduled-messages.md): reads
+  /// the list and does it. Another device being first isn't a failure.
+  pub async fn seal_scheduled_messages(&self) -> Result<(), TeamCraftError> {
+    self
+      .call(|engine| {
+        Box::pin(async move {
+          engine
+            .with_client(|client| Box::pin(async move { client.seal_after_wake().await }))
+            .await
+        })
+      })
+      .await
+  }
+
   /// Answers a `ChatQuery` (JSON, tagged by `kind`) with a `ChatAnswer` (JSON, tagged by `answer`):
   /// message extras, threads, pins, saved items, drafts, files, channel browser, search, mentions.
   pub async fn query(&self, query_json: String) -> Result<String, TeamCraftError> {

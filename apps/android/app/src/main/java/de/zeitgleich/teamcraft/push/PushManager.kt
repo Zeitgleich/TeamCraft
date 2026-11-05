@@ -21,6 +21,7 @@ import de.zeitgleich.teamcraft.notifications.PushHandler
 import de.zeitgleich.teamcraft.notifications.PushRetry
 import de.zeitgleich.teamcraft.server.ManagedConfig
 import uniffi.teamcraft_ffi.PushNotification
+import uniffi.teamcraft_ffi.PushNotificationKind
 import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.TeamCraftException
 
@@ -213,6 +214,13 @@ class PushManager(
       // Checked again: sign-out may have started while the wake-up was being opened.
       .onSuccess {
         if (isSigningOut) return
+        // The group of a scheduled message changed: nothing to show. WakeUpWork carries this past the
+        // receiver's time if it takes longer (docs/scheduled-messages.md).
+        if (it.kind == PushNotificationKind.SCHEDULED_SEAL) {
+          catching { core.sealScheduledMessages() }
+            .onFailure { failure -> Log.w(TAG, "scheduled messages not sealed again: ${failure.javaClass.simpleName}") }
+          return
+        }
         val isRingOver = kind == WakeUpRun.RESUMED && PushRetry.isRingOver(it.maybeSentAtMs, System.currentTimeMillis())
         handler.handle(it, payload, isVisible, isRingOver)
         if (handler.isPlaceholderShowing(it) && PushRetry.isWanted(it, attempt = 1)) retries.readSoon(payload, it)

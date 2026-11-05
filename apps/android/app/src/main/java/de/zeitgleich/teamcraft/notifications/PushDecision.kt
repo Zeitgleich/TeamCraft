@@ -69,6 +69,8 @@ sealed interface PushDecision {
       PushNotificationKind.MESSAGE -> message(notification)
       PushNotificationKind.CALL -> call(notification, isRingOver)
       PushNotificationKind.DISMISS -> dismiss(notification)
+      // Handled before this: it wakes the core, and there is nothing to decide or show.
+      PushNotificationKind.SCHEDULED_SEAL -> Ignore(IgnoreReason.UNKNOWN_KIND)
       PushNotificationKind.TEST -> ShowTest(notification.maybeSentAtMs)
       PushNotificationKind.UNKNOWN -> Ignore(IgnoreReason.UNKNOWN_KIND)
     }

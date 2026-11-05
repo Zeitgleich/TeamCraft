@@ -59,10 +59,6 @@ import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZoneOffset
-import kotlinx.coroutines.delay
-
-/** How often the open list looks at the clock: a message's time passing changes its line. */
-private const val CLOCK_REFRESH_MS = 30_000L
 
 /** The overview, read again whenever the store changes. */
 @Composable
@@ -79,13 +75,6 @@ private fun rememberScheduledOverview(viewModel: MainViewModel): ScheduledOvervi
 @Composable
 fun ScheduledScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -> Unit) {
   val maybeOverview = rememberScheduledOverview(viewModel)
-  var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-  LaunchedEffect(Unit) {
-    while (true) {
-      delay(CLOCK_REFRESH_MS)
-      nowMs = System.currentTimeMillis()
-    }
-  }
   var maybeEditing by remember { mutableStateOf<ScheduledMessage?>(null) }
   var maybeCancelling by remember { mutableStateOf<ScheduledMessage?>(null) }
   Scaffold(
@@ -106,7 +95,6 @@ fun ScheduledScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: 
       items(messages, key = { it.id }) { message ->
         ScheduledRow(
           message = message,
-          nowMs = nowMs,
           onOpen = onOpen,
           onSendNow = { viewModel.act(ChatActions.sendScheduledNow(message.id)) },
           onEdit = { maybeEditing = message },
@@ -146,14 +134,12 @@ fun ScheduledScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: 
 @Composable
 private fun ScheduledRow(
   message: ScheduledMessage,
-  nowMs: Long,
   onOpen: (String) -> Unit,
   onSendNow: () -> Unit,
   onEdit: () -> Unit,
   onCancel: () -> Unit,
 ) {
   val context = LocalContext.current
-  val status = message.shownStatus(nowMs)
   Column(Modifier.fillMaxWidth().padding(16.dp)) {
     Text(
       message.conversationName.ifEmpty { stringResource(R.string.scheduled_unknown_conversation) },
@@ -169,15 +155,15 @@ private fun ScheduledRow(
       fontWeight = FontWeight.Bold,
     )
     Text(
-      stringResource(statusText(status)),
+      stringResource(statusText(message.status)),
       style = MaterialTheme.typography.bodySmall,
       color = if (message.needsAttention) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
     )
     Text(message.body, maxLines = 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(vertical = 4.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-      if (message.isAvailable) TextButton(onClick = onSendNow) { Text(stringResource(R.string.scheduled_send_now)) }
-      if (message.isAvailable) TextButton(onClick = onEdit) { Text(stringResource(R.string.scheduled_edit)) }
-      if (message.isAvailable) {
+      if (message.canGoOut) TextButton(onClick = onSendNow) { Text(stringResource(R.string.scheduled_send_now)) }
+      if (message.canEdit) TextButton(onClick = onEdit) { Text(stringResource(R.string.scheduled_edit)) }
+      if (message.canGoOut) {
         TextButton(onClick = { onOpen(message.conversation) }) { Text(stringResource(R.string.scheduled_open)) }
       }
       TextButton(onClick = onCancel) { Text(stringResource(R.string.scheduled_cancel)) }
@@ -187,10 +173,14 @@ private fun ScheduledRow(
 
 private fun statusText(status: String): Int = when (status) {
   ScheduledMessage.STATUS_WAITING -> R.string.scheduled_status_waiting
-  ScheduledMessage.STATUS_DUE -> R.string.scheduled_status_due
-  ScheduledMessage.STATUS_MISSED -> R.string.scheduled_status_missed
+  ScheduledMessage.STATUS_NEEDS_SEALING -> R.string.scheduled_status_needs_sealing
+  ScheduledMessage.STATUS_STALE -> R.string.scheduled_status_stale
   ScheduledMessage.STATUS_POLICY_OFF -> R.string.scheduled_status_policy_off
-  ScheduledMessage.STATUS_UNAVAILABLE -> R.string.scheduled_status_unavailable
+  ScheduledMessage.STATUS_NOT_A_MEMBER -> R.string.scheduled_status_not_a_member
+  ScheduledMessage.STATUS_NO_PERMISSION -> R.string.scheduled_status_no_permission
+  ScheduledMessage.STATUS_CONVERSATION_GONE -> R.string.scheduled_status_conversation_gone
+  ScheduledMessage.STATUS_THREAD_GONE -> R.string.scheduled_status_thread_gone
+  ScheduledMessage.STATUS_UNREADABLE -> R.string.scheduled_status_unreadable
   else -> R.string.scheduled_status_unknown
 }
 

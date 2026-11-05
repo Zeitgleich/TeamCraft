@@ -27,6 +27,7 @@ use crate::composer_focus::{self, FocusSituation};
 use crate::editor_doc::{BlockFormat, InlineStyle};
 use crate::emoji_catalog::{self, SkinTone};
 use crate::emoji_support;
+use crate::feedback::PendingAction;
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
 use crate::keys::t_with_shortcuts;
@@ -590,6 +591,7 @@ pub fn Composer(
   // (docs/scheduled-messages.md). `pending_schedule` holds the time while @channel waits for its
   // confirmation.
   let pending_schedule = RwSignal::new(None::<i64>);
+  let scheduling = PendingAction::new();
   let schedule_checked = move |due_at: i64, is_confirmed: bool| {
     let Some(element) = editor.get_untracked() else {
       return;
@@ -649,7 +651,6 @@ pub fn Composer(
       .and_then(|target| target.maybe_image.as_ref())
       .map(|image| image.attachment);
     let maybe_reply_to = maybe_reply.map(|target| target.message);
-    state.reply_target.set(None);
     let message = OutgoingMessage {
       maybe_client_message_id: None,
       conversation,
@@ -665,16 +666,22 @@ pub fn Composer(
         && also_send_to_channel.get_untracked(),
       files: Vec::new(),
     };
-    state.write(|backend| backend.schedule_message(message, due_at));
-    clear_editor();
-    also_send_to_channel.set(false);
-    priority.set(MessagePriority::Normal);
-    is_silent.set(false);
-    wants_acknowledgement.set(false);
-    let time = format_date_time(due_at, i18n.locale().tag());
-    notice.set(Some(Notice::Text(
-      i18n.t_with("schedule-done", &[("time", &time)]),
-    )));
+    // The server takes it or refuses it: the text stays here until it did.
+    scheduling.run_and_then(
+      || state.write(|backend| backend.schedule_message(message, due_at)),
+      move || {
+        state.reply_target.set(None);
+        clear_editor();
+        also_send_to_channel.set(false);
+        priority.set(MessagePriority::Normal);
+        is_silent.set(false);
+        wants_acknowledgement.set(false);
+        let time = format_date_time(due_at, i18n.locale().tag());
+        notice.set(Some(Notice::Text(
+          i18n.t_with("schedule-done", &[("time", &time)]),
+        )));
+      },
+    );
   };
 
   // The picker under the input: people and user groups after `@`, commands after a leading `/`. It

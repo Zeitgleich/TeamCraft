@@ -196,6 +196,10 @@ define_id!(
   CategoryId
 );
 define_id!(
+  /// A message the server holds until its time (docs/scheduled-messages.md).
+  ScheduledMessageId
+);
+define_id!(
   /// A pending invitation.
   InviteId
 );

@@ -641,11 +641,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /** Runs a `ChatAction` built with [ChatActions]; failures show as [lastFailure]. */
-  fun act(action: String) = viewModelScope.launch {
+  fun act(action: String, onRefused: () -> Unit = {}) = viewModelScope.launch {
     try {
       chat.act(action)
     } catch (failure: TeamCraftException) {
       failures.value = errorText(failure)
+      onRefused()
     } catch (failure: CancellationException) {
       throw failure
     } catch (failure: IllegalStateException) {

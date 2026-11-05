@@ -4,7 +4,6 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ScheduledMessage
 import de.zeitgleich.teamcraft.core.ScheduledOverview
-import de.zeitgleich.teamcraft.core.ScheduledSendWork
 import de.zeitgleich.teamcraft.core.SchedulePolicy
 import de.zeitgleich.teamcraft.core.SendOptions
 import de.zeitgleich.teamcraft.core.decodeAnswer
@@ -59,32 +58,12 @@ class ScheduleTimesTest {
   }
 
   @Test
-  fun aWaitingMessageShowsAsDueOnceItsTimePassed() {
-    val message = message(status = ScheduledMessage.STATUS_WAITING, dueAt = 10)
-    assertEquals(ScheduledMessage.STATUS_WAITING, message.shownStatus(9))
-    assertEquals(ScheduledMessage.STATUS_DUE, message.shownStatus(10))
-  }
-
-  @Test
   fun onlyWhatWaitsForTheUserAsksForAttention() {
-    assertTrue(message(ScheduledMessage.STATUS_MISSED).needsAttention)
-    assertFalse(message(ScheduledMessage.STATUS_DUE).needsAttention)
-    assertFalse(message(ScheduledMessage.STATUS_UNAVAILABLE).isAvailable)
-  }
-
-  @Test
-  fun theBackgroundWorkPlansForWhatCanStillGoOut() {
-    val overview = ScheduledOverview(
-      messages = listOf(
-        message(ScheduledMessage.STATUS_MISSED, dueAt = 1),
-        message(ScheduledMessage.STATUS_WAITING, dueAt = 20),
-        message(ScheduledMessage.STATUS_WAITING, dueAt = 10),
-      ),
-    )
-    assertEquals(10L, overview.maybeNextDueAt)
-    assertNull(ScheduledOverview().maybeNextDueAt)
-    assertEquals(0L, ScheduledSendWork.delayMs(5, 9))
-    assertEquals(4L, ScheduledSendWork.delayMs(9, 5))
+    assertTrue(message(ScheduledMessage.STATUS_NOT_A_MEMBER).needsAttention)
+    assertFalse(message(ScheduledMessage.STATUS_STALE).needsAttention)
+    assertFalse(message(ScheduledMessage.STATUS_NOT_A_MEMBER).canGoOut)
+    assertTrue(message(ScheduledMessage.STATUS_POLICY_OFF).canGoOut)
+    assertFalse(message(ScheduledMessage.STATUS_POLICY_OFF).canEdit)
   }
 
   @Test
@@ -102,7 +81,7 @@ class ScheduleTimesTest {
     val answer = decodeAnswer(
       """{"answer":"scheduled_messages","overview":{"messages":[{"id":"ab","conversation":"7","conversation_name":"general",
       "maybe_thread":null,"body":"later","due_at":5,"status":"policy_off","priority":"normal"}],
-      "policy":{"is_enabled":true,"max_horizon_days":30,"late_limit_hours":24},"server_now":3}}""",
+      "policy":{"is_enabled":true,"max_horizon_days":30,"max_per_user":50},"server_now":3}}""",
     )
     val overview = answer.overview!!
     assertEquals(30, overview.policy.maxHorizonDays)

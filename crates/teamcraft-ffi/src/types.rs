@@ -324,8 +324,7 @@ impl From<PendingWork> for PendingWorkItem {
   fn from(work: PendingWork) -> Self {
     let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
     Self {
-      // A scheduled message that is due is a send like any other to the app.
-      sends: count(work.sends.saturating_add(work.scheduled)),
+      sends: count(work.sends),
       uploads: count(work.uploads),
       actions: count(work.actions),
       is_empty: work.is_empty(),
@@ -429,6 +428,9 @@ pub enum PushNotificationKind {
   /// Remove what was shown: the conversation (or thread) up to `maybe_message_id` was read on
   /// another device, or, with `maybe_call_id`, the ring ended. Never shows anything.
   Dismiss,
+  /// The group of a message the user scheduled changed: seal it again
+  /// ([`crate::TeamCraft::seal_scheduled_messages`]). Never shows anything.
+  ScheduledSeal,
   /// The diagnostics' test push: show a short confirmation on the "other" channel.
   Test,
   /// A kind this version doesn't know: show nothing.
@@ -906,6 +908,7 @@ pub(crate) fn notification_kind(kind: &PushKind) -> PushNotificationKind {
     PushKind::Message | PushKind::Mention => PushNotificationKind::Message,
     PushKind::Call => PushNotificationKind::Call,
     PushKind::Dismiss => PushNotificationKind::Dismiss,
+    PushKind::ScheduledSeal => PushNotificationKind::ScheduledSeal,
     PushKind::Test => PushNotificationKind::Test,
     PushKind::Unknown(_) => PushNotificationKind::Unknown,
   }

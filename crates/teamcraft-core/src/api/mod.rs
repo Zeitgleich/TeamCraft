@@ -43,10 +43,12 @@ use teamcraft_proto::{
   ErrorBody, ErrorCode, GatewayClientMessage, GatewayServerMessage, GetMeResponse, IdentityKeyResponse,
   KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse,
   ListDevicesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
-  ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse,
-  MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
-  PutDeviceListRequest, PutKeyBagRequest, RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest,
-  SpaceId, SpaceMemberResponse, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
+  ListMlsMessagesResponse, ListScheduledMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse,
+  MessageResponse, MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse,
+  PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest, RegisterDeviceRequest,
+  ScheduleMessageRequest, ScheduledMessageId, ScheduledMessageResponse, SearchUsersResponse,
+  SendMessageRequest, SendScheduledMessageResponse, SpaceId, SpaceMemberResponse,
+  UpdateScheduledMessageRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
@@ -586,6 +588,24 @@ pub trait ServerApi {
   fn put_key_bag(&self, request: &PutKeyBagRequest)
   -> impl Future<Output = Result<KeyBagResponse, ApiError>>;
   fn key_bag(&self) -> impl Future<Output = Result<KeyBagResponse, ApiError>>;
+
+  /// "Send later" (docs/scheduled-messages.md).
+  fn schedule_message(
+    &self,
+    conversation: ConversationId,
+    request: &ScheduleMessageRequest,
+  ) -> impl Future<Output = Result<ScheduledMessageResponse, ApiError>>;
+  fn list_scheduled_messages(&self) -> impl Future<Output = Result<ListScheduledMessagesResponse, ApiError>>;
+  fn update_scheduled_message(
+    &self,
+    id: ScheduledMessageId,
+    request: &UpdateScheduledMessageRequest,
+  ) -> impl Future<Output = Result<ScheduledMessageResponse, ApiError>>;
+  fn cancel_scheduled_message(&self, id: ScheduledMessageId) -> impl Future<Output = Result<(), ApiError>>;
+  fn send_scheduled_message(
+    &self,
+    id: ScheduledMessageId,
+  ) -> impl Future<Output = Result<SendScheduledMessageResponse, ApiError>>;
 
   /// The session's tokens from the identity provider, for role signing (e2ee.md §3.1.3). `None` where
   /// there is no such session (a local account, an app that doesn't hand them over).

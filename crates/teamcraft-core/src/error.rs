@@ -21,10 +21,6 @@ use crate::store::StoreError;
 pub enum CoreError {
   #[error("synced settings would grow past their limit: {keys:?}")]
   SettingsTooLarge { keys: Vec<String> },
-  /// A scheduled message that no longer fits the rules (the policy changed since the form checked).
-  #[cfg(feature = "ui")]
-  #[error("the message can't be scheduled: {0:?}")]
-  ScheduleRefused(teamcraft_client_api::scheduled::ScheduleRefusal),
   #[error("local store: {0}")]
   Store(#[from] StoreError),
   /// The store holds the MLS record of a version before 1.0.9, and this process leaves moving it to

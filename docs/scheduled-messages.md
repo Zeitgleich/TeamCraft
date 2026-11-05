@@ -1,145 +1,191 @@
 # Scheduled messages ("send later")
 
 Issue #203. A person writes a message now and it goes out later: at the start of a colleague's
-working day, not at midnight. This note states the choice between holding the message on the server
-and holding it on the client, what the server learns, what it means for the user, and what is not
-built yet.
+working day, not at midnight. This note states the choice, what the server learns, what happens when
+the group changes, and what is not built yet.
 
-## The choice: client-held
+## The choice: server-held
 
-The message waits on the **sender's own devices**, and **any device of the sender that is online at
-or after the time** sends it. The server holds nothing for it.
+A scheduled message must go out on time with all of the sender's devices off. So the **server holds
+it**: the sender's device encrypts and signs the message when it is scheduled, the server stores the
+ciphertext and releases it at its time by its own clock, through the normal path of a message, so
+members get the usual gateway event and push.
 
-Holding a ciphertext on the server and releasing it at the time (the first idea in PLAN.md) is
-unsound here:
+The earlier version of this feature kept the message on the sender's devices. That didn't meet the
+requirement, and it is gone.
 
-- A message is encrypted under the conversation's current content key (e2ee.md §4). A key switches
-  when a member is removed, or added "from join". A ciphertext made today may then be sent under a
-  key a member removed in the meantime still holds, which is exactly what `ensure_mls_current` exists
-  to prevent before every send (§4.6), and members who joined since may be unable to read it. The
-  server can't re-encrypt, and the sender's device isn't there at release time to do so.
-- The server would learn that a message exists, for which conversation and when it goes out, days
-  before it does, and it could withhold or reorder releases without anyone noticing.
+## The rule: the MLS epoch decides
 
-With client-held sending, a scheduled message is encrypted at the moment it goes out, under the key
-that is current then, exactly like one written then. Members who joined since read it; members who
-left don't.
+A message is encrypted under a conversation's content key, and that key changes when a member is
+removed or added "from join" (e2ee.md §4.2). A removed member still holds the old key, so a ciphertext
+made today must not simply go out next week.
 
-**The price, said plainly in every client:** the message goes out only when one of the sender's
-devices is online at or after its time. If all of them are off, it waits for the first one back. A
-laptop that is closed over the weekend and a phone the OS won't wake mean a Monday 08:00 message may
-leave at 09:30. The screens that offer "Send later" and list the waiting messages say this, and each
-waiting message says where it stands (below).
+The obvious rule, comparing the message's content key with the conversation's current key, **can't be
+built**: the server doesn't know the current key. It sees `content_key_id` per message only. The key
+after a removal is derived from the MLS exporter, its ID is secret material nobody sends it, and
+commits are opaque. Its only stand-in, "the key of the newest message", is still the old key right
+after a removal, so that comparison would release under the very key it is meant to avoid.
 
-A message with files can't be scheduled yet: the account data holds text, and picked files would
-have to stay staged on one device. The composer says so instead of offering it.
+What the server does know is the **epoch**: `mls_epoch_heads` moves in the same transaction as every
+accepted commit.
 
-## What the server learns
+- An entry records the epoch it was sealed in, and the server refuses it unless that is the current
+  one (`409 epoch_conflict`).
+- **Same epoch at its time: released.** No commit was accepted since, so nobody was removed, and the
+  key is as good as when it was sealed. This is exactly as safe as sending at that moment. The release
+  takes a shared lock on the epoch's row, so a commit is either before it (the entry waits) or after it
+  (an ordinary race with a send).
+- **Epoch moved: never released under that key.** The entry waits for a device of the sender to seal
+  it again under the current key. The server counts every commit as a change, because it can't tell a
+  removal from an addition. So additions and new devices also need sealing again, and a stale entry is
+  more common than "the key changed" suggests. A flag "this commit removes nobody" is left out for now.
 
-Nothing beyond what it learns today:
+Rotations for message count or key age (§4.2) change the key without a commit. They need nothing: the
+old key is still known to the same people, and members keep it in their rings.
 
-| What                         | The server sees                                                                                                                                                                   |
-|------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| A message being scheduled    | The key bag changed and its size (e2ee.md §6.4). Not that a message was scheduled, not for whom, not when. Drafts make the key bag change the same way.                           |
-| A waiting message            | Nothing. Text, conversation and time are only in the account data, encrypted with the backup key.                                                                                 |
-| The message going out        | An ordinary send: ciphertext, sender, conversation, at that moment. It can't tell it was scheduled, except that the sending device may have been idle before.                    |
-| The admin's rule             | The signed workspace policy, as for link previews and the notetaker. The server stores the bytes and checks the ranges; it can't change the rule without an owner's signature.    |
+### Sealing again
 
-One small addition to the wire: `GET /me/key-bag` answers with the server's clock (`server_now`),
-which reveals nothing and is what clients need to not trust their own (below).
+- A device **online** hears of the commit, merges it, and within 15 s seals the entry again, keeping
+  its time (`seal_stale_scheduled`, in the upkeep every shell runs).
+- A device **offline** is woken: see "The wake" below.
+- **Racing devices:** an upload names the entry's version and the current epoch. One wins; the other
+  gets `409 version_conflict`, drops its work and reads the list.
+- **Still stale at its time:** it is held with the reason `stale_epoch`, the sender's devices are woken
+  once more, and it goes out as soon as one of them has sealed it. The sender sees that state.
 
-Text is never logged. Refusals and failures log only error kinds and counts.
+So the promise, and what the screens say, is: **on time unless the group changed and all your devices
+stayed off.** There is no "too late" hold any more: a held message that a device seals again goes out
+then, however late, and the list has shown it as late all along.
 
-## Where it lives
+### The wake
 
-- **Data:** `scheduled` in the account data (`teamcraft-core/src/account_data.rs`), keyed by the
-  message's client message ID, each entry stamped like saved items and drafts. A sent or cancelled
-  message becomes a tombstone without its text, forgotten after 90 days like the others. Fields added
-  later have defaults; a priority of a newer version reads as `Unknown`, so an entry never costs the
-  whole account data.
-- **Rules:** `teamcraft-client-api/src/scheduled.rs`: the status of a message and the refusals of a
-  form, in one place. The mobile apps word what the core decides; their form checks repeat only the
-  time and text rules, and the core checks again on the way in.
-- **Sending:** `teamcraft-core/src/client/scheduled.rs`, called from the upkeep (`upkeep.rs`) every
-  15 s. Every shell's loop runs the same upkeep, so desktop, web, Android and iOS do the same. While
-  nothing is due this is one local read and no request.
+When a commit moves a conversation's epoch and somebody holds entries there, the server pushes to those
+people's devices that aren't connected, kind `scheduled_seal`. The woken device reads the list, syncs
+the group and uploads the new seal.
 
-## Sending once
+- **Payload:** the sealed wake-up of every push (e2ee.md §7), with the kind and conversation and no
+  message or sender. **The push provider sees a push to a device at a time, no more than for a message.**
+- **Rate:** one wake for a burst of commits (`push.scheduled_wake_coalesce_ms`, 10 s), and at most one
+  per user and conversation per `push.scheduled_wake_min_interval_secs` (5 min). A commit in that time
+  waits for its end. No polling, and a commit in a conversation where nobody holds anything costs one
+  indexed read and no push.
+- **Last stretch:** those queues are memory, so a restart loses them. The scheduler therefore wakes once
+  per version for an entry still stale 15 minutes before its time, and once when it holds one at its
+  time.
+- **Android:** FCM high priority, to get through Doze, and the existing wake-up path (the receiver, then
+  expedited work). FCM may lower the priority of apps whose high-priority messages show nothing; these
+  are rare, and this is why they aren't used for anything else. The F-Droid build gets the same through
+  its UnifiedPush distributor, as reliable as that distributor is.
+- **iOS:** a silent push (APNs background, priority 5), and a `BGProcessingTask` if that couldn't finish.
+  iOS may defer or drop both, and doesn't deliver them after the user force-quit the app. **This isn't a
+  promise: a stale entry whose only device is an iPhone can still wait.** The screen says so.
+- **Desktop and web** seal when they run.
 
-1. A local read: anything due? If not, stop.
-2. **Read the newest key bag** and merge it. The user may have cancelled or changed the message on
-   another device, or another device sent it. A device back from a weekend offline therefore never
-   sends what was cancelled meanwhile. Offline this read fails and the message stays due.
-3. Put each due message into the outbox with **its entry's ID as client message ID**, encrypted when
-   the outbox sends it. Writing the same ID again changes nothing (`enqueue_as`).
-4. Mark it sent (a tombstone) and upload the key bag, so the other devices stop.
+## What the server now learns
 
-Two devices racing both reach the server with the same client message ID; `message_client_ids` keeps
-one message and answers both with its ID. A crash between 3 and 4 finds the entry still waiting and
-enqueues the same ID again. A retry after a lost answer is the outbox's usual retry.
+**Ahead of time**, for every scheduled message: that a ciphertext exists, its conversation, its sender
+and sending device, its due time, its size, whether it mentions people and whom, and whether it is
+urgent. A message sent at once shows all this at once; a scheduled one shows it days before. The server
+learns of plans before they happen, and that a message was scheduled at all, also after its release if
+it kept track.
 
-A narrow race stays: a device edits or re-times a message in the seconds between another device's
-key bag read and its upload. The other device sent the older text, and the edit, being newer, brings
-the entry back; when it comes due, the server's deduplication drops it and the entry ends. Nothing is
-sent twice, but that edit was too late. Devices of one user rarely do this within seconds of the time.
+Not the text, the attachments, the reply target or anything else inside the ciphertext.
 
-An app from before this field drops it when it uploads the key bag, like the other newer fields of
-§6.4, and the next newer device puts its entries back. With such an app in the mix a cancel can be lost
-in that gap. The deduplication still holds: at worst a cancelled message goes out, once.
+**It could withhold or delay a release**, as with any message it forwards, and it could release an entry
+early. The sender's devices see the list, so a message that stays there after its time shows. They can't
+prove a release happened at the right moment.
 
-## Time
+### The accepted risk
 
-Every time is server time. The server's clock comes with each key bag answer and is kept as an offset
-(`scheduled/server_clock_offset`), and step 2 refreshes it just before sending, so a device whose clock
-runs ahead doesn't send early and one that runs behind doesn't send late. "In 1 hour" counts from the
-server's clock; "tomorrow morning" (08:00) and "Monday morning" are what the sender's calendar and time
-zone call that morning. A device that wakes up (sleep, resume, a corrected clock) checks at once.
+**A compromised server working with somebody removed before the message's time can hand them the text.**
+The ciphertext sits on the server from the moment it is scheduled, under a key that person holds. The
+epoch check stops an honest server from delivering it; it can't stop a server that gives the ciphertext
+away. Before this feature, reaching a removed member took withholding a commit from the sender; here it
+doesn't, for messages written before the removal. The product owner has accepted this. It is written down
+in e2ee.md §4.4 too. Whoever must not read a text once removed shouldn't have it scheduled while they are
+still in the conversation.
 
-## Where a message stands
+## What goes out, and what doesn't
 
-| Status        | Means                                                                                   | Who acts                     |
-|---------------|-----------------------------------------------------------------------------------------|------------------------------|
-| `waiting`     | Its time hasn't come.                                                                   | Nobody                       |
-| `due`         | Its time has come: it goes out as soon as one of the user's devices has a connection.   | The next device that is online |
-| `missed`      | Its time passed longer ago than the workspace's late limit (default 24 h).              | The user: send, edit, cancel |
-| `policy_off`  | The workspace turned scheduling off after it was written.                               | The user: send or cancel     |
-| `unavailable` | This device doesn't know its conversation (the user left it, or it isn't loaded here). | The user: cancel             |
+Everything a send checks is checked again at the time, with nobody signed in. The sender's role is the
+one their last sign-in brought.
 
-`missed` exists because a message written for Monday morning shouldn't surprise everybody the
-following Thursday. Those needing the user are counted next to "Scheduled" in the sidebar (desktop,
-web) and shown as a card or row on the main screen (Android, iOS). A message that goes out and is
-then refused by the server (the sender lost the right to post) is a failed message in its
-conversation, with "Try again" and "Delete", like any other.
+| At the time                            | What happens                                                   | Reason in the list  |
+|----------------------------------------|----------------------------------------------------------------|---------------------|
+| All fine, same epoch                   | Released                                                       | –                   |
+| The group moved                        | Held; goes out once a device seals it again                    | `stale_epoch`       |
+| The device that signed it is gone      | Held the same way: members would refuse its signature          | `stale_epoch`       |
+| The workspace turned scheduling off    | Held; the owner can send it now or cancel it                   | `policy_off`        |
+| The sender left or was removed         | Never goes out; they can cancel it                             | `not_a_member`      |
+| The sender may no longer post          | Held; they can cancel it                                       | `no_permission`     |
+| The sender's account is deactivated    | Never goes out                                                 | `sender_inactive`   |
+| The conversation was deleted           | Never goes out; removed when the conversation is               | `conversation_gone` |
+| The thread it answers is gone          | Held; they can cancel it                                       | `thread_gone`       |
+
+A hold other than `stale_epoch` stays until its owner acts. It doesn't go out by itself if the cause
+goes away (the policy on again, say): by then it may be long out of date. Sealing again or a new time
+makes an entry wait for its time again.
+
+Mentions are metadata fixed when sealing. At release, people who left drop out of the list, so they
+aren't notified.
+
+## What recipients see
+
+A released message is an ordinary message; the delay leaves no trace in its checks.
+
+- **Ordering:** the server's ID and time at release decide its place, not when it was written. The
+  signature and associated data bind conversation, sender, device, client message ID and key ID, not a
+  time.
+- **Sender checks:** a device that left is refused by the server time of the message (§4.4), and its
+  leaving moves the epoch, so such a message is never released. The sender's other devices seal it again.
+- **An older key:** a message released in its epoch uses that epoch's key, which every member holds.
+  A member added "from join" is a commit, so the message is sealed again first and they can read it.
+- **Heads:** the text carries the sender's heads of the workspace log and the channel's roles from when
+  it was sealed. A reader who moved on since finds an older version, which neither `note_head` raises
+  anything over (a fork is only the same version with another hash), so a late message causes no warning.
+  It also tells nobody anything new, which the design of §4.6.3 already assumes of a device behind.
+
+## Exactly once
+
+The client message ID is the idempotency key. A release deletes the row and stores the message in one
+transaction, only if the row is still at the version the scheduler read and the epoch still matches.
+
+- **Two scheduler instances, or a rolling deploy:** `FOR UPDATE SKIP LOCKED` gives them different rows.
+- **A crash:** a claim is a lease of 60 s, after which another instance takes the row. A crash after the
+  commit loses that message's gateway event and push, as for a send; members get it at their next sync.
+- **A cancel or edit racing the release:** whichever commits first decides. A later release finds nothing
+  or another version and stops; a later cancel gets `404 scheduled_message_not_found`.
+- **A retry of the schedule request** with the same client message ID answers with what is stored.
+
+## The API
+
+Only the sender's own entries, on every call, and only ciphertext, conversation and time.
+
+| Request                                         | Does                                                                |
+|-------------------------------------------------|---------------------------------------------------------------------|
+| `POST /conversations/{id}/scheduled-messages`   | Holds a sealed message                                              |
+| `GET /me/scheduled-messages`                    | The caller's list, soonest first, and the server's clock            |
+| `PUT /me/scheduled-messages/{id}`               | New time and optionally a new seal, given the version it is based on |
+| `DELETE /me/scheduled-messages/{id}`            | Cancels                                                             |
+| `POST /me/scheduled-messages/{id}/send`         | Releases now; `409 epoch_conflict` if it must be sealed again first |
+
+Every request is checked for membership, the right to post, the caller's own device, size, mentions
+of members only, the epoch, and the time. The gateway event `scheduled_messages_update` tells the
+sender's devices to read the list. A device decrypts it like any message of the conversation and keeps
+the result in its encrypted local store. A device that holds no key for it yet says so. Text is never
+logged.
 
 ## Admin policy
 
-`scheduled_messages` in the signed workspace policy, edited in the console under People (admin.md
-§6): `is_enabled`, `max_horizon_days` (default 365), `late_limit_hours` (default 24). Only member
-clients can apply it, since the server sees no scheduled messages; a modified client can always send
-a message later by itself, so nothing is lost by that. With scheduling off "Send later" isn't
-offered, and messages already waiting stay with their owner as `policy_off`.
-
-## Limits
-
-At most 50 waiting messages per user with at most 8 KiB of text each: the account data travels in
-the key bag, which is uploaded whole and limited to `limits.max_key_bag_bytes` (default 1 MiB).
-
-## Closed apps
-
-Desktop and web send while they run. On top of the upkeep:
-
-- **Android:** when the app leaves the foreground it plans one WorkManager run at the next message's
-  time, with a network constraint, which keeps the sync loop going until what is due has left. Doze
-  and App Standby may defer it.
-- **iOS:** the same with a `BGProcessingTask`. iOS decides when it runs and may not run it at all,
-  certainly not after the user force-quit the app. A silent push waking the app for something else
-  sends what is due too.
-
-Neither is a promise, which is why the screens promise only "when one of your devices is online".
+`scheduled_messages` in the signed workspace policy, edited in the console under People: `is_enabled`,
+`max_horizon_days` (default 365, at most 3650) and `max_per_user` (default 50, at most 1000). **The server
+enforces it.** Off, nothing new is taken and nothing goes out by itself. Send now still works, since that
+is an ordinary send.
 
 ## Not built yet (issue #203)
 
-- **Reminders.** "Remind me" on a message, synced `/remind`, native alarms on mobile, snooze and
-  dismiss on all devices. They will sit in the account data the same way and share the time handling;
-  today `/remind` still lives in one browser's local storage.
-- Scheduled messages with files, and recurring ones (PLAN.md).
+- **Reminders.** "Remind me" on a message, synced `/remind`, native alarms on mobile, snooze and dismiss on
+  all devices. Today `/remind` still lives in one browser's local storage.
+- **Files.** The composer says they can't be scheduled yet.
+- **Link previews:** a scheduled message goes without one.
+- Recurring messages (PLAN.md).

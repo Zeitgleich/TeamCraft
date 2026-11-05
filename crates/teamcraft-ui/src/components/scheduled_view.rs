@@ -1,13 +1,12 @@
 //! "Send later" (docs/scheduled-messages.md): the choices in the composer's send menu and the page
-//! that lists what waits. Everything says when a message really goes out: when one of the user's
-//! devices is online at or after its time, not at the time whatever happens.
+//! that lists what waits. The server sends a message at its time, on time unless the group changed and
+//! all of the user's devices stayed off; everything here says so and shows a message that is late why.
 
 use leptos::prelude::*;
 use teamcraft_client_api::scheduled::{
-  MAX_SCHEDULED_BODY_BYTES, MAX_SCHEDULED_MESSAGES, ScheduleCheck, ScheduleRefusal, ScheduledMessage,
-  ScheduledOverview, ScheduledStatus, latest_due,
+  ScheduleCheck, ScheduleRefusal, ScheduledMessage, ScheduledOverview, ScheduledStatus, latest_due,
 };
-use teamcraft_proto::{ClientMessageId, ScheduledMessagePolicy};
+use teamcraft_proto::{ScheduledMessageId, ScheduledMessagePolicy};
 
 use crate::clock::{
   format_date_time, format_local_datetime_input, next_monday_at, now_ms, parse_local_datetime, tomorrow_at,
@@ -21,14 +20,11 @@ use crate::feedback::PendingAction;
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::{I18n, use_i18n};
 use crate::model::TimestampMs;
-use crate::reactive::use_interval_while_visible;
 use crate::state::use_app_state;
 
 /// The morning the presets go for: 08:00, as the issue's "tomorrow 08:00".
 const PRESET_MINUTE_OF_DAY: u16 = 8 * 60;
 const MS_PER_HOUR: TimestampMs = 3_600_000;
-/// How often the open list looks at the clock: a message's time passing changes its line.
-const LIST_REFRESH_MS: u64 = 30_000;
 const TIME_FIELD: &str = "schedule-at";
 const FORM_ID: &str = "schedule-custom";
 
@@ -174,9 +170,6 @@ pub fn ScheduledView() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let overview = Memo::new(move |_| state.read(|backend| backend.scheduled_overview()));
-  // A time passing changes a line without any store change.
-  let clock = RwSignal::new(now_ms());
-  use_interval_while_visible(LIST_REFRESH_MS, move || clock.set(now_ms()));
   view! {
     <section class="scheduled-view page-view" aria-label=move || i18n.t("scheduled-title")>
       <header class="panel-header">
@@ -193,10 +186,10 @@ pub fn ScheduledView() -> impl IntoView {
         <ul class="page-cards">
           <For
             each=move || overview.with(|overview| overview.messages.clone())
-            key=|message| (message.id, message.due_at, message.body.clone())
+            key=|message| (message.id, message.due_at, message.body.clone(), format!("{:?}", message.status))
             let:message
           >
-            <ScheduledCard message=message overview=overview clock=clock />
+            <ScheduledCard message=message overview=overview />
           </For>
         </ul>
         <Show when=move || overview.with(|overview| overview.messages.is_empty()) fallback=|| ()>
@@ -209,24 +202,19 @@ pub fn ScheduledView() -> impl IntoView {
 
 /// One waiting message: read it, change it, send it now, or cancel it.
 #[component]
-fn ScheduledCard(
-  message: ScheduledMessage,
-  overview: Memo<ScheduledOverview>,
-  clock: RwSignal<TimestampMs>,
-) -> impl IntoView {
+fn ScheduledCard(message: ScheduledMessage, overview: Memo<ScheduledOverview>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let locale = i18n.locale().tag();
   let (id, conversation) = (message.id, message.conversation);
   let due_at = message.due_at;
-  let stored_status = message.status;
+  let status = message.status;
   let is_editing = RwSignal::new(false);
   let is_confirming_cancel = RwSignal::new(false);
   let sending = PendingAction::new();
   let cancelling = PendingAction::new();
-  let status = move || shown_status(stored_status, due_at, clock.get());
-  let is_available = stored_status != ScheduledStatus::Unavailable;
-  let can_edit = move || !matches!(status(), ScheduledStatus::Unavailable | ScheduledStatus::Unknown);
+  let is_available = can_still_go_out(status);
+  let can_edit = is_available && status != ScheduledStatus::PolicyOff;
   let (name, body) = (message.conversation_name.clone(), message.body.clone());
   let edit_body = body.clone();
   view! {
@@ -240,10 +228,10 @@ fn ScheduledCard(
       </div>
       <p
         class="scheduled-status"
-        class:needs-you=move || needs_attention(status())
-        role=move || needs_attention(status()).then_some("status")
+        class:needs-you=needs_attention(status)
+        role=needs_attention(status).then_some("status")
       >
-        {move || i18n.t(status_key(status()))}
+        {move || i18n.t(status_key(status))}
       </p>
       <Show
         when=move || is_editing.get()
@@ -286,7 +274,7 @@ fn ScheduledCard(
             >
               {move || i18n.t("scheduled-send-now")}
             </PendingButton>
-            <button class="btn btn-small btn-quiet" prop:disabled=move || !can_edit() on:click=move |_| is_editing.set(true)>
+            <button class="btn btn-small btn-quiet" prop:disabled=!can_edit on:click=move |_| is_editing.set(true)>
               {move || i18n.t("scheduled-edit")}
             </button>
             <Show when=move || is_available fallback=|| ()>
@@ -307,7 +295,7 @@ fn ScheduledCard(
 /// Changes the text and time of a waiting message, right in its card.
 #[component]
 fn ScheduledEditor(
-  id: ClientMessageId,
+  id: ScheduledMessageId,
   body: String,
   due_at: TimestampMs,
   overview: Memo<ScheduledOverview>,
@@ -318,7 +306,7 @@ fn ScheduledEditor(
   let text = RwSignal::new(body);
   let at = RwSignal::new(format_local_datetime_input(due_at));
   let errors = FormErrors::new();
-  let suffix: String = id.as_bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+  let suffix = id.to_string();
   let form_id = format!("schedule-edit-{suffix}");
   let body_field = format!("schedule-edit-body-{suffix}");
   let time_field = format!("schedule-edit-time-{suffix}");
@@ -338,7 +326,7 @@ fn ScheduledEditor(
       let mut found = FieldErrors::new();
       for refusal in refusals {
         let field = match refusal {
-          ScheduleRefusal::EmptyBody | ScheduleRefusal::BodyTooLong => &body_field,
+          ScheduleRefusal::EmptyBody => &body_field,
           _ => &time_field,
         };
         found.push(field.clone(), refusal_text(i18n, refusal, &overview.policy));
@@ -417,15 +405,11 @@ pub fn refusal_text(i18n: I18n, refusal: ScheduleRefusal, policy: &ScheduledMess
   match refusal {
     ScheduleRefusal::Disabled => i18n.t("schedule-refused-off"),
     ScheduleRefusal::EmptyBody => i18n.t("schedule-refused-empty"),
-    ScheduleRefusal::BodyTooLong => i18n.t_with(
-      "schedule-refused-long",
-      &[("kib", &(MAX_SCHEDULED_BODY_BYTES / 1024).to_string())],
-    ),
     ScheduleRefusal::NotInFuture => i18n.t("schedule-refused-past"),
     ScheduleRefusal::BeyondHorizon => i18n.t_count("schedule-refused-far", policy.max_horizon_days as usize),
     ScheduleRefusal::TooMany => i18n.t_with(
       "schedule-refused-many",
-      &[("max", &MAX_SCHEDULED_MESSAGES.to_string())],
+      &[("max", &policy.max_per_user.to_string())],
     ),
   }
 }
@@ -441,31 +425,40 @@ fn time_refusal(due_at: TimestampMs, overview: &ScheduledOverview) -> Option<Sch
   }
 }
 
-/// The status as the list shows it: one that was waiting when the list was read is due once its time
-/// passed (the clock moves without a store change).
-fn shown_status(stored: ScheduledStatus, due_at: TimestampMs, now: TimestampMs) -> ScheduledStatus {
-  if stored == ScheduledStatus::Waiting && due_at <= now {
-    ScheduledStatus::Due
-  } else {
-    stored
-  }
+/// Whether sending or changing it can still make it go out.
+fn can_still_go_out(status: ScheduledStatus) -> bool {
+  matches!(
+    status,
+    ScheduledStatus::Waiting
+      | ScheduledStatus::NeedsSealing
+      | ScheduledStatus::Stale
+      | ScheduledStatus::PolicyOff
+  )
 }
 
 /// Whether the message waits for the user to do something.
 pub fn needs_attention(status: ScheduledStatus) -> bool {
   matches!(
     status,
-    ScheduledStatus::Missed | ScheduledStatus::PolicyOff | ScheduledStatus::Unavailable
+    ScheduledStatus::PolicyOff
+      | ScheduledStatus::NotAMember
+      | ScheduledStatus::NoPermission
+      | ScheduledStatus::ConversationGone
+      | ScheduledStatus::ThreadGone
   )
 }
 
 fn status_key(status: ScheduledStatus) -> &'static str {
   match status {
     ScheduledStatus::Waiting => "scheduled-status-waiting",
-    ScheduledStatus::Due => "scheduled-status-due",
-    ScheduledStatus::Missed => "scheduled-status-missed",
+    ScheduledStatus::NeedsSealing => "scheduled-status-needs-sealing",
+    ScheduledStatus::Stale => "scheduled-status-stale",
     ScheduledStatus::PolicyOff => "scheduled-status-policy-off",
-    ScheduledStatus::Unavailable => "scheduled-status-unavailable",
+    ScheduledStatus::NotAMember => "scheduled-status-not-a-member",
+    ScheduledStatus::NoPermission => "scheduled-status-no-permission",
+    ScheduledStatus::ConversationGone => "scheduled-status-conversation-gone",
+    ScheduledStatus::ThreadGone => "scheduled-status-thread-gone",
+    ScheduledStatus::Unreadable => "scheduled-status-unreadable",
     ScheduledStatus::Unknown => "scheduled-status-unknown",
   }
 }
@@ -486,27 +479,12 @@ mod tests {
   }
 
   #[test]
-  fn a_waiting_message_shows_as_due_once_its_time_passed() {
-    assert_eq!(
-      shown_status(ScheduledStatus::Waiting, NOW, NOW),
-      ScheduledStatus::Due
-    );
-    assert_eq!(
-      shown_status(ScheduledStatus::Waiting, NOW + 1, NOW),
-      ScheduledStatus::Waiting
-    );
-    assert_eq!(
-      shown_status(ScheduledStatus::Missed, NOW, NOW),
-      ScheduledStatus::Missed
-    );
-  }
-
-  #[test]
   fn only_what_waits_for_the_user_asks_for_attention() {
-    assert!(needs_attention(ScheduledStatus::Missed));
+    assert!(needs_attention(ScheduledStatus::NotAMember));
     assert!(needs_attention(ScheduledStatus::PolicyOff));
     assert!(!needs_attention(ScheduledStatus::Waiting));
-    assert!(!needs_attention(ScheduledStatus::Due));
+    // A device of the user seals it again by itself.
+    assert!(!needs_attention(ScheduledStatus::Stale));
   }
 
   #[test]

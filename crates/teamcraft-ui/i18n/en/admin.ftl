@@ -918,12 +918,8 @@ roster-signing-awaiting-owner = The identity provider makes you an owner. That's
 roster-standing-expired-ask-unnamed = No owner signed the admin roster within 30 days, so admin rights are paused on every app. An owner only needs to open TeamCraft on a device with their keys.
 
 policy-scheduled = Scheduled messages
-policy-scheduled-hint = Each person's own devices hold these, encrypted, so the server can't see or enforce them. People's apps apply this signed rule.
+policy-scheduled-hint = The server holds these encrypted and releases them at their time, whether their author's devices are on or not. It enforces this rule.
 policy-scheduled-enabled = People can schedule messages
-policy-scheduled-enabled-hint = Off: "Send later" goes away, and messages already scheduled wait until their owner sends or cancels them.
+policy-scheduled-enabled-hint = Off: "Send later" goes away, and messages already scheduled don't go out by themselves: they wait until their owner sends or cancels them.
 policy-scheduled-horizon = How far ahead
-policy-scheduled-late = Still send by itself when late by
-policy-hours = { $count ->
-    [one] 1 hour
-   *[other] { $count } hours
-}
+policy-scheduled-cap = Waiting messages per person

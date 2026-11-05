@@ -38,7 +38,8 @@ use teamcraft_client_api::scheduled::ScheduledOverview;
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_proto::{
-  AttachmentId, BackgroundId, CategoryId, ClientMessageId, HistoryPolicy, WebPushKeyResponse,
+  AttachmentId, BackgroundId, CategoryId, ClientMessageId, HistoryPolicy, ScheduledMessageId,
+  WebPushKeyResponse,
 };
 
 use crate::auth::Authenticator;
@@ -1525,7 +1526,7 @@ impl ChatBackend for RemoteChat {
 
   fn update_scheduled(
     &self,
-    id: ClientMessageId,
+    id: ScheduledMessageId,
     body: &str,
     due_at: teamcraft_client_api::model::TimestampMs,
   ) {
@@ -1536,11 +1537,11 @@ impl ChatBackend for RemoteChat {
     });
   }
 
-  fn cancel_scheduled(&self, id: ClientMessageId) {
+  fn cancel_scheduled(&self, id: ScheduledMessageId) {
     self.act(ChatAction::CancelScheduled { id });
   }
 
-  fn send_scheduled_now(&self, id: ClientMessageId) {
+  fn send_scheduled_now(&self, id: ScheduledMessageId) {
     self.act(ChatAction::SendScheduledNow { id });
   }
 

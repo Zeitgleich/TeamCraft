@@ -749,17 +749,9 @@ final class AppModel {
     if count != scheduledAttentionCount { scheduledAttentionCount = count }
   }
 
-  /// Plans the background run for the next scheduled message, or takes the plan back.
-  func planScheduledSend() async {
-    if let dueAtMs = await scheduledOverview()?.maybeNextDueAt {
-      ScheduledSendTask.schedule(dueAtMs: dueAtMs)
-    } else {
-      ScheduledSendTask.cancel()
-    }
-  }
-
-  /// A background run: keeps the sync loop going for what is due, whose upkeep sends it.
-  func runScheduledSend() async -> Bool {
+  /// A push or background task: seals again the scheduled messages whose group changed
+  /// (docs/scheduled-messages.md). Another device being first isn't a failure.
+  func sealScheduledMessages() async -> Bool {
     guard case .ready = phase, let core = try? core() else { return true }
     // The foreground app already holds the lock; otherwise take it like the extension does.
     if !isSyncing {
@@ -767,8 +759,13 @@ final class AppModel {
       guard await Task.detached(operation: { lock.acquire(timeout: 5) }).value else { return false }
     }
     defer { if !isSyncing { processLock.release() } }
-    let left = try? await core.flushPendingWork(maxWaitMs: UInt64(Self.maxBackgroundFlushSeconds * 1000))
-    return left?.isEmpty == true
+    do {
+      try await core.sealScheduledMessages()
+      return true
+    } catch {
+      AppLog.failure("sealing scheduled messages again", error)
+      return false
+    }
   }
 
   func maxUploadBytes() async -> Int64? {
@@ -927,8 +924,6 @@ final class AppModel {
     await stopSyncing()
     guard case .ready = phase else { return }
     if await segmentPrefetch() != .off { SegmentPrefetchTask.schedule() }
-    // A phone in a pocket sends what is scheduled too, as far as iOS lets it.
-    await planScheduledSend()
   }
 
   /// Presence (issue #472): the app came to the foreground, went to the background, or the user
@@ -1048,6 +1043,12 @@ final class AppModel {
         calls.endRinging(conversationId: notification.conversationId, maybeCallId: notification.maybeCallId)
       }
       return .newData
+    case .scheduledSeal:
+      if await sealScheduledMessages() { return .newData }
+      // iOS gave too little time or no network: ask for a later run. It may not come, and the list says
+      // what that means.
+      ScheduledSealTask.schedule()
+      return .failed
     case .message, .call, .test, .unknown:
       // Not sent as background pushes; only the badge is taken.
       await DeliveredNotifications.setBadge(notification.maybeBadge)

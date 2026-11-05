@@ -34,7 +34,7 @@ use teamcraft_proto::{
   ConversationVisibility, Id, InviteId, JoinPolicy, ListConversationMembersResponse, ListInvitesResponse,
   MessageId, NotificationLevel, PresenceState, SpaceResponse, SpaceRole, UserKind, UserSummary,
 };
-use teamcraft_proto::{BackgroundId, OrgBackgroundId};
+use teamcraft_proto::{BackgroundId, OrgBackgroundId, ScheduledMessageId};
 use teamcraft_proto::{
   CategoryId, ConversationNotificationSettings, CreateSpaceRequest, EffectiveNotifications, HistoryPolicy,
   MoveChannelRequest, UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
@@ -105,21 +105,21 @@ pub enum CoreCommand {
     maybe_thread: Option<ThreadId>,
     body: String,
   },
-  /// "Send later" (docs/scheduled-messages.md): in the account data too.
+  /// "Send later" (docs/scheduled-messages.md): sealed here, held by the server.
   ScheduleMessage {
     message: OutgoingMessage,
     due_at_ms: i64,
   },
   UpdateScheduled {
-    id: ClientMessageId,
+    id: ScheduledMessageId,
     body: String,
     due_at_ms: i64,
   },
   CancelScheduled {
-    id: ClientMessageId,
+    id: ScheduledMessageId,
   },
   SendScheduledNow {
-    id: ClientMessageId,
+    id: ScheduledMessageId,
   },
   SaveSearch {
     id: u64,
@@ -2067,7 +2067,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     });
   }
 
-  fn update_scheduled(&self, id: ClientMessageId, body: &str, due_at: TimestampMs) {
+  fn update_scheduled(&self, id: ScheduledMessageId, body: &str, due_at: TimestampMs) {
     self.command(CoreCommand::UpdateScheduled {
       id,
       body: body.to_owned(),
@@ -2075,11 +2075,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     });
   }
 
-  fn cancel_scheduled(&self, id: ClientMessageId) {
+  fn cancel_scheduled(&self, id: ScheduledMessageId) {
     self.command(CoreCommand::CancelScheduled { id });
   }
 
-  fn send_scheduled_now(&self, id: ClientMessageId) {
+  fn send_scheduled_now(&self, id: ScheduledMessageId) {
     self.command(CoreCommand::SendScheduledNow { id });
   }
 

@@ -45,6 +45,7 @@ use teamcraft_server::services::calls::{self, CallService};
 use teamcraft_server::services::local_accounts::LocalAuth;
 use teamcraft_server::services::permission_scheme::{self, SchemeStore};
 use teamcraft_server::services::presence::{self, refresh_presence};
+use teamcraft_server::services::scheduled_messages;
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
   admin, admin_join_requests, attachments, backgrounds, brands, calendar_settings, conversations,
@@ -304,6 +305,7 @@ async fn run() -> anyhow::Result<()> {
   })
   .await?;
   spawn_urgent_scheduler(state.clone());
+  spawn_scheduled_messages(state.clone());
   spawn_email_digests(state.clone());
   spawn_account_housekeeping(state.clone());
   spawn_background_sweeper(state.clone());
@@ -708,6 +710,23 @@ fn spawn_account_housekeeping(state: AppState) {
 }
 
 /// Pushes urgent direct messages again until they are acknowledged (PLAN.md §5).
+/// Releases scheduled messages at their time (docs/scheduled-messages.md). Runs on every instance:
+/// they claim different rows, and a message is stored once.
+fn spawn_scheduled_messages(state: AppState) {
+  tokio::spawn(async move {
+    let period = Duration::from_secs(state.settings.get().limits.scheduled_release_interval_secs.max(1));
+    let mut interval = tokio::time::interval(period);
+    loop {
+      interval.tick().await;
+      let now = time::OffsetDateTime::now_utc();
+      match scheduled_messages::run_due(&state, now).await {
+        Ok(_) => state.metrics.job_succeeded(BackgroundJob::ScheduledMessages, now),
+        Err(error) => warn!(%error, "scheduled messages failed"),
+      }
+    }
+  });
+}
+
 fn spawn_urgent_scheduler(state: AppState) {
   tokio::spawn(async move {
     let period = Duration::from_secs(
@@ -1097,6 +1116,8 @@ fn push_settings(config: &Config) -> PushSettings {
     },
     test_interval: Duration::from_secs(push.test_interval_secs),
     max_rings_per_minute: push.max_rings_per_minute,
+    scheduled_wake_coalesce: Duration::from_millis(push.scheduled_wake_coalesce_ms),
+    scheduled_wake_min_interval: Duration::from_secs(push.scheduled_wake_min_interval_secs),
     dismiss_coalesce: Duration::from_millis(push.dismiss_coalesce_ms),
     allow_private_endpoints: push.allow_private_endpoints,
   }

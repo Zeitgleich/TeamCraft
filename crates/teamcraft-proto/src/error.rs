@@ -71,6 +71,14 @@ wire_enum! {
     NotetakerKeyNotFound => "notetaker_key_not_found",
     UserGroupNotFound => "user_group_not_found",
     MfaRequired => "mfa_required",
+    /// The message isn't held any more, or isn't the caller's (docs/scheduled-messages.md).
+    ScheduledMessageNotFound => "scheduled_message_not_found",
+    /// The workspace doesn't allow scheduling messages.
+    ScheduledMessagesDisabled => "scheduled_messages_disabled",
+    /// The caller holds as many scheduled messages as the workspace allows.
+    ScheduledMessageLimit => "scheduled_message_limit",
+    /// The time has passed or lies beyond the workspace's horizon.
+    ScheduledTimeInvalid => "scheduled_time_invalid",
     Conflict => "conflict",
     EpochConflict => "epoch_conflict",
     VersionConflict => "version_conflict",
@@ -323,6 +331,10 @@ mod tests {
       ErrorCode::UnknownHost,
       ErrorCode::BrandAssetNotFound,
       ErrorCode::UserGroupNotFound,
+      ErrorCode::ScheduledMessageNotFound,
+      ErrorCode::ScheduledMessagesDisabled,
+      ErrorCode::ScheduledMessageLimit,
+      ErrorCode::ScheduledTimeInvalid,
       ErrorCode::Conflict,
       ErrorCode::EpochConflict,
       ErrorCode::VersionConflict,

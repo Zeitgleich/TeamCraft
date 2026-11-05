@@ -250,7 +250,7 @@ history-gap-failed = Messages could not be loaded.
 
 # Send later (docs/scheduled-messages.md)
 schedule-heading = Send later
-schedule-online-hint = Goes out when one of your devices is online at or after this time.
+schedule-online-hint = Goes out on time, even with your devices off, unless the group changes and all your devices stay off.
 schedule-write-first = Write something first.
 schedule-no-files = Messages with files can't wait yet: send them now.
 schedule-no-command = Commands run right away and can't be scheduled.
@@ -260,10 +260,9 @@ schedule-monday = Monday morning
 schedule-custom = Pick a time
 schedule-custom-label = Send at
 schedule-confirm = Schedule
-schedule-done = Scheduled for { $time }. It goes out when one of your devices is online then or later.
+schedule-done = Scheduled for { $time }.
 schedule-refused-off = Your workspace doesn't allow scheduling messages.
 schedule-refused-empty = Write something first.
-schedule-refused-long = A scheduled message can have at most { $kib } KiB of text.
 schedule-refused-past = Pick a time in the future.
 schedule-refused-far = { $count ->
     [one] Pick a time at most 1 day ahead.
@@ -275,15 +274,19 @@ scheduled-count = { $count ->
     [one] 1 message waiting
    *[other] { $count } messages waiting
 }
-scheduled-note = Your own devices keep these, encrypted. A message goes out when one of them is online at or after its time, so if all are off it waits for the first one back.
+scheduled-note = The server keeps these, encrypted, and sends them on time, even with your devices off. Only if the group changes (someone joins or leaves) and all your devices stay off does a message wait for one of them to come back.
 scheduled-empty-title = Nothing scheduled
 scheduled-empty = Use "Send later" in the send menu next to the send button.
 scheduled-unknown-conversation = Unknown conversation
-scheduled-status-waiting = Waiting for its time.
-scheduled-status-due = Due: goes out as soon as one of your devices is online.
-scheduled-status-missed = Its time passed long ago while your devices were off. It may be out of date, so it stays here until you decide.
+scheduled-status-waiting = Goes out on time.
+scheduled-status-needs-sealing = The group changed. One of your devices updates the encryption by itself; it goes out on time if one does in time.
+scheduled-status-stale = Late: the group changed and none of your devices was on. It goes out as soon as one is.
 scheduled-status-policy-off = Your workspace turned scheduling off. It stays here until you send or cancel it.
-scheduled-status-unavailable = This device can't reach that conversation. You may have left it.
+scheduled-status-not-a-member = You're no longer in this conversation, so it won't go out.
+scheduled-status-no-permission = You may no longer post in this conversation, so it didn't go out.
+scheduled-status-conversation-gone = This conversation was deleted, so it won't go out.
+scheduled-status-thread-gone = The thread it answers is gone, so it didn't go out.
+scheduled-status-unreadable = This device can't read it yet. It still goes out.
 scheduled-status-unknown = Your app can't tell what happens to this message. Update it.
 scheduled-send-now = Send now
 scheduled-edit = Edit
@@ -293,3 +296,4 @@ scheduled-cancel = Cancel message
 scheduled-cancel-question = Cancel this message? Nobody will see it.
 scheduled-cancel-confirm = Cancel it
 scheduled-keep = Keep it
+schedule-refused-limit = You have as many scheduled messages as your workspace allows. Send or cancel one first.

@@ -627,32 +627,11 @@ session (the core has no call-state API yet).
   restart (#168, e2ee.md §5); a setup given up on drops its device key pair and revokes its device,
   and the receipt is awaited beside the core loop (#415, e2ee.md §3.2, §5).
 
-### B16 Scheduled messages depend on the sender's devices – medium, by design (#203)
+### B16 Scheduled messages under an old epoch – medium, by design (#203)
 
-- **Scope:** a scheduled message goes out only when a device of the sender is online at or after its
-  time (docs/scheduled-messages.md). Closed mobile apps try through WorkManager and `BGProcessingTask`,
-  which the OS may defer or skip. Known gaps: an edit in the seconds around the time can come too late;
-  an app from before the feature can drop a cancel from the key bag.
-- **Status:** accepted and shown to the user: every waiting message says where it stands, and one that
-  is too late waits for its owner instead of going out unseen.
-
-## Sharing into the app (#208)
-
-Added after the audit above; every client copies a share out of reach of a kill, except where listed.
-Nothing here was run on a device yet: docs/manual-tests/share-into.md.
-
-| Gap                                                                                                                                                                                                            | Severity   | Owner |
-|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------|-------|
-| Desktop: a share waits in memory as a list of paths; a killed app forgets it, the files stay where they are                                                                                                    | low        | #208  |
-| Desktop, Windows: a link swapped in between the check and the open of a shared file isn't caught (the open flag would also stop cloud placeholders from being fetched)                                         | low        | #208  |
-| Desktop, Unix: only the last path segment is protected against a swap (`O_NOFOLLOW`); a parent folder swapped for a link is followed                                                                           | low        | #208  |
-| Web: without an active service worker that knows `/share-target`, the browser posts the plaintext to the network; the proxy has to refuse it unbuffered (e2ee.md §9.3). Not offered by any browser until #1324 | medium     | #1324 |
-| Web: parsing a very large share's form is the browser's; not measured                                                                                                                                          | unverified | #1324 |
-| Web: a site can plant up to the cap of waiting shares and so block real ones until they are handled or expire; the picker shows them as from outside                                                           | low        | #1324 |
-| Attachments in a composer (shared or picked) aren't kept across a kill before the send; the outbox starts at send                                                                                              | medium     | #208  |
-| Android: a share delivered to a running activity (`onNewIntent`) whose copy is cut short by a kill is lost: the system hands back the intent the activity started with, so the user has to share again         | low        | #208  |
-| Android: a blocked provider's copy can outlive a sign-out by up to its block; it holds no share, and it leaves nothing when it ends                                                                            | low        | #208  |
-| Android, iOS: no handling of a deactivated or deleted account, so a waiting share stays until the next sign-in or the 7 days. Another person signing in removes it                                             | low        | #208  |
-| Whoever signs in after a session ran out loses a share they made while signed out, with a notice: the app can't tell it from the previous person's                                                             | low        | #208  |
-| iOS: the extension can't open the app; a notification and the sheet's text lead there, and without permission only the text does                                                                               | low        | #208  |
-| iOS: the inbox has no cap on shares or bytes (Android and web have one); the 7-day pruning bounds it                                                                                                           | low        | #208  |
+- **Scope:** the server holds a message and releases it on time, unless a commit moved the group's epoch
+  and no device of the sender sealed it again (docs/scheduled-messages.md). Phones are woken by a push;
+  iOS may defer or drop it. Every commit counts, also additions.
+- **Status:** accepted and shown to the user: a late message says so with its reason, and goes out once a
+  device is back. A crash right after a release loses that message's gateway event and push, as for a
+  send.

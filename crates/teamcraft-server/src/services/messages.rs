@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
-use teamcraft_db::{HistoryQuery, NewMessage};
+use teamcraft_db::{Conversation, HistoryQuery, NewMessage, StoredMessage};
 use teamcraft_proto::{
   ConversationId, ConversationKind, GatewayEvent, Id, ListMessagesQuery, ListMessagesResponse, MessageId,
-  MessageResponse, Permission, SendMessageRequest,
+  MessageResponse, Permission, SendMessageRequest, ThreadId, UserId,
 };
 use tracing::warn;
 
@@ -14,7 +14,7 @@ use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-const MAX_CONTENT_KEY_ID_BYTES: usize = 64;
+pub(super) const MAX_CONTENT_KEY_ID_BYTES: usize = 64;
 
 /// The stored message and whether this call created it (a repeated client ID returns the old one).
 pub struct Sent {
@@ -80,17 +80,7 @@ pub async fn send_message(
     ));
   }
   let maybe_thread_root = match request.maybe_thread_id {
-    Some(thread) => {
-      let root = state
-        .database
-        .get_message(conversation, MessageId::from_snowflake(thread.snowflake()))
-        .await?
-        .filter(|root| root.maybe_thread_id.is_none())
-        .ok_or_else(|| {
-          ApiError::InvalidRequest("thread root is not a message of this conversation".into())
-        })?;
-      Some(root)
-    },
+    Some(thread) => Some(thread_root(state, conversation, thread).await?),
     None => None,
   };
 
@@ -115,38 +105,28 @@ pub async fn send_message(
 
   let response = message_response(&outcome.message);
   if outcome.is_new {
-    if let Some(root) = &maybe_thread_root {
-      threads::record_reply(state, root, &outcome.message).await?;
-    }
-    urgent::schedule_reminders(
-      state,
-      &access.view.conversation.kind,
-      &outcome.message,
-      time::OffsetDateTime::now_utc(),
-    )
-    .await?;
-    state.hub.publish(
-      members,
-      &GatewayEvent::MessageCreate {
-        message: response.clone(),
-      },
-    );
     // The import account's announcements (people it added, a channel it archived) are part of
     // the import: synced quietly like the imported messages, never pushed (e2ee.md §4.10).
-    if !super::import::is_importing(state, caller.user.id) {
-      tokio::spawn(crate::push::routing::notify_message(
-        state.clone(),
-        crate::push::routing::NewMessageEvent {
-          conversation,
-          kind: access.view.conversation.kind.clone(),
-          message: outcome.message.id,
-          sender: caller.user.id,
-          mentioned: outcome.message.mentioned_user_ids.clone(),
-          maybe_thread: outcome.message.maybe_thread_id,
-          is_urgent: outcome.message.is_urgent,
-          is_integration: access.view.conversation.is_integration,
-        },
-      ));
+    if super::import::is_importing(state, caller.user.id) {
+      deliver_quietly(
+        state,
+        &access.view.conversation.kind,
+        &outcome.message,
+        members,
+        maybe_thread_root.as_ref(),
+        time::OffsetDateTime::now_utc(),
+      )
+      .await?;
+    } else {
+      deliver_stored(
+        state,
+        &access.view.conversation,
+        &outcome.message,
+        members,
+        maybe_thread_root.as_ref(),
+        time::OffsetDateTime::now_utc(),
+      )
+      .await?;
     }
     // Sending is the surest sign the user is there (gateway.md, "Presence"). A failure here
     // doesn't fail the send: the message is stored and delivered.
@@ -158,6 +138,82 @@ pub async fn send_message(
     message: response,
     is_new: outcome.is_new,
   })
+}
+
+/// A thread's root, which must be a top-level message of the conversation, with threads turned on.
+pub(super) async fn thread_root(
+  state: &AppState,
+  conversation: ConversationId,
+  thread: ThreadId,
+) -> Result<StoredMessage, ApiError> {
+  if !state.policy.get().threads.is_threaded_view_enabled {
+    return Err(ApiError::Forbidden(
+      "threads are turned off in this workspace".into(),
+    ));
+  }
+  state
+    .database
+    .get_message(conversation, MessageId::from_snowflake(thread.snowflake()))
+    .await?
+    .filter(|root| root.maybe_thread_id.is_none())
+    .ok_or_else(|| ApiError::InvalidRequest("thread root is not a message of this conversation".into()))
+}
+
+/// What follows a freshly stored message: thread records, urgent reminders, the gateway and the push.
+/// A scheduled message goes the same way at its release (docs/scheduled-messages.md).
+pub(super) async fn deliver_stored(
+  state: &AppState,
+  conversation: &Conversation,
+  message: &StoredMessage,
+  members: HashSet<UserId>,
+  maybe_thread_root: Option<&StoredMessage>,
+  now: time::OffsetDateTime,
+) -> Result<(), ApiError> {
+  deliver_quietly(
+    state,
+    &conversation.kind,
+    message,
+    members,
+    maybe_thread_root,
+    now,
+  )
+  .await?;
+  tokio::spawn(crate::push::routing::notify_message(
+    state.clone(),
+    crate::push::routing::NewMessageEvent {
+      conversation: conversation.id,
+      kind: conversation.kind.clone(),
+      message: message.id,
+      sender: message.sender_user_id,
+      mentioned: message.mentioned_user_ids.clone(),
+      maybe_thread: message.maybe_thread_id,
+      is_urgent: message.is_urgent,
+      is_integration: conversation.is_integration,
+    },
+  ));
+  Ok(())
+}
+
+/// [`deliver_stored`] without the push.
+async fn deliver_quietly(
+  state: &AppState,
+  kind: &ConversationKind,
+  message: &StoredMessage,
+  members: HashSet<UserId>,
+  maybe_thread_root: Option<&StoredMessage>,
+  now: time::OffsetDateTime,
+) -> Result<(), ApiError> {
+  if let Some(root) = maybe_thread_root {
+    threads::record_reply(state, root, message).await?;
+  }
+  urgent::schedule_reminders(state, kind, message, now).await?;
+  state.hub.publish(
+    members,
+    &GatewayEvent::MessageCreate {
+      message: message_response(message),
+    },
+  );
+  Ok(())
 }
 
 /// One page of history, newest first (or oldest first with `after`). Guests and channels with the

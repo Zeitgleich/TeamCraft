@@ -110,10 +110,10 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         # audio: the call keeps running in the background; voip: lets the extension report incoming
         # calls to CallKit (CXProvider.reportNewIncomingVoIPPushPayload, docs/e2ee.md §7).
-        # processing: the search index prefetch (BGProcessingTask while charging and online), and
-        # sending what is scheduled (docs/scheduled-messages.md).
+        # processing: the search index prefetch (BGProcessingTask while charging and online), and sealing
+        # scheduled messages again when a silent push couldn't finish (docs/scheduled-messages.md).
         UIBackgroundModes: [audio, voip, remote-notification, processing]
-        BGTaskSchedulerPermittedIdentifiers: [de.zeitgleich.teamcraft.segment-prefetch, de.zeitgleich.teamcraft.scheduled-send]
+        BGTaskSchedulerPermittedIdentifiers: [de.zeitgleich.teamcraft.segment-prefetch, de.zeitgleich.teamcraft.scheduled-seal]
         ITSAppUsesNonExemptEncryption: true
         NSMicrophoneUsageDescription: "TeamCraft uses the microphone for calls."
         NSCameraUsageDescription: "TeamCraft uses the camera for video calls, for photos you send and to scan the code of a new device you link."

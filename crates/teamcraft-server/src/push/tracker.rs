@@ -6,7 +6,7 @@
 //! In memory and per process, like the gateway hub: after a restart nothing is withdrawn for pushes
 //! sent before it, which costs a stale notification, never a missing one.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -101,6 +101,10 @@ struct Inner {
   last_test: HashMap<DeviceId, Instant>,
   /// Withdrawals waiting for the end of a reading burst: the newest message read and the devices.
   pending_dismissals: HashMap<DismissKey, (MessageId, Vec<DeviceId>)>,
+  /// Wakes to seal scheduled messages that wait for the end of a burst of commits.
+  pending_seal_wakes: HashSet<(UserId, ConversationId)>,
+  /// When the last wake went out, for the minimum interval between them.
+  last_seal_wakes: HashMap<(UserId, ConversationId), Instant>,
   /// Held pushes per user, oldest first (all have the same grace delay, so also soonest due first).
   held: HashMap<UserId, VecDeque<HeldPush>>,
   /// When each caller's recent rings were pushed (within the last minute).
@@ -262,6 +266,44 @@ impl PushTracker {
   /// The pending withdrawal for `key`, if any.
   pub fn take_dismiss(&self, key: DismissKey) -> Option<(MessageId, Vec<DeviceId>)> {
     self.lock().pending_dismissals.remove(&key)
+  }
+
+  /// Queues a wake to seal scheduled messages; how long to wait before sending it, or `None` when one
+  /// is on its way already and covers this commit too.
+  pub fn queue_seal_wake(
+    &self,
+    user: UserId,
+    conversation: ConversationId,
+    coalesce: Duration,
+    min_interval: Duration,
+  ) -> Option<Duration> {
+    let now = Instant::now();
+    let mut inner = self.lock();
+    if inner.pending_seal_wakes.len() >= MAX_PENDING_DISMISSALS {
+      return None;
+    }
+    if !inner.pending_seal_wakes.insert((user, conversation)) {
+      return None;
+    }
+    if inner.last_seal_wakes.len() >= MAX_PENDING_DISMISSALS {
+      inner
+        .last_seal_wakes
+        .retain(|_, at| now.duration_since(*at) < min_interval);
+    }
+    let until_allowed = inner
+      .last_seal_wakes
+      .get(&(user, conversation))
+      .map_or(Duration::ZERO, |at| {
+        min_interval.saturating_sub(now.duration_since(*at))
+      });
+    Some(coalesce.max(until_allowed))
+  }
+
+  /// The queued wake goes out now.
+  pub fn take_seal_wake(&self, user: UserId, conversation: ConversationId) {
+    let mut inner = self.lock();
+    inner.pending_seal_wakes.remove(&(user, conversation));
+    inner.last_seal_wakes.insert((user, conversation), Instant::now());
   }
 
   /// Remembers which devices ring for the call.

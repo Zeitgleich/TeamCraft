@@ -6,7 +6,7 @@ import SwiftUI
 struct SchedulePolicy: Decodable, Equatable, Sendable {
   let isEnabled: Bool
   let maxHorizonDays: Int
-  let lateLimitHours: Int
+  let maxPerUser: Int
 }
 
 /// A message waiting for its time. The core decides `status`; the app only words it.
@@ -18,27 +18,36 @@ struct ScheduledMessage: Decodable, Equatable, Identifiable, Sendable {
   let dueAt: Int64
   let status: ScheduledStatus
 
-  /// The status as shown: one that was waiting when it was read is due once its time passed.
-  func shownStatus(nowMs: Int64) -> ScheduledStatus {
-    status == .waiting && dueAt <= nowMs ? .due : status
-  }
-
   /// Whether the message waits for the user to do something.
   var needsAttention: Bool {
     switch status {
-    case .missed, .policyOff, .unavailable: return true
-    case .waiting, .due, .unknown: return false
+    case .policyOff, .notAMember, .noPermission, .conversationGone, .threadGone: return true
+    case .waiting, .needsSealing, .stale, .unreadable, .unknown: return false
     }
   }
+
+  /// Whether sending it can still make it go out.
+  var canGoOut: Bool {
+    switch status {
+    case .waiting, .needsSealing, .stale, .policyOff: return true
+    case .notAMember, .noPermission, .conversationGone, .threadGone, .unreadable, .unknown: return false
+    }
+  }
+
+  var canEdit: Bool { canGoOut && status != .policyOff }
 }
 
 /// `ScheduledStatus` of the core, with what the lists say about it.
 enum ScheduledStatus: String, Decodable, Equatable, Sendable {
   case waiting
-  case due
-  case missed
+  case needsSealing = "needs_sealing"
+  case stale
   case policyOff = "policy_off"
-  case unavailable
+  case notAMember = "not_a_member"
+  case noPermission = "no_permission"
+  case conversationGone = "conversation_gone"
+  case threadGone = "thread_gone"
+  case unreadable
   case unknown
 
   init(from decoder: Decoder) throws {
@@ -49,10 +58,14 @@ enum ScheduledStatus: String, Decodable, Equatable, Sendable {
   var text: LocalizedStringKey {
     switch self {
     case .waiting: return "scheduled_status_waiting"
-    case .due: return "scheduled_status_due"
-    case .missed: return "scheduled_status_missed"
+    case .needsSealing: return "scheduled_status_needs_sealing"
+    case .stale: return "scheduled_status_stale"
     case .policyOff: return "scheduled_status_policy_off"
-    case .unavailable: return "scheduled_status_unavailable"
+    case .notAMember: return "scheduled_status_not_a_member"
+    case .noPermission: return "scheduled_status_no_permission"
+    case .conversationGone: return "scheduled_status_conversation_gone"
+    case .threadGone: return "scheduled_status_thread_gone"
+    case .unreadable: return "scheduled_status_unreadable"
     case .unknown: return "scheduled_status_unknown"
     }
   }
@@ -63,11 +76,6 @@ struct ScheduledOverview: Decodable, Equatable, Sendable {
   let messages: [ScheduledMessage]
   let policy: SchedulePolicy
   let serverNow: Int64
-
-  /// The next time a device of this user has something to send, for the background task.
-  var maybeNextDueAt: Int64? {
-    messages.filter { $0.status == .waiting || $0.status == .due }.map(\.dueAt).min()
-  }
 }
 
 /// The fields of editing a scheduled message, top to bottom.
@@ -76,12 +84,11 @@ enum ScheduleField: CaseIterable, Hashable {
 }
 
 enum ScheduleProblem: FieldProblem {
-  case empty, tooLong, inThePast, tooFarAhead
+  case empty, inThePast, tooFarAhead
 
   var message: LocalizedStringKey {
     switch self {
     case .empty: return "schedule_error_empty"
-    case .tooLong: return "schedule_error_long"
     case .inThePast: return "schedule_error_past"
     case .tooFarAhead: return "schedule_error_far"
     }
@@ -91,8 +98,6 @@ enum ScheduleProblem: FieldProblem {
 /// The times "send later" offers and what it refuses, as desktop and web do (teamcraft-client-api
 /// `scheduled`). Pure, so the rules are tested.
 enum ScheduleTimes {
-  /// Limit of the core; a form that passes this is taken.
-  static let maxBodyBytes = 8 * 1024
   private static let hourMs: Int64 = 3_600_000
   private static let dayMs: Int64 = 24 * hourMs
   private static let morningHour = 8
@@ -126,8 +131,6 @@ enum ScheduleTimes {
     let bodyProblem: ScheduleProblem?
     if body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
       bodyProblem = .empty
-    } else if body.utf8.count > maxBodyBytes {
-      bodyProblem = .tooLong
     } else {
       bodyProblem = nil
     }
@@ -139,12 +142,11 @@ enum ScheduleTimes {
   static func ms(_ date: Date) -> Int64 { Int64((date.timeIntervalSince1970 * 1000).rounded()) }
 }
 
-/// Wakes the app for the next scheduled message, so a phone in a pocket sends it without being
-/// opened. Best effort: iOS decides when a `BGProcessingTask` runs, possibly much later, and not at
-/// all after the user force-quit the app. The lists say that a message goes out when a device of the
-/// user is online at or after its time; this makes the phone one of them more often.
-enum ScheduledSendTask {
-  static let identifier = "de.zeitgleich.teamcraft.scheduled-send"
+/// When a silent push couldn't finish sealing a scheduled message again, a later try once the network
+/// is there. iOS decides when a `BGProcessingTask` runs and may not run it at all, certainly not after
+/// the user force-quit the app; the lists don't promise more (docs/scheduled-messages.md).
+enum ScheduledSealTask {
+  static let identifier = "de.zeitgleich.teamcraft.scheduled-seal"
 
   /// Must run before the app finished launching.
   static func register() {
@@ -154,25 +156,17 @@ enum ScheduledSendTask {
         return
       }
       let work = Task {
-        let isDone = await AppModel.shared.runScheduledSend()
-        processing.setTaskCompleted(success: isDone)
-        await AppModel.shared.planScheduledSend()
+        processing.setTaskCompleted(success: await AppModel.shared.sealScheduledMessages())
       }
       processing.expirationHandler = { work.cancel() }
     }
   }
 
-  /// Asks for a run at or after `dueAtMs`. Fails quietly where the system doesn't allow it
-  /// (simulator); the next foreground sends it then.
-  static func schedule(dueAtMs: Int64) {
+  /// Fails quietly where the system doesn't allow it (simulator).
+  static func schedule() {
     let request = BGProcessingTaskRequest(identifier: identifier)
     request.requiresNetworkConnectivity = true
     request.requiresExternalPower = false
-    request.earliestBeginDate = ScheduleTimes.date(ms: dueAtMs)
     try? BGTaskScheduler.shared.submit(request)
-  }
-
-  static func cancel() {
-    BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
   }
 }

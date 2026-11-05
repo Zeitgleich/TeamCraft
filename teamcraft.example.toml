@@ -214,6 +214,8 @@ max_mls_payload_bytes = 1048576
 max_welcomes_per_commit = 500
 # Encrypted key bag and wrapped backup keys of one user.
 max_key_bag_bytes = 1048576
+# How often held messages are checked: a scheduled message goes out at most this late.
+scheduled_release_interval_secs = 5
 # One signed device list.
 max_device_list_bytes = 65536
 # Active devices per user.
@@ -557,6 +559,10 @@ test_interval_secs = 10
 max_rings_per_minute = 10
 # Withdrawals ("read elsewhere") for one conversation within this time go out as one.
 dismiss_coalesce_ms = 3000
+# A burst of commits within this time makes one wake to seal scheduled messages again, and there is at
+# most one such wake per user and conversation per interval (docs/scheduled-messages.md).
+scheduled_wake_coalesce_ms = 10000
+scheduled_wake_min_interval_secs = 300
 request_timeout_secs = 10
 # Per pool: APNs/FCM share one, Web Push/UnifiedPush (endpoints users chose) another.
 max_concurrent_sends = 32

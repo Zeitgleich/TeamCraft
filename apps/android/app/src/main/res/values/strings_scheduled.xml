@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
   <string name="schedule_heading">Send later</string>
-  <string name="schedule_online_hint">Goes out when one of your devices is online at or after this time.</string>
+  <string name="schedule_online_hint">Goes out on time, even with your devices off, unless the group changes and all your devices stay off.</string>
   <string name="schedule_write_first">Write something first.</string>
   <string name="schedule_no_files">Messages with files can\'t wait yet: send them now.</string>
   <string name="schedule_in_one_hour">In 1 hour</string>
@@ -9,20 +9,23 @@
   <string name="schedule_monday">Monday morning</string>
   <string name="schedule_custom_label">Send at</string>
   <string name="schedule_confirm">Schedule</string>
-  <string name="schedule_done">Scheduled. It goes out when one of your devices is online then or later.</string>
+  <string name="schedule_done">Scheduled.</string>
   <string name="schedule_error_empty">Write something first.</string>
-  <string name="schedule_error_long">A scheduled message can have at most 8 KiB of text.</string>
   <string name="schedule_error_past">Pick a time in the future.</string>
   <string name="schedule_error_far">That is further ahead than your workspace allows.</string>
   <string name="scheduled_title">Scheduled messages</string>
-  <string name="scheduled_note">Your own devices keep these, encrypted. A message goes out when one of them is online at or after its time, so if all are off it waits for the first one back. This phone tries in the background, but Android may delay it.</string>
+  <string name="scheduled_note">The server keeps these, encrypted, and sends them on time, even with your devices off. If the group changes (someone joins or leaves), this phone updates the encryption in the background; only if that fails and all your devices stay off does a message wait for one to come back. Android can delay this.</string>
   <string name="scheduled_empty">Nothing scheduled. Use \"Send later\" behind the + in the composer.</string>
   <string name="scheduled_unknown_conversation">Unknown conversation</string>
   <string name="scheduled_status_waiting">Waiting for its time.</string>
-  <string name="scheduled_status_due">Due: goes out as soon as one of your devices is online.</string>
-  <string name="scheduled_status_missed">Its time passed long ago while your devices were off. It may be out of date, so it stays here until you decide.</string>
+  <string name="scheduled_status_needs_sealing">The group changed. One of your devices updates the encryption by itself; it goes out on time if one does in time.</string>
+  <string name="scheduled_status_stale">Late: the group changed and none of your devices got to it. It goes out as soon as one does.</string>
+  <string name="scheduled_status_not_a_member">You\'re no longer in this conversation, so it won\'t go out.</string>
+  <string name="scheduled_status_no_permission">You may no longer post in this conversation, so it didn\'t go out.</string>
+  <string name="scheduled_status_conversation_gone">This conversation was deleted, so it won\'t go out.</string>
+  <string name="scheduled_status_thread_gone">The thread it answers is gone, so it didn\'t go out.</string>
+  <string name="scheduled_status_unreadable">This device can\'t read it yet. It still goes out.</string>
   <string name="scheduled_status_policy_off">Your workspace turned scheduling off. It stays here until you send or cancel it.</string>
-  <string name="scheduled_status_unavailable">This device can\'t reach that conversation. You may have left it.</string>
   <string name="scheduled_status_unknown">Your app can\'t tell what happens to this message. Update it.</string>
   <string name="scheduled_send_now">Send now</string>
   <string name="scheduled_edit">Edit</string>

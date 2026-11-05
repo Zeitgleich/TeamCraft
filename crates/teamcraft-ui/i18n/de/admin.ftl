@@ -918,12 +918,8 @@ roster-signing-awaiting-owner = Der Identity Provider macht dich zum Eigentümer
 roster-standing-expired-ask-unnamed = Seit 30 Tagen hat kein Eigentümer die Admin-Liste signiert, daher ruhen die Admin-Rechte in allen Apps. Ein Eigentümer muss nur TeamCraft auf einem Gerät mit seinen Schlüsseln öffnen.
 
 policy-scheduled = Geplante Nachrichten
-policy-scheduled-hint = Die eigenen Geräte jeder Person heben sie verschlüsselt auf, der Server kann sie weder sehen noch durchsetzen. Die Apps wenden diese signierte Regel an.
+policy-scheduled-hint = Der Server hebt sie verschlüsselt auf und gibt sie zu ihrer Zeit frei, egal ob die Geräte der Verfassenden an sind. Er setzt diese Regel durch.
 policy-scheduled-enabled = Nachrichten dürfen geplant werden
-policy-scheduled-enabled-hint = Aus: „Später senden“ verschwindet, und schon geplante Nachrichten warten, bis ihre Besitzer sie senden oder verwerfen.
+policy-scheduled-enabled-hint = Aus: „Später senden“ verschwindet, und schon geplante Nachrichten gehen nicht von selbst raus: Sie warten, bis ihre Besitzer sie senden oder verwerfen.
 policy-scheduled-horizon = Wie weit im Voraus
-policy-scheduled-late = Noch von selbst senden bei Verspätung bis
-policy-hours = { $count ->
-    [one] 1 Stunde
-   *[other] { $count } Stunden
-}
+policy-scheduled-cap = Wartende Nachrichten pro Person

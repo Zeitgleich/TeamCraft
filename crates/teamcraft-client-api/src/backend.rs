@@ -10,9 +10,9 @@ use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
   AdminMailSettingsResponse, AnnouncementResponse, AttachmentId, BackgroundId, BrandAssetSlot, CategoryId,
-  ChannelModeration, ClientMessageId, CreateBrandRequest, HistoryPolicy, OrgBackgroundId,
-  PermissionSchemeResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection,
-  SchemeChange, SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest,
+  ChannelModeration, CreateBrandRequest, HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role,
+  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, ScheduledMessageId, SchemeChange,
+  SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest,
   UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
@@ -547,10 +547,10 @@ pub trait ChatBackend {
   /// Keeps a message for `due_at` (server time). The caller checked [`crate::scheduled::ScheduleCheck`].
   fn schedule_message(&self, _message: OutgoingMessage, _due_at: TimestampMs) {}
   /// Changes the text and time of a waiting message.
-  fn update_scheduled(&self, _id: ClientMessageId, _body: &str, _due_at: TimestampMs) {}
-  fn cancel_scheduled(&self, _id: ClientMessageId) {}
+  fn update_scheduled(&self, _id: ScheduledMessageId, _body: &str, _due_at: TimestampMs) {}
+  fn cancel_scheduled(&self, _id: ScheduledMessageId) {}
   /// Sends a waiting message now, whatever its time and status: the user decided.
-  fn send_scheduled_now(&self, _id: ClientMessageId) {}
+  fn send_scheduled_now(&self, _id: ScheduledMessageId) {}
   /// Starts (or finds) the direct conversation with a person; it shows up in the lists when ready.
   fn open_dm(&self, _user: UserId) {}
   /// Starts (or finds) the group DM with exactly these people and the user.

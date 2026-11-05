@@ -169,7 +169,7 @@ impl ApnsSender {
     let sealed = URL_SAFE_NO_PAD.encode(&message.sealed);
     let until_ttl = now.saturating_add(message.ttl.as_secs()).to_string();
     let (push_type, topic, priority, expiration, body) = match message.kind {
-      PushKind::Dismiss => (
+      PushKind::Dismiss | PushKind::ScheduledSeal => (
         "background",
         self.bundle_id.clone(),
         "5",

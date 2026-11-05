@@ -11534,13 +11534,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Goes out when one of your devices is online at or after this time."
+            "value": "Goes out on time, even with your devices off, unless the group changes and all your devices stay off."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Geht raus, sobald eines deiner Geräte zu dieser Zeit oder danach online ist."
+            "value": "Geht pünktlich raus, auch wenn deine Geräte aus sind, außer die Gruppe ändert sich und alle deine Geräte bleiben aus."
           }
         }
       }
@@ -11641,22 +11641,6 @@
         }
       }
     },
-    "schedule_error_long": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "A scheduled message can have at most 8 KiB of text."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Eine geplante Nachricht darf höchstens 8 KiB Text haben."
-          }
-        }
-      }
-    },
     "schedule_error_past": {
       "localizations": {
         "en": {
@@ -11726,13 +11710,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Your own devices keep these, encrypted. A message goes out when one of them is online at or after its time, so if all are off it waits for the first one back. This phone tries in the background, but iOS may delay it or not run it at all."
+            "value": "The server keeps these, encrypted, and sends them on time, even with your devices off. If the group changes (someone joins or leaves), a device of yours must update the encryption first. This iPhone tries in the background, but iOS may delay it or skip it; then a message waits for one of your devices."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Deine eigenen Geräte heben sie verschlüsselt auf. Eine Nachricht geht raus, sobald eines davon zu ihrer Zeit oder danach online ist; sind alle aus, wartet sie auf das erste, das zurückkommt. Dieses Telefon versucht es im Hintergrund, iOS kann das aber verzögern oder ganz auslassen."
+            "value": "Der Server hebt sie verschlüsselt auf und sendet sie pünktlich, auch wenn deine Geräte aus sind. Ändert sich die Gruppe (jemand kommt dazu oder geht), muss zuerst eines deiner Geräte die Verschlüsselung erneuern. Dieses iPhone versucht das im Hintergrund, iOS kann es aber verzögern oder auslassen; dann wartet eine Nachricht auf eines deiner Geräte."
           }
         }
       }
@@ -11774,45 +11758,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Waiting for its time."
+            "value": "Goes out on time."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Wartet auf ihre Zeit."
-          }
-        }
-      }
-    },
-    "scheduled_status_due": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Due: goes out as soon as one of your devices is online."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Fällig: Geht raus, sobald eines deiner Geräte online ist."
-          }
-        }
-      }
-    },
-    "scheduled_status_missed": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Its time passed long ago while your devices were off. It may be out of date, so it stays here until you decide."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ihre Zeit ist lange vorbei, deine Geräte waren aus. Sie könnte veraltet sein und bleibt deshalb hier, bis du entscheidest."
+            "value": "Geht pünktlich raus."
           }
         }
       }
@@ -11829,22 +11781,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Dein Workspace hat geplante Nachrichten abgeschaltet. Sie bleibt hier, bis du sie sendest oder verwirfst."
-          }
-        }
-      }
-    },
-    "scheduled_status_unavailable": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This device can't reach that conversation. You may have left it."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Dieses Gerät erreicht diese Unterhaltung nicht. Vielleicht hast du sie verlassen."
           }
         }
       }
@@ -12005,6 +11941,118 @@
           "stringUnit": {
             "state": "translated",
             "value": "Eine geplante Nachricht braucht dich"
+          }
+        }
+      }
+    },
+    "scheduled_status_needs_sealing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The group changed. One of your devices updates the encryption by itself; it goes out on time if one does in time."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Gruppe hat sich geändert. Eines deiner Geräte erneuert die Verschlüsselung von selbst; schafft es das rechtzeitig, geht sie pünktlich raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_stale": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Late: the group changed and none of your devices got to it. It goes out as soon as one does."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verspätet: Die Gruppe hat sich geändert, und keines deiner Geräte kam dazu. Sie geht raus, sobald eines es tut."
+          }
+        }
+      }
+    },
+    "scheduled_status_not_a_member": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You're no longer in this conversation, so it won't go out."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du bist nicht mehr in dieser Unterhaltung, deshalb geht sie nicht raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_no_permission": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You may no longer post in this conversation, so it didn't go out."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du darfst hier nicht mehr schreiben, deshalb ging sie nicht raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_conversation_gone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This conversation was deleted, so it won't go out."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Unterhaltung wurde gelöscht, deshalb geht sie nicht raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_thread_gone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The thread it answers is gone, so it didn't go out."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Den Thread, auf den sie antwortet, gibt es nicht mehr, deshalb ging sie nicht raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_unreadable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device can't read it yet. It still goes out."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät kann sie noch nicht lesen. Sie geht trotzdem raus."
           }
         }
       }
