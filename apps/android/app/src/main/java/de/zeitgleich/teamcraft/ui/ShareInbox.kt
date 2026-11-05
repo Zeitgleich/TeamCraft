@@ -3,7 +3,18 @@ package de.zeitgleich.teamcraft.ui
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.security.MessageDigest
 import java.util.UUID
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -14,6 +25,15 @@ private const val SHARE_KEPT_MS = 7L * 24 * 60 * 60 * 1000
 private const val UNFINISHED_KEPT_MS = 60L * 60 * 1000
 
 private const val LIST_FILE = "share.json"
+
+/** Who signed in last; a share waits through a session that ran out, for them only. */
+private const val OWNER_FILE = "owner"
+
+/**
+ * How long a sign-out or a discard waits for a copy to stop. Cancelling can't interrupt a provider
+ * blocked in a read or a query: such a copy finds out later, and leaves nothing ([ShareInbox.stage]).
+ */
+const val SHARE_COPY_STOP_TIMEOUT_MS = 2_000L
 
 /** Shares that may wait at once; a further one can't be kept. */
 const val MAX_WAITING_SHARES = 5
@@ -35,6 +55,8 @@ data class StagedShare(
   /** Files that couldn't be taken: too many, too large, unreadable or not another app's. */
   val leftOut: Int,
   val maybeTarget: String? = null,
+  /** Identifies what was shared: the same intent delivered again doesn't make a second share. */
+  val sourceKey: String = "",
 ) {
   val isEmpty: Boolean get() = text.isBlank() && files.isEmpty()
 }
@@ -77,7 +99,11 @@ class ShareInbox(
     nowMs: Long,
     isCancelled: () -> Boolean = { false },
   ): ShareStageResult {
-    if (folders().count { read(it) != null } >= maxShares) return ShareStageResult.Failed
+    if (isCancelled()) return ShareStageResult.Cancelled
+    val sourceKey = sourceKeyOf(content)
+    val waiting = folders().mapNotNull(::read)
+    waiting.firstOrNull { it.sourceKey == sourceKey }?.let { return ShareStageResult.Stored(it) }
+    if (waiting.size >= maxShares) return ShareStageResult.Failed
     // The time first, so the folders sort by age.
     val id = "${nowMs.toString().padStart(16, '0')}-${UUID.randomUUID()}"
     val folder = File(root, id)
@@ -102,8 +128,14 @@ class ShareInbox(
         files = files,
         leftOut = content.leftOut + sources.size - files.size,
         maybeTarget = content.maybeTarget,
+        sourceKey = sourceKey,
       )
       writeList(folder, share)
+      // A cancel while the list went out: whoever cancelled may already have wiped and moved on.
+      if (isCancelled()) {
+        folder.deleteRecursively()
+        return ShareStageResult.Cancelled
+      }
       ShareStageResult.Stored(share)
     } catch (_: IOException) {
       folder.deleteRecursively()
@@ -141,6 +173,24 @@ class ShareInbox(
     root.deleteRecursively()
   }
 
+  /**
+   * [userId] signed in. What waits from before goes if somebody else signed in last: they would see
+   * another person's plaintext. Answers whether a share went that way. After a [wipe] (the user signed
+   * out) nobody is the owner, so what is shared until the next sign-in stays for whoever that is.
+   */
+  fun claim(userId: String): Boolean {
+    val owner = File(root, OWNER_FILE)
+    val maybeOwner = runCatching { owner.readText() }.getOrNull()
+    val isOther = maybeOwner != null && maybeOwner != userId
+    val hadShare = isOther && folders().any { read(it) != null }
+    if (isOther) wipe()
+    runCatching {
+      root.mkdirs()
+      owner.writeText(userId)
+    }
+    return hadShare
+  }
+
   /** Drops shares past their time and copies that were cut short. */
   fun prune(nowMs: Long) {
     for (folder in folders()) {
@@ -155,6 +205,12 @@ class ShareInbox(
 
   private fun read(folder: File): StagedShare? =
     runCatching { json.decodeFromString(StagedShare.serializer(), File(folder, LIST_FILE).readText()) }.getOrNull()
+
+  private fun sourceKeyOf(content: SharedContent): String {
+    val source = (content.uris.map { it.toString() } + content.text + content.maybeTarget.orEmpty()).joinToString("\n")
+    val digest = MessageDigest.getInstance("SHA-256").digest(source.toByteArray())
+    return digest.joinToString("") { "%02x".format(it) }
+  }
 
   private fun fileOf(id: String, file: StagedShareFile): File = File(File(root, id), file.storedAs)
 
@@ -183,4 +239,81 @@ class ShareInbox(
     }
     return StagedShareFile(source.name, source.mediaType, storedAs)
   }
+}
+
+/**
+ * Takes shares for all of the app's activities, on the process's scope: an activity that finishes
+ * doesn't end a copy, only a discard or a sign-out does.
+ */
+class ShareReceiver(root: File, maxFileBytes: Long, private val scope: CoroutineScope) {
+  val inbox = ShareInbox(root, maxFileBytes)
+  private val copies = ArrayList<Copy>()
+  private val handedOver = HashSet<String>()
+  private val changeCount = MutableStateFlow(0L)
+  private val failure = MutableStateFlow(false)
+
+  /** Goes up when a copy ended: the inbox may look different. */
+  val changes: StateFlow<Long> = changeCount
+
+  /** A share couldn't be kept (full disk, too many waiting); the user has to be told. */
+  val hasFailed: StateFlow<Boolean> = failure
+
+  val isCopying: Boolean get() = synchronized(copies) { copies.any { it.job.isActive } }
+
+  fun isCopying(content: SharedContent): Boolean =
+    synchronized(copies) { copies.any { it.content == content && it.job.isActive } }
+
+  fun failureShown() {
+    failure.value = false
+  }
+
+  /** Copies [content] into the inbox unless that is under way already; [sources] may block. */
+  fun receive(content: SharedContent, sources: () -> List<ShareSource>) {
+    synchronized(copies) {
+      if (copies.any { it.content == content && it.job.isActive }) return
+      copies.removeAll { !it.job.isActive }
+      val maybePrevious = copies.lastOrNull()?.job
+      val job = scope.launch(Dispatchers.IO) {
+        maybePrevious?.join()
+        val copy = currentCoroutineContext()[Job]
+        val isCancelled = { copy?.isActive == false }
+        if (isCancelled()) return@launch
+        val result = inbox.stage(content, sources(), System.currentTimeMillis(), isCancelled)
+        if (result is ShareStageResult.Failed) failure.value = true
+      }
+      job.invokeOnCompletion { changeCount.update { it + 1 } }
+      copies.add(Copy(content, job))
+    }
+  }
+
+  /**
+   * Stops every copy, waiting at most [timeoutMs]: a provider blocked in a read can't be interrupted,
+   * and a sign-out must not hang on it. A late copy sees the cancellation and leaves nothing behind.
+   */
+  suspend fun stopCopies(timeoutMs: Long = SHARE_COPY_STOP_TIMEOUT_MS) {
+    val jobs = synchronized(copies) {
+      val running = copies.map { it.job }
+      copies.clear()
+      running
+    }
+    jobs.forEach { it.cancel() }
+    withTimeoutOrNull(timeoutMs) { jobs.joinAll() }
+  }
+
+  /** The oldest share not on its way into a composer. */
+  fun next(): StagedShare? = inbox.oldest(except = synchronized(handedOver) { handedOver.toSet() })
+
+  fun handOver(share: StagedShare) {
+    synchronized(handedOver) { handedOver.add(share.id) }
+  }
+
+  fun finished(share: StagedShare) {
+    synchronized(handedOver) { handedOver.remove(share.id) }
+  }
+
+  fun forgetHandedOver() {
+    synchronized(handedOver) { handedOver.clear() }
+  }
+
+  private class Copy(val content: SharedContent, val job: Job)
 }

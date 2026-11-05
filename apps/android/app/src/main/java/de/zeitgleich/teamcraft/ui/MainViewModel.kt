@@ -17,8 +17,6 @@ import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
 import androidx.compose.runtime.mutableStateMapOf
@@ -142,25 +140,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val graph = TeamCraftApplication.graph(application)
   private val state = MutableStateFlow<AppState>(AppState.Starting)
   private val busy = MutableStateFlow(false)
-  private val shareInbox = ShareInbox(File(application.noBackupFilesDir, "share-inbox"), MAX_IMPORT_BYTES)
+  private val shares = graph.shares
   private val shareState = MutableStateFlow<ShareState?>(null)
-  /** Shares on their way into a composer; they leave the inbox once it has their files. */
-  private val handedOverShares = HashSet<String>()
-  private val shareCopies = ArrayList<Job>()
-  private var shareBeingCopied: SharedContent? = null
-  private val shareFailure = MutableStateFlow(false)
+  private val shareOfOtherAccount = MutableStateFlow(false)
 
   /** A share couldn't be kept (full disk, too many waiting); the user has to be told. */
-  val hasShareFailed: StateFlow<Boolean> = shareFailure
+  val hasShareFailed: StateFlow<Boolean> = shares.hasFailed
+
+  /** A share from before the sign-in went: it was kept for the person signed in before. */
+  val hasShareGoneForAccount: StateFlow<Boolean> = shareOfOtherAccount
 
   /** What another app shared, until the user picked a conversation or discarded it (issue #208). */
   val share: StateFlow<ShareState?> = shareState
 
-  /** A copy under way must start over if the process is killed: its intent is not yet used up. */
-  val isCopyingShare: Boolean get() = shareCopies.any { it.isActive }
+  /** A copy of [content] under way must start over if the process is killed: its intent isn't used up. */
+  fun isCopyingShare(content: SharedContent): Boolean = shares.isCopying(content)
 
   fun shareFailureShown() {
-    shareFailure.value = false
+    shares.failureShown()
+  }
+
+  fun shareGoneForAccountShown() {
+    shareOfOtherAccount.value = false
   }
 
   val appState: StateFlow<AppState> = state
@@ -236,8 +237,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   init {
     // What waited when the process ended comes back; what is past its time goes.
     viewModelScope.launch {
-      withContext(Dispatchers.IO) { shareInbox.prune(System.currentTimeMillis()) }
-      refreshShare()
+      withContext(Dispatchers.IO) { shares.inbox.prune(System.currentTimeMillis()) }
+      // Also what a copy started by an activity that is gone leaves.
+      shares.changes.collect { refreshShare() }
     }
   }
 
@@ -767,41 +769,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * The same content again (a rotation while it is copied) is not copied twice.
    */
   fun receiveShare(content: SharedContent) {
-    if (isCopyingShare && shareBeingCopied == content) return
-    shareCopies.removeAll { !it.isActive }
-    val maybePrevious = shareCopies.lastOrNull()
-    shareBeingCopied = content
     if (shareState.value == null) shareState.value = ShareState.Preparing
-    shareCopies += viewModelScope.launch {
-      maybePrevious?.join()
-      val copy = currentCoroutineContext()[Job]
-      val result = withContext(Dispatchers.IO) {
-        shareInbox.stage(content, shareSources(content), System.currentTimeMillis()) { copy?.isActive == false }
-      }
-      if (result is ShareStageResult.Failed) shareFailure.value = true
-      refreshShare()
-    }
+    shares.receive(content) { shareSources(content) }
   }
 
   /** The waiting share goes without a conversation: the user said so. */
   fun discardShare() {
     val maybeId = (shareState.value as? ShareState.Ready)?.share?.id
     viewModelScope.launch {
-      if (maybeId == null) cancelShareCopies()
-      maybeId?.let { id -> withContext(Dispatchers.IO) { shareInbox.delete(id) } }
+      if (maybeId == null) shares.stopCopies()
+      maybeId?.let { id -> withContext(Dispatchers.IO) { shares.inbox.delete(id) } }
       refreshShare()
     }
   }
 
   /** The user picked a conversation: its composer takes over ([finishShare]). */
   fun handOverShare(share: StagedShare) {
-    handedOverShares.add(share.id)
+    shares.handOver(share)
     viewModelScope.launch { refreshShare() }
   }
 
   /** Moves a shared file into the core's staging folder; `null` when that fails. */
   suspend fun importSharedFile(share: StagedShare, file: StagedShareFile): PickedFile? = withContext(Dispatchers.IO) {
-    val source = shareInbox.fileOf(share, file)
+    val source = shares.inbox.fileOf(share, file)
     val name = cleanFileName(file.name).ifBlank { "file" }
     val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
     val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
@@ -815,34 +805,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** The composer has the share: it leaves the inbox, except [failed] files, which wait for a retry. */
   suspend fun finishShare(share: StagedShare, failed: List<StagedShareFile>) {
     withContext(Dispatchers.IO) {
-      if (failed.isEmpty()) shareInbox.delete(share.id) else shareInbox.keepOnly(share, failed)
+      if (failed.isEmpty()) shares.inbox.delete(share.id) else shares.inbox.keepOnly(share, failed)
     }
-    handedOverShares.remove(share.id)
+    shares.finished(share)
     refreshShare()
-  }
-
-  /** Stops copies and waits for them, so that nothing of theirs appears after what follows. */
-  private suspend fun cancelShareCopies() {
-    val copies = shareCopies.toList()
-    copies.forEach { it.cancel() }
-    copies.joinAll()
-    shareCopies.removeAll(copies)
   }
 
   /** What waits to be shared doesn't outlive the session on this device. */
   private suspend fun forgetWaitingShares() {
-    cancelShareCopies()
-    withContext(Dispatchers.IO) { shareInbox.wipe() }
-    handedOverShares.clear()
+    shares.stopCopies()
+    withContext(Dispatchers.IO) { shares.inbox.wipe() }
+    shares.forgetHandedOver()
     PendingShare.current.value = null
     shareState.value = null
   }
 
   private suspend fun refreshShare() {
-    val maybeNext = withContext(Dispatchers.IO) { shareInbox.oldest(except = handedOverShares) }
-    val maybeThisCopy = currentCoroutineContext()[Job]
-    val isCopyingAnother = shareCopies.any { it.isActive && it != maybeThisCopy }
-    shareState.value = maybeNext?.let { ShareState.Ready(it) } ?: ShareState.Preparing.takeIf { isCopyingAnother }
+    val maybeNext = withContext(Dispatchers.IO) { shares.next() }
+    shareState.value = maybeNext?.let { ShareState.Ready(it) } ?: ShareState.Preparing.takeIf { shares.isCopying }
   }
 
   /** The share's files, each checked and named like a picked file; others count as left out. */
@@ -1262,6 +1242,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   private suspend fun ready(account: AccountState): AppState {
     val ready = account as? AccountState.Ready ?: return AppState.NeedsEnrollment(hasExistingIdentity = true)
+    // Before anything of the app shows: a share left from a session that ran out isn't for somebody
+    // else signing in now.
+    if (withContext(Dispatchers.IO) { shares.inbox.claim(ready.userId) }) {
+      shareOfOtherAccount.value = true
+      refreshShare()
+    }
     // Also started on every foreground, which keeps trying and tells the user (issue #1142).
     runCatching { graph.core.core().start() }
       .onFailure { Log.w(TAG, "sync not started: ${it.javaClass.simpleName}") }
@@ -1321,7 +1307,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
  * Largest file the app copies in for sending. The server enforces its own (smaller) limit; this
  * only keeps a hostile or endless provider from filling the device.
  */
-private const val MAX_IMPORT_BYTES = 4L * 1024 * 1024 * 1024
+internal const val MAX_IMPORT_BYTES = 4L * 1024 * 1024 * 1024
 
 /** Copies `input` to `output`; false (and stops) once more than `maxBytes` arrived or on [isCancelled]. */
 internal fun copyAtMost(

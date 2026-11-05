@@ -1082,6 +1082,8 @@ internal fun Composer(
     val imported = taken.mapNotNull { (_, maybePicked) -> maybePicked }
     text = listOf(text, share.content.text).filter { it.isNotBlank() }.joinToString("\n")
     files = files + imported
+    // At once: when files failed the picker comes back right now, and the draft's pause never ends.
+    viewModel.act(ChatActions.setDraft(conversationId, maybeThread, text))
     val failedCount = failed.size
     if (failedCount > 0) {
       val failed = context.resources.getQuantityString(R.plurals.share_import_failed, failedCount, failedCount)

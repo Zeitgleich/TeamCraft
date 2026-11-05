@@ -91,6 +91,7 @@
   <string name="share_nothing">The other app sent nothing TeamCraft can read. Try sharing it again.</string>
   <string name="share_waiting">What you shared is kept on this device. Sign in or unlock to choose a conversation.</string>
   <string name="share_failed">What you shared could not be kept: the device is full or too much waits already. Choose a conversation for what waits, or free some space, and share it again.</string>
+  <string name="share_other_account">Something shared before this sign-in was removed: it was kept for the person signed in before you.</string>
   <string name="share_discard">Discard</string>
   <string name="share_recent">Recent</string>
   <string name="share_no_match">No conversation matches.</string>

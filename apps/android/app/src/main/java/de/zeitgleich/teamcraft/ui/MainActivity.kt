@@ -48,12 +48,16 @@ private const val SPLASH_MARK_SHARE = 88f / 288f
 
 /** Whether the share of the activity's intent is in the inbox (or was never there to take). */
 private const val KEY_SHARE_TAKEN = "share_taken"
+private const val KEY_OPEN_CONVERSATION = "open_conversation"
+private const val KEY_APP_LINK = "app_link"
 
 /** A [FragmentActivity] because the app lock's system prompt needs one. */
 class MainActivity : FragmentActivity() {
   private val viewModel: MainViewModel by viewModels()
   /** A conversation to open, from a notification tap. */
   private val openConversation = mutableStateOf<String?>(null)
+  /** The share of the intent this activity started with; the system hands that one back after a kill. */
+  private var startShare: SharedContent? = null
   /** A link the system handed over, until it was acted on (docs/app-links.md). */
   private val appLink = mutableStateOf<String?>(null)
   private val isLocked = mutableStateOf(false)
@@ -76,15 +80,25 @@ class MainActivity : FragmentActivity() {
     // Locked at a cold start; a rotation or a recreated activity keeps the unlocked state.
     isLocked.value = AppLockPrefs.prefs(this).isEnabled && !isUnlockedInProcess
     if (!isLocked.value) isUnlockedInProcess = true
-    // Not again when the activity is recreated: a kept intent was acted on.
-    if (savedInstanceState == null) openConversation.value = conversationToOpen(intent)
+    // Not again when the activity is recreated: a kept intent was acted on. What wasn't acted on yet
+    // comes from the saved state.
+    openConversation.value = when (savedInstanceState) {
+      null -> conversationToOpen(intent)
+      else -> savedInstanceState.getString(KEY_OPEN_CONVERSATION)
+    }
     // Not again when the activity is recreated with an intent already taken, nor when the system
     // starts it from the recent apps with the old share's intent; an unfinished copy starts over.
     val isShareTaken = savedInstanceState?.getBoolean(KEY_SHARE_TAKEN) == true ||
       intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
-    if (!isShareTaken) sharedContent(intent, packageName)?.let(viewModel::receiveShare)
+    if (!isShareTaken) {
+      startShare = sharedContent(intent, packageName)
+      startShare?.let(viewModel::receiveShare)
+    }
     // Not again when the activity is recreated with the same intent (a rotation): it was acted on.
-    if (savedInstanceState == null) appLink.value = appLinkOf(intent)
+    appLink.value = when (savedInstanceState) {
+      null -> appLinkOf(intent)
+      else -> savedInstanceState.getString(KEY_APP_LINK)
+    }
     setContent {
       // The server's brand colors the whole app (branding.md §5), not only the sign-in screen.
       val maybeBrand by viewModel.loginBrand.collectAsState()
@@ -97,6 +111,13 @@ class MainActivity : FragmentActivity() {
           if (hasShareFailed) {
             Toast.makeText(this@MainActivity, R.string.share_failed, Toast.LENGTH_LONG).show()
             viewModel.shareFailureShown()
+          }
+        }
+        val hasShareGone by viewModel.hasShareGoneForAccount.collectAsState()
+        LaunchedEffect(hasShareGone) {
+          if (hasShareGone) {
+            Toast.makeText(this@MainActivity, R.string.share_other_account, Toast.LENGTH_LONG).show()
+            viewModel.shareGoneForAccountShown()
           }
         }
         LaunchedEffect(isSettingUp) { keepUprightWhileSettingUp(isSettingUp) }
@@ -184,12 +205,16 @@ class MainActivity : FragmentActivity() {
 
   override fun onSaveInstanceState(outState: Bundle) {
     super.onSaveInstanceState(outState)
-    outState.putBoolean(KEY_SHARE_TAKEN, !viewModel.isCopyingShare)
+    // Only for the intent the system hands back after a kill: the one the activity started with.
+    outState.putBoolean(KEY_SHARE_TAKEN, startShare?.let(viewModel::isCopyingShare) != true)
+    outState.putString(KEY_OPEN_CONVERSATION, openConversation.value)
+    outState.putString(KEY_APP_LINK, appLink.value)
   }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
-    // A recreated activity must see this intent: a copy cut short by a kill starts over from it.
+    // For a configuration change. After a kill the system hands back the intent the activity started
+    // with, so a copy of this share cut short by a kill is lost (docs/robustness-audit.md).
     setIntent(intent)
     conversationToOpen(intent)?.let { openConversation.value = it }
     sharedContent(intent, packageName)?.let(viewModel::receiveShare)

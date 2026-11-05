@@ -2,7 +2,17 @@ package de.zeitgleich.teamcraft.ui
 
 import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.InputStream
 import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -131,9 +141,9 @@ class ShareInboxTest {
   @Test
   fun filesBeyondTheInboxsBytesAreLeftOut() {
     val small = ShareInbox(root, maxFileBytes = 1000, maxTotalBytes = 1000)
-    small.stage(content(""), listOf(source("first", ByteArray(600))), NOW_MS)
+    small.stage(content("first"), listOf(source("first", ByteArray(600))), NOW_MS)
     val result = small.stage(
-      content(""),
+      content("second"),
       // What is left is 400 bytes less the first share's list.
       listOf(source("too much", ByteArray(400)), source("fits", ByteArray(100))),
       NOW_MS + 1,
@@ -163,6 +173,86 @@ class ShareInboxTest {
     assertEquals(listOf("b"), kept.files.map { it.name })
     assertEquals("", kept.text)
     assertNull(kept.maybeTarget)
+  }
+
+  @Test
+  fun aBlockedCopyDoesntHoldUpTheStopAndLeavesNothingWhenItEnds() = runBlocking {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val receiver = ShareReceiver(root, maxFileBytes = 1000, scope)
+    val isReading = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    val blocked = object : InputStream() {
+      override fun read(): Int = throw AssertionError("reads arrays")
+
+      override fun read(buffer: ByteArray): Int {
+        isReading.countDown()
+        release.await()
+        return 1
+      }
+    }
+    receiver.receive(content("text")) { listOf(ShareSource("a", "text/plain") { blocked }) }
+    val copy = scope.coroutineContext[Job]!!.children.single()
+    assertTrue(isReading.await(10, TimeUnit.SECONDS))
+
+    withTimeout(10_000) { receiver.stopCopies(timeoutMs = 1) }
+    receiver.inbox.wipe()
+    assertTrue("still blocked in the provider", copy.isActive || copy.isCancelled)
+    release.countDown()
+    copy.join()
+
+    assertNull(receiver.inbox.oldest())
+    assertEquals(0, root.listFiles().orEmpty().size)
+    scope.cancel()
+  }
+
+  @Test
+  fun aCopyBlockedBeforeItBeganNeverStarts() = runBlocking {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val receiver = ShareReceiver(root, maxFileBytes = 1000, scope)
+    val isAsking = CountDownLatch(1)
+    val release = CountDownLatch(1)
+    // A provider stuck in `query`, before the copy has its list of files.
+    receiver.receive(content("text")) {
+      isAsking.countDown()
+      release.await()
+      emptyList()
+    }
+    val copy = scope.coroutineContext[Job]!!.children.single()
+    assertTrue(isAsking.await(10, TimeUnit.SECONDS))
+    receiver.stopCopies(timeoutMs = 1)
+    release.countDown()
+    copy.join()
+    assertEquals(0, root.listFiles().orEmpty().size)
+    scope.cancel()
+  }
+
+  @Test
+  fun theSameShareDeliveredAgainIsOfferedOnce() {
+    val first = stored(content("same"), emptyList(), NOW_MS)
+    val again = stored(content("same"), emptyList(), NOW_MS + 1)
+    assertEquals(first.id, again.id)
+    assertEquals(1, root.listFiles()!!.size)
+  }
+
+  @Test
+  fun aShareStaysForTheSamePersonAndGoesForAnother() {
+    assertFalse("nobody signed in before", inbox.claim("1"))
+    stored(content("mine"), emptyList(), NOW_MS)
+    assertFalse(inbox.claim("1"))
+    assertEquals("mine", inbox.oldest()?.text)
+
+    assertTrue(inbox.claim("2"))
+    assertNull(inbox.oldest())
+    assertFalse("nothing left to lose", inbox.claim("3"))
+  }
+
+  @Test
+  fun afterASignOutNobodyOwnsWhatIsSharedNext() {
+    inbox.claim("1")
+    inbox.wipe()
+    stored(content("shared while signed out"), emptyList(), NOW_MS)
+    assertFalse(inbox.claim("2"))
+    assertEquals("shared while signed out", inbox.oldest()?.text)
   }
 
   private fun stored(content: SharedContent, sources: List<ShareSource>, nowMs: Long): StagedShare =
