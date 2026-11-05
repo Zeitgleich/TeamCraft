@@ -287,7 +287,7 @@ fn Sources(conversation: ConversationId, has_bot: Signal<bool>) -> impl IntoView
   view! {
     <h3 class="detail-heading">{move || i18n.t("channel-sources")}</h3>
     <ul class="settings-member-list">
-      <For each=move || sources.get() key=|source| source.id let:source>
+      <For each=move || sources.get() key=|source| (source.id, source.name.clone(), source.maybe_picture_sha256) let:source>
         <SourceRow conversation=conversation source=source can_manage=can_manage />
       </For>
     </ul>
@@ -406,7 +406,7 @@ fn SourceRow(
       </span>
       <span class="badge">{move || i18n.t(kind_key)}</span>
       <Show when=move || can_manage.get() && !is_renaming.get() fallback=|| ()>
-        <button type="button" class="btn btn-small btn-quiet" on:click=move |_| is_renaming.set(true)>
+        <button type="button" class="btn btn-small" on:click=move |_| is_renaming.set(true)>
           {move || i18n.t("channel-sources-rename")}
         </button>
       </Show>
@@ -592,7 +592,7 @@ fn SourcePicture(conversation: ConversationId, source: SourceId, has_picture: bo
       aria-invalid=move || has_error().then_some("true")
       aria-describedby=move || has_error().then(|| described.clone())
     >
-      <label class="btn btn-small btn-quiet">
+      <label class="btn btn-small">
         <Icon name=IconName::Camera />
         <span>{move || i18n.t(if has_picture { "channel-sources-picture-change" } else { "channel-sources-picture-set" })}</span>
         <input type="file" class="visually-hidden" accept="image/png,image/jpeg,image/webp" on:change=pick />
