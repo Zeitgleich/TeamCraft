@@ -1622,6 +1622,63 @@ mod admitters {
     rig.app.stop().await;
   }
 
+  #[tokio::test]
+  async fn the_meeting_list_marks_the_meetings_whose_lobby_the_caller_hosts() {
+    let rig = rig!();
+    let app = &rig.app;
+    let (alice, bob) = (owner(), member("bob"));
+    let (meeting, chat) = rig.meeting_with(&alice, &bob, true).await;
+    let listed = |user: TestUser| {
+      let (app, meeting) = (&rig.app, meeting.clone());
+      async move {
+        let list = app.get(&user, &format!("/meetings?from={STARTS_AT}")).await;
+        assert_eq!(list.status, StatusCode::OK, "{}", list.body);
+        let entry = list.body["meetings"]
+          .as_array()
+          .unwrap()
+          .iter()
+          .find(|entry| entry["id"] == meeting.as_str())
+          .cloned()
+          .unwrap();
+        let lobby = app.get(&user, &format!("/meetings/{meeting}/lobby")).await;
+        (entry["can_host_lobby"].clone(), lobby)
+      }
+    };
+
+    // The organizer hosts; a member of a meeting with a lobby doesn't, and the field is left out.
+    let (flag, lobby) = listed(alice.clone()).await;
+    assert_eq!(flag, true);
+    assert_eq!(lobby.body["is_host"], true);
+    let (flag, lobby) = listed(bob.clone()).await;
+    assert_eq!(flag, Value::Null);
+    assert_eq!(lobby.status, StatusCode::FORBIDDEN);
+
+    // Made chat admin, Bob hosts the lobby too, as the lobby itself says.
+    let bob_id = user_id(app, &bob).await;
+    teamcraft_db::testing::sqlx::query(
+      "UPDATE memberships SET role = 'admin' WHERE conversation_id = $1 AND user_id = $2",
+    )
+    .bind(chat.parse::<i64>().unwrap())
+    .bind(bob_id.parse::<i64>().unwrap())
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+    let (flag, lobby) = listed(bob.clone()).await;
+    assert_eq!(flag, true);
+    assert_eq!(lobby.body["is_host"], true);
+
+    // A cancelled meeting has no lobby to host.
+    assert_eq!(
+      app.delete(&alice, &format!("/meetings/{meeting}")).await.status,
+      StatusCode::OK
+    );
+    for user in [alice, bob] {
+      let (flag, _) = listed(user).await;
+      assert_eq!(flag, Value::Null);
+    }
+    rig.app.stop().await;
+  }
+
   impl Rig {
     /// Schedules a meeting of `organizer` with `invitee` and returns (meeting id, chat id).
     async fn meeting_with(

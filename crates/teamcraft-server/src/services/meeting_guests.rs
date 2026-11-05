@@ -7,12 +7,14 @@
 //! nothing and can see nothing. Members who open the meeting's link without being in its chat knock
 //! the same way and wait in the same lobby.
 
+use std::collections::HashSet;
+
 use teamcraft_crypto::meeting_link::is_meeting_link_token;
 use teamcraft_db::{LobbyRow, SharedInviteClaim, StoredMeeting, StoredMeetingInvite};
 use teamcraft_proto::{
-  CreateGuestLinkRequest, GatewayEvent, GuestDeviceReadyRequest, GuestLinkResponse, JoinMeetingRequest,
-  JoinMeetingResponse, KnockByLinkResponse, ListLobbyResponse, LobbyEntry, LobbyState, LobbyStateResponse,
-  MeetingId, MeetingInviteId, MeetingStatus, UserId, UserKind,
+  ChannelRole, ConversationId, CreateGuestLinkRequest, GatewayEvent, GuestDeviceReadyRequest,
+  GuestLinkResponse, JoinMeetingRequest, JoinMeetingResponse, KnockByLinkResponse, ListLobbyResponse,
+  LobbyEntry, LobbyState, LobbyStateResponse, MeetingId, MeetingInviteId, MeetingStatus, UserId, UserKind,
 };
 use time::OffsetDateTime;
 
@@ -777,25 +779,54 @@ async fn host_meeting(
     .get_meeting(id)
     .await?
     .ok_or_else(ApiError::meeting_not_found)?;
-  let members = state
+  let Some(role) = state
     .database
-    .conversation_member_ids(meeting.conversation)
-    .await?;
-  if !members.contains(&caller.user.id) {
-    return Err(ApiError::meeting_not_found());
-  }
-  if !state
-    .database
-    .meeting_host_ids(&meeting)
+    .member_roles(caller.user.id, &[meeting.conversation])
     .await?
-    .contains(&caller.user.id)
-  {
+    .remove(&meeting.conversation)
+  else {
+    return Err(ApiError::meeting_not_found());
+  };
+  if !is_meeting_host(&meeting, caller.user.id, &role) {
     return Err(ApiError::Forbidden("only hosts can do that".into()));
   }
   if meeting.status != MeetingStatus::Scheduled.as_str() {
     return Err(ApiError::Conflict("the meeting is not scheduled".into()));
   }
   Ok(meeting)
+}
+
+/// The meetings among `meetings` whose lobby the caller hosts, by the rule of [`host_meeting`]
+/// (`ListLobbyResponse::is_host`): in the meeting chat, organizer or chat admin, scheduled. One
+/// query for the whole meeting list, whose `can_host_lobby` it sets (#1305).
+pub async fn hosted_lobbies(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  meetings: &[StoredMeeting],
+) -> Result<HashSet<MeetingId>, ApiError> {
+  let conversations: Vec<ConversationId> = meetings.iter().map(|meeting| meeting.conversation).collect();
+  let roles = state
+    .database
+    .member_roles(caller.user.id, &conversations)
+    .await?;
+  Ok(
+    meetings
+      .iter()
+      .filter(|meeting| meeting.status == MeetingStatus::Scheduled.as_str())
+      .filter(|meeting| {
+        roles
+          .get(&meeting.conversation)
+          .is_some_and(|role| is_meeting_host(meeting, caller.user.id, role))
+      })
+      .map(|meeting| meeting.id)
+      .collect(),
+  )
+}
+
+/// Whether a member of the meeting chat with `role` there hosts the meeting: its organizer or a
+/// chat admin (`Database::meeting_host_ids`).
+fn is_meeting_host(meeting: &StoredMeeting, user: UserId, role: &ChannelRole) -> bool {
+  meeting.organizer == user || *role == ChannelRole::Admin
 }
 
 /// How the caller may act on a meeting's lobby.

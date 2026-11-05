@@ -258,9 +258,11 @@ pub async fn list_meetings(
   let mut zones: HashMap<UserId, Tz> = HashMap::new();
   // One query for the links of all listed meetings, one brand and key per organizer (#987 review).
   let mut links = LinkCache::for_meetings(state, &stored).await?;
+  let hosted = super::meeting_guests::hosted_lobbies(state, caller, &stored).await?;
   for meeting in &stored {
     let join_url = links.link(state, service, meeting).await?;
-    let response = respond_with_link(state, meeting, Vec::new(), join_url).await?;
+    let mut response = respond_with_link(state, meeting, Vec::new(), join_url).await?;
+    response.can_host_lobby = hosted.contains(&meeting.id);
     let Some(recurrence) = response.maybe_recurrence.clone() else {
       meetings.push(response);
       continue;
@@ -310,6 +312,7 @@ pub async fn list_meetings(
       if skipped.contains(&occurrence.starts_at_ms) {
         listed.status = MeetingStatus::Cancelled;
         listed.is_occurrence_cancelled = true;
+        listed.can_host_lobby = false;
       }
       meetings.push(listed);
     }
@@ -1699,6 +1702,7 @@ async fn respond_with_link(
       .as_deref()
       .and_then(parse_recurrence_rule),
     is_occurrence_cancelled: false,
+    can_host_lobby: false,
     attendees: attendees
       .iter()
       .map(|attendee| attendee_response(attendee, &names))
