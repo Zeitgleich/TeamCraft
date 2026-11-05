@@ -631,6 +631,9 @@ set in the console's security section; the server enforces them.
   or a later extension at the same moment stands. The general member
   update (`PATCH /spaces/{id}/members/{user}`), adding and inviting with an expiry keep to the same
   limits, and the update is audited the same way; only somebody without limit clears an expiry.
+- **Roles:** `invite_guest` covers a guest's own terms only. Making somebody a guest takes
+  `demote_to_guest` or managing the space's members (`manage_space_members`, so space admins can). A
+  guest made a member loses the expiry.
 - **Overview:** the guests tab of the console's users section lists every guest membership, soonest
   expiry first (`GET /admin/guests`), filtered by space, sponsor, expiring soon, no sponsor (none, or
   deactivated or deleted) and never signed in, with bulk extend and remove.
