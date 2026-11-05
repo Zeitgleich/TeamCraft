@@ -20,6 +20,9 @@ pub const MEDIUM_BELOW_PX: u32 = 1100;
 const KEYBOARD_MIN_HEIGHT_PX: f64 = 120.0;
 /// A page scale above this is pinch-zoomed.
 const ZOOMED_ABOVE: f64 = 1.01;
+/// With less than this much height above the keyboard (a phone on its side) a conversation's header
+/// and bars would push the composer off the screen; they make way while the keyboard is up (#1313).
+const SHORT_KEYBOARD_AREA_BELOW_PX: f64 = 320.0;
 
 /// The layouts the shell switches between, mirrored into `data-layout` on `<html>` for the CSS.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -242,6 +245,13 @@ pub fn rem_px() -> f64 {
 /// element with it) can come out shorter than the screen by up to the safe areas, on launch and
 /// after a rotation. There the shell gets the screen's height as `--vv-height`, so it reaches the
 /// bottom whatever the layout viewport says.
+///
+/// What a pinned shell really reaches is measured, not derived from `innerHeight` (#1313): a probe
+/// pinned like the shell tells where its bottom edge lies. Keyboard up, the bottom safe area is
+/// dropped, since the composer then sits on the keyboard, not on the home indicator. Keyboard down
+/// in a browser tab, a part of the shell's bottom that lies outside the visual viewport (Safari's
+/// toolbar floating over the page) goes into the bottom inset of pages without the tab bar, so the
+/// composer ends above it while the shell keeps reaching the edges.
 pub fn track_visual_viewport() {
   thread_local! {
     static IS_TRACKING: Cell<bool> = const { Cell::new(false) };
@@ -253,6 +263,7 @@ pub fn track_visual_viewport() {
   let Some(viewport) = web_sys::window().and_then(|window| window.visual_viewport()) else {
     return;
   };
+  let maybe_probe = pinned_probe();
   let apply = {
     let viewport = viewport.clone();
     move || {
@@ -272,14 +283,17 @@ pub fn track_visual_viewport() {
         .and_then(|window| window.inner_width().ok())
         .and_then(|width| width.as_f64())
         .unwrap_or_else(|| viewport.width());
-      let maybe_area = keyboard_free_area(
-        layout_height,
+      let maybe_pinned_bottom = maybe_probe
+        .as_ref()
+        .map(|probe| probe.get_bounding_client_rect().bottom());
+      let maybe_keyboard_area = keyboard_free_area(
+        pinned_height(maybe_pinned_bottom, layout_height),
         viewport.height(),
         viewport.offset_top(),
         viewport.scale(),
         is_text_field_focused(),
-      )
-      .or_else(|| {
+      );
+      let maybe_area = maybe_keyboard_area.or_else(|| {
         let (screen_width, screen_height) = screen_size()?;
         installed_screen_height(
           layout_width,
@@ -310,7 +324,23 @@ pub fn track_visual_viewport() {
         },
         None => style.remove_property("--vv-height").is_ok() && style.remove_property("--vv-top").is_ok(),
       };
-      if !is_applied {
+      let maybe_covered = covered_bottom(
+        maybe_pinned_bottom.unwrap_or(layout_height),
+        viewport.height(),
+        viewport.offset_top(),
+        viewport.scale(),
+        is_ios_home_screen_app(),
+      );
+      let is_inset_applied = match shell_bottom_inset(maybe_keyboard_area.is_some(), maybe_covered) {
+        Some(inset) => style.set_property("--vv-bottom-inset", &inset).is_ok(),
+        None => style.remove_property("--vv-bottom-inset").is_ok(),
+      };
+      let is_short_area_applied = if is_short_keyboard_area(maybe_keyboard_area) {
+        root.set_attribute("data-keyboard-area", "short").is_ok()
+      } else {
+        root.remove_attribute("data-keyboard-area").is_ok()
+      };
+      if !is_applied || !is_inset_applied || !is_short_area_applied {
         tracing::debug!("could not apply the visual viewport size");
       }
     }
@@ -351,6 +381,58 @@ pub fn track_visual_viewport() {
   }
   // The listeners live as long as the page.
   handler.forget();
+}
+
+/// An invisible element pinned to the layout's bottom edge like the phone shell (`.viewport-probe`):
+/// its position is where the shell's bottom ends up without `--vv-height`, whatever the shell's
+/// current size. `None` without a document; the caller falls back to `innerHeight`.
+fn pinned_probe() -> Option<web_sys::Element> {
+  let document = web_sys::window()?.document()?;
+  let probe = document.create_element("div").ok()?;
+  probe.set_class_name("viewport-probe");
+  probe.set_attribute("aria-hidden", "true").ok()?;
+  document.body()?.append_child(&probe).ok()?;
+  Some(probe)
+}
+
+/// The height the visual viewport is compared with to find the keyboard: the larger of the measured
+/// pinned edge and `innerHeight`. The keyboard goes over a pinned shell whenever the pinned edge
+/// stays down there, also if `innerHeight` follows the visual viewport (#1313). Where the keyboard
+/// really shrinks the layout (Chrome), both shrink and nothing is covered.
+fn pinned_height(maybe_pinned_bottom: Option<f64>, layout_height: f64) -> f64 {
+  maybe_pinned_bottom.map_or(layout_height, |bottom| bottom.max(layout_height))
+}
+
+/// How many CSS pixels of a pinned shell's bottom lie below the visual viewport without a keyboard:
+/// browser chrome floating over the page (#1313). `None` when nothing is covered, when the page is
+/// pinch-zoomed, in a home screen app (no chrome; a gap there is iOS's stale visual viewport, #709),
+/// or when the gap is a keyboard's, which `keyboard_free_area` handles or, with no field focused,
+/// iOS left behind after closing it.
+fn covered_bottom(
+  pinned_bottom: f64,
+  visible_height: f64,
+  visible_top: f64,
+  scale: f64,
+  is_ios_home_screen_app: bool,
+) -> Option<f64> {
+  let covered = pinned_bottom - (visible_top.max(0.0) + visible_height);
+  (!is_ios_home_screen_app && scale <= ZOOMED_ABOVE && covered > 1.0 && covered <= KEYBOARD_MIN_HEIGHT_PX)
+    .then_some(covered)
+}
+
+/// The value of `--vv-bottom-inset`, the padding below a page without the tab bar, or `None` for
+/// the stylesheet's default (the bottom safe area). Nothing on top of the keyboard; never less than
+/// the safe area below chrome, which can be shorter than the home indicator's zone.
+fn shell_bottom_inset(is_keyboard_up: bool, maybe_covered: Option<f64>) -> Option<String> {
+  if is_keyboard_up {
+    return Some("0px".to_owned());
+  }
+  maybe_covered.map(|covered| format!("max(env(safe-area-inset-bottom), {}px)", covered.round()))
+}
+
+/// Whether the keyboard leaves so little height that only the messages and the composer fit.
+fn is_short_keyboard_area(maybe_keyboard_area: Option<(f64, f64)>) -> bool {
+  maybe_keyboard_area.is_some_and(|(height, _)| height < SHORT_KEYBOARD_AREA_BELOW_PX)
 }
 
 /// The part of the window the compact layout fits into while the keyboard is up, as height and
@@ -506,6 +588,115 @@ mod tests {
     #[test]
     fn ignores_a_pinch_zoomed_page() {
       assert_eq!(keyboard_free_area(844.0, 422.0, 200.0, 2.0, true), None);
+    }
+  }
+
+  mod pinned_height {
+    use super::*;
+
+    #[test]
+    fn finds_the_keyboard_when_inner_height_follows_the_visual_viewport() {
+      // innerHeight came down with the keyboard, the pinned edge stayed behind it.
+      let height = pinned_height(Some(844.0), 508.0);
+      assert_eq!(height, 844.0);
+      assert_eq!(
+        keyboard_free_area(height, 508.0, 0.0, 1.0, true),
+        Some((508.0, 0.0))
+      );
+    }
+
+    #[test]
+    fn a_layout_that_shrinks_with_the_keyboard_covers_nothing() {
+      // Chrome with `interactive-widget=resizes-content`.
+      let height = pinned_height(Some(508.0), 508.0);
+      assert_eq!(keyboard_free_area(height, 508.0, 0.0, 1.0, true), None);
+    }
+
+    #[test]
+    fn falls_back_to_inner_height_without_the_probe() {
+      assert_eq!(pinned_height(None, 844.0), 844.0);
+    }
+
+    #[test]
+    fn a_page_panned_up_by_the_keyboard_still_has_it() {
+      // iOS scrolled the visual viewport to the bottom of the layout: its bottom is the pinned
+      // edge, but the keyboard is up all the same.
+      assert_eq!(
+        keyboard_free_area(pinned_height(Some(844.0), 844.0), 508.0, 336.0, 1.0, true),
+        Some((508.0, 336.0))
+      );
+    }
+  }
+
+  mod covered_bottom {
+    use super::*;
+
+    #[test]
+    fn floating_browser_chrome_is_covered() {
+      assert_eq!(covered_bottom(844.0, 778.0, 0.0, 1.0, false), Some(66.0));
+    }
+
+    #[test]
+    fn a_fully_visible_shell_covers_nothing() {
+      // Android Chrome, desktop browsers, the desktop app: the pinned edge is the visible edge.
+      assert_eq!(covered_bottom(844.0, 844.0, 0.0, 1.0, false), None);
+      assert_eq!(covered_bottom(844.0, 843.5, 0.0, 1.0, false), None);
+    }
+
+    #[test]
+    fn a_visual_viewport_panned_to_the_bottom_covers_nothing() {
+      assert_eq!(covered_bottom(844.0, 778.0, 66.0, 1.0, false), None);
+    }
+
+    #[test]
+    fn not_in_a_home_screen_app() {
+      assert_eq!(covered_bottom(844.0, 778.0, 0.0, 1.0, true), None);
+    }
+
+    #[test]
+    fn not_for_a_pinch_zoomed_page() {
+      assert_eq!(covered_bottom(844.0, 422.0, 0.0, 2.0, false), None);
+      assert_eq!(covered_bottom(844.0, 778.0, 0.0, 1.2, false), None);
+    }
+
+    #[test]
+    fn not_for_a_keyboard_sized_gap() {
+      // iOS keeps a shrunken visual viewport after the keyboard closed.
+      assert_eq!(covered_bottom(844.0, 508.0, 0.0, 1.0, false), None);
+    }
+  }
+
+  mod is_short_keyboard_area {
+    use super::*;
+
+    #[test]
+    fn only_a_short_area_above_the_keyboard() {
+      assert!(is_short_keyboard_area(Some((180.0, 0.0))));
+      assert!(!is_short_keyboard_area(Some((363.0, 0.0))));
+      assert!(!is_short_keyboard_area(None));
+    }
+  }
+
+  mod shell_bottom_inset {
+    use super::*;
+
+    #[test]
+    fn no_inset_on_top_of_the_keyboard() {
+      assert_eq!(shell_bottom_inset(true, None).as_deref(), Some("0px"));
+      assert_eq!(shell_bottom_inset(true, Some(66.0)).as_deref(), Some("0px"));
+    }
+
+    #[test]
+    fn covered_chrome_never_goes_below_the_safe_area() {
+      assert_eq!(
+        shell_bottom_inset(false, Some(65.6)).as_deref(),
+        Some("max(env(safe-area-inset-bottom), 66px)")
+      );
+    }
+
+    #[test]
+    fn the_stylesheet_default_otherwise() {
+      assert_eq!(shell_bottom_inset(false, None), None);
     }
   }
 

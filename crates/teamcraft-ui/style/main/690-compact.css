@@ -78,9 +78,21 @@
   grid-row: 5;
 }
 
-/* Pages without the bottom navigation end above the home indicator. */
+/* Where a pinned shell's bottom edge lies: viewport.rs measures this invisible twin of it (#1313). */
+.viewport-probe {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* Pages without the bottom navigation end above the home indicator, above Safari's floating toolbar
+   and directly on the keyboard: viewport.rs sets --vv-bottom-inset for the last two (#1313). */
 :root[data-layout="compact"] .app:not(.has-bottom-nav) {
-  padding-bottom: env(safe-area-inset-bottom);
+  padding-bottom: var(--vv-bottom-inset, env(safe-area-inset-bottom));
   background: var(--surface);
 }
 
@@ -404,6 +416,19 @@
 /* The composer: wide send button, no keyboard hints, room for the home indicator. */
 :root[data-layout="compact"] .composer {
   padding: 0 var(--space-2) var(--space-2);
+}
+
+/* While the keyboard is up the text gets its share of what is left above it (`dvh` doesn't shrink
+   with the keyboard on iOS, #1313): a long draft scrolls inside and the toolbar stays on screen.
+   Without --vv-height the fallback leaves the base rule's limit as it is (its top is 480px). */
+:root[data-layout="compact"] .composer-input {
+  max-height: min(clamp(220px, 40dvh, 480px), calc(var(--vv-height, 1200px) * 0.4));
+}
+
+/* A phone on its side with the keyboard up has room for the messages and the composer only; the
+   rest would push the composer off the screen (viewport.rs, #1313). */
+:root[data-layout="compact"][data-keyboard-area="short"] :is(.app-banners, .channel-header, .huddle-bar, .bookmarks-bar) {
+  display: none;
 }
 
 :root[data-layout="compact"] .composer-hint:not(.also-send),
