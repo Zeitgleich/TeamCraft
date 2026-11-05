@@ -329,13 +329,16 @@ struct CallScreen: View {
     }
   }
 
-  /// What matters while talking: that the connection is gone, and that nobody hears you.
+  /// What matters while talking: that the connection is gone, that nobody hears you, and that the
+  /// call runs on the fallback for networks that block UDP (as on Android, desktop and web).
   @ViewBuilder
   private var statusHint: some View {
     if call.phase == .reconnecting {
       hint("call_reconnecting")
     } else if call.isMuted && call.phase == .connected {
       hint("call_you_muted")
+    } else if call.isOnLimitedNetwork && call.phase == .connected {
+      hint("call_limited_network")
     }
   }
 

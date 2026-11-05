@@ -34,6 +34,9 @@ struct ActiveCall: Identifiable, Equatable {
   var maybePrivacyCode: String?
   /// Put on hold from the system's call UI: nothing is sent or played.
   var isOnHold = false
+  /// The call runs on the WebSocket fallback for networks that block UDP (ARCHITECTURE.md §6.6):
+  /// the call screen says quality may be lower.
+  var isOnLimitedNetwork = false
 }
 
 /// A move of the call into a meeting room that somebody else announced in the conversation's
@@ -741,6 +744,7 @@ extension CallManager: CallListener {
       call.mutedUserIds = state.mutedUserIds
       if hasNewPeople { Task { @MainActor in self.names = await AppModel.shared.displayNames() } }
       call.maybePrivacyCode = state.maybePrivacyCode
+      call.isOnLimitedNetwork = state.isOnLimitedNetwork
       switch state.phase {
       case .connected: call.phase = .connected
       // The connection broke; the core rejoins (the others keep this device's place meanwhile).
