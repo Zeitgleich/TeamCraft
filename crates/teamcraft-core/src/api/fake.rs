@@ -189,6 +189,9 @@ struct State {
   /// Held messages with their owners; the real rules are tested against the real server.
   scheduled: Vec<(UserId, ScheduledMessageResponse)>,
   next_scheduled: i64,
+  /// Scripted answers to `update_scheduled_message`: always, or for the next one only.
+  scheduled_update_failure: Option<(u16, ErrorCode)>,
+  next_scheduled_update_failure: Option<(u16, ErrorCode)>,
   device_lists: HashMap<UserId, DeviceListResponse>,
   sessions: HashMap<String, Session>,
   offline_users: HashSet<UserId>,
@@ -997,6 +1000,16 @@ impl FakeServer {
   /// The custom status the server keeps for the user (set through `PUT /me/status`).
   pub fn custom_status(&self, user: UserId) -> Option<teamcraft_proto::CustomStatus> {
     self.lock().custom_statuses.get(&user).cloned()
+  }
+
+  /// Every update of a held message answers with this from now on.
+  pub fn fail_scheduled_updates(&self, maybe_failure: Option<(u16, ErrorCode)>) {
+    self.lock().scheduled_update_failure = maybe_failure;
+  }
+
+  /// The next update of a held message answers with this.
+  pub fn fail_next_scheduled_update(&self, failure: (u16, ErrorCode)) {
+    self.lock().next_scheduled_update_failure = Some(failure);
   }
 
   /// The server's clock now (the system clock plus [`FakeServer::advance_clock`]).
@@ -4797,6 +4810,13 @@ impl ServerApi for FakeServerApi {
     request: &UpdateScheduledMessageRequest,
   ) -> Result<ScheduledMessageResponse, ApiError> {
     self.with(|state, me| {
+      if let Some((status, code)) = state
+        .next_scheduled_update_failure
+        .take()
+        .or_else(|| state.scheduled_update_failure.clone())
+      {
+        return Err(ApiError::status(status, code, "scripted"));
+      }
       let conversation = state
         .scheduled
         .iter()

@@ -18,6 +18,8 @@ CREATE TABLE scheduled_messages (
   version            bigint      NOT NULL DEFAULT 1,
   -- Why it didn't go out at its time; NULL while it waits for that time.
   hold_reason        text,
+  -- Since when: a hold nothing can solve any more is purged after a while.
+  held_at            timestamptz,
   -- A scheduler instance is on it until then; after a crash the next one takes over.
   claimed_until      timestamptz,
   -- When the sender's devices were last woken shortly before `due_at`, once per version.
@@ -27,5 +29,6 @@ CREATE TABLE scheduled_messages (
 );
 
 CREATE INDEX scheduled_messages_due_idx ON scheduled_messages (due_at) WHERE hold_reason IS NULL;
+CREATE INDEX scheduled_messages_held_idx ON scheduled_messages (held_at) WHERE hold_reason IS NOT NULL;
 CREATE INDEX scheduled_messages_user_idx ON scheduled_messages (user_id, due_at);
 CREATE INDEX scheduled_messages_conversation_idx ON scheduled_messages (conversation_id);

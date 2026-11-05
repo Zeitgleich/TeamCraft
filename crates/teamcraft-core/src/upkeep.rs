@@ -20,6 +20,9 @@ use crate::store::LocalStore;
 /// usually comes with a gateway event long before their time.
 #[cfg(feature = "ui")]
 const SCHEDULED_CHECK_MS: i64 = 15_000;
+/// How often a device reads the list because the gateway said it changed: a burst costs one read.
+#[cfg(feature = "ui")]
+const SCHEDULED_READ_PACE_MS: i64 = 5_000;
 
 /// What runs on every tick, with the state of the work that runs less often.
 #[derive(Clone, Debug)]
@@ -43,6 +46,9 @@ pub struct Upkeep {
   /// When reading the list of scheduled messages last failed.
   #[cfg(feature = "ui")]
   maybe_scheduled_read_failed_ms: Option<i64>,
+  /// When the list was last read because the gateway said it changed.
+  #[cfg(feature = "ui")]
+  last_scheduled_event_read_ms: i64,
   /// The gateway connection the list of scheduled messages was read for.
   #[cfg(feature = "ui")]
   maybe_scheduled_connection: Option<u64>,
@@ -73,6 +79,8 @@ impl Upkeep {
       last_scheduled_check_ms: i64::MIN,
       #[cfg(feature = "ui")]
       maybe_scheduled_read_failed_ms: None,
+      #[cfg(feature = "ui")]
+      last_scheduled_event_read_ms: i64::MIN,
       #[cfg(feature = "ui")]
       maybe_scheduled_connection: None,
       uploads: UploadMode::Inline,
@@ -184,17 +192,27 @@ impl Upkeep {
         },
       }
     }
-    if now >= self.last_scheduled_check_ms
-      && now.saturating_sub(self.last_scheduled_check_ms) < SCHEDULED_CHECK_MS
+    let is_due_by_clock = now.abs_diff(self.last_scheduled_check_ms) >= SCHEDULED_CHECK_MS.unsigned_abs();
+    if now.abs_diff(self.last_scheduled_event_read_ms) >= SCHEDULED_READ_PACE_MS.unsigned_abs()
+      && client.take_scheduled_list_stale()
     {
+      self.last_scheduled_event_read_ms = now;
+      if let Err(error) = client.refresh_scheduled().await {
+        tracing::debug!(%error, "scheduled messages not read yet");
+        client.note_scheduled_list_stale();
+      }
+    }
+    if !is_due_by_clock {
       return false;
     }
     self.last_scheduled_check_ms = now;
     match client.seal_stale_scheduled().await {
       Ok(sealed) => sealed > 0,
       Err(error) => {
-        // Offline: they stay as they are, and the list says what that means.
+        // They stay as they are, and the list says what that means. Paced by the interval: a group
+        // that can't be caught up here isn't asked about every few seconds.
         tracing::debug!(%error, "scheduled messages not sealed again yet");
+        self.last_scheduled_check_ms = now.saturating_add(interval_ms.saturating_sub(SCHEDULED_CHECK_MS));
         false
       },
     }

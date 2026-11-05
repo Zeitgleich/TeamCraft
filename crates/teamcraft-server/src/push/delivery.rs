@@ -122,9 +122,10 @@ pub(super) async fn on_failed(state: &AppState, user: UserId, device: &PushDevic
 }
 
 /// Visible wake-ups may wake a dozing phone (FCM `HIGH`, APNs priority 10); a withdrawal never needs
-/// to: it is silent and can wait for the next window.
+/// to: it is silent and can wait for the next window. A wake to seal a scheduled message again shows
+/// nothing but has to get through before the message's time.
 fn urgency(kind: &PushKind) -> Urgency {
-  if kind.is_visible() {
+  if kind.is_visible() || *kind == PushKind::ScheduledSeal {
     Urgency::High
   } else {
     Urgency::Normal
@@ -175,5 +176,17 @@ async fn log_failure(state: &AppState, user: UserId, device: &PushDeviceRow, err
     },
     PushError::NotConfigured => debug!(provider = %device.provider, "push provider unavailable"),
     error => warn!(%error, device_id = %device.device, "push failed"),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_wake_to_seal_is_high_urgency_though_it_shows_nothing() {
+    assert_eq!(urgency(&PushKind::ScheduledSeal), Urgency::High);
+    assert_eq!(urgency(&PushKind::Dismiss), Urgency::Normal);
+    assert_eq!(urgency(&PushKind::Message), Urgency::High);
   }
 }

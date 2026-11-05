@@ -197,6 +197,128 @@ mod the_group_moved {
     assert_eq!(after.version, version, "the loser changed nothing");
   }
 
+  mod when_sealing_fails {
+    use teamcraft_proto::ErrorCode;
+
+    use super::*;
+
+    /// A 403 isn't asked again for this version in this epoch; once the group moved on, it is.
+    #[tokio::test]
+    async fn a_refusal_holds_until_the_group_moves() {
+      let mut world = World::new().await;
+      world.schedule("Refused", 10 * MINUTE_MS).await;
+      world.move_epoch().await;
+      world.phone.client.refresh_scheduled().await.unwrap();
+
+      world
+        .server
+        .fail_scheduled_updates(Some((403, ErrorCode::Forbidden)));
+      assert_eq!(world.phone.client.seal_stale_scheduled().await.unwrap(), 0);
+      let calls = world.calls();
+      assert_eq!(world.phone.client.seal_stale_scheduled().await.unwrap(), 0);
+      assert_eq!(world.calls(), calls, "not asked again");
+
+      world.server.fail_scheduled_updates(None);
+      world.move_epoch().await;
+      world.phone.client.sync_mls(world.channel).await.unwrap();
+      assert_eq!(world.phone.client.seal_stale_scheduled().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_outage_a_lost_sign_in_or_a_bad_request_marks_nothing() {
+      for (status, code) in [
+        (500, ErrorCode::Internal),
+        (401, ErrorCode::Unauthorized),
+        (400, ErrorCode::InvalidRequest),
+      ] {
+        let mut world = World::new().await;
+        world.schedule("Later", 10 * MINUTE_MS).await;
+        world.move_epoch().await;
+        world.phone.client.refresh_scheduled().await.unwrap();
+
+        world.server.fail_scheduled_updates(Some((status, code)));
+        assert!(
+          world.phone.client.seal_stale_scheduled().await.is_err(),
+          "{status}"
+        );
+        world.server.fail_scheduled_updates(None);
+        assert_eq!(
+          world.phone.client.seal_stale_scheduled().await.unwrap(),
+          1,
+          "{status}"
+        );
+      }
+    }
+
+    /// The group moved between catching up and asking: this round catches up and tries again.
+    #[tokio::test]
+    async fn an_epoch_conflict_catches_up_and_tries_again() {
+      let mut world = World::new().await;
+      world.schedule("Moving", 10 * MINUTE_MS).await;
+      world.move_epoch().await;
+      world.phone.client.refresh_scheduled().await.unwrap();
+
+      world
+        .server
+        .fail_next_scheduled_update((409, ErrorCode::EpochConflict));
+      assert_eq!(world.phone.client.seal_stale_scheduled().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_loser_of_a_race_drops_its_work_without_a_mark() {
+      let mut world = World::new().await;
+      world.schedule("Raced", 10 * MINUTE_MS).await;
+      world.move_epoch().await;
+      world.phone.client.refresh_scheduled().await.unwrap();
+
+      world
+        .server
+        .fail_next_scheduled_update((409, ErrorCode::VersionConflict));
+      assert_eq!(world.phone.client.seal_stale_scheduled().await.unwrap(), 0);
+      // The next round reads what is there and seals if it still has to.
+      assert_eq!(world.phone.client.seal_stale_scheduled().await.unwrap(), 1);
+    }
+  }
+
+  #[tokio::test]
+  async fn a_retry_with_the_same_id_holds_one_message() {
+    let mut world = World::new().await;
+    let id = teamcraft_proto::ClientMessageId::from_bytes([3; 16]);
+    let message = OutgoingMessage {
+      maybe_client_message_id: Some(id),
+      ..world.outgoing("Once")
+    };
+    let due_at_ms = world.server.server_now_ms() + MINUTE_MS;
+    world
+      .run(CoreCommand::ScheduleMessage {
+        message: message.clone(),
+        due_at_ms,
+      })
+      .await;
+    world
+      .run(CoreCommand::ScheduleMessage { message, due_at_ms })
+      .await;
+    assert_eq!(world.backend().scheduled_overview().messages.len(), 1);
+  }
+
+  #[tokio::test]
+  async fn a_burst_of_events_costs_one_read() {
+    let mut world = World::new().await;
+    let mut upkeep = Upkeep::new(Duration::from_secs(60));
+    upkeep.tick(&mut world.phone.client).await;
+    let calls = world.calls();
+    for _ in 0..5 {
+      world.phone.client.note_scheduled_list_stale();
+    }
+    upkeep.tick(&mut world.phone.client).await;
+    world.phone.client.note_scheduled_list_stale();
+    upkeep.tick(&mut world.phone.client).await;
+    assert_eq!(world.calls(), calls + 1, "the second waits for the pace");
+    world.clock.advance(6_000);
+    upkeep.tick(&mut world.phone.client).await;
+    assert_eq!(world.calls(), calls + 2);
+  }
+
   #[tokio::test]
   async fn send_now_seals_again_first() {
     let mut world = World::new().await;
@@ -280,6 +402,11 @@ impl World {
       .add_member(self.channel, joining.client.user_id())
       .await
       .unwrap();
+  }
+
+  /// Requests this device made so far.
+  fn calls(&self) -> u64 {
+    self.server.rest_call_count(self.phone.client.user_id())
   }
 
   fn outgoing(&self, body: &str) -> OutgoingMessage {

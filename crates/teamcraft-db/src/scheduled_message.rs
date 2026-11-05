@@ -246,7 +246,7 @@ impl Database {
         sqlx::query!(
           r#"UPDATE scheduled_messages
              SET due_at = $4, sender_device_id = $5, mentioned_user_ids = $6, is_urgent = $7, content_key_id = $8,
-                 ciphertext = $9, mls_epoch = $10, version = version + 1, hold_reason = NULL, claimed_until = NULL, last_wake_at = NULL
+                 ciphertext = $9, mls_epoch = $10, version = version + 1, hold_reason = NULL, held_at = NULL, claimed_until = NULL, last_wake_at = NULL
              WHERE id = $1 AND user_id = $2 AND version = $3"#,
           to_db(id),
           to_db(user),
@@ -265,7 +265,7 @@ impl Database {
       None => {
         sqlx::query!(
           r#"UPDATE scheduled_messages
-             SET due_at = $4, version = version + 1, hold_reason = NULL, claimed_until = NULL, last_wake_at = NULL
+             SET due_at = $4, version = version + 1, hold_reason = NULL, held_at = NULL, claimed_until = NULL, last_wake_at = NULL
              WHERE id = $1 AND user_id = $2 AND version = $3"#,
           to_db(id),
           to_db(user),
@@ -369,8 +369,9 @@ impl Database {
     conversation: ConversationId,
   ) -> Result<Vec<UserId>, DbError> {
     let rows = sqlx::query_scalar!(
-      r#"SELECT DISTINCT user_id FROM scheduled_messages
-         WHERE conversation_id = $1 AND (hold_reason IS NULL OR hold_reason = 'stale_epoch')"#,
+      r#"SELECT DISTINCT s.user_id FROM scheduled_messages s
+         JOIN memberships m ON m.conversation_id = s.conversation_id AND m.user_id = s.user_id
+         WHERE s.conversation_id = $1 AND (s.hold_reason IS NULL OR s.hold_reason = 'stale_epoch')"#,
       to_db(conversation),
     )
     .fetch_all(self.pool())
@@ -411,6 +412,30 @@ impl Database {
       .collect()
   }
 
+  /// Forgets holds nothing can solve any more once they are older than `max_age`: the ciphertext of
+  /// somebody who left or whose account is off shouldn't stay for good. Returns how many.
+  pub async fn purge_dead_scheduled_messages(
+    &self,
+    now: OffsetDateTime,
+    max_age: Duration,
+    limit: i64,
+  ) -> Result<u64, DbError> {
+    let purged = sqlx::query!(
+      r#"DELETE FROM scheduled_messages WHERE id IN (
+           SELECT id FROM scheduled_messages
+           WHERE hold_reason IN ('sender_inactive', 'not_a_member', 'conversation_gone')
+             AND held_at <= $1::timestamptz - make_interval(secs => $2)
+           LIMIT $3
+           FOR UPDATE SKIP LOCKED)"#,
+      now,
+      max_age.as_secs_f64(),
+      limit,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(purged.rows_affected())
+  }
+
   /// Notes why a message didn't go out at its time; nothing if it changed since it was read.
   pub async fn hold_scheduled_message(
     &self,
@@ -420,7 +445,7 @@ impl Database {
   ) -> Result<bool, DbError> {
     let held = sqlx::query!(
       r#"UPDATE scheduled_messages
-         SET hold_reason = $3, claimed_until = NULL, version = version + 1
+         SET hold_reason = $3, held_at = now(), claimed_until = NULL, version = version + 1
          WHERE id = $1 AND version = $2"#,
       to_db(id),
       version_to_db(version)?,

@@ -155,6 +155,8 @@ struct SendRequest: Equatable {
   var maybeReplyToId: String?
   /// With `maybeReplyToId`: the one picture of an album the reply answers.
   var maybeReplyAttachmentId: String?
+  /// Chosen by the composer when a retry must be the same message (a scheduled one).
+  var maybeClientMessageId: String?
 
   var object: [String: Any] {
     [
@@ -163,6 +165,7 @@ struct SendRequest: Equatable {
       "body": body,
       "maybe_reply_to": maybeReplyToId.map { $0 as Any } ?? NSNull(),
       "maybe_reply_attachment": maybeReplyAttachmentId.map { $0 as Any } ?? NSNull(),
+      "maybe_client_message_id": maybeClientMessageId.map { $0 as Any } ?? NSNull(),
       "priority": "normal",
       "wants_acknowledgement": false,
       "is_silent": false,

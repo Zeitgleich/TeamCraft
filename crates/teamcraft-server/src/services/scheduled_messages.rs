@@ -50,6 +50,7 @@ pub async fn schedule_message(
   check_member_may_post(state, caller, conversation).await?;
   let due_at = check_due_at(state, request.due_at)?;
   check_sealed(state, caller, conversation, &request.sealed).await?;
+  check_mentions_are_members(state, conversation, &request.sealed.mentioned_user_ids).await?;
   if let Some(thread) = request.maybe_thread_id {
     messages::thread_root(state, conversation, thread).await?;
   }
@@ -101,6 +102,12 @@ pub async fn update_scheduled_message(
   id: ScheduledMessageId,
   request: UpdateScheduledMessageRequest,
 ) -> Result<ScheduledMessageResponse, ApiError> {
+  // Versions are positive 64-bit integers in the database; a larger one matches nothing.
+  if i64::try_from(request.expected_version).is_err() {
+    return Err(ApiError::InvalidRequest(
+      "expected_version is out of range".into(),
+    ));
+  }
   let current = own_entry(state, caller, id).await?;
   let policy = state.policy.get().scheduled_messages.clone();
   let is_same_time = unix_millis(current.due_at) == request.due_at;
@@ -114,13 +121,18 @@ pub async fn update_scheduled_message(
   } else {
     check_due_at(state, request.due_at)?
   };
-  let mentions = request
-    .maybe_sealed
-    .as_ref()
-    .map_or_else(Vec::new, |sealed| sorted_mentions(&sealed.mentioned_user_ids));
   if let Some(sealed) = &request.maybe_sealed {
     check_sealed(state, caller, current.conversation_id, sealed).await?;
   }
+  // Somebody mentioned may have left since the first seal, and it is a member's device sealing the
+  // same text again: they drop out, as at the release, rather than the message getting stuck.
+  let mentions = match &request.maybe_sealed {
+    Some(sealed) => mentions_still_in(
+      &sorted_mentions(&sealed.mentioned_user_ids),
+      &member_set(state, current.conversation_id).await?,
+    ),
+    None => Vec::new(),
+  };
   let maybe_parts = request
     .maybe_sealed
     .as_ref()
@@ -217,8 +229,9 @@ pub async fn send_scheduled_now(
 }
 
 /// A commit moved the group's epoch: whoever holds a message there is told to seal it again. Devices
-/// online hear of the commit anyway; the others get a push that shows nothing, at most one per user
-/// and conversation for a burst of commits and per `scheduled_wake_min_interval`.
+/// online hear of the commit anyway; the others get a push that shows nothing. Both the event and the
+/// push go at most once per user and conversation for a burst of commits and per
+/// `scheduled_wake_min_interval`, so a member committing in a loop costs nobody a list per commit.
 pub fn note_epoch_moved(state: &AppState, conversation: ConversationId) {
   let state = state.clone();
   tokio::spawn(async move {
@@ -230,7 +243,6 @@ pub fn note_epoch_moved(state: &AppState, conversation: ConversationId) {
       },
     };
     for user in users {
-      tell_devices(&state, user);
       crate::push::routing::wake_to_seal(state.clone(), user, conversation);
     }
   });
@@ -240,6 +252,13 @@ pub fn note_epoch_moved(state: &AppState, conversation: ConversationId) {
 /// instances and across restarts: instances claim different rows, a release stores a message once,
 /// and what a crash left behind comes up again after the claim's lease.
 pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, ApiError> {
+  let limits = &state.settings.get().limits;
+  let hold_max_age =
+    Duration::from_secs(u64::from(limits.scheduled_hold_retention_days).saturating_mul(86_400));
+  state
+    .database
+    .purge_dead_scheduled_messages(now, hold_max_age, BATCH_SIZE)
+    .await?;
   // The last stretch: messages still under an old epoch, for a wake that got lost (a restart, a push
   // service that dropped it). No polling of devices: one wake per version.
   for (user, conversation) in state
@@ -457,10 +476,11 @@ async fn check_sealed(
   if sealed.ciphertext.is_empty() {
     return Err(ApiError::InvalidRequest("ciphertext must not be empty".into()));
   }
-  if sealed.ciphertext.len() > limits.max_ciphertext_bytes {
+  // Smaller than a message's limit: every list of the sender carries it, on every device.
+  if sealed.ciphertext.len() > limits.max_scheduled_ciphertext_bytes {
     return Err(ApiError::PayloadTooLarge(format!(
       "ciphertext exceeds {} bytes",
-      limits.max_ciphertext_bytes
+      limits.max_scheduled_ciphertext_bytes
     )));
   }
   if sealed.content_key_id.is_empty() || sealed.content_key_id.len() > MAX_CONTENT_KEY_ID_BYTES {
@@ -472,21 +492,26 @@ async fn check_sealed(
     return Err(ApiError::InvalidRequest("too many mentions".into()));
   }
   ensure_own_device(state, caller, sealed.device_id).await?;
-  let members = member_set(state, conversation).await?;
-  if let Some(stranger) = sealed
-    .mentioned_user_ids
-    .iter()
-    .find(|user| !members.contains(user))
-  {
-    return Err(ApiError::InvalidRequest(format!(
-      "mentioned user {stranger} is not in the conversation"
-    )));
-  }
   let current_epoch = state.database.current_epoch(conversation).await?;
   if sealed.mls_epoch != current_epoch {
     return Err(ApiError::EpochConflict { current_epoch });
   }
   Ok(())
+}
+
+/// A first seal names only members.
+async fn check_mentions_are_members(
+  state: &AppState,
+  conversation: ConversationId,
+  mentioned: &[UserId],
+) -> Result<(), ApiError> {
+  let members = member_set(state, conversation).await?;
+  match mentioned.iter().find(|user| !members.contains(user)) {
+    Some(stranger) => Err(ApiError::InvalidRequest(format!(
+      "mentioned user {stranger} is not in the conversation"
+    ))),
+    None => Ok(()),
+  }
 }
 
 async fn ensure_own_device(
@@ -559,7 +584,8 @@ fn new_message<'a>(
   }
 }
 
-/// The user's other devices read the list again.
+/// The user's other devices read the list again. Changes the user made and releases are bounded by
+/// the write limit and the list's size; a burst of commits goes through `wake_to_seal` instead.
 fn tell_devices(state: &AppState, user: UserId) {
   state.hub.publish([user], &GatewayEvent::ScheduledMessagesUpdate);
 }

@@ -216,6 +216,10 @@ max_welcomes_per_commit = 500
 max_key_bag_bytes = 1048576
 # How often held messages are checked: a scheduled message goes out at most this late.
 scheduled_release_interval_secs = 5
+# The largest held message; every list of the sender carries it, so far less than a message's limit.
+max_scheduled_ciphertext_bytes = 65536
+# How long a held message nothing can solve stays (its sender left, or their account is off).
+scheduled_hold_retention_days = 30
 # One signed device list.
 max_device_list_bytes = 65536
 # Active devices per user.

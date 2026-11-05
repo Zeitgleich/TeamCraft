@@ -407,6 +407,62 @@ mod stale_epoch {
     assert_eq!(delivered(&app, &s).await.len(), 1);
   }
 
+  /// Somebody mentioned left: that commit moves the epoch, and sealing the same text again must work.
+  #[tokio::test]
+  async fn a_mention_of_somebody_who_left_doesn_t_block_sealing_again() {
+    let app = app!();
+    let s = scene(&app).await;
+    let (carol_id, dave_id) = (user_id(&app, &s.carol).await, user_id(&app, &s.dave).await);
+    let mut body = sealed(&s.carol_device, 0, "hello");
+    body["mentioned_user_ids"] = json!([carol_id, dave_id]);
+    let id = schedule_at(&app, &s, 1, millis(later(60)), body.clone())
+      .await
+      .id();
+    let removal = app
+      .delete(
+        &s.dave,
+        &format!("/conversations/{}/members/{dave_id}", s.channel),
+      )
+      .await;
+    assert_eq!(removal.status, StatusCode::NO_CONTENT, "{}", removal.body);
+    let reply = app
+      .post(
+        &s.carol,
+        &format!("/conversations/{}/mls/commits", s.channel),
+        json!({"device_id": s.carol_device, "epoch": 0, "commit": "Y29tbWl0", "welcomes": []}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+
+    let held = listed(&app, &s.carol).await[0].clone();
+    body["mls_epoch"] = json!(1);
+    let seal = app
+      .put(
+        &s.carol,
+        &format!("/me/scheduled-messages/{id}"),
+        json!({"expected_version": held["version"], "due_at": held["due_at"], "sealed": body}),
+      )
+      .await;
+    assert_eq!(seal.status, StatusCode::OK, "{}", seal.body);
+    assert_eq!(seal.body["mentioned_user_ids"], json!([carol_id]));
+  }
+
+  #[tokio::test]
+  async fn an_absurd_expected_version_is_a_bad_request() {
+    let app = app!();
+    let s = scene(&app).await;
+    let id = schedule(&app, &s, 1).await;
+    let due_at = millis(later(90));
+    let reply = app
+      .put(
+        &s.carol,
+        &format!("/me/scheduled-messages/{id}"),
+        json!({"expected_version": u64::MAX, "due_at": due_at}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+  }
+
   #[tokio::test]
   async fn sealing_needs_the_current_epoch() {
     let app = app!();
@@ -568,6 +624,68 @@ mod must_not_go_out {
       .get(&alice, &format!("/conversations/{channel}/messages"))
       .await;
     assert_eq!(reply.body["messages"], json!([]));
+  }
+}
+
+mod cleaning_up {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_deleted_account_takes_its_ciphertext_along() {
+    let app = app!();
+    let s = scene(&app).await;
+    schedule(&app, &s, 1).await;
+    let carol_id = user_id(&app, &s.carol).await;
+    let deactivated = app
+      .post(
+        &owner(),
+        &format!("/admin/users/{carol_id}/deactivate"),
+        json!({}),
+      )
+      .await;
+    assert_eq!(deactivated.status, StatusCode::NO_CONTENT, "{}", deactivated.body);
+    let deleted = app.delete(&owner(), &format!("/admin/users/{carol_id}")).await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
+    let held = app
+      .state
+      .database
+      .list_scheduled_messages(carol_id.parse().unwrap())
+      .await
+      .unwrap();
+    assert!(held.is_empty());
+  }
+
+  #[tokio::test]
+  async fn a_hold_nothing_can_solve_goes_after_its_time() {
+    let app = app!();
+    let s = scene(&app).await;
+    schedule(&app, &s, 1).await;
+    let carol_id = user_id(&app, &s.carol).await;
+    let left = app
+      .delete(
+        &s.carol,
+        &format!("/conversations/{}/members/{carol_id}", s.channel),
+      )
+      .await;
+    assert_eq!(left.status, StatusCode::NO_CONTENT, "{}", left.body);
+    run_due(&app.state, later(61)).await.unwrap();
+    assert_eq!(listed(&app, &s.carol).await.len(), 1, "they still see why");
+
+    let days = i64::from(app.state.settings.get().limits.scheduled_hold_retention_days);
+    run_due(&app.state, later(days * 86_400 + 61)).await.unwrap();
+    assert!(listed(&app, &s.carol).await.is_empty());
+  }
+
+  #[tokio::test]
+  async fn a_stale_one_isn_t_purged() {
+    let app = app!();
+    let s = scene(&app).await;
+    schedule(&app, &s, 1).await;
+    commit(&app, &s, 0).await;
+    run_due(&app.state, later(61)).await.unwrap();
+    let days = i64::from(app.state.settings.get().limits.scheduled_hold_retention_days);
+    run_due(&app.state, later(days * 86_400 + 61)).await.unwrap();
+    assert_eq!(listed(&app, &s.carol).await.len(), 1);
   }
 }
 

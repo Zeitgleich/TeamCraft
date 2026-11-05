@@ -23,6 +23,8 @@ data class SendOptions(
   val isSilent: Boolean = false,
   val alsoSendToChannel: Boolean = false,
   val files: List<PickedFile> = emptyList(),
+  /** Chosen by the composer when a retry must be the same message (a scheduled one). */
+  val maybeClientMessageId: String? = null,
 )
 
 /**
@@ -52,6 +54,7 @@ object ChatActions {
 
   private fun outgoing(conversation: String, body: String, options: SendOptions) = buildJsonObject {
     put("conversation", conversation)
+    options.maybeClientMessageId?.let { put("maybe_client_message_id", it) }
     put("maybe_thread", options.maybeThread.json())
     put("body", body)
     put("maybe_reply_to", options.maybeReplyTo.json())

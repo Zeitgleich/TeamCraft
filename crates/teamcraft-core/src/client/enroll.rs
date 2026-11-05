@@ -236,6 +236,8 @@ impl PendingEnrollment {
       sync_trace: Default::default(),
       maybe_heads: None,
       read_ahead: Default::default(),
+      #[cfg(feature = "ui")]
+      is_scheduled_list_stale: false,
       maybe_last_heard_ms: None,
       is_checking_as_before_v1_0_9: false,
       is_imported_history_paged: false,

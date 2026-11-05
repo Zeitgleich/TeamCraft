@@ -5,6 +5,7 @@ use wasm_bindgen::JsCast;
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::scheduled::ScheduleCheck;
+use teamcraft_proto::ClientMessageId;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::audio::AudioFormat;
@@ -587,10 +588,12 @@ pub fn Composer(
   };
   let send = move || send_checked(false);
 
-  // "Send later": the same way out of the composer, into the account data instead of the outbox
+  // "Send later": the same way out of the composer, to the server to hold instead of the outbox
   // (docs/scheduled-messages.md). `pending_schedule` holds the time while @channel waits for its
-  // confirmation.
+  // confirmation. `schedule_attempt` is this text's message ID until the server took it, so a retry
+  // after a lost answer holds one message (forms.md).
   let pending_schedule = RwSignal::new(None::<i64>);
+  let schedule_attempt = StoredValue::new(None::<(String, ClientMessageId)>);
   let scheduling = PendingAction::new();
   let schedule_checked = move |due_at: i64, is_confirmed: bool| {
     let Some(element) = editor.get_untracked() else {
@@ -651,8 +654,13 @@ pub fn Composer(
       .and_then(|target| target.maybe_image.as_ref())
       .map(|image| image.attachment);
     let maybe_reply_to = maybe_reply.map(|target| target.message);
+    let id = schedule_attempt
+      .get_value()
+      .filter(|(attempted, _)| *attempted == text)
+      .map_or_else(ClientMessageId::random, |(_, id)| id);
+    schedule_attempt.set_value(Some((text.clone(), id)));
     let message = OutgoingMessage {
-      maybe_client_message_id: None,
+      maybe_client_message_id: Some(id),
       conversation,
       maybe_thread,
       body: text,
@@ -670,6 +678,7 @@ pub fn Composer(
     scheduling.run_and_then(
       || state.write(|backend| backend.schedule_message(message, due_at)),
       move || {
+        schedule_attempt.set_value(None);
         state.reply_target.set(None);
         clear_editor();
         also_send_to_channel.set(false);

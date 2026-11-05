@@ -1136,7 +1136,11 @@ internal fun Composer(
   var isSendLaterOpen by remember { mutableStateOf(false) }
   // The time while @channel waits for its confirmation; none for a plain send.
   var maybeSendLaterAt by remember { mutableStateOf<Long?>(null) }
+  // This text's message ID until the server took it, so a retry after a lost answer holds one message.
+  var maybeScheduleAttempt by remember { mutableStateOf<Pair<String, String>?>(null) }
   fun schedule(dueAtMs: Long) {
+    val id = maybeScheduleAttempt?.takeIf { it.first == text }?.second
+      ?: java.util.UUID.randomUUID().toString().replace("-", "")
     val options = SendOptions(
       maybeThread = maybeThread,
       maybeReplyTo = maybeReply?.messageId,
@@ -1145,10 +1149,14 @@ internal fun Composer(
       wantsAcknowledgement = wantsAcknowledgement,
       isSilent = isSilent,
       alsoSendToChannel = alsoToChannel,
+      maybeClientMessageId = id,
     )
     val body = text
     // The server may refuse it: the text comes back, and the failure shows like any other.
-    viewModel.act(ChatActions.schedule(conversationId, emojiConvert(body.trim()), options, dueAtMs)) { text = body }
+    viewModel.act(ChatActions.schedule(conversationId, emojiConvert(body.trim()), options, dueAtMs)) {
+      text = body
+      maybeScheduleAttempt = body to id
+    }
     viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
     text = ""
     priority = "normal"

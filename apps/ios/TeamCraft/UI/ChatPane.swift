@@ -23,6 +23,8 @@ struct ChatPane: View {
   @State private var isPickingPhoto = false
   @State private var isPickingDocument = false
   @State private var isSchedulingSend = false
+  /// This text's message ID until the server took it, so a retry after a lost answer holds one message.
+  @State private var maybeScheduleAttempt: (body: String, id: String)?
   @State private var isSchedulingAllowed = false
   @State private var isTakingPhoto = false
   @State private var photoSelection: [PhotosPickerItem] = []
@@ -814,7 +816,12 @@ struct ChatPane: View {
     attachments.isEmpty && maybeEditing == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
-  /// Hands the composer's text to the user's account data, to go out at `dueAtMs`.
+  /// A client message ID as the core reads it: 32 lowercase hex digits.
+  private func newClientMessageId() -> String {
+    UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+  }
+
+  /// Hands the composer's text to the server to hold, to go out at `dueAtMs`.
   private func schedule(dueAtMs: Int64) async {
     let body = emojiConvert(text: draft.trimmingCharacters(in: .whitespacesAndNewlines))
     let replying = maybeReplying
@@ -822,14 +829,18 @@ struct ChatPane: View {
     draft = ""
     maybeReplying = nil
     maybeReplyingImage = nil
+    let id = maybeScheduleAttempt.flatMap { $0.body == body ? $0.id : nil } ?? newClientMessageId()
+    maybeScheduleAttempt = (body, id)
     let request = SendRequest(
       conversationId: conversation.id, maybeThreadId: threadId, body: body,
-      maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId)
+      maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId, maybeClientMessageId: id)
     if !(await model.performChecked(.scheduleMessage(request, dueAtMs: dueAtMs))) {
       draft = body
       maybeReplying = replying
       maybeReplyingImage = replyingImage
       isSendFailed = true
+    } else {
+      maybeScheduleAttempt = nil
     }
   }
 

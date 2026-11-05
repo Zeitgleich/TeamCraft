@@ -417,6 +417,10 @@ async fn delete_user_rows(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, id: i6
   sqlx::query!("DELETE FROM urgent_reminders WHERE user_id = $1", id)
     .execute(&mut **tx)
     .await?;
+  // Held ciphertext goes with the account (docs/scheduled-messages.md).
+  sqlx::query!("DELETE FROM scheduled_messages WHERE user_id = $1", id)
+    .execute(&mut **tx)
+    .await?;
   sqlx::query!("DELETE FROM deleted_conversations WHERE user_id = $1", id)
     .execute(&mut **tx)
     .await?;

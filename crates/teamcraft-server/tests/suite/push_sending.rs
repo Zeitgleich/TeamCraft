@@ -2573,6 +2573,46 @@ mod wake_to_seal {
   }
 
   #[tokio::test]
+  async fn somebody_who_left_isn_t_woken() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let due_at = OffsetDateTime::now_utc() + TimeDuration::seconds(3600);
+    let scheduled = app
+      .post(
+        &s.carol,
+        &format!("/conversations/{}/scheduled-messages", s.channel),
+        json!({
+          "client_message_id": client_id(1),
+          "sealed": {"device_id": s.carol_push_device, "content_key_id": "a2V5", "ciphertext": "eA==", "mls_epoch": epoch(&app, &s).await},
+          "due_at": i64::try_from(due_at.unix_timestamp_nanos() / 1_000_000).unwrap(),
+        }),
+      )
+      .await;
+    assert_eq!(scheduled.status, StatusCode::OK, "{}", scheduled.body);
+    let carol_id = user_id(&app, &s.carol).await;
+    let left = app
+      .delete(
+        &s.carol,
+        &format!("/conversations/{}/members/{carol_id}", s.channel),
+      )
+      .await;
+    assert_eq!(left.status, StatusCode::NO_CONTENT, "{}", left.body);
+    let current = epoch(&app, &s).await;
+    let reply = app
+      .post(
+        &s.alice,
+        &format!("/conversations/{}/mls/commits", s.channel),
+        json!({"device_id": s.alice_device, "epoch": current, "commit": "Y29tbWl0", "welcomes": []}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert!(seal_wakes(&recorder.wait_for(1).await).is_empty());
+  }
+
+  #[tokio::test]
   async fn a_burst_of_commits_makes_one_push() {
     let recorder = Recorder::default();
     let Some(app) = TestApp::start_with_push(

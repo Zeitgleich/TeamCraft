@@ -21,7 +21,7 @@ use crate::records;
 use crate::store::{LocalStore, MessageContent, Priority, Table};
 use crate::ui_backend::CoreChatBackend;
 
-/// The list as this device read it last, next to the account data for readers without the keys.
+/// The list as this device read it last, in its encrypted store, for readers without the keys.
 pub(crate) const SCHEDULED_LIST_KEY: &str = "scheduled_messages";
 
 /// What this device knows of the user's held messages.
@@ -42,14 +42,53 @@ pub(crate) struct ScheduledEntry {
   /// `None`: this device doesn't hold the key yet.
   #[serde(rename = "content", default, skip_serializing_if = "Option::is_none")]
   pub maybe_content: Option<MessageContent>,
-  /// The server refused sealing this version again (the sender can't post there any more): not
-  /// tried again until the entry changes.
-  #[serde(
-    rename = "seal_refused_version",
-    default,
-    skip_serializing_if = "Option::is_none"
-  )]
-  pub maybe_seal_refused_version: Option<u64>,
+  /// The server refused sealing this version again in this epoch (the sender may not post there any
+  /// more): not tried again until the entry changes or the group moves on.
+  #[serde(rename = "seal_refused", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_seal_refused: Option<SealRefused>,
+}
+
+/// What a refusal to seal was about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SealRefused {
+  pub version: u64,
+  pub epoch: u64,
+}
+
+/// What sealing again ran into, and so what to do about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SealFailure {
+  /// The group moved between catching up and asking: catch up and try again.
+  EpochMoved,
+  /// Another device was first: it drops its work and reads the list.
+  LostRace,
+  /// The server says no (403, 404): not tried again until something changes.
+  Refused,
+  /// Offline, the server in trouble, or the sign-in ran out: stops this round.
+  Later,
+  /// Anything else (the group can't be caught up here, say): tried again later, paced by the caller.
+  Other,
+}
+
+impl SealFailure {
+  fn of(error: &CoreError) -> Self {
+    if error.is_retry_later() {
+      return Self::Later;
+    }
+    let CoreError::Api(api) = error else {
+      return Self::Other;
+    };
+    match api.error_code() {
+      Some(ErrorCode::EpochConflict) => Self::EpochMoved,
+      Some(ErrorCode::VersionConflict) => Self::LostRace,
+      _ => match api {
+        ApiError::Status {
+          status: 403 | 404, ..
+        } => Self::Refused,
+        _ => Self::Other,
+      },
+    }
+  }
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -87,6 +126,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.seal_stale_scheduled().await.map(|_| ())
   }
 
+  /// Whether the gateway said the list changed since it was read last. Taken: a failed read asks again
+  /// through [`Self::note_scheduled_list_stale`].
+  pub fn take_scheduled_list_stale(&mut self) -> bool {
+    std::mem::take(&mut self.is_scheduled_list_stale)
+  }
+
+  pub fn note_scheduled_list_stale(&mut self) {
+    self.is_scheduled_list_stale = true;
+  }
+
   /// Reads the list from the server and what it holds with this device's keys. A server from before
   /// this feature has no list: that is an empty one.
   pub async fn refresh_scheduled(&mut self) -> Result<(), CoreError> {
@@ -102,16 +151,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .messages
       .into_iter()
       .map(|response| {
-        let maybe_refused = known
+        let maybe_known = known
           .entries
           .iter()
-          .find(|entry| entry.response.id == response.id && entry.response.version == response.version)
-          .and_then(|entry| entry.maybe_seal_refused_version);
-        let maybe_content = self.read_scheduled(&response);
+          .find(|entry| entry.response.id == response.id);
+        // What didn't change isn't opened again: a list read costs what changed.
+        let maybe_same = maybe_known
+          .filter(|entry| entry.response.version == response.version && entry.maybe_content.is_some());
+        let maybe_content = match maybe_same {
+          Some(same) => same.maybe_content.clone(),
+          None => self.read_scheduled(&response),
+        };
+        let maybe_seal_refused = maybe_known
+          .and_then(|entry| entry.maybe_seal_refused)
+          .filter(|refused| refused.version == response.version);
         ScheduledEntry {
           response,
           maybe_content,
-          maybe_seal_refused_version: maybe_refused,
+          maybe_seal_refused,
         }
       })
       .collect();
@@ -234,30 +291,56 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn seal_stale_scheduled(&mut self) -> Result<usize, CoreError> {
     let list = read_list(&self.store)?;
     let mut sealed = 0;
+    let mut has_lost_race = false;
+    let mut maybe_failure = None;
     for entry in &list.entries {
       if !self.needs_sealing_again(entry)? {
         continue;
       }
-      match self.seal_again(entry.response.id).await {
+      let id = entry.response.id;
+      let mut outcome = self.seal_again(id).await;
+      // Sealing caught the group up; it moved once more before the answer. Once more, then later.
+      if matches!(&outcome, Err(error) if SealFailure::of(error) == SealFailure::EpochMoved) {
+        outcome = self.seal_again(id).await;
+      }
+      match outcome {
         Ok(()) => sealed += 1,
-        Err(error) if error.is_transient() => return Err(error),
-        Err(error) => {
-          // Another device was first, or the sender may not post there any more: not a busy loop.
-          tracing::debug!(%error, scheduled_message_id = %entry.response.id, "a scheduled message wasn't sealed again");
-          self.note_seal_refused(entry.response.id, entry.response.version)?;
+        Err(error) => match SealFailure::of(&error) {
+          SealFailure::Later => {
+            if sealed > 0 {
+              self.refresh_scheduled().await?;
+            }
+            return Err(error);
+          },
+          SealFailure::LostRace => has_lost_race = true,
+          SealFailure::Refused => {
+            tracing::debug!(%error, scheduled_message_id = %id, "sealing a scheduled message again was refused");
+            let epoch = self
+              .group_or_error(entry.response.conversation_id)
+              .map_or(0, |group| group.epoch());
+            self.note_seal_refused(id, entry.response.version, epoch)?;
+          },
+          SealFailure::EpochMoved | SealFailure::Other => {
+            tracing::debug!(%error, scheduled_message_id = %id, "a scheduled message wasn't sealed again yet");
+            maybe_failure = Some(error);
+          },
         },
       }
     }
-    if sealed > 0 {
+    if sealed > 0 || has_lost_race {
       self.refresh_scheduled().await?;
     }
-    Ok(sealed)
+    match maybe_failure {
+      // The caller paces the next round; this isn't to be tried on every tick.
+      Some(error) => Err(error),
+      None => Ok(sealed),
+    }
   }
 
   /// Whether this device should and can seal the entry again.
   fn needs_sealing_again(&mut self, entry: &ScheduledEntry) -> Result<bool, CoreError> {
     let response = &entry.response;
-    if entry.maybe_content.is_none() || entry.maybe_seal_refused_version == Some(response.version) {
+    if entry.maybe_content.is_none() {
       return Ok(false);
     }
     // Only these can be solved by sealing: the others stay until the user decides.
@@ -265,14 +348,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       None | Some(ScheduledHoldReason::StaleEpoch) => {},
       Some(_) => return Ok(false),
     }
+    let maybe_epoch = if self.has_group(response.conversation_id)? {
+      Some(self.group_or_error(response.conversation_id)?.epoch())
+    } else {
+      None
+    };
+    // A refusal counts for its version in its epoch: once the group moved on, it may not hold.
+    if let Some(refused) = entry.maybe_seal_refused
+      && refused.version == response.version
+      && Some(refused.epoch) == maybe_epoch
+    {
+      return Ok(false);
+    }
     if response.maybe_hold.is_some() || !response.is_epoch_current {
       return Ok(true);
     }
     // The server's word when the list was read is old by now; this device may have merged a commit.
-    Ok(
-      self.has_group(response.conversation_id)?
-        && self.group_or_error(response.conversation_id)?.epoch() > response.mls_epoch,
-    )
+    Ok(maybe_epoch.is_some_and(|epoch| epoch > response.mls_epoch))
   }
 
   /// Seals a held message again in the current epoch, keeping its time.
@@ -367,10 +459,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  fn note_seal_refused(&self, id: ScheduledMessageId, version: u64) -> Result<(), CoreError> {
+  fn note_seal_refused(&self, id: ScheduledMessageId, version: u64, epoch: u64) -> Result<(), CoreError> {
     let mut list = read_list(&self.store)?;
     if let Some(entry) = list.entries.iter_mut().find(|entry| entry.response.id == id) {
-      entry.maybe_seal_refused_version = Some(version);
+      entry.maybe_seal_refused = Some(SealRefused { version, epoch });
     }
     write_list(&self.store, &list)
   }
@@ -426,5 +518,43 @@ struct FrozenClock(i64);
 impl Clock for FrozenClock {
   fn now_ms(&self) -> i64 {
     self.0
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn only_a_refusal_stops_sealing_for_good() {
+    for (error, expected) in [
+      (status(403, ErrorCode::Forbidden), SealFailure::Refused),
+      (
+        status(404, ErrorCode::ScheduledMessageNotFound),
+        SealFailure::Refused,
+      ),
+      (status(409, ErrorCode::EpochConflict), SealFailure::EpochMoved),
+      (status(409, ErrorCode::VersionConflict), SealFailure::LostRace),
+      (status(401, ErrorCode::Unauthorized), SealFailure::Later),
+      (status(500, ErrorCode::Internal), SealFailure::Later),
+      (status(429, ErrorCode::RateLimited), SealFailure::Later),
+      (
+        CoreError::Api(ApiError::Network("down".into())),
+        SealFailure::Later,
+      ),
+      (status(400, ErrorCode::InvalidRequest), SealFailure::Other),
+      (
+        CoreError::NoContentKey(ConversationId::from_snowflake(
+          teamcraft_proto::Snowflake::new(1).unwrap(),
+        )),
+        SealFailure::Other,
+      ),
+    ] {
+      assert_eq!(SealFailure::of(&error), expected, "{error}");
+    }
+  }
+
+  fn status(status: u16, code: ErrorCode) -> CoreError {
+    CoreError::Api(ApiError::status(status, code, "x"))
   }
 }

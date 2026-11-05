@@ -77,6 +77,13 @@ class ScheduleTimesTest {
   }
 
   @Test
+  fun aRetryCarriesTheSameMessageId() {
+    val options = SendOptions(maybeClientMessageId = "ab")
+    val json = Json.parseToJsonElement(ChatActions.schedule("7", "later", options, 123)).jsonObject
+    assertEquals("ab", json["message"]!!.jsonObject["maybe_client_message_id"]!!.jsonPrimitive.content)
+  }
+
+  @Test
   fun theCoresAnswerDecodes() {
     val answer = decodeAnswer(
       """{"answer":"scheduled_messages","overview":{"messages":[{"id":"ab","conversation":"7","conversation_name":"general",

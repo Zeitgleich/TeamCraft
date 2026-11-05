@@ -190,10 +190,15 @@ impl PushSender for FcmSender {
         return Err(PushError::Invalid("not an FCM registration token".into()));
       }
       let priority = android_priority(message);
+      let mut data = json!({ "w": URL_SAFE_NO_PAD.encode(&message.sealed) });
+      // High priority but nothing to show: the app must know even if it can't open the wake-up.
+      if message.kind == PushKind::ScheduledSeal {
+        data["v"] = json!("0");
+      }
       let body = json!({
         "message": {
           "token": target.token,
-          "data": { "w": URL_SAFE_NO_PAD.encode(&message.sealed) },
+          "data": data,
           "android": {
             "priority": priority,
             "ttl": format!("{}s", message.ttl.as_secs()),
@@ -300,6 +305,17 @@ mod tests {
     let wait = Some(Duration::from_secs(120));
     let error = classify(StatusCode::SERVICE_UNAVAILABLE, "UNAVAILABLE", wait).unwrap_err();
     assert!(matches!(error, PushError::Unavailable { maybe_retry_after, .. } if maybe_retry_after == wait));
+  }
+
+  #[test]
+  fn a_wake_to_seal_goes_through_doze() {
+    let message = PushMessage {
+      sealed: Vec::new(),
+      kind: PushKind::ScheduledSeal,
+      urgency: Urgency::High,
+      ttl: Duration::from_secs(60),
+    };
+    assert_eq!(android_priority(&message), "HIGH");
   }
 
   #[test]

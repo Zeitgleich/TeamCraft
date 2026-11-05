@@ -59,7 +59,7 @@ pub enum ScheduledStatus {
   ConversationGone,
   /// The thread it answers is gone, or threads were turned off.
   ThreadGone,
-  /// This device holds no key for it yet. It says nothing about the message going out.
+  /// This device holds no key for it yet, and its epoch is current: the server sends it at its time.
   Unreadable,
   /// From a newer version.
   #[serde(other)]
@@ -160,8 +160,10 @@ pub fn status_of(
     Some(ScheduledHoldReason::ConversationGone) => ScheduledStatus::ConversationGone,
     Some(ScheduledHoldReason::ThreadGone) => ScheduledStatus::ThreadGone,
     Some(ScheduledHoldReason::Unknown(_)) => ScheduledStatus::Unknown,
-    None if !is_readable => ScheduledStatus::Unreadable,
+    // Before "can't read": a message under an old epoch needs a device of the user whatever this one
+    // can read, so "it still goes out" would be wrong.
     None if !is_epoch_current => ScheduledStatus::NeedsSealing,
+    None if !is_readable => ScheduledStatus::Unreadable,
     None => ScheduledStatus::Waiting,
   }
 }
@@ -180,6 +182,11 @@ mod tests {
       assert_eq!(status_of(None, true, true), ScheduledStatus::Waiting);
       assert_eq!(status_of(None, false, true), ScheduledStatus::NeedsSealing);
       assert_eq!(status_of(None, true, false), ScheduledStatus::Unreadable);
+      assert_eq!(
+        status_of(None, false, false),
+        ScheduledStatus::NeedsSealing,
+        "a stale one without the key doesn't claim to go out"
+      );
     }
 
     #[test]

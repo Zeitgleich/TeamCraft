@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE scheduled_messages\n             SET due_at = $4, version = version + 1, hold_reason = NULL, held_at = NULL, claimed_until = NULL, last_wake_at = NULL\n             WHERE id = $1 AND user_id = $2 AND version = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4f1ef9d223d98dbcea16195610806adc1d3d432da38f2920e9ac32455ac5ba9e"
+}

@@ -651,7 +651,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::KeyBagUpdate { .. } => Ok(()),
       // Another device of the user, or the server's release of one (docs/scheduled-messages.md).
       #[cfg(feature = "ui")]
-      GatewayEvent::ScheduledMessagesUpdate => self.refresh_scheduled().await,
+      GatewayEvent::ScheduledMessagesUpdate => {
+        // Read by the upkeep, so that a burst of events costs one read.
+        self.is_scheduled_list_stale = true;
+        Ok(())
+      },
       #[cfg(not(feature = "ui"))]
       GatewayEvent::ScheduledMessagesUpdate => Ok(()),
       // The UI (the admin console's) reads the health itself; the mark tells it to now.

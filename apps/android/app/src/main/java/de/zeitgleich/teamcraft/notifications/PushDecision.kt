@@ -15,6 +15,9 @@ import uniffi.teamcraft_ffi.PushNotificationKind
  * shows a short quiet note.
  */
 sealed interface PushDecision {
+  /** A scheduled message's group changed: seal it again (docs/scheduled-messages.md). Shows nothing. */
+  data object SealScheduled : PushDecision
+
   /** Post nothing: muted or DND (the device's own check), or an unknown kind. */
   data class Ignore(val reason: IgnoreReason) : PushDecision
 
@@ -69,8 +72,7 @@ sealed interface PushDecision {
       PushNotificationKind.MESSAGE -> message(notification)
       PushNotificationKind.CALL -> call(notification, isRingOver)
       PushNotificationKind.DISMISS -> dismiss(notification)
-      // Handled before this: it wakes the core, and there is nothing to decide or show.
-      PushNotificationKind.SCHEDULED_SEAL -> Ignore(IgnoreReason.UNKNOWN_KIND)
+      PushNotificationKind.SCHEDULED_SEAL -> SealScheduled
       PushNotificationKind.TEST -> ShowTest(notification.maybeSentAtMs)
       PushNotificationKind.UNKNOWN -> Ignore(IgnoreReason.UNKNOWN_KIND)
     }

@@ -758,13 +758,15 @@ final class AppModel {
   /// A push or background task: seals again the scheduled messages whose group changed
   /// (docs/scheduled-messages.md). Another device being first isn't a failure.
   func sealScheduledMessages() async -> Bool {
-    guard case .ready = phase, let core = try? core() else { return true }
-    // The foreground app already holds the lock; otherwise take it like the extension does.
-    if !isSyncing {
+    // A cold background launch has no phase yet: the core opens from the store, as for a push.
+    guard let core = try? core() else { return false }
+    // In the foreground the app holds the lock already; otherwise take it like the extension does.
+    let needsLock = !isSyncing
+    if needsLock {
       let lock = processLock
       guard await Task.detached(operation: { lock.acquire(timeout: 5) }).value else { return false }
     }
-    defer { if !isSyncing { processLock.release() } }
+    defer { if needsLock && !isSyncing { processLock.release() } }
     do {
       try await core.sealScheduledMessages()
       return true

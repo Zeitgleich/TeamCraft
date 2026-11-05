@@ -424,6 +424,10 @@ pub struct Client<A, S> {
   maybe_heads: Option<heads::HeadsInSync>,
   /// The first reads of a gateway connection, read at once and waiting for their steps (#714).
   read_ahead: read_ahead::ReadAhead,
+  /// The gateway said the list of scheduled messages changed: the upkeep reads it, paced, so a burst
+  /// of events costs one read.
+  #[cfg(feature = "ui")]
+  is_scheduled_list_stale: bool,
   /// When this process last heard from the gateway (any frame): a reconnect soon after reads its
   /// once-per-connection data while the server answers `resume`.
   maybe_last_heard_ms: Option<i64>,
@@ -578,6 +582,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       sync_trace: Default::default(),
       maybe_heads: None,
       read_ahead: Default::default(),
+      #[cfg(feature = "ui")]
+      is_scheduled_list_stale: false,
       maybe_last_heard_ms: None,
       is_checking_as_before_v1_0_9: false,
       is_imported_history_paged: false,

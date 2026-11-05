@@ -523,7 +523,7 @@ impl Default for OwnerPolicy {
 
 /// How far ahead a message may be scheduled in a new workspace.
 pub const DEFAULT_SCHEDULE_HORIZON_DAYS: u32 = 365;
-/// The farthest horizon a workspace may set: the entries wait in the user's key bag until then.
+/// The farthest horizon a workspace may set: the server keeps the ciphertext until then.
 pub const MAX_SCHEDULE_HORIZON_DAYS: u32 = 3650;
 /// How many messages one user can have waiting in a new workspace.
 pub const DEFAULT_SCHEDULE_MAX_PER_USER: u32 = 50;

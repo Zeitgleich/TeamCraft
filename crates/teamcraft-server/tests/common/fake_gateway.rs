@@ -51,6 +51,9 @@ struct Inner {
   accepts_unbound: bool,
   /// Pushes are taken and never answered (a gateway that hangs, or a send cut off by a crash).
   is_hanging: bool,
+  /// `/v1/info` lists the wake to seal scheduled messages (a gateway that knows it).
+  offers_seal: bool,
+  info_reads: usize,
 }
 
 #[derive(Clone, Default)]
@@ -72,6 +75,16 @@ impl FakeGateway {
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     (fake, url)
+  }
+
+  /// From now on `/v1/info` lists the wake to seal scheduled messages.
+  pub fn offer_seal(&self) {
+    self.inner.lock().unwrap().offers_seal = true;
+  }
+
+  /// How often `/v1/info` was read.
+  pub fn info_reads(&self) -> usize {
+    self.inner.lock().unwrap().info_reads
   }
 
   /// Signed push requests that arrived, accepted or answered with an error.
@@ -224,9 +237,18 @@ async fn push(State(fake): State<FakeGateway>, headers: HeaderMap, body: axum::b
 
 async fn info(State(fake): State<FakeGateway>) -> Response {
   let public = fake.token_public_key();
-  let accepts_unbound = fake.inner.lock().unwrap().accepts_unbound;
+  let (accepts_unbound, offers_seal) = {
+    let mut inner = fake.inner.lock().unwrap();
+    inner.info_reads += 1;
+    (inner.accepts_unbound, inner.offers_seal)
+  };
+  let mut kinds = vec!["message", "mention", "call", "dismiss", "test"];
+  if offers_seal {
+    kinds.push("scheduled_seal");
+  }
   axum::Json(json!({
     "version": "1.0.0",
+    "kinds": kinds,
     "providers": ["apns", "fcm"],
     "is_registration_open": true,
     "limits": {"pushes_per_second": 50, "burst": 200, "pushes_per_day": 200000, "pushes_per_token_per_minute": 30},

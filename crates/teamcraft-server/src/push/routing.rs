@@ -444,7 +444,7 @@ pub async fn dismiss_read(
 /// (docs/scheduled-messages.md): nothing shows, and the push service sees a push, no more than for a
 /// message. A burst of commits makes one wake, and there is at most one per
 /// `scheduled_wake_min_interval` per user and conversation; a later commit in that time waits for its
-/// end instead of being lost.
+/// end instead of being lost. A push gateway that doesn't list the kind means no wake for store apps.
 pub fn wake_to_seal(state: AppState, user: UserId, conversation: ConversationId) {
   let settings = state.settings.get().push.clone();
   let Some(delay) = state.push_tracker.queue_seal_wake(
@@ -458,6 +458,10 @@ pub fn wake_to_seal(state: AppState, user: UserId, conversation: ConversationId)
   tokio::spawn(async move {
     tokio::time::sleep(delay).await;
     state.push_tracker.take_seal_wake(user, conversation);
+    // Online devices read the list, the others get the push.
+    state
+      .hub
+      .publish([user], &teamcraft_proto::GatewayEvent::ScheduledMessagesUpdate);
     let rows = match state.database.list_push_devices(user).await {
       Ok(rows) => rows,
       Err(error) => {

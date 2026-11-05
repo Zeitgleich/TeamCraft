@@ -317,6 +317,11 @@ pub struct LimitsConfig {
   pub max_key_bag_bytes: usize,
   /// How often held messages are checked: a scheduled message goes out at most this late.
   pub scheduled_release_interval_secs: u64,
+  /// The largest held message. Every list of the sender carries it, so far less than a message's
+  /// limit: with `max_per_user` this bounds one list (docs/scheduled-messages.md).
+  pub max_scheduled_ciphertext_bytes: usize,
+  /// How long a held message nothing can solve stays (its sender left, or their account is off).
+  pub scheduled_hold_retention_days: u32,
   /// One signed device list.
   pub max_device_list_bytes: usize,
   /// Active devices one user may have; registering more fails until one is revoked.
@@ -1476,6 +1481,8 @@ impl Default for LimitsConfig {
       max_welcomes_per_commit: 500,
       max_key_bag_bytes: 1024 * 1024,
       scheduled_release_interval_secs: 5,
+      max_scheduled_ciphertext_bytes: 64 * 1024,
+      scheduled_hold_retention_days: 30,
       max_device_list_bytes: 64 * 1024,
       max_devices_per_user: 20,
       max_pending_attachments_per_user: 20,

@@ -31,10 +31,12 @@ accepted commit.
 
 - An entry records the epoch it was sealed in, and the server refuses it unless that is the current
   one (`409 epoch_conflict`).
-- **Same epoch at its time: released.** No commit was accepted since, so nobody was removed, and the
-  key is as good as when it was sealed. This is exactly as safe as sending at that moment. The release
-  takes a shared lock on the epoch's row, so a commit is either before it (the entry waits) or after it
-  (an ordinary race with a send).
+- **Same epoch at its time: released.** No commit was accepted since. A removal counts for the group
+  only once a member's device commits it: until then the removed person still is in the group, and an
+  honest server doesn't deliver to somebody off its member list in that gap. So the key is as good as
+  when it was sealed, and this is exactly as safe as sending at that moment. The release takes a shared
+  lock on the epoch's row, so a commit is either before it (the entry waits) or after it (an ordinary
+  race with a send).
 - **Epoch moved: never released under that key.** The entry waits for a device of the sender to seal
   it again under the current key. The server counts every commit as a change, because it can't tell a
   removal from an addition. So additions and new devices also need sealing again, and a stale entry is
@@ -65,6 +67,10 @@ the group and uploads the new seal.
 
 - **Payload:** the sealed wake-up of every push (e2ee.md §7), with the kind and conversation and no
   message or sender. **The push provider sees a push to a device at a time, no more than for a message.**
+- **The gateway:** store apps get pushes through the push gateway, which refuses kinds it doesn't know.
+  The server reads the gateway's `/v1/info` (at most hourly) and sends the kind only if it is listed. **A
+  gateway without the kind means no wake for those phones,** not an error loop: such an entry waits for
+  a device to run, as on desktop.
 - **Rate:** one wake for a burst of commits (`push.scheduled_wake_coalesce_ms`, 10 s), and at most one
   per user and conversation per `push.scheduled_wake_min_interval_secs` (5 min). A commit in that time
   waits for its end. No polling, and a commit in a conversation where nobody holds anything costs one
@@ -72,8 +78,9 @@ the group and uploads the new seal.
 - **Last stretch:** those queues are memory, so a restart loses them. The scheduler therefore wakes once
   per version for an entry still stale 15 minutes before its time, and once when it holds one at its
   time.
-- **Android:** FCM high priority, to get through Doze, and the existing wake-up path (the receiver, then
-  expedited work). FCM may lower the priority of apps whose high-priority messages show nothing; these
+- **Android:** FCM high priority, to get through Doze, marked outside the sealed payload with `v=0`, which
+  reveals only "silent", so that a wake-up that can't be opened shows no "New message". Sealing runs as
+  WorkManager work with a network constraint and backoff. FCM may lower the priority of apps whose high-priority messages show nothing; these
   are rare, and this is why they aren't used for anything else. The F-Droid build gets the same through
   its UnifiedPush distributor, as reliable as that distributor is.
 - **iOS:** a silent push (APNs background, priority 5), and a `BGProcessingTask` if that couldn't finish.
@@ -84,16 +91,18 @@ the group and uploads the new seal.
 ## What the server now learns
 
 **Ahead of time**, for every scheduled message: that a ciphertext exists, its conversation, its sender
-and sending device, its due time, its size, whether it mentions people and whom, and whether it is
-urgent. A message sent at once shows all this at once; a scheduled one shows it days before. The server
-learns of plans before they happen, and that a message was scheduled at all, also after its release if
-it kept track.
+and sending device, its due time, its size, the thread it answers, its content key ID, whether it
+mentions people and whom, and whether it is urgent. A message sent at once shows all this at once; a
+scheduled one shows it days before. It also learns **when each edit, each new seal and each cancel
+happens**. The server learns of plans before they happen, and that a message was scheduled at all, also
+after its release if it kept track.
 
 Not the text, the attachments, the reply target or anything else inside the ciphertext.
 
 **It could withhold or delay a release**, as with any message it forwards, and it could release an entry
 early. The sender's devices see the list, so a message that stays there after its time shows. They can't
-prove a release happened at the right moment.
+prove a release happened at the right moment. **A cancel or edit isn't binding against a compromised
+server:** it can keep the old ciphertext and release it anyway, signed by the sender as it is.
 
 ### The accepted risk
 
@@ -174,6 +183,27 @@ of members only, the epoch, and the time. The gateway event `scheduled_messages_
 sender's devices to read the list. A device decrypts it like any message of the conversation and keeps
 the result in its encrypted local store. A device that holds no key for it yet says so. Text is never
 logged.
+
+## Limits on what a member can cost
+
+A held message is at most `limits.max_scheduled_ciphertext_bytes` (64 KiB), so a list is bounded by that
+times the cap, and held messages that nothing can solve (the sender left, the account is off) go after
+`limits.scheduled_hold_retention_days` (30). A burst of commits makes one event and one push per sender and
+conversation, a device reads the list at most every 5 s for events, and it opens only entries that changed.
+Commits themselves have no limit of their own: the general limit per user applies
+(`user_writes_per_minute`, 600).
+
+## Open issues
+
+- **A hostile member's garbage commit.** The server takes commits as opaque, so a member can move the head
+  with bytes no device can merge. Devices then can't reach that epoch, and every seal gets `epoch_conflict`:
+  held messages in that conversation stay stale. That fails safe, nothing goes out under the old key, but
+  it stalls them, and send now with them. The same commit already disturbs the group for everybody
+  (e2ee.md §4.6). The way out for the user is to cancel and send normally.
+- **A forked device.** A device whose group forked seals under its own idea of the current key. If its
+  epoch number matches the head the server takes it, and members on the other branch can't read the
+  message, like any message sent from a forked device (the group health check repairs forks, e2ee.md §4.6).
+  It isn't worse than a send, but it is delayed: the sender isn't there to see it.
 
 ## Admin policy
 
