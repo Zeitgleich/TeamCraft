@@ -296,6 +296,7 @@ impl VoiceRecorder {
       .try_get_value()
       .flatten()
       .ok_or("the take is gone")?;
+    let generation = parts.generation.get_value();
     parts.maybe_phase.try_set(Some(RecorderPhase::Finishing));
     match hand_over(source).await {
       Ok((file_name, media_type, source)) => {
@@ -312,7 +313,10 @@ impl VoiceRecorder {
         }))
       },
       Err(error) => {
-        parts.maybe_phase.try_set(Some(RecorderPhase::Review(info)));
+        // Back to review, unless the take was discarded (or the user signed out) meanwhile.
+        if parts.generation.try_get_value() == Some(generation) {
+          parts.maybe_phase.try_set(Some(RecorderPhase::Review(info)));
+        }
         Err(error)
       },
     }

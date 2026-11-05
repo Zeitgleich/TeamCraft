@@ -59,7 +59,7 @@ pub fn AudioCard(file: FileInfo) -> impl IntoView {
     key,
     format,
     rate: 1.0,
-    maybe_voice_max_seconds: None,
+    is_voice: false,
   };
   let fits = AudioLimit::load().allows(file.size_bytes);
   let actions = FileActions::new(state, &file);

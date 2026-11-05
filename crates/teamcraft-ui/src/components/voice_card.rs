@@ -84,7 +84,6 @@ pub fn VoiceCard(file: FileInfo) -> impl IntoView {
   };
   let status = transfer_status(&file.transfer, actions);
   let conversation = file.conversation;
-  let max_seconds = state.read(|backend| backend.voice_message_policy()).max_seconds();
   let press = move || {
     // No voice message plays over a call (#204).
     if is_in_call(state) {
@@ -96,7 +95,7 @@ pub fn VoiceCard(file: FileInfo) -> impl IntoView {
       key,
       format,
       rate: speed.get_untracked().rate(),
-      maybe_voice_max_seconds: Some(max_seconds),
+      is_voice: true,
     });
   };
   let cycle_speed = move |_| {

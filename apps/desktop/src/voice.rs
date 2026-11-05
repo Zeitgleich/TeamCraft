@@ -8,18 +8,22 @@
 //!   done; the recording folder is emptied at every start, so a take left by a crash is never
 //!   sent.
 //! - Voice messages the webview can't play (Ogg or WebM Opus in the macOS webview) are decoded
-//!   here from memory to WAV ([`voice_playback_prepare`]), no longer than the workspace's limit
+//!   here from memory to WAV ([`voice_playback_prepare`]), no longer than the policy's ceiling
 //!   and than the file's size can hold, into a private folder; the webview reads it in parts and
 //!   lets go of it ([`voice_playback_release`]). The decrypted Opus never touches the disk.
-//! - Sign-out ([`stop_for_sign_out`]) cancels a recording and deletes every take.
+//! - Sign-out ([`stop_for_sign_out`]) cancels a recording and deletes every take. A webview that
+//!   loads anew (reload, the panic overlay, an update, webview recovery) can't see its recording
+//!   or files any more: [`page_started`] cancels the recording it owned and deletes its takes and
+//!   decoded files.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, Webview};
 use teamcraft_client_api::remote::AttachmentPriority;
 use teamcraft_client_api::voice::{RecordingRefusal, RecordingStatus, RecordingStop, ShellTake};
 use teamcraft_media::audio_io::AudioDeviceChoice;
@@ -37,10 +41,19 @@ const PLAYBACK_FOLDER: &str = "voice-playback";
 /// The most of a decoded file one read hands the webview.
 const PLAYBACK_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
 
-/// The recording under way, if any; one at a time for the whole app.
+/// The longest a decoded voice message plays: the hard ceiling of the policy and a minute of
+/// slack, never the workspace's current limit (a message recorded under a longer one plays
+/// whole). A small hostile file is stopped by `voice_decode::plausible_length`.
+const PLAYBACK_LIMIT: Duration = Duration::from_secs(MAX_VOICE_MESSAGE_MINUTES as u64 * 60 + 60);
+
+/// The recording under way, if any (one at a time for the whole app), and which webview owns it
+/// and each take and decoded file.
 #[derive(Default)]
 pub struct VoiceState {
-  maybe_recorder: Mutex<Option<VoiceRecorder>>,
+  /// The recorder and the label of the webview that started it.
+  maybe_recorder: Mutex<Option<(String, VoiceRecorder)>>,
+  /// Takes and decoded files on disk, by the label of the webview they belong to.
+  files: Mutex<HashMap<PathBuf, String>>,
   takes: AtomicU64,
   /// Numbers the decoded files, so two decodes never share one.
   decodes: AtomicU64,
@@ -68,13 +81,36 @@ pub fn stop_for_sign_out(app: &AppHandle) {
   if let Some(recorder) = take_recorder(&state) {
     recorder.cancel();
   }
+  lock(&state.files).clear();
   clear_voice_folders(app);
+}
+
+/// The webview `label` starts loading a page: what its old page recorded or decoded is
+/// unreachable now, so its recording is cancelled and its takes and decoded files deleted.
+pub fn page_started(app: &AppHandle, label: &str) {
+  let state = app.state::<VoiceState>();
+  let maybe_recorder = {
+    let mut slot = lock(&state.maybe_recorder);
+    match slot.as_ref() {
+      Some((owner, _)) if owner == label => slot.take().map(|(_, recorder)| recorder),
+      _ => None,
+    }
+  };
+  if let Some(recorder) = maybe_recorder {
+    tracing::info!("a voice recording ended with its page");
+    recorder.cancel();
+  }
+  let orphans = take_files_of(&mut lock(&state.files), label);
+  for path in orphans {
+    drop(fs::remove_file(path));
+  }
 }
 
 /// Starts recording from the system's default microphone, for at most `max_seconds`.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn voice_record_start(
   app: AppHandle,
+  webview: Webview,
   state: State<'_, VoiceState>,
   max_seconds: u32,
 ) -> Result<(), String> {
@@ -102,36 +138,26 @@ pub async fn voice_record_start(
       _ => RecordingRefusal::Failed.as_str().to_owned(),
     }
   })?;
-  let mut slot = state
-    .maybe_recorder
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner);
+  let mut slot = lock(&state.maybe_recorder);
   if slot.is_some() {
     // Another window started one meanwhile: this one goes.
     drop(slot);
     recorder.cancel();
     return Err(RecordingRefusal::Busy.as_str().to_owned());
   }
-  *slot = Some(recorder);
+  *slot = Some((webview.label().to_owned(), recorder));
   Ok(())
 }
 
 fn is_recording(state: &VoiceState) -> bool {
-  state
-    .maybe_recorder
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner)
-    .is_some()
+  lock(&state.maybe_recorder).is_some()
 }
 
 /// The recording's level and length; `None` without one.
 #[tauri::command(rename_all = "snake_case")]
 pub fn voice_record_status(state: State<'_, VoiceState>) -> Option<RecordingStatus> {
-  let slot = state
-    .maybe_recorder
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner);
-  slot.as_ref().map(|recorder| RecordingStatus {
+  let slot = lock(&state.maybe_recorder);
+  slot.as_ref().map(|(_, recorder)| RecordingStatus {
     level: recorder.level(),
     elapsed_ms: recorder.elapsed().as_millis() as u64,
     maybe_stop: recorder.maybe_stop(),
@@ -142,6 +168,7 @@ pub fn voice_record_status(state: State<'_, VoiceState>) -> Option<RecordingStat
 /// stopped it, when the user didn't.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn voice_record_finish(
+  webview: Webview,
   state: State<'_, VoiceState>,
   stop: Option<RecordingStop>,
 ) -> Result<ShellTake, String> {
@@ -153,6 +180,7 @@ pub async fn voice_record_finish(
       tracing::debug!(%error, "the voice recording ended without a take");
       RecordingRefusal::Failed.as_str().to_owned()
     })?;
+  lock(&state.files).insert(take.path.clone(), webview.label().to_owned());
   Ok(ShellTake {
     path: take.path.to_string_lossy().into_owned(),
     duration_ms: take.duration_ms,
@@ -176,6 +204,7 @@ pub async fn voice_record_cancel(state: State<'_, VoiceState>) -> Result<(), Str
 pub fn voice_take_stage(
   app: AppHandle,
   host: State<'_, CoreHost>,
+  state: State<'_, VoiceState>,
   path: String,
   file_name: String,
 ) -> Result<String, String> {
@@ -188,28 +217,30 @@ pub fn voice_take_stage(
     fs::copy(&take, &target).map_err(|error| error.to_string())?;
     drop(fs::remove_file(&take));
   }
+  lock(&state.files).remove(&take);
   Ok(target.to_string_lossy().into_owned())
 }
 
 /// Deletes a take the user discarded.
 #[tauri::command(rename_all = "snake_case")]
-pub fn voice_take_discard(app: AppHandle, path: String) -> Result<(), String> {
+pub fn voice_take_discard(app: AppHandle, state: State<'_, VoiceState>, path: String) -> Result<(), String> {
   let take = own_take(&app, &path)?;
+  lock(&state.files).remove(&take);
   fs::remove_file(take).map_err(|error| error.to_string())
 }
 
 /// Decodes a voice message to WAV for a webview that can't play its Opus (macOS), at most
-/// `max_seconds` (the workspace's limit) long. The webview then reads it with
+/// [`PLAYBACK_LIMIT`] long. The webview then reads it with
 /// [`voice_playback_read`] and lets go of it with [`voice_playback_release`].
 #[tauri::command(rename_all = "snake_case")]
 pub async fn voice_playback_prepare(
   app: AppHandle,
+  webview: Webview,
   host: State<'_, CoreHost>,
   state: State<'_, VoiceState>,
   conversation: ConversationId,
   message: MessageId,
   file_id: String,
-  max_seconds: u32,
 ) -> Result<DecodedVoice, String> {
   let plaintext = host
     .current()?
@@ -218,24 +249,34 @@ pub async fn voice_playback_prepare(
   let folder = private_folder(&app, PLAYBACK_FOLDER).map_err(|error| error.to_string())?;
   let token = format!("{:016x}", state.decodes.fetch_add(1, Ordering::Relaxed));
   let output = folder.join(format!("{token}.wav"));
-  let max_minutes = u32::from(MAX_VOICE_MESSAGE_MINUTES);
-  let max = Duration::from_secs(u64::from(max_seconds.clamp(1, max_minutes * 60)));
+  lock(&state.files).insert(output.clone(), webview.label().to_owned());
   let bytes = plaintext.expose_secret().to_vec();
   let decoded = tokio::task::spawn_blocking({
     let output = output.clone();
-    move || voice_decode::decode_bytes_to_wav(bytes, &output, max)
+    move || voice_decode::decode_bytes_to_wav(bytes, &output, PLAYBACK_LIMIT)
   })
   .await;
+  // The page that asked may have loaded anew meanwhile (`page_started`): then nobody reads it.
+  let is_wanted = lock(&state.files).contains_key(&output);
   match decoded {
-    Ok(Ok(_)) => {
+    Ok(Ok(_)) if is_wanted => {
       let size_bytes = fs::metadata(&output).map_err(|error| error.to_string())?.len();
       Ok(DecodedVoice { token, size_bytes })
     },
+    Ok(Ok(_)) => {
+      drop(fs::remove_file(&output));
+      Err("the page went away".to_owned())
+    },
     Ok(Err(error)) => {
+      lock(&state.files).remove(&output);
       tracing::debug!(%error, conversation_id = %conversation, "a voice message did not decode");
       Err("not playable".to_owned())
     },
-    Err(_) => Err("not playable".to_owned()),
+    Err(_) => {
+      lock(&state.files).remove(&output);
+      drop(fs::remove_file(&output));
+      Err("not playable".to_owned())
+    },
   }
 }
 
@@ -263,8 +304,13 @@ pub fn voice_playback_read(
 
 /// Deletes a decoded voice message once the webview holds it.
 #[tauri::command(rename_all = "snake_case")]
-pub fn voice_playback_release(app: AppHandle, token: String) -> Result<(), String> {
+pub fn voice_playback_release(
+  app: AppHandle,
+  state: State<'_, VoiceState>,
+  token: String,
+) -> Result<(), String> {
   let path = decoded_path(&app, &token)?;
+  lock(&state.files).remove(&path);
   match fs::remove_file(path) {
     Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
     _ => Ok(()),
@@ -280,12 +326,23 @@ fn decoded_path(app: &AppHandle, token: &str) -> Result<PathBuf, String> {
   Ok(folder.join(format!("{token}.wav")))
 }
 
+/// Forgets and returns the files the webview `label` owns.
+fn take_files_of(files: &mut HashMap<PathBuf, String>, label: &str) -> Vec<PathBuf> {
+  let owned: Vec<PathBuf> = files
+    .iter()
+    .filter(|(_, owner)| owner.as_str() == label)
+    .map(|(path, _)| path.clone())
+    .collect();
+  files.retain(|_, owner| owner.as_str() != label);
+  owned
+}
+
 fn take_recorder(state: &VoiceState) -> Option<VoiceRecorder> {
-  state
-    .maybe_recorder
-    .lock()
-    .unwrap_or_else(std::sync::PoisonError::into_inner)
-    .take()
+  lock(&state.maybe_recorder).take().map(|(_, recorder)| recorder)
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+  mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A take path from the webview, if it names a file directly in the recording folder.
@@ -331,6 +388,29 @@ fn private_folder(app: &AppHandle, name: &str) -> Result<PathBuf, std::io::Error
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn playback_isnt_cut_by_the_current_policy() {
+    // A message recorded under a longer limit plays whole after an admin lowers it.
+    assert!(PLAYBACK_LIMIT > Duration::from_secs(u64::from(MAX_VOICE_MESSAGE_MINUTES) * 60));
+  }
+
+  #[test]
+  fn a_page_that_loads_anew_loses_only_its_own_files() {
+    let mut files = HashMap::from([
+      (PathBuf::from("take-0.ogg"), "main".to_owned()),
+      (PathBuf::from("0000000000000001.wav"), "main".to_owned()),
+      (PathBuf::from("take-1.ogg"), "call".to_owned()),
+    ]);
+    let mut orphans = take_files_of(&mut files, "main");
+    orphans.sort();
+    assert_eq!(
+      orphans,
+      [PathBuf::from("0000000000000001.wav"), PathBuf::from("take-0.ogg")]
+    );
+    assert_eq!(files.len(), 1);
+    assert!(take_files_of(&mut files, "main").is_empty());
+  }
 
   #[test]
   fn file_names_stay_in_the_folder() {

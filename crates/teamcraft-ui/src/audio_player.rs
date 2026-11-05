@@ -74,9 +74,8 @@ pub struct AudioRequest {
   pub format: AudioFormat,
   /// The playback rate: 1.0, or a voice message's chosen speed.
   pub rate: f64,
-  /// A voice message (#204), with the workspace's longest: Opus the shell can decode where the
-  /// webview can't play it, no longer than that.
-  pub maybe_voice_max_seconds: Option<u32>,
+  /// A voice message (#204): Opus the shell can decode where the webview can't play it.
+  pub is_voice: bool,
 }
 
 /// The `<audio>` element and the listeners it needs kept alive.
@@ -332,7 +331,7 @@ impl Parts {
     let maybe_request = self.maybe_request.try_get_value().flatten();
     let has_tried = self.has_tried_decoding.try_get_value().unwrap_or(true);
     if let Some(request) = maybe_request
-      && request.maybe_voice_max_seconds.is_some()
+      && request.is_voice
       && !has_tried
       && crate::auth::tauri::is_available()
     {
@@ -348,8 +347,7 @@ impl Parts {
     let generation = self.generation.try_get_value().unwrap_or_default();
     self.phase.try_set(AudioPhase::Loading);
     spawn_local(async move {
-      let max_seconds = request.maybe_voice_max_seconds.unwrap_or_default();
-      let result = decoded_wav(request.conversation, request.key, max_seconds).await;
+      let result = decoded_wav(request.conversation, request.key).await;
       if self.generation.try_get_value() != Some(generation) {
         return;
       }
@@ -580,11 +578,7 @@ fn apply_rate(audio: &web_sys::HtmlMediaElement, rate: f64) {
 }
 
 /// A voice message decoded to WAV by the desktop app's shell, as a URL.
-async fn decoded_wav(
-  conversation: ConversationId,
-  key: MediaKey,
-  max_seconds: u32,
-) -> Result<ObjectUrl, String> {
+async fn decoded_wav(conversation: ConversationId, key: MediaKey) -> Result<ObjectUrl, String> {
   #[derive(serde::Deserialize)]
   struct Decoded {
     token: String,
@@ -594,7 +588,6 @@ async fn decoded_wav(
     "conversation": conversation,
     "message": key.message,
     "file_id": key.attachment.to_string(),
-    "max_seconds": max_seconds,
   });
   let decoded = crate::auth::tauri::call::<Decoded>("voice_playback_prepare", &args).await?;
   let read = read_decoded(&decoded.token, decoded.size_bytes).await;

@@ -216,6 +216,10 @@ fn main() -> anyhow::Result<()> {
       Ok(())
     })
     .on_page_load(|webview, payload| {
+      if payload.event() == PageLoadEvent::Started {
+        // What the old page recorded or decoded is unreachable now (#204).
+        voice::page_started(webview.app_handle(), webview.label());
+      }
       if webview.label() == tray::MAIN_WINDOW && payload.event() == PageLoadEvent::Started {
         webview_recovery::page_started(webview.app_handle());
       }
