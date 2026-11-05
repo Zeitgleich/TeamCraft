@@ -225,3 +225,30 @@ entry-menu-leave-space-confirm = { $name } verlassen? Du verlässt auch alle sei
 entry-menu-leave-last-space-admin = Ernenne zuerst jemand anderen zum Space-Admin.
 entry-menu-settings = Einstellungen…
 sidebar-item-in-space = { $label }, in { $space }
+
+# Drafts and sent (#1220)
+sidebar-drafts = Entwürfe & Gesendet
+sidebar-item-draft = Entwurf
+sidebar-item-draft-label = { $label }, Entwurf
+drafts-title = Entwürfe & Gesendet
+drafts-tab-drafts = Entwürfe
+drafts-tab-sent = Gesendet
+drafts-empty-title = Keine Entwürfe
+drafts-empty = Text, den du anfängst und nicht sendest, wartet hier, auf allen deinen Geräten.
+drafts-space-empty = Text, den du in den Kanälen dieses Space anfängst und nicht sendest, wartet hier.
+drafts-in-thread = Thread: { $root }
+drafts-in-thread-unknown = In einem Thread
+drafts-continue = Weiterschreiben
+drafts-delete = Löschen
+drafts-delete-question = Diesen Entwurf auf allen deinen Geräten löschen?
+drafts-show-more = Mehr anzeigen
+sent-empty-title = Noch nichts gesendet
+sent-empty = Deine letzten Nachrichten aus allen Unterhaltungen erscheinen hier.
+sent-space-empty = Deine letzten Nachrichten aus den Kanälen dieses Space erscheinen hier.
+sent-note = Deine letzten Nachrichten, soweit dieses Gerät sie hat.
+sent-in-thread = In einem Thread
+sent-open = Zur Nachricht
+sent-files = { $count ->
+    [one] { $count } Datei
+   *[other] { $count } Dateien
+  }

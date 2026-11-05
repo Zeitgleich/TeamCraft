@@ -569,6 +569,8 @@ pub struct CoreChatBackend<S> {
   pub(crate) mentions: RefCell<MentionMemo>,
   /// The activity feed's entries per conversation, kept while it doesn't change.
   pub(crate) activity: RefCell<HashMap<ConversationId, crate::ui_activity::KeptActivity>>,
+  /// The user's own messages per conversation, kept while it doesn't change (#1220).
+  pub(crate) sent: RefCell<HashMap<ConversationId, crate::ui_drafts::KeptSent>>,
   /// Tallies counted and not kept yet ([`Self::flush_entry_tallies`]).
   entry_tallies: RefCell<BTreeMap<ConversationId, EntryTally>>,
   /// The feed rows of the conversations read last, kept while their messages don't change.
@@ -612,6 +614,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       requests: RefCell::default(),
       mentions: RefCell::default(),
       activity: RefCell::default(),
+      sent: RefCell::default(),
       entry_tallies: RefCell::default(),
       feeds: RefCell::default(),
       layouts: RefCell::default(),
@@ -780,12 +783,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
     users: &BTreeMap<UserId, UserSummary>,
     preferences: &MentionPreferences,
   ) -> Conversation {
-    let maybe_mark = self
-      .read(crate::client::stored_account_data(&self.store))
-      .unread_mark(response.id);
-    let counts = self.entry_counts(response, maybe_mark, users.get(&self.me), preferences);
+    let account = self.read(crate::client::stored_account_data(&self.store));
+    let counts = self.entry_counts(
+      response,
+      account.unread_mark(response.id),
+      users.get(&self.me),
+      preferences,
+    );
     self.flush_entry_tallies();
-    self.conversation_view(response, users, counts.unread)
+    Conversation {
+      maybe_draft_preview: account.draft_preview(response.id),
+      ..self.conversation_view(response, users, counts.unread)
+    }
   }
 
   /// What a conversation's sidebar entry counts, from the kept tally and only the rows it doesn't
@@ -955,6 +964,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           .map_or(participant.is_deactivated, |user| user.is_deactivated)
       }),
       maybe_image_version: response.maybe_image.as_ref().map(|image| image.version.clone()),
+      maybe_draft_preview: None,
     }
   }
 
@@ -2043,6 +2053,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       maybe_thread,
       body: body.to_string(),
     });
+  }
+
+  fn drafts(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::DraftItem> {
+    self.ui_drafts(maybe_space)
+  }
+
+  fn sent_messages(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::SentItem> {
+    self.ui_sent_messages(maybe_space)
   }
 
   fn send_message(&self, message: OutgoingMessage) {

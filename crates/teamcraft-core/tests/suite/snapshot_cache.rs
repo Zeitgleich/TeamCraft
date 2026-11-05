@@ -15,7 +15,7 @@ use teamcraft_client_api::snapshot_changes::SnapshotCursor;
 use teamcraft_core::api::fake::{FakeGateway, FakeServer, FakeServerApi};
 use teamcraft_core::client::{LinkAnnouncement, NewDeviceLink};
 use teamcraft_core::store::{MemoryStore, TrackedStore};
-use teamcraft_core::ui_backend::CoreChatBackend;
+use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::{Client, LinkOffer, PendingEnrollment};
 use teamcraft_proto::{ClientMessageId, ConversationId, DeviceLinkPlatform};
@@ -49,6 +49,41 @@ async fn a_new_message_sends_only_its_conversation() {
     .collect();
   assert_eq!(changed, vec![first]);
   assert!(changes.maybe_order.is_none() && changes.maybe_spaces.is_none());
+  let applied = carol.held.apply(changes);
+  assert!(applied.touches(first) && !applied.touches(second));
+  carol.assert_up_to_date();
+}
+
+/// The sidebar's draft marker (#1220) costs one conversation's entry per saved draft, not a sidebar.
+#[tokio::test]
+async fn a_saved_draft_sends_only_its_conversation() {
+  let (_alice, mut carol, [first, second]) = workspace().await;
+  drop(carol.changes());
+
+  carol
+    .client
+    .run_ui_command(CoreCommand::SetDraft {
+      conversation: first,
+      maybe_thread: None,
+      body: "half a thought".into(),
+    })
+    .await
+    .unwrap();
+  let changes = carol.changes();
+
+  let changed: Vec<ConversationId> = changes
+    .conversations
+    .iter()
+    .map(|change| change.conversation.id)
+    .collect();
+  assert_eq!(changed, vec![first]);
+  assert_eq!(
+    changes.conversations[0]
+      .conversation
+      .maybe_draft_preview
+      .as_deref(),
+    Some("half a thought")
+  );
   let applied = carol.held.apply(changes);
   assert!(applied.touches(first) && !applied.touches(second));
   carol.assert_up_to_date();

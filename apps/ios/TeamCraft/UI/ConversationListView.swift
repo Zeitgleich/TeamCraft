@@ -13,6 +13,7 @@ struct ConversationListView: View {
   @State private var canBrowseChannels = true
   @State private var previews: [String: ChatPreview] = [:]
   @State private var selection: String?
+  @State private var isShowingDrafts = false
   @State private var query = ""
   @State private var hits: [SearchHitItem] = []
   @State private var isShowingSettings = false
@@ -81,6 +82,10 @@ struct ConversationListView: View {
             }
             .accessibilityLabel(Text("search_filters_title"))
           }
+          ToolbarItem(placement: .topBarLeading) {
+            Button { isShowingDrafts = true } label: { Image(systemName: "pencil.line") }
+              .accessibilityLabel(Text("drafts_title"))
+          }
           ToolbarItemGroup(placement: .topBarTrailing) {
             Button { maybeBrowseTab = .people } label: { Image(systemName: "square.and.pencil") }
               .accessibilityLabel(Text("new_chat"))
@@ -133,6 +138,12 @@ struct ConversationListView: View {
     .joinNoteAlert(model, isActive: maybeBrowseTab == nil)
     .sheet(isPresented: $isShowingSettings) { SettingsView(account: account) }
     .sheet(isPresented: $isShowingMeetings) { MeetingsView(account: account) }
+    .sheet(isPresented: $isShowingDrafts) {
+      DraftsAndSentView { place in
+        model.openedPlace = place
+        selection = place.conversationId
+      }
+    }
     .onChange(of: model.isShowingMeetingsFromLink) { _, isAsked in
       if isAsked {
         isShowingMeetings = true
@@ -237,7 +248,13 @@ struct ConversationListView: View {
         Menu {
           spaceMenu(for: section)
         } label: {
-          Text(title(of: section.title))
+          HStack {
+            if let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
+              SpacePictureView(
+                spaceId: spaceId, maybeVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
+            }
+            Text(title(of: section.title))
+          }
         }
         .task(id: section.id) { await loadSpaceMenu(for: section) }
       }
@@ -408,9 +425,12 @@ struct ConversationListView: View {
   private func sectionHeader(_ section: ConversationSection) -> some View {
     if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
       Button {
-        maybeSpaceViews = SpaceChoice(id: spaceId, name: name)
+        maybeSpaceViews = SpaceChoice(
+          id: spaceId, name: name, maybeImageVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
       } label: {
         HStack {
+          SpacePictureView(
+            spaceId: spaceId, maybeVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
           Text(title(of: section.title))
           Spacer()
           Image(systemName: "chevron.right")
@@ -602,7 +622,15 @@ struct ConversationRow: View {
 
   @ViewBuilder
   private var previewText: some View {
-    if let preview = maybePreview {
+    // A draft stands in for the newest message: it's what the user owes this conversation (#1220).
+    if let draft = conversation.maybeDraftPreview {
+      Label {
+        Text("draft_preview \(draft)")
+      } icon: {
+        Image(systemName: "pencil.line")
+      }
+      .labelStyle(.titleAndIcon)
+    } else if let preview = maybePreview {
       switch (preview.sender, preview.content) {
       case (_, .noText): Text("chat_preview_event")
       case (.none, .placeholder(let placeholder)): Text(PlaceholderLine.text(placeholder))

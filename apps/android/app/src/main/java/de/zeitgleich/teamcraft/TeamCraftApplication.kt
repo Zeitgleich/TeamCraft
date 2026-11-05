@@ -26,6 +26,7 @@ import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.core.OutboxWork
 import de.zeitgleich.teamcraft.notifications.AvatarCache
+import de.zeitgleich.teamcraft.ui.SpacePictureCache
 import de.zeitgleich.teamcraft.notifications.JoinRequestNotifier
 import de.zeitgleich.teamcraft.notifications.JoinRequestWatcher
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
@@ -56,11 +57,17 @@ class AppGraph(context: Context) {
   val managedConfig = ManagedConfig(context)
   /** Profile pictures for screens and notifications; they belong to the signed-in account. `core` is only used when called. */
   val avatars = AvatarCache(context) { core.core() }
-  val auth: AuthRepository = AuthRepository(context, servers, onSignedOut = avatars::clear)
+  /** Pictures of spaces on screen, kept by version (issue #284). */
+  val spacePictures = SpacePictureCache(context) { core.core() }
+  val auth: AuthRepository = AuthRepository(context, servers, onSignedOut = {
+    avatars.clear()
+    spacePictures.clear()
+  })
   // Decrypted pictures leave memory with the account they belong to.
   val core: CoreRepository = CoreRepository(context, auth, onAccountClosed = {
     Pictures.clear()
     avatars.clear()
+    spacePictures.clear()
   })
   val notificationContent = NotificationContentPrefs(context)
   val carProjection = CarProjection(context)

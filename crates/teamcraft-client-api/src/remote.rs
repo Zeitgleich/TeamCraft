@@ -24,6 +24,7 @@ use crate::calls::{
   OrgBackgroundRule, OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall,
   ScreenContentMode, ScreenShareResolution, VideoQuality,
 };
+use crate::drafts::{DraftItem, SentItem};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -1554,6 +1555,16 @@ pub enum ChatQuery {
     #[serde(default)]
     maybe_thread: Option<ThreadId>,
   },
+  /// Every draft of one space or (`None`) of all conversations.
+  Drafts {
+    #[serde(default)]
+    maybe_space: Option<SpaceId>,
+  },
+  /// The newest sent messages of one space or (`None`) of all conversations.
+  SentMessages {
+    #[serde(default)]
+    maybe_space: Option<SpaceId>,
+  },
   ConversationFiles {
     conversation: ConversationId,
   },
@@ -1713,6 +1724,12 @@ pub enum ChatAnswer {
   },
   Draft {
     maybe_body: Option<String>,
+  },
+  Drafts {
+    drafts: Vec<DraftItem>,
+  },
+  SentMessages {
+    sent: Vec<SentItem>,
   },
   Files {
     files: Vec<FileInfo>,
@@ -1928,6 +1945,12 @@ impl ChatQuery {
       } => ChatAnswer::Draft {
         maybe_body: backend.draft(conversation, maybe_thread),
       },
+      Self::Drafts { maybe_space } => ChatAnswer::Drafts {
+        drafts: backend.drafts(maybe_space),
+      },
+      Self::SentMessages { maybe_space } => ChatAnswer::SentMessages {
+        sent: backend.sent_messages(maybe_space),
+      },
       Self::ConversationFiles { conversation } => ChatAnswer::Files {
         files: backend.conversation_files(conversation),
       },
@@ -2074,6 +2097,23 @@ mod tests {
       (
         r#"{"kind":"space_saved_items","space":"7"}"#,
         ChatQuery::SpaceSavedItems { space },
+      ),
+      (
+        r#"{"kind":"drafts","maybe_space":"7"}"#,
+        ChatQuery::Drafts {
+          maybe_space: Some(space),
+        },
+      ),
+      (r#"{"kind":"drafts"}"#, ChatQuery::Drafts { maybe_space: None }),
+      (
+        r#"{"kind":"sent_messages","maybe_space":"7"}"#,
+        ChatQuery::SentMessages {
+          maybe_space: Some(space),
+        },
+      ),
+      (
+        r#"{"kind":"sent_messages"}"#,
+        ChatQuery::SentMessages { maybe_space: None },
       ),
       (
         r#"{"kind":"space_files","space":"7"}"#,

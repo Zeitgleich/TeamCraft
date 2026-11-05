@@ -60,6 +60,8 @@ data class Space(
   @SerialName("mention_count") val mentionCount: Int = 0,
   /** Whether the user may create channels here, as the core decided it (issue #758). */
   @SerialName("can_create_channels") val canCreateChannels: Boolean = true,
+  /** Version of the space's picture; without one the space shows no picture. */
+  @SerialName("maybe_image_version") val maybeImageVersion: String? = null,
 )
 
 @Serializable
@@ -303,8 +305,14 @@ data class FileInfo(
   @SerialName("maybe_sent_at") val maybeSentAt: Long? = null,
   /** Who wrote an imported message when that is nobody with an account here. */
   @SerialName("imported_author") val maybeImportedAuthor: ImportedAuthor? = null,
+  /** How long a video plays, from the sender. */
+  @SerialName("maybe_duration_ms") val maybeDurationMs: Long? = null,
 ) {
   val isImage: Boolean get() = mediaType.startsWith("image/")
+  val isVideo: Boolean get() = mediaType.startsWith("video/")
+
+  /** A video that opens in the player: on the server or here, not one still going up. */
+  val opensInVideoPlayer: Boolean get() = isVideo && transfer.state in setOf("local", "remote", "downloading", "failed")
 }
 
 /** Who wrote an imported message: `person` (the file's sender), `deleted` or `named` (a bot). */
@@ -396,6 +404,29 @@ data class SavedItem(
   @SerialName("saved_at") val savedAt: Long,
 )
 
+/** One unsent text, in a conversation or one of its threads (#1220). */
+@Serializable
+data class DraftItem(
+  val conversation: String,
+  @SerialName("maybe_thread") val maybeThread: String? = null,
+  @SerialName("conversation_name") val conversationName: String,
+  @SerialName("maybe_thread_root") val maybeThreadRoot: String? = null,
+  val body: String,
+  @SerialName("edited_at") val editedAt: Long,
+)
+
+/** One message the user sent, as much of it as the list shows (#1220). */
+@Serializable
+data class SentItem(
+  val conversation: String,
+  @SerialName("conversation_name") val conversationName: String,
+  val message: String,
+  @SerialName("maybe_thread") val maybeThread: String? = null,
+  val excerpt: String = "",
+  @SerialName("file_count") val fileCount: Int = 0,
+  @SerialName("sent_at") val sentAt: Long,
+)
+
 @Serializable
 data class BrowsableChannel(
   val conversation: String,
@@ -460,6 +491,8 @@ data class ChatAnswer(
   @SerialName("maybe_target") val maybeTarget: PermalinkTarget? = null,
   @SerialName("maybe_message") val maybeMessage: String? = null,
   @SerialName("maybe_body") val maybeBody: String? = null,
+  val drafts: List<DraftItem> = emptyList(),
+  val sent: List<SentItem> = emptyList(),
   val files: List<FileInfo> = emptyList(),
   @SerialName("maybe_bytes") val maybeBytes: Long? = null,
   val channels: List<BrowsableChannel> = emptyList(),

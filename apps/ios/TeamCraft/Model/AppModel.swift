@@ -141,6 +141,8 @@ final class AppModel {
   var openConversationId: String?
   /// A message to show once its conversation is open (from a message link).
   var focusMessageId: String?
+  /// The thread or composer "Drafts & sent" asked for; the conversation's pane takes it (#1220).
+  var openedPlace: OpenedPlace?
   /// What another app shared, until the user picked a conversation (AppModel+Share.swift).
   var waitingShare: StagedShare?
   /// A share on its way into its conversation's composer.
@@ -209,6 +211,10 @@ final class AppModel {
   @ObservationIgnored private lazy var processLock = ProcessLock(fileURL: container.lockFileURL)
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
   @ObservationIgnored private var maybeCore: TeamCraft?
+  /// Pictures of spaces on disk, by version (AppModel+SpacePictures.swift).
+  @ObservationIgnored let spacePictureStore = SpacePictureStore(
+    directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("space-pictures", isDirectory: true))
   @ObservationIgnored private var isSyncing = false
   /// Background time held while what is pending goes out after the app left the foreground.
   @ObservationIgnored private var backgroundTask = UIBackgroundTaskIdentifier.invalid
@@ -759,6 +765,14 @@ final class AppModel {
   /// The composer text left unsent in the conversation or thread (empty: none).
   func draft(conversationId: String, threadId: String?) async -> String {
     await answer(.draft(conversationId: conversationId, maybeThreadId: threadId))?.maybeBody ?? ""
+  }
+
+  func drafts() async -> [DraftItem] {
+    await answer(.drafts)?.drafts ?? []
+  }
+
+  func sentMessages() async -> [SentItem] {
+    await answer(.sentMessages)?.sent ?? []
   }
 
   /// Every file of the conversation, newest first as the core lists them.
@@ -1342,6 +1356,7 @@ final class AppModel {
   /// plaintext go; the server entry stays.
   private func endSession() async {
     await stopSyncing()
+    await clearSpacePictures()
     // Before the keys go: deletes the push key here, ends the sealed device token at the gateway
     // and the registration on the server, so the server can't push to this phone any more.
     // Best effort and at most a few seconds; offline, the push key is still gone.

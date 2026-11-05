@@ -3,10 +3,16 @@ import XCTest
 @testable import TeamCraft
 
 final class SpaceViewsTests: XCTestCase {
-  private func item(_ id: String, space: (String, String)?) -> ConversationItem {
+  private func item(_ id: String, space: (String, String)?, imageVersion: String? = nil) -> ConversationItem {
     ConversationItem(
       id: id, maybeSpaceId: space?.0, maybeSpaceName: space?.1, kind: .public, name: "general", topic: "",
-      unreadCount: 0, mentionCount: 0, isFavorite: false, isMuted: false, canPost: true, isNotesToSelf: false)
+      unreadCount: 0, mentionCount: 0, isFavorite: false, isMuted: false, canPost: true, isNotesToSelf: false,
+      maybeSpaceImageVersion: imageVersion)
+  }
+
+  func testAChoiceCarriesThePictureVersion() {
+    let choices = spaceChoices([item("1", space: ("1", "Project A"), imageVersion: "v2")])
+    XCTAssertEqual(choices.map(\.maybeImageVersion), ["v2"])
   }
 
   func testOneChoicePerSpaceByNameAndNoneForDirectMessages() {

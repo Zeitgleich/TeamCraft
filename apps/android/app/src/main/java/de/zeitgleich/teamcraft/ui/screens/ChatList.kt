@@ -107,6 +107,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Dp
 import de.zeitgleich.teamcraft.ui.ListedSpace
+import de.zeitgleich.teamcraft.ui.SpacePicture
 import de.zeitgleich.teamcraft.ui.Section
 import de.zeitgleich.teamcraft.ui.TabBadge
 import de.zeitgleich.teamcraft.ui.activityConversations
@@ -432,6 +433,7 @@ private fun ListedSpaceRow(space: ListedSpace, list: ListState) {
   Box(Modifier.fillMaxWidth()) {
     ListItem(
       headlineContent = { Text(space.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+      leadingContent = space.maybeImageVersion?.let { version -> { SpacePicture(space.id, version) } },
       modifier = Modifier.clickable(onClickLabel = menuLabel) { isOpen = true },
     )
     list.spaceMenu(space.id, space.name, isOpen) { isOpen = false }
@@ -456,6 +458,7 @@ private fun ActivityTab(
   Column(Modifier.fillMaxSize()) {
     EntryRow(Icons.AutoMirrored.Filled.List, stringResource(R.string.threads_title)) { onNavigate("threads") }
     EntryRow(Icons.Filled.Star, stringResource(R.string.saved_title)) { onNavigate("saved") }
+    EntryRow(Icons.Filled.Edit, stringResource(R.string.drafts_title)) { onNavigate("drafts") }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     if (waiting.isEmpty() && joinRequestCount == 0 && guestNoticeCount == 0) {
       RemainingEmptyState(
@@ -547,7 +550,11 @@ private fun SectionHeaderWithMenu(section: Section, list: ListState) {
       },
     ),
   ) {
-    SectionHeader(title)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      val maybeVersion = section.conversations.firstNotNullOfOrNull { it.maybeSpaceImageVersion }
+      if (maybeVersion != null) SpacePicture(maybeSpaceId, maybeVersion, modifier = Modifier.padding(start = Spacing.m, top = 12.dp))
+      SectionHeader(title)
+    }
     Icon(
       Icons.AutoMirrored.Filled.KeyboardArrowRight,
       contentDescription = null,
@@ -666,7 +673,7 @@ private fun NavigationIcon(tab: ChatTab) {
   }
 }
 
-/** The global entries of Home (#237), in one row that never clips: each takes a quarter. */
+/** The global entries of Home (#237), in one row that never clips: each takes an equal share. */
 @Composable
 private fun HomeEntries(onNavigate: (String) -> Unit) {
   Row(
@@ -1055,6 +1062,11 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
 
 @Composable
 private fun PreviewLine(conversation: ConversationItem, maybeEntry: ChatListEntry?) {
+  // A draft stands in for the newest message: it's what the user owes this conversation (#1220).
+  conversation.maybeDraftPreview?.let { preview ->
+    DraftLine(preview)
+    return
+  }
   val isUnread = conversation.unreadCount > 0u
   Row(verticalAlignment = Alignment.CenterVertically) {
     Text(
@@ -1215,6 +1227,7 @@ private fun prefix(kind: ConversationKind): String = when (kind) {
 private val HOME_ENTRIES = listOf(
   Triple("threads", Icons.AutoMirrored.Filled.List, R.string.home_entry_threads),
   Triple("saved", Icons.Filled.Star, R.string.home_entry_saved),
+  Triple("drafts", Icons.Filled.Edit, R.string.home_entry_drafts),
   Triple("meetings", Icons.Filled.DateRange, R.string.home_entry_meetings),
   Triple("browse?people=true", Icons.Filled.Person, R.string.home_entry_people),
 )

@@ -366,6 +366,19 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     String::from_utf8(body).map_err(|error| ApiError::Decode(error.to_string()))
   }
 
+  /// An authenticated GET of `/api/v1{path}` answered with the raw body, refused above
+  /// `max_bytes`: for pictures the server serves itself (a space's picture). `method` is GET.
+  pub async fn get_bytes_capped(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>, ApiError> {
+    if !path.starts_with('/') || path.contains("..") {
+      return Err(ApiError::Decode(format!("not an API path: {path}")));
+    }
+    let response = self.call(self.request(Method::GET, path).await?).await?;
+    if response.content_length().is_some_and(|length| length > max_bytes) {
+      return Err(ApiError::BlobTooLarge { max_bytes });
+    }
+    read_capped(response, max_bytes).await
+  }
+
   fn gateway_url(&self) -> String {
     self.websocket_url("/api/v1/gateway")
   }

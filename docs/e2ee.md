@@ -853,6 +853,17 @@ badge. A click plays the video in the row (one at a time, paused when scrolled o
 64 MiB, as the player gets the whole decrypted file as a `blob:` (`MAX_INLINE_VIDEO_BYTES`); bigger videos
 open in the lightbox. The desktop app's CSP allows `media-src 'self' blob:` for this, as the web client's does.
 
+The mobile apps (#200) show the poster with the length and the size, and a tap opens the player: Media3 on
+Android, AVFoundation on iOS, with the device's decoders. There the core streams the blob into a plaintext file
+in the app's private downloads, as it does for every file opened on a phone, so a video of any size stays out of
+memory; that folder is trimmed to 1 GiB at start, least recently used first, and wiped with the account. The
+player reads that file only: Android through a file data source; iOS refuses an HLS playlist (by extension,
+type or first bytes, whatever the sender calls it) and forbids all references in the file
+(`AVAssetReferenceRestrictions.forbidAll`), so a hostile video can't make the phone load an address. AirPlay
+is off and picture in picture is off while the app lock is on, as both show the video outside the app. Media3's
+demuxers parse the untrusted file in the app's process (in Java and Kotlin); the codecs run in the system's
+media process. A format the device can't decode says so and offers another app.
+
 **Audio** (#802). An audio file (`audio/*`, or by extension when the type is generic) is a card with the app's
 own player. Nothing is downloaded until play is pressed; then the core decrypts the file in memory like a
 video, and the app's one `<audio>` element (not part of the page's layout) plays it from a `blob:` URL. One
@@ -3431,6 +3442,8 @@ restored together with them on a new device.
   Settings have their own rule below, without a clock.
 - Other devices pull the key bag when a gateway session starts, and when the `key_bag_update`
   gateway event announces a new version.
+- A draft's last edit is the time of its record (`Stamped`), so the "Drafts & sent" view (#1220) adds
+  nothing to the format; the sent list is read from the local store. The view asks the server nothing.
 - The server sees that the key bag changed and its size, not what changed. Drafts make the key bag
   change while typing; clients upload at most once per sync round.
 - **Trust decisions travel too.** The identity keys the user's devices pinned and the workspace root

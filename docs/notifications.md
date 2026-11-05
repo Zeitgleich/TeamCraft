@@ -77,7 +77,7 @@ DMs and group DMs live outside spaces (their `space_id` is null), so no space co
 | Space rail entry of a space          | Unread messages of the space's channels, red, up to "99+"; muted ones count only mentions  |
 | Chats (top of the rail)              | Unread messages of all DMs and group DMs plus mentions; muted ones count only mentions     |
 | "Unreads" group of a space's sidebar | That space's channels only                                                                 |
-| App badge (dock, taskbar, tray)      | Mentions everywhere plus unread DMs and group DMs (`badge_count`)                          |
+| App badge (dock, taskbar, tray)      | Mentions everywhere plus unread DMs and group DMs (`badge_count`); on macOS also as a number next to the menu bar icon, up to "99+" |
 | Mobile chat list tabs                | "Spaces": mentions (a dot for other unread messages); "Direct messages": as the rail entry |
 
 **Chats** (desktop and web; the first rail entry, a phone's first tab) lists every DM and

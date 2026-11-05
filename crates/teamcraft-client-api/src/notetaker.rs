@@ -270,6 +270,7 @@ mod tests {
 
     let space_id = id_of(2);
     let channel = |kind, maybe_space| Conversation {
+      maybe_draft_preview: None,
       id: id_of(5),
       maybe_space,
       kind,

@@ -28,8 +28,10 @@ const SWIPE_EXIT: Duration = Duration::from_millis(120);
 /// Moves smaller than this are not played.
 const MIN_FLIP_PX: f64 = 1.0;
 
-/// Glides the toasts of `stack` to their new places whenever one is added or removed. The observer
-/// goes with the component.
+/// Glides the toasts of `stack` to their new places whenever one is added or removed. Places are
+/// also refreshed, without playing, when a toast changes size (details opened) or the window is
+/// resized, so the next glide starts from where the toast really is. The observers and the
+/// listener go with the component.
 pub fn use_flip_stack(stack: NodeRef<html::Div>) {
   let last_places = Rc::new(RefCell::new(Vec::<(web_sys::Element, f64)>::new()));
   Effect::new(move |_| {
@@ -38,10 +40,20 @@ pub fn use_flip_stack(stack: NodeRef<html::Div>) {
     };
     let stack: web_sys::HtmlElement = stack.unchecked_into();
     let last_places = last_places.clone();
-    flip(&stack, &last_places);
+    let on_resize = Closure::<dyn FnMut()>::new({
+      let stack = stack.clone();
+      let last_places = last_places.clone();
+      move || *last_places.borrow_mut() = measure_places(&stack)
+    });
+    let Ok(resize) = web_sys::ResizeObserver::new(on_resize.as_ref().unchecked_ref()) else {
+      return;
+    };
+    resize.observe(&stack);
+    flip(&stack, &last_places, &resize);
     let on_change = Closure::<dyn FnMut()>::new({
       let stack = stack.clone();
-      move || flip(&stack, &last_places)
+      let resize = resize.clone();
+      move || flip(&stack, &last_places, &resize)
     });
     let Ok(observer) = web_sys::MutationObserver::new(on_change.as_ref().unchecked_ref()) else {
       return;
@@ -52,44 +64,70 @@ pub fn use_flip_stack(stack: NodeRef<html::Div>) {
       tracing::debug!("could not observe the toast stack");
       return;
     }
-    let handle = StoredValue::new_local((observer, on_change));
+    // The stack is anchored to the viewport, so a window resize moves it without resizing it.
+    let window = web_sys::window();
+    if let Some(window) = &window
+      && window
+        .add_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref())
+        .is_err()
+    {
+      tracing::debug!("could not listen for window resizes");
+    }
+    let handle = StoredValue::new_local((observer, resize, on_change, on_resize, window));
     on_cleanup(move || {
-      handle.try_with_value(|(observer, _)| observer.disconnect());
+      handle.try_with_value(|(observer, resize, _, on_resize, window)| {
+        observer.disconnect();
+        resize.disconnect();
+        if let Some(window) = window {
+          drop(window.remove_event_listener_with_callback("resize", on_resize.as_ref().unchecked_ref()));
+        }
+      });
     });
   });
 }
 
 /// Measures every toast and plays the ones that moved from their last place; remembers the new
 /// places. A toast still gliding starts from where it is drawn, so a second change retargets.
-fn flip(stack: &web_sys::HtmlElement, last_places: &RefCell<Vec<(web_sys::Element, f64)>>) {
-  let top = stack.get_bounding_client_rect().top();
+fn flip(
+  stack: &web_sys::HtmlElement,
+  last_places: &RefCell<Vec<(web_sys::Element, f64)>>,
+  resize: &web_sys::ResizeObserver,
+) {
   let is_reduced = prefers_reduced_motion();
-  let items = stack.children();
-  let mut places = Vec::with_capacity(items.length() as usize);
-  for index in 0..items.length() {
-    let Some(item) = items
-      .item(index)
-      .and_then(|item| item.dyn_into::<web_sys::HtmlElement>().ok())
-    else {
-      continue;
-    };
-    let place = top + f64::from(item.offset_top());
+  let places = measure_places(stack);
+  for (element, place) in &places {
+    // Observing an element twice is a no-op; this picks up toasts added after mount.
+    resize.observe(element);
     let maybe_last = last_places
       .borrow()
       .iter()
-      .find(|(element, _)| element == item.as_ref())
+      .find(|(known, _)| known == element)
       .map(|(_, last)| *last);
     if let Some(last) = maybe_last
       && !is_reduced
+      && let Ok(item) = element.clone().dyn_into::<web_sys::HtmlElement>()
     {
       let from = last - place + drawn_offset_y(&item);
       if from.abs() >= MIN_FLIP_PX {
         play_from(&item, from);
       }
     }
-    places.push((item.unchecked_into(), place));
   }
   *last_places.borrow_mut() = places;
+}
+
+/// Each toast with its layout place in the viewport (transforms and `translate` don't count).
+fn measure_places(stack: &web_sys::HtmlElement) -> Vec<(web_sys::Element, f64)> {
+  let top = stack.get_bounding_client_rect().top();
+  let items = stack.children();
+  (0..items.length())
+    .filter_map(|index| items.item(index))
+    .filter_map(|item| item.dyn_into::<web_sys::HtmlElement>().ok())
+    .map(|item| {
+      let place = top + f64::from(item.offset_top());
+      (item.unchecked_into(), place)
+    })
+    .collect()
 }
 
 /// Draws `item` `from_px` off its place without a transition, then lets it glide back

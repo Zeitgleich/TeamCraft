@@ -48,6 +48,7 @@ import de.zeitgleich.teamcraft.core.SavedItem
 import de.zeitgleich.teamcraft.core.Space
 import de.zeitgleich.teamcraft.core.SpaceRoster
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.SpacePicture
 import kotlinx.coroutines.delay
 
 /** How long a space's member list may load before the user is offered another try. */
@@ -86,6 +87,7 @@ fun SpaceViewsScreen(viewModel: MainViewModel, initialSpaceId: String, onOpen: (
     topBar = {
       ChromeTopBar(
         title = spaces.firstOrNull { it.id == spaceId }?.name.orEmpty(),
+        maybeIcon = spaces.firstOrNull { it.id == spaceId }?.maybeImageVersion?.let { version -> { SpacePicture(spaceId, version, size = 28.dp) } },
         maybeOnBack = onBack,
         actions = { if (spaces.size > 1) SpaceSwitcher(spaces, onSelect = { spaceId = it }) },
       )

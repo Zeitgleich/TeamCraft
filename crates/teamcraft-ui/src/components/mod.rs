@@ -59,6 +59,7 @@ pub mod count_badge;
 pub mod date_jump;
 pub mod directory_view;
 pub mod downloads_menu;
+pub mod drafts_view;
 pub mod edge_swipe;
 pub mod emoji_picker;
 pub mod empty_state;

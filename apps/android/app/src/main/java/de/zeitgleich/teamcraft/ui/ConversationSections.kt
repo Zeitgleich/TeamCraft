@@ -158,7 +158,7 @@ fun listSections(
 }
 
 /** A space the list layout names under its list, where its menu is. */
-data class ListedSpace(val id: String, val name: String)
+data class ListedSpace(val id: String, val name: String, val maybeImageVersion: String? = null)
 
 /** The spaces the conversations are in, by name (#1151). */
 fun listedSpaces(conversations: List<ConversationItem>): List<ListedSpace> =
@@ -166,7 +166,7 @@ fun listedSpaces(conversations: List<ConversationItem>): List<ListedSpace> =
     .mapNotNull { conversation ->
       val id = conversation.maybeSpaceId
       val name = conversation.maybeSpaceName
-      if (id != null && name != null) ListedSpace(id, name) else null
+      if (id != null && name != null) ListedSpace(id, name, conversation.maybeSpaceImageVersion) else null
     }
     .distinctBy { it.id }
     .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })

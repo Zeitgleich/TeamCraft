@@ -177,6 +177,17 @@ class ConversationSectionsTest {
     assertEquals(listOf("Project A", "Project B"), spaces.map { it.name })
   }
 
+  @Test
+  fun listedSpacesCarryThePictureVersion() {
+    val spaces = listedSpaces(
+      listOf(
+        item("1", "a", ConversationKind.PUBLIC, space = "Project A", imageVersion = "v2"),
+        item("2", "b", ConversationKind.PUBLIC, space = "Project B"),
+      ),
+    )
+    assertEquals(listOf("v2", null), spaces.map { it.maybeImageVersion })
+  }
+
   private fun item(
     id: String,
     name: String,
@@ -186,6 +197,7 @@ class ConversationSectionsTest {
     unread: UInt = 0u,
     mentions: UInt = 0u,
     isMuted: Boolean = false,
+    imageVersion: String? = null,
   ) = ConversationItem(
     id = id,
     maybeSpaceId = space?.let { "s-$it" },
@@ -198,5 +210,6 @@ class ConversationSectionsTest {
     isFavorite = isFavorite,
     isMuted = isMuted,
     canPost = true,
+    maybeSpaceImageVersion = imageVersion,
   )
 }

@@ -38,6 +38,16 @@ struct SpaceViewsView: View {
       .navigationTitle(spaces.first { $0.id == spaceId }?.name ?? "")
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
+        if let space = spaces.first(where: { $0.id == spaceId }), space.maybeImageVersion != nil {
+          ToolbarItem(placement: .principal) {
+            HStack(spacing: 8) {
+              SpacePictureView(spaceId: space.id, maybeVersion: space.maybeImageVersion, size: 28)
+              Text(space.name).font(.headline).lineLimit(1)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+          }
+        }
         ToolbarItem(placement: .confirmationAction) { Button("done") { dismiss() } }
         if spaces.count > 1 {
           ToolbarItem(placement: .topBarLeading) {

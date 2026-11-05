@@ -61,6 +61,8 @@ struct SavedItem: Decodable, Equatable, Identifiable, Sendable {
 struct SpaceChoice: Equatable, Identifiable, Sendable {
   let id: String
   let name: String
+  /// Version of the space's picture; `nil`: no picture, the title stands alone (#284).
+  var maybeImageVersion: String?
 }
 
 /// The views of one space, in the order of the sidebar on the desktop.
@@ -82,11 +84,13 @@ enum SpaceViewTab: String, CaseIterable, Identifiable, Sendable {
 
 /// One choice per space the conversations are in, by name.
 func spaceChoices(_ conversations: [ConversationItem]) -> [SpaceChoice] {
-  var names: [String: String] = [:]
+  var choices: [String: SpaceChoice] = [:]
   for conversation in conversations {
-    if let id = conversation.maybeSpaceId, let name = conversation.maybeSpaceName { names[id] = name }
+    if let id = conversation.maybeSpaceId, let name = conversation.maybeSpaceName {
+      choices[id] = SpaceChoice(id: id, name: name, maybeImageVersion: conversation.maybeSpaceImageVersion)
+    }
   }
-  return names.map { SpaceChoice(id: $0.key, name: $0.value) }
+  return choices.values
     .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 }
 

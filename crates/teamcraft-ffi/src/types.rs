@@ -225,10 +225,18 @@ pub struct ConversationItem {
   /// the DM's participants; its `name` is empty, the apps name it in the user's language.
   #[uniffi(default = false)]
   pub is_notes_to_self: bool,
+  /// The start of the unsent text in this conversation's composer (#1220): the lists show it in
+  /// place of the newest message. A thread's draft doesn't count here.
+  #[uniffi(default = None)]
+  pub maybe_draft_preview: Option<String>,
   /// When the newest top-level message was sent; filled only where the order needs it
   /// ([`share_targets`]), `None` elsewhere and for conversations without messages.
   #[uniffi(default = None)]
   pub maybe_last_activity_ms: Option<i64>,
+  /// Version of the picture of the conversation's space (`space_picture`); the apps cache the
+  /// picture by it. `None`: the space has no picture (or this is a DM), the letter tile shows.
+  #[uniffi(default = None)]
+  pub maybe_space_image_version: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -679,7 +687,9 @@ impl ConversationItem {
       maybe_peer_presence: maybe_peer.as_ref().and_then(|peer| peer.maybe_presence),
       maybe_peer_id: maybe_peer.map(|peer| peer.id.to_string()),
       is_notes_to_self: conversation.is_notes_to_self,
+      maybe_draft_preview: conversation.maybe_draft_preview,
       maybe_last_activity_ms: None,
+      maybe_space_image_version: None,
     }
   }
 }
@@ -1219,6 +1229,7 @@ mod tests {
   fn conversation_items_carry_what_the_user_may_do() {
     let item = |kind, maybe_permissions, is_guest| {
       let conversation = view::Conversation {
+        maybe_draft_preview: None,
         id: view::id_from_raw(5),
         maybe_space: Some(view::id_from_raw(2)),
         kind,
@@ -1280,6 +1291,7 @@ mod tests {
   #[test]
   fn a_direct_conversation_item_names_its_peer() {
     let conversation = view::Conversation {
+      maybe_draft_preview: None,
       id: view::id_from_raw(5),
       maybe_space: None,
       kind: ConversationKindView::Direct,
@@ -1438,6 +1450,7 @@ mod tests {
 
   fn conversation_view(id: u64, name: &str) -> view::Conversation {
     view::Conversation {
+      maybe_draft_preview: None,
       id: view::id_from_raw(id),
       maybe_space: None,
       kind: ConversationKindView::Public,

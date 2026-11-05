@@ -21,6 +21,7 @@ pub use teamcraft_client_api::media_viewer::{Direction, MediaPages, MediaScope a
 use teamcraft_proto::AttachmentId;
 
 use crate::model::MessageId;
+use crate::video_controls::PlayerCommand;
 
 /// Largest zoom, relative to the fitted size (the same on every platform).
 pub const DEFAULT_MAX_SCALE: f64 = MAX_ZOOM;
@@ -140,6 +141,17 @@ pub struct Picture {
   pub laid_out: Size,
   pub stage: Size,
   pub device_pixel_ratio: f64,
+}
+
+/// What a key does to the video on show while the focus is outside its player: player keys go
+/// first, so J seeks instead of leaving the video and 0 goes to its start instead of resetting a
+/// zoom it doesn't have. The left and right arrows keep paging, and full screen takes the player's
+/// own focus.
+pub fn player_command_for_video(key: &str, has_modifier: bool) -> Option<PlayerCommand> {
+  if matches!(key, "ArrowLeft" | "ArrowRight") {
+    return None;
+  }
+  PlayerCommand::for_key(key, has_modifier).filter(|command| *command != PlayerCommand::ToggleFullscreen)
 }
 
 /// How the picture's element is drawn at one moment (#1089).
@@ -1425,6 +1437,20 @@ mod tests {
 
   mod keys {
     use super::*;
+
+    #[test]
+    fn a_video_takes_the_player_keys_and_the_arrows_keep_paging() {
+      let command = |key| player_command_for_video(key, false);
+      assert!(matches!(command("j"), Some(PlayerCommand::SeekBy(_))));
+      assert!(matches!(command("l"), Some(PlayerCommand::SeekBy(_))));
+      assert_eq!(command("0"), Some(PlayerCommand::SeekToTenth(0)));
+      assert_eq!(command("k"), Some(PlayerCommand::TogglePlay));
+      assert_eq!(command("ArrowLeft"), None);
+      assert_eq!(command("ArrowRight"), None);
+      assert_eq!(command("f"), None);
+      assert_eq!(command("r"), None, "the lightbox's own keys stay its own");
+      assert_eq!(player_command_for_video("j", true), None);
+    }
 
     #[test]
     fn plain_keys_page_zoom_rotate_and_toggle() {

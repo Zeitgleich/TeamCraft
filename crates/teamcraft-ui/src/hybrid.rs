@@ -669,6 +669,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_draft(conversation, maybe_thread, body);
   }
 
+  fn drafts(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::DraftItem> {
+    self.chat.drafts(maybe_space)
+  }
+
+  fn sent_messages(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::SentItem> {
+    self.chat.sent_messages(maybe_space)
+  }
+
   fn retry_send(&self, conversation: ConversationId, message: MessageId) {
     self.chat.retry_send(conversation, message);
   }
