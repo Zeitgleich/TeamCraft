@@ -110,6 +110,7 @@ pub mod shell_level;
 pub mod shell_video;
 pub mod sign_in_page;
 pub mod slash;
+pub mod source_pictures;
 pub mod space_images;
 #[cfg(target_arch = "wasm32")]
 pub mod speaker_test;

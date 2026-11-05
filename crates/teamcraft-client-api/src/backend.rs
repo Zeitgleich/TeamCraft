@@ -681,6 +681,30 @@ pub trait ChatBackend {
   }
   /// Revokes a source for good: its token stops working once the bridge reads the revocation.
   fn revoke_integration_source(&self, _conversation: ConversationId, _source: teamcraft_proto::SourceId) {}
+  /// Renames a source: messages sent from now on show the new name.
+  fn rename_integration_source(
+    &self,
+    _conversation: ConversationId,
+    _source: teamcraft_proto::SourceId,
+    _name: String,
+  ) {
+  }
+  /// Sets a source's picture (a small PNG, [`teamcraft_proto::check_source_picture`]) or takes it away.
+  fn set_integration_source_picture(
+    &self,
+    _conversation: ConversationId,
+    _source: teamcraft_proto::SourceId,
+    _maybe_picture: Option<Vec<u8>>,
+  ) {
+  }
+  /// A source's picture, when this device holds it; `None` shows the bot's picture.
+  fn integration_source_picture(
+    &self,
+    _conversation: ConversationId,
+    _sha256: teamcraft_proto::SourcePictureHash,
+  ) -> Option<Vec<u8>> {
+    None
+  }
   /// The notetaker group of the verified workspace policy (e2ee.md §8.2); `None` before a policy
   /// was verified. The call screen shows the notetaker from this, never from the server's word.
   fn notetaker_policy(&self) -> Option<teamcraft_proto::NotetakerPolicy> {

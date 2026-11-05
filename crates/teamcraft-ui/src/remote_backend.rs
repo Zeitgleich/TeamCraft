@@ -1061,6 +1061,7 @@ impl RemoteChat {
         reply_count: 0,
         maybe_thread: message.maybe_thread,
         maybe_imported: None,
+        maybe_source: None,
         maybe_placeholder: None,
       };
       match message.maybe_thread {
@@ -1759,6 +1760,45 @@ impl ChatBackend for RemoteChat {
 
   fn revoke_integration_source(&self, conversation: ConversationId, source: teamcraft_proto::SourceId) {
     self.act(ChatAction::RevokeIntegrationSource { conversation, source });
+  }
+
+  fn rename_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_proto::SourceId,
+    name: String,
+  ) {
+    self.act(ChatAction::RenameIntegrationSource {
+      conversation,
+      source,
+      name,
+    });
+  }
+
+  fn set_integration_source_picture(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_proto::SourceId,
+    maybe_picture: Option<Vec<u8>>,
+  ) {
+    self.act(ChatAction::SetIntegrationSourcePicture {
+      conversation,
+      source,
+      maybe_picture: maybe_picture.map(teamcraft_proto::Base64Bytes::new),
+    });
+  }
+
+  fn integration_source_picture(
+    &self,
+    conversation: ConversationId,
+    sha256: teamcraft_proto::SourcePictureHash,
+  ) -> Option<Vec<u8>> {
+    match self.ask(ChatQuery::IntegrationSourcePicture { conversation, sha256 }) {
+      Some(ChatAnswer::IntegrationSourcePicture { maybe_picture }) => {
+        maybe_picture.map(teamcraft_proto::Base64Bytes::into_vec)
+      },
+      _ => None,
+    }
   }
 
   fn notetaker_policy(&self) -> Option<teamcraft_proto::NotetakerPolicy> {
@@ -3268,6 +3308,7 @@ mod tests {
           reply_count: 0,
           maybe_thread: None,
           maybe_imported: None,
+          maybe_source: None,
           maybe_placeholder: None,
         })
         .collect(),

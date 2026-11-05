@@ -1,11 +1,12 @@
 //! Batching of log lines (ARCHITECTURE.md §4.5): lines of one conversation are collected and sent
 //! as one message once the interval has passed or the batch reaches its size limit, so a chatty
-//! service doesn't produce a message per line.
+//! service doesn't produce a message per line. A batch belongs to one key: the worker's names a
+//! source, so the lines of two sources in one channel don't end up under one name.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use teamcraft_proto::{ConversationId, UserId};
+use teamcraft_proto::UserId;
 
 /// How batches are cut.
 #[derive(Debug, Clone, Copy)]
@@ -28,8 +29,8 @@ pub struct LogLine {
 
 /// A message ready to send.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutgoingBatch {
-  pub conversation: ConversationId,
+pub struct OutgoingBatch<K> {
+  pub key: K,
   /// Markdown: a code block with the lines, so clients show them monospaced.
   pub text: String,
   pub mentions: Vec<UserId>,
@@ -54,12 +55,12 @@ struct Pending {
 }
 
 #[derive(Debug)]
-pub struct Batcher {
+pub struct Batcher<K> {
   limits: BatchLimits,
-  pending: BTreeMap<ConversationId, Pending>,
+  pending: BTreeMap<K, Pending>,
 }
 
-impl Batcher {
+impl<K: Ord + Clone> Batcher<K> {
   pub fn new(limits: BatchLimits) -> Self {
     Self {
       limits,
@@ -70,14 +71,14 @@ impl Batcher {
   /// Adds a line; returns the batch if it is full now.
   pub fn push(
     &mut self,
-    conversation: ConversationId,
+    key: K,
     line: LogLine,
     mentions: &Mentions,
     now: Instant,
-  ) -> Option<OutgoingBatch> {
+  ) -> Option<OutgoingBatch<K>> {
     // Fences are broken before the cut, so the size limits count what is really sent.
     let text = cut(&break_fences(&line.text), self.limits.max_line_bytes);
-    let entry = self.pending.entry(conversation).or_insert_with(|| Pending {
+    let entry = self.pending.entry(key.clone()).or_insert_with(|| Pending {
       started_at: now,
       lines: Vec::new(),
       bytes: 0,
@@ -86,8 +87,8 @@ impl Batcher {
     });
     // A line that would overflow the batch closes the batch before it, so batches stay under the limit.
     let overflows = !entry.lines.is_empty() && entry.bytes + text.len() + 1 > self.limits.max_bytes;
-    let closed = if overflows { self.take(conversation) } else { None };
-    let entry = self.pending.entry(conversation).or_insert_with(|| Pending {
+    let closed = if overflows { self.take(&key) } else { None };
+    let entry = self.pending.entry(key.clone()).or_insert_with(|| Pending {
       started_at: now,
       lines: Vec::new(),
       bytes: 0,
@@ -104,32 +105,26 @@ impl Batcher {
       return closed;
     }
     if entry.bytes >= self.limits.max_bytes {
-      return self.take(conversation);
+      return self.take(&key);
     }
     None
   }
 
   /// Batches whose interval has passed.
-  pub fn take_due(&mut self, now: Instant) -> Vec<OutgoingBatch> {
-    let due: Vec<ConversationId> = self
+  pub fn take_due(&mut self, now: Instant) -> Vec<OutgoingBatch<K>> {
+    let due: Vec<K> = self
       .pending
       .iter()
       .filter(|(_, pending)| now.saturating_duration_since(pending.started_at) >= self.limits.interval)
-      .map(|(conversation, _)| *conversation)
+      .map(|(key, _)| key.clone())
       .collect();
-    due
-      .into_iter()
-      .filter_map(|conversation| self.take(conversation))
-      .collect()
+    due.iter().filter_map(|key| self.take(key)).collect()
   }
 
   /// Everything that is pending, for shutdown.
-  pub fn take_all(&mut self) -> Vec<OutgoingBatch> {
-    let all: Vec<ConversationId> = self.pending.keys().copied().collect();
-    all
-      .into_iter()
-      .filter_map(|conversation| self.take(conversation))
-      .collect()
+  pub fn take_all(&mut self) -> Vec<OutgoingBatch<K>> {
+    let all: Vec<K> = self.pending.keys().cloned().collect();
+    all.iter().filter_map(|key| self.take(key)).collect()
   }
 
   /// When the next batch becomes due, if anything is pending.
@@ -141,13 +136,13 @@ impl Batcher {
       .min()
   }
 
-  fn take(&mut self, conversation: ConversationId) -> Option<OutgoingBatch> {
-    let pending = self.pending.remove(&conversation)?;
-    Some(render(conversation, pending))
+  fn take(&mut self, key: &K) -> Option<OutgoingBatch<K>> {
+    let pending = self.pending.remove(key)?;
+    Some(render(key.clone(), pending))
   }
 }
 
-fn render(conversation: ConversationId, pending: Pending) -> OutgoingBatch {
+fn render<K>(key: K, pending: Pending) -> OutgoingBatch<K> {
   let line_count = pending.lines.len();
   let mut text = String::new();
   if pending.has_alert && !pending.mentions.names.is_empty() {
@@ -167,7 +162,7 @@ fn render(conversation: ConversationId, pending: Pending) -> OutgoingBatch {
   }
   text.push_str("```");
   OutgoingBatch {
-    conversation,
+    key,
     text,
     mentions: if pending.has_alert {
       pending.mentions.users
@@ -213,7 +208,7 @@ fn cut(line: &str, max_bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::{Id, Snowflake};
+  use teamcraft_proto::{ConversationId, Id, Snowflake};
 
   use super::*;
 
@@ -268,12 +263,25 @@ mod tests {
         start + Duration::from_millis(600),
       );
       let due = batcher.take_due(start + Duration::from_millis(1100));
-      assert_eq!(
-        due.iter().map(|b| b.conversation).collect::<Vec<_>>(),
-        [conversation(1)]
-      );
+      assert_eq!(due.iter().map(|b| b.key).collect::<Vec<_>>(), [conversation(1)]);
       assert_eq!(batcher.next_due(), Some(start + Duration::from_millis(1600)));
     }
+  }
+
+  #[test]
+  fn each_key_gets_its_own_batch() {
+    // Two sources in one channel: their lines never share a message, and so a name.
+    let (mut batcher, start) = (Batcher::new(LIMITS), Instant::now());
+    let (hotline, ci) = ((conversation(1), "hotline"), (conversation(1), "ci"));
+    batcher.push(hotline, line("a"), &Mentions::default(), start);
+    batcher.push(ci, line("b"), &Mentions::default(), start);
+    batcher.push(hotline, line("c"), &Mentions::default(), start);
+    let due = batcher.take_due(start + Duration::from_secs(1));
+    let batches: Vec<(&str, &str)> = due
+      .iter()
+      .map(|batch| (batch.key.1, batch.text.as_str()))
+      .collect();
+    assert_eq!(batches, [("ci", "```\nb\n```"), ("hotline", "```\na\nc\n```")]);
   }
 
   mod size {

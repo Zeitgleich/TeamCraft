@@ -129,6 +129,7 @@ image-pick-unreadable = Das Bild konnte nicht gelesen werden.
 crop-title-avatar = Profilbild zuschneiden
 crop-title-space = Space-Bild zuschneiden
 crop-title-channel = Kanalbild zuschneiden
+crop-title-integration = Bild der Integration zuschneiden
 crop-stage = Bildausschnitt
 crop-help = Ziehen zum Verschieben, scrollen oder mit zwei Fingern zoomen. Tastatur: Pfeiltasten verschieben, + und − zoomen, R dreht.
 crop-preparing = Bild wird vorbereitet …

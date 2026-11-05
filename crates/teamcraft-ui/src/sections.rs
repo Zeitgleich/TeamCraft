@@ -439,6 +439,7 @@ mod tests {
         message: crate::model::id_from_raw(9),
         maybe_thread: None,
         actor: crate::model::id_from_raw(3),
+        maybe_source_name: None,
         at: 0,
         excerpt: String::new(),
         maybe_read_through: None,

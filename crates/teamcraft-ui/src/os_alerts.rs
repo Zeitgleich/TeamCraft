@@ -147,13 +147,24 @@ fn watch_messages(state: AppState, i18n: I18n, sounds: MessageSounds) {
     let sound = notification_sound(prefs.message_sound);
     for notification in notifications {
       let is_generic = notification.title == NotificationTitle::Generic;
+      // A source's name always says it's a bot.
+      let shown = |name: &String| {
+        if notification.is_source {
+          i18n.t_with("source-sender", &[("name", name)])
+        } else {
+          name.clone()
+        }
+      };
       let title = match &notification.title {
         NotificationTitle::Generic => i18n.t("notify-new-message"),
-        NotificationTitle::Sender(name) => name.clone(),
-        NotificationTitle::InChannel { sender, channel } => {
-          i18n.t_with("notify-in-channel", &[("name", sender), ("channel", channel)])
+        NotificationTitle::Sender(name) => shown(name),
+        NotificationTitle::InChannel { sender, channel } => i18n.t_with(
+          "notify-in-channel",
+          &[("name", &shown(sender)), ("channel", channel)],
+        ),
+        NotificationTitle::ThreadReply { sender } => {
+          i18n.t_with("notify-thread-reply", &[("name", &shown(sender))])
         },
-        NotificationTitle::ThreadReply { sender } => i18n.t_with("notify-thread-reply", &[("name", sender)]),
       };
       // A generic notification is only its title; otherwise the fallback body says what happened.
       let maybe_body = notification

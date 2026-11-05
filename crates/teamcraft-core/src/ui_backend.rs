@@ -1167,6 +1167,23 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
   }
 
+  /// The source a message shows (docs/bridge.md, "Source identity"), checked to come from a bot.
+  fn source_of(&self, stored: &StoredMessage) -> Option<teamcraft_client_api::model::MessageSource> {
+    let MessageContent::Text { meta, .. } = &stored.content else {
+      return None;
+    };
+    let identity = meta.maybe_source.as_deref()?;
+    let is_bot = self.read(crate::integration_sources::is_known_bot(
+      &self.store,
+      stored.sender_user_id,
+    ));
+    let shown = crate::integration_sources::shown_source(identity, is_bot)?;
+    Some(teamcraft_client_api::model::MessageSource {
+      name: shown.name,
+      maybe_picture_sha256: shown.maybe_picture_sha256,
+    })
+  }
+
   pub(crate) fn to_message(&self, stored: &StoredMessage, all: &[StoredMessage]) -> Message {
     self.to_message_among(stored, &Relations::of(all, self.importer()))
   }
@@ -1207,6 +1224,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     };
     let maybe_origin = authorship.maybe_origin;
     let maybe_imported = maybe_origin.map(|origin| imported_mark(origin, stored.sender_user_id));
+    let maybe_source = self.source_of(stored).filter(|_| maybe_origin.is_none());
     let reply_count = stored.maybe_server_id.map_or(0, |server_id| {
       relations.reply_count(ThreadId::from_snowflake(server_id.snowflake()))
     });
@@ -1230,6 +1248,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       reply_count: u32::try_from(reply_count).unwrap_or(u32::MAX),
       maybe_thread: stored.maybe_thread_id,
       maybe_imported,
+      maybe_source,
       maybe_placeholder: stored.maybe_unreadable.map(placeholder_view),
     }
   }
@@ -2845,6 +2864,32 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn revoke_integration_source(&self, conversation: ConversationId, source: teamcraft_proto::SourceId) {
     self.ui_revoke_integration_source(conversation, source);
+  }
+
+  fn rename_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_proto::SourceId,
+    name: String,
+  ) {
+    self.ui_rename_integration_source(conversation, source, name);
+  }
+
+  fn set_integration_source_picture(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_proto::SourceId,
+    maybe_picture: Option<Vec<u8>>,
+  ) {
+    self.ui_set_integration_source_picture(conversation, source, maybe_picture);
+  }
+
+  fn integration_source_picture(
+    &self,
+    conversation: ConversationId,
+    sha256: teamcraft_proto::SourcePictureHash,
+  ) -> Option<Vec<u8>> {
+    self.ui_integration_source_picture(conversation, sha256)
   }
 
   fn notetaker_policy(&self) -> Option<teamcraft_proto::NotetakerPolicy> {
@@ -4621,6 +4666,86 @@ mod tests {
           body: format!("message {client}"),
           mentions: Vec::new(),
           meta: Default::default(),
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: None,
+        maybe_server_change: None,
+        maybe_unreadable: None,
+      }
+    }
+  }
+
+  mod source_identity {
+    use teamcraft_proto::SourceIdentity;
+
+    use super::*;
+    use crate::store::MessageMeta;
+
+    #[test]
+    fn a_bots_message_shows_the_source_and_a_persons_doesnt() {
+      let store = MemoryStore::new();
+      let backend = CoreChatBackend::new(store, id(1), Box::new(ManualClock::new(0)));
+      for (user, kind) in [(5, UserKind::Bot), (6, UserKind::Member)] {
+        let summary = UserSummary {
+          id: id(user),
+          maybe_username: None,
+          display_name: "account".into(),
+          kind,
+          maybe_email: None,
+          maybe_organization: None,
+          maybe_has_devices: None,
+          is_deactivated: false,
+          is_deleted: false,
+        };
+        records::put_json(
+          &backend.store,
+          Table::Users,
+          &id::<UserId>(user).to_string(),
+          &summary,
+        )
+        .unwrap();
+      }
+      let from_bot = message_from(5);
+      let row = backend.to_message(&from_bot, std::slice::from_ref(&from_bot));
+      assert_eq!(
+        row.author,
+        id(5),
+        "the account stays: its profile and badge tell who it is"
+      );
+      assert_eq!(row.maybe_source.unwrap().name, "Hotline");
+
+      let from_person = message_from(6);
+      let row = backend.to_message(&from_person, std::slice::from_ref(&from_person));
+      assert_eq!(row.maybe_source, None);
+
+      let from_unknown = message_from(7);
+      let row = backend.to_message(&from_unknown, std::slice::from_ref(&from_unknown));
+      assert_eq!(row.maybe_source, None, "only a known bot");
+    }
+
+    fn message_from(sender: i64) -> StoredMessage {
+      StoredMessage {
+        conversation_id: id(70),
+        client_message_id: ClientMessageId::from_bytes([1; 16]),
+        maybe_server_id: Some(id(100)),
+        sender_user_id: id(sender),
+        maybe_thread_id: None,
+        sent_at_ms: 1,
+        content: MessageContent::Text {
+          body: "down".into(),
+          mentions: Vec::new(),
+          meta: MessageMeta {
+            maybe_source: Some(Box::new(SourceIdentity {
+              maybe_id: None,
+              name: "Hotline".into(),
+              maybe_picture_sha256: None,
+              maybe_picture: None,
+            })),
+            ..MessageMeta::default()
+          },
         },
         is_edited: false,
         edits: Vec::new(),

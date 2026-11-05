@@ -245,6 +245,7 @@ fn conversation_items(
       message: ui_message_id(reacted_to),
       maybe_thread: reacted_to.maybe_thread_id,
       actor: stored.sender_user_id,
+      maybe_source_name: None,
       at: stored.sent_at_ms,
       excerpt: shorten(&excerpt),
       maybe_read_through: stored.maybe_server_id,
@@ -276,6 +277,14 @@ fn item(
     message: ui_message_id(stored),
     maybe_thread: stored.maybe_thread_id,
     actor: authorship.author,
+    maybe_source_name: match &stored.content {
+      MessageContent::Text { meta, .. } if authorship.maybe_origin.is_none() => meta
+        .maybe_source
+        .as_deref()
+        .and_then(|identity| crate::integration_sources::shown_source(identity, true))
+        .map(|shown| shown.name),
+      _ => None,
+    },
     at: authorship.sent_at_ms,
     excerpt: shorten(body),
     maybe_read_through: stored.maybe_server_id,

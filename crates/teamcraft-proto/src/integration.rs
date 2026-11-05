@@ -13,8 +13,8 @@ use std::fmt;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::ClientMessageId;
 use crate::wire_enum::wire_enum;
+use crate::{Base64Bytes, ClientMessageId};
 
 /// Webhook requests and log lines a source may send per minute when it doesn't say.
 pub const DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE: u32 = 600;
@@ -26,9 +26,15 @@ pub const MAX_SOURCE_RATE_LIMIT_PER_MINUTE: u32 = 60_000;
 pub const MAX_SOURCE_FILES_PER_MESSAGE: u32 = 16;
 /// Longest source name, in characters (it shows in the bridge's logs and its notices).
 pub const MAX_SOURCE_NAME_CHARS: usize = 80;
+/// Largest source picture, in bytes. It travels inside encrypted messages, so it stays small; the
+/// app scales a picture down until it fits.
+pub const MAX_SOURCE_PICTURE_BYTES: usize = 32 * 1024;
+/// Longest side of a source picture, in pixels; receivers refuse a larger one before decoding it.
+pub const MAX_SOURCE_PICTURE_SIDE_PX: u32 = 256;
 /// Most alert levels a source may list, and the longest level name.
 pub const MAX_SOURCE_ALERT_LEVELS: usize = 16;
 pub const MAX_SOURCE_ALERT_LEVEL_CHARS: usize = 32;
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 /// Log levels (lower case) that make a line an alert unless a source lists its own.
 pub const DEFAULT_SOURCE_ALERT_LEVELS: [&str; 6] =
   ["error", "err", "fatal", "critical", "alert", "emergency"];
@@ -51,6 +57,12 @@ pub enum SourceChange {
   Renamed {
     source: SourceId,
     name: String,
+  },
+  /// Sets the source's picture, a small PNG ([`check_source_picture`]), or takes it away.
+  PictureChanged {
+    source: SourceId,
+    #[serde(rename = "picture", default, skip_serializing_if = "Option::is_none")]
+    maybe_picture: Option<Base64Bytes>,
   },
   /// The token stops working for good; a revoked source never comes back.
   Revoked {
@@ -92,6 +104,33 @@ pub struct SourceOptions {
   pub maybe_max_files_per_message: Option<u32>,
 }
 
+/// Who posted a message of the bridge, in its encrypted metadata (docs/bridge.md, "Source
+/// identity"). Clients believe it only from a bot account and always show the bot badge with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceIdentity {
+  /// `None` for a source of the bridge's configuration file, which has no ID.
+  #[serde(rename = "id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_id: Option<SourceId>,
+  pub name: String,
+  /// The source's picture at the time of the message.
+  #[serde(rename = "picture_sha256", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_picture_sha256: Option<SourcePictureHash>,
+  /// The picture itself, now and then, for devices that never read the announcement.
+  #[serde(rename = "picture", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_picture: Option<Base64Bytes>,
+}
+
+/// Why a source picture is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SourcePictureError {
+  #[error("a source picture is at most {MAX_SOURCE_PICTURE_BYTES} bytes")]
+  TooLarge,
+  #[error("a source picture must be a PNG")]
+  NotPng,
+  #[error("a source picture is at most {MAX_SOURCE_PICTURE_SIDE_PX} pixels on each side")]
+  TooManyPixels,
+}
+
 /// Random 128-bit name of a source, chosen by the client that creates it. Wire format: 32 lowercase
 /// hex characters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -107,11 +146,19 @@ pub struct SourceTokenHash([u8; 32]);
 #[error("a source token hash must be 64 hex characters")]
 pub struct SourceTokenHashError;
 
+/// SHA-256 of a source picture (computed in `teamcraft-crypto`), which names it on a device. Wire
+/// format: 64 lowercase hex characters.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SourcePictureHash([u8; 32]);
+
 impl SourceChange {
   /// The source the change is about; `None` for an unknown change.
   pub fn source(&self) -> Option<SourceId> {
     match self {
-      Self::Created { source, .. } | Self::Renamed { source, .. } | Self::Revoked { source } => Some(*source),
+      Self::Created { source, .. }
+      | Self::Renamed { source, .. }
+      | Self::PictureChanged { source, .. }
+      | Self::Revoked { source } => Some(*source),
       Self::Unknown => None,
     }
   }
@@ -214,6 +261,45 @@ impl SourceTokenHash {
   }
 }
 
+impl SourcePictureHash {
+  pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    Self(bytes)
+  }
+
+  pub fn to_hex(&self) -> String {
+    SourceTokenHash::from_bytes(self.0).to_hex()
+  }
+
+  pub fn from_hex(text: &str) -> Result<Self, SourceTokenHashError> {
+    SourceTokenHash::from_hex(text).map(|hash| Self::from_bytes(*hash.as_bytes()))
+  }
+}
+
+impl fmt::Debug for SourcePictureHash {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "SourcePictureHash({}…)", &self.to_hex()[..8])
+  }
+}
+
+impl fmt::Display for SourcePictureHash {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(&self.to_hex())
+  }
+}
+
+impl Serialize for SourcePictureHash {
+  fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&self.to_hex())
+  }
+}
+
+impl<'de> Deserialize<'de> for SourcePictureHash {
+  fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    Self::from_hex(&text).map_err(de::Error::custom)
+  }
+}
+
 /// Not secret (a hash of a high-entropy token), but shortened in logs anyway.
 impl fmt::Debug for SourceTokenHash {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -232,6 +318,47 @@ impl<'de> Deserialize<'de> for SourceTokenHash {
     let text = String::deserialize(deserializer)?;
     Self::from_hex(&text).map_err(de::Error::custom)
   }
+}
+
+/// A source's name as it may be shown: without control and invisible formatting characters (bidi
+/// overrides, zero-width characters, which could dress one name up as another), trimmed, of 1 to
+/// [`MAX_SOURCE_NAME_CHARS`] characters. `None` if nothing valid is left.
+pub fn clean_source_name(name: &str) -> Option<String> {
+  let name: String = name
+    .chars()
+    .filter(|c| !c.is_control() && !is_invisible_format(*c))
+    .collect();
+  let name = name.trim();
+  (!name.is_empty() && name.chars().count() <= MAX_SOURCE_NAME_CHARS).then(|| name.to_owned())
+}
+
+/// Checks a source picture before anything decodes it: small, a PNG, and few pixels by its header,
+/// so a tiny file can't unpack into a huge bitmap. PNG alone: no format with scripts (SVG), and one
+/// header to read.
+pub fn check_source_picture(bytes: &[u8]) -> Result<(), SourcePictureError> {
+  if bytes.len() > MAX_SOURCE_PICTURE_BYTES {
+    return Err(SourcePictureError::TooLarge);
+  }
+  // The signature, the length and type of the first chunk, then width and height.
+  let header = bytes.get(..24).ok_or(SourcePictureError::NotPng)?;
+  if header[..8] != PNG_SIGNATURE || header[12..16] != *b"IHDR" {
+    return Err(SourcePictureError::NotPng);
+  }
+  let side = |at: usize| u32::from_be_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]]);
+  let (width, height) = (side(16), side(20));
+  if width == 0 || height == 0 {
+    return Err(SourcePictureError::NotPng);
+  }
+  if width > MAX_SOURCE_PICTURE_SIDE_PX || height > MAX_SOURCE_PICTURE_SIDE_PX {
+    return Err(SourcePictureError::TooManyPixels);
+  }
+  Ok(())
+}
+
+fn is_invisible_format(c: char) -> bool {
+  matches!(c,
+    '\u{ad}' | '\u{61c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+    | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}')
 }
 
 fn default_alert_levels() -> Vec<String> {
@@ -387,6 +514,97 @@ mod tests {
       );
       let unset = serde_json::to_value(SourceOptions::default()).unwrap();
       assert!(unset.get("max_files_per_message").is_none());
+    }
+  }
+
+  mod source_identity {
+    use super::*;
+
+    #[test]
+    fn a_picture_change_has_a_stable_form_and_an_older_client_ignores_it() {
+      let source = SourceId::from_bytes([1; 16]);
+      let change = SourceChange::PictureChanged {
+        source,
+        maybe_picture: Some(Base64Bytes::new(vec![1, 2, 3])),
+      };
+      let value = serde_json::to_value(&change).unwrap();
+      assert_eq!(value["action"], json!("picture_changed"));
+      assert_eq!(value["picture"], json!("AQID"));
+      assert_eq!(serde_json::from_value::<SourceChange>(value).unwrap(), change);
+      let removed: SourceChange =
+        serde_json::from_value(json!({"action": "picture_changed", "source": source.to_hex()})).unwrap();
+      assert_eq!(
+        removed,
+        SourceChange::PictureChanged {
+          source,
+          maybe_picture: None
+        }
+      );
+    }
+
+    #[test]
+    fn an_identity_leaves_out_what_it_does_not_have() {
+      let identity = SourceIdentity {
+        maybe_id: None,
+        name: "nas-logs".into(),
+        maybe_picture_sha256: None,
+        maybe_picture: None,
+      };
+      assert_eq!(
+        serde_json::to_value(&identity).unwrap(),
+        json!({"name": "nas-logs"})
+      );
+    }
+
+    #[test]
+    fn names_lose_invisible_characters() {
+      assert_eq!(clean_source_name("  Hotline\n"), Some("Hotline".to_owned()));
+      assert_eq!(clean_source_name("Ceo\u{202e}oot"), Some("Ceooot".to_owned()));
+      assert_eq!(clean_source_name("a\u{200b}b\u{feff}"), Some("ab".to_owned()));
+      assert_eq!(clean_source_name("\u{200b} \u{202e}"), None);
+      assert_eq!(clean_source_name(""), None);
+      assert_eq!(clean_source_name(&"x".repeat(MAX_SOURCE_NAME_CHARS + 1)), None);
+      assert!(clean_source_name(&"x".repeat(MAX_SOURCE_NAME_CHARS)).is_some());
+    }
+
+    #[test]
+    fn only_a_small_png_is_a_source_picture() {
+      assert_eq!(check_source_picture(&png_header(128, 128)), Ok(()));
+      assert_eq!(check_source_picture(&[]), Err(SourcePictureError::NotPng));
+      assert_eq!(
+        check_source_picture(b"<svg></svg>"),
+        Err(SourcePictureError::NotPng)
+      );
+      assert_eq!(
+        check_source_picture(&png_header(128, 128)[..20]),
+        Err(SourcePictureError::NotPng),
+        "cut off in the header"
+      );
+      assert_eq!(
+        check_source_picture(&png_header(0, 8)),
+        Err(SourcePictureError::NotPng)
+      );
+      assert_eq!(
+        check_source_picture(&png_header(MAX_SOURCE_PICTURE_SIDE_PX + 1, 8)),
+        Err(SourcePictureError::TooManyPixels)
+      );
+      assert_eq!(
+        check_source_picture(&png_header(8, 30_000)),
+        Err(SourcePictureError::TooManyPixels),
+        "a tiny file can claim a huge bitmap"
+      );
+      let mut large = png_header(8, 8);
+      large.resize(MAX_SOURCE_PICTURE_BYTES + 1, 0);
+      assert_eq!(check_source_picture(&large), Err(SourcePictureError::TooLarge));
+    }
+
+    fn png_header(width: u32, height: u32) -> Vec<u8> {
+      let mut bytes = PNG_SIGNATURE.to_vec();
+      bytes.extend(13_u32.to_be_bytes());
+      bytes.extend(*b"IHDR");
+      bytes.extend(width.to_be_bytes());
+      bytes.extend(height.to_be_bytes());
+      bytes
     }
   }
 }

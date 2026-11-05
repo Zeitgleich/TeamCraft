@@ -1,6 +1,8 @@
 use leptos::prelude::*;
 
-use crate::model::{PresenceStatus, User};
+use teamcraft_proto::SourcePictureHash;
+
+use crate::model::{ConversationId, PresenceStatus, User};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AvatarSize {
@@ -28,11 +30,19 @@ pub fn Avatar(
   user: User,
   #[prop(default = AvatarSize::Medium)] size: AvatarSize,
   #[prop(default = false)] show_presence: bool,
+  /// An integration source's own picture, which goes before the account's (docs/bridge.md, "Source
+  /// identity").
+  #[prop(default = None)]
+  maybe_source_picture: Option<(ConversationId, SourcePictureHash)>,
 ) -> impl IntoView {
   let presence = user.presence;
   let id = user.id;
   // Their picture, once loaded (signed-in builds); the generated initials until then.
-  let picture = Memo::new(move |_| crate::profiles::use_profiles().and_then(|hub| hub.avatar_url(id)));
+  let picture = Memo::new(move |_| {
+    maybe_source_picture
+      .and_then(|(conversation, sha256)| crate::source_pictures::picture_url(conversation, sha256))
+      .or_else(|| crate::profiles::use_profiles().and_then(|hub| hub.avatar_url(id)))
+  });
   let initials = user.initials();
   // Both are always there, one hidden: an avatar built again by a list or row that renders anew
   // keeps its `<img>` (only changed attributes are written) instead of loading and flashing it

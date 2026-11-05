@@ -11,7 +11,9 @@
 //! files of a message only once all of them are up. Until then each is an unfinished upload that
 //! the server frees when it is given up; a failure half way leaves nothing behind.
 
-use teamcraft_proto::{AttachmentId, Base64Bytes, ClientMessageId, ConversationId, Id, Snowflake, UserId};
+use teamcraft_proto::{
+  AttachmentId, Base64Bytes, ClientMessageId, ConversationId, Id, Snowflake, SourceIdentity, UserId,
+};
 
 use super::Client;
 use super::files::{
@@ -252,12 +254,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     body: &str,
     mentions: Vec<UserId>,
     attachments: Vec<AttachmentRef>,
+    maybe_source: Option<SourceIdentity>,
   ) -> Result<ClientMessageId, CoreError> {
     let content = MessageContent::Text {
       body: body.to_string(),
       mentions,
       meta: MessageMeta {
         attachments: within_thumbnail_budget(attachments),
+        maybe_source: maybe_source.map(Box::new),
         ..MessageMeta::default()
       },
     };

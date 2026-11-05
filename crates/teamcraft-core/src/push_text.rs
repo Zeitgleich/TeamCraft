@@ -329,6 +329,7 @@ mod tests {
       },
       maybe_conversation_name: maybe_conversation.map(str::to_owned),
       maybe_sender_name: maybe_sender.map(str::to_owned),
+      is_sender_source: false,
       content,
       is_direct,
       is_silent: false,

@@ -299,10 +299,12 @@ pub fn SearchView() -> impl IntoView {
 fn HitCard(hit: SearchHit) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let author = state
-    .read(|backend| backend.user(hit.message.author))
-    .map(|user| user.display_name)
-    .unwrap_or_default();
+  let author_user = state.read(|backend| backend.user(hit.message.author));
+  let is_bot = author_user.as_ref().is_some_and(|user| user.is_bot);
+  let author = match &hit.message.maybe_source {
+    Some(source) => source.name.clone(),
+    None => author_user.map(|user| user.display_name).unwrap_or_default(),
+  };
   let when = move || format_date_time(hit.message.sent_at, i18n.locale().tag());
   let conversation = hit.message.conversation;
   let maybe_thread = hit.message.maybe_thread;
@@ -323,6 +325,7 @@ fn HitCard(hit: SearchHit) -> impl IntoView {
         <strong translate="no">{prefix}{hit.conversation_name}</strong>
         {hit.maybe_space_name.map(|space| view! { <span class="muted-text" translate="no">{space}</span> })}
         <span translate="no">{author}</span>
+        {is_bot.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
         <time class="muted-text">{when}</time>
         {is_reply.then(|| view! { <span class="badge">{move || i18n.t("search-reply-badge")}</span> })}
       </div>

@@ -64,7 +64,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     file: OutgoingFile,
   ) -> Result<ClientMessageId, CoreError> {
     let attachment = self.upload_encrypted(conversation, file).await?;
-    let id = self.queue_text_with_files(conversation, body, Vec::new(), vec![attachment])?;
+    let id = self.queue_text_with_files(conversation, body, Vec::new(), vec![attachment], None)?;
     self.flush_outbox().await?;
     Ok(id)
   }

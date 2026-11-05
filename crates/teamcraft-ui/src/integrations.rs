@@ -10,7 +10,7 @@ use teamcraft_proto::{
   BotResponse, BotTokenResponse, CreateBotRequest, ListBotsResponse, MAX_SOURCE_NAME_CHARS, SourceTokenHash,
 };
 
-use crate::auth::ApiMethod;
+use crate::auth::{ApiMethod, BinaryBody};
 use crate::model::UserId;
 use crate::reactive::SetIfAlive;
 use crate::rest::{RestClient, RestError};
@@ -102,6 +102,32 @@ impl BotsHub {
     Ok(())
   }
 
+  /// Sets the bot's picture, the fallback of its sources: the profile picture every client shows.
+  pub async fn set_picture(&self, bot: UserId, png: Vec<u8>) -> Result<(), RestError> {
+    let body = BinaryBody {
+      content_type: "image/png".to_owned(),
+      bytes: png,
+    };
+    self
+      .client
+      .get_value()
+      .send_bytes(ApiMethod::Put, &format!("/api/v1/admin/bots/{bot}/avatar"), body)
+      .await
+  }
+
+  /// Takes the bot's picture away.
+  pub async fn remove_picture(&self, bot: UserId) -> Result<(), RestError> {
+    self
+      .client
+      .get_value()
+      .send(
+        ApiMethod::Delete,
+        &format!("/api/v1/admin/bots/{bot}/avatar"),
+        None,
+      )
+      .await
+  }
+
   /// Deactivates the bot: its token dies, its devices go and its sessions end.
   pub async fn revoke(&self, bot: UserId) -> Result<(), RestError> {
     self
@@ -169,7 +195,7 @@ impl NewSource {
 /// Whether a source name may be announced (the receiving devices drop other names).
 pub fn is_valid_source_name(name: &str) -> bool {
   let name = name.trim();
-  !name.is_empty() && name.chars().count() <= MAX_SOURCE_NAME_CHARS && !name.chars().any(char::is_control)
+  name.chars().count() <= MAX_SOURCE_NAME_CHARS && teamcraft_proto::clean_source_name(name).is_some()
 }
 
 fn toml_escape(text: &str) -> String {

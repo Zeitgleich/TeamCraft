@@ -804,6 +804,11 @@ fn apply_control_with(
       maybe_server_id,
     );
   }
+  if let MessageContent::Text { meta, .. } = content
+    && let Some(identity) = &meta.maybe_source
+  {
+    return crate::integration_sources::take_message_picture(store, conversation, sender, identity);
+  }
   if let MessageContent::Notetaker { request } = content {
     // Decrypted in the conversation's group, so `sender` is a member of it; whether the request
     // counts is decided from the verified policy and roster (notetaker.rs).

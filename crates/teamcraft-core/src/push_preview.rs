@@ -11,7 +11,7 @@ use teamcraft_crypto::push::open_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
   Base64Bytes, ConversationKind, ConversationResponse, Id, ListMessagesQuery, MessageId, PushContentMode,
-  PushKind, PushWakeUp, Snowflake, UserSummary,
+  PushKind, PushWakeUp, Snowflake, UserId, UserSummary,
 };
 
 use crate::api::ServerApi;
@@ -34,6 +34,9 @@ pub struct PushPreview {
   /// Channel name, or the other participants of a DM.
   pub maybe_conversation_name: Option<String>,
   pub maybe_sender_name: Option<String>,
+  /// The sender's name is an integration source's: the apps mark it as a bot, so it can't pass as
+  /// a person (docs/bridge.md, "Source identity").
+  pub is_sender_source: bool,
   pub content: PreviewContent,
   /// A DM or group DM: the sender's name is the title, no "sender:" prefix needed.
   pub is_direct: bool,
@@ -134,22 +137,26 @@ pub async fn push_preview<A: ServerApi>(
     None => None,
   };
   // Only messages have content to fetch; a withdrawal names the newest message read, not one to show.
-  let (content, is_silent, is_conversation_verified) = match (&wake_up.kind, wake_up.maybe_message_id) {
-    (PushKind::Message | PushKind::Mention, Some(message_id)) => {
-      preview_content(store, maybe_api, &wake_up, message_id).await
-    },
-    // A ring names no message; answering joins that conversation's call, which the server controls
-    // anyway. It counts as verified when this device knows the conversation as one it is in, so the
-    // apps offer answer and decline.
-    (PushKind::Call, _) => (
-      Ok(PreviewContent::Unavailable),
-      false,
-      maybe_conversation
-        .as_ref()
-        .is_some_and(|conversation| conversation.maybe_my_membership.is_some()),
-    ),
-    _ => (Ok(PreviewContent::Unavailable), false, false),
-  };
+  let (content, is_silent, is_conversation_verified, maybe_source_name) =
+    match (&wake_up.kind, wake_up.maybe_message_id) {
+      (PushKind::Message | PushKind::Mention, Some(message_id)) => {
+        preview_content(store, maybe_api, &wake_up, message_id).await
+      },
+      // A ring names no message; answering joins that conversation's call, which the server controls
+      // anyway. It counts as verified when this device knows the conversation as one it is in, so the
+      // apps offer answer and decline.
+      (PushKind::Call, _) => (
+        Ok(PreviewContent::Unavailable),
+        false,
+        maybe_conversation
+          .as_ref()
+          .is_some_and(|conversation| conversation.maybe_my_membership.is_some()),
+        None,
+      ),
+      _ => (Ok(PreviewContent::Unavailable), false, false, None),
+    };
+  let is_sender_source = maybe_source_name.is_some();
+  let maybe_sender_name = maybe_source_name.or(maybe_sender_name);
   let (content, maybe_gap) = match content {
     Ok(PreviewContent::Unavailable) if is_message(&wake_up) => {
       (PreviewContent::Unavailable, Some(PreviewGap::NotShowable))
@@ -161,6 +168,7 @@ pub async fn push_preview<A: ServerApi>(
     wake_up,
     maybe_conversation_name,
     maybe_sender_name,
+    is_sender_source,
     content,
     is_direct,
     is_silent,
@@ -290,7 +298,7 @@ async fn preview_content<A: ServerApi>(
   maybe_api: Option<&A>,
   wake_up: &PushWakeUp,
   message_id: MessageId,
-) -> (Result<PreviewContent, PreviewGap>, bool, bool) {
+) -> (Result<PreviewContent, PreviewGap>, bool, bool, Option<String>) {
   let conversation = wake_up.conversation_id;
   // One indexed lookup: the notification extension has little memory (issue #155).
   let local = store
@@ -298,13 +306,13 @@ async fn preview_content<A: ServerApi>(
     .ok()
     .flatten();
   if let Some(message) = local {
-    return readable_preview(store, &message.content);
+    return readable_preview(store, message.sender_user_id, &message.content);
   }
   let Some(api) = maybe_api else {
-    return (Err(PreviewGap::NoSession), false, false);
+    return (Err(PreviewGap::NoSession), false, false, None);
   };
   match fetch_and_decrypt(store, api, wake_up, message_id).await {
-    Ok(content) => readable_preview(store, &content),
+    Ok((sender, content)) => readable_preview(store, sender, &content),
     Err(error) => {
       // The class of failure only: what the store or the server said may name more than it should.
       tracing::info!(
@@ -313,7 +321,7 @@ async fn preview_content<A: ServerApi>(
         conversation_id = %conversation,
         "no preview for push"
       );
-      (Err(PreviewGap::NotDecrypted), false, false)
+      (Err(PreviewGap::NotDecrypted), false, false, None)
     },
   }
 }
@@ -321,12 +329,28 @@ async fn preview_content<A: ServerApi>(
 /// What a message this device could read shows: a hidden change names [`PreviewGap::Hidden`].
 fn readable_preview(
   store: &impl LocalStore,
+  sender: UserId,
   content: &MessageContent,
-) -> (Result<PreviewContent, PreviewGap>, bool, bool) {
+) -> (Result<PreviewContent, PreviewGap>, bool, bool, Option<String>) {
   if is_hidden_change(content) && !adds_this_user(store, content) {
-    return (Err(PreviewGap::Hidden), false, true);
+    return (Err(PreviewGap::Hidden), false, true, None);
   }
-  (Ok(content_preview(content)), is_silent(content), true)
+  (
+    Ok(content_preview(content)),
+    is_silent(content),
+    true,
+    source_name(store, sender, content),
+  )
+}
+
+/// The integration source's name a message of a bot shows instead of the bot's.
+fn source_name(store: &impl LocalStore, sender: UserId, content: &MessageContent) -> Option<String> {
+  let MessageContent::Text { meta, .. } = content else {
+    return None;
+  };
+  let identity = meta.maybe_source.as_deref()?;
+  let is_bot = crate::integration_sources::is_known_bot(store, sender).unwrap_or(false);
+  crate::integration_sources::shown_source(identity, is_bot).map(|shown| shown.name)
 }
 
 /// Whether this is a change to the conversation rather than something somebody said. An unknown
@@ -400,7 +424,7 @@ async fn fetch_and_decrypt<A: ServerApi>(
   api: &A,
   wake_up: &PushWakeUp,
   message_id: MessageId,
-) -> Result<MessageContent, CoreError> {
+) -> Result<(UserId, MessageContent), CoreError> {
   // `before` is exclusive: start right after the message, newest first.
   let next = Snowflake::new(message_id.snowflake().get().saturating_add(1))
     .map_err(|_| CoreError::Corrupt("message ID out of range".into()))?;
@@ -442,7 +466,8 @@ async fn fetch_and_decrypt<A: ServerApi>(
   let maybe_sender_key =
     records::device_signing_key(store, message.sender_user_id, message.sender_device_id)?;
   // Previews never show unsigned messages.
-  decrypt_content(&account.key_bag, &message, maybe_sender_key.as_ref(), false)
+  let content = decrypt_content(&account.key_bag, &message, maybe_sender_key.as_ref(), false)?;
+  Ok((message.sender_user_id, content))
 }
 
 fn content_preview(content: &MessageContent) -> PreviewContent {
@@ -554,6 +579,7 @@ mod tests {
       },
       maybe_conversation_name: None,
       maybe_sender_name: None,
+      is_sender_source: false,
       content: PreviewContent::Unavailable,
       is_direct: true,
       is_silent: false,
@@ -661,11 +687,14 @@ mod tests {
     ];
     let store = crate::store::MemoryStore::new();
     for content in &hidden {
-      assert_eq!(readable_preview(&store, content).0, Err(PreviewGap::Hidden));
+      assert_eq!(
+        readable_preview(&store, crate::store::nobody(), content).0,
+        Err(PreviewGap::Hidden)
+      );
     }
     // A kind from a newer client may be a message: it still shows that something came.
     assert_eq!(
-      readable_preview(&store, &MessageContent::Unknown).0,
+      readable_preview(&store, crate::store::nobody(), &MessageContent::Unknown).0,
       Ok(PreviewContent::Unavailable)
     );
   }
@@ -705,6 +734,7 @@ mod tests {
       },
       maybe_conversation_name: Some("planning".into()),
       maybe_sender_name: Some("Alice".into()),
+      is_sender_source: false,
       content: PreviewContent::Text("lunch?".into()),
       is_direct: false,
       is_silent: false,
@@ -762,6 +792,7 @@ mod tests {
       wake_up: wake_up.clone(),
       maybe_conversation_name: None,
       maybe_sender_name: Some("Alice".into()),
+      is_sender_source: false,
       content: PreviewContent::Unavailable,
       is_direct: false,
       is_silent: false,

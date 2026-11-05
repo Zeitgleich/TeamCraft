@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use secrecy::ExposeSecret;
 use teamcraft_core::integration_sources::ActiveSource;
 use teamcraft_crypto::source_token::{find_source_token, source_token_sha256};
-use teamcraft_proto::{ConversationId, SourceId, SourceKind};
+use teamcraft_proto::{ConversationId, SourceId, SourceIdentity, SourceKind, SourcePictureHash};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::batch::Mentions;
@@ -40,11 +40,13 @@ pub struct Source {
   /// Files one webhook message may carry; `None`: the bridge's default (`files.max_files_per_message`).
   pub maybe_max_files_per_message: Option<u32>,
   pub mentions: Mentions,
+  /// Set in the app; a source of the file has none and shows the bot's picture.
+  pub maybe_picture_sha256: Option<SourcePictureHash>,
   token_sha256: [u8; 32],
 }
 
 /// Names a source across replacements of the managed set, so its rate limit carries over.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SourceKey {
   /// A `[[sources]]` block, by its name (unique in the file).
   Static(String),
@@ -134,6 +136,7 @@ impl Source {
       rate_limit_per_minute: config.rate_limit_per_minute,
       maybe_max_files_per_message: config.maybe_max_files_per_message,
       mentions: config.mentions(),
+      maybe_picture_sha256: None,
       token_sha256: source_token_sha256(config.token.expose_secret()),
     }
   }
@@ -157,8 +160,23 @@ impl Source {
       rate_limit_per_minute: source.options.rate_limit_per_minute,
       maybe_max_files_per_message: source.options.maybe_max_files_per_message,
       mentions: Mentions::default(),
+      maybe_picture_sha256: source.maybe_picture_sha256,
       token_sha256: *source.token_sha256.as_bytes(),
     })
+  }
+
+  /// What a message of this source says about who posted it (docs/bridge.md, "Source identity").
+  /// The name is the one its owner set, never what a producer sends.
+  pub fn identity(&self) -> SourceIdentity {
+    SourceIdentity {
+      maybe_id: match &self.key {
+        SourceKey::Managed(id) => Some(*id),
+        SourceKey::Static(_) => None,
+      },
+      name: self.name.clone(),
+      maybe_picture_sha256: self.maybe_picture_sha256,
+      maybe_picture: None,
+    }
   }
 
   fn opens(&self, endpoint: Endpoint) -> bool {
@@ -610,6 +628,27 @@ mod tests {
       },
       created_by: UserId::from_snowflake(Snowflake::new(1).unwrap()),
       created_at_ms: 0,
+      maybe_picture_sha256: None,
     }
   }
+
+  #[test]
+  fn a_managed_source_states_its_id_name_and_picture() {
+    let sha256 = SourcePictureHash::from_bytes([9; 32]);
+    let source = Source::from_managed(&ActiveSource {
+      maybe_picture_sha256: Some(sha256),
+      ..active(4, "Hotline", SourceKind::Webhook, TOKEN_FOR_IDENTITY)
+    })
+    .unwrap();
+    let identity = source.identity();
+    assert_eq!(identity.maybe_id, Some(SourceId::from_bytes([4; 16])));
+    assert_eq!(identity.name, "Hotline");
+    assert_eq!(identity.maybe_picture_sha256, Some(sha256));
+    assert_eq!(
+      identity.maybe_picture, None,
+      "the worker adds the picture when it is due"
+    );
+  }
+
+  const TOKEN_FOR_IDENTITY: &str = "identity-token-0123456789";
 }

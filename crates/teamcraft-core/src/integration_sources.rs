@@ -8,8 +8,8 @@
 //! bridge would have to read each channel's role log first (a follow-up of issue #380). Neither do
 //! the server's account kinds, except to take rights away (guests and bots manage nothing).
 //!
-//! - **Taking in** ([`SourceLedger::apply`]): a creation or rename counts only from a roster admin
-//!   at the message's server time; a revocation from a roster admin or the source's creator.
+//! - **Taking in** ([`SourceLedger::apply`]): a creation, rename or picture counts only from a
+//!   roster admin at the message's server time; a revocation from a roster admin or the source's creator.
 //!   Anything else never reaches the ledger, so a member can't fill it.
 //! - **In force** ([`SourceLedger::active`]): created by somebody who is a roster admin now and in
 //!   the channel's encryption group, not revoked, of a known kind; at most
@@ -17,13 +17,20 @@
 //!
 //! The ledger is bounded ([`MAX_LEDGER_ENTRIES`]) and order-independent: history loads newest
 //! first, so a revocation may arrive before the creation it revokes.
+//!
+//! **What a message shows.** A message of the bridge carries the source's name and the hash of its
+//! picture ([`SourceIdentity`]). [`shown_source`] believes it only from a bot account, so the bot
+//! badge always goes with it and a person's client can't post under a source's name. Pictures are
+//! kept apart from the ledger, by hash and bounded ([`source_picture`]): from an admin's change, and
+//! from a bot's message for devices that never read the change.
 
 use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use teamcraft_crypto::source_token::source_picture_sha256;
 use teamcraft_proto::{
-  ConversationId, MAX_SOURCE_NAME_CHARS, MessageId, SourceChange, SourceId, SourceKind, SourceOptions,
-  SourceTokenHash, UserId, UserKind, UserSummary,
+  Base64Bytes, ConversationId, MessageId, SourceChange, SourceId, SourceIdentity, SourceKind, SourceOptions,
+  SourcePictureHash, SourceTokenHash, UserId, UserKind, UserSummary, check_source_picture, clean_source_name,
 };
 
 use crate::error::CoreError;
@@ -36,6 +43,8 @@ use crate::workspace::WorkspaceState;
 pub const MAX_LEDGER_ENTRIES: usize = 1024;
 /// Sources in force per conversation; the oldest ones count.
 pub const MAX_ACTIVE_SOURCES: usize = 50;
+/// Source pictures a device keeps per conversation; the ones not named for the longest go first.
+pub const MAX_KEPT_PICTURES: usize = 64;
 
 /// Everything this device learned about a conversation's sources.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +68,14 @@ pub struct ActiveSource {
   pub options: SourceOptions,
   pub created_by: UserId,
   pub created_at_ms: i64,
+  pub maybe_picture_sha256: Option<SourcePictureHash>,
+}
+
+/// A source's name and picture as a message shows them; see [`shown_source`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShownSource {
+  pub name: String,
+  pub maybe_picture_sha256: Option<SourcePictureHash>,
 }
 
 /// Who may manage a conversation's sources at the moment.
@@ -79,6 +96,8 @@ struct LedgerEntry {
   maybe_created: Option<CreatedRecord>,
   #[serde(rename = "renamed", default, skip_serializing_if = "Option::is_none")]
   maybe_renamed: Option<RenamedRecord>,
+  #[serde(rename = "picture", default, skip_serializing_if = "Option::is_none")]
+  maybe_picture: Option<PictureRecord>,
   /// Admins (or the creator) who revoked the source; any one of them is enough.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   revoked_by: Vec<UserId>,
@@ -103,6 +122,18 @@ struct RenamedRecord {
   #[serde(rename = "server_id", default, skip_serializing_if = "Option::is_none")]
   maybe_server_id: Option<MessageId>,
   name: String,
+}
+
+/// The newest picture change; the bytes are kept apart, so reading the ledger stays cheap (the
+/// bridge does it once a second).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct PictureRecord {
+  by: UserId,
+  #[serde(rename = "server_id", default, skip_serializing_if = "Option::is_none")]
+  maybe_server_id: Option<MessageId>,
+  /// `None`: the picture was taken away.
+  #[serde(rename = "sha256", default, skip_serializing_if = "Option::is_none")]
+  maybe_sha256: Option<SourcePictureHash>,
 }
 
 impl SourceLedger {
@@ -149,7 +180,7 @@ impl SourceLedger {
         options,
         ..
       } => {
-        let Some(name) = clean_name(name) else {
+        let Some(name) = clean_source_name(name) else {
           return false;
         };
         let record = CreatedRecord {
@@ -175,7 +206,7 @@ impl SourceLedger {
         }
       },
       SourceChange::Renamed { name, .. } => {
-        let Some(name) = clean_name(name) else {
+        let Some(name) = clean_source_name(name) else {
           return false;
         };
         let is_newer = entry
@@ -189,6 +220,33 @@ impl SourceLedger {
         };
         if is_newer && entry.maybe_renamed.as_ref() != Some(&record) {
           entry.maybe_renamed = Some(record);
+          true
+        } else {
+          false
+        }
+      },
+      SourceChange::PictureChanged { maybe_picture, .. } => {
+        let maybe_sha256 = match maybe_picture {
+          Some(picture) if check_source_picture(picture.as_slice()).is_err() => {
+            tracing::debug!("ignored a source picture that is no small PNG");
+            return false;
+          },
+          Some(picture) => Some(SourcePictureHash::from_bytes(source_picture_sha256(
+            picture.as_slice(),
+          ))),
+          None => None,
+        };
+        let is_newer = entry
+          .maybe_picture
+          .as_ref()
+          .is_none_or(|existing| !is_before(maybe_server_id, existing.maybe_server_id));
+        let record = PictureRecord {
+          by: sender,
+          maybe_server_id,
+          maybe_sha256,
+        };
+        if is_newer && entry.maybe_picture.as_ref() != Some(&record) {
+          entry.maybe_picture = Some(record);
           true
         } else {
           false
@@ -235,6 +293,11 @@ impl SourceLedger {
           options: created.options.clone(),
           created_by: created.by,
           created_at_ms: created.at_ms,
+          maybe_picture_sha256: entry
+            .maybe_picture
+            .as_ref()
+            .filter(|picture| authority.may_manage(picture.by))
+            .and_then(|picture| picture.maybe_sha256),
         })
       })
       .collect();
@@ -300,7 +363,87 @@ pub(crate) fn apply_source_change(
   if ledger.apply(sender, is_manager, change, at_ms, maybe_server_id) {
     records::put_json(store, Table::Account, &ledger_key(conversation), &ledger)?;
   }
+  // Also when a newer change won already: an older message may still name this picture.
+  if is_manager
+    && let SourceChange::PictureChanged {
+      maybe_picture: Some(picture),
+      ..
+    } = change
+  {
+    keep_picture(store, conversation, picture)?;
+  }
   Ok(())
+}
+
+/// What a message of `sender` shows instead of the sender's name: the source it states, if the
+/// sender is a bot (`is_sender_bot`, the server's account kind; every client shows the bot badge
+/// with it) and the name is one that may be shown. `None`: the message shows its sender as usual.
+pub fn shown_source(identity: &SourceIdentity, is_sender_bot: bool) -> Option<ShownSource> {
+  if !is_sender_bot {
+    return None;
+  }
+  Some(ShownSource {
+    name: clean_source_name(&identity.name)?,
+    maybe_picture_sha256: identity.maybe_picture_sha256,
+  })
+}
+
+/// Whether the store knows `user` as a bot account.
+pub fn is_known_bot(store: &impl LocalStore, user: UserId) -> Result<bool, CoreError> {
+  let maybe_summary: Option<UserSummary> = records::get_json(store, Table::Users, &user.to_string())?;
+  Ok(maybe_summary.is_some_and(|summary| summary.kind == UserKind::Bot))
+}
+
+/// Keeps the picture a received message carries for devices that never read the source's
+/// announcement: only from a bot, only a valid picture that is the one the message names.
+pub(crate) fn take_message_picture(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  sender: UserId,
+  identity: &SourceIdentity,
+) -> Result<(), CoreError> {
+  let (Some(picture), Some(named)) = (&identity.maybe_picture, identity.maybe_picture_sha256) else {
+    return Ok(());
+  };
+  let is_named = SourcePictureHash::from_bytes(source_picture_sha256(picture.as_slice())) == named;
+  if is_named && is_known_bot(store, sender)? {
+    keep_picture(store, conversation, picture)?;
+  }
+  Ok(())
+}
+
+/// A source picture this device keeps for `conversation`.
+pub fn source_picture(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  sha256: SourcePictureHash,
+) -> Result<Option<Vec<u8>>, CoreError> {
+  let maybe_picture: Option<Base64Bytes> =
+    records::get_json(store, Table::Account, &picture_key(conversation, sha256))?;
+  Ok(maybe_picture.map(Base64Bytes::into_vec))
+}
+
+/// Stores a picture (if valid) under its hash and forgets the ones not named for the longest.
+fn keep_picture(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  picture: &Base64Bytes,
+) -> Result<(), CoreError> {
+  if check_source_picture(picture.as_slice()).is_err() {
+    return Ok(());
+  }
+  let sha256 = SourcePictureHash::from_bytes(source_picture_sha256(picture.as_slice()));
+  let index_key = picture_index_key(conversation);
+  let mut kept: Vec<SourcePictureHash> =
+    records::get_json(store, Table::Account, &index_key)?.unwrap_or_default();
+  kept.retain(|existing| *existing != sha256);
+  kept.push(sha256);
+  while kept.len() > MAX_KEPT_PICTURES {
+    let oldest = kept.remove(0);
+    store.delete(Table::Account, &picture_key(conversation, oldest))?;
+  }
+  records::put_json(store, Table::Account, &picture_key(conversation, sha256), picture)?;
+  records::put_json(store, Table::Account, &index_key, &kept)
 }
 
 /// Whether `user` was a source manager at `at_ms` (the message's server time): an admin of the
@@ -326,11 +469,12 @@ fn ledger_key(conversation: ConversationId) -> String {
   format!("integration_sources/{conversation}")
 }
 
-/// A name without control characters, trimmed, of 1 to [`MAX_SOURCE_NAME_CHARS`] characters.
-fn clean_name(name: &str) -> Option<String> {
-  let name: String = name.chars().filter(|c| !c.is_control()).collect();
-  let name = name.trim();
-  (!name.is_empty() && name.chars().count() <= MAX_SOURCE_NAME_CHARS).then(|| name.to_owned())
+fn picture_key(conversation: ConversationId, sha256: SourcePictureHash) -> String {
+  format!("integration_source_pictures/{conversation}/{sha256}")
+}
+
+fn picture_index_key(conversation: ConversationId) -> String {
+  format!("integration_source_pictures/{conversation}")
 }
 
 /// Whether a change numbered `candidate` came before one numbered `existing`. A change not sent yet
@@ -624,6 +768,185 @@ mod tests {
         ledger.active(conversation(), &authority()).is_empty(),
         "never comes back"
       );
+    }
+  }
+
+  mod pictures {
+    use super::*;
+
+    #[test]
+    fn a_picture_counts_from_an_admin_only_and_the_newest_wins() {
+      let mut ledger = SourceLedger::default();
+      assert!(take(&mut ledger, ADMIN, &created(1, "ci"), 10));
+      assert!(!take(&mut ledger, MEMBER, &picture(1, Some(png(1))), 11));
+      assert_eq!(shown_hash(&ledger), None, "a member changes nothing");
+      assert!(take(&mut ledger, ADMIN, &picture(1, Some(png(2))), 13));
+      assert!(
+        !take(&mut ledger, ADMIN, &picture(1, Some(png(3))), 12),
+        "an older change lost"
+      );
+      assert_eq!(shown_hash(&ledger), Some(hash(&png(2))));
+      assert!(take(&mut ledger, ADMIN, &picture(1, None), 14));
+      assert_eq!(shown_hash(&ledger), None, "taken away");
+    }
+
+    #[test]
+    fn a_picture_of_somebody_no_longer_admin_is_out_of_force() {
+      let mut ledger = SourceLedger::default();
+      take(&mut ledger, ADMIN, &created(1, "ci"), 10);
+      take(&mut ledger, OTHER_ADMIN, &picture(1, Some(png(1))), 11);
+      let mut without = authority();
+      without.managers.remove(&user(OTHER_ADMIN));
+      assert_eq!(
+        ledger.active(conversation(), &without)[0].maybe_picture_sha256,
+        None
+      );
+    }
+
+    #[test]
+    fn what_is_no_small_png_is_ignored() {
+      let mut ledger = SourceLedger::default();
+      take(&mut ledger, ADMIN, &created(1, "ci"), 10);
+      let svg = Base64Bytes::new(b"<svg onload=''></svg>".to_vec());
+      assert!(!take(&mut ledger, ADMIN, &picture(1, Some(svg)), 11));
+      assert_eq!(shown_hash(&ledger), None);
+    }
+
+    #[test]
+    fn a_bot_may_hand_over_the_picture_it_names_and_nobody_else_may() {
+      let store = store_with_users();
+      let mut identity = identity_with(png(1), hash(&png(1)));
+      take_message_picture(&store, conversation(), user(MEMBER), &identity).unwrap();
+      assert_eq!(
+        source_picture(&store, conversation(), hash(&png(1))).unwrap(),
+        None
+      );
+      take_message_picture(&store, conversation(), user(BOT), &identity).unwrap();
+      assert_eq!(
+        source_picture(&store, conversation(), hash(&png(1))).unwrap(),
+        Some(png(1).into_vec())
+      );
+
+      identity.maybe_picture_sha256 = Some(hash(&png(3)));
+      take_message_picture(&store, conversation(), user(BOT), &identity).unwrap();
+      assert_eq!(
+        source_picture(&store, conversation(), hash(&png(3))).unwrap(),
+        None,
+        "bytes that aren't the named picture stay out"
+      );
+      let not_a_png = Base64Bytes::new(vec![0; 64]);
+      let bad = identity_with(not_a_png.clone(), hash(&not_a_png));
+      take_message_picture(&store, conversation(), user(BOT), &bad).unwrap();
+      assert_eq!(
+        source_picture(&store, conversation(), hash(&not_a_png)).unwrap(),
+        None
+      );
+    }
+
+    #[test]
+    fn a_device_keeps_a_bounded_number_of_pictures() {
+      let store = store_with_users();
+      let count = u8::try_from(MAX_KEPT_PICTURES + 1).unwrap();
+      for seed in 0..count {
+        let picture = png(seed);
+        let identity = identity_with(picture.clone(), hash(&picture));
+        take_message_picture(&store, conversation(), user(BOT), &identity).unwrap();
+      }
+      assert_eq!(
+        source_picture(&store, conversation(), hash(&png(0))).unwrap(),
+        None
+      );
+      assert!(
+        source_picture(&store, conversation(), hash(&png(1)))
+          .unwrap()
+          .is_some()
+      );
+      assert!(
+        source_picture(&store, conversation(), hash(&png(count - 1)))
+          .unwrap()
+          .is_some()
+      );
+    }
+
+    #[test]
+    fn an_older_ledger_without_pictures_still_reads() {
+      let ledger: SourceLedger = serde_json::from_value(serde_json::json!({
+        "revision": 1,
+        "entries": {},
+      }))
+      .unwrap();
+      assert_eq!(ledger.revision, 1);
+    }
+
+    const BOT: i64 = 5;
+
+    fn shown_hash(ledger: &SourceLedger) -> Option<SourcePictureHash> {
+      ledger.active(conversation(), &authority())[0].maybe_picture_sha256
+    }
+
+    fn picture(id: i64, maybe_picture: Option<Base64Bytes>) -> SourceChange {
+      SourceChange::PictureChanged {
+        source: source(id),
+        maybe_picture,
+      }
+    }
+
+    fn identity_with(picture: Base64Bytes, sha256: SourcePictureHash) -> SourceIdentity {
+      SourceIdentity {
+        maybe_id: None,
+        name: "ci".into(),
+        maybe_picture_sha256: Some(sha256),
+        maybe_picture: Some(picture),
+      }
+    }
+
+    fn store_with_users() -> crate::store::MemoryStore {
+      let store = crate::store::MemoryStore::new();
+      for (id, kind) in [(BOT, UserKind::Bot), (MEMBER, UserKind::Member)] {
+        records::put_json(&store, Table::Users, &user(id).to_string(), &summary(id, kind)).unwrap();
+      }
+      store
+    }
+
+    /// A valid header; `seed` makes each one different.
+    fn png(seed: u8) -> Base64Bytes {
+      let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+      bytes.extend(*b"IHDR");
+      bytes.extend(8_u32.to_be_bytes());
+      bytes.extend(8_u32.to_be_bytes());
+      bytes.push(seed);
+      Base64Bytes::new(bytes)
+    }
+
+    fn hash(picture: &Base64Bytes) -> SourcePictureHash {
+      SourcePictureHash::from_bytes(source_picture_sha256(picture.as_slice()))
+    }
+  }
+
+  mod shown_identity {
+    use super::*;
+
+    #[test]
+    fn a_person_cant_post_under_a_sources_name() {
+      let identity = identity("Hotline");
+      assert_eq!(shown_source(&identity, false), None);
+      assert_eq!(shown_source(&identity, true).unwrap().name, "Hotline");
+    }
+
+    #[test]
+    fn a_name_that_may_not_be_shown_falls_back_to_the_bot() {
+      assert_eq!(shown_source(&identity("\u{200b}"), true), None);
+      assert_eq!(shown_source(&identity(&"x".repeat(200)), true), None);
+      assert_eq!(shown_source(&identity("A\u{202e}B"), true).unwrap().name, "AB");
+    }
+
+    fn identity(name: &str) -> SourceIdentity {
+      SourceIdentity {
+        maybe_id: None,
+        name: name.into(),
+        maybe_picture_sha256: None,
+        maybe_picture: None,
+      }
     }
   }
 

@@ -464,6 +464,21 @@ async fn sources_added_in_the_app_work_without_configuration_and_survive_a_resta
       },
     )
     .await;
+    // The message states its source, under the name its owner gave it: a webhook's `username`
+    // stays in the body and changes nothing (docs/bridge.md, "Source identity").
+    let message = setup
+      .bob_store
+      .messages(channel, MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .find(|message| matches!(&message.content, MessageContent::Text { body, .. } if body.ends_with("from the app")))
+      .unwrap();
+    let MessageContent::Text { meta, .. } = &message.content else {
+      unreachable!("found by its text")
+    };
+    let identity = meta.maybe_source.as_deref().unwrap();
+    assert_eq!(identity.maybe_id, Some(source));
+    assert_eq!(identity.name, "ci");
     endpoints.shutdown().await;
   };
   let (client, ()) = tokio::join!(worker.run(), script);

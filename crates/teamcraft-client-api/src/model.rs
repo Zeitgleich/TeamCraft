@@ -312,6 +312,9 @@ pub struct IntegrationSource {
   pub kind: teamcraft_proto::SourceKind,
   pub created_by: UserId,
   pub created_at_ms: i64,
+  /// Names the source's picture ([`crate::backend::ChatBackend::integration_source_picture`]).
+  #[serde(rename = "picture_sha256", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_picture_sha256: Option<teamcraft_proto::SourcePictureHash>,
 }
 
 /// A source to announce: the app generated the token and keeps only its hash.
@@ -765,10 +768,22 @@ pub struct Message {
   /// original author when they have an account, `sent_at` the original time.
   #[serde(rename = "imported", default, skip_serializing_if = "Option::is_none")]
   pub maybe_imported: Option<ImportedMark>,
+  /// Posted by an integration source: shown with this name and picture instead of the bot's, always
+  /// with the bot badge (docs/bridge.md, "Source identity"). Only ever set on a bot's message.
+  #[serde(rename = "source", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_source: Option<MessageSource>,
   /// Set while this device can't read the message (issue #888): a placeholder with the
   /// envelope's sender, time and thread, and an empty `body`. It fills in place once readable.
   #[serde(rename = "placeholder", default, skip_serializing_if = "Option::is_none")]
   pub maybe_placeholder: Option<Placeholder>,
+}
+
+/// The integration source a message shows, see [`Message::maybe_source`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageSource {
+  pub name: String,
+  #[serde(rename = "picture_sha256", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_picture_sha256: Option<teamcraft_proto::SourcePictureHash>,
 }
 
 /// How far the conversations with messages waiting for keys have caught up (issue #888): each is
@@ -1085,6 +1100,7 @@ mod tests {
         reply_count: 0,
         maybe_thread: None,
         maybe_imported: None,
+        maybe_source: None,
         maybe_placeholder: None,
       })
     };
@@ -1111,6 +1127,7 @@ mod tests {
       reply_count: 0,
       maybe_thread: None,
       maybe_imported: None,
+      maybe_source: None,
       maybe_placeholder: None,
     };
     as_chat_message(&mut message);

@@ -287,6 +287,23 @@ impl Engine {
     )
   }
 
+  /// An integration source's picture, from the local store.
+  pub(crate) fn integration_source_picture(
+    &self,
+    conversation: &str,
+    sha256: &str,
+  ) -> Result<Option<Vec<u8>>, TeamCraftError> {
+    let conversation: teamcraft_proto::ConversationId = parse_id(conversation)?;
+    let Ok(sha256) = teamcraft_proto::SourcePictureHash::from_hex(sha256) else {
+      return Ok(None);
+    };
+    Ok(teamcraft_core::integration_sources::source_picture(
+      &self.store,
+      conversation,
+      sha256,
+    )?)
+  }
+
   /// The profile picture of `user` as image bytes (JPEG, PNG or WebP); `None` if the person has
   /// none. The API names a presigned URL (profile pictures are not secret from members) and the
   /// download is capped at `max_bytes`, so a hostile answer can't make the phone buffer a huge body.

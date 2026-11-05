@@ -456,6 +456,7 @@ impl ChatBackend for MockBackend {
         message: message.id,
         maybe_thread: None,
         actor: message.author,
+        maybe_source_name: None,
         at: message.sent_at,
         excerpt: message.body.chars().take(140).collect(),
         maybe_read_through: None,
@@ -661,12 +662,26 @@ impl ChatBackend for MockBackend {
       kind: source.kind,
       created_by: me(),
       created_at_ms: crate::clock::now_ms(),
+      maybe_picture_sha256: None,
     };
     self
       .state
       .borrow_mut()
       .integration_sources
       .push((conversation, listed));
+  }
+
+  fn rename_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_proto::SourceId,
+    name: String,
+  ) {
+    for (id, listed) in &mut self.state.borrow_mut().integration_sources {
+      if *id == conversation && listed.id == source {
+        listed.name.clone_from(&name);
+      }
+    }
   }
 
   fn revoke_integration_source(&self, conversation: ConversationId, source: teamcraft_proto::SourceId) {
@@ -892,6 +907,7 @@ impl ChatBackend for MockBackend {
       reply_count: 0,
       maybe_thread,
       maybe_imported: None,
+      maybe_source: None,
       maybe_placeholder: None,
     };
     match maybe_thread {
@@ -1240,6 +1256,7 @@ impl State {
         reply_count: 0,
         maybe_thread: None,
         maybe_imported: None,
+        maybe_source: None,
         maybe_placeholder: None,
       };
       if matches!(message.kind, MessageKind::User) {
@@ -1284,6 +1301,7 @@ impl State {
               reply_count: 0,
               maybe_thread: Some(thread_id_of(id)),
               maybe_imported: None,
+              maybe_source: None,
               maybe_placeholder: None,
             });
           }
@@ -1353,6 +1371,7 @@ fn log_line(conversation: ConversationId, index: usize, total: usize, now: Times
     reply_count: 0,
     maybe_thread: None,
     maybe_imported: None,
+    maybe_source: None,
     maybe_placeholder: None,
   }
 }

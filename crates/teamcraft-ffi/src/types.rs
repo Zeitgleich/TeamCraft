@@ -258,6 +258,14 @@ pub struct MessageItem {
   /// Defaulted, so items the apps build need no change.
   #[uniffi(default = None)]
   pub maybe_placeholder: Option<PlaceholderItem>,
+  /// `author_name` is an integration source's, on a bot's message: the app shows the bot badge
+  /// with it (docs/bridge.md, "Source identity"). Defaulted, so items the apps build need no change.
+  #[uniffi(default = false)]
+  pub is_author_source: bool,
+  /// The source's picture, for [`crate::TeamCraftCore::integration_source_picture`]; without one
+  /// the app shows the bot's. Defaulted, so items the apps build need no change.
+  #[uniffi(default = None)]
+  pub maybe_source_picture_sha256: Option<String>,
 }
 
 /// Why a message shows as a placeholder ([`MessageItem::maybe_placeholder`]).
@@ -523,6 +531,10 @@ pub struct PushNotification {
   pub maybe_conversation_name: Option<String>,
   pub maybe_sender_id: Option<String>,
   pub maybe_sender_name: Option<String>,
+  /// The name is an integration source's: the app marks it as a bot. Defaulted, so items the apps
+  /// build need no change.
+  #[uniffi(default = false)]
+  pub is_sender_source: bool,
   /// The decrypted text, if the message could be read.
   pub maybe_text: Option<String>,
   /// A file's name, if the message is a file.
@@ -579,6 +591,10 @@ pub struct NotifiedMessage {
   pub message_id: String,
   pub maybe_sender_id: Option<String>,
   pub maybe_sender_name: Option<String>,
+  /// The name is an integration source's: the app marks it as a bot. Defaulted, so items the apps
+  /// build need no change.
+  #[uniffi(default = false)]
+  pub is_sender_source: bool,
   /// The decrypted text, if the message could be read.
   pub maybe_text: Option<String>,
   /// A file's name, if the message is a file.
@@ -702,13 +718,23 @@ impl MessageItem {
       id: message.id.to_string(),
       conversation_id: message.conversation.to_string(),
       author_id: message.author.to_string(),
-      author_name: match message.maybe_imported.as_ref().map(|mark| &mark.author) {
+      author_name: match (
+        &message.maybe_source,
+        message.maybe_imported.as_ref().map(|mark| &mark.author),
+      ) {
+        (Some(source), _) => source.name.clone(),
         // An imported bot's or webhook's name; the apps don't know imported messages yet.
-        Some(view::ImportedAuthorView::Named { name }) => name.clone(),
+        (None, Some(view::ImportedAuthorView::Named { name })) => name.clone(),
         _ => maybe_author
           .map(|author| author.display_name.clone())
           .unwrap_or_default(),
       },
+      is_author_source: message.maybe_source.is_some(),
+      maybe_source_picture_sha256: message
+        .maybe_source
+        .as_ref()
+        .and_then(|source| source.maybe_picture_sha256)
+        .map(|sha256| sha256.to_hex()),
       sent_at_ms: message.sent_at,
       body: message.body.clone(),
       is_edited: message.is_edited,
@@ -776,6 +802,7 @@ impl From<PushPreview> for PushNotification {
       maybe_conversation_name: preview.maybe_conversation_name,
       maybe_sender_id: preview.wake_up.maybe_sender_id.map(|id| id.to_string()),
       maybe_sender_name: preview.maybe_sender_name,
+      is_sender_source: preview.is_sender_source,
       maybe_text,
       maybe_file_name,
       maybe_attachment_kind,
@@ -812,6 +839,7 @@ impl From<NotifiedMessageCore> for NotifiedMessage {
       message_id: message.message_id.to_string(),
       maybe_sender_id: message.maybe_sender_id.map(|id| id.to_string()),
       maybe_sender_name: message.maybe_sender_name,
+      is_sender_source: message.is_sender_source,
       maybe_text,
       maybe_file_name,
       maybe_thread_id: message.maybe_thread_id.map(|id| id.to_string()),
@@ -1171,6 +1199,7 @@ mod tests {
         reply_count: 0,
         maybe_thread: None,
         maybe_imported: None,
+        maybe_source: None,
         maybe_placeholder: None,
       }
     }
@@ -1364,6 +1393,7 @@ mod tests {
       reply_count: 0,
       maybe_thread: None,
       maybe_imported: None,
+      maybe_source: None,
       maybe_placeholder: None,
     }
   }

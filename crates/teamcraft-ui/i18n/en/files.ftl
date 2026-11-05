@@ -129,6 +129,7 @@ image-pick-unreadable = The picture could not be read.
 crop-title-avatar = Crop profile picture
 crop-title-space = Crop space picture
 crop-title-channel = Crop channel picture
+crop-title-integration = Crop integration picture
 crop-stage = Picture section
 crop-help = Drag to move, scroll or pinch to zoom. Keyboard: arrow keys move, + and − zoom, R rotates.
 crop-preparing = Preparing the picture…

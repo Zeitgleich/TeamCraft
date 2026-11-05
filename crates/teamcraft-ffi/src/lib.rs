@@ -862,6 +862,20 @@ impl TeamCraft {
       .await
   }
 
+  /// An integration source's picture (a small PNG) as this device holds it, or `None`: the app
+  /// shows the bot's picture then. `sha256` is what the message names; nothing goes to the server.
+  pub async fn integration_source_picture(
+    &self,
+    conversation_id: String,
+    sha256: String,
+  ) -> Result<Option<Vec<u8>>, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move { engine.integration_source_picture(&conversation_id, &sha256) })
+      })
+      .await
+  }
+
   /// New device without the passphrase: asks the organization's admins to recover the account
   /// (e2ee.md §6.3.1). Show the code; the user reads it to an admin.
   pub async fn start_org_recovery(&self) -> Result<OrgRecoveryStart, TeamCraftError> {
