@@ -109,6 +109,10 @@ pub enum EffectsError {
   UnsupportedWidth(u16),
   #[error("background image is {width}x{height} with {bytes} bytes, expected RGBA8")]
   InvalidImage { width: u32, height: u32, bytes: usize },
+  /// A camera picture for [`Compositor::apply_rgba`] that isn't RGBA8 of its size, or whose height
+  /// is odd (I420 needs it even).
+  #[error("camera picture is {width}x{height} with {bytes} bytes, expected RGBA8 and an even height")]
+  InvalidPicture { width: u32, height: u32, bytes: usize },
   #[error("segmentation: {0}")]
   Segmentation(String),
   /// A picture file that isn't a JPEG or PNG, is broken or too large.
@@ -412,6 +416,129 @@ mod tests {
     fn invalid_inputs_are_rejected() {
       assert!(BackgroundImage::new(2, 2, vec![0; 15]).is_err());
       assert!(SegmentationMask::new(2, 2, vec![0.0; 3]).is_err());
+    }
+  }
+
+  /// The browser's camera picture goes in as RGBA and comes out as I420 (#1295): the GPU converts
+  /// it as the CPU did before (`rgbx_to_i420`), composited or not.
+  #[cfg(any(feature = "native", feature = "web"))]
+  mod rgba {
+    use super::*;
+    use crate::capture_convert::rgbx_to_i420;
+
+    #[test]
+    fn without_a_background_the_gpu_converts_like_the_cpu() {
+      let Some(mut compositor) = compositor(EffectsConfig::default()) else {
+        return;
+      };
+      let picture = rgba_picture();
+      let (width, height) = (u32::from(SIZE.width), u32::from(SIZE.height));
+      let mask = SegmentationMask::new(4, 4, vec![0.0; 16]).unwrap();
+      let output = pollster::block_on(compositor.apply_rgba(
+        width,
+        height,
+        &picture,
+        77,
+        &mask,
+        &BackgroundEffect::None,
+      ))
+      .unwrap();
+      let expected = rgbx_to_i420(&picture, width, height, 77).unwrap();
+      assert_eq!(output.resolution(), expected.resolution());
+      assert_eq!(output.timestamp_us(), 77);
+      let difference = max_difference(&output, &expected);
+      assert!(difference <= 2, "rounding only, not {difference}");
+    }
+
+    #[test]
+    fn a_picture_composites_like_its_i420_conversion() {
+      let picture = rgba_picture();
+      let (width, height) = (u32::from(SIZE.width), u32::from(SIZE.height));
+      let frame = rgbx_to_i420(&picture, width, height, 0).unwrap();
+      let mask = MASK.clone().segment(&frame).unwrap();
+      for effect in [
+        BackgroundEffect::Blur(BlurStrength::Strong),
+        BackgroundEffect::Image(Arc::new(gradient_image())),
+      ] {
+        // Fresh ones, so neither has a mask history.
+        let (Some(mut from_rgba), Some(mut from_i420)) = (
+          compositor(EffectsConfig::default()),
+          compositor(EffectsConfig::default()),
+        ) else {
+          return;
+        };
+        let expected = pollster::block_on(from_i420.apply(&frame, &mask, &effect)).unwrap();
+        let output =
+          pollster::block_on(from_rgba.apply_rgba(width, height, &picture, 0, &mask, &effect)).unwrap();
+        // The RGBA picture keeps its full chroma until the end, the I420 frame had it halved
+        // before: the stripes' edges differ a little, nothing else.
+        let differences: Vec<u32> = output
+          .data()
+          .iter()
+          .zip(expected.data())
+          .map(|(a, b)| u32::from(a.abs_diff(*b)))
+          .collect();
+        let mean = differences.iter().sum::<u32>() as f64 / differences.len() as f64;
+        assert!(mean <= 1.5, "{effect:?}: mean {mean:.2}");
+        assert_ne!(
+          output.data(),
+          rgbx_to_i420(&picture, width, height, 0).unwrap().data()
+        );
+      }
+    }
+
+    #[test]
+    fn pictures_of_the_wrong_size_are_refused() {
+      let Some(mut compositor) = compositor(EffectsConfig::default()) else {
+        return;
+      };
+      let mask = SegmentationMask::new(4, 4, vec![1.0; 16]).unwrap();
+      let effect = BackgroundEffect::Blur(BlurStrength::Light);
+      let mut apply = |width: u32, height: u32, bytes: usize| {
+        pollster::block_on(compositor.apply_rgba(width, height, &vec![0; bytes], 0, &mask, &effect))
+      };
+      assert!(matches!(
+        apply(16, 8, 16 * 8 * 4 - 1),
+        Err(EffectsError::InvalidPicture { .. })
+      ));
+      assert!(matches!(
+        apply(16, 7, 16 * 7 * 4),
+        Err(EffectsError::InvalidPicture { .. })
+      ));
+      assert!(matches!(
+        apply(70_000, 2, 0),
+        Err(EffectsError::InvalidPicture { .. })
+      ));
+      assert!(matches!(
+        apply(18, 8, 18 * 8 * 4),
+        Err(EffectsError::UnsupportedWidth(18))
+      ));
+      assert!(apply(16, 8, 16 * 8 * 4).is_ok());
+      assert!(compositor.takes_rgba(3840, 2160), "4K");
+      assert!(!compositor.takes_rgba(65_535, 65_535));
+    }
+
+    /// The test frame's stripes and colours as RGBA (a canvas' `getImageData`).
+    fn rgba_picture() -> Vec<u8> {
+      let (width, height) = (usize::from(SIZE.width), usize::from(SIZE.height));
+      let mut rgba = Vec::with_capacity(width * height * 4);
+      for y in 0..height {
+        for x in 0..width {
+          let stripe = if (x + y) / 6 % 2 == 0 { 220 } else { 40 };
+          rgba.extend_from_slice(&[stripe, (x * 255 / width) as u8, (y * 255 / height) as u8, 255]);
+        }
+      }
+      rgba
+    }
+
+    /// The largest difference between two frames' bytes.
+    fn max_difference(a: &VideoFrame, b: &VideoFrame) -> u8 {
+      a.data()
+        .iter()
+        .zip(b.data())
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0)
     }
   }
 
