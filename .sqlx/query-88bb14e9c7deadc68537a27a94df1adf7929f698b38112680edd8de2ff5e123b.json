@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO space_members (space_id, user_id, role, expires_at, sponsor_user_id)\n         VALUES ($1, $2, $3, $4, $5)\n         ON CONFLICT (space_id, user_id) DO UPDATE\n           SET role = EXCLUDED.role,\n               expires_at = CASE WHEN $6 THEN EXCLUDED.expires_at ELSE space_members.expires_at END,\n               expiry_notice_lead_days = CASE WHEN $6 THEN NULL ELSE space_members.expiry_notice_lead_days END,\n               sponsor_user_id = COALESCE(EXCLUDED.sponsor_user_id, space_members.sponsor_user_id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "88bb14e9c7deadc68537a27a94df1adf7929f698b38112680edd8de2ff5e123b"
+}

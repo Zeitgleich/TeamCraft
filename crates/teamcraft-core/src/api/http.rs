@@ -57,6 +57,7 @@ use teamcraft_proto::{
   PutMeetingAdmittersRequest,
 };
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentResponse};
+use teamcraft_proto::{ExpiringGuestResponse, ExtendGuestRequest, ListExpiringGuestsResponse};
 use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
   ProvisionUsersRequest, ProvisionUsersResponse,
@@ -494,6 +495,31 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self
       .send_without_response::<()>(Method::DELETE, &format!("/device-links/{request_id}"), None)
       .await
+  }
+
+  async fn expiring_guests(&self) -> Result<Vec<ExpiringGuestResponse>, ApiError> {
+    Ok(
+      self
+        .get::<ListExpiringGuestsResponse>("/guests/expiring")
+        .await?
+        .guests,
+    )
+  }
+
+  async fn extend_guest(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    request: &ExtendGuestRequest,
+  ) -> Result<(), ApiError> {
+    let _: SpaceMemberResponse = self
+      .send_json(
+        Method::POST,
+        &format!("/spaces/{space}/guests/{user}/extend"),
+        request,
+      )
+      .await?;
+    Ok(())
   }
 
   async fn admin_join_requests(&self) -> Result<Vec<AdminJoinRequestResponse>, ApiError> {

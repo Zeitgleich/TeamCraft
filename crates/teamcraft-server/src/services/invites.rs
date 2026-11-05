@@ -82,6 +82,9 @@ pub async fn create_invite(
   }
   check_channels(state, caller, space, &request.channel_ids).await?;
   let maybe_expires_at = future_expiry(request.maybe_expires_at)?;
+  if let Some(at) = maybe_expires_at {
+    super::guests::check_new_expiry(state, caller, &access.target(), at)?;
+  }
 
   let invite = state
     .database

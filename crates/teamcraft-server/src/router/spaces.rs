@@ -38,6 +38,8 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .routes(routes!(handlers::resend_invite_handler))
     .routes(routes!(handlers::join_space_handler))
     .routes(routes!(handlers::create_local_guest_handler))
+    .routes(routes!(handlers::extend_guest_handler))
+    .routes(routes!(handlers::list_expiring_guests_handler))
     .routes(routes!(
       handlers::list_space_members_handler,
       handlers::add_space_member_handler

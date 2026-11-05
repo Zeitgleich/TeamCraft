@@ -18,10 +18,18 @@ pub enum SectionKind {
   Favorites,
   Channels,
   Integrations,
+  /// Only for guests, who have no channel browser to find them in.
+  Archived,
 }
 
 impl SectionKind {
-  pub const ALL: [SectionKind; 4] = [Self::Unreads, Self::Favorites, Self::Channels, Self::Integrations];
+  pub const ALL: [SectionKind; 5] = [
+    Self::Unreads,
+    Self::Favorites,
+    Self::Channels,
+    Self::Integrations,
+    Self::Archived,
+  ];
 
   pub fn from_slug(slug: &str) -> Option<Self> {
     Self::ALL.into_iter().find(|kind| kind.slug() == slug)
@@ -33,6 +41,7 @@ impl SectionKind {
       Self::Favorites => "favorites",
       Self::Channels => "channels",
       Self::Integrations => "integrations",
+      Self::Archived => "archived",
     }
   }
 
@@ -43,6 +52,7 @@ impl SectionKind {
       Self::Favorites => "sidebar-favorites",
       Self::Channels => "sidebar-channels",
       Self::Integrations => "sidebar-integrations",
+      Self::Archived => "sidebar-archived",
     }
   }
 }
@@ -61,6 +71,9 @@ pub struct SidebarOptions {
   /// The conversation that was unread when the user opened it: it stays in the "Unreads" section
   /// (shown as read) until they open another one, so the list doesn't shift under the pointer.
   pub maybe_held_open: Option<ConversationId>,
+  /// Lists archived channels in a section of their own, for guests. Everybody else finds them in
+  /// the channel browser.
+  pub lists_archived: bool,
 }
 
 impl SidebarOptions {
@@ -69,6 +82,7 @@ impl SidebarOptions {
       show_unreads_group,
       sort: SidebarSort::Default,
       maybe_held_open: None,
+      lists_archived: false,
     }
   }
 }
@@ -88,10 +102,16 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
   for conversation in conversations
     .iter()
     .filter(|conversation| !conversation.kind.is_direct_like())
+    // Archived channels leave the list; Browse finds them, and the open one stays while it is open.
+    .filter(|conversation| {
+      !conversation.is_archived || options.lists_archived || options.maybe_held_open == Some(conversation.id)
+    })
   {
     let is_unread = conversation.unread_count > 0 && !conversation.is_muted;
     let is_held_open = options.maybe_held_open == Some(conversation.id);
-    let kind = if options.show_unreads_group && (is_unread || is_held_open) {
+    let kind = if conversation.is_archived && options.lists_archived {
+      SectionKind::Archived
+    } else if options.show_unreads_group && (is_unread || is_held_open) {
       SectionKind::Unreads
     } else if conversation.is_favorite {
       SectionKind::Favorites
@@ -120,7 +140,8 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
 /// Whether Chats lists the conversation: DMs and group DMs, and channels of a space the user starred
 /// (#1152). Any other channel belongs to its space only.
 pub fn is_listed_in_chats(conversation: &Conversation) -> bool {
-  conversation.kind.is_direct_like() || (conversation.is_favorite && conversation.maybe_space.is_some())
+  conversation.kind.is_direct_like()
+    || (conversation.is_favorite && conversation.maybe_space.is_some() && !conversation.is_archived)
 }
 
 /// The sections of Home, in display order.
@@ -413,6 +434,8 @@ pub fn has_urgent_activity(items: &[ActivityItem], is_direct: impl Fn(Conversati
 pub fn badge_count(conversations: &[Conversation]) -> u32 {
   conversations
     .iter()
+    // No list row to clear it from.
+    .filter(|conversation| !conversation.is_archived)
     .map(|conversation| {
       let is_direct = matches!(
         conversation.kind,
@@ -484,7 +507,9 @@ pub fn build_grouped(
   for section in build_sections(conversations, options) {
     match section.kind {
       SectionKind::Unreads | SectionKind::Favorites => top.push(section),
-      SectionKind::Channels | SectionKind::Integrations => channels.extend(section.conversations),
+      SectionKind::Channels | SectionKind::Integrations | SectionKind::Archived => {
+        channels.extend(section.conversations);
+      },
     }
   }
   let spaces = spaces
@@ -717,6 +742,7 @@ mod tests {
       show_unreads_group: true,
       sort: SidebarSort::Alphabetical,
       maybe_held_open: None,
+      lists_archived: false,
     };
     let names: Vec<String> = build_sections(&list, &options)[0]
       .conversations
@@ -727,6 +753,55 @@ mod tests {
   }
 
   /// #1152: the channels a user starred show under Favorites in Chats, next to the favorite DMs.
+  mod archived_channels {
+    use super::*;
+
+    fn archived(id: u64) -> Conversation {
+      let mut channel = conversation(id, SidebarCategory::Channels, 0, true);
+      channel.maybe_space = Some(id_from_raw::<SpaceId>(7));
+      channel.is_archived = true;
+      channel
+    }
+
+    #[test]
+    fn they_leave_the_lists_unless_they_are_open() {
+      let all = [archived(1)];
+      assert!(build_sections(&all, &SidebarOptions::plain(true)).is_empty());
+      assert!(
+        !is_listed_in_chats(&all[0]),
+        "not under Chats either, even when starred"
+      );
+      let open = SidebarOptions {
+        maybe_held_open: Some(all[0].id),
+        ..SidebarOptions::plain(true)
+      };
+      assert_eq!(
+        build_sections(&all, &open).len(),
+        1,
+        "the open one doesn't vanish under the reader"
+      );
+    }
+
+    #[test]
+    fn guests_find_them_in_a_section_of_their_own() {
+      let all = [archived(1)];
+      let guest = SidebarOptions {
+        lists_archived: true,
+        ..SidebarOptions::plain(true)
+      };
+      let sections = build_sections(&all, &guest);
+      assert_eq!(sections.len(), 1);
+      assert_eq!(sections[0].kind, SectionKind::Archived);
+    }
+
+    #[test]
+    fn the_badge_counts_nothing_without_a_row() {
+      let mut channel = archived(1);
+      channel.mention_count = 3;
+      assert_eq!(badge_count(&[channel]), 0);
+    }
+  }
+
   mod favorite_channels_in_chats {
     use super::*;
 

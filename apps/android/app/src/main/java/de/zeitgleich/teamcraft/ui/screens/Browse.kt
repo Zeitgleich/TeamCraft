@@ -28,6 +28,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.Tab
 import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -67,6 +68,7 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
   var showPeople by rememberSaveable { mutableStateOf(isPeopleFirst) }
   var channels by remember { mutableStateOf<List<BrowsableChannel>>(emptyList()) }
   var isCreating by remember { mutableStateOf(false) }
+  var showsArchived by rememberSaveable { mutableStateOf(false) }
   val pendingJoins by viewModel.joinRequests.pending.collectAsState()
   val snackbars = rememberFailureSnackbars(viewModel)
   val spaces = snapshot?.spaces.orEmpty()
@@ -122,7 +124,9 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
         }
       }
       val people = snapshot?.users.orEmpty().filter { it.id != snapshot?.me?.id && !it.isBot }
-      val visibleChannels = channels.filter { !it.isArchived }
+      // Archived channels are hidden from the lists, so this is the way back to the ones the user is
+      // in; nobody can join an archived channel.
+      val visibleChannels = channels.filter { !it.isArchived || (showsArchived && it.isMember) }
       if (isShowingPeople && snapshot != null && people.isEmpty()) {
         EmptyHint(R.string.browse_no_people)
       } else if (isShowingPeople) {
@@ -171,6 +175,18 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
         }
         if (snapshot != null && visibleChannels.isEmpty()) {
           EmptyHint(if (maybeSpace == null) R.string.browse_no_spaces else R.string.browse_no_channels)
+        }
+        if (channels.any { it.isArchived && it.isMember }) {
+          Row(
+            Modifier
+              .fillMaxWidth()
+              .toggleable(value = showsArchived, role = Role.Switch) { showsArchived = it }
+              .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Text(stringResource(R.string.browse_show_archived), Modifier.weight(1f))
+            Switch(checked = showsArchived, onCheckedChange = null)
+          }
         }
         LazyColumn(Modifier.fillMaxSize()) {
           items(visibleChannels, key = { it.conversation }) { channel ->

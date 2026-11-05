@@ -391,6 +391,12 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
   /// error means the message is lost: the outbox could not store it.
   async fn deliver(&mut self, message: Outgoing) -> Result<(), CoreError> {
     let conversation = message.source.conversation;
+    // The server would refuse it for good, and each refusal stays in the outbox; a source pointing
+    // at an archived channel must not fill it.
+    if self.client.is_archived(conversation)? {
+      warn!(%conversation, "dropped a message for an archived channel");
+      return Ok(());
+    }
     if !self.can_send(conversation) {
       self.hold(message);
       return Ok(());

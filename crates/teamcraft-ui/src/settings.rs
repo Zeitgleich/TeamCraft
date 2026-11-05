@@ -419,6 +419,7 @@ impl Settings {
       show_unreads_group: self.prefs.with(|prefs| prefs.sidebar.shows_unreads_section),
       sort: self.prefs.with(|prefs| prefs.sidebar.sort),
       maybe_held_open,
+      lists_archived: false,
     }
   }
 

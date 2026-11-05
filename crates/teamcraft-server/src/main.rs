@@ -645,7 +645,8 @@ async fn load_runtime_settings(state: &AppState) -> anyhow::Result<()> {
   Ok(())
 }
 
-/// Removes guests whose membership expired (and tells their sponsors), forgets old sessions,
+/// Warns about guests expiring soon, removes guests whose membership expired (and tells their
+/// sponsors), forgets old sessions,
 /// removes long-deactivated users from all chats (when an admin set a period) and deletes key
 /// packages that expire too soon to be handed out.
 fn spawn_account_housekeeping(state: AppState) {
@@ -658,6 +659,11 @@ fn spawn_account_housekeeping(state: AppState) {
       match guests::expire_once(&state, now).await {
         Ok(_) => state.metrics.job_succeeded(BackgroundJob::GuestExpiry, now),
         Err(error) => warn!(%error, "expiring guests failed"),
+      }
+      match guests::send_notices_once(&state, now).await {
+        Ok(0) => {},
+        Ok(sent) => info!(sent, "sent notices about guests expiring soon"),
+        Err(error) => warn!(%error, "sending notices about expiring guests failed"),
       }
       if let Err(error) = session::forget_stale_sessions(&state, now).await {
         warn!(%error, "forgetting stale sessions failed");

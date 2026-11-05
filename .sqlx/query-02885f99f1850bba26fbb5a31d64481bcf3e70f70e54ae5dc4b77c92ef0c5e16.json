@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE space_members SET\n           role = $3,\n           expires_at = CASE WHEN $3 <> 'guest' THEN NULL WHEN $5 THEN $4 ELSE expires_at END,\n           expiry_notice_lead_days = CASE WHEN $5 THEN NULL ELSE expiry_notice_lead_days END\n         WHERE space_id = $1 AND user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "02885f99f1850bba26fbb5a31d64481bcf3e70f70e54ae5dc4b77c92ef0c5e16"
+}
