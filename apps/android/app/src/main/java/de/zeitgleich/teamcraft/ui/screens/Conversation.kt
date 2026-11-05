@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import android.widget.Toast
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.draw.clip
@@ -1080,9 +1081,21 @@ internal fun Composer(
     // Text and files shared from another app land in the composer; the user sends them.
     val share = maybePendingShare?.takeIf { it.conversation == conversationId && maybeThread == null } ?: return@LaunchedEffect
     if (!isDraftLoaded) return@LaunchedEffect
-    val imported = share.content.uris.mapNotNull { viewModel.importFile(it) }
+    val (taken, failed) = share.content.files
+      .map { it to viewModel.importSharedFile(share.content, it) }
+      .partition { (_, maybePicked) -> maybePicked != null }
+    val imported = taken.mapNotNull { (_, maybePicked) -> maybePicked }
     text = listOf(text, share.content.text).filter { it.isNotBlank() }.joinToString("\n")
     files = files + imported
+    // At once: when files failed the picker comes back right now, and the draft's pause never ends.
+    viewModel.act(ChatActions.setDraft(conversationId, maybeThread, text))
+    val failedCount = failed.size
+    if (failedCount > 0) {
+      val failed = context.resources.getQuantityString(R.plurals.share_import_failed, failedCount, failedCount)
+      Toast.makeText(context, failed, Toast.LENGTH_LONG).show()
+    }
+    // What failed stays in the inbox, and the picker comes back with it.
+    viewModel.finishShare(share.content, failed.map { (file, _) -> file })
     // Cleared last: clearing restarts this effect, which would cancel the import.
     PendingShare.current.value = null
     focus.requestFocus()

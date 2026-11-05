@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-shared-files-list"
+description = "Enables the shared_files_list command without any pre-configured scope."
+commands.allow = ["shared_files_list"]
+
+[[permission]]
+identifier = "deny-shared-files-list"
+description = "Denies the shared_files_list command without any pre-configured scope."
+commands.deny = ["shared_files_list"]

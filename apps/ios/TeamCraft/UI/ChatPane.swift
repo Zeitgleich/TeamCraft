@@ -89,6 +89,12 @@ struct ChatPane: View {
       isDraftLoaded = true
       takeOpenedPlace()
     }
+    // What another app shared, once the stored draft is in the composer: the user sends it (#208).
+    .task(id: "\(model.shareHandover?.share.id ?? "")/\(isDraftLoaded)") {
+      guard isDraftLoaded, threadId == nil, let shared = await model.takeShare(for: conversation.id) else { return }
+      if !shared.text.isEmpty { draft = draft.isEmpty ? shared.text : draft + "\n" + shared.text }
+      attachments.append(contentsOf: shared.files)
+    }
     .task(id: draft) {
       // Saved after a pause in typing; a new keystroke cancels the wait.
       guard (try? await Task.sleep(for: Self.draftSaveDelay)) != nil else { return }

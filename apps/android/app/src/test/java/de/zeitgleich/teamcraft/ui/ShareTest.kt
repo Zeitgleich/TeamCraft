@@ -1,10 +1,29 @@
 package de.zeitgleich.teamcraft.ui
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ShareTest {
+  @Test
+  fun aPagesTitleGoesAboveItsAddress() {
+    assertEquals("A page\nhttps://example.com/a", sharedText("A page", "https://example.com/a"))
+    assertEquals("https://example.com/a", sharedText(null, " https://example.com/a "))
+    assertEquals("https://example.com/a", sharedText("https://example.com/a", "https://example.com/a"))
+  }
+
+  @Test
+  fun aSubjectNextToOtherTextStaysOut() {
+    assertEquals("Look at https://example.com/a", sharedText("Re: hello", "Look at https://example.com/a"))
+    assertEquals("", sharedText("Only a subject", ""))
+  }
+
+  @Test
+  fun sharedTextIsBounded() {
+    assertEquals(MAX_SHARED_TEXT_CHARS, sharedText(null, "x".repeat(MAX_SHARED_TEXT_CHARS + 5)).length)
+  }
+
   @Test
   fun acceptsOtherAppsContent() {
     assertTrue(isForeignContent("content", "com.example.gallery.provider", PACKAGE))

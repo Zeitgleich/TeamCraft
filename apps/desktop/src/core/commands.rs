@@ -23,6 +23,7 @@ use super::runtime::{CoreConfig, CoreRuntime, FailureHandler, KeyChoice, SaveTo,
 use crate::auth::commands::Service;
 use crate::auth::{AuthService, TokenStore};
 use crate::calls::CallHost;
+use crate::dropped_files::DroppedFilesState;
 
 /// Headers of [`core_stage_file`]; the webview's `large_files` sends the same names.
 const STAGE_ID_HEADER: &str = "x-stage-id";
@@ -583,6 +584,27 @@ pub async fn core_stage_file(
   let directory = host.current()?.staging_dir().to_path_buf();
   let path = super::staging::append_chunk(&directory, &id, offset, chunk)
     .map_err(|error| CommandError(error.to_string()))?;
+  Ok(path.to_string_lossy().into_owned())
+}
+
+/// Copies a file the user dropped or shared to the staging directory, by the ID the page knows it
+/// by (#208): the file never passes through the webview. Answers the staged copy's path.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_stage_dropped_file(
+  host: State<'_, CoreHost>,
+  dropped: State<'_, Arc<DroppedFilesState>>,
+  id: u32,
+  stage_id: String,
+) -> Result<String, CommandError> {
+  let source = dropped
+    .stageable_path(id)
+    .ok_or_else(|| CommandError("the file is no longer available".into()))?;
+  let directory = host.current()?.staging_dir().to_path_buf();
+  let path =
+    tauri::async_runtime::spawn_blocking(move || super::staging::copy_file(&directory, &stage_id, &source))
+      .await
+      .map_err(|error| CommandError(error.to_string()))?
+      .map_err(|error| CommandError(error.to_string()))?;
   Ok(path.to_string_lossy().into_owned())
 }
 

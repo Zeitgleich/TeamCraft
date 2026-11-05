@@ -15,6 +15,8 @@ struct TeamCraftApp: App {
         .tint(Theme.accent)
         .task {
           updateShield(phase: scenePhase)
+          // A cold launch may never report a change of `scenePhase` to active (`onChange` below).
+          model.loadWaitingShare()
           await model.bootstrap()
         }
         // Universal Links and `teamcraft://` alike; waits behind the app lock's shield and the sign-in.
@@ -24,6 +26,8 @@ struct TeamCraftApp: App {
           switch phase {
           case .active:
             lock.didBecomeActive()
+            // The share extension may have left something, while the app slept or wasn't running.
+            model.loadWaitingShare()
             model.reportActivity(.foreground)
           case .background:
             // First, before anything else runs: the background time for pending sends (#158).

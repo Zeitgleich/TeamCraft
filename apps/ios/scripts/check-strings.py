@@ -36,6 +36,7 @@ def main():
     catalogs = {
         "TeamCraft/Resources/Localizable.xcstrings": ["TeamCraft", "Shared"],
         "NotificationService/Localizable.xcstrings": ["NotificationService"],
+        "ShareExtension/Localizable.xcstrings": ["ShareExtension"],
     }
     for catalog_path, source_dirs in catalogs.items():
         strings = load(ROOT / catalog_path)

@@ -77,6 +77,7 @@ use crate::model::{ConversationId, MessageId, SpaceId, UserId};
 use crate::reactive::SetIfAlive;
 use crate::session::SessionControl;
 use crate::settings::Settings;
+use crate::share_into::ShareDialog;
 use crate::state::AppState;
 use crate::tab_handover::TabState;
 use teamcraft_client_api::remote::LinkRequestView;
@@ -190,6 +191,8 @@ areas! {
   search(_unit: ()) => search: view! { <SearchView /> };
   /// The top bar's search (Ctrl/Cmd+K), in the chunk of the search results it leads to (#695).
   quick_switcher(_unit: ()) => search: view! { <QuickSwitcher /> };
+  /// Where to send what another app shared (#208).
+  share_into(_unit: ()) => dialogs: view! { <ShareDialog /> };
   /// Dialogs a first visit doesn't open: on a message, a file or a contact's keys (#695).
   forward(from: ConversationId, message: MessageId, maybe_attachment: Option<AttachmentId>) => dialogs: view! { <ForwardDialog from=from message=message maybe_attachment=maybe_attachment /> };
   edit_history(conversation: ConversationId, message: MessageId) => dialogs: view! { <EditHistoryDialog conversation=conversation message=message /> };

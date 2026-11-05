@@ -214,6 +214,8 @@ pub enum SidePanel {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overlay {
   None,
+  /// Where to send what another app shared (`share_into`).
+  Share,
   QuickSwitcher,
   StatusMenu,
   /// The desktop app's recent downloads under their button in the top bar.

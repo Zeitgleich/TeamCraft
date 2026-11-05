@@ -140,6 +140,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val graph = TeamCraftApplication.graph(application)
   private val state = MutableStateFlow<AppState>(AppState.Starting)
   private val busy = MutableStateFlow(false)
+  private val shares = graph.shares
+  private val shareState = MutableStateFlow<ShareState?>(null)
+  private val shareOfOtherAccount = MutableStateFlow(false)
+
+  /** A share couldn't be kept (full disk, too many waiting); the user has to be told. */
+  val hasShareFailed: StateFlow<Boolean> = shares.hasFailed
+
+  /** A share from before the sign-in went: it was kept for the person signed in before. */
+  val hasShareGoneForAccount: StateFlow<Boolean> = shareOfOtherAccount
+
+  /** What another app shared, until the user picked a conversation or discarded it (issue #208). */
+  val share: StateFlow<ShareState?> = shareState
+
+  /** A copy of [content] under way must start over if the process is killed: its intent isn't used up. */
+  fun isCopyingShare(content: SharedContent): Boolean = shares.isCopying(content)
+
+  fun shareFailureShown() {
+    shares.failureShown()
+  }
+
+  fun shareGoneForAccountShown() {
+    shareOfOtherAccount.value = false
+  }
 
   val appState: StateFlow<AppState> = state
   val isBusy: StateFlow<Boolean> = busy
@@ -212,6 +235,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private var pageFetchedAtMillis = 0L
 
   init {
+    // What waited when the process ended comes back; what is past its time goes.
+    viewModelScope.launch {
+      withContext(Dispatchers.IO) { shares.inbox.prune(System.currentTimeMillis()) }
+      // Also what a copy started by an activity that is gone leaves.
+      shares.changes.collect { refreshShare() }
+    }
+  }
+
+  init {
     refresh()
     retryServerWhenOnline()
     loadSignInPageWhenShown()
@@ -242,6 +274,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       maybeStored != null && start is ServerStart.ReplaceStored -> {
         // The organization locked another server: this account can't stay on the device.
         endSession()
+        forgetWaitingShares()
         graph.servers.forget(maybeStored.address.origin)
         forgetActiveServer()
         checkServer(start.address)
@@ -492,6 +525,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   fun signOut() = launchBusy {
     endSession()
+    forgetWaitingShares()
     state.value = AppState.SignedOut()
   }
 
@@ -728,6 +762,85 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }.getOrNull()?.let(::cleanFileName)?.takeIf { it.isNotBlank() } ?: "file"
     val type = runCatching { resolver.getType(uri) }.getOrNull() ?: "application/octet-stream"
     stage(name, type) { resolver.openInputStream(uri) }
+  }
+
+  /**
+   * Copies a share into the inbox right away (a URI grant doesn't outlive the task, the copy does).
+   * [isRedelivery]: the intent of a recreated activity, whose copy may be under way or done.
+   */
+  fun receiveShare(content: SharedContent, isRedelivery: Boolean = false) {
+    if (shareState.value == null) shareState.value = ShareState.Preparing
+    shares.receive(content, isRedelivery) { shareSources(content) }
+  }
+
+  /** The waiting share goes without a conversation: the user said so. */
+  fun discardShare() {
+    val maybeId = (shareState.value as? ShareState.Ready)?.share?.id
+    viewModelScope.launch {
+      if (maybeId == null) shares.stopCopies()
+      maybeId?.let { id -> withContext(Dispatchers.IO) { shares.inbox.delete(id) } }
+      refreshShare()
+    }
+  }
+
+  /** The user picked a conversation: its composer takes over ([finishShare]). */
+  fun handOverShare(share: StagedShare) {
+    shares.handOver(share)
+    viewModelScope.launch { refreshShare() }
+  }
+
+  /** Moves a shared file into the core's staging folder; `null` when that fails. */
+  suspend fun importSharedFile(share: StagedShare, file: StagedShareFile): PickedFile? = withContext(Dispatchers.IO) {
+    val source = shares.inbox.fileOf(share, file)
+    val name = cleanFileName(file.name).ifBlank { "file" }
+    val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
+    val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
+    if (source.renameTo(target)) {
+      PickedFile(fileName = name, mediaType = file.mediaType, path = target.absolutePath)
+    } else {
+      stage(name, file.mediaType) { source.inputStream() }
+    }
+  }
+
+  /** The composer has the share: it leaves the inbox, except [failed] files, which wait for a retry. */
+  suspend fun finishShare(share: StagedShare, failed: List<StagedShareFile>) {
+    withContext(Dispatchers.IO) {
+      if (failed.isEmpty()) shares.inbox.delete(share.id) else shares.inbox.keepOnly(share, failed)
+    }
+    shares.finished(share)
+    refreshShare()
+  }
+
+  /** What waits to be shared doesn't outlive the session on this device. */
+  private suspend fun forgetWaitingShares() {
+    shares.stopCopies()
+    withContext(Dispatchers.IO) { shares.inbox.wipe() }
+    shares.forgetHandedOver()
+    PendingShare.current.value = null
+    shareState.value = null
+  }
+
+  private suspend fun refreshShare() {
+    val maybeNext = withContext(Dispatchers.IO) { shares.next() }
+    shareState.value = maybeNext?.let { ShareState.Ready(it) } ?: ShareState.Preparing.takeIf { shares.isCopying }
+  }
+
+  /** The share's files, each checked and named like a picked file; others count as left out. */
+  private fun shareSources(content: SharedContent): List<ShareSource> {
+    val app = getApplication<Application>()
+    val resolver = app.contentResolver
+    return content.uris.map { uri ->
+      // A share from another app may not point into the app's private files.
+      val isAllowed = isForeignContent(uri.scheme, uri.authority, app.packageName) && !isPrivateFile(uri)
+      val maybeName = runCatching {
+        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+          if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+      }.getOrNull()
+      val name = maybeName?.let(::cleanFileName)?.takeIf { it.isNotBlank() } ?: "file"
+      val type = runCatching { resolver.getType(uri) }.getOrNull() ?: "application/octet-stream"
+      ShareSource(name, type) { if (isAllowed) resolver.openInputStream(uri) else null }
+    }
   }
 
   /** A photo the camera wrote into the app's cache. */
@@ -1129,6 +1242,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   private suspend fun ready(account: AccountState): AppState {
     val ready = account as? AccountState.Ready ?: return AppState.NeedsEnrollment(hasExistingIdentity = true)
+    // Before anything of the app shows: a share left from a session that ran out isn't for somebody
+    // else signing in now.
+    if (withContext(Dispatchers.IO) { shares.inbox.claim(ready.userId) }) {
+      shareOfOtherAccount.value = true
+      // The folder of one on its way into a composer went too.
+      shares.forgetHandedOver()
+      PendingShare.current.value = null
+      refreshShare()
+    }
     // Also started on every foreground, which keeps trying and tells the user (issue #1142).
     runCatching { graph.core.core().start() }
       .onFailure { Log.w(TAG, "sync not started: ${it.javaClass.simpleName}") }
@@ -1188,13 +1310,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
  * Largest file the app copies in for sending. The server enforces its own (smaller) limit; this
  * only keeps a hostile or endless provider from filling the device.
  */
-private const val MAX_IMPORT_BYTES = 4L * 1024 * 1024 * 1024
+internal const val MAX_IMPORT_BYTES = 4L * 1024 * 1024 * 1024
 
-/** Copies `input` to `output`; false (and stops) once more than `maxBytes` arrived. */
-internal fun copyAtMost(input: InputStream, output: OutputStream, maxBytes: Long): Boolean {
+/** Copies `input` to `output`; false (and stops) once more than `maxBytes` arrived or on [isCancelled]. */
+internal fun copyAtMost(
+  input: InputStream,
+  output: OutputStream,
+  maxBytes: Long,
+  isCancelled: () -> Boolean = { false },
+): Boolean {
   val buffer = ByteArray(64 * 1024)
   var total = 0L
   while (true) {
+    if (isCancelled()) return false
     val count = input.read(buffer)
     if (count < 0) return true
     total += count

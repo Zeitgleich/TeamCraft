@@ -19,5 +19,22 @@
   </array>
   <key>CFBundleAllowMixedLocalizations</key>
   <true/>
+  <!-- "Open With" in the Finder and drops on the dock icon share files into a conversation (#208).
+       Rank None: never the default app of any file. -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>File</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>None</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.data</string>
+      </array>
+    </dict>
+  </array>
 </dict>
 </plist>

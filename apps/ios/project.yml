@@ -48,6 +48,8 @@ targets:
     dependencies:
       - target: NotificationService
         embed: true
+      - target: ShareExtension
+        embed: true
       - framework: Generated/TeamCraftFFI.xcframework
         embed: false
         link: true
@@ -185,6 +187,43 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: de.zeitgleich.teamcraft.notifications
         CODE_SIGN_ENTITLEMENTS: $(NSE_ENTITLEMENTS)
+        SKIP_INSTALL: YES
+
+  # The share sheet's entry (issue #208). No core: it copies what was shared into the App Group, and
+  # the app takes it from there. Its App ID needs the App Group capability (README.md).
+  ShareExtension:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ShareExtension
+        excludes:
+          - "*.entitlements"
+      - path: Shared/AppEnvironment.swift
+      - path: Shared/ShareInbox.swift
+    dependencies:
+      - sdk: UserNotifications.framework
+    info:
+      path: ShareExtension/Info.plist
+      properties:
+        CFBundleDisplayName: TeamCraft
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).ShareViewController
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsAttachmentsWithMaxCount: 20
+              NSExtensionActivationSupportsFileWithMaxCount: 20
+              NSExtensionActivationSupportsImageWithMaxCount: 20
+              NSExtensionActivationSupportsMovieWithMaxCount: 20
+              NSExtensionActivationSupportsText: true
+              NSExtensionActivationSupportsWebURLWithMaxCount: 1
+        TCAppGroupId: $(APP_GROUP_ID)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.zeitgleich.teamcraft.share
+        CODE_SIGN_ENTITLEMENTS: ShareExtension/ShareExtension.entitlements
         SKIP_INSTALL: YES
 
   TeamCraftTests:
