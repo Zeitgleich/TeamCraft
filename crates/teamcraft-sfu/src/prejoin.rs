@@ -3,46 +3,62 @@
 //! has a whole /64 to itself, so that is what counts as one address.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::{Arc, Mutex, PoisonError};
 
-/// Counts pre-join sessions per source address.
-#[derive(Debug, Default)]
-pub struct PreJoinLimiter {
-  counts: Mutex<HashMap<IpAddr, usize>>,
+/// Counts pre-join sessions per key: a source address, or on the fallback also the device of a join
+/// token checked before the upgrade (#1297).
+#[derive(Debug)]
+pub struct PreJoinLimiter<K = IpAddr> {
+  counts: Mutex<HashMap<K, usize>>,
 }
 
 /// Holds one slot until dropped (the session joined or ended).
 #[derive(Debug)]
-pub struct PreJoinSlot {
-  limiter: Arc<PreJoinLimiter>,
-  ip: IpAddr,
+pub struct PreJoinSlot<K: Eq + Hash + Copy = IpAddr> {
+  limiter: Arc<PreJoinLimiter<K>>,
+  key: K,
 }
 
-impl PreJoinLimiter {
+impl<K> Default for PreJoinLimiter<K> {
+  fn default() -> Self {
+    Self {
+      counts: Mutex::new(HashMap::new()),
+    }
+  }
+}
+
+impl PreJoinLimiter<IpAddr> {
   /// Takes a slot for `ip`, or `None` if it already has `max` unjoined sessions.
   pub fn try_acquire(self: &Arc<Self>, ip: IpAddr, max: usize) -> Option<PreJoinSlot> {
-    let ip = counted_address(ip);
+    self.try_acquire_key(counted_address(ip), max)
+  }
+}
+
+impl<K: Eq + Hash + Copy> PreJoinLimiter<K> {
+  /// Takes a slot for `key`, or `None` if it already has `max` unjoined sessions.
+  pub fn try_acquire_key(self: &Arc<Self>, key: K, max: usize) -> Option<PreJoinSlot<K>> {
     let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
-    let count = counts.entry(ip).or_insert(0);
+    let count = counts.entry(key).or_insert(0);
     if *count >= max {
       return None;
     }
     *count += 1;
     Some(PreJoinSlot {
       limiter: Arc::clone(self),
-      ip,
+      key,
     })
   }
 }
 
-impl Drop for PreJoinSlot {
+impl<K: Eq + Hash + Copy> Drop for PreJoinSlot<K> {
   fn drop(&mut self) {
     let mut counts = self.limiter.counts.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(count) = counts.get_mut(&self.ip) {
+    if let Some(count) = counts.get_mut(&self.key) {
       *count -= 1;
       if *count == 0 {
-        counts.remove(&self.ip);
+        counts.remove(&self.key);
       }
     }
   }

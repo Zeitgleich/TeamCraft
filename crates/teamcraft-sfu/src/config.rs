@@ -89,6 +89,15 @@ pub struct FallbackConfig {
   /// How long the WebSocket upgrade may take, before any token is seen. Enough for a slow link: a
   /// client that means it has sent the request as its first packet after TCP.
   pub handshake_timeout: Duration,
+  /// How long a connection that showed no join token in the upgrade has to send its `join`, instead
+  /// of the join timeout: it holds an unjoined slot meanwhile, and a client sends its `join` right
+  /// after the upgrade. One that showed a valid token has the join timeout, on a slot of its device
+  /// (#1297).
+  pub first_frame_timeout: Duration,
+  /// Refuses an upgrade without a join token (`Sec-WebSocket-Protocol`), so nobody without a token
+  /// holds an unjoined slot past the handshake. Off by default: clients of before #1297 don't
+  /// send one.
+  pub requires_upgrade_token: bool,
   /// What waits for one slow connection. Media beyond it, or older, is dropped.
   pub queue: MediaQueueConfig,
   /// The socket's send buffer. What is in it can't be dropped any more and has to go through, so a
@@ -151,6 +160,8 @@ impl Default for FallbackConfig {
       max_connections: 1024,
       max_unjoined_connections: 128,
       handshake_timeout: Duration::from_secs(3),
+      first_frame_timeout: Duration::from_secs(3),
+      requires_upgrade_token: false,
       queue: MediaQueueConfig::default(),
       socket_send_buffer_bytes: 128 * 1024,
       ping_interval: Duration::from_secs(1),

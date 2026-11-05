@@ -37,8 +37,8 @@ use teamcraft_media::{
   video::EncodedVideoFrame,
 };
 use teamcraft_proto::{
-  AudioCodec, CALL_FALLBACK_PATH, CallClientMessage, CallServerMessage, DeviceId, ErrorCode, FallbackFrame,
-  MediaCapabilities, VideoCodec, VideoLayerInfo, VideoTrackKind,
+  AudioCodec, CALL_FALLBACK_PATH, CALL_FALLBACK_PROTOCOL, CallClientMessage, CallServerMessage, DeviceId,
+  ErrorCode, FallbackFrame, MediaCapabilities, VideoCodec, VideoLayerInfo, VideoTrackKind,
 };
 use teamcraft_sfu::{
   auth::DevTokenVerifier,
@@ -267,6 +267,106 @@ mod first_frame {
     let sfu = start_sfu(SfuConfig::default()).await;
     let url = format!("ws://{}/other", sfu.fallback_addr);
     assert!(tokio_tungstenite::connect_async(url).await.is_err());
+  }
+}
+
+/// The join token in the upgrade (#1297): somebody with many addresses but no token can't hold the
+/// unjoined slots for long, and a client that shows one doesn't need them.
+mod upgrade_tokens {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_valid_token_is_answered_with_the_call_protocol_and_joins() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let (mut socket, protocol) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    assert_eq!(protocol.as_deref(), Some(CALL_FALLBACK_PROTOCOL));
+    send_join(&mut socket, &token(ALICE)).await;
+    wait_for_joined(&mut socket).await;
+  }
+
+  #[tokio::test]
+  async fn an_invalid_token_gets_no_upgrade() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let refused = sfu.connect_with_token("not a token").await;
+    assert_eq!(http_status(refused), Some(401));
+    wait_until(|| sfu.control.fallback_connections() == 0).await;
+  }
+
+  #[tokio::test]
+  async fn the_join_must_carry_the_upgrades_token() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let (mut socket, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    send_join(&mut socket, &token(BOB)).await;
+    let (error_code, close_code) = read_refusal(&mut socket).await;
+    assert_eq!(error_code, Some(ErrorCode::InvalidJoinToken));
+    assert_eq!(close_code, Some(0));
+    assert_eq!(sfu.control.room_stats().participants, 0);
+  }
+
+  /// One anonymous slot and one per address: a client with a token gets in past both, and leaves
+  /// them to others while it joins.
+  #[tokio::test]
+  async fn a_client_with_a_token_needs_no_anonymous_slot_after_the_upgrade() {
+    let mut config = SfuConfig::default();
+    config.fallback.max_unjoined_connections = 1;
+    config.fallback.trusted_proxies = Vec::new();
+    config.max_prejoin_sessions_per_ip = 1;
+    let sfu = start_sfu(config).await;
+    let (mut with_token, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    let mut anonymous = sfu.connect_socket().await;
+    send_join(&mut anonymous, &token(BOB)).await;
+    wait_for_joined(&mut anonymous).await;
+    send_join(&mut with_token, &token(ALICE)).await;
+    wait_for_joined(&mut with_token).await;
+  }
+
+  #[tokio::test]
+  async fn a_device_holds_few_unjoined_connections() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let _first = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    let _second = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    let (mut third, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    // As for a full SFU: no verdict on the call, the socket just goes.
+    assert_eq!(read_refusal(&mut third).await, (None, None));
+    let (mut other_device, _) = sfu.connect_with_token(&token(BOB)).await.unwrap();
+    send_join(&mut other_device, &token(BOB)).await;
+    wait_for_joined(&mut other_device).await;
+  }
+
+  /// A client of before sends no token in the upgrade: it gets in, but has to join at once.
+  #[tokio::test]
+  async fn without_a_token_the_join_has_to_come_soon() {
+    let mut config = SfuConfig::default();
+    config.fallback.first_frame_timeout = Duration::from_millis(100);
+    config.join_timeout = Duration::from_secs(60);
+    let sfu = start_sfu(config).await;
+    let started_at = Instant::now();
+    let mut anonymous = sfu.connect_socket().await;
+    let (_, close_code) = read_refusal(&mut anonymous).await;
+    assert_eq!(close_code, Some(0));
+    assert!(started_at.elapsed() < Duration::from_secs(5));
+    let (mut with_token, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    send_join(&mut with_token, &token(ALICE)).await;
+    wait_for_joined(&mut with_token).await;
+  }
+
+  #[tokio::test]
+  async fn an_sfu_that_requires_a_token_refuses_an_upgrade_without_one() {
+    let mut config = SfuConfig::default();
+    config.fallback.requires_upgrade_token = true;
+    let sfu = start_sfu(config).await;
+    assert_eq!(http_status(sfu.try_connect_socket(None).await), Some(401));
+    let (mut socket, _) = sfu.connect_with_token(&token(ALICE)).await.unwrap();
+    send_join(&mut socket, &token(ALICE)).await;
+    wait_for_joined(&mut socket).await;
+  }
+
+  fn http_status<T>(result: Result<T, tokio_tungstenite::tungstenite::Error>) -> Option<u16> {
+    match result {
+      Err(tokio_tungstenite::tungstenite::Error::Http(response)) => Some(response.status().as_u16()),
+      _ => None,
+    }
   }
 }
 
@@ -895,6 +995,27 @@ impl RunningSfu {
         .insert("x-forwarded-for", address.parse().unwrap());
     }
     Ok(tokio_tungstenite::connect_async(request).await?.0)
+  }
+
+  /// Opens a socket as clients do since #1297: the join token offered as a subprotocol. Returns the
+  /// subprotocol the SFU answered with.
+  async fn connect_with_token(
+    &self,
+    token: &str,
+  ) -> Result<(Socket, Option<String>), tokio_tungstenite::tungstenite::Error> {
+    let url = format!("ws://{}{CALL_FALLBACK_PATH}", self.fallback_addr);
+    let mut request = url.into_client_request()?;
+    let offered = teamcraft_proto::fallback_protocols(token).join(", ");
+    request
+      .headers_mut()
+      .insert("sec-websocket-protocol", offered.parse().unwrap());
+    let (socket, response) = tokio_tungstenite::connect_async(request).await?;
+    let maybe_protocol = response
+      .headers()
+      .get("sec-websocket-protocol")
+      .and_then(|value| value.to_str().ok())
+      .map(str::to_owned);
+    Ok((socket, maybe_protocol))
   }
 
   async fn native_client(

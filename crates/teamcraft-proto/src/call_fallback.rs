@@ -16,14 +16,82 @@
 //! 0x03 | close code (u32 BE) | reason the sender closes on purpose
 //! ```
 //!
+//! The join token also goes along with the upgrade, in `Sec-WebSocket-Protocol` (the one header a
+//! browser lets a page set): the client offers [`CALL_FALLBACK_PROTOCOL`] and
+//! [`join_token_protocol`], and the SFU checks the token before the upgrade and answers with
+//! [`CALL_FALLBACK_PROTOCOL`] alone, so the token never comes back. A connection that can't show a
+//! token holds no more than an anonymous one may (#1297). The `join` still carries the same token:
+//! SFUs and clients of before don't know the header.
+//!
 //! Frames come from untrusted peers: [`FallbackFrame::decode`] never panics, and refuses a datagram
 //! bigger than any QUIC could carry. A kind it doesn't know is [`FallbackFrame::Unknown`], for
 //! receivers to ignore: newer peers may add some.
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use thiserror::Error;
 
 /// HTTP path of the WebSocket on the SFU's fallback listener.
 pub const CALL_FALLBACK_PATH: &str = "/call/fallback";
+
+/// The subprotocol the SFU answers with when the client offered it.
+pub const CALL_FALLBACK_PROTOCOL: &str = "teamcraft-call";
+
+/// In front of the join token in the subprotocol that carries it.
+pub const JOIN_TOKEN_PROTOCOL_PREFIX: &str = "teamcraft-join.";
+
+/// The subprotocols a client offers: [`CALL_FALLBACK_PROTOCOL`] first, then its join token.
+pub fn fallback_protocols(token: &str) -> [String; 2] {
+  [CALL_FALLBACK_PROTOCOL.to_owned(), join_token_protocol(token)]
+}
+
+/// The join token as a subprotocol: base64url, as a subprotocol may hold only an HTTP token's
+/// characters (a development token has colons).
+pub fn join_token_protocol(token: &str) -> String {
+  format!(
+    "{JOIN_TOKEN_PROTOCOL_PREFIX}{}",
+    URL_SAFE_NO_PAD.encode(token.as_bytes())
+  )
+}
+
+/// What the client offered in its `Sec-WebSocket-Protocol` lines: whether it knows
+/// [`CALL_FALLBACK_PROTOCOL`], and its join token if it sent one. `Err` for a token that isn't
+/// base64url of UTF-8, or more than one token.
+pub fn parse_offered_protocols<'a>(
+  lines: impl IntoIterator<Item = &'a str>,
+) -> Result<OfferedProtocols, OfferedProtocolsError> {
+  let mut offered = OfferedProtocols::default();
+  for protocol in lines.into_iter().flat_map(|line| line.split(',')).map(str::trim) {
+    if protocol == CALL_FALLBACK_PROTOCOL {
+      offered.knows_call_protocol = true;
+    } else if let Some(encoded) = protocol.strip_prefix(JOIN_TOKEN_PROTOCOL_PREFIX) {
+      if offered.maybe_token.is_some() {
+        return Err(OfferedProtocolsError::SeveralTokens);
+      }
+      let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| OfferedProtocolsError::Malformed)?;
+      let token = String::from_utf8(bytes).map_err(|_| OfferedProtocolsError::Malformed)?;
+      offered.maybe_token = Some(token);
+    }
+  }
+  Ok(offered)
+}
+
+/// The subprotocols of a fallback upgrade, as far as the SFU cares.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OfferedProtocols {
+  pub knows_call_protocol: bool,
+  pub maybe_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum OfferedProtocolsError {
+  #[error("the join token subprotocol is not base64url of UTF-8")]
+  Malformed,
+  #[error("more than one join token subprotocol")]
+  SeveralTokens,
+}
 
 /// Largest media datagram on the fallback. Clients send at most 1200 bytes, and the SFU forwards
 /// them with at most 2 bytes more; nothing bigger fits a QUIC datagram either.
@@ -228,6 +296,51 @@ mod tests {
       assert_eq!(
         FallbackFrame::decode(b"\x01\xFF\xFE"),
         Ok(FallbackFrame::Signal(b"\xFF\xFE"))
+      );
+    }
+  }
+
+  mod protocols {
+    use super::*;
+
+    #[test]
+    fn a_token_round_trips_through_its_subprotocol() {
+      let token = "dev:1:2:3";
+      let [call, carried] = fallback_protocols(token);
+      assert_eq!(call, CALL_FALLBACK_PROTOCOL);
+      assert!(
+        carried
+          .bytes()
+          .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+      );
+      let line = format!("{call}, {carried}");
+      let offered = parse_offered_protocols([line.as_str()]).unwrap();
+      assert!(offered.knows_call_protocol);
+      assert_eq!(offered.maybe_token.as_deref(), Some(token));
+    }
+
+    #[test]
+    fn several_lines_and_other_protocols_are_read_too() {
+      let carried = join_token_protocol("t");
+      let offered = parse_offered_protocols(["chat", carried.as_str()]).unwrap();
+      assert!(!offered.knows_call_protocol);
+      assert_eq!(offered.maybe_token.as_deref(), Some("t"));
+      assert_eq!(
+        parse_offered_protocols(std::iter::empty()),
+        Ok(OfferedProtocols::default())
+      );
+    }
+
+    #[test]
+    fn a_broken_or_second_token_is_refused() {
+      assert_eq!(
+        parse_offered_protocols(["teamcraft-join.!!"]),
+        Err(OfferedProtocolsError::Malformed)
+      );
+      let carried = join_token_protocol("t");
+      assert_eq!(
+        parse_offered_protocols([carried.as_str(), carried.as_str()]),
+        Err(OfferedProtocolsError::SeveralTokens)
       );
     }
   }

@@ -68,8 +68,8 @@ pub async fn join_call(
   let mut config = NativeCallConfig::new(join.sfu_url, join.token, engine);
   config.maybe_fallback_url = maybe_fallback_url;
   // As the apps open it: the core's HTTP stack, with its proxy handling.
-  config.maybe_fallback_opener = Some(fallback_opener(|url| async move {
-    let socket = teamcraft_core::api::open_call_socket(&url)
+  config.maybe_fallback_opener = Some(fallback_opener(|url, protocols| async move {
+    let socket = teamcraft_core::api::open_call_socket(&url, &protocols)
       .await
       .map_err(|error| error.to_string())?;
     Ok(FallbackSocket::new(socket))

@@ -1579,8 +1579,8 @@ fn native_config(
   config.maybe_certificate_hash = certificate_hash_from_env()?;
   config.maybe_fallback_url = ticket.maybe_fallback_url;
   config.maybe_fallback_opener = Some(teamcraft_media::fallback_link::fallback_opener(
-    |url| async move {
-      let socket = teamcraft_core::api::open_call_socket(&url)
+    |url, protocols| async move {
+      let socket = teamcraft_core::api::open_call_socket(&url, &protocols)
         .await
         .map_err(|error| error.to_string())?;
       Ok(teamcraft_media::fallback_link::FallbackSocket::new(socket))

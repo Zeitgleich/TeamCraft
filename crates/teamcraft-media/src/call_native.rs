@@ -28,7 +28,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use teamcraft_net::{ATTEMPT_DELAY, RaceError, interleave, race};
 use teamcraft_proto::{
   CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, VideoCodec,
-  VideoLayerInfo, VideoPublicationId, VideoTrackKind,
+  VideoLayerInfo, VideoPublicationId, VideoTrackKind, fallback_protocols,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -1328,7 +1328,12 @@ impl LinkTarget {
       return quic.await;
     };
     let starts = tokio::time::sleep(fallback_delay(self.current, &self.resilience));
-    let fallback = Link::open_fallback(fallback_url, self.maybe_opener.as_ref(), &self.resilience);
+    let fallback = Link::open_fallback(
+      fallback_url,
+      &ticket.token,
+      self.maybe_opener.as_ref(),
+      &self.resilience,
+    );
     let (link, transport) = connect_preferring_quic(quic, starts, fallback).await?;
     if transport == CallTransport::Fallback {
       info!("QUIC didn't connect, the call runs on the fallback");
@@ -1338,9 +1343,11 @@ impl LinkTarget {
 }
 
 impl Link {
-  /// Opens the WebSocket fallback. Nothing goes over it before the call joins, as on QUIC.
+  /// Opens the WebSocket fallback, with the join token in the upgrade for the SFU to check before it
+  /// (#1297). Nothing goes over it before the call joins, as on QUIC.
   async fn open_fallback(
     url: &str,
+    token: &str,
     maybe_opener: Option<&Arc<dyn FallbackOpener>>,
     resilience: &ResilienceConfig,
   ) -> Result<Self, NativeCallError> {
@@ -1349,9 +1356,10 @@ impl Link {
         "the call socket's address must use TLS".into(),
       ));
     }
+    let protocols = fallback_protocols(token);
     let opening = match maybe_opener {
-      Some(opener) => opener.open(url),
-      None => LoopbackOpener.open(url),
+      Some(opener) => opener.open(url, &protocols),
+      None => LoopbackOpener.open(url, &protocols),
     };
     let socket = opening.await.map_err(NativeCallError::Connect)?;
     let sender = FallbackSender::new(MediaQueueConfig::default());

@@ -26,8 +26,9 @@ mod wire_enum;
 pub use api::*;
 pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, IdempotencyKey, UnixMillis};
 pub use call_fallback::{
-  CALL_FALLBACK_PATH, FallbackFrame, FallbackFrameError, MAX_FALLBACK_CLOSE_REASON_BYTES,
-  MAX_FALLBACK_DATAGRAM_BYTES,
+  CALL_FALLBACK_PATH, CALL_FALLBACK_PROTOCOL, FallbackFrame, FallbackFrameError, JOIN_TOKEN_PROTOCOL_PREFIX,
+  MAX_FALLBACK_CLOSE_REASON_BYTES, MAX_FALLBACK_DATAGRAM_BYTES, OfferedProtocols, OfferedProtocolsError,
+  fallback_protocols, join_token_protocol, parse_offered_protocols,
 };
 pub use call_media::{
   AudioCodec, KNOWN_VIDEO_CODECS, LEGACY_SIMULCAST_LAYERS, MAX_SIMULCAST_LAYERS, MAX_VIDEO_FRAME_FRAGMENTS,
