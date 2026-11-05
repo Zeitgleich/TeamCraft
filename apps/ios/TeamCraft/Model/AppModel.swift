@@ -1366,10 +1366,13 @@ final class AppModel {
   }
 
   private func refreshAccountState() async {
-    guard maybeServer != nil, vault.hasSession, container.activeAccount != nil else {
+    guard maybeServer != nil, vault.hasSession, let account = container.activeAccount else {
       phase = .signedOut(nil)
       return
     }
+    // Also for a restored session: only then a later sign-in can tell somebody else from this person.
+    // The same value as at the sign-in, not the core's user ID.
+    claimWaitingShare(for: account)
     do {
       let state = try await core().accountState()
       switch state {

@@ -92,7 +92,7 @@ class MainActivity : FragmentActivity() {
       intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
     if (!isShareTaken) {
       startShare = sharedContent(intent, packageName)
-      startShare?.let(viewModel::receiveShare)
+      startShare?.let { viewModel.receiveShare(it, isRedelivery = savedInstanceState != null) }
     }
     // Not again when the activity is recreated with the same intent (a rotation): it was acted on.
     appLink.value = when (savedInstanceState) {

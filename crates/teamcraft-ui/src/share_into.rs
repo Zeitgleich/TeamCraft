@@ -53,6 +53,8 @@ const SHARE_OWNER_KEY: &str = "teamcraft.share-owner";
 thread_local! {
   /// The app's inbox, for the sign-out, which outlives the components it was started from.
   static CURRENT: Cell<Option<ShareInbox>> = const { Cell::new(None) };
+  /// Goes up when what waits is thrown away, so a read under way can't bring it back.
+  static DISCARDS: DiscardCount = const { DiscardCount::new() };
 }
 
 /// What waits to be shared, and the way into the composer.
@@ -67,6 +69,27 @@ pub struct ShareInbox {
   is_picker_open: RwSignal<bool>,
   /// A new share (or the notice's button) asks for the picker.
   wants_picker: RwSignal<bool>,
+}
+
+/// How often what waits was thrown away.
+struct DiscardCount(Cell<u64>);
+
+impl DiscardCount {
+  const fn new() -> Self {
+    Self(Cell::new(0))
+  }
+
+  fn current(&self) -> u64 {
+    self.0.get()
+  }
+
+  fn bump(&self) {
+    self.0.set(self.0.get().wrapping_add(1));
+  }
+
+  fn has_changed_since(&self, started: u64) -> bool {
+    self.0.get() != started
+  }
 }
 
 /// A share until the user picked a conversation for it.
@@ -182,10 +205,15 @@ impl ShareInbox {
 
   fn load(self) {
     leptos::task::spawn_local(async move {
+      let started = DISCARDS.with(DiscardCount::current);
       let loaded = match tauri::is_available() {
         true => next_shell_share().await,
         false => next_browser_share().await,
       };
+      // async-ok: DISCARDS is a thread-local counter, not a signal.
+      if DISCARDS.with(|discards| discards.has_changed_since(started)) {
+        return;
+      }
       match loaded {
         Ok(maybe_share) => self.show(maybe_share),
         Err(error) => {
@@ -283,8 +311,11 @@ pub async fn claim_for(user: &str) {
 /// Nobody is the owner of what is shared after this.
 pub async fn discard_waiting() {
   store_string(SHARE_OWNER_KEY, "");
+  DISCARDS.with(DiscardCount::bump);
   if let Some(inbox) = CURRENT.get() {
     inbox.maybe_waiting.set_if_alive(None);
+    // Also one on its way into a composer.
+    inbox.maybe_picked.set_if_alive(None);
     inbox.wants_picker.set_if_alive(false);
   }
   let result = match tauri::is_available() {
@@ -858,6 +889,19 @@ mod tests {
     assert_eq!(share_id_of_meta("https://a.example/share/12-ab/file/0"), None);
     assert_eq!(share_id_of_meta("https://a.example/share//meta"), None);
     assert_eq!(share_id_of_meta("https://a.example/other"), None);
+  }
+
+  #[test]
+  fn a_read_started_before_a_discard_is_dropped() {
+    let discards = DiscardCount::new();
+    let started = discards.current();
+    assert!(!discards.has_changed_since(started));
+    discards.bump();
+    assert!(discards.has_changed_since(started));
+    assert!(
+      !discards.has_changed_since(discards.current()),
+      "a read after it counts"
+    );
   }
 
   #[test]

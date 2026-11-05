@@ -766,11 +766,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /**
    * Copies a share into the inbox right away (a URI grant doesn't outlive the task, the copy does).
-   * The same content again (a rotation while it is copied) is not copied twice.
+   * [isRedelivery]: the intent of a recreated activity, whose copy may be under way or done.
    */
-  fun receiveShare(content: SharedContent) {
+  fun receiveShare(content: SharedContent, isRedelivery: Boolean = false) {
     if (shareState.value == null) shareState.value = ShareState.Preparing
-    shares.receive(content) { shareSources(content) }
+    shares.receive(content, isRedelivery) { shareSources(content) }
   }
 
   /** The waiting share goes without a conversation: the user said so. */
@@ -1246,6 +1246,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // else signing in now.
     if (withContext(Dispatchers.IO) { shares.inbox.claim(ready.userId) }) {
       shareOfOtherAccount.value = true
+      // The folder of one on its way into a composer went too.
+      shares.forgetHandedOver()
+      PendingShare.current.value = null
       refreshShare()
     }
     // Also started on every foreground, which keeps trying and tells the user (issue #1142).

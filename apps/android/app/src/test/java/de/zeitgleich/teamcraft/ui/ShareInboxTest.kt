@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -110,7 +111,7 @@ class ShareInboxTest {
         return super.read(buffer)
       }
     }
-    val result = inbox.stage(content("text"), listOf(ShareSource("a", "text/plain") { stream }), NOW_MS, isCancelled)
+    val result = inbox.stage(content("text"), listOf(ShareSource("a", "text/plain") { stream }), NOW_MS, isCancelled = isCancelled)
 
     assertEquals(ShareStageResult.Cancelled, result)
     assertEquals(1, reads)
@@ -227,11 +228,39 @@ class ShareInboxTest {
   }
 
   @Test
-  fun theSameShareDeliveredAgainIsOfferedOnce() {
+  fun anIntentDeliveredAgainIsOfferedOnce() {
     val first = stored(content("same"), emptyList(), NOW_MS)
-    val again = stored(content("same"), emptyList(), NOW_MS + 1)
-    assertEquals(first.id, again.id)
+    val again = inbox.stage(content("same"), emptyList(), NOW_MS + 1, isRedelivery = true)
+    assertEquals(first, (again as ShareStageResult.Stored).share)
     assertEquals(1, root.listFiles()!!.size)
+  }
+
+  @Test
+  fun aNewShareReusingAUriIsKeptBesideTheOldOne() {
+    // An app's fixed path: what looks the same from outside is another picture.
+    stored(content("same"), listOf(source("picture", ByteArray(1))), NOW_MS)
+    val newer = stored(content("same"), listOf(source("picture", ByteArray(2))), NOW_MS + 1)
+    assertEquals(2, root.listFiles()!!.size)
+    assertEquals(2L, inbox.fileOf(newer, newer.files[0]).length())
+  }
+
+  @Test
+  fun aNewShareReusingAUriWaitsForTheCopyUnderWay() = runBlocking {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val receiver = ShareReceiver(root, maxFileBytes = 1000, scope)
+    val release = CountDownLatch(1)
+    receiver.receive(content("same")) {
+      release.await()
+      emptyList()
+    }
+    receiver.receive(content("same")) { emptyList() }
+    receiver.receive(content("same"), isRedelivery = true) { throw AssertionError("a third copy") }
+    val copies = scope.coroutineContext[Job]!!.children.toList()
+    assertEquals(2, copies.size)
+    release.countDown()
+    copies.joinAll()
+    assertEquals(2, root.listFiles()!!.size)
+    scope.cancel()
   }
 
   @Test

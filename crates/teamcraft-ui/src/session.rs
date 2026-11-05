@@ -452,13 +452,17 @@ impl SessionControl {
     if me.id != cached.id {
       tracing::warn!("the server names another account than the cached one");
       self.next_core_round();
-      // Another person: what the cached account's user shared isn't theirs to see.
-      crate::share_into::discard_waiting().await;
+      // Another person: what the cached account's user shared isn't theirs to see. The cached account
+      // first, as a start from before owners were kept has none on record.
+      crate::share_into::claim_for(&cached.id.to_string()).await;
+      crate::share_into::claim_for(&me.id.to_string()).await;
       self.state.set_if_alive(SessionState::Checking);
       self.close_account_data(cached.id).await;
       self.start_core(me).await;
       return;
     }
+    // A cached start goes through no sign-in: this is where the owner goes on record.
+    crate::share_into::claim_for(&me.id.to_string()).await;
     self.authenticator().remember_account(&me).await;
     self.maybe_confirmed.set_if_alive(Some(me.clone()));
     // Confirmed: the core gets its token and connects, and what waited goes out.

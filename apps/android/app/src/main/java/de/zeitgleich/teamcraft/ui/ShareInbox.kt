@@ -55,7 +55,7 @@ data class StagedShare(
   /** Files that couldn't be taken: too many, too large, unreadable or not another app's. */
   val leftOut: Int,
   val maybeTarget: String? = null,
-  /** Identifies what was shared: the same intent delivered again doesn't make a second share. */
+  /** Identifies what was shared, for recognising an intent the system delivers again. */
   val sourceKey: String = "",
 ) {
   val isEmpty: Boolean get() = text.isBlank() && files.isEmpty()
@@ -97,12 +97,15 @@ class ShareInbox(
     content: SharedContent,
     sources: List<ShareSource>,
     nowMs: Long,
+    isRedelivery: Boolean = false,
     isCancelled: () -> Boolean = { false },
   ): ShareStageResult {
     if (isCancelled()) return ShareStageResult.Cancelled
     val sourceKey = sourceKeyOf(content)
     val waiting = folders().mapNotNull(::read)
-    waiting.firstOrNull { it.sourceKey == sourceKey }?.let { return ShareStageResult.Stored(it) }
+    // Only an intent the system delivers again: a new share may reuse a URI (an app's fixed path for
+    // whatever it shares now) with other content, and it is the newer one the user means.
+    if (isRedelivery) waiting.firstOrNull { it.sourceKey == sourceKey }?.let { return ShareStageResult.Stored(it) }
     if (waiting.size >= maxShares) return ShareStageResult.Failed
     // The time first, so the folders sort by age.
     val id = "${nowMs.toString().padStart(16, '0')}-${UUID.randomUUID()}"
@@ -267,10 +270,13 @@ class ShareReceiver(root: File, maxFileBytes: Long, private val scope: Coroutine
     failure.value = false
   }
 
-  /** Copies [content] into the inbox unless that is under way already; [sources] may block. */
-  fun receive(content: SharedContent, sources: () -> List<ShareSource>) {
+  /**
+   * Copies [content] into the inbox; [sources] may block. With [isRedelivery] (an intent the system
+   * hands a recreated activity again) not if that is under way or done already.
+   */
+  fun receive(content: SharedContent, isRedelivery: Boolean = false, sources: () -> List<ShareSource>) {
     synchronized(copies) {
-      if (copies.any { it.content == content && it.job.isActive }) return
+      if (isRedelivery && copies.any { it.content == content && it.job.isActive }) return
       copies.removeAll { !it.job.isActive }
       val maybePrevious = copies.lastOrNull()?.job
       val job = scope.launch(Dispatchers.IO) {
@@ -278,7 +284,7 @@ class ShareReceiver(root: File, maxFileBytes: Long, private val scope: Coroutine
         val copy = currentCoroutineContext()[Job]
         val isCancelled = { copy?.isActive == false }
         if (isCancelled()) return@launch
-        val result = inbox.stage(content, sources(), System.currentTimeMillis(), isCancelled)
+        val result = inbox.stage(content, sources(), System.currentTimeMillis(), isRedelivery, isCancelled)
         if (result is ShareStageResult.Failed) failure.value = true
       }
       job.invokeOnCompletion { changeCount.update { it + 1 } }

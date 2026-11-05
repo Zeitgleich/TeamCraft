@@ -21,7 +21,12 @@ extension AppModel {
   /// Somebody signed in: a share kept through a session that ran out is only for the same person.
   func claimWaitingShare(for userId: String) {
     guard let inbox = ShareInbox.shared() else { return }
-    isShareGoneForAccount = inbox.claim(for: userId)
+    // Runs again for the same person right after a sign-in, which must not take the notice back.
+    if inbox.claim(for: userId) {
+      isShareGoneForAccount = true
+      // The folder of one on its way into a composer went too.
+      shareHandover = nil
+    }
     loadWaitingShare()
   }
 
