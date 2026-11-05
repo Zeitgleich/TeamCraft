@@ -19,6 +19,7 @@ import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import uniffi.teamcraft_ffi.NotetakerAddition
 import uniffi.teamcraft_ffi.NotetakerCallInfo
 import uniffi.teamcraft_ffi.TeamCraftException
 
@@ -131,19 +132,19 @@ class CallMoves(
     }
 
   /**
-   * "Add notetaker" (e2ee.md §8.2, "In every call"): where it is a member of the conversation,
-   * asks it in; anywhere else the call moves into a meeting room with everybody in it and the
-   * notetaker, which the core asks in there (it isn't rung), and this device follows. `requestKey`
-   * is the call screen's: a retry after a lost answer gets the same room.
+   * "Add notetaker" (e2ee.md §8.2, "In every call"), on the route desktop and web take: where it is
+   * a member of the conversation the core asks it in; in a channel whose members the user manages
+   * or a meeting the user organizes the core adds it there first and the call stays where it is.
+   * Anywhere else the call moves into a meeting room with everybody in it and the notetaker, which
+   * the core asks in there (it isn't rung), and this device follows. `requestKey` is the call
+   * screen's: a retry after a lost answer gets the same room.
    */
   fun addNotetaker(conversationId: String, notetaker: NotetakerCallInfo, title: String, requestKey: String) {
     if (notetakerAdding.value == NotetakerAddState.Pending || !notetaker.canInvite) return
     notetakerAdding.value = NotetakerAddState.Pending
     scope.launch {
       notetakerAdding.value = try {
-        if (notetaker.isMember) {
-          core.core().askNotetakerIn(conversationId)
-        } else {
+        if (core.core().bringInNotetaker(conversationId) == NotetakerAddition.MOVE_TO_ROOM) {
           val me = (readSnapshot() ?: error("no account")).me.id
           // Who is in the call now (plus the user); the core keeps only members of the group.
           val inCall = (callPeople() + me).distinct()

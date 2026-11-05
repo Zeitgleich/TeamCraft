@@ -78,10 +78,17 @@
   grid-row: 5;
 }
 
-/* Pages without the bottom navigation end above the home indicator. */
+/* Pages without the bottom navigation end above the home indicator. `--vv-short` is how much of the
+   screen lies below the layout viewport in an iOS home screen app (viewport.rs): the web view may
+   not draw there, so the content ends above it and only the background reaches it. With the keyboard
+   up there is no home indicator. */
 :root[data-layout="compact"] .app:not(.has-bottom-nav) {
-  padding-bottom: env(safe-area-inset-bottom);
+  padding-bottom: max(env(safe-area-inset-bottom), var(--vv-short, 0px));
   background: var(--surface);
+}
+
+:root[data-layout="compact"][data-keyboard] .app:not(.has-bottom-nav) {
+  padding-bottom: 0;
 }
 
 /* Deeper pages have their own header with a back button instead of the top bar. The desktop
@@ -275,7 +282,7 @@
   position: relative;
   isolation: isolate;
   display: flex;
-  padding-bottom: env(safe-area-inset-bottom);
+  padding-bottom: max(env(safe-area-inset-bottom), var(--vv-short, 0px));
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   background: var(--chrome);
 }

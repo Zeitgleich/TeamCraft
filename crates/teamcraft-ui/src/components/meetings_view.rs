@@ -837,10 +837,7 @@ pub fn admit_link_arrivals(
   }
 }
 
-/// How long after a meeting's end the server keeps a guest's session (`guest_grace_secs`, default
-/// two hours): the host's device removes the guest from the encryption group then at the latest,
-/// and the organizer's signed admitters end then.
-pub(crate) const GUEST_ACCESS_GRACE_MS: i64 = 2 * 60 * 60_000;
+pub(crate) use teamcraft_client_api::meeting_invitees::GUEST_ACCESS_GRACE_MS;
 /// How long the core gets to pin a key for a link's fragment or a guest's key code.
 const VERIFY_WAIT: Duration = Duration::from_secs(8);
 const VERIFY_POLL: Duration = Duration::from_millis(100);

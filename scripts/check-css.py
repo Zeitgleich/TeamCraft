@@ -283,6 +283,9 @@ COMPACT_SHELL = ':root[data-layout="compact"] .app'
 COMPACT_NAV = ':root[data-layout="compact"] .bottom-nav'
 VIEWPORT_UNITS = re.compile(r"\d(?:vh|dvh|svh|lvh)\b|fill-available")
 BOTTOM_SAFE_AREA = "env(safe-area-inset-bottom)"
+# The tab bar also keeps clear of the screen below the layout viewport of an iOS home screen app,
+# which the web view may not draw (viewport.rs, #1313).
+TAB_BAR_PADDING = "max(env(safe-area-inset-bottom), var(--vv-short, 0px))"
 
 
 def compact_shell(parsed):
@@ -303,9 +306,9 @@ def compact_shell(parsed):
         path, decl = shell[0]
         findings.append(f"{path}:{decl.line}: the phone shell is pinned with top and `bottom: 0` (#1222)")
     nav = [decl for sheet in parsed.values() for decl in sheet.declarations if COMPACT_NAV in decl.selectors and decl.name == "padding-bottom"]
-    if [decl.value for decl in nav] != [BOTTOM_SAFE_AREA]:
+    if [decl.value for decl in nav] != [TAB_BAR_PADDING]:
         path = next(iter(parsed))
-        findings.append(f"{path}: the tab bar must pad the home indicator exactly once: `{COMPACT_NAV}` with padding-bottom: {BOTTOM_SAFE_AREA}")
+        findings.append(f"{path}: the tab bar must pad the home indicator exactly once: `{COMPACT_NAV}` with padding-bottom: {TAB_BAR_PADDING}")
     for path, sheet in parsed.items():
         for decl in sheet.declarations:
             if BOTTOM_SAFE_AREA in decl.value and any(selector in ("html", "body", ":root") or selector.endswith(" body") for selector in decl.selectors):

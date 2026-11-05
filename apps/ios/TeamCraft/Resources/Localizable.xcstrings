@@ -1305,6 +1305,38 @@
         }
       }
     },
+    "call_prejoin_join": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitreten"
+          }
+        }
+      }
+    },
+    "call_prejoin_notetaker": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The notetaker is in this call: what you say is sent to OpenRouter for a transcript."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Notetaker ist in diesem Anruf: Was du sagst, wird für ein Transkript an OpenRouter gesendet."
+          }
+        }
+      }
+    },
     "call_start_video": {
       "localizations": {
         "en": {
