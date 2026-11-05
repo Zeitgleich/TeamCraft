@@ -501,12 +501,20 @@ mod call_moves {
         .collect();
       assert_eq!(lines.len(), 1, "{}: one line for the move", peer.name);
       let extras = backend.message_extras(dm, &[lines[0].id]);
-      let Some(WorkspaceEvent::CallMoved { by, room, room_name }) = extras[0].maybe_workspace_event.clone() else {
+      let Some(WorkspaceEvent::CallMoved { by, room, room_name }) = extras[0].maybe_workspace_event.clone()
+      else {
         panic!("{}: not a moved call: {extras:?}", peer.name);
       };
       assert_eq!((by, room), (alice_id, meeting), "{}", peer.name);
-      let shown = backend.conversation(meeting).map(|conversation| conversation.name);
-      assert_eq!(Some(room_name), shown, "{}: named as the sidebar names it", peer.name);
+      let shown = backend
+        .conversation(meeting)
+        .map(|conversation| conversation.name);
+      assert_eq!(
+        Some(room_name),
+        shown,
+        "{}: named as the sidebar names it",
+        peer.name
+      );
     }
   }
 
