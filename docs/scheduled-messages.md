@@ -196,14 +196,15 @@ Commits themselves have no limit of their own: the general limit per user applie
 ## Open issues
 
 - **A hostile member's garbage commit.** The server takes commits as opaque, so a member can move the head
-  with bytes no device can merge. Devices then can't reach that epoch, and every seal gets `epoch_conflict`:
-  held messages in that conversation stay stale. That fails safe, nothing goes out under the old key, but
-  it stalls them, and send now with them. The same commit already disturbs the group for everybody
-  (e2ee.md §4.6). The way out for the user is to cancel and send normally.
+  with bytes no device can merge. Devices then can't reach that epoch and every seal gets `epoch_conflict`,
+  so held messages in that conversation stay stale, and send now with them. That fails safe, nothing goes
+  out under the old key, but it stalls them for as long as the group stays that way, and a member can do it
+  on purpose. The way out for the user is to cancel and send normally. A fix needs the server to tell a
+  valid commit from garbage, which it can't.
 - **A forked device.** A device whose group forked seals under its own idea of the current key. If its
-  epoch number matches the head the server takes it, and members on the other branch can't read the
-  message, like any message sent from a forked device (the group health check repairs forks, e2ee.md §4.6).
-  It isn't worse than a send, but it is delayed: the sender isn't there to see it.
+  epoch number matches the head, the server takes it, and members on the other branch can't read the
+  message, as with any message sent from a forked device. The difference from a send is that the sender
+  may not be there to see it. Nothing here detects it.
 
 ## Admin policy
 
