@@ -31,6 +31,10 @@ const RECONNECT_BACKOFF_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Messages for channels the bot has no group for yet wait here; the oldest are dropped beyond this.
 const MAX_WAITING_MESSAGES: usize = 1000;
+/// After the server refused a message with the picture, the next one that carries it waits this
+/// long: refused messages stay in the bridge's store, and a server that keeps refusing would cost a
+/// picture per message.
+const PICTURE_RETRY_AFTER_REFUSAL: Duration = Duration::from_secs(60 * 60);
 /// How often a source's messages carry its picture itself, for devices that never read its
 /// announcement (a device linked later, a log channel whose retention removed it).
 const PICTURE_RESEND_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -73,11 +77,11 @@ struct Outgoing {
 #[derive(Debug, Clone)]
 struct SourceBatch(Arc<Source>);
 
-/// When a picture last went out in a message, per source.
+/// Which picture last went out in a message of a source, and when it goes out again.
 #[derive(Debug, Clone, Copy)]
 struct SentPicture {
   sha256: SourcePictureHash,
-  at: Instant,
+  next_due: Instant,
 }
 
 pub struct Worker<A: ServerApi, S: LocalStore> {
@@ -393,14 +397,10 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     }
     let room = self.room_beside(&message);
     let maybe_identity = (room >= IDENTITY_ROOM_BYTES).then(|| self.identity_of(&message.source, room));
-    let maybe_sent_picture = maybe_identity
+    let maybe_carried_picture = maybe_identity
       .as_ref()
       .filter(|identity| identity.maybe_picture.is_some())
-      .and_then(|identity| identity.maybe_picture_sha256)
-      .map(|sha256| SentPicture {
-        sha256,
-        at: Instant::now(),
-      });
+      .and_then(|identity| identity.maybe_picture_sha256);
     let Outgoing {
       source,
       text,
@@ -415,11 +415,17 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       // The message is in the outbox already when sending fails; it goes out with the next flush.
       debug!(%error, %conversation, "sending is delayed");
     }
-    // Refused for good, the next message of the source carries the picture instead.
-    if let Some(sent) = maybe_sent_picture
-      && !self.client.is_refused(conversation, queued).unwrap_or(false)
-    {
-      self.sent_pictures.insert(source.key.clone(), sent);
+    if let Some(sha256) = maybe_carried_picture {
+      let is_refused = self.client.is_refused(conversation, queued).unwrap_or(false);
+      let wait = if is_refused {
+        PICTURE_RETRY_AFTER_REFUSAL
+      } else {
+        PICTURE_RESEND_INTERVAL
+      };
+      let next_due = Instant::now() + wait;
+      self
+        .sent_pictures
+        .insert(source.key.clone(), SentPicture { sha256, next_due });
     }
     Ok(())
   }
@@ -512,17 +518,23 @@ mod picture_tests {
   }
 
   #[test]
-  fn a_picture_goes_out_first_on_change_and_then_once_a_day() {
+  fn a_picture_goes_out_first_on_change_and_then_when_due() {
     let (old, new) = (
       SourcePictureHash::from_bytes([1; 32]),
       SourcePictureHash::from_bytes([2; 32]),
     );
     let at = Instant::now();
-    let sent = SentPicture { sha256: old, at };
+    let sent = SentPicture {
+      sha256: old,
+      next_due: at + PICTURE_RETRY_AFTER_REFUSAL,
+    };
     assert!(is_picture_due(None, old, at), "first message after a start");
-    assert!(!is_picture_due(Some(&sent), old, at + Duration::from_secs(3600)));
+    assert!(
+      !is_picture_due(Some(&sent), old, at),
+      "a refusal doesn't bring it back at once"
+    );
     assert!(is_picture_due(Some(&sent), new, at), "the picture changed");
-    assert!(is_picture_due(Some(&sent), old, at + PICTURE_RESEND_INTERVAL));
+    assert!(is_picture_due(Some(&sent), old, at + PICTURE_RETRY_AFTER_REFUSAL));
   }
 }
 
@@ -584,7 +596,5 @@ fn picture_fits(picture_bytes: usize, room: usize) -> bool {
 }
 
 fn is_picture_due(maybe_sent: Option<&SentPicture>, sha256: SourcePictureHash, now: Instant) -> bool {
-  maybe_sent.is_none_or(|sent| {
-    sent.sha256 != sha256 || now.saturating_duration_since(sent.at) >= PICTURE_RESEND_INTERVAL
-  })
+  maybe_sent.is_none_or(|sent| sent.sha256 != sha256 || now >= sent.next_due)
 }

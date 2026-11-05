@@ -40,6 +40,7 @@ pub const MAX_SOURCE_PICTURE_SIDE_PX: u32 = 256;
 pub const MAX_SOURCE_ALERT_LEVELS: usize = 16;
 pub const MAX_SOURCE_ALERT_LEVEL_CHARS: usize = 32;
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+const IHDR_LENGTH: [u8; 4] = [0, 0, 0, 13];
 /// Log levels (lower case) that make a line an alert unless a source lists its own.
 pub const DEFAULT_SOURCE_ALERT_LEVELS: [&str; 6] =
   ["error", "err", "fatal", "critical", "alert", "emergency"];
@@ -354,7 +355,8 @@ pub fn check_source_picture(bytes: &[u8]) -> Result<(), SourcePictureError> {
   }
   // The signature, the length and type of the first chunk, then width and height.
   let header = bytes.get(..24).ok_or(SourcePictureError::NotPng)?;
-  if header[..8] != PNG_SIGNATURE || header[12..16] != *b"IHDR" {
+  // The image header's length is fixed; a false one could jump over what comes next.
+  if header[..8] != PNG_SIGNATURE || header[8..12] != IHDR_LENGTH || header[12..16] != *b"IHDR" {
     return Err(SourcePictureError::NotPng);
   }
   let side = |at: usize| u32::from_be_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]]);
@@ -373,17 +375,19 @@ pub fn check_source_picture(bytes: &[u8]) -> Result<(), SourcePictureError> {
 fn check_png_is_still(bytes: &[u8]) -> Result<(), SourcePictureError> {
   let mut at = PNG_SIGNATURE.len();
   loop {
-    let chunk = bytes.get(at..at + 8).ok_or(SourcePictureError::NotPng)?;
+    let end = at.checked_add(8).ok_or(SourcePictureError::NotPng)?;
+    let chunk = bytes.get(at..end).ok_or(SourcePictureError::NotPng)?;
     match &chunk[4..8] {
       b"acTL" => return Err(SourcePictureError::Animated),
       b"IDAT" => return Ok(()),
       _ => {},
     }
     let length = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-    // The size limit above keeps this far from overflowing; a wild length just ends past the file.
-    at = at
-      .saturating_add(usize::try_from(length).unwrap_or(usize::MAX))
-      .saturating_add(12);
+    // A wild length ends past the file, or past what a 32-bit address can say.
+    at = usize::try_from(length)
+      .ok()
+      .and_then(|length| at.checked_add(length)?.checked_add(12))
+      .ok_or(SourcePictureError::NotPng)?;
   }
 }
 
@@ -707,6 +711,12 @@ mod tests {
       chunk(&mut with_text, b"tEXt");
       chunk(&mut with_text, b"IDAT");
       assert_eq!(check_source_picture(&with_text), Ok(()));
+      let mut false_header = png(8, 8);
+      false_header[11] = 40;
+      assert_eq!(
+        check_source_picture(&false_header),
+        Err(SourcePictureError::NotPng)
+      );
       let mut wild = png_header(8, 8);
       wild.extend(u32::MAX.to_be_bytes());
       wild.extend(*b"tEXt");

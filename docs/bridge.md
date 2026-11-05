@@ -403,7 +403,9 @@ with the bot badge.
 - A source of the file shows its `name` from the file and the bot's picture.
 - A message's text and files come first: one too full for the picture goes without, and the next one
   with room carries it. With no room even for the name it shows the bot's.
-- Removing a source's picture deletes it from devices; older messages then show the bot's picture.
+- Removing a source's picture stops it being sent and deletes that picture from devices, unless another
+  source shows it; older messages then show the bot's. Earlier pictures of the source may stay on devices
+  until they are pushed out, so don't count on removal to erase a picture.
 - Log lines are batched per source, so two sources in a channel never share a message and a name.
 
 **Sources in the file.** A bridge on its own host may still list `[[sources]]` (token, conversation,

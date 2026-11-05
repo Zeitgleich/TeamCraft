@@ -4823,8 +4823,10 @@ its header, checked before anything decodes it, and then the message keeps only 
 taking-in rule above. Pictures are bounded per conversation: 64 from admins and 64 from bots, kept
 apart so a bot can't push out what admins set, the longest unnamed going first. A second bot can push
 out another bot's copies on devices that never read the announcement; those show the bot's picture until
-the source's next daily resend. A picture an admin takes away is deleted from the device, and older
-messages then show the bot's; everything of a source goes when its conversation is purged.
+the source's next daily resend. A picture an admin takes away goes from the device once that change has its server number, unless another
+source shows it; older messages then show the bot's. Only that picture: ones the source had before stay
+until they are pushed out, so a removal is no way to erase a picture from every device. Everything of a
+source goes when its conversation is purged.
 
 A device's own rename or picture waits apart from the newest numbered change, shown over it until it was
 sent or refused, so another admin's change arriving meanwhile isn't lost and a refused change (a server's 4xx

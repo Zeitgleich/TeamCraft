@@ -302,14 +302,19 @@ impl SourceLedger {
     is_settled
   }
 
-  /// The picture the source shows now, whoever may have set it.
-  fn current_picture(&self, source: SourceId) -> Option<SourcePictureHash> {
-    let entry = self.entries.get(&source)?;
-    entry
-      .maybe_pending_picture
-      .as_ref()
-      .or(entry.maybe_picture.as_ref())?
-      .maybe_sha256
+  /// The source's newest numbered picture.
+  fn numbered_picture(&self, source: SourceId) -> Option<SourcePictureHash> {
+    self.entries.get(&source)?.maybe_picture.as_ref()?.maybe_sha256
+  }
+
+  /// Whether any source shows this picture, or will once its pending change is sent.
+  fn names_picture(&self, sha256: SourcePictureHash) -> bool {
+    self.entries.values().any(|entry| {
+      [&entry.maybe_picture, &entry.maybe_pending_picture]
+        .into_iter()
+        .flatten()
+        .any(|record| record.maybe_sha256 == Some(sha256))
+    })
   }
 
   /// The sources in force under `authority`, oldest first.
@@ -415,7 +420,7 @@ pub(crate) fn apply_source_change(
 ) -> Result<(), CoreError> {
   let mut ledger = SourceLedger::load(store, conversation)?;
   let is_manager = was_manager(store, sender, at_ms)?;
-  let maybe_previous = change.source().and_then(|source| ledger.current_picture(source));
+  let maybe_previous = change.source().and_then(|source| ledger.numbered_picture(source));
   let is_applied = ledger.apply(sender, is_manager, change, at_ms, maybe_server_id);
   if is_applied {
     records::put_json(store, Table::Account, &ledger_key(conversation), &ledger)?;
@@ -426,13 +431,10 @@ pub(crate) fn apply_source_change(
       maybe_picture: Some(picture),
       ..
     } if is_manager => keep_picture(store, conversation, picture, PictureFrom::Admin)?,
-    // Taken away means gone from this device; older messages then show the bot's picture.
     SourceChange::PictureChanged {
       maybe_picture: None, ..
-    } if is_applied => {
-      if let Some(previous) = maybe_previous {
-        forget_picture(store, conversation, previous)?;
-      }
+    } if is_applied && maybe_server_id.is_some() => {
+      forget_removed_picture(store, conversation, &ledger, maybe_previous)?;
     },
     _ => {},
   }
@@ -451,6 +453,7 @@ pub(crate) fn settle_source_change(
 ) -> Result<(), CoreError> {
   let mut ledger = SourceLedger::load(store, conversation)?;
   let is_settled = ledger.settle(change);
+  let maybe_previous = change.source().and_then(|source| ledger.numbered_picture(source));
   let is_applied = match maybe_server_id {
     Some(server_id) => {
       let is_manager = was_manager(store, sender, at_ms)?;
@@ -461,7 +464,33 @@ pub(crate) fn settle_source_change(
   if is_settled || is_applied {
     records::put_json(store, Table::Account, &ledger_key(conversation), &ledger)?;
   }
+  if is_applied
+    && matches!(
+      change,
+      SourceChange::PictureChanged {
+        maybe_picture: None,
+        ..
+      }
+    )
+  {
+    forget_removed_picture(store, conversation, &ledger, maybe_previous)?;
+  }
   Ok(())
+}
+
+/// A picture that was taken away, for good (a numbered change, so not one the server may still
+/// refuse), goes from this device unless another source shows it. Older messages then show the bot's
+/// picture. Only this one: pictures a source had before stay until they are pushed out.
+fn forget_removed_picture(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  ledger: &SourceLedger,
+  maybe_removed: Option<SourcePictureHash>,
+) -> Result<(), CoreError> {
+  match maybe_removed {
+    Some(removed) if !ledger.names_picture(removed) => forget_picture(store, conversation, removed),
+    _ => Ok(()),
+  }
 }
 
 /// Everything this device keeps about a conversation's sources goes with the conversation.
@@ -1127,6 +1156,45 @@ mod tests {
       assert!(!ledger.settle(&first));
       assert_eq!(ledger.active(conversation(), &authority())[0].name, "Second");
       assert!(ledger.settle(&second));
+    }
+
+    #[test]
+    fn a_picture_another_source_shows_stays_and_a_refused_removal_deletes_nothing() {
+      let store = store_with_users();
+      let conversation = conversation();
+      let admin = user(ADMIN);
+      let now = 1_000;
+      records::put_json(
+        &store,
+        Table::Workspace,
+        crate::client::WORKSPACE_KEY,
+        &workspace_with_admins(&[ADMIN]),
+      )
+      .unwrap();
+      let numbered = |change: &SourceChange, id| {
+        apply_source_change(&store, conversation, admin, change, now, Some(message(id))).unwrap();
+      };
+      numbered(&created(1, "A"), 1);
+      numbered(&created(2, "B"), 2);
+      numbered(&picture(1, Some(png(1))), 3);
+      numbered(&picture(2, Some(png(1))), 4);
+      let bytes = || source_picture(&store, conversation, hash(&png(1))).unwrap();
+      assert!(bytes().is_some());
+
+      // Pending, then refused: nothing is deleted.
+      let removal = picture(1, None);
+      apply_source_change(&store, conversation, admin, &removal, now, None).unwrap();
+      assert!(bytes().is_some(), "the server may still refuse it");
+      settle_source_change(&store, conversation, admin, &removal, 0, None).unwrap();
+      assert!(bytes().is_some());
+
+      // Sent: B still shows it.
+      settle_source_change(&store, conversation, admin, &removal, now, Some(message(5))).unwrap();
+      assert!(bytes().is_some(), "another source shows it");
+
+      // The last source to show it lets it go.
+      numbered(&picture(2, None), 6);
+      assert_eq!(bytes(), None);
     }
 
     #[test]
