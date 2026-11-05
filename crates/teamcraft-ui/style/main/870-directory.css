@@ -4,6 +4,11 @@
   flex-wrap: wrap;
 }
 
+/* The title keeps its width; the tabs move below it instead. */
+.directory .panel-title {
+  flex-shrink: 0;
+}
+
 .directory .segmented {
   max-width: 100%;
   overflow-x: auto;

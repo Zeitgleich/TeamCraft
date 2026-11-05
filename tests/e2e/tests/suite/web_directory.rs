@@ -12,10 +12,11 @@ use teamcraft_e2e::{Peer, Stack};
 use tokio::time::{Instant, sleep};
 
 use crate::perf::sign_in_and_unlock;
-use crate::web::{click_text, shot, wait_for_element, wait_for_text};
+use crate::web::{shot, wait_for_element, wait_for_text};
 
-const PORT: u16 = 8084;
-const WEB_ORIGIN: &str = "http://127.0.0.1:8084";
+/// The port `sign_in_and_unlock` signs in on; the lease keeps the browser tests that share it apart.
+const PORT: u16 = 8083;
+const WEB_ORIGIN: &str = "http://127.0.0.1:8083";
 const WAIT: Duration = Duration::from_secs(30);
 const INVITED: &str = "invited@example.org";
 
@@ -81,11 +82,11 @@ async fn the_directory_lists_people_and_channels_and_manages_invitations() {
       shot(&page, "directory-invitations").await;
 
       let mails = sent_to(INVITED).await;
-      click_text(&page, "Send again").await;
+      click_row_button(&page, "Send again").await;
       wait_for_text(&page, "Sent again").await;
       assert_eq!(sent_to(INVITED).await, mails + 1, "the mail went out again");
 
-      click_text(&page, "Revoke").await;
+      click_row_button(&page, "Revoke").await;
       wait_for_text(&page, "They won't join").await;
       click_confirm_revoke(&page).await;
       wait_until_gone(&page, INVITED).await;
@@ -100,6 +101,14 @@ async fn the_directory_lists_people_and_channels_and_manages_invitations() {
 async fn click_tab(page: &Page, label: &str) {
   let script = format!(
     "[...document.querySelectorAll('[role=tab]')].find(tab => tab.innerText.includes({label:?})).click()"
+  );
+  page.evaluate(script).await.unwrap();
+}
+
+/// A button of the invitation row (`click_text` would find the row itself first).
+async fn click_row_button(page: &Page, label: &str) {
+  let script = format!(
+    "[...document.querySelectorAll('.directory-invitation-actions button')].find(button => button.innerText.includes({label:?})).click()"
   );
   page.evaluate(script).await.unwrap();
 }

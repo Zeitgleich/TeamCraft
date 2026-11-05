@@ -31,7 +31,7 @@ impl DirectoryPage for DirectoryPeopleResponse {
   type Row = DirectoryPerson;
 
   fn into_parts(self) -> (Vec<Self::Row>, Option<String>) {
-    (self.people, self.maybe_next_after.map(|id| id.to_string()))
+    (self.people, self.maybe_next_after)
   }
 }
 
@@ -39,7 +39,7 @@ impl DirectoryPage for DirectoryChannelsResponse {
   type Row = DirectoryChannel;
 
   fn into_parts(self) -> (Vec<Self::Row>, Option<String>) {
-    (self.channels, self.maybe_next_after.map(|id| id.to_string()))
+    (self.channels, self.maybe_next_after)
   }
 }
 
