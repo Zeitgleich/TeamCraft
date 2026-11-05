@@ -32,6 +32,8 @@
 //! once instead of the others seeing "reconnecting" until the grace period ends.
 
 mod cadence;
+#[cfg(feature = "effects")]
+mod effects_preview;
 mod fallback;
 #[cfg(feature = "effects")]
 mod gl_compositor;
@@ -44,6 +46,8 @@ mod segmentation_worker;
 mod session_watch;
 mod video;
 
+#[cfg(feature = "effects")]
+pub use effects_preview::EffectsPreview;
 #[cfg(feature = "effects")]
 pub use gl_compositor::GlCompositor;
 #[cfg(feature = "effects")]
@@ -2235,7 +2239,7 @@ impl Transport {
         return Err(WebCallError::Unsupported("WebTransport"));
       };
       debug!("no WebTransport in this browser: the call runs on the fallback");
-      return Self::connect_fallback(fallback_url, sessions, inputs, generation).await;
+      return Self::connect_fallback(fallback_url, &ticket.token, sessions, inputs, generation).await;
     }
     let quic = Self::connect(
       &ticket.sfu_url,
@@ -2248,7 +2252,7 @@ impl Transport {
       return quic.await;
     };
     let starts = sleep(fallback_delay(current, resilience));
-    let fallback = Self::connect_fallback(fallback_url, sessions, inputs, generation);
+    let fallback = Self::connect_fallback(fallback_url, &ticket.token, sessions, inputs, generation);
     let (transport, kind) = connect_preferring_quic(quic, starts, fallback).await?;
     if kind == CallTransport::Fallback {
       info!("QUIC didn't connect, the call runs on the fallback");
@@ -2263,14 +2267,21 @@ impl Transport {
     }
   }
 
-  /// Opens the WebSocket fallback, tracked as [`Self::connect`]'s session is.
+  /// Opens the WebSocket fallback, tracked as [`Self::connect`]'s session is. The join token goes
+  /// along as a subprotocol, for the SFU to check before the upgrade (#1297).
   async fn connect_fallback(
     url: &str,
+    token: &str,
     sessions: &OpenSessions,
     inputs: &mpsc::UnboundedSender<Input>,
     generation: u64,
   ) -> Result<Self, WebCallError> {
-    let socket = web_sys::WebSocket::new(url).map_err(browser("call socket"))?;
+    let protocols = Array::new();
+    for protocol in teamcraft_proto::fallback_protocols(token) {
+      protocols.push(&JsValue::from_str(&protocol));
+    }
+    let socket =
+      web_sys::WebSocket::new_with_str_sequence(url, &protocols).map_err(browser("call socket"))?;
     let session = SessionHandle::Fallback(socket.clone());
     sessions.track(&session);
     let mut opening = OpeningSession {

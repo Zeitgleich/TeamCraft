@@ -87,6 +87,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
@@ -105,6 +106,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Dp
+import de.zeitgleich.teamcraft.ui.ListedSpace
 import de.zeitgleich.teamcraft.ui.Section
 import de.zeitgleich.teamcraft.ui.TabBadge
 import de.zeitgleich.teamcraft.ui.activityConversations
@@ -122,6 +124,10 @@ import de.zeitgleich.teamcraft.ui.HomeFilter
 import de.zeitgleich.teamcraft.ui.channelSections
 import de.zeitgleich.teamcraft.ui.directSections
 import de.zeitgleich.teamcraft.ui.isDirect
+import de.zeitgleich.teamcraft.ui.listSections
+import de.zeitgleich.teamcraft.ui.listedSpaces
+import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
+import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
 import de.zeitgleich.teamcraft.ui.isListedInHome
 import de.zeitgleich.teamcraft.ui.listName
 import de.zeitgleich.teamcraft.ui.tabBadge
@@ -170,13 +176,17 @@ fun ChatListScreen(
   // is what names the user).
   var isGuest by remember { mutableStateOf(false) }
   LaunchedEffect(conversations?.size) { isGuest = viewModel.readChat { snapshot() }?.me?.isGuest == true }
+  // Takes effect at once: the flow follows the setting (#1151).
+  val context = LocalContext.current
+  val layout by remember { AppearancePrefs.prefs(context).chatListLayout }.collectAsState()
+  val isList = layout == ChatListLayout.List
   BackHandler(enabled = selection.isNotEmpty()) { selection = emptyList() }
   // Back on Activity or Spaces goes Home first, as in other apps with a bottom navigation.
-  BackHandler(enabled = selection.isEmpty() && tab != ChatTab.Home) { tab = ChatTab.Home }
+  BackHandler(enabled = selection.isEmpty() && (tab == ChatTab.Activity || (tab == ChatTab.Spaces && !isList))) { tab = ChatTab.Home }
   // A conversation opened from elsewhere (notification, link) shows in its own tab.
-  LaunchedEffect(maybeSelectedId, conversations) {
+  LaunchedEffect(maybeSelectedId, conversations, isList) {
     conversations?.firstOrNull { it.id == maybeSelectedId }?.let { selected ->
-      if (tab != ChatTab.Activity) tab = if (selected.isDirect) ChatTab.Home else ChatTab.Spaces
+      if (tab != ChatTab.Activity) tab = if (selected.isDirect || isList) ChatTab.Home else ChatTab.Spaces
     }
   }
   var maybeFirstSync by remember { mutableStateOf<FirstSyncItem?>(null) }
@@ -208,6 +218,7 @@ fun ChatListScreen(
     brand = MainBrand(maybeBrand?.displayName ?: stringResource(R.string.app_name), maybeLogo),
     accountUserId = accountUserId,
     accountName = accountName,
+    layout = layout,
     tab = tab,
     onTab = { tab = it },
     maybeConversations = loaded,
@@ -229,6 +240,7 @@ fun ChatListScreen(
         )
       },
       spaceMenu = { spaceId, name, isOpen, onDismiss -> SpaceEntryMenu(viewModel, spaceId, name, isOpen, onDismiss) },
+      onOpenSpace = { spaceId -> onNavigate("space/$spaceId") },
     ),
     maybeSelectionBar = if (selected.isEmpty()) {
       null
@@ -273,6 +285,7 @@ internal fun MainScaffold(
   brand: MainBrand,
   accountUserId: String,
   accountName: String,
+  layout: ChatListLayout = ChatListLayout.Spaces,
   tab: ChatTab,
   onTab: (ChatTab) -> Unit,
   maybeConversations: List<ConversationItem>?,
@@ -289,17 +302,20 @@ internal fun MainScaffold(
   joinRequests: @Composable () -> Unit = {},
   snackbarHost: @Composable () -> Unit = {},
 ) {
-  val hasDirect = maybeConversations.orEmpty().any { it.isDirect }
+  val isList = layout == ChatListLayout.List
+  // The tab the Spaces layout left: Home has its channels now.
+  val shownTab = if (isList && tab == ChatTab.Spaces) ChatTab.Home else tab
+  val hasDirect = isList || maybeConversations.orEmpty().any { it.isDirect }
   Scaffold(
     contentWindowInsets = ScreenInsets,
     topBar = { maybeSelectionBar?.invoke() ?: BrandTopBar(brand, accountUserId, accountName, onSearch = onSearch, onAccount = onAccount) },
     bottomBar = {
-      if (maybeSelectionBar == null) MainNavigation(tab, maybeConversations.orEmpty(), joinRequestCount, onSelect = onTab)
+      if (maybeSelectionBar == null) MainNavigation(shownTab, isList, maybeConversations.orEmpty(), joinRequestCount, onSelect = onTab)
     },
     snackbarHost = snackbarHost,
     floatingActionButton = {
       // Only where it fits and not twice: an empty Home has the same action in its middle.
-      if (maybeSelectionBar == null && tab == ChatTab.Home && hasDirect) {
+      if (maybeSelectionBar == null && shownTab == ChatTab.Home && hasDirect) {
         ExtendedFloatingActionButton(
           onClick = { onNavigate("browse?people=true") },
           icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
@@ -312,8 +328,9 @@ internal fun MainScaffold(
       banners()
       when {
         maybeConversations == null -> LoadingScreen()
-        tab == ChatTab.Home -> HomeTab(maybeConversations, list, onNavigate)
-        tab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests)
+        isList && shownTab == ChatTab.Home -> ListTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
+        shownTab == ChatTab.Home -> HomeTab(maybeConversations, list, onNavigate)
+        shownTab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests)
         else -> SpacesTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
       }
     }
@@ -332,6 +349,8 @@ internal class ListState(
   val conversationMenu: @Composable (ConversationItem, Boolean, () -> Unit) -> Unit = { _, _, _ -> },
   /** The long-press menu of a space header: id, name, whether it is open, how to close it. */
   val spaceMenu: @Composable (String, String, Boolean, () -> Unit) -> Unit = { _, _, _, _ -> },
+  /** Opens the people, calls, meetings, saved messages and files of a space (#954). */
+  val onOpenSpace: (String) -> Unit = {},
 ) {
   val lastActivity: Map<String, Long> get() = previews.mapValues { it.value.preview.sentAt }
 }
@@ -360,6 +379,50 @@ private fun HomeTab(conversations: List<ConversationItem>, list: ListState, onNa
     item(key = "chips") { HomeChips(homeChip, onSelect = { homeChip = if (homeChip == it) HomeFilter.All else it }) }
     if (sections.isEmpty()) item(key = "no-match") { EmptyHint(stringResource(R.string.dm_filter_empty)) }
     conversationRows(sections, list, showsSpace = true)
+  }
+}
+
+/**
+ * The list layout's Home (#1151): the global entries, then the DMs and the channels of all spaces
+ * in one list (a `LazyColumn`, so only what is on screen is built), and the spaces at its end, where
+ * their menus and browsing for more are.
+ */
+@Composable
+private fun ListTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit, canBrowse: Boolean) {
+  var filter by rememberSaveable { mutableStateOf("") }
+  var chip by rememberSaveable { mutableStateOf(HomeFilter.All) }
+  val sections = listSections(conversations, list.lastActivity, filter, chip)
+  val spaces = listedSpaces(conversations)
+  val isFiltering = filter.isNotBlank() || chip != HomeFilter.All
+  LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
+    item(key = "entries") { HomeEntries(onNavigate) }
+    item(key = "filter") { DirectFilter(filter, onChange = { filter = it }) }
+    item(key = "chips") {
+      HomeChips(chip, showsChannels = true, onSelect = { chip = if (chip == it) HomeFilter.All else it })
+    }
+    if (sections.isEmpty()) item(key = "no-match") { EmptyHint(stringResource(R.string.dm_filter_empty)) }
+    conversationRows(sections, list, showsSpace = true)
+    if (!isFiltering) {
+      if (spaces.isNotEmpty()) item(key = "spaces-title") { SectionHeader(SectionTitle.Spaces) }
+      items(spaces, key = { "space-${it.id}" }) { space -> ListedSpaceRow(space, list) }
+      if (canBrowse) {
+        item(key = "browse") { EntryRow(Icons.Filled.Add, stringResource(R.string.browse_channels)) { onNavigate("browse") } }
+      }
+    }
+  }
+}
+
+/** A space under the list layout's list: a tap or long-press opens its menu. */
+@Composable
+private fun ListedSpaceRow(space: ListedSpace, list: ListState) {
+  var isOpen by remember { mutableStateOf(false) }
+  val menuLabel = stringResource(R.string.entry_space_menu)
+  Box(Modifier.fillMaxWidth()) {
+    ListItem(
+      headlineContent = { Text(space.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+      modifier = Modifier.clickable(onClickLabel = menuLabel) { isOpen = true },
+    )
+    list.spaceMenu(space.id, space.name, isOpen) { isOpen = false }
   }
 }
 
@@ -446,7 +509,7 @@ private fun LazyListScope.conversationRows(
   }
 }
 
-/** A section's header; a space's also opens the space menu on a long-press (#1105). */
+/** A section's header; a space's opens the views of that space, and its menu on a long-press (#1105). */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SectionHeaderWithMenu(section: Section, list: ListState) {
@@ -460,7 +523,8 @@ private fun SectionHeaderWithMenu(section: Section, list: ListState) {
   var isOpen by remember { mutableStateOf(false) }
   Box(
     Modifier.fillMaxWidth().combinedClickable(
-      onClick = {},
+      onClickLabel = stringResource(R.string.space_views_open),
+      onClick = { list.onOpenSpace(maybeSpaceId) },
       onLongClickLabel = stringResource(R.string.entry_space_menu),
       onLongClick = {
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -469,6 +533,12 @@ private fun SectionHeaderWithMenu(section: Section, list: ListState) {
     ),
   ) {
     SectionHeader(title)
+    Icon(
+      Icons.AutoMirrored.Filled.KeyboardArrowRight,
+      contentDescription = null,
+      tint = MaterialTheme.colorScheme.onSurfaceVariant,
+      modifier = Modifier.align(Alignment.CenterEnd).padding(end = Spacing.m),
+    )
     list.spaceMenu(maybeSpaceId, title.name, isOpen) { isOpen = false }
   }
 }
@@ -511,6 +581,7 @@ private fun BrandTopBar(brand: MainBrand, accountUserId: String, accountName: St
 @Composable
 private fun MainNavigation(
   selected: ChatTab,
+  isList: Boolean,
   conversations: List<ConversationItem>,
   joinRequestCount: Int,
   onSelect: (ChatTab) -> Unit,
@@ -521,7 +592,8 @@ private fun MainNavigation(
     containerColor = MaterialTheme.colorScheme.surfaceContainer,
     windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
   ) {
-    for (tab in ChatTab.entries) {
+    // The list layout has the channels on Home and no tab of their own for them.
+    for (tab in ChatTab.entries.filterNot { isList && it == ChatTab.Spaces }) {
       val label = stringResource(
         when (tab) {
           ChatTab.Home -> R.string.nav_home
@@ -530,7 +602,8 @@ private fun MainNavigation(
         },
       )
       val badge = when (tab) {
-        ChatTab.Home -> tabBadge(direct)
+        // Channels count as "something new" there too; a number is for what is addressed to the user.
+        ChatTab.Home -> if (isList) TabBadge(maxOf(tabBadge(conversations).mentions, tabBadge(direct).unread), tabBadge(channels).unread) else tabBadge(direct)
         // A request waits for a decision like a mention waits for an answer.
         ChatTab.Activity -> TabBadge(mentions = tabBadge(conversations).mentions + joinRequestCount, unread = 0)
         ChatTab.Spaces -> tabBadge(channels)
@@ -678,16 +751,17 @@ private fun EmptyStateContent(icon: ImageVector, title: String, text: String, ma
 
 /** Unread / People / Groups; pressing the selected chip again shows everything. */
 @Composable
-private fun HomeChips(selected: HomeFilter, onSelect: (HomeFilter) -> Unit) {
+private fun HomeChips(selected: HomeFilter, showsChannels: Boolean = false, onSelect: (HomeFilter) -> Unit) {
   Row(
     Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = Spacing.l),
     horizontalArrangement = Arrangement.spacedBy(Spacing.s),
   ) {
-    for ((chip, label) in listOf(
+    val chips = listOf(
       HomeFilter.Unread to R.string.home_filter_unread,
       HomeFilter.People to R.string.home_filter_people,
       HomeFilter.Groups to R.string.home_filter_groups,
-    )) {
+    ) + if (showsChannels) listOf(HomeFilter.Channels to R.string.channels) else emptyList()
+    for ((chip, label) in chips) {
       FilterChip(selected = chip == selected, onClick = { onSelect(chip) }, label = { Text(stringResource(label)) })
     }
   }
@@ -730,6 +804,8 @@ internal fun SectionHeader(title: SectionTitle) {
     SectionTitle.Favorites -> stringResource(R.string.favorites)
     SectionTitle.Channels -> stringResource(R.string.channels)
     SectionTitle.DirectMessages -> stringResource(R.string.direct_messages)
+    SectionTitle.Everything -> stringResource(R.string.list_conversations)
+    SectionTitle.Spaces -> stringResource(R.string.nav_spaces)
     SectionTitle.Activity -> stringResource(R.string.nav_activity)
     SectionTitle.Notes -> stringResource(R.string.notes_title)
     SectionTitle.Recent -> stringResource(R.string.share_recent)

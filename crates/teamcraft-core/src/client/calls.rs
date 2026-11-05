@@ -188,6 +188,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .create_instant_meeting(&CreateInstantMeetingRequest {
         maybe_title,
         invitees,
+        // A room for a call that moves is no meeting of the space, whichever channel it came from.
+        maybe_space: None,
         maybe_idempotency_key: Some(key),
       })
       .await?;

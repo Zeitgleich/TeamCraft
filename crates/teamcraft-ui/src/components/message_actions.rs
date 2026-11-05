@@ -6,6 +6,7 @@
 
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{FileInfo, MessageExtras, ReplyAttachmentPreview};
+use teamcraft_client_api::space_scope::saved_items_of_space;
 use teamcraft_proto::{AttachmentId, ErrorCode};
 use wasm_bindgen::JsCast;
 
@@ -16,6 +17,7 @@ use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::components::page::ScopedSpaceName;
 use crate::components::rich_text::RichText;
 use crate::feedback::{ActionFailure, FailureKind, PendingAction, report_failure};
 use crate::i18n::use_i18n;
@@ -635,8 +637,14 @@ pub fn SavedView() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let locale = i18n.locale().tag();
+  let scope = Memo::new(move |_| state.maybe_scoped_space());
   let items = Memo::new(move |_| {
-    let mut items = state.read(|backend| backend.saved_items());
+    // Filtered on this device: which messages are saved stays between the user's devices.
+    let maybe_space = scope.get();
+    let mut items = state.read(|backend| match maybe_space {
+      Some(space) => saved_items_of_space(backend, space),
+      None => backend.saved_items(),
+    });
     items.sort_by_key(|item| std::cmp::Reverse(item.saved_at));
     items
   });
@@ -646,6 +654,7 @@ pub fn SavedView() -> impl IntoView {
         <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("saved-title")}</h1>
+          <ScopedSpaceName />
           <span class="panel-subtitle">{move || i18n.t_count("saved-count", items.with(Vec::len))}</span>
         </div>
       </header>
@@ -680,7 +689,10 @@ pub fn SavedView() -> impl IntoView {
           </For>
         </ul>
         <Show when=move || items.get().is_empty() fallback=|| ()>
-          <EmptyState icon=IconName::Bookmark title_key="saved-empty-title" body_key="saved-empty" />
+          {move || {
+            let body_key = if scope.get().is_some() { "saved-space-empty" } else { "saved-empty" };
+            view! { <EmptyState icon=IconName::Bookmark title_key="saved-empty-title" body_key=body_key /> }
+          }}
         </Show>
       </div>
     </section>

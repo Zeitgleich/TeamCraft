@@ -5,13 +5,35 @@ import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
+/** How the main screen lists conversations (#1151). */
+enum class ChatListLayout {
+  /** Home for the DMs, a tab for the channels by space. */
+  Spaces,
+
+  /** The DMs and the channels of all spaces in one list, on Home. */
+  List,
+}
+
 /**
  * "Use the colors of the wallpaper" (Material You, Android 12+) instead of the TeamCraft colors.
- * A device setting, off by default so the app looks like desktop and web.
+ * A device setting, off by default so the app looks like desktop and web. The layout of the
+ * conversations is one too.
  */
 class AppearancePrefs private constructor(context: Context) {
   private val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
   private val dynamic = shared ?: MutableStateFlow(prefs.getBoolean(KEY_DYNAMIC, false)).also { shared = it }
+
+  private val layout = sharedLayout ?: MutableStateFlow(
+    ChatListLayout.entries.firstOrNull { it.name == prefs.getString(KEY_LAYOUT, null) } ?: ChatListLayout.Spaces,
+  ).also { sharedLayout = it }
+
+  /** Live, so the main screen switches as soon as the setting changes. */
+  val chatListLayout: StateFlow<ChatListLayout> = layout
+
+  fun setChatListLayout(choice: ChatListLayout) {
+    prefs.edit().putString(KEY_LAYOUT, choice.name).apply()
+    layout.value = choice
+  }
 
   /** Live, so the theme switches as soon as the setting changes. */
   val isDynamicColor: StateFlow<Boolean> = dynamic
@@ -24,9 +46,11 @@ class AppearancePrefs private constructor(context: Context) {
   companion object {
     private const val FILE = "appearance_prefs"
     private const val KEY_DYNAMIC = "dynamic_color"
+    private const val KEY_LAYOUT = "chat_list_layout"
 
     /** One flow per process: every screen and the theme see the same value. */
     private var shared: MutableStateFlow<Boolean>? = null
+    private var sharedLayout: MutableStateFlow<ChatListLayout>? = null
 
     val isSupported: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 

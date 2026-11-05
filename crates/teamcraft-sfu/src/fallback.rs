@@ -14,6 +14,13 @@
 //! count separate from QUIC's. Exhausting them costs new fallback joins for a moment, never a joined
 //! call, a QUIC session or the SFU's descriptors.
 //!
+//! The join token comes along with the upgrade too ([`teamcraft_proto::fallback_protocols`]), and
+//! is checked there (#1297): a connection with a valid one leaves the anonymous limits at once for a
+//! slot of the call's connections and a small count per device, and one with an invalid token gets
+//! no upgrade. So somebody with many addresses but no token holds an unjoined slot for the handshake
+//! and, as long as clients without the header are let in, for [`FallbackConfig::first_frame_timeout`]
+//! more; with [`FallbackConfig::requires_upgrade_token`], for the handshake alone.
+//!
 //! Limits as on QUIC: the join timeout, the signaling message size and queue, and everything rooms
 //! enforce (they don't know which transport a participant uses).
 
@@ -29,20 +36,21 @@ use futures_util::{SinkExt, StreamExt};
 use socket2::SockRef;
 use teamcraft_media::fallback_socket::{ControlFrames, FallbackSender, WriterConfig, WriterEnd, run_writer};
 use teamcraft_proto::{
-  CALL_FALLBACK_PATH, CallClientMessage, CallServerMessage, FallbackFrame, MAX_FALLBACK_DATAGRAM_BYTES,
-  SFU_GOING_AWAY_CLOSE_CODE,
+  CALL_FALLBACK_PATH, CALL_FALLBACK_PROTOCOL, CallClientMessage, CallServerMessage, ErrorBody, ErrorCode,
+  FallbackFrame, MAX_FALLBACK_DATAGRAM_BYTES, SFU_GOING_AWAY_CLOSE_CODE, parse_offered_protocols,
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tokio_tungstenite::tungstenite::http::StatusCode;
+use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
+use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::{Bytes, Error as WebSocketError, Message, error::ProtocolError};
 use tracing::{Instrument, debug, info_span, warn};
 
-use crate::auth::JoinGrant;
+use crate::auth::{JoinGrant, JoinTokenVerifier};
 use crate::config::FallbackConfig;
 use crate::prejoin::PreJoinSlot;
 use crate::room::{ParticipantHandle, ParticipantLink, Room, SESSION_CLOSE_TIMEOUT, SessionId};
@@ -63,6 +71,9 @@ const ACCEPT_ERROR_PAUSE: Duration = Duration::from_millis(50);
 const OTHER_DESCRIPTORS: usize = 64;
 /// At most one log line per this long about connections that were refused.
 const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(10);
+/// Unjoined connections of one device that showed its token in the upgrade: a rejoin may overlap
+/// with a connection still being set up, not more.
+const MAX_UNJOINED_PER_DEVICE: usize = 2;
 
 type Sink = SplitSink<WebSocketStream<TcpStream>, Message>;
 type Source = SplitStream<WebSocketStream<TcpStream>>;
@@ -78,6 +89,15 @@ struct Accepted {
   unjoined_slot: OwnedSemaphorePermit,
   /// Taken at once for a client's own connection; a proxy's waits for the name it gives.
   maybe_address_slot: Option<PreJoinSlot>,
+}
+
+/// What the upgrade said about the join token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UpgradeToken {
+  /// The client offered [`CALL_FALLBACK_PROTOCOL`], so the answer names it.
+  answers_protocol: bool,
+  /// A token that was valid at the upgrade, and whom it lets in.
+  maybe_checked: Option<(String, JoinGrant)>,
 }
 
 /// A session whose connection is over and whose place in the call isn't yet.
@@ -196,11 +216,24 @@ async fn handle_connection(
   let config = &shared.config;
   configure_socket(&stream, &config.fallback);
   let mut maybe_forwarded_ip = None;
+  let mut maybe_upgrade_token = None;
   let upgrade = tokio_tungstenite::accept_hdr_async_with_config(
     stream,
-    |request: &Request, response: Response| {
+    |request: &Request, mut response: Response| {
       if request.uri().path() != CALL_FALLBACK_PATH {
         return Err(not_found());
+      }
+      let token = check_upgrade_token(
+        request,
+        shared.verifier.as_ref(),
+        config.fallback.requires_upgrade_token,
+      )
+      .map_err(status_response)?;
+      if token.answers_protocol {
+        response.headers_mut().insert(
+          SEC_WEBSOCKET_PROTOCOL,
+          HeaderValue::from_static(CALL_FALLBACK_PROTOCOL),
+        );
       }
       if is_from_proxy {
         maybe_forwarded_ip = forwarded_for(request);
@@ -213,6 +246,7 @@ async fn handle_connection(
            TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES"
         );
       }
+      maybe_upgrade_token = token.maybe_checked;
       Ok(response)
     },
     Some(socket_config(config.max_signaling_message_bytes)),
@@ -233,7 +267,32 @@ async fn handle_connection(
     close_now(&mut sink, SFU_GOING_AWAY_CLOSE_CODE, b"going away").await;
     return None;
   }
-  if is_from_proxy {
+  // A valid token in the upgrade: the connection counts against its device and the call's
+  // connections from now on, not against what anybody may hold without one.
+  let mut maybe_joined_slot = None;
+  let mut maybe_device_slot = None;
+  let mut unjoined_slot = Some(unjoined_slot);
+  let first_frame_timeout = if let Some((_, grant)) = &maybe_upgrade_token {
+    let Ok(joined_slot) = Arc::clone(joined_slots).try_acquire_owned() else {
+      debug!("too many joined connections on the fallback");
+      return None;
+    };
+    let Some(device_slot) = shared
+      .fallback_device_prejoin
+      .try_acquire_key((grant.call_id, grant.device_id), MAX_UNJOINED_PER_DEVICE)
+    else {
+      debug!(call_id = %grant.call_id, participant_id = %grant.device_id, "too many unjoined connections of one device");
+      return None;
+    };
+    maybe_joined_slot = Some(joined_slot);
+    maybe_device_slot = Some(device_slot);
+    maybe_address_slot = None;
+    unjoined_slot = None;
+    config.join_timeout
+  } else {
+    config.fallback.first_frame_timeout
+  };
+  if is_from_proxy && maybe_upgrade_token.is_none() {
     let remote_ip = maybe_forwarded_ip.unwrap_or(peer_ip);
     maybe_address_slot = shared
       .fallback_prejoin
@@ -245,15 +304,33 @@ async fn handle_connection(
     }
   }
 
-  let first = tokio::time::timeout(config.join_timeout, read_first_message(&mut source)).await;
+  let first = tokio::time::timeout(first_frame_timeout, read_first_message(&mut source)).await;
   let Ok(Some(first)) = first else {
     close_now(&mut sink, REFUSED, b"expected join").await;
     return None;
   };
-  // A full SFU is no decision about the call either: a client that is rejoining tries again.
-  let Ok(joined_slot) = Arc::clone(joined_slots).try_acquire_owned() else {
-    debug!("too many joined connections on the fallback");
+  if let Some((token, _)) = &maybe_upgrade_token
+    && !is_join_with(&first, token)
+  {
+    // Somebody else's token, or none: what the upgrade checked has to be what joins.
+    let error = ErrorBody::new(
+      ErrorCode::InvalidJoinToken,
+      "the join token differs from the upgrade's",
+    );
+    send_refusal(&mut sink, &CallServerMessage::Error { error }).await;
+    close_now(&mut sink, REFUSED, b"refused").await;
     return None;
+  }
+  // A full SFU is no decision about the call either: a client that is rejoining tries again.
+  let joined_slot = match maybe_joined_slot {
+    Some(joined_slot) => joined_slot,
+    None => {
+      let Ok(joined_slot) = Arc::clone(joined_slots).try_acquire_owned() else {
+        debug!("too many joined connections on the fallback");
+        return None;
+      };
+      joined_slot
+    },
   };
   let sender = FallbackSender::new(config.fallback.queue);
   let (signal_tx, signal_rx) = mpsc::channel(config.signaling_queue_len.max(1));
@@ -273,6 +350,7 @@ async fn handle_connection(
     },
   };
   drop(maybe_address_slot);
+  drop(maybe_device_slot);
   drop(unjoined_slot);
   let (room, grant, session_id) = (admitted.room, admitted.grant, admitted.session_id);
   let session = ParticipantSession::new(Arc::clone(&room), grant, signal_tx, shared);
@@ -423,6 +501,41 @@ async fn read_first_message(source: &mut Source) -> Option<CallClientMessage> {
   }
 }
 
+/// Reads the join token the client offered with the upgrade, and checks it. `Err` is the status to
+/// answer with: a token that isn't one, or that isn't valid, gets no upgrade; nor does a client
+/// without one if `requires_token`. A token is checked here only for what it says: the `join` that
+/// follows still goes through [`crate::server::admit`], with the same token.
+fn check_upgrade_token(
+  request: &Request,
+  verifier: &dyn JoinTokenVerifier,
+  requires_token: bool,
+) -> Result<UpgradeToken, StatusCode> {
+  let mut lines = Vec::new();
+  for value in request.headers().get_all(SEC_WEBSOCKET_PROTOCOL) {
+    lines.push(value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?);
+  }
+  let offered = parse_offered_protocols(lines).map_err(|_| StatusCode::BAD_REQUEST)?;
+  let maybe_checked = match offered.maybe_token {
+    Some(token) => match verifier.verify(&token) {
+      Ok(grant) => Some((token, grant)),
+      Err(error) => {
+        debug!(%error, "fallback upgrade with an invalid join token");
+        return Err(StatusCode::UNAUTHORIZED);
+      },
+    },
+    None if requires_token => return Err(StatusCode::UNAUTHORIZED),
+    None => None,
+  };
+  Ok(UpgradeToken {
+    answers_protocol: offered.knows_call_protocol,
+    maybe_checked,
+  })
+}
+
+fn is_join_with(message: &CallClientMessage, upgrade_token: &str) -> bool {
+  matches!(message, CallClientMessage::Join { token, .. } if token == upgrade_token)
+}
+
 /// Best effort: the session is being closed anyway.
 async fn close_now(sink: &mut Sink, code: u32, reason: &[u8]) {
   let frame = FallbackFrame::Close { code, reason }.encode();
@@ -489,8 +602,12 @@ fn forwarded_for(request: &Request) -> Option<IpAddr> {
 }
 
 fn not_found() -> ErrorResponse {
+  status_response(StatusCode::NOT_FOUND)
+}
+
+fn status_response(status: StatusCode) -> ErrorResponse {
   let mut response = ErrorResponse::new(None);
-  *response.status_mut() = StatusCode::NOT_FOUND;
+  *response.status_mut() = status;
   response
 }
 
@@ -659,6 +776,64 @@ mod tests {
     fn breaking_the_protocol_keeps_no_slot() {
       let error = WebSocketError::Protocol(ProtocolError::UnmaskedFrameFromClient);
       assert_eq!(read_error_end(&error), ReadEnd::Closed);
+    }
+  }
+
+  mod upgrade_tokens {
+    use teamcraft_proto::fallback_protocols;
+
+    use super::*;
+    use crate::auth::DevTokenVerifier;
+
+    #[test]
+    fn a_valid_token_is_checked_and_the_call_protocol_answered() {
+      let line = fallback_protocols("dev:1:2:3").join(", ");
+      let checked = check_upgrade_token(&request_with(Some(&line)), &DevTokenVerifier, false).unwrap();
+      assert!(checked.answers_protocol);
+      let (token, grant) = checked.maybe_checked.unwrap();
+      assert_eq!(token, "dev:1:2:3");
+      assert_eq!(grant.device_id.to_string(), "3");
+    }
+
+    #[test]
+    fn a_client_of_before_gets_in_unless_a_token_is_required() {
+      let unchecked = check_upgrade_token(&request_with(None), &DevTokenVerifier, false).unwrap();
+      assert_eq!(
+        unchecked,
+        UpgradeToken {
+          answers_protocol: false,
+          maybe_checked: None
+        }
+      );
+      assert_eq!(
+        check_upgrade_token(&request_with(None), &DevTokenVerifier, true),
+        Err(StatusCode::UNAUTHORIZED)
+      );
+    }
+
+    #[test]
+    fn a_broken_or_invalid_token_gets_no_upgrade() {
+      assert_eq!(
+        check_upgrade_token(
+          &request_with(Some("teamcraft-call, teamcraft-join.%%")),
+          &DevTokenVerifier,
+          false
+        ),
+        Err(StatusCode::BAD_REQUEST)
+      );
+      let invalid = fallback_protocols("not a token").join(", ");
+      assert_eq!(
+        check_upgrade_token(&request_with(Some(&invalid)), &DevTokenVerifier, false),
+        Err(StatusCode::UNAUTHORIZED)
+      );
+    }
+
+    fn request_with(maybe_protocols: Option<&str>) -> Request {
+      let mut builder = HttpRequest::builder();
+      if let Some(protocols) = maybe_protocols {
+        builder = builder.header("sec-websocket-protocol", protocols);
+      }
+      builder.body(()).unwrap()
     }
   }
 

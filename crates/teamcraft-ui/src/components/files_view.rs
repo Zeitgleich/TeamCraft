@@ -1,23 +1,23 @@
-//! Every file the user can see, across spaces, channels and direct messages: the "Files" entry of
-//! the sidebar (issue #301). It gathers what each conversation already holds locally, newest first,
-//! with a filter by kind; nothing is fetched.
+//! The files the user can see: the "Files" entry of the sidebar (issue #301). Inside a space those of
+//! its conversations (#954), elsewhere those of all spaces, channels and direct messages. It gathers
+//! what each conversation already holds locally, newest first, with a filter by kind; nothing is
+//! fetched, so the server learns nothing about what is looked at.
 
 use leptos::prelude::*;
 use teamcraft_client_api::actions::FileInfo;
+use teamcraft_client_api::space_scope::{files_of_everything, files_of_space};
 
 use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::file_views::FileCard;
 use crate::components::icons::IconName;
+use crate::components::page::ScopedSpaceName;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
 use crate::lightbox::MediaKind;
 use crate::reactive::use_interval_while_visible;
 use crate::state::use_app_state;
 
-/// Files taken from one conversation (its newest); a conversation with thousands of attachments
-/// must not decide how much work the view does.
-const MAX_FILES_PER_CONVERSATION: usize = 100;
 /// Files shown at once.
 const MAX_FILES: usize = 300;
 /// New files arrive without an event this view hears, so it looks again this often while it is
@@ -60,10 +60,18 @@ pub fn FilesView() -> impl IntoView {
   let filter = RwSignal::new(FileFilter::All);
   let reload = RwSignal::new(0_u32);
   use_interval_while_visible(REFRESH_MS, move || reload.update(|count| *count += 1));
+  let scope = Memo::new(move |_| state.maybe_scoped_space());
   let all_files = Memo::new(move |_| {
     reload.track();
-    // Looked at again on a timer and when the view opens, not on every change of the workspace.
-    untrack(|| state.read(gather_files))
+    let maybe_space = scope.get();
+    // Looked at again on a timer, when the view opens and when the space changes, not on every
+    // change of the workspace.
+    untrack(|| {
+      state.read(|backend| match maybe_space {
+        Some(space) => files_of_space(backend, space),
+        None => files_of_everything(backend),
+      })
+    })
   });
   let files = Memo::new(move |_| {
     let wanted = filter.get();
@@ -82,6 +90,7 @@ pub fn FilesView() -> impl IntoView {
         <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("files-title")}</h1>
+          <ScopedSpaceName />
         </div>
         <div class="segmented" role="group" aria-label=move || i18n.t("files-filter")>
           <SlidingIndicator />
@@ -104,28 +113,12 @@ pub fn FilesView() -> impl IntoView {
           </For>
         </div>
         <Show when=move || files.with(Vec::is_empty) fallback=|| ()>
-          <EmptyState icon=IconName::Paperclip title_key="files-empty-title" body_key="files-all-empty" />
+          {move || {
+            let body_key = if scope.get().is_some() { "files-space-empty" } else { "files-all-empty" };
+            view! { <EmptyState icon=IconName::Paperclip title_key="files-empty-title" body_key=body_key /> }
+          }}
         </Show>
       </div>
     </section>
   }
-}
-
-/// The newest files of every conversation, newest first.
-fn gather_files(backend: &dyn teamcraft_client_api::backend::Backend) -> Vec<FileInfo> {
-  let mut conversations = backend.direct_conversations();
-  for space in backend.spaces() {
-    conversations.extend(backend.space_conversations(space.id));
-  }
-  let mut files: Vec<FileInfo> = conversations
-    .into_iter()
-    .flat_map(|conversation| {
-      backend
-        .conversation_files(conversation.id)
-        .into_iter()
-        .take(MAX_FILES_PER_CONVERSATION)
-    })
-    .collect();
-  files.sort_by_key(|file| std::cmp::Reverse(file.maybe_sent_at));
-  files
 }

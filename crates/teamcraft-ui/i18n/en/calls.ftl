@@ -281,6 +281,7 @@ calls-all = All calls
 calls-missed = Missed
 calls-empty = Calls you make, take or miss show up here.
 calls-empty-title = No calls yet
+calls-space-empty = Calls in this space's channels show up here.
 calls-direction-missed = Missed
 calls-direction-incoming = Incoming
 calls-direction-outgoing = Outgoing

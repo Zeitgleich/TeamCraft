@@ -27,6 +27,7 @@ home-filter-all = All
 home-filter-unread = Unread
 home-filter-people = People
 home-filter-groups = Groups
+home-filter-channels = Channels
 dm-new = New message
 dm-options = List options
 dm-filter-empty = No direct messages match.
@@ -54,6 +55,7 @@ sidebar-label = Channels and direct messages
 sidebar-threads = Threads
 sidebar-unreads = Unreads
 sidebar-favorites = Favorites
+sidebar-conversations = Conversations
 sidebar-channels = Channels
 sidebar-integrations = Integrations
 sidebar-direct-messages = Direct messages
@@ -103,6 +105,7 @@ saved-title = Saved items
 saved-open = Open conversation
 saved-empty = Use "Save for later" in a message's menu.
 saved-empty-title = Nothing saved yet
+saved-space-empty = Messages you save from this space's channels show up here.
 sidebar-saved = Saved
 
 # Profiles, people and groups (v1 REST UI)

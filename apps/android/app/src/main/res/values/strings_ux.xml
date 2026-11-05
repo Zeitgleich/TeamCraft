@@ -133,6 +133,10 @@
   <string name="settings_security_summary">Security code, app lock, screenshots, passphrase</string>
   <string name="settings_devices_title">Devices</string>
   <string name="settings_devices_summary">Link a new device</string>
+  <string name="chat_list_layout">Chats and channels</string>
+  <string name="chat_list_layout_list">List</string>
+  <string name="chat_list_layout_hint">Spaces shows direct messages and the channels of each space apart. List shows them all in one list.</string>
+  <string name="list_conversations">Conversations</string>
   <string name="dynamic_color">Use the colors of my wallpaper</string>
   <plurals name="chats_selected">
     <item quantity="one">%d selected</item>

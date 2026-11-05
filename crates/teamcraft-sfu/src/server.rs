@@ -33,8 +33,8 @@ use std::{
 
 use socket2::{Domain, Protocol, Socket, Type};
 use teamcraft_proto::{
-  CallClientMessage, CallEvent, CallServerMessage, ErrorBody, ErrorCode, SFU_GOING_AWAY_CLOSE_CODE,
-  SfuControlRequest, SfuRosterReport,
+  CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, ErrorBody, ErrorCode,
+  SFU_GOING_AWAY_CLOSE_CODE, SfuControlRequest, SfuRosterReport,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -81,11 +81,14 @@ pub struct Sfu {
 pub(crate) struct Shared {
   pub(crate) config: SfuConfig,
   pub(crate) rooms: Rooms,
-  verifier: Arc<dyn JoinTokenVerifier>,
+  pub(crate) verifier: Arc<dyn JoinTokenVerifier>,
   reporter: Arc<dyn ParticipantReporter>,
   prejoin: Arc<PreJoinLimiter>,
   /// The fallback's own: what fills it, through a proxy or not, costs a QUIC session nothing.
   pub(crate) fallback_prejoin: Arc<PreJoinLimiter>,
+  /// Unjoined fallback connections per device, of those that showed a valid join token in the
+  /// upgrade (#1297): they count against their device instead of their address.
+  pub(crate) fallback_device_prejoin: Arc<PreJoinLimiter<(CallId, DeviceId)>>,
   /// The pace of each device's joins of each call, on both transports.
   rejoins: RejoinLimiter,
   /// When this SFU started: the roster tells the server how fresh its rooms are.
@@ -214,6 +217,7 @@ impl Sfu {
         reporter: Arc::new(NoReporter),
         prejoin: Arc::new(PreJoinLimiter::default()),
         fallback_prejoin: Arc::new(PreJoinLimiter::default()),
+        fallback_device_prejoin: Arc::new(PreJoinLimiter::default()),
         rejoins,
         started_at: Instant::now(),
         roster_now: Arc::new(Notify::new()),

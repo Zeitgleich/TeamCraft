@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use leptos::prelude::*;
+use teamcraft_client_api::model::SpaceId;
 use teamcraft_proto::{
   CancelScope, CreateGuestLinkRequest, CreateInstantMeetingRequest, CreateMeetingRequest, ErrorBody,
   ErrorCode, GuestLinkResponse, IdempotencyKey, JoinMeetingRequest, JoinMeetingResponse, KnockByLinkResponse,
@@ -119,11 +120,13 @@ impl MeetingsClient {
     &self,
     maybe_title: Option<String>,
     invitees: Vec<UserId>,
+    maybe_space: Option<SpaceId>,
     maybe_idempotency_key: Option<IdempotencyKey>,
   ) -> Result<MeetingResponse, MeetingError> {
     let body = to_json(&CreateInstantMeetingRequest {
       maybe_title,
       invitees,
+      maybe_space,
       maybe_idempotency_key,
     })?;
     self
@@ -1005,6 +1008,8 @@ impl ScheduleForm {
       invitees,
       maybe_recurrence,
       has_lobby: self.has_lobby,
+      // The dialog sets it: the form doesn't know where it is opened.
+      maybe_space: None,
       maybe_idempotency_key: self.maybe_idempotency_key,
     })
   }
@@ -1693,6 +1698,7 @@ mod tests {
       has_lobby: false,
       organizer_user_id: organizer,
       conversation_id: id_from_raw(9),
+      maybe_space: None,
       join_url: String::new(),
       maybe_recurrence: None,
       is_occurrence_cancelled: false,
@@ -1828,6 +1834,7 @@ mod tests {
       has_lobby: true,
       organizer_user_id: organizer,
       conversation_id: id_from_raw(9),
+      maybe_space: None,
       join_url: String::new(),
       maybe_recurrence: None,
       is_occurrence_cancelled: false,

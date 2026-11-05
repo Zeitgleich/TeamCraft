@@ -45,6 +45,7 @@ import uniffi.teamcraft_ffi.OpenedAppLink
 import uniffi.teamcraft_ffi.OpenedAppLinkStep
 import uniffi.teamcraft_ffi.openAppLink
 import de.zeitgleich.teamcraft.ui.screens.SavedScreen
+import de.zeitgleich.teamcraft.ui.screens.SpaceViewsScreen
 import de.zeitgleich.teamcraft.ui.screens.ThreadsScreen
 import de.zeitgleich.teamcraft.ui.screens.ConversationScreen
 import de.zeitgleich.teamcraft.ui.screens.DoNotDisturbScreen
@@ -385,6 +386,14 @@ private fun ReadyNavigation(
     }
     composable("meetings") {
       MeetingsScreen(viewModel = viewModel, onBack = { navigation.popBackStack() })
+    }
+    composable("space/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { entry ->
+      SpaceViewsScreen(
+        viewModel = viewModel,
+        initialSpaceId = entry.arguments?.getString("id").orEmpty(),
+        onOpen = { navigation.navigate("conversation/$it") },
+        onBack = { navigation.popBackStack() },
+      )
     }
     composable("files/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { entry ->
       FilesScreen(

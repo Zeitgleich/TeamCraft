@@ -17,10 +17,12 @@ use crate::model::{
   id_from_raw,
 };
 use crate::navigation::{Step, divider_index, next_unread};
-use crate::prefs::SidebarSort;
+use crate::prefs::{SidebarLayout, SidebarSort};
 use crate::reactive::{SetIfAlive, get_if_observed};
 use crate::route::{HistoryReach, Route};
-use crate::sections::{HomeFilter, apply_favorite_order, build_direct, build_sections};
+use crate::sections::{
+  HomeFilter, ListOptions, apply_favorite_order, build_direct, build_list, build_sections,
+};
 use crate::security::DeviceApproval;
 use crate::settings::{LastOpenPlace, Settings, last_open, remember_last_open};
 use crate::toast_timer::{Hold, ToastClock};
@@ -174,7 +176,7 @@ pub enum MainView {
   Search,
   /// Messages the user saved for later.
   Saved,
-  /// Every file the user can see, across conversations.
+  /// The files the user can see, of the selected space or across conversations.
   Files,
   /// Mentions, reactions to the user's messages and replies in their threads.
   Activity,
@@ -718,10 +720,9 @@ impl AppState {
     }
     self.space.set(space);
     self.rail.set(RailEntry::Space);
-    let is_grouped = self
-      .settings
-      .prefs
-      .with_untracked(|prefs| prefs.sidebar.is_grouped_by_space);
+    let is_grouped = self.settings.prefs.with_untracked(|prefs| {
+      prefs.sidebar.is_grouped_by_space || prefs.sidebar.layout == SidebarLayout::List
+    });
     let belongs = match self.view.get_untracked() {
       MainView::Conversation(current) => {
         self
@@ -766,10 +767,12 @@ impl AppState {
       self.panel.set(SidePanel::Closed);
       return;
     }
+    // In the list layout Chats is the list of every conversation: a channel open is in it too.
+    let is_list = untrack(|| self.is_list_layout());
     let is_direct_open = self
       .current_conversation_id()
       .and_then(|id| self.read(|backend| backend.conversation(id)))
-      .is_some_and(|conversation| conversation.kind.is_direct_like());
+      .is_some_and(|conversation| is_list || conversation.kind.is_direct_like());
     if is_direct_open {
       return;
     }
@@ -817,6 +820,28 @@ impl AppState {
       },
     }
     true
+  }
+
+  /// The space the People, Calls, Meetings, Saved and Files views are scoped to (#954): the one the
+  /// sidebar is showing. `None` where no single space is selected, so they show everything: on
+  /// Home, in Activity, in the grouped sidebar, which lists all spaces together, and in the list
+  /// layout, where opening a channel moves the rail but the sidebar stays the one list (#1151).
+  pub fn maybe_scoped_space(&self) -> Option<SpaceId> {
+    let is_one_list = self
+      .settings
+      .prefs
+      .with(|prefs| prefs.sidebar.is_grouped_by_space || prefs.sidebar.layout == SidebarLayout::List);
+    (self.rail.get() == RailEntry::Space && !is_one_list).then(|| self.space.get())
+  }
+
+  /// The name of the space the views are scoped to, for their headers.
+  pub fn scoped_space_name(&self) -> Option<String> {
+    let space = self.maybe_scoped_space()?;
+    self
+      .read(|backend| backend.spaces())
+      .into_iter()
+      .find(|candidate| candidate.id == space)
+      .map(|found| found.name)
   }
 
   /// Whether switching to Home or a space reopens what was open there (the sidebar setting).
@@ -876,6 +901,50 @@ impl AppState {
       }));
     });
     entries
+  }
+
+  /// Whether the sidebar is the one list of all conversations (#1151).
+  pub fn is_list_layout(&self) -> bool {
+    self
+      .settings
+      .prefs
+      .with(|prefs| prefs.sidebar.layout == SidebarLayout::List)
+  }
+
+  /// What the list layout lists, each with the time of its newest message. Opening a channel still
+  /// moves the rail to its space; the shell shows the same list for Chats and a space.
+  pub fn list_entries(&self) -> Vec<(Conversation, Option<TimestampMs>)> {
+    let list = self.with_mutes(self.sidebar_list(self.read(|backend| backend.listed_conversations())));
+    self.read(|backend| {
+      list
+        .into_iter()
+        .map(|conversation| {
+          let at = backend.last_activity(conversation.id);
+          (conversation, at)
+        })
+        .collect()
+    })
+  }
+
+  /// [`Self::list_entries`] as the list layout shows them, unfiltered and whole.
+  fn list_order(&self) -> Vec<Conversation> {
+    let (sort, show_unreads_group) = self
+      .settings
+      .prefs
+      .with(|prefs| (prefs.sidebar.dm_sort, prefs.sidebar.shows_unreads_section));
+    let options = ListOptions {
+      sort,
+      show_unreads_group,
+      maybe_held_open: self.held_unread.get_untracked(),
+      filter: "",
+      chip: HomeFilter::All,
+      max_rows: 0,
+    };
+    build_list(self.list_entries(), &options)
+      .sections
+      .into_iter()
+      .flat_map(|section| section.conversations)
+      .collect()
   }
 
   /// Reads from the backend and re-runs the calling reactive scope after any mutation.
@@ -1747,6 +1816,9 @@ impl AppState {
   /// All conversations of the current sidebar in its order: the DMs on Home,
   /// otherwise the channels of the current space (of every space in the grouped sidebar).
   pub fn navigable_conversations(&self) -> Vec<Conversation> {
+    if self.is_list_layout() && self.rail.get() != RailEntry::Activity {
+      return self.list_order();
+    }
     if self.rail.get() == RailEntry::Chats {
       return self.direct_list();
     }
@@ -2529,8 +2601,193 @@ mod tests {
     }
   }
 
+  /// #954: what the five views are scoped to follows the sidebar.
+  mod view_scope {
+    use teamcraft_client_api::space_scope::{
+      calls_of_space, files_of_everything, files_of_space, saved_items_of_space,
+    };
+
+    use super::*;
+
+    #[test]
+    fn a_selected_space_scopes_the_views_and_switching_keeps_the_view() {
+      let state = test_state();
+      let spaces = state.read(|backend| backend.spaces());
+      let (first, second) = (spaces[0].id, spaces[1].id);
+      state.open_space(first);
+      state.open_saved();
+      assert_eq!(state.maybe_scoped_space(), Some(first));
+      state.open_space(second);
+      assert_eq!(state.maybe_scoped_space(), Some(second));
+      assert_eq!(state.view.get(), MainView::Saved);
+      assert_eq!(state.scoped_space_name(), Some(spaces[1].name.clone()));
+    }
+
+    #[test]
+    fn home_activity_and_the_grouped_sidebar_show_everything() {
+      let state = test_state();
+      let (space, _) = first_channel(&state);
+      state.open_space(space);
+      state.open_chats();
+      assert_eq!(state.maybe_scoped_space(), None);
+      state.open_space(space);
+      state.open_activity();
+      assert_eq!(state.maybe_scoped_space(), None);
+      state.open_space(space);
+      state
+        .settings
+        .prefs
+        .update(|prefs| prefs.sidebar.is_grouped_by_space = true);
+      assert_eq!(state.maybe_scoped_space(), None);
+    }
+
+    #[test]
+    fn the_list_layout_has_no_selected_space_even_with_a_channel_open() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      state
+        .settings
+        .prefs
+        .update(|prefs| prefs.sidebar.layout = SidebarLayout::List);
+      state.open_conversation(channel);
+      assert_eq!(state.rail.get(), RailEntry::Space);
+      assert_eq!(state.maybe_scoped_space(), None);
+    }
+
+    #[test]
+    fn files_and_calls_of_a_space_are_those_of_its_conversations() {
+      let state = test_state();
+      state.read(|backend| {
+        let spaces = backend.spaces();
+        let with_files = spaces
+          .iter()
+          .find(|space| !files_of_space(backend, space.id).is_empty())
+          .expect("the mock has files in a channel");
+        let other = spaces
+          .iter()
+          .find(|space| space.id != with_files.id)
+          .expect("several spaces");
+        assert!(files_of_space(backend, other.id).is_empty());
+        assert_eq!(
+          files_of_space(backend, with_files.id).len(),
+          files_of_everything(backend).len()
+        );
+        // The mock's calls are all in a direct message, which is in no space.
+        assert!(!backend.call_history().is_empty());
+        assert!(
+          spaces
+            .iter()
+            .all(|space| calls_of_space(backend, space.id).is_empty())
+        );
+      });
+    }
+
+    #[test]
+    fn saved_messages_of_a_space_are_those_of_its_conversations() {
+      let state = test_state();
+      let spaces = state.read(|backend| backend.spaces());
+      let (space, other) = (spaces[0].id, spaces[1].id);
+      let (conversation, message) = state.read(|backend| {
+        backend
+          .space_conversations(space)
+          .into_iter()
+          .find_map(|conversation| {
+            let found = backend.messages(conversation.id, 0, 1).into_iter().next()?;
+            Some((conversation.id, found.id))
+          })
+          .expect("the mock's first space has messages")
+      });
+      state.write(|backend| backend.set_saved(conversation, message, true));
+      state.read(|backend| {
+        let ids = |space| -> Vec<MessageId> {
+          saved_items_of_space(backend, space)
+            .into_iter()
+            .map(|item| item.message.id)
+            .collect()
+        };
+        assert!(ids(space).contains(&message));
+        assert!(!ids(other).contains(&message));
+      });
+    }
+  }
+
   /// Issue #322: the core answers, a timer fires or the backend reports a change after the shell
   /// was unmounted (sign-out, a new session). Nothing may panic then.
+  /// #1151: the list layout keeps the rail's moves, and its list and navigation take everything.
+  mod list_layout {
+    use super::*;
+    use crate::prefs::SidebarLayout;
+
+    fn in_list_layout() -> AppState {
+      let state = test_state();
+      state
+        .settings
+        .prefs
+        .update(|prefs| prefs.sidebar.layout = SidebarLayout::List);
+      state
+    }
+
+    #[test]
+    fn chats_stays_on_the_channel_that_is_open() {
+      let state = in_list_layout();
+      let (_, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      state.open_chats();
+      assert_eq!(state.rail.get(), RailEntry::Chats);
+      assert_eq!(state.view.get(), MainView::Conversation(channel));
+    }
+
+    #[test]
+    fn in_the_spaces_layout_chats_leaves_a_channel_as_before() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      state.open_chats();
+      assert_ne!(state.view.get(), MainView::Conversation(channel));
+    }
+
+    #[test]
+    fn moving_through_conversations_goes_over_dms_and_all_spaces() {
+      let state = in_list_layout();
+      let order: HashSet<ConversationId> = state
+        .navigable_conversations()
+        .into_iter()
+        .map(|conversation| conversation.id)
+        .collect();
+      assert!(order.contains(&first_dm(&state)));
+      let spaces = state.read(|backend| backend.spaces());
+      assert!(spaces.len() >= 2, "the mock has several spaces");
+      for space in spaces {
+        for channel in state.read(|backend| backend.space_conversations(space.id)) {
+          assert!(order.contains(&channel.id), "{}", channel.name);
+        }
+      }
+    }
+
+    #[test]
+    fn the_one_pass_lists_what_the_spaces_list() {
+      let state = in_list_layout();
+      let mut asked: Vec<ConversationId> = state.read(|backend| {
+        let mut list = backend.direct_conversations();
+        list.extend(
+          backend
+            .spaces()
+            .into_iter()
+            .flat_map(|space| backend.space_conversations(space.id)),
+        );
+        list.into_iter().map(|conversation| conversation.id).collect()
+      });
+      let mut listed: Vec<ConversationId> = state
+        .list_entries()
+        .into_iter()
+        .map(|(conversation, _)| conversation.id)
+        .collect();
+      asked.sort_by_key(|id| crate::model::raw_id(*id));
+      listed.sort_by_key(|id| crate::model::raw_id(*id));
+      assert_eq!(asked, listed);
+    }
+  }
+
   mod activity_place {
     use super::*;
 

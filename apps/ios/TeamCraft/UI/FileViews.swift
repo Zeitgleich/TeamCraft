@@ -363,8 +363,14 @@ struct LinkPreviewCard: View {
 
 /// Every file of a conversation as a gallery; tap opens or downloads.
 struct FilesGalleryView: View {
+  /// Whose files it shows.
+  enum Source: Hashable {
+    case conversation(String)
+    case space(String)
+  }
+
   @Environment(AppModel.self) private var model
-  let conversation: ConversationItem
+  let source: Source
 
   @State private var files: [FileInfo]?
   @State private var maybePreviewURL: URL?
@@ -372,10 +378,18 @@ struct FilesGalleryView: View {
 
   private let columns = [GridItem(.adaptive(minimum: 110), spacing: 8)]
 
+  init(conversation: ConversationItem) {
+    source = .conversation(conversation.id)
+  }
+
+  init(spaceId: String) {
+    source = .space(spaceId)
+  }
+
   var body: some View {
     Group {
       if let files, files.isEmpty {
-        Text("files_empty").foregroundStyle(Theme.textMuted)
+        Text(emptyText).foregroundStyle(Theme.textMuted)
       } else {
         ScrollView {
           LazyVGrid(columns: columns, spacing: 8) {
@@ -391,9 +405,28 @@ struct FilesGalleryView: View {
     .background(Theme.background)
     .navigationTitle("files_title")
     .navigationBarTitleDisplayMode(.inline)
-    .task(id: model.changeCount) { files = await model.files(conversationId: conversation.id) }
+    .task(id: LoadKey(changeCount: model.changeCount, source: source)) { files = await load() }
     .quickLookPreview($maybePreviewURL)
     .fullScreenCover(item: $maybeViewing) { target in PictureViewer(target: target) }
+  }
+
+  private struct LoadKey: Hashable {
+    let changeCount: Int
+    let source: Source
+  }
+
+  private var emptyText: LocalizedStringKey {
+    switch source {
+    case .conversation: return "files_empty"
+    case .space: return "space_files_empty"
+    }
+  }
+
+  private func load() async -> [FileInfo] {
+    switch source {
+    case .conversation(let conversation): return await model.files(conversationId: conversation)
+    case .space(let space): return await model.files(spaceId: space)
+    }
   }
 
   private func tile(_ file: FileInfo) -> some View {

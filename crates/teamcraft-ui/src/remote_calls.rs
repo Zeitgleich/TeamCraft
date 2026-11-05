@@ -524,12 +524,12 @@ fn is_carried_out_beside(action: &CallAction) -> bool {
   matches!(action, CallAction::StartScreenShare { .. })
 }
 
-/// The effects of calls in the page: every one in the call, without the pre-join preview, where
-/// the browser runs them at all.
+/// The effects of calls in the page: every one, in the call and in the pre-join check (#1295),
+/// where the browser runs them at all.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn browser_effects_offer(applies_effects: bool) -> EffectsOffer {
   if applies_effects {
-    EffectsOffer::InCall
+    EffectsOffer::Full
   } else {
     EffectsOffer::Unavailable
   }
@@ -542,13 +542,15 @@ mod tests {
   use teamcraft_client_api::model::id_from_raw;
   use teamcraft_proto::CallRosterEntry;
 
-  /// #439: the browser's call module runs the effects in the call where the page can.
+  /// #439, #1295: the browser's call module runs the effects in the call and in the pre-join
+  /// check where the page can.
   #[test]
   fn the_browser_offers_effects_only_where_it_runs_them() {
-    assert_eq!(browser_effects_offer(true), EffectsOffer::InCall);
+    assert_eq!(browser_effects_offer(true), EffectsOffer::Full);
     assert_eq!(browser_effects_offer(false), EffectsOffer::Unavailable);
     assert!(!browser_effects_offer(false).has_picker());
-    assert!(!browser_effects_offer(true).has_preview());
+    assert!(!browser_effects_offer(false).has_preview());
+    assert!(browser_effects_offer(true).has_preview());
   }
 
   #[test]

@@ -335,9 +335,10 @@ fn start_meeting(state: AppState, i18n: I18n) -> Outcome {
     return Outcome::Notice(Notice::Text(i18n.t("slash-meet-unavailable")));
   };
   let client = hub.client();
+  let scope = untrack(|| state.maybe_scoped_space());
   leptos::task::spawn_local(async move {
     if let Ok(meeting) = client
-      .start_instant(None, Vec::new(), Some(IdempotencyKey::random()))
+      .start_instant(None, Vec::new(), scope, Some(IdempotencyKey::random()))
       .await
     {
       // The server makes the chat without encryption; an instant meeting invites nobody.

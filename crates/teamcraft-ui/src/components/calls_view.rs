@@ -3,6 +3,7 @@
 use leptos::prelude::*;
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
 use teamcraft_client_api::list_load::{LoadingList, REQUEST_DEADLINE_MS};
+use teamcraft_client_api::space_scope::calls_of_space;
 
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::clock::{format_time, local_day};
@@ -11,7 +12,7 @@ use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::list_status::{ListPlaceholder, ListStatus};
-use crate::components::page::{ConversationPortrait, day_heading};
+use crate::components::page::{ConversationPortrait, ScopedSpaceName, day_heading};
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
 use crate::model::{ConversationKind, TimestampMs};
@@ -32,8 +33,14 @@ pub fn CallsView() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let filter = RwSignal::new(CallFilter::All);
+  let scope = Memo::new(move |_| state.maybe_scoped_space());
   let days = Memo::new(move |_| {
-    let mut all = state.read(|backend| backend.call_history());
+    // Filtered here, over the history the device holds: the server is asked for nothing else.
+    let maybe_space = scope.get();
+    let mut all = state.read(|backend| match maybe_space {
+      Some(space) => calls_of_space(backend, space),
+      None => backend.call_history(),
+    });
     if filter.get() == CallFilter::Missed {
       all.retain(|call| call.direction == CallDirection::Missed);
     }
@@ -63,6 +70,7 @@ pub fn CallsView() -> impl IntoView {
         <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("calls-title")}</h1>
+          <ScopedSpaceName />
         </div>
         <div class="segmented" role="group" aria-label=move || i18n.t("calls-filter")>
           <SlidingIndicator />
@@ -89,7 +97,10 @@ pub fn CallsView() -> impl IntoView {
           label=Signal::derive(move || i18n.t("calls-loading"))
           on_retry=on_retry
         >
-          <EmptyState icon=IconName::Phone title_key="calls-empty-title" body_key="calls-empty" />
+          {move || {
+            let body_key = if scope.get().is_some() { "calls-space-empty" } else { "calls-empty" };
+            view! { <EmptyState icon=IconName::Phone title_key="calls-empty-title" body_key=body_key /> }
+          }}
         </ListPlaceholder>
       </div>
     </section>

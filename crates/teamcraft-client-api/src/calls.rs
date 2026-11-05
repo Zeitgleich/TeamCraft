@@ -197,13 +197,11 @@ pub enum CameraBackground {
 /// Which background effects the UI offers on this device (#439).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum EffectsOffer {
-  /// Every effect, in the pre-join check too: the desktop and mobile apps.
+  /// Every effect, in the call and in the pre-join check: the desktop and mobile apps, and a
+  /// browser that runs the effects (WebGPU or WebGL2; #1295 brought them to its pre-join check).
+  /// There the photos' full pictures are files the browser downloads when one is picked.
   #[default]
   Full,
-  /// Every effect in the call: a browser that runs the effects (WebGPU or WebGL2). The photos'
-  /// full pictures are files the browser downloads when one is picked. The pre-join check shows
-  /// the camera without effects.
-  InCall,
   /// None: a browser without WebGPU and WebGL2, or without WebAssembly SIMD.
   Unavailable,
 }
@@ -1033,8 +1031,9 @@ mod tests {
     }
   }
 
+  /// #1295: a browser that runs the effects offers them before the call too, like the apps.
   #[test]
-  fn browsers_offer_every_effect_in_the_call() {
+  fn browsers_offer_every_effect_in_the_call_and_before_it() {
     let photo = BackgroundEffect::Preset(BackgroundPreset::LivingRoom);
     let illustration = BackgroundEffect::Preset(BackgroundPreset::Forest);
     let own = BackgroundEffect::Custom("4".parse().unwrap());
@@ -1044,13 +1043,6 @@ mod tests {
       [photo, illustration, own]
         .iter()
         .all(|effect| full.offers(*effect))
-    );
-    let in_call = EffectsOffer::InCall;
-    assert!(in_call.has_picker() && !in_call.has_preview());
-    assert!(
-      [photo, illustration, own, BackgroundEffect::BlurLight]
-        .iter()
-        .all(|effect| in_call.offers(*effect))
     );
     let none = EffectsOffer::Unavailable;
     assert!(!none.has_picker() && !none.has_preview());

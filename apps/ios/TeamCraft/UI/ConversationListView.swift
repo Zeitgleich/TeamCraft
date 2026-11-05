@@ -18,9 +18,13 @@ struct ConversationListView: View {
   @State private var isShowingFilters = false
   @State private var filters = SearchFilters()
   @State private var maybeBrowseTab: BrowseView.Tab?
+  /// The space whose people, calls, meetings, saved messages and files are open (#954).
+  @State private var maybeSpaceViews: SpaceChoice?
   /// DMs live outside spaces (as on desktop), so they have their own tab.
   @State private var tab: ChatTab = .home
   @State private var homeChip: HomeFilter = .all
+  /// Takes effect at once: the view follows the stored value (#1151).
+  @AppStorage(ChatListLayout.key) private var layoutRaw = ChatListLayout.spaces.rawValue
   @State private var dmFilter = ""
   /// A mute from the long-press menu the server didn't take (#903).
   @State private var isMuteFailed = false
@@ -42,7 +46,7 @@ struct ConversationListView: View {
             OfflineBanner()
             if let progress = maybeFirstSync { FirstSyncBar(progress: progress) }
             NotificationPromptCard()
-            if !isSearching && !conversations.isEmpty { tabPicker }
+            if !isSearching && !conversations.isEmpty && !isList { tabPicker }
           }
         }
         .navigationTitle("chats_title")
@@ -133,6 +137,11 @@ struct ConversationListView: View {
       }
     }
     .sheet(isPresented: $isShowingFilters) { SearchFiltersView(filters: $filters) }
+    .sheet(item: $maybeSpaceViews) { choice in
+      SpaceViewsView(
+        account: account, spaces: spaceChoices(conversations), initialSpaceId: choice.id
+      ) { conversationId in selection = conversationId }
+    }
     .sheet(item: $maybeBrowseTab) { tab in
       BrowseView(tab: tab) { conversationId in selection = conversationId }
     }
@@ -142,6 +151,11 @@ struct ConversationListView: View {
   private var fullQuery: String { filters.query(for: query) }
 
   private var isSearching: Bool { !fullQuery.isEmpty }
+
+  private var isList: Bool { layoutRaw == ChatListLayout.list.rawValue }
+
+  /// Where the chips and the filter belong: Home, and always in the list layout.
+  private var isHomeShown: Bool { isList || tab == .home }
 
   @ViewBuilder
   private var sidebar: some View {
@@ -159,7 +173,9 @@ struct ConversationListView: View {
       }
     } else {
       List(selection: $selection) {
-        if tab == .home {
+        if isHomeShown {
+          // Decided where the channels are (#799): in the list layout, here too.
+          if isList { JoinRequestSection() }
           TextField("dm_filter", text: $dmFilter)
             .textFieldStyle(.roundedBorder)
             .autocorrectionDisabled()
@@ -180,13 +196,13 @@ struct ConversationListView: View {
         }
         ForEach(shownSections) { section in
           Section(
-            header: Text(title(of: section.title))
+            header: sectionHeader(section)
               .contextMenu { spaceMenu(for: section) }
               .task(id: section.id) { await loadSpaceMenu(for: section) }
           ) {
             ForEach(section.conversations, id: \.id) { conversation in
               ConversationRow(
-                conversation: conversation, maybePreview: previews[conversation.id], showsSpace: tab == .home)
+                conversation: conversation, maybePreview: previews[conversation.id], showsSpace: isHomeShown)
                 .tag(conversation.id)
                 .swipeActions(edge: .leading) { readButton(for: conversation) }
                 .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
@@ -203,12 +219,33 @@ struct ConversationListView: View {
             }
           }
         }
+        if isList && dmFilter.isEmpty && homeChip == .all { listSpacesSection }
       }
       .listStyle(.sidebar)
     }
   }
 
+  /// The spaces under the list layout's list: a space's menu and browsing for more are here, since
+  /// no header of a space is left to hold them (#1151).
+  private var listSpacesSection: some View {
+    Section("chats_tab_spaces") {
+      ForEach(listedSpaces(conversations)) { section in
+        Menu {
+          spaceMenu(for: section)
+        } label: {
+          Text(title(of: section.title))
+        }
+        .task(id: section.id) { await loadSpaceMenu(for: section) }
+      }
+      Button("browse_channels", systemImage: "plus") { maybeBrowseTab = .channels }
+    }
+  }
+
   private var shownSections: [ConversationSection] {
+    if isList {
+      return listSections(
+        conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip)
+    }
     switch tab {
     case .spaces: return channelSections(conversations)
     case .home:
@@ -220,7 +257,7 @@ struct ConversationListView: View {
   /// Unread / People / Groups; tapping the selected chip again shows everything.
   private var homeChips: some View {
     HStack {
-      ForEach(HomeFilter.chips, id: \.self) { chip in
+      ForEach(isList ? HomeFilter.listChips : HomeFilter.chips, id: \.self) { chip in
         Button(LocalizedStringKey(chipKey(chip))) { homeChip = homeChip == chip ? .all : chip }
           .buttonStyle(.bordered)
           .tint(homeChip == chip ? Theme.accent : .secondary)
@@ -235,6 +272,7 @@ struct ConversationListView: View {
     case .unread: return "home_filter_unread"
     case .people: return "home_filter_people"
     case .groups: return "home_filter_groups"
+    case .channels: return "channels"
     }
   }
 
@@ -361,6 +399,25 @@ struct ConversationListView: View {
     leaveChoices[conversation.id] = await model.conversationLeaveChoice(conversation.id)
   }
 
+  /// A section's title; a space's opens the views of that space.
+  @ViewBuilder
+  private func sectionHeader(_ section: ConversationSection) -> some View {
+    if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
+      Button {
+        maybeSpaceViews = SpaceChoice(id: spaceId, name: name)
+      } label: {
+        HStack {
+          Text(title(of: section.title))
+          Spacer()
+          Image(systemName: "chevron.right")
+        }
+      }
+      .accessibilityHint(Text("space_views_open"))
+    } else {
+      Text(title(of: section.title))
+    }
+  }
+
   /// Mute (its channels follow), mark all read and leave: the menu of a space's header.
   @ViewBuilder
   private func spaceMenu(for section: ConversationSection) -> some View {
@@ -473,6 +530,7 @@ struct ConversationListView: View {
     case .space(let name): return LocalizedStringKey(name)
     case .channels: return "channels"
     case .directMessages: return "direct_messages"
+    case .everything: return "list_conversations"
     }
   }
 }

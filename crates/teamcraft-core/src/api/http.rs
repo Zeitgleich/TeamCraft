@@ -2298,9 +2298,11 @@ pub type NativeSocket =
 const MAX_CALL_SOCKET_MESSAGE_BYTES: usize = 1024 * 1024 + 1;
 
 /// Opens a call's WebSocket fallback for networks that block UDP (ARCHITECTURE.md §6.6): like the
-/// gateway's, through the same proxy with the same trust store. Nothing is sent on it yet.
+/// gateway's, through the same proxy with the same trust store. `protocols` go along in
+/// `Sec-WebSocket-Protocol` (the call's join token, for the SFU to check before the upgrade). Nothing
+/// is sent on it yet.
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn open_call_socket(url: &str) -> Result<NativeSocket, ApiError> {
+pub async fn open_call_socket(url: &str, protocols: &[String]) -> Result<NativeSocket, ApiError> {
   let parsed = url::Url::parse(url).map_err(|error| ApiError::Network(format!("{url}: {error}")))?;
   let maybe_proxy = super::proxy::tunnel_proxy_for(&parsed);
   let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
@@ -2308,7 +2310,7 @@ pub async fn open_call_socket(url: &str) -> Result<NativeSocket, ApiError> {
     .max_frame_size(Some(MAX_CALL_SOCKET_MESSAGE_BYTES));
   tokio::time::timeout(
     WEBSOCKET_CONNECT_TIMEOUT,
-    open_websocket_with(&parsed, maybe_proxy.as_ref(), Some(config)),
+    open_websocket_with(&parsed, maybe_proxy.as_ref(), Some(config), protocols),
   )
   .await
   .map_err(|_| ApiError::Network("WebSocket connection timed out".into()))?
@@ -2332,7 +2334,7 @@ async fn connect_websocket(url: &str) -> Result<NativeSocket, ApiError> {
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn open_websocket(url: &url::Url, maybe_proxy: Option<&url::Url>) -> Result<NativeSocket, ApiError> {
-  open_websocket_with(url, maybe_proxy, None).await
+  open_websocket_with(url, maybe_proxy, None, &[]).await
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2340,14 +2342,30 @@ async fn open_websocket_with(
   url: &url::Url,
   maybe_proxy: Option<&url::Url>,
   maybe_config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
+  protocols: &[String],
 ) -> Result<NativeSocket, ApiError> {
+  use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+  let mut request = url
+    .as_str()
+    .into_client_request()
+    .map_err(|error| ApiError::Network(error.to_string()))?;
+  if !protocols.is_empty() {
+    let offered = protocols
+      .join(", ")
+      .parse()
+      .map_err(|_| ApiError::Network("a WebSocket subprotocol that no header can carry".into()))?;
+    request.headers_mut().insert(
+      tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL,
+      offered,
+    );
+  }
   let stream = super::connect::connect_via(url, maybe_proxy)
     .await
     .map_err(|error| ApiError::Network(error.to_string()))?;
   // Always an explicit configuration: tungstenite's default one panics in rustls (api/tls.rs).
   let maybe_connector = Some(tokio_tungstenite::Connector::Rustls(super::tls::client_config()));
   let (socket, _) =
-    tokio_tungstenite::client_async_tls_with_config(url.as_str(), stream, maybe_config, maybe_connector)
+    tokio_tungstenite::client_async_tls_with_config(request, stream, maybe_config, maybe_connector)
       .await
       .map_err(websocket_error)?;
   Ok(socket)

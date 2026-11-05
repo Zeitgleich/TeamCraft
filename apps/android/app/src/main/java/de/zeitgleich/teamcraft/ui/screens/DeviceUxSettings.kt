@@ -32,6 +32,7 @@ import de.zeitgleich.teamcraft.security.LockAfter
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MediaPrefs
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
+import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
 import uniffi.teamcraft_ffi.CallStatusSounds
 import uniffi.teamcraft_ffi.OriginalDownload
 
@@ -149,6 +150,32 @@ fun OriginalDownloadSetting() {
   }
 }
 
+/** One list of all conversations, or Home and Spaces apart (#1151). Takes effect at once. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun ChatListLayoutSetting() {
+  val context = LocalContext.current
+  val prefs = remember { AppearancePrefs.prefs(context) }
+  val layout by prefs.chatListLayout.collectAsState()
+  Column {
+    Text(stringResource(R.string.chat_list_layout))
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      for ((choice, label) in CHAT_LIST_LAYOUT_CHOICES) {
+        FilterChip(
+          selected = layout == choice,
+          onClick = { prefs.setChatListLayout(choice) },
+          label = { Text(stringResource(label)) },
+        )
+      }
+    }
+    Text(
+      stringResource(R.string.chat_list_layout_hint),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+}
+
 /** The wallpaper's colors instead of TeamCraft's (Android 12+). */
 @Composable
 fun DynamicColorSetting() {
@@ -170,6 +197,11 @@ fun SendWithEnterSetting() {
     prefs.setSendWithEnter(it)
   }
 }
+
+private val CHAT_LIST_LAYOUT_CHOICES = listOf(
+  ChatListLayout.Spaces to R.string.nav_spaces,
+  ChatListLayout.List to R.string.chat_list_layout_list,
+)
 
 private val STATUS_SOUND_CHOICES = listOf(
   CallStatusSounds.ALL to R.string.call_status_sounds_all,

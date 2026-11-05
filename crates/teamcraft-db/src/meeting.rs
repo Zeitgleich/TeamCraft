@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use teamcraft_proto::{
-  ChannelRole, ConversationId, IdempotencyKey, MeetingAttendeeId, MeetingId, MeetingInviteId, UserId,
+  ChannelRole, ConversationId, IdempotencyKey, MeetingAttendeeId, MeetingId, MeetingInviteId, SpaceId, UserId,
 };
 use time::OffsetDateTime;
 
@@ -21,6 +21,8 @@ pub struct StoredMeeting {
   pub uid: String,
   pub organizer: UserId,
   pub conversation: ConversationId,
+  /// The space the meeting was scheduled in, if any (#954).
+  pub maybe_space: Option<SpaceId>,
   pub title: String,
   pub maybe_description: Option<String>,
   pub starts_at: OffsetDateTime,
@@ -52,6 +54,7 @@ pub struct NewMeeting<'a> {
   pub uid: &'a str,
   pub organizer: UserId,
   pub conversation: NewConversation<'a>,
+  pub maybe_space: Option<SpaceId>,
   pub title: &'a str,
   pub maybe_description: Option<&'a str>,
   pub starts_at: OffsetDateTime,
@@ -159,8 +162,8 @@ impl Database {
     insert_membership(&mut tx, new.conversation.id, new.organizer, ChannelRole::Admin).await?;
     sqlx::query!(
       r#"INSERT INTO meetings (id, uid, organizer_user_id, conversation_id, title, description, starts_at,
-                               ends_at, recurrence_rule, kind, has_lobby)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+                               ends_at, recurrence_rule, kind, has_lobby, space_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
       to_db(new.id),
       new.uid,
       to_db(new.organizer),
@@ -172,6 +175,7 @@ impl Database {
       new.maybe_recurrence_rule,
       new.kind,
       new.has_lobby,
+      new.maybe_space.map(to_db),
     )
     .execute(&mut *tx)
     .await?;
@@ -191,7 +195,7 @@ impl Database {
   pub async fn get_meeting(&self, id: MeetingId) -> Result<Option<StoredMeeting>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, uid, organizer_user_id, conversation_id, title, description, starts_at, ends_at,
-                recurrence_rule, kind, status, has_lobby, sequence, cancelled_at
+                recurrence_rule, kind, status, has_lobby, sequence, cancelled_at, space_id
          FROM meetings WHERE id = $1"#,
       to_db(id),
     )
@@ -204,6 +208,7 @@ impl Database {
           uid: row.uid,
           organizer: from_db(row.organizer_user_id)?,
           conversation: from_db(row.conversation_id)?,
+          maybe_space: from_db_opt(row.space_id)?,
           title: row.title,
           maybe_description: row.description,
           starts_at: row.starts_at,

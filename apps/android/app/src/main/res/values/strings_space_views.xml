@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="space_views_open">Show people, calls, meetings, saved messages and files</string>
+  <string name="space_views_switch">Switch space</string>
+  <string name="space_tab_people">People</string>
+  <string name="space_tab_calls">Calls</string>
+  <string name="space_tab_meetings">Meetings</string>
+  <string name="space_tab_saved">Saved</string>
+  <string name="space_tab_files">Files</string>
+  <string name="space_person_guest">Guest</string>
+  <string name="space_people_empty">Nobody is in this space yet.</string>
+  <string name="space_people_hidden">Only members of a space can see who is in it.</string>
+  <string name="space_people_failed">The members of this space could not be loaded.</string>
+  <string name="space_calls_empty">Calls in this space\'s channels show up here.</string>
+  <string name="space_call_missed">Missed</string>
+  <string name="space_call_incoming">Incoming</string>
+  <string name="space_call_outgoing">Outgoing</string>
+  <string name="space_call_back">Call</string>
+  <string name="space_meetings_empty">Meetings scheduled in this space show up here.</string>
+  <string name="space_saved_empty">Messages you save from this space\'s channels show up here.</string>
+  <string name="space_files_empty">Files and images shared in this space\'s channels show up here.</string>
+</resources>

@@ -11,6 +11,8 @@ use futures_util::{Sink, Stream, StreamExt};
 use teamcraft_proto::{CallClientMessage, CallServerMessage, FallbackFrame, SFU_GOING_AWAY_CLOSE_CODE};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
 use tokio_tungstenite::tungstenite::{Bytes, Error as WebSocketError, Message};
 use tracing::{debug, warn};
 use url::{Host, Url};
@@ -18,9 +20,15 @@ use url::{Host, Url};
 use crate::fallback_socket::{ControlFrames, FallbackSender};
 
 /// How a call socket is opened: plain, only to a loopback address, in development tools and tests.
-/// The apps bring their own, with their trust store and the system's proxy.
+/// The apps bring their own, with their trust store and the system's proxy. `protocols` go in the
+/// upgrade's `Sec-WebSocket-Protocol`: the join token, for the SFU to check before the upgrade
+/// ([`teamcraft_proto::fallback_protocols`]).
 pub trait FallbackOpener: fmt::Debug + Send + Sync {
-  fn open(&self, url: &str) -> Pin<Box<dyn Future<Output = Result<FallbackSocket, String>> + Send>>;
+  fn open(
+    &self,
+    url: &str,
+    protocols: &[String],
+  ) -> Pin<Box<dyn Future<Output = Result<FallbackSocket, String>> + Send>>;
 }
 
 /// An open WebSocket, already upgraded.
@@ -79,11 +87,26 @@ impl ControlFrames for SignalFrames {
 }
 
 impl FallbackOpener for LoopbackOpener {
-  fn open(&self, url: &str) -> Pin<Box<dyn Future<Output = Result<FallbackSocket, String>> + Send>> {
+  fn open(
+    &self,
+    url: &str,
+    protocols: &[String],
+  ) -> Pin<Box<dyn Future<Output = Result<FallbackSocket, String>> + Send>> {
     let url = url.to_owned();
+    let offered = protocols.join(", ");
     Box::pin(async move {
       if !url.starts_with("ws://") {
         return Err("no way to open a TLS call socket here".to_owned());
+      }
+      let mut request = url
+        .as_str()
+        .into_client_request()
+        .map_err(|error| error.to_string())?;
+      if !offered.is_empty() {
+        let value = offered
+          .parse()
+          .map_err(|_| "a subprotocol no header can carry".to_owned())?;
+        request.headers_mut().insert(SEC_WEBSOCKET_PROTOCOL, value);
       }
       let addresses = crate::sfu_address::sfu_addresses(&url)
         .await
@@ -91,7 +114,7 @@ impl FallbackOpener for LoopbackOpener {
       let stream = TcpStream::connect(addresses.as_slice())
         .await
         .map_err(|error| error.to_string())?;
-      let (socket, _) = tokio_tungstenite::client_async(url.as_str(), stream)
+      let (socket, _) = tokio_tungstenite::client_async(request, stream)
         .await
         .map_err(|error| error.to_string())?;
       Ok(FallbackSocket::new(socket))
@@ -197,7 +220,7 @@ pub(crate) fn is_going_away(code: u32) -> bool {
 /// A [`FallbackOpener`] from a function, for the apps: their HTTP stack opens the socket.
 pub fn fallback_opener<F, Opened>(open: F) -> Arc<dyn FallbackOpener>
 where
-  F: Fn(String) -> Opened + Send + Sync + 'static,
+  F: Fn(String, Vec<String>) -> Opened + Send + Sync + 'static,
   Opened: Future<Output = Result<FallbackSocket, String>> + Send + 'static,
 {
   Arc::new(FnOpener(open))
@@ -213,11 +236,15 @@ impl<F> fmt::Debug for FnOpener<F> {
 
 impl<F, Opened> FallbackOpener for FnOpener<F>
 where
-  F: Fn(String) -> Opened + Send + Sync,
+  F: Fn(String, Vec<String>) -> Opened + Send + Sync,
   Opened: Future<Output = Result<FallbackSocket, String>> + Send + 'static,
 {
-  fn open(&self, url: &str) -> Pin<Box<dyn Future<Output = Result<FallbackSocket, String>> + Send>> {
-    Box::pin((self.0)(url.to_owned()))
+  fn open(
+    &self,
+    url: &str,
+    protocols: &[String],
+  ) -> Pin<Box<dyn Future<Output = Result<FallbackSocket, String>> + Send>> {
+    Box::pin((self.0)(url.to_owned(), protocols.to_vec()))
   }
 }
 

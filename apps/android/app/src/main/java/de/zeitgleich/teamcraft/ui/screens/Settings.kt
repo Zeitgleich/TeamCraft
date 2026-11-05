@@ -198,6 +198,8 @@ private fun ChatsPage(viewModel: MainViewModel) {
   ShareTypingSetting()
   DynamicColorSetting()
   HorizontalDivider()
+  ChatListLayoutSetting()
+  HorizontalDivider()
   CallStatusSoundsSetting()
   HorizontalDivider()
   OriginalDownloadSetting()

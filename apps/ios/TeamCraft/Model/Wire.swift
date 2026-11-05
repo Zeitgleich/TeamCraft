@@ -226,6 +226,9 @@ struct ChatAnswer: Decodable, Sendable {
   let unseen: UnseenReactions?
   let maybeBody: String?
   let olderHistory: OlderHistory?
+  var calls: [CallHistoryItem]?
+  var roster: SpaceRoster?
+  var items: [SavedItem]?
 }
 
 /// How far a conversation's history reaches beyond what this device holds.
@@ -336,6 +339,8 @@ struct Meeting: Decodable, Equatable, Identifiable, Sendable {
   /// `scheduled`, `cancelled` or `ended`.
   let status: String
   let conversationId: String
+  /// The space it was scheduled in; its chat stays outside spaces.
+  var spaceId: String?
   let attendees: [MeetingAttendee]?
 
   var startDate: Date { Date(timeIntervalSince1970: TimeInterval(startsAt) / 1000) }

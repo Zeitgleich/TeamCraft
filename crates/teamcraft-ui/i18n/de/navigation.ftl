@@ -27,6 +27,7 @@ home-filter-all = Alle
 home-filter-unread = Ungelesen
 home-filter-people = Personen
 home-filter-groups = Gruppen
+home-filter-channels = Kanäle
 dm-new = Neue Nachricht
 dm-options = Listenoptionen
 dm-filter-empty = Keine Direktnachricht passt.
@@ -54,6 +55,7 @@ sidebar-label = Kanäle und Direktnachrichten
 sidebar-threads = Threads
 sidebar-unreads = Ungelesen
 sidebar-favorites = Favoriten
+sidebar-conversations = Unterhaltungen
 sidebar-channels = Kanäle
 sidebar-integrations = Integrationen
 sidebar-direct-messages = Direktnachrichten
@@ -103,6 +105,7 @@ saved-title = Gespeicherte Elemente
 saved-open = Unterhaltung öffnen
 saved-empty = Nutze „Für später speichern“ im Menü einer Nachricht.
 saved-empty-title = Noch nichts gespeichert
+saved-space-empty = Nachrichten, die du aus den Kanälen dieses Space speicherst, erscheinen hier.
 sidebar-saved = Gespeichert
 
 # Profiles, people and groups (v1 REST UI)

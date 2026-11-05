@@ -128,8 +128,12 @@ pub fn is_listed_in_chats(conversation: &Conversation) -> bool {
 pub enum DirectSectionKind {
   /// The user's notes to themself, pinned above everything (no heading).
   Notes,
+  /// Only in the list layout, with the setting for the section on ([`build_list`]).
+  Unreads,
   Favorites,
   Conversations,
+  /// The list layout's conversations that are in no section above ([`build_list`]).
+  Everything,
   /// DMs whose other people are all deactivated (issue #698): after the active ones, never cut
   /// off, so their history stays a click away.
   Deactivated,
@@ -140,8 +144,10 @@ impl DirectSectionKind {
   pub fn title_key(self) -> &'static str {
     match self {
       Self::Notes => "notes-title",
+      Self::Unreads => "sidebar-unreads",
       Self::Favorites => "sidebar-favorites",
       Self::Conversations => "sidebar-direct-messages",
+      Self::Everything => "sidebar-conversations",
       Self::Deactivated => "sidebar-deactivated-accounts",
     }
   }
@@ -164,11 +170,15 @@ pub enum HomeFilter {
   People,
   /// Group DMs.
   Groups,
+  /// Channels of spaces; a chip of the list layout only.
+  Channels,
 }
 
 impl HomeFilter {
   /// The chips, in display order ("All" is no chip selected).
   pub const CHIPS: [HomeFilter; 3] = [Self::Unread, Self::People, Self::Groups];
+  /// The chips of the list layout, where channels are in the list too.
+  pub const LIST_CHIPS: [HomeFilter; 4] = [Self::Unread, Self::People, Self::Groups, Self::Channels];
 
   /// i18n key of the chip.
   pub fn label_key(self) -> &'static str {
@@ -177,6 +187,7 @@ impl HomeFilter {
       Self::Unread => "home-filter-unread",
       Self::People => "home-filter-people",
       Self::Groups => "home-filter-groups",
+      Self::Channels => "home-filter-channels",
     }
   }
 
@@ -188,6 +199,7 @@ impl HomeFilter {
       },
       Self::People => conversation.kind == ConversationKind::Direct,
       Self::Groups => conversation.kind == ConversationKind::Group,
+      Self::Channels => !conversation.kind.is_direct_like(),
     }
   }
 }
@@ -211,26 +223,17 @@ pub fn build_direct(
   filter: &str,
   chip: HomeFilter,
 ) -> DirectList {
-  let needle = filter.trim().to_lowercase();
-  let mut seen = HashSet::new();
-  let mut list: Vec<(Conversation, Option<TimestampMs>)> = conversations
-    .into_iter()
-    // Each conversation is one row, however often a caller hands it over (issue #643).
-    .filter(|(conversation, _)| seen.insert(conversation.id))
-    .filter(|(conversation, _)| is_listed_in_chats(conversation) && chip.matches(conversation))
-    .filter(|(conversation, _)| needle.is_empty() || conversation.name.to_lowercase().contains(&needle))
-    .collect();
-  match sort {
-    DmSort::Recent => list.sort_by(|(a, a_at), (b, b_at)| {
-      b_at
-        .cmp(a_at)
-        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    }),
-    DmSort::Alphabetical => list.sort_by_key(|(conversation, _)| conversation.name.to_lowercase()),
-  }
+  let list = matching_in_order(
+    conversations
+      .into_iter()
+      .filter(|(conversation, _)| is_listed_in_chats(conversation))
+      .collect(),
+    sort,
+    filter,
+    chip,
+  );
   let (notes, list): (Vec<_>, Vec<_>) = list
     .into_iter()
-    .map(|(conversation, _)| conversation)
     .partition(|conversation| conversation.is_notes_to_self);
   // A deactivated account's DM leaves the active list, favorite or not (issue #698).
   let (deactivated, list): (Vec<Conversation>, Vec<Conversation>) = list
@@ -240,7 +243,7 @@ pub fn build_direct(
     .into_iter()
     .partition(|conversation| conversation.is_favorite);
   let mut hidden_count = 0;
-  let is_filtering = !needle.is_empty() || chip != HomeFilter::All;
+  let is_filtering = !filter.trim().is_empty() || chip != HomeFilter::All;
   let rest = if limit > 0 && !is_filtering && rest.len() > limit {
     let (keep, cut): (Vec<_>, Vec<_>) = rest
       .into_iter()
@@ -265,6 +268,108 @@ pub fn build_direct(
     sections,
     hidden_count,
   }
+}
+
+/// What [`build_list`] is to show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListOptions<'a> {
+  pub sort: DmSort,
+  pub show_unreads_group: bool,
+  /// Stays in "Unreads" while it is open, as in a space's sidebar ([`SidebarOptions`]).
+  pub maybe_held_open: Option<ConversationId>,
+  pub filter: &'a str,
+  pub chip: HomeFilter,
+  /// The most rows to hand out, 0 for all: the page the sidebar has come to. The list is cut here
+  /// whatever the filters, so what gets rendered doesn't follow the size of the workspace.
+  pub max_rows: usize,
+}
+
+/// The one list of the list layout (#1151), for direct messages and the channels of all spaces: the
+/// notes, unread ones when the setting wants them apart, favorites, everything else, and last the
+/// DMs of deactivated accounts. Each section in `sort` order. Every conversation is one row.
+pub fn build_list(
+  conversations: Vec<(Conversation, Option<TimestampMs>)>,
+  options: &ListOptions,
+) -> DirectList {
+  let list = matching_in_order(conversations, options.sort, options.filter, options.chip);
+  let total = list.len();
+  let mut sections: Vec<DirectSection> = [
+    DirectSectionKind::Notes,
+    DirectSectionKind::Unreads,
+    DirectSectionKind::Favorites,
+    DirectSectionKind::Everything,
+    DirectSectionKind::Deactivated,
+  ]
+  .into_iter()
+  .map(|kind| DirectSection {
+    kind,
+    conversations: Vec::new(),
+  })
+  .collect();
+  for conversation in list {
+    let is_waiting =
+      HomeFilter::Unread.matches(&conversation) || options.maybe_held_open == Some(conversation.id);
+    let kind = if conversation.is_notes_to_self {
+      DirectSectionKind::Notes
+    } else if conversation.has_only_deactivated_others {
+      DirectSectionKind::Deactivated
+    } else if options.show_unreads_group && is_waiting {
+      DirectSectionKind::Unreads
+    } else if conversation.is_favorite {
+      DirectSectionKind::Favorites
+    } else {
+      DirectSectionKind::Everything
+    };
+    if let Some(section) = sections.iter_mut().find(|section| section.kind == kind) {
+      section.conversations.push(conversation);
+    }
+  }
+  let mut room = if options.max_rows == 0 {
+    total
+  } else {
+    options.max_rows
+  };
+  for section in &mut sections {
+    section.conversations.truncate(room);
+    room -= section.conversations.len();
+  }
+  sections.retain(|section| !section.conversations.is_empty());
+  DirectList {
+    hidden_count: total
+      - sections
+        .iter()
+        .map(|section| section.conversations.len())
+        .sum::<usize>(),
+    sections,
+  }
+}
+
+/// One of each conversation, those `chip` lets through whose names contain `filter` (any case), in
+/// `sort` order.
+fn matching_in_order(
+  conversations: Vec<(Conversation, Option<TimestampMs>)>,
+  sort: DmSort,
+  filter: &str,
+  chip: HomeFilter,
+) -> Vec<Conversation> {
+  let needle = filter.trim().to_lowercase();
+  let mut seen = HashSet::new();
+  let mut list: Vec<(Conversation, Option<TimestampMs>)> = conversations
+    .into_iter()
+    // Each conversation is one row, however often a caller hands it over (issue #643).
+    .filter(|(conversation, _)| seen.insert(conversation.id))
+    .filter(|(conversation, _)| chip.matches(conversation))
+    .filter(|(conversation, _)| needle.is_empty() || conversation.name.to_lowercase().contains(&needle))
+    .collect();
+  match sort {
+    DmSort::Recent => list.sort_by(|(a, a_at), (b, b_at)| {
+      b_at
+        .cmp(a_at)
+        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    }),
+    DmSort::Alphabetical => list.sort_by_key(|(conversation, _)| conversation.name.to_lowercase()),
+  }
+  list.into_iter().map(|(conversation, _)| conversation).collect()
 }
 
 /// What a space's rail entry counts for its conversations (#955): the sum of the red numbers their
@@ -710,6 +815,197 @@ mod tests {
       channel.name = "Launch".into();
       let list = build_direct(vec![(channel, None)], DmSort::Recent, 0, "laun", HomeFilter::All);
       assert_eq!(ids(&list, DirectSectionKind::Favorites), vec![2]);
+    }
+  }
+
+  /// #1151: direct messages and the channels of all spaces in one list.
+  mod one_list {
+    use super::*;
+
+    fn channel(id: u64, space: u64) -> Conversation {
+      let mut channel = conversation(id, SidebarCategory::Channels, 0, false);
+      channel.maybe_space = Some(id_from_raw::<SpaceId>(space));
+      channel
+    }
+
+    fn options() -> ListOptions<'static> {
+      ListOptions {
+        sort: DmSort::Recent,
+        show_unreads_group: false,
+        maybe_held_open: None,
+        filter: "",
+        chip: HomeFilter::All,
+        max_rows: 0,
+      }
+    }
+
+    fn rows(list: &DirectList) -> Vec<(DirectSectionKind, u64)> {
+      list
+        .sections
+        .iter()
+        .flat_map(|section| {
+          section
+            .conversations
+            .iter()
+            .map(|conversation| (section.kind, crate::model::raw_id(conversation.id)))
+        })
+        .collect()
+    }
+
+    #[test]
+    fn dms_and_channels_of_all_spaces_mix_by_recency() {
+      let list = build_list(
+        vec![
+          direct(1, 0, Some(20)),
+          (channel(2, 7), Some(30)),
+          (channel(3, 8), Some(10)),
+        ],
+        &options(),
+      );
+      assert_eq!(
+        rows(&list),
+        [
+          (DirectSectionKind::Everything, 2),
+          (DirectSectionKind::Everything, 1),
+          (DirectSectionKind::Everything, 3)
+        ]
+      );
+    }
+
+    #[test]
+    fn notes_then_favorites_then_the_rest_then_deactivated() {
+      let mut notes = direct(1, 0, None);
+      notes.0.is_notes_to_self = true;
+      let mut starred = channel(2, 7);
+      starred.is_favorite = true;
+      let mut gone = direct(3, 0, Some(99));
+      gone.0.has_only_deactivated_others = true;
+      let list = build_list(
+        vec![gone, direct(4, 0, Some(50)), (starred, None), notes],
+        &options(),
+      );
+      assert_eq!(
+        rows(&list),
+        [
+          (DirectSectionKind::Notes, 1),
+          (DirectSectionKind::Favorites, 2),
+          (DirectSectionKind::Everything, 4),
+          (DirectSectionKind::Deactivated, 3)
+        ]
+      );
+    }
+
+    #[test]
+    fn unread_ones_go_apart_only_when_the_setting_asks() {
+      let mut muted = channel(3, 7);
+      muted.unread_count = 9;
+      muted.is_muted = true;
+      let entries = vec![direct(1, 2, Some(1)), (channel(2, 7), Some(2)), (muted, Some(3))];
+      let plain = build_list(entries.clone(), &options());
+      assert_eq!(plain.sections.len(), 1);
+      let apart = ListOptions {
+        show_unreads_group: true,
+        ..options()
+      };
+      assert_eq!(
+        rows(&build_list(entries, &apart)),
+        [
+          (DirectSectionKind::Unreads, 1),
+          (DirectSectionKind::Everything, 3),
+          (DirectSectionKind::Everything, 2)
+        ],
+        "a muted channel without a mention waits for nobody"
+      );
+    }
+
+    #[test]
+    fn the_conversation_opened_while_unread_stays_in_unreads() {
+      let held = ListOptions {
+        show_unreads_group: true,
+        maybe_held_open: Some(id_from_raw(2)),
+        ..options()
+      };
+      assert_eq!(
+        rows(&build_list(vec![(channel(2, 7), None)], &held)),
+        [(DirectSectionKind::Unreads, 2)]
+      );
+    }
+
+    #[test]
+    fn the_channels_chip_and_the_text_filter_narrow_it() {
+      let mut launch = channel(2, 7);
+      launch.name = "Launch".into();
+      let entries = vec![direct(1, 0, None), (launch, None), (channel(3, 8), None)];
+      let channels = ListOptions {
+        chip: HomeFilter::Channels,
+        ..options()
+      };
+      assert_eq!(
+        build_list(entries.clone(), &channels).sections[0]
+          .conversations
+          .len(),
+        2
+      );
+      let people = ListOptions {
+        chip: HomeFilter::People,
+        ..options()
+      };
+      assert_eq!(
+        rows(&build_list(entries.clone(), &people)),
+        [(DirectSectionKind::Everything, 1)]
+      );
+      let named = ListOptions {
+        filter: " LAUN",
+        ..options()
+      };
+      assert_eq!(
+        rows(&build_list(entries, &named)),
+        [(DirectSectionKind::Everything, 2)]
+      );
+    }
+
+    #[test]
+    fn a_conversation_handed_over_twice_is_one_row() {
+      let list = build_list(vec![(channel(2, 7), None), (channel(2, 7), None)], &options());
+      assert_eq!(rows(&list).len(), 1);
+    }
+
+    /// What gets rendered doesn't follow the size of the workspace: filtering doesn't lift the cut.
+    #[test]
+    fn a_big_workspace_hands_out_one_page_and_counts_the_rest() {
+      let entries: Vec<_> = (0..5000)
+        .map(|id| (channel(id, id % 40), Some(id as TimestampMs)))
+        .collect();
+      let paged = ListOptions {
+        max_rows: 100,
+        ..options()
+      };
+      let list = build_list(entries.clone(), &paged);
+      assert_eq!(rows(&list).len(), 100);
+      assert_eq!(list.hidden_count, 4900);
+      assert_eq!(rows(&list)[0].1, 4999, "the newest come first");
+      let filtered = ListOptions { filter: "c", ..paged };
+      assert_eq!(rows(&build_list(entries.clone(), &filtered)).len(), 100);
+      assert_eq!(build_list(entries, &options()).hidden_count, 0);
+    }
+
+    #[test]
+    fn the_cut_takes_the_sections_in_order() {
+      let mut starred = channel(1, 7);
+      starred.is_favorite = true;
+      let paged = ListOptions {
+        max_rows: 1,
+        ..options()
+      };
+      let list = build_list(vec![(channel(2, 7), Some(9)), (starred, Some(1))], &paged);
+      assert_eq!(rows(&list), [(DirectSectionKind::Favorites, 1)]);
+      assert_eq!(list.hidden_count, 1);
+    }
+
+    #[test]
+    fn the_layout_stays_spaces_for_preferences_from_before_it() {
+      let stored = crate::prefs::Preferences::from_json(r#"{"sidebar":{"sort":"default"}}"#);
+      assert_eq!(stored.sidebar.layout, crate::prefs::SidebarLayout::Spaces);
     }
   }
 

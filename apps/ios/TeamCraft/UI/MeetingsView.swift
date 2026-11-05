@@ -18,7 +18,9 @@ struct MeetingsView: View {
           } else {
             // A repeating meeting is listed once per occurrence, all with the series' ID.
             List(meetings, id: \.occurrenceKey) { meeting in
-              row(meeting)
+              MeetingRow(account: account, meeting: meeting, onJoin: { dismiss() }) { answer in
+                await respond(to: meeting, with: answer)
+              }
             }
           }
         } else {
@@ -38,20 +40,37 @@ struct MeetingsView: View {
     }
   }
 
-  private func row(_ meeting: Meeting) -> some View {
+  private func respond(to meeting: Meeting, with answer: RsvpAnswer) async {
+    if await model.setRsvp(meetingId: meeting.id, answer: answer) {
+      meetings = await model.meetings()
+    } else {
+      isRsvpFailed = true
+    }
+  }
+}
+
+/// A meeting's title and time, with the buttons to join its call and to answer the invitation.
+struct MeetingRow: View {
+  @Environment(AppModel.self) private var model
+  let account: Account
+  let meeting: Meeting
+  let onJoin: () -> Void
+  let onAnswer: (RsvpAnswer) async -> Void
+
+  var body: some View {
     VStack(alignment: .leading, spacing: 8) {
       Text(meeting.title).font(.headline)
-      Text(timeText(meeting)).font(.subheadline).foregroundStyle(Theme.textMuted)
+      Text(timeText).font(.subheadline).foregroundStyle(Theme.textMuted)
       HStack {
         Button("meeting_join") {
-          dismiss()
+          onJoin()
           model.calls.startCall(conversationId: meeting.conversationId, displayName: meeting.title)
         }
         .buttonStyle(.borderedProminent)
         if let answer = meeting.rsvp(of: account.userId) {
           Menu {
             ForEach([RsvpAnswer.accepted, .tentative, .declined]) { choice in
-              Button { Task { await respond(to: meeting, with: choice) } } label: {
+              Button { Task { await onAnswer(choice) } } label: {
                 if choice == answer { Label(choice.title, systemImage: "checkmark") } else { Text(choice.title) }
               }
             }
@@ -65,20 +84,12 @@ struct MeetingsView: View {
     .padding(.vertical, 4)
   }
 
-  private func timeText(_ meeting: Meeting) -> String {
+  private var timeText: String {
     let start = meeting.startDate.formatted(date: .abbreviated, time: .shortened)
     let end = meeting.endDate.formatted(
       Calendar.current.isDate(meeting.startDate, inSameDayAs: meeting.endDate)
         ? Date.FormatStyle(date: .omitted, time: .shortened) : Date.FormatStyle(date: .abbreviated, time: .shortened))
     return "\(start) – \(end)"
-  }
-
-  private func respond(to meeting: Meeting, with answer: RsvpAnswer) async {
-    if await model.setRsvp(meetingId: meeting.id, answer: answer) {
-      meetings = await model.meetings()
-    } else {
-      isRsvpFailed = true
-    }
   }
 }
 

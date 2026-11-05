@@ -265,6 +265,7 @@ files-filter-all = All
 files-filter-media = Images and videos
 files-filter-documents = Documents
 files-all-empty = Files and images shared in any of your conversations show up here.
+files-space-empty = Files and images shared in this space's channels show up here.
 
 # Downloads list of the desktop app (top bar)
 downloads-title = Downloads

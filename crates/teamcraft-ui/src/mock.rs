@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 use teamcraft_proto::{BackgroundId, ErrorCode, HistoryPolicy};
 
 use teamcraft_client_api::actions::{
-  FileInfo, LinkedMessage, MessageExtras, PermalinkTarget, ShareLink, ShareLinkOptions, WorkspaceEvent,
+  FileInfo, LinkedMessage, MessageExtras, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions,
+  WorkspaceEvent,
 };
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
@@ -1018,6 +1019,24 @@ impl ChatBackend for MockBackend {
       true => state.saved.insert(message),
       false => state.saved.remove(&message),
     };
+  }
+
+  fn saved_items(&self) -> Vec<SavedItem> {
+    let state = self.state.borrow();
+    state
+      .messages
+      .iter()
+      .flat_map(|(conversation, messages)| messages.iter().map(move |message| (*conversation, message)))
+      .filter(|(_, message)| state.saved.contains(&message.id))
+      .map(|(conversation, message)| SavedItem {
+        message: message.clone(),
+        conversation_name: self
+          .conversation(conversation)
+          .map(|found| found.name)
+          .unwrap_or_default(),
+        saved_at: message.sent_at,
+      })
+      .collect()
   }
 
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {

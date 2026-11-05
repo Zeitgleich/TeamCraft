@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="space_views_open">Personen, Anrufe, Meetings, gespeicherte Nachrichten und Dateien anzeigen</string>
+  <string name="space_views_switch">Space wechseln</string>
+  <string name="space_tab_people">Personen</string>
+  <string name="space_tab_calls">Anrufe</string>
+  <string name="space_tab_meetings">Meetings</string>
+  <string name="space_tab_saved">Gespeichert</string>
+  <string name="space_tab_files">Dateien</string>
+  <string name="space_person_guest">Gast</string>
+  <string name="space_people_empty">Noch niemand ist in diesem Space.</string>
+  <string name="space_people_hidden">Nur Mitglieder eines Space sehen, wer darin ist.</string>
+  <string name="space_people_failed">Die Mitglieder dieses Space konnten nicht geladen werden.</string>
+  <string name="space_calls_empty">Anrufe in den Kanälen dieses Space erscheinen hier.</string>
+  <string name="space_call_missed">Verpasst</string>
+  <string name="space_call_incoming">Eingehend</string>
+  <string name="space_call_outgoing">Ausgehend</string>
+  <string name="space_call_back">Anrufen</string>
+  <string name="space_meetings_empty">Meetings, die in diesem Space geplant werden, erscheinen hier.</string>
+  <string name="space_saved_empty">Nachrichten, die du aus den Kanälen dieses Space speicherst, erscheinen hier.</string>
+  <string name="space_files_empty">Dateien und Bilder aus den Kanälen dieses Space erscheinen hier.</string>
+</resources>

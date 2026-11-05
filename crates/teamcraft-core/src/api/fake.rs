@@ -3342,6 +3342,7 @@ impl ServerApi for FakeServerApi {
         has_lobby: true,
         organizer_user_id: me,
         conversation_id,
+        maybe_space: None,
         join_url: format!("https://chat.example.com/meeting/{conversation_id}"),
         maybe_recurrence: None,
         is_occurrence_cancelled: false,

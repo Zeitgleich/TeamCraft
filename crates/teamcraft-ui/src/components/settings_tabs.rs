@@ -21,7 +21,7 @@ use crate::components::update_notice::UpdatesSection;
 use crate::feedback::{ActionFailure, FailureKind, PendingAction, report_failure};
 use crate::i18n::{Locale, use_i18n};
 use crate::keys::t_with_shortcuts;
-use crate::prefs::{CallPrefs, Density, ImageSize, SidebarSort, TextSize, Zoom};
+use crate::prefs::{CallPrefs, Density, ImageSize, SidebarLayout, SidebarSort, TextSize, Zoom};
 use crate::reactive::SetIfAlive;
 use crate::settings::{AudioLimit, MediaCacheLimit, MediaCacheMaxAge, PreviewLimit, SendMode, Theme};
 use crate::state::use_app_state;
@@ -44,6 +44,19 @@ pub fn AppearanceSection() -> impl IntoView {
   view! {
     <SettingsCard heading="settings-theme">
       <ThemeTiles />
+    </SettingsCard>
+    <SettingsCard heading="settings-tab-sidebar">
+      <SegmentedRow
+        label="settings-sidebar-layout"
+        hint="settings-sidebar-layout-hint"
+        options=slug_options(&SidebarLayout::ALL.map(SidebarLayout::slug), "settings-sidebar-layout-")
+        value=Signal::derive(move || prefs.with(|all| all.sidebar.layout.slug().to_owned()))
+        on_change=Callback::new(move |slug: String| {
+          if let Some(layout) = SidebarLayout::from_slug(&slug) {
+            prefs.update(|all| all.sidebar.layout = layout);
+          }
+        })
+      />
     </SettingsCard>
     <SettingsCard heading="settings-messages-look" hint="settings-messages-look-hint">
       <MessagePreview />
@@ -334,6 +347,8 @@ pub fn PreferencesSection() -> impl IntoView {
         hint="settings-sidebar-grouped-hint"
         value=Signal::derive(move || prefs.get().sidebar.is_grouped_by_space)
         on_change=Callback::new(move |value: bool| prefs.update(|all| all.sidebar.is_grouped_by_space = value))
+        // The one list replaces the grouping; it comes back with the Spaces layout.
+        is_disabled=Signal::derive(move || prefs.get().sidebar.layout == SidebarLayout::List)
       />
       <SwitchRow
         label="settings-reopen-last"

@@ -254,6 +254,14 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let main_view = Memo::new(move |_| state.view.get());
   // The sidebar mounts again only when the place changes, not on every conversation opened.
   let rail = Memo::new(move |_| state.rail.get());
+  // Opening a channel moves the rail to its space. In the list layout that is no other list: the
+  // sidebar stays, with its scroll position and filter (#1151).
+  let sidebar_place = Memo::new(move |_| match (rail.get(), state.is_list_layout()) {
+    (RailEntry::Activity, _) => SidebarPlace::Activity,
+    (_, true) => SidebarPlace::List,
+    (RailEntry::Chats, false) => SidebarPlace::Chats,
+    (RailEntry::Space, false) => SidebarPlace::Space,
+  });
   let side_panel = Memo::new(move |_| state.panel.get());
   let open_conversation = Memo::new(move |_| match main_view.get() {
     MainView::Conversation(id) => Some(id),
@@ -303,10 +311,11 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <Show when=move || !matches!(state.view.get(), MainView::Admin(_)) fallback=|| ()>
           <SpaceRail />
           // The sidebar is the selected place's list: Chats, a space or Activity (#752).
-          {move || match rail.get() {
-            RailEntry::Chats => view! { <HomeSidebar /> }.into_any(),
-            RailEntry::Space => view! { <Sidebar /> }.into_any(),
-            RailEntry::Activity => lazy_area(Place::Sidebar, || areas::activity_list(())),
+          {move || match sidebar_place.get() {
+            SidebarPlace::Chats => view! { <HomeSidebar /> }.into_any(),
+            SidebarPlace::List => view! { <HomeSidebar is_list=true /> }.into_any(),
+            SidebarPlace::Space => view! { <Sidebar /> }.into_any(),
+            SidebarPlace::Activity => lazy_area(Place::Sidebar, || areas::activity_list(())),
           }}
           // Drag the sidebar's edge to resize it (#842); the phone layout has its own panes.
           <Show when=move || !state.is_compact() fallback=|| ()>
@@ -1433,6 +1442,16 @@ struct ActivityWatch {
   maybe_os: Cell<Option<tauri::OsAttention>>,
   lock: Cell<LockReading>,
   reporter: RefCell<AttentionReporter>,
+}
+
+/// Which list the sidebar shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarPlace {
+  Chats,
+  /// The list layout's one list, whatever the rail stands on but Activity (#1151).
+  List,
+  Space,
+  Activity,
 }
 
 /// Two reports from the same input: no input for "Away after" marks this device idle (the server

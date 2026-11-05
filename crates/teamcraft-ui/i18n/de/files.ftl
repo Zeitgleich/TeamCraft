@@ -265,6 +265,7 @@ files-filter-all = Alle
 files-filter-media = Bilder und Videos
 files-filter-documents = Dokumente
 files-all-empty = Dateien und Bilder aus allen deinen Unterhaltungen erscheinen hier.
+files-space-empty = Dateien und Bilder aus den Kanälen dieses Space erscheinen hier.
 
 # Download-Liste der Desktop-App (obere Leiste)
 downloads-title = Downloads

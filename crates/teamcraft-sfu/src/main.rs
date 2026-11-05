@@ -40,6 +40,9 @@
 //! - `TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS` (joined, default 1024),
 //!   `TEAMCRAFT_SFU_FALLBACK_MAX_UNJOINED_CONNECTIONS` (default 128),
 //!   `TEAMCRAFT_SFU_FALLBACK_HANDSHAKE_TIMEOUT_MILLIS` (default 3000),
+//!   `TEAMCRAFT_SFU_FALLBACK_FIRST_FRAME_TIMEOUT_MILLIS` (the `join` of a connection that showed no
+//!   token in the upgrade, default 3000), `TEAMCRAFT_SFU_FALLBACK_REQUIRE_UPGRADE_TOKEN=1` (refuse
+//!   such connections at the upgrade, once every client sends one, which those of before #1297 do not; default `0`),
 //!   `TEAMCRAFT_SFU_FALLBACK_QUEUE_BYTES`
 //!   (media waiting for one connection, default 1 MiB), `TEAMCRAFT_SFU_FALLBACK_QUEUE_MAX_AGE_MILLIS`
 //!   (older media is dropped, default 300) and `TEAMCRAFT_SFU_FALLBACK_SEND_BUFFER_BYTES` (a
@@ -205,6 +208,16 @@ fn apply_fallback_env(fallback: &mut FallbackConfig) -> anyhow::Result<()> {
   if let Some(millis) = env_count("TEAMCRAFT_SFU_FALLBACK_HANDSHAKE_TIMEOUT_MILLIS")? {
     fallback.handshake_timeout = Duration::from_millis(u64::try_from(millis)?);
   }
+  if let Some(millis) = env_count("TEAMCRAFT_SFU_FALLBACK_FIRST_FRAME_TIMEOUT_MILLIS")? {
+    fallback.first_frame_timeout = Duration::from_millis(u64::try_from(millis)?);
+  }
+  fallback.requires_upgrade_token = match std::env::var("TEAMCRAFT_SFU_FALLBACK_REQUIRE_UPGRADE_TOKEN")
+    .as_deref()
+  {
+    Err(_) | Ok("0") => false,
+    Ok("1") => true,
+    Ok(other) => anyhow::bail!("TEAMCRAFT_SFU_FALLBACK_REQUIRE_UPGRADE_TOKEN must be 0 or 1, not {other:?}"),
+  };
   if let Some(connections) = env_count("TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS")? {
     fallback.max_connections = connections;
   }
