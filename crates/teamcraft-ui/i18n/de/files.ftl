@@ -312,10 +312,7 @@ share-into-recent = Zuletzt
 share-into-others = Alle Unterhaltungen
 share-into-no-match = Keine passende Unterhaltung.
 share-into-empty = Unterhaltungen, in denen du schreiben kannst, erscheinen hier nach dem Abgleich.
-share-into-files = { $count ->
-    [one] { $count } Datei
-   *[other] { $count } Dateien
-  }
+share-into-from-outside = Das kommt aus einer anderen App oder von einer Website. Prüfe es, bevor du es sendest.
 share-into-left-out = { $count ->
     [one] { $count } Datei wurde ausgelassen: Sie ist nicht mehr da oder es waren zu viele.
    *[other] { $count } Dateien wurden ausgelassen: Sie sind nicht mehr da oder es waren zu viele.

@@ -121,7 +121,11 @@ impl DroppedFilesState {
     }
     let mut files = Vec::new();
     for path in pending.paths {
-      // Follows symbolic links: the user dropped what the link points to.
+      // The user dropped what a link points to, and that is what they see and what goes out.
+      let Ok(path) = path.canonicalize() else {
+        tracing::debug!("a dropped file is gone");
+        continue;
+      };
       let Ok(metadata) = std::fs::metadata(&path) else {
         tracing::debug!("a dropped file is gone");
         continue;
@@ -144,10 +148,21 @@ impl DroppedFilesState {
   }
 
   /// Files were shared to the app from outside; they join a share that still waits, without the
-  /// ones it has already.
+  /// ones it has already. Links are resolved now: the user sees the name of the file that goes out,
+  /// and that file is what is read later, whatever the link points to by then.
   pub fn shared(&self, paths: Vec<PathBuf>) {
+    let count = paths.len();
+    let resolved: Vec<PathBuf> = paths
+      .into_iter()
+      .filter_map(|path| path.canonicalize().ok())
+      .collect();
+    self.keep_shared(count - resolved.len(), resolved);
+  }
+
+  fn keep_shared(&self, unresolved: usize, resolved: Vec<PathBuf>) {
     let mut store = self.lock();
-    for path in paths {
+    store.shared_left_out += unresolved;
+    for path in resolved {
       if store.shared.iter().any(|known| known.path == path) {
         continue;
       }
@@ -289,6 +304,10 @@ fn read_chunk(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
     return Err(std::io::Error::other("the file is larger than a drop may be"));
   }
   let length = CHUNK_BYTES.min(READ_MAX_BYTES - offset);
+  // The path was resolved on receipt: something else there now is not what the user was shown.
+  if !std::fs::symlink_metadata(path)?.is_file() {
+    return Err(std::io::Error::other("no longer the file that was dropped"));
+  }
   let mut file = File::open(path)?;
   file.seek(SeekFrom::Start(offset))?;
   let mut chunk = Vec::new();
@@ -516,7 +535,7 @@ mod tests {
       assert_eq!(files.len(), 1, "folders and missing files are left out");
       assert_eq!(files[0].name, "notes.txt");
       assert_eq!(files[0].size_bytes, 5);
-      assert_eq!(state.path_of(files[0].id), Some(file));
+      assert_eq!(state.path_of(files[0].id), Some(file.canonicalize().unwrap()));
       assert!(state.take(now).is_empty(), "a drop is taken once");
       assert_eq!(state.path_of(files[0].id + 1), None);
     }
@@ -526,9 +545,10 @@ mod tests {
       let directory = scratch_dir("share");
       let file = directory.join("report.pdf");
       std::fs::write(&file, b"12345").unwrap();
+      let resolved = file.canonicalize().unwrap();
       let state = DroppedFilesState::default();
 
-      state.shared(vec![file.clone(), directory.join("gone.pdf"), file.clone()]);
+      state.shared(vec![file.clone(), directory.join("gone.pdf"), file]);
       let waiting = state.waiting_share();
       assert_eq!(waiting.files.len(), 1, "the same file twice counts once");
       assert_eq!(waiting.left_out, 1, "a file that is gone is reported");
@@ -538,34 +558,64 @@ mod tests {
         "listing doesn't consume the share"
       );
       let id = waiting.files[0].id;
-      assert_eq!(state.path_of(id), Some(file.clone()));
+      assert_eq!(state.path_of(id), Some(resolved.clone()));
 
       state.finish_share();
       assert!(state.waiting_share().files.is_empty());
       assert_eq!(state.path_of(id), None, "no longer readable");
       assert_eq!(
         state.stageable_path(id),
-        Some(file),
+        Some(resolved),
         "the composer may still send it"
       );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_shows_and_sends_the_file_it_points_to() {
+      let directory = scratch_dir("link");
+      let secret = directory.join("private-key");
+      std::fs::write(&secret, b"key").unwrap();
+      let link = directory.join("holiday.jpg");
+      std::os::unix::fs::symlink(&secret, &link).unwrap();
+      let state = DroppedFilesState::default();
+      let now = Instant::now();
+
+      state.shared(vec![link.clone()]);
+      let waiting = state.waiting_share();
+      assert_eq!(waiting.files[0].name, "private-key");
+      let resolved = secret.canonicalize().unwrap();
+      assert_eq!(state.stageable_path(waiting.files[0].id), Some(resolved.clone()));
+
+      state.dropped(vec![link.clone()], now);
+      let dropped = state.take(now);
+      assert_eq!(dropped[0].name, "private-key");
+
+      // A link pointed elsewhere after the receipt changes nothing.
+      let other = directory.join("other");
+      std::fs::write(&other, b"other").unwrap();
+      std::fs::remove_file(&link).unwrap();
+      std::os::unix::fs::symlink(&other, &link).unwrap();
+      assert_eq!(state.stageable_path(waiting.files[0].id), Some(resolved));
     }
 
     #[test]
     fn a_share_is_bounded_and_says_how_much_it_left_out() {
       let state = DroppedFilesState::default();
       let paths = (0..MAX_SHARED_FILES + 2).map(|index| PathBuf::from(format!("/gone/{index}")));
-      state.shared(paths.collect());
-      assert_eq!(state.waiting_share().left_out, MAX_SHARED_FILES + 2);
-      assert_eq!(state.lock().shared.len(), MAX_SHARED_FILES);
+      state.keep_shared(1, paths.collect());
+      let store = state.lock();
+      assert_eq!(store.shared.len(), MAX_SHARED_FILES);
+      assert_eq!(store.shared_left_out, 3);
     }
 
     #[test]
     fn only_the_newest_files_stay_stageable() {
       let state = DroppedFilesState::default();
-      state.shared(vec![PathBuf::from("/first")]);
+      state.keep_shared(0, vec![PathBuf::from("/first")]);
       state.finish_share();
       for index in 0..MAX_STAGEABLE_FILES {
-        state.shared(vec![PathBuf::from(format!("/next/{index}"))]);
+        state.keep_shared(0, vec![PathBuf::from(format!("/next/{index}"))]);
         state.finish_share();
       }
       assert_eq!(state.stageable_path(0), None);

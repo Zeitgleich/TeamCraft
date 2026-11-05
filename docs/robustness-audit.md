@@ -632,10 +632,12 @@ session (the core has no call-state API yet).
 Added after the audit above; every client copies a share out of reach of a kill, except where listed.
 Nothing here was run on a device yet: docs/manual-tests/share-into.md.
 
-| Gap                                                                                                                                | Severity   | Owner |
-|------------------------------------------------------------------------------------------------------------------------------------|------------|-------|
-| Desktop: a share waits in memory as a list of paths; a killed app forgets it, the files stay where they are                        | low        | #208  |
-| Web: without an active service worker that knows `/share-target`, the browser posts the plaintext to the web server (e2ee.md §9.3) | medium     | #208  |
-| Web: `formData()` of a very large share is the browser's; not measured                                                             | unverified | #208  |
-| Attachments in a composer (shared or picked) aren't kept across a kill before the send; the outbox starts at send                  | medium     | #208  |
-| iOS: the extension can't open the app; a notification and the sheet's text lead there, and without permission only the text does   | low        | #208  |
+| Gap                                                                                                                                                                                                            | Severity   | Owner |
+|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------|-------|
+| Desktop: a share waits in memory as a list of paths; a killed app forgets it, the files stay where they are                                                                                                    | low        | #208  |
+| Web: without an active service worker that knows `/share-target`, the browser posts the plaintext to the network; the proxy has to refuse it unbuffered (e2ee.md §9.3). Not offered by any browser until #1324 | medium     | #1324 |
+| Web: `formData()` of a very large share is the browser's; not measured                                                                                                                                         | unverified | #1324 |
+| Web: a site can plant up to the cap of waiting shares and so block real ones until they are handled or expire; the picker shows them as from outside                                                           | low        | #1324 |
+| Attachments in a composer (shared or picked) aren't kept across a kill before the send; the outbox starts at send                                                                                              | medium     | #208  |
+| iOS: the extension can't open the app; a notification and the sheet's text lead there, and without permission only the text does                                                                               | low        | #208  |
+| iOS: the inbox has no cap on shares or bytes (Android and web have one); the 7-day pruning bounds it                                                                                                           | low        | #208  |

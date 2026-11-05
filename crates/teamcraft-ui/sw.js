@@ -53,13 +53,18 @@ const PENDING_STATE = '/pending';
 const PUSH_CONFIG_CACHE = 'teamcraft-push-config';
 const PUSH_WASM = '__PUSH_WASM__';
 
-// Sharing into the installed app (#208, the manifest's `share_target`). The content stays in this
-// browser: it waits in a cache of its own until the signed-in page takes it (share_into.rs), and
-// nothing goes to the server. File bodies are the browser's blobs on disk, not held in memory.
+// Sharing into the installed app (#208). The manifest offers this only from a later release on
+// (#1324), once workers with this handling are out; until then only a form on some site can post
+// here, which is why waiting shares are capped and the picker shows what came in. The content stays in
+// this browser in a cache of its own until the signed-in page takes it (share_into.rs); nothing goes
+// to the server. File bodies are the browser's blobs on disk, not held in memory.
 const SHARE_PATH = '/share-target';
 const SHARE_CACHE = 'teamcraft-share-inbox';
 const MAX_SHARED_FILES = 10;
 const MAX_SHARED_TEXT_CHARS = 64 * 1024;
+// What may wait at once, so that a site posting forms here can't fill the disk.
+const MAX_WAITING_SHARES = 5;
+const MAX_WAITING_BYTES = 4 * 1024 * 1024 * 1024;
 // A share nobody picked a conversation for goes after this long (plaintext at rest).
 const SHARE_KEPT_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -97,6 +102,8 @@ self.addEventListener('activate', (event) => {
         }
       }
       await pruneReleases();
+      // Shares past their time go without waiting for another share to arrive.
+      if (await caches.has(SHARE_CACHE)) await pruneShares(await caches.open(SHARE_CACHE));
       await self.clients.claim();
       await broadcast();
     })(),
@@ -157,6 +164,11 @@ async function receiveShare(request) {
   const cache = await caches.open(SHARE_CACHE);
   try {
     await pruneShares(cache);
+    const waiting = await waitingShares(cache);
+    if (waiting.count >= MAX_WAITING_SHARES) return Response.redirect('/?share-failed', 303);
+    let room = MAX_WAITING_BYTES - waiting.bytes;
+    // Told up front: a body that can't fit isn't even parsed.
+    if (Number(request.headers.get('content-length')) > room) return Response.redirect('/?share-failed', 303);
     const form = await request.formData();
     const text = (name) => {
       const value = form.get(name);
@@ -165,11 +177,13 @@ async function receiveShare(request) {
     const sent = form.getAll('files').filter((file) => file instanceof File);
     const files = [];
     for (const file of sent.slice(0, MAX_SHARED_FILES)) {
+      if (file.size > room) continue;
+      room -= file.size;
       const path = `/share/${id}/file/${files.length}`;
       await cache.put(path, new Response(file));
-      files.push({ path, name: file.name, media_type: file.type });
+      files.push({ path, name: file.name, media_type: file.type, size: file.size });
     }
-    const left_out = Math.max(0, sent.length - MAX_SHARED_FILES);
+    const left_out = sent.length - files.length;
     const meta = { title: text('title'), text: text('text'), url: text('url'), files, left_out };
     // Last: a share without its list is incomplete, and the next share prunes it.
     await cache.put(`/share/${id}/meta`, new Response(JSON.stringify(meta)));
@@ -178,6 +192,17 @@ async function receiveShare(request) {
     await deleteShare(cache, id);
     return Response.redirect('/?share-failed', 303);
   }
+}
+
+// How many complete shares wait, and the bytes of their files.
+async function waitingShares(cache) {
+  const lists = (await cache.keys()).filter((key) => new URL(key.url).pathname.endsWith('/meta'));
+  let bytes = 0;
+  for (const key of lists) {
+    const meta = await (await cache.match(key)).json();
+    for (const file of meta.files) bytes += file.size || 0;
+  }
+  return { count: lists.length, bytes };
 }
 
 function isFromAnotherSite(request) {

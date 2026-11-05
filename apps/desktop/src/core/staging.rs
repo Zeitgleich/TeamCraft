@@ -21,6 +21,8 @@ pub enum StagingError {
   ChunkTooLarge,
   #[error("the chunk at {offset} doesn't continue the staged file, which has {staged} bytes")]
   OutOfOrder { offset: u64, staged: u64 },
+  #[error("the file to stage is no longer a regular file")]
+  NotAFile,
   #[error("the staged file could not be written: {0}")]
   Io(#[from] std::io::Error),
 }
@@ -59,6 +61,11 @@ pub fn append_chunk(directory: &Path, id: &str, offset: u64, chunk: &[u8]) -> Re
 pub fn copy_file(directory: &Path, id: &str, source: &Path) -> Result<PathBuf, StagingError> {
   if id.len() != STAGE_ID_LEN || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
     return Err(StagingError::InvalidId);
+  }
+  // `source` was resolved on receipt: anything else there now (a link, a pipe, which would block
+  // here) isn't what the user was shown.
+  if !std::fs::symlink_metadata(source)?.is_file() {
+    return Err(StagingError::NotAFile);
   }
   create_private_dir(directory)?;
   let path = directory.join(id);
@@ -115,6 +122,19 @@ mod tests {
     let gone = directory.join("gone");
     assert!(copy_file(&staging, &"1".repeat(STAGE_ID_LEN), &gone).is_err());
     assert!(!staging.join("1".repeat(STAGE_ID_LEN)).exists());
+    assert!(matches!(
+      copy_file(&staging, &id, &staging),
+      Err(StagingError::NotAFile)
+    ));
+    #[cfg(unix)]
+    {
+      let link = directory.join("link");
+      std::os::unix::fs::symlink(&source, &link).unwrap();
+      assert!(matches!(
+        copy_file(&staging, &id, &link),
+        Err(StagingError::NotAFile)
+      ));
+    }
     std::fs::remove_dir_all(&directory).unwrap();
   }
 

@@ -41,7 +41,7 @@ Needs a signed build: the extension and the app talk through the App Group.
       memory of the webview stays flat, and it sends.
 - [ ] Linux: "Open with" > TeamCraft in the file manager with several files selected and the app
       running: the window comes forward with the picker. No file type's default app changed.
-- [ ] `teamcraft-desktop --share a.pdf b.png` from a terminal, app closed: the app starts and offers
+- [ ] `teamcraft-desktop --share -- a.pdf b.png` from a terminal, app closed: the app starts and offers
       the picker after the sign-in. With "start minimized" on, the window shows.
 - [ ] Windows (NSIS): Explorer > Send to > TeamCraft with several files. The entry goes with the
       uninstaller.
@@ -53,12 +53,18 @@ Needs a signed build: the extension and the app talk through the App Group.
 
 ## Web (installed app, Chrome or Edge on Android, ChromeOS or Windows)
 
-Safari has no share target; there sharing into the web app isn't offered.
+The share target isn't active yet: the manifest declares it a release after the service workers that
+handle it (#1324), and these steps apply from then on. Until then, no share sheet offers the web app.
+Safari has no share target at all.
 
 - [ ] Install the app, reopen it once so the new service worker runs, then share a picture from
-      another app: TeamCraft is offered, opens, and shows the picker.
+      another app: TeamCraft is offered, opens, and shows the picker with the file's name and size.
 - [ ] Share a page: the composer has its title and address.
 - [ ] Close the app with the picker open and open it again: the share is still there. The network tab
       never shows the file going to `/share-target`.
 - [ ] Share while signed out: the notice says it is kept; after the sign-in the picker opens.
+- [ ] A form on another site that posts to `/share-target` with its referrer hidden: the picker says it
+      came from outside and lists the files; after five waiting shares the next says it failed.
+- [ ] With the service worker unregistered, `curl -i -X POST https://<host>/share-target`: `303` to
+      `/?share-failed`, from the proxy without the body being buffered; the page shows the notice.
 - [ ] Paste a picture and a copied file into the composer: both attach.

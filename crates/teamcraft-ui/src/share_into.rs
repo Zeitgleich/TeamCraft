@@ -1,5 +1,6 @@
-//! Sharing into the app from outside it (#208): the file manager's "Send to" on the desktop, the
-//! system's share sheet in an installed web app.
+//! Sharing into the app from outside it (#208): the file manager's "Send to" on the desktop, and the
+//! service worker's cache in the browser, which no share sheet offers until the manifest declares the
+//! share target (#1324).
 //!
 //! What was shared waits outside the signed-in app (the shell's list of paths, the service worker's
 //! cache in `sw.js`), so it survives the sign-in and, in the browser, a closed tab. Once signed in
@@ -13,12 +14,15 @@ use std::time::Duration;
 use leptos::prelude::*;
 use serde::Deserialize;
 use teamcraft_client_api::admin::format_bytes;
+use teamcraft_client_api::failure::ActionFailure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::auth::tauri;
+use crate::clock::now_ms;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
+use crate::feedback::PendingAction;
 use crate::i18n::{I18n, use_i18n};
 use crate::media_formats::media_type_for;
 use crate::model::{ConversationId, TimestampMs};
@@ -36,8 +40,12 @@ const MAX_SHARED_TEXT_CHARS: usize = 64 * 1024;
 const NOTICE_DELAY: Duration = Duration::from_millis(1500);
 /// How many of the most recently active conversations the picker offers on top.
 const RECENT_COUNT: usize = 5;
+/// How much of a shared text the picker shows.
+const SHOWN_TEXT_CHARS: usize = 200;
 /// Conversations listed below them; the filter reaches the others.
 const MAX_LISTED: usize = 100;
+/// A share nobody picked a conversation for goes after this long (`SHARE_KEPT_MS` in `sw.js`).
+const SHARE_KEPT_MS: TimestampMs = 7 * 24 * 60 * 60 * 1000;
 
 thread_local! {
   /// The app's inbox, for the sign-out, which outlives the components it was started from.
@@ -195,45 +203,45 @@ impl ShareInbox {
   }
 
   /// Sends the waiting share to the composer of `target`. The share is released only after its
-  /// small files were read, so a failure leaves it waiting.
-  fn pick(self, state: AppState, i18n: I18n, target: ConversationId) {
-    let Some(share) = self.maybe_waiting.get_untracked() else {
-      return;
+  /// small files were read, so a failure leaves it waiting. The failure is the notice's, so what
+  /// goes to the `PendingAction` that guards a second pick is always a success.
+  async fn pick(self, state: AppState, i18n: I18n, target: ConversationId) -> Result<(), ActionFailure> {
+    let Some(share) = self.maybe_waiting.try_get_untracked().flatten() else {
+      return Ok(());
     };
-    leptos::task::spawn_local(async move {
-      let mut files = share.files;
-      let mut in_shell = Vec::new();
-      let maybe_limit = state.try_read(|backend| backend.max_upload_bytes()).flatten();
-      for file in share.in_shell {
-        if let Some(limit) = maybe_limit.filter(|limit| file.size_bytes > *limit) {
-          let args = [("name", file.name.as_str()), ("limit", &format_bytes(limit))];
-          let text = i18n.t_with("composer-file-too-large", &args);
-          state.show_error(text, "a shared file is larger than the upload limit".to_owned());
-        } else if file.is_read_whole() {
-          match shell_drop::read(&file).await {
-            Ok(file) => files.push(file),
-            Err(error) => {
-              tracing::warn!(%error, "could not read a shared file");
-              self.maybe_failure.set_if_alive(Some("share-into-read-failed"));
-              return;
-            },
-          }
-        } else {
-          in_shell.push(file);
+    let mut files = share.files;
+    let mut in_shell = Vec::new();
+    let maybe_limit = state.try_read(|backend| backend.max_upload_bytes()).flatten();
+    for file in share.in_shell {
+      if let Some(limit) = maybe_limit.filter(|limit| file.size_bytes > *limit) {
+        let args = [("name", file.name.as_str()), ("limit", &format_bytes(limit))];
+        let text = i18n.t_with("composer-file-too-large", &args);
+        state.show_error(text, "a shared file is larger than the upload limit".to_owned());
+      } else if file.is_read_whole() {
+        match shell_drop::read(&file).await {
+          Ok(file) => files.push(file),
+          Err(error) => {
+            tracing::warn!(%error, "could not read a shared file");
+            self.maybe_failure.set_if_alive(Some("share-into-read-failed"));
+            return Ok(());
+          },
         }
+      } else {
+        in_shell.push(file);
       }
-      self.maybe_picked.set_if_alive(Some(PickedShare {
-        conversation: target,
-        text: share.text,
-        files,
-        in_shell,
-      }));
-      self.release(share.maybe_browser_id).await;
-      if state.overlay.try_get_untracked().is_some() {
-        state.close_overlay();
-        state.open_conversation(target);
-      }
-    });
+    }
+    self.maybe_picked.set_if_alive(Some(PickedShare {
+      conversation: target,
+      text: share.text,
+      files,
+      in_shell,
+    }));
+    self.release(share.maybe_browser_id).await;
+    if state.overlay.try_get_untracked().is_some() {
+      state.close_overlay();
+      state.open_conversation(target);
+    }
+    Ok(())
   }
 
   /// Forgets the waiting share, and shows the next if the browser holds another.
@@ -345,17 +353,30 @@ pub fn ShareDialog() -> impl IntoView {
   let filter = RwSignal::new(String::new());
   let targets = Memo::new(move |_| state.read(share_targets));
   let sections = Memo::new(move |_| share_sections(targets.get(), &filter.get()));
-  let summary = move || {
+  let pending = PendingAction::new();
+  let shown_text = move || {
     inbox.maybe_waiting.with(|maybe_share| {
-      let Some(share) = maybe_share else {
-        return String::new();
-      };
-      let count = share.files.len() + share.in_shell.len();
-      match count {
-        0 => share.text.chars().take(200).collect(),
-        count => i18n.t_count("share-into-files", count),
-      }
+      maybe_share
+        .as_ref()
+        .map(|share| share.text.chars().take(SHOWN_TEXT_CHARS).collect::<String>())
+        .filter(|text| !text.is_empty())
     })
+  };
+  let shown_text_view = move || shown_text().map(|text| view! { <p class="share-into-summary">{text}</p> });
+  let shown_files = move || {
+    inbox
+      .maybe_waiting
+      .with(|maybe_share| maybe_share.as_ref().map(listed_files).unwrap_or_default())
+      .into_iter()
+      .map(|(name, size)| {
+        view! {
+          <li>
+            <span translate="no">{name}</span>
+            <span class="share-into-size">{size}</span>
+          </li>
+        }
+      })
+      .collect_view()
   };
   let left_out = move || {
     let count = inbox
@@ -375,7 +396,12 @@ pub fn ShareDialog() -> impl IntoView {
             let name = if target.is_notes { notes.clone() } else { target.name };
             view! {
               <li>
-                <button type="button" class="forward-item" on:click=move |_| inbox.pick(state, i18n, id)>
+                <button
+                  type="button"
+                  class="forward-item"
+                  prop:disabled=move || pending.is_pending()
+                  on:click=move |_| pending.spawn(inbox.pick(state, i18n, id))
+                >
                   <span translate="no">{name}</span>
                 </button>
               </li>
@@ -394,7 +420,9 @@ pub fn ShareDialog() -> impl IntoView {
         </button>
       </header>
       <div class="modal-body">
-        <p class="share-into-summary">{summary}</p>
+        <p class="share-into-summary">{move || i18n.t("share-into-from-outside")}</p>
+        {shown_text_view}
+        <ul class="share-into-files">{shown_files}</ul>
         {left_out}
         <label class="visually-hidden" for="share-into-filter">{move || i18n.t("share-into-filter")}</label>
         <input
@@ -426,6 +454,20 @@ pub fn ShareDialog() -> impl IntoView {
     </Modal>
   }
   .into_any()
+}
+
+/// A share's files as the picker lists them: name and size. A site or an app chose them, so the user
+/// sees what would go out.
+fn listed_files(share: &IncomingShare) -> Vec<(String, String)> {
+  let picked = share
+    .files
+    .iter()
+    .map(|file| (file.name(), format_bytes(file.size() as u64)));
+  let in_shell = share
+    .in_shell
+    .iter()
+    .map(|file| (file.name.clone(), format_bytes(file.size_bytes)));
+  picked.chain(in_shell).collect()
 }
 
 /// The conversations the user may post in.
@@ -511,6 +553,16 @@ fn clean_file_name(name: &str) -> String {
   }
 }
 
+/// Whether a share (its ID starts with the time it arrived) is past its time; an ID without a time
+/// is nothing the service worker wrote.
+fn is_share_expired(id: &str, now: TimestampMs) -> bool {
+  let maybe_arrived = id
+    .split('-')
+    .next()
+    .and_then(|time| time.parse::<TimestampMs>().ok());
+  maybe_arrived.is_none_or(|arrived| now - arrived >= SHARE_KEPT_MS)
+}
+
 /// The ID of a share from the address of its list in the cache (`/share/<id>/meta`).
 fn share_id_of_meta(address: &str) -> Option<&str> {
   let (_, rest) = address.split_once("/share/")?;
@@ -563,7 +615,16 @@ async fn next_browser_share() -> Result<Option<IncomingShare>, String> {
     })
     .collect();
   ids.sort();
-  let Some(id) = ids.into_iter().next() else {
+  let now = now_ms();
+  let mut maybe_id = None;
+  for id in ids {
+    if !is_share_expired(&id, now) {
+      maybe_id = Some(id);
+      break;
+    }
+    delete_browser_share(&id).await?;
+  }
+  let Some(id) = maybe_id else {
     return Ok(None);
   };
   let list = response_at(&cache, &format!("/share/{id}/meta")).await?;
@@ -772,6 +833,15 @@ mod tests {
     assert_eq!(share_id_of_meta("https://a.example/share/12-ab/file/0"), None);
     assert_eq!(share_id_of_meta("https://a.example/share//meta"), None);
     assert_eq!(share_id_of_meta("https://a.example/other"), None);
+  }
+
+  #[test]
+  fn a_share_expires_by_the_time_in_its_id() {
+    let now = 1_000_000_000_000;
+    assert!(!is_share_expired(&format!("{}-ab", now - SHARE_KEPT_MS + 1), now));
+    assert!(is_share_expired(&format!("{}-ab", now - SHARE_KEPT_MS), now));
+    assert!(is_share_expired("not-a-time", now));
+    assert!(is_share_expired("", now));
   }
 
   #[test]

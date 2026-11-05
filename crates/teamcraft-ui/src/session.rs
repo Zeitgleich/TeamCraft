@@ -454,6 +454,8 @@ impl SessionControl {
     if me.id != cached.id {
       tracing::warn!("the server names another account than the cached one");
       self.next_core_round();
+      // Another person: what the cached account's user shared isn't theirs to see.
+      crate::share_into::discard_waiting().await;
       self.state.set_if_alive(SessionState::Checking);
       self.close_account_data(cached.id).await;
       self.start_core(me).await;
@@ -671,9 +673,9 @@ impl SessionControl {
     spawn_local(async move {
       // Pictures of this account don't outlive the session on this device (#749).
       crate::persisted_media::clear(maybe_user).await;
-      // Nor does what other apps shared and still waits for a conversation; an expired session
-      // isn't the user's choice, and the share waits for the next sign-in.
-      if maybe_problem.is_none() {
+      // Nor does what other apps shared and still waits for a conversation, unless the session
+      // only ran out: the same person signs in again, and the share waits for that.
+      if !keeps_waiting_share(maybe_problem.as_ref()) {
         crate::share_into::discard_waiting().await;
       }
       if tauri::has_core()
@@ -890,6 +892,16 @@ fn local_problem(error: &AuthError) -> LocalSignInProblem {
   }
 }
 
+/// Whether a share waiting for a conversation survives this end of the session. An end the user
+/// didn't choose and that says nothing about who comes back keeps it; signing out and an account that
+/// can't stay on this device don't.
+fn keeps_waiting_share(maybe_problem: Option<&LoginProblem>) -> bool {
+  matches!(
+    maybe_problem,
+    Some(LoginProblem::SessionExpired | LoginProblem::SessionEnded | LoginProblem::SessionTimedOut)
+  )
+}
+
 fn problem_from_auth(error: &AuthError) -> LoginProblem {
   match error {
     AuthError::Cancelled => LoginProblem::Cancelled,
@@ -1010,6 +1022,15 @@ pub fn interpret_me_response(response: ApiResponse) -> Result<GetMeResponse, Log
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_waiting_share_outlives_only_a_session_that_ran_out() {
+    assert!(keeps_waiting_share(Some(&LoginProblem::SessionExpired)));
+    assert!(keeps_waiting_share(Some(&LoginProblem::SessionTimedOut)));
+    assert!(!keeps_waiting_share(None), "the user signed out");
+    assert!(!keeps_waiting_share(Some(&LoginProblem::DeviceKeyLost)));
+    assert!(!keeps_waiting_share(Some(&LoginProblem::AccountDeactivated)));
+  }
 
   const ME: &str = r#"{"id":"42","username":"alice","display_name":"Alice","role":"owner"}"#;
 

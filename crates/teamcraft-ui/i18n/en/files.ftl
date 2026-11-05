@@ -312,10 +312,7 @@ share-into-recent = Recent
 share-into-others = All conversations
 share-into-no-match = No conversation matches.
 share-into-empty = Conversations you can write in show up here once they have synced.
-share-into-files = { $count ->
-    [one] { $count } file
-   *[other] { $count } files
-  }
+share-into-from-outside = This came from another app or a website. Check it before you send it.
 share-into-left-out = { $count ->
     [one] { $count } file was left out: it is gone or there were too many.
    *[other] { $count } files were left out: they are gone or there were too many.
