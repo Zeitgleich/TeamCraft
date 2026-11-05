@@ -762,7 +762,7 @@ final class AppModel {
   /// (docs/scheduled-messages.md). Another device being first isn't a failure.
   func sealScheduledMessages() async -> Bool {
     // A cold background launch has no phase yet: the core opens from the store, as for a push.
-    guard let core = try? core() else { return false }
+    guard let core = try? core(createsKey: false) else { return false }
     // In the foreground the app holds the lock already; otherwise take it like the extension does.
     // Asks the lock, not `isSyncing`: background expiry gives up the lock with the sync still marked.
     let needsLock = !processLock.isHeld
@@ -1316,11 +1316,14 @@ final class AppModel {
   // MARK: Private
 
   /// The core of the signed-in account; opened on first use (a notification action may be the first).
-  func core() throws -> TeamCraft {
+  /// `createsKey: false` for background launches: the keychain read before first unlock fails rather
+  /// than returning nothing, but a background path still never replaces a database key it can't find
+  /// (that would lose the store); it fails and the foreground opens the core.
+  func core(createsKey: Bool = true) throws -> TeamCraft {
     if let maybeCore { return maybeCore }
     guard let account = container.activeAccount, vault.hasSession else { throw CoreFactoryError.noAccount }
     let opened = try factory.open(
-      account: account, createKey: true,
+      account: account, createKey: createsKey,
       listener: ClosureEventListener { [weak self] in
         Task { @MainActor in self?.storeDidChange() }
       })

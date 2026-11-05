@@ -191,7 +191,8 @@ impl PushSender for FcmSender {
       }
       let priority = android_priority(message);
       let mut data = json!({ "w": URL_SAFE_NO_PAD.encode(&message.sealed) });
-      // High priority but nothing to show: the app must know even if it can't open the wake-up.
+      // High priority but nothing to show: the app must know even if it can't open the wake-up. Only
+      // this kind sets it, so Google learns the kind (accepted, docs/scheduled-messages.md, "The wake").
       if message.kind == PushKind::ScheduledSeal {
         data["v"] = json!("0");
       }

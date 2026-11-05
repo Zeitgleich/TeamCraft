@@ -633,5 +633,7 @@ session (the core has no call-state API yet).
   and no device of the sender sealed it again (docs/scheduled-messages.md). Phones are woken by a push;
   iOS may defer or drop it. Every commit counts, also additions.
 - **Status:** accepted and shown to the user: a late message says so with its reason, and goes out once a
-  device is back. A crash right after a release loses that message's gateway event and push, as for a
+  device is back. Lost wakes are retried per entry (every 5 min in the last 15 min before its time, hourly
+  for a day after a hold), failed sealing rounds back off up to 10 min, and a hold the server purges stays
+  on the devices as text to copy until dismissed. A crash right after a release loses that message's gateway event and push, as for a
   send.

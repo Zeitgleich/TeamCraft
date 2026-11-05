@@ -76,6 +76,10 @@ does that by itself, phones in the background too, though iPhones may not get to
 on time unless the group changed and all your devices stayed off; then it goes out when one is back, and
 the list says so. Messages with files can't be scheduled yet.
 
+A message that can't go out any more (you left the conversation, or it was deleted) stays in the list
+with the date the server removes it. After that your devices still keep its text, so you can copy it,
+until you remove it from the list.
+
 If you schedule a message and then someone is removed from the conversation, the message doesn't reach
 them through the app. If the server itself were compromised, though, it could give them the text. Don't
 schedule what they must not read once they're gone.

@@ -48,7 +48,10 @@ old key is still known to the same people, and members keep it in their rings.
 ### Sealing again
 
 - A device **online** hears of the commit, merges it, and within 15 s seals the entry again, keeping
-  its time (`seal_stale_scheduled`, in the upkeep every shell runs).
+  its time (`seal_stale_scheduled`, in the upkeep every shell runs). A round that fails waits the
+  upkeep's interval (1 min), doubling up to 10 min, and starts over once the list changes or the device
+  connects again. A device without the group doesn't try: it isn't in the conversation any more, or its
+  welcome is still to come.
 - A device **offline** is woken: see "The wake" below.
 - **Racing devices:** an upload names the entry's version and the current epoch. One wins; the other
   gets `409 version_conflict`, drops its work and reads the list.
@@ -66,21 +69,29 @@ people's devices that aren't connected, kind `scheduled_seal`. The woken device 
 the group and uploads the new seal.
 
 - **Payload:** the sealed wake-up of every push (e2ee.md §7), with the kind and conversation and no
-  message or sender. **The push provider sees a push to a device at a time, no more than for a message.**
+  message or sender. On APNs the push provider sees a push to a device at a time, as for a `dismiss`. On
+  FCM it also sees the kind: see Android below.
 - **The gateway:** store apps get pushes through the push gateway, which refuses kinds it doesn't know.
   The server reads the gateway's `/v1/info` (at most hourly) and sends the kind only if it is listed. **A
   gateway without the kind means no wake for those phones,** not an error loop: such an entry waits for
-  a device to run, as on desktop.
+  a device to run, as on desktop. A failed read keeps the list read before; with none read yet the wake
+  goes to the push retry queue instead of being dropped.
 - **Rate:** one wake for a burst of commits (`push.scheduled_wake_coalesce_ms`, 10 s), and at most one
   per user and conversation per `push.scheduled_wake_min_interval_secs` (5 min). A commit in that time
   waits for its end. No polling, and a commit in a conversation where nobody holds anything costs one
   indexed read and no push.
-- **Last stretch:** those queues are memory, so a restart loses them. The scheduler therefore wakes once
-  per version for an entry still stale 15 minutes before its time, and once when it holds one at its
-  time.
-- **Android:** FCM high priority, to get through Doze, marked outside the sealed payload with `v=0`, which
-  reveals only "silent", so that a wake-up that can't be opened shows no "New message". Sealing runs as
-  WorkManager work with a network constraint and backoff. FCM may lower the priority of apps whose high-priority messages show nothing; these
+- **Wakes without a commit:** those queues are memory, so a restart loses them, and a push can get lost
+  or come to nothing (a phone off). The scheduler therefore wakes the sender of an entry still stale in
+  the last 15 minutes before its time, again every 5 minutes while it is, and of an entry held for an
+  old epoch at its time, again every hour for a day after the hold. Only senders still in the
+  conversation, and per entry, not per run: a phone that stays off costs at most these pushes.
+- **Android:** FCM high priority, to get through Doze, marked outside the sealed payload with `v=0`, so
+  that a wake-up that can't be opened shows no "New message". **Only this kind sets `v`, so it is a kind
+  tag, not a generic "silent":** Google learns that the user of this device holds a scheduled message and
+  that a group they are in just changed, though not which message or which group. This is accepted: the
+  alternative is a "New message" that isn't one each time a wake-up can't be opened, and giving `v` to
+  `dismiss` too wouldn't hide it, since high priority plus `v` stays unique. Sealing runs as WorkManager
+  work with a network constraint and backoff. FCM may lower the priority of apps whose high-priority messages show nothing; these
   are rare, and this is why they aren't used for anything else. The F-Droid build gets the same through
   its UnifiedPush distributor, as reliable as that distributor is.
 - **iOS:** a silent push (APNs background, priority 5), and a `BGProcessingTask` if that couldn't finish.
@@ -164,7 +175,11 @@ transaction, only if the row is still at the version the scheduler read and the 
   commit loses that message's gateway event and push, as for a send; members get it at their next sync.
 - **A cancel or edit racing the release:** whichever commits first decides. A later release finds nothing
   or another version and stops; a later cancel gets `404 scheduled_message_not_found`.
-- **A retry of the schedule request** with the same client message ID answers with what is stored.
+- **A retry of the schedule request** with the same client message ID answers with what is stored. The
+  device compares that with what it asked for: another time or another text (a new reply target, say)
+  becomes a change of the entry, another thread a cancel and a new entry, so a retry with a new time
+  isn't reported as done under the old one. Composers keep the ID only after a failed try and only while
+  the text stays the same, so a later message with the same words is a new one.
 
 ## The API
 
@@ -187,8 +202,13 @@ logged.
 ## Limits on what a member can cost
 
 A held message is at most `limits.max_scheduled_ciphertext_bytes` (64 KiB), so a list is bounded by that
-times the cap, and held messages that nothing can solve (the sender left, the account is off) go after
-`limits.scheduled_hold_retention_days` (30). A burst of commits makes one event and one push per sender and
+times the cap; a longer one is refused with `413 payload_too_large`, and the apps say it is too long.
+Held messages that nothing can solve (the sender left, the account is off, the conversation is gone) go
+after `limits.scheduled_hold_retention_days` (30). A hold of another kind whose sender left since (one
+held for an old epoch, say) becomes `not_a_member` then and counts from there. The list states the date
+(`removes_at`) and the screens show it, the purge tells the owner's devices, and those keep the text,
+marked as removed by the server, until the user dismisses it: the server's copy was the only one outside
+the devices, so it can still be copied. A burst of commits makes one event and one push per sender and
 conversation, a device reads the list at most every 5 s for events, and it opens only entries that changed.
 Commits themselves have no limit of their own: the general limit per user applies
 (`user_writes_per_minute`, 600).
