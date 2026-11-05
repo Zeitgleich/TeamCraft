@@ -308,7 +308,7 @@ A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "M
    fingerprint with the knock (retried on the next poll if that fails). It shows the guest's key
    code and the organizer's code; the host's lobby entry shows the same guest code, the
    organizer's app its own code, so they can compare out of band. If the organizer's app is too
-   old to let guests in by this flow, the page says it needs an update. While nobody of the meeting is there yet it shows "Waiting for the organizer to
+   old to let guests in by this flow, the page says it needs an update. While nobody of the meeting is there yet it shows "Waiting for someone in the meeting to
    let you in"; that is the normal case for a guest who comes early.
 3. Once an organizer's or admitter's device let the guest in (on "Let in", which the host's app offers when the
    guest's device is ready, or by itself without a lobby; `LetGuestIntoMeetingChat`), the page

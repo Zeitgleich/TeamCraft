@@ -1664,7 +1664,7 @@ never by the server's member list:
     group like any member's (§8): the commit that adds it is another new epoch, and the frames of
     earlier epochs were encrypted under keys it never gets. A host's "admit" without a device of
     the organizer or of an admitter online makes the guest a member on the server only; the
-    guest's page keeps waiting ("waiting for the organizer") until such a device adds the device. If no app
+    guest's page keeps waiting ("waiting for someone in the meeting to let it in") until such a device adds the device. If no app
     of the organizer was seen admitting by this flow (`PUT /meetings/admitter`, sent by apps since
     #987), the guest's page says the organizer's app needs an update: an older app asks for a link
     proof that guests no longer send and never lets them in.
