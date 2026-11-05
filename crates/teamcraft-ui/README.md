@@ -330,6 +330,10 @@ Without the Tauri CLI, build the UI first and then run the shell with the embedd
 cargo run -p teamcraft-desktop --features custom-protocol
 ```
 
+The app embeds this build without the files only browsers load: the call module, its AudioWorklet,
+the segmentation worker and its model (`apps/desktop/build/frontend.rs`; the app's calls run in the
+shell, which bundles its own model).
+
 ## Checks
 
 ```sh

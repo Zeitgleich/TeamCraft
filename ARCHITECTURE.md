@@ -317,7 +317,9 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   and signs and verifies the call key bindings for it (`teamcraft_client_api::page_calls`). Calls run in the
   tab that runs the client core (e2ee.md §9.4). Background effects run in the page too (#439):
   WebGPU or WebGL2 compositing, the segmentation in a worker of its own that loads with the first
-  effect of the session.
+  effect of the session (the model as NNEF, read without tract's ONNX parser, #1295). The desktop
+  app embeds the web build without the call module and the segmentation worker
+  (`apps/desktop/build/frontend.rs`): its calls run in the shell.
 - Desktop: `cpal` for audio I/O (on Linux through PipeWire, else PulseAudio, else ALSA; devices,
   defaults and hotplug from PipeWire's registry, #1072), `opus`, **`webrtc-audio-processing`** (AEC, noise suppression, AGC) – the only WebRTC component used.
   The media runs in the shell; for each tile on screen the shell sends the decrypted track to the
