@@ -1117,7 +1117,8 @@ internal fun Composer(
   fun schedule(dueAtMs: Long) {
     val options = SendOptions(
       maybeThread = maybeThread,
-      maybeReplyTo = maybeReply?.message?.id,
+      maybeReplyTo = maybeReply?.messageId,
+      maybeReplyAttachment = maybeReply?.maybeImage?.fileId,
       priority = priority,
       wantsAcknowledgement = wantsAcknowledgement,
       isSilent = isSilent,

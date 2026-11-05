@@ -774,7 +774,8 @@ struct ChatPane: View {
     draft = ""
     maybeReplying = nil
     let request = SendRequest(
-      conversationId: conversation.id, maybeThreadId: threadId, body: body, maybeReplyToId: replying?.id)
+      conversationId: conversation.id, maybeThreadId: threadId, body: body,
+      maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId)
     if !(await model.performChecked(.scheduleMessage(request, dueAtMs: dueAtMs))) {
       draft = body
       maybeReplying = replying
