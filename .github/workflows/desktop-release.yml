@@ -282,17 +282,26 @@ jobs:
       # The official universal GStreamer: development files to link against, and the runtime that is
       # bundled into the app for VideoToolbox hardware encoding (thinned to the build's architecture).
       # (The Homebrew casks are disabled, so the packages come from gstreamer.freedesktop.org, pinned by hash.)
+      # The packages are big and their server is flaky. The cache only saves the download: the
+      # pinned hashes below still check every file. Bump the key with GSTREAMER_VERSION.
+      - name: Restore the GStreamer packages
+        id: gstreamer-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/gstreamer-pkgs
+          key: gstreamer-pkgs-macos-1.28.8
       - name: GStreamer framework
         env:
           GSTREAMER_VERSION: "1.28.8"
         run: |
           set -euo pipefail
           base="https://gstreamer.freedesktop.org/data/pkg/osx/$GSTREAMER_VERSION"
+          mkdir -p "$HOME/gstreamer-pkgs"
+          cd "$HOME/gstreamer-pkgs"
           for package in gstreamer-1.0 gstreamer-1.0-devel; do
             file="$package-$GSTREAMER_VERSION-universal.pkg"
-            curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$file" "$base/$file"
+            [ -f "$file" ] || curl --fail --silent --show-error --location --http1.1 --retry 5 --retry-all-errors --continue-at - --output "$file" "$base/$file"
           done
-          cd "$RUNNER_TEMP"
           echo "d371ab04a7632713626836c2fc234e863cc98484c74c473eba99b0fbd9b3a3fe  gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
           echo "e6d380bc17be7eccf13e0154567d4718fc9321da822408c7ca0cd808b3d4a3f7  gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
           sudo installer -pkg "gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" -target /
@@ -302,7 +311,7 @@ jobs:
         run: |
           set -euo pipefail
           file="cargo-tauri-aarch64-apple-darwin.zip"
-          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$file" \
+          curl --fail --silent --show-error --location --http1.1 --retry 5 --retry-all-errors --continue-at - --output "$RUNNER_TEMP/$file" \
             "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v$TEAMCRAFT_TAURI_CLI_VERSION/$file"
           echo "f71a34ada728ca2d1a51c28d6d21639e1e080898ec69ec8d49c5da3b7e8bc1be  $RUNNER_TEMP/$file" | shasum -a 256 -c -
           unzip -q "$RUNNER_TEMP/$file" cargo-tauri -d "$RUNNER_TEMP/tauri-cli"
