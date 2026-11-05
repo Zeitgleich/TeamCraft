@@ -197,7 +197,7 @@ pub fn reply_ref(
 ) -> ReplyRef {
   let maybe_quoted = maybe_attachment
     .and_then(|id| album_attachment(target, id))
-    .map(reply_attachment);
+    .map(|attachment| Box::new(reply_attachment(attachment)));
   let text = match (&target.content, &maybe_quoted) {
     (MessageContent::Text { body, .. }, Some(quoted)) if body.trim().is_empty() => quoted.file_name.as_str(),
     (MessageContent::Text { body, .. }, _) => body.as_str(),
@@ -317,11 +317,11 @@ mod tests {
       target: ClientMessageId::from_bytes([1; 16]),
       author: id(7),
       excerpt: "c.jpg".into(),
-      maybe_attachment: Some(ReplyAttachment {
+      maybe_attachment: Some(Box::new(ReplyAttachment {
         attachment_id: id(3),
         file_name: "c.jpg".into(),
         maybe_thumbnail: Some(Base64Bytes::from(vec![1, 2, 3])),
-      }),
+      })),
     };
     let wire = serde_json::to_value(&reply).unwrap();
     assert_eq!(

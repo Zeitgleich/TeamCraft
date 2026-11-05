@@ -108,7 +108,7 @@ impl ReplyRef {
     self.excerpt.len()
       + self
         .maybe_attachment
-        .as_ref()
+        .as_deref()
         .map_or(0, ReplyAttachment::heap_bytes)
   }
 }

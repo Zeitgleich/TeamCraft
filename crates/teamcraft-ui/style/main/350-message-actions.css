@@ -7,6 +7,7 @@
 .msg-quote-image { flex-direction: row; align-items: center; gap: .5rem; width: fit-content; max-width: 100%; padding-block: .25rem; text-align: start; }
 button.msg-quote-image { border-block: 0; border-inline-end: 0; background: none; font: inherit; font-size: var(--text-sm); cursor: pointer; transition: color var(--dur-fast, .12s) ease; }
 button.msg-quote-image:hover { color: var(--text); }
+button.msg-quote-image:active { opacity: .7; }
 .quote-lines { display: flex; flex-direction: column; min-width: 0; }
 .quote-lines .quote-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .quote-thumb { display: grid; place-items: center; flex: none; width: 2.5rem; height: 2.5rem; border-radius: 6px; object-fit: cover; background: var(--surface-2, var(--border-strong)); }

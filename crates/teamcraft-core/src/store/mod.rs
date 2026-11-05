@@ -470,7 +470,7 @@ pub struct ReplyRef {
   pub excerpt: String,
   /// The one picture of an album this reply answers (issue #241).
   #[serde(rename = "attachment", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_attachment: Option<ReplyAttachment>,
+  pub maybe_attachment: Option<Box<ReplyAttachment>>,
 }
 
 /// One picture of the quoted message. A copy of its thumbnail travels with the reply, so the quote

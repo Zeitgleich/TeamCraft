@@ -721,7 +721,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         excerpt: reply.excerpt.clone(),
         maybe_attachment: reply
           .maybe_attachment
-          .as_ref()
+          .as_deref()
           .map(|quoted| quoted_attachment(quoted, maybe_target.as_ref())),
       }
     });
@@ -944,7 +944,7 @@ mod tests {
     let album = album_of(&[id(3), id(4)]);
     let mut quoted = reply_ref(&album, None, Some(id(3))).maybe_attachment.unwrap();
     quoted.maybe_thumbnail = Some(Base64Bytes::from(thumbnail.to_vec()));
-    quoted
+    *quoted
   }
 
   fn album_of(ids: &[teamcraft_proto::AttachmentId]) -> StoredMessage {
