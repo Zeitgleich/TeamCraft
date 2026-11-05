@@ -1834,6 +1834,46 @@ image does not boot on this AMD host), signed out:
 | Cold start to the first frame (`am start -W`) | 1.0–1.2 s |
 | Memory after start (PSS)                      | 95 MiB    |
 
+### Android on a slow phone (November 2026)
+
+A OnePlus 5T (Snapdragon 835, Android 13, 6 GB), the libre release build (R8 on, as shipped, compiled
+with its baseline profile: `cmd package compile -m speed-profile`), against the dev stack through
+`adb reverse`. The workspace comes from `tests/e2e/tests/suite/mobile_workspace.rs`: 12 spaces of 25
+channels, 40,000 messages (10,000 in one channel), two direct messages, reactions; the phone was a
+member while it was written, so its store holds all of it. "List complete" is the app's
+`reportFullyDrawn` (rows and their last lines), median of five cold starts.
+
+| What                                      | Before        | After          | Budget (mobile) |
+|-------------------------------------------|---------------|----------------|-----------------|
+| Cold start, first frame (`am start -W`)   | 224-237 ms    | 281-295 ms     |                 |
+| Cold start, list complete                 | 2.22 s        | 1.22 s         | 2 s             |
+| Chat list refresh after a change          | 1.6-2.5 s     | 0.25-0.8 s     |                 |
+| Chat switch, tap until the messages show  | 1.31-1.48 s   | 0.20-0.29 s    | 150 ms          |
+| Scrolling the long channel (25 flings)    | 0.26 % janky  | not changed    |                 |
+
+The first frame moved by about 60 ms between the two runs, with a store grown by 10,000 messages in
+between; it was not measured again on the same store.
+
+What cost the time:
+
+- **The chat list's last lines** were two reads and a JSON decode per conversation (600 reads for 300
+  conversations) on every change, and each read moved the catch-up focus to that conversation, so
+  the list kept taking the focus from the open chat (Android and iOS). Now one read for the whole
+  list (`chat_previews`), which leaves the focus alone and skips system lines when a written message
+  is close by.
+- **The list of conversations** decrypted every conversation and user record once per space (13
+  times with 12 spaces). Now one pass (`listed_conversations`).
+- **A conversation** waited for the whole-workspace snapshot (200-380 ms to decode on this phone)
+  before its messages, and every change cancelled the pass and started it again. Now the messages
+  come first, the snapshot is decoded once per change and shared, and the screen starts with the one
+  read last.
+- **The read thread** is one queue: the conversation's reads waited 450-600 ms behind the list's.
+
+Coming back after a long absence: the core reported `Connecting` until the whole catch-up was done
+(13 s for 8,000 new messages here, longer on a mobile network), so the "connecting" banner could
+show while new messages were already arriving. It reports connected once the server answers
+`identify` or `resume` now (test `a_long_catch_up_shows_connected_once_the_server_answered`).
+
 ### Mobile core: start and channel switch on a large workspace
 
 `crates/teamcraft-ffi/tests/start_budget.rs` measures through the API the apps call, on a sealed
