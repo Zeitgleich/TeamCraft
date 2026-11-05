@@ -2309,8 +2309,8 @@ mod tests {
       block_on(live.refresh_once());
 
       let paths = server.paths();
-      // Eleven lists, the further pages of channels (2) and users (1), the audit log, and one
-      // request per space: 27 requests in all, once, where the console used to make about 650.
+      // Twelve lists, the further pages of channels (2) and users (1), the audit log, and one
+      // request per space: 28 requests in all, once, where the console used to make about 650.
       assert!(
         paths.len() <= 11 + 3 + 1 + 1 + SPACES as usize,
         "{} requests: {paths:?}",
