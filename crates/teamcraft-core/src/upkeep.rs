@@ -166,7 +166,8 @@ impl Upkeep {
     }
     #[cfg(feature = "ui")]
     {
-      is_changed |= self.tend_scheduled(client, now).await;
+      // On the heap: sealing catches groups up, too big a future for the frame of every tick's caller.
+      is_changed |= Box::pin(self.tend_scheduled(client, now)).await;
     }
     let is_flushed = match self.uploads {
       UploadMode::Inline => flush(client).await,

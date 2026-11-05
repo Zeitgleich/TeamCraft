@@ -60,6 +60,10 @@ use crate::auth::{AuthError, AuthService, TokenPeek, TokenStore, token_fingerpri
 /// issue #1000): SQLCipher decrypts and checks every page it reads, and the UI reads the open
 /// conversation several times per change. Bounded by bytes, not by messages (issue #1125): about
 /// 60,000 messages of ordinary length.
+/// The core thread's stack, the same on every system: a new thread otherwise gets 2 MiB from Rust, and
+/// the main thread's size elsewhere, 1 MiB on Windows. Reserved, not committed. The loop keeps its own
+/// frame small (`on_heap`, its tests pass with 1 MiB); this is the margin.
+const CORE_STACK_BYTES: usize = 8 * 1024 * 1024;
 const MESSAGE_CACHE_BYTES: usize = DEFAULT_MESSAGE_CACHE_BYTES;
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
@@ -464,6 +468,7 @@ impl CoreRuntime {
     let shared_media = media.clone();
     let thread = std::thread::Builder::new()
       .name("teamcraft-core".to_owned())
+      .stack_size(CORE_STACK_BYTES)
       .spawn(move || {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
           Ok(runtime) => runtime,
@@ -1038,13 +1043,15 @@ impl Core {
   }
 
   async fn run(mut self, mut requests: mpsc::UnboundedReceiver<Request>) {
-    self.open().await;
+    on_heap(|| self.open()).await;
     let mut flush = tokio::time::interval(FLUSH_INTERVAL);
     loop {
-      if self.connect(&mut requests).await == Flow::Stop {
+      if on_heap(|| self.connect(&mut requests)).await == Flow::Stop {
         break;
       }
-      if std::mem::take(&mut self.has_queued_sends) && self.send_queued(&mut requests).await == Flow::Stop {
+      if std::mem::take(&mut self.has_queued_sends)
+        && on_heap(|| self.send_queued(&mut requests)).await == Flow::Stop
+      {
         break;
       }
       let maybe_deadline = self.connection_deadline();
@@ -1052,17 +1059,17 @@ impl Core {
       tokio::select! {
         request = requests.recv() => match request {
           Some(Request::Shutdown) | None => break,
-          Some(request) => self.handle(request).await,
+          Some(request) => on_heap(|| self.handle(request)).await,
         },
-        frame = self.connection.receive() => self.on_frame(frame).await,
+        frame = self.connection.receive() => on_heap(|| self.on_frame(frame)).await,
         _ = flush.tick(), if self.client.is_some() => {
-          self.connection.on_tick(SystemClock.now_ms()).await;
-          self.upkeep().await;
+          on_heap(|| self.connection.on_tick(SystemClock.now_ms())).await;
+          on_heap(|| self.upkeep()).await;
           // Retries of failed uploads come due with time.
           self.is_upload_due = true;
         },
         sent = upload_sent(&mut self.maybe_upload), if self.maybe_upload.is_some() => {
-          self.on_uploaded(sent).await;
+          on_heap(|| self.on_uploaded(sent)).await;
         },
         finished = self.downloads.next_finished(), if self.downloads.is_running() => {
           if let Some(client) = self.client.as_mut()
@@ -1074,27 +1081,29 @@ impl Core {
         // While a file goes up, the UI reads its progress again every so often.
         () = tokio::time::sleep(TRANSFER_PROGRESS), if self.maybe_reported_bytes.is_some() => {},
         () = sleep_for(maybe_deadline), if maybe_deadline.is_some() => {
-          self.connection.on_tick(SystemClock.now_ms()).await;
+          on_heap(|| self.connection.on_tick(SystemClock.now_ms())).await;
         },
         // Someone stopped typing: no event says so, the indicator runs out.
         () = sleep_for(maybe_typing_change), if maybe_typing_change.is_some() => self.drop_expired_typing(),
-        linked = poll_link(&mut self.link), if self.link.is_some() => self.on_linked(linked).await,
+        linked = poll_link(&mut self.link), if self.link.is_some() => on_heap(|| self.on_linked(linked)).await,
         () = sleep_until_retry(self.maybe_open_retry.as_ref()), if self.maybe_open_retry.is_some() => {
-          self.open().await;
+          on_heap(|| self.open()).await;
           self.changed();
         },
         // A first sync's older history: one page per turn, so what else is ready gets its turn.
         () = std::future::ready(()), if self.is_older_history_due() => {
-          if self.load_older_history(&mut requests).await == Flow::Stop {
+          if on_heap(|| self.load_older_history(&mut requests)).await == Flow::Stop {
             break;
           }
         },
       }
-      if std::mem::take(&mut self.has_queued_sends) && self.send_queued(&mut requests).await == Flow::Stop {
+      if std::mem::take(&mut self.has_queued_sends)
+        && on_heap(|| self.send_queued(&mut requests)).await == Flow::Stop
+      {
         break;
       }
-      self.start_upload().await;
-      self.start_downloads().await;
+      on_heap(|| self.start_upload()).await;
+      on_heap(|| self.start_downloads()).await;
       self.report_progress();
       self.report_background_failures();
     }
@@ -2847,6 +2856,14 @@ async fn lock_store(path: &std::path::Path) -> Result<StoreLock, String> {
     }
   }
   StoreLock::acquire(path).map_err(|error| error.to_string())
+}
+
+/// Builds the future `make` returns in a frame of its own and moves it to the heap. Awaiting a big
+/// future in place puts it into the caller's frame; the core loop awaits many, and its frame then
+/// outgrew a 1 MiB thread stack (Windows) in a debug build.
+#[inline(never)]
+fn on_heap<'a, F: Future + 'a>(make: impl FnOnce() -> F) -> Pin<Box<dyn Future<Output = F::Output> + 'a>> {
+  Box::pin(make())
 }
 
 #[cfg(test)]
