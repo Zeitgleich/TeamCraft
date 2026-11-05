@@ -336,6 +336,14 @@ jobs:
       # call media asks for? Needs GStreamer's MSVC runtime, which the hosted runner doesn't have;
       # the packages are pinned by hash. Media Foundation is a Windows Server feature that may be
       # missing on the runner (then mfh264enc is not there either, and the test says so).
+      # The packages are big and their server is flaky. The cache only saves the download: the
+      # pinned hashes below still check every file. Bump the key with GSTREAMER_VERSION.
+      - name: Restore the GStreamer packages
+        id: gstreamer-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/gstreamer-pkgs
+          key: gstreamer-pkgs-windows-1.28.8
       - name: GStreamer (MSVC runtime and development files)
         shell: pwsh
         env:
@@ -348,8 +356,10 @@ jobs:
             Write-Host "Media Foundation feature not installed: $_"
           }
           $file = "gstreamer-1.0-msvc-x86_64-$env:GSTREAMER_VERSION.exe"
-          $installer = Join-Path $env:RUNNER_TEMP $file
-          curl.exe --fail --silent --show-error --location --http1.1 --retry 5 --retry-all-errors --continue-at - --output $installer "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GSTREAMER_VERSION/msvc/$file"
+          $packages = Join-Path $HOME "gstreamer-pkgs"
+          New-Item -ItemType Directory -Force $packages | Out-Null
+          $installer = Join-Path $packages $file
+          if (-not (Test-Path $installer)) { curl.exe --fail --silent --show-error --location --http1.1 --retry 5 --retry-all-errors --continue-at - --output $installer "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GSTREAMER_VERSION/msvc/$file" }
           if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLower() -ne $env:GSTREAMER_SHA256) { throw "GStreamer installer hash mismatch" }
           $install = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=C:\gstreamer", "/LOG=$env:RUNNER_TEMP\gstreamer-install.log"
           if ($install.ExitCode -ne 0) { throw "GStreamer installer exited with $($install.ExitCode)" }
@@ -359,6 +369,13 @@ jobs:
           "$root\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
           "PKG_CONFIG_PATH=$root\lib\pkgconfig" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) { choco install pkgconfiglite --no-progress -y }
+      # On main only: every pull request saving its own copy would push out the Rust caches.
+      - name: Save the GStreamer packages
+        if: github.ref == 'refs/heads/main' && steps.gstreamer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/gstreamer-pkgs
+          key: gstreamer-pkgs-windows-1.28.8
       - name: Media Foundation encoder available?
         shell: pwsh
         continue-on-error: true
@@ -394,21 +411,37 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The desktop shell links GStreamer (VideoToolbox encoding); same pinned packages as the release.
+      # The packages are big and their server is flaky. The cache only saves the download: the
+      # pinned hashes below still check every file. Bump the key with GSTREAMER_VERSION.
+      - name: Restore the GStreamer packages
+        id: gstreamer-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/gstreamer-pkgs
+          key: gstreamer-pkgs-macos-1.28.8
       - name: GStreamer framework
         env:
           GSTREAMER_VERSION: "1.28.8"
         run: |
           set -euo pipefail
           base="https://gstreamer.freedesktop.org/data/pkg/osx/$GSTREAMER_VERSION"
+          mkdir -p "$HOME/gstreamer-pkgs"
+          cd "$HOME/gstreamer-pkgs"
           for package in gstreamer-1.0 gstreamer-1.0-devel; do
             file="$package-$GSTREAMER_VERSION-universal.pkg"
-            curl --fail --silent --show-error --location --http1.1 --retry 5 --retry-all-errors --continue-at - --output "$RUNNER_TEMP/$file" "$base/$file"
+            [ -f "$file" ] || curl --fail --silent --show-error --location --http1.1 --retry 5 --retry-all-errors --continue-at - --output "$file" "$base/$file"
           done
-          cd "$RUNNER_TEMP"
           echo "d371ab04a7632713626836c2fc234e863cc98484c74c473eba99b0fbd9b3a3fe  gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
           echo "e6d380bc17be7eccf13e0154567d4718fc9321da822408c7ca0cd808b3d4a3f7  gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
           sudo installer -pkg "gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" -target /
           sudo installer -pkg "gstreamer-1.0-devel-$GSTREAMER_VERSION-universal.pkg" -target /
+      # On main only: every pull request saving its own copy would push out the Rust caches.
+      - name: Save the GStreamer packages
+        if: github.ref == 'refs/heads/main' && steps.gstreamer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/gstreamer-pkgs
+          key: gstreamer-pkgs-macos-1.28.8
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
       # The desktop shell has macOS-only code (notification center, dock); the release build is the
