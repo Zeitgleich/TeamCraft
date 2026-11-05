@@ -20,6 +20,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Appearance, "settings-theme"),
   (SettingsTab::Appearance, "settings-density"),
   (SettingsTab::Appearance, "settings-image-size"),
+  (SettingsTab::Appearance, "settings-animated-images"),
   (SettingsTab::Appearance, "settings-text-size"),
   (SettingsTab::Appearance, "settings-zoom"),
   (SettingsTab::Appearance, "settings-join-leave"),

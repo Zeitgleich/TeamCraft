@@ -102,8 +102,17 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.FileInfo
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.AnimationButton
+import de.zeitgleich.teamcraft.ui.AnimationRead
+import de.zeitgleich.teamcraft.ui.AnimationView
 import de.zeitgleich.teamcraft.ui.MediaPrefs
 import de.zeitgleich.teamcraft.ui.OriginalState
+import de.zeitgleich.teamcraft.ui.PlayChoice
+import de.zeitgleich.teamcraft.ui.isAppResumed
+import de.zeitgleich.teamcraft.ui.mayBeAnimated
+import de.zeitgleich.teamcraft.ui.rememberAnimation
+import de.zeitgleich.teamcraft.ui.rememberMotionReduced
+import de.zeitgleich.teamcraft.ui.wantsToMove
 import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.PictureViewerState
 import de.zeitgleich.teamcraft.ui.Pictures
@@ -337,9 +346,16 @@ private fun PicturePage(
     maybePath,
     maxSidePx,
   ) {
-    val path = maybePath ?: return@produceState
+    // The state outlives a change of path: a file that went away doesn't stay "unreadable".
+    val path = maybePath ?: run {
+      if (value is FullImage.Unreadable) value = FullImage.Waiting
+      return@produceState
+    }
     if (value is FullImage.Ready) return@produceState
-    value = Pictures.file(path, maxSidePx)?.let { FullImage.Ready(it) } ?: FullImage.Unreadable
+    value = Pictures.file(path, maxSidePx)?.let { FullImage.Ready(it) }
+      // Gone (the core trimmed its downloads): the core shows it as remote again, and the viewer
+      // fetches or offers the original.
+      ?: if (File(path).exists()) FullImage.Unreadable else FullImage.Waiting
   }
   val currentOnTap by rememberUpdatedState(onTap)
   var scale by remember { mutableFloatStateOf(1f) }
@@ -377,7 +393,37 @@ private fun PicturePage(
   ) {
     val decoded = full
     val maybeShown = (decoded as? FullImage.Ready)?.bitmap ?: maybeThumbnail
-    maybeShown?.let { bitmap ->
+    // Only the page on screen reads its file as an animation (#201).
+    val maybeAnimation = (rememberAnimation(maybePath?.takeIf { isCurrent && isPossiblyMoving(file.mediaType) }, maxSidePx) as? AnimationRead.Moving)?.drawable
+    val context = LocalContext.current
+    val mode by remember(context) { MediaPrefs.prefs(context) }.animatedImages.collectAsState()
+    val startMode = mode.effective(rememberMotionReduced())
+    var choice by rememberSaveable(file.fileId) { mutableStateOf(PlayChoice.UNSET) }
+    val isWanted = wantsToMove(startMode, choice)
+    val isResumed = isAppResumed()
+    if (maybeAnimation != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+      AnimationView(
+        maybeAnimation,
+        isPlaying = isWanted && isCurrent && isResumed,
+        contentScale = ContentScale.Fit,
+        modifier = Modifier
+          .fillMaxSize()
+          .graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y),
+        onEnded = { choice = PlayChoice.PAUSED },
+      )
+      AnimationButton(
+        isMoving = isWanted,
+        onClick = { choice = if (isWanted) PlayChoice.PAUSED else PlayChoice.PLAYING },
+        modifier = Modifier
+          .align(Alignment.BottomEnd)
+          .safeDrawingPadding()
+          .padding(end = 8.dp, bottom = 88.dp)
+          .semantics {
+            stateDescription = context.getString(if (isWanted) R.string.animation_state_playing else R.string.animation_state_paused)
+          },
+      )
+    }
+    maybeShown?.takeIf { maybeAnimation == null }?.let { bitmap ->
       val isStandIn = decoded !is FullImage.Ready
       val isBlurry = isStandIn && maxOf(bitmap.width, bitmap.height) < SHARP_THUMBNAIL_PX
       Image(
@@ -414,6 +460,9 @@ private fun PicturePage(
     }
   }
 }
+
+/** Formats whose file may hold an animation. Other pictures stay plain bitmaps. */
+private fun isPossiblyMoving(mediaType: String): Boolean = mayBeAnimated(mediaType) || mediaType.startsWith("image/png")
 
 /** A small ring over the stand-in while the original comes (the bytes' share once known). */
 @Composable

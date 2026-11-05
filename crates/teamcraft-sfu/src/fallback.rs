@@ -23,12 +23,18 @@
 //!
 //! Limits as on QUIC: the join timeout, the signaling message size and queue, and everything rooms
 //! enforce (they don't know which transport a participant uses).
+//!
+//! A session here moves to QUIC once its client gets through there (#1309, [`crate::switch`]): the
+//! writer sends what was queued before the move, hands the queue on and closes with
+//! [`SFU_SWITCHED_CLOSE_CODE`]. What the client sent before it learned of the move may still be on
+//! its way, so the connection is read a little longer ([`SWITCH_LINGER`]), until the client closes
+//! it.
 
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::stream::{SplitSink, SplitStream};
@@ -37,7 +43,8 @@ use socket2::SockRef;
 use teamcraft_media::fallback_socket::{ControlFrames, FallbackSender, WriterConfig, WriterEnd, run_writer};
 use teamcraft_proto::{
   CALL_FALLBACK_PATH, CALL_FALLBACK_PROTOCOL, CallClientMessage, CallServerMessage, ErrorBody, ErrorCode,
-  FallbackFrame, MAX_FALLBACK_DATAGRAM_BYTES, SFU_GOING_AWAY_CLOSE_CODE, parse_offered_protocols,
+  FallbackFrame, MAX_FALLBACK_DATAGRAM_BYTES, SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE,
+  parse_offered_protocols,
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
@@ -54,8 +61,10 @@ use crate::auth::{JoinGrant, JoinTokenVerifier};
 use crate::config::FallbackConfig;
 use crate::prejoin::PreJoinSlot;
 use crate::room::{ParticipantHandle, ParticipantLink, Room, SESSION_CLOSE_TIMEOUT, SessionId};
-use crate::server::{Admission, ParticipantSession, SessionEnd, Shared, admit, release_slot};
-use crate::signaling::{EventSequence, Outgoing};
+use crate::server::{
+  Admission, ParticipantSession, SessionEnd, Shared, admit, register_switch, release_slot,
+};
+use crate::signaling::{Dequeued, Handover, SignalQueue};
 
 /// The close code of a session refused before it joined.
 const REFUSED: u32 = 0;
@@ -74,6 +83,9 @@ const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(10);
 /// Unjoined connections of one device that showed its token in the upgrade: a rejoin may overlap
 /// with a connection still being set up, not more.
 const MAX_UNJOINED_PER_DEVICE: usize = 2;
+/// How long a connection whose session moved to QUIC is still read, for what its client sent before
+/// it learned of the move; the client closes it as soon as it read the close.
+const SWITCH_LINGER: Duration = Duration::from_secs(5);
 
 type Sink = SplitSink<WebSocketStream<TcpStream>, Message>;
 type Source = SplitStream<WebSocketStream<TcpStream>>;
@@ -116,10 +128,12 @@ struct RefusalLog {
   unlogged: u64,
 }
 
-/// Signaling events of one session as frames for the writer.
+/// Signaling events of one session as frames for the writer, until the session moves away.
 struct OutgoingFrames {
-  outgoing: mpsc::Receiver<Outgoing>,
-  sequence: EventSequence,
+  maybe_queue: Option<SignalQueue>,
+  sender: FallbackSender,
+  /// The session moved to another connection (#1309).
+  has_moved: Arc<AtomicBool>,
 }
 
 /// Why a session on the fallback stopped reading.
@@ -334,6 +348,7 @@ async fn handle_connection(
   };
   let sender = FallbackSender::new(config.fallback.queue);
   let (signal_tx, signal_rx) = mpsc::channel(config.signaling_queue_len.max(1));
+  let handover = Arc::new(Handover::default());
   let handle = ParticipantHandle {
     link: Arc::new(FallbackLink(sender.clone())),
     signal_tx: signal_tx.clone(),
@@ -353,17 +368,33 @@ async fn handle_connection(
   drop(maybe_device_slot);
   drop(unjoined_slot);
   let (room, grant, session_id) = (admitted.room, admitted.grant, admitted.session_id);
+  // Dropped when the connection ends, before the slot is: a session that is lost can't move.
+  let _registration = register_switch(
+    shared,
+    admitted.maybe_switch_secret,
+    &room,
+    grant,
+    session_id,
+    &handover,
+  );
   let session = ParticipantSession::new(Arc::clone(&room), grant, signal_tx, shared);
   let writer_config = WriterConfig {
     ping_interval: config.fallback.ping_interval,
     write_timeout: config.fallback.write_timeout,
   };
+  let has_moved = Arc::new(AtomicBool::new(false));
   let frames = OutgoingFrames {
-    outgoing: signal_rx,
-    sequence: EventSequence::default(),
+    maybe_queue: Some(SignalQueue::new(signal_rx, handover)),
+    sender: sender.clone(),
+    has_moved: Arc::clone(&has_moved),
   };
   let writer = tokio::spawn(run_writer(sink, frames, sender.clone(), writer_config));
-  let end = run_session(&session, source, writer, &sender, config.idle_timeout).await;
+  let mut end = run_session(&session, &mut source, writer, &sender, config.idle_timeout).await;
+  if has_moved.load(Ordering::Acquire) {
+    linger(&session, &mut source).await;
+    // Whatever happened to this connection, the session goes on on the other one.
+    end = SessionEnd::Closed;
+  }
   debug!(
     dropped_packets = sender.dropped_packets(),
     "media dropped on this connection"
@@ -380,13 +411,13 @@ async fn handle_connection(
 /// Reads and runs the session's periodic work until something ends it.
 async fn run_session(
   session: &ParticipantSession,
-  mut source: Source,
+  source: &mut Source,
   mut writer: tokio::task::JoinHandle<WriterEnd>,
   sender: &FallbackSender,
   idle_timeout: Duration,
 ) -> SessionEnd {
   let end = tokio::select! {
-    end = read_frames(session, &mut source, idle_timeout) => match end {
+    end = read_frames(session, source, idle_timeout) => match end {
       ReadEnd::Closed => SessionEnd::Closed,
       ReadEnd::Lost => SessionEnd::Lost,
     },
@@ -412,6 +443,17 @@ async fn run_session(
   writer.abort();
   debug!(?end, "fallback session closed");
   end
+}
+
+/// The session moved to QUIC (#1309): what its client sent here before it learned of that still
+/// counts. Read until the client closes, for [`SWITCH_LINGER`] at most.
+async fn linger(session: &ParticipantSession, source: &mut Source) {
+  if tokio::time::timeout(SWITCH_LINGER, read_frames(session, source, SWITCH_LINGER))
+    .await
+    .is_err()
+  {
+    debug!("the client didn't close the connection its session moved away from");
+  }
 }
 
 async fn read_frames(session: &ParticipantSession, source: &mut Source, idle_timeout: Duration) -> ReadEnd {
@@ -680,8 +722,22 @@ impl ParticipantLink for FallbackLink {
 impl ControlFrames for OutgoingFrames {
   async fn next_frame(&mut self) -> Option<Vec<u8>> {
     loop {
-      let outgoing = self.outgoing.recv().await?;
-      match serde_json::to_vec(&self.sequence.frame(outgoing)) {
+      let message = match self.maybe_queue.as_mut()?.next().await? {
+        Dequeued::Message(message) => message,
+        Dequeued::HandOver => {
+          // Everything before the move went out: the queue goes on on the new connection, and
+          // the client reads this one up to the close.
+          if let Some(queue) = self.maybe_queue.take()
+            && !queue.hand_over()
+          {
+            debug!("the connection the session moved to went first");
+          }
+          self.has_moved.store(true, Ordering::Release);
+          self.sender.close(SFU_SWITCHED_CLOSE_CODE, b"switched");
+          return None;
+        },
+      };
+      match serde_json::to_vec(&message) {
         Ok(body) => return Some(FallbackFrame::Signal(&body).encode()),
         Err(error) => warn!(%error, "could not encode a signaling message"),
       }

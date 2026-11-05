@@ -117,6 +117,7 @@ macro_rules! synced_prefs {
 synced_prefs! {
   "display.density" => display.density,
   "display.image_size" => display.image_size,
+  "display.animated_images" => display.animated_images,
   "display.show_status_in_messages" => display.show_status_in_messages,
   "display.maybe_divider_dwell_secs" => display.maybe_divider_dwell_secs,
   "sidebar.layout" => sidebar.layout,
@@ -680,7 +681,9 @@ mod tests {
       let mut local = values();
       local.theme = Theme::Dark;
       local.prefs.display.density = Density::Compact;
+      local.prefs.display.animated_images = crate::prefs::AnimatedImages::OnHover;
       local.prefs.notifications.desktop = NotifyLevel::Mentions;
+      assert_eq!(local.read("display.animated_images"), Some(json!("on_hover")));
       assert_eq!(local.read("theme"), Some(json!("dark")));
       assert_eq!(local.read("display.density"), Some(json!("compact")));
       assert_eq!(local.read("notifications.desktop"), Some(json!("mentions")));

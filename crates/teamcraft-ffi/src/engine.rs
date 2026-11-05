@@ -79,9 +79,12 @@ const PUSH_FETCH_BUDGET: Duration = Duration::from_secs(4);
 /// short once begun.
 const PUSH_FOLLOW_MIN_LEFT: Duration = Duration::from_secs(2);
 /// The decrypted downloads an account keeps: the disk cache the apps reopen pictures and files from
-/// without downloading them again. Above it the least recently used go at start (a deleted file is
-/// fetched again when opened: its transfer shows as remote).
+/// without downloading them again. Above it the least recently used go at start and before every
+/// download, as apps fetch by themselves while they run (a deleted file is fetched again when opened:
+/// its transfer shows as remote). Partial downloads live elsewhere, so none of them goes.
 const MAX_DOWNLOADS_BYTES: u64 = 1024 * 1024 * 1024;
+/// Downloads used this recently aren't trimmed while the app runs: they may be on screen.
+const RECENT_DOWNLOAD_USE: Duration = Duration::from_secs(10 * 60);
 /// Plaintext copies of files waiting to be uploaded, one folder per account below it.
 const UPLOAD_STAGING_DIR: &str = "outgoing";
 /// Decoded messages of the conversations read last, kept so the open conversation isn't decrypted
@@ -648,13 +651,28 @@ impl Engine {
     }
   }
 
+  /// Makes room before a download: the folder stays at its limit while the app runs. Files used
+  /// lately (on screen, in a viewer: the apps bump their time) stay; the downloads whose files went
+  /// show as remote at once.
+  pub(crate) fn trim_downloads_before_fetch(&self) {
+    let deleted = trim_downloads(&self.download_dir, MAX_DOWNLOADS_BYTES, RECENT_DOWNLOAD_USE);
+    if deleted.is_empty() {
+      return;
+    }
+    match teamcraft_core::client::files::forget_deleted_downloads(&self.store, &deleted) {
+      Ok(_) => self.listener.on_change(),
+      // The next start trims and the apps treat a missing file as remote; only slower.
+      Err(error) => tracing::debug!(%error, "trimmed downloads could not be forgotten"),
+    }
+  }
+
   fn open_client(&mut self) -> Result<(), OpenError> {
     remove_shared_downloads(&self.shared_downloads);
     // Plaintext copies of files that were never sent (taken out of the composer, app stopped).
     if let Err(error) = sweep_staged_copies(&self.store, &self.upload_staging_dir) {
       tracing::debug!(%error, "stray staged upload copies could not be listed");
     }
-    trim_downloads(&self.download_dir, MAX_DOWNLOADS_BYTES);
+    trim_downloads(&self.download_dir, MAX_DOWNLOADS_BYTES, Duration::ZERO);
     let maybe_client = Client::open(
       self.api(),
       self.store.clone(),
@@ -1886,11 +1904,15 @@ fn remove_shared_downloads(directory: &std::path::Path) {
 }
 
 /// Deletes the least recently used files of `directory` (by modification time, which the apps bump
-/// when they open a file) until the rest fit into `max_bytes`.
-fn trim_downloads(directory: &std::path::Path, max_bytes: u64) {
+/// when they open a file) until the rest fit into `max_bytes`, sparing those used within
+/// `recent_use`. Returns the deleted paths.
+fn trim_downloads(directory: &std::path::Path, max_bytes: u64, recent_use: Duration) -> Vec<PathBuf> {
   let Ok(entries) = std::fs::read_dir(directory) else {
-    return;
+    return Vec::new();
   };
+  let spared_from = std::time::SystemTime::now()
+    .checked_sub(recent_use)
+    .unwrap_or(std::time::UNIX_EPOCH);
   let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
     .flatten()
     .filter_map(|entry| {
@@ -1903,15 +1925,20 @@ fn trim_downloads(directory: &std::path::Path, max_bytes: u64) {
     .collect();
   let mut total: u64 = files.iter().map(|(_, size, _)| size).sum();
   files.sort_by_key(|(modified, _, _)| *modified);
-  for (_, size, path) in files {
-    if total <= max_bytes {
+  let mut deleted = Vec::new();
+  for (modified, size, path) in files {
+    if total <= max_bytes || (!recent_use.is_zero() && modified >= spared_from) {
       break;
     }
     match std::fs::remove_file(&path) {
-      Ok(()) => total -= size,
+      Ok(()) => {
+        total -= size;
+        deleted.push(path);
+      },
       Err(error) => tracing::debug!(%error, "an old download could not be deleted"),
     }
   }
+  deleted
 }
 
 /// The other person's presence in a one-to-one DM; `None` for every other conversation.
@@ -2001,7 +2028,8 @@ mod tests {
       file.set_modified(now - Duration::from_secs(age_seconds)).unwrap();
     }
 
-    trim_downloads(directory.path(), 20);
+    let deleted = trim_downloads(directory.path(), 20, Duration::ZERO);
+    assert_eq!(deleted, [directory.path().join("old")]);
 
     let mut left: Vec<String> = std::fs::read_dir(directory.path())
       .unwrap()
@@ -2012,12 +2040,32 @@ mod tests {
   }
 
   #[test]
+  fn downloads_used_lately_stay_while_the_app_runs() {
+    let directory = TestDir::new("recent");
+    let now = SystemTime::now();
+    for (name, age_seconds) in [("old", 3_600), ("watched", 60)] {
+      let path = directory.path().join(name);
+      std::fs::write(&path, [0u8; 10]).unwrap();
+      let file = std::fs::File::options().write(true).open(&path).unwrap();
+      file.set_modified(now - Duration::from_secs(age_seconds)).unwrap();
+    }
+
+    let deleted = trim_downloads(directory.path(), 0, Duration::from_secs(600));
+
+    assert_eq!(deleted, [directory.path().join("old")]);
+    assert!(
+      directory.path().join("watched").is_file(),
+      "over the limit, but just used"
+    );
+  }
+
+  #[test]
   fn downloads_within_the_limit_or_missing_stay_as_they_are() {
     let directory = TestDir::new("within");
     std::fs::write(directory.path().join("one"), [0u8; 10]).unwrap();
-    trim_downloads(directory.path(), 10);
+    assert!(trim_downloads(directory.path(), 10, Duration::ZERO).is_empty());
     assert!(directory.path().join("one").is_file());
-    trim_downloads(&directory.path().join("missing"), 0);
+    assert!(trim_downloads(&directory.path().join("missing"), 0, Duration::ZERO).is_empty());
   }
 
   mod unreadable_store {

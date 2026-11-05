@@ -9,6 +9,9 @@
 //! the same device on a new connection takes the slot back ([`JoinOutcome::Resumed`]). Every
 //! connection gets its own [`SessionId`], so a late cleanup of an old connection never touches the
 //! slot a newer one took over.
+//!
+//! A connected participant can also move its session to another connection without leaving its
+//! slot at all ([`Room::switch_link`], #1309): nothing re-keys and the others hear nothing of it.
 
 use std::{
   collections::{HashMap, HashSet},
@@ -165,6 +168,22 @@ struct Resumed {
   effects: Vec<Effect>,
 }
 
+/// A join on its way into the room.
+struct Joining {
+  grant: JoinGrant,
+  capabilities: MediaCapabilities,
+  handle: ParticipantHandle,
+  session: SessionId,
+  maybe_switch_secret: Option<Base64Bytes>,
+}
+
+/// What a (re)joined participant's `joined` says besides the call's state.
+struct Welcome {
+  package: Vec<u8>,
+  reconnect_grace: Duration,
+  maybe_switch_secret: Option<Base64Bytes>,
+}
+
 struct Participant {
   user_id: UserId,
   /// The device's microphone is muted (its own report; metadata for the others' tiles).
@@ -198,6 +217,10 @@ pub enum RoomError {
   TooManyDevices(usize),
   #[error("call {0} is not on this SFU")]
   CallNotFound(CallId),
+  /// The session to move isn't the device's connected one any more (lost, replaced or left), or
+  /// its signaling queue is full.
+  #[error("participant {0:?} has no connection to move")]
+  NotSwitchable(DeviceId),
 }
 
 impl ParticipantLink for Connection {
@@ -370,12 +393,14 @@ impl Rooms {
   }
 
   /// Adds a participant to a call, creating the room on first join. A device that is already in
-  /// the call takes its slot back on the new connection; a locked call still lets it back in.
+  /// the call takes its slot back on the new connection; a locked call still lets it back in. Its
+  /// `joined` carries `maybe_switch_secret` (#1309).
   pub fn join(
     &self,
     grant: JoinGrant,
     capabilities: MediaCapabilities,
     handle: ParticipantHandle,
+    maybe_switch_secret: Option<Base64Bytes>,
   ) -> Result<(Arc<Room>, SessionId, JoinOutcome), RoomError> {
     let session = SessionId(self.next_session.fetch_add(1, Ordering::Relaxed));
     // The rooms lock is held across the join so `leave` can't drop the room in between.
@@ -415,11 +440,32 @@ impl Rooms {
         room
       },
     };
-    let result = room.join(grant, capabilities, handle, session, Instant::now());
+    let joining = Joining {
+      grant,
+      capabilities,
+      handle,
+      session,
+      maybe_switch_secret,
+    };
+    let result = room.join(joining, Instant::now());
     if result.is_err() && room.is_empty() {
       rooms.remove(&call_id);
     }
     Ok((room, session, result?))
+  }
+
+  /// Moves `participant_id`'s session `from` to a new connection's `link` (#1309); returns the new
+  /// session's id and the sender of the session's signaling queue, which goes along.
+  pub fn switch(
+    &self,
+    room: &Room,
+    participant_id: DeviceId,
+    from: SessionId,
+    link: Arc<dyn ParticipantLink>,
+  ) -> Result<(SessionId, Sender<Outgoing>), RoomError> {
+    let session = SessionId(self.next_session.fetch_add(1, Ordering::Relaxed));
+    let signal_tx = room.switch_link(participant_id, from, link, session)?;
+    Ok((session, signal_tx))
   }
 
   /// The session's connection was lost: the participant keeps its slot while it reconnects.
@@ -514,6 +560,11 @@ impl Room {
         Ok(())
       },
       CallClientMessage::Join { .. } => Err(ErrorBody::new(ErrorCode::ProtocolViolation, "already joined")),
+      // Only the first message of a connection moves a session (#1309).
+      CallClientMessage::Switch { .. } => Err(ErrorBody::new(
+        ErrorCode::ProtocolViolation,
+        "already in the call",
+      )),
       CallClientMessage::TransportFeedback { feedback } => {
         self.on_transport_feedback(participant_id, &feedback, now);
         Ok(())
@@ -732,14 +783,14 @@ impl Room {
     state.dispatch(outbound);
   }
 
-  fn join(
-    &self,
-    grant: JoinGrant,
-    capabilities: MediaCapabilities,
-    handle: ParticipantHandle,
-    session: SessionId,
-    now: Instant,
-  ) -> Result<JoinOutcome, RoomError> {
+  fn join(&self, joining: Joining, now: Instant) -> Result<JoinOutcome, RoomError> {
+    let Joining {
+      grant,
+      capabilities,
+      handle,
+      session,
+      maybe_switch_secret,
+    } = joining;
     let participant_id = grant.device_id;
     let mut state = lock(&self.state);
     let package = state.dave.external_sender_package()?;
@@ -749,7 +800,12 @@ impl Room {
       },
       Some(_) => {
         let resumed = state.resume(participant_id, capabilities, handle, session, now);
-        state.welcome(self.call_id, participant_id, package, self.reconnect_grace);
+        let welcome = Welcome {
+          package,
+          reconnect_grace: self.reconnect_grace,
+          maybe_switch_secret,
+        };
+        state.welcome(self.call_id, participant_id, welcome);
         // Its capabilities may differ on the new connection: the others' codecs may change too.
         state.announce_decodable_codecs(Some(participant_id));
         // After `joined`: what its tracks need now, which may have changed while it was away.
@@ -789,7 +845,12 @@ impl Room {
             presence: Presence::Connected(handle),
           },
         );
-        state.welcome(self.call_id, participant_id, package, self.reconnect_grace);
+        let welcome = Welcome {
+          package,
+          reconnect_grace: self.reconnect_grace,
+          maybe_switch_secret,
+        };
+        state.welcome(self.call_id, participant_id, welcome);
         let info = state.info(participant_id);
         if let Some(participant) = info {
           state.broadcast_except(participant_id, CallEvent::ParticipantJoined { participant });
@@ -824,6 +885,48 @@ impl Room {
         () = &mut joined => {},
       }
     }
+  }
+
+  /// Moves a connected participant's session `from` to `link`, the connection of `to` (#1309): its
+  /// slot, tracks, subscriptions and DAVE leaf stay as they are, and the others hear nothing of
+  /// it. From now on media goes over `link`, and `to` is the session whose end counts, so the old
+  /// connection's end is no leave and no loss any more. The signaling queue gets
+  /// [`Outgoing::HandOver`]: the old connection's writer sends what was queued before it and then
+  /// hands the queue on, so the events go on without a gap. Returns the queue's sender, for the
+  /// new session's own messages.
+  ///
+  /// Refused unless `from` is the device's connected session: one that was lost meanwhile has left
+  /// the DAVE group, and its device rejoins.
+  pub fn switch_link(
+    &self,
+    participant_id: DeviceId,
+    from: SessionId,
+    link: Arc<dyn ParticipantLink>,
+    to: SessionId,
+  ) -> Result<Sender<Outgoing>, RoomError> {
+    let mut state = lock(&self.state);
+    let Some(participant) = state
+      .participants
+      .get_mut(&participant_id)
+      .filter(|participant| participant.session == from)
+    else {
+      return Err(RoomError::NotSwitchable(participant_id));
+    };
+    let Presence::Connected(handle) = &mut participant.presence else {
+      return Err(RoomError::NotSwitchable(participant_id));
+    };
+    // Full: the old connection doesn't read, and is about to be dropped for it.
+    if handle.signal_tx.try_send(Outgoing::HandOver).is_err() {
+      return Err(RoomError::NotSwitchable(participant_id));
+    }
+    // The old connection's datagrams still queued there may get lost: media tolerates that.
+    handle.link = link;
+    let signal_tx = handle.signal_tx.clone();
+    participant.session = to;
+    state.latest_sessions.insert(participant_id, to);
+    drop(state);
+    info!(call_id = %self.call_id, participant_id = %participant_id, "participant moved to another connection");
+    Ok(signal_tx)
   }
 
   fn holds_slot(&self, participant_id: DeviceId, session: SessionId) -> bool {
@@ -1026,7 +1129,12 @@ impl Room {
 impl RoomState {
   /// Sends a (re)joined participant what it needs to start: the call's state, the DAVE external
   /// sender, the current speakers and who of the others is reconnecting.
-  fn welcome(&self, call_id: CallId, participant_id: DeviceId, package: Vec<u8>, reconnect_grace: Duration) {
+  fn welcome(&self, call_id: CallId, participant_id: DeviceId, welcome: Welcome) {
+    let Welcome {
+      package,
+      reconnect_grace,
+      maybe_switch_secret,
+    } = welcome;
     let Some(participant) = self.info(participant_id) else {
       return;
     };
@@ -1046,6 +1154,7 @@ impl RoomState {
         screen_audio_tracks: self.forwarder.screen_audio_tracks(),
         maybe_reconnect_grace_ms: Some(u64::try_from(reconnect_grace.as_millis()).unwrap_or(u64::MAX)),
         maybe_max_simulcast_layers: Some(MAX_SIMULCAST_LAYERS),
+        maybe_switch_secret,
       },
     );
     for (device_id, other) in &self.participants {
@@ -1548,6 +1657,154 @@ mod tests {
     assert!(devices.contains(&id(20)));
   }
 
+  /// A session moves to another connection without leaving its slot (#1309).
+  mod switch {
+    use super::*;
+
+    #[test]
+    fn the_others_hear_nothing_and_the_queue_is_handed_over() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (mut alice_rx, alice_session) = join(&rooms, 1, 10);
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      let room = room_of(&rooms);
+      drain(&mut alice_rx);
+      drain(&mut bob_rx);
+
+      let (moved_to, _signal_tx) = rooms
+        .switch(&room, id(10), alice_session, Arc::new(QuietLink))
+        .unwrap();
+
+      assert!(drain(&mut bob_rx).is_empty(), "no reconnect, no leave, no re-key");
+      assert_eq!(alice_rx.try_recv().ok(), Some(Outgoing::HandOver));
+      assert!(room.holds_slot(id(10), moved_to));
+      // Events for alice keep coming through the same queue, after the hand-over.
+      room.set_muted(id(20), true, Instant::now());
+      assert_eq!(
+        drain(&mut alice_rx),
+        vec![CallEvent::ParticipantMuted {
+          device_id: id(20),
+          is_muted: true
+        }]
+      );
+    }
+
+    #[test]
+    fn the_old_connections_end_is_no_leave_and_no_loss() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, alice_session) = join(&rooms, 1, 10);
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      let room = room_of(&rooms);
+      let (moved_to, _signal_tx) = rooms
+        .switch(&room, id(10), alice_session, Arc::new(QuietLink))
+        .unwrap();
+      drain(&mut bob_rx);
+
+      assert!(!rooms.disconnect(&room, id(10), alice_session, Instant::now()));
+      assert!(!rooms.leave(&room, id(10), alice_session));
+      assert!(drain(&mut bob_rx).is_empty());
+      assert_eq!(rooms.stats().participants, 2);
+      // The new connection's end counts.
+      assert!(rooms.leave(&room, id(10), moved_to));
+      assert_eq!(rooms.stats().participants, 1);
+    }
+
+    /// The old connection is lost just as the switch comes: one of them wins, and the device keeps
+    /// exactly one slot.
+    #[test]
+    fn a_switch_racing_a_loss_keeps_one_slot() {
+      // The loss first: the session left the DAVE group, its device rejoins instead.
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, alice_session) = join(&rooms, 1, 10);
+      let room = room_of(&rooms);
+      assert!(rooms.disconnect(&room, id(10), alice_session, Instant::now()));
+      assert!(matches!(
+        rooms.switch(&room, id(10), alice_session, Arc::new(QuietLink)),
+        Err(RoomError::NotSwitchable(_))
+      ));
+      assert_eq!(rooms.stats().participants, 1);
+      assert!(room.holds_slot(id(10), alice_session), "kept for the rejoin");
+
+      // The switch first: the loss of the old connection comes too late to matter.
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, alice_session) = join(&rooms, 1, 10);
+      let room = room_of(&rooms);
+      let (moved_to, _signal_tx) = rooms
+        .switch(&room, id(10), alice_session, Arc::new(QuietLink))
+        .unwrap();
+      assert!(!rooms.disconnect(&room, id(10), alice_session, Instant::now()));
+      assert!(!rooms.leave(&room, id(10), alice_session));
+      assert_eq!(rooms.stats().participants, 1);
+      assert!(room.holds_slot(id(10), moved_to));
+    }
+
+    #[tokio::test]
+    async fn only_the_connected_session_moves() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, first) = join(&rooms, 1, 10);
+      let room = room_of(&rooms);
+      // The device came back on another connection: the first session is no more.
+      let (_alice_rx, _second) = join(&rooms, 1, 10);
+      assert!(matches!(
+        rooms.switch(&room, id(10), first, Arc::new(QuietLink)),
+        Err(RoomError::NotSwitchable(_))
+      ));
+      assert!(matches!(
+        rooms.switch(&room, id(99), first, Arc::new(QuietLink)),
+        Err(RoomError::NotSwitchable(_))
+      ));
+    }
+
+    #[test]
+    fn a_full_queue_refuses_the_move_and_changes_nothing() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (signal_tx, _signal_rx) = mpsc::channel(1);
+      let handle = ParticipantHandle {
+        link: Arc::new(QuietLink),
+        signal_tx,
+      };
+      let (room, session, _) = rooms
+        .join(
+          grant(CALL, Some(CONVERSATION), 1, 10),
+          MediaCapabilities::default(),
+          handle,
+          None,
+        )
+        .unwrap();
+      // `joined` and the rest filled it.
+      assert!(matches!(
+        rooms.switch(&room, id(10), session, Arc::new(QuietLink)),
+        Err(RoomError::NotSwitchable(_))
+      ));
+      assert!(room.holds_slot(id(10), session));
+    }
+
+    #[test]
+    fn joined_carries_the_sessions_secret() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (signal_tx, mut signal_rx) = mpsc::channel(64);
+      let handle = ParticipantHandle {
+        link: Arc::new(QuietLink),
+        signal_tx,
+      };
+      rooms
+        .join(
+          grant(CALL, Some(CONVERSATION), 1, 10),
+          MediaCapabilities::default(),
+          handle,
+          Some(Base64Bytes::new(vec![3; 32])),
+        )
+        .unwrap();
+      assert!(drain(&mut signal_rx).iter().any(|event| matches!(
+        event,
+        CallEvent::Joined { maybe_switch_secret: Some(secret), .. } if secret.as_slice() == [3; 32]
+      )));
+    }
+
+    fn room_of(rooms: &Rooms) -> Arc<Room> {
+      lock(&rooms.rooms).get(&id(CALL)).cloned().unwrap()
+    }
+  }
+
   mod decodable_codecs {
     use teamcraft_proto::KNOWN_VIDEO_CODECS;
 
@@ -1626,6 +1883,7 @@ mod tests {
         grant(CALL, Some(CONVERSATION), user, device),
         capabilities,
         handle,
+        None,
       )
       .unwrap();
     (signal_rx, room, session)
@@ -1647,7 +1905,7 @@ mod tests {
       link: Arc::new(QuietLink),
       signal_tx,
     };
-    let (room, session, _) = rooms.join(grant, MediaCapabilities::default(), handle)?;
+    let (room, session, _) = rooms.join(grant, MediaCapabilities::default(), handle, None)?;
     Ok((signal_rx, session, room.call_id()))
   }
 

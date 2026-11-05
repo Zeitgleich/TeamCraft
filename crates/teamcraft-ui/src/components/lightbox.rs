@@ -181,12 +181,18 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
   let arrival = RwSignal::new(Arrival::default());
   let viewport = RwSignal::new(Viewport::default());
   let is_paused = RwSignal::new(false);
-  // An animation found only once the file arrived starts paused under reduced motion too.
+  let motion_mode = Signal::derive(move || {
+    state
+      .settings
+      .prefs
+      .with_untracked(|prefs| prefs.display.animated_images)
+  });
+  // An animation found only once the file arrived starts paused like any other.
   Effect::new(move |previous: Option<Option<MediaKind>>| {
     let now = kind.get();
     if previous == Some(Some(MediaKind::Image))
       && now == Some(MediaKind::Animated)
-      && prefers_reduced_motion()
+      && MediaKind::Animated.starts_paused(motion_mode.get_untracked(), prefers_reduced_motion())
     {
       is_paused.set(true);
     }
@@ -215,6 +221,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     arrival,
     viewport,
     is_paused,
+    motion_mode,
     retries,
     ticket,
   });
@@ -490,6 +497,8 @@ struct LoadInputs {
   arrival: RwSignal<Arrival>,
   viewport: RwSignal<Viewport>,
   is_paused: RwSignal<bool>,
+  /// The "Animated images" setting (#201), read when a file comes on screen.
+  motion_mode: Signal<crate::prefs::AnimatedImages>,
   retries: RwSignal<u32>,
   ticket: StoredValue<u64>,
 }
@@ -508,6 +517,7 @@ fn load_current(inputs: LoadInputs) {
     arrival,
     viewport,
     is_paused,
+    motion_mode,
     retries,
     ticket,
   } = inputs;
@@ -535,7 +545,7 @@ fn load_current(inputs: LoadInputs) {
     is_paused.set(
       kind
         .get_untracked()
-        .is_some_and(|kind| kind.starts_paused(prefers_reduced_motion())),
+        .is_some_and(|kind| kind.starts_paused(motion_mode.get_untracked(), prefers_reduced_motion())),
     );
     // Replacing the old values drops their URLs, which releases the previous file right away.
     // The sharper inline rendition when the conversation already loaded it, else the thumbnail.

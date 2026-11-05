@@ -766,6 +766,26 @@ pub async fn still_frame(url: &str) -> Option<ObjectUrl> {
   ObjectUrl::from_blob(&blob.dyn_into().ok()?)
 }
 
+/// [`still_frame`] with its longest side at most `max_side`, for a place that shows it small.
+pub async fn small_still_frame(url: &str, max_side: u32) -> Option<ObjectUrl> {
+  let image = web_sys::HtmlImageElement::new().ok()?;
+  image.set_src(url);
+  JsFuture::from(image.decode()).await.ok()?;
+  let (width, height) = fitted_side(image.natural_width(), image.natural_height(), max_side);
+  let blob = JsFuture::from(png_of_size(&image, width, height)?).await.ok()?;
+  ObjectUrl::from_blob(&blob.dyn_into().ok()?)
+}
+
+/// `width` × `height` scaled down until the longer side is at most `max_side`, never up.
+fn fitted_side(width: u32, height: u32, max_side: u32) -> (u32, u32) {
+  let longer = width.max(height);
+  if longer <= max_side {
+    return (width, height);
+  }
+  let scaled = |side: u32| ((u64::from(side) * u64::from(max_side) / u64::from(longer)) as u32).max(1);
+  (scaled(width), scaled(height))
+}
+
 /// Puts the image on the clipboard as a PNG (the type every browser accepts there).
 async fn copy_image(image: &web_sys::HtmlImageElement) -> bool {
   let Some(write) = clipboard_write(image) else {
@@ -801,7 +821,11 @@ fn clipboard_write(image: &web_sys::HtmlImageElement) -> Option<js_sys::Promise>
 
 /// The image drawn into a canvas of its natural size, as a promise of a PNG `Blob`.
 fn png_of(image: &web_sys::HtmlImageElement) -> Option<js_sys::Promise> {
-  let (width, height) = (image.natural_width(), image.natural_height());
+  png_of_size(image, image.natural_width(), image.natural_height())
+}
+
+/// The image drawn at `width` × `height`, as a PNG.
+fn png_of_size(image: &web_sys::HtmlImageElement, width: u32, height: u32) -> Option<js_sys::Promise> {
   if width == 0 || height == 0 {
     return None;
   }
@@ -818,7 +842,9 @@ fn png_of(image: &web_sys::HtmlImageElement) -> Option<js_sys::Promise> {
     .ok()??
     .dyn_into::<web_sys::CanvasRenderingContext2d>()
     .ok()?;
-  context.draw_image_with_html_image_element(image, 0.0, 0.0).ok()?;
+  context
+    .draw_image_with_html_image_element_and_dw_and_dh(image, 0.0, 0.0, f64::from(width), f64::from(height))
+    .ok()?;
   Some(js_sys::Promise::new(&mut |resolve, reject| {
     let on_reject = reject.clone();
     let done = Closure::once_into_js(move |blob: JsValue| {
@@ -873,4 +899,19 @@ fn move_focus(menu: NodeRef<html::Div>, is_down: bool) {
     (Some(at), false) => (at + items.len() - 1) % items.len(),
   };
   drop(items[next].focus());
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_still_frame_only_ever_shrinks_and_keeps_its_shape() {
+    assert_eq!(fitted_side(300, 200, 960), (300, 200));
+    assert_eq!(fitted_side(960, 10, 960), (960, 10));
+    assert_eq!(fitted_side(9600, 4800, 960), (960, 480));
+    assert_eq!(fitted_side(4800, 9600, 960), (480, 960));
+    assert_eq!(fitted_side(100_000, 1, 960), (960, 1), "a strip keeps a pixel");
+    assert_eq!(fitted_side(u32::MAX, u32::MAX, 960), (960, 960));
+  }
 }

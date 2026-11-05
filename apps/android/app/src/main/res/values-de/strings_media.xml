@@ -16,6 +16,15 @@
     <item quantity="one">%d weiteres Bild</item>
     <item quantity="other">%d weitere Bilder</item>
   </plurals>
+  <string name="animated_images_title">Animierte Bilder</string>
+  <string name="animated_images_autoplay">Automatisch</string>
+  <string name="animated_images_tap">Beim Tippen</string>
+  <string name="animated_images_hint">GIFs und andere bewegte Bilder. „Automatisch“ lädt sie wie Originalbilder (siehe oben). Sind Animationen in den Systemeinstellungen entfernt, starten sie nicht von selbst.</string>
+  <string name="animation_play">Animation abspielen</string>
+  <string name="animation_pause">Animation anhalten</string>
+  <string name="animation_state_playing">Animiertes Bild, wird abgespielt</string>
+  <string name="animation_state_paused">Animiertes Bild, angehalten</string>
+  <string name="animation_failed">Nicht geladen</string>
   <string name="original_download_title">Originalbilder automatisch laden</string>
   <string name="original_download_always">Immer</string>
   <string name="original_download_unmetered">Nur im WLAN</string>

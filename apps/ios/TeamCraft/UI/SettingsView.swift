@@ -255,6 +255,7 @@ private struct ChatsSettingsPage: View {
   @AppStorage(ChatListLayout.key) private var chatListLayout = ChatListLayout.spaces.rawValue
   @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
   @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.fallback.rawValue
+  @AppStorage(AnimatedImagesSetting.key) private var animatedImages = AnimatedImagesSetting.fallback.rawValue
   @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
   @State private var isPrefetchLoaded = false
 
@@ -288,6 +289,14 @@ private struct ChatsSettingsPage: View {
         }
       } footer: {
         Text("original_download_hint")
+      }
+      Section {
+        Picker("animated_images_title", selection: $animatedImages) {
+          Text("animated_images_autoplay").tag(AnimatedImagesSetting.autoplay.rawValue)
+          Text("animated_images_tap").tag(AnimatedImagesSetting.onTap.rawValue)
+        }
+      } footer: {
+        Text("animated_images_hint")
       }
       Section {
         Picker("prefetch_title", selection: $prefetch) {

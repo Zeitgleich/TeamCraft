@@ -2,6 +2,8 @@ package de.zeitgleich.teamcraft.ui
 
 import android.content.Context
 import android.net.ConnectivityManager
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import uniffi.teamcraft_ffi.OriginalDownload
 import uniffi.teamcraft_ffi.fetchesOriginalAutomatically
 
@@ -12,6 +14,17 @@ import uniffi.teamcraft_ffi.fetchesOriginalAutomatically
  */
 class MediaPrefs private constructor(private val context: Context) {
   private val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+  private val animatedImagesFlow = sharedAnimatedImages ?: MutableStateFlow(
+    animatedImagesOf(prefs.getString(KEY_ANIMATED_IMAGES, null)),
+  ).also { sharedAnimatedImages = it }
+
+  /** When animated images move. Kept on this device, like the mobile apps' other settings. */
+  val animatedImages: StateFlow<AnimatedImagesMode> get() = animatedImagesFlow
+
+  fun setAnimatedImages(choice: AnimatedImagesMode) {
+    prefs.edit().putString(KEY_ANIMATED_IMAGES, choice.name).apply()
+    animatedImagesFlow.value = choice
+  }
 
   val originalDownload: OriginalDownload get() = originalDownloadOf(prefs.getString(KEY_ORIGINAL_DOWNLOAD, null))
 
@@ -29,6 +42,10 @@ class MediaPrefs private constructor(private val context: Context) {
   companion object {
     private const val FILE = "media_prefs"
     private const val KEY_ORIGINAL_DOWNLOAD = "original_download"
+    private const val KEY_ANIMATED_IMAGES = "animated_images"
+
+    /** One value for the whole process, so an open conversation follows a change in Settings. */
+    private var sharedAnimatedImages: MutableStateFlow<AnimatedImagesMode>? = null
 
     fun prefs(context: Context) = MediaPrefs(context.applicationContext)
   }
@@ -40,3 +57,7 @@ class MediaPrefs private constructor(private val context: Context) {
  */
 internal fun originalDownloadOf(maybeStored: String?): OriginalDownload =
   OriginalDownload.entries.firstOrNull { it.name == maybeStored } ?: OriginalDownload.UNMETERED_ONLY
+
+/** The stored choice; nothing (or something unknown) plays automatically. */
+internal fun animatedImagesOf(maybeStored: String?): AnimatedImagesMode =
+  AnimatedImagesMode.entries.firstOrNull { it.name == maybeStored } ?: AnimatedImagesMode.AUTOPLAY
