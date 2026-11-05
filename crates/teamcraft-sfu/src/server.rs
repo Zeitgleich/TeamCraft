@@ -53,6 +53,7 @@ use crate::{
   fallback,
   net::bind_dual_stack,
   prejoin::PreJoinLimiter,
+  rejoin::{RejoinLimiter, RejoinTurn},
   reporting::{NoReporter, ParticipantReporter},
   room::{JoinOutcome, ParticipantHandle, Room, RoomError, RoomStats, Rooms, SessionId},
   signaling::{EventSequence, Outgoing, SignalingError, read_message, write_message},
@@ -85,6 +86,8 @@ pub(crate) struct Shared {
   prejoin: Arc<PreJoinLimiter>,
   /// The fallback's own: what fills it, through a proxy or not, costs a QUIC session nothing.
   pub(crate) fallback_prejoin: Arc<PreJoinLimiter>,
+  /// The pace of each device's joins of each call, on both transports.
+  rejoins: RejoinLimiter,
   /// When this SFU started: the roster tells the server how fresh its rooms are.
   started_at: Instant,
   /// Wakes the roster reporter before its interval (a call moved between devices).
@@ -148,6 +151,8 @@ pub(crate) struct Admitted {
 pub(crate) struct Refusal {
   code: ErrorCode,
   text: String,
+  /// When the client may try again (a join that came too soon).
+  maybe_retry_after: Option<Duration>,
   pub(crate) result: Result<(), SessionError>,
 }
 
@@ -188,6 +193,7 @@ impl Sfu {
       .build();
     let endpoint = Endpoint::server(server_config).map_err(SfuError::Bind)?;
     let rooms = Rooms::new(config.clone());
+    let rejoins = RejoinLimiter::new(config.rejoin);
     // Calls on QUIC don't depend on it: a port that is taken costs the fallback, not the SFU.
     let maybe_fallback_listener = config.fallback.maybe_bind_addr.and_then(|addr| {
       bind_dual_stack(addr)
@@ -208,6 +214,7 @@ impl Sfu {
         reporter: Arc::new(NoReporter),
         prejoin: Arc::new(PreJoinLimiter::default()),
         fallback_prejoin: Arc::new(PreJoinLimiter::default()),
+        rejoins,
         started_at: Instant::now(),
         roster_now: Arc::new(Notify::new()),
         fallback_connections: AtomicUsize::new(0),
@@ -405,10 +412,10 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     room,
     grant,
     session_id,
-  } = match admit(shared, first, handle) {
+  } = match admit(shared, first, handle).await {
     Admission::Admitted(admitted) => admitted,
     Admission::Refused(refusal) => {
-      reject(&mut send, refusal.code, &refusal.text).await;
+      reject(&mut send, refusal.message()).await;
       return refusal.result;
     },
   };
@@ -422,13 +429,17 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
 }
 
 /// The join every session starts with, whichever transport brought it: the first message must be
-/// `join`, its token must verify, and the room must take the device. The one place a join token is
-/// checked (ARCHITECTURE.md §6.6: the fallback's first frame gets what QUIC's gets).
-pub(crate) fn admit(shared: &Shared, first: CallClientMessage, handle: ParticipantHandle) -> Admission {
+/// `join`, its token must verify, the device must not join this call more often than
+/// [`SfuConfig::rejoin`] allows, and the room must take the device. The one place a join token is
+/// checked (ARCHITECTURE.md §6.6: the fallback's first frame gets what QUIC's gets), and the one
+/// place joins are paced (#1227): a join whose turn is near waits for it here, holding nothing but
+/// its unjoined slot; one whose turn is further off is refused with the time to wait.
+pub(crate) async fn admit(shared: &Shared, first: CallClientMessage, handle: ParticipantHandle) -> Admission {
   let CallClientMessage::Join { token, capabilities } = first else {
     return Admission::Refused(Refusal {
       code: ErrorCode::ProtocolViolation,
       text: "expected join".to_owned(),
+      maybe_retry_after: None,
       result: Err(SessionError::ExpectedJoin),
     });
   };
@@ -438,10 +449,36 @@ pub(crate) fn admit(shared: &Shared, first: CallClientMessage, handle: Participa
       return Admission::Refused(Refusal {
         code: ErrorCode::InvalidJoinToken,
         text: error.to_string(),
+        maybe_retry_after: None,
         result: Ok(()),
       });
     },
   };
+  match shared
+    .rejoins
+    .take_turn(grant.call_id, grant.device_id, Instant::now())
+  {
+    RejoinTurn::Now => {},
+    RejoinTurn::After(wait) => {
+      debug!(call_id = %grant.call_id, participant_id = %grant.device_id, ?wait, "join waits for its turn");
+      tokio::time::sleep(wait).await;
+    },
+    RejoinTurn::Refused { retry_after } => {
+      // Not above debug: whoever loops would choose the size of the log.
+      debug!(
+        call_id = %grant.call_id,
+        participant_id = %grant.device_id,
+        ?retry_after,
+        "join refused: the device joins this call too often"
+      );
+      return Admission::Refused(Refusal {
+        code: ErrorCode::RateLimited,
+        text: "joined this call too often, try again later".to_owned(),
+        maybe_retry_after: Some(retry_after),
+        result: Ok(()),
+      });
+    },
+  }
   let (room, session_id, outcome) = match shared.rooms.join(grant, capabilities, handle) {
     Ok(joined) => joined,
     Err(error) => {
@@ -454,6 +491,7 @@ pub(crate) fn admit(shared: &Shared, first: CallClientMessage, handle: Participa
       return Admission::Refused(Refusal {
         code,
         text: error.to_string(),
+        maybe_retry_after: None,
         result: Err(error.into()),
       });
     },
@@ -477,14 +515,20 @@ pub(crate) fn admit(shared: &Shared, first: CallClientMessage, handle: Participa
 impl Refusal {
   /// What the client gets to read.
   pub(crate) fn message(&self) -> CallServerMessage {
-    CallServerMessage::Error {
-      error: ErrorBody::new(self.code.clone(), &self.text),
+    let mut error = ErrorBody::new(self.code.clone(), &self.text);
+    if let Some(retry_after) = self.maybe_retry_after {
+      // Rounded up: a client that waits as told finds its turn there.
+      let secs = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
+      error = error.with_retry_after_secs(secs);
     }
+    CallServerMessage::Error { error }
   }
 }
 
 /// Ends a session's hold on its slot: at once after a close, after the reconnect grace period
-/// after a loss (unless the device took the slot back on a new connection meanwhile).
+/// after a loss, or as soon as the device took the slot back on a new connection: a lost session
+/// waits only while it may still matter, so a device that keeps reconnecting leaves at most one
+/// waiting behind.
 pub(crate) async fn release_slot(
   shared: &Shared,
   room: &Room,
@@ -497,7 +541,9 @@ pub(crate) async fn release_slot(
       .rooms
       .disconnect(room, grant.device_id, session_id, Instant::now())
   {
-    tokio::time::sleep(shared.config.reconnect_grace).await;
+    room
+      .wait_for_return(grant.device_id, session_id, shared.config.reconnect_grace)
+      .await;
   }
   // Going away: the participant rejoins on the restarted SFU, and the server keeps it in the call.
   if shared.rooms.leave(room, grant.device_id, session_id) && !shared.rooms.is_going_away() {
@@ -675,12 +721,9 @@ async fn write_signaling(mut send: SendStream, mut signal_rx: mpsc::Receiver<Out
   }
 }
 
-async fn reject(send: &mut SendStream, error_code: ErrorCode, message: &str) {
-  let error = CallServerMessage::Error {
-    error: ErrorBody::new(error_code, message),
-  };
+async fn reject(send: &mut SendStream, refusal: CallServerMessage) {
   // Best effort: the session is being closed anyway.
-  if write_message(send, &error).await.is_ok() {
+  if write_message(send, &refusal).await.is_ok() {
     let _ = send.finish().await;
   }
 }

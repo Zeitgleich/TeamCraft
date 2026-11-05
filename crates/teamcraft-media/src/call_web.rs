@@ -101,7 +101,7 @@ use crate::call_engine::{
   OwnVideoEnd,
 };
 use crate::call_resilience::{
-  CallTransport, Jitter, JoinTicket, JoinTicketError, ReconnectSchedule, ResilienceConfig,
+  CallTransport, Jitter, JoinTicket, JoinTicketError, ReconnectSchedule, RejoinPacer, ResilienceConfig,
   connect_preferring_quic, fallback_delay, rejoin_attempt,
 };
 use crate::call_video::ReceivedVideoFrame;
@@ -110,8 +110,8 @@ use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
 use crate::rtp::AudioLevel;
 use crate::video::{EncodedVideoFrame, ScreenProfile, TOP_LAYER, VideoResolution, chosen_layer};
 use crate::web_api::{
-  AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, WORKLET_SOURCE, WebTransport,
-  WebTransportBidirectionalStream, datagram_writable, dictionary, has_global,
+  AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, QUIC_GLOBAL, WORKLET_SOURCE, WebTransport,
+  WebTransportBidirectionalStream, datagram_writable, dictionary, has_global, missing_for_calls,
 };
 
 /// Audio frame period.
@@ -957,8 +957,8 @@ async fn open_microphone(choice: &AudioDeviceChoice) -> Result<MediaStream, WebC
   )
 }
 
-/// Whether this browser has what calls need (WebTransport, WebCodecs audio, AudioWorklet); the
-/// error names the first thing missing.
+/// Whether this browser has what calls need (WebCodecs audio, AudioWorklet; WebTransport only for
+/// QUIC, the fallback does without it); the error names the first thing missing.
 pub fn check_support() -> Result<(), WebCallError> {
   ensure_supported()
 }
@@ -1044,6 +1044,8 @@ async fn run_call(
     watch: SessionWatch::new(Instant::now(), config.resilience),
     maybe_lost_at: None,
     lost_before_joining: 0,
+    pacer: RejoinPacer::default(),
+    maybe_refused_retry_after: None,
     maybe_hurry: None,
     timer_ticks: 0,
     ticket: JoinTicket {
@@ -1124,6 +1126,9 @@ async fn run_call(
       break Ok(());
     }
     if engine.is_in_call() {
+      if state.maybe_lost_at.is_some() {
+        state.pacer.on_back(Instant::now());
+      }
       state.maybe_lost_at = None;
       state.lost_before_joining = 0;
       state.close_lost_sessions();
@@ -1164,6 +1169,10 @@ struct CallState<'a> {
   maybe_lost_at: Option<Instant>,
   /// Sessions in a row that were lost before the SFU took the join, which paces the next attempt.
   lost_before_joining: u32,
+  /// Pauses rejoins when the call keeps dropping right after each one.
+  pacer: RejoinPacer,
+  /// The SFU turned the last join away for now and asked to wait this long (#1227).
+  maybe_refused_retry_after: Option<Duration>,
   /// Asks the rejoin task to try again early, while rejoining.
   maybe_hurry: Option<mpsc::UnboundedSender<()>>,
   timer_ticks: u32,
@@ -1251,6 +1260,13 @@ impl CallState<'_> {
           } else {
             self.watch.on_heard(now);
             engine.handle_signal(message, now)?;
+            if let Some(retry_after) = engine.take_join_refusal() {
+              // Joined this call too often (#1227): this session is of no use, the next attempt
+              // waits as asked, and the call goes on.
+              info!(?retry_after, "the SFU asks to join again later");
+              self.maybe_refused_retry_after = Some(retry_after);
+              return Ok(self.on_session_lost(engine, SessionEnd::Lost));
+            }
           }
         }
       },
@@ -1409,7 +1425,10 @@ impl CallState<'_> {
 
     let at_ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut report = engine.video_stats(at_ms);
-    report.maybe_rtt_ms = self.maybe_rtt_ms;
+    report.maybe_rtt_ms = match self.call_transport {
+      CallTransport::Quic => self.maybe_rtt_ms,
+      CallTransport::Fallback => self.watch.round_trip_ms(),
+    };
     for track in &mut report.tracks {
       let VideoTrackStats::Sent(sent) = track else {
         continue;
@@ -1432,7 +1451,9 @@ impl CallState<'_> {
       });
       sent.maybe_frames_captured = Some(sender.frames_captured());
     }
-    if let Some(transport) = &self.maybe_transport {
+    if let Some(transport) = &self.maybe_transport
+      && transport.kind() == CallTransport::Quic
+    {
       let session = transport.session.clone();
       let inputs = self.inputs.clone();
       spawn_local(async move {
@@ -1637,6 +1658,7 @@ impl CallState<'_> {
     }
     engine.connection_lost();
     let now = Instant::now();
+    let is_new_loss = self.maybe_lost_at.is_none();
     let lost_at = *self.maybe_lost_at.get_or_insert(now);
     let grace = engine
       .maybe_reconnect_grace()
@@ -1646,6 +1668,12 @@ impl CallState<'_> {
     let mut schedule = reconnect_schedule(lost_at, grace, end, now, &self.resilience, Jitter::random());
     // The schedule is new, the attempts before it aren't.
     schedule.count_lost_before_joining(self.lost_before_joining, now, &self.resilience);
+    if is_new_loss {
+      schedule.pause_first_attempt(now, self.pacer.on_lost(now, &self.resilience));
+    }
+    if let Some(retry_after) = self.maybe_refused_retry_after.take() {
+      schedule.on_join_refused(now, retry_after, &self.resilience);
+    }
     let (hurry, hurry_rx) = mpsc::unbounded();
     self.maybe_hurry = Some(hurry);
     self.spawn_reconnect(schedule, hurry_rx, generation);
@@ -1738,6 +1766,8 @@ impl CallState<'_> {
   /// The call runs over this now: the UI hears of it, and the jitter buffers suit its timing.
   fn use_transport(&mut self, transport: CallTransport) {
     self.call_transport = transport;
+    // QUIC sessions have the browser's measure of the round trip; the fallback's is the pings'.
+    self.watch.time_round_trip(transport == CallTransport::Fallback);
     self.jitter = match transport {
       CallTransport::Quic => self.quic_jitter,
       CallTransport::Fallback => JitterBufferConfig::for_fallback(),
@@ -2199,6 +2229,14 @@ impl Transport {
     inputs: &mpsc::UnboundedSender<Input>,
     generation: u64,
   ) -> Result<Self, WebCallError> {
+    // No WebTransport (Safari before 26.4): the fallback is the only way, and it needn't wait.
+    if !has_global(QUIC_GLOBAL) {
+      let Some(fallback_url) = &ticket.maybe_fallback_url else {
+        return Err(WebCallError::Unsupported("WebTransport"));
+      };
+      debug!("no WebTransport in this browser: the call runs on the fallback");
+      return Self::connect_fallback(fallback_url, sessions, inputs, generation).await;
+    }
     let quic = Self::connect(
       &ticket.sfu_url,
       &ticket.certificate_hashes,
@@ -3214,16 +3252,10 @@ fn codec_error_callback(
 }
 
 fn ensure_supported() -> Result<(), WebCallError> {
-  for name in ["WebTransport", "AudioEncoder", "AudioDecoder", "AudioWorkletNode"] {
-    if !has_global(name) {
-      return Err(WebCallError::Unsupported(match name {
-        "WebTransport" => "WebTransport",
-        "AudioEncoder" | "AudioDecoder" => "WebCodecs audio",
-        _ => "AudioWorklet",
-      }));
-    }
+  match missing_for_calls(has_global) {
+    Some(missing) => Err(WebCallError::Unsupported(missing)),
+    None => Ok(()),
   }
-  Ok(())
 }
 
 fn window() -> Result<web_sys::Window, WebCallError> {

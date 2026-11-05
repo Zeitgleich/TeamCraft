@@ -54,8 +54,8 @@ use crate::call_engine::{
   OwnPublication, OwnVideoEnd, VideoSendOutcome, VideoStats,
 };
 use crate::call_resilience::{
-  CallTransport, JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, ResilienceConfig,
-  connect_preferring_quic, fallback_delay, rejoin_attempt,
+  CallTransport, JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, RejoinPacer,
+  ResilienceConfig, connect_preferring_quic, fallback_delay, rejoin_attempt,
 };
 use crate::fallback_link::{
   FallbackOpener, LoopbackOpener, SignalFrames, SocketEnd, SocketInput, is_allowed_url, is_going_away,
@@ -928,7 +928,10 @@ async fn run_call(
     if engine.is_over() {
       break Ok(());
     }
-    connection.settle(&engine);
+    if let Some(retry_after) = engine.take_join_refusal() {
+      connection.refused(&mut engine, retry_after, Instant::now());
+    }
+    connection.settle(&engine, Instant::now());
   };
 
   if let Some(mut screen_audio) = maybe_screen_audio {
@@ -964,6 +967,8 @@ struct CallConnection {
   monitor: PathMonitor,
   route: RouteWatch,
   maybe_schedule: Option<ReconnectSchedule>,
+  /// Pauses rejoins when the call keeps dropping right after each one.
+  pacer: RejoinPacer,
   maybe_attempt: Option<JoinHandle<Result<(Link, JoinTicket), NativeCallError>>>,
   /// The ticket of the current (or last) connection.
   ticket: JoinTicket,
@@ -1055,6 +1060,7 @@ impl CallConnection {
       monitor: PathMonitor::new(now),
       route: RouteWatch::new(),
       maybe_schedule: None,
+      pacer: RejoinPacer::default(),
       maybe_attempt: None,
       ticket: JoinTicket {
         sfu_url: config.sfu_url.clone(),
@@ -1106,14 +1112,27 @@ impl CallConnection {
     let was_in_call = engine.is_in_call();
     engine.connection_lost();
     let resilience = self.resilience;
+    let pacer = &mut self.pacer;
     let schedule = self.maybe_schedule.get_or_insert_with(|| {
       let grace = engine
         .maybe_reconnect_grace()
         .unwrap_or(resilience.default_reconnect_grace);
-      ReconnectSchedule::new(now, grace)
+      let mut schedule = ReconnectSchedule::new(now, grace);
+      schedule.pause_first_attempt(now, pacer.on_lost(now, &resilience));
+      schedule
     });
     if !was_in_call {
       schedule.count_lost_before_joining(1, now, &resilience);
+    }
+  }
+
+  /// The SFU turned the join away for now (#1227): the link is of no use any more, and the next
+  /// attempt waits as long as the SFU asked. The call goes on.
+  fn refused(&mut self, engine: &mut CallEngine, retry_after: Duration, now: Instant) {
+    info!(?retry_after, "the SFU asks to join again later");
+    self.lose(engine, now);
+    if let Some(schedule) = &mut self.maybe_schedule {
+      schedule.on_join_refused(now, retry_after, &self.resilience);
     }
   }
 
@@ -1211,9 +1230,10 @@ impl CallConnection {
   }
 
   /// Once the engine is back in the call, the rejoin is over.
-  fn settle(&mut self, engine: &CallEngine) {
+  fn settle(&mut self, engine: &CallEngine, now: Instant) {
     if self.maybe_schedule.is_some() && self.maybe_link.is_some() && engine.is_in_call() {
       self.maybe_schedule = None;
+      self.pacer.on_back(now);
       // The slot is on the new connection now; the SFU no longer cares about the old ones.
       self.lost_links.clear();
       info!("back in the call");
@@ -1348,7 +1368,12 @@ impl Link {
       sender.clone(),
       writer_config,
     ));
-    let reader = tokio::spawn(read_fallback(socket.stream, Arc::clone(&received), input_tx));
+    let reader = tokio::spawn(read_fallback(
+      socket.stream,
+      Arc::clone(&received),
+      sender.clone(),
+      input_tx,
+    ));
     Ok(Self {
       path: LinkPath::Fallback { sender, received },
       signal_out,
@@ -1422,12 +1447,12 @@ impl Link {
     }
   }
 
-  /// QUIC measures it; a WebSocket can't tell.
+  /// QUIC measures it; on the fallback, the SFU's answers to the client's pings time it.
   #[cfg(feature = "call-view")]
   fn rtt(&self) -> Option<Duration> {
     match &self.path {
       LinkPath::Quic { connection, .. } => Some(connection.rtt()),
-      LinkPath::Fallback { .. } => None,
+      LinkPath::Fallback { sender, .. } => sender.round_trip(),
     }
   }
 
@@ -2402,10 +2427,11 @@ async fn read_fallback(
     >,
   >,
   received: Arc<AtomicU64>,
+  sender: FallbackSender,
   inputs: mpsc::UnboundedSender<LinkInput>,
 ) {
   let delivering = inputs.clone();
-  let end = read_socket(stream, received, move |input| {
+  let end = read_socket(stream, received, sender, move |input| {
     let input = match input {
       SocketInput::Signal(message) => LinkInput::Signal(message),
       SocketInput::Datagram(bytes) => LinkInput::Datagram(bytes),

@@ -332,3 +332,46 @@ pub fn pictures_drawn(element: &JsValue) -> Option<u64> {
 pub fn has_global(name: &str) -> bool {
   Reflect::has(&js_sys::global(), &JsValue::from_str(name)).unwrap_or(false)
 }
+
+/// What a browser needs for calls, by global constructor, with what to call it when it's missing.
+/// WebTransport isn't among them (#1227): without it a call runs on the SFU's WebSocket fallback, as
+/// in Safari before 26.4, which has WebCodecs and the AudioWorklet.
+pub const CALL_GLOBALS: [(&str, &str); 3] = [
+  ("AudioEncoder", "WebCodecs audio"),
+  ("AudioDecoder", "WebCodecs audio"),
+  ("AudioWorkletNode", "AudioWorklet"),
+];
+
+/// The global calls go over QUIC with; without it they take the fallback.
+pub const QUIC_GLOBAL: &str = "WebTransport";
+
+/// The first thing calls need that a browser with `has` lacks; `None` if it can call.
+pub fn missing_for_calls(has: impl Fn(&str) -> bool) -> Option<&'static str> {
+  CALL_GLOBALS
+    .iter()
+    .find(|(global, _)| !has(global))
+    .map(|(_, what)| *what)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn a_browser_without_webtransport_can_call_over_the_fallback() {
+    // Safari 26.0 to 26.3: WebCodecs audio and the AudioWorklet, no WebTransport.
+    let safari_26_2 = |name: &str| ["AudioEncoder", "AudioDecoder", "AudioWorkletNode"].contains(&name);
+    assert_eq!(missing_for_calls(safari_26_2), None);
+    assert!(!safari_26_2(QUIC_GLOBAL));
+    let chrome = |_: &str| true;
+    assert_eq!(missing_for_calls(chrome), None);
+  }
+
+  #[test]
+  fn a_browser_without_webcodecs_audio_or_the_worklet_cannot() {
+    let no_audio_codecs = |name: &str| ["WebTransport", "AudioWorkletNode"].contains(&name);
+    assert_eq!(missing_for_calls(no_audio_codecs), Some("WebCodecs audio"));
+    let no_worklet = |name: &str| name != "AudioWorkletNode";
+    assert_eq!(missing_for_calls(no_worklet), Some("AudioWorklet"));
+  }
+}

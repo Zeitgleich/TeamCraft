@@ -9,6 +9,7 @@ use ipnet::{IpNet, Ipv4Net};
 use teamcraft_media::fallback_queue::MediaQueueConfig;
 
 use crate::forwarding::ForwardingConfig;
+use crate::rejoin::RejoinLimit;
 
 /// The bits of `::ffff:a.b.c.d` in front of the IPv4 address.
 const IPV4_MAPPED_PREFIX_BITS: u8 = 96;
@@ -53,6 +54,9 @@ pub struct SfuConfig {
   /// How long a participant whose connection was lost keeps its slot to rejoin; the others see
   /// it as reconnecting meanwhile. Clients learn it with `joined`.
   pub reconnect_grace: Duration,
+  /// How often one device may join one call, on either transport: each join re-keys the call's
+  /// DAVE group, so a device that loops connect, join, drop is held to this pace (#1227).
+  pub rejoin: RejoinLimit,
   /// On shutdown, how long the going-away closes get to reach the clients before the process
   /// exits (clients that miss it notice the dead path within seconds anyway).
   pub shutdown_drain: Duration,
@@ -177,6 +181,7 @@ impl Default for SfuConfig {
       keep_alive_interval: Duration::from_secs(2),
       idle_timeout: Duration::from_secs(10),
       reconnect_grace: Duration::from_secs(30),
+      rejoin: RejoinLimit::default(),
       shutdown_drain: Duration::from_secs(2),
       roster_interval: Duration::from_secs(30),
       udp_receive_buffer_bytes: 4 * 1024 * 1024,

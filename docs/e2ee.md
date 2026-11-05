@@ -3809,6 +3809,28 @@ sequence numbers and timestamps continue across the rejoin – they are unencryp
 the SFU sees anyway, and DAVE's per-frame nonces come from the new epoch's ratchets, so nothing
 repeats.
 
+**Joining too often** (#1227). Every join re-keys the call twice: the device's leaf is removed when
+its connection goes, and added again with its new key package. A member with a valid join token
+(60 s) who loops connect, join, drop would make every other device in the call re-key with each
+cycle, and leave the SFU a session waiting through the grace period with each one. So the SFU paces
+joins per call and device, in the one function both transports admit through (`server::admit`): a
+burst of 5 joins, then one more per 10 s (`SfuConfig::rejoin`). A join over that whose turn comes
+within 2 s waits for it before it is admitted, holding only its unjoined slot; a later one is refused
+with `rate_limited` and `retry_after_secs`, before the room or the DAVE group see it, so a refusal
+costs nobody a re-key. A lost session's wait through the grace period ends as soon as its device is
+back on a newer one, so a looping device leaves at most one waiting behind. That bounds what one
+looping device costs the call to about two commits per 10 s.
+
+What a legitimately flapping client gets: its own pace first. A client that loses the call within
+30 s of rejoining waits before the next rejoin, 1 s and doubling up to 10 s (with up to half of it
+again as jitter, never less), which keeps it below the SFU's pace; a stable stretch resets it. If
+the SFU still refuses a join (an older client, or several devices of the user coming back at once),
+the client takes the refusal as a failed attempt: the call goes on as "reconnecting" and tries again
+after `retry_after_secs`, within the reconnect grace period. Only an older client, which ends the
+call on any refused join, can lose a call this way, and only after looping more than the burst
+within seconds. The limit doesn't weaken anything: it decides when a verified join is admitted,
+never whether a device may be in the call.
+
 ### 8.1 Call backgrounds
 
 Backgrounds are composited on the sending device before encoding, so the SFU and other participants
