@@ -877,7 +877,7 @@ const SIDEBAR_BADGE_CAP: u32 = 99;
 #[component]
 pub fn SidebarItem(
   #[prop(into)] conversation: Signal<Conversation>,
-  /// The space the channel belongs to, shown under its name where the list is not that space's own
+  /// The space the channel belongs to, shown after its name where the list is not that space's own
   /// (a favorite channel in Chats, #1152): names repeat across spaces.
   #[prop(optional, into)]
   maybe_space_name: Option<Signal<String>>,
@@ -1001,13 +1001,12 @@ pub fn SidebarItem(
     }
   };
 
-  // Name and space are two lines that shorten on their own, so a long name never hides the space.
+  // Name and space share one line, so every row has the same height; the space shortens first
+  // and stays in the tooltip.
   let name_view = match maybe_space_name {
     Some(space) => view! {
-      <span class="sb-stack">
-        <span class="sb-name" translate="no">{move || name.get()}</span>
-        <span class="sb-space" translate="no">{move || space.get()}</span>
-      </span>
+      <span class="sb-name" translate="no">{move || name.get()}</span>
+      <span class="sb-space" translate="no" title=move || space.get()>{move || space.get()}</span>
     }
     .into_any(),
     None => view! { <span class="sb-name" translate="no">{move || name.get()}</span> }.into_any(),
