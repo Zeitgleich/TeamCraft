@@ -73,7 +73,7 @@ base64.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 # Not used directly: tauri-plugin-deep-link 2.6 asks for `rust-ini = "0.21"` but builds only against
 # 0.21.1 (0.21.2 and later added public fields it doesn't set). Drop this once the plugin is fixed.
-rust-ini = "=0.21.1"
+rust-ini = "=0.21.3"
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["pipewire", "v4l2", "gstreamer"] }
 # Push-to-talk on Wayland through the GlobalShortcuts portal (MIT; already in the tree for capture).
 ashpd = { version = "0.13.13", features = ["global_shortcuts", "background"] }
