@@ -20,6 +20,14 @@ pub fn HostControls(meeting: MeetingId, conversation: ConversationId) -> impl In
   let hub = expect_context::<MeetingsHub>();
   let is_locked = RwSignal::new(false);
   let is_confirming_end = RwSignal::new(false);
+  // The tray's "End for everyone…" for this call: the confirmation is shown right away.
+  let call = state.call;
+  Effect::new(move |_| {
+    if call.is_end_for_everyone_asked.get() && call.is_in_call_for(conversation) {
+      is_confirming_end.set(true);
+      call.is_end_for_everyone_asked.set(false);
+    }
+  });
   let notice = RwSignal::new(None::<String>);
   let me = state.me().id;
   // Hosts (the organizer and the meeting chat's admins) can't be removed (docs/meetings.md): they

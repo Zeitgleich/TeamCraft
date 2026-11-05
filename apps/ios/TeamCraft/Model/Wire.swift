@@ -58,9 +58,14 @@ struct FileInfo: Decodable, Equatable, Identifiable, Sendable {
   var maybeSentAt: Int64?
   /// Who wrote an imported message when that is nobody with an account here.
   var importedAuthor: ImportedAuthor?
+  /// How long a video plays, from the sender.
+  var maybeDurationMs: Int64?
 
   var id: String { fileId }
   var isImage: Bool { mediaType.hasPrefix("image/") }
+  var isVideo: Bool { mediaType.hasPrefix("video/") }
+  /// A video that opens in the player: on the server or here, not one still going up.
+  var opensInVideoPlayer: Bool { isVideo && ["local", "remote", "downloading", "failed"].contains(transfer.state) }
   var maybeThumbnailData: Data? { maybeThumbnailPng.map { Data($0) } }
 }
 

@@ -304,8 +304,14 @@ data class FileInfo(
   @SerialName("maybe_sent_at") val maybeSentAt: Long? = null,
   /** Who wrote an imported message when that is nobody with an account here. */
   @SerialName("imported_author") val maybeImportedAuthor: ImportedAuthor? = null,
+  /** How long a video plays, from the sender. */
+  @SerialName("maybe_duration_ms") val maybeDurationMs: Long? = null,
 ) {
   val isImage: Boolean get() = mediaType.startsWith("image/")
+  val isVideo: Boolean get() = mediaType.startsWith("video/")
+
+  /** A video that opens in the player: on the server or here, not one still going up. */
+  val opensInVideoPlayer: Boolean get() = isVideo && transfer.state in setOf("local", "remote", "downloading", "failed")
 }
 
 /** Who wrote an imported message: `person` (the file's sender), `deleted` or `named` (a bot). */

@@ -159,7 +159,8 @@ struct MessageBubble: View {
       }
       if !isDeleted {
         ForEach(otherFiles) { file in
-          AttachmentView(file: file, isInBubble: true).padding(.top, 4)
+          // A video's poster spans the bubble like a picture.
+          AttachmentView(file: file, maybeMediaWidth: file.isVideo ? mediaWidth : nil, isInBubble: true).padding(.top, 4)
         }
         if let preview = maybeExtras?.maybeLinkPreview {
           LinkPreviewCard(preview: preview, isInBubble: true).padding(.top, 4).bubbleStretch()
