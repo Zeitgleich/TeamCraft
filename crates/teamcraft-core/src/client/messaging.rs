@@ -187,6 +187,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           entry.maybe_last_error = Some(error.to_string());
           let key = records::outbox_key(entry.conversation_id, entry.client_message_id);
           records::put_json(&self.store, Table::Outbox, &key, &entry)?;
+          // Refused: it no longer stands in the way of what others changed.
+          if let Some(MessageContent::IntegrationSource { change }) = self
+            .store
+            .message(entry.conversation_id, entry.client_message_id)?
+            .map(|stored| stored.content)
+          {
+            crate::integration_sources::settle_source_change(
+              &self.store,
+              entry.conversation_id,
+              self.account.user_id,
+              &change,
+              0,
+              None,
+            )?;
+          }
           report.failed += 1;
         },
       }
@@ -395,6 +410,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           if let Some(head) = meta.maybe_channel_roles_head.take() {
             self.note_channel_roles_head(conversation, &head)?;
           }
+          crate::integration_sources::take_message_source(
+            &self.store,
+            conversation,
+            message.sender_user_id,
+            meta,
+          )?;
         }
         let stored = StoredMessage {
           conversation_id: conversation,
@@ -635,12 +656,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.store.delete(Table::Outbox, &key)?;
       // An own edit showed at once; with its server ID it now competes with other devices' edits
       // like theirs do (issue #160).
+      // Source changes too, or other admins' later changes would never win over them here.
       if matches!(stored.content, MessageContent::Edit { .. }) {
         apply_control_with(
           &self.store,
           entry.conversation_id,
           self.account.user_id,
           &stored.content,
+          stored.sent_at_ms,
+          Some(response.id),
+        )?;
+      }
+      if let MessageContent::IntegrationSource { change } = &stored.content {
+        crate::integration_sources::settle_source_change(
+          &self.store,
+          entry.conversation_id,
+          self.account.user_id,
+          change,
           stored.sent_at_ms,
           Some(response.id),
         )?;

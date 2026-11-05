@@ -8,26 +8,34 @@ use teamcraft_crypto::source_token::SourceToken;
 use teamcraft_proto::{
   HistoryPolicy, MAX_SOURCE_NAME_CHARS, Permission, SourceId, SourceKind, SourceOptions,
 };
+use wasm_bindgen::JsCast;
 
 use crate::channel_access::ChannelAccess;
 use crate::components::admin_integrations::CopyButton;
+use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
+use crate::components::image_crop_dialog::{CropTarget, CropUpload, ImageCropDialog};
+use crate::components::pending_button::PendingButton;
 use crate::components::roster_banner::unsigned_reason;
 use crate::components::space_invites::web_origin;
 use crate::components::workspace_dialogs::FailureNote;
-use crate::feedback::PendingAction;
+use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::use_i18n;
+use crate::image_crop::{check_pick, fit_source_picture};
 use crate::integrations::{
   BridgeLocation, NewSource, bridge_base_url, ingest_url, is_valid_source_name, webhook_url,
 };
 use crate::model::{ConversationId, ConversationKind, User};
+use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
 /// How many bots the search lists at most.
 const SOURCE_FIELD_ID: &str = "channel-source-field";
 const SOURCE_NAME_ID: &str = "channel-source-name";
 const MAX_BOT_RESULTS: usize = 8;
+/// What the crop dialog hands back for a source's picture (`CropTarget::IntegrationPicture`).
+const CROPPED_SOURCE_PICTURE_PX: u32 = 256;
 
 /// The "Integrations" section of the channel settings (docs/bridge.md): normal or log mode, the
 /// bots in the channel with adding and removing, and the channel's sources. A bot is a normal
@@ -279,7 +287,7 @@ fn Sources(conversation: ConversationId, has_bot: Signal<bool>) -> impl IntoView
   view! {
     <h3 class="detail-heading">{move || i18n.t("channel-sources")}</h3>
     <ul class="settings-member-list">
-      <For each=move || sources.get() key=|source| source.id let:source>
+      <For each=move || sources.get() key=|source| (source.id, source.name.clone(), source.maybe_picture_sha256) let:source>
         <SourceRow conversation=conversation source=source can_manage=can_manage />
       </For>
     </ul>
@@ -372,15 +380,36 @@ fn SourceRow(
     .unwrap_or_default();
   let added = crate::clock::format_date(source.created_at_ms, i18n.locale().tag());
   let kind_key = kind_label(&source.kind);
+  let name = source.name.clone();
+  let has_picture = source.maybe_picture_sha256.is_some();
+  let preview = source_preview(state.me(), &source);
+  let maybe_source_picture = source.maybe_picture_sha256.map(|sha256| (conversation, sha256));
+  let is_renaming = RwSignal::new(false);
+  let is_editing_name = {
+    let name = name.clone();
+    move || {
+      is_renaming.get().then(|| {
+        view! {
+          <RenameSource conversation=conversation source=id name=name.clone() on_done=move || is_renaming.set(false) />
+        }
+      })
+    }
+  };
   view! {
     <li class="settings-member">
+      <Avatar user=preview size=AvatarSize::Medium maybe_source_picture=maybe_source_picture />
       <span class="grow source-meta">
-        <span translate="no">{source.name.clone()}</span>
+        <span translate="no">{name}</span>
         <span class="muted-text">
           {move || i18n.t_with("channel-sources-added-by", &[("name", &creator), ("date", &added)])}
         </span>
       </span>
       <span class="badge">{move || i18n.t(kind_key)}</span>
+      <Show when=move || can_manage.get() && !is_renaming.get() fallback=|| ()>
+        <button type="button" class="btn btn-small" on:click=move |_| is_renaming.set(true)>
+          {move || i18n.t("channel-sources-rename")}
+        </button>
+      </Show>
       <Show when=can_revoke fallback=|| ()>
         <Show
           when=move || is_confirming.get()
@@ -404,7 +433,187 @@ fn SourceRow(
           </button>
         </Show>
       </Show>
+      {is_editing_name}
+      <Show when=move || can_manage.get() fallback=|| ()>
+        <SourcePicture conversation=conversation source=id has_picture=has_picture />
+      </Show>
     </li>
+  }
+}
+
+/// What a source's picture stands on when it has none: its initials in its own colour.
+fn source_preview(me: User, source: &IntegrationSource) -> User {
+  User {
+    display_name: source.name.clone(),
+    avatar_hue: source.name.bytes().fold(0_u16, |hue, byte| {
+      (hue.wrapping_mul(31).wrapping_add(u16::from(byte))) % 360
+    }),
+    ..me
+  }
+}
+
+/// Renames a source: an encrypted control message like adding one, so it also works offline.
+/// Messages sent from then on show the new name.
+#[component]
+fn RenameSource(
+  conversation: ConversationId,
+  source: SourceId,
+  name: String,
+  #[prop(into)] on_done: Callback<()>,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let field_id = format!("channel-source-rename-{source}");
+  let container_id = format!("{field_id}-field");
+  let draft = RwSignal::new(name);
+  let errors = FormErrors::new();
+  let pending = PendingAction::new();
+  let found_errors = {
+    let field_id = field_id.clone();
+    move || {
+      let mut found = FieldErrors::new();
+      if !draft.with(|draft| is_valid_source_name(draft)) {
+        let max = MAX_SOURCE_NAME_CHARS.to_string();
+        found.push(
+          field_id.clone(),
+          i18n.t_with("channel-sources-name-invalid", &[("max", &max)]),
+        );
+      }
+      found
+    }
+  };
+  Effect::new({
+    let found_errors = found_errors.clone();
+    move |_| errors.follow(found_errors())
+  });
+  let save = {
+    let container_id = container_id.clone();
+    move |_| {
+      let found = untrack(&found_errors);
+      if !found.is_empty() {
+        errors.refuse(container_id.clone(), found);
+        return;
+      }
+      errors.clear();
+      let new_name = draft.with_untracked(|draft| draft.trim().to_owned());
+      pending.run_and_then(
+        || state.write(|backend| backend.rename_integration_source(conversation, source, new_name)),
+        move || on_done.run(()),
+      );
+    }
+  };
+  view! {
+    <div id=container_id class="field source-rename">
+      <label for=field_id.clone()>{move || i18n.t("channel-sources-name")}</label>
+      <input
+        id=field_id.clone()
+        class="input"
+        type="text"
+        maxlength=MAX_SOURCE_NAME_CHARS.to_string()
+        aria-required="true"
+        aria-invalid=errors.invalid(field_id.clone())
+        aria-describedby=errors.described(field_id.clone())
+        prop:value=move || draft.get()
+        on:input=move |ev| draft.set(event_target_value(&ev))
+      />
+      <FieldError errors=errors field=field_id />
+      <div class="integration-copy-row">
+        <PendingButton pending=pending class="btn btn-small btn-primary" on_click=save>
+          {move || i18n.t("channel-sources-rename-save")}
+        </PendingButton>
+        <button type="button" class="btn btn-small" on:click=move |_| on_done.run(())>
+          {move || i18n.t("cancel")}
+        </button>
+      </div>
+      <p class="hint">{move || i18n.t("channel-sources-rename-hint")}</p>
+    </div>
+  }
+}
+
+/// Sets or removes a source's picture. The picture is cropped and scaled here, and travels in an
+/// encrypted control message; the server never sees it (e2ee.md §13.1).
+#[component]
+fn SourcePicture(conversation: ConversationId, source: SourceId, has_picture: bool) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let field_id = format!("channel-source-picture-{source}");
+  let picked = RwSignal::new_local(None::<web_sys::File>);
+  let maybe_error = RwSignal::new(None::<&'static str>);
+  let removing = PendingAction::new();
+  let pick = move |ev: leptos::ev::Event| {
+    let Some(input) = ev
+      .target()
+      .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
+    else {
+      return;
+    };
+    let maybe_file = input.files().and_then(|files| files.item(0));
+    input.set_value("");
+    let Some(file) = maybe_file else {
+      return;
+    };
+    match check_pick(&file.type_(), file.size()) {
+      Ok(()) => {
+        maybe_error.set(None);
+        picked.set(Some(file));
+      },
+      Err(error) => maybe_error.set(Some(error.i18n_key())),
+    }
+  };
+  let apply = Callback::new(move |png: Vec<u8>| -> CropUpload {
+    Box::pin(async move {
+      let Some(picture) = fit_source_picture(&png, CROPPED_SOURCE_PICTURE_PX) else {
+        maybe_error.set_if_alive(Some("channel-sources-picture-too-large"));
+        picked.set_if_alive(None);
+        return Err(ActionFailure::new(
+          FailureKind::Other,
+          "the picture does not fit a source picture",
+        ));
+      };
+      state.write(|backend| backend.set_integration_source_picture(conversation, source, Some(picture)));
+      picked.set_if_alive(None);
+      Ok(())
+    })
+  });
+  let remove = move |_| {
+    removing
+      .run(|| state.write(|backend| backend.set_integration_source_picture(conversation, source, None)));
+  };
+  let has_error = move || maybe_error.with(Option::is_some);
+  let error_id = crate::form_errors::error_id(&field_id);
+  let described = error_id.clone();
+  view! {
+    <div
+      id=field_id
+      class="source-picture-actions"
+      role="group"
+      tabindex="-1"
+      aria-label=move || i18n.t("channel-sources-picture")
+      aria-invalid=move || has_error().then_some("true")
+      aria-describedby=move || has_error().then(|| described.clone())
+    >
+      <label class="btn btn-small">
+        <Icon name=IconName::Camera />
+        <span>{move || i18n.t(if has_picture { "channel-sources-picture-change" } else { "channel-sources-picture-set" })}</span>
+        <input type="file" class="visually-hidden" accept="image/png,image/jpeg,image/webp" on:change=pick />
+      </label>
+      {has_picture.then(|| view! {
+        <PendingButton pending=removing class="btn btn-small btn-quiet" on_click=remove>
+          {move || i18n.t("channel-sources-picture-remove")}
+        </PendingButton>
+      })}
+      {move || maybe_error.get().map(|key| view! {
+        <p id=error_id.clone() class="field-error" role="alert">{move || i18n.t(key)}</p>
+      })}
+    </div>
+    {move || picked.get().map(|file| view! {
+      <ImageCropDialog
+        file=file
+        target=CropTarget::IntegrationPicture
+        on_apply=apply
+        on_cancel=Callback::new(move |()| picked.set(None))
+      />
+    })}
   }
 }
 

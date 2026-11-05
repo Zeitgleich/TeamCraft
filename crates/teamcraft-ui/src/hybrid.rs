@@ -834,6 +834,34 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.revoke_integration_source(conversation, source);
   }
 
+  fn rename_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_proto::SourceId,
+    name: String,
+  ) {
+    self.chat.rename_integration_source(conversation, source, name);
+  }
+
+  fn set_integration_source_picture(
+    &self,
+    conversation: ConversationId,
+    source: teamcraft_proto::SourceId,
+    maybe_picture: Option<Vec<u8>>,
+  ) {
+    self
+      .chat
+      .set_integration_source_picture(conversation, source, maybe_picture);
+  }
+
+  fn integration_source_picture(
+    &self,
+    conversation: ConversationId,
+    sha256: teamcraft_proto::SourcePictureHash,
+  ) -> Option<Vec<u8>> {
+    self.chat.integration_source_picture(conversation, sha256)
+  }
+
   fn notetaker_policy(&self) -> Option<teamcraft_proto::NotetakerPolicy> {
     self.chat.notetaker_policy()
   }

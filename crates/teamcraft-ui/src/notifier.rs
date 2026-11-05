@@ -176,6 +176,9 @@ pub fn is_mentioned(body: &str, me: &User, prefs: &NotificationPrefs) -> bool {
 pub struct Notification {
   pub conversation: ConversationId,
   pub title: NotificationTitle,
+  /// The sender in the title is an integration source: the title marks it as a bot, so it can't
+  /// pass as a person.
+  pub is_source: bool,
   pub body: Option<String>,
   /// A reply from the notification goes to the conversation: offered for messages in conversations
   /// the user may post in, not for thread replies (the answer belongs in the thread).
@@ -446,10 +449,17 @@ pub fn notifications_for(
       if decide(&input) != Decision::Notify {
         return None;
       }
-      let sender = backend
-        .user(item.message.author)
-        .map(|user| user.display_name)
-        .unwrap_or_default();
+      let maybe_source = item.message.maybe_source.as_ref();
+      let is_source = maybe_source.is_some();
+      let sender = maybe_source.map_or_else(
+        || {
+          backend
+            .user(item.message.author)
+            .map(|user| user.display_name)
+            .unwrap_or_default()
+        },
+        |source| source.name.clone(),
+      );
       let title = match (item.kind, item.conversation.kind) {
         (CandidateKind::ThreadReply { .. }, _) => NotificationTitle::ThreadReply { sender },
         (CandidateKind::Message, ConversationKind::Direct) => NotificationTitle::Sender(sender),
@@ -461,6 +471,7 @@ pub fn notifications_for(
       Some(Notification {
         conversation: item.conversation.id,
         title,
+        is_source,
         body: prefs.show_preview.then(|| preview(&item.message.body)),
         can_reply: item.kind == CandidateKind::Message && item.conversation.can_post,
         maybe_picture: Some(picture_subject(&item.conversation, item.message.author)),
@@ -513,6 +524,7 @@ mod tests {
   fn shown() -> Notification {
     Notification {
       conversation: id_from_raw(1),
+      is_source: false,
       title: NotificationTitle::InChannel {
         sender: "Alice".into(),
         channel: "planning".into(),
@@ -641,6 +653,7 @@ mod tests {
         reply_count: 0,
         maybe_thread: None,
         maybe_imported: None,
+        maybe_source: None,
         maybe_placeholder: None,
       }
     }

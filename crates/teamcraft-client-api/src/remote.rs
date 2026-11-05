@@ -1010,6 +1010,17 @@ pub enum ChatAction {
     conversation: ConversationId,
     source: teamcraft_proto::SourceId,
   },
+  RenameIntegrationSource {
+    conversation: ConversationId,
+    source: teamcraft_proto::SourceId,
+    name: String,
+  },
+  SetIntegrationSourcePicture {
+    conversation: ConversationId,
+    source: teamcraft_proto::SourceId,
+    #[serde(rename = "picture", default, skip_serializing_if = "Option::is_none")]
+    maybe_picture: Option<teamcraft_proto::Base64Bytes>,
+  },
   RequestNotetaker {
     conversation: ConversationId,
     request: teamcraft_proto::NotetakerRequest,
@@ -1375,6 +1386,20 @@ impl ChatAction {
       Self::RevokeIntegrationSource { conversation, source } => {
         backend.revoke_integration_source(conversation, source)
       },
+      Self::RenameIntegrationSource {
+        conversation,
+        source,
+        name,
+      } => backend.rename_integration_source(conversation, source, name),
+      Self::SetIntegrationSourcePicture {
+        conversation,
+        source,
+        maybe_picture,
+      } => backend.set_integration_source_picture(
+        conversation,
+        source,
+        maybe_picture.map(teamcraft_proto::Base64Bytes::into_vec),
+      ),
       Self::RequestNotetaker {
         conversation,
         request,
@@ -1526,6 +1551,10 @@ pub enum ChatQuery {
     conversation: ConversationId,
   },
   CanManageIntegrationSources,
+  IntegrationSourcePicture {
+    conversation: ConversationId,
+    sha256: teamcraft_proto::SourcePictureHash,
+  },
   ChannelRolesReview {
     conversation: ConversationId,
   },
@@ -1686,6 +1715,10 @@ pub enum ChatAnswer {
   CanManageIntegrationSources {
     #[serde(default)]
     can_manage: bool,
+  },
+  IntegrationSourcePicture {
+    #[serde(rename = "picture", default)]
+    maybe_picture: Option<teamcraft_proto::Base64Bytes>,
   },
   ChannelRolesReview {
     #[serde(default)]
@@ -1895,6 +1928,11 @@ impl ChatQuery {
       },
       Self::CanManageIntegrationSources => ChatAnswer::CanManageIntegrationSources {
         can_manage: backend.can_manage_integration_sources(),
+      },
+      Self::IntegrationSourcePicture { conversation, sha256 } => ChatAnswer::IntegrationSourcePicture {
+        maybe_picture: backend
+          .integration_source_picture(conversation, sha256)
+          .map(teamcraft_proto::Base64Bytes::new),
       },
       Self::ChannelRolesReview { conversation } => ChatAnswer::ChannelRolesReview {
         maybe_review: backend.channel_roles_review(conversation),

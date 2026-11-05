@@ -421,6 +421,7 @@ impl ChatBackend for RestChat {
       reply_count: 0,
       maybe_thread: None,
       maybe_imported: None,
+      maybe_source: None,
       maybe_placeholder: None,
     };
     self

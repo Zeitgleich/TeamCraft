@@ -85,7 +85,11 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
               modifier = Modifier.padding(start = 16.dp, top = 8.dp),
             )
             Text(
-              hit.message.authorName,
+              if (hit.message.isAuthorSource) {
+                stringResource(R.string.source_sender, hit.message.authorName)
+              } else {
+                hit.message.authorName
+              },
               style = MaterialTheme.typography.labelLarge,
               modifier = Modifier.padding(start = 16.dp, top = 2.dp),
             )

@@ -4963,11 +4963,12 @@ touching the bridge's configuration. The app generates the source token (256 ran
 `teamcraft-crypto::source_token`), shows the URL once and sends an encrypted control message into
 the channel: `MessageContent::IntegrationSource` with a `SourceChange` (`teamcraft-proto`):
 
-| Change    | Carries                                                                                                                                                |
-|-----------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `created` | random source ID, name, kind (`webhook`, `log`), SHA-256 of the token, options (danger attachments alert, alert levels, rate limit, files per message) |
-| `renamed` | source ID, new name                                                                                                                                    |
-| `revoked` | source ID                                                                                                                                              |
+| Change            | Carries                                                                                                                                                |
+|-------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `created`         | random source ID, name, kind (`webhook`, `log`), SHA-256 of the token, options (danger attachments alert, alert levels, rate limit, files per message) |
+| `renamed`         | source ID, new name                                                                                                                                    |
+| `picture_changed` | source ID, the picture (a small PNG), or nothing to take it away                                                                                       |
+| `revoked`         | source ID                                                                                                                                              |
 
 The message is hidden from the timeline; older clients that don't know the kind keep it as
 `unknown` (also hidden), and unknown changes or kinds are ignored. The token itself never travels;
@@ -4981,7 +4982,7 @@ count here: every bridge reads a role log late, where a founder's claim is trust
 member into a source admin. Each member device (the bridge included) keeps a bounded ledger per channel
 (`teamcraft-core::integration_sources`):
 
-- **Taking in.** A `created` or `renamed` reaches the ledger only from an admin of the verified
+- **Taking in.** A `created`, `renamed` or `picture_changed` reaches the ledger only from an admin of the verified
   roster, fresh at the message's server time; a `revoked` only from such an admin or from the
   source's creator. Changes from anybody else are dropped before the ledger, so a member (or a
   guest) can't fill its 1024 entries and crowd out later sources.
@@ -4993,6 +4994,54 @@ member into a source admin. Each member device (the bridge included) keeps a bou
 - A revocation is final: a revoked source never comes back, whatever arrives later or in which
   order. A rename's newest by server order wins. Of two announcements with the same source ID the
   first the server numbered wins.
+
+**A source's identity on a message** (docs/bridge.md, "Source identity"). The bridge writes
+`MessageMeta::maybe_source` (source ID, name, SHA-256 of the picture, now and then the picture) into
+the encrypted message, so the server learns nothing new, apart from a message about 40 KiB larger once
+a day per source with a picture. What a client checks before it shows that name instead of the
+sender's (`integration_sources::shown_source`):
+
+1. **The sender's account is a bot** (`UserKind::Bot`). The message is signed by a member device
+   (§4.4), so its sender is real; the kind is the server's word. Anything else is ignored and the
+   message shows its sender. So a member, or a person's client changed by its owner, can write
+   the field and gets nothing.
+2. **The name may be shown:** control characters, everything invisible (Unicode's default-ignorable code
+   points, format characters, line separators, blank-looking letters) and more than 4 combining marks on a
+   letter are removed and whitespace collapses; 1 to 80 characters must be left, with something visible.
+   Otherwise the message shows the bot. A message stating a name over 1 KiB loses its source when it
+   arrives, from any sender, so nobody fills a device's store through it.
+3. **The badge goes with it,** by the same check: everywhere the name shows, the badge or a leading "Bot ·"
+   says so, also when a long name is cut off, and the profile behind the name is the bot's account.
+
+A picture a message carries is kept only from a known bot, only if it is the picture the message names
+by hash, and only a still PNG (no `acTL`, reduced motion holds) of at most 32 KiB and 256 pixels a side by
+its header, checked before anything decodes it, and then the message keeps only the hash. A picture in a `picture_changed` comes under the
+taking-in rule above. Pictures are bounded per conversation: 64 from admins and 64 from bots, kept
+apart so a bot can't push out what admins set, the longest unnamed going first. A second bot can push
+out another bot's copies on devices that never read the announcement; those show the bot's picture until
+the source's next daily resend. A picture an admin takes away goes from the device once that change has its server number, unless another
+source shows it; older messages then show the bot's. Only that picture: ones the source had before stay
+until they are pushed out, so a removal is no way to erase a picture from every device. Everything of a
+source goes when its conversation is purged.
+
+A device's own rename or picture waits apart from the newest numbered change, shown over it until it was
+sent or refused, so another admin's change arriving meanwhile isn't lost and a refused change (a server's 4xx
+included) stands in nobody's way. Display only, as the bridge reads only what was sent.
+
+Deliberately **not** checked: that the source ID is in this device's ledger, or that the name is the
+ledger's. A later device has no ledger entry, and a source of the bridge's file has none at all, and they
+should still show a name. A message keeps the name it was sent with, which a rename may have changed
+since. What that leaves open:
+
+- **A bot can claim any name, in the channels it is in.** Whoever runs a bot could already write
+  anything into those channels; the badge says it is a bot. Who adds a bot to a channel decides whom
+  this is trusted to. A second bot in a channel can show the first one's source names.
+- **A token holder can't.** A producer has no say in the name (`username` stays in the text), so a
+  leaked URL gives a sender the source's own name, as it already gave the bot's.
+- **A hostile server** could call a member's account a bot. That member's client then gets a source's
+  name, with the bot badge. The server can already rename any account (display names are directory
+  data), and with the badge this passes as no person, so it gains nothing against a person's name.
+  Calling a bot a person shows the bot's account name, without the source's.
 
 **What the server can still do.** It can withhold or drop messages, as for any content: hold back
 an announcement (the source doesn't work), or, for a bridge whose database is new, leave a

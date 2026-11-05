@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use teamcraft_proto::{ErrorBody, ErrorCode};
 
-use crate::auth::{ApiMethod, ApiResponse, AuthError, Authenticator};
+use crate::auth::{ApiMethod, ApiResponse, AuthError, Authenticator, BinaryBody};
 use crate::feedback::{ActionFailure, FailureKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -70,6 +70,21 @@ impl RestClient {
     maybe_body: Option<String>,
   ) -> Result<(), RestError> {
     check(self.auth.api_request(method, path, maybe_body).await?).map(|_| ())
+  }
+
+  /// A request with a binary body whose answer is not read.
+  pub async fn send_bytes(&self, method: ApiMethod, path: &str, body: BinaryBody) -> Result<(), RestError> {
+    let response = self.auth.api_request_bytes(method, path, Some(body)).await?;
+    if response.status < 300 {
+      return Ok(());
+    }
+    let code = serde_json::from_slice::<teamcraft_proto::ErrorBody>(&response.body)
+      .map(|body| body.error_code.as_str().to_owned())
+      .unwrap_or_else(|_| "unknown".to_owned());
+    Err(RestError::Refused {
+      status: response.status,
+      code,
+    })
   }
 
   async fn call<T: DeserializeOwned>(

@@ -11,7 +11,9 @@
 //! files of a message only once all of them are up. Until then each is an unfinished upload that
 //! the server frees when it is given up; a failure half way leaves nothing behind.
 
-use teamcraft_proto::{AttachmentId, Base64Bytes, ClientMessageId, ConversationId, Id, Snowflake, UserId};
+use teamcraft_proto::{
+  AttachmentId, Base64Bytes, ClientMessageId, ConversationId, Id, Snowflake, SourceIdentity, UserId,
+};
 
 use super::Client;
 use super::files::{
@@ -20,7 +22,8 @@ use super::files::{
 };
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
-use crate::store::{AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageMeta};
+use crate::records;
+use crate::store::{AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageMeta, Table};
 use crate::thumbnail::MAX_THUMBNAIL_BYTES;
 use crate::transfers::TransferGuard;
 
@@ -252,16 +255,31 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     body: &str,
     mentions: Vec<UserId>,
     attachments: Vec<AttachmentRef>,
+    maybe_source: Option<SourceIdentity>,
   ) -> Result<ClientMessageId, CoreError> {
     let content = MessageContent::Text {
       body: body.to_string(),
       mentions,
       meta: MessageMeta {
         attachments: within_thumbnail_budget(attachments),
+        maybe_source: maybe_source.map(Box::new),
         ..MessageMeta::default()
       },
     };
     self.enqueue(conversation, None, content)
+  }
+}
+
+impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Whether the server refused a queued message for good, so it stays unsent.
+  pub fn is_refused(
+    &self,
+    conversation: ConversationId,
+    message: ClientMessageId,
+  ) -> Result<bool, CoreError> {
+    let key = records::outbox_key(conversation, message);
+    let maybe_entry: Option<records::OutboxEntry> = records::get_json(&self.store, Table::Outbox, &key)?;
+    Ok(maybe_entry.is_some_and(|entry| entry.maybe_last_error.is_some()))
   }
 }
 

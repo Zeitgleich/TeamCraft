@@ -52,6 +52,10 @@
 .source-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .source-meta > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .source-meta .muted-text { font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
+/* Its own row under the source, so a long error or hint doesn't squeeze the name. */
+.source-rename, .source-picture-actions { flex-basis: 100%; }
+.source-picture-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.source-picture-actions .field-error { flex-basis: 100%; margin: 0; }
 .plain-fieldset { border: 0; margin: 0; padding: 0; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .plain-fieldset:disabled { opacity: .7; }
 .radio-explained { align-items: flex-start; }

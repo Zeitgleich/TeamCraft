@@ -31,6 +31,10 @@ pub struct ActivityItem {
   pub maybe_thread: Option<ThreadId>,
   /// Who mentioned, reacted or replied.
   pub actor: UserId,
+  /// The integration source that posted it, as the message states it (believed from a bot only,
+  /// shown with its badge; docs/bridge.md, "Source identity").
+  #[serde(rename = "source_name", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_source_name: Option<String>,
   pub at: TimestampMs,
   /// The start of the message text (of the reply or mention; of the message reacted to).
   pub excerpt: String,
@@ -127,6 +131,7 @@ mod tests {
       message: id_from_raw(2),
       maybe_thread: None,
       actor: id_from_raw(3),
+      maybe_source_name: None,
       at,
       excerpt: String::new(),
       maybe_read_through: None,

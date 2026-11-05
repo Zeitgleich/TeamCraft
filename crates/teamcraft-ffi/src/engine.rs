@@ -1322,6 +1322,9 @@ impl Engine {
       if caught_up.maybe_gap != Some(PreviewGap::NoSession) {
         preview = caught_up;
       } else {
+        if preview.maybe_sender_name.is_none() {
+          preview.is_sender_source = caught_up.is_sender_source;
+        }
         preview.maybe_sender_name = preview.maybe_sender_name.or(caught_up.maybe_sender_name);
         preview.maybe_conversation_name = preview
           .maybe_conversation_name

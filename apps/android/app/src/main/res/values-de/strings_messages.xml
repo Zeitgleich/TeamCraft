@@ -34,6 +34,7 @@
   <string name="message_placeholder_failed">Diese Nachricht konnte nicht entschlüsselt werden</string>
   <string name="forwarded_from">Weitergeleitet von %1$s</string>
   <string name="replying_to">Antwort an %1$s</string>
+  <string name="source_sender">Bot · %1$s</string>
   <string name="new_messages">Neue Nachrichten</string>
   <string name="loading_older_messages">Ältere Nachrichten werden geladen …</string>
   <string name="older_history_failed">Ältere Nachrichten konnten nicht geladen werden.</string>

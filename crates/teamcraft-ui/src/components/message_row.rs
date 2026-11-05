@@ -3,6 +3,7 @@ use std::time::Duration;
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{FileTransfer, MessagePriority, WorkspaceEvent};
 use teamcraft_client_api::log::{LogEntry, log_entries};
+use teamcraft_client_api::model::MessageSource;
 use teamcraft_proto::HistoryPolicy;
 
 use crate::channel_access::can_react_in;
@@ -180,7 +181,7 @@ fn placeholder_message(message: Message, placeholder: Placeholder, is_grouped: b
 fn log_line(message: &Message, level: LogLevel, locale: &'static str) -> impl IntoView + use<> {
   let time = format_time_seconds(message.sent_at, locale);
   let entries = log_entries(&message.body, level);
-  let author = log_author(message.author);
+  let author = log_author(message.author, message.maybe_source.as_deref());
   if let [single] = entries.as_slice() {
     let class = format!("msg msg-log level-{}", single.level.slug());
     return log_entry_line(&time, &author, single, &class, message.sent_at).into_any();
@@ -202,18 +203,32 @@ fn log_line(message: &Message, level: LogLevel, locale: &'static str) -> impl In
 }
 
 /// Who wrote a log row: the bridge's bot or, for a pasted message, the person.
-pub fn log_author(author: crate::model::UserId) -> String {
-  let state = use_app_state();
-  state
-    .read(|backend| backend.user(author))
-    .map(|user| user.display_name)
-    .unwrap_or_default()
+pub fn log_author(author: crate::model::UserId, maybe_source: Option<&MessageSource>) -> LogAuthor {
+  match maybe_source {
+    Some(source) => LogAuthor {
+      name: source.name.clone(),
+      is_source: true,
+    },
+    None => LogAuthor {
+      name: use_app_state()
+        .read(|backend| backend.user(author))
+        .map(|user| user.display_name)
+        .unwrap_or_default(),
+      is_source: false,
+    },
+  }
+}
+
+/// The author column of a log row; a source's name carries the bot badge.
+pub struct LogAuthor {
+  name: String,
+  is_source: bool,
 }
 
 /// One entry of the log view: time, author, level and text in a monospace line.
 pub fn log_entry_line(
   time: &str,
-  author: &str,
+  author: &LogAuthor,
   entry: &LogEntry,
   class: &str,
   sent_at: i64,
@@ -223,7 +238,8 @@ pub fn log_entry_line(
   let text = entry.text.clone();
   let class = class.to_owned();
   let time = time.to_owned();
-  let author = author.to_owned();
+  let is_source = author.is_source;
+  let author = author.name.clone();
   let title = author.clone();
   let tab_index = if class.starts_with("msg ") { "-1" } else { "" };
   let data_nav = if class.starts_with("msg ") { "row" } else { "" };
@@ -233,6 +249,7 @@ pub fn log_entry_line(
         {time}
       </time>
       <span class="log-author" translate="no" title=title>
+        {is_source.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
         {author}
       </span>
       <span class="log-level">{move || i18n.t(&format!("log-level-{}", level.slug()))}</span>
@@ -335,7 +352,20 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   let author = shown_author(
     Some(message.author),
     maybe_imported.as_ref().map(|mark| &mark.author),
-  );
+  )
+  .map(|user| as_source(user, message.maybe_source.as_deref()))
+  // The bot's account may not be in the client's list yet: the source's name and badge still show.
+  .or_else(|| {
+    message
+      .maybe_source
+      .as_ref()
+      .map(|source| imported_stand_in(source.name.clone(), true))
+  });
+  let maybe_source_picture = message
+    .maybe_source
+    .as_ref()
+    .and_then(|source| source.maybe_picture_sha256)
+    .map(|sha256| (message.conversation, sha256));
   let has_profile = !matches!(
     maybe_imported.as_ref().map(|mark| &mark.author),
     Some(ImportedAuthorView::Deleted | ImportedAuthorView::Named { .. })
@@ -383,7 +413,10 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   });
 
   let gutter = match (is_grouped, author.clone()) {
-    (false, Some(user)) => view! { <Avatar user=user size=AvatarSize::Large /> }.into_any(),
+    (false, Some(user)) => {
+      view! { <Avatar user=user size=AvatarSize::Large maybe_source_picture=maybe_source_picture /> }
+        .into_any()
+    },
     _ => {
       let time = time.clone();
       let title = imported_title.clone();
@@ -1097,7 +1130,9 @@ fn is_grouped(message: &Message, maybe_prev: Option<&Message>) -> bool {
   let Some(prev) = maybe_prev else { return false };
   matches!(prev.kind, MessageKind::User)
     && prev.author == message.author
-    // Imported messages of different people without an account share the import account's ID.
+    // Sources of one bot and imported messages of different people without an account share an
+    // account's ID.
+    && prev.maybe_source == message.maybe_source
     && prev.maybe_imported.as_ref().map(|mark| &mark.author) == message.maybe_imported.as_ref().map(|mark| &mark.author)
     && message.sent_at - prev.sent_at < GROUP_WINDOW_MS
     && local_day(prev.sent_at) == local_day(message.sent_at)
@@ -1145,10 +1180,27 @@ pub(crate) fn shown_author(
   }
 }
 
-fn imported_stand_in(display_name: String, is_bot: bool) -> User {
-  let avatar_hue = display_name.bytes().fold(0_u16, |hue, byte| {
+/// The bot's account as a message of `maybe_source` shows it: the source's name and colour. The ID
+/// stays, so the profile and hover card tell which bot it really is, and so does the badge.
+fn as_source(user: User, maybe_source: Option<&MessageSource>) -> User {
+  match maybe_source {
+    Some(source) => User {
+      display_name: source.name.clone(),
+      avatar_hue: name_hue(&source.name),
+      ..user
+    },
+    None => user,
+  }
+}
+
+fn name_hue(name: &str) -> u16 {
+  name.bytes().fold(0_u16, |hue, byte| {
     (hue.wrapping_mul(31).wrapping_add(u16::from(byte))) % 360
-  });
+  })
+}
+
+fn imported_stand_in(display_name: String, is_bot: bool) -> User {
+  let avatar_hue = name_hue(&display_name);
   User {
     id: UserId::from_snowflake(teamcraft_proto::Snowflake::ZERO),
     username: String::new(),
@@ -1170,6 +1222,37 @@ fn imported_stand_in(display_name: String, is_bot: bool) -> User {
 mod tests {
   use super::*;
   use crate::model::{ConversationId, MessageId, UserId, id_from_raw};
+
+  #[test]
+  fn sources_of_one_bot_group_apart() {
+    let of = |id, name: Option<&str>| Message {
+      maybe_source: name.map(|name| {
+        Box::new(MessageSource {
+          name: name.into(),
+          maybe_picture_sha256: None,
+        })
+      }),
+      ..message(id, 1, 0)
+    };
+    let hotline = of(1, Some("Hotline"));
+    assert!(is_grouped(&of(2, Some("Hotline")), Some(&hotline)));
+    assert!(!is_grouped(&of(3, Some("CI")), Some(&hotline)));
+    assert!(!is_grouped(&of(4, None), Some(&hotline)));
+  }
+
+  #[test]
+  fn a_source_shows_on_the_bots_account() {
+    let bot = imported_stand_in("Webhooks".into(), true);
+    let source = MessageSource {
+      name: "Hotline".into(),
+      maybe_picture_sha256: None,
+    };
+    let shown = as_source(bot.clone(), Some(&source));
+    assert_eq!(shown.display_name, "Hotline");
+    assert_eq!(shown.id, bot.id, "the profile behind the name stays the bot's");
+    assert!(shown.is_bot);
+    assert_eq!(as_source(bot.clone(), None), bot);
+  }
 
   #[test]
   fn grouping_needs_same_author_and_short_gap() {
@@ -1386,6 +1469,7 @@ mod tests {
       reply_count: 0,
       maybe_thread: None,
       maybe_imported: None,
+      maybe_source: None,
       maybe_placeholder: None,
     }
   }

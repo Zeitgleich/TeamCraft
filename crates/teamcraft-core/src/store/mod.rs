@@ -454,6 +454,10 @@ pub struct MessageMeta {
   /// only from the import account of the verified policy ([`crate::imported::trusted_origin`]).
   #[serde(rename = "imported", default, skip_serializing_if = "Option::is_none")]
   pub maybe_imported: Option<Box<crate::imported::ImportedOrigin>>,
+  /// The integration source that posted this, as the bridge states it (docs/bridge.md, "Source
+  /// identity"). Believed only from a bot account ([`crate::integration_sources::shown_source`]).
+  #[serde(rename = "source", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_source: Option<Box<teamcraft_proto::SourceIdentity>>,
 }
 
 /// The quoted message: the reference, plus enough to show it where it isn't loaded.

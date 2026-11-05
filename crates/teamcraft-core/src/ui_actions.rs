@@ -359,6 +359,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         kind: source.kind,
         created_by: source.created_by,
         created_at_ms: source.created_at_ms,
+        maybe_picture_sha256: source.maybe_picture_sha256,
       })
       .collect()
   }
@@ -492,6 +493,44 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.control(conversation, MessageContent::Notetaker { request });
   }
 
+  /// Renames a source; messages sent from now on show the new name.
+  pub(crate) fn ui_rename_integration_source(
+    &self,
+    conversation: ConversationId,
+    source: SourceId,
+    name: String,
+  ) {
+    let change = SourceChange::Renamed { source, name };
+    self.control(conversation, MessageContent::IntegrationSource { change });
+  }
+
+  /// Sets a source's picture (a small PNG), or takes it away.
+  pub(crate) fn ui_set_integration_source_picture(
+    &self,
+    conversation: ConversationId,
+    source: SourceId,
+    maybe_picture: Option<Vec<u8>>,
+  ) {
+    let change = SourceChange::PictureChanged {
+      source,
+      maybe_picture: maybe_picture.map(Base64Bytes::new),
+    };
+    self.control(conversation, MessageContent::IntegrationSource { change });
+  }
+
+  /// A source picture this device keeps for the conversation.
+  pub(crate) fn ui_integration_source_picture(
+    &self,
+    conversation: ConversationId,
+    sha256: teamcraft_proto::SourcePictureHash,
+  ) -> Option<Vec<u8>> {
+    self.read(crate::integration_sources::source_picture(
+      self.store_ref(),
+      conversation,
+      sha256,
+    ))
+  }
+
   pub(crate) fn ui_revoke_integration_source(&self, conversation: ConversationId, source: SourceId) {
     let change = SourceChange::Revoked { source };
     self.control(conversation, MessageContent::IntegrationSource { change });
@@ -563,7 +602,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       // Without the rest of the conversation: a preview shows no reactions or reply counts.
       MessageContent::Text { .. } | MessageContent::File { .. } => LinkedMessage::Visible {
         target,
-        message: self.to_message(&stored, &[]),
+        message: Box::new(self.to_message(&stored, &[])),
         files: self.files_of(&stored, self.importer()),
       },
       // Reactions, edits, events and the like are no message one can link to.

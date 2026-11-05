@@ -34,6 +34,9 @@ pub struct NotifiedMessage {
   pub message_id: MessageId,
   pub maybe_sender_id: Option<UserId>,
   pub maybe_sender_name: Option<String>,
+  /// The name is an integration source's: shown marked as a bot.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_sender_source: bool,
   pub content: NotifiedContent,
   /// The thread it replies in: then it is not part of the conversation's own feed.
   pub maybe_thread_id: Option<ThreadId>,
@@ -91,6 +94,7 @@ pub fn remember(store: &impl LocalStore, preview: &PushPreview) -> Result<(), Co
       message_id,
       maybe_sender_id: wake_up.maybe_sender_id,
       maybe_sender_name: preview.maybe_sender_name.clone(),
+      is_sender_source: preview.is_sender_source,
       content,
       maybe_thread_id: wake_up.maybe_thread_id,
     }),
@@ -248,6 +252,7 @@ mod tests {
       },
       maybe_conversation_name: Some("planning".into()),
       maybe_sender_name: Some("Alice".into()),
+      is_sender_source: false,
       content: PreviewContent::Text(text.into()),
       is_direct: false,
       is_silent: false,

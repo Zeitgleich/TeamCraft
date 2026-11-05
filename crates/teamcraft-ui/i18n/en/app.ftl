@@ -30,6 +30,7 @@ key-catch-up-progress = { $count ->
 
 ## Messages
 badge-bot = BOT
+source-sender = Bot · { $name }
 imported-from-synology = Synology Chat
 imported-from-other = another chat
 imported-until = Imported from { $source } up to here

@@ -473,7 +473,10 @@ class MessageNotifier(
   private fun text(notification: PushNotification): NotificationText =
     NotificationText.from(
       maybeConversationName = notification.maybeConversationName,
-      maybeSenderName = notification.maybeSenderName,
+      maybeSenderName = notification.maybeSenderName?.let { name ->
+        // A source's name always says it's a bot.
+        if (notification.isSenderSource) context.getString(R.string.source_sender, name) else name
+      },
       maybeText = notification.maybeText,
       maybeFileName = notification.maybeFileName,
       maybeAttachmentKind = notification.maybeAttachmentKind,

@@ -69,6 +69,11 @@ impl MessageMeta {
     let roles_head = self.maybe_channel_roles_head.as_ref().map_or(0, |head| {
       size_of::<crate::channel_roles::ChannelRolesHead>() + head.hash.len()
     });
+    let source = self.maybe_source.as_ref().map_or(0, |identity| {
+      size_of::<teamcraft_proto::SourceIdentity>()
+        + identity.name.len()
+        + identity.maybe_picture.as_ref().map_or(0, |picture| picture.len())
+    });
     self.maybe_reply_to.as_ref().map_or(0, ReplyRef::heap_bytes)
       + self.maybe_forwarded.as_ref().map_or(0, Forwarded::heap_bytes)
       + self.attachments.capacity() * size_of::<AttachmentRef>()
@@ -84,6 +89,7 @@ impl MessageMeta {
       + workspace_head
       + roles_head
       + imported
+      + source
   }
 }
 
@@ -150,6 +156,21 @@ mod tests {
     assert!(short.footprint_bytes() < 2_048, "{}", short.footprint_bytes());
     assert!(long.footprint_bytes() >= 100_000);
     assert!(long.footprint_bytes() < 100_000 + 2_048);
+  }
+
+  #[test]
+  fn a_sources_name_counts() {
+    let mut message = text_message("hi");
+    let plain = message.footprint_bytes();
+    if let MessageContent::Text { meta, .. } = &mut message.content {
+      meta.maybe_source = Some(Box::new(teamcraft_proto::SourceIdentity {
+        maybe_id: None,
+        name: "n".repeat(5_000),
+        maybe_picture_sha256: None,
+        maybe_picture: None,
+      }));
+    }
+    assert!(message.footprint_bytes() >= plain + 5_000);
   }
 
   #[test]

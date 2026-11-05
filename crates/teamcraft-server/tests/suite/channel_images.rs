@@ -255,3 +255,54 @@ mod what_has_a_picture {
     app.stop().await;
   }
 }
+
+/// A bot's picture, the fallback of its sources (docs/bridge.md, "Bots"): set by an admin, re-encoded
+/// like a channel picture, downloaded like anybody's avatar.
+#[tokio::test]
+async fn an_admin_sets_a_bots_picture_that_everybody_sees_as_its_avatar() {
+  let app = app!();
+  let (alice, dave) = (owner(), member("dave"));
+  let bot = app.post(&alice, "/admin/bots", json!({"name": "Webhooks"})).await;
+  let bot_id = bot.body["bot"]["id"].as_str().unwrap().to_owned();
+  let path = format!("/admin/bots/{bot_id}/avatar");
+  let jpeg = picture(300, 300, ImageFormat::Jpeg);
+
+  let (status, _) = put_image(&app, &dave, &path, "image/jpeg", &jpeg).await;
+  assert_eq!(status, StatusCode::FORBIDDEN, "only admins");
+  let (status, _) = put_image(&app, &alice, &path, "image/svg+xml", b"<svg/>").await;
+  assert_eq!(status, StatusCode::BAD_REQUEST, "no SVG");
+  let (status, body) = put_image(&app, &alice, &path, "image/jpeg", &jpeg).await;
+  assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+
+  let shown = app.get(&dave, &format!("/users/{bot_id}/avatar")).await;
+  assert_eq!(shown.status, StatusCode::OK, "{}", shown.body);
+  assert_eq!(shown.body["content_type"], "image/png", "re-encoded");
+  let profile = app.get(&dave, &format!("/users/{bot_id}/profile")).await;
+  assert_eq!(profile.body["has_avatar"], true);
+
+  assert_eq!(app.delete(&dave, &path).await.status, StatusCode::FORBIDDEN);
+  assert_eq!(app.delete(&alice, &path).await.status, StatusCode::NO_CONTENT);
+  assert_eq!(
+    app.get(&dave, &format!("/users/{bot_id}/avatar")).await.status,
+    StatusCode::NOT_FOUND
+  );
+
+  // A person's account is no bot, and a revoked bot takes no picture.
+  let dave_id = user_id(&app, &dave).await;
+  let (status, _) = put_image(
+    &app,
+    &alice,
+    &format!("/admin/bots/{dave_id}/avatar"),
+    "image/jpeg",
+    &jpeg,
+  )
+  .await;
+  assert_eq!(status, StatusCode::NOT_FOUND);
+  assert_eq!(
+    app.delete(&alice, &format!("/admin/bots/{bot_id}")).await.status,
+    StatusCode::NO_CONTENT
+  );
+  let (status, _) = put_image(&app, &alice, &path, "image/jpeg", &jpeg).await;
+  assert_eq!(status, StatusCode::NOT_FOUND);
+  app.stop().await;
+}

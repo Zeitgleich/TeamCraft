@@ -14,6 +14,9 @@ pub const MAX_IMAGE_PICK_BYTES: f64 = 20.0 * 1024.0 * 1024.0;
 const MIN_CROP_SIDE_PX: f64 = 96.0;
 /// The most a picture can be zoomed in, however large it is.
 const MAX_ZOOM: f64 = 8.0;
+/// The sizes a source picture is tried at, largest first: it shows at about 38 px, up to 96 px on
+/// dense screens.
+const SOURCE_PICTURE_SIDES_PX: [u32; 4] = [128, 96, 64, 48];
 
 /// The square of the picture the user is choosing, and how it sits in the frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -244,6 +247,22 @@ pub fn crop_png(editor_png: &[u8], rect: CropRect, size_px: u32) -> Result<Vec<u
     None
   };
   maybe_png.ok_or(ImagePickError::Unreadable)
+}
+
+/// Scales a square PNG down until it fits a source picture (teamcraft-proto:
+/// `MAX_SOURCE_PICTURE_BYTES`), which travels inside messages. `None`: not even the smallest fits.
+pub fn fit_source_picture(square_png: &[u8], side_px: u32) -> Option<Vec<u8>> {
+  SOURCE_PICTURE_SIDES_PX.iter().find_map(|&size_px| {
+    let rect = CropRect {
+      quarter_turns: 0,
+      x: 0,
+      y: 0,
+      side: side_px,
+    };
+    crop_png(square_png, rect, size_px)
+      .ok()
+      .filter(|png| teamcraft_proto::check_source_picture(png).is_ok())
+  })
 }
 
 /// Rounds a non-negative pixel position; the picture is at most a few thousand pixels wide.

@@ -71,7 +71,9 @@ struct MessageRow: View {
           // The avatar sits by the group's last bubble; the others keep its room so bubbles line up.
           Group {
             if entry.isGroupEnd {
-              SenderAvatar(name: message.authorName, userId: message.authorId)
+              SenderAvatar(
+                name: message.authorName, userId: message.authorId, conversationId: message.conversationId,
+                maybeSourcePictureSha256: message.maybeSourcePictureSha256)
             } else {
               Color.clear
             }
@@ -106,7 +108,8 @@ struct MessageBubble: View {
   var body: some View {
     BubbleStack {
       if showsName {
-        Text(message.authorName)
+        // A source's name always says it's a bot.
+        Text(verbatim: message.shownAuthorName)
           .font(.subheadline.weight(.semibold))
           .foregroundStyle(PersonColor.name(message.authorId))
           .lineLimit(1)
@@ -581,14 +584,37 @@ struct DayPill: View {
 struct SenderAvatar: View {
   let name: String
   let userId: String
+  var conversationId = ""
+  /// An integration source's own picture (docs/bridge.md, "Source identity"), from this device's store.
+  var maybeSourcePictureSha256: String?
+
+  @Environment(AppModel.self) private var model
+  @State private var maybePicture: UIImage?
 
   var body: some View {
-    Text(AvatarView.initials(of: name))
-      .font(.system(size: senderAvatarSize * 0.4, weight: .semibold))
-      .foregroundStyle(.white)
-      .frame(width: senderAvatarSize, height: senderAvatarSize)
-      .background(PersonColor.avatar(userId), in: Circle())
-      .accessibilityHidden(true)
+    Group {
+      if let maybePicture {
+        Image(uiImage: maybePicture).resizable().scaledToFill()
+          .frame(width: senderAvatarSize, height: senderAvatarSize)
+          .clipShape(Circle())
+      } else {
+        Text(AvatarView.initials(of: name))
+          .font(.system(size: senderAvatarSize * 0.4, weight: .semibold))
+          .foregroundStyle(.white)
+          .frame(width: senderAvatarSize, height: senderAvatarSize)
+          .background(PersonColor.avatar(userId), in: Circle())
+      }
+    }
+    .accessibilityHidden(true)
+    .task(id: maybeSourcePictureSha256) {
+      guard let sha256 = maybeSourcePictureSha256 else {
+        maybePicture = nil
+        return
+      }
+      // The initials stay when this device doesn't hold it: a picture, nothing depends on it.
+      let maybeBytes = try? await model.core().integrationSourcePicture(conversationId: conversationId, sha256: sha256)
+      maybePicture = maybeBytes.flatMap { UIImage(data: $0) }
+    }
   }
 }
 

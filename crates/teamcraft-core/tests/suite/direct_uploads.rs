@@ -55,7 +55,7 @@ async fn files_go_up_first_and_arrive_with_their_message() {
 
   alice
     .client
-    .queue_text_with_files(channel, "**ci**\nBuild 42", Vec::new(), attachments)
+    .queue_text_with_files(channel, "**ci**\nBuild 42", Vec::new(), attachments, None)
     .unwrap();
   alice.client.flush_outbox().await.unwrap();
   settle(&mut [&mut alice, &mut bob]).await;

@@ -67,6 +67,11 @@ pub fn source_token_sha256(token: &str) -> [u8; 32] {
   Sha256::digest(token.as_bytes()).into()
 }
 
+/// SHA-256 of a source's picture, which names it on a device (e2ee.md §13.1).
+pub fn source_picture_sha256(picture: &[u8]) -> [u8; 32] {
+  Sha256::digest(picture).into()
+}
+
 /// Which of `known` hashes equals the hash of `token`. Every entry is compared, in constant time
 /// each, so the answer's timing tells nothing about which entry (or how much of one) matched.
 pub fn find_source_token<'a, T>(

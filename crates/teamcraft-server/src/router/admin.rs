@@ -27,6 +27,10 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     ))
     .routes(routes!(handlers::admin_revoke_bot_handler))
     .routes(routes!(handlers::admin_rotate_bot_token_handler))
+    .routes(routes!(
+      handlers::admin_put_bot_avatar_handler,
+      handlers::admin_delete_bot_avatar_handler
+    ))
     .routes(routes!(handlers::admin_list_conversations_handler))
     .routes(routes!(handlers::admin_list_conversation_members_handler))
     .routes(routes!(

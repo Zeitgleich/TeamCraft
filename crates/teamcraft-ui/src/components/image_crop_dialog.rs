@@ -44,6 +44,8 @@ pub enum CropTarget {
   Avatar,
   SpacePicture,
   ChannelPicture,
+  /// An integration source's or a bot's picture: where it shows, it stands in for an avatar.
+  IntegrationPicture,
 }
 
 /// Where the dialog stands with the picked file.
@@ -85,7 +87,7 @@ struct ActivePointer {
 
 impl CropTarget {
   fn is_round(self) -> bool {
-    matches!(self, Self::Avatar)
+    matches!(self, Self::Avatar | Self::IntegrationPicture)
   }
 
   fn title_key(self) -> &'static str {
@@ -93,6 +95,7 @@ impl CropTarget {
       Self::Avatar => "crop-title-avatar",
       Self::SpacePicture => "crop-title-space",
       Self::ChannelPicture => "crop-title-channel",
+      Self::IntegrationPicture => "crop-title-integration",
     }
   }
 
@@ -100,7 +103,7 @@ impl CropTarget {
   fn output_px(self) -> u32 {
     match self {
       Self::Avatar => 512,
-      Self::SpacePicture | Self::ChannelPicture => 256,
+      Self::SpacePicture | Self::ChannelPicture | Self::IntegrationPicture => 256,
     }
   }
 
@@ -108,7 +111,7 @@ impl CropTarget {
   /// `.space-tile`).
   fn previews(self) -> [CropPreview; 3] {
     match self {
-      Self::Avatar => [
+      Self::Avatar | Self::IntegrationPicture => [
         preview(64.0, "50%", "crop-preview-profile"),
         preview(38.0, "50%", "crop-preview-messages"),
         preview(20.0, "50%", "crop-preview-lists"),

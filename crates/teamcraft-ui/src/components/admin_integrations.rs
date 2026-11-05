@@ -1,13 +1,16 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_proto::{BotResponse, BotTokenResponse};
+use wasm_bindgen::JsCast;
 
 use crate::clock::format_date_time;
 use crate::components::admin_console::SectionHeader;
 use crate::components::icons::{Icon, IconName};
+use crate::components::image_crop_dialog::{CropTarget, CropUpload, ImageCropDialog};
 use crate::components::message_actions::copy_text;
 use crate::feedback::report_failure;
 use crate::i18n::use_i18n;
+use crate::image_crop::check_pick;
 use crate::integrations::{BotsHub, MAX_BOT_NAME_CHARS, bridge_config, use_bots};
 use crate::reactive::SetIfAlive;
 use crate::rest::RestError;
@@ -109,6 +112,38 @@ fn BotRow(hub: BotsHub, bot: BotResponse) -> impl IntoView {
       is_confirming.set_if_alive(false);
     });
   };
+  let picked = RwSignal::new_local(None::<web_sys::File>);
+  let pick_error = RwSignal::new(None::<&'static str>);
+  let pick = move |ev: leptos::ev::Event| {
+    let Some(input) = ev
+      .target()
+      .and_then(|target| target.dyn_into::<web_sys::HtmlInputElement>().ok())
+    else {
+      return;
+    };
+    let maybe_file = input.files().and_then(|files| files.item(0));
+    input.set_value("");
+    let Some(file) = maybe_file else {
+      return;
+    };
+    match check_pick(&file.type_(), file.size()) {
+      Ok(()) => {
+        pick_error.set(None);
+        picked.set(Some(file));
+      },
+      Err(error) => pick_error.set(Some(error.i18n_key())),
+    }
+  };
+  let apply_picture = Callback::new(move |png: Vec<u8>| -> CropUpload {
+    Box::pin(async move {
+      hub
+        .set_picture(id, png)
+        .await
+        .map_err(|error| error.to_failure())?;
+      picked.set_if_alive(None);
+      Ok(())
+    })
+  });
   view! {
     <tr>
       <th scope="row" translate="no">{bot.name.clone()}</th>
@@ -122,6 +157,14 @@ fn BotRow(hub: BotsHub, bot: BotResponse) -> impl IntoView {
         {(!is_revoked)
           .then(|| {
             view! {
+              <label class="btn btn-small">
+                <Icon name=IconName::Camera />
+                <span>{move || i18n.t("admin-integrations-picture")}</span>
+                <input type="file" class="visually-hidden" accept="image/png,image/jpeg,image/webp" on:change=pick />
+              </label>
+              <button type="button" class="btn btn-small btn-quiet" prop:disabled=move || is_busy.get() on:click=move |_| run(Box::pin(async move { hub.remove_picture(id).await }))>
+                {move || i18n.t("admin-integrations-picture-remove")}
+              </button>
               <button type="button" class="btn btn-small" prop:disabled=move || is_busy.get() on:click=move |_| run(Box::pin(async move { hub.rotate(id).await }))>
                 {move || i18n.t("admin-integrations-rotate")}
               </button>
@@ -144,6 +187,15 @@ fn BotRow(hub: BotsHub, bot: BotResponse) -> impl IntoView {
               </Show>
             }
           })}
+        {move || pick_error.get().map(|key| view! { <p class="field-error" role="alert">{move || i18n.t(key)}</p> })}
+        {move || picked.get().map(|file| view! {
+          <ImageCropDialog
+            file=file
+            target=CropTarget::IntegrationPicture
+            on_apply=apply_picture
+            on_cancel=Callback::new(move |()| picked.set(None))
+          />
+        })}
       </td>
     </tr>
   }

@@ -46,7 +46,9 @@ func feedSections(_ messages: [MessageItem], calendar: Calendar = .current) -> [
 }
 
 private func continues(_ previous: MessageItem, _ message: MessageItem) -> Bool {
-  previous.authorId == message.authorId && !previous.body.isEmpty && !message.body.isEmpty
+  // One bot posts for several sources.
+  previous.authorId == message.authorId && previous.authorName == message.authorName
+    && !previous.body.isEmpty && !message.body.isEmpty
     && (0...groupWindowMs).contains(message.sentAtMs - previous.sentAtMs)
 }
 
@@ -89,7 +91,7 @@ func chatPreview(_ message: MessageItem, myId: String, isOneToOne: Bool) -> Chat
     } else if isOneToOne {
       .none
     } else {
-      .other(message.authorName)
+      .other(message.shownAuthorName)
     }
   return ChatPreview(
     sender: sender, content: previewContent(message, text: text), sentDate: message.sentDate,

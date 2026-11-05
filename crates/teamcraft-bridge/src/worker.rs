@@ -3,20 +3,25 @@
 //! webhooks ([`crate::file_jobs`]), publishes search index segments and keeps the sources announced
 //! in the app current (docs/bridge.md, "Sources").
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use teamcraft_core::api::{GatewayConnection, ServerApi};
+use teamcraft_core::client::direct_uploads::estimated_message_bytes;
 use teamcraft_core::store::{AttachmentRef, LocalStore};
 use teamcraft_core::{Client, CoreError, HistoryScan};
-use teamcraft_proto::{ConversationId, GatewayClientMessage, UserId};
+use teamcraft_proto::{
+  Base64Bytes, ConversationId, GatewayClientMessage, SourceIdentity, SourcePictureHash, UserId,
+};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::batch::{BatchLimits, Batcher, LogLine, Mentions};
 use crate::file_jobs::{FileJobs, FilesFailure, UploadedMessage};
 use crate::http::Submission;
-use crate::sources::{Source, SourceRegistry};
+use crate::sources::{Source, SourceKey, SourceRegistry};
 
 /// How often the worker looks at timers, the gateway and the outbox.
 const TICK: Duration = Duration::from_millis(200);
@@ -26,6 +31,15 @@ const RECONNECT_BACKOFF_MIN: Duration = Duration::from_secs(1);
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Messages for channels the bot has no group for yet wait here; the oldest are dropped beyond this.
 const MAX_WAITING_MESSAGES: usize = 1000;
+/// After the server refused a message with the picture, the next one that carries it waits this
+/// long: refused messages stay in the bridge's store, and a server that keeps refusing would cost a
+/// picture per message.
+const PICTURE_RETRY_AFTER_REFUSAL: Duration = Duration::from_secs(60 * 60);
+/// How often a source's messages carry its picture itself, for devices that never read its
+/// announcement (a device linked later, a log channel whose retention removed it).
+const PICTURE_RESEND_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Room a source's ID, name and picture hash take in a message, at most (80 characters of 4 bytes).
+const IDENTITY_ROOM_BYTES: usize = 640;
 
 #[derive(Debug, Clone, Copy)]
 pub struct WorkerSettings {
@@ -37,6 +51,9 @@ pub struct WorkerSettings {
   /// Messages with files that may wait for their upload (`files.max_concurrent_requests`: the
   /// endpoint lets no more run at once).
   pub max_file_messages: usize,
+  /// The server's message limit (`files.max_message_bytes`): a message's own text and files come
+  /// first; what says who posted it goes along only where it fits.
+  pub max_message_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,11 +66,22 @@ pub struct AppSourceSettings {
 /// A message on its way to the client, or waiting for its channel.
 #[derive(Debug)]
 struct Outgoing {
-  conversation: ConversationId,
+  source: Arc<Source>,
   text: String,
   mentions: Vec<UserId>,
   /// Files that are up already.
   attachments: Vec<AttachmentRef>,
+}
+
+/// Batches log lines per source; a rename during a batch shows from the next one.
+#[derive(Debug, Clone)]
+struct SourceBatch(Arc<Source>);
+
+/// Which picture last went out in a message of a source, and when it goes out again.
+#[derive(Debug, Clone, Copy)]
+struct SentPicture {
+  sha256: SourcePictureHash,
+  next_due: Instant,
 }
 
 pub struct Worker<A: ServerApi, S: LocalStore> {
@@ -63,7 +91,8 @@ pub struct Worker<A: ServerApi, S: LocalStore> {
   history_scans: BTreeMap<ConversationId, u32>,
   scanned: HashSet<ConversationId>,
   receiver: mpsc::Receiver<Submission>,
-  batcher: Batcher,
+  batcher: Batcher<SourceBatch>,
+  sent_pictures: HashMap<SourceKey, SentPicture>,
   files: FileJobs,
   settings: WorkerSettings,
   gateway: Option<A::Gateway>,
@@ -90,6 +119,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       scanned: HashSet::new(),
       receiver,
       batcher: Batcher::new(settings.batch),
+      sent_pictures: HashMap::new(),
       files: FileJobs::new(settings.max_file_messages),
       settings,
       gateway: None,
@@ -136,7 +166,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     }
     self.files.abandon_all(&self.client).await;
     for batch in self.batcher.take_all() {
-      self.send(batch.conversation, batch.text, batch.mentions).await;
+      self.send(batch.key.0, batch.text, batch.mentions).await;
     }
     self.retry_waiting().await;
     if let Err(error) = self.client.flush_outbox().await {
@@ -154,15 +184,15 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
         is_alert,
       } => {
         let (text, mentions) = alert_text(text, is_alert, &source.mentions);
-        self.send(source.conversation, text, mentions).await;
+        self.send(source, text, mentions).await;
       },
       Submission::Lines { source, lines } => {
         for line in lines {
           if let Some(batch) = self
             .batcher
-            .push(source.conversation, line, &source.mentions, now)
+            .push(SourceBatch(source.clone()), line, &source.mentions, now)
           {
-            self.send(batch.conversation, batch.text, batch.mentions).await;
+            self.send(batch.key.0, batch.text, batch.mentions).await;
           }
         }
       },
@@ -175,9 +205,9 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
         };
         if let Some(batch) = self
           .batcher
-          .push(source.conversation, notice, &source.mentions, now)
+          .push(SourceBatch(source.clone()), notice, &source.mentions, now)
         {
-          self.send(batch.conversation, batch.text, batch.mentions).await;
+          self.send(batch.key.0, batch.text, batch.mentions).await;
         }
       },
     }
@@ -187,7 +217,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     let now = Instant::now();
     self.files.drop_abandoned();
     for batch in self.batcher.take_due(now) {
-      self.send(batch.conversation, batch.text, batch.mentions).await;
+      self.send(batch.key.0, batch.text, batch.mentions).await;
     }
     self.keep_gateway(now).await;
     if now.saturating_duration_since(self.last_flush) >= Duration::from_secs(1) {
@@ -330,7 +360,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     let (text, mentions) = alert_text(text, is_alert, &source.mentions);
     let delivered = self
       .deliver(Outgoing {
-        conversation: source.conversation,
+        source: source.clone(),
         text,
         mentions,
         attachments,
@@ -344,9 +374,10 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     let _ = reply.send(answer);
   }
 
-  async fn send(&mut self, conversation: ConversationId, text: String, mentions: Vec<UserId>) {
+  async fn send(&mut self, source: Arc<Source>, text: String, mentions: Vec<UserId>) {
+    let conversation = source.conversation;
     let message = Outgoing {
-      conversation,
+      source,
       text,
       mentions,
       attachments: Vec::new(),
@@ -359,34 +390,82 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
   /// Hands a message to the client; if the bot has no group for the channel yet it waits. An
   /// error means the message is lost: the outbox could not store it.
   async fn deliver(&mut self, message: Outgoing) -> Result<(), CoreError> {
-    let conversation = message.conversation;
+    let conversation = message.source.conversation;
     if !self.can_send(conversation) {
       self.hold(message);
       return Ok(());
     }
+    let room = self.room_beside(&message);
+    let maybe_identity = (room >= IDENTITY_ROOM_BYTES).then(|| self.identity_of(&message.source, room));
+    let maybe_carried_picture = maybe_identity
+      .as_ref()
+      .filter(|identity| identity.maybe_picture.is_some())
+      .and_then(|identity| identity.maybe_picture_sha256);
     let Outgoing {
+      source,
       text,
       mentions,
       attachments,
-      ..
     } = message;
-    let sent = if attachments.is_empty() {
+    let queued =
       self
         .client
-        .send_text_mentioning(conversation, None, &text, mentions)
-        .await
-        .map(drop)
-    } else {
-      self
-        .client
-        .queue_text_with_files(conversation, &text, mentions, attachments)?;
-      self.client.flush_outbox().await.map(drop)
-    };
-    if let Err(error) = sent {
+        .queue_text_with_files(conversation, &text, mentions, attachments, maybe_identity)?;
+    if let Err(error) = self.client.flush_outbox().await {
       // The message is in the outbox already when sending fails; it goes out with the next flush.
       debug!(%error, %conversation, "sending is delayed");
     }
+    if let Some(sha256) = maybe_carried_picture {
+      let is_refused = self.client.is_refused(conversation, queued).unwrap_or(false);
+      let wait = if is_refused {
+        PICTURE_RETRY_AFTER_REFUSAL
+      } else {
+        PICTURE_RESEND_INTERVAL
+      };
+      let next_due = Instant::now() + wait;
+      self
+        .sent_pictures
+        .insert(source.key.clone(), SentPicture { sha256, next_due });
+    }
     Ok(())
+  }
+
+  /// Bytes of the server's limit a message leaves for what says who posted it.
+  fn room_beside(&self, message: &Outgoing) -> usize {
+    let files: Vec<(&str, &str)> = message
+      .attachments
+      .iter()
+      .map(|file| (file.file_name.as_str(), file.media_type.as_str()))
+      .collect();
+    let used = estimated_message_bytes(&message.text, message.mentions.len(), &files);
+    self.settings.max_message_bytes.saturating_sub(used)
+  }
+
+  /// The source's identity for its next message, with the picture itself when it is due and fits
+  /// into `room`: the first message after a start or a change, then once per
+  /// [`PICTURE_RESEND_INTERVAL`].
+  fn identity_of(&mut self, source: &Source, room: usize) -> SourceIdentity {
+    let mut identity = source.identity();
+    let Some(sha256) = source.maybe_picture_sha256 else {
+      return identity;
+    };
+    if !is_picture_due(self.sent_pictures.get(&source.key), sha256, Instant::now()) {
+      return identity;
+    }
+    match self
+      .client
+      .integration_source_picture(source.conversation, sha256)
+    {
+      Ok(Some(picture)) if picture_fits(picture.len(), room) => {
+        identity.maybe_picture = Some(Base64Bytes::new(picture));
+      },
+      // A later, smaller message of the source carries it.
+      Ok(Some(_)) => debug!(source = %source.name, "no room for the source's picture in this message"),
+      // Devices without it show the bot's picture; the message still names the source.
+      Ok(None) => debug!(source = %source.name, "the source's picture is not on this device"),
+      Err(error) => warn!(%error, source = %source.name, "reading the source's picture failed"),
+    }
+    identity
   }
 
   fn can_send(&mut self, conversation: ConversationId) -> bool {
@@ -406,8 +485,8 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       let Some(message) = self.waiting.pop_front() else {
         break;
       };
-      if self.can_send(message.conversation) {
-        let conversation = message.conversation;
+      let conversation = message.source.conversation;
+      if self.can_send(conversation) {
         if let Err(error) = self.deliver(message).await {
           warn!(%error, %conversation, "a waiting message could not be stored");
         }
@@ -425,6 +504,38 @@ pub(crate) fn alert_text(text: String, is_alert: bool, mentions: &Mentions) -> (
   }
   let names: Vec<String> = mentions.names.iter().map(|name| format!("@{name}")).collect();
   (format!("{}\n{text}", names.join(" ")), mentions.users.clone())
+}
+
+#[cfg(test)]
+mod picture_tests {
+  use super::*;
+
+  #[test]
+  fn a_full_message_goes_without_the_picture() {
+    assert!(picture_fits(3_000, 4_000 + IDENTITY_ROOM_BYTES));
+    assert!(!picture_fits(3_000, 4_000 + IDENTITY_ROOM_BYTES - 1));
+    assert!(!picture_fits(3_000, 0));
+  }
+
+  #[test]
+  fn a_picture_goes_out_first_on_change_and_then_when_due() {
+    let (old, new) = (
+      SourcePictureHash::from_bytes([1; 32]),
+      SourcePictureHash::from_bytes([2; 32]),
+    );
+    let at = Instant::now();
+    let sent = SentPicture {
+      sha256: old,
+      next_due: at + PICTURE_RETRY_AFTER_REFUSAL,
+    };
+    assert!(is_picture_due(None, old, at), "first message after a start");
+    assert!(
+      !is_picture_due(Some(&sent), old, at),
+      "a refusal doesn't bring it back at once"
+    );
+    assert!(is_picture_due(Some(&sent), new, at), "the picture changed");
+    assert!(is_picture_due(Some(&sent), old, at + PICTURE_RETRY_AFTER_REFUSAL));
+  }
 }
 
 #[cfg(test)]
@@ -450,4 +561,40 @@ mod tests {
       ("x".to_owned(), Vec::new())
     );
   }
+}
+
+impl SourceBatch {
+  fn sort_key(&self) -> (ConversationId, &SourceKey) {
+    (self.0.conversation, &self.0.key)
+  }
+}
+
+impl PartialEq for SourceBatch {
+  fn eq(&self, other: &Self) -> bool {
+    self.sort_key() == other.sort_key()
+  }
+}
+
+impl Eq for SourceBatch {}
+
+impl PartialOrd for SourceBatch {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+impl Ord for SourceBatch {
+  fn cmp(&self, other: &Self) -> Ordering {
+    self.sort_key().cmp(&other.sort_key())
+  }
+}
+
+/// Whether a message with `room` left can take the identity with a picture of this size, which
+/// base64 makes a third larger.
+fn picture_fits(picture_bytes: usize, room: usize) -> bool {
+  picture_bytes.div_ceil(3) * 4 + IDENTITY_ROOM_BYTES <= room
+}
+
+fn is_picture_due(maybe_sent: Option<&SentPicture>, sha256: SourcePictureHash, now: Instant) -> bool {
+  maybe_sent.is_none_or(|sent| sent.sha256 != sha256 || now >= sent.next_due)
 }

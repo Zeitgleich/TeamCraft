@@ -164,10 +164,14 @@ fn ActivityRow(item: ActivityItem) -> impl IntoView {
   let i18n = use_i18n();
   let locale = i18n.locale().tag();
   let actor = state.read(|backend| backend.user(item.actor));
-  let actor_name = actor
-    .as_ref()
-    .map(|user| user.display_name.clone())
-    .unwrap_or_default();
+  // The core sets a source's name on a bot's message only; it is always marked as one.
+  let actor_name = match item.maybe_source_name.as_ref() {
+    Some(source) => i18n.t_with("source-sender", &[("name", source)]),
+    None => actor
+      .as_ref()
+      .map(|user| user.display_name.clone())
+      .unwrap_or_default(),
+  };
   let conversation_name = state
     .read(|backend| backend.conversation(item.conversation))
     .map(|conversation| place_name(&conversation))

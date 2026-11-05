@@ -5,13 +5,13 @@
 
 use std::collections::HashSet;
 
-use teamcraft_proto::{ConversationId, SourceChange};
+use teamcraft_proto::{ConversationId, SourceChange, SourcePictureHash};
 
 use super::Client;
 use super::messaging::apply_control;
 use crate::api::ServerApi;
 use crate::error::CoreError;
-use crate::integration_sources::{ActiveSource, SourceAuthority, SourceLedger};
+use crate::integration_sources::{ActiveSource, SourceAuthority, SourceLedger, source_picture};
 use crate::records;
 use crate::store::{LocalStore, MessageContent, Table};
 
@@ -55,6 +55,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let authority =
       SourceAuthority::from_store(&self.store, &workspace, is_fresh, Some(group_users), guests)?;
     Ok(ledger.active(conversation, &authority))
+  }
+
+  /// A source picture this device keeps for the conversation.
+  pub fn integration_source_picture(
+    &self,
+    conversation: ConversationId,
+    sha256: SourcePictureHash,
+  ) -> Result<Option<Vec<u8>>, CoreError> {
+    source_picture(&self.store, conversation, sha256)
   }
 
   /// Announces a change to the conversation's sources: an encrypted, hidden message for the

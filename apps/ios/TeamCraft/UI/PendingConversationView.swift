@@ -34,7 +34,8 @@ struct PendingConversationView: View {
       {
         VStack(alignment: .leading, spacing: 2) {
           if let sender = message.maybeSenderName {
-            Text(verbatim: sender).font(.subheadline.weight(.semibold))
+            Text(verbatim: message.isSenderSource ? String(localized: "source_sender \(sender)") : sender)
+              .font(.subheadline.weight(.semibold))
           }
           // The members' text, never a translation key.
           Text(verbatim: text)

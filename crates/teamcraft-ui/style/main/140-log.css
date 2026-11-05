@@ -49,9 +49,11 @@
   font-variant-numeric: tabular-nums;
 }
 
+.log-author .badge { margin-inline-end: 4px; }
+
 .log-author {
   flex: none;
-  max-width: 110px;
+  max-width: 150px;
   overflow: hidden;
   color: var(--text-muted);
   text-overflow: ellipsis;

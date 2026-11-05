@@ -162,12 +162,39 @@ pub async fn complete_avatar_upload(
 }
 
 pub async fn delete_my_avatar(state: &AppState, caller: &AuthenticatedUser) -> Result<(), ApiError> {
+  remove_avatar(state, caller.user.id).await
+}
+
+/// Removes `user`'s avatar, if there is one.
+pub(super) async fn remove_avatar(state: &AppState, user: UserId) -> Result<(), ApiError> {
   let store = blob_store(state)?;
-  if let Some(key) = state.database.clear_avatar(caller.user.id).await? {
+  if let Some(key) = state.database.clear_avatar(user).await? {
     forget_object(store, &key).await;
-    publish_update(state, caller.user.id).await?;
+    publish_update(state, user).await?;
   }
   Ok(())
+}
+
+/// Makes an already checked PNG `user`'s avatar, for an account that doesn't upload its own (a bot).
+pub(super) async fn store_avatar(state: &AppState, user: UserId, png: Vec<u8>) -> Result<(), ApiError> {
+  let store = blob_store(state)?;
+  let object: teamcraft_proto::AttachmentId = state.next_id()?;
+  let avatar = StoredAvatar {
+    key: format!("avatars/{}/{}", user.snowflake(), object.snowflake()),
+    content_type: AvatarContentType::Png.as_str().to_owned(),
+    size_bytes: png.len() as u64,
+  };
+  store
+    .put_object(&avatar.key, png, AvatarContentType::Png.as_str())
+    .await
+    .map_err(|error| ApiError::Unavailable(format!("storing the picture failed: {error}")))?;
+  if let Some(previous) = state.database.set_pending_avatar(user, &avatar).await? {
+    forget_object(store, &previous).await;
+  }
+  if let Some(replaced) = state.database.promote_pending_avatar(user).await? {
+    forget_object(store, &replaced).await;
+  }
+  publish_update(state, user).await
 }
 
 /// A download URL for somebody's avatar.

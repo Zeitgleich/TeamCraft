@@ -192,6 +192,7 @@ mod tests {
       },
       maybe_conversation_name: Some("planning".into()),
       maybe_sender_name: Some("Alice".into()),
+      is_sender_source: false,
       content: PreviewContent::Text("lunch?".into()),
       is_direct,
       is_silent: false,
