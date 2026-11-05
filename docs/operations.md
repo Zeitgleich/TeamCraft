@@ -335,6 +335,13 @@ the server itself is down.
     is left, `TEAMCRAFT_SFU_FALLBACK_REQUIRE_UPGRADE_TOKEN=1` refuses upgrades without a token, so
     someone with many addresses can hold an unjoined slot only for the upgrade. The proxy must pass
     `Sec-WebSocket-Protocol` through (nginx and Caddy do) and shouldn't log it.
+  - **Back to QUIC during a call** (#1309): a native client on the fallback tries QUIC again about
+    every minute and moves the running session over without a rejoin. It needs nothing to set up:
+    the SFU's QUIC port as before. It is on only between an SFU and apps that both have it, in any
+    order of deploying them: an SFU from before sends no `switch_secret`, so newer apps never try,
+    and older apps ignore it. Behind a load balancer with SFUs of both versions, a newer app that
+    reaches an older SFU is told "expected join" and stays on the fallback for that call. The usual
+    order, the SFU before or with the server and the apps, is fine.
   - **Descriptors:** the SFU warns at start when `RLIMIT_NOFILE` is below those two connection limits
     plus a margin. Raise it (`LimitNOFILE=` in systemd, `--ulimit nofile=` in Docker) or lower the
     limits: running out would also hurt QUIC calls through the roster reports and the health endpoint.

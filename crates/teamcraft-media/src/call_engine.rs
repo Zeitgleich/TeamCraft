@@ -90,6 +90,9 @@ pub struct CallEngine {
   subscriptions: HashMap<StreamId, u8>,
   /// How long the SFU keeps this device's slot after the connection was lost.
   maybe_reconnect_grace: Option<Duration>,
+  /// What moves the current session to another connection without a rejoin (#1309), from the
+  /// SFU's last `joined`; `None` from an SFU that sends none, and while away.
+  maybe_switch_secret: Option<Base64Bytes>,
   /// The video codecs every other device that receives video decodes, as the SFU last said
   /// (#565); `None` before it said (an older SFU never does): H.264 only.
   maybe_decodable: Option<Vec<VideoCodec>>,
@@ -432,6 +435,7 @@ impl CallEngine {
       uplink_policy: UplinkPolicy::default(),
       subscriptions: HashMap::new(),
       maybe_reconnect_grace: None,
+      maybe_switch_secret: None,
       maybe_decodable: None,
       maybe_sfu_layer_limit: None,
       remote_video: HashMap::new(),
@@ -473,6 +477,8 @@ impl CallEngine {
   /// this device) until [`Self::rejoin`] brings the device back into its slot. Also call it when
   /// a rejoin attempt's connection fails.
   pub fn connection_lost(&mut self) {
+    // The session it moves is gone with the connection; the rejoin's `joined` brings a new one.
+    self.maybe_switch_secret = None;
     match self.phase {
       Phase::Joined { call_id, .. } => {
         self.phase = Phase::Reconnecting { call_id };
@@ -540,6 +546,23 @@ impl CallEngine {
   /// How long the SFU keeps this device's slot after a lost connection, as it announced.
   pub fn maybe_reconnect_grace(&self) -> Option<Duration> {
     self.maybe_reconnect_grace
+  }
+
+  /// What a new connection names to take the current session over without a rejoin
+  /// ([`CallClientMessage::Switch`], #1309): while in the call, if the SFU gave one.
+  pub fn maybe_switch_secret(&self) -> Option<&Base64Bytes> {
+    self.maybe_switch_secret.as_ref().filter(|_| self.is_in_call())
+  }
+
+  /// The session moved to another connection (#1309): the call goes on as it was, over another
+  /// path. What the uplink estimate learned belongs to the old path (the fallback's TCP has
+  /// another delay, and its own queue), so it is measured afresh, as at the start; own tracks
+  /// that were held back come back, with keyframes. The secret was used up.
+  pub fn moved_to_another_path(&mut self) {
+    self.maybe_switch_secret = None;
+    if self.is_in_call() {
+      self.measure_uplink_afresh();
+    }
   }
 
   /// Bandwidth kept for audio when the uplink limits video layers.
@@ -711,6 +734,11 @@ impl CallEngine {
       // Answers to the driver's pings (browsers watch their session's path with them); the
       // browser driver takes them before they get here.
       CallServerMessage::Pong { .. } => Ok(()),
+      // The answer to a driver's `switch` (#1309), which the driver takes on the new connection.
+      CallServerMessage::Switched => {
+        debug!("ignoring a switch confirmation outside a switch");
+        Ok(())
+      },
       CallServerMessage::Unknown => {
         debug!("ignoring unknown signaling frame");
         Ok(())
@@ -1070,8 +1098,10 @@ impl CallEngine {
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
+        maybe_switch_secret,
       } => {
         self.maybe_reconnect_grace = maybe_reconnect_grace_ms.map(Duration::from_millis);
+        self.maybe_switch_secret = maybe_switch_secret;
         // An SFU from before #978 says nothing and takes three; more than this version plans
         // would be no use.
         let limit = maybe_max_simulcast_layers.unwrap_or(LEGACY_SIMULCAST_LAYERS);
@@ -3147,6 +3177,109 @@ mod tests {
     }
   }
 
+  /// Back to QUIC without a rejoin (#1309): the engine keeps the secret that moves its session, and
+  /// the move itself changes nothing about the call but the path.
+  mod switch {
+    use super::*;
+
+    #[test]
+    fn the_secret_of_the_session_is_there_while_in_the_call() {
+      let now = Instant::now();
+      let mut engine = engine(1, now);
+      engine.join("t".into());
+      assert!(engine.maybe_switch_secret().is_none(), "not joined yet");
+      engine
+        .handle_signal(event(1, joined_with_secret(1, &[9; 32])), now)
+        .unwrap();
+      assert_eq!(
+        engine.maybe_switch_secret().map(Base64Bytes::as_slice),
+        Some(&[9; 32][..])
+      );
+
+      // Lost: the session the secret moves is gone, and the rejoin's `joined` brings another.
+      engine.connection_lost();
+      assert!(engine.maybe_switch_secret().is_none());
+      engine.rejoin("t2".into(), now);
+      assert!(engine.maybe_switch_secret().is_none(), "not back yet");
+      engine
+        .handle_signal(event(1, joined_with_secret(1, &[7; 32])), now)
+        .unwrap();
+      assert_eq!(
+        engine.maybe_switch_secret().map(Base64Bytes::as_slice),
+        Some(&[7; 32][..])
+      );
+    }
+
+    #[test]
+    fn an_sfu_from_before_gives_none() {
+      let now = Instant::now();
+      assert!(engine_joined(1, now).maybe_switch_secret().is_none());
+    }
+
+    #[test]
+    fn the_move_keeps_the_call_and_uses_the_secret_up() {
+      let now = Instant::now();
+      let mut engine = engine(1, now);
+      engine.join("t".into());
+      engine
+        .handle_signal(event(1, joined_with_secret(1, &[9; 32])), now)
+        .unwrap();
+      drain(&mut engine);
+
+      // The SFU's answer comes on the new connection; the driver takes it, the engine ignores it.
+      engine.handle_signal(CallServerMessage::Switched, now).unwrap();
+      engine.moved_to_another_path();
+
+      assert!(engine.is_in_call(), "no rejoin");
+      assert!(engine.maybe_switch_secret().is_none());
+      assert!(
+        !drain(&mut engine).iter().any(|output| matches!(
+          output,
+          EngineOutput::Event(CallEngineEvent::Reconnecting | CallEngineEvent::Reconnected)
+        )),
+        "the app sees no reconnect"
+      );
+      // The events go on with the next number.
+      engine
+        .handle_signal(
+          event(
+            2,
+            CallEvent::ActiveSpeakers {
+              device_ids: Vec::new(),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+    }
+
+    fn joined_with_secret(id: i64, secret: &[u8]) -> CallEvent {
+      let CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        video_tracks,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
+        ..
+      } = joined(id, &[])
+      else {
+        unreachable!()
+      };
+      CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        video_tracks,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
+        maybe_switch_secret: Some(Base64Bytes::new(secret.to_vec())),
+      }
+    }
+  }
+
   mod reconnect {
     use super::*;
 
@@ -3305,6 +3438,7 @@ mod tests {
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
+        maybe_switch_secret: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert_eq!(
@@ -3385,6 +3519,7 @@ mod tests {
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
+        maybe_switch_secret: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert!(
@@ -3440,6 +3575,7 @@ mod tests {
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
+        maybe_switch_secret: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       let outputs = drain(&mut alice);
@@ -3518,6 +3654,7 @@ mod tests {
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
+        maybe_switch_secret: None,
       };
       assert!(matches!(
         alice.handle_signal(event(1, other_call), now),
@@ -4137,6 +4274,7 @@ mod tests {
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
+        maybe_switch_secret: None,
       }
     }
 
@@ -4293,6 +4431,7 @@ mod tests {
         screen_audio_tracks,
         maybe_reconnect_grace_ms,
         maybe_max_simulcast_layers,
+        maybe_switch_secret: None,
       }
     }
   }
@@ -4743,6 +4882,7 @@ mod tests {
       screen_audio_tracks: Vec::new(),
       maybe_reconnect_grace_ms: Some(30_000),
       maybe_max_simulcast_layers: Some(MAX_SIMULCAST_LAYERS),
+      maybe_switch_secret: None,
     }
   }
 

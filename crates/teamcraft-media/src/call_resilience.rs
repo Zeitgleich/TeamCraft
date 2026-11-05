@@ -20,6 +20,10 @@
 //!    whole call. The SFU holds devices to a pace of its own (#1227) and refuses a join that comes
 //!    too soon with the time to wait; that refusal is a failed attempt, not the end of the call.
 //!
+//! A call that had to take the WebSocket fallback tries QUIC again now and then while it runs
+//! ([`QuicRetrySchedule`], #1309): when a QUIC connection gets through, the session moves over to it
+//! without a rejoin, so nothing re-keys and the others notice nothing.
+//!
 //! Every attempt connects with what its own join ticket says: the SFU's URL, and the SHA-256s of
 //! its certificate where that is self-signed. A restarted SFU may come back with a new certificate,
 //! which the fresh token's response names ([`rejoin_attempt`]).
@@ -79,6 +83,15 @@ pub struct ResilienceConfig {
   /// Ping the SFU this often on the fallback, whatever else arrives: the answers time the round trip
   /// for the video stats, which QUIC measures by itself.
   pub round_trip_interval: Duration,
+  /// A call on the fallback tries QUIC again about this long after it got there (#1309); after a
+  /// try that didn't get through, twice as long each time, up to `max_quic_retry_interval`. A
+  /// network that blocks UDP now may not later (a VPN that went away), and QUIC carries media
+  /// better.
+  pub quic_retry_interval: Duration,
+  pub max_quic_retry_interval: Duration,
+  /// A QUIC connection that opened has this long for the SFU's answer to `switch`; without it, the
+  /// try failed.
+  pub switch_answer_timeout: Duration,
 }
 
 /// What carries a call to the SFU.
@@ -140,6 +153,16 @@ pub struct ReconnectSchedule {
   jitter: Jitter,
 }
 
+/// When a call on the fallback tries QUIC again (#1309): about [`ResilienceConfig::quic_retry_interval`]
+/// after it got there, then with back-off after each try that failed, always with some jitter so
+/// the calls of an office whose VPN went away don't all try at the same moment.
+#[derive(Debug, Clone)]
+pub struct QuicRetrySchedule {
+  next_try_at: Instant,
+  failed_tries: u32,
+  jitter: Jitter,
+}
+
 /// Spreads retry times, so clients that lost the SFU at the same moment (its restart, an office's
 /// network outage) don't come back in lockstep. Not for security: a small generator (SplitMix64).
 #[derive(Debug, Clone)]
@@ -183,6 +206,9 @@ impl Default for ResilienceConfig {
       first_flap_pause: Duration::from_secs(1),
       max_flap_pause: Duration::from_secs(10),
       round_trip_interval: Duration::from_secs(2),
+      quic_retry_interval: Duration::from_secs(60),
+      max_quic_retry_interval: Duration::from_secs(5 * 60),
+      switch_answer_timeout: Duration::from_secs(2),
     }
   }
 }
@@ -348,6 +374,45 @@ impl ReconnectSchedule {
   pub fn attempts(&self) -> u32 {
     self.attempts
   }
+}
+
+impl QuicRetrySchedule {
+  /// The call is on the fallback since `now`.
+  pub fn new(now: Instant, config: &ResilienceConfig) -> Self {
+    Self::with_jitter(now, config, Jitter::random())
+  }
+
+  /// [`Self::new`] with a given jitter source (tests).
+  pub fn with_jitter(now: Instant, config: &ResilienceConfig, mut jitter: Jitter) -> Self {
+    let next_try_at = now + jittered(config.quic_retry_interval, &mut jitter);
+    Self {
+      next_try_at,
+      failed_tries: 0,
+      jitter,
+    }
+  }
+
+  /// When the next try is due.
+  pub fn next_try_at(&self) -> Instant {
+    self.next_try_at
+  }
+
+  /// A try failed at `now` (QUIC still doesn't get through, or the SFU didn't take the switch): the
+  /// next one waits twice as long as the last, up to [`ResilienceConfig::max_quic_retry_interval`].
+  pub fn on_failed_try(&mut self, now: Instant, config: &ResilienceConfig) {
+    self.failed_tries = self.failed_tries.saturating_add(1);
+    let factor = 2u32.saturating_pow(self.failed_tries.min(16));
+    let interval = config
+      .quic_retry_interval
+      .saturating_mul(factor)
+      .min(config.max_quic_retry_interval);
+    self.next_try_at = now + jittered(interval, &mut self.jitter);
+  }
+}
+
+/// `interval`, give or take a fifth.
+fn jittered(interval: Duration, jitter: &mut Jitter) -> Duration {
+  interval.mul_f64(0.8 + 0.4 * jitter.next_fraction())
 }
 
 impl RejoinPacer {
@@ -983,6 +1048,55 @@ mod tests {
         wait >= Duration::from_secs(4) && wait <= Duration::from_secs(6),
         "{wait:?}"
       );
+    }
+  }
+
+  mod quic_retries {
+    use super::*;
+
+    #[test]
+    fn the_first_try_comes_about_a_minute_after_the_fallback() {
+      let start = Instant::now();
+      for seed in 0..50 {
+        let schedule = QuicRetrySchedule::with_jitter(start, &config(), Jitter::seeded(seed));
+        let wait = schedule.next_try_at().duration_since(start);
+        assert!(
+          wait >= Duration::from_secs(48) && wait < Duration::from_secs(72),
+          "{wait:?}"
+        );
+      }
+    }
+
+    #[test]
+    fn failed_tries_back_off_to_five_minutes() {
+      let start = Instant::now();
+      let mut schedule = QuicRetrySchedule::with_jitter(start, &config(), Jitter::seeded(3));
+      let mut now = schedule.next_try_at();
+      let mut waits = Vec::new();
+      for _ in 0..6 {
+        schedule.on_failed_try(now, &config());
+        let wait = schedule.next_try_at().duration_since(now);
+        waits.push(wait);
+        now = schedule.next_try_at();
+      }
+      let nominal = [120, 240, 300, 300, 300, 300];
+      for (wait, nominal) in waits.iter().zip(nominal) {
+        let nominal = Duration::from_secs(nominal);
+        assert!(
+          *wait >= nominal.mul_f64(0.8) && *wait < nominal.mul_f64(1.2),
+          "{waits:?}"
+        );
+      }
+    }
+
+    /// The calls of an office whose VPN went away don't all try at the same moment.
+    #[test]
+    fn calls_try_at_different_moments() {
+      let start = Instant::now();
+      let tries: std::collections::HashSet<Instant> = (0..20)
+        .map(|seed| QuicRetrySchedule::with_jitter(start, &config(), Jitter::seeded(seed)).next_try_at())
+        .collect();
+      assert!(tries.len() > 15, "{}", tries.len());
     }
   }
 

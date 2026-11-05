@@ -26,8 +26,11 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 ipnet = "2.12"
 # Reports call participants to teamcraft-server.
 reqwest.workspace = true
-# Constant-time comparison of the registration token on the control endpoint.
+# Constant-time comparison of the registration token on the control endpoint, and of the secrets
+# that move a session to another connection (#1309).
 subtle = "2"
+# Those secrets, from the system's generator; already in the tree.
+rand_core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -54,7 +57,6 @@ teamcraft-media = { path = "../teamcraft-media", features = ["native", "openh264
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
 # Device identities for the clients' call key bindings.
 teamcraft-crypto.workspace = true
-rand_core.workspace = true
 # A stand-in for the server's internal endpoints in the reporting test.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # Its quinn, for a raw QUIC client that cuts HTTP/3 frames where a test wants them cut.

@@ -3851,6 +3851,7 @@ mod tests {
       screen_audio_tracks: Vec::new(),
       maybe_reconnect_grace_ms: Some(30_000),
       maybe_max_simulcast_layers: Some(teamcraft_proto::MAX_SIMULCAST_LAYERS),
+      maybe_switch_secret: None,
     }
   }
 

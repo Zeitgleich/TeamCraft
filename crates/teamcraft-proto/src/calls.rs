@@ -3,11 +3,19 @@
 //! The client opens a WebTransport session to the SFU, opens one bidirectional stream and sends
 //! [`CallClientMessage::Join`] with a join token from `teamcraft-server`. Messages on that stream
 //! are framed as a 4-byte big-endian length followed by one JSON message. Every
-//! [`CallServerMessage::Event`] carries a sequence number that increases by one per connection.
+//! [`CallServerMessage::Event`] carries a sequence number that increases by one per session (a
+//! connection, and the one it moves to, below).
 //! A QUIC connection survives a change of the client's address (connection migration). If it is
 //! lost anyway, the SFU keeps the device's slot for a grace period ([`CallEvent::Joined`] says how
 //! long) and tells the others it is reconnecting; the client joins again with a fresh token on a
 //! new connection and takes its slot back with a fresh `joined` event (ARCHITECTURE.md §6.5).
+//!
+//! A call that runs on the WebSocket fallback moves back to QUIC without a rejoin when UDP gets
+//! through again (#1309): `joined` carries a secret of the session, and a new QUIC connection that
+//! starts with [`CallClientMessage::Switch`] instead of `join` takes the session over, with its
+//! slot, its DAVE group and its event sequence. The SFU answers [`CallServerMessage::Switched`],
+//! sends what was queued for the old connection on it and closes it with
+//! [`SFU_SWITCHED_CLOSE_CODE`]; the events after that come on the new one, numbered on.
 //!
 //! Media flows as QUIC datagrams (`teamcraft-media::datagram`), not through these types.
 
@@ -27,6 +35,14 @@ pub const CALL_JOIN_TOKEN_AUDIENCE: &str = "teamcraft-sfu";
 /// SFU's other closes it is not final: clients rejoin with a fresh join token, spread over a short
 /// moment so the restarted SFU isn't hit by every client at once (ARCHITECTURE.md §6.5).
 pub const SFU_GOING_AWAY_CLOSE_CODE: u32 = 0x4805;
+
+/// Close code (QUIC application close, or the fallback's close frame) of a connection whose session
+/// moved to another one ([`CallClientMessage::Switch`], #1309): every event queued for it went out
+/// before the close, and the next one comes on the new connection. Not the end of the call.
+pub const SFU_SWITCHED_CLOSE_CODE: u32 = 0x4806;
+
+/// Bytes of the secret that lets a session move to another connection ([`CallEvent::Joined`]).
+pub const SWITCH_SECRET_BYTES: usize = 32;
 
 /// Claims of a call join token: a JWT signed by `teamcraft-server` (EdDSA) and verified by the
 /// SFU with the server's public key. Short-lived (about a minute); the SFU checks it once on join.
@@ -131,6 +147,14 @@ pub enum CallClientMessage {
   Ping {
     id: u64,
   },
+  /// First message of a connection that takes over a session of this device instead of joining
+  /// (#1309): `secret` is the session's [`CallEvent::Joined`] `switch_secret`, which went out only
+  /// over that session's own connection. The SFU answers [`CallServerMessage::Switched`] or an
+  /// error, after which it closes the connection. An SFU from before reads it as anything but
+  /// `join`: it answers `protocol_violation` ("expected join") and closes.
+  Switch {
+    secret: Base64Bytes,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -151,6 +175,10 @@ pub enum CallServerMessage {
   Pong {
     id: u64,
   },
+  /// Answer to [`CallClientMessage::Switch`]: this connection carries the session from now on. Not
+  /// an event either: the events still queued for the old connection go out there, up to its close
+  /// with [`SFU_SWITCHED_CLOSE_CODE`], and the next one comes here with the next number.
+  Switched,
   #[serde(other)]
   Unknown,
 }
@@ -176,6 +204,11 @@ pub enum CallEvent {
     /// and take [`crate::LEGACY_SIMULCAST_LAYERS`]; a client publishes no more than that then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     maybe_max_simulcast_layers: Option<u8>,
+    /// [`SWITCH_SECRET_BYTES`] random bytes that let this session move to another connection
+    /// without a rejoin ([`CallClientMessage::Switch`], #1309); a fresh one with every `joined`.
+    /// SFUs from before send none, and clients from before ignore it.
+    #[serde(rename = "switch_secret", default, skip_serializing_if = "Option::is_none")]
+    maybe_switch_secret: Option<Base64Bytes>,
   },
   ParticipantJoined {
     participant: CallParticipant,
@@ -397,6 +430,7 @@ impl fmt::Debug for CallClientMessage {
         .finish(),
       Self::MoveHere => f.write_str("MoveHere"),
       Self::Ping { id } => f.debug_struct("Ping").field("id", id).finish(),
+      Self::Switch { .. } => f.debug_struct("Switch").field("secret", &"[redacted]").finish(),
       Self::SetMuted { is_muted } => f.debug_struct("SetMuted").field("is_muted", is_muted).finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
@@ -529,6 +563,7 @@ mod tests {
       screen_audio_tracks: Vec::new(),
       maybe_reconnect_grace_ms: Some(30_000),
       maybe_max_simulcast_layers: Some(4),
+      maybe_switch_secret: None,
     };
     let json = serde_json::to_string(&joined).unwrap();
     assert!(json.ends_with(r#""maybe_reconnect_grace_ms":30000,"maybe_max_simulcast_layers":4}"#));
@@ -711,6 +746,33 @@ mod tests {
     );
     let frame: CallServerMessage = serde_json::from_str(r#"{"type":"goaway"}"#).unwrap();
     assert_eq!(frame, CallServerMessage::Unknown);
+  }
+
+  /// A session moves to another connection (#1309): the secret comes with `joined`, the new
+  /// connection names it first, and the SFU's answer is no event.
+  #[test]
+  fn switch_wire_format() {
+    let joined: CallEvent = serde_json::from_str(
+      r#"{"type":"joined","call_id":"7","participant":{"user_id":"4","device_id":"5","audio_stream_id":9},"participants":[],"switch_secret":"AQI="}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+      joined,
+      CallEvent::Joined { maybe_switch_secret: Some(secret), .. } if secret.as_slice() == [1, 2]
+    ));
+    let switch = CallClientMessage::Switch {
+      secret: Base64Bytes::new(vec![1, 2]),
+    };
+    let json = serde_json::to_string(&switch).unwrap();
+    assert_eq!(json, r#"{"type":"switch","secret":"AQI="}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), switch);
+    assert!(!format!("{switch:?}").contains("AQI="), "the secret is redacted");
+    let switched = serde_json::to_string(&CallServerMessage::Switched).unwrap();
+    assert_eq!(switched, r#"{"type":"switched"}"#);
+    assert_eq!(
+      serde_json::from_str::<CallServerMessage>(&switched).unwrap(),
+      CallServerMessage::Switched
+    );
   }
 
   #[test]
