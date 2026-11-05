@@ -815,13 +815,14 @@ impl AppState {
 
   /// The space the People, Calls, Meetings, Saved and Files views are scoped to (#954): the one the
   /// sidebar is showing. `None` where no single space is selected, so they show everything: on
-  /// Home, in Activity, and in the grouped sidebar, which lists all spaces together.
+  /// Home, in Activity, in the grouped sidebar, which lists all spaces together, and in the list
+  /// layout, where opening a channel moves the rail but the sidebar stays the one list (#1151).
   pub fn maybe_scoped_space(&self) -> Option<SpaceId> {
-    let is_grouped = self
+    let is_one_list = self
       .settings
       .prefs
-      .with(|prefs| prefs.sidebar.is_grouped_by_space);
-    (self.rail.get() == RailEntry::Space && !is_grouped).then(|| self.space.get())
+      .with(|prefs| prefs.sidebar.is_grouped_by_space || prefs.sidebar.layout == SidebarLayout::List);
+    (self.rail.get() == RailEntry::Space && !is_one_list).then(|| self.space.get())
   }
 
   /// The name of the space the views are scoped to, for their headers.
@@ -2628,6 +2629,19 @@ mod tests {
         .settings
         .prefs
         .update(|prefs| prefs.sidebar.is_grouped_by_space = true);
+      assert_eq!(state.maybe_scoped_space(), None);
+    }
+
+    #[test]
+    fn the_list_layout_has_no_selected_space_even_with_a_channel_open() {
+      let state = test_state();
+      let (_, channel) = first_channel(&state);
+      state
+        .settings
+        .prefs
+        .update(|prefs| prefs.sidebar.layout = SidebarLayout::List);
+      state.open_conversation(channel);
+      assert_eq!(state.rail.get(), RailEntry::Space);
       assert_eq!(state.maybe_scoped_space(), None);
     }
 
