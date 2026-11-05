@@ -12,6 +12,8 @@ struct ChatPane: View {
   let account: Account
 
   @State private var messages: [MessageItem] = []
+  /// People in the call running here; 0 without one (issue #1352).
+  @State private var runningCallCount = 0
   @State private var draft = ""
   /// The stored draft was read; saving before that would overwrite it with the empty field.
   @State private var isDraftLoaded = false
@@ -78,8 +80,12 @@ struct ChatPane: View {
 
   var body: some View {
     screenWithDialogs
+    .safeAreaInset(edge: .top, spacing: 0) {
+      if runningCallCount > 0 && threadId == nil { runningCallBanner }
+    }
     .task(id: model.changeCount) {
       await reload()
+      runningCallCount = await model.runningCalls()[conversation.id] ?? 0
       await followTransfers()
     }
     .task {
@@ -609,6 +615,22 @@ struct ChatPane: View {
     } else {
       startCall(withVideo: withVideo)
     }
+  }
+
+  /// A call runs in this conversation: who is in it, and Join (as the call button, notetaker notice
+  /// first where it is in the call).
+  private var runningCallBanner: some View {
+    HStack(spacing: 8) {
+      Image(systemName: "phone.fill").foregroundStyle(.green)
+      Text("call_participants \(runningCallCount)").font(.subheadline)
+      Spacer()
+      Button("call_prejoin_join") { Task { await prepareCall(withVideo: false) } }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.small)
+    }
+    .padding(.horizontal, 16)
+    .padding(.vertical, 6)
+    .background(.bar)
   }
 
   private func startCall(withVideo: Bool) {

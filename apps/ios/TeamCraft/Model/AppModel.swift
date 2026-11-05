@@ -645,6 +645,17 @@ final class AppModel {
     (try? await core().notifiedConversation(conversationId: conversationId)) ?? nil
   }
 
+  /// Conversations with a call running now and how many people are in each (issue #1352): the
+  /// list marks them and the conversation offers to join. Never waits for the engine.
+  func runningCalls() async -> [String: Int] {
+    guard let core = try? core() else { return [:] }
+    var counts: [String: Int] = [:]
+    for call in core.runningCalls() {
+      counts[call.conversationId] = call.participantUserIds.count
+    }
+    return counts
+  }
+
   /// How far the first sync of a newly set up device is; `nil` when none runs.
   func firstSync() async -> FirstSyncItem? {
     (try? await core().firstSync()) ?? nil

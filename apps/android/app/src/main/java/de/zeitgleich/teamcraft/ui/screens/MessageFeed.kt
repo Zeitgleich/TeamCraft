@@ -1380,6 +1380,16 @@ private fun UploadLine(viewModel: MainViewModel, file: FileInfo, colors: BubbleC
         } else {
           CircularProgressIndicator(progress = { maybeProgress }, modifier = ring, color = colors.content, strokeWidth = 2.dp)
         }
+        // A failed attempt says so at once, not only after the core gives up (#1355): a ring that
+        // keeps turning without a word reads as stuck.
+        if (transfer.isRetrying) {
+          Text(
+            label,
+            color = colors.content,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(start = 6.dp).weight(1f, fill = false),
+          )
+        }
         TextButton(onClick = cancel) { Text(stringResource(R.string.file_cancel_upload), color = colors.content) }
       }
       "upload_stalled" -> {
