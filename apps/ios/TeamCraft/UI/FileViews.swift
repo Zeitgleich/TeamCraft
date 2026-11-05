@@ -8,6 +8,7 @@ import SwiftUI
 struct AttachmentView: View {
   @Environment(AppModel.self) private var model
   @Environment(\.openPicture) private var maybeOpenPicture
+  @Environment(\.imageActions) private var maybeImageActions
   let file: FileInfo
   /// A tile of an album, sized by the album, instead of the large preview.
   var isTile = false
@@ -22,6 +23,36 @@ struct AttachmentView: View {
   @State private var isWaitingToOpen = false
 
   var body: some View {
+    withImageMenu(content)
+  }
+
+  /// A tile of an album has its own menu on a long press (#241); everything else keeps the message's.
+  @ViewBuilder
+  private func withImageMenu(_ view: some View) -> some View {
+    if isTile, let actions = maybeImageActions {
+      view.contextMenu {
+        if let reply = actions.maybeReply {
+          Button("image_reply", systemImage: "arrowshape.turn.up.left") { reply(file) }
+        }
+        Button("image_forward_one", systemImage: "arrowshape.turn.up.right") { actions.forward(file) }
+        if file.transfer.state == "local", let path = file.transfer.path {
+          ShareLink(item: URL(fileURLWithPath: path)) { Label("picture_share", systemImage: "square.and.arrow.up") }
+        } else {
+          Button("file_download", systemImage: "arrow.down.circle") {
+            Task {
+              await model.perform(
+                .downloadAttachment(conversationId: file.conversation, messageId: file.message, fileId: file.fileId))
+            }
+          }
+        }
+        Button("open", systemImage: "eye", action: open)
+      }
+    } else {
+      view
+    }
+  }
+
+  private var content: some View {
     VStack(alignment: .leading, spacing: 2) {
       Button(action: open) {
         if file.isImage, let image = ThumbnailCache.image(for: file) {
@@ -274,6 +305,15 @@ enum ThumbnailCache {
     let key = file.fileId as NSString
     if let cached = images.object(forKey: key) { return cached }
     guard let data = file.maybeThumbnailData, let image = UIImage(data: data) else { return nil }
+    images.setObject(image, forKey: key)
+    return image
+  }
+
+  /// The copy a reply carries; another picture than the file's may stand under the same ID.
+  static func image(forQuote quoted: ReplyAttachmentPreview) -> UIImage? {
+    let key = "quote:\(quoted.fileId)" as NSString
+    if let cached = images.object(forKey: key) { return cached }
+    guard let data = quoted.thumbnailData, let image = UIImage(data: data) else { return nil }
     images.setObject(image, forKey: key)
     return image
   }

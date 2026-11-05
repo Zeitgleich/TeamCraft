@@ -18,8 +18,12 @@ struct PictureViewer: View {
   @State private var maybeForwarding: ForwardTarget?
   @State private var displayNames: [String: String] = [:]
 
-  init(target: PictureTarget) {
+  /// Starts a reply to the picture on screen; nil where the user can't reply.
+  private let maybeOnReply: ((FileInfo) -> Void)?
+
+  init(target: PictureTarget, maybeOnReply: ((FileInfo) -> Void)? = nil) {
     _model = State(initialValue: PictureViewerModel(target: target))
+    self.maybeOnReply = maybeOnReply
   }
 
   var body: some View {
@@ -69,7 +73,8 @@ struct PictureViewer: View {
       if isGone { dismiss() }
     }
     .sheet(item: $maybeForwarding) { target in
-      ForwardSheet(fromConversationId: target.conversationId, messageId: target.messageId)
+      ForwardSheet(
+        fromConversationId: target.conversationId, messageId: target.messageId, maybeAttachmentId: target.fileId)
     }
   }
 
@@ -166,8 +171,18 @@ struct PictureViewer: View {
         .accessibilityLabel(Text("picture_share"))
       }
       if let file = model.currentFile ?? (model.items.isEmpty ? model.target.file : nil) {
+        if let reply = maybeOnReply {
+          Button {
+            reply(file)
+            dismiss()
+          } label: {
+            Image(systemName: "arrowshape.turn.up.left").frame(width: 44, height: 44)
+          }
+          .accessibilityLabel(Text("reply"))
+        }
+        // The picture on screen: of an album only this one, a message with just it goes whole.
         Button {
-          maybeForwarding = ForwardTarget(conversationId: file.conversation, messageId: file.message)
+          maybeForwarding = ForwardTarget(conversationId: file.conversation, messageId: file.message, fileId: file.fileId)
         } label: {
           Image(systemName: "arrowshape.turn.up.right").frame(width: 44, height: 44)
         }
@@ -205,12 +220,13 @@ struct PictureViewer: View {
   }
 }
 
-/// A message to forward from the viewer.
+/// A picture to forward from the viewer.
 private struct ForwardTarget: Identifiable {
   let conversationId: String
   let messageId: String
+  let fileId: String
 
-  var id: String { messageId }
+  var id: String { "\(messageId):\(fileId)" }
 }
 
 /// One page of the viewer: the original when it is here, else the thumbnail (softened when small),
@@ -467,10 +483,42 @@ private struct OpenPictureKey: EnvironmentKey {
   static let defaultValue: OpenPictureAction? = nil
 }
 
+/// Opens the picture a reply quotes: the message's ID and the file's.
+struct OpenQuotedPictureAction {
+  let run: (String, String) -> Void
+
+  func callAsFunction(_ messageId: String, _ fileId: String) { run(messageId, fileId) }
+}
+
+private struct OpenQuotedPictureKey: EnvironmentKey {
+  static let defaultValue: OpenQuotedPictureAction? = nil
+}
+
+/// What a long press on a picture of an album offers (#241).
+struct ImageActions {
+  /// Nil where the user can't reply here.
+  let maybeReply: ((FileInfo) -> Void)?
+  let forward: (FileInfo) -> Void
+}
+
+private struct ImageActionsKey: EnvironmentKey {
+  static let defaultValue: ImageActions? = nil
+}
+
 extension EnvironmentValues {
   var openPicture: OpenPictureAction? {
     get { self[OpenPictureKey.self] }
     set { self[OpenPictureKey.self] = newValue }
+  }
+
+  var openQuotedPicture: OpenQuotedPictureAction? {
+    get { self[OpenQuotedPictureKey.self] }
+    set { self[OpenQuotedPictureKey.self] = newValue }
+  }
+
+  var imageActions: ImageActions? {
+    get { self[ImageActionsKey.self] }
+    set { self[ImageActionsKey.self] = newValue }
   }
 }
 

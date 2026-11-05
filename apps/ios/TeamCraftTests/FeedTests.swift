@@ -75,6 +75,10 @@ final class FeedTests: XCTestCase {
   func testReplyAndMarkUnreadSerialize() throws {
     let request = SendRequest(conversationId: "1", maybeThreadId: nil, body: "hi", maybeReplyToId: "9")
     XCTAssertEqual(request.object["maybe_reply_to"] as? String, "9")
+    XCTAssertTrue(request.object["maybe_reply_attachment"] is NSNull)
+    let onePicture = SendRequest(
+      conversationId: "1", maybeThreadId: nil, body: "hi", maybeReplyToId: "9", maybeReplyAttachmentId: "4")
+    XCTAssertEqual(onePicture.object["maybe_reply_attachment"] as? String, "4")
     XCTAssertTrue(SendRequest(conversationId: "1", body: "hi").object["maybe_reply_to"] is NSNull)
     let unread = try JSONSerialization.jsonObject(
       with: Data(ChatAction.markUnread(conversationId: "1", fromMessageId: "9").json.utf8)) as? [String: String]
@@ -113,6 +117,11 @@ final class FeedTests: XCTestCase {
     let forward = try object(.forward(fromConversationId: "1", messageId: "9", toConversationId: "2"))
     XCTAssertEqual(forward?["action"] as? String, "forward_message")
     XCTAssertEqual(forward?["to"] as? String, "2")
+    XCTAssertNil(forward?["attachment"])
+    let forwardOne = try object(
+      .forwardAttachment(fromConversationId: "1", messageId: "9", fileId: "4", toConversationId: "2"))
+    XCTAssertEqual(forwardOne?["action"] as? String, "forward_message")
+    XCTAssertEqual(forwardOne?["attachment"] as? String, "4")
     XCTAssertEqual(try object(.setPinned(conversationId: "1", messageId: "9", isPinned: true))?["is_pinned"] as? Bool, true)
     XCTAssertEqual(try object(.setSaved(conversationId: "1", messageId: "9", isSaved: false))?["is_saved"] as? Bool, false)
     let extras = Wire.decode(
@@ -120,6 +129,13 @@ final class FeedTests: XCTestCase {
       from: #"{"message":"9","is_pinned":true,"maybe_reply":{"author":"5","excerpt":"hi"},"edits":[{"body":"old","replaced_at":1}]}"#)
     XCTAssertEqual(extras?.isPinned, true)
     XCTAssertEqual(extras?.maybeReply?.excerpt, "hi")
+    XCTAssertNil(extras?.maybeReply?.attachment)
+    let quote = Wire.decode(
+      ReplyPreview.self,
+      from: #"{"maybe_message":"9","author":"5","excerpt":"c.jpg","attachment":{"file_id":"4","file_name":"c.jpg","thumbnail_png":[1],"can_open":true}}"#)
+    XCTAssertEqual(quote?.attachment?.fileId, "4")
+    XCTAssertEqual(quote?.attachment?.canOpen, true)
+    XCTAssertEqual(quote?.attachment?.thumbnailPng, [1])
     XCTAssertEqual(extras?.edits?.first?.body, "old")
   }
 

@@ -176,8 +176,23 @@ struct ForwardedFrom: Decodable, Equatable, Sendable {
 
 /// The quoted message of a reply, as much as the reader can see of it.
 struct ReplyPreview: Decodable, Equatable, Sendable {
+  /// The quoted message, if this device has it.
+  let maybeMessage: String?
   let author: String
   let excerpt: String
+  /// The one picture of an album the reply answers (#241); it still shows when the picture is gone.
+  let attachment: ReplyAttachmentPreview?
+}
+
+/// The picture a reply quotes.
+struct ReplyAttachmentPreview: Decodable, Equatable, Sendable {
+  let fileId: String
+  let fileName: String
+  let thumbnailPng: [UInt8]?
+  /// The picture is still in the quoted message: the quote can open it.
+  let canOpen: Bool?
+
+  var thumbnailData: Data? { thumbnailPng.map { Data($0) } }
 }
 
 /// An earlier version of an edited message.

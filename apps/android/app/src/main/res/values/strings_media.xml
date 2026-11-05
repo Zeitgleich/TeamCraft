@@ -9,7 +9,9 @@
   <string name="image_try_again">Try again</string>
   <string name="image_scope_message">This message</string>
   <string name="image_scope_conversation">Whole chat</string>
-  <string name="image_forward">Forward message</string>
+  <string name="image_reply">Reply to this image</string>
+  <string name="image_forward_one">Forward this image</string>
+  <string name="file_gone">This file is no longer available.</string>
   <plurals name="album_more_pictures">
     <item quantity="one">%d more picture</item>
     <item quantity="other">%d more pictures</item>
