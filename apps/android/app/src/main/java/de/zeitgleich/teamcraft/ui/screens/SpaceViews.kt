@@ -48,6 +48,7 @@ import de.zeitgleich.teamcraft.core.SavedItem
 import de.zeitgleich.teamcraft.core.Space
 import de.zeitgleich.teamcraft.core.SpaceRoster
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.SpacePicture
 import kotlinx.coroutines.delay
 
 /** How long a space's member list may load before the user is offered another try. */
