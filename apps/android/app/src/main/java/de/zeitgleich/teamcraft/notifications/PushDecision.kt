@@ -33,7 +33,16 @@ sealed interface PushDecision {
   /** Ring: incoming-call notification with full-screen intent. */
   data class Ring(val conversationId: String, val maybeCallId: String?, val notification: PushNotification) : PushDecision
 
-  /** A ring the device's own mute/DND check keeps quiet: a silent missed-call notification. */
+  /**
+   * A ring looked at late that the server's call history says this user answered on another device
+   * (issue #1257): no missed call, and a ring of it still going here stops.
+   */
+  data class RingAnswered(val maybeCallId: String?) : PushDecision
+
+  /**
+   * A ring the device's own mute/DND check keeps quiet, or one opened after it ended without the
+   * server saying it was answered: a silent missed-call notification.
+   */
   data class ShowQuietCall(val notification: PushNotification) : PushDecision
 
   /** The ring ended elsewhere (answered, declined, timed out): stop ringing. */
@@ -53,7 +62,8 @@ sealed interface PushDecision {
   companion object {
     /**
      * `isRingOver`: this wake-up was opened so late that a ring in it has ended by now; it is told
-     * as a missed call, and never rings or reaches Telecom.
+     * as a missed call, unless the server says it was answered elsewhere ([RingAnswered]), and never
+     * rings or reaches Telecom.
      */
     fun of(notification: PushNotification, isRingOver: Boolean = false): PushDecision = when (notification.kind) {
       PushNotificationKind.MESSAGE -> message(notification)
@@ -74,12 +84,12 @@ sealed interface PushDecision {
       else -> ShowMessage(notification, isAlerting = !notification.isSilent)
     }
 
-    private fun call(notification: PushNotification, isRingOver: Boolean): PushDecision =
-      if (notification.maybeSuppression != null || isRingOver) {
-        ShowQuietCall(notification)
-      } else {
-        Ring(notification.conversationId, notification.maybeCallId, notification)
-      }
+    private fun call(notification: PushNotification, isRingOver: Boolean): PushDecision = when {
+      // Only a late look asks the server, so a ring that arrives in time always rings.
+      notification.isRingAnswered -> RingAnswered(notification.maybeCallId)
+      notification.maybeSuppression != null || isRingOver -> ShowQuietCall(notification)
+      else -> Ring(notification.conversationId, notification.maybeCallId, notification)
+    }
 
     private fun dismiss(notification: PushNotification): PushDecision {
       notification.maybeCallId?.let { return StopRinging(it, notification.maybeBadge) }

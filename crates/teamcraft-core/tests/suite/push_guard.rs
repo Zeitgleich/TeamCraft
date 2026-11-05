@@ -15,8 +15,9 @@ use teamcraft_crypto::push::seal_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::Id as _;
 use teamcraft_proto::{
-  ConversationId, ConversationResponse, DndSchedule, MessageId, NotificationSettings, PresenceState,
-  PushKind, PushMode, PushProvider, PushWakeUp, TestPushOutcome, UnixMillis,
+  CallHistoryEntry, CallId, ConversationId, ConversationResponse, DndSchedule, MessageId,
+  NotificationSettings, PresenceState, PushKind, PushMode, PushProvider, PushWakeUp, TestPushOutcome,
+  UnixMillis,
 };
 
 // 2026-01-05 (Monday) 12:00 UTC.
@@ -231,6 +232,32 @@ async fn a_test_push_is_requested_for_this_device() {
     .unwrap();
   assert_eq!(response.outcome, TestPushOutcome::Sent);
   assert_eq!(response.maybe_provider, Some(PushProvider::WebPush));
+}
+
+/// A ring looked at only after it ended (issue #1257): the server's call history says whether this
+/// user missed it. Answered on another device, it isn't a missed call; missed, or not among the
+/// newest calls, it is.
+#[tokio::test]
+async fn a_late_ring_is_answered_only_if_the_call_history_says_so() {
+  let (server, alice, bob, channel) = channel_with_two().await;
+  let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+  let call_id = |raw: i64| -> CallId { serde_json::from_value(serde_json::json!(raw.to_string())).unwrap() };
+  let call = |raw: i64, is_missed, participants| CallHistoryEntry {
+    call_id: call_id(raw),
+    conversation_id: channel,
+    maybe_started_by: Some(alice_id),
+    started_at: UnixMillis(1_799_000_000_000 + raw),
+    maybe_ended_at: Some(UnixMillis(1_799_000_060_000 + raw)),
+    participants,
+    is_missed,
+  };
+  server.add_call_history(call(1, true, vec![alice_id]));
+  server.add_call_history(call(2, false, vec![alice_id, bob_id]));
+
+  let is_answered = |raw| push_guard::is_ring_answered(&bob.api, call_id(raw));
+  assert!(is_answered(2).await.unwrap(), "joined on another device");
+  assert!(!is_answered(1).await.unwrap(), "missed");
+  assert!(!is_answered(3).await.unwrap(), "unknown: told as missed");
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {

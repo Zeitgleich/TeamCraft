@@ -48,7 +48,8 @@ use teamcraft_core::{
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
-  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceActivity, DeviceId, Id,
+  CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceActivity, DeviceId, Id, PushKind,
+  PushWakeUp,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, LocalSet};
@@ -257,6 +258,13 @@ impl PushOpening {
   /// client, while it isn't syncing (the gateway keeps it fresh then).
   fn refreshes_read_position(self, reader: PushReader, is_client_idle: bool) -> bool {
     self == Self::LateLook && reader == PushReader::App && is_client_idle
+  }
+
+  /// Whether this opening asks the server how a ring ended (issue #1257): only a late look of the
+  /// app at a ring. Unlike the read position, also while the sync runs: the gateway doesn't replay
+  /// a ring that ended.
+  fn asks_how_a_ring_ended(self, reader: PushReader, kind: &PushKind) -> bool {
+    self == Self::LateLook && reader == PushReader::App && *kind == PushKind::Call
   }
 }
 
@@ -1231,6 +1239,7 @@ impl Engine {
         tracing::debug!("read position not refreshed for a push");
       }
     }
+    let is_ring_answered = self.is_ring_answered(&preview.wake_up, opening, reader).await;
     let is_read = is_read(&self.store, &preview.wake_up);
     let now_ms = SystemClock.now_ms();
     let store = &self.store;
@@ -1249,6 +1258,7 @@ impl Engine {
     notification.is_duplicate = is_duplicate;
     notification.is_read = is_read;
     notification.maybe_suppression = maybe_suppression.map(Into::into);
+    notification.is_ring_answered = is_ring_answered;
     if !notification.is_mention
       && let (Some(text), Ok(backend)) = (&notification.maybe_text, self.backend())
     {
@@ -1265,6 +1275,25 @@ impl Engine {
       );
     }
     Ok(notification)
+  }
+
+  /// Whether a ring looked at late was answered on another device, as the server's call history says
+  /// (issue #1257). Only a late look of the app asks: a ring opened as it arrives rings, and the
+  /// answer costs up to [`PUSH_FETCH_BUDGET`]. Best effort: `false`, a missed call, when the server
+  /// doesn't answer in time.
+  async fn is_ring_answered(&self, wake_up: &PushWakeUp, opening: PushOpening, reader: PushReader) -> bool {
+    let Some(call) = wake_up.maybe_call_id else {
+      return false;
+    };
+    if !opening.asks_how_a_ring_ended(reader, &wake_up.kind) {
+      return false;
+    }
+    let api = self.api();
+    let answered = tokio::time::timeout(PUSH_FETCH_BUDGET, push_guard::is_ring_answered(&api, call)).await;
+    if !matches!(answered, Ok(Ok(_))) {
+      tracing::debug!("call history not read for a late ring");
+    }
+    matches!(answered, Ok(Ok(true)))
   }
 
   /// The preview of a wake-up within [`PUSH_PREVIEW_BUDGET`], so the push service's time for the
@@ -1935,6 +1964,19 @@ mod tests {
     assert!(!PushOpening::Retry.refreshes_read_position(PushReader::App, true));
     assert!(!PushOpening::Received.refreshes_read_position(PushReader::App, true));
     assert!(!PushOpening::StoreOnly.refreshes_read_position(PushReader::App, true));
+  }
+
+  /// Only a late look of the app at a ring asks the server how the call ended (issue #1257): a ring
+  /// opened as it arrives rings, and an extension never looks late.
+  #[test]
+  fn only_a_late_look_at_a_ring_asks_how_the_call_ended() {
+    assert!(PushOpening::LateLook.asks_how_a_ring_ended(PushReader::App, &PushKind::Call));
+    assert!(!PushOpening::LateLook.asks_how_a_ring_ended(PushReader::App, &PushKind::Message));
+    assert!(!PushOpening::LateLook.asks_how_a_ring_ended(PushReader::App, &PushKind::Dismiss));
+    assert!(!PushOpening::LateLook.asks_how_a_ring_ended(PushReader::Extension, &PushKind::Call));
+    assert!(!PushOpening::Received.asks_how_a_ring_ended(PushReader::App, &PushKind::Call));
+    assert!(!PushOpening::Retry.asks_how_a_ring_ended(PushReader::App, &PushKind::Call));
+    assert!(!PushOpening::StoreOnly.asks_how_a_ring_ended(PushReader::App, &PushKind::Call));
   }
 
   #[test]
