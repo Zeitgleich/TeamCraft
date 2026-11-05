@@ -60,6 +60,9 @@ Mark each line with pass/fail and a note. "Dialog" is what the desktop should sh
 | P2 | Focus another app, hold the key                              | The microphone opens while held and closes on release; others hear only while held                              |
 | P3 | Change the key in the desktop's settings (GNOME: Settings → Apps → TeamCraft → Global Shortcuts; KDE: System Settings → Shortcuts) | The new key works without restarting the app |
 | P4 | X11 session (log in with "GNOME on Xorg" or "Plasma (X11)")  | No dialog; the shortcut works through the X11 grab                                                              |
+| P5 | Settings → Audio and video: turn on the mute shortcut (default Ctrl+Shift+M), then start a call | Dialog: the desktop asks to bind "Mute or unmute the microphone in a call" (only in a call; the setting itself shows no dialog) |
+| P6 | Focus another app, press the mute shortcut                   | The microphone mutes, a second press unmutes; the window stays where it is                                       |
+| P7 | Leave the call, press the key in another app                  | The other app gets the key (the session is closed outside calls)                                                 |
 
 ### Rest of the sandbox
 

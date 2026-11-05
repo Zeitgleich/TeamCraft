@@ -277,10 +277,10 @@
   pointer-events: none;
 }
 
-@media (pointer: coarse) {
-  .toast {
-    touch-action: pan-y;
-  }
+/* Not only under (pointer: coarse): a touch laptop has a fine primary pointer, and without this
+   the browser takes the horizontal pan and fires pointercancel. It only affects touch input. */
+.toast {
+  touch-action: pan-y;
 }
 
 .motion-ghost.is-leaving.toast {

@@ -180,6 +180,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   if tauri::has_core() {
     crate::os_alerts::start(state, i18n);
   }
+  crate::calls::run_call_clock(state.call);
   if tauri::is_available() {
     sync_tray(state, i18n);
     crate::tray_menu::start(state, i18n);

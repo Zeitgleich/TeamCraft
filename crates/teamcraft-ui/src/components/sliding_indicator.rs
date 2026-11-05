@@ -88,15 +88,23 @@ fn follow_selection(indicator: web_sys::HtmlElement, placing: Placing) {
   };
   place(Move::Jump);
 
-  let on_select = Closure::<dyn FnMut()>::new({
+  let on_resize = Closure::<dyn FnMut()>::new({
     let place = place.clone();
-    move || place(Move::Slide)
+    move || place(Move::Jump)
   });
-  let on_resize = Closure::<dyn FnMut()>::new(move || place(Move::Jump));
-  let Ok(selection) = web_sys::MutationObserver::new(on_select.as_ref().unchecked_ref()) else {
+  let Ok(resize) = web_sys::ResizeObserver::new(on_resize.as_ref().unchecked_ref()) else {
     return;
   };
-  let Ok(resize) = web_sys::ResizeObserver::new(on_resize.as_ref().unchecked_ref()) else {
+  // Items added later (a tab that appears) are observed for resize from the mutation callback.
+  let on_select = Closure::<dyn FnMut()>::new({
+    let list = list.clone();
+    let resize = resize.clone();
+    move || {
+      observe_items(&resize, &list);
+      place(Move::Slide);
+    }
+  });
+  let Ok(selection) = web_sys::MutationObserver::new(on_select.as_ref().unchecked_ref()) else {
     return;
   };
   let options = web_sys::MutationObserverInit::new();
@@ -112,12 +120,7 @@ fn follow_selection(indicator: web_sys::HtmlElement, placing: Placing) {
     tracing::debug!("could not observe a tab list");
   }
   resize.observe(&list);
-  let items = list.children();
-  for index in 0..items.length() {
-    if let Some(item) = items.item(index) {
-      resize.observe(&item);
-    }
-  }
+  observe_items(&resize, &list);
   let observers = StoredValue::new_local((selection, resize, on_select, on_resize));
   on_cleanup(move || {
     observers.try_with_value(|(selection, resize, _, _)| {
@@ -125,6 +128,16 @@ fn follow_selection(indicator: web_sys::HtmlElement, placing: Placing) {
       resize.disconnect();
     });
   });
+}
+
+/// Observes every child of `list` for resize; observing one twice is a no-op.
+fn observe_items(resize: &web_sys::ResizeObserver, list: &web_sys::HtmlElement) {
+  let items = list.children();
+  for index in 0..items.length() {
+    if let Some(item) = items.item(index) {
+      resize.observe(&item);
+    }
+  }
 }
 
 /// Moves the indicator onto the selected item, or hides it when nothing is selected or the list is
