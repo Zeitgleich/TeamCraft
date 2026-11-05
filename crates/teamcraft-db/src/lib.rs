@@ -24,6 +24,7 @@ mod identity;
 mod ids;
 mod import;
 mod instance_stats;
+mod directory;
 mod invite;
 mod key_bag;
 mod key_package;
@@ -89,6 +90,10 @@ pub use idempotency::Created;
 pub use identity::{IdentityKey, IdentityKeyOutcome, InitialKeyBag, NewIdentityKey};
 pub use import::{ImportOutcome, NewImportedMessage};
 pub use instance_stats::{InstanceStats, PoolStats};
+pub use directory::{
+  DirectoryChannel, DirectoryChannelFilter, DirectoryFilterValues, DirectoryInvitation,
+  DirectoryInvitationFilter, DirectoryPeopleFilter, DirectoryPerson,
+};
 pub use invite::{AppliedInvite, Invite, NewInvite};
 pub use key_bag::{KeyBag, KeyBagOutcome};
 pub use key_package::{AddPackagesOutcome, ClaimedPackage, KeyPackageCounts, NewKeyPackage};

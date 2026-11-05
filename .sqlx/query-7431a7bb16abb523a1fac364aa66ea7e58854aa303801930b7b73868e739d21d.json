@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ranked.facet AS \"facet!\", ranked.value AS \"value!\"\n         FROM (\n           SELECT x.facet, x.value,\n                  row_number() OVER (PARTITION BY x.facet ORDER BY count(*) DESC, x.value) AS position\n           FROM users u\n           LEFT JOIN user_profiles p ON p.user_id = u.id\n           CROSS JOIN LATERAL (VALUES ('organization', u.organization), ('department', p.department), ('title', p.title))\n             AS x (facet, value)\n           WHERE u.deactivated_at IS NULL\n             AND u.kind <> 'bot'\n             AND x.value IS NOT NULL AND x.value <> ''\n             AND ($1::text IS NULL OR u.kind = $1)\n             AND ($2::bigint IS NULL OR EXISTS (\n                   SELECT 1 FROM space_members m\n                   WHERE m.space_id = $2 AND m.user_id = u.id\n                     AND (m.expires_at IS NULL OR m.expires_at > now())))\n           GROUP BY x.facet, x.value\n         ) ranked\n         WHERE ranked.position <= $3\n         ORDER BY ranked.value",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "facet!",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "value!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "7431a7bb16abb523a1fac364aa66ea7e58854aa303801930b7b73868e739d21d"
+}

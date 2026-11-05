@@ -1,17 +1,19 @@
 use std::sync::Arc;
 
 use serde_json::json;
-use teamcraft_db::NewInvite;
+use teamcraft_db::{DirectoryInvitationFilter, NewInvite, SpaceListing};
 use teamcraft_proto::{
-  ConversationKind, CreateInviteRequest, InviteId, InviteResponse, ListInvitesResponse, Permission, SpaceId,
-  SpaceRole, UserId,
+  ConversationKind, CreateInviteRequest, DirectoryInvitation, DirectoryInvitationsQuery,
+  DirectoryInvitationsResponse, InviteId, InviteResponse, ListInvitesResponse, Permission, SpaceId, SpaceRole,
+  Target, UserId,
 };
 use time::OffsetDateTime;
 use tracing::warn;
 
-use super::access::load_space;
+use super::access::{allows, is_guest, is_instance_admin, load_space, space_target};
 use super::audit::{self, Target as AuditTarget};
-use super::convert::{invite_response, offset_date_time, presented_name};
+use super::convert::{invite_response, offset_date_time, presented_name, unix_millis, user_summary};
+use super::directory::page_size;
 use super::spaces::require_member_management;
 use crate::auth::AuthenticatedUser;
 use crate::brand::Brand;
@@ -22,6 +24,30 @@ use crate::state::AppState;
 
 const MAX_EMAIL_CHARS: usize = 254;
 const MAX_INVITE_CHANNELS: usize = 100;
+
+/// What a caller may do with the open invitations of one space. The one place that decides who sees,
+/// resends and revokes them (docs/admin.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InviteReach {
+  /// Every invitation of the space.
+  manages_all: bool,
+  /// Guest invitations the caller sent, while they may still invite guests here.
+  has_own_guests: bool,
+}
+
+impl InviteReach {
+  fn of(state: &AppState, caller: &AuthenticatedUser, target: &Target) -> Self {
+    let is_allowed = |permission| !is_guest(caller) && allows(state, caller, &permission, target);
+    Self {
+      manages_all: is_allowed(Permission::ManageSpaceMembers),
+      has_own_guests: is_allowed(Permission::InviteGuest),
+    }
+  }
+
+  fn covers(self, caller: UserId, role: &SpaceRole, sponsor: UserId) -> bool {
+    self.manages_all || (self.has_own_guests && *role == SpaceRole::Guest && sponsor == caller)
+  }
+}
 
 /// Invites a person by email. The invite is applied when someone signs in with that verified
 /// email address (accounts::authenticate); delivering an email to the invitee is not part of M1.
@@ -159,6 +185,19 @@ async fn send_invite_mail(
   let Some(mailer) = state.mailer.get() else {
     return;
   };
+  let mail = invite_mail(state, caller, space_name, invite, maybe_message).await;
+  if let Err(error) = mailer.send(&mail).await {
+    warn!(%error, invite_id = %invite.id, "sending the invitation e-mail failed");
+  }
+}
+
+async fn invite_mail(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  space_name: &str,
+  invite: &teamcraft_db::Invite,
+  maybe_message: Option<&str>,
+) -> OutgoingMail {
   // Mail goes out as the brand of the recipient's domain, else as the brand the inviter used.
   let inviter_brand = inviter_brand(state, &caller.user.id).await;
   let brands = state.brands.current();
@@ -180,7 +219,7 @@ async fn send_invite_mail(
       .replace("{role}", invite.role.as_str())
       .replace("{url}", &url)
   };
-  let mail = OutgoingMail {
+  OutgoingMail {
     to_address: invite.email.clone(),
     maybe_to_name: None,
     subject: fill(&subject),
@@ -190,10 +229,7 @@ async fn send_invite_mail(
     maybe_from_name: None,
     maybe_from_address: None,
   }
-  .as_brand(brand);
-  if let Err(error) = mailer.send(&mail).await {
-    warn!(%error, invite_id = %invite.id, "sending the invitation e-mail failed");
-  }
+  .as_brand(brand)
 }
 
 /// Adds the inviter's own words to the invitation text: in place of `{message}` when the template
@@ -234,17 +270,167 @@ pub async fn delete_invite(
   invite: InviteId,
 ) -> Result<(), ApiError> {
   let access = load_space(state, caller, space).await?;
-  super::access::require(state, caller, Permission::ManageSpaceMembers, &access.target())?;
-  let existing = state
+  manageable_invite(state, caller, &access.target(), space, invite).await?;
+  state.database.delete_invite(invite).await?;
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "invite_revoked",
+    Some(AuditTarget::new("space", space)),
+    &json!({}),
+  )
+  .await?;
+  Ok(())
+}
+
+/// Sends the invitation mail again, at most once per `limits.invite_resend_interval_secs`. Unlike
+/// the mail of a new invitation, a failure here is the caller's answer: sending is all this does.
+pub async fn resend_invite(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  space: SpaceId,
+  invite: InviteId,
+) -> Result<(), ApiError> {
+  let access = load_space(state, caller, space).await?;
+  let existing = manageable_invite(state, caller, &access.target(), space, invite).await?;
+  if access.view.space.is_archived {
+    return Err(ApiError::Conflict("the space is archived".into()));
+  }
+  if is_expired(existing.maybe_expires_at) {
+    return Err(ApiError::Conflict("the invitation has expired".into()));
+  }
+  if existing.role == SpaceRole::Guest {
+    check_guest_domain(state, &existing.email)?;
+  }
+  let Some(mailer) = state.mailer.get() else {
+    return Err(ApiError::Conflict("this server sends no mail".into()));
+  };
+  let interval_secs = state.settings.get().limits.invite_resend_interval_secs;
+  if !state.database.mark_invite_resent(invite, interval_secs).await? {
+    return Err(ApiError::RateLimited {
+      retry_after_secs: interval_secs,
+    });
+  }
+  let mail = invite_mail(state, caller, &access.view.space.name, &existing, None).await;
+  if let Err(error) = mailer.send(&mail).await {
+    warn!(%error, invite_id = %invite, "resending the invitation e-mail failed");
+    state.database.forget_invite_resend(invite).await?;
+    return Err(ApiError::Unavailable("the mail server did not take the mail".into()));
+  }
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "invite_resent",
+    Some(AuditTarget::new("space", space)),
+    &json!({"role": existing.role.as_str()}),
+  )
+  .await?;
+  Ok(())
+}
+
+/// One page of the open invitations the caller may manage, across spaces.
+pub async fn list_directory_invitations(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  query: &DirectoryInvitationsQuery,
+) -> Result<DirectoryInvitationsResponse, ApiError> {
+  if is_guest(caller) {
+    return Err(ApiError::Forbidden(
+      "invitations are not available to guests".into(),
+    ));
+  }
+  let listing = if is_instance_admin(caller) {
+    SpaceListing::All
+  } else {
+    SpaceListing::Mine
+  };
+  let spaces = state
+    .database
+    .list_spaces_for_user(caller.user.id, listing)
+    .await?;
+  let (mut managed_spaces, mut guest_inviter_spaces) = (Vec::new(), Vec::new());
+  for space in &spaces {
+    let reach = InviteReach::of(
+      state,
+      caller,
+      &space_target(Some(space.space.id), space.maybe_role.clone()),
+    );
+    if reach.manages_all {
+      managed_spaces.push(space.space.id);
+    } else if reach.has_own_guests {
+      guest_inviter_spaces.push(space.space.id);
+    }
+  }
+  let page_size = page_size(state);
+  let mut found = state
+    .database
+    .directory_invitations(&DirectoryInvitationFilter {
+      sponsor: caller.user.id,
+      managed_spaces: &managed_spaces,
+      guest_inviter_spaces: &guest_inviter_spaces,
+      query: query.query.trim(),
+      maybe_space: query.maybe_space_id,
+      maybe_after: query.maybe_after,
+      limit: page_size + 1,
+    })
+    .await?;
+  let has_more = found.len() as i64 > page_size;
+  found.truncate(page_size as usize);
+  let maybe_next_after = has_more.then(|| found.last().map(|invite| invite.id)).flatten();
+  let sponsor_ids: Vec<UserId> = found.iter().map(|invite| invite.sponsor_user_id).collect();
+  let sponsors = state.database.get_users(&sponsor_ids).await?;
+  let can_send_mail = state.mailer.get().is_some();
+  let mut invitations = Vec::with_capacity(found.len());
+  for invite in found {
+    let sponsor = sponsors
+      .iter()
+      .find(|user| user.id == invite.sponsor_user_id)
+      .ok_or_else(|| ApiError::Internal("invite sponsor missing".into()))?;
+    let is_expired = is_expired(invite.maybe_expires_at);
+    invitations.push(DirectoryInvitation {
+      id: invite.id,
+      space_id: invite.space_id,
+      space_name: invite.space_name,
+      email: invite.email,
+      role: invite.role,
+      sponsor: user_summary(state, sponsor),
+      maybe_expires_at: invite.maybe_expires_at.map(unix_millis),
+      is_expired,
+      can_resend: can_send_mail && !is_expired && !invite.is_space_archived,
+    });
+  }
+  Ok(DirectoryInvitationsResponse {
+    invitations,
+    maybe_next_after,
+  })
+}
+
+/// The open invitation, if the caller may manage it; one they may not manage doesn't exist for
+/// them, as it isn't in their list either.
+async fn manageable_invite(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  target: &Target,
+  space: SpaceId,
+  invite: InviteId,
+) -> Result<teamcraft_db::Invite, ApiError> {
+  let reach = InviteReach::of(state, caller, target);
+  if !reach.manages_all && !reach.has_own_guests {
+    return Err(ApiError::Forbidden(format!(
+      "missing permission {}",
+      Permission::ManageSpaceMembers
+    )));
+  }
+  state
     .database
     .get_invite(invite)
     .await?
-    .filter(|i| i.space_id == space);
-  if existing.is_none() {
-    return Err(ApiError::invite_not_found());
-  }
-  state.database.delete_invite(invite).await?;
-  Ok(())
+    .filter(|existing| existing.space_id == space && reach.covers(caller.user.id, &existing.role, existing.sponsor_user_id))
+    .ok_or_else(ApiError::invite_not_found)
+}
+
+fn is_expired(maybe_expires_at: Option<OffsetDateTime>) -> bool {
+  maybe_expires_at.is_some_and(|at| at <= OffsetDateTime::now_utc())
 }
 
 /// Guests may only be invited from the configured domains, if there are any.
@@ -321,6 +507,42 @@ mod tests {
     ] {
       assert!(normalize_email(bad).is_err(), "{bad:?}");
     }
+  }
+}
+
+#[cfg(test)]
+mod reach_tests {
+  use teamcraft_proto::{Id, Snowflake};
+
+  use super::*;
+
+  fn user(raw: u64) -> UserId {
+    Id::new(Snowflake(raw))
+  }
+
+  #[test]
+  fn a_guest_inviter_reaches_only_the_guests_they_invited() {
+    let reach = InviteReach {
+      manages_all: false,
+      has_own_guests: true,
+    };
+    assert!(reach.covers(user(1), &SpaceRole::Guest, user(1)));
+    assert!(!reach.covers(user(1), &SpaceRole::Guest, user(2)), "somebody else's");
+    assert!(!reach.covers(user(1), &SpaceRole::Member, user(1)), "not a guest");
+  }
+
+  #[test]
+  fn a_member_manager_reaches_every_invitation_and_nobody_else_any() {
+    let manager = InviteReach {
+      manages_all: true,
+      has_own_guests: false,
+    };
+    assert!(manager.covers(user(1), &SpaceRole::Member, user(2)));
+    let none = InviteReach {
+      manages_all: false,
+      has_own_guests: false,
+    };
+    assert!(!none.covers(user(1), &SpaceRole::Guest, user(1)));
   }
 }
 

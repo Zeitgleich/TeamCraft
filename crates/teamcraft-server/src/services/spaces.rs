@@ -305,15 +305,25 @@ pub async fn list_space_members(
   caller: &AuthenticatedUser,
   id: SpaceId,
 ) -> Result<ListSpaceMembersResponse, ApiError> {
+  require_roster_access(state, caller, id).await?;
+  let members = state.database.list_space_members(id).await?;
+  Ok(space_members_response(state, &members))
+}
+
+/// Who may see who is in a space. Guests have no directory; only non-guest members and admins see
+/// the roster.
+pub(super) async fn require_roster_access(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: SpaceId,
+) -> Result<(), ApiError> {
   let access = load_space(state, caller, id).await?;
-  // Guests have no directory; only non-guest members and admins see the roster.
   if is_guest(caller) || (access.view.maybe_role.is_none() && !is_instance_admin(caller)) {
     return Err(ApiError::Forbidden(
       "the member list is not available to you".into(),
     ));
   }
-  let members = state.database.list_space_members(id).await?;
-  Ok(space_members_response(state, &members))
+  Ok(())
 }
 
 /// The answer of `GET /spaces/{id}/members` for these members (also what `GET /sync/heads`

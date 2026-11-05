@@ -266,6 +266,11 @@ pub struct LimitsConfig {
   pub default_page_size: u32,
   pub max_page_size: u32,
   pub max_directory_results: u32,
+  /// Values each directory filter (organization, department, title) offers at most; the most common
+  /// ones when there are more.
+  pub max_directory_filter_values: u32,
+  /// How long after an invitation mail the same invitation can be sent again.
+  pub invite_resend_interval_secs: u64,
   /// Largest avatar image.
   pub max_avatar_bytes: u64,
   /// Largest space or channel picture (the one limit for both), after the server re-encoded the
@@ -1448,6 +1453,8 @@ impl Default for LimitsConfig {
       default_page_size: 50,
       max_page_size: 200,
       max_directory_results: 50,
+      max_directory_filter_values: 200,
+      invite_resend_interval_secs: 300,
       max_avatar_bytes: 1024 * 1024,
       max_space_image_bytes: teamcraft_proto::DEFAULT_MAX_SPACE_IMAGE_BYTES,
       max_concurrent_image_decodes: 2,

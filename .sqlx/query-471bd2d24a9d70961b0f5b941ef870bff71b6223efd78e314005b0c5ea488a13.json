@@ -1,0 +1,106 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.id, c.space_id AS \"space_id!\", s.name AS space_name, c.name AS \"name!\", c.topic, c.visibility,\n                mine.user_id IS NOT NULL AS \"is_member!\",\n                (SELECT count(*) FROM memberships n WHERE n.conversation_id = c.id) AS \"member_count!\"\n         FROM conversations c\n         JOIN spaces s ON s.id = c.space_id AND s.deleted_at IS NULL AND s.archived_at IS NULL\n         LEFT JOIN memberships mine ON mine.conversation_id = c.id AND mine.user_id = $1\n         WHERE c.kind = 'channel'\n           AND c.deleted_at IS NULL\n           AND c.archived_at IS NULL\n           AND c.name IS NOT NULL\n           AND (mine.user_id IS NOT NULL OR (c.visibility = 'public' AND EXISTS (\n                 SELECT 1 FROM space_members m\n                 WHERE m.space_id = c.space_id AND m.user_id = $1\n                   AND (m.expires_at IS NULL OR m.expires_at > now()))))\n           AND (c.name ILIKE $2 OR c.topic ILIKE $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND ($4::bigint IS NULL OR (c.name, c.id) >\n                 (SELECT last.name, last.id FROM conversations last WHERE last.id = $4))\n         ORDER BY c.name, c.id\n         LIMIT $5",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "space_id!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "space_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "space_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "topic",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "topic"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "visibility",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "visibility"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "is_member!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "member_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "471bd2d24a9d70961b0f5b941ef870bff71b6223efd78e314005b0c5ea488a13"
+}

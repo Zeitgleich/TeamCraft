@@ -117,6 +117,32 @@ impl Database {
     Ok(())
   }
 
+  /// Notes that the invitation goes out again, unless it went out less than `min_interval_secs`
+  /// ago: then `false`, and nothing changes. Atomic, so two clicks send one mail.
+  pub async fn mark_invite_resent(&self, invite: InviteId, min_interval_secs: u64) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"UPDATE invites SET last_sent_at = now()
+         WHERE id = $1 AND accepted_at IS NULL
+           AND last_sent_at <= now() - make_interval(secs => $2::double precision)"#,
+      to_db(invite),
+      min_interval_secs as f64,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
+  }
+
+  /// The mail of a resend could not be sent: the next try need not wait.
+  pub async fn forget_invite_resend(&self, invite: InviteId) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE invites SET last_sent_at = created_at WHERE id = $1",
+      to_db(invite)
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
   /// Applies all pending invites for a (verified) email to the user: space membership with the
   /// invited role and membership in the listed channels of that space. Guest memberships expire
   /// when the invite says so. Idempotent; returns what was applied.
