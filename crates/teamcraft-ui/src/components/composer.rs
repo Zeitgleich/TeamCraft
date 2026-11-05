@@ -638,11 +638,15 @@ pub fn Composer(
     }
     pending_confirm.set(None);
     pending_schedule.set(None);
-    let maybe_reply_to = state
+    let maybe_reply = state
       .reply_target
       .get_untracked()
-      .filter(|target| target.conversation == conversation)
-      .map(|target| target.message);
+      .filter(|target| target.conversation == conversation);
+    let maybe_reply_attachment = maybe_reply
+      .as_ref()
+      .and_then(|target| target.maybe_image.as_ref())
+      .map(|image| image.attachment);
+    let maybe_reply_to = maybe_reply.map(|target| target.message);
     state.reply_target.set(None);
     let message = OutgoingMessage {
       maybe_client_message_id: None,
@@ -650,6 +654,7 @@ pub fn Composer(
       maybe_thread,
       body: text,
       maybe_reply_to,
+      maybe_reply_attachment,
       priority: priority.get_untracked(),
       wants_acknowledgement: wants_acknowledgement.get_untracked(),
       is_silent: is_silent.get_untracked(),
