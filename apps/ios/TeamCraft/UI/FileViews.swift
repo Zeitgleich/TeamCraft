@@ -8,6 +8,7 @@ import SwiftUI
 struct AttachmentView: View {
   @Environment(AppModel.self) private var model
   @Environment(\.openPicture) private var maybeOpenPicture
+  @Environment(\.openVideo) private var maybeOpenVideo
   @Environment(\.imageActions) private var maybeImageActions
   let file: FileInfo
   /// A tile of an album, sized by the album, instead of the large preview.
@@ -163,7 +164,7 @@ struct AttachmentView: View {
       return
     }
     if file.opensInVideoPlayer {
-      maybeVideo = file
+      if let openVideo = maybeOpenVideo { openVideo(file) } else { maybeVideo = file }
       return
     }
     switch file.transfer.state {

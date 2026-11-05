@@ -8,7 +8,9 @@ import SwiftUI
 /// iOS can't decode (WebM, VP8, VP9, AV1 on older chips) says so and offers another app.
 struct VideoViewer: View {
   @Environment(AppModel.self) private var model
+  @Environment(AppLock.self) private var lock
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.scenePhase) private var scenePhase
   let opened: FileInfo
 
   @State private var maybeFile: FileInfo?
@@ -32,6 +34,23 @@ struct VideoViewer: View {
     }
     .task(id: attempt) { await follow() }
     .onDisappear(perform: stop)
+    // Nothing of the video stays on screen or in the speakers behind the lock, picture in picture
+    // included. The lock's shield only covers the app's own window.
+    .onChange(of: lock.isLocked) { _, isLocked in
+      guard isLocked else { return }
+      clearPlayer()
+      dismiss()
+    }
+    .onChange(of: scenePhase) { _, phase in
+      guard phase == .background, lock.isEnabled, case .playing(let player) = self.phase else { return }
+      player.pause()
+    }
+    // A call goes first: its screen shows, and the video doesn't talk over it.
+    .onChange(of: model.calls.activeCall?.id) { _, maybeCall in
+      guard maybeCall != nil else { return }
+      clearPlayer()
+      dismiss()
+    }
   }
 
   @ViewBuilder
@@ -40,7 +59,7 @@ struct VideoViewer: View {
     case .waiting:
       downloadProgress
     case .playing(let player):
-      SystemVideoPlayer(player: player).ignoresSafeArea()
+      SystemVideoPlayer(player: player, allowsPictureInPicture: !lock.isEnabled).ignoresSafeArea()
     case .failed:
       notice("file_failed") {
         Button("retry") {
@@ -88,10 +107,14 @@ struct VideoViewer: View {
   }
 
   /// Follows the file until it is here, asking for it once, then plays it. Downloads report their end
-  /// in the store, not every chunk, so this looks every second while one runs. Cancelled with the view.
+  /// in the store, not every chunk, so this looks every second while one runs or has failed (a retry
+  /// may still be getting through). Cancelled with the view.
   private func follow() async {
-    if attempt > 0 { await requestDownload() }
-    var hasRequested = attempt > 0
+    var hasRequested = false
+    if attempt > 0 {
+      await requestDownload()
+      hasRequested = true
+    }
     while !Task.isCancelled {
       let extras = await model.extras(conversationId: opened.conversation, messageIds: [opened.message])
       guard let file = extras[opened.message]?.files?.first(where: { $0.fileId == opened.fileId }) else {
@@ -101,20 +124,22 @@ struct VideoViewer: View {
       maybeFile = file
       switch file.transfer.state {
       case "local":
-        guard let path = file.transfer.path else { break }
-        await play(URL(fileURLWithPath: path), mediaType: file.mediaType)
-        return
+        if let path = file.transfer.path {
+          await play(URL(fileURLWithPath: path), mediaType: file.mediaType)
+          return
+        }
       case "failed":
         phase = .failed
-        return
       case "remote":
+        phase = .waiting
         // Opening the video is the request for it: the bubble showed its size and length.
         if !hasRequested {
           hasRequested = true
           await requestDownload()
         }
       default:
-        break
+        phase = .waiting
+        hasRequested = false
       }
       try? await Task.sleep(for: .seconds(1))
     }
@@ -126,18 +151,30 @@ struct VideoViewer: View {
   }
 
   /// Plays the file if iOS can decode its picture, and watches for a failure later on. A video
-  /// from another member may refer to other files or addresses: nothing it refers to is loaded.
+  /// from another member may refer to other files or addresses: a playlist isn't opened at all, and
+  /// nothing a movie refers to is loaded. The type is the message's, not one guessed from the
+  /// sender's file name.
   private func play(_ url: URL, mediaType: String) async {
-    var options: [String: Any] = [AVURLAssetReferenceRestrictionsKey: AVAssetReferenceRestrictions.forbidAll.rawValue]
-    // AVFoundation goes by the extension; a sender's name may have none.
-    if url.pathExtension.isEmpty { options[AVURLAssetOverrideMIMETypeKey] = mediaType }
-    let asset = AVURLAsset(url: url, options: options)
+    // Opening counts as use: the downloads are trimmed least recently used first.
+    try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+    guard !VideoFileCheck.isPlaylist(at: url, mediaType: mediaType) else {
+      phase = .unplayable(url)
+      return
+    }
+    let asset = AVURLAsset(
+      url: url,
+      options: [
+        AVURLAssetReferenceRestrictionsKey: AVAssetReferenceRestrictions.forbidAll.rawValue,
+        AVURLAssetOverrideMIMETypeKey: mediaType,
+      ])
     guard await canPlay(asset), !Task.isCancelled else {
       phase = .unplayable(url)
       return
     }
     let item = AVPlayerItem(asset: asset)
     let player = AVPlayer(playerItem: item)
+    // The decrypted video stays on this device: no AirPlay to whatever is on the network.
+    player.allowsExternalPlayback = false
     startAudioSession()
     phase = .playing(player)
     player.play()
@@ -172,8 +209,16 @@ struct VideoViewer: View {
     hasAudioSession = true
   }
 
+  private func clearPlayer() {
+    if case .playing(let player) = phase {
+      player.pause()
+      player.replaceCurrentItem(with: nil)
+    }
+    phase = .waiting
+  }
+
   private func stop() {
-    if case .playing(let player) = phase { player.pause() }
+    clearPlayer()
     // A call that started meanwhile owns the session now.
     guard hasAudioSession, model.calls.activeCall == nil else { return }
     try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -194,16 +239,44 @@ private enum VideoPhase {
 /// The system's player with its own controls, inside the viewer.
 private struct SystemVideoPlayer: UIViewControllerRepresentable {
   let player: AVPlayer
+  let allowsPictureInPicture: Bool
 
   func makeUIViewController(context: Context) -> AVPlayerViewController {
     let controller = AVPlayerViewController()
-    controller.player = player
-    controller.allowsPictureInPicturePlayback = true
+    updateUIViewController(controller, context: context)
     return controller
   }
 
   func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
     controller.player = player
+    controller.allowsPictureInPicturePlayback = allowsPictureInPicture
+  }
+}
+
+/// Whether a "video" is an HLS playlist. AVFoundation would follow its addresses, which tells a
+/// stranger's server this device's IP; a sender's file name and the message's type prove nothing,
+/// so the file's first bytes count too.
+enum VideoFileCheck {
+  private static let playlistExtensions: Set<String> = ["m3u", "m3u8"]
+  private static let playlistMark = Data("#EXTM3U".utf8)
+  private static let byteOrderMark = Data([0xEF, 0xBB, 0xBF])
+  /// Enough for a byte order mark, some blank lines and the mark.
+  private static let headBytes = 256
+
+  /// Also a file that can't be read: it wouldn't play, and it can't be told apart.
+  static func isPlaylist(at url: URL, mediaType: String) -> Bool {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return true }
+    defer { try? handle.close() }
+    guard let head = try? handle.read(upToCount: headBytes) else { return true }
+    return isPlaylist(fileExtension: url.pathExtension, mediaType: mediaType, head: head)
+  }
+
+  static func isPlaylist(fileExtension: String, mediaType: String, head: Data) -> Bool {
+    if playlistExtensions.contains(fileExtension.lowercased()) { return true }
+    if mediaType.lowercased().contains("mpegurl") { return true }
+    var rest = head.starts(with: byteOrderMark) ? head.dropFirst(byteOrderMark.count) : head[...]
+    rest = rest.drop { [0x09, 0x0A, 0x0D, 0x20].contains($0) }
+    return rest.starts(with: playlistMark)
   }
 }
 
@@ -244,5 +317,18 @@ struct VideoBadge: View {
       .padding(.horizontal, 6).padding(.vertical, 2)
       .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 6))
       .padding(6)
+  }
+}
+
+/// Opens a video in the viewer of the screen around it: on a row of a lazy list a viewer of its own
+/// would go when new messages push the row out.
+private struct OpenVideoKey: EnvironmentKey {
+  static let defaultValue: OpenPictureAction? = nil
+}
+
+extension EnvironmentValues {
+  var openVideo: OpenPictureAction? {
+    get { self[OpenVideoKey.self] }
+    set { self[OpenVideoKey.self] = newValue }
   }
 }

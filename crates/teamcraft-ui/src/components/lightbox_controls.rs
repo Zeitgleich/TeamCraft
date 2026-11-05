@@ -552,7 +552,10 @@ fn MoreMenu(
           <button class="menu-item" role="menuitem" on:click=move |_| actions.run(Command::JumpToMessage)>
             <Icon name=IconName::Reply />
             <span class="menu-label">{move || i18n.t("lightbox-jump")}</span>
-            <kbd class="menu-shortcut">{shortcut(Command::JumpToMessage)}</kbd>
+            // On a video J seeks; the menu item is the way to the message there.
+            {move || (actions.kind.get() != Some(MediaKind::Video)).then(|| view! {
+              <kbd class="menu-shortcut">{shortcut(Command::JumpToMessage)}</kbd>
+            })}
           </button>
           <button class="menu-item" role="menuitem" on:click=toggle_saved>
             <Icon name=IconName::Bookmark />

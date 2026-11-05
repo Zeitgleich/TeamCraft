@@ -12,6 +12,7 @@ struct TeamCraftApp: App {
     WindowGroup {
       RootView()
         .environment(model)
+        .environment(lock)
         .tint(Theme.accent)
         .task {
           updateShield(phase: scenePhase)

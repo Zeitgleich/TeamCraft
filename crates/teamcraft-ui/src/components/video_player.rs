@@ -371,8 +371,9 @@ impl IdleWatch {
   /// The pointer moved: the controls come back, and go again after [`CONTROLS_IDLE_TIMEOUT`].
   fn wake(self) {
     self.stop();
-    if self.is_idle.get_untracked() {
-      self.is_idle.set(false);
+    // A media event can still come in after the player went (a removed video pauses).
+    if self.is_idle.try_get_untracked() == Some(true) {
+      self.is_idle.set_if_alive(false);
     }
     match set_timeout_with_handle(move || self.is_idle.set_if_alive(true), CONTROLS_IDLE_TIMEOUT) {
       Ok(handle) => {
@@ -464,43 +465,10 @@ fn playback_state(video: &web_sys::HtmlVideoElement) -> PlaybackState {
 
 impl Controls {
   fn run(self, command: PlayerCommand) {
-    let Some(video) = self.video.get_untracked() else {
-      return;
-    };
-    match command {
-      PlayerCommand::TogglePlay => {
-        if video.paused() {
-          // A refused play (no user gesture yet) leaves the video paused; the button stays "play".
-          drop(video.play());
-        } else {
-          drop(video.pause());
-        }
-      },
-      PlayerCommand::SeekBy(seconds) => {
-        video.set_current_time(seek_target(video.current_time(), seconds, video.duration()));
-      },
-      PlayerCommand::SeekToStart => video.set_current_time(0.0),
-      PlayerCommand::SeekToEnd => {
-        let duration = video.duration();
-        if duration.is_finite() {
-          video.set_current_time(duration);
-        }
-      },
-      PlayerCommand::SeekToTenth(tenths) => {
-        if let Some(target) = tenth_target(tenths, video.duration()) {
-          video.set_current_time(target);
-        }
-      },
-      PlayerCommand::StepFrame(seconds) => {
-        // A refused pause leaves it playing; the step still happens.
-        drop(video.pause());
-        video.set_current_time(seek_target(video.current_time(), seconds, video.duration()));
-      },
-      PlayerCommand::VolumeBy(delta) => self.set_volume(volume_target(video.volume(), delta)),
-      // Unmuted at zero volume would still be silent.
-      PlayerCommand::ToggleMute if video.muted() && video.volume() == 0.0 => self.set_volume(UNMUTED_VOLUME),
-      PlayerCommand::ToggleMute => video.set_muted(!video.muted()),
-      PlayerCommand::ToggleFullscreen => self.toggle_fullscreen(),
+    if command == PlayerCommand::ToggleFullscreen {
+      self.toggle_fullscreen();
+    } else if let Some(video) = self.video.get_untracked() {
+      run_player_command(&video, command);
     }
   }
 
@@ -510,13 +478,10 @@ impl Controls {
     }
   }
 
-  /// Sets the volume; turning it up unmutes.
   fn set_volume(self, level: f64) {
-    let Some(video) = self.video.get_untracked() else {
-      return;
-    };
-    video.set_volume(level);
-    video.set_muted(level == 0.0);
+    if let Some(video) = self.video.get_untracked() {
+      set_video_volume(&video, level);
+    }
   }
 
   /// The whole player goes full screen, so the app's controls come along.
@@ -536,4 +501,52 @@ impl Controls {
     }
     self.is_fullscreen.set(true);
   }
+}
+
+/// Runs a player key on the video; also for the lightbox, which sends them on while the focus is
+/// outside the player. Full screen needs the whole player, so it is [`Controls`]'s.
+pub fn run_player_command(video: &web_sys::HtmlVideoElement, command: PlayerCommand) {
+  match command {
+    PlayerCommand::TogglePlay => {
+      if video.paused() {
+        // A refused play (no user gesture yet) leaves the video paused; the button stays "play".
+        drop(video.play());
+      } else {
+        drop(video.pause());
+      }
+    },
+    PlayerCommand::SeekBy(seconds) => {
+      video.set_current_time(seek_target(video.current_time(), seconds, video.duration()));
+    },
+    PlayerCommand::SeekToStart => video.set_current_time(0.0),
+    PlayerCommand::SeekToEnd => {
+      let duration = video.duration();
+      if duration.is_finite() {
+        video.set_current_time(duration);
+      }
+    },
+    PlayerCommand::SeekToTenth(tenths) => {
+      if let Some(target) = tenth_target(tenths, video.duration()) {
+        video.set_current_time(target);
+      }
+    },
+    PlayerCommand::StepFrame(seconds) => {
+      // A refused pause leaves it playing; the step still happens.
+      drop(video.pause());
+      video.set_current_time(seek_target(video.current_time(), seconds, video.duration()));
+    },
+    PlayerCommand::VolumeBy(delta) => set_video_volume(video, volume_target(video.volume(), delta)),
+    // Unmuted at zero volume would still be silent.
+    PlayerCommand::ToggleMute if video.muted() && video.volume() == 0.0 => {
+      set_video_volume(video, UNMUTED_VOLUME)
+    },
+    PlayerCommand::ToggleMute => video.set_muted(!video.muted()),
+    PlayerCommand::ToggleFullscreen => {},
+  }
+}
+
+/// Sets the volume; turning it up unmutes.
+fn set_video_volume(video: &web_sys::HtmlVideoElement, level: f64) {
+  video.set_volume(level);
+  video.set_muted(level == 0.0);
 }

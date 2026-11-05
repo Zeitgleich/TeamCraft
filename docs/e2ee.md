@@ -857,8 +857,10 @@ The mobile apps (#200) show the poster with the length and the size, and a tap o
 Android, AVFoundation on iOS, with the device's decoders. There the core streams the blob into a plaintext file
 in the app's private downloads, as it does for every file opened on a phone, so a video of any size stays out of
 memory; that folder is trimmed to 1 GiB at start, least recently used first, and wiped with the account. The
-player reads that file only: Android through a file data source, iOS with all references in the file forbidden
-(`AVAssetReferenceRestrictions.forbidAll`), so a hostile video can't make the phone load an address. Media3's
+player reads that file only: Android through a file data source; iOS refuses an HLS playlist (by extension,
+type or first bytes, whatever the sender calls it) and forbids all references in the file
+(`AVAssetReferenceRestrictions.forbidAll`), so a hostile video can't make the phone load an address. AirPlay
+is off and picture in picture is off while the app lock is on, as both show the video outside the app. Media3's
 demuxers parse the untrusted file in the app's process (in Java and Kotlin); the codecs run in the system's
 media process. A format the device can't decode says so and offers another app.
 

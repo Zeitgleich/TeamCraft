@@ -41,6 +41,7 @@ struct ChatPane: View {
   @State private var displayNames: [String: String] = [:]
   @State private var maybeForwarding: MessageTarget?
   @State private var maybeViewing: PictureTarget?
+  @State private var maybeVideo: FileInfo?
   @State private var maybeShowingEdits: MessageTarget?
   @State private var maybeLastTypingNotified: Date?
   @State private var maybeFeed: (conversationId: String, feed: PagedFeed)?
@@ -113,6 +114,7 @@ struct ChatPane: View {
     .fullScreenCover(item: $maybeViewing) { target in
       PictureViewer(target: target, maybeOnReply: canReply ? startImageReply : nil)
     }
+    .fullScreenCover(item: $maybeVideo) { video in VideoViewer(opened: video) }
     .sheet(item: $maybeShowingEdits) { target in
       EditHistorySheet(edits: extras[target.message.id]?.edits ?? [], current: target.message.body)
     }
@@ -152,6 +154,7 @@ struct ChatPane: View {
       }
       messageList
         .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
+        .environment(\.openVideo, OpenPictureAction { file in maybeVideo = file })
         .environment(\.openQuotedPicture, OpenQuotedPictureAction(run: openQuotedPicture))
         .environment(
           \.imageActions,

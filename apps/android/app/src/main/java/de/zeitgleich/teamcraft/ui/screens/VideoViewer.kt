@@ -60,6 +60,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
+import androidx.media3.common.util.Log as MediaLog
 import androidx.media3.common.util.RepeatModeUtil
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.FileDataSource
@@ -110,8 +111,9 @@ private fun BoxScope.VideoContent(viewModel: MainViewModel, target: PictureTarge
   val changes by viewModel.changeCount.collectAsState()
   var maybeFile by remember(target) { mutableStateOf<FileInfo?>(null) }
   var isRead by remember(target) { mutableStateOf(false) }
-  // Saveable: a rotation doesn't ask for the download again, and an unplayable video stays one.
-  var hasRequested by rememberSaveable(target.key) { mutableStateOf(false) }
+  // Not saved: a restored viewer whose download died with the process asks again.
+  var hasRequested by remember(target) { mutableStateOf(false) }
+  // Saved: an unplayable video stays one across a rotation.
   var isUnplayable by rememberSaveable(target.key) { mutableStateOf(false) }
 
   suspend fun read() {
@@ -129,7 +131,9 @@ private fun BoxScope.VideoContent(viewModel: MainViewModel, target: PictureTarge
   val download = { viewModel.act(ChatActions.downloadAttachment(target.conversation, target.message, target.fileId)) }
   LaunchedEffect(maybeFile?.transfer?.state) {
     // Opening the video is the request for it: the bubble showed its size and length.
-    if (maybeFile?.transfer?.state == "remote" && !hasRequested) {
+    if (maybeFile?.transfer?.state != "remote") {
+      hasRequested = false
+    } else if (!hasRequested) {
       hasRequested = true
       download()
     }
@@ -199,6 +203,11 @@ private fun VideoSurface(file: File, label: String, onUnplayable: () -> Unit) {
   var positionMs by rememberSaveable(file.path) { mutableLongStateOf(0L) }
   var wasPlaying by rememberSaveable(file.path) { mutableStateOf(true) }
   val player = remember(file) {
+    // Opening counts as use: the downloads are trimmed least recently used first.
+    file.setLastModified(System.currentTimeMillis())
+    // Its messages and stack traces can name the file's path, so the sender's file name; the
+    // listener below logs the error's code instead.
+    MediaLog.setLogLevel(MediaLog.LOG_LEVEL_OFF)
     ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true))
       .setSeekBackIncrementMs(SEEK_STEP_MS)
       .setSeekForwardIncrementMs(SEEK_STEP_MS)
