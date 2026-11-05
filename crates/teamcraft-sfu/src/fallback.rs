@@ -261,7 +261,7 @@ async fn handle_connection(
     link: Arc::new(FallbackLink(sender.clone())),
     signal_tx: signal_tx.clone(),
   };
-  let admitted = match admit(shared, first, handle) {
+  let admitted = match admit(shared, first, handle).await {
     Admission::Admitted(admitted) => admitted,
     Admission::Refused(refusal) => {
       send_refusal(&mut sink, &refusal.message()).await;

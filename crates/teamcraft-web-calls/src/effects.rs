@@ -3,21 +3,25 @@
 //! segmentation runs in a worker of its own (`teamcraft-web-segmentation`), started when the first
 //! effect starts and kept for the session: only then are its module and the model downloaded, and
 //! the model is checked and parsed once. The compositing is `teamcraft-media`'s: WebGPU, or WebGL2
-//! where WebGPU reads frames back too slowly (Firefox) or isn't there.
+//! where WebGPU reads frames back too slowly (Firefox) or isn't there. A photo's picture is a file
+//! of the web release, downloaded when the photo is picked and checked against its pinned SHA-256.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use teamcraft_client_api::calls::BackgroundEffect as ChosenEffect;
+use js_sys::Uint8Array;
+use teamcraft_client_api::calls::{BackgroundEffect as ChosenEffect, BackgroundPreset};
 use teamcraft_client_api::page_calls::{
   EffectsCompositing, SEGMENTATION_MODEL_META, SEGMENTATION_WORKER_META,
 };
 use teamcraft_media::call_web::{CameraEffects, SegmentationWorker};
 use teamcraft_media::effects::{
-  BackgroundEffect, BackgroundImage, EffectsError, chosen_background, model_url, worker_url,
+  BackgroundEffect, BackgroundImage, EffectsError, check_photo_file, chosen_background, model_url,
+  photo_path, worker_url,
 };
-use wasm_bindgen::JsCast;
-use web_sys::{HtmlCanvasElement, MediaStream};
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{HtmlCanvasElement, MediaStream, Response};
 
 /// Frames a second the self view's canvas stream offers at most (the camera's rate).
 const VIEW_FRAMERATE: f64 = 30.0;
@@ -94,6 +98,32 @@ impl Effects {
     *self.maybe_worker.borrow_mut() = Some(Rc::clone(&worker));
     Ok(worker)
   }
+}
+
+/// The file of a photo background, downloaded from the page's origin (the service worker of a
+/// signed release checks it too) and checked against its pinned SHA-256. A build without the
+/// photos (development, `add-background-photos.sh` not run) answers 404: the effect fails like any
+/// other that can't start.
+pub(crate) async fn photo_file(photo: BackgroundPreset) -> Result<Vec<u8>, String> {
+  let path = photo_path(photo).ok_or_else(|| format!("{} is no photo", photo.slug()))?;
+  let failed = |what: &'static str| {
+    let path = path.clone();
+    move |error: JsValue| format!("{what} {path}: {error:?}")
+  };
+  let window = web_sys::window().ok_or("no window")?;
+  let response: Response = JsFuture::from(window.fetch_with_str(&path))
+    .await
+    .map_err(failed("fetching"))?
+    .unchecked_into();
+  if !response.ok() {
+    return Err(format!("fetching {path}: HTTP {}", response.status()));
+  }
+  let buffer = JsFuture::from(response.array_buffer().map_err(failed("reading"))?)
+    .await
+    .map_err(failed("reading"))?;
+  let file = Uint8Array::new(&buffer).to_vec();
+  check_photo_file(photo, &file).map_err(|error| error.to_string())?;
+  Ok(file)
 }
 
 /// A canvas the effects draw every sent picture into, and the stream of it the self view plays.

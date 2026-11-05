@@ -47,8 +47,9 @@ nix = { version = "0.31.3", default-features = false, features = ["resource"] }
 portal-e2e = ["teamcraft-media/pipewire"]
 
 [dev-dependencies]
-# The native call client (engine, Opus, driver) for end-to-end tests against this SFU.
-teamcraft-media = { path = "../teamcraft-media", features = ["native", "openh264-source"] }
+# The native call client (engine, Opus, driver, and its video stats) for end-to-end tests against
+# this SFU.
+teamcraft-media = { path = "../teamcraft-media", features = ["native", "openh264-source", "call-view"] }
 # Raw sockets for what a hostile client sends to the fallback's listener.
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
 # Device identities for the clients' call key bindings.
@@ -58,3 +59,5 @@ rand_core.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # Its quinn, for a raw QUIC client that cuts HTTP/3 frames where a test wants them cut.
 wtransport = { version = "0.7.2", features = ["quinn"] }
+# A paused clock for waits as long as the reconnect grace.
+tokio = { version = "1", features = ["test-util"] }

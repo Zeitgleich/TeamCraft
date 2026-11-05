@@ -14,12 +14,16 @@
 //!
 //! Media alone never decides: a muted microphone, a camera that is off or a still screen share
 //! send nothing for long stretches, and the answered pings keep such a session alive.
+//!
+//! The answers also time the round trip. QUIC sessions have the browser's own measure; on the
+//! fallback's WebSocket the page pings every [`ResilienceConfig::round_trip_interval`] for it,
+//! however busy the session is (#1227).
 
 use std::time::Duration;
 
 use web_time::Instant;
 
-use crate::call_resilience::{PathMonitor, PathState, ReconnectSchedule, ResilienceConfig};
+use crate::call_resilience::{PathMonitor, PathState, ReconnectSchedule, ResilienceConfig, RoundTripTimer};
 
 /// Pings a session may leave unanswered, each given the echo interval, before its SFU counts as
 /// one that doesn't answer (an older one). The signaling stream is reliable and ordered, so an SFU
@@ -48,6 +52,10 @@ pub(super) struct SessionWatch {
   echo: Echo,
   /// Ping ids grow across sessions, so an answer always names the ping it answers.
   next_ping: u64,
+  /// The current session's round trip, from the answers to its pings.
+  round_trip: RoundTripTimer,
+  /// Ping regularly for the round trip, not only when the session is quiet (the fallback).
+  is_timing_round_trip: bool,
   maybe_last_tick_at: Option<Instant>,
   resilience: ResilienceConfig,
 }
@@ -163,6 +171,8 @@ impl SessionWatch {
       maybe_baseline_until: None,
       echo: Echo::new(now),
       next_ping: 0,
+      round_trip: RoundTripTimer::default(),
+      is_timing_round_trip: false,
       maybe_last_tick_at: None,
       resilience,
     }
@@ -197,6 +207,18 @@ impl SessionWatch {
     self.maybe_baseline_until = None;
     // Maybe another SFU (a restarted one): whether it answers pings is found out again.
     self.echo = Echo::new(now);
+    self.round_trip = RoundTripTimer::default();
+  }
+
+  /// Whether to ping regularly to time the round trip: on a session that doesn't measure it
+  /// itself (the fallback).
+  pub(super) fn time_round_trip(&mut self, is_timing: bool) {
+    self.is_timing_round_trip = is_timing;
+  }
+
+  /// The current session's round trip from the answers to its pings, in milliseconds.
+  pub(super) fn round_trip_ms(&self) -> Option<u32> {
+    self.round_trip.smoothed_ms()
   }
 
   /// A datagram or a signaling frame of the current session arrived at `now` (the caller checked
@@ -212,6 +234,7 @@ impl SessionWatch {
   /// The SFU answered the current session's ping `id` at `now` (the caller checked
   /// [`Self::is_current`]).
   pub(super) fn on_pong(&mut self, id: u64, now: Instant) {
+    self.round_trip.on_answer(id, now);
     self.echo.watch = EchoWatch::Answering;
     self.echo.last_heard_at = now;
     let is_proof = !self.monitor.is_migrating()
@@ -258,8 +281,12 @@ impl SessionWatch {
       EchoWatch::Answering => {
         let is_quiet =
           now.saturating_duration_since(self.echo.last_heard_at) >= self.resilience.echo_interval;
+        let is_round_trip_due = self.is_timing_round_trip
+          && self.echo.maybe_last_ping_at.is_none_or(|pinged_at| {
+            now.saturating_duration_since(pinged_at) >= self.resilience.round_trip_interval
+          });
         // While a network change waits for proof, only answers count: keep asking.
-        if is_ping_due && (is_quiet || self.monitor.is_migrating()) {
+        if (is_ping_due && (is_quiet || self.monitor.is_migrating())) || is_round_trip_due {
           tick.maybe_ping = Some(self.ping(now));
         }
         if self.monitor.check(now, &self.resilience) == PathState::Dead {
@@ -359,6 +386,7 @@ impl SessionWatch {
   fn ping(&mut self, now: Instant) -> u64 {
     let id = self.next_ping;
     self.next_ping += 1;
+    self.round_trip.on_ping(id, now);
     self.echo.maybe_last_ping_at = Some(now);
     if let EchoWatch::Probing { unanswered } = &mut self.echo.watch {
       *unanswered += 1;
@@ -710,6 +738,59 @@ mod tests {
       // No answers, no readings: the ticks don't judge (the readings do, as before #841).
       let run = run(&mut watch, start, 600..=20_000, |_| false);
       assert_eq!(run.verdicts, vec![(5_600, PathVerdict::Unanswered)]);
+    }
+  }
+
+  mod round_trip {
+    use super::*;
+
+    /// On the fallback the page pings for the round trip however busy the session is; the answers
+    /// time it.
+    #[test]
+    fn a_busy_session_on_the_fallback_still_pings_and_times_the_answers() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      watch.time_round_trip(true);
+      let mut pings = Vec::new();
+      for millis in (100..=10_000).step_by(100) {
+        watch.on_heard(at(start, millis - 20));
+        let tick = watch.on_tick(at(start, millis));
+        if let Some(id) = tick.maybe_ping {
+          pings.push(millis);
+          watch.on_pong(id, at(start, millis + 60));
+        }
+      }
+      // The first finds out that the SFU answers, then one every round trip interval (2 s).
+      assert_eq!(pings, vec![100, 2_100, 4_100, 6_100, 8_100]);
+      assert_eq!(watch.round_trip_ms(), Some(60));
+    }
+
+    #[test]
+    fn a_new_session_measures_afresh() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      watch.time_round_trip(true);
+      run(&mut watch, start, 100..=300, |_| true);
+      assert_eq!(watch.round_trip_ms(), Some(40));
+      let generation = watch.lose();
+      watch.relinked(generation, at(start, 1_000));
+      assert_eq!(watch.round_trip_ms(), None);
+    }
+
+    /// QUIC sessions have the browser's measure: a busy one isn't pinged for it.
+    #[test]
+    fn without_timing_a_busy_session_is_left_alone() {
+      let start = Instant::now();
+      let mut watch = safari(start);
+      let mut pings = 0;
+      for millis in (100..=10_000).step_by(100) {
+        watch.on_heard(at(start, millis - 20));
+        if let Some(id) = watch.on_tick(at(start, millis)).maybe_ping {
+          pings += 1;
+          watch.on_pong(id, at(start, millis + 60));
+        }
+      }
+      assert_eq!(pings, 1);
     }
   }
 

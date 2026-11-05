@@ -5,6 +5,10 @@
 //!
 //! A write that doesn't finish in [`WriterConfig::write_timeout`] ends the session: a peer that
 //! stopped reading must not keep the task, and the session's memory, for as long as TCP retries.
+//!
+//! The writer's pings carry a number, which the peer's WebSocket sends back in its pong: the reader
+//! hands that to [`FallbackSender::on_pong`], and [`FallbackSender::round_trip`] is the path's round
+//! trip, which QUIC would measure by itself (#1227).
 
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -21,6 +25,7 @@ use tokio_tungstenite::tungstenite::{Bytes, Error as WebSocketError, Message};
 use tracing::debug;
 use web_time::Instant;
 
+use crate::call_resilience::RoundTripTimer;
 use crate::fallback_queue::{MediaQueue, MediaQueueConfig};
 
 /// Gives a peer that hasn't finished reading the close some time; the socket closes after it anyway.
@@ -41,6 +46,9 @@ struct SenderShared {
   finished: Notify,
   /// Datagrams the queue dropped, kept here so the metrics needn't take its lock.
   dropped_packets: AtomicU64,
+  /// The number of the next ping.
+  next_ping: AtomicU64,
+  round_trip: Mutex<RoundTripTimer>,
 }
 
 /// A close to send when the writer gets to it.
@@ -85,6 +93,8 @@ impl FallbackSender {
         is_finished: AtomicBool::new(false),
         finished: Notify::new(),
         dropped_packets: AtomicU64::new(0),
+        next_ping: AtomicU64::new(0),
+        round_trip: Mutex::new(RoundTripTimer::default()),
       }),
     }
   }
@@ -127,6 +137,32 @@ impl FallbackSender {
   /// Datagrams dropped so far.
   pub fn dropped_packets(&self) -> u64 {
     self.shared.dropped_packets.load(Ordering::Relaxed)
+  }
+
+  /// The peer answered a ping with this payload (a WebSocket pong).
+  pub fn on_pong(&self, payload: &[u8]) {
+    let Ok(number) = <[u8; 8]>::try_from(payload) else {
+      return;
+    };
+    lock(&self.shared.round_trip).on_answer(u64::from_be_bytes(number), Instant::now());
+  }
+
+  /// The round trip of the socket, from the answers to its pings; `None` before the first.
+  pub fn round_trip(&self) -> Option<Duration> {
+    lock(&self.shared.round_trip).smoothed()
+  }
+
+  /// [`Self::ping`], for the reader's tests.
+  #[cfg(test)]
+  pub(crate) fn ping_for_test(&self) -> Message {
+    self.ping()
+  }
+
+  /// The next ping, numbered, noted as sent now.
+  fn ping(&self) -> Message {
+    let number = self.shared.next_ping.fetch_add(1, Ordering::Relaxed);
+    lock(&self.shared.round_trip).on_ping(number, Instant::now());
+    Message::Ping(Bytes::copy_from_slice(&number.to_be_bytes()))
   }
 
   fn finish(&self) {
@@ -194,7 +230,7 @@ where
           true
         },
       },
-      _ = pings.tick() => send(sink, Message::Ping(Bytes::new()), config.write_timeout).await,
+      _ = pings.tick() => send(sink, sender.ping(), config.write_timeout).await,
       () = std::future::ready(()), if has_media => write_media(sink, sender, config.write_timeout).await,
       () = sender.shared.wake.notified() => true,
     };

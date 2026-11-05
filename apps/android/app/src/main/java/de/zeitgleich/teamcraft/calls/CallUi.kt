@@ -39,6 +39,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -157,6 +158,8 @@ internal class CallUiActions(
   val onSpeaker: (Boolean) -> Unit,
   val maybeOnAddPeople: (() -> Unit)?,
   val onHangUp: () -> Unit,
+  /** "Add notetaker" (e2ee.md §8.2): offered to whoever the policy lets ask it in. */
+  val maybeOnAddNotetaker: (() -> Unit)? = null,
 )
 
 /**
@@ -555,6 +558,16 @@ private fun ControlBar(ui: CallUiState, actions: CallUiActions) {
             onClick = {
               isMenuOpen = false
               onAddPeople()
+            },
+          )
+        }
+        actions.maybeOnAddNotetaker?.let { onAddNotetaker ->
+          DropdownMenuItem(
+            text = { Text(stringResource(R.string.call_notetaker_add)) },
+            leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) },
+            onClick = {
+              isMenuOpen = false
+              onAddNotetaker()
             },
           )
         }

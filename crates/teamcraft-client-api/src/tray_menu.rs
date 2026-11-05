@@ -33,10 +33,16 @@ pub enum TrayAction {
   StopSharing,
   LeaveCall,
   OpenCall,
+  /// Opens the dialog for the custom status in the main window.
+  SetCustomStatus,
+  /// Opens the new message dialog in the main window.
+  NewMessage,
+  /// Not a menu item: the global mute shortcut was pressed.
+  ToggleMute,
 }
 
 impl TrayAction {
-  pub const ALL: [Self; 18] = [
+  pub const ALL: [Self; 21] = [
     Self::OpenApp,
     Self::CheckForUpdates,
     Self::Quit,
@@ -55,6 +61,9 @@ impl TrayAction {
     Self::StopSharing,
     Self::LeaveCall,
     Self::OpenCall,
+    Self::SetCustomStatus,
+    Self::NewMessage,
+    Self::ToggleMute,
   ];
 
   /// The menu item's id, and the text of the event.
@@ -78,6 +87,9 @@ impl TrayAction {
       Self::StopSharing => "stop_sharing",
       Self::LeaveCall => "leave_call",
       Self::OpenCall => "open_call",
+      Self::SetCustomStatus => "set_custom_status",
+      Self::NewMessage => "new_message",
+      Self::ToggleMute => "toggle_mute",
     }
   }
 
@@ -92,8 +104,28 @@ impl TrayAction {
 
   /// Whether the main window is brought to the front before the UI handles it.
   pub fn shows_window(self) -> bool {
-    matches!(self, Self::OpenApp | Self::OpenCall | Self::AcceptCall)
+    matches!(
+      self,
+      Self::OpenApp | Self::OpenCall | Self::AcceptCall | Self::SetCustomStatus | Self::NewMessage
+    )
   }
+}
+
+/// What came of asking the shell for the global mute shortcut (`mute_shortcut_set`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MuteShortcutStatus {
+  /// No shortcut asked for.
+  #[default]
+  Off,
+  /// The shortcut works in every app (while a call runs).
+  Ready,
+  /// Not a shortcut the system understands.
+  Invalid,
+  /// Another app (or push-to-talk) already holds it.
+  Taken,
+  /// The desktop doesn't allow global shortcuts (e.g. Wayland without the portal), or no shell.
+  Unavailable,
 }
 
 /// One line of the menu.
@@ -190,6 +222,11 @@ mod tests {
       [TrayAction::OpenApp, TrayAction::CheckForUpdates, TrayAction::Quit]
     );
     assert!(TrayAction::OpenCall.shows_window() && !TrayAction::Mute.shows_window());
+    assert!(TrayAction::SetCustomStatus.shows_window() && TrayAction::NewMessage.shows_window());
+    assert!(
+      !TrayAction::ToggleMute.shows_window(),
+      "the shortcut works in the background"
+    );
   }
 
   #[test]

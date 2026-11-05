@@ -307,6 +307,61 @@ async fn the_web_client_stays_on_quic_when_udp_works() {
   rig.finish().await;
 }
 
+/// A browser without WebTransport (Safari 26.0 to 26.3) calls over the fallback (#1227): the call
+/// buttons take it, it goes straight to the WebSocket, says the network is limited, and media flows
+/// with a native client that stays on QUIC.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_browser_without_webtransport_calls_over_the_fallback() {
+  let Some(mut rig) = start_rig_with_fallback().await else {
+    return;
+  };
+  let channel = rig.channel;
+  let certificate_hash = rig.stack.maybe_sfu.as_ref().unwrap().certificate_hash;
+  let page = rig.browser.page.clone();
+  // Before any of the app's documents load.
+  page
+    .evaluate_on_new_document("delete globalThis.WebTransport")
+    .await
+    .unwrap();
+  sign_in_and_join_the_channel(&mut rig, &page).await;
+  rig
+    .browser
+    .screenshot_on_failure("web-call-no-webtransport", |page| async move {
+      crate::web::click_text(&page, "browser-channel").await;
+      click_selector(&page, "button[aria-label='Start video call']").await;
+      wait_for_element(&page, ".prejoin").await;
+      click_selector(&page, ".prejoin-actions .btn-primary").await;
+      wait_for_element(&page, ".call-screen").await;
+      wait_for_text(&page, "Limited network, call quality may be lower").await;
+    })
+    .await;
+  let mut carol_call = join_call(&mut rig.carol, channel, certificate_hash, 550.0).await;
+  let (mut is_secured, mut has_browser_video) = (false, false);
+  let deadline = tokio::time::Instant::now() + CALL_DURATION;
+  while let Ok(Some(event)) = tokio::time::timeout_at(deadline, carol_call.next_event()).await {
+    is_secured |= matches!(event, CallEngineEvent::Secured { .. });
+    has_browser_video |=
+      matches!(&event, CallEngineEvent::VideoPublished(track) if track.kind == VideoTrackKind::Camera);
+  }
+  let stats = carol_call.leave().await.expect("leaving the call");
+  assert!(
+    !page
+      .evaluate("'WebTransport' in globalThis")
+      .await
+      .unwrap()
+      .into_value::<bool>()
+      .unwrap(),
+    "the page still had WebTransport"
+  );
+  assert!(
+    is_secured,
+    "the DAVE group with the browser was never established"
+  );
+  assert!(has_browser_video, "the browser's camera never reached the call");
+  assert!(stats.frames_received > 50, "{stats:?}");
+  rig.finish().await;
+}
+
 /// The person sharing sees what goes out (#1175): small, live, from the capture, and gone with the
 /// share or when collapsed. Chromium's fake capture stands in for the screen.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

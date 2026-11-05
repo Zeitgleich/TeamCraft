@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.util.Log
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.activity.ComponentActivity
@@ -50,7 +51,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
@@ -65,6 +69,7 @@ import de.zeitgleich.teamcraft.ui.toggled
 import kotlinx.coroutines.delay
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
+import uniffi.teamcraft_ffi.NotetakerCallInfo
 import uniffi.teamcraft_ffi.newRequestKey
 
 private const val MILLIS_PER_SECOND = 1000L
@@ -93,12 +98,15 @@ class CallActivity : ComponentActivity() {
         val maybeState by calls.callState.collectAsStateWithLifecycle()
         val maybeRing by calls.incomingRing.collectAsStateWithLifecycle()
         val isJoining by calls.isJoining.collectAsStateWithLifecycle()
-        val isIdle = maybeRing == null && !isJoining && (maybeState == null || maybeState?.phase == CallPhase.ENDED)
+        val maybeFailure by calls.joinFailure.collectAsStateWithLifecycle()
+        val isIdle = maybeRing == null && !isJoining && maybeFailure == null &&
+          (maybeState == null || maybeState?.phase == CallPhase.ENDED)
         LaunchedEffect(isIdle) {
-          // Declined, rang out, or the call ended.
+          // Declined, rang out, the call ended, or the user closed why joining failed.
           if (isIdle) finish()
         }
         val ring = maybeRing
+        val failure = maybeFailure
         if (ring != null && maybeState == null && !isJoining) {
           IncomingCallScreen(
             ring = ring,
@@ -108,11 +116,23 @@ class CallActivity : ComponentActivity() {
             },
             onDecline = { calls.decline() },
           )
+        } else if (failure != null && !isJoining) {
+          JoinFailedScreen(failure, onClose = { calls.dismissJoinFailure() })
         } else {
           CallScreen(calls, maybeState)
         }
       }
     }
+  }
+
+  override fun onStart() {
+    super.onStart()
+    calls.onCallScreenVisible(true)
+  }
+
+  override fun onStop() {
+    calls.onCallScreenVisible(false)
+    super.onStop()
   }
 
   override fun onNewIntent(intent: Intent) {
@@ -124,9 +144,13 @@ class CallActivity : ComponentActivity() {
   /** "Answer" on the incoming-call notification opens this screen with the conversation. */
   private fun handle(intent: Intent?) {
     if (intent?.action != ACTION_ANSWER) return
-    val conversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID) ?: return
     // Handled once: a recreated activity must not answer again.
     intent.action = null
+    val conversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID) ?: run {
+      Log.w(TAG, "call screen: answer without a conversation")
+      return
+    }
+    Log.i(TAG, "call screen: answer from the notification")
     requestMicrophoneIfMissing()
     calls.answer(conversationId)
   }
@@ -143,6 +167,23 @@ class CallActivity : ComponentActivity() {
     const val ACTION_SHOW_INCOMING = "de.zeitgleich.teamcraft.calls.SHOW_INCOMING"
     const val ACTION_ANSWER = "de.zeitgleich.teamcraft.calls.ANSWER"
     const val EXTRA_CONVERSATION_ID = "conversation_id"
+    private const val TAG = "TeamCraftCalls"
+  }
+}
+
+/** Why answering didn't get into the call, until the user closes it (#1272). */
+@Composable
+private fun JoinFailedScreen(failure: JoinFailure, onClose: () -> Unit) {
+  Surface(modifier = Modifier.fillMaxSize()) {
+    Column(
+      modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(32.dp),
+      verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+      horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+      Text(stringResource(R.string.call_join_failed_title), style = MaterialTheme.typography.headlineSmall)
+      Text(stringResource(failure.text), style = MaterialTheme.typography.bodyLarge)
+      Button(onClick = onClose) { Text(stringResource(R.string.close)) }
+    }
   }
 }
 
@@ -205,6 +246,18 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
   if (isAddingPeople && addChoice != null) {
     AddPeopleDialog(calls.moves, addChoice) { isAddingPeople = false }
   }
+  // The notetaker of the verified policy in this call (e2ee.md §8.2), read again when somebody
+  // comes or goes: "Add notetaker" in every call, its notice for everybody while it is in.
+  val maybeNotetaker by produceState<NotetakerCallInfo?>(null, maybeConversationId, participantIds) {
+    value = maybeConversationId?.let { calls.moves.notetaker(it, participantIds) }
+  }
+  val notetakerKey = rememberSaveable(maybeConversationId) { newRequestKey() }
+  val notetakerRoomTitle = stringResource(R.string.call_notetaker_room_title)
+  val notetakerState by calls.moves.notetakerState.collectAsStateWithLifecycle()
+  val canAddNotetaker = maybeNotetaker?.canInvite == true &&
+    maybeState?.phase == CallPhase.CONNECTED &&
+    notetakerState != NotetakerAddState.Pending &&
+    notetakerState != NotetakerAddState.Asked
 
   val isConnected = maybeState?.phase == CallPhase.CONNECTED
   var maybeStartedAt by remember { mutableStateOf<Long?>(null) }
@@ -263,9 +316,17 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       onFlipCamera = { isFrontCamera = !isFrontCamera },
       onSpeaker = { calls.setSpeakerOn(it) },
       maybeOnAddPeople = if (canAddPeople) ({ isAddingPeople = true }) else null,
+      maybeOnAddNotetaker = maybeNotetaker?.takeIf { canAddNotetaker }?.let { notetaker ->
+        { maybeConversationId?.let { calls.moves.addNotetaker(it, notetaker, notetakerRoomTitle, notetakerKey) } }
+      },
       onHangUp = { calls.hangUp() },
     ),
-    banner = { CallMoveBanner(calls.moves) },
+    banner = {
+      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        NotetakerBanner(calls.moves, maybeConversationId, maybeNotetaker)
+        CallMoveBanner(calls.moves)
+      }
+    },
     selfView = selfView,
   )
 }
@@ -313,7 +374,12 @@ private fun CallMoveBanner(moves: CallMoves) {
   ) {
     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
       if (offer != null) {
-        Text(stringResource(R.string.call_move_offer, offer.byName, offer.addedNames.joinToString(", ")))
+        if (offer.isNotetakerOnly) {
+          // Where the audio will go, before the tap that takes the user there.
+          Text(stringResource(R.string.call_move_offer_notetaker, offer.byName))
+        } else {
+          Text(stringResource(R.string.call_move_offer, offer.byName, offer.addedNames.joinToString(", ")))
+        }
         Button(onClick = { moves.accept() }, enabled = !isAccepting) {
           if (isAccepting) {
             CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
@@ -325,6 +391,45 @@ private fun CallMoveBanner(moves: CallMoves) {
       if (failure != null) {
         Text(stringResource(failure), color = MaterialTheme.colorScheme.error)
         TextButton(onClick = { moves.dismissFailure() }) { Text(stringResource(R.string.close)) }
+      }
+    }
+  }
+}
+
+/**
+ * The notetaker's notice (e2ee.md §8.2, "Everybody sees it"): while it is in the call, where the
+ * audio goes and, for whoever may, "Remove notetaker"; while it was asked in, that it is coming;
+ * why adding it failed.
+ */
+@Composable
+private fun NotetakerBanner(moves: CallMoves, maybeConversationId: String?, maybeNotetaker: NotetakerCallInfo?) {
+  val state by moves.notetakerState.collectAsStateWithLifecycle()
+  val maybePresent = maybeNotetaker?.takeIf { it.isPresent }
+  LaunchedEffect(maybePresent != null) {
+    if (maybePresent != null) moves.notetakerShown()
+  }
+  val failed = state as? NotetakerAddState.Failed
+  if (maybePresent == null && state != NotetakerAddState.Asked && failed == null) return
+  Surface(
+    color = MaterialTheme.colorScheme.secondaryContainer,
+    shape = MaterialTheme.shapes.medium,
+    modifier = Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
+  ) {
+    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      when {
+        maybePresent != null -> {
+          Text(stringResource(R.string.call_notetaker_banner, maybePresent.transcriptionModel))
+          if (maybePresent.canStop && maybeConversationId != null) {
+            TextButton(onClick = { moves.sendNotetakerAway(maybeConversationId) }) {
+              Text(stringResource(R.string.call_notetaker_remove))
+            }
+          }
+        }
+        failed != null -> {
+          Text(stringResource(failed.text), color = MaterialTheme.colorScheme.error)
+          TextButton(onClick = { moves.notetakerShown() }) { Text(stringResource(R.string.close)) }
+        }
+        else -> Text(stringResource(R.string.call_notetaker_joining))
       }
     }
   }

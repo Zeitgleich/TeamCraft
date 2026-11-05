@@ -107,6 +107,7 @@
     "allow-shell-prefs-set",
     "allow-tray-update",
     "allow-tray-menu-set",
+    "allow-mute-shortcut-set",
     "allow-set-zoom",
     "allow-update-status",
     "allow-update-check",

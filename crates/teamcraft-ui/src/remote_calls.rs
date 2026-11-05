@@ -524,8 +524,8 @@ fn is_carried_out_beside(action: &CallAction) -> bool {
   matches!(action, CallAction::StartScreenShare { .. })
 }
 
-/// The effects of calls in the page: in the call, without the photos (their full pictures are
-/// only in the apps) and without the pre-join preview, where the browser runs them at all.
+/// The effects of calls in the page: every one in the call, without the pre-join preview, where
+/// the browser runs them at all.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn browser_effects_offer(applies_effects: bool) -> EffectsOffer {
   if applies_effects {

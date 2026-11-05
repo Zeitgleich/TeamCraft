@@ -329,7 +329,10 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - Browser support (MDN browser-compat-data, checked 2026-10): WebTransport incl. datagrams in Chrome 97,
   Firefox 114, **Safari / iOS Safari 26.4**; WebCodecs `VideoEncoder`/`VideoDecoder` in Chrome 94,
   Firefox 130, Safari 16.4; `AudioEncoder`/`AudioDecoder` in Safari 26. No WebRTC fallback planned;
-  networks that block UDP fall back to a WebSocket (§6.6).
+  networks that block UDP fall back to a WebSocket (§6.6). Calls need WebCodecs audio and the
+  `AudioWorklet` (`web_api::missing_for_calls`, checked by the page and the call module alike);
+  a browser without WebTransport (Safari 26.0 to 26.3) calls over that WebSocket from the start, on
+  an instance that offers it (#1227).
 - `MediaStreamTrackProcessor` (raw frames from the camera/mic track) is missing in Firefox: fall back to
   an `AudioWorklet` for audio and `<video>` → `VideoFrame` for video there. Codec availability (e.g.
   Opus in `AudioEncoder`) is checked at runtime with `isConfigSupported()`; fallback is a WASM Opus
@@ -797,9 +800,10 @@ reverse proxy as the gateway. Setup and what an existing deployment has to chang
   turned away after the upgrade counts that as a failed attempt: it retries with backoff and jitter
   until the grace period ends, so a full SFU isn't hammered and the call doesn't end. Someone with
   many addresses can still fill the 128 (each holds its place at most 3 s plus the join timeout).
-- **Rejoin loops re-key.** A member with a valid token who connects, joins and drops in a loop makes
-  the group re-key each time. That is the case on QUIC too and not specific to this path: limiting
-  it means deciding what a legitimately flapping client gets, which affects both (#1227).
+- **Rejoin loops re-key.** A member with a valid token who connects, joins and drops in a loop would
+  make the group re-key each time, on QUIC as here. The SFU paces joins per call and device in one
+  place for both transports (`server::admit`, `rejoin.rs`; e2ee.md §8, "Joining too often"), and
+  clients pace their own rejoins when the network keeps dropping (`RejoinPacer`) (#1227).
 - **Residual risk of TLS:** the socket verifies the SFU with the platform's trust store (or the
   browser's). `sfu_certificate_sha256` applies to QUIC only, since a browser's WebSocket can't pin,
   so an explicit `sfu_fallback_url` on an SFU pinned by hash loses that pin. A TLS-intercepting
@@ -811,6 +815,12 @@ reverse proxy as the gateway. Setup and what an existing deployment has to chang
 - **Liveness:** the SFU pings each second, which keeps proxies from closing a quiet call. Native
   clients count frames as they count QUIC packets, and browsers use the pings they use on Safari.
   A TCP connection can't migrate: after a network change it goes silent and the call rejoins.
+- **Round trip** (the video stats' `maybe_rtt_ms`): a WebSocket doesn't measure one, so native
+  clients number their own WebSocket pings, which the SFU's WebSocket answers, and time the answers;
+  browsers can't send WebSocket pings, so on this path the page sends its signaling ping every
+  `ResilienceConfig::round_trip_interval` (2 s) and times the SFU's answer. Both smooth it as TCP
+  does (`RoundTripTimer`). It includes waiting behind what TCP still has to send, which is what the
+  call feels.
 
 The UI says "Limited network, call quality may be lower" for as long as the call is on the fallback.
 

@@ -7,6 +7,8 @@
 #
 # The model is fetched and checked against its pinned SHA-256 by crates/teamcraft-media/models/fetch.sh
 # (a copy fetched before is reused). Run it before signing the build (sign-web-release.sh lists it).
+# It adds the photo backgrounds' full pictures too (add-background-photos.sh): the release workflow
+# runs this script for every web release-only file of the effects.
 set -eu
 dist="${1:?dist directory}"
 models="$(cd "$(dirname "$0")/../../teamcraft-media/models" && pwd)"
@@ -17,3 +19,4 @@ path="$(sed -n 's|.*<meta name="teamcraft-segmentation-model" content="/\([^"]*\
 mkdir -p "$dist/$(dirname "$path")"
 cp "$models/selfie_segmentation_landscape.onnx" "$dist/$path"
 echo "added $path"
+"$(dirname "$0")/add-background-photos.sh" "$dist"

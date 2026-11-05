@@ -200,11 +200,11 @@ pub enum EffectsOffer {
   /// Every effect, in the pre-join check too: the desktop and mobile apps.
   #[default]
   Full,
-  /// Blur, the drawn illustrations and the user's own and the organization's pictures, in the
-  /// call: a browser that runs the effects (WebGPU). The photos aren't offered (their full
-  /// pictures are only in the apps) and the pre-join check shows the camera without effects.
+  /// Every effect in the call: a browser that runs the effects (WebGPU or WebGL2). The photos'
+  /// full pictures are files the browser downloads when one is picked. The pre-join check shows
+  /// the camera without effects.
   InCall,
-  /// None: a browser without WebGPU, or with one too slow for video.
+  /// None: a browser without WebGPU and WebGL2, or without WebAssembly SIMD.
   Unavailable,
 }
 
@@ -219,19 +219,10 @@ impl EffectsOffer {
     self == Self::Full
   }
 
-  /// Whether the photos are among them.
-  pub fn has_photos(self) -> bool {
-    self == Self::Full
-  }
-
-  /// Whether `effect` is one of the offered effects (own and organization pictures always are,
-  /// where effects are offered at all).
+  /// Whether `effect` is one of the offered effects: no effect always is, every other one where
+  /// effects are offered at all.
   pub fn offers(self, effect: BackgroundEffect) -> bool {
-    match effect {
-      BackgroundEffect::Preset(preset) if preset.is_photo() => self.has_photos(),
-      BackgroundEffect::None => true,
-      _ => self.has_picker(),
-    }
+    effect == BackgroundEffect::None || self.has_picker()
   }
 }
 
@@ -643,7 +634,8 @@ pub struct IncomingCall {
 pub enum CallsUnavailableReason {
   /// This app has no call support at all.
   NotInThisApp,
-  /// The browser lacks what calls need (WebTransport, WebCodecs audio, AudioWorklet).
+  /// The browser lacks what calls need (WebCodecs audio, AudioWorklet), or has no WebTransport on
+  /// an instance without the WebSocket fallback.
   BrowserUnsupported,
   /// TeamCraft is open in another tab of this browser, which runs the account; calls run there.
   OtherTab,
@@ -1042,26 +1034,28 @@ mod tests {
   }
 
   #[test]
-  fn browsers_offer_effects_in_the_call_without_photos() {
+  fn browsers_offer_every_effect_in_the_call() {
     let photo = BackgroundEffect::Preset(BackgroundPreset::LivingRoom);
     let illustration = BackgroundEffect::Preset(BackgroundPreset::Forest);
     let own = BackgroundEffect::Custom("4".parse().unwrap());
     let full = EffectsOffer::Full;
-    assert!(full.has_picker() && full.has_preview() && full.has_photos());
+    assert!(full.has_picker() && full.has_preview());
     assert!(
       [photo, illustration, own]
         .iter()
         .all(|effect| full.offers(*effect))
     );
     let in_call = EffectsOffer::InCall;
-    assert!(in_call.has_picker() && !in_call.has_preview() && !in_call.has_photos());
-    assert!(!in_call.offers(photo));
+    assert!(in_call.has_picker() && !in_call.has_preview());
     assert!(
-      in_call.offers(illustration) && in_call.offers(own) && in_call.offers(BackgroundEffect::BlurLight)
+      [photo, illustration, own, BackgroundEffect::BlurLight]
+        .iter()
+        .all(|effect| in_call.offers(*effect))
     );
     let none = EffectsOffer::Unavailable;
     assert!(!none.has_picker() && !none.has_preview());
-    assert!(!none.offers(BackgroundEffect::BlurLight) && none.offers(BackgroundEffect::None));
+    assert!(!none.offers(BackgroundEffect::BlurLight) && !none.offers(photo));
+    assert!(none.offers(BackgroundEffect::None));
   }
 
   #[test]

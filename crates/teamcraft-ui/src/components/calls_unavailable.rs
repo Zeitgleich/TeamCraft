@@ -1,4 +1,4 @@
-//! Calls aren't possible here (a browser without WebTransport, a second tab of the account, a
+//! Calls aren't possible here (a browser without WebCodecs audio, a second tab of the account, a
 //! client without call support): the call buttons still show, and pressing one explains why nothing
 //! rings and what to do instead, instead of failing silently (#329, #322).
 

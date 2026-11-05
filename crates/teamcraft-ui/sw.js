@@ -10,7 +10,7 @@
 //     fetched and checked against the signed hash when a page first asks for one, and in the
 //     background a little after a page (not a guest's meeting page) asked for the status, so they
 //     work offline too; the ones only some people use (`on_demand`: the background effects'
-//     segmentation, #439) only when a page asks for them;
+//     segmentation and photos, #439) only when a page asks for them;
 //   - serves the app from that cache, never from the network;
 //   - keeps running the previous verified version if a new one does not verify, and tells the pages.
 // A build without a pinned key (development) skips all of this and says so.

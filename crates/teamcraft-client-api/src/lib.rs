@@ -31,6 +31,7 @@ pub mod media;
 pub mod media_viewer;
 pub mod message_sound;
 pub mod model;
+pub mod notetaker;
 pub mod notify;
 pub mod oidc_login;
 pub mod os_notify;

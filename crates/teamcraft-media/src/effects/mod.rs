@@ -16,6 +16,8 @@ mod compositor;
 mod image_file;
 #[cfg(feature = "segmentation")]
 mod model_file;
+#[cfg(feature = "call-view")]
+mod photo_file;
 #[cfg(feature = "photo-backgrounds")]
 mod photos;
 mod presets;
@@ -26,7 +28,7 @@ use std::sync::Arc;
 
 pub use cadence::MaskCadence;
 #[cfg(feature = "call-view")]
-pub use chosen::{chosen_background, needs_picture};
+pub use chosen::{chosen_background, is_photo, needs_picture};
 
 pub use compositor::Compositor;
 pub use image_file::{
@@ -35,6 +37,8 @@ pub use image_file::{
 };
 #[cfg(feature = "segmentation")]
 pub use model_file::{ModelCache, SEGMENTATION_MODEL_FILE, check_segmentation_model};
+#[cfg(feature = "call-view")]
+pub use photo_file::{check_photo_file, photo_path};
 #[cfg(feature = "photo-backgrounds")]
 pub use photos::PhotoBackground;
 pub use presets::{PRESET_HEIGHT, PRESET_WIDTH, PresetBackground};

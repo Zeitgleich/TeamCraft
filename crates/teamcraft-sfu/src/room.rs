@@ -32,6 +32,7 @@ use teamcraft_proto::{
   VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
 };
 use thiserror::Error;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tracing::{debug, info, trace, warn};
 use wtransport::Connection;
@@ -92,6 +93,9 @@ pub struct Room {
   mute_report_burst: u32,
   mute_reports_per_second: u32,
   state: Mutex<RoomState>,
+  /// Wakes the lost sessions waiting through the reconnect grace when a device joins: the one whose
+  /// device took its slot back stops waiting ([`Room::wait_for_return`]).
+  joins: Notify,
 }
 
 /// One connection of a participant; a device that reconnects gets a new one.
@@ -467,6 +471,7 @@ impl Room {
       mute_report_burst: config.mute_report_burst,
       mute_reports_per_second: config.mute_reports_per_second,
       state: Mutex::new(state),
+      joins: Notify::new(),
     })
   }
 
@@ -794,8 +799,38 @@ impl Room {
       },
     };
     state.latest_sessions.insert(participant_id, session);
+    drop(state);
+    self.joins.notify_waiters();
     info!(call_id = %self.call_id, participant_id = %participant_id, ?outcome, "participant joined");
     Ok(outcome)
+  }
+
+  /// Waits through the reconnect `grace` of `session`, a lost one of `participant_id`, but no longer
+  /// than the session holds the slot: when the device is back on a newer one, there is nothing
+  /// left to wait for.
+  pub async fn wait_for_return(&self, participant_id: DeviceId, session: SessionId, grace: Duration) {
+    let deadline = tokio::time::sleep(grace);
+    tokio::pin!(deadline);
+    loop {
+      let joined = self.joins.notified();
+      tokio::pin!(joined);
+      // Registered before the check, so a join right after it still wakes this.
+      joined.as_mut().enable();
+      if !self.holds_slot(participant_id, session) {
+        return;
+      }
+      tokio::select! {
+        () = &mut deadline => return,
+        () = &mut joined => {},
+      }
+    }
+  }
+
+  fn holds_slot(&self, participant_id: DeviceId, session: SessionId) -> bool {
+    lock(&self.state)
+      .participants
+      .get(&participant_id)
+      .is_some_and(|participant| participant.session == session)
   }
 
   /// The participant's connection is gone; it keeps its slot. Returns whether `session` held it.
@@ -1426,6 +1461,53 @@ mod tests {
       assert!(matches!(removed, Err(RoomError::Removed)));
       assert!(matches!(locked_out, Err(RoomError::Locked)));
     }
+  }
+
+  /// A lost session waits through the grace period only while its device hasn't come back (#1227):
+  /// a device that loops connect, join, drop leaves at most one waiting behind, not one per cycle.
+  #[tokio::test(start_paused = true)]
+  async fn a_lost_session_stops_waiting_once_its_device_is_back() {
+    let grace = Duration::from_secs(30);
+    let rooms = Rooms::new(SfuConfig::default());
+    let (_rx, lost) = join(&rooms, 1, 10);
+    let room = lock(&rooms.rooms).get(&id(CALL)).cloned().unwrap();
+    assert!(rooms.disconnect(&room, id(10), lost, Instant::now()));
+    let waiting = {
+      let room = Arc::clone(&room);
+      tokio::spawn(async move { room.wait_for_return(id(10), lost, grace).await })
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(!waiting.is_finished(), "nobody came back yet");
+
+    let (_rx, _back) = join(&rooms, 1, 10);
+    tokio::time::timeout(Duration::from_millis(10), waiting)
+      .await
+      .expect("the device is back: nothing left to wait for")
+      .unwrap();
+    // And the late cleanup leaves the device in its slot.
+    assert!(!rooms.leave(&room, id(10), lost));
+    assert_eq!(rooms.stats().participants, 1);
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_lost_session_whose_device_stays_away_waits_the_whole_grace() {
+    let grace = Duration::from_secs(30);
+    let rooms = Rooms::new(SfuConfig::default());
+    let (_rx, lost) = join(&rooms, 1, 10);
+    // Somebody else coming and going doesn't end the wait.
+    let (_bob_rx, _) = join(&rooms, 2, 20);
+    let room = lock(&rooms.rooms).get(&id(CALL)).cloned().unwrap();
+    assert!(rooms.disconnect(&room, id(10), lost, Instant::now()));
+    let started = tokio::time::Instant::now();
+    let waiting = {
+      let room = Arc::clone(&room);
+      tokio::spawn(async move { room.wait_for_return(id(10), lost, grace).await })
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    join(&rooms, 3, 30);
+    waiting.await.unwrap();
+    assert_eq!(started.elapsed(), grace);
+    assert!(rooms.leave(&room, id(10), lost), "the slot goes after the grace");
   }
 
   #[tokio::test]

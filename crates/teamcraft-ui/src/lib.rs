@@ -73,8 +73,9 @@ pub mod message_sounds;
 #[cfg(any(test, feature = "demo"))]
 pub mod mock;
 pub mod motion;
+pub mod mute_shortcut;
 pub mod navigation;
-pub mod notetaker;
+pub use teamcraft_client_api::notetaker;
 pub mod notification_pictures;
 pub mod notifier;
 pub mod notify_sync;

@@ -3989,6 +3989,28 @@ sequence numbers and timestamps continue across the rejoin – they are unencryp
 the SFU sees anyway, and DAVE's per-frame nonces come from the new epoch's ratchets, so nothing
 repeats.
 
+**Joining too often** (#1227). Every join re-keys the call twice: the device's leaf is removed when
+its connection goes, and added again with its new key package. A member with a valid join token
+(60 s) who loops connect, join, drop would make every other device in the call re-key with each
+cycle, and leave the SFU a session waiting through the grace period with each one. So the SFU paces
+joins per call and device, in the one function both transports admit through (`server::admit`): a
+burst of 5 joins, then one more per 10 s (`SfuConfig::rejoin`). A join over that whose turn comes
+within 2 s waits for it before it is admitted, holding only its unjoined slot; a later one is refused
+with `rate_limited` and `retry_after_secs`, before the room or the DAVE group see it, so a refusal
+costs nobody a re-key. A lost session's wait through the grace period ends as soon as its device is
+back on a newer one, so a looping device leaves at most one waiting behind. That bounds what one
+looping device costs the call to about two commits per 10 s.
+
+What a legitimately flapping client gets: its own pace first. A client that loses the call within
+30 s of rejoining waits before the next rejoin, 1 s and doubling up to 10 s (with up to half of it
+again as jitter, never less), which keeps it below the SFU's pace; a stable stretch resets it. If
+the SFU still refuses a join (an older client, or several devices of the user coming back at once),
+the client takes the refusal as a failed attempt: the call goes on as "reconnecting" and tries again
+after `retry_after_secs`, within the reconnect grace period. Only an older client, which ends the
+call on any refused join, can lose a call this way, and only after looping more than the burst
+within seconds. The limit doesn't weaken anything: it decides when a verified join is admitted,
+never whether a device may be in the call.
+
 ### 8.1 Call backgrounds
 
 Backgrounds are composited on the sending device before encoding, so the SFU and other participants
@@ -4098,8 +4120,9 @@ like an integration bot, or added **during the call**. "Add notetaker" in a runn
 to whoever the policy lets ask it in, where it is a member or where that user can add it: a channel
 of a space where the user manages members (the bot goes in from its join on, into the space as a
 guest first where needed, as from the channel's integrations), or a meeting the user organizes (the
-bot becomes an invitee, which puts it into the meeting chat's group). A DM takes nobody more, so
-there the call moves into a room with the notetaker ("In every call" below). The button first
+bot becomes an invitee, which puts it into the meeting chat's group). In every other call (a DM,
+which takes nobody more, a channel whose members somebody else manages, a meeting somebody else
+organizes) the call moves into a room with the notetaker ("In every call" below). The button first
 adds the bot through that normal member-add path, and sends the `join` only once the addition is
 through: the request then goes out after the commit that put the bot into the group, in an epoch
 it can read.
@@ -4117,7 +4140,7 @@ verify, puts one on the roster. Desktop, web (through the page's `roster` callba
 change ends the call when such a device joins, and the notetaker's join notice asks its people to
 join again.
 
-**In every call (issue #1271).** "Add notetaker" is to work in every call, also one that runs
+**In every call (issues #1271, #1274).** "Add notetaker" is to work in every call, also one that runs
 already, for everybody the policy lets ask it in (`inviters`), and the notetaker transcribes from
 its join on. Where it is a member, or the user can add it (above), that is how it comes in. The
 other calls need a way for the bot into the call of a conversation it isn't in and the user can't
@@ -4161,13 +4184,59 @@ can only hear a call it is a member of (above), so the call has to be where the 
   the room is new. Nothing leaves beyond what the policy already sends: the audio of the room's
   call, as in any call with the notetaker.
 
-Channels where the user doesn't manage members and meetings the user doesn't organize keep asking
-the notetaker in only where it is a member, for now. They would take the same route (the server's
-move accepting channel and meeting calls), but a channel's call is open to every member, who
-would not find the room, and a meeting's guests without an account can't follow; the follow-up
-(#1274) decides between that and asking a channel admin or the organizer, who can add the bot.
-The mobile apps follow a move that adds the notetaker like any other and see its join message and
-participant in the room, but have no "Add notetaker" button yet (also #1274).
+**Channels and meetings the user can't add to (#1274).** In a channel whose members somebody else
+manages, and in a meeting somebody else organizes, the user can't put the bot into the
+conversation either. Two ways were weighed for them:
+
+| Question                    | (a) The call moves into a room with the notetaker, as from a DM                                                                       | (c) Ask who can add it: a channel admin, the meeting's organizer or admitters                                            |
+|-----------------------------|---------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
+| Works                       | Always, at once, also mid-call                                                                                                        | Only while somebody who may add it is online; nobody may be, and a meeting's organizer is often not in the call          |
+| The conversation            | Unchanged: no commit, the bot reads none of it                                                                                        | The bot becomes a member and reads everything written there from its join on, also after the call                        |
+| Whose audio it hears        | Only of those who follow the move with a tap; the others stay in the conversation's call                                              | Everybody in the call, from the commit on                                                                                |
+| Who comes later             | Finds the conversation's call (or starts one), not the room: a channel's call is open to every member, the room is not                | Finds the call with the notetaker in it                                                                                  |
+| New trust, protocol, server | None beyond the server's move accepting channel and meeting calls (the same checks: the caller is in the call and organizes the room) | A request to a third party's device, a standing rule on that device to add the bot on a valid request, or a person's tap |
+
+**(a) it is** for these too: the owner's requirement is that the notetaker can be added in every
+call, at any time, which (c) can't promise, and (a) keeps the conversation as it is, which matters
+more in a channel (the bot would stay a member of it) than in a call. The cost is that the call
+splits: who doesn't follow, and who comes later, stays in or finds the conversation's call without
+the notetaker. That is the same choice everybody in a DM call has, and it is the safer default: the
+notetaker hears nobody who didn't tap.
+
+- **The button.** In a channel call or huddle of a user who doesn't manage the channel's members,
+  and in the call of a meeting the user doesn't organize, "Add notetaker" shows for whoever the
+  policy lets ask it in (guests and bots never), and does what it does in a DM call. The room's
+  group holds the people in the call as far as they are in the conversation's group, and the bot;
+  a huddle continues as a call in the room. Where the user can add the bot (a channel the user
+  manages, a meeting the user organizes) or it is a member already, the call stays where it is.
+- **The server.** `POST /conversations/{id}/call/move` accepts the call of any conversation the
+  caller is a member of and in the call of, into a meeting the caller organizes and that is a
+  different conversation (`400` otherwise). Moving changes nobody's membership, and each device
+  checks the announcement in the conversation's group before it follows, as for a DM; a client
+  only moves a channel's or meeting's call for the notetaker ("Add people" there adds people to
+  the channel or invites them to the meeting, meetings.md step 8).
+- **A meeting's guests.** People in the meeting's call who are in its group, guests included, are
+  invited to the room as well. A guest whose session can't open the room stays in the meeting's
+  call without the notetaker; nothing of theirs reaches it.
+- **Too many people.** A call with more people than a meeting may invite (`max_invitees`) can't
+  move; the button then says it failed and the call goes on unchanged.
+- **The summary** goes into the room's chat, whose members are the people of the call and the
+  notetaker, not into the channel or the meeting chat (which the bot can't write to).
+- **The guarantees** are those of the DM case: the policy (`inviters`) decides who sees the button
+  and whose `join` counts; the banner, badge and tile show for everybody in the room; anybody
+  `can_anyone_stop` allows sends it away; the room is new, so the bot reads no history and nothing
+  of the channel or meeting chat; nothing leaves beyond the room's audio.
+
+**On mobile.** The Android and iOS call screens have "Add notetaker" for whoever the policy lets
+ask it in, and its notice with "Remove notetaker" while it is in the call. Their core reads the
+notetaker through `notetaker_in_call` (teamcraft-ffi, the same rules as desktop and web). Where the
+notetaker is a member of the conversation they ask it in (`ask_notetaker_in`); in every other call
+they move the call into a room with the notetaker (`add_people_to_call` with the notetaker as the
+added one), also in a channel the user manages or a meeting the user organizes, where desktop and web
+add the bot instead: the apps have no member-add path for bots. Android has the button in the call
+screen's "More" menu, iOS among the round controls (in one "+" menu with "Add people" in a DM
+call). The others' move banner on mobile says, as on desktop, that the notetaker was added and
+where the audio goes. The encryption badge doesn't change on mobile yet.
 
 **Everybody sees it.**
 
@@ -4181,8 +4250,8 @@ participant in the room, but have no "Add notetaker" button yet (also #1274).
   policy, never from what the notetaker or the server says about itself: the server can't hide them
   while the notetaker is in the call, and can't make an ordinary participant look like it.
 - When it joins it posts a message into the conversation: that it transcribes, that the audio goes to
-  OpenRouter and to which model, and how to remove it. Clients that don't know the feature yet (the
-  mobile apps) see that message and the participant.
+  OpenRouter and to which model, and how to remove it. Clients that don't know the feature (mobile
+  apps from before #1274) see that message and the participant.
 - The notices bind compliant clients only: anybody in a call can record it by other means (#216).
 
 **The result.** One message in the call's conversation, encrypted for its members like any other: the
@@ -4352,7 +4421,8 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   page asks for it, or in the background about 15 s after a page other than a guest's meeting page
   loaded (so guests never download the signed-in app), checks it against the signed hash in the
   version's verified file list and only then stores and serves it. Files only some people use are
-  also listed in `on_demand` (the background effects' segmentation worker and model, #439): the
+  also listed in `on_demand` (the background effects' segmentation worker and model and the photo
+  backgrounds' full pictures, #439): the
   worker skips them in the background fetch. A server that edits `lazy` or `on_demand` only
   changes when a file is downloaded, never what runs. A chunk that doesn't match its hash isn't
   served, and the pages warn as for a release that doesn't verify. A page of a release whose chunks

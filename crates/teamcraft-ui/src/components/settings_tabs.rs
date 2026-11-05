@@ -651,6 +651,7 @@ pub fn AudioVideoSection() -> impl IntoView {
         value=Signal::derive(move || calls.get().push_to_talk)
         on_change=Callback::new(move |value: bool| prefs.update(|all| all.calls.push_to_talk = value))
       />
+      {tauri::is_available().then(|| view! { <crate::mute_shortcut::MuteShortcutRows /> })}
       <SelectRow
         label="calls-status-sounds"
         hint="calls-status-sounds-hint"

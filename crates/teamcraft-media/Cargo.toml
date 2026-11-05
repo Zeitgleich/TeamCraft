@@ -52,8 +52,10 @@ web-api = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys"]
 # Signing and verifying call key bindings (`call_auth`) without the rest of the call engine: the
 # web client's page does this for its call module.
 call-auth = ["dep:teamcraft-crypto"]
-# The UI's view of calls (`call_view`): shared by the desktop shell and the browser.
-call-view = ["dave", "dep:teamcraft-client-api"]
+# The UI's view of calls (`call_view`): shared by the desktop shell and the browser. With `effects`
+# also the UI's choice of background as the effects' (`chosen_background`) and the check of a photo
+# background the browser downloaded (SHA-256; DAVE's MLS already brings sha2 along).
+call-view = ["dave", "dep:teamcraft-client-api", "dep:sha2"]
 # The app's own message sounds (`message_sounds`, synthesized): the desktop shell and the browser.
 message-sounds = ["dep:teamcraft-client-api"]
 # A user's own message sound file decoded on the desktop (`sound_file`: MP3, Ogg Vorbis, WAV, FLAC).

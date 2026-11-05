@@ -26,9 +26,9 @@ use std::time::Duration;
 use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage, DaveKeyBinding,
-  DeviceId, ErrorBody, LEGACY_SIMULCAST_LAYERS, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
-  ScreenAudioTrack, TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack,
-  VideoTrackKind,
+  DeviceId, ErrorBody, ErrorCode, LEGACY_SIMULCAST_LAYERS, MAX_SIMULCAST_LAYERS, MediaCapabilities,
+  MediaStreamId, ScreenAudioTrack, TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId,
+  VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -116,6 +116,9 @@ pub struct CallEngine {
   /// The call is over for this device whatever happens to the connection: the SFU refused the
   /// join, a host removed the user or ended the call, or the device joined on another connection.
   is_over: bool,
+  /// The SFU turned the last join away for now (this device joins the call too often, #1227) and
+  /// asked to wait this long: the driver retries ([`Self::take_join_refusal`]).
+  maybe_join_retry_after: Option<Duration>,
   has_reported_unauthenticated_keys: bool,
   uplink: SendSideEstimator,
   downlink_feedback: FeedbackRecorder,
@@ -441,6 +444,7 @@ impl CallEngine {
       is_roster_requested: false,
       is_compromised: false,
       is_over: false,
+      maybe_join_retry_after: None,
       has_reported_unauthenticated_keys: false,
       uplink,
       downlink_feedback: FeedbackRecorder::new(now),
@@ -509,6 +513,12 @@ impl CallEngine {
       token,
       capabilities: self.config.capabilities.clone(),
     });
+  }
+
+  /// The SFU turned the join away for now and asked to wait this long: the connection is of no use
+  /// any more, and the driver tries again after the wait, as after any failed attempt. Taken once.
+  pub fn take_join_refusal(&mut self) -> Option<Duration> {
+    self.maybe_join_retry_after.take()
   }
 
   /// Over for good (refused, removed, ended, or replaced by another connection of this device):
@@ -683,8 +693,16 @@ impl CallEngine {
         self.handle_event(event, now)
       },
       CallServerMessage::Error { error } => {
-        // An error in answer to `join` means the SFU refused it and closes the connection.
+        // An error in answer to `join` means the SFU refused it and closes the connection. Only a
+        // join that came too soon is worth another try: the driver makes it after the wait asked
+        // for, the call goes on meanwhile.
         if matches!(self.phase, Phase::Joining | Phase::Rejoining { .. }) {
+          if error.error_code == ErrorCode::RateLimited {
+            let secs = error.maybe_retry_after_secs.unwrap_or(1).max(1);
+            self.maybe_join_retry_after = Some(Duration::from_secs(secs));
+            debug!(secs, "the SFU asks to join again later");
+            return Ok(());
+          }
           self.is_over = true;
         }
         self.event(CallEngineEvent::Error(error));
@@ -2427,6 +2445,37 @@ mod tests {
         .handle_signal(event(2, CallEvent::ConnectionReplaced), now)
         .unwrap();
       assert!(joined_engine.is_over());
+    }
+
+    #[test]
+    fn a_join_that_came_too_soon_is_retried_not_over() {
+      let now = Instant::now();
+      let mut rejoining = engine_joined(1, now);
+      rejoining.connection_lost();
+      rejoining.rejoin("t2".into(), now);
+      let too_soon = CallServerMessage::Error {
+        error: ErrorBody::new(teamcraft_proto::ErrorCode::RateLimited, "too often").with_retry_after_secs(7),
+      };
+      rejoining.handle_signal(too_soon, now).unwrap();
+      assert!(!rejoining.is_over(), "the call goes on");
+      assert_eq!(rejoining.take_join_refusal(), Some(Duration::from_secs(7)));
+      assert_eq!(rejoining.take_join_refusal(), None);
+      // The driver retries on a new connection; the engine takes it as any rejoin.
+      rejoining.connection_lost();
+      assert!(rejoining.is_reconnecting());
+      // Also for the first join; without a time, a second.
+      let mut joining = engine(2, now);
+      joining.join("t".into());
+      joining
+        .handle_signal(
+          CallServerMessage::Error {
+            error: ErrorBody::new(teamcraft_proto::ErrorCode::RateLimited, "too often"),
+          },
+          now,
+        )
+        .unwrap();
+      assert!(!joining.is_over());
+      assert_eq!(joining.take_join_refusal(), Some(Duration::from_secs(1)));
     }
 
     #[test]

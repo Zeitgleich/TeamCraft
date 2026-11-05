@@ -42,8 +42,6 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, future_to_promise, spawn_local};
 use web_sys::Element;
 
-/// What a browser needs for calls (as `teamcraft_media::call_web` checks it).
-const REQUIRED_GLOBALS: [&str; 4] = ["WebTransport", "AudioEncoder", "AudioDecoder", "AudioWorkletNode"];
 /// Gateway call events kept while the module loads; older ones go first (later ones repeat the state).
 const MAX_PENDING_SIGNALS: usize = 64;
 /// The call module loads this long after sign-in, out of the way of the first screen.
@@ -121,13 +119,11 @@ pub fn applies_effects() -> bool {
   browser_effects_compositing(graphics, &user_agent).is_some()
 }
 
-/// Whether this page can make calls, and why not.
+/// Whether this page can make calls, and why not. The same check as the call module's
+/// (`teamcraft_media::web_api::missing_for_calls`): WebCodecs audio and the AudioWorklet. A browser
+/// without WebTransport calls over the SFU's WebSocket fallback (#1227).
 pub fn support() -> Result<(), CallsUnavailableReason> {
-  let global = js_sys::global();
-  let has_all = REQUIRED_GLOBALS
-    .iter()
-    .all(|name| Reflect::has(&global, &JsValue::from_str(name)).unwrap_or(false));
-  if !has_all {
+  if teamcraft_media::web_api::missing_for_calls(teamcraft_media::web_api::has_global).is_some() {
     return Err(CallsUnavailableReason::BrowserUnsupported);
   }
   if !crate::web_core::runs_here() {

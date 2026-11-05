@@ -48,7 +48,7 @@ use teamcraft_media::call_web::{
   self, CameraEffects, LocalTicketFuture, LocalTrustFuture, MediaAccessReason, MediaInput, MicrophoneMeter,
   WebCall, WebCallConfig, WebCallError, WebJoinTicketSource, WebTrustSource, decode_picture,
 };
-use teamcraft_media::effects::{BackgroundEffect as MediaEffect, needs_picture};
+use teamcraft_media::effects::{BackgroundEffect as MediaEffect, is_photo, needs_picture};
 use teamcraft_media::jitter::JitterBufferConfig;
 use teamcraft_media::video::{ScreenProfile, VideoResolution, camera_limit};
 use teamcraft_proto::{
@@ -910,9 +910,10 @@ impl Host {
   }
 
   /// What goes behind the camera under the organization's rule, as the pipeline's effect (an own
-  /// or organization picture is fetched and decoded, an illustration drawn, the first time).
+  /// or organization picture or a photo is fetched and decoded, an illustration drawn, the first
+  /// time).
   async fn background_plan(&self) -> Result<BackgroundPlan, ActionFailure> {
-    // The photos are only in the apps (a choice synced from one of them, say): none here.
+    // Where the browser offers no effects, none is asked for.
     let requested = Some(self.state.borrow().background)
       .filter(|requested| EffectsOffer::InCall.offers(*requested))
       .unwrap_or_default();
@@ -943,11 +944,14 @@ impl Host {
     if let Some(effect) = self.effects.cached(chosen) {
       return Ok(effect);
     }
-    let maybe_picture = if needs_picture(chosen) {
-      let file = self.background_picture(chosen).await?;
-      Some(decode_picture(&file).await.map_err(|error| error.to_string())?)
-    } else {
-      None
+    let maybe_file = match chosen {
+      BackgroundEffect::Preset(photo) if is_photo(chosen) => Some(effects::photo_file(photo).await?),
+      _ if needs_picture(chosen) => Some(self.background_picture(chosen).await?),
+      _ => None,
+    };
+    let maybe_picture = match maybe_file {
+      Some(file) => Some(decode_picture(&file).await.map_err(|error| error.to_string())?),
+      None => None,
     };
     self
       .effects

@@ -17,7 +17,7 @@ use crate::components::status_menu::{MORNING_MINUTE, MS_PER_HOUR};
 use crate::i18n::I18n;
 use crate::meetings::MeetingsHub;
 use crate::model::PresenceStatus;
-use crate::state::AppState;
+use crate::state::{AppState, Overlay};
 
 /// The user's own call, as far as the menu shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,6 +34,8 @@ pub struct TrayCall {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrayInput {
   pub presence: PresenceStatus,
+  /// The workspace allows custom statuses: "Set a custom status…" is offered.
+  pub are_statuses_enabled: bool,
   /// "Bob is calling you" while a call rings on this device.
   pub maybe_ringing: Option<String>,
   pub maybe_call: Option<TrayCall>,
@@ -95,7 +97,16 @@ pub fn menu_model(input: &TrayInput, t: &dyn Fn(&str) -> String) -> TrayMenuMode
       t("tray-status-offline"),
       is(PresenceStatus::Offline),
     ),
+  ]);
+  if input.are_statuses_enabled {
+    entries.push(TrayEntry::action(
+      TrayAction::SetCustomStatus,
+      t("tray-custom-status"),
+    ));
+  }
+  entries.extend([
     TrayEntry::Separator,
+    TrayEntry::action(TrayAction::NewMessage, t("tray-new-message")),
     TrayEntry::action(TrayAction::OpenApp, t("tray-show")),
     TrayEntry::action(TrayAction::CheckForUpdates, t("tray-check-updates")),
     TrayEntry::Separator,
@@ -117,6 +128,7 @@ pub fn start(state: AppState, i18n: I18n) {
   let call = state.call;
   Effect::new(move |previous: Option<TrayMenuModel>| {
     let presence = state.me().presence;
+    let are_statuses_enabled = state.read(|backend| backend.presence_policy()).statuses_enabled;
     let maybe_ringing = call.incoming.get().and_then(|incoming| {
       let caller = state.read(|backend| backend.user(incoming.caller))?;
       let key = if incoming.with_video {
@@ -145,6 +157,7 @@ pub fn start(state: AppState, i18n: I18n) {
       });
     let input = TrayInput {
       presence,
+      are_statuses_enabled,
       maybe_ringing,
       maybe_call,
     };
@@ -193,6 +206,14 @@ pub fn run(state: AppState, action: TrayAction) {
     TrayAction::StopSharing => call.set_screen_share(false),
     TrayAction::LeaveCall => call.leave(),
     TrayAction::OpenCall => call.is_minimized.set(false),
+    TrayAction::SetCustomStatus => state.overlay.set(Overlay::CustomStatus),
+    TrayAction::NewMessage => state.overlay.set(Overlay::NewMessage),
+    // The global shortcut: only a running call has a microphone to switch.
+    TrayAction::ToggleMute => {
+      if call.phase.get_untracked() == CallPhase::Active {
+        call.set_muted(call.is_mic_on.get_untracked());
+      }
+    },
     // The shell does these itself.
     TrayAction::OpenApp | TrayAction::CheckForUpdates | TrayAction::Quit => {},
   }
@@ -226,6 +247,7 @@ mod tests {
   fn input(presence: PresenceStatus) -> TrayInput {
     TrayInput {
       presence,
+      are_statuses_enabled: true,
       maybe_ringing: None,
       maybe_call: None,
     }
@@ -241,7 +263,7 @@ mod tests {
     }
   }
 
-  const TAIL: [&str; 5] = ["-", "open_app", "check_for_updates", "-", "quit"];
+  const TAIL: [&str; 6] = ["-", "new_message", "open_app", "check_for_updates", "-", "quit"];
 
   #[test]
   fn idle_has_status_and_the_general_entries_only() {
@@ -259,7 +281,40 @@ mod tests {
         "[ ] status_offline",
       ]
     );
+    assert_eq!(list[6], "set_custom_status");
+    assert_eq!(&list[7..], &TAIL);
+  }
+
+  #[test]
+  fn no_custom_status_entry_where_the_workspace_has_no_statuses() {
+    let mut input = input(PresenceStatus::Online);
+    input.are_statuses_enabled = false;
+    let list = keys(&menu_model(&input, &|key| key.to_owned()));
+    assert!(!list.iter().any(|line| line == "set_custom_status"));
     assert_eq!(&list[6..], &TAIL);
+  }
+
+  #[test]
+  fn new_message_and_custom_status_use_their_own_labels() {
+    let model = menu_model(&input(PresenceStatus::Online), &|key| format!("<{key}>"));
+    let label_of = |wanted: TrayAction| {
+      model.entries.iter().find_map(|entry| match entry {
+        TrayEntry::Item {
+          maybe_action: Some(action),
+          label,
+          ..
+        } if *action == wanted => Some(label.clone()),
+        _ => None,
+      })
+    };
+    assert_eq!(
+      label_of(TrayAction::NewMessage).as_deref(),
+      Some("<tray-new-message>")
+    );
+    assert_eq!(
+      label_of(TrayAction::SetCustomStatus).as_deref(),
+      Some("<tray-custom-status>")
+    );
   }
 
   #[test]

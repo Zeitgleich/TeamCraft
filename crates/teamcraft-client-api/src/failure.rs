@@ -188,7 +188,8 @@ pub enum CallFailure {
   /// The screen share sends, but only black: on macOS before the Screen Recording permission
   /// applies, which needs an app restart (issue #683), or protected content. The share stays on.
   ScreenBlack,
-  /// The browser lacks what calls need (WebTransport, WebCodecs, AudioWorklet).
+  /// The browser lacks what calls need (WebCodecs, AudioWorklet), or has no WebTransport on an
+  /// instance without the WebSocket fallback.
   Unsupported,
   /// The call server (SFU) can't be reached, while the chat server can: often a network that
   /// blocks UDP (QUIC).
