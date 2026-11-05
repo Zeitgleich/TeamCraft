@@ -146,6 +146,19 @@ struct State {
   preview_camera: PreviewCamera,
   /// The pre-join check's microphone, for the meter.
   maybe_preview_meter: Option<MicrophoneMeter>,
+  /// The pre-join check's camera through the chosen background (#1295); after a join, until the
+  /// call's camera has taken the self view over.
+  maybe_preview_effects: Option<PreviewEffects>,
+  /// Counts the starts and ends of the check's effects: a start that took longer than the next
+  /// change (another background, the camera off, a join) gives way to it.
+  preview_effects_turn: u64,
+}
+
+/// The pre-join check's effects and the stream of the canvas they draw into, which the self view
+/// plays.
+struct PreviewEffects {
+  driver: call_web::EffectsPreview,
+  view: MediaStream,
 }
 
 /// The task that owns the [`WebCall`].
@@ -481,9 +494,11 @@ impl Host {
     media: JoinMedia,
   ) -> Result<CallActionAnswer, ActionFailure> {
     // The call opens the microphone itself; the check's camera goes on as the call's (no second
-    // prompt, no gap in the self view).
+    // prompt, no gap in the self view). The check's effects keep the self view going until the
+    // call's own take over (#1295).
     let maybe_checked_camera = self.end_preview(media.is_camera_on);
     if let Err(failure) = self.connect(request, media.is_muted).await {
+      self.end_preview_effects();
       if let Some(stream) = &maybe_checked_camera {
         stop_tracks(stream);
         if let Some(view) = &self.state.borrow().maybe_camera_view {
@@ -496,6 +511,8 @@ impl Host {
       return Ok(None);
     }
     let started = self.start_camera_from(maybe_checked_camera).await;
+    // Started: the call's effects took the self view over already. Not started: nothing to show.
+    self.end_preview_effects();
     Ok(started.err().map(|failure| failure.to_wire()))
   }
 
@@ -838,6 +855,10 @@ impl Host {
       if let Some(old) = state.maybe_effects_view.take() {
         stop_tracks(&old);
       }
+      // The pre-join check's effects showed the camera until now.
+      if let Some(preview) = state.maybe_preview_effects.take() {
+        preview.stop();
+      }
       state.maybe_effects_view = maybe_view.map(|(_, view)| view);
       state.is_camera_through_effects = is_through_effects;
       state.maybe_local_camera = Some(stream);
@@ -854,10 +875,14 @@ impl Host {
 
   /// The user chose another background: a camera through the effects changes it at once, a
   /// camera without them starts again through them when there is an effect to apply (#439).
-  async fn set_background(&self, effect: BackgroundEffect) -> Result<(), ActionFailure> {
+  /// Before a join, the pre-join check shows it (#1295) and the join starts the camera with it.
+  async fn set_background(self: &Rc<Self>, effect: BackgroundEffect) -> Result<(), ActionFailure> {
     self.state.borrow_mut().background = effect;
-    let is_camera_on = self.maybe_media.borrow().is_some() && self.state.borrow().view.is_camera_on();
-    if !is_camera_on {
+    if self.maybe_media.borrow().is_none() {
+      self.refresh_preview_effects();
+      return Ok(());
+    }
+    if !self.state.borrow().view.is_camera_on() {
       return Ok(());
     }
     let plan = match self.background_plan().await {
@@ -915,7 +940,7 @@ impl Host {
   async fn background_plan(&self) -> Result<BackgroundPlan, ActionFailure> {
     // Where the browser offers no effects, none is asked for.
     let requested = Some(self.state.borrow().background)
-      .filter(|requested| EffectsOffer::InCall.offers(*requested))
+      .filter(|requested| EffectsOffer::Full.offers(*requested))
       .unwrap_or_default();
     let rule = self.background_rule().await;
     let is_required = rule.is_required();
@@ -1054,7 +1079,7 @@ impl Host {
 
   /// Runs the pre-join check as asked (#442). A call on this device has the camera and
   /// microphone; then there is nothing to check.
-  async fn set_preview(&self, preview: CallPreview) -> Result<(), ActionFailure> {
+  async fn set_preview(self: &Rc<Self>, preview: CallPreview) -> Result<(), ActionFailure> {
     if self.maybe_media.borrow().is_some() {
       return Ok(());
     }
@@ -1080,7 +1105,7 @@ impl Host {
   }
 
   /// Opens the camera for the self view only (the browser may ask).
-  async fn start_preview_camera(&self) -> Result<(), ActionFailure> {
+  async fn start_preview_camera(self: &Rc<Self>) -> Result<(), ActionFailure> {
     self.set_preview_camera(PreviewCamera::Starting);
     let maybe_camera = self.state.borrow().maybe_camera.clone();
     let result = call_web::capture_camera(maybe_camera.as_deref(), self.camera_limit()).await;
@@ -1101,6 +1126,8 @@ impl Host {
           state.maybe_local_camera = Some(stream);
         }
         self.set_preview_camera(PreviewCamera::Live);
+        // The chosen background goes behind it (#1295).
+        self.refresh_preview_effects();
         Ok(())
       },
       Err(error) => {
@@ -1111,6 +1138,7 @@ impl Host {
   }
 
   fn stop_preview_camera(&self) {
+    self.end_preview_effects();
     {
       let mut state = self.state.borrow_mut();
       if let Some(stream) = state.maybe_local_camera.take() {
@@ -1124,7 +1152,7 @@ impl Host {
   }
 
   /// Another camera was chosen: the check shows it instead.
-  async fn restart_preview_camera(&self) -> Result<(), ActionFailure> {
+  async fn restart_preview_camera(self: &Rc<Self>) -> Result<(), ActionFailure> {
     let is_checking = self.maybe_media.borrow().is_none() && self.state.borrow().preview.is_camera_on;
     if !is_checking {
       return Ok(());
@@ -1171,14 +1199,147 @@ impl Host {
       }
     };
     self.set_preview_camera(PreviewCamera::Off);
-    match maybe_camera {
+    let maybe_kept = match maybe_camera {
       Some(stream) if keeps_camera => Some(stream),
       Some(stream) => {
         stop_tracks(&stream);
         None
       },
       None => None,
+    };
+    if maybe_kept.is_some() {
+      // The effects keep showing the handed-over camera until the call's take over; a start
+      // still under way gives way.
+      self.state.borrow_mut().preview_effects_turn += 1;
+    } else {
+      self.end_preview_effects();
     }
+    maybe_kept
+  }
+
+  /// Puts the chosen background behind the pre-join check's camera, changes it, or takes it away
+  /// (#1295), beside the action that asked: the segmentation worker may still have to load (the
+  /// first effect of the session), and a join must not wait for it.
+  fn refresh_preview_effects(self: &Rc<Self>) {
+    let host = Rc::clone(self);
+    spawn_local(async move { host.apply_preview_effects().await });
+  }
+
+  /// The check's self view with the background the call would start the camera with: through
+  /// the effects (the worker starts with the first one), or the camera itself. The check sends
+  /// nothing, so a required background that can't be applied leaves the camera as it is here; the
+  /// join keeps it off and says why.
+  async fn apply_preview_effects(&self) {
+    let turn = self.next_preview_effects_turn();
+    let Some(camera) = self.checked_camera() else {
+      return;
+    };
+    let plan = match self.background_plan().await {
+      Ok(plan) => plan,
+      Err(failure) => {
+        tracing::debug!(detail = %failure.detail, "the check shows the camera without a background");
+        BackgroundPlan::plain(true)
+      },
+    };
+    if !self.is_preview_effects_turn(turn) {
+      return;
+    }
+    let Some(effect) = plan.maybe_effect else {
+      self.end_preview_effects();
+      return;
+    };
+    if let Some(running) = &self.state.borrow().maybe_preview_effects {
+      running.driver.set_effect(effect);
+      return;
+    }
+    let started = self
+      .start_preview_effects(&camera, effect, plan.is_required)
+      .await;
+    if !self.is_preview_effects_turn(turn) {
+      if let Ok(preview) = started {
+        preview.stop();
+      }
+      return;
+    }
+    match started {
+      Ok(preview) => {
+        let mut state = self.state.borrow_mut();
+        if let Some(old) = state.maybe_preview_effects.replace(preview) {
+          old.stop();
+        }
+        if let Some(view) = &state.maybe_camera_view {
+          view.set_src_object(state.shown_camera());
+        }
+      },
+      Err(error) => {
+        if let Err(failure) = self.effect_failed(plan.is_required, &error) {
+          tracing::debug!(detail = %failure.detail, "the check shows the camera without a background");
+        }
+      },
+    }
+  }
+
+  /// Runs `camera` through `effect` into a canvas of its own: the worker (started the first time)
+  /// and a compositor, as the call would.
+  async fn start_preview_effects(
+    &self,
+    camera: &MediaStream,
+    effect: MediaEffect,
+    is_required: bool,
+  ) -> Result<PreviewEffects, String> {
+    let compositing = self
+      .effects_compositing()
+      .ok_or("this browser can't composite the effects")?;
+    let effects = self
+      .effects
+      .camera_effects(compositing, effect)
+      .await
+      .map_err(|error| error.to_string())?;
+    let effects = if is_required { effects.required() } else { effects };
+    let (canvas, view) = effects::self_view().ok_or("no canvas for the self view")?;
+    match call_web::EffectsPreview::start(camera, effects.with_view(canvas)).await {
+      Ok(driver) => Ok(PreviewEffects { driver, view }),
+      Err(error) => {
+        stop_tracks(&view);
+        Err(error.to_string())
+      },
+    }
+  }
+
+  /// Ends the check's effects; the self view shows what is left (the camera itself, or nothing).
+  /// A start still under way gives way.
+  fn end_preview_effects(&self) {
+    let mut state = self.state.borrow_mut();
+    state.preview_effects_turn += 1;
+    let Some(preview) = state.maybe_preview_effects.take() else {
+      return;
+    };
+    preview.stop();
+    if let Some(view) = &state.maybe_camera_view {
+      view.set_src_object(state.shown_camera());
+    }
+  }
+
+  fn next_preview_effects_turn(&self) -> u64 {
+    let mut state = self.state.borrow_mut();
+    state.preview_effects_turn += 1;
+    state.preview_effects_turn
+  }
+
+  fn is_preview_effects_turn(&self, turn: u64) -> bool {
+    self.state.borrow().preview_effects_turn == turn
+  }
+
+  /// The pre-join check's running camera; none in a call.
+  fn checked_camera(&self) -> Option<MediaStream> {
+    if self.maybe_media.borrow().is_some() {
+      return None;
+    }
+    let state = self.state.borrow();
+    if state.preview_camera != PreviewCamera::Live {
+      return None;
+    }
+    state.maybe_local_camera.clone()
   }
 
   fn set_preview_camera(&self, camera: PreviewCamera) {
@@ -1650,12 +1811,22 @@ impl State {
     self.is_camera_through_effects = false;
   }
 
-  /// What the self view plays: what the effects send, else the camera itself.
+  /// What the self view plays: what the effects send (or show in the pre-join check), else the
+  /// camera itself.
   fn shown_camera(&self) -> Option<&MediaStream> {
     self
       .maybe_effects_view
       .as_ref()
+      .or(self.maybe_preview_effects.as_ref().map(|preview| &preview.view))
       .or(self.maybe_local_camera.as_ref())
+  }
+}
+
+impl PreviewEffects {
+  /// Stops the effects and the canvas' stream (not the camera).
+  fn stop(self) {
+    drop(self.driver);
+    stop_tracks(&self.view);
   }
 }
 

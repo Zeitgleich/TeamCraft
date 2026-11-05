@@ -1380,7 +1380,7 @@ fn constraint(name: &str, value: u32) -> Result<JsValue, WebCallError> {
 }
 
 /// A muted, detached `<video>` playing the stream, to take frames from.
-async fn play_hidden(stream: &MediaStream) -> Result<HtmlVideoElement, WebCallError> {
+pub(super) async fn play_hidden(stream: &MediaStream) -> Result<HtmlVideoElement, WebCallError> {
   let video: HtmlVideoElement = window()?
     .document()
     .ok_or(WebCallError::Unsupported("a document"))?
@@ -1472,7 +1472,7 @@ impl CameraEffects {
 /// with WebGL2 it stays on the GPU and the `VideoFrame` is the compositor's canvas. Without an
 /// effect the picture goes to the encoders as it is, without either detour.
 #[cfg(feature = "effects")]
-mod effects {
+pub(super) mod effects {
   use std::rc::Rc;
   use std::time::Duration;
 
