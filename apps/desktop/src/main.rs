@@ -31,6 +31,7 @@ mod reconnect;
 mod ringtone;
 mod shared_files;
 mod shell_prefs;
+mod shortcut_portal;
 mod single_instance;
 #[cfg(target_os = "linux")]
 mod startup_env;

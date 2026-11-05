@@ -39,10 +39,16 @@ pub enum TrayAction {
   NewMessage,
   /// Not a menu item: the global mute shortcut was pressed.
   ToggleMute,
+  /// "Pause notifications → For 30 minutes" (do not disturb, as the focus button's shortest choice).
+  PauseNotificationsBriefly,
+  /// Ends a pause of the notifications (do not disturb), as the focus button does while it is on.
+  ResumeNotifications,
+  /// The host of a meeting: opens the call with "End for everyone" waiting to be confirmed.
+  EndCallForEveryone,
 }
 
 impl TrayAction {
-  pub const ALL: [Self; 21] = [
+  pub const ALL: [Self; 24] = [
     Self::OpenApp,
     Self::CheckForUpdates,
     Self::Quit,
@@ -64,6 +70,9 @@ impl TrayAction {
     Self::SetCustomStatus,
     Self::NewMessage,
     Self::ToggleMute,
+    Self::PauseNotificationsBriefly,
+    Self::ResumeNotifications,
+    Self::EndCallForEveryone,
   ];
 
   /// The menu item's id, and the text of the event.
@@ -90,6 +99,9 @@ impl TrayAction {
       Self::SetCustomStatus => "set_custom_status",
       Self::NewMessage => "new_message",
       Self::ToggleMute => "toggle_mute",
+      Self::PauseNotificationsBriefly => "pause_notifications_briefly",
+      Self::ResumeNotifications => "resume_notifications",
+      Self::EndCallForEveryone => "end_call_for_everyone",
     }
   }
 
@@ -97,7 +109,8 @@ impl TrayAction {
     Self::ALL.into_iter().find(|action| action.id() == id)
   }
 
-  /// Whether the shell does it without the UI (the window may not even have a page).
+  /// Whether the shell does it without the UI (the window may not even have a page). The shell
+  /// still tells the UI about [`TrayAction::CheckForUpdates`], which then says what came of it.
   pub fn is_shell_action(self) -> bool {
     matches!(self, Self::OpenApp | Self::CheckForUpdates | Self::Quit)
   }
@@ -106,7 +119,12 @@ impl TrayAction {
   pub fn shows_window(self) -> bool {
     matches!(
       self,
-      Self::OpenApp | Self::OpenCall | Self::AcceptCall | Self::SetCustomStatus | Self::NewMessage
+      Self::OpenApp
+        | Self::OpenCall
+        | Self::AcceptCall
+        | Self::SetCustomStatus
+        | Self::NewMessage
+        | Self::EndCallForEveryone
     )
   }
 }
@@ -223,6 +241,10 @@ mod tests {
     );
     assert!(TrayAction::OpenCall.shows_window() && !TrayAction::Mute.shows_window());
     assert!(TrayAction::SetCustomStatus.shows_window() && TrayAction::NewMessage.shows_window());
+    assert!(
+      TrayAction::EndCallForEveryone.shows_window(),
+      "ending for everyone is confirmed in the window"
+    );
     assert!(
       !TrayAction::ToggleMute.shows_window(),
       "the shortcut works in the background"

@@ -72,6 +72,12 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       .find(|tile| tile.participant.as_ref().is_some_and(|p| p.is_sharing_screen))
   });
   let host_open = RwSignal::new(false);
+  // The tray's "End for everyone…" opens the host controls, which ask to confirm.
+  Effect::new(move |_| {
+    if call.is_end_for_everyone_asked.get() {
+      host_open.set(true);
+    }
+  });
   let maybe_hub = use_context::<crate::meetings::MeetingsHub>();
   // A DM's call moves into a meeting room with the added people; a meeting's organizer invites
   // them, anybody else in it hands out its link (#1141).
