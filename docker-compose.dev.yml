@@ -61,7 +61,7 @@ services:
       - garage-data:/var/lib/garage/data
 
   mailpit:
-    image: docker.io/axllent/mailpit:v1.32.0
+    image: docker.io/axllent/mailpit:v1.33.0
     ports:
       - "127.0.0.1:1025:1025"
       - "[::1]:1025:1025" # SMTP, no authentication
