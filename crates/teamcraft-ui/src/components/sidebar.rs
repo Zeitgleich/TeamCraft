@@ -23,7 +23,7 @@ use crate::sections::{
   move_favorite, row_badge,
 };
 use crate::settings::{load_json, store_json};
-use crate::state::{MainView, Overlay, use_app_state};
+use crate::state::{AppState, MainView, Overlay, use_app_state};
 
 /// Sidebar sections and spaces the user collapsed, remembered on this device.
 const KEY_COLLAPSED_SECTIONS: &str = "teamcraft.sidebar_collapsed";
@@ -116,24 +116,7 @@ pub fn Sidebar() -> impl IntoView {
         .collect()
     }
   });
-  // The conversation opened while unread stays in the "Unreads" section until another one opens,
-  // so the list doesn't shift under the pointer (#890). Read untracked: the count dropping to
-  // zero because the conversation is being read must not release it.
-  Effect::new(move |_| {
-    let held = match state.view.get() {
-      MainView::Conversation(id) if state.held_unread.get_untracked() == Some(id) => Some(id),
-      MainView::Conversation(id) => untrack(|| {
-        state
-          .read(|backend| backend.conversation(id))
-          .filter(|conversation| conversation.unread_count > 0 && !conversation.is_muted)
-          .map(|conversation| conversation.id)
-      }),
-      _ => None,
-    };
-    if state.held_unread.get_untracked() != held {
-      state.held_unread.set(held);
-    }
-  });
+  hold_unread_while_open(state);
   let sections = Memo::new(move |_| {
     build_sections(
       &listed.get(),
@@ -217,6 +200,27 @@ pub fn Sidebar() -> impl IntoView {
       </div>
     </nav>
   }
+}
+
+/// The conversation opened while unread stays in the "Unreads" section until another one opens, so
+/// the list doesn't shift under the pointer (#890). Read untracked: the count dropping to zero
+/// because the conversation is being read must not release it.
+pub fn hold_unread_while_open(state: AppState) {
+  Effect::new(move |_| {
+    let held = match state.view.get() {
+      MainView::Conversation(id) if state.held_unread.get_untracked() == Some(id) => Some(id),
+      MainView::Conversation(id) => untrack(|| {
+        state
+          .read(|backend| backend.conversation(id))
+          .filter(|conversation| conversation.unread_count > 0 && !conversation.is_muted)
+          .map(|conversation| conversation.id)
+      }),
+      _ => None,
+    };
+    if state.held_unread.get_untracked() != held {
+      state.held_unread.set(held);
+    }
+  });
 }
 
 /// The entries that are not about one space: calls, meetings, people, saved items. Home and the

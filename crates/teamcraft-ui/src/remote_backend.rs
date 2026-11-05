@@ -2249,6 +2249,23 @@ impl ChatBackend for RemoteChat {
       .collect()
   }
 
+  fn listed_conversations(&self) -> Vec<Conversation> {
+    let mirror = self.mirror.borrow();
+    let spaces: HashSet<SpaceId> = mirror.snapshot.spaces.iter().map(|space| space.id).collect();
+    mirror
+      .snapshot
+      .conversations
+      .iter()
+      .filter(|conversation| {
+        conversation.kind.is_direct_like()
+          || conversation
+            .maybe_space
+            .is_some_and(|space| spaces.contains(&space))
+      })
+      .cloned()
+      .collect()
+  }
+
   fn direct_conversations(&self) -> Vec<Conversation> {
     let mirror = self.mirror.borrow();
     mirror

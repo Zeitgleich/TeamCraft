@@ -19,8 +19,16 @@ pub fn BottomNav() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let me = Memo::new(move |_| state.me());
+  let is_list_layout = Memo::new(move |_| state.is_list_layout());
   let home_count = Memo::new(move |_| {
-    let list = state.with_mutes(state.read(|backend| backend.direct_conversations()));
+    let is_list_layout = is_list_layout.get();
+    let list = state.with_mutes(state.read(|backend| {
+      if is_list_layout {
+        backend.listed_conversations()
+      } else {
+        backend.direct_conversations()
+      }
+    }));
     badge_count(&list)
   });
   let activity_count = Memo::new(move |_| state.read(|backend| backend.activity().badge_count()));
@@ -37,14 +45,18 @@ pub fn BottomNav() -> impl IntoView {
   let is_list = move || state.compact_pane() == CompactPane::List;
   let is_home = Signal::derive(move || {
     state.overlay.get() != Overlay::StatusMenu
-      && state.rail.get() == RailEntry::Chats
+      && (state.rail.get() == RailEntry::Chats
+        || (is_list_layout.get() && state.rail.get() == RailEntry::Space))
       && (is_list() || state.view.get() == MainView::GettingStarted)
   });
   let is_activity = Signal::derive(move || {
     state.overlay.get() != Overlay::StatusMenu && state.rail.get() == RailEntry::Activity
   });
   let is_spaces = Signal::derive(move || {
-    state.overlay.get() != Overlay::StatusMenu && state.rail.get() == RailEntry::Space && is_list()
+    state.overlay.get() != Overlay::StatusMenu
+      && state.rail.get() == RailEntry::Space
+      && !is_list_layout.get()
+      && is_list()
   });
   let is_you = Signal::derive(move || state.overlay.get() == Overlay::StatusMenu);
 
@@ -71,14 +83,17 @@ pub fn BottomNav() -> impl IntoView {
       >
         <Icon name=IconName::Bell />
       </NavTab>
-      <NavTab
-        label_key="bottom-nav-spaces"
-        is_current=is_spaces
-        count=Signal::derive(move || spaces_count.get())
-        on_open=Callback::new(move |()| open_spaces(state))
-      >
-        <Icon name=IconName::Layers />
-      </NavTab>
+      // The list layout has the channels under Chats and no list of its own for them (#1151).
+      <Show when=move || !is_list_layout.get() fallback=|| ()>
+        <NavTab
+          label_key="bottom-nav-spaces"
+          is_current=is_spaces
+          count=Signal::derive(move || spaces_count.get())
+          on_open=Callback::new(move |()| open_spaces(state))
+        >
+          <Icon name=IconName::Layers />
+        </NavTab>
+      </Show>
       <NavTab
         label_key="bottom-nav-you"
         is_current=is_you

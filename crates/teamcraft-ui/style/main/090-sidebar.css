@@ -202,6 +202,14 @@
   color: inherit;
 }
 
+/* The spaces under the list layout's list (#1151): the tile at the size of a row's icon. */
+.sb-list-spaces .space-tile {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  font-size: var(--text-2xs);
+}
+
 .sb-status {
   font-size: var(--text-sm);
 }

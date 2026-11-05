@@ -127,6 +127,10 @@
   <string name="settings_security_summary">Sicherheitscode, App-Sperre, Bildschirmfotos, Passphrase</string>
   <string name="settings_devices_title">Geräte</string>
   <string name="settings_devices_summary">Neues Gerät verknüpfen</string>
+  <string name="chat_list_layout">Chats und Kanäle</string>
+  <string name="chat_list_layout_list">Liste</string>
+  <string name="chat_list_layout_hint">Spaces zeigt Direktnachrichten und die Kanäle jedes Space getrennt. Liste zeigt alles in einer Liste.</string>
+  <string name="list_conversations">Unterhaltungen</string>
   <string name="dynamic_color">Farben meines Hintergrundbilds verwenden</string>
   <plurals name="chats_selected">
     <item quantity="one">%d ausgewählt</item>

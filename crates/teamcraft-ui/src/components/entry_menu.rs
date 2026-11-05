@@ -8,6 +8,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::channel_access::{can_create_channel_in, can_invite_to, is_guest};
 use crate::components::composer_commands::left_text;
 use crate::components::conversation_notify::{NotifyChoices, NotifyTarget, entry_of, update_entry};
 use crate::components::icons::{Icon, IconName};
@@ -155,7 +156,16 @@ impl EntryMenuTrigger {
     }
     ev.prevent_default();
     ev.stop_propagation();
-    if let Some(element) = element_of(ev.current_target()) {
+    self.open_under(ev.current_target());
+  }
+
+  /// A press on an entry that has nothing else to open: its menu, under it.
+  pub fn on_click(&self, ev: &web_sys::MouseEvent) {
+    self.open_under(ev.current_target());
+  }
+
+  fn open_under(&self, maybe_target: Option<web_sys::EventTarget>) {
+    if let Some(element) = element_of(maybe_target) {
       let rect = element.get_bounding_client_rect();
       open(
         self.maybe_menu,
@@ -507,6 +517,37 @@ fn SpaceItems(space: SpaceId, page: RwSignal<MenuPage>, close: Callback<()>) -> 
       MenuPage::Actions => {
         let hint_id = hint_id.clone();
         view! {
+          // The list layout has no space sidebar with these buttons in its head (#1151).
+          <Show when=move || state.is_list_layout() fallback=|| ()>
+            <Show when=move || can_create_channel_in(state, space) fallback=|| ()>
+              <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
+                close.run(());
+                state.overlay.set(Overlay::NewChannel(space));
+              }>
+                <Icon name=IconName::Plus />
+                <span class="menu-label">{move || i18n.t("channel-new-title")}</span>
+              </button>
+            </Show>
+            <Show when=move || !is_guest(state) fallback=|| ()>
+              <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
+                close.run(());
+                state.overlay.set(Overlay::BrowseChannels(space));
+              }>
+                <Icon name=IconName::List />
+                <span class="menu-label">{move || i18n.t("browse-title")}</span>
+              </button>
+            </Show>
+            <Show when=move || can_invite_to(state, space) fallback=|| ()>
+              <button type="button" class="menu-item" role="menuitem" on:click=move |_| {
+                close.run(());
+                state.overlay.set(Overlay::InvitePeople(space));
+              }>
+                <Icon name=IconName::UserPlus />
+                <span class="menu-label">{move || i18n.t("invite-title")}</span>
+              </button>
+            </Show>
+            <div class="menu-sep" role="separator"></div>
+          </Show>
           <NotifyItems target=target page=page close=close />
           <button type="button" class="menu-item" role="menuitem" disabled=move || !has_unread() on:click=move |_| {
             state.mark_space_read(space);

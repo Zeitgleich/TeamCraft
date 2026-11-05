@@ -10,6 +10,12 @@ sealed interface SectionTitle {
   data object Channels : SectionTitle
   data object DirectMessages : SectionTitle
 
+  /** The list layout's conversations that are not favorites (#1151). */
+  data object Everything : SectionTitle
+
+  /** The spaces under the list layout's list. */
+  data object Spaces : SectionTitle
+
   /** The user's notes to themself, pinned above everything (the share picker, issue #829). */
   data object Notes : SectionTitle
 
@@ -47,6 +53,9 @@ enum class HomeFilter {
   Unread,
   People,
   Groups,
+
+  /** Channels of spaces; a chip of the list layout only. */
+  Channels,
   ;
 
   fun matches(item: ConversationItem): Boolean = when (this) {
@@ -54,6 +63,7 @@ enum class HomeFilter {
     Unread -> item.mentionCount > 0u || (item.unreadCount > 0u && !item.isMuted)
     People -> item.kind == ConversationKind.DIRECT
     Groups -> item.kind == ConversationKind.GROUP
+    Channels -> !item.isDirect
   }
 }
 
@@ -116,6 +126,45 @@ fun directSections(
     if (rest.isNotEmpty()) add(Section(SectionTitle.DirectMessages, rest))
   }
 }
+
+/**
+ * The list layout's one list (#1151): favorites, then every other DM and channel, each the most
+ * recent first. Only conversations `chip` lets through whose names contain `filter` (any case) are
+ * kept. Empty sections are left out.
+ */
+fun listSections(
+  conversations: List<ConversationItem>,
+  lastActivity: Map<String, Long> = emptyMap(),
+  filter: String = "",
+  chip: HomeFilter = HomeFilter.All,
+): List<Section> {
+  val needle = filter.trim()
+  val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
+  val byRecency = compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName)
+  val (favorites, rest) = conversations
+    .distinctBy { it.id }
+    .filter { chip.matches(it) && (needle.isEmpty() || it.name.contains(needle, ignoreCase = true)) }
+    .sortedWith(byRecency)
+    .partition { it.isFavorite }
+  return buildList {
+    if (favorites.isNotEmpty()) add(Section(SectionTitle.Favorites, favorites))
+    if (rest.isNotEmpty()) add(Section(SectionTitle.Everything, rest))
+  }
+}
+
+/** A space the list layout names under its list, where its menu is. */
+data class ListedSpace(val id: String, val name: String)
+
+/** The spaces the conversations are in, by name (#1151). */
+fun listedSpaces(conversations: List<ConversationItem>): List<ListedSpace> =
+  conversations
+    .mapNotNull { conversation ->
+      val id = conversation.maybeSpaceId
+      val name = conversation.maybeSpaceName
+      if (id != null && name != null) ListedSpace(id, name) else null
+    }
+    .distinctBy { it.id }
+    .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
 
 /** What a tab shows next to its name: mentions, unread messages, or nothing. */
 data class TabBadge(val mentions: Int, val unread: Int)

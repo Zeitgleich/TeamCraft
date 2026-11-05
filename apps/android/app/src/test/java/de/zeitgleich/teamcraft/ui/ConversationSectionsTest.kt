@@ -130,6 +130,44 @@ class ConversationSectionsTest {
     assertEquals(TabBadge(mentions = 1, unread = 2), badge)
   }
 
+  @Test
+  fun theListHoldsDmsAndChannelsOfAllSpacesByRecencyWithFavoritesFirst() {
+    val list = listOf(
+      item("1", "Amy", ConversationKind.DIRECT),
+      item("2", "general", ConversationKind.PUBLIC, space = "Project A"),
+      item("3", "general", ConversationKind.PUBLIC, space = "Project B"),
+      item("4", "release", ConversationKind.PUBLIC, space = "Project A", isFavorite = true),
+    )
+    val result = listSections(list + list[0], lastActivity = mapOf("1" to 20L, "2" to 30L, "3" to 10L))
+    assertEquals(listOf(SectionTitle.Favorites, SectionTitle.Everything), result.map { it.title })
+    assertEquals(listOf("4"), result[0].conversations.map { it.id })
+    assertEquals(listOf("2", "1", "3"), result[1].conversations.map { it.id })
+  }
+
+  @Test
+  fun theListNarrowsByChipAndName() {
+    val list = listOf(
+      item("1", "Amy", ConversationKind.DIRECT),
+      item("2", "Launch", ConversationKind.PUBLIC, space = "Project A"),
+    )
+    assertEquals(listOf("2"), listSections(list, chip = HomeFilter.Channels).flatMap { it.conversations }.map { it.id })
+    assertEquals(listOf("1"), listSections(list, chip = HomeFilter.People).flatMap { it.conversations }.map { it.id })
+    assertEquals(listOf("2"), listSections(list, filter = " laun").flatMap { it.conversations }.map { it.id })
+  }
+
+  @Test
+  fun listedSpacesAreOneEachByName() {
+    val spaces = listedSpaces(
+      listOf(
+        item("1", "a", ConversationKind.PUBLIC, space = "Project B"),
+        item("2", "b", ConversationKind.PUBLIC, space = "Project A"),
+        item("3", "c", ConversationKind.PUBLIC, space = "Project B"),
+        item("4", "Amy", ConversationKind.DIRECT),
+      ),
+    )
+    assertEquals(listOf("Project A", "Project B"), spaces.map { it.name })
+  }
+
   private fun item(
     id: String,
     name: String,

@@ -59,6 +59,8 @@ pub fn SpaceRail() -> impl IntoView {
         <ActivityButton />
         <RailCreateMenu />
       </div>
+      // The list layout has the spaces under its list (#1151): no space to switch to here.
+      <Show when=move || !state.is_list_layout() fallback=|| ()>
       <span class="rail-divider" aria-hidden="true"></span>
       <div class="rail-spaces" node_ref=scroller on:scroll=move |_| {
         if let Some(element) = scroller.get_untracked() {
@@ -92,6 +94,7 @@ pub fn SpaceRail() -> impl IntoView {
           </button>
         </Show>
       </div>
+      </Show>
       <div class="rail-bottom">
         <RailFocusMenu />
       </div>
@@ -111,16 +114,28 @@ fn mark_hidden_edges(element: &web_sys::HtmlDivElement) {
   drop(classes.toggle_with_force("has-more-below", has_more_below));
 }
 
-/// Chats (the DMs and group DMs), with the number of unread DMs and mentions in them.
+/// Chats (the DMs and group DMs; in the list layout every conversation), with the number of unread
+/// DMs and mentions in them.
 #[component]
 fn ChatsButton() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let count = Memo::new(move |_| {
-    let list = state.with_mutes(state.read(|backend| backend.direct_conversations()));
+    let is_list = state.is_list_layout();
+    let list = state.with_mutes(state.read(|backend| {
+      if is_list {
+        backend.listed_conversations()
+      } else {
+        backend.direct_conversations()
+      }
+    }));
     badge_count(&list)
   });
-  let is_current = Signal::derive(move || state.rail.get() == RailEntry::Chats);
+  let is_current = Signal::derive(move || match state.rail.get() {
+    RailEntry::Chats => true,
+    RailEntry::Space => state.is_list_layout(),
+    RailEntry::Activity => false,
+  });
   let label = Signal::derive(move || match count.get() {
     0 => i18n.t("chats-title"),
     unread => i18n.t_with("rail-chats-unread", &[("count", &unread.to_string())]),

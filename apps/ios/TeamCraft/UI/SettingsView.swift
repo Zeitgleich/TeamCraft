@@ -249,6 +249,7 @@ private struct NotificationsSettingsPage: View {
 private struct ChatsSettingsPage: View {
   @Environment(AppModel.self) private var model
   @AppStorage("share_typing") private var isSharingTyping = true
+  @AppStorage(ChatListLayout.key) private var chatListLayout = ChatListLayout.spaces.rawValue
   @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
   @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.fallback.rawValue
   @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
@@ -258,6 +259,14 @@ private struct ChatsSettingsPage: View {
     Form {
       Section {
         Toggle("share_typing", isOn: $isSharingTyping)
+      }
+      Section {
+        Picker("chat_list_layout", selection: $chatListLayout) {
+          Text("chats_tab_spaces").tag(ChatListLayout.spaces.rawValue)
+          Text("chat_list_layout_list").tag(ChatListLayout.list.rawValue)
+        }
+      } footer: {
+        Text("chat_list_layout_hint")
       }
       Section {
         Picker("call_status_sounds", selection: $statusSounds) {

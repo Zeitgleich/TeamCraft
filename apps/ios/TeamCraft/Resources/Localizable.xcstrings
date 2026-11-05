@@ -7489,6 +7489,70 @@
         }
       }
     },
+    "chat_list_layout": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chats and channels"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chats und Kanäle"
+          }
+        }
+      }
+    },
+    "chat_list_layout_list": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "List"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Liste"
+          }
+        }
+      }
+    },
+    "chat_list_layout_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spaces shows direct messages and the channels of each space apart. List shows them all in one list."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Spaces zeigt Direktnachrichten und die Kanäle jedes Space getrennt. Liste zeigt alles in einer Liste."
+          }
+        }
+      }
+    },
+    "list_conversations": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Conversations"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unterhaltungen"
+          }
+        }
+      }
+    },
     "chats_tab_spaces": {
       "localizations": {
         "en": {

@@ -312,8 +312,12 @@ settings-show-formatting = Formatierungsleiste zeigen
 privacy-last-seen-off = Deine Administration hat „Zuletzt online“ für alle abgeschaltet.
 
 # Bereiche: Kanäle verschieben, stummschalten, Suche im Bereich, gruppierte Seitenleiste, Aufbewahrung
+settings-sidebar-layout = Chats und Kanäle
+settings-sidebar-layout-hint = Spaces zeigt Direktnachrichten und jeden Space getrennt. Liste zeigt Direktnachrichten und die Kanäle aller Spaces in einer Liste.
+settings-sidebar-layout-spaces = Spaces
+settings-sidebar-layout-list = Liste
 settings-sidebar-grouped = Alle Bereiche in einer Seitenleiste zeigen
-settings-sidebar-grouped-hint = Listet die Kanäle aller Bereiche nach Bereich gruppiert, statt den Bereichswechsler zu verwenden.
+settings-sidebar-grouped-hint = Listet die Kanäle aller Bereiche nach Bereich gruppiert, statt den Bereichswechsler zu verwenden. Gilt für die Ansicht Spaces.
 settings-reopen-last = Zuletzt geöffnete Unterhaltung wieder öffnen
 settings-reopen-last-hint = Wenn du zu Start oder einem Space zurückkehrst, öffnet sich die Unterhaltung, die dort zuletzt offen war. Aus: Start zeigt die Übersicht, ein Space öffnet seinen ersten Kanal.
 
