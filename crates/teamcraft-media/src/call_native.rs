@@ -40,7 +40,7 @@ use teamcraft_proto::{
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tokio_tungstenite::tungstenite::Bytes;
 use tracing::{debug, info, warn};
 use wtransport::config::ClientConfigBuilder;
@@ -995,6 +995,9 @@ struct CallConnection {
   /// Lost links, kept open until the call is back: dropping one closes it, which the SFU would
   /// take for a deliberate leave and free the slot (it keeps it only for lost connections).
   lost_links: Vec<Link>,
+  /// Tries to move the call to QUIC that were still running when the link was lost, kept like the
+  /// lost links (#1338).
+  lost_tries: Vec<LostTry>,
   monitor: PathMonitor,
   route: RouteWatch,
   maybe_schedule: Option<ReconnectSchedule>,
@@ -1034,6 +1037,17 @@ struct SwitchBack {
 
 /// What a try to move the call to QUIC came to.
 type SwitchTry = Result<SwitchedLink, SwitchError>;
+
+/// A try to move the call to QUIC that was still running when the link was lost (#1338). The SFU
+/// may have moved the session to it in that moment: dropping its connection would read as a leave,
+/// and the rejoin would be a fresh join (the others would see a leave and a join, and DAVE would
+/// re-key). So it runs on, and the link it brings is kept open like the lost ones until the rejoin
+/// is back in the call. Dropping this ends the try and closes that link.
+struct LostTry {
+  running: AbortHandle,
+  /// Holds the link the try brought, if it brought one (not read any more).
+  kept: JoinHandle<Option<Link>>,
+}
 
 /// A QUIC connection the SFU moved the session to.
 struct SwitchedLink {
@@ -1140,6 +1154,7 @@ impl CallConnection {
     Self {
       maybe_link: Some(link),
       lost_links: Vec::new(),
+      lost_tries: Vec::new(),
       monitor: PathMonitor::new(now),
       route: RouteWatch::new(),
       maybe_schedule: None,
@@ -1193,6 +1208,10 @@ impl CallConnection {
     warn!("lost the connection to the call, rejoining");
     link.stop_reading();
     self.lost_links.push(link);
+    // So may be the one a try still running brings: it runs on instead of being aborted.
+    if let Some(running) = self.switch.maybe_try.take() {
+      self.lost_tries.push(LostTry::keep(running));
+    }
     // A link the session may have moved to is the SFU's slot as well: kept open, as lost ones are.
     for moving in self.switch.stop() {
       moving.stop_reading();
@@ -1335,6 +1354,7 @@ impl CallConnection {
       self.pacer.on_back(now);
       // The slot is on the new connection now; the SFU no longer cares about the old ones.
       self.lost_links.clear();
+      self.lost_tries.clear();
       info!("back in the call");
     }
   }
@@ -1504,6 +1524,31 @@ impl CallConnection {
       link.stop_reading();
       link.close_as_leave();
     }
+  }
+}
+
+impl LostTry {
+  fn keep(running: JoinHandle<SwitchTry>) -> Self {
+    let abort = running.abort_handle();
+    let kept = tokio::spawn(async move {
+      let link = match running.await {
+        Ok(Ok(SwitchedLink { link, .. })) => link,
+        Ok(Err(SwitchError::NoAnswer(link))) => *link,
+        // Nothing the SFU could have moved the session to.
+        Ok(Err(_)) | Err(_) => return None,
+      };
+      link.stop_reading();
+      Some(link)
+    });
+    Self { running: abort, kept }
+  }
+}
+
+impl Drop for LostTry {
+  fn drop(&mut self) {
+    self.running.abort();
+    // A finished holder's link goes with its handle, right after this.
+    self.kept.abort();
   }
 }
 
@@ -2978,6 +3023,73 @@ mod tests {
       application_close_end(u64::from(SFU_SWITCHED_CLOSE_CODE)),
       LinkEnd::Switched
     );
+  }
+
+  /// A try still running when the fallback broke (#1338): the SFU may move the session to it in
+  /// that moment, so its link stays open until the rejoin is back in the call.
+  mod lost_tries {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_link_the_try_brings_after_the_loss_is_kept_until_the_rejoin_settles() {
+      let (link, probe) = probe_link();
+      let (answer, answered) = oneshot::channel::<()>();
+      let running = tokio::spawn(async move {
+        // The SFU's `switched` comes after the fallback broke.
+        let _ = answered.await;
+        Ok(SwitchedLink {
+          link,
+          early: Vec::new(),
+        })
+      });
+      let lost = LostTry::keep(running);
+      answer.send(()).unwrap();
+      for _ in 0..10 {
+        tokio::task::yield_now().await;
+      }
+      assert!(lost.kept.is_finished());
+      assert!(!probe.is_closed(), "kept open for the rejoin");
+      drop(lost);
+      assert!(probe.is_closed(), "closed once the rejoin settled");
+    }
+
+    #[tokio::test]
+    async fn a_try_still_running_runs_on_until_the_rejoin_settles() {
+      let (link, probe) = probe_link();
+      let running = tokio::spawn(async move {
+        std::future::pending::<()>().await;
+        Ok(SwitchedLink {
+          link,
+          early: Vec::new(),
+        })
+      });
+      let lost = LostTry::keep(running);
+      for _ in 0..10 {
+        tokio::task::yield_now().await;
+      }
+      assert!(!probe.is_closed(), "not aborted");
+      drop(lost);
+      for _ in 0..10 {
+        tokio::task::yield_now().await;
+      }
+      assert!(probe.is_closed(), "aborted with the rest");
+    }
+
+    /// A link whose drop shows in the returned sender.
+    fn probe_link() -> (Link, mpsc::UnboundedSender<LinkInput>) {
+      let (signal_out, _) = mpsc::unbounded_channel();
+      let (probe, inputs) = mpsc::unbounded_channel();
+      let link = Link {
+        path: LinkPath::Fallback {
+          sender: FallbackSender::new(MediaQueueConfig::default()),
+          received: Arc::new(AtomicU64::new(0)),
+        },
+        signal_out,
+        inputs,
+        tasks: Vec::new(),
+      };
+      (link, probe)
+    }
   }
 
   #[test]
