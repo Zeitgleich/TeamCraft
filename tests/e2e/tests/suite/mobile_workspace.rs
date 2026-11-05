@@ -15,11 +15,17 @@
 //! `_HOLD_SECS` keeps the server up (default 12 hours). Writing a number to the file the log names
 //! sends that many more messages, spread over the channels and the direct messages, for measuring
 //! a return after new messages arrived.
+//!
+//! With `MOBILE_WORKSPACE_CALLS=1` the server runs an SFU with its WebSocket fallback (QUIC doesn't
+//! pass `adb reverse`; `adb reverse` the fallback's port, `ss -ltnp` shows it), and `call dm 60` or
+//! `call channel 60` in the control file starts a call with a test tone in the direct message or
+//! the first channel.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use teamcraft_core::client::OutgoingFile;
+use teamcraft_e2e::call::{join_call, run_call};
 use teamcraft_e2e::scenario::space_with;
 use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::{ConversationId, UserId};
@@ -50,13 +56,15 @@ const REACTIONS: [&str; 4] = ["👍", "🎉", "👀", "❤️"];
 async fn serve_a_large_workspace_to_a_device() {
   let user = std::env::var("MOBILE_WORKSPACE_USER").unwrap_or_else(|_| "carol".into());
   let size = Size::from_env();
-  let Some(stack) = Stack::builder()
+  let mut builder = Stack::builder()
     .with_port(PORT)
     .with_env("TEAMCRAFT_SECURITY__RATE_LIMITS__IS_ENABLED", "false")
-    .with_env("TEAMCRAFT_DATABASE__MAX_CONNECTIONS", "16")
-    .start()
-    .await
-  else {
+    .with_env("TEAMCRAFT_DATABASE__MAX_CONNECTIONS", "16");
+  if size.has_calls {
+    // QUIC doesn't pass `adb reverse`; the SFU's WebSocket fallback does (reverse its port too).
+    builder = builder.with_call_fallback();
+  }
+  let Some(stack) = builder.start().await else {
     return;
   };
   let mut alice = Peer::enroll(&stack, "alice").await;
@@ -65,7 +73,8 @@ async fn serve_a_large_workspace_to_a_device() {
   let channels = seed(&stack, &mut alice, &mut bob, device_user, size).await;
   let control = burst_file();
   eprintln!(
-    "WORKSPACE: ready, {} conversations; write a number to {} to send that many more",
+    "WORKSPACE: ready, {} conversations; write a number to {} to send that many more, or \
+     `call dm <seconds>` / `call channel <seconds>` for a call with a test tone",
     channels.len(),
     control.display()
   );
@@ -74,14 +83,41 @@ async fn serve_a_large_workspace_to_a_device() {
   while Instant::now() < deadline {
     alice.heartbeat().await;
     bob.heartbeat().await;
-    if let Some(count) = take_burst(&control) {
-      let started = Instant::now();
-      for index in 0..count {
-        let writer = if index % 2 == 0 { &mut alice } else { &mut bob };
-        send(writer, channels[index % channels.len()], sent + index).await;
-      }
-      sent += count;
-      eprintln!("WORKSPACE: sent {count} more in {:?}", started.elapsed());
+    match take_command(&control) {
+      Some(Command::Send(count)) => {
+        let started = Instant::now();
+        for index in 0..count {
+          let writer = if index % 2 == 0 { &mut alice } else { &mut bob };
+          send(writer, channels[index % channels.len()], sent + index).await;
+        }
+        sent += count;
+        eprintln!("WORKSPACE: sent {count} more in {:?}", started.elapsed());
+      },
+      Some(Command::Call { is_direct, duration }) => {
+        let Some(sfu) = stack.maybe_sfu.as_ref() else {
+          eprintln!("WORKSPACE: no calls: start with MOBILE_WORKSPACE_CALLS=1");
+          continue;
+        };
+        let hash = sfu.certificate_hash;
+        // The direct message is Alice's with the device's user, the last conversation.
+        let conversation = if is_direct {
+          channels[channels.len() - 1]
+        } else {
+          channels[0]
+        };
+        eprintln!("WORKSPACE: calling in {conversation} for {duration:?}");
+        let alice_call = join_call(&mut alice, conversation, hash, 330.0).await;
+        if is_direct {
+          let stats = run_call(alice_call, duration).await;
+          eprintln!("WORKSPACE: call ended: {stats:?}");
+        } else {
+          let bob_call = join_call(&mut bob, conversation, hash, 550.0).await;
+          let (alice_stats, bob_stats) =
+            tokio::join!(run_call(alice_call, duration), run_call(bob_call, duration));
+          eprintln!("WORKSPACE: call ended: {alice_stats:?} {bob_stats:?}");
+        }
+      },
+      None => {},
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
   }
@@ -96,6 +132,8 @@ struct Size {
   messages: usize,
   long_channel_messages: usize,
   images: usize,
+  /// An SFU with its fallback, for calls with the device (`MOBILE_WORKSPACE_CALLS=1`).
+  has_calls: bool,
   hold: Duration,
 }
 
@@ -107,6 +145,7 @@ impl Size {
       messages: number("MESSAGES", 40_000),
       long_channel_messages: number("LONG_CHANNEL_MESSAGES", 10_000),
       images: number("IMAGES", 60),
+      has_calls: number("CALLS", 0) == 1,
       hold: Duration::from_secs(number("HOLD_SECS", 12 * 3600) as u64),
     }
   }
@@ -279,9 +318,23 @@ fn burst_file() -> PathBuf {
   std::env::temp_dir().join(format!("teamcraft-mobile-workspace-{PORT}.burst"))
 }
 
-/// The number written to the control file, which is then removed.
-fn take_burst(path: &PathBuf) -> Option<usize> {
+/// What the control file asks for.
+enum Command {
+  Send(usize),
+  Call { is_direct: bool, duration: Duration },
+}
+
+/// The command written to the control file, which is then removed.
+fn take_command(path: &PathBuf) -> Option<Command> {
   let text = std::fs::read_to_string(path).ok()?;
   let _ = std::fs::remove_file(path);
-  text.trim().parse().ok()
+  let words: Vec<&str> = text.split_whitespace().collect();
+  match words.as_slice() {
+    [count] => count.parse().ok().map(Command::Send),
+    ["call", kind, seconds] => Some(Command::Call {
+      is_direct: *kind == "dm",
+      duration: Duration::from_secs(seconds.parse().ok()?),
+    }),
+    _ => None,
+  }
 }
