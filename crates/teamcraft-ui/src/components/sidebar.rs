@@ -11,6 +11,7 @@ use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
 use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::icons::{Icon, IconName};
+use crate::components::scheduled_view::needs_attention;
 use crate::components::space_tile::SpaceTile;
 use crate::components::typing_indicator::{TypingDots, typing_text};
 use crate::entry_actions::MenuEntry;
@@ -274,6 +275,7 @@ pub fn GlobalEntries(entries: EntriesDisclosure, id: &'static str) -> impl IntoV
         <Icon name=IconName::Bookmark />
         <span class="sb-name">{move || i18n.t("sidebar-saved")}</span>
       </button>
+      <ScheduledEntry />
       <button
         class="sb-item"
         class:current=move || state.view.get() == MainView::Files
@@ -1069,5 +1071,47 @@ fn close_section(phase: RwSignal<SectionPhase>) {
 fn end_phase(ev: &leptos::ev::AnimationEvent, phase: RwSignal<SectionPhase>) {
   if ev.target() == ev.current_target() {
     phase.set(SectionPhase::Still);
+  }
+}
+
+/// The way to the messages waiting for their time: offered while scheduling is allowed or something
+/// waits, with the number of those that need the user (docs/scheduled-messages.md: nothing waits
+/// silently).
+#[component]
+fn ScheduledEntry() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let overview = Memo::new(move |_| state.read(|backend| backend.scheduled_overview()));
+  let is_offered =
+    move || overview.with(|overview| overview.policy.is_enabled || !overview.messages.is_empty());
+  let waiting_for_me = Memo::new(move |_| {
+    overview.with(|overview| {
+      let count = overview
+        .messages
+        .iter()
+        .filter(|message| needs_attention(message.status))
+        .count();
+      u32::try_from(count).unwrap_or(u32::MAX)
+    })
+  });
+  view! {
+    <Show when=is_offered fallback=|| ()>
+      <button
+        class="sb-item"
+        class:current=move || state.view.get() == MainView::Scheduled
+        aria-current=move || (state.view.get() == MainView::Scheduled).then_some("page")
+        on:click=move |_| state.open_scheduled()
+      >
+        <Icon name=IconName::Clock />
+        <span class="sb-name">{move || i18n.t("sidebar-scheduled")}</span>
+        <span
+          class="visually-hidden"
+          prop:hidden=move || waiting_for_me.get() == 0
+        >
+          {move || i18n.t_count("sidebar-scheduled-attention", waiting_for_me.get() as usize)}
+        </span>
+        <CountBadge count=waiting_for_me is_decorative=true maybe_cap=SIDEBAR_BADGE_CAP />
+      </button>
+    </Show>
   }
 }

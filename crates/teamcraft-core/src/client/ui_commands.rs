@@ -121,6 +121,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_thread,
         body,
       } => self.update_account_data(|data, now| data.set_draft(conversation, maybe_thread, &body, now)),
+      CoreCommand::ScheduleMessage { message, due_at_ms } => self.schedule_message(message, due_at_ms),
+      CoreCommand::UpdateScheduled { id, body, due_at_ms } => self.update_scheduled(id, body, due_at_ms),
+      CoreCommand::CancelScheduled { id } => self.cancel_scheduled(id),
+      CoreCommand::SendScheduledNow { id } => self.send_scheduled_now(id).await,
       CoreCommand::SaveSearch { id, name, query } => self.update_account_data(|data, now| {
         data.save_search(id, &name, &query, now);
         true

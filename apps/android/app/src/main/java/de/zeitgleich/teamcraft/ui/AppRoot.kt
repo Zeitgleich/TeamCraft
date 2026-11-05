@@ -45,6 +45,7 @@ import uniffi.teamcraft_ffi.OpenedAppLink
 import uniffi.teamcraft_ffi.OpenedAppLinkStep
 import uniffi.teamcraft_ffi.openAppLink
 import de.zeitgleich.teamcraft.ui.screens.SavedScreen
+import de.zeitgleich.teamcraft.ui.screens.ScheduledScreen
 import de.zeitgleich.teamcraft.ui.screens.SpaceViewsScreen
 import de.zeitgleich.teamcraft.ui.screens.ThreadsScreen
 import de.zeitgleich.teamcraft.ui.screens.ConversationScreen
@@ -369,6 +370,9 @@ private fun ReadyNavigation(
         onOpenThread = { conversation, thread -> navigation.navigate("thread/$conversation/$thread") },
         onBack = { navigation.popBackStack() },
       )
+    }
+    composable("scheduled") {
+      ScheduledScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })
     }
     composable("saved") {
       SavedScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })

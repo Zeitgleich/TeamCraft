@@ -916,3 +916,14 @@ policy-role-provider-details = Identity provider settings
 roster-signing-reported-gone = The server reports that { $names } no longer holds an admin role. Unless the identity provider says otherwise, they come off the roster in a few days, one at a time. If that's wrong, check the server: nothing else is needed.
 roster-signing-awaiting-owner = The identity provider makes you an owner. That's in force as soon as another owner's app has been open. If no other owner is left, ask your operator to give the former owner their role back for a moment.
 roster-standing-expired-ask-unnamed = No owner signed the admin roster within 30 days, so admin rights are paused on every app. An owner only needs to open TeamCraft on a device with their keys.
+
+policy-scheduled = Scheduled messages
+policy-scheduled-hint = Each person's own devices hold these, encrypted, so the server can't see or enforce them. People's apps apply this signed rule.
+policy-scheduled-enabled = People can schedule messages
+policy-scheduled-enabled-hint = Off: "Send later" goes away, and messages already scheduled wait until their owner sends or cancels them.
+policy-scheduled-horizon = How far ahead
+policy-scheduled-late = Still send by itself when late by
+policy-hours = { $count ->
+    [one] 1 hour
+   *[other] { $count } hours
+}

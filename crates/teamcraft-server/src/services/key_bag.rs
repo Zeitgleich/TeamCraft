@@ -5,6 +5,7 @@
 use teamcraft_crypto::backup::{RawWrappedKey, WrapMethod, split_wrapped_key_list};
 use teamcraft_db::KeyBagOutcome;
 use teamcraft_proto::{Base64Bytes, GatewayEvent, KeyBagResponse, PutKeyBagRequest, UserKind};
+use time::OffsetDateTime;
 
 use super::convert::unix_millis;
 use crate::auth::AuthenticatedUser;
@@ -115,6 +116,7 @@ pub async fn get_key_bag(state: &AppState, caller: &AuthenticatedUser) -> Result
     encrypted_key_bag: Base64Bytes::new(bag.encrypted_key_bag),
     wrapped_backup_keys: Base64Bytes::new(bag.wrapped_backup_keys),
     updated_at: unix_millis(bag.updated_at),
+    maybe_server_now: Some(unix_millis(OffsetDateTime::now_utc())),
   })
 }
 

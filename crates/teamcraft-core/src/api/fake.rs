@@ -2109,6 +2109,7 @@ impl ServerApi for FakeServerApi {
           encrypted_key_bag: key_bag.encrypted_key_bag.clone(),
           wrapped_backup_keys: key_bag.wrapped_backup_keys.clone(),
           updated_at: UnixMillis(0),
+          maybe_server_now: None,
         },
       );
       let stored = IdentityKeyResponse {
@@ -4048,6 +4049,7 @@ impl ServerApi for FakeServerApi {
         encrypted_key_bag: request.encrypted_key_bag.clone(),
         wrapped_backup_keys: request.wrapped_backup_keys.clone(),
         updated_at: UnixMillis(0),
+        maybe_server_now: None,
       };
       state.key_bags.insert(me, stored.clone());
       // Like the server: the user's devices learn about the new version.
@@ -4634,10 +4636,15 @@ impl ServerApi for FakeServerApi {
 
   async fn key_bag(&self) -> Result<KeyBagResponse, ApiError> {
     self.with(|state, me| {
+      let server_now = state.now_ms();
       state
         .key_bags
         .get(&me)
         .cloned()
+        .map(|bag| KeyBagResponse {
+          maybe_server_now: Some(UnixMillis(server_now)),
+          ..bag
+        })
         .ok_or_else(|| ApiError::status(404, ErrorCode::KeyBagNotFound, "no key bag"))
     })
   }

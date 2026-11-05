@@ -15,6 +15,8 @@ use teamcraft_proto::{
   BackgroundId, Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId, UserId,
 };
 
+use crate::store::Priority;
+
 /// Tombstones older than this are dropped when merging (every device has synced by then).
 pub const TOMBSTONE_LIFETIME_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 /// How far the activity read mark may lie ahead of this device's clock.
@@ -28,6 +30,11 @@ pub struct AccountData {
   /// Unsent text per conversation or thread, keyed by [`draft_key`]; an empty body is "no draft".
   #[serde(default)]
   pub drafts: BTreeMap<String, Stamped<Draft>>,
+  /// Messages waiting for their time, keyed by [`scheduled_key`] (docs/scheduled-messages.md). The
+  /// text stays here until any device of the user sends it; a sent or cancelled one is a tombstone
+  /// without its text.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub scheduled: BTreeMap<String, Stamped<ScheduledEntry>>,
   /// Saved searches, keyed by their ID (random, so devices don't collide).
   #[serde(default)]
   pub saved_searches: BTreeMap<u64, Stamped<SavedSearchEntry>>,
@@ -165,6 +172,33 @@ pub struct Draft {
   pub body: String,
 }
 
+/// A message one of the user's devices sends at `due_at_ms` (docs/scheduled-messages.md). Fields a
+/// later version adds have a default, so this and older entries stay readable (an unreadable one
+/// would cost the whole account data).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScheduledEntry {
+  /// Also the message's ID when it goes out: the server stores one message per ID, so two devices
+  /// racing, or a retry after a crash, send it once.
+  pub client_message_id: ClientMessageId,
+  pub conversation_id: ConversationId,
+  #[serde(rename = "thread_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_thread_id: Option<ThreadId>,
+  pub body: String,
+  /// Server time, Unix milliseconds.
+  pub due_at_ms: i64,
+  /// The message this one quotes, as the server numbered it.
+  #[serde(rename = "reply_to", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_reply_to: Option<MessageId>,
+  #[serde(default)]
+  pub priority: Priority,
+  #[serde(default)]
+  pub wants_acknowledgement: bool,
+  #[serde(default)]
+  pub is_silent: bool,
+  #[serde(default)]
+  pub also_send_to_channel: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnreadMark {
   pub conversation_id: ConversationId,
@@ -207,6 +241,7 @@ impl AccountData {
   pub fn merge(&mut self, other: &Self, now_ms: i64) {
     merge_map(&mut self.saved, &other.saved);
     merge_map(&mut self.drafts, &other.drafts);
+    merge_map(&mut self.scheduled, &other.scheduled);
     merge_map(&mut self.saved_searches, &other.saved_searches);
     merge_map(&mut self.marked_unread, &other.marked_unread);
     merge_map(&mut self.pins, &other.pins);
@@ -267,6 +302,9 @@ impl AccountData {
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
     self
       .drafts
+      .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
+    self
+      .scheduled
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
     self
       .saved_searches
@@ -518,6 +556,16 @@ impl AccountData {
       entry.updated_at_ms = now_ms;
       has_changed = true;
     }
+    for entry in self
+      .scheduled
+      .values_mut()
+      .filter(|entry| entry.value.conversation_id == conversation && !entry.is_removed)
+    {
+      entry.is_removed = true;
+      entry.value.body = String::new();
+      entry.updated_at_ms = now_ms;
+      has_changed = true;
+    }
     has_changed
   }
 
@@ -573,6 +621,52 @@ impl AccountData {
       },
     );
     true
+  }
+
+  /// The messages waiting to be sent, soonest first.
+  pub fn scheduled_messages(&self) -> Vec<&ScheduledEntry> {
+    let mut entries: Vec<&ScheduledEntry> = self
+      .scheduled
+      .values()
+      .filter(|entry| !entry.is_removed)
+      .map(|entry| &entry.value)
+      .collect();
+    entries.sort_by_key(|entry| entry.due_at_ms);
+    entries
+  }
+
+  pub fn scheduled_message(&self, id: ClientMessageId) -> Option<&ScheduledEntry> {
+    self
+      .scheduled
+      .get(&scheduled_key(id))
+      .filter(|entry| !entry.is_removed)
+      .map(|entry| &entry.value)
+  }
+
+  /// Adds a scheduled message or replaces it with a newer version of the same message.
+  pub fn set_scheduled(&mut self, entry: ScheduledEntry, now_ms: i64) {
+    self.scheduled.insert(
+      scheduled_key(entry.client_message_id),
+      Stamped {
+        value: entry,
+        updated_at_ms: now_ms,
+        is_removed: false,
+      },
+    );
+  }
+
+  /// Ends a scheduled message (cancelled, or on its way): a tombstone without the text, so an older
+  /// copy of the key bag doesn't bring it back. Returns whether it was still waiting.
+  pub fn remove_scheduled(&mut self, id: ClientMessageId, now_ms: i64) -> bool {
+    match self.scheduled.get_mut(&scheduled_key(id)) {
+      Some(entry) if !entry.is_removed => {
+        entry.is_removed = true;
+        entry.value.body = String::new();
+        entry.updated_at_ms = now_ms;
+        true
+      },
+      _ => false,
+    }
   }
 
   pub fn saved_searches(&self) -> Vec<(u64, &SavedSearchEntry)> {
@@ -656,6 +750,14 @@ pub fn saved_key(conversation: ConversationId, message: ClientMessageId) -> Stri
     .map(|byte| format!("{byte:02x}"))
     .collect();
   format!("{conversation}/{hex}")
+}
+
+pub fn scheduled_key(message: ClientMessageId) -> String {
+  message
+    .as_bytes()
+    .iter()
+    .map(|byte| format!("{byte:02x}"))
+    .collect()
 }
 
 pub fn draft_key(conversation: ConversationId, maybe_thread: Option<ThreadId>) -> String {
@@ -796,6 +898,115 @@ mod tests {
       assert!(data.is_pruned_sender(KEY, 100));
       data.forget_tombstones(1_000 + TOMBSTONE_LIFETIME_MS);
       assert!(data.pruned_senders.is_empty());
+    }
+  }
+
+  mod scheduled {
+    use super::*;
+
+    #[test]
+    fn a_cancel_on_one_device_wins_over_the_older_copy_on_the_other() {
+      let mut phone = AccountData::default();
+      phone.set_scheduled(entry(1, "later"), 100);
+      let mut laptop = phone.clone();
+      assert!(phone.remove_scheduled(client_id(1), 200));
+      laptop.merge(&phone, 300);
+      assert!(laptop.scheduled_messages().is_empty());
+      phone.merge(&laptop, 300);
+      assert!(phone.scheduled_messages().is_empty());
+    }
+
+    #[test]
+    fn the_newer_edit_wins_and_a_removed_one_keeps_no_text() {
+      let mut phone = AccountData::default();
+      phone.set_scheduled(entry(1, "first"), 100);
+      let mut laptop = phone.clone();
+      laptop.set_scheduled(entry(1, "second"), 200);
+      phone.merge(&laptop, 300);
+      assert_eq!(phone.scheduled_message(client_id(1)).unwrap().body, "second");
+      phone.remove_scheduled(client_id(1), 400);
+      assert!(
+        !String::from_utf8(phone.to_bytes().unwrap())
+          .unwrap()
+          .contains("second")
+      );
+    }
+
+    #[test]
+    fn they_are_listed_soonest_first() {
+      let mut data = AccountData::default();
+      data.set_scheduled(
+        ScheduledEntry {
+          due_at_ms: 20,
+          ..entry(1, "b")
+        },
+        1,
+      );
+      data.set_scheduled(
+        ScheduledEntry {
+          due_at_ms: 10,
+          ..entry(2, "a")
+        },
+        1,
+      );
+      let bodies: Vec<&str> = data
+        .scheduled_messages()
+        .iter()
+        .map(|entry| entry.body.as_str())
+        .collect();
+      assert_eq!(bodies, ["a", "b"]);
+    }
+
+    #[test]
+    fn a_gone_conversation_takes_its_scheduled_messages_along() {
+      let mut data = AccountData::default();
+      data.set_scheduled(entry(1, "later"), 1);
+      assert!(data.forget_conversation(conversation(), 2));
+      assert!(data.scheduled_messages().is_empty());
+    }
+
+    #[test]
+    fn old_tombstones_go() {
+      let mut data = AccountData::default();
+      data.set_scheduled(entry(1, "later"), 1);
+      data.remove_scheduled(client_id(1), 2);
+      data.forget_tombstones(2 + TOMBSTONE_LIFETIME_MS);
+      assert!(data.scheduled.is_empty());
+    }
+
+    #[test]
+    fn a_priority_of_a_newer_version_leaves_the_entry_readable() {
+      let mut data = AccountData::default();
+      data.set_scheduled(entry(1, "later"), 1);
+      let text = String::from_utf8(data.to_bytes().unwrap()).unwrap().replace(
+        "\"priority\":\"normal\"",
+        "\"priority\":\"shouting\",\"new_field\":1",
+      );
+      let read = AccountData::from_bytes(text.as_bytes()).unwrap();
+      assert_eq!(read.scheduled_message(client_id(1)).unwrap().body, "later");
+    }
+
+    fn conversation() -> ConversationId {
+      ConversationId::from_snowflake(Snowflake::new(7).unwrap())
+    }
+
+    fn client_id(byte: u8) -> ClientMessageId {
+      ClientMessageId::from_bytes([byte; 16])
+    }
+
+    fn entry(byte: u8, body: &str) -> ScheduledEntry {
+      ScheduledEntry {
+        client_message_id: client_id(byte),
+        conversation_id: conversation(),
+        maybe_thread_id: None,
+        body: body.to_owned(),
+        due_at_ms: 1_000,
+        maybe_reply_to: None,
+        priority: Priority::Normal,
+        wants_acknowledgement: false,
+        is_silent: false,
+        also_send_to_channel: false,
+      }
     }
   }
 

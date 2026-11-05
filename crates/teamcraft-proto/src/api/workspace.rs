@@ -521,6 +521,58 @@ impl Default for OwnerPolicy {
   }
 }
 
+/// How far ahead a message may be scheduled in a new workspace.
+pub const DEFAULT_SCHEDULE_HORIZON_DAYS: u32 = 365;
+/// The farthest horizon a workspace may set: the entries wait in the user's key bag until then.
+pub const MAX_SCHEDULE_HORIZON_DAYS: u32 = 3650;
+/// How late a scheduled message may still go out by itself in a new workspace.
+pub const DEFAULT_SCHEDULE_LATE_LIMIT_HOURS: u32 = 24;
+/// The longest late limit a workspace may set (30 days).
+pub const MAX_SCHEDULE_LATE_LIMIT_HOURS: u32 = 720;
+
+/// "Send later" (docs/scheduled-messages.md). Only the sender's own devices hold a scheduled message,
+/// so the server can't enforce any of this; member clients do, and an owner signs it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ScheduledMessagePolicy {
+  /// People may schedule messages. Off, those already scheduled wait for their owner to send or
+  /// cancel them.
+  #[serde(default = "default_true")]
+  pub is_enabled: bool,
+  /// A message may be scheduled at most this many days ahead.
+  #[serde(default = "default_schedule_horizon_days")]
+  pub max_horizon_days: u32,
+  /// A message whose time passed longer ago than this (all of the sender's devices were off) doesn't
+  /// go out by itself: it may be stale by then, so its owner decides.
+  #[serde(default = "default_schedule_late_limit_hours")]
+  pub late_limit_hours: u32,
+}
+
+fn default_schedule_horizon_days() -> u32 {
+  DEFAULT_SCHEDULE_HORIZON_DAYS
+}
+
+fn default_schedule_late_limit_hours() -> u32 {
+  DEFAULT_SCHEDULE_LATE_LIMIT_HOURS
+}
+
+impl Default for ScheduledMessagePolicy {
+  fn default() -> Self {
+    Self {
+      is_enabled: true,
+      max_horizon_days: DEFAULT_SCHEDULE_HORIZON_DAYS,
+      late_limit_hours: DEFAULT_SCHEDULE_LATE_LIMIT_HOURS,
+    }
+  }
+}
+
+impl ScheduledMessagePolicy {
+  /// Whether the limits are in their allowed ranges.
+  pub fn is_valid(&self) -> bool {
+    (1..=MAX_SCHEDULE_HORIZON_DAYS).contains(&self.max_horizon_days)
+      && (1..=MAX_SCHEDULE_LATE_LIMIT_HOURS).contains(&self.late_limit_hours)
+  }
+}
+
 /// The security and retention policy of the workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct WorkspacePolicy {
@@ -561,6 +613,9 @@ pub struct WorkspacePolicy {
   /// Importing history from another chat (e2ee.md §4.10); off when absent.
   #[serde(default)]
   pub import: crate::ImportPolicy,
+  /// "Send later" (docs/scheduled-messages.md); allowed with the defaults when absent.
+  #[serde(default)]
+  pub scheduled_messages: ScheduledMessagePolicy,
   /// How the admin roster follows the identity provider (e2ee.md §3.1.3). Absent means automatic.
   /// A policy that doesn't name it doesn't change it: an older owner's app re-signs without it, so
   /// clients keep the last one they verified. Boxed: every client future that holds a policy holds this.
@@ -736,6 +791,7 @@ impl Default for WorkspacePolicy {
       screen_share: ScreenSharePolicy::default(),
       notetaker: NotetakerPolicy::default(),
       import: crate::ImportPolicy::default(),
+      scheduled_messages: ScheduledMessagePolicy::default(),
     }
   }
 }

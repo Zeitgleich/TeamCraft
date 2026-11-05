@@ -8,6 +8,7 @@ use teamcraft_client_api::actions::MessagePriority;
 
 use crate::areas::{self, Place, lazy_area};
 use crate::components::icons::{Icon, IconName};
+use crate::components::scheduled_view::SendLaterItems;
 use crate::components::sheet::MenuSurface;
 use crate::editor_doc::{BlockFormat, InlineStyle};
 use crate::i18n::{I18n, use_i18n};
@@ -188,6 +189,11 @@ pub fn SendOptionsMenu(
   priority: RwSignal<MessagePriority>,
   is_silent: RwSignal<bool>,
   wants_acknowledgement: RwSignal<bool>,
+  /// "Send later": whether the composer holds something that can wait, and why not otherwise.
+  #[prop(into)]
+  can_schedule: Signal<bool>,
+  #[prop(into)] maybe_schedule_hint: Signal<Option<String>>,
+  on_schedule: Callback<i64>,
   on_close: Callback<()>,
 ) -> impl IntoView {
   let i18n = use_i18n();
@@ -256,6 +262,7 @@ pub fn SendOptionsMenu(
       <div class="menu-sep" role="separator"></div>
       {toggle_item(is_silent, "composer-silent", "composer-silent-detail")}
       {toggle_item(wants_acknowledgement, "composer-ack", "composer-ack-detail")}
+      <SendLaterItems is_ready=can_schedule maybe_blocked_hint=maybe_schedule_hint on_pick=on_schedule />
     </MenuSurface>
   }
 }

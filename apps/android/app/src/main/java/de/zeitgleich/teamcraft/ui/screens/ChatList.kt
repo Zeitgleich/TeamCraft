@@ -262,6 +262,7 @@ fun ChatListScreen(
       OfflineBanner(onSignInAgain = { viewModel.signOut() })
       maybeFirstSync?.let { FirstSyncBar(it) }
       NotificationPermissionCard()
+      ScheduledAttentionCard(viewModel) { onNavigate("scheduled") }
     },
     isGuest = isGuest,
     joinRequestCount = joinRequests.size,
@@ -442,6 +443,7 @@ private fun ActivityTab(
   Column(Modifier.fillMaxSize()) {
     EntryRow(Icons.AutoMirrored.Filled.List, stringResource(R.string.threads_title)) { onNavigate("threads") }
     EntryRow(Icons.Filled.Star, stringResource(R.string.saved_title)) { onNavigate("saved") }
+    EntryRow(Icons.Filled.DateRange, stringResource(R.string.scheduled_title)) { onNavigate("scheduled") }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     if (waiting.isEmpty() && joinRequestCount == 0) {
       RemainingEmptyState(
@@ -1199,6 +1201,7 @@ private fun prefix(kind: ConversationKind): String = when (kind) {
 private val HOME_ENTRIES = listOf(
   Triple("threads", Icons.AutoMirrored.Filled.List, R.string.home_entry_threads),
   Triple("saved", Icons.Filled.Star, R.string.home_entry_saved),
+  Triple("scheduled", Icons.Filled.DateRange, R.string.home_entry_scheduled),
   Triple("meetings", Icons.Filled.DateRange, R.string.home_entry_meetings),
   Triple("browse?people=true", Icons.Filled.Person, R.string.home_entry_people),
 )

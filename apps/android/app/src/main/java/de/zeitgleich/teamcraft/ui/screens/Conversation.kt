@@ -1027,6 +1027,28 @@ internal fun Composer(
     ReplyTarget.current.value = null
     onSent()
   }
+  var isSendLaterOpen by remember { mutableStateOf(false) }
+  // The time while @channel waits for its confirmation; none for a plain send.
+  var maybeSendLaterAt by remember { mutableStateOf<Long?>(null) }
+  fun schedule(dueAtMs: Long) {
+    val options = SendOptions(
+      maybeThread = maybeThread,
+      maybeReplyTo = maybeReply?.message?.id,
+      priority = priority,
+      wantsAcknowledgement = wantsAcknowledgement,
+      isSilent = isSilent,
+      alsoSendToChannel = alsoToChannel,
+    )
+    viewModel.act(ChatActions.schedule(conversationId, emojiConvert(text.trim()), options, dueAtMs))
+    viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
+    text = ""
+    priority = "normal"
+    wantsAcknowledgement = false
+    isSilent = false
+    ReplyTarget.current.value = null
+    maybeSendLaterAt = null
+    onSent()
+  }
   var isConfirmingChannel by remember { mutableStateOf(false) }
   if (isConfirmingChannel) {
     AlertDialog(
@@ -1036,10 +1058,16 @@ internal fun Composer(
       confirmButton = {
         TextButton(onClick = {
           isConfirmingChannel = false
-          send()
+          val maybeAt = maybeSendLaterAt
+          if (maybeAt != null) schedule(maybeAt) else send()
         }) { Text(stringResource(R.string.send)) }
       },
-      dismissButton = { TextButton(onClick = { isConfirmingChannel = false }) { Text(stringResource(R.string.cancel)) } },
+      dismissButton = {
+        TextButton(onClick = {
+          isConfirmingChannel = false
+          maybeSendLaterAt = null
+        }) { Text(stringResource(R.string.cancel)) }
+      },
     )
   }
   val canSend = text.isNotBlank() || files.isNotEmpty()
@@ -1129,7 +1157,32 @@ internal fun Composer(
         maybeAlsoToChannel = alsoToChannel.takeIf { maybeThread != null },
         onAlsoToChannel = { alsoToChannel = it },
       )
+      SendLaterRow(
+        viewModel = viewModel,
+        canSchedule = text.isNotBlank() && files.isEmpty(),
+        hasFiles = files.isNotEmpty(),
+        onOpen = {
+          isOptionsOpen = false
+          isSendLaterOpen = true
+        },
+      )
     }
+  }
+  if (isSendLaterOpen) {
+    SendLaterSheet(
+      viewModel = viewModel,
+      onPick = { dueAtMs ->
+        isSendLaterOpen = false
+        val confirmOver = viewModel.confirmChannelOver().toUInt()
+        if (needsChannelConfirmation(text, members.size.toUInt(), confirmOver)) {
+          maybeSendLaterAt = dueAtMs
+          isConfirmingChannel = true
+        } else {
+          schedule(dueAtMs)
+        }
+      },
+      onDismiss = { isSendLaterOpen = false },
+    )
   }
 }
 

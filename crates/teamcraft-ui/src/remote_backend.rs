@@ -34,6 +34,7 @@ use teamcraft_client_api::remote::{
   CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, PhoneLinkStatus,
   StoreHealth,
 };
+use teamcraft_client_api::scheduled::ScheduledOverview;
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_proto::{BackgroundId, CategoryId, ClientMessageId, HistoryPolicy, WebPushKeyResponse};
@@ -1489,6 +1490,38 @@ impl ChatBackend for RemoteChat {
       maybe_thread,
       body: body.to_owned(),
     });
+  }
+
+  fn scheduled_overview(&self) -> ScheduledOverview {
+    match self.ask(ChatQuery::ScheduledMessages) {
+      Some(ChatAnswer::ScheduledMessages { overview }) => overview,
+      _ => ScheduledOverview::default(),
+    }
+  }
+
+  fn schedule_message(&self, message: OutgoingMessage, due_at: teamcraft_client_api::model::TimestampMs) {
+    self.act(ChatAction::ScheduleMessage { message, due_at });
+  }
+
+  fn update_scheduled(
+    &self,
+    id: ClientMessageId,
+    body: &str,
+    due_at: teamcraft_client_api::model::TimestampMs,
+  ) {
+    self.act(ChatAction::UpdateScheduled {
+      id,
+      body: body.to_owned(),
+      due_at,
+    });
+  }
+
+  fn cancel_scheduled(&self, id: ClientMessageId) {
+    self.act(ChatAction::CancelScheduled { id });
+  }
+
+  fn send_scheduled_now(&self, id: ClientMessageId) {
+    self.act(ChatAction::SendScheduledNow { id });
   }
 
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {

@@ -10,6 +10,11 @@ enum ChatAction {
   case setCustomStatus(CustomStatusValue?)
   case setActivity(isIdle: Bool)
   case sendMessage(SendRequest)
+  /// Keeps the message for `dueAtMs` (server time, docs/scheduled-messages.md); it can't have files.
+  case scheduleMessage(SendRequest, dueAtMs: Int64)
+  case updateScheduled(id: String, body: String, dueAtMs: Int64)
+  case cancelScheduled(id: String)
+  case sendScheduledNow(id: String)
   case downloadFile(conversationId: String, messageId: String)
   /// One file of a message (the image viewer fetches only the picture on screen).
   case downloadAttachment(conversationId: String, messageId: String, fileId: String)
@@ -116,6 +121,14 @@ enum ChatAction {
       object = ["action": "mark_reactions_seen", "conversation": conversation, "messages": messages]
     case .loadOlderHistory(let conversation):
       object = ["action": "load_older_history", "conversation": conversation]
+    case .scheduleMessage(let request, let dueAtMs):
+      object = ["action": "schedule_message", "message": request.object, "due_at": dueAtMs]
+    case .updateScheduled(let id, let body, let dueAtMs):
+      object = ["action": "update_scheduled", "id": id, "body": body, "due_at": dueAtMs]
+    case .cancelScheduled(let id):
+      object = ["action": "cancel_scheduled", "id": id]
+    case .sendScheduledNow(let id):
+      object = ["action": "send_scheduled_now", "id": id]
     case .setDraft(let conversation, let maybeThread, let body):
       object = [
         "action": "set_draft", "conversation": conversation,
@@ -183,6 +196,8 @@ enum ChatQuery {
   case olderHistory(conversationId: String)
   /// The composer text left unsent here, from this or another device of the user.
   case draft(conversationId: String, maybeThreadId: String?)
+  /// The messages waiting for their time, and the workspace's rule for them.
+  case scheduledMessages
 
   var json: String {
     switch self {
@@ -212,6 +227,8 @@ enum ChatQuery {
       return jsonText(["kind": "unseen_reactions", "conversation": conversation])
     case .olderHistory(let conversation):
       return jsonText(["kind": "older_history", "conversation": conversation])
+    case .scheduledMessages:
+      return jsonText(["kind": "scheduled_messages"])
     case .draft(let conversation, let maybeThread):
       return jsonText([
         "kind": "draft", "conversation": conversation, "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(),

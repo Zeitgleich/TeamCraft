@@ -1231,6 +1231,7 @@ macro_rules! forward_local_store {
   };
 }
 
+forward_local_store!(&T);
 forward_local_store!(std::sync::Arc<T>);
 // Single-threaded sharing in the browser, where the IndexedDB store is neither `Send` nor `Sync`.
 forward_local_store!(std::rc::Rc<T>);

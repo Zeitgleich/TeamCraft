@@ -167,6 +167,8 @@ pub enum MainView {
   Search,
   /// Messages the user saved for later.
   Saved,
+  /// Messages waiting for their time ("send later").
+  Scheduled,
   /// The files the user can see, of the selected space or across conversations.
   Files,
   /// Mentions, reactions to the user's messages and replies in their threads.
@@ -725,6 +727,7 @@ impl AppState {
       MainView::Search
       | MainView::Meetings
       | MainView::Saved
+      | MainView::Scheduled
       | MainView::Files
       | MainView::Calls
       | MainView::Directory => true,
@@ -989,6 +992,7 @@ impl AppState {
       | MainView::Search
       | MainView::Meetings
       | MainView::Saved
+      | MainView::Scheduled
       | MainView::Files
       | MainView::Activity
       | MainView::Calls
@@ -1607,6 +1611,12 @@ impl AppState {
     self.overlay.set(Overlay::None);
   }
 
+  pub fn open_scheduled(&self) {
+    self.view.set(MainView::Scheduled);
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
   pub fn open_files(&self) {
     self.view.set(MainView::Files);
     self.panel.set(SidePanel::Closed);
@@ -1861,6 +1871,7 @@ impl AppState {
       MainView::Admin(section) => Route::Admin(section),
       MainView::Search => Route::Search,
       MainView::Saved => Route::Saved,
+      MainView::Scheduled => Route::Scheduled,
       MainView::Files => Route::Files,
       MainView::Activity if self.activity_filter.get() == ActivityFilter::Threads => Route::Threads,
       MainView::Activity => Route::Activity,
@@ -2087,6 +2098,7 @@ impl AppState {
       },
       Route::People => self.open_directory(),
       Route::Saved => self.open_saved(),
+      Route::Scheduled => self.open_scheduled(),
       Route::Files => self.open_files(),
       Route::Search => self.open_search(None),
       Route::Settings(page) => self.show_settings(page),
@@ -2354,6 +2366,7 @@ mod tests {
         Route::Meetings,
         Route::People,
         Route::Saved,
+        Route::Scheduled,
         Route::Files,
         Route::Search,
         Route::Settings(SettingsPage::Section(SettingsTab::Security)),

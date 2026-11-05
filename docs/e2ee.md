@@ -3425,6 +3425,11 @@ restored together with them on a new device.
   gateway event announces a new version.
 - The server sees that the key bag changed and its size, not what changed. Drafts make the key bag
   change while typing; clients upload at most once per sync round.
+- **Scheduled messages** ([scheduled-messages.md](scheduled-messages.md), issue #203): text,
+  conversation and time of a message waiting to be sent. No key is involved: the device that sends it
+  encrypts it then, under the content key current then, so the epoch rules of §4 apply as to any
+  message. The entry's ID is the message's client message ID, so several devices send one message.
+  Key bag answers carry the server's clock (`server_now`), for the moment of sending.
 - **Trust decisions travel too.** The identity keys the user's devices pinned and the workspace root
   of trust are account data. A new or linked device starts with them instead of trusting the server
   on first use again: it verifies colleagues' credentials with the inherited pins and refuses a

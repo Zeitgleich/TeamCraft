@@ -224,3 +224,8 @@ entry-menu-leave-space-confirm = { $name } verlassen? Du verlässt auch alle sei
 entry-menu-leave-last-space-admin = Ernenne zuerst jemand anderen zum Space-Admin.
 entry-menu-settings = Einstellungen…
 sidebar-item-in-space = { $label }, in { $space }
+sidebar-scheduled = Geplant
+sidebar-scheduled-attention = { $count ->
+    [one] 1 Nachricht braucht dich
+   *[other] { $count } Nachrichten brauchen dich
+}

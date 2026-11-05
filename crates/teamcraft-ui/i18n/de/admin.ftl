@@ -916,3 +916,14 @@ policy-role-provider-details = Einstellungen zum Identity Provider
 roster-signing-reported-gone = Der Server meldet, dass { $names } keine Admin-Rolle mehr hat. Wenn der Identity Provider nichts anderes sagt, verschwindet die Person in einigen Tagen von der Admin-Liste, immer eine nach der anderen. Wenn das falsch ist, prüfe den Server: Mehr ist nicht nötig.
 roster-signing-awaiting-owner = Der Identity Provider macht dich zum Eigentümer. Das gilt, sobald die App eines anderen Eigentümers geöffnet war. Ist kein anderer Eigentümer mehr da, bitte deinen Betreiber, dem früheren Eigentümer die Rolle kurz zurückzugeben.
 roster-standing-expired-ask-unnamed = Seit 30 Tagen hat kein Eigentümer die Admin-Liste signiert, daher ruhen die Admin-Rechte in allen Apps. Ein Eigentümer muss nur TeamCraft auf einem Gerät mit seinen Schlüsseln öffnen.
+
+policy-scheduled = Geplante Nachrichten
+policy-scheduled-hint = Die eigenen Geräte jeder Person heben sie verschlüsselt auf, der Server kann sie weder sehen noch durchsetzen. Die Apps wenden diese signierte Regel an.
+policy-scheduled-enabled = Nachrichten dürfen geplant werden
+policy-scheduled-enabled-hint = Aus: „Später senden“ verschwindet, und schon geplante Nachrichten warten, bis ihre Besitzer sie senden oder verwerfen.
+policy-scheduled-horizon = Wie weit im Voraus
+policy-scheduled-late = Noch von selbst senden bei Verspätung bis
+policy-hours = { $count ->
+    [one] 1 Stunde
+   *[other] { $count } Stunden
+}

@@ -50,6 +50,8 @@ pub mod previews;
 mod read_ahead;
 mod removal;
 mod role_signing;
+#[cfg(feature = "ui")]
+pub(crate) mod scheduled;
 #[cfg(not(target_arch = "wasm32"))]
 mod segments;
 mod self_add;

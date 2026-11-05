@@ -20,4 +20,9 @@ pub struct KeyBagResponse {
   pub encrypted_key_bag: Base64Bytes,
   pub wrapped_backup_keys: Base64Bytes,
   pub updated_at: UnixMillis,
+  /// The server's clock when it answered. Devices check it before sending what they hold for a
+  /// time (docs/scheduled-messages.md), so a wrong local clock doesn't send early. Absent from older
+  /// servers.
+  #[serde(rename = "server_now", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_server_now: Option<UnixMillis>,
 }

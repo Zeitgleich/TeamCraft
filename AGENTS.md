@@ -10,22 +10,23 @@ untrusted VPS.
 
 Read before changing behaviour:
 
-| Document                                           | Content                                                       |
-|----------------------------------------------------|---------------------------------------------------------------|
-| [ARCHITECTURE.md](ARCHITECTURE.md)                 | Components, threat model, data model, Keycloak, calls         |
-| [PLAN.md](PLAN.md)                                 | Feature catalog with priorities, roadmap                      |
-| [docs/e2ee.md](docs/e2ee.md)                       | Encryption, devices, backup, push, search, compliance         |
-| [docs/admin.md](docs/admin.md)                     | Roles, admin actions without content access                   |
-| [docs/telephony.md](docs/telephony.md)             | SIP trunk, AI hotline, agents                                 |
-| [docs/notifications.md](docs/notifications.md)     | Threads, unread counts, notifications, urgent                 |
-| [docs/bridge.md](docs/bridge.md)                   | Integration bridge: webhooks and logs into encrypted channels |
-| [docs/meetings.md](docs/meetings.md)               | Meetings, invitations, guests and lobby                       |
-| [docs/push-gateway.md](docs/push-gateway.md)       | Push gateway for store apps (own repo): server side, contract |
-| [docs/app-links.md](docs/app-links.md)             | Links that open the installed app, per platform               |
-| [docs/operations.md](docs/operations.md)           | Running an instance; deployment: Zeitgleich/teamcraft-deploy  |
-| [docs/release.md](docs/release.md)                 | Versions and the release procedure                            |
-| [docs/updates.md](docs/updates.md)                 | Desktop self-update, package repositories, update policy      |
-| [docs/import-synology.md](docs/import-synology.md) | Importing history from Synology Chat (runbook)                |
+| Document                                                 | Content                                                       |
+|----------------------------------------------------------|---------------------------------------------------------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md)                       | Components, threat model, data model, Keycloak, calls         |
+| [PLAN.md](PLAN.md)                                       | Feature catalog with priorities, roadmap                      |
+| [docs/e2ee.md](docs/e2ee.md)                             | Encryption, devices, backup, push, search, compliance         |
+| [docs/admin.md](docs/admin.md)                           | Roles, admin actions without content access                   |
+| [docs/telephony.md](docs/telephony.md)                   | SIP trunk, AI hotline, agents                                 |
+| [docs/notifications.md](docs/notifications.md)           | Threads, unread counts, notifications, urgent                 |
+| [docs/bridge.md](docs/bridge.md)                         | Integration bridge: webhooks and logs into encrypted channels |
+| [docs/meetings.md](docs/meetings.md)                     | Meetings, invitations, guests and lobby                       |
+| [docs/scheduled-messages.md](docs/scheduled-messages.md) | Send later: client-held, what the server learns               |
+| [docs/push-gateway.md](docs/push-gateway.md)             | Push gateway for store apps (own repo): server side, contract |
+| [docs/app-links.md](docs/app-links.md)                   | Links that open the installed app, per platform               |
+| [docs/operations.md](docs/operations.md)                 | Running an instance; deployment: Zeitgleich/teamcraft-deploy  |
+| [docs/release.md](docs/release.md)                       | Versions and the release procedure                            |
+| [docs/updates.md](docs/updates.md)                       | Desktop self-update, package repositories, update policy      |
+| [docs/import-synology.md](docs/import-synology.md)       | Importing history from Synology Chat (runbook)                |
 
 ## Repository layout
 

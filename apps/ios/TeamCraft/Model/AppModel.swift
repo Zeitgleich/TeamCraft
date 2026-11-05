@@ -137,6 +137,8 @@ final class AppModel {
   private(set) var isBusy = false
   /// Increments on every store change; screens re-read when it changes.
   private(set) var changeCount = 0
+  /// Scheduled messages that wait for the user (docs/scheduled-messages.md).
+  private(set) var scheduledAttentionCount = 0
   /// The conversation a notification asked to open.
   var openConversationId: String?
   /// A message to show once its conversation is open (from a message link).
@@ -721,6 +723,42 @@ final class AppModel {
     AttachmentImporter(directory: container.uploadsDirectory, maybeLimitBytes: await maxUploadBytes())
   }
 
+  // MARK: Scheduled messages
+
+  /// The messages waiting for their time, or nil while the core can't say.
+  func scheduledOverview() async -> ScheduledOverview? {
+    await answer(.scheduledMessages)?.overview
+  }
+
+  /// How many scheduled messages wait for the user; called on every change the core reports.
+  func refreshScheduledAttention() async {
+    guard case .ready = phase else { return }
+    let count = await scheduledOverview()?.messages.filter(\.needsAttention).count ?? 0
+    if count != scheduledAttentionCount { scheduledAttentionCount = count }
+  }
+
+  /// Plans the background run for the next scheduled message, or takes the plan back.
+  func planScheduledSend() async {
+    if let dueAtMs = await scheduledOverview()?.maybeNextDueAt {
+      ScheduledSendTask.schedule(dueAtMs: dueAtMs)
+    } else {
+      ScheduledSendTask.cancel()
+    }
+  }
+
+  /// A background run: keeps the sync loop going for what is due, whose upkeep sends it.
+  func runScheduledSend() async -> Bool {
+    guard case .ready = phase, let core = try? core() else { return true }
+    // The foreground app already holds the lock; otherwise take it like the extension does.
+    if !isSyncing {
+      let lock = processLock
+      guard await Task.detached(operation: { lock.acquire(timeout: 5) }).value else { return false }
+    }
+    defer { if !isSyncing { processLock.release() } }
+    let left = try? await core.flushPendingWork(maxWaitMs: UInt64(Self.maxBackgroundFlushSeconds * 1000))
+    return left?.isEmpty == true
+  }
+
   func maxUploadBytes() async -> Int64? {
     await answer(.maxUploadBytes)?.maybeBytes
   }
@@ -877,6 +915,8 @@ final class AppModel {
     await stopSyncing()
     guard case .ready = phase else { return }
     if await segmentPrefetch() != .off { SegmentPrefetchTask.schedule() }
+    // A phone in a pocket sends what is scheduled too, as far as iOS lets it.
+    await planScheduledSend()
   }
 
   /// Presence (issue #472): the app came to the foreground, went to the background, or the user
@@ -1030,7 +1070,10 @@ final class AppModel {
       Task { [weak self] in await self?.pushUpkeep() }
     }
     Task { [weak self] in await self?.refreshLinkRequests() }
-    Task { [weak self] in await self?.refreshJoinRequests() }
+    Task { [weak self] in
+      await self?.refreshJoinRequests()
+      await self?.refreshScheduledAttention()
+    }
     Task { [weak self] in await self?.leaveIfStoreTurnedUnreadable() }
     guard maybeReconcile == nil else { return }
     maybeReconcile = Task { [weak self] in

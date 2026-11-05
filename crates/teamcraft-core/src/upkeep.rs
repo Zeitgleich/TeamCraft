@@ -16,6 +16,11 @@ use crate::api::ServerApi;
 use crate::client::Client;
 use crate::store::LocalStore;
 
+/// How often scheduled messages are looked at: what the JSON of the account data costs, against a
+/// message going out a few seconds late.
+#[cfg(feature = "ui")]
+const SCHEDULED_CHECK_MS: i64 = 15_000;
+
 /// What runs on every tick, with the state of the work that runs less often.
 #[derive(Clone, Debug)]
 pub struct Upkeep {
@@ -32,6 +37,9 @@ pub struct Upkeep {
   has_reported_refusal: bool,
   /// When the roster and workspace head were last checked.
   last_local_check_ms: i64,
+  /// When scheduled messages were last looked at.
+  #[cfg(feature = "ui")]
+  last_scheduled_check_ms: i64,
   uploads: UploadMode,
 }
 
@@ -55,6 +63,8 @@ impl Upkeep {
       has_failed: false,
       has_reported_refusal: false,
       last_local_check_ms: i64::MIN,
+      #[cfg(feature = "ui")]
+      last_scheduled_check_ms: i64::MIN,
       uploads: UploadMode::Inline,
     }
   }
@@ -121,11 +131,41 @@ impl Upkeep {
       Ok(loaded) => is_changed |= loaded > 0,
       Err(error) => tracing::debug!(%error, "imported history not read further yet"),
     }
+    #[cfg(feature = "ui")]
+    {
+      is_changed |= self.send_due_scheduled(client, now).await;
+    }
     let is_flushed = match self.uploads {
       UploadMode::Inline => flush(client).await,
       UploadMode::Host => flush_sends(client).await,
     };
     is_changed | is_flushed
+  }
+
+  /// Scheduled messages whose time has come (docs/scheduled-messages.md), checked every
+  /// [`SCHEDULED_CHECK_MS`]: a local read, and no request while none is due. A device whose clock jumps
+  /// (a resume, a corrected clock) checks at once.
+  #[cfg(feature = "ui")]
+  async fn send_due_scheduled<A: ServerApi, S: LocalStore>(
+    &mut self,
+    client: &mut Client<A, S>,
+    now: i64,
+  ) -> bool {
+    if now >= self.last_scheduled_check_ms
+      && now.saturating_sub(self.last_scheduled_check_ms) < SCHEDULED_CHECK_MS
+    {
+      return false;
+    }
+    self.last_scheduled_check_ms = now;
+    match client.send_due_scheduled().await {
+      Ok(sent) => sent > 0,
+      Err(error) => {
+        // Offline, or the newest key bag couldn't be read: they stay "due" in the lists and the next
+        // check tries again.
+        tracing::debug!(%error, "due scheduled messages not sent yet");
+        false
+      },
+    }
   }
 
   /// Due after a new gateway connection and after a local change; after a failed attempt not

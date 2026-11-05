@@ -487,6 +487,43 @@
   margin-top: var(--space-4);
 }
 
+/* Scheduled messages */
+
+.scheduled-note {
+  margin: 0 0 var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.scheduled-status {
+  margin: var(--space-1) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.scheduled-status.needs-you {
+  color: var(--danger);
+}
+
+.scheduled-confirm {
+  align-self: center;
+  font-size: var(--text-sm);
+}
+
+.scheduled-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.send-later-hint {
+  margin: 0;
+  padding: 0 14px 4px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
 /* Saved */
 
 .saved-card .saved-meta {

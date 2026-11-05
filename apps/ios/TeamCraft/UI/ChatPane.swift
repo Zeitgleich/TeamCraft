@@ -22,6 +22,8 @@ struct ChatPane: View {
   @State private var attachmentError: AttachmentError?
   @State private var isPickingPhoto = false
   @State private var isPickingDocument = false
+  @State private var isSchedulingSend = false
+  @State private var isSchedulingAllowed = false
   @State private var isTakingPhoto = false
   @State private var photoSelection: [PhotosPickerItem] = []
   @State private var isShowingFiles = false
@@ -179,6 +181,12 @@ struct ChatPane: View {
       }
     } message: { _ in
       Text("delete_confirm_text")
+    }
+    .sheet(isPresented: $isSchedulingSend) {
+      SendLaterSheet { dueAtMs in Task { await schedule(dueAtMs: dueAtMs) } }
+    }
+    .task(id: model.changeCount) {
+      isSchedulingAllowed = await model.scheduledOverview()?.policy.isEnabled == true
     }
     .alert("send_failed", isPresented: $isSendFailed) {
       Button("done", role: .cancel) {}
@@ -399,6 +407,12 @@ struct ChatPane: View {
                   Button("attach_camera", systemImage: "camera") { isTakingPhoto = true }
                 }
                 Button("attach_file", systemImage: "doc") { isPickingDocument = true }
+                if isSchedulingAllowed {
+                  Divider()
+                  // Text waits in the account data; with files or nothing to send there is nothing it can keep.
+                  Button("schedule_heading", systemImage: "clock") { isSchedulingSend = true }
+                    .disabled(!canSchedule)
+                }
               } label: {
                 composerIcon("paperclip")
               }
@@ -680,6 +694,26 @@ struct ChatPane: View {
   private func react(_ message: MessageItem, _ emoji: String) {
     Task {
       await model.perform(.toggleReaction(conversationId: conversation.id, messageId: message.id, emoji: emoji))
+    }
+  }
+
+  /// Whether the composer holds what can wait: text, without files.
+  private var canSchedule: Bool {
+    attachments.isEmpty && maybeEditing == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  /// Hands the composer's text to the user's account data, to go out at `dueAtMs`.
+  private func schedule(dueAtMs: Int64) async {
+    let body = emojiConvert(text: draft.trimmingCharacters(in: .whitespacesAndNewlines))
+    let replying = maybeReplying
+    draft = ""
+    maybeReplying = nil
+    let request = SendRequest(
+      conversationId: conversation.id, maybeThreadId: threadId, body: body, maybeReplyToId: replying?.id)
+    if !(await model.performChecked(.scheduleMessage(request, dueAtMs: dueAtMs))) {
+      draft = body
+      maybeReplying = replying
+      isSendFailed = true
     }
   }
 

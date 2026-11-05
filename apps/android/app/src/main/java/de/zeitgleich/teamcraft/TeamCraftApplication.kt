@@ -23,6 +23,7 @@ import de.zeitgleich.teamcraft.core.ActivityReports
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.core.OutboxWork
+import de.zeitgleich.teamcraft.core.ScheduledSendWork
 import de.zeitgleich.teamcraft.notifications.AvatarCache
 import de.zeitgleich.teamcraft.notifications.JoinRequestNotifier
 import de.zeitgleich.teamcraft.notifications.JoinRequestWatcher
@@ -132,7 +133,11 @@ class TeamCraftApplication : Application() {
       graph.isSyncStartFailing.value = false
       maybeStopping?.cancel()
       maybeStopping = graph.scope.launch {
-        if (graph.auth.isSignedIn.value) scheduleOutbox()
+        if (graph.auth.isSignedIn.value) {
+          scheduleOutbox()
+          // A phone in a pocket sends what is scheduled too (docs/scheduled-messages.md).
+          ScheduledSendWork.plan(context, graph.core)
+        }
         delay(STOP_DELAY_MS)
         order.withLock {
           // A run of OutboxWork under way keeps the sync going until it is done; the core stops it then.

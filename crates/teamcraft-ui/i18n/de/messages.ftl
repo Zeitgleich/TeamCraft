@@ -247,3 +247,49 @@ older-history-failed = Ältere Nachrichten konnten nicht geladen werden.
 older-history-retry = Erneut versuchen
 history-gap-loading = Nachrichten werden geladen …
 history-gap-failed = Nachrichten konnten nicht geladen werden.
+
+# Später senden (docs/scheduled-messages.md)
+schedule-heading = Später senden
+schedule-online-hint = Geht raus, sobald eines deiner Geräte zu dieser Zeit oder danach online ist.
+schedule-write-first = Schreib zuerst etwas.
+schedule-no-files = Nachrichten mit Dateien können noch nicht warten: Sende sie jetzt.
+schedule-no-command = Befehle laufen sofort und lassen sich nicht planen.
+schedule-in-one-hour = In 1 Stunde
+schedule-tomorrow = Morgen früh
+schedule-monday = Montag früh
+schedule-custom = Zeit wählen
+schedule-custom-label = Senden um
+schedule-confirm = Planen
+schedule-done = Geplant für { $time }. Sie geht raus, sobald eines deiner Geräte dann oder später online ist.
+schedule-refused-off = Dein Workspace erlaubt keine geplanten Nachrichten.
+schedule-refused-empty = Schreib zuerst etwas.
+schedule-refused-long = Eine geplante Nachricht darf höchstens { $kib } KiB Text haben.
+schedule-refused-past = Wähle eine Zeit in der Zukunft.
+schedule-refused-far = { $count ->
+    [one] Wähle eine Zeit höchstens 1 Tag im Voraus.
+   *[other] Wähle eine Zeit höchstens { $count } Tage im Voraus.
+}
+schedule-refused-many = Du hast schon { $max } geplante Nachrichten. Sende oder verwirf zuerst eine.
+scheduled-title = Geplante Nachrichten
+scheduled-count = { $count ->
+    [one] 1 Nachricht wartet
+   *[other] { $count } Nachrichten warten
+}
+scheduled-note = Deine eigenen Geräte heben sie verschlüsselt auf. Eine Nachricht geht raus, sobald eines davon zu ihrer Zeit oder danach online ist; sind alle aus, wartet sie auf das erste, das zurückkommt.
+scheduled-empty-title = Nichts geplant
+scheduled-empty = Nutze „Später senden“ im Sendemenü neben dem Senden-Knopf.
+scheduled-unknown-conversation = Unbekannte Unterhaltung
+scheduled-status-waiting = Wartet auf ihre Zeit.
+scheduled-status-due = Fällig: Geht raus, sobald eines deiner Geräte online ist.
+scheduled-status-missed = Ihre Zeit ist lange vorbei, deine Geräte waren aus. Sie könnte veraltet sein und bleibt deshalb hier, bis du entscheidest.
+scheduled-status-policy-off = Dein Workspace hat geplante Nachrichten abgeschaltet. Sie bleibt hier, bis du sie sendest oder verwirfst.
+scheduled-status-unavailable = Dieses Gerät erreicht diese Unterhaltung nicht. Vielleicht hast du sie verlassen.
+scheduled-status-unknown = Deine App kann nicht sagen, was mit dieser Nachricht passiert. Aktualisiere sie.
+scheduled-send-now = Jetzt senden
+scheduled-edit = Bearbeiten
+scheduled-edit-text = Nachricht
+scheduled-save = Speichern
+scheduled-cancel = Nachricht verwerfen
+scheduled-cancel-question = Diese Nachricht verwerfen? Niemand wird sie sehen.
+scheduled-cancel-confirm = Verwerfen
+scheduled-keep = Behalten

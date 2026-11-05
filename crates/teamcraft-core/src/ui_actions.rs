@@ -11,9 +11,11 @@ use teamcraft_client_api::model::{
   ThreadId, UserId, is_pending,
 };
 use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
+use teamcraft_client_api::scheduled::{ScheduledMessage, ScheduledOverview, status_of};
 use teamcraft_proto::{Base64Bytes, ClientMessageId, SourceChange, SourceId};
 
 use crate::client::previews::queue_preview;
+use crate::client::scheduled::{message_priority, server_now_ms};
 use crate::client::{apply_control, forward_content, imported_author_name, reply_ref, stored_account_data};
 use crate::error::CoreError;
 use crate::imported::Authorship;
@@ -88,6 +90,57 @@ impl<S: LocalStore> CoreChatBackend<S> {
         })
       })
       .collect()
+  }
+
+  pub(crate) fn ui_scheduled_overview(&self) -> ScheduledOverview {
+    let data = self.read(stored_account_data(self.store_ref()));
+    let policy = self.verified_policy().scheduled_messages;
+    let server_now = server_now_ms(self.store_ref(), self.now_ms());
+    let waiting = data.scheduled_messages();
+    if waiting.is_empty() {
+      return ScheduledOverview {
+        messages: Vec::new(),
+        policy,
+        server_now,
+      };
+    }
+    let users = self.summaries();
+    let preferences = self.mention_preferences();
+    let names: std::collections::BTreeMap<ConversationId, String> = self
+      .conversations_raw()
+      .iter()
+      .map(|conversation| {
+        (
+          conversation.id,
+          self.to_conversation(conversation, &users, &preferences).name,
+        )
+      })
+      .collect();
+    let messages = waiting
+      .into_iter()
+      .map(|entry| {
+        let maybe_name = names.get(&entry.conversation_id);
+        ScheduledMessage {
+          id: entry.client_message_id,
+          conversation: entry.conversation_id,
+          conversation_name: maybe_name.cloned().unwrap_or_default(),
+          maybe_thread: entry.maybe_thread_id,
+          body: entry.body.clone(),
+          due_at: entry.due_at_ms,
+          status: status_of(entry.due_at_ms, server_now, &policy, maybe_name.is_some()),
+          maybe_reply_to: entry.maybe_reply_to,
+          priority: message_priority(entry.priority),
+          wants_acknowledgement: entry.wants_acknowledgement,
+          is_silent: entry.is_silent,
+          also_send_to_channel: entry.also_send_to_channel,
+        }
+      })
+      .collect();
+    ScheduledOverview {
+      messages,
+      policy,
+      server_now,
+    }
   }
 
   pub(crate) fn ui_draft(

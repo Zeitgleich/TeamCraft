@@ -56,6 +56,9 @@ struct SettingsView: View {
           NavigationLink { SecuritySettingsPage(account: account) } label: {
             SettingsEntry(title: "settings_security_title", summary: "settings_security_summary", icon: "lock.shield")
           }
+          NavigationLink { ScheduledMessagesView() } label: {
+            SettingsEntry(title: "scheduled_title", summary: "settings_scheduled_summary", icon: "clock")
+          }
           NavigationLink { ApproveLinkView() } label: {
             SettingsEntry(title: "devices_title", summary: "settings_devices_summary", icon: "iphone")
           }

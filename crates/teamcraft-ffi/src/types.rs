@@ -324,7 +324,8 @@ impl From<PendingWork> for PendingWorkItem {
   fn from(work: PendingWork) -> Self {
     let count = |value: usize| u32::try_from(value).unwrap_or(u32::MAX);
     Self {
-      sends: count(work.sends),
+      // A scheduled message that is due is a send like any other to the app.
+      sends: count(work.sends.saturating_add(work.scheduled)),
       uploads: count(work.uploads),
       actions: count(work.actions),
       is_empty: work.is_empty(),

@@ -42,6 +42,7 @@ use teamcraft_proto::{
 
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::receipts::{ReadIndicator, seen_by};
+use teamcraft_client_api::scheduled::ScheduledOverview;
 
 use crate::client::bookmarks_key;
 use crate::client::history_gaps::{Gap, read_record as read_gaps_record};
@@ -103,6 +104,22 @@ pub enum CoreCommand {
     conversation: ConversationId,
     maybe_thread: Option<ThreadId>,
     body: String,
+  },
+  /// "Send later" (docs/scheduled-messages.md): in the account data too.
+  ScheduleMessage {
+    message: OutgoingMessage,
+    due_at_ms: i64,
+  },
+  UpdateScheduled {
+    id: ClientMessageId,
+    body: String,
+    due_at_ms: i64,
+  },
+  CancelScheduled {
+    id: ClientMessageId,
+  },
+  SendScheduledNow {
+    id: ClientMessageId,
   },
   SaveSearch {
     id: u64,
@@ -2037,6 +2054,33 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       maybe_thread,
       body: body.to_string(),
     });
+  }
+
+  fn scheduled_overview(&self) -> ScheduledOverview {
+    self.ui_scheduled_overview()
+  }
+
+  fn schedule_message(&self, message: OutgoingMessage, due_at: TimestampMs) {
+    self.command(CoreCommand::ScheduleMessage {
+      message,
+      due_at_ms: due_at,
+    });
+  }
+
+  fn update_scheduled(&self, id: ClientMessageId, body: &str, due_at: TimestampMs) {
+    self.command(CoreCommand::UpdateScheduled {
+      id,
+      body: body.to_owned(),
+      due_at_ms: due_at,
+    });
+  }
+
+  fn cancel_scheduled(&self, id: ClientMessageId) {
+    self.command(CoreCommand::CancelScheduled { id });
+  }
+
+  fn send_scheduled_now(&self, id: ClientMessageId) {
+    self.command(CoreCommand::SendScheduledNow { id });
   }
 
   fn send_message(&self, message: OutgoingMessage) {

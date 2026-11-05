@@ -10,10 +10,10 @@ use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
   AdminMailSettingsResponse, AnnouncementResponse, BackgroundId, BrandAssetSlot, CategoryId,
-  ChannelModeration, CreateBrandRequest, HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role,
-  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SendTestMailRequest,
-  SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest, UpdateCalendarSettingsRequest,
-  UpdateMailSettingsRequest, WorkspacePolicy,
+  ChannelModeration, ClientMessageId, CreateBrandRequest, HistoryPolicy, OrgBackgroundId,
+  PermissionSchemeResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection,
+  SchemeChange, SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest,
+  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use crate::actions::{
@@ -40,6 +40,7 @@ use crate::model::{
   MessageId, PresenceStatus, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
+use crate::scheduled::ScheduledOverview;
 use crate::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use crate::video_stats::VideoStatsJson;
 
@@ -527,6 +528,18 @@ pub trait ChatBackend {
   }
   /// Stores the draft; an empty body removes it. Call debounced while typing.
   fn set_draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _body: &str) {}
+  /// The messages waiting for their time, and the rule that applies (docs/scheduled-messages.md).
+  /// A backend that can't keep them answers with scheduling off, so nothing offers it.
+  fn scheduled_overview(&self) -> ScheduledOverview {
+    ScheduledOverview::default()
+  }
+  /// Keeps a message for `due_at` (server time). The caller checked [`crate::scheduled::ScheduleCheck`].
+  fn schedule_message(&self, _message: OutgoingMessage, _due_at: TimestampMs) {}
+  /// Changes the text and time of a waiting message.
+  fn update_scheduled(&self, _id: ClientMessageId, _body: &str, _due_at: TimestampMs) {}
+  fn cancel_scheduled(&self, _id: ClientMessageId) {}
+  /// Sends a waiting message now, whatever its time and status: the user decided.
+  fn send_scheduled_now(&self, _id: ClientMessageId) {}
   /// Starts (or finds) the direct conversation with a person; it shows up in the lists when ready.
   fn open_dm(&self, _user: UserId) {}
   /// Starts (or finds) the group DM with exactly these people and the user.

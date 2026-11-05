@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="schedule_heading">Später senden</string>
+  <string name="schedule_online_hint">Geht raus, sobald eines deiner Geräte zu dieser Zeit oder danach online ist.</string>
+  <string name="schedule_write_first">Schreib zuerst etwas.</string>
+  <string name="schedule_no_files">Nachrichten mit Dateien können noch nicht warten: Sende sie jetzt.</string>
+  <string name="schedule_in_one_hour">In 1 Stunde</string>
+  <string name="schedule_tomorrow">Morgen früh</string>
+  <string name="schedule_monday">Montag früh</string>
+  <string name="schedule_custom_label">Senden um</string>
+  <string name="schedule_confirm">Planen</string>
+  <string name="schedule_done">Geplant. Sie geht raus, sobald eines deiner Geräte dann oder später online ist.</string>
+  <string name="schedule_error_empty">Schreib zuerst etwas.</string>
+  <string name="schedule_error_long">Eine geplante Nachricht darf höchstens 8 KiB Text haben.</string>
+  <string name="schedule_error_past">Wähle eine Zeit in der Zukunft.</string>
+  <string name="schedule_error_far">Das ist weiter im Voraus, als dein Workspace erlaubt.</string>
+  <string name="scheduled_title">Geplante Nachrichten</string>
+  <string name="scheduled_note">Deine eigenen Geräte heben sie verschlüsselt auf. Eine Nachricht geht raus, sobald eines davon zu ihrer Zeit oder danach online ist; sind alle aus, wartet sie auf das erste, das zurückkommt. Dieses Telefon versucht es im Hintergrund, Android kann das aber verzögern.</string>
+  <string name="scheduled_empty">Nichts geplant. Nutze „Später senden“ hinter dem + im Eingabefeld.</string>
+  <string name="scheduled_unknown_conversation">Unbekannte Unterhaltung</string>
+  <string name="scheduled_status_waiting">Wartet auf ihre Zeit.</string>
+  <string name="scheduled_status_due">Fällig: Geht raus, sobald eines deiner Geräte online ist.</string>
+  <string name="scheduled_status_missed">Ihre Zeit ist lange vorbei, deine Geräte waren aus. Sie könnte veraltet sein und bleibt deshalb hier, bis du entscheidest.</string>
+  <string name="scheduled_status_policy_off">Dein Workspace hat geplante Nachrichten abgeschaltet. Sie bleibt hier, bis du sie sendest oder verwirfst.</string>
+  <string name="scheduled_status_unavailable">Dieses Gerät erreicht diese Unterhaltung nicht. Vielleicht hast du sie verlassen.</string>
+  <string name="scheduled_status_unknown">Deine App kann nicht sagen, was mit dieser Nachricht passiert. Aktualisiere sie.</string>
+  <string name="scheduled_send_now">Jetzt senden</string>
+  <string name="scheduled_edit">Bearbeiten</string>
+  <string name="scheduled_edit_text">Nachricht</string>
+  <string name="scheduled_save">Speichern</string>
+  <string name="scheduled_open">Öffnen</string>
+  <string name="scheduled_cancel">Nachricht verwerfen</string>
+  <string name="scheduled_cancel_question">Diese Nachricht verwerfen? Niemand wird sie sehen.</string>
+  <string name="scheduled_cancel_confirm">Verwerfen</string>
+  <string name="scheduled_keep">Behalten</string>
+  <string name="scheduled_attention">Eine geplante Nachricht braucht dich. Tippe, um sie zu sehen.</string>
+  <string name="home_entry_scheduled">Geplant</string>
+</resources>

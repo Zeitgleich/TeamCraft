@@ -9,6 +9,7 @@
 
 use crate::client::files::PendingUpload;
 use crate::client::pending_action_count;
+use crate::clock::{Clock, SystemClock};
 use crate::error::CoreError;
 use crate::records::{self, OutboxEntry};
 use crate::store::{LocalStore, Table};
@@ -23,11 +24,26 @@ pub struct PendingWork {
   pub uploads: usize,
   /// Read positions, acknowledgements, pins, presence and status changes in the queue.
   pub actions: usize,
+  /// Scheduled messages whose time has come (docs/scheduled-messages.md): the sync loop sends them
+  /// once it runs, so a background run waits for that.
+  pub scheduled: usize,
 }
 
 impl PendingWork {
   /// Reads what `store` holds; works while a runner owns the client.
   pub fn read(store: &impl LocalStore) -> Result<Self, CoreError> {
+    Self::read_at(store, SystemClock.now_ms())
+  }
+
+  /// [`Self::read`] at this device's time `now_ms`.
+  pub fn read_at(store: &impl LocalStore, now_ms: i64) -> Result<Self, CoreError> {
+    #[cfg(feature = "ui")]
+    let scheduled = crate::client::scheduled::due_entries(store, now_ms)?.len();
+    #[cfg(not(feature = "ui"))]
+    let scheduled = {
+      let _ = now_ms;
+      0
+    };
     let sends = records::outbox(store)?
       .iter()
       .filter(|entry: &&OutboxEntry| entry.maybe_last_error.is_none())
@@ -45,6 +61,7 @@ impl PendingWork {
       sends,
       uploads,
       actions: pending_action_count(store)?,
+      scheduled,
     })
   }
 

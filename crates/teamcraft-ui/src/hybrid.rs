@@ -29,7 +29,7 @@ use teamcraft_client_api::actions::{
   MessageExtras, NewChannel, NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
   ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
-use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, PresencePolicy};
+use teamcraft_proto::{BackgroundId, CategoryId, ClientMessageId, HistoryPolicy, PresencePolicy};
 
 use crate::admin::{
   AdminChannel, AdminLoad, AdminSection, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter,
@@ -56,6 +56,7 @@ use crate::security::KeyChange;
 use crate::settings::{load_string, store_string};
 use teamcraft_client_api::custom_status::shown_status;
 use teamcraft_client_api::remote::CallAction;
+use teamcraft_client_api::scheduled::ScheduledOverview;
 use teamcraft_client_api::video_stats::VideoStatsJson;
 
 pub struct Hybrid<C> {
@@ -654,6 +655,26 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn set_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
     self.chat.set_draft(conversation, maybe_thread, body);
+  }
+
+  fn scheduled_overview(&self) -> ScheduledOverview {
+    self.chat.scheduled_overview()
+  }
+
+  fn schedule_message(&self, message: OutgoingMessage, due_at: TimestampMs) {
+    self.chat.schedule_message(message, due_at);
+  }
+
+  fn update_scheduled(&self, id: ClientMessageId, body: &str, due_at: TimestampMs) {
+    self.chat.update_scheduled(id, body, due_at);
+  }
+
+  fn cancel_scheduled(&self, id: ClientMessageId) {
+    self.chat.cancel_scheduled(id);
+  }
+
+  fn send_scheduled_now(&self, id: ClientMessageId) {
+    self.chat.send_scheduled_now(id);
   }
 
   fn retry_send(&self, conversation: ConversationId, message: MessageId) {

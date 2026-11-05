@@ -176,6 +176,7 @@ struct ConversationListView: View {
         if isHomeShown {
           // Decided where the channels are (#799): in the list layout, here too.
           if isList { JoinRequestSection() }
+          ScheduledAttentionSection()
           TextField("dm_filter", text: $dmFilter)
             .textFieldStyle(.roundedBorder)
             .autocorrectionDisabled()

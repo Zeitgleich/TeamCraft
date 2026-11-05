@@ -60,6 +60,19 @@ Hover a message and open **More actions**:
 
 **Jump to date** opens a conversation's history at a day.
 
+
+## Send a message later
+
+Open the menu next to the send button (on phones: the + or the paperclip in the composer) and choose
+**Send later**: in an hour, tomorrow morning, Monday morning, or a time you pick. Your scheduled
+messages are under **Scheduled**, where you can edit them, send them right away or cancel them.
+
+Your own devices keep these messages, encrypted; the server doesn't have them. So a message goes out
+when one of your devices is online at or after its time. If all your devices are off, it waits for the
+first one back. If that is much later (24 hours, unless your workspace says otherwise), it doesn't go
+out by itself, since it may be out of date: it stays in the list until you decide. Messages with files
+can't be scheduled yet.
+
 ## Slash commands
 
 Type `/` in the composer for the list. Commands run on your device. To send text that starts with a

@@ -61,6 +61,8 @@ pub enum Route {
   /// `/people`: people and user groups.
   People,
   Saved,
+  /// `/scheduled`: the messages waiting for their time.
+  Scheduled,
   /// `/files`: every file the user can see.
   Files,
   /// `/search`: the search page. The query never goes into the URL.
@@ -149,6 +151,7 @@ impl Route {
       ["meeting", meeting] => MeetingHandle::parse(meeting).map(Self::Meeting),
       ["people"] => Some(Self::People),
       ["saved"] => Some(Self::Saved),
+      ["scheduled"] => Some(Self::Scheduled),
       ["files"] => Some(Self::Files),
       ["search"] => Some(Self::Search),
       ["settings"] => Some(Self::Settings(SettingsPage::Sections)),
@@ -207,6 +210,7 @@ impl Route {
       Self::Meeting(meeting) => format!("/meeting/{}", meeting.path_segment()),
       Self::People => "/people".to_owned(),
       Self::Saved => "/saved".to_owned(),
+      Self::Scheduled => "/scheduled".to_owned(),
       Self::Files => "/files".to_owned(),
       Self::Search => "/search".to_owned(),
       Self::Settings(SettingsPage::Sections) => "/settings".to_owned(),
@@ -243,6 +247,7 @@ impl Route {
       | Self::Meeting(_)
       | Self::People
       | Self::Saved
+      | Self::Scheduled
       | Self::Files
       | Self::Search
       | Self::Settings(_)
@@ -677,6 +682,7 @@ mod tests {
       )),
       Route::People,
       Route::Saved,
+      Route::Scheduled,
       Route::Files,
       Route::Search,
       Route::Settings(SettingsPage::Sections),

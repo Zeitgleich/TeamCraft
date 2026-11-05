@@ -109,6 +109,7 @@ pub mod reaction_jump;
 pub mod recovery_kit_setup;
 pub mod rich_text;
 pub mod roster_banner;
+pub mod scheduled_view;
 pub mod search_view;
 pub mod section_tabs;
 pub mod security_ui;

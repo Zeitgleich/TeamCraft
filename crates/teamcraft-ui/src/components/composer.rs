@@ -4,10 +4,11 @@ use wasm_bindgen::JsCast;
 
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::admin::format_bytes;
+use teamcraft_client_api::scheduled::ScheduleCheck;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::audio::AudioFormat;
-use crate::clock::now_ms;
+use crate::clock::{format_date_time, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::composer_commands::{self, CommandButton, Notice, NoticeEvent, Outcome};
 use crate::components::composer_editor;
@@ -18,6 +19,7 @@ use crate::components::emoji_picker::EmojiPicker;
 use crate::components::file_drop::{DropContent, DroppedFiles, take_drop, transfer_files};
 use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
+use crate::components::scheduled_view::refusal_text;
 use crate::components::sheet::MenuSurface;
 use crate::components::typing_indicator::should_notify_typing;
 use crate::composer_focus::{self, FocusSituation};
@@ -575,6 +577,92 @@ pub fn Composer(
     state.divider_event(conversation, DividerEvent::Sent);
   };
   let send = move || send_checked(false);
+
+  // "Send later": the same way out of the composer, into the account data instead of the outbox
+  // (docs/scheduled-messages.md). `pending_schedule` holds the time while @channel waits for its
+  // confirmation.
+  let pending_schedule = RwSignal::new(None::<i64>);
+  let schedule_checked = move |due_at: i64, is_confirmed: bool| {
+    let Some(element) = editor.get_untracked() else {
+      return;
+    };
+    is_send_menu_open.set(false);
+    let mut text = match slash::parse(&composer_editor::markdown(&element)) {
+      Parsed::Invalid(error) => {
+        notice.set(Some(Notice::Text(composer_commands::explain_error(i18n, &error))));
+        return;
+      },
+      Parsed::Command(_) => {
+        notice.set(Some(Notice::Text(i18n.t("schedule-no-command"))));
+        return;
+      },
+      Parsed::Message(message) => message,
+    };
+    if state.settings.prefs.get_untracked().composer.convert_emoticons {
+      text = crate::emoji::convert(&text);
+    }
+    let overview = state.read(|backend| backend.scheduled_overview());
+    let refusals = ScheduleCheck {
+      body: &text,
+      due_at,
+      server_now: overview.server_now,
+      waiting: overview.messages.len(),
+      is_new: true,
+    }
+    .refusals(&overview.policy);
+    if let Some(refusal) = refusals.first() {
+      notice.set(Some(Notice::Text(refusal_text(i18n, *refusal, &overview.policy))));
+      return;
+    }
+    if !is_confirmed {
+      let members = state
+        .read(|backend| backend.conversation(conversation))
+        .map_or(0, |conv| conv.member_ids.len());
+      let threshold = state
+        .settings
+        .prefs
+        .get_untracked()
+        .notifications
+        .confirm_channel_over;
+      if needs_channel_confirmation(&text, members, threshold) {
+        pending_schedule.set(Some(due_at));
+        pending_confirm.set(Some(members));
+        return;
+      }
+    }
+    pending_confirm.set(None);
+    pending_schedule.set(None);
+    let maybe_reply_to = state
+      .reply_target
+      .get_untracked()
+      .filter(|target| target.conversation == conversation)
+      .map(|target| target.message);
+    state.reply_target.set(None);
+    let message = OutgoingMessage {
+      maybe_client_message_id: None,
+      conversation,
+      maybe_thread,
+      body: text,
+      maybe_reply_to,
+      priority: priority.get_untracked(),
+      wants_acknowledgement: wants_acknowledgement.get_untracked(),
+      is_silent: is_silent.get_untracked(),
+      also_send_to_channel: maybe_thread.is_some()
+        && maybe_channel_name().is_some()
+        && also_send_to_channel.get_untracked(),
+      files: Vec::new(),
+    };
+    state.write(|backend| backend.schedule_message(message, due_at));
+    clear_editor();
+    also_send_to_channel.set(false);
+    priority.set(MessagePriority::Normal);
+    is_silent.set(false);
+    wants_acknowledgement.set(false);
+    let time = format_date_time(due_at, i18n.locale().tag());
+    notice.set(Some(Notice::Text(
+      i18n.t_with("schedule-done", &[("time", &time)]),
+    )));
+  };
 
   // The picker under the input: people and user groups after `@`, commands after a leading `/`. It
   // looks at the text node at the caret only.
@@ -1241,10 +1329,16 @@ pub fn Composer(
             view! {
               <div class="composer-confirm" role="alertdialog" aria-live="assertive">
                 <span>{i18n.t_with("composer-confirm-channel", &[("count", &members.to_string())])}</span>
-                <button class="btn btn-small btn-primary" on:click=move |_| send_checked(true)>
+                <button class="btn btn-small btn-primary" on:click=move |_| match pending_schedule.get_untracked() {
+                  Some(due_at) => schedule_checked(due_at, true),
+                  None => send_checked(true),
+                }>
                   {move || i18n.t("composer-confirm-send")}
                 </button>
-                <button class="btn btn-small" on:click=move |_| pending_confirm.set(None)>
+                <button class="btn btn-small" on:click=move |_| {
+                  pending_schedule.set(None);
+                  pending_confirm.set(None);
+                }>
                   {move || i18n.t("cancel")}
                 </button>
               </div>
@@ -1590,6 +1684,17 @@ pub fn Composer(
                   priority=priority
                   is_silent=is_silent
                   wants_acknowledgement=wants_acknowledgement
+                  can_schedule=Signal::derive(move || !is_empty.get() && attachments.with(Vec::is_empty))
+                  maybe_schedule_hint=Signal::derive(move || {
+                    if !attachments.with(Vec::is_empty) {
+                      Some(i18n.t("schedule-no-files"))
+                    } else if is_empty.get() {
+                      Some(i18n.t("schedule-write-first"))
+                    } else {
+                      None
+                    }
+                  })
+                  on_schedule=Callback::new(move |due_at| schedule_checked(due_at, false))
                   on_close=Callback::new(move |()| {
                     is_send_menu_open.set(false);
                     if let Some(element) = editor.get_untracked() {
