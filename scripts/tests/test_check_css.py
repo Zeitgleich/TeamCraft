@@ -145,7 +145,7 @@ class LayerHintsTest(unittest.TestCase):
 SHELL = (
     ':root[data-layout="compact"] .app { position: fixed; top: var(--vv-top, 0px); bottom: 0; height: var(--vv-height, auto); '
     "padding: env(safe-area-inset-top) 0 0 0; }\n"
-    ':root[data-layout="compact"] .bottom-nav { padding-bottom: env(safe-area-inset-bottom); }\n'
+    ':root[data-layout="compact"] .bottom-nav { padding-bottom: max(env(safe-area-inset-bottom), var(--vv-short, 0px)); }\n'
 )
 
 
@@ -175,7 +175,7 @@ class CompactShellTest(unittest.TestCase):
         self.assertIn("on the page itself", findings(SHELL + "body { padding-bottom: env(safe-area-inset-bottom); }")[0])
 
     def test_a_tab_bar_without_the_safe_area_is_found(self):
-        self.assertIn("exactly once", findings(SHELL.replace("padding-bottom: env(safe-area-inset-bottom)", "padding-bottom: 0"))[0])
+        self.assertIn("exactly once", findings(SHELL.replace("padding-bottom: max(env(safe-area-inset-bottom), var(--vv-short, 0px))", "padding-bottom: 0"))[0])
 
 
 class AuthPageTest(unittest.TestCase):

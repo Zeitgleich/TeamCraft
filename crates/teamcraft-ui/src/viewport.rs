@@ -20,6 +20,8 @@ pub const MEDIUM_BELOW_PX: u32 = 1100;
 const KEYBOARD_MIN_HEIGHT_PX: f64 = 120.0;
 /// A page scale above this is pinch-zoomed.
 const ZOOMED_ABOVE: f64 = 1.01;
+/// Delays (ms) after a focus change at which the keyboard's size is read again.
+const KEYBOARD_SETTLE_MS: [u64; 6] = [50, 150, 300, 500, 800, 1200];
 
 /// The layouts the shell switches between, mirrored into `data-layout` on `<html>` for the CSS.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -272,25 +274,29 @@ pub fn track_visual_viewport() {
         .and_then(|window| window.inner_width().ok())
         .and_then(|width| width.as_f64())
         .unwrap_or_else(|| viewport.width());
-      let maybe_area = keyboard_free_area(
+      let keyboard_area = keyboard_free_area(
         layout_height,
         viewport.height(),
         viewport.offset_top(),
         viewport.scale(),
         is_text_field_focused(),
-      )
-      .or_else(|| {
-        let (screen_width, screen_height) = screen_size()?;
-        installed_screen_height(
-          layout_width,
-          layout_height,
-          screen_width,
-          screen_height,
-          viewport.scale(),
-          is_ios_home_screen_app(),
-        )
-        .map(|height| (height, 0.0))
-      });
+      );
+      let is_keyboard_up = keyboard_area.is_some();
+      let installed_height = if is_keyboard_up {
+        None
+      } else {
+        screen_size().and_then(|(screen_width, screen_height)| {
+          installed_screen_height(
+            layout_width,
+            layout_height,
+            screen_width,
+            screen_height,
+            viewport.scale(),
+            is_ios_home_screen_app(),
+          )
+        })
+      };
+      let maybe_area = keyboard_area.or_else(|| installed_height.map(|height| (height, 0.0)));
       // iOS keeps the page scrolled up after the keyboard closed; the fixed shell moves with it.
       if maybe_area.is_none()
         && viewport.offset_top() > 1.0
@@ -310,12 +316,33 @@ pub fn track_visual_viewport() {
         },
         None => style.remove_property("--vv-height").is_ok() && style.remove_property("--vv-top").is_ok(),
       };
+      // The part of the screen below the layout viewport is not always drawn (the web view can be
+      // shorter than the screen): content keeps clear of it, only the shell's background reaches it.
+      let is_short_applied = match installed_height {
+        Some(height) => style
+          .set_property(
+            "--vv-short",
+            &format!("{}px", (height - layout_height).round().max(0.0)),
+          )
+          .is_ok(),
+        None => style.remove_property("--vv-short").is_ok(),
+      };
+      // Under the keyboard there is no home indicator to leave room for.
+      let is_keyboard_marked = if is_keyboard_up {
+        root.set_attribute("data-keyboard", "").is_ok()
+      } else {
+        root.remove_attribute("data-keyboard").is_ok()
+      };
+      if !(is_short_applied && is_keyboard_marked) {
+        tracing::debug!("could not apply the visual viewport state");
+      }
       if !is_applied {
         tracing::debug!("could not apply the visual viewport size");
       }
     }
   };
   apply();
+  let apply_later = apply.clone();
   let handler = Closure::<dyn Fn()>::new(apply);
   for event in ["resize", "scroll"] {
     if viewport
@@ -348,6 +375,25 @@ pub fn track_visual_viewport() {
         tracing::debug!(event, "could not watch the focus for the visual viewport");
       }
     }
+    // The keyboard slides in (or out) after the focus change, and an iOS home screen app reports
+    // that neither with a `resize` nor a `scroll` of the visual viewport: the composer then stayed
+    // under the keyboard. Looking again while the keyboard animates catches its final size.
+    let settle = Closure::<dyn Fn()>::new(move || {
+      for delay_ms in KEYBOARD_SETTLE_MS {
+        let apply = apply_later.clone();
+        set_timeout(apply, std::time::Duration::from_millis(delay_ms));
+      }
+    });
+    for event in ["focusin", "focusout"] {
+      if document
+        .add_event_listener_with_callback(event, settle.as_ref().unchecked_ref())
+        .is_err()
+      {
+        tracing::debug!(event, "could not follow the keyboard animation");
+      }
+    }
+    // The listeners live as long as the page.
+    settle.forget();
   }
   // The listeners live as long as the page.
   handler.forget();
