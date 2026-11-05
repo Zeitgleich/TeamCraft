@@ -220,6 +220,7 @@ error-account-deactivated = Dein Konto ist deaktiviert. Bitte einen Admin, es wi
 error-device-binding-required = Dieser Server nimmt nur Anmeldungen an, die an dein Gerät gebunden sind. Melde dich erneut an; hilft das nicht, aktualisiere die App oder sag deiner Administration Bescheid.
 error-proof-refused = Der Server hat den Nachweis dieses Geräts abgelehnt. Vielleicht verändert ein Proxy die Anfragen, oder der Server kennt diese Adresse nicht: Sag deiner Administration Bescheid.
 error-rate-limited = Zu viele Anfragen auf einmal. Warte einen Moment und versuche es erneut.
+error-invite-already-open = Für diese Adresse ist schon eine Einladung offen. Unter Personen, Einladungen kannst du sie erneut senden oder zurückziehen.
 error-too-large = Das ist zu groß für den Server. Versuche es mit etwas Kleinerem.
 error-attachment-gone = Diese Datei ist nicht mehr verfügbar.
 error-server-trouble = Der Server hat gerade ein Problem. Versuche es in ein paar Minuten erneut.

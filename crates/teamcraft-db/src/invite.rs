@@ -35,10 +35,22 @@ pub struct AppliedInvite {
 }
 
 impl Database {
-  pub async fn create_invite(&self, new: &NewInvite<'_>) -> Result<Invite, DbError> {
+  /// `None` if an invitation for this address and space is already open. One that has expired no
+  /// longer counts: it makes way for the new one.
+  pub async fn create_invite(&self, new: &NewInvite<'_>) -> Result<Option<Invite>, DbError> {
+    let mut tx = self.pool().begin().await?;
     sqlx::query!(
+      r#"DELETE FROM invites
+         WHERE space_id = $1 AND lower(email) = lower($2) AND accepted_at IS NULL AND expires_at <= now()"#,
+      to_db(new.space_id),
+      new.email,
+    )
+    .execute(&mut *tx)
+    .await?;
+    let inserted = sqlx::query!(
       r#"INSERT INTO invites (id, space_id, email, space_role, channel_ids, sponsor_user_id, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (space_id, lower(email)) WHERE accepted_at IS NULL DO NOTHING"#,
       to_db(new.id),
       to_db(new.space_id),
       new.email.to_lowercase(),
@@ -47,9 +59,14 @@ impl Database {
       to_db(new.sponsor),
       new.maybe_expires_at,
     )
-    .execute(self.pool())
-    .await?;
-    Ok(Invite {
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    if inserted == 0 {
+      return Ok(None);
+    }
+    Ok(Some(Invite {
       id: new.id,
       space_id: new.space_id,
       email: new.email.to_lowercase(),
@@ -57,7 +74,7 @@ impl Database {
       channel_ids: new.channel_ids.to_vec(),
       sponsor_user_id: new.sponsor,
       maybe_expires_at: new.maybe_expires_at,
-    })
+    }))
   }
 
   pub async fn list_pending_invites(&self, space: SpaceId) -> Result<Vec<Invite>, DbError> {
@@ -117,9 +134,36 @@ impl Database {
     Ok(())
   }
 
+  /// Notes that the invitation goes out again, unless it went out less than `min_interval_secs`
+  /// ago: then `false`, and nothing changes. Atomic, so two clicks send one mail.
+  pub async fn mark_invite_resent(&self, invite: InviteId, min_interval_secs: u64) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"UPDATE invites SET last_sent_at = now()
+         WHERE id = $1 AND accepted_at IS NULL
+           AND last_sent_at <= now() - make_interval(secs => $2::double precision)"#,
+      to_db(invite),
+      min_interval_secs as f64,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() == 1)
+  }
+
+  /// The mail of a resend could not be sent: the next try need not wait.
+  pub async fn forget_invite_resend(&self, invite: InviteId) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE invites SET last_sent_at = to_timestamp(0) WHERE id = $1",
+      to_db(invite)
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
   /// Applies all pending invites for a (verified) email to the user: space membership with the
   /// invited role and membership in the listed channels of that space. Guest memberships expire
-  /// when the invite says so. Idempotent; returns what was applied.
+  /// when the invite says so. A guest account only takes guest invitations; others stay open for an
+  /// admin to see. Idempotent; returns what was applied.
   pub async fn accept_pending_invites(
     &self,
     user: UserId,
@@ -130,6 +174,8 @@ impl Database {
     let invites = sqlx::query!(
       r#"UPDATE invites SET accepted_at = now(), accepted_by = $2
          WHERE lower(email) = lower($1) AND accepted_at IS NULL AND (expires_at IS NULL OR expires_at > now())
+           AND (space_role = 'guest'
+                OR NOT EXISTS (SELECT 1 FROM users account WHERE account.id = $2 AND account.kind = 'guest'))
          RETURNING space_id, space_role, channel_ids, sponsor_user_id, expires_at"#,
       email,
       to_db(user),
