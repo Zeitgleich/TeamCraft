@@ -95,7 +95,7 @@ pub async fn create_invite(
       maybe_expires_at,
     })
     .await?
-    .ok_or_else(|| ApiError::Conflict("this address already has an open invitation to the space".into()))?;
+    .ok_or(ApiError::InviteAlreadyOpen)?;
   let should_send_mail = match state.mailer.get() {
     Some(_) => match spend_invite_mail(state, caller) {
       Ok(has_budget) => has_budget,
@@ -341,9 +341,16 @@ pub async fn resend_invite(
       retry_after_secs: interval_secs,
     });
   }
-  if !spend_invite_mail(state, caller)? {
+  // A refusal for the budget sends nothing, so it must not start the interval either. The interval
+  // goes first so that its refusal doesn't use up the budget.
+  let refusal = match spend_invite_mail(state, caller) {
+    Ok(true) => None,
+    Ok(false) => Some(ApiError::Conflict("this server sends no invitation mail".into())),
+    Err(over_budget) => Some(over_budget),
+  };
+  if let Some(refusal) = refusal {
     state.database.forget_invite_resend(invite).await?;
-    return Err(ApiError::Conflict("this server sends no invitation mail".into()));
+    return Err(refusal);
   }
   let mail = invite_mail(state, caller, &access.view.space.name, &existing, None).await;
   if let Err(error) = mailer.send(&mail).await {

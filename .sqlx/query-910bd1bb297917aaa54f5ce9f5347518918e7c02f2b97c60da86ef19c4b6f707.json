@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE invites SET accepted_at = now(), accepted_by = $2\n         WHERE lower(email) = lower($1) AND accepted_at IS NULL AND (expires_at IS NULL OR expires_at > now())\n         RETURNING space_id, space_role, channel_ids, sponsor_user_id, expires_at",
+  "query": "UPDATE invites SET accepted_at = now(), accepted_by = $2\n         WHERE lower(email) = lower($1) AND accepted_at IS NULL AND (expires_at IS NULL OR expires_at > now())\n           AND (space_role = 'guest'\n                OR NOT EXISTS (SELECT 1 FROM users account WHERE account.id = $2 AND account.kind = 'guest'))\n         RETURNING space_id, space_role, channel_ids, sponsor_user_id, expires_at",
   "describe": {
     "columns": [
       {
@@ -73,5 +73,5 @@
       true
     ]
   },
-  "hash": "bf936cbb4264de487affe3b2c847afccb42e5e7b6cae80076e4c12a19d85ce95"
+  "hash": "910bd1bb297917aaa54f5ce9f5347518918e7c02f2b97c60da86ef19c4b6f707"
 }

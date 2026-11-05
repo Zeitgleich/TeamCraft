@@ -144,3 +144,4 @@ directory-resend = Erneut senden
 directory-resent = Erneut gesendet
 directory-revoke = Zurückziehen
 directory-revoke-confirm = Einladung für { $email } zurückziehen? Die Person tritt bei der Anmeldung dann nicht bei.
+directory-resend-later = Vor Kurzem gesendet. Du kannst sie später erneut senden.

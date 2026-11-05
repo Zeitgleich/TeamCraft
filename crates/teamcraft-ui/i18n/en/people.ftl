@@ -144,3 +144,4 @@ directory-resend = Send again
 directory-resent = Sent again
 directory-revoke = Revoke
 directory-revoke-confirm = Revoke the invitation for { $email }? They won't join when they sign in.
+directory-resend-later = Sent a short while ago. You can send it again later.

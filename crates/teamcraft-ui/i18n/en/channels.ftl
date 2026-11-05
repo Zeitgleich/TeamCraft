@@ -237,6 +237,7 @@ invite-email-hint = For people without an account yet. They get an e-mail and jo
 invite-email-invalid = Please check these addresses: { $addresses }
 invite-email-too-many = At most { $max } addresses at a time.
 invite-email-refused = The server refused these addresses. Check them and send again.
+invite-email-already-open = An invitation for one of these addresses is already open in this space. Find it under People, Invitations, to send it again or revoke it.
 invite-message = Personal message (optional)
 invite-message-hint = Added to the invitation e-mails.
 invite-done = { $count ->

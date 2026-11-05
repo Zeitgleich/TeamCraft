@@ -220,6 +220,7 @@ error-account-deactivated = Your account is deactivated. Ask an admin to reactiv
 error-device-binding-required = This server only accepts sign-ins bound to your device. Sign in again; if that doesn't help, update the app or tell your administrator.
 error-proof-refused = The server refused this device's proof of who it is. A proxy may change requests, or the server may not know this address: tell your administrator.
 error-rate-limited = Too many requests at once. Wait a moment and try again.
+error-invite-already-open = An invitation for this address is already open. Send it again or revoke it under People, Invitations.
 error-too-large = That is too large for the server. Try something smaller.
 error-attachment-gone = This file is no longer available.
 error-server-trouble = The server has a problem right now. Try again in a few minutes.

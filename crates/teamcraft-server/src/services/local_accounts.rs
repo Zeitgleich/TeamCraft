@@ -136,6 +136,22 @@ pub async fn create_local_guest(
   check_channels(state, caller, space, &request.channel_ids).await?;
   let maybe_expires_at = future_expiry(request.maybe_expires_at)?;
 
+  // The guest gets the space, the channels and the expiry through this invite, applied at the first
+  // sign-in like for every verified e-mail address. It comes first: an invitation already open for
+  // the address would be applied in its place, with whatever role it names.
+  let invite = state
+    .database
+    .create_invite(&NewInvite {
+      id: state.next_id()?,
+      space_id: space,
+      email: &email,
+      role: SpaceRole::Guest,
+      channel_ids: &request.channel_ids,
+      sponsor: caller.user.id,
+      maybe_expires_at,
+    })
+    .await?
+    .ok_or(ApiError::InviteAlreadyOpen)?;
   let user: UserId = state.next_id()?;
   let token = new_one_time_token(&mut OsRng);
   let activation_expires_at = OffsetDateTime::now_utc()
@@ -153,24 +169,11 @@ pub async fn create_local_guest(
     )
     .await?;
   if !is_created {
+    state.database.delete_invite(invite.id).await?;
     return Err(ApiError::Conflict(
       "a local account with this e-mail address exists".into(),
     ));
   }
-  // The guest gets the space, the channels and the expiry through the invite, applied at the first
-  // sign-in like for every verified e-mail address. One already open for this address does that too.
-  state
-    .database
-    .create_invite(&NewInvite {
-      id: state.next_id()?,
-      space_id: space,
-      email: &email,
-      role: SpaceRole::Guest,
-      channel_ids: &request.channel_ids,
-      sponsor: caller.user.id,
-      maybe_expires_at,
-    })
-    .await?;
   audit::record(
     state,
     Some(caller.user.id),

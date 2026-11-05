@@ -162,7 +162,8 @@ impl Database {
 
   /// Applies all pending invites for a (verified) email to the user: space membership with the
   /// invited role and membership in the listed channels of that space. Guest memberships expire
-  /// when the invite says so. Idempotent; returns what was applied.
+  /// when the invite says so. A guest account only takes guest invitations; others stay open for an
+  /// admin to see. Idempotent; returns what was applied.
   pub async fn accept_pending_invites(
     &self,
     user: UserId,
@@ -173,6 +174,8 @@ impl Database {
     let invites = sqlx::query!(
       r#"UPDATE invites SET accepted_at = now(), accepted_by = $2
          WHERE lower(email) = lower($1) AND accepted_at IS NULL AND (expires_at IS NULL OR expires_at > now())
+           AND (space_role = 'guest'
+                OR NOT EXISTS (SELECT 1 FROM users account WHERE account.id = $2 AND account.kind = 'guest'))
          RETURNING space_id, space_role, channel_ids, sponsor_user_id, expires_at"#,
       email,
       to_db(user),

@@ -544,12 +544,110 @@ mod invitations {
             json!({"email": email, "role": "member"}),
           )
           .await
-          .status
       }
     };
-    assert_eq!(invite(team.clone(), "m@example.org").await, StatusCode::CREATED);
-    assert_eq!(invite(team.clone(), "M@Example.org").await, StatusCode::CONFLICT);
-    assert_eq!(invite(other, "m@example.org").await, StatusCode::CREATED);
+    assert_eq!(
+      invite(team.clone(), "m@example.org").await.status,
+      StatusCode::CREATED
+    );
+    let again = invite(team.clone(), "M@Example.org").await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    assert_eq!(again.body["error_code"], json!("invite_already_open"));
+    assert_eq!(invite(other, "m@example.org").await.status, StatusCode::CREATED);
+    app.stop().await;
+  }
+
+  /// The dedupe of migration `0082`, checked to be what the migration runs.
+  const OPEN_INVITE_DEDUPE: &str = "DELETE FROM invites WHERE id IN (
+  SELECT ranked.id FROM (
+    SELECT id, row_number() OVER (
+      PARTITION BY space_id, lower(email)
+      ORDER BY expires_at DESC NULLS FIRST, id DESC
+    ) AS position
+    FROM invites WHERE accepted_at IS NULL
+  ) ranked
+  WHERE ranked.position > 1
+);";
+
+  #[tokio::test]
+  async fn the_migration_keeps_the_invitation_that_still_works() {
+    let migration = include_str!("../../../teamcraft-db/migrations/0082_invite_last_sent.sql");
+    assert!(
+      migration.contains(OPEN_INVITE_DEDUPE),
+      "the test runs what the migration runs"
+    );
+    let Some(app) = TestApp::start().await else { return };
+    let alice = owner();
+    let alice_id: i64 = user_id(&app, &alice).await.parse().unwrap();
+    let space: i64 = create_space(&app, &alice, "Team", "invite_only")
+      .await
+      .parse()
+      .unwrap();
+    let pool = app.sql_pool();
+    sqlx::query("DROP INDEX invites_open_address_idx")
+      .execute(pool)
+      .await
+      .unwrap();
+    // (id, address, expiry): a newer expired one beside an older valid one, a newer one beside an
+    // older one without expiry, two valid ones with different expiry, and a lone expired one.
+    let rows = [
+      (1, "a@example.org", Some("-1 day")),
+      (2, "A@example.org", Some("-2 days")),
+      (0, "a@example.org", Some("+1 day")),
+      (4, "b@example.org", Some("+1 day")),
+      (3, "b@example.org", None),
+      (5, "c@example.org", Some("+1 day")),
+      (6, "c@example.org", Some("+5 days")),
+      (7, "d@example.org", Some("-1 day")),
+    ];
+    for (id, email, maybe_offset) in rows {
+      sqlx::query(
+        "INSERT INTO invites (id, space_id, email, space_role, sponsor_user_id, expires_at)
+         VALUES ($1, $2, $3, 'member', $4, now() + $5::interval)",
+      )
+      .bind(1000 + id)
+      .bind(space)
+      .bind(email)
+      .bind(alice_id)
+      .bind(maybe_offset)
+      .execute(pool)
+      .await
+      .unwrap();
+    }
+    sqlx::query(OPEN_INVITE_DEDUPE).execute(pool).await.unwrap();
+    let mut kept: Vec<i64> = sqlx::query_scalar("SELECT id - 1000 FROM invites WHERE space_id = $1")
+      .bind(space)
+      .fetch_all(pool)
+      .await
+      .unwrap();
+    kept.sort_unstable();
+    assert_eq!(kept, vec![0, 3, 6, 7]);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_guest_account_takes_no_member_invitation() {
+    let Some(app) = TestApp::start().await else { return };
+    let alice = owner();
+    let space = create_space(&app, &alice, "Team", "invite_only").await;
+    let ext = guest("ext");
+    let reply = app
+      .post(
+        &alice,
+        &format!("/spaces/{space}/invites"),
+        json!({"email": ext.email, "role": "member"}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    user_id(&app, &ext).await;
+    let spaces = app.get(&ext, "/spaces").await;
+    assert_eq!(spaces.body["spaces"], json!([]), "{}", spaces.body);
+    let list = app.get(&alice, "/directory/invitations").await;
+    assert_eq!(
+      listed(&list.body),
+      vec![ext.email.as_str()],
+      "it stays open for an admin"
+    );
     app.stop().await;
   }
 
@@ -581,10 +679,22 @@ mod invitations {
     );
     assert_eq!(mailer.sent().len(), 2);
 
+    let past_budget = app.post(&alice, &resend, json!({})).await;
     assert_eq!(
-      app.post(&alice, &resend, json!({})).await.status,
+      past_budget.status,
       StatusCode::TOO_MANY_REQUESTS,
       "a resend past the budget"
+    );
+    let marked: Option<bool> =
+      sqlx::query_scalar("SELECT last_sent_at < now() - interval '1 hour' FROM invites WHERE id = $1")
+        .bind(first.id().parse::<i64>().unwrap())
+        .fetch_one(app.sql_pool())
+        .await
+        .unwrap();
+    assert_eq!(
+      marked,
+      Some(true),
+      "a refusal for the budget doesn't start the interval"
     );
     let over = app
       .post(&alice, &path, json!({"email": "b@example.org", "role": "member"}))

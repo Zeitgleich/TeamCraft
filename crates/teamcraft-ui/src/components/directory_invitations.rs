@@ -109,6 +109,8 @@ fn InvitationRow(invitation: DirectoryInvitation, pager: Pager<DirectoryInvitati
   let resend = PendingAction::new();
   let revoke = PendingAction::new();
   let is_resent = RwSignal::new(false);
+  // The interval since the last mail, or the sender's mail budget: worded at the row, not a toast.
+  let is_too_soon = RwSignal::new(false);
   let is_confirming = RwSignal::new(false);
   let on_resend = move |_| {
     let maybe_client = pager.client();
@@ -117,6 +119,10 @@ fn InvitationRow(invitation: DirectoryInvitation, pager: Pager<DirectoryInvitati
       match call(maybe_client, ApiMethod::Post, path).await {
         Ok(()) => {
           is_resent.set_if_alive(true);
+          Ok(())
+        },
+        Err(failure) if is_too_soon_refusal(&failure) => {
+          is_too_soon.set_if_alive(true);
           Ok(())
         },
         Err(failure) => {
@@ -187,6 +193,9 @@ fn InvitationRow(invitation: DirectoryInvitation, pager: Pager<DirectoryInvitati
               when=move || !is_resent.get()
               fallback=move || view! { <span class="muted-text" role="status">{move || i18n.t("directory-resent")}</span> }
             >
+              <Show when=move || is_too_soon.get() fallback=|| ()>
+                <span class="muted-text" role="status">{move || i18n.t("directory-resend-later")}</span>
+              </Show>
               <PendingButton pending=resend class="btn btn-small" on_click=on_resend>
                 {move || i18n.t("directory-resend")}
               </PendingButton>
@@ -213,6 +222,10 @@ async fn call(
     .map_err(|refusal| refusal.to_failure())
 }
 
+fn is_too_soon_refusal(failure: &ActionFailure) -> bool {
+  failure.kind == FailureKind::Server(ErrorCode::RateLimited)
+}
+
 fn is_gone(failure: &ActionFailure) -> bool {
   failure.kind == FailureKind::Server(ErrorCode::InviteNotFound)
 }
@@ -231,5 +244,12 @@ mod tests {
     assert!(is_gone(&refusal(ErrorCode::InviteNotFound)));
     assert!(!is_gone(&refusal(ErrorCode::Conflict)));
     assert!(!is_gone(&ActionFailure::new(FailureKind::Network, String::new())));
+  }
+
+  #[test]
+  fn a_limit_on_resending_is_worded_at_the_row() {
+    let refusal = |code| ActionFailure::new(FailureKind::Server(code), String::new());
+    assert!(is_too_soon_refusal(&refusal(ErrorCode::RateLimited)));
+    assert!(!is_too_soon_refusal(&refusal(ErrorCode::Conflict)));
   }
 }

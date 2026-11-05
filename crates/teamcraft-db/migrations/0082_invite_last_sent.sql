@@ -1,12 +1,19 @@
 -- When an invitation mail last went out, so resending can be limited (issue #298).
 ALTER TABLE invites ADD COLUMN last_sent_at timestamptz NOT NULL DEFAULT now();
 
--- One open invitation per address and space. Of repeated ones the newest is what was meant last.
-DELETE FROM invites older USING invites newer
-  WHERE older.accepted_at IS NULL AND newer.accepted_at IS NULL
-    AND older.space_id = newer.space_id
-    AND lower(older.email) = lower(newer.email)
-    AND older.id < newer.id;
+-- One open invitation per address and space. Of repeated ones the one that still works is kept: no
+-- expiry first, then the latest expiry, then the newest. Expired ones without a sibling stay, so they
+-- can still be seen and revoked.
+DELETE FROM invites WHERE id IN (
+  SELECT ranked.id FROM (
+    SELECT id, row_number() OVER (
+      PARTITION BY space_id, lower(email)
+      ORDER BY expires_at DESC NULLS FIRST, id DESC
+    ) AS position
+    FROM invites WHERE accepted_at IS NULL
+  ) ranked
+  WHERE ranked.position > 1
+);
 CREATE UNIQUE INDEX invites_open_address_idx ON invites (space_id, lower(email)) WHERE accepted_at IS NULL;
 
 -- The directory's pages walk people and channels by name (issue #298). At 100k users the first page

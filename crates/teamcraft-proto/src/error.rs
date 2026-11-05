@@ -67,6 +67,8 @@ wire_enum! {
     /// The signed workspace policy does not let members replace the name from the identity provider
     /// (`directory.allow_display_name_override`).
     DisplayNameOverrideNotAllowed => "display_name_override_not_allowed",
+    /// An invitation for the address is open in the space already; revoke it to invite anew.
+    InviteAlreadyOpen => "invite_already_open",
     /// No OpenRouter API key is stored for the notetaker (admin.md §3.7).
     NotetakerKeyNotFound => "notetaker_key_not_found",
     UserGroupNotFound => "user_group_not_found",
@@ -319,6 +321,7 @@ mod tests {
       ErrorCode::ShareUnavailable,
       ErrorCode::RecoveryPassphraseNotAllowed,
       ErrorCode::DisplayNameOverrideNotAllowed,
+      ErrorCode::InviteAlreadyOpen,
       ErrorCode::NotetakerKeyNotFound,
       ErrorCode::UnknownHost,
       ErrorCode::BrandAssetNotFound,

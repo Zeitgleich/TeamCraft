@@ -698,3 +698,54 @@ mod creation {
     app.stop().await;
   }
 }
+
+mod open_invitations {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_guest_account_is_not_made_while_another_invitation_is_open() {
+    let (app, mailer) = app!();
+    let alice = owner();
+    let space = create_space(&app, &alice, "Partners", "invite_only").await;
+    let member_invite = app
+      .post(
+        &alice,
+        &format!("/spaces/{space}/invites"),
+        json!({"email": "gus@partner.test", "role": "member"}),
+      )
+      .await;
+    assert_eq!(
+      member_invite.status,
+      StatusCode::CREATED,
+      "{}",
+      member_invite.body
+    );
+    let mails = mailer.sent().len();
+
+    let refused = app
+      .post(
+        &alice,
+        &format!("/spaces/{space}/local-guests"),
+        json!({"email": "Gus@Partner.test", "display_name": "Gus Guest"}),
+      )
+      .await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+    assert_eq!(refused.body["error_code"], json!("invite_already_open"));
+    assert_eq!(mailer.sent().len(), mails, "no activation mail");
+
+    // Once the other invitation is revoked, the guest is made, as a guest.
+    let revoked = app
+      .delete(&alice, &format!("/spaces/{space}/invites/{}", member_invite.id()))
+      .await;
+    assert_eq!(revoked.status, StatusCode::NO_CONTENT);
+    create_guest(&app, &mailer, &alice, &space).await;
+    let list = app.get(&alice, "/directory/invitations").await;
+    assert_eq!(
+      list.body["invitations"][0]["role"],
+      json!("guest"),
+      "{}",
+      list.body
+    );
+    app.stop().await;
+  }
+}

@@ -143,6 +143,9 @@ pub enum ApiError {
   /// The signed policy does not let members replace the name from the identity provider.
   #[error("the workspace policy does not allow changing the display name")]
   DisplayNameOverrideNotAllowed,
+  /// An invitation for the address is open in the space already (one per address and space).
+  #[error("an invitation for this address is open; revoke it first")]
+  InviteAlreadyOpen,
   /// The request arrived on a host name no brand is configured for and `unknown_host = "reject"`.
   #[error("this host name is not served here")]
   UnknownHost,
@@ -382,7 +385,8 @@ impl ApiError {
       | Self::ImportWindowFull
       | Self::KeyPackageExhausted
       | Self::EpochConflict { .. }
-      | Self::VersionConflict { .. } => StatusCode::CONFLICT,
+      | Self::VersionConflict { .. }
+      | Self::InviteAlreadyOpen => StatusCode::CONFLICT,
       Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
       Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
       Self::Unavailable(_) | Self::Busy { .. } | Self::DependencyDown { .. } => {
@@ -419,6 +423,7 @@ impl ApiError {
       Self::LocalAccountsDisabled => ErrorCode::LocalAccountsDisabled,
       Self::RecoveryPassphraseNotAllowed => ErrorCode::RecoveryPassphraseNotAllowed,
       Self::DisplayNameOverrideNotAllowed => ErrorCode::DisplayNameOverrideNotAllowed,
+      Self::InviteAlreadyOpen => ErrorCode::InviteAlreadyOpen,
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::LastOwner => ErrorCode::LastOwner,
@@ -716,6 +721,11 @@ mod tests {
         ApiError::DisplayNameOverrideNotAllowed,
         StatusCode::FORBIDDEN,
         ErrorCode::DisplayNameOverrideNotAllowed,
+      ),
+      (
+        ApiError::InviteAlreadyOpen,
+        StatusCode::CONFLICT,
+        ErrorCode::InviteAlreadyOpen,
       ),
       (
         ApiError::NotSpaceMember,
