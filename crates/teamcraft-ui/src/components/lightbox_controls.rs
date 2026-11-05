@@ -142,7 +142,8 @@ impl MediaActions {
     match self.kind.get_untracked() {
       Some(MediaKind::Animated) => self.is_paused.update(|paused| *paused = !*paused),
       Some(MediaKind::Video) => {
-        let Some(video) = self.video.get_untracked() else {
+        // Not one that left the page and still sits in the NodeRef: it would play unseen.
+        let Some(video) = self.video.get_untracked().filter(|video| video.is_connected()) else {
           return;
         };
         if video.paused() {
@@ -552,7 +553,10 @@ fn MoreMenu(
           <button class="menu-item" role="menuitem" on:click=move |_| actions.run(Command::JumpToMessage)>
             <Icon name=IconName::Reply />
             <span class="menu-label">{move || i18n.t("lightbox-jump")}</span>
-            <kbd class="menu-shortcut">{shortcut(Command::JumpToMessage)}</kbd>
+            // On a video J seeks; the menu item is the way to the message there.
+            {move || (actions.kind.get() != Some(MediaKind::Video)).then(|| view! {
+              <kbd class="menu-shortcut">{shortcut(Command::JumpToMessage)}</kbd>
+            })}
           </button>
           <button class="menu-item" role="menuitem" on:click=toggle_saved>
             <Icon name=IconName::Bookmark />

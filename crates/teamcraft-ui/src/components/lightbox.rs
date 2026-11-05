@@ -46,13 +46,13 @@ use crate::components::message_row::shown_author;
 use crate::components::modal::Modal;
 use crate::components::pending_button::PendingButton;
 use crate::components::thread_panel::ThreadPanel;
-use crate::components::video_player::VideoPlayer;
+use crate::components::video_player::{VideoPlayer, run_player_command};
 use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::i18n::use_i18n;
 use crate::lightbox::{
   Arrival, Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, MediaPages, ModifierStyle,
   Picture, Point, Pointers, Release, Size, Viewport, album_len, fitted_layout, images_in_scope, neighbor,
-  position, wheel_zoom_factor,
+  player_command_for_video, position, wheel_zoom_factor,
 };
 use crate::media_cache::{self, Rendition};
 use crate::model::{ConversationId, ConversationKind, thread_id_of};
@@ -290,6 +290,9 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
       ev.prevent_default();
       ev.stop_propagation();
       motion.close();
+      return;
+    }
+    if kind.get_untracked() == Some(MediaKind::Video) && run_video_key(&ev, video) {
       return;
     }
     let Some(command) = Command::for_key(&ev.key(), ev.ctrl_key() || ev.meta_key(), ev.alt_key()) else {
@@ -1217,6 +1220,31 @@ fn observe_stage_size(stage: NodeRef<html::Div>, layout: RwSignal<u32>) {
   on_cleanup(move || {
     handle.try_with_value(|(observer, _)| observer.disconnect());
   });
+}
+
+/// Sends a player key on to the video on show; `false` when the key isn't one, or Space or Enter
+/// press the button that has the focus.
+fn run_video_key(ev: &web_sys::KeyboardEvent, video: NodeRef<html::Video>) -> bool {
+  let is_button = ev
+    .target()
+    .and_then(|target| target.dyn_into::<web_sys::HtmlButtonElement>().ok())
+    .is_some();
+  if is_button && matches!(ev.key().as_str(), " " | "Enter") {
+    return false;
+  }
+  let has_modifier = ev.ctrl_key() || ev.meta_key() || ev.alt_key();
+  let (Some(command), Some(element)) = (
+    player_command_for_video(&ev.key(), has_modifier),
+    // A NodeRef keeps its element after it left the page: paged on while the next video loads, this
+    // would play the previous one, with sound and no controls.
+    video.get_untracked().filter(|element| element.is_connected()),
+  ) else {
+    return false;
+  };
+  ev.prevent_default();
+  ev.stop_propagation();
+  run_player_command(&element, command);
+  true
 }
 
 /// Keys typed into the thread's composer, a text field or the zoom slider are theirs, and the "…"

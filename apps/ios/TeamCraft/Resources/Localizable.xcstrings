@@ -1,6 +1,54 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "video_unplayable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This video can't be played on this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Video kann auf diesem Gerät nicht abgespielt werden."
+          }
+        }
+      }
+    },
+    "video_open_elsewhere": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open in another app"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In anderer App öffnen"
+          }
+        }
+      }
+    },
+    "video_loading %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading the video (%@)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video wird geladen (%@)"
+          }
+        }
+      }
+    },
     "server_confirm_from_link": {
       "localizations": {
         "en": {
