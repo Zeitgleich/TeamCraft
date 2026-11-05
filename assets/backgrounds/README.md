@@ -6,7 +6,7 @@ was checked on the source page). No people, faces, logos or readable text.
 
 | File                | Content                                                           |
 |---------------------|-------------------------------------------------------------------|
-| `<slug>.jpg`        | 1920x1080, JPEG of at most 400 KiB, compiled into the desktop app |
+| `<slug>.jpg`        | 1920x1080, JPEG of at most 400 KiB, compiled into the desktop app; the web release serves it as `backgrounds/<slug>-<hash>.jpg` (`crates/teamcraft-ui/scripts/add-background-photos.sh`) |
 | `thumbs/<slug>.jpg` | 320x180, served by the web UI for the picker and loaded lazily    |
 | `manifest.json`     | Source of truth: origin, licence, SHA-256, crop (`focus`, `zoom`) |
 
@@ -24,4 +24,6 @@ scripts/process-backgrounds.py --check  # fail if the committed files differ (ne
    Pexels or Pixabay licences) and shows nothing identifiable: no people, brands or readable text.
 2. Add an entry to `manifest.json` (`sha256` of the download, optional `focus` and `zoom`).
 3. Run the script, look at the result, and add the preset to `BackgroundPreset`
-   (`teamcraft-client-api`), `PhotoBackground` (`teamcraft-media`) and `i18n/*.ftl`.
+   (`teamcraft-client-api`), `PhotoBackground` (`teamcraft-media`) and `i18n/*.ftl`, and the
+   file's SHA-256 to `effects/photo_file.rs` (`teamcraft-media`; the browser checks the downloaded
+   picture against it, and its tests say when a pin is stale).

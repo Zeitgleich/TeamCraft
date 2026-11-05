@@ -1,8 +1,10 @@
 //! The UI's choice of background as the effects' [`BackgroundEffect`], for the browser's call
 //! module (#439): the illustrations are drawn here; the user's own and the organization's pictures
-//! come decoded from the file the page's core hands over (the browser decodes them,
-//! `call_web::decode_picture`, so the call module carries no image decoder). The photos are only
-//! in the apps (`photo-backgrounds`); the desktop maps its choices itself.
+//! come decoded from the file the page's core hands over, the photos from the file the call module
+//! downloaded ([`photo_path`](super::photo_path), checked with
+//! [`check_photo_file`](super::check_photo_file)). The browser decodes both
+//! (`call_web::decode_picture`), so the call module carries no image decoder. The desktop maps its
+//! choices itself.
 
 use std::sync::Arc;
 
@@ -18,8 +20,13 @@ pub fn needs_picture(effect: ChosenEffect) -> bool {
   matches!(effect, ChosenEffect::Custom(_) | ChosenEffect::Org(_))
 }
 
-/// The effect for `chosen`; `maybe_picture` is an own or organization picture, decoded (it is
-/// scaled to fit the presets' size). Drawing takes a moment (tens of milliseconds): keep the result
+/// Whether `effect` is a photo, whose picture file the call module downloads.
+pub fn is_photo(effect: ChosenEffect) -> bool {
+  matches!(effect, ChosenEffect::Preset(preset) if preset.is_photo())
+}
+
+/// The effect for `chosen`; `maybe_picture` is an own or organization picture or a photo, decoded
+/// (it is scaled to fit the presets' size). Drawing takes a moment (tens of milliseconds): keep the result
 /// while the choice stays.
 pub fn chosen_background(
   chosen: ChosenEffect,
@@ -29,8 +36,10 @@ pub fn chosen_background(
     ChosenEffect::None => return Ok(BackgroundEffect::None),
     ChosenEffect::BlurLight => return Ok(BackgroundEffect::Blur(BlurStrength::Light)),
     ChosenEffect::BlurStrong => return Ok(BackgroundEffect::Blur(BlurStrength::Strong)),
-    ChosenEffect::Preset(preset) => illustration(preset)?.render(PRESET_WIDTH, PRESET_HEIGHT)?,
-    ChosenEffect::Custom(_) | ChosenEffect::Org(_) => maybe_picture
+    ChosenEffect::Preset(preset) if !preset.is_photo() => {
+      illustration(preset)?.render(PRESET_WIDTH, PRESET_HEIGHT)?
+    },
+    ChosenEffect::Preset(_) | ChosenEffect::Custom(_) | ChosenEffect::Org(_) => maybe_picture
       .ok_or_else(|| EffectsError::UnsupportedImage("no picture file".into()))?
       .fit_within(PRESET_WIDTH, PRESET_HEIGHT),
   };
@@ -46,7 +55,7 @@ fn illustration(preset: BackgroundPreset) -> Result<PresetBackground, EffectsErr
     BackgroundPreset::Forest => PresetBackground::Forest,
     photo => {
       return Err(EffectsError::UnsupportedImage(format!(
-        "the photo {} is only in the apps",
+        "the photo {} is a file, not drawn",
         photo.slug()
       )));
     },
@@ -75,23 +84,42 @@ mod tests {
   }
 
   #[test]
-  fn every_illustration_is_drawn_and_photos_are_refused() {
+  fn every_illustration_is_drawn() {
     for preset in BackgroundPreset::ILLUSTRATIONS {
+      assert!(!is_photo(ChosenEffect::Preset(preset)));
       let BackgroundEffect::Image(image) = chosen_background(ChosenEffect::Preset(preset), None).unwrap()
       else {
         panic!("{preset:?} is no picture");
       };
       assert_eq!((image.width(), image.height()), (PRESET_WIDTH, PRESET_HEIGHT));
     }
+  }
+
+  /// A photo goes behind as its downloaded picture; without one it can't.
+  #[test]
+  fn photos_need_their_picture() {
     for photo in BackgroundPreset::PHOTOS {
+      let chosen = ChosenEffect::Preset(photo);
+      assert!(is_photo(chosen) && !needs_picture(chosen));
       assert!(
         matches!(
-          chosen_background(ChosenEffect::Preset(photo), None),
+          chosen_background(chosen, None),
           Err(EffectsError::UnsupportedImage(_))
         ),
         "{photo:?}"
       );
     }
+    let picture = BackgroundImage::new(
+      PRESET_WIDTH,
+      PRESET_HEIGHT,
+      vec![90; PRESET_WIDTH as usize * PRESET_HEIGHT as usize * 4],
+    )
+    .unwrap();
+    let chosen = ChosenEffect::Preset(BackgroundPreset::Loft);
+    assert_eq!(
+      chosen_background(chosen, Some(picture.clone())).unwrap(),
+      BackgroundEffect::Image(Arc::new(picture))
+    );
   }
 
   #[test]

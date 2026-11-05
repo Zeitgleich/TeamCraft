@@ -1947,8 +1947,9 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   pictures are decoded by the browser. The person segmentation is a module of its own,
   `teamcraft-web-segmentation` (tract, built with WebAssembly SIMD: 2.09 MB gzip), which the call
   module runs in a worker, and the model (0.46 MB, 0.26 MB gzip) a file of its own: both are only
-  downloaded when someone first turns an effect on. A signed release lists them in `on_demand`,
-  so the service worker doesn't fetch them in the background. `check-web-size.py` keeps the call
+  downloaded when someone first turns an effect on. A photo background's full picture (0.15 to
+  0.4 MB, JPEG) is a file of the web release too, downloaded when the photo is picked. A signed
+  release lists them in `on_demand`, so the service worker doesn't fetch them in the background. `check-web-size.py` keeps the call
   module under 1 MB gzip.
 - A signed release's service worker installs without the chunks (the signed-in app's included) and
   fetches each one, checked against its signed hash, when it is first used or in the background
