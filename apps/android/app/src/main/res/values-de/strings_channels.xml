@@ -58,6 +58,9 @@
   <string name="event_pinned">%1$s hat eine Nachricht angeheftet</string>
   <string name="event_moved">%1$s hat diesen Kanal in %2$s verschoben</string>
   <string name="event_moved_unnamed">%1$s hat diesen Kanal in einen anderen Bereich verschoben</string>
+  <string name="event_call_moved">%1$s hat den Anruf in „%2$s“ verschoben</string>
+  <string name="event_call_moved_unnamed">%1$s hat den Anruf in einen Meetingraum verschoben</string>
+  <string name="event_call_moved_open">Raum öffnen</string>
   <string name="event_archived_unattributed">Dieser Kanal wurde archiviert</string>
   <string name="event_unarchived_unattributed">Dieser Kanal wurde wiederhergestellt</string>
   <string name="event_private_unattributed">Dieser Kanal wurde privat gemacht</string>
