@@ -12,8 +12,6 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,7 +21,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -57,6 +54,17 @@ import androidx.compose.ui.window.DialogProperties
 import java.text.DateFormat
 import java.util.Date
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.produceState
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
@@ -89,7 +97,6 @@ private enum class SettingsPage(val title: Int, val summary: Int) {
  * Settings as a hub: the user's name, presence and status on top, then one entry per page
  * (notifications, chats, privacy and security, devices) and sign-out, instead of one long page.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
   viewModel: MainViewModel,
@@ -125,33 +132,50 @@ fun SettingsScreen(
   }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SettingsHub(viewModel: MainViewModel, account: AppState.Ready, onOpen: (SettingsPage) -> Unit) {
-  var presence by rememberSaveable { mutableStateOf(Presence.ONLINE) }
-  Text(account.displayName, style = MaterialTheme.typography.titleLarge)
-  DisplayNameSection(viewModel)
-  Heading(R.string.presence_title)
-  FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-    for ((choice, label) in PRESENCE_CHOICES) {
-      FilterChip(
-        selected = presence == choice,
-        onClick = {
-          presence = choice
-          viewModel.setPresence(choice)
-        },
-        label = { Text(stringResource(label)) },
-      )
+  val changes by viewModel.changeCount.collectAsState()
+  // The user's own presence and custom status as the workspace shows them, not a guess.
+  val maybeMe by produceState(viewModel.chat.maybeKeptSnapshot()?.me, changes) { value = viewModel.readChat { snapshot() }?.me ?: value }
+  var presence by remember(maybeMe?.presence) { mutableStateOf(presenceOf(maybeMe?.presence)) }
+  Row(verticalAlignment = Alignment.CenterVertically) {
+    AccountAvatar(account.userId, account.displayName, size = 56.dp)
+    Column(Modifier.padding(start = 16.dp).weight(1f)) {
+      Text(account.displayName, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+      maybeMe?.maybeCustomStatus?.let { status ->
+        Text(
+          listOf(status.emoji, status.text).filter { it.isNotBlank() }.joinToString(" "),
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
     }
   }
-  CustomStatusSection(viewModel)
+  DisplayNameSection(viewModel)
+  PresenceRow(presence) { choice ->
+    presence = choice
+    viewModel.setPresence(choice)
+  }
+  var isEditingStatus by rememberSaveable { mutableStateOf(false) }
+  ListItem(
+    headlineContent = { Text(stringResource(R.string.custom_status_title)) },
+    supportingContent = {
+      val status = maybeMe?.maybeCustomStatus
+      Text(status?.let { listOf(it.emoji, it.text).filter(String::isNotBlank).joinToString(" ") } ?: stringResource(R.string.custom_status_hint))
+    },
+    trailingContent = { Chevron(isOpen = isEditingStatus) },
+    modifier = Modifier.clickable { isEditingStatus = !isEditingStatus },
+  )
+  if (isEditingStatus) CustomStatusSection(viewModel)
   HorizontalDivider()
   Column {
     for (entry in SettingsPage.entries) {
       ListItem(
         headlineContent = { Text(stringResource(entry.title)) },
         supportingContent = { Text(stringResource(entry.summary)) },
-        trailingContent = { Text("›", style = MaterialTheme.typography.titleLarge) },
+        trailingContent = { Chevron() },
         modifier = Modifier.clickable { onOpen(entry) },
       )
     }
@@ -451,6 +475,57 @@ private fun DisplayNameSection(viewModel: MainViewModel) {
   }
 }
 
+/** The user's presence as one row; a tap opens the choices. */
+@Composable
+private fun PresenceRow(presence: Presence, onChoose: (Presence) -> Unit) {
+  var isOpen by remember { mutableStateOf(false) }
+  Box {
+    ListItem(
+      headlineContent = { Text(stringResource(R.string.presence_title)) },
+      supportingContent = { Text(stringResource(PRESENCE_CHOICES.first { it.first == presence }.second)) },
+      leadingContent = { Box(Modifier.size(12.dp).background(presenceDot(presence), CircleShape)) },
+      trailingContent = { Chevron() },
+      modifier = Modifier.clickable { isOpen = true },
+    )
+    DropdownMenu(expanded = isOpen, onDismissRequest = { isOpen = false }) {
+      for ((choice, label) in PRESENCE_CHOICES) {
+        DropdownMenuItem(
+          text = { Text(stringResource(label)) },
+          leadingIcon = { Box(Modifier.size(10.dp).background(presenceDot(choice), CircleShape)) },
+          onClick = {
+            isOpen = false
+            onChoose(choice)
+          },
+        )
+      }
+    }
+  }
+}
+
+/** A row's "more behind this" mark; pointing down while what it opens is shown below. */
+@Composable
+private fun Chevron(isOpen: Boolean = false) {
+  Icon(
+    if (isOpen) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+    contentDescription = null,
+    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+  )
+}
+
+private fun presenceOf(maybeWire: String?): Presence = when (maybeWire) {
+  "Away" -> Presence.AWAY
+  "DoNotDisturb" -> Presence.DO_NOT_DISTURB
+  "Offline" -> Presence.OFFLINE
+  else -> Presence.ONLINE
+}
+
+private fun presenceDot(presence: Presence): Color = when (presence) {
+  Presence.ONLINE -> Color(0xFF2E9E5B)
+  Presence.AWAY -> Color(0xFFE0A030)
+  Presence.DO_NOT_DISTURB -> Color(0xFFD0453A)
+  Presence.OFFLINE -> Color(0xFF8A8F98)
+}
+
 /** An emoji and text shown next to the user's name, cleared after the chosen time. */
 @Composable
 private fun CustomStatusSection(viewModel: MainViewModel) {
@@ -462,7 +537,6 @@ private fun CustomStatusSection(viewModel: MainViewModel) {
   var maybeFailure by remember { mutableStateOf<Int?>(null) }
   val textFocus = remember { FocusRequester() }
   val maybeTextError = requiredTextError(text, R.string.custom_status_missing).takeIf { hasTried } ?: maybeFailure
-  Heading(R.string.custom_status_title)
   Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
     OutlinedTextField(
       value = emoji,

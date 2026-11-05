@@ -44,6 +44,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import java.time.LocalDate
 import kotlinx.coroutines.delay
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.material.icons.filled.Search
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.ui.MainViewModel
@@ -64,16 +66,26 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
   }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.search), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
-      OutlinedTextField(
+      // Opening search is for typing: the keyboard comes up with it.
+      val focus = remember { FocusRequester() }
+      LaunchedEffect(Unit) { focus.requestFocus() }
+      CompactSearchField(
         value = query,
-        onValueChange = { query = it },
-        placeholder = { Text(stringResource(R.string.search_hint)) },
-        singleLine = true,
-        modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 12.dp),
+        onChange = { query = it },
+        placeholder = stringResource(R.string.search_hint),
+        focusRequester = focus,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
       )
       SearchFilterBar(snapshot, query) { query = it }
-      if (query.isNotBlank() && hits.isEmpty()) {
-        Text(stringResource(R.string.search_empty), modifier = Modifier.padding(16.dp))
+      if (query.isBlank()) {
+        EmptyState(
+          icon = Icons.Filled.Search,
+          title = stringResource(R.string.search_start_title),
+          text = stringResource(R.string.search_start_text),
+          maybeAction = null,
+        )
+      } else if (hits.isEmpty()) {
+        EmptyHint(stringResource(R.string.search_empty))
       }
       LazyColumn {
         items(hits, key = { it.message.id }) { hit ->

@@ -1302,7 +1302,7 @@ private fun CheckedAvatar() {
 
 /** The user's own avatar: their picture, or the initial on their hue, as for other people. */
 @Composable
-private fun AccountAvatar(userId: String, name: String, size: Dp) {
+internal fun AccountAvatar(userId: String, name: String, size: Dp) {
   UserAvatar(userId, Modifier.size(size)) {
     Box(Modifier.size(size).background(avatarColor(userId, name), CircleShape), contentAlignment = Alignment.Center) {
       Text(

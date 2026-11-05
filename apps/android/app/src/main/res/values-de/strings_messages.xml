@@ -76,4 +76,6 @@
   </plurals>
   <string name="message_edit_label">Nachricht</string>
   <string name="message_edit_empty">Eine Nachricht kann nicht leer sein. Lösche sie, um sie zu entfernen.</string>
+  <string name="search_start_title">Alle Unterhaltungen durchsuchen</string>
+  <string name="search_start_text">Gib ein Wort ein oder grenze mit den Filtern ein: Person, Unterhaltung, Datum, Dateien oder Links.</string>
 </resources>

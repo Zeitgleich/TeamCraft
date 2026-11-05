@@ -17,6 +17,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
@@ -36,7 +39,13 @@ private val FIELD_HEIGHT = 44.dp
  * The [placeholder] names the field for screen readers too.
  */
 @Composable
-internal fun CompactSearchField(value: String, onChange: (String) -> Unit, placeholder: String, modifier: Modifier = Modifier) {
+internal fun CompactSearchField(
+  value: String,
+  onChange: (String) -> Unit,
+  placeholder: String,
+  modifier: Modifier = Modifier,
+  focusRequester: FocusRequester = remember { FocusRequester() },
+) {
   val colors = MaterialTheme.colorScheme
   Surface(shape = CircleShape, color = colors.surfaceContainerHigh, modifier = modifier.fillMaxWidth()) {
     BasicTextField(
@@ -45,7 +54,7 @@ internal fun CompactSearchField(value: String, onChange: (String) -> Unit, place
       singleLine = true,
       textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
       cursorBrush = SolidColor(colors.primary),
-      modifier = Modifier.fillMaxWidth().heightIn(min = FIELD_HEIGHT).semantics { contentDescription = placeholder },
+      modifier = Modifier.fillMaxWidth().heightIn(min = FIELD_HEIGHT).focusRequester(focusRequester).semantics { contentDescription = placeholder },
       decorationBox = { field ->
         Row(Modifier.padding(start = Spacing.m), verticalAlignment = Alignment.CenterVertically) {
           Icon(Icons.Filled.Search, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(20.dp))
