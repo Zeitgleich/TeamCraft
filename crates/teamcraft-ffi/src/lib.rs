@@ -74,8 +74,8 @@ pub use types::{
 
 pub use video::{CameraFrame, VideoFrameRgba};
 pub use voice::{
-  VoiceError, VoiceRecording, VoiceStop, VoiceTakeInfo, voice_clear_takes, voice_decode_to_wav, voice_file_name,
-  voice_waveform_heights,
+  VoiceError, VoiceRecording, VoiceStop, VoiceTakeInfo, voice_clear_takes, voice_decode_to_wav,
+  voice_file_name, voice_waveform_heights,
 };
 
 use crate::engine::{Engine, EngineThreads, Job, PushOpening, PushReader};

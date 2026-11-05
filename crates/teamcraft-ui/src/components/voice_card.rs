@@ -30,7 +30,11 @@ const KEY_STEP_SECONDS: f64 = 5.0;
 
 /// Whether an audio file is a voice message: it carries a waveform.
 pub fn is_voice(file: &FileInfo) -> bool {
-  file.maybe_waveform.as_deref().and_then(Waveform::checked).is_some()
+  file
+    .maybe_waveform
+    .as_deref()
+    .and_then(Waveform::checked)
+    .is_some()
 }
 
 /// One voice message; see the module. `MessageFiles` only puts audio on the server here.
@@ -52,7 +56,9 @@ pub fn VoiceCard(file: FileInfo) -> impl IntoView {
   let actions = FileActions::new(state, &file);
   let phase = Memo::new(move |_| player.phase_of(key));
   let is_loaded = move || phase.get().is_some_and(AudioPhase::is_loaded);
-  let sent_seconds = file.maybe_duration_ms.map(|duration_ms| duration_ms as f64 / 1000.0);
+  let sent_seconds = file
+    .maybe_duration_ms
+    .map(|duration_ms| duration_ms as f64 / 1000.0);
   let duration = move || {
     let maybe_known = phase
       .get()
@@ -64,10 +70,10 @@ pub fn VoiceCard(file: FileInfo) -> impl IntoView {
     Some(_) => player.position(),
     None => 0.0,
   };
-  let played = move || match duration() {
+  let played = Memo::new(move |_| match duration() {
     total if total > 0.0 => (position() / total).clamp(0.0, 1.0),
     _ => 0.0,
-  };
+  });
   let (done_bytes, total_bytes) = match file.transfer {
     FileTransfer::Downloading {
       done_bytes,
@@ -152,7 +158,8 @@ pub fn VoiceCard(file: FileInfo) -> impl IntoView {
     )
   };
   let speed_label = move || i18n.t_with("voice-speed", &[("speed", speed.get().label())]);
-  let failure = move || match phase.get() {
+  let failure = move || {
+    match phase.get() {
     Some(AudioPhase::Failed(AudioFailure::Unplayable)) => Some(
       view! {
         <span class="file-error" role="alert">{move || i18n.t("audio-unplayable")}</span>
@@ -168,6 +175,7 @@ pub fn VoiceCard(file: FileInfo) -> impl IntoView {
       .into_any(),
     ),
     _ => None,
+  }
   };
   let maybe_menu = attachment_menu::use_attachment_menu();
   let menu_file = StoredValue::new(file.clone());
@@ -180,11 +188,12 @@ pub fn VoiceCard(file: FileInfo) -> impl IntoView {
     .enumerate()
     .map(|(index, height)| {
       let threshold = (index as f64 + 0.5) / BARS as f64;
+      let is_played = Signal::derive(move || played.get() >= threshold);
       view! {
         <span
           class="voice-bar"
-          class:is-played=move || played() >= threshold
-          style:--bar-height=format!("{:.0}%", 12.0 + f64::from(height) * 88.0)
+          class:is-played=is_played
+          style:--media-bar-height=format!("{:.0}%", 12.0 + f64::from(height) * 88.0)
         ></span>
       }
     })

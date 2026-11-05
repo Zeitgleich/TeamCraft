@@ -77,7 +77,7 @@ work stream).
 | Mention highlighting in message text                                                      | Android      | done   |
 | Mention highlighting in message text                                                      | iOS          | done   |
 | Emoji autocomplete (`:tad` → 🎉) and `:)`/`:tada:` on send, catalog shared with desktop | Android, iOS | done   |
-| Voice messages                                                                            | Android, iOS | open: core |
+| Voice messages                                                                            | Android, iOS | done       |
 | Image grid for several images in one message                                              | Android      | done   |
 | Image grid for several images in one message                                              | iOS          | done   |
 | Save an image to the gallery (Pictures/TeamCraft, Android 10+)                            | Android      | done   |

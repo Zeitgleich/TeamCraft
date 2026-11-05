@@ -635,4 +635,3 @@ fn waveform_view(maybe_waveform: Option<&Base64Bytes>) -> Option<Vec<u8>> {
     .and_then(|bytes| Waveform::checked(bytes.as_slice()))
     .map(Waveform::into_bytes)
 }
-

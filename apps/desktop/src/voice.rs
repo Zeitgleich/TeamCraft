@@ -23,7 +23,7 @@ use teamcraft_client_api::voice::{RecordingRefusal, RecordingStatus, RecordingSt
 use teamcraft_media::audio_io::AudioDeviceChoice;
 use teamcraft_media::voice_decode;
 use teamcraft_media::voice_recording::{VoiceRecorder, VoiceRecordingError, clear_takes};
-use teamcraft_proto::{ConversationId, MessageId, MAX_VOICE_MESSAGE_MINUTES};
+use teamcraft_proto::{ConversationId, MAX_VOICE_MESSAGE_MINUTES, MessageId};
 
 use crate::core::commands::CoreHost;
 use crate::video_playback::{create_private_dir, write_private};
@@ -51,17 +51,28 @@ pub fn clear_voice_folders(app: &AppHandle) {
 
 /// Starts recording from the system's default microphone, for at most `max_seconds`.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn voice_record_start(app: AppHandle, state: State<'_, VoiceState>, max_seconds: u32) -> Result<(), String> {
-  let folder = private_folder(&app, TAKES_FOLDER).map_err(|_| RecordingRefusal::Failed.as_str().to_owned())?;
-  let path = folder.join(format!("take-{}.ogg", state.takes.fetch_add(1, Ordering::Relaxed)));
-  let max = Duration::from_secs(u64::from(max_seconds.min(u32::from(MAX_VOICE_MESSAGE_MINUTES) * 60)));
+pub async fn voice_record_start(
+  app: AppHandle,
+  state: State<'_, VoiceState>,
+  max_seconds: u32,
+) -> Result<(), String> {
+  let folder =
+    private_folder(&app, TAKES_FOLDER).map_err(|_| RecordingRefusal::Failed.as_str().to_owned())?;
+  let path = folder.join(format!(
+    "take-{}.ogg",
+    state.takes.fetch_add(1, Ordering::Relaxed)
+  ));
+  let max = Duration::from_secs(u64::from(
+    max_seconds.min(u32::from(MAX_VOICE_MESSAGE_MINUTES) * 60),
+  ));
   if is_recording(&state) {
     return Err(RecordingRefusal::Busy.as_str().to_owned());
   }
   // Opening the microphone takes a moment; the composer waits for it to show the recording.
-  let started = tokio::task::spawn_blocking(move || VoiceRecorder::start(&path, &AudioDeviceChoice::Default, max))
-    .await
-    .map_err(|_| RecordingRefusal::Failed.as_str().to_owned())?;
+  let started =
+    tokio::task::spawn_blocking(move || VoiceRecorder::start(&path, &AudioDeviceChoice::Default, max))
+      .await
+      .map_err(|_| RecordingRefusal::Failed.as_str().to_owned())?;
   let recorder = started.map_err(|error| {
     tracing::warn!(%error, "the voice recording did not start");
     match error {
@@ -69,7 +80,10 @@ pub async fn voice_record_start(app: AppHandle, state: State<'_, VoiceState>, ma
       _ => RecordingRefusal::Failed.as_str().to_owned(),
     }
   })?;
-  let mut slot = state.maybe_recorder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+  let mut slot = state
+    .maybe_recorder
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
   if slot.is_some() {
     // Another window started one meanwhile: this one goes.
     drop(slot);
@@ -91,7 +105,10 @@ fn is_recording(state: &VoiceState) -> bool {
 /// The recording's level and length; `None` without one.
 #[tauri::command(rename_all = "snake_case")]
 pub fn voice_record_status(state: State<'_, VoiceState>) -> Option<RecordingStatus> {
-  let slot = state.maybe_recorder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+  let slot = state
+    .maybe_recorder
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
   slot.as_ref().map(|recorder| RecordingStatus {
     level: recorder.level(),
     elapsed_ms: recorder.elapsed().as_millis() as u64,
@@ -209,7 +226,9 @@ fn own_take(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
   let folder = private_folder(app, TAKES_FOLDER).map_err(|error| error.to_string())?;
   let path = Path::new(path);
   let is_own = path.parent() == Some(folder.as_path())
-    && path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("take-"));
+    && path
+      .file_name()
+      .is_some_and(|name| name.to_string_lossy().starts_with("take-"));
   match is_own {
     true => Ok(path.to_path_buf()),
     false => Err("not a voice recording".to_owned()),
@@ -249,7 +268,10 @@ mod tests {
   #[test]
   fn file_names_stay_in_the_folder() {
     assert_eq!(plain_name("../../etc/passwd"), "-..-etc-passwd");
-    assert_eq!(plain_name("voice-message-20261105-140312.ogg"), "voice-message-20261105-140312.ogg");
+    assert_eq!(
+      plain_name("voice-message-20261105-140312.ogg"),
+      "voice-message-20261105-140312.ogg"
+    );
     assert_eq!(plain_name(".."), "voice-message.ogg");
   }
 }

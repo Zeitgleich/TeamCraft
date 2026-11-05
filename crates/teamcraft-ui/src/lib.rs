@@ -126,10 +126,10 @@ pub mod toast_timer;
 pub mod tray_menu;
 pub mod unread_divider;
 pub mod video_controls;
-pub mod voice_recorder;
 pub mod video_quality;
 pub mod video_stats;
 pub mod viewport;
+pub mod voice_recorder;
 #[cfg(target_arch = "wasm32")]
 pub mod web_calls;
 #[cfg(target_arch = "wasm32")]

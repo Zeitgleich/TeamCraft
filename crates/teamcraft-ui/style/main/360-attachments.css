@@ -358,7 +358,7 @@ select.tv-level { min-width: 0; }
 .voice-body { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .voice-wave { display: flex; align-items: center; gap: 2px; height: 28px; border-radius: var(--radius-xs); cursor: pointer; touch-action: none; }
 .voice-wave:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 2px; }
-.voice-bar { flex: 1 1 0; min-width: 2px; max-width: 4px; height: var(--bar-height, 20%); border-radius: 1px; background: var(--surface-3); transition: background-color var(--dur-fast) var(--ease-standard); }
+.voice-bar { flex: 1 1 0; min-width: 2px; max-width: 4px; height: var(--media-bar-height, 20%); border-radius: 1px; background: var(--surface-3); transition: background-color var(--dur-fast) var(--ease-standard); }
 .voice-bar.is-played { background: var(--accent); }
 .voice-meta { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-muted); font-size: var(--text-xs); }
 .voice-time { flex: none; font-variant-numeric: tabular-nums; letter-spacing: var(--tracking-xs); }

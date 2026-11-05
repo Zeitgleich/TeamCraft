@@ -217,7 +217,10 @@ mod tests {
     #[test]
     fn has_one_bar_per_frame_for_short_takes_and_64_for_long_ones() {
       assert_eq!(Waveform::from_levels(&[0.5; 10]).unwrap().as_bytes().len(), 10);
-      assert_eq!(Waveform::from_levels(&[0.5; 3_000]).unwrap().as_bytes().len(), WAVEFORM_BARS);
+      assert_eq!(
+        Waveform::from_levels(&[0.5; 3_000]).unwrap().as_bytes().len(),
+        WAVEFORM_BARS
+      );
       assert_eq!(Waveform::from_levels(&[]), None);
     }
 
@@ -255,12 +258,21 @@ mod tests {
   fn speeds_cycle_and_serialize_stably() {
     assert_eq!(PlaybackSpeed::Normal.next().next().next(), PlaybackSpeed::Normal);
     assert_eq!(PlaybackSpeed::OneAndHalf.rate(), 1.5);
-    assert_eq!(serde_json::to_string(&PlaybackSpeed::OneAndHalf).unwrap(), "\"one_and_half\"");
-    assert_eq!(serde_json::to_string(&RecordingStop::LimitReached).unwrap(), "\"limit_reached\"");
+    assert_eq!(
+      serde_json::to_string(&PlaybackSpeed::OneAndHalf).unwrap(),
+      "\"one_and_half\""
+    );
+    assert_eq!(
+      serde_json::to_string(&RecordingStop::LimitReached).unwrap(),
+      "\"limit_reached\""
+    );
   }
 
   #[test]
   fn file_names_sort_by_time() {
-    assert_eq!(file_name((2026, 11, 5, 14, 3, 12), "ogg"), "voice-message-20261105-140312.ogg");
+    assert_eq!(
+      file_name((2026, 11, 5, 14, 3, 12), "ogg"),
+      "voice-message-20261105-140312.ogg"
+    );
   }
 }

@@ -21,9 +21,9 @@ pub mod fallback_queue;
 pub mod fallback_socket;
 pub mod fragment;
 pub mod jitter;
-pub mod ogg_opus;
 #[cfg(feature = "message-sounds")]
 pub mod message_sounds;
+pub mod ogg_opus;
 #[cfg(feature = "native")]
 pub mod openh264_library;
 pub mod picture_check;
@@ -111,15 +111,15 @@ pub mod dave;
 pub mod effects;
 #[cfg(feature = "native")]
 mod sfu_address;
-#[cfg(feature = "voice")]
-pub mod voice_decode;
-#[cfg(feature = "voice")]
-pub mod voice_recording;
 #[cfg(feature = "native")]
 pub mod system_audio;
 #[cfg(all(feature = "pipewire", target_os = "linux"))]
 pub mod system_audio_pipewire;
 #[cfg(all(feature = "wasapi-loopback", target_os = "windows"))]
 pub mod system_audio_wasapi;
+#[cfg(feature = "voice")]
+pub mod voice_decode;
+#[cfg(feature = "voice")]
+pub mod voice_recording;
 #[cfg(feature = "web-api")]
 pub mod web_api;

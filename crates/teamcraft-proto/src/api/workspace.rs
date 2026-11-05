@@ -1010,7 +1010,10 @@ mod tests {
   #[test]
   fn voice_messages_are_on_by_default_and_older_policies_still_parse() {
     let mut value = serde_json::to_value(WorkspacePolicy::default()).unwrap();
-    assert_eq!(value["voice_messages"], serde_json::json!({ "enabled": true, "max_minutes": 10 }));
+    assert_eq!(
+      value["voice_messages"],
+      serde_json::json!({ "enabled": true, "max_minutes": 10 })
+    );
     value.as_object_mut().unwrap().remove("voice_messages");
     let older: WorkspacePolicy = serde_json::from_value(value).unwrap();
     assert_eq!(older.voice_messages, VoiceMessagePolicy::default());

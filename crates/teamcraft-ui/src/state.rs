@@ -476,7 +476,9 @@ impl AppState {
       active_inline_video: RwSignal::new(None),
       audio: AudioPlayer::new(),
       voice: crate::voice_recorder::VoiceRecorder::new(),
-      voice_speed: RwSignal::new(crate::settings::load_json(crate::components::voice_card::SPEED_KEY).unwrap_or_default()),
+      voice_speed: RwSignal::new(
+        crate::settings::load_json(crate::components::voice_card::SPEED_KEY).unwrap_or_default(),
+      ),
       layout: RwSignal::new(current_layout()),
       search_query: RwSignal::new(String::new()),
       switcher_query: RwSignal::new(String::new()),

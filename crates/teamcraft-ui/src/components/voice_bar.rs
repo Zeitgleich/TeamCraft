@@ -91,12 +91,14 @@ pub fn VoiceButton(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Ca
       recorder.press(key, max_seconds);
       return;
     }
-    let is_recording = matches!(
-      recorder.phase_for(key),
-      Some(RecorderPhase::Starting | RecorderPhase::Recording)
-    );
-    if !is_recording {
-      return;
+    match recorder.phase_for(key) {
+      Some(RecorderPhase::Recording) => {},
+      // Let go before the microphone opened: nothing to send.
+      Some(RecorderPhase::Starting) => {
+        recorder.discard();
+        return;
+      },
+      _ => return,
     }
     match release_of(ev.client_x() - hold.start_x, ev.client_y() - hold.start_y) {
       Release::Send => on_send.run(()),
@@ -170,7 +172,7 @@ pub fn VoiceBar(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Callb
         </span>
         <span class="voice-live" aria-hidden="true">
           {move || recorder.live_levels().into_iter().map(|level| view! {
-            <span class="voice-bar is-played" style:--bar-height=format!("{:.0}%", 12.0 + level * 88.0)></span>
+            <span class="voice-bar is-played" style:--media-bar-height=format!("{:.0}%", 12.0 + level * 88.0)></span>
           }).collect_view()}
         </span>
         <span class="voice-hint">{move || i18n.t("voice-hold-hint")}</span>
@@ -193,7 +195,7 @@ pub fn VoiceBar(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Callb
           </button>
           <span class="voice-live" aria-hidden="true">
             {heights.into_iter().map(|height| view! {
-              <span class="voice-bar" style:--bar-height=format!("{:.0}%", 12.0 + height * 88.0)></span>
+              <span class="voice-bar" style:--media-bar-height=format!("{:.0}%", 12.0 + height * 88.0)></span>
             }).collect_view()}
           </span>
           <span class="voice-time">{format_seconds(info.duration_ms as f64 / 1000.0)}</span>

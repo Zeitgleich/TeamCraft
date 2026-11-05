@@ -410,7 +410,7 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   ours and those of processes we started, like the WebView's helpers, left out), WASAPI process
   loopback excluding our process tree on Windows, and ScreenCaptureKit with
   `excludesCurrentProcessAudio` on macOS. The call's own sound never plays in the WebView; video and
-  audio attachments do (`media-src 'self' blob:`, e2ee.md §4.5), and on Linux and Windows the
+  audio attachments (voice messages too) do (`media-src 'self' blob:`, e2ee.md §4.5), and on Linux and Windows the
   process-tree exclusion leaves those out of the share too. On macOS WebKit plays them in a helper
   process of its own, which `excludesCurrentProcessAudio` may not cover (not measured, #200). The Flatpak
   needs the PipeWire socket for this; apps/desktop/packaging/linux/README.md explains what that

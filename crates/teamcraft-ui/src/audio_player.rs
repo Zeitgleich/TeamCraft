@@ -489,6 +489,13 @@ impl AudioPlayer {
     }
   }
 
+  /// Plays `key` at `rate` from now on, if the player holds it.
+  pub fn set_rate(self, key: MediaKey, rate: f64) {
+    if let Some(parts) = self.parts() {
+      parts.set_rate(key, rate);
+    }
+  }
+
   /// A card of `key` is on screen until the current scope ends; see [`Parts::show`].
   pub fn show(self, key: MediaKey) {
     if let Some(parts) = self.parts() {
@@ -577,7 +584,8 @@ async fn decoded_wav(conversation: ConversationId, key: MediaKey) -> Result<Obje
     "message": key.message,
     "file_id": key.attachment.to_string(),
   });
-  let js_args = js_sys::JSON::parse(&args.to_string()).map_err(|_| "could not encode the arguments".to_owned())?;
+  let js_args =
+    js_sys::JSON::parse(&args.to_string()).map_err(|_| "could not encode the arguments".to_owned())?;
   let answer = crate::auth::tauri::invoke("voice_playback_wav", js_args)
     .await
     .map_err(|error| error.to_string())?;

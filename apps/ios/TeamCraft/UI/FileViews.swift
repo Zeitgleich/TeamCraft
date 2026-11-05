@@ -64,38 +64,12 @@ struct AttachmentView: View {
 
   private var content: some View {
     VStack(alignment: .leading, spacing: 2) {
-      Button(action: open) {
-        if file.isImage, let image = ThumbnailCache.image(for: file) {
-          if isTile {
-            tile(image)
-          } else if let width = maybeMediaWidth {
-            bubblePreview(image, width: width)
-          } else {
-            imagePreview(image)
-          }
-        } else if file.isVideo, let image = ThumbnailCache.image(for: file), let width = maybeMediaWidth {
-          bubblePreview(image, width: width)
-            .overlay { VideoPlayMark() }
-            .overlay(alignment: .bottomLeading) { VideoBadge(file: file) }
-        } else {
-          fileRow
-        }
+      if file.isVoiceMessage {
+        // A voice message plays in place (#204); the message's menu still downloads or forwards it.
+        VoiceCard(file: file, isInBubble: isInBubble)
+      } else {
+        mediaButton
       }
-      .buttonStyle(.plain)
-      .accessibilityLabel(Text(file.fileName))
-      .accessibilityValue(maybeHiddenCount.map { Text("album_more_pictures \($0)") } ?? Text(verbatim: ""))
-      // Beside the picture's button, not in it: a tap here stops or starts it (#201), a tap on the
-      // rest opens the viewer as on any picture.
-      .overlay(alignment: .topLeading) {
-        if canMoveHere { AnimationButton(isMoving: isGoing, action: toggleMotion) }
-      }
-      .overlay(alignment: .bottomLeading) {
-        if canMoveHere && !isMoving {
-          AnimationBadge(
-            text: file.transfer.state == "failed" ? Text("animation_failed") : Text(verbatim: AnimationKind.label(file.mediaType)))
-        }
-      }
-      .task(id: motionTask) { await runMotion() }
       if file.transfer.isCancellable { UploadActions(file: file) }
     }
     .quickLookPreview($maybePreviewURL)
@@ -106,6 +80,41 @@ struct AttachmentView: View {
       isWaitingToOpen = false
       if state == "local", let path = file.transfer.path { preview(path) }
     }
+  }
+
+  private var mediaButton: some View {
+    Button(action: open) {
+      if file.isImage, let image = ThumbnailCache.image(for: file) {
+        if isTile {
+          tile(image)
+        } else if let width = maybeMediaWidth {
+          bubblePreview(image, width: width)
+        } else {
+          imagePreview(image)
+        }
+      } else if file.isVideo, let image = ThumbnailCache.image(for: file), let width = maybeMediaWidth {
+        bubblePreview(image, width: width)
+          .overlay { VideoPlayMark() }
+          .overlay(alignment: .bottomLeading) { VideoBadge(file: file) }
+      } else {
+        fileRow
+      }
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(Text(file.fileName))
+    .accessibilityValue(maybeHiddenCount.map { Text("album_more_pictures \($0)") } ?? Text(verbatim: ""))
+    // Beside the picture's button, not in it: a tap here stops or starts it (#201), a tap on the
+    // rest opens the viewer as on any picture.
+    .overlay(alignment: .topLeading) {
+      if canMoveHere { AnimationButton(isMoving: isGoing, action: toggleMotion) }
+    }
+    .overlay(alignment: .bottomLeading) {
+      if canMoveHere && !isMoving {
+        AnimationBadge(
+          text: file.transfer.state == "failed" ? Text("animation_failed") : Text(verbatim: AnimationKind.label(file.mediaType)))
+      }
+    }
+    .task(id: motionTask) { await runMotion() }
   }
 
   // MARK: Animated images (#201)

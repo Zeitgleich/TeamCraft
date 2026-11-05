@@ -14,9 +14,9 @@
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -125,7 +125,10 @@ impl VoiceRecorder {
         return Err(VoiceRecordingError::File(error));
       },
     };
-    let opened = opened_rx.recv().map_err(|_| VoiceRecordingError::Thread).and_then(|result| result);
+    let opened = opened_rx
+      .recv()
+      .map_err(|_| VoiceRecordingError::Thread)
+      .and_then(|result| result);
     if let Err(error) = opened {
       drop(thread.join());
       remove(path);

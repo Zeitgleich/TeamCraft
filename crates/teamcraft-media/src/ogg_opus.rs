@@ -90,14 +90,23 @@ impl<W: Write> OggOpusWriter<W> {
 
 /// One page with whole packets. Opus packets are at most 1275 bytes (6 segments each), so 50 of
 /// them stay below the 255 segments a page may have.
-fn write_page(output: &mut impl Write, flags: u8, granule: u64, sequence: u32, packets: &[&[u8]]) -> io::Result<()> {
+fn write_page(
+  output: &mut impl Write,
+  flags: u8,
+  granule: u64,
+  sequence: u32,
+  packets: &[&[u8]],
+) -> io::Result<()> {
   let mut segments = Vec::new();
   for packet in packets {
     segments.extend(std::iter::repeat_n(255u8, packet.len() / 255));
     segments.push((packet.len() % 255) as u8);
   }
   if segments.len() > 255 {
-    return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many segments for one page"));
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidInput,
+      "too many segments for one page",
+    ));
   }
   let body_len: usize = packets.iter().map(|packet| packet.len()).sum();
   let mut page = Vec::with_capacity(27 + segments.len() + body_len);
@@ -152,7 +161,10 @@ mod tests {
     assert!(pages[1].body.starts_with(b"OpusTags"));
     assert_eq!(pages[4].flags, LAST_PAGE);
     assert_eq!(pages[4].granule, 312 + 120 * 960);
-    assert_eq!(pages.iter().map(|page| page.sequence).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+    assert_eq!(
+      pages.iter().map(|page| page.sequence).collect::<Vec<_>>(),
+      vec![0, 1, 2, 3, 4]
+    );
   }
 
   #[test]

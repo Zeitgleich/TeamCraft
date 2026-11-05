@@ -1038,7 +1038,9 @@ private fun Bubble(
           hasText -> MessageBody(message.body, colors.content, colors.markup, look.names, onOpenPermalink)
         }
         if (!isDeleted) {
-          others.forEach { file -> FileCard(file, colors, onOpenFile) }
+          others.forEach { file ->
+            if (file.isVoice) VoiceCard(viewModel, file, colors.content, colors.muted, colors.accent) else FileCard(file, colors, onOpenFile)
+          }
           maybeExtras?.maybeLinkPreview?.let { LinkPreviewCard(it, colors) }
         }
         files.filter { it.transfer.isCancellable || it.transfer.state == "upload_failed" }.forEach { file ->

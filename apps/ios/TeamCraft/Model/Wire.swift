@@ -58,8 +58,11 @@ struct FileInfo: Decodable, Equatable, Identifiable, Sendable {
   var maybeSentAt: Int64?
   /// Who wrote an imported message when that is nobody with an account here.
   var importedAuthor: ImportedAuthor?
-  /// How long a video plays, from the sender.
+  /// How long a video or voice message plays, from the sender.
   var maybeDurationMs: Int64?
+  /// A voice message's waveform from the sender (#204), one loudness byte per bar; checked by the
+  /// core, so present only on voice messages.
+  var maybeWaveform: [UInt8]?
 
   var id: String { fileId }
   var isImage: Bool { mediaType.hasPrefix("image/") }
@@ -67,6 +70,8 @@ struct FileInfo: Decodable, Equatable, Identifiable, Sendable {
   /// A video that opens in the player: on the server or here, not one still going up.
   var opensInVideoPlayer: Bool { isVideo && ["local", "remote", "downloading", "failed"].contains(transfer.state) }
   var maybeThumbnailData: Data? { maybeThumbnailPng.map { Data($0) } }
+  /// An audio file with a waveform: shown as a voice message with its own player (#204).
+  var isVoiceMessage: Bool { mediaType.hasPrefix("audio/") && !(maybeWaveform ?? []).isEmpty }
 }
 
 /// Who wrote an imported message: `person` (the file's sender), `deleted` or `named` (a bot).
@@ -279,6 +284,29 @@ struct BackupSnapshot: Decodable, Sendable {
   }
 
   let security: Security?
+}
+
+/// The voice message part of the core's chat snapshot (#204): the workspace's verified policy.
+struct VoicePolicySnapshot: Decodable, Sendable {
+  struct Security: Decodable, Sendable {
+    let voiceMessagePolicy: VoiceMessagePolicy?
+  }
+
+  let security: Security?
+}
+
+/// Whether voice messages may be recorded, and how long (`VoiceMessagePolicy` of the core). Absent
+/// before a policy was verified: on, up to 10 minutes.
+struct VoiceMessagePolicy: Decodable, Equatable, Sendable {
+  static let fallback = VoiceMessagePolicy(enabled: true, maxMinutes: 10)
+  /// The longest a workspace may allow, in minutes.
+  static let maxAllowedMinutes = 60
+
+  let enabled: Bool
+  let maxMinutes: Int
+
+  /// The longest recording in seconds, a stored value outside 1...60 minutes clamped into it.
+  var maxSeconds: UInt32 { UInt32(min(max(maxMinutes, 1), Self.maxAllowedMinutes) * 60) }
 }
 
 /// The people part of the core's chat snapshot: who can be mentioned, and the former accounts that

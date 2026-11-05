@@ -121,12 +121,14 @@ import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.core.SendOptions
 import de.zeitgleich.teamcraft.core.UnseenReactions
+import de.zeitgleich.teamcraft.core.VoiceMessagePolicy
 import de.zeitgleich.teamcraft.ui.ServerHistory
 import de.zeitgleich.teamcraft.ui.olderState
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.ConversationRights
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.MessageAction
+import de.zeitgleich.teamcraft.ui.VoiceOwner
 import de.zeitgleich.teamcraft.ui.messageActions
 import de.zeitgleich.teamcraft.ui.EmojiInput
 import de.zeitgleich.teamcraft.ui.FirstUnread
@@ -1111,19 +1113,34 @@ internal fun Composer(
   }
   val maybeQuery = Mentions.activeQuery(text)
   val members = snapshot?.conversation(conversationId)?.memberIds?.mapNotNull { snapshot.user(it) } ?: emptyList()
+  fun sendOptions(sending: List<PickedFile>) = SendOptions(
+    maybeThread = maybeThread,
+    maybeReplyTo = maybeReply?.messageId,
+    maybeReplyAttachment = maybeReply?.maybeImage?.fileId,
+    priority = priority,
+    wantsAcknowledgement = wantsAcknowledgement,
+    isSilent = isSilent,
+    alsoSendToChannel = alsoToChannel,
+    files = sending,
+  )
+
+  fun resetOptions() {
+    priority = "normal"
+    wantsAcknowledgement = false
+    isSilent = false
+    ReplyTarget.current.value = null
+    onSent()
+  }
+
+  /** A voice message goes alone, with the send options and the reply chosen (#204); the draft stays. */
+  fun sendVoice(voice: PickedFile) {
+    viewModel.act(ChatActions.send(conversationId, "", sendOptions(listOf(voice))))
+    resetOptions()
+  }
+
   fun send() {
-    val options = SendOptions(
-      maybeThread = maybeThread,
-      maybeReplyTo = maybeReply?.messageId,
-      maybeReplyAttachment = maybeReply?.maybeImage?.fileId,
-      priority = priority,
-      wantsAcknowledgement = wantsAcknowledgement,
-      isSilent = isSilent,
-      alsoSendToChannel = alsoToChannel,
-      files = files,
-    )
     // `:)` and `:tada:` become emoji, as on desktop.
-    viewModel.act(ChatActions.send(conversationId, emojiConvert(text.trim()), options))
+    viewModel.act(ChatActions.send(conversationId, emojiConvert(text.trim()), sendOptions(files)))
     viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
     text = ""
     files = emptyList()
@@ -1149,6 +1166,11 @@ internal fun Composer(
     )
   }
   val canSend = text.isNotBlank() || files.isNotEmpty()
+  val voice = rememberVoiceControls(viewModel, VoiceOwner(conversationId, maybeThread))
+  val voicePolicy = snapshot?.security?.voiceMessagePolicy ?: VoiceMessagePolicy()
+  // The record button stands in for the send button while there is nothing to send; a recording
+  // or take of this composer keeps it whatever the policy says now.
+  val showsVoice = voice.isActive || (voicePolicy.enabled && !canSend)
   fun trySend() {
     val confirmOver = viewModel.confirmChannelOver().toUInt()
     if (needsChannelConfirmation(text, members.size.toUInt(), confirmOver)) isConfirmingChannel = true else send()
@@ -1226,6 +1248,16 @@ internal fun Composer(
       onAttach = { isOptionsOpen = true },
       onCamera = pickers.takePhoto,
       onSend = ::trySend,
+      maybeVoiceBar = if (voice.isActive) {
+        { VoiceBar(viewModel, voice) }
+      } else {
+        null
+      },
+      maybeTrailing = if (showsVoice) {
+        { modifier -> VoiceButton(viewModel, voice, voicePolicy, SEND_BUTTON_SIZE, ::sendVoice, modifier) }
+      } else {
+        null
+      },
     )
   }
   if (isOptionsOpen) {
@@ -1246,8 +1278,9 @@ internal fun Composer(
 
 /**
  * The message field as in the common messengers (#315, #704): a rounded pill with attach on the
- * left and the camera on the right inside it, and a round accent send button beside it, disabled
- * while there is nothing to send. Voice messages don't exist yet, so the button is always "send".
+ * left and the camera on the right inside it, and a round accent send button beside it. While there
+ * is nothing to send, the button records a voice message (#204, [maybeTrailing]); a recording or
+ * take shows in the pill instead of the field ([maybeVoiceBar]).
  */
 @Composable
 private fun ComposerField(
@@ -1259,6 +1292,8 @@ private fun ComposerField(
   onAttach: () -> Unit,
   onCamera: () -> Unit,
   onSend: () -> Unit,
+  maybeVoiceBar: (@Composable () -> Unit)? = null,
+  maybeTrailing: (@Composable (Modifier) -> Unit)? = null,
 ) {
   Row(
     Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 6.dp),
@@ -1269,6 +1304,10 @@ private fun ComposerField(
       color = MaterialTheme.colorScheme.surfaceContainerHigh,
       modifier = Modifier.weight(1f),
     ) {
+      if (maybeVoiceBar != null) {
+        maybeVoiceBar()
+        return@Surface
+      }
       Row(Modifier.padding(horizontal = 4.dp), verticalAlignment = Alignment.Bottom) {
         IconButton(onClick = onAttach, modifier = Modifier.padding(vertical = 4.dp)) {
           Icon(painterResource(R.drawable.ic_attach_file), contentDescription = stringResource(R.string.attach))
@@ -1309,6 +1348,10 @@ private fun ComposerField(
           }
         }
       }
+    }
+    if (maybeTrailing != null) {
+      maybeTrailing(Modifier.padding(start = 6.dp, bottom = 4.dp))
+      return@Row
     }
     FilledIconButton(
       onClick = onSend,

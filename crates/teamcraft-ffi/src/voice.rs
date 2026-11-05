@@ -93,7 +93,10 @@ impl VoiceRecording {
   /// Why the recording stopped by itself (the maximum length, the microphone gone); the app
   /// then finishes it and shows the take.
   pub fn stopped_by_itself(&self) -> Option<VoiceStop> {
-    self.with(VoiceRecorder::maybe_stop).flatten().map(VoiceStop::from)
+    self
+      .with(VoiceRecorder::maybe_stop)
+      .flatten()
+      .map(VoiceStop::from)
   }
 
   /// Stops and finishes the file. `maybe_reason`: why the app stopped it, when the user didn't.

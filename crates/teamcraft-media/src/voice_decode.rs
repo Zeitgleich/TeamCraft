@@ -47,7 +47,12 @@ pub enum VoiceDecodeError {
 pub fn decode_to_wav(input: &Path, output: &Path, max: Duration) -> Result<Duration, VoiceDecodeError> {
   let source = MediaSourceStream::new(Box::new(File::open(input)?), Default::default());
   let mut format = symphonia::default::get_probe()
-    .probe(&Hint::new(), source, FormatOptions::default(), MetadataOptions::default())
+    .probe(
+      &Hint::new(),
+      source,
+      FormatOptions::default(),
+      MetadataOptions::default(),
+    )
     .map_err(not_opus)?;
   let track = format
     .default_track(TrackType::Audio)
@@ -66,17 +71,21 @@ pub fn decode_to_wav(input: &Path, output: &Path, max: Duration) -> Result<Durat
   let max_samples = (max.as_secs_f64() * f64::from(DECODED_RATE_HZ)) as u64;
   let mut wav = WavWriter::create(output)?;
   let decoded = decode_packets(&mut *format, track_id, &mut decoder, &mut wav, max_samples);
-  if let Err(error) = decoded.and_then(|()| match wav.samples {
-    0 => Err(VoiceDecodeError::Empty),
-    _ => Ok(()),
-  }) {
+  let checked = match (decoded, wav.samples) {
+    (Err(error), _) => Err(error),
+    (Ok(()), 0) => Err(VoiceDecodeError::Empty),
+    (Ok(()), _) => Ok(()),
+  };
+  if let Err(error) = checked {
     drop(wav);
     // Nothing half-written is left behind.
     drop(std::fs::remove_file(output));
     return Err(error);
   }
   let samples = wav.finish()?;
-  Ok(Duration::from_secs_f64(samples as f64 / f64::from(DECODED_RATE_HZ)))
+  Ok(Duration::from_secs_f64(
+    samples as f64 / f64::from(DECODED_RATE_HZ),
+  ))
 }
 
 /// Decodes the track's packets into `wav` until the end, the limit, or too many broken packets.
@@ -184,7 +193,10 @@ mod tests {
     assert!((length.as_secs_f64() - 1.0).abs() < 0.05, "{length:?}");
     let wav = std::fs::read(&output).unwrap();
     assert_eq!(&wav[..4], b"RIFF");
-    assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize, wav.len() - 44);
+    assert_eq!(
+      u32::from_le_bytes(wav[40..44].try_into().unwrap()) as usize,
+      wav.len() - 44
+    );
   }
 
   #[test]
@@ -237,7 +249,9 @@ mod tests {
           (0.3 * (std::f32::consts::TAU * 440.0 * time).sin() * f32::from(i16::MAX)) as i16
         })
         .collect();
-      writer.push(encoder.encode(&pcm).unwrap(), FRAME_SAMPLES_PER_CHANNEL as u32).unwrap();
+      writer
+        .push(encoder.encode(&pcm).unwrap(), FRAME_SAMPLES_PER_CHANNEL as u32)
+        .unwrap();
     }
     writer.finish().unwrap()
   }

@@ -35,7 +35,12 @@ pub fn SecuritySection() -> impl IntoView {
   let voice_options = Signal::derive(move || {
     VOICE_MINUTES
       .into_iter()
-      .map(|minutes| (minutes.to_string(), i18n.t_count("policy-minutes", minutes as usize)))
+      .map(|minutes| {
+        (
+          minutes.to_string(),
+          i18n.t_count("policy-minutes", minutes as usize),
+        )
+      })
       .collect()
   });
   let session_options = Signal::derive(move || {

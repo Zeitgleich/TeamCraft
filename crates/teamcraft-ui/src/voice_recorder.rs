@@ -21,7 +21,9 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::actions::{FileSource, OutgoingFile};
-use teamcraft_client_api::voice::{self, RecordingRefusal, RecordingStatus, RecordingStop, ShellTake, Waveform};
+use teamcraft_client_api::voice::{
+  self, RecordingRefusal, RecordingStatus, RecordingStop, ShellTake, Waveform,
+};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::JsFuture;
@@ -321,11 +323,14 @@ impl VoiceRecorder {
   /// Stops the recording and keeps the take; returns what the composer shows of it.
   async fn finish(self, maybe_reason: Option<RecordingStop>) -> Result<TakeInfo, String> {
     let parts = self.parts().ok_or("the recorder is gone")?;
-    if !matches!(
-      parts.maybe_phase.get_untracked(),
-      Some(RecorderPhase::Starting | RecorderPhase::Recording)
-    ) {
-      return Err("not recording".to_owned());
+    match parts.maybe_phase.get_untracked() {
+      Some(RecorderPhase::Recording) => {},
+      // Nothing recorded yet: stopped while the microphone opened is a discard.
+      Some(RecorderPhase::Starting) => {
+        self.discard();
+        return Err("stopped before the recording started".to_owned());
+      },
+      _ => return Err("not recording".to_owned()),
     }
     let generation = parts.generation.get_value();
     parts.maybe_phase.set(Some(RecorderPhase::Finishing));
@@ -343,7 +348,9 @@ impl VoiceRecorder {
     match finished {
       Ok((info, source)) => {
         parts.maybe_source.try_set_value(Some(source));
-        parts.maybe_phase.try_set(Some(RecorderPhase::Review(info.clone())));
+        parts
+          .maybe_phase
+          .try_set(Some(RecorderPhase::Review(info.clone())));
         parts.level.try_set(0.0);
         Ok(info)
       },
@@ -369,7 +376,10 @@ impl VoiceRecorder {
   }
 
   fn stop_ticker(self) {
-    if let Some(handle) = self.parts().and_then(|parts| parts.maybe_ticker.try_update_value(Option::take).flatten()) {
+    if let Some(handle) = self
+      .parts()
+      .and_then(|parts| parts.maybe_ticker.try_update_value(Option::take).flatten())
+    {
       handle.clear();
     }
   }
@@ -453,7 +463,8 @@ impl BrowserRecording {
   fn read(&mut self) -> (f32, u64, bool) {
     let mut samples = vec![0.0f32; self.analyser.fft_size() as usize];
     self.analyser.get_float_time_domain_data(&mut samples);
-    let rms = (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len().max(1) as f32).sqrt();
+    let rms =
+      (samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len().max(1) as f32).sqrt();
     self.levels.push(rms);
     let elapsed_ms = (now() - self.started_at_ms).max(0.0) as u64;
     let is_live = self
@@ -555,7 +566,9 @@ async fn start_in_browser() -> Result<BrowserRecording, RecordingRefusal> {
   let options = web_sys::MediaRecorderOptions::new();
   options.set_mime_type(format.mime_type);
   options.set_audio_bits_per_second(BROWSER_BITRATE_BPS);
-  let Ok(recorder) = web_sys::MediaRecorder::new_with_media_stream_and_media_recorder_options(&stream, &options) else {
+  let Ok(recorder) =
+    web_sys::MediaRecorder::new_with_media_stream_and_media_recorder_options(&stream, &options)
+  else {
     stop_tracks(&stream);
     return Err(RecordingRefusal::Failed);
   };
@@ -633,7 +646,11 @@ fn browser_format() -> Option<BrowserFormat> {
 }
 
 /// The take as the core takes it: bytes when small, the browser's file otherwise.
-async fn browser_source(blob: &web_sys::Blob, file_name: &str, format: BrowserFormat) -> Result<FileSource, String> {
+async fn browser_source(
+  blob: &web_sys::Blob,
+  file_name: &str,
+  format: BrowserFormat,
+) -> Result<FileSource, String> {
   if blob.size() as u64 <= READ_WHOLE_MAX_BYTES {
     let buffer = JsFuture::from(blob.array_buffer())
       .await
@@ -685,8 +702,8 @@ fn now() -> f64 {
 pub fn interrupt_when_needed(state: crate::state::AppState) {
   let recorder = state.voice;
   Effect::new(move |_| {
-    let is_in_call =
-      state.call.phase.get() != teamcraft_client_api::calls::CallPhase::Idle || state.call.incoming.with(Option::is_some);
+    let is_in_call = state.call.phase.get() != teamcraft_client_api::calls::CallPhase::Idle
+      || state.call.incoming.with(Option::is_some);
     if is_in_call {
       recorder.interrupt(RecordingStop::Call);
       state.audio.pause();

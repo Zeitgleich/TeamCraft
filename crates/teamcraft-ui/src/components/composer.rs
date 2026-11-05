@@ -1793,7 +1793,6 @@ fn pending_file_in_shell(file: ShellFile) -> PendingFile {
     maybe_preview_url: None,
     maybe_thumbnail: None,
     maybe_duration_ms: None,
-    maybe_waveform: None,
   }
 }
 
@@ -1886,7 +1885,6 @@ mod tests {
       maybe_preview_url: None,
       maybe_thumbnail: None,
       maybe_duration_ms: None,
-      maybe_waveform: None,
     }
   }
 }
