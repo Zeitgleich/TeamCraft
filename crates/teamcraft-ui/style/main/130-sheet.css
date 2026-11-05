@@ -155,3 +155,17 @@
   font-size: var(--text-sm);
 }
 
+/* The room a call moved into (issue #1290). */
+.msg-system .system-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.msg-system .system-link:hover {
+  text-decoration: underline;
+}
+

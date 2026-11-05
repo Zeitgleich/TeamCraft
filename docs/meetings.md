@@ -130,8 +130,9 @@ the change, and people taken off the list are removed from the group.
    members (`call_move`), and rings the added people in the meeting chat: when its call starts, or
    at once if it runs. Only one of them answering, or the ring timeout, ends that ringing; the people
    moving over don't. The adding app then announces the move in the DM's encryption group (an
-   encrypted `call_moved` event with the room, the added people and the DM call's ID, not shown in
-   the history).
+   encrypted `call_moved` event with the room, the added people and the DM call's ID). The history
+   shows it as a line ("Alice moved the call into 'Call with notetaker'") which, for whoever is in
+   the room, opens it: there the summary lands (issue #1290).
    `call_move` alone moves nobody: a device in the DM's call shows "X moved the call into a meeting
    room and added Y" once the announcement is in, and on the user's tap checks it (announced by a
    member of the DM's group, the room's group holds nobody but the DM's members and the named
@@ -308,7 +309,7 @@ A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "M
    fingerprint with the knock (retried on the next poll if that fails). It shows the guest's key
    code and the organizer's code; the host's lobby entry shows the same guest code, the
    organizer's app its own code, so they can compare out of band. If the organizer's app is too
-   old to let guests in by this flow, the page says it needs an update. While nobody of the meeting is there yet it shows "Waiting for the organizer to
+   old to let guests in by this flow, the page says it needs an update. While nobody of the meeting is there yet it shows "Waiting for someone in the meeting to
    let you in"; that is the normal case for a guest who comes early.
 3. Once an organizer's or admitter's device let the guest in (on "Let in", which the host's app offers when the
    guest's device is ready, or by itself without a lobby; `LetGuestIntoMeetingChat`), the page

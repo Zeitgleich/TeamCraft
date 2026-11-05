@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -123,6 +124,11 @@ internal class CallUiState(
   val areControlsShown: Boolean,
   /** Display names by user ID; people not in it show without a name. */
   val names: Map<String, String> = emptyMap(),
+  /**
+   * The notetaker is in the call (e2ee.md §8.2): the encryption chip says the audio goes to
+   * OpenRouter, as on desktop and web (issue #1290).
+   */
+  val isNotetakerPresent: Boolean = false,
 )
 
 /** Somebody else in the call, as the tiles show them. */
@@ -160,6 +166,11 @@ internal class CallUiActions(
   val onHangUp: () -> Unit,
   /** "Add notetaker" (e2ee.md §8.2): offered to whoever the policy lets ask it in. */
   val maybeOnAddNotetaker: (() -> Unit)? = null,
+  /**
+   * Why "Add notetaker" shows, but disabled, for whoever the policy keeps from asking it in (a
+   * string resource; issue #1290).
+   */
+  val maybeNotetakerRefusal: Int? = null,
 )
 
 /**
@@ -419,9 +430,20 @@ private fun TopBar(ui: CallUiState) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
       ) {
-        Icon(Icons.Filled.Lock, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+        Icon(
+          if (ui.isNotetakerPresent) Icons.Filled.Warning else Icons.Filled.Lock,
+          contentDescription = null,
+          tint = Color.White,
+          modifier = Modifier.size(16.dp),
+        )
         Text(
-          stringResource(if (isSecured) R.string.call_secured else R.string.call_securing),
+          stringResource(
+            when {
+              ui.isNotetakerPresent -> R.string.call_notetaker_badge
+              isSecured -> R.string.call_secured
+              else -> R.string.call_securing
+            },
+          ),
           color = Color.White,
           style = MaterialTheme.typography.labelLarge,
         )
@@ -569,6 +591,19 @@ private fun ControlBar(ui: CallUiState, actions: CallUiActions) {
               isMenuOpen = false
               onAddNotetaker()
             },
+          )
+        }
+        actions.maybeNotetakerRefusal?.let { refusal ->
+          DropdownMenuItem(
+            text = {
+              Column {
+                Text(stringResource(R.string.call_notetaker_add))
+                Text(stringResource(refusal), style = MaterialTheme.typography.bodySmall)
+              }
+            },
+            leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null) },
+            enabled = false,
+            onClick = {},
           )
         }
       }

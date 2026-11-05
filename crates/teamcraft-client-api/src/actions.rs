@@ -750,6 +750,16 @@ pub enum WorkspaceEvent {
     #[serde(rename = "added_by", default, skip_serializing_if = "Option::is_none")]
     maybe_added_by: Option<UserId>,
   },
+  /// `by` moved the conversation's call into the meeting room `room` (docs/meetings.md, "A call
+  /// becomes a meeting"; issue #1290), for example to add the notetaker. `room_name` is the room's
+  /// name as the sidebar shows it, empty if the user isn't in the room: the line links to the room
+  /// only when it is set.
+  CallMoved {
+    by: UserId,
+    room: ConversationId,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    room_name: String,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -911,6 +921,25 @@ mod tests {
       })
       .expect("serialize"),
       serde_json::json!({ "event": "moved", "by": "1", "space": "Project A" })
+    );
+    // Issue #1290: the apps link the line to `room` when they get its name.
+    assert_eq!(
+      serde_json::to_value(WorkspaceEvent::CallMoved {
+        by: id_from_raw(1),
+        room: id_from_raw(5),
+        room_name: "Call with notetaker".into(),
+      })
+      .expect("serialize"),
+      serde_json::json!({ "event": "call_moved", "by": "1", "room": "5", "room_name": "Call with notetaker" })
+    );
+    assert_eq!(
+      serde_json::to_value(WorkspaceEvent::CallMoved {
+        by: id_from_raw(1),
+        room: id_from_raw(5),
+        room_name: String::new(),
+      })
+      .expect("serialize"),
+      serde_json::json!({ "event": "call_moved", "by": "1", "room": "5" })
     );
     // A change nobody is named for (issue #818) leaves `by` out; the apps word it without a name.
     assert_eq!(

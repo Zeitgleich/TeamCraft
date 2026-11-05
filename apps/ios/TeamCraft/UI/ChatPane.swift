@@ -348,7 +348,8 @@ struct ChatPane: View {
       listWidth: listWidth, showsThreadLink: threadId == nil,
       onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) },
       displayNames: displayNames,
-      canReact: conversation.canReact
+      canReact: conversation.canReact,
+      onOpenConversation: { model.openConversationId = $0 }
     )
     if message.maybePlaceholder != nil {
       row

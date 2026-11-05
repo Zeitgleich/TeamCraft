@@ -30,6 +30,9 @@
   <string name="call_move_join">Meetingraum beitreten</string>
   <string name="call_move_offer_notetaker">%1$s hat den Notetaker hinzugefügt. Der Anruf geht in einem Meetingraum weiter, wo das Gesprochene für ein Transkript an OpenRouter gesendet wird. Dein Ton erreicht ihn erst, wenn du dort beitrittst.</string>
   <string name="call_notetaker_add">Notetaker hinzufügen</string>
+  <string name="call_notetaker_badge">Notetaker im Anruf – Ton geht an OpenRouter</string>
+  <string name="call_notetaker_refused_guest">Gäste können den Notetaker nicht zu einem Anruf hinzufügen.</string>
+  <string name="call_notetaker_refused_admins">Nur Workspace-Admins können den Notetaker zu einem Anruf hinzufügen.</string>
   <string name="call_notetaker_remove">Notetaker entfernen</string>
   <string name="call_notetaker_room_title">Anruf mit Notetaker</string>
   <string name="call_notetaker_joining">Der Notetaker wird hinzugefügt. Solange er im Anruf ist, wird der Ton für das Transkript an OpenRouter gesendet.</string>

@@ -1672,7 +1672,7 @@ never by the server's member list:
     group like any member's (§8): the commit that adds it is another new epoch, and the frames of
     earlier epochs were encrypted under keys it never gets. A host's "admit" without a device of
     the organizer or of an admitter online makes the guest a member on the server only; the
-    guest's page keeps waiting ("waiting for the organizer") until such a device adds the device. If no app
+    guest's page keeps waiting ("waiting for someone in the meeting to let it in") until such a device adds the device. If no app
     of the organizer was seen admitting by this flow (`PUT /meetings/admitter`, sent by apps since
     #987), the guest's page says the organizer's app needs an update: an older app asks for a link
     proof that guests no longer send and never lets them in.
@@ -4260,7 +4260,17 @@ added one), also in a channel the user manages or a meeting the user organizes, 
 add the bot instead: the apps have no member-add path for bots. Android has the button in the call
 screen's "More" menu, iOS among the round controls (in one "+" menu with "Add people" in a DM
 call). The others' move banner on mobile says, as on desktop, that the notetaker was added and
-where the audio goes. The encryption badge doesn't change on mobile yet.
+where the audio goes. While the notetaker is in the call, the encryption badge says so on mobile
+too ("Notetaker in the call – audio goes to OpenRouter").
+
+**Who may not ask it in (issue #1290).** Where the button would be offered but the policy keeps the
+user from asking the notetaker in (a guest, or a member while `inviters` is `admins`), every client
+shows "Add notetaker" disabled with the reason (`NotetakerInCall::maybe_refusal`), instead of
+hiding it. Only the screen changes: the notetaker would drop such a `join` anyway.
+
+**After a move.** The conversation a call moved out of shows the `CallMoved` announcement as a line
+("Alice moved the call into 'Call with notetaker'"); for whoever is in the room it links there,
+where the summary lands. An app from before this change keeps the announcement hidden.
 
 **Everybody sees it.**
 

@@ -10793,6 +10793,102 @@
         }
       }
     },
+    "event_call_moved %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ moved the call into “%2$@”"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ hat den Anruf in „%2$@“ verschoben"
+          }
+        }
+      }
+    },
+    "event_call_moved_unnamed %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ moved the call into a meeting room"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat den Anruf in einen Meetingraum verschoben"
+          }
+        }
+      }
+    },
+    "event_call_moved_open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open the room"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Raum öffnen"
+          }
+        }
+      }
+    },
+    "call_notetaker_badge": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notetaker in the call – audio goes to OpenRouter"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notetaker im Anruf – Ton geht an OpenRouter"
+          }
+        }
+      }
+    },
+    "call_notetaker_refused_guest": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guests can't add the notetaker to a call."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gäste können den Notetaker nicht zu einem Anruf hinzufügen."
+          }
+        }
+      }
+    },
+    "call_notetaker_refused_admins": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only workspace admins can add the notetaker to a call."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur Workspace-Admins können den Notetaker zu einem Anruf hinzufügen."
+          }
+        }
+      }
+    },
     "image_reply": {
       "localizations": {
         "en": {

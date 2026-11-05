@@ -1,19 +1,25 @@
 //! v1 acceptance, PLAN.md §9 and §12, issue #987: an external guest follows the link from the
 //! invitation mail in a browser, waits in the lobby, the organizer's device lets the guest's own
 //! device into the meeting chat's encryption, and the guest's browser and the organizer share the
-//! meeting's call (e2ee.md §4.6, "Meeting guests").
+//! meeting's call (e2ee.md §4.6, "Meeting guests"); and (#1231) a member, not the organizer, lets
+//! the guest in.
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chromiumoxide::cdp::browser_protocol::browser::{
   PermissionDescriptor, PermissionSetting, SetPermissionParams,
 };
+use chromiumoxide::page::Page;
 use reqwest::StatusCode;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use teamcraft_core::client::admits_link_arrivals;
 use teamcraft_e2e::browser::{BrowserSession, web_dir};
 use teamcraft_e2e::call::join_call;
+use teamcraft_e2e::peer::settle;
 use teamcraft_e2e::{Mailpit, Peer, Stack};
 use teamcraft_media::call_engine::CallEngineEvent;
+use teamcraft_media::call_native::NativeCall;
 use teamcraft_proto::{ConversationId, MeetingId, UserId};
 
 use crate::web::{TEST_CSP, click_text, type_until_kept, wait_for_element, wait_for_text};
@@ -29,34 +35,14 @@ const CALL_DURATION: Duration = Duration::from_secs(8);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
-  let Some(web_dir) = web_dir() else {
-    let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
-    assert!(!is_required, "no web build: run tests/e2e/web/build.sh");
-    eprintln!("skipping: no web build (tests/e2e/web/build.sh)");
-    return;
-  };
-  let identity = sfu_identity();
-  let sha256: String = Sha256::digest(identity.cert.der())
-    .iter()
-    .map(|byte| format!("{byte:02x}"))
-    .collect();
-  let (certificate, key) = (identity.cert.pem(), identity.signing_key.serialize_pem());
-  let Some(stack) = Stack::builder()
-    .with_meetings()
-    .with_calls()
-    .with_sfu_identity(certificate, key, sha256)
-    .with_web_dir(web_dir)
-    // The SFU listens on a random port of its own: the test policy lets the page reach it.
-    .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP)
-    .start()
-    .await
+  let Some(Env {
+    stack,
+    browser,
+    certificate_hash,
+  }) = Env::start().await
   else {
     return;
   };
-  let Some(browser) = BrowserSession::launch_with(&MEDIA_ARGS).await else {
-    return;
-  };
-  let certificate_hash = stack.maybe_sfu.as_ref().unwrap().certificate_hash;
   let mut alice = Peer::enroll(&stack, "alice").await;
   let address = format!("gus-{}@example.org", alice.client.device_id());
   let starts_at = now_ms() - 60_000;
@@ -101,35 +87,12 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
   let alice_ref = &mut alice;
   let page = browser.page.clone();
   let console = console_log(&page).await;
-  // Headless Chromium denies the microphone and camera unless the origin has them.
-  for name in ["microphone", "camera"] {
-    page
-      .execute(
-        SetPermissionParams::builder()
-          .permission(PermissionDescriptor::new(name))
-          .setting(PermissionSetting::Granted)
-          .origin(stack.base_url.clone())
-          .build()
-          .unwrap(),
-      )
-      .await
-      .unwrap();
-  }
+  grant_media(&page, &stack.base_url).await;
   browser
     .screenshot_on_failure("meeting-guest-mail-link", |page| async move {
-      // The UI follows the browser language; pin English (same origin, before the app loads).
-      page.goto(format!("{origin}/healthz")).await.unwrap();
-      page
-        .evaluate("localStorage.setItem('teamcraft.locale', 'en')")
-        .await
-        .unwrap();
-      page.goto(link).await.unwrap();
-      wait_for_text(&page, "Join the meeting").await;
-      wait_for_element(&page, "input.input").await;
-      type_until_kept(&page, "input.input", "Gus (customer)").await;
-      click_text(&page, "Ask to join").await;
+      knock(&page, &origin, link, "Gus (customer)").await;
       // Nobody let the guest in yet: the normal case, said plainly.
-      wait_for_text(&page, "Waiting for the organizer").await;
+      wait_for_text(&page, "Waiting for someone in the meeting to let you in").await;
 
       // The organizer's app sees the guest in the lobby once the guest's page set up its device.
       let deadline = Instant::now() + SETUP_TIMEOUT;
@@ -167,18 +130,212 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
         .let_guest_into_meeting_chat(chat, guest, &fingerprint, ends_at + GUEST_ACCESS_GRACE_MS)
         .await
         .unwrap();
-      wait_for_text(&page, "Join the call").await;
-
-      // The guest joins the meeting's call from the browser.
-      click_text(&page, "Join the call").await;
-      wait_for_element(&page, ".prejoin").await;
-      click_selector(&page, ".prejoin-actions .btn-primary").await;
-      wait_for_element(&page, ".call-screen").await;
+      join_call_in_browser(&page).await;
     })
     .await;
 
   // The organizer joins natively: both verify each other's DAVE keys, media flows both ways.
-  let mut call = join_call(&mut alice, chat, certificate_hash, 550.0).await;
+  let call = join_call(&mut alice, chat, certificate_hash, 550.0).await;
+  expect_secured_call(call, &console, "the organizer").await;
+
+  browser.close().await;
+  stack.stop().await;
+}
+
+/// #1231: the organizer scheduled without a lobby and left; a member stays and his app, as the
+/// organizer's signed admitters allow, lets the browser guest in, who then shares the call with
+/// him, DAVE-secured. (As in the app, the lobby is read and answered by the member's own device;
+/// "while in the meeting's call" is the app's gate, the server and core accept the member any time.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_admits_a_browser_guest_when_the_organizer_has_left_and_they_share_the_call() {
+  let Some(Env {
+    stack,
+    browser,
+    certificate_hash,
+  }) = Env::start().await
+  else {
+    return;
+  };
+  let mut alice = Peer::enroll(&stack, "alice").await;
+  let mut bob = Peer::enroll(&stack, "bob").await;
+  let bob_id = bob.user_id();
+  let starts_at = now_ms() - 60_000;
+  let ends_at = starts_at + MEETING_LENGTH_MS;
+  let meeting = stack
+    .post(
+      &alice.tokens,
+      "/meetings",
+      json!({
+        "title": "Open call", "starts_at": starts_at, "ends_at": ends_at,
+        "has_lobby": false,
+        "invitees": [{"kind": "user", "user_id": bob_id.to_string()}],
+      }),
+    )
+    .await
+    .expect(StatusCode::CREATED);
+  let meeting_id: MeetingId = meeting.id().parse().unwrap();
+  let chat: ConversationId = meeting.body["conversation_id"].as_str().unwrap().parse().unwrap();
+  let link = meeting.body["join_url"].as_str().unwrap().to_owned();
+
+  // The organizer's app sets the chat's group up with Bob in it, chooses "no lobby", signs Bob
+  // as an admitter, and is gone from here on.
+  alice.client.set_up_meeting_chat(chat, &[bob_id]).await.unwrap();
+  alice.client.note_meeting_lobby(meeting_id, false).unwrap();
+  let access_ends_at = ends_at + GUEST_ACCESS_GRACE_MS;
+  assert!(
+    alice
+      .client
+      .sync_meeting_admitters(meeting_id, chat, access_ends_at)
+      .await
+      .unwrap()
+  );
+  settle(&mut [&mut alice, &mut bob], Duration::from_secs(1)).await;
+  bob.client.full_sync().await.unwrap();
+  assert!(bob.client.has_group(chat).unwrap());
+  bob.client.check_meeting_admission(chat).await.unwrap();
+  assert!(admits_link_arrivals(bob.store.as_ref(), chat, now_ms()));
+  drop(alice);
+
+  let origin = stack.base_url.clone();
+  let lobby_path = format!("/meetings/{meeting_id}/lobby");
+  let page = browser.page.clone();
+  let console = console_log(&page).await;
+  grant_media(&page, &origin).await;
+  let (stack_ref, bob_ref) = (&stack, &mut bob);
+  browser
+    .screenshot_on_failure("meeting-member-admits-guest", |page| async move {
+      knock(&page, &origin, link, "Gus (customer)").await;
+      wait_for_text(&page, "Waiting for someone in the meeting to let you in").await;
+
+      // Bob's app sees the guest, who came with the link, once the guest's device is ready.
+      let deadline = Instant::now() + SETUP_TIMEOUT;
+      let entry = loop {
+        let lobby = stack_ref
+          .get(&bob_ref.tokens, &lobby_path)
+          .await
+          .expect(StatusCode::OK);
+        assert_eq!(lobby.body["is_host"], false);
+        let entry = lobby.body["entries"][0].clone();
+        if entry["has_device"] == true && entry["knock_fingerprint"].is_string() {
+          break entry;
+        }
+        assert!(
+          Instant::now() < deadline,
+          "the guest's device never got ready: {}",
+          lobby.body
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+      };
+      assert_eq!(entry["is_by_link"], true);
+      let guest: UserId = entry["user"]["id"].as_str().unwrap().parse().unwrap();
+      let fingerprint = entry["knock_fingerprint"].as_str().unwrap().to_owned();
+
+      // Bob's app admits on the server and adds the guest's device to the chat's group.
+      stack_ref
+        .post(&bob_ref.tokens, &format!("{lobby_path}/{guest}/admit"), json!({}))
+        .await
+        .expect(StatusCode::NO_CONTENT);
+      bob_ref
+        .client
+        .let_guest_into_meeting_chat(chat, guest, &fingerprint, access_ends_at)
+        .await
+        .unwrap();
+      join_call_in_browser(&page).await;
+    })
+    .await;
+
+  // Bob joins natively: he and the guest verify each other's DAVE keys, media flows to him.
+  let call = join_call(&mut bob, chat, certificate_hash, 550.0).await;
+  expect_secured_call(call, &console, "the admitting member").await;
+
+  browser.close().await;
+  stack.stop().await;
+}
+
+/// The stack with its SFU and web build, and a Chromium for the guest.
+struct Env {
+  stack: Stack,
+  browser: BrowserSession,
+  certificate_hash: [u8; 32],
+}
+
+impl Env {
+  async fn start() -> Option<Self> {
+    let Some(web_dir) = web_dir() else {
+      let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
+      assert!(!is_required, "no web build: run tests/e2e/web/build.sh");
+      eprintln!("skipping: no web build (tests/e2e/web/build.sh)");
+      return None;
+    };
+    let identity = sfu_identity();
+    let sha256: String = Sha256::digest(identity.cert.der())
+      .iter()
+      .map(|byte| format!("{byte:02x}"))
+      .collect();
+    let (certificate, key) = (identity.cert.pem(), identity.signing_key.serialize_pem());
+    let stack = Stack::builder()
+      .with_meetings()
+      .with_calls()
+      .with_sfu_identity(certificate, key, sha256)
+      .with_web_dir(web_dir)
+      // The SFU listens on a random port of its own: the test policy lets the page reach it.
+      .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP)
+      .start()
+      .await?;
+    let browser = BrowserSession::launch_with(&MEDIA_ARGS).await?;
+    let certificate_hash = stack.maybe_sfu.as_ref().unwrap().certificate_hash;
+    Some(Self {
+      stack,
+      browser,
+      certificate_hash,
+    })
+  }
+}
+
+/// Headless Chromium denies the microphone and camera unless the origin has them.
+async fn grant_media(page: &Page, origin: &str) {
+  for name in ["microphone", "camera"] {
+    page
+      .execute(
+        SetPermissionParams::builder()
+          .permission(PermissionDescriptor::new(name))
+          .setting(PermissionSetting::Granted)
+          .origin(origin)
+          .build()
+          .unwrap(),
+      )
+      .await
+      .unwrap();
+  }
+}
+
+/// The guest opens the meeting link and asks to join under `name`.
+async fn knock(page: &Page, origin: &str, link: String, name: &str) {
+  // The UI follows the browser language; pin English (same origin, before the app loads).
+  page.goto(format!("{origin}/healthz")).await.unwrap();
+  page
+    .evaluate("localStorage.setItem('teamcraft.locale', 'en')")
+    .await
+    .unwrap();
+  page.goto(link).await.unwrap();
+  wait_for_text(page, "Join the meeting").await;
+  wait_for_element(page, "input.input").await;
+  type_until_kept(page, "input.input", name).await;
+  click_text(page, "Ask to join").await;
+}
+
+/// The guest, let in, joins the meeting's call from the browser.
+async fn join_call_in_browser(page: &Page) {
+  wait_for_text(page, "Join the call").await;
+  click_text(page, "Join the call").await;
+  wait_for_element(page, ".prejoin").await;
+  click_selector(page, ".prejoin-actions .btn-primary").await;
+  wait_for_element(page, ".call-screen").await;
+}
+
+/// The native peer listens for [`CALL_DURATION`], then leaves: the DAVE group with the guest was
+/// established and the guest's fake microphone (a beep) reached it and decoded.
+async fn expect_secured_call(mut call: NativeCall, console: &Arc<Mutex<Vec<String>>>, who: &str) {
   let mut is_secured = false;
   let deadline = tokio::time::Instant::now() + CALL_DURATION;
   while let Ok(Some(event)) = tokio::time::timeout_at(deadline, call.next_event()).await {
@@ -197,12 +354,11 @@ async fn a_guest_joins_a_meeting_with_the_mailed_link_and_shares_its_call() {
       eprintln!("console: {line}");
     }
   }
-  assert!(is_secured, "the DAVE group with the guest was never established");
-  // The guest's fake microphone (a beep) reached the organizer and decoded.
-  assert!(stats.frames_received > 50, "{stats:?}");
-
-  browser.close().await;
-  stack.stop().await;
+  assert!(
+    is_secured,
+    "the DAVE group with the guest was never established ({who})"
+  );
+  assert!(stats.frames_received > 50, "{who}: {stats:?}");
 }
 
 fn now_ms() -> i64 {

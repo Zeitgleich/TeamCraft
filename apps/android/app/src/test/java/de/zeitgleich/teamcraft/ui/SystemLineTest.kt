@@ -54,6 +54,19 @@ class SystemLineTest {
   }
 
   @Test
+  fun aMovedCallLinksToTheRoomOnlyForItsMembers() {
+    // Issue #1290: the core names the room only where the user is in it.
+    assertEquals(
+      SystemLine.CallMoved("Ada", "5", "Call with notetaker"),
+      line(workspace = """{"event":"call_moved","by":"1","room":"5","room_name":"Call with notetaker"}"""),
+    )
+    assertEquals(
+      SystemLine.CallMoved("Ada", null, ""),
+      line(workspace = """{"event":"call_moved","by":"1","room":"5"}"""),
+    )
+  }
+
+  @Test
   fun channelChangesNobodyIsNamedForAreTheServersWord() {
     // Issue #818: no member's announcement matched the change the server reports, so no "by".
     assertEquals(

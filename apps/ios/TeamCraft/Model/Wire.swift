@@ -138,10 +138,13 @@ enum WorkspaceEvent: Decodable, Equatable, Sendable {
   /// A workspace admin joined the private channel because `by` added them without an approval to
   /// ask for (admin.md §2.4.2).
   case adminAdded(user: String, by: String)
+  /// `by` moved the conversation's call into the meeting room `room` (issue #1290). `roomName` is
+  /// empty if the user isn't in the room: the line links to it only when it is set.
+  case callMoved(by: String, room: String, roomName: String)
   case unknown
 
   private enum CodingKeys: String, CodingKey {
-    case event, user, by, history, space, approvedBy, addedBy
+    case event, user, by, history, space, approvedBy, addedBy, room, roomName
   }
 
   init(from decoder: Decoder) throws {
@@ -164,6 +167,7 @@ enum WorkspaceEvent: Decodable, Equatable, Sendable {
       } else {
         self = .adminJoined(user: text(.user) ?? "", maybeApprovedBy: text(.approvedBy).flatMap { $0.isEmpty ? nil : $0 })
       }
+    case "call_moved": self = .callMoved(by: by, room: text(.room) ?? "", roomName: text(.roomName) ?? "")
     default: self = .unknown
     }
   }

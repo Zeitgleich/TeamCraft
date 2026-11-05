@@ -11,7 +11,7 @@ use crate::calls::{
 use crate::components::add_to_call::AddPeople;
 use crate::components::call_audio_menu::AudioMenu;
 use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
-use crate::components::call_notetaker::{NotetakerBanner, use_notetaker_in_call};
+use crate::components::call_notetaker::{NotetakerBanner, notetaker_refusal_key, use_notetaker_in_call};
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_video::{
   BackgroundPicker, LiveVideo, PickerSize, VideoSource, VideoTile, can_share_screen, can_show_video,
@@ -756,17 +756,31 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             on_press=move || state.overlay.set(Overlay::AddToCall(request.conversation))
           />
         </Show>
-        // Where the notetaker is no member yet, the button adds it first (e2ee.md §8.2).
+        // Where the notetaker is no member yet, the button adds it first (e2ee.md §8.2). Who the
+        // policy keeps from asking it in sees it disabled, and a press says why (issue #1290).
         <Show
-          when=move || notetaker.get().is_some_and(|notetaker| notetaker.can_invite) && !notetaker_invite.is_busy()
+          when=move || {
+            notetaker.get().is_some_and(|notetaker| notetaker.can_invite || notetaker.maybe_refusal.is_some())
+              && !notetaker_invite.is_busy()
+          }
           fallback=|| ()
         >
           <ControlButton
             icon=IconName::Compose
-            label=Signal::derive(move || i18n.t("call-notetaker-add"))
+            label=Signal::derive(move || {
+              match notetaker.get().and_then(|notetaker| notetaker.maybe_refusal) {
+                Some(refusal) => i18n.t(notetaker_refusal_key(refusal)),
+                None => i18n.t("call-notetaker-add"),
+              }
+            })
+            is_disabled=Signal::derive(move || notetaker.get().is_some_and(|notetaker| notetaker.maybe_refusal.is_some()))
             on_press=move || {
-              if let Some(found) = notetaker.get_untracked() {
-                notetaker_invite.press(&found);
+              let Some(found) = notetaker.get_untracked() else {
+                return;
+              };
+              match found.maybe_refusal {
+                Some(refusal) => state.show_toast(i18n.t(notetaker_refusal_key(refusal))),
+                None => notetaker_invite.press(&found),
               }
             }
           />
@@ -848,6 +862,10 @@ fn ControlButton(
   on_press: impl Fn() + 'static,
   #[prop(into, default = Signal::stored(false))] is_off: Signal<bool>,
   #[prop(into, default = Signal::stored(false))] is_active: Signal<bool>,
+  /// Shown, but not available: a press still runs `on_press` (to say why), so the button stays
+  /// focusable and its label reads out the reason.
+  #[prop(into, default = Signal::stored(false))]
+  is_disabled: Signal<bool>,
   /// A badge on the button (the chat's unread count).
   #[prop(optional)]
   children: Option<Children>,
@@ -857,6 +875,8 @@ fn ControlButton(
       class="control-btn"
       class:off=move || is_off.get()
       class:active=move || is_active.get()
+      class:is-disabled=move || is_disabled.get()
+      aria-disabled=move || is_disabled.get().then_some("true")
       aria-label=move || label.get()
       title=move || label.get()
       aria-pressed=move || (is_off.get() || is_active.get()).to_string()

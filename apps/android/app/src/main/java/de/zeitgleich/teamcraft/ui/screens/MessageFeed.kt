@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -154,6 +155,7 @@ import de.zeitgleich.teamcraft.ui.reactionsInView
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.rowOf
 import de.zeitgleich.teamcraft.ui.showsSenders
+import de.zeitgleich.teamcraft.ui.SystemLine
 import de.zeitgleich.teamcraft.ui.systemLine
 import de.zeitgleich.teamcraft.ui.thumbnailKey
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
@@ -244,6 +246,8 @@ fun MessageFeed(
   modifier: Modifier = Modifier,
   maybeFocusMessage: String? = null,
   onOpenPermalink: (String) -> Unit = {},
+  /** Opens another conversation: the room a call moved into (issue #1290). */
+  onOpenConversation: (String) -> Unit = {},
   /** Whether the user may react here; without it the reactions stay readable but don't toggle. */
   canReact: Boolean = true,
   older: OlderMessages = OlderMessages.None,
@@ -376,6 +380,7 @@ fun MessageFeed(
               maybeOnReply = maybeOnReply,
               isHighlighted = item.message.id == maybeHighlighted,
               onOpenPermalink = onOpenPermalink,
+              onOpenConversation = onOpenConversation,
               canReact = canReact,
             )
           }
@@ -811,6 +816,7 @@ private fun MessageRow(
   maybeOnReply: ((Message) -> Unit)?,
   isHighlighted: Boolean,
   onOpenPermalink: (String) -> Unit,
+  onOpenConversation: (String) -> Unit,
   canReact: Boolean,
 ) {
   val message = entry.message
@@ -825,6 +831,15 @@ private fun MessageRow(
       textAlign = TextAlign.Center,
       modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 6.dp),
     )
+    // The room a call moved into, where its summary lands (issue #1290).
+    (maybeSystemLine as? SystemLine.CallMoved)?.maybeRoomId?.let { room ->
+      TextButton(
+        onClick = { onOpenConversation(room) },
+        modifier = Modifier.fillMaxWidth().wrapContentWidth(Alignment.CenterHorizontally),
+      ) {
+        Text(stringResource(R.string.event_call_moved_open), style = MaterialTheme.typography.labelMedium)
+      }
+    }
     return
   }
   val haptics = LocalHapticFeedback.current

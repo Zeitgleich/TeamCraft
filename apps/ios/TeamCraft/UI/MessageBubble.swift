@@ -46,15 +46,24 @@ struct MessageRow: View {
   var displayNames: [String: String] = [:]
   /// Without the right to react, the reactions stay readable but don't toggle (issue #758).
   var canReact = true
+  /// Opens another conversation: the room a call moved into (issue #1290).
+  var onOpenConversation: (String) -> Void = { _ in }
 
   var body: some View {
     if let line = SystemLine(message: message, maybeExtras: maybeExtras, names: displayNames) {
-      Text(line.text)
-        .font(.footnote.italic())
-        .foregroundStyle(Theme.textMuted)
-        .multilineTextAlignment(.center)
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 4)
+      VStack(spacing: 2) {
+        Text(line.text)
+          .font(.footnote.italic())
+          .foregroundStyle(Theme.textMuted)
+          .multilineTextAlignment(.center)
+        // The room a call moved into, where its summary lands.
+        if case .callMoved(_, let room?, _) = line {
+          Button("event_call_moved_open") { onOpenConversation(room) }
+            .font(.footnote)
+        }
+      }
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 4)
     } else {
       bubbleRow
     }

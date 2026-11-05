@@ -20,6 +20,8 @@ struct CallScreen: View {
   @State private var maybeNotetaker: NotetakerCallInfo?
   /// One per call screen: a retry of "Add notetaker" gets the same room.
   @State private var notetakerKey = newRequestKey()
+  /// "Add notetaker" was pressed where the policy doesn't let the user: the reason shows.
+  @State private var isNotetakerRefusalShown = false
   @State private var areControlsShown = true
   @State private var isEncryptionShown = false
   @State private var maybeConnectedAt: Date?
@@ -70,6 +72,11 @@ struct CallScreen: View {
       Button("done", role: .cancel) {}
     } message: { failure in
       Text(failure.message)
+    }
+    .alert("call_notetaker_add", isPresented: $isNotetakerRefusalShown) {
+      Button("done", role: .cancel) {}
+    } message: {
+      if let key = notetakerRefusalKey { Text(key) }
     }
     .sheet(isPresented: $isAddingPeople) { AddPeopleView(conversationId: call.conversationId) }
     .sheet(isPresented: $isEncryptionShown) { encryptionSheet }
@@ -272,7 +279,12 @@ struct CallScreen: View {
         .accessibilityAddTraits(.updatesFrequently)
       if call.isSecured || call.maybePrivacyCode != nil {
         Button { isEncryptionShown = true } label: {
-          Label(LocalizedStringKey(call.isSecured ? "call_secured" : "call_securing"), systemImage: "lock.fill")
+          // While the notetaker is in, the audio goes to OpenRouter, as desktop and web say (#1290).
+          Label(
+            LocalizedStringKey(
+              maybeNotetaker?.isPresent == true
+                ? "call_notetaker_badge" : call.isSecured ? "call_secured" : "call_securing"),
+            systemImage: maybeNotetaker?.isPresent == true ? "exclamationmark.triangle.fill" : "lock.fill")
             .font(.footnote.weight(.semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, 12)
@@ -359,12 +371,12 @@ struct CallScreen: View {
       }
       Spacer(minLength: 0)
       AudioRouteButton().frame(width: Self.controlSize, height: Self.controlSize)
-      if isAddingPeopleOffered && isAddingNotetakerOffered {
+      if isAddingPeopleOffered && isNotetakerControlShown {
         // Both in one menu, so the bar keeps its room on small phones.
         Spacer(minLength: 0)
         Menu {
           Button("call_add_people", systemImage: "person.badge.plus") { interact { isAddingPeople = true } }
-          Button("call_notetaker_add", systemImage: "note.text.badge.plus") { interact { addNotetaker() } }
+          Button("call_notetaker_add", systemImage: "note.text.badge.plus") { interact { pressNotetaker() } }
         } label: {
           Image(systemName: "plus")
             .font(.title2)
@@ -379,11 +391,12 @@ struct CallScreen: View {
         RoundControl(system: "person.badge.plus", isActive: false, label: "call_add_people") {
           interact { isAddingPeople = true }
         }
-      } else if isAddingNotetakerOffered {
+      } else if isNotetakerControlShown {
         Spacer(minLength: 0)
         RoundControl(system: "note.text.badge.plus", isActive: false, label: "call_notetaker_add") {
-          interact { addNotetaker() }
+          interact { pressNotetaker() }
         }
+        .opacity(notetakerRefusalKey == nil ? 1 : 0.45)
       }
       Spacer(minLength: 0)
       RoundControl(system: "phone.down.fill", isActive: false, label: "call_hang_up", tint: Theme.danger) {
@@ -408,6 +421,28 @@ struct CallScreen: View {
   private var isAddingNotetakerOffered: Bool {
     maybeNotetaker?.canInvite == true && call.phase == .connected && model.calls.maybeMoveOffer == nil
       && !model.calls.isMoving && !model.calls.isAddingNotetaker && !model.calls.isNotetakerAsked
+  }
+
+  /// Why the policy doesn't let the user ask the notetaker in, where the button shows disabled
+  /// (issue #1290): only while it would otherwise be offered.
+  private var notetakerRefusalKey: LocalizedStringKey? {
+    guard call.phase == .connected, model.calls.maybeMoveOffer == nil, !model.calls.isMoving else { return nil }
+    switch maybeNotetaker?.maybeRefusal {
+    case .guest: return "call_notetaker_refused_guest"
+    case .adminsOnly: return "call_notetaker_refused_admins"
+    case nil: return nil
+    }
+  }
+
+  private var isNotetakerControlShown: Bool { isAddingNotetakerOffered || notetakerRefusalKey != nil }
+
+  /// "Add notetaker": adds it, or says why the user can't.
+  private func pressNotetaker() {
+    if isAddingNotetakerOffered {
+      addNotetaker()
+    } else {
+      isNotetakerRefusalShown = true
+    }
   }
 
   private func addNotetaker() {

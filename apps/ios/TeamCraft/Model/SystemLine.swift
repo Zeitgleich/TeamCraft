@@ -26,6 +26,9 @@ enum SystemLine: Equatable {
   /// A workspace admin joined because `by` added them without an approval to ask for (admin.md
   /// §2.4.2).
   case adminAdded(name: String, by: String)
+  /// `by` moved the conversation's call into a meeting room (issue #1290), for example to add the
+  /// notetaker. `maybeRoomId` and `roomName` only when the user is in the room: the line opens it.
+  case callMoved(by: String, maybeRoomId: String?, roomName: String)
   /// A message without text or files of a kind this version doesn't know.
   case changed
 
@@ -71,6 +74,8 @@ enum SystemLine: Equatable {
     case .adminJoined(let name, nil): return String(localized: "event_admin_joined \(name)")
     case .adminJoined(let name, let by?): return String(localized: "event_admin_joined_approved \(name) \(by)")
     case .adminAdded(let name, let by): return String(localized: "event_admin_joined_added \(name) \(by)")
+    case .callMoved(let by, nil, _): return String(localized: "event_call_moved_unnamed \(by)")
+    case .callMoved(let by, _, let room): return String(localized: "event_call_moved \(by) \(room)")
     case .changed: return String(localized: "chat_preview_event")
     }
   }
@@ -98,6 +103,8 @@ enum SystemLine: Equatable {
     case .adminJoined(let user, let maybeApprovedBy):
       self = .adminJoined(name: nameOf(user), maybeApprovedBy: maybeApprovedBy.map(nameOf))
     case .adminAdded(let user, let by): self = .adminAdded(name: nameOf(user), by: nameOf(by))
+    case .callMoved(let by, let room, let roomName):
+      self = .callMoved(by: nameOf(by), maybeRoomId: roomName.isEmpty || room.isEmpty ? nil : room, roomName: roomName)
     case .unknown: return nil
     }
   }
