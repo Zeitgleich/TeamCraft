@@ -233,7 +233,13 @@ struct ConversationListView: View {
         Menu {
           spaceMenu(for: section)
         } label: {
-          Text(title(of: section.title))
+          HStack {
+            if let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
+              SpacePictureView(
+                spaceId: spaceId, maybeVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
+            }
+            Text(title(of: section.title))
+          }
         }
         .task(id: section.id) { await loadSpaceMenu(for: section) }
       }
@@ -404,9 +410,12 @@ struct ConversationListView: View {
   private func sectionHeader(_ section: ConversationSection) -> some View {
     if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
       Button {
-        maybeSpaceViews = SpaceChoice(id: spaceId, name: name)
+        maybeSpaceViews = SpaceChoice(
+          id: spaceId, name: name, maybeImageVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
       } label: {
         HStack {
+          SpacePictureView(
+            spaceId: spaceId, maybeVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
           Text(title(of: section.title))
           Spacer()
           Image(systemName: "chevron.right")

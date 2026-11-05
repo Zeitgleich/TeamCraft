@@ -107,6 +107,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Dp
 import de.zeitgleich.teamcraft.ui.ListedSpace
+import de.zeitgleich.teamcraft.ui.SpacePicture
 import de.zeitgleich.teamcraft.ui.Section
 import de.zeitgleich.teamcraft.ui.TabBadge
 import de.zeitgleich.teamcraft.ui.activityConversations
@@ -420,6 +421,7 @@ private fun ListedSpaceRow(space: ListedSpace, list: ListState) {
   Box(Modifier.fillMaxWidth()) {
     ListItem(
       headlineContent = { Text(space.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+      leadingContent = space.maybeImageVersion?.let { version -> { SpacePicture(space.id, version) } },
       modifier = Modifier.clickable(onClickLabel = menuLabel) { isOpen = true },
     )
     list.spaceMenu(space.id, space.name, isOpen) { isOpen = false }
@@ -532,7 +534,11 @@ private fun SectionHeaderWithMenu(section: Section, list: ListState) {
       },
     ),
   ) {
-    SectionHeader(title)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      val maybeVersion = section.conversations.firstNotNullOfOrNull { it.maybeSpaceImageVersion }
+      if (maybeVersion != null) SpacePicture(maybeSpaceId, maybeVersion, modifier = Modifier.padding(start = Spacing.m, top = 12.dp))
+      SectionHeader(title)
+    }
     Icon(
       Icons.AutoMirrored.Filled.KeyboardArrowRight,
       contentDescription = null,

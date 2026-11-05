@@ -266,7 +266,7 @@ impl Reads {
     let spaces: BTreeMap<_, _> = backend
       .spaces()
       .into_iter()
-      .map(|space| (space.id, space.name))
+      .map(|space| (space.id, (space.name, space.maybe_image_version)))
       .collect();
     let mut conversations = Vec::new();
     for space in spaces.keys() {
@@ -279,10 +279,14 @@ impl Reads {
         .into_iter()
         .map(|conversation| {
           let maybe_peer = direct_peer(backend, &conversation, me.id);
-          let maybe_space_name = conversation
+          let (maybe_space_name, maybe_space_image_version) = conversation
             .maybe_space
-            .and_then(|space| spaces.get(&space).cloned());
-          ConversationItem::from_view(conversation, maybe_space_name, maybe_peer, me.is_guest)
+            .and_then(|space| spaces.get(&space).cloned())
+            .map_or((None, None), |(name, version)| (Some(name), version));
+          ConversationItem {
+            maybe_space_image_version,
+            ..ConversationItem::from_view(conversation, maybe_space_name, maybe_peer, me.is_guest)
+          }
         })
         .collect(),
     )

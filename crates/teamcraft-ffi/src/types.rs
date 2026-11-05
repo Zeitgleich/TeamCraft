@@ -226,6 +226,10 @@ pub struct ConversationItem {
   /// ([`share_targets`]), `None` elsewhere and for conversations without messages.
   #[uniffi(default = None)]
   pub maybe_last_activity_ms: Option<i64>,
+  /// Version of the picture of the conversation's space (`space_picture`); the apps cache the
+  /// picture by it. `None`: the space has no picture (or this is a DM), the letter tile shows.
+  #[uniffi(default = None)]
+  pub maybe_space_image_version: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -676,6 +680,7 @@ impl ConversationItem {
       maybe_peer_id: maybe_peer.map(|peer| peer.id.to_string()),
       is_notes_to_self: conversation.is_notes_to_self,
       maybe_last_activity_ms: None,
+      maybe_space_image_version: None,
     }
   }
 }

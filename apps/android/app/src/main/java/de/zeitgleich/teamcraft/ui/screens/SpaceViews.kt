@@ -86,6 +86,7 @@ fun SpaceViewsScreen(viewModel: MainViewModel, initialSpaceId: String, onOpen: (
     topBar = {
       ChromeTopBar(
         title = spaces.firstOrNull { it.id == spaceId }?.name.orEmpty(),
+        maybeIcon = spaces.firstOrNull { it.id == spaceId }?.maybeImageVersion?.let { version -> { SpacePicture(spaceId, version, size = 28.dp) } },
         maybeOnBack = onBack,
         actions = { if (spaces.size > 1) SpaceSwitcher(spaces, onSelect = { spaceId = it }) },
       )
