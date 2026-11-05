@@ -283,12 +283,28 @@ fn Sources(conversation: ConversationId, has_bot: Signal<bool>) -> impl IntoView
   let i18n = use_i18n();
   let sources = Memo::new(move |_| state.read(|backend| backend.integration_sources(conversation)));
   let can_manage = Signal::derive(move || state.read(|backend| backend.can_manage_integration_sources()));
+  // The bot that posts for the sources: its picture stands in for a source without one, as in the
+  // messages. With several bots in the channel it isn't known which one serves them.
+  let maybe_bot = Signal::derive(move || {
+    let ids = state
+      .read(|backend| backend.conversation(conversation))
+      .map(|info| info.member_ids)
+      .unwrap_or_default();
+    let mut bots: Vec<User> = state.read(|backend| {
+      ids
+        .iter()
+        .filter_map(|id| backend.user(*id))
+        .filter(|user| user.is_bot)
+        .collect()
+    });
+    (bots.len() == 1).then(|| bots.remove(0))
+  });
   let maybe_reveal: RwSignal<Option<Revealed>> = RwSignal::new(None);
   view! {
     <h3 class="detail-heading">{move || i18n.t("channel-sources")}</h3>
     <ul class="settings-member-list">
       <For each=move || sources.get() key=|source| (source.id, source.name.clone(), source.maybe_picture_sha256) let:source>
-        <SourceRow conversation=conversation source=source can_manage=can_manage />
+        <SourceRow conversation=conversation source=source can_manage=can_manage maybe_bot=maybe_bot />
       </For>
     </ul>
     <Show when=move || sources.with(Vec::is_empty) fallback=|| ()>
@@ -367,6 +383,7 @@ fn SourceRow(
   conversation: ConversationId,
   source: IntegrationSource,
   can_manage: Signal<bool>,
+  maybe_bot: Signal<Option<User>>,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
@@ -382,8 +399,23 @@ fn SourceRow(
   let kind_key = kind_label(&source.kind);
   let name = source.name.clone();
   let has_picture = source.maybe_picture_sha256.is_some();
-  let preview = source_preview(state.me(), &source);
   let maybe_source_picture = source.maybe_picture_sha256.map(|sha256| (conversation, sha256));
+  let avatar = {
+    let source = source.clone();
+    move || {
+      let maybe_bot = maybe_bot.get();
+      let shows_profile_picture = maybe_bot.is_some();
+      let preview = source_preview(maybe_bot.unwrap_or_else(|| state.me()), &source);
+      view! {
+        <Avatar
+          user=preview
+          size=AvatarSize::Medium
+          maybe_source_picture=maybe_source_picture
+          shows_profile_picture=shows_profile_picture
+        />
+      }
+    }
+  };
   let is_renaming = RwSignal::new(false);
   let is_editing_name = {
     let name = name.clone();
@@ -397,7 +429,7 @@ fn SourceRow(
   };
   view! {
     <li class="settings-member">
-      <Avatar user=preview size=AvatarSize::Medium maybe_source_picture=maybe_source_picture />
+      {avatar}
       <span class="grow source-meta">
         <span translate="no">{name}</span>
         <span class="muted-text">
@@ -441,14 +473,17 @@ fn SourceRow(
   }
 }
 
-/// What a source's picture stands on when it has none: its initials in its own colour.
-fn source_preview(me: User, source: &IntegrationSource) -> User {
+/// What a source's row shows when the source has no picture, as its messages do (docs/bridge.md,
+/// "Source identity"): the picture of `account` when it is the bot that posts for the source,
+/// otherwise the source's initials in its own colour. Never the picture of whoever added the source
+/// or views it (issue #1299); the adder is named in the text.
+fn source_preview(account: User, source: &IntegrationSource) -> User {
   User {
     display_name: source.name.clone(),
     avatar_hue: source.name.bytes().fold(0_u16, |hue, byte| {
       (hue.wrapping_mul(31).wrapping_add(u16::from(byte))) % 360
     }),
-    ..me
+    ..account
   }
 }
 

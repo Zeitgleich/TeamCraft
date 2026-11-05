@@ -34,6 +34,10 @@ pub fn Avatar(
   /// identity").
   #[prop(default = None)]
   maybe_source_picture: Option<(ConversationId, SourcePictureHash)>,
+  /// Whether the account's profile picture may show; off for a stand-in `user` whose ID is not the
+  /// account pictured (a source with no bot to stand for it shows its initials).
+  #[prop(default = true)]
+  shows_profile_picture: bool,
 ) -> impl IntoView {
   let presence = user.presence;
   let id = user.id;
@@ -41,7 +45,12 @@ pub fn Avatar(
   let picture = Memo::new(move |_| {
     maybe_source_picture
       .and_then(|(conversation, sha256)| crate::source_pictures::picture_url(conversation, sha256))
-      .or_else(|| crate::profiles::use_profiles().and_then(|hub| hub.avatar_url(id)))
+      .or_else(|| {
+        shows_profile_picture
+          .then(crate::profiles::use_profiles)
+          .flatten()
+          .and_then(|hub| hub.avatar_url(id))
+      })
   });
   let initials = user.initials();
   // Both are always there, one hidden: an avatar built again by a list or row that renders anew
