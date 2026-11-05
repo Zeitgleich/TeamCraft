@@ -6,6 +6,7 @@
       },
       "nsis": {
         "installMode": "both",
+        "installerHooks": "packaging/windows/send-to-hooks.nsh",
         "displayLanguageSelector": true,
         "languages": [
           "English",

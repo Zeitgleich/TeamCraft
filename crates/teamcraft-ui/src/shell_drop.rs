@@ -1,50 +1,63 @@
 //! Files the desktop shell saw dropped on the window (#651). WebKitGTK hands the page a drop from a
 //! file manager without its files; the shell keeps the dropped paths and the page reads the files
-//! from it chunk by chunk, so they attach like picked ones. The page names no path: it can only read
-//! what was just dropped (apps/desktop/src/dropped_files.rs).
+//! from it chunk by chunk, so they attach like picked ones; large ones the shell stages itself when
+//! the message is sent, without the webview holding them (`large_files`). The page names no path: it
+//! can only read what was just dropped or shared (apps/desktop/src/dropped_files.rs).
 
 use serde::Deserialize;
 use wasm_bindgen::JsCast;
 
 use crate::auth::tauri;
+use crate::large_files::READ_WHOLE_MAX_BYTES;
 use crate::media_formats::media_type_for;
 
 /// The shell's event when files were dropped but the page got no `drop` for them.
 pub const FILES_DROPPED_EVENT: &str = "files-dropped";
-/// Largest file the shell lets the page read (`READ_MAX_BYTES` in the shell).
-pub const READ_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 /// A drop the shell read for the page.
 #[derive(Default)]
 pub struct ShellDrop {
   pub files: Vec<web_sys::File>,
+  /// Files too large to read, which stay with the shell.
+  pub in_shell: Vec<ShellFile>,
   /// Names of files above the limit, left out.
   pub too_large: Vec<String>,
   /// Whether the shell knew of a drop at all.
   pub was_dropped: bool,
 }
 
-#[derive(Deserialize)]
-struct DroppedFile {
-  id: u32,
-  name: String,
-  size_bytes: u64,
+/// A file the shell knows by path, as the page knows it: an ID, never the path.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct ShellFile {
+  pub id: u32,
+  pub name: String,
+  pub size_bytes: u64,
 }
 
-/// Reads the files of the drop that just happened; files above `max_size_bytes` are only named.
-pub async fn take(max_size_bytes: u64) -> Result<ShellDrop, String> {
-  let listed: Vec<DroppedFile> =
+impl ShellFile {
+  /// Small enough to read into memory, for the composer's thumbnails.
+  pub fn is_read_whole(&self) -> bool {
+    self.size_bytes <= READ_WHOLE_MAX_BYTES
+  }
+}
+
+/// Reads the small files of the drop that just happened; files above `maybe_max_size_bytes` are
+/// only named.
+pub async fn take(maybe_max_size_bytes: Option<u64>) -> Result<ShellDrop, String> {
+  let listed: Vec<ShellFile> =
     tauri::call("dropped_files_take", &serde_json::json!({ "is_handled": false })).await?;
   let mut taken = ShellDrop {
     was_dropped: !listed.is_empty(),
     ..ShellDrop::default()
   };
   for file in listed {
-    if file.size_bytes > max_size_bytes {
+    if maybe_max_size_bytes.is_some_and(|limit| file.size_bytes > limit) {
       taken.too_large.push(file.name);
-      continue;
+    } else if file.is_read_whole() {
+      taken.files.push(read(&file).await?);
+    } else {
+      taken.in_shell.push(file);
     }
-    taken.files.push(read(&file).await?);
   }
   Ok(taken)
 }
@@ -59,8 +72,8 @@ pub fn forget() {
   });
 }
 
-/// One dropped file, read chunk by chunk into a `File`.
-async fn read(file: &DroppedFile) -> Result<web_sys::File, String> {
+/// One dropped or shared file, read chunk by chunk into a `File`.
+pub async fn read(file: &ShellFile) -> Result<web_sys::File, String> {
   let parts = js_sys::Array::new();
   let mut offset = 0_u64;
   while offset < file.size_bytes {

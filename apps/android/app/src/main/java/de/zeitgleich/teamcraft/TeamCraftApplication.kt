@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft
 
+import de.zeitgleich.teamcraft.ui.ShareReceiver
+import de.zeitgleich.teamcraft.ui.MAX_IMPORT_BYTES
 import android.app.Application
 import android.content.Context
 import android.util.Log
@@ -47,6 +49,9 @@ import uniffi.teamcraft_ffi.setDeletedUserName
 /** Process-wide objects, shared by the activity, receivers and services. */
 class AppGraph(context: Context) {
   val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+  /** What other apps shared, until it has a conversation (issue #208). */
+  val shares = ShareReceiver(File(context.noBackupFilesDir, "share-inbox"), MAX_IMPORT_BYTES, scope)
   val servers = ServerStore(context)
   val managedConfig = ManagedConfig(context)
   /** Profile pictures for screens and notifications; they belong to the signed-in account. `core` is only used when called. */

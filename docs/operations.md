@@ -266,6 +266,16 @@ the server itself is down.
   **Without `trust_forwarded_for` behind a proxy, every client has the proxy's address**: they share one
   rate limit, and bad tokens from anybody block everybody. The server warns once when it sees
   `X-Forwarded-For` from a private address.
+- Answer `/share-target` at the proxy, so a body never reaches disk there (nginx buffers request
+  bodies by default):
+
+  ```nginx
+  location = /share-target { return 303 /?share-failed; }
+  ```
+
+  Sharing into the installed web app posts plaintext to that path, and only the client's service
+  worker may see it (docs/e2ee.md §9.3). The server answers the same way without reading the body, as
+  a fallback. The web app doesn't offer itself as a share target yet (#1324).
 - Never expose `/api/internal/` to the internet: it is for the SFU and the mail inbox handler, and is
   protected by bearer tokens, but there is no reason to publish it.
 - Everything facing the network is dual stack (IPv4 and IPv6). The SFU needs UDP `3478` reachable

@@ -5,7 +5,9 @@
 //! * In the browser (the core runs in the page), the picked `File` is registered with the core,
 //!   which slices it and keeps a copy in IndexedDB so a reload continues the upload.
 //! * In the desktop app (the core runs in the shell), the file is copied to the shell's staging
-//!   directory in chunks over raw IPC requests, and the message names the copy's path.
+//!   directory in chunks over raw IPC requests, and the message names the copy's path. A file the
+//!   shell knows by path (dropped on Linux, shared from the file manager) is copied by the shell
+//!   itself and never enters the webview.
 //!
 //! Small files are read into memory as before: the composer needs them for its thumbnails, and a
 //! single request is all they take.
@@ -14,15 +16,36 @@ use teamcraft_client_api::actions::FileSource;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::auth::tauri;
+use crate::shell_drop::ShellFile;
 
 /// Files up to this size are read whole (as large as one upload part in the core).
 pub const READ_WHOLE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 /// Chunk of a file staged in the desktop app; below the shell's limit per request.
 const STAGE_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 
+/// A file too large to read into memory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LargeFile {
+  /// The browser's handle on a file on disk.
+  Picked(web_sys::File),
+  /// A file the desktop shell knows by path.
+  InShell(ShellFile),
+}
+
 /// Where the core reads `file` from. Fails (with a reason for the log) when the file can't be read
 /// or the desktop app can't take it.
-pub async fn source_of(file: &web_sys::File) -> Result<FileSource, String> {
+pub async fn source_of(file: &LargeFile) -> Result<FileSource, String> {
+  match file {
+    LargeFile::Picked(file) => source_of_picked(file).await,
+    LargeFile::InShell(file) => {
+      let args = serde_json::json!({ "id": file.id, "stage_id": stage_id() });
+      let path = tauri::call::<String>("core_stage_dropped_file", &args).await?;
+      Ok(FileSource::Path { path })
+    },
+  }
+}
+
+async fn source_of_picked(file: &web_sys::File) -> Result<FileSource, String> {
   if tauri::is_available() {
     return stage(file).await.map(|path| FileSource::Path { path });
   }

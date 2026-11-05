@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.ui
 
 import android.content.Intent
+import android.widget.Toast
 import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.Bundle
@@ -17,6 +18,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.fragment.app.FragmentActivity
@@ -31,6 +33,7 @@ import de.zeitgleich.teamcraft.security.ScreenPrefs.Companion.prefs
 import de.zeitgleich.teamcraft.security.promptUnlock
 import de.zeitgleich.teamcraft.ui.screens.LoadingMarkOverlay
 import de.zeitgleich.teamcraft.ui.screens.LockScreen
+import de.zeitgleich.teamcraft.ui.screens.ShareWaitingNotice
 import de.zeitgleich.teamcraft.ui.screens.SplashHandoff
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 import uniffi.teamcraft_ffi.AppActivity
@@ -43,13 +46,18 @@ private const val TABLET_MIN_WIDTH_DP = 600
 /** The mark's share of the splash icon's side (88 of 288 dp, scripts/brand/mark_parts.py). */
 private const val SPLASH_MARK_SHARE = 88f / 288f
 
+/** Whether the share of the activity's intent is in the inbox (or was never there to take). */
+private const val KEY_SHARE_TAKEN = "share_taken"
+private const val KEY_OPEN_CONVERSATION = "open_conversation"
+private const val KEY_APP_LINK = "app_link"
+
 /** A [FragmentActivity] because the app lock's system prompt needs one. */
 class MainActivity : FragmentActivity() {
   private val viewModel: MainViewModel by viewModels()
   /** A conversation to open, from a notification tap. */
   private val openConversation = mutableStateOf<String?>(null)
-  /** Text or files another app shared, until the user picked a conversation. */
-  private val share = mutableStateOf<SharedContent?>(null)
+  /** The share of the intent this activity started with; the system hands that one back after a kill. */
+  private var startShare: SharedContent? = null
   /** A link the system handed over, until it was acted on (docs/app-links.md). */
   private val appLink = mutableStateOf<String?>(null)
   private val isLocked = mutableStateOf(false)
@@ -72,29 +80,59 @@ class MainActivity : FragmentActivity() {
     // Locked at a cold start; a rotation or a recreated activity keeps the unlocked state.
     isLocked.value = AppLockPrefs.prefs(this).isEnabled && !isUnlockedInProcess
     if (!isLocked.value) isUnlockedInProcess = true
-    openConversation.value = conversationToOpen(intent)
-    share.value = sharedContent(intent, packageName)
+    // Not again when the activity is recreated: a kept intent was acted on. What wasn't acted on yet
+    // comes from the saved state.
+    openConversation.value = when (savedInstanceState) {
+      null -> conversationToOpen(intent)
+      else -> savedInstanceState.getString(KEY_OPEN_CONVERSATION)
+    }
+    // Not again when the activity is recreated with an intent already taken, nor when the system
+    // starts it from the recent apps with the old share's intent; an unfinished copy starts over.
+    val isShareTaken = savedInstanceState?.getBoolean(KEY_SHARE_TAKEN) == true ||
+      intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
+    if (!isShareTaken) {
+      startShare = sharedContent(intent, packageName)
+      startShare?.let { viewModel.receiveShare(it, isRedelivery = savedInstanceState != null) }
+    }
     // Not again when the activity is recreated with the same intent (a rotation): it was acted on.
-    if (savedInstanceState == null) appLink.value = appLinkOf(intent)
+    appLink.value = when (savedInstanceState) {
+      null -> appLinkOf(intent)
+      else -> savedInstanceState.getString(KEY_APP_LINK)
+    }
     setContent {
       // The server's brand colors the whole app (branding.md §5), not only the sign-in screen.
       val maybeBrand by viewModel.loginBrand.collectAsState()
       TeamCraftTheme(maybeBrand = maybeBrand) {
         val state by viewModel.appState.collectAsState()
         val isSettingUp = state !is AppState.Ready
+        val maybeShare by viewModel.share.collectAsState()
+        val hasShareFailed by viewModel.hasShareFailed.collectAsState()
+        LaunchedEffect(hasShareFailed) {
+          if (hasShareFailed) {
+            Toast.makeText(this@MainActivity, R.string.share_failed, Toast.LENGTH_LONG).show()
+            viewModel.shareFailureShown()
+          }
+        }
+        val hasShareGone by viewModel.hasShareGoneForAccount.collectAsState()
+        LaunchedEffect(hasShareGone) {
+          if (hasShareGone) {
+            Toast.makeText(this@MainActivity, R.string.share_other_account, Toast.LENGTH_LONG).show()
+            viewModel.shareGoneForAccountShown()
+          }
+        }
         LaunchedEffect(isSettingUp) { keepUprightWhileSettingUp(isSettingUp) }
         // The automatic sign-in retry (issue #1063) opens the browser like the user's own sign-in.
         LaunchedEffect(Unit) { viewModel.loginRetryIntents.collect { intent -> loginLauncher.launch(intent) } }
         Box(Modifier.fillMaxSize()) {
           if (isLocked.value) {
             LockScreen(onUnlock = ::unlock)
+            maybeShare?.let { ShareWaitingNotice(onDiscard = viewModel::discardShare, Modifier.align(Alignment.TopCenter)) }
           } else {
             AppRoot(
               viewModel = viewModel,
               maybeConversationToOpen = openConversation.value,
               onConversationOpened = { openConversation.value = null },
-              maybeShare = share.value,
-              onShareHandled = { share.value = null },
+              maybeShare = maybeShare,
               maybeAppLink = appLink.value,
               onAppLinkHandled = { appLink.value = null },
               onLogin = { intent -> loginLauncher.launch(intent) },
@@ -165,10 +203,21 @@ class MainActivity : FragmentActivity() {
     TeamCraftApplication.graph(this).core.reportActivity(AppActivity.INTERACTION)
   }
 
+  override fun onSaveInstanceState(outState: Bundle) {
+    super.onSaveInstanceState(outState)
+    // Only for the intent the system hands back after a kill: the one the activity started with.
+    outState.putBoolean(KEY_SHARE_TAKEN, startShare?.let(viewModel::isCopyingShare) != true)
+    outState.putString(KEY_OPEN_CONVERSATION, openConversation.value)
+    outState.putString(KEY_APP_LINK, appLink.value)
+  }
+
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
+    // For a configuration change. After a kill the system hands back the intent the activity started
+    // with, so a copy of this share cut short by a kill is lost (docs/robustness-audit.md).
+    setIntent(intent)
     conversationToOpen(intent)?.let { openConversation.value = it }
-    sharedContent(intent, packageName)?.let { share.value = it }
+    sharedContent(intent, packageName)?.let(viewModel::receiveShare)
     appLinkOf(intent)?.let { appLink.value = it }
   }
 

@@ -33,6 +33,8 @@ const PUBLIC: &[(&str, &str)] = &[
   // Installing the web app: the browser fetches the manifest without credentials.
   ("get", "/api/v1/brand/manifest.webmanifest"),
   ("get", "/api/v1/brand/assets/{slot}"),
+  // A share from a browser whose service worker didn't take it: refused unread, nothing to protect.
+  ("post", "/share-target"),
   // Android and Apple fetch these from the app's link hosts without credentials, to decide whether
   // an app may open a link; they name only the apps' public identifiers (docs/app-links.md).
   ("get", "/.well-known/assetlinks.json"),

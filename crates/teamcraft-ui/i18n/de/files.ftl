@@ -154,7 +154,6 @@ crop-uploading = Wird gespeichert …
 ## Daily-use improvements (docs/ux-backlog.md)
 drop-files-here = Zum Anhängen hier ablegen
 drop-files-unreadable = Die abgelegten Dateien konnten nicht gelesen werden. Hänge sie stattdessen mit der Plus-Schaltfläche an.
-drop-file-too-large = { $name } ist größer als { $limit } und zu groß, um es per Ablegen anzuhängen. Hänge es stattdessen mit der Plus-Schaltfläche an.
 paste-picture-failed = Das Bild aus der Zwischenablage konnte nicht eingefügt werden.
 
 ## Window controls of the desktop app's own title bar
@@ -306,3 +305,22 @@ downloads-failed-missing = Fehlgeschlagen: nicht mehr auf dem Server
 downloads-failed-corrupted = Fehlgeschlagen: Datei beschädigt angekommen
 downloads-failed-disk = Fehlgeschlagen: konnte nicht geschrieben werden
 downloads-failed-too-large = Fehlgeschlagen: Datei zu groß
+
+share-into-title = Teilen in …
+share-into-filter = Unterhaltung suchen
+share-into-recent = Zuletzt
+share-into-others = Alle Unterhaltungen
+share-into-no-match = Keine passende Unterhaltung.
+share-into-empty = Unterhaltungen, in denen du schreiben kannst, erscheinen hier nach dem Abgleich.
+share-into-from-outside = Das kommt aus einer anderen App oder von einer Website. Prüfe es, bevor du es sendest.
+share-into-left-out = { $count ->
+    [one] { $count } Datei wurde ausgelassen: Sie ist nicht mehr da oder es waren zu viele.
+   *[other] { $count } Dateien wurden ausgelassen: Sie sind nicht mehr da oder es waren zu viele.
+  }
+share-into-waiting-choose = Etwas, das du geteilt hast, wartet auf eine Unterhaltung.
+share-into-waiting-signed-out = Was du geteilt hast, bleibt auf diesem Gerät. Melde dich an oder entsperre die App, um eine Unterhaltung zu wählen.
+share-into-choose = Auswählen
+share-into-discard = Verwerfen
+share-into-failed = Was du geteilt hast, konnte nicht empfangen werden. Teile es noch einmal.
+share-into-read-failed = Was du geteilt hast, konnte nicht gelesen werden. Teile es noch einmal.
+share-into-other-account = Etwas, das vor dieser Anmeldung geteilt wurde, ist entfernt: Es war für die Person aufbewahrt, die zuvor angemeldet war.

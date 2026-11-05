@@ -957,6 +957,11 @@ fn theme_css(colors: &BrandColors) -> String {
 
 /// The web app manifest: the brand's name, its top bar color and its icon (the client's own icons
 /// without one). Everything in it was validated or is fixed; the host is never part of it.
+///
+/// No `share_target` yet (#1324): the browser would POST what is shared to `/share-target`, and
+/// only a service worker of this release or later keeps that in the browser. An older worker lets the
+/// plaintext through to the proxy and this server (docs/e2ee.md §9.3), so the field follows a release
+/// after the workers.
 fn web_manifest(display_name: &str, colors: &BrandColors, assets: &HashMap<String, BrandAsset>) -> String {
   let chrome = colors
     .light
@@ -1425,6 +1430,8 @@ mod tests {
       assert_eq!(manifest["display"], "standalone");
       assert_eq!(manifest["start_url"], "/");
       assert_eq!(manifest["theme_color"], "#202a3c");
+      // Not before the service workers that keep shares in the browser are out (#1324).
+      assert!(manifest.get("share_target").is_none());
       let other: serde_json::Value =
         serde_json::from_str(&registry.by_id("b").unwrap().web_manifest).unwrap();
       assert_eq!(other["theme_color"], DEFAULT_CHROME_COLOR);
