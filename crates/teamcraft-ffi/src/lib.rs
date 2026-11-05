@@ -71,6 +71,10 @@ pub use types::{
   SegmentPrefetchResult, SpaceMenuItem, StoreProblem, TestPushOutcome, TestPushResult,
 };
 
+/// The JNI method that sets up the audio context calls need on Android (cpal through ndk-context):
+/// re-exported so the library keeps the symbol for the app to find.
+#[cfg(target_os = "android")]
+pub use teamcraft_desktop_native::Java_de_zeitgleich_teamcraft_calls_AudioContext_initialize;
 pub use video::{CameraFrame, VideoFrameRgba};
 
 use crate::engine::{Engine, EngineThreads, Job, PushOpening, PushReader};

@@ -81,6 +81,10 @@ async fn serve_a_large_workspace_to_a_device() {
   let deadline = Instant::now() + size.hold;
   let mut sent = size.messages;
   while Instant::now() < deadline {
+    // Like apps left open: they add the device's new devices to their groups (it can join calls
+    // and read new messages only then).
+    alice.pump_reconnecting().await;
+    bob.pump_reconnecting().await;
     alice.heartbeat().await;
     bob.heartbeat().await;
     match take_command(&control) {

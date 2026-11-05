@@ -438,6 +438,7 @@ class CallController(
     }
     // Receiving video needs Cisco's OpenH264; without it the call is audio-only for this device.
     VideoCodecInstaller.ensure(context)
+    AudioContext.ensure(context)
     if (isJoinAbandoned) return false
     // Muted from the first frame (a muted call moving into a meeting room): no audio slips out.
     val isMuted = options.isMuted
