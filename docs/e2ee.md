@@ -894,7 +894,10 @@ Ogg or WebM Opus, and Safari's MP4. Recordings in progress live in a private fol
 emptied at every start; a take to send moves into the upload staging folder, which the core empties once
 it is uploaded. Where the platform's player reads neither Ogg nor WebM (iOS, the macOS webview), the app
 decodes the decrypted file to a WAV in a private folder that holds it only while it plays
-(`voice_decode`). Nothing about what was said is logged; nothing is sent without the user's press.
+(`voice_decode`; the desktop decodes from memory), no longer than the workspace's limit and than the
+file's size can hold, so a small hostile file can't fill a disk. Sign-out ends a recording and
+deletes every take and decoded file. Nothing about what was said is logged; nothing is sent without
+the user's press.
 
 An attachment's file is untrusted content from another member. Only images, videos and known audio types get
 a `blob:` of their own media type; everything else is opaque bytes. SVG is a document that can carry scripts,
