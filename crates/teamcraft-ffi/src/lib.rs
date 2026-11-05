@@ -878,6 +878,21 @@ impl TeamCraft {
       .await
   }
 
+  /// The picture of a space (PNG bytes, at most `max_bytes`), or `None` without one. Fetched on
+  /// demand for spaces on screen; the app keeps its own cache, keyed by the version in
+  /// `ConversationItem.maybe_space_image_version`.
+  pub async fn space_picture(
+    &self,
+    space_id: String,
+    max_bytes: u32,
+  ) -> Result<Option<Vec<u8>>, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move { engine.space_picture(&space_id, u64::from(max_bytes)).await })
+      })
+      .await
+  }
+
   /// An integration source's picture (a small PNG) as this device holds it, or `None`: the app
   /// shows the bot's picture then. `sha256` is what the message names; nothing goes to the server.
   pub async fn integration_source_picture(

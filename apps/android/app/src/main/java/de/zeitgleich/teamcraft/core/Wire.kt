@@ -60,6 +60,8 @@ data class Space(
   @SerialName("mention_count") val mentionCount: Int = 0,
   /** Whether the user may create channels here, as the core decided it (issue #758). */
   @SerialName("can_create_channels") val canCreateChannels: Boolean = true,
+  /** Version of the space's picture; without one the space shows no picture. */
+  @SerialName("maybe_image_version") val maybeImageVersion: String? = null,
 )
 
 @Serializable

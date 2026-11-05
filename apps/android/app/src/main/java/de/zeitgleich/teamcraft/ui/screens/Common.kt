@@ -70,20 +70,27 @@ fun ChromeTopBar(
   maybeSubtitle: String? = null,
   maybeOnBack: (() -> Unit)? = null,
   actions: @Composable RowScope.() -> Unit = {},
+  maybeIcon: (@Composable () -> Unit)? = null,
 ) {
   val colors = LocalTeamCraftColors.current
   TopAppBar(
     title = {
-      androidx.compose.foundation.layout.Column {
-        Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.semantics { heading() })
-        maybeSubtitle?.takeIf { it.isNotBlank() }?.let {
-          Text(
-            it,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            style = MaterialTheme.typography.bodySmall,
-            color = colors.chromeMuted,
-          )
+      androidx.compose.foundation.layout.Row(
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
+      ) {
+        maybeIcon?.invoke()
+        androidx.compose.foundation.layout.Column {
+          Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.semantics { heading() })
+          maybeSubtitle?.takeIf { it.isNotBlank() }?.let {
+            Text(
+              it,
+              maxLines = 1,
+              overflow = TextOverflow.Ellipsis,
+              style = MaterialTheme.typography.bodySmall,
+              color = colors.chromeMuted,
+            )
+          }
         }
       }
     },

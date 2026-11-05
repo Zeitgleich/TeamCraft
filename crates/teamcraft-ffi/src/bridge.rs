@@ -356,6 +356,26 @@ impl Engine {
     Ok(Some(picture))
   }
 
+  /// The picture of a space as PNG bytes (`GET /spaces/{id}/image`, at most `max_bytes`); `None`
+  /// when the space has none (any more). The app caches by the version the space list names, so
+  /// it asks only for a version it doesn't hold.
+  pub(crate) async fn space_picture(
+    &self,
+    space: &str,
+    max_bytes: u64,
+  ) -> Result<Option<Vec<u8>>, TeamCraftError> {
+    let space: teamcraft_proto::SpaceId = parse_id(space)?;
+    match self
+      .api()
+      .get_bytes_capped(&format!("/spaces/{space}/image"), max_bytes)
+      .await
+    {
+      Ok(picture) => Ok(Some(picture)),
+      Err(error) if error.error_code() == Some(&ErrorCode::SpaceImageNotFound) => Ok(None),
+      Err(error) => Err(teamcraft_core::CoreError::from(error).into()),
+    }
+  }
+
   /// New device without the passphrase: asks the organization's admins to recover the account.
   /// Returns the code the user reads to an admin.
   pub(crate) async fn start_org_recovery(&mut self) -> Result<OrgRecoveryStart, TeamCraftError> {

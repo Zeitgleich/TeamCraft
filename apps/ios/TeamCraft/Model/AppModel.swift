@@ -212,6 +212,10 @@ final class AppModel {
   @ObservationIgnored private lazy var processLock = ProcessLock(fileURL: container.lockFileURL)
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
   @ObservationIgnored private var maybeCore: TeamCraft?
+  /// Pictures of spaces on disk, by version (AppModel+SpacePictures.swift).
+  @ObservationIgnored let spacePictureStore = SpacePictureStore(
+    directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("space-pictures", isDirectory: true))
   @ObservationIgnored private var isSyncing = false
   /// Background time held while what is pending goes out after the app left the foreground.
   @ObservationIgnored private var backgroundTask = UIBackgroundTaskIdentifier.invalid
@@ -1382,6 +1386,7 @@ final class AppModel {
   /// plaintext go; the server entry stays.
   private func endSession() async {
     await stopSyncing()
+    await clearSpacePictures()
     // Before the keys go: deletes the push key here, ends the sealed device token at the gateway
     // and the registration on the server, so the server can't push to this phone any more.
     // Best effort and at most a few seconds; offline, the push key is still gone.
