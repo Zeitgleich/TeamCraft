@@ -581,6 +581,11 @@ class CallController(
   private suspend fun conversationNameOf(conversationId: String): String? =
     runCatching { core.core().conversations().firstOrNull { it.id == conversationId }?.name }.getOrNull()
 
+  /** The call screen of the running call, from a "Back to the call" outside it. */
+  fun bringToFront() {
+    if (maybeSession != null || joining.value) showCall()
+  }
+
   private fun showCall() {
     // The previous call's ended state would close the screen right away.
     if (state.value?.phase == CallPhase.ENDED) state.value = null

@@ -4,6 +4,7 @@ import androidx.compose.ui.semantics.heading
 import android.content.Context
 import android.text.format.DateUtils
 import androidx.activity.compose.BackHandler
+import androidx.compose.material.icons.filled.Call
 import androidx.activity.compose.ReportDrawnWhen
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.runtime.derivedStateOf
@@ -238,6 +239,7 @@ fun ChatListScreen(
     maybeConversations = loaded,
     list = ListState(
       previews = previews,
+      runningCalls = kept.runningCalls,
       maybeSelectedId = maybeSelectedId,
       selection = selection,
       actionsFor = { conversation, maybeEntry -> rowActions(viewModel, conversation, maybeEntry) },
@@ -367,6 +369,8 @@ internal fun MainScaffold(
 /** What every tab's conversation rows need. */
 internal class ListState(
   val previews: Map<String, ChatListEntry>,
+  /** Conversations with a call running and how many are in it: their rows say so (issue #1352). */
+  val runningCalls: Map<String, Int> = emptyMap(),
   val maybeSelectedId: String?,
   val selection: List<String>,
   val actionsFor: (ConversationItem, ChatListEntry?) -> RowActions,
@@ -547,6 +551,7 @@ private fun LazyListScope.conversationRows(
         isChecked = conversation.id in list.selection,
         isSelecting = list.selection.isNotEmpty(),
         showsSpace = showsSpace,
+        callCount = list.runningCalls[conversation.id] ?: 0,
         onClick = { list.onOpen(conversation.id) },
         onLongPress = { list.onLongPress(conversation.id) },
         menu = { isOpen, onDismiss -> list.conversationMenu(conversation, isOpen, onDismiss) },
@@ -847,6 +852,7 @@ private fun SwipeableConversationRow(
   isChecked: Boolean,
   isSelecting: Boolean,
   showsSpace: Boolean,
+  callCount: Int,
   onClick: () -> Unit,
   onLongPress: () -> Unit,
   menu: @Composable (Boolean, () -> Unit) -> Unit,
@@ -880,6 +886,7 @@ private fun SwipeableConversationRow(
         isSelected,
         isChecked,
         showsSpace,
+        callCount,
         onClick,
         onLongPress = { if (isSelecting) onLongPress() else isMenuOpen = true },
       )
@@ -950,6 +957,7 @@ private fun ConversationRow(
   isSelected: Boolean,
   isChecked: Boolean,
   showsSpace: Boolean,
+  callCount: Int,
   onClick: () -> Unit,
   onLongPress: () -> Unit,
 ) {
@@ -987,15 +995,34 @@ private fun ConversationRow(
     ) {
       if (isChecked) CheckedAvatar() else ConversationAvatar(conversation)
       Column(Modifier.weight(1f).padding(start = 12.dp)) {
-        TitleLine(conversation, maybeEntry, maybeSpaceName = conversation.maybeSpaceName.takeIf { showsSpace })
+        TitleLine(conversation, maybeEntry, maybeSpaceName = conversation.maybeSpaceName.takeIf { showsSpace }, callCount = callCount)
         PreviewLine(conversation, maybeEntry)
       }
     }
   }
 }
 
+/** A call runs here: a green phone and how many are in it, before the unread count. */
 @Composable
-private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?, maybeSpaceName: String? = null) {
+private fun RunningCallMark(count: Int) {
+  val description = pluralStringResource(R.plurals.call_running_people, count, count)
+  Row(
+    Modifier
+      .padding(start = 8.dp)
+      .background(CALL_GREEN, CircleShape)
+      .padding(horizontal = 6.dp, vertical = 1.dp)
+      .semantics(mergeDescendants = true) { contentDescription = description },
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Icon(Icons.Filled.Call, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
+    Text(count.toString(), style = MaterialTheme.typography.labelSmall, color = Color.White, modifier = Modifier.padding(start = 2.dp))
+  }
+}
+
+private val CALL_GREEN = Color(0xFF2E9E5B)
+
+@Composable
+private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?, maybeSpaceName: String? = null, callCount: Int = 0) {
   val context = LocalContext.current
   val isUnread = conversation.unreadCount > 0u
   Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1029,6 +1056,7 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
         modifier = Modifier.padding(start = 4.dp).size(14.dp),
       )
     }
+    if (callCount > 0) RunningCallMark(callCount)
     rowBadge(conversation.unreadCount, conversation.mentionCount, conversation.isMuted)?.let { badge ->
       RowCount(badge, conversation.isMuted)
     }

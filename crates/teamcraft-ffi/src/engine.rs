@@ -54,7 +54,7 @@ use teamcraft_proto::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, LocalSet};
 
-use crate::calls::{CallHub, CallPreparation};
+use crate::calls::{CallHub, CallPreparation, RunningCalls};
 use crate::error::TeamCraftError;
 use crate::logging::LIFECYCLE;
 use crate::reads::ReadQueue;
@@ -171,6 +171,8 @@ pub(crate) struct SyncSignals {
   pub(crate) catch_up_focus: CatchUpFocus,
   /// The newest ID token the app handed over.
   pub(crate) id_tokens: IdTokens,
+  /// The calls running in the user's conversations (issue #1352).
+  pub(crate) running_calls: RunningCalls,
 }
 
 /// The new device's wait in the relay ([`Engine::wait_for_link_peer`]): a task on the engine thread
@@ -624,7 +626,7 @@ impl Engine {
       new_link: NewLinkWait::default(),
       maybe_approval: None,
       maybe_receipt: None,
-      calls: CallHub::default(),
+      calls: CallHub::with_running(signals.running_calls.clone()),
       mentions,
       signals,
       is_syncing_for_app: false,
@@ -1487,7 +1489,13 @@ impl Engine {
   /// Gateway call events (rings) of `client` go to the app's call listener.
   fn attach_call_sink(&self, client: &mut CoreClient) {
     let calls = self.calls.clone();
-    client.set_call_event_sink(Box::new(move |event| calls.on_gateway_event(event)));
+    let listener = self.listener.clone();
+    client.set_call_event_sink(Box::new(move |event| {
+      // A call started or ended where nothing was stored: the lists read the running calls again.
+      if calls.on_gateway_event(event) {
+        listener.on_change();
+      }
+    }));
   }
 
   /// Stops the sync loop if it runs and hands out the client; put it back into `self.client`.
@@ -2325,6 +2333,7 @@ mod tests {
         connection: ConnectionStatus::new(),
         catch_up_focus: CatchUpFocus::default(),
         id_tokens: Default::default(),
+        running_calls: Default::default(),
       };
       let start = EngineStart::new(config, Arc::new(Token), Arc::new(listener), signals).unwrap();
       let key_source = StaticKeySource::new(SymmetricKey::from_slice(&KEY).unwrap());

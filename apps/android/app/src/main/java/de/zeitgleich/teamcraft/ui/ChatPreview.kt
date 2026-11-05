@@ -15,6 +15,8 @@ data class ChatPreview(val sender: PreviewSender, val content: PreviewContent, v
 data class ChatListState(
   val maybeConversations: List<ConversationItem>? = null,
   val previews: Map<String, ChatListEntry> = emptyMap(),
+  /** Conversations with a call running now, and how many people are in it (issue #1352). */
+  val runningCalls: Map<String, Int> = emptyMap(),
 )
 
 /** A conversation's row data: its preview and the newest message's ID (for "mark unread"). */

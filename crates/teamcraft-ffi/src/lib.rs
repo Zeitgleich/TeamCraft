@@ -31,7 +31,8 @@ use std::time::{Duration, Instant};
 
 pub use calls::{
   CallEndReason, CallListener, CallMoveInfo, CallPhase, CallSession, CallStateInfo, EncodedVideoListener,
-  IncomingCallInfo, NotetakerCallInfo, RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
+  IncomingCallInfo, NotetakerCallInfo, RemoteVideoFrame, RemoteVideoTrack, RunningCallItem, VideoListener,
+  VideoTrackInfo,
 };
 pub use error::TeamCraftError;
 pub use http_fetch::{
@@ -99,6 +100,8 @@ pub struct TeamCraft {
   id_tokens: engine::IdTokens,
   /// What the app last reported about its use; input repeats at most every 30 s (issue #472).
   activity: Mutex<ActivityReports>,
+  /// The calls running in the user's conversations, read without the engine (issue #1352).
+  running_calls: calls::RunningCalls,
 }
 
 /// Supplies the current OIDC access token. The app owns login and refresh (AppAuth on Android);
@@ -473,6 +476,13 @@ impl TeamCraft {
     self
       .read(move |reads| reads.chat_previews(&conversation_ids))
       .await
+  }
+
+  /// The calls running in the user's conversations, with who is in them, as the gateway reported
+  /// them: the chat list marks those conversations and the conversation offers to join. Read
+  /// again after each change notification; never waits for the engine.
+  pub fn running_calls(&self) -> Vec<RunningCallItem> {
+    self.running_calls.list()
   }
 
   /// The newest `limit` top-level messages, oldest first.
@@ -1317,11 +1327,13 @@ impl TeamCraft {
     let network = NetworkChanges::new();
     let connection = ConnectionStatus::new();
     let id_tokens = engine::IdTokens::default();
+    let running_calls = calls::RunningCalls::default();
     let signals = engine::SyncSignals {
       network: network.clone(),
       connection: connection.clone(),
       catch_up_focus: Default::default(),
       id_tokens: id_tokens.clone(),
+      running_calls: running_calls.clone(),
     };
     let start = engine::EngineStart::new(config, tokens, listener, signals)?;
     let recovery = Arc::new(Mutex::new(None));
@@ -1340,6 +1352,7 @@ impl TeamCraft {
       connection,
       id_tokens,
       activity: Mutex::default(),
+      running_calls,
     }))
   }
 

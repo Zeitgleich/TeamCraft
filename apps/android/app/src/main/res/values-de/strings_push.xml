@@ -16,6 +16,13 @@
 
   <string name="call_incoming">Eingehender Anruf</string>
   <string name="call_incoming_from">Anruf von %1$s</string>
+  <string name="call_prejoin_join_title">Anruf in %1$s beitreten</string>
+  <string name="call_in_this_call">Du bist in diesem Anruf</string>
+  <string name="call_back_to">Zurück zum Anruf</string>
+  <plurals name="call_running_people">
+    <item quantity="one">Ein Anruf läuft: %d Person</item>
+    <item quantity="other">Ein Anruf läuft: %d Personen</item>
+  </plurals>
   <string name="call_answer">Annehmen</string>
   <string name="call_decline">Ablehnen</string>
   <string name="call_missed">Verpasster Anruf (Nicht stören oder stummgeschaltet)</string>

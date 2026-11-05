@@ -18,6 +18,13 @@
   <!-- Calls -->
   <string name="call_incoming">Incoming call</string>
   <string name="call_incoming_from">Call from %1$s</string>
+  <string name="call_prejoin_join_title">Join the call in %1$s</string>
+  <string name="call_in_this_call">You are in this call</string>
+  <string name="call_back_to">Back to the call</string>
+  <plurals name="call_running_people">
+    <item quantity="one">A call is running: %d person</item>
+    <item quantity="other">A call is running: %d people</item>
+  </plurals>
   <string name="call_answer">Answer</string>
   <string name="call_decline">Decline</string>
   <string name="call_missed">Missed call (do not disturb or muted)</string>

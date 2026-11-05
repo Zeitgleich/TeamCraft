@@ -549,7 +549,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Reads the conversations, shows them, then reads their previews. One refresh at a time. */
   suspend fun refreshChatList(myId: String) = chatListLock.withLock {
     val conversations = conversations()
-    chatListState.update { it.copy(maybeConversations = conversations) }
+    chatListState.update { it.copy(maybeConversations = conversations, runningCalls = runningCalls()) }
     val previews = chatPreviews(conversations, myId)
     chatListState.update { it.copy(previews = previews) }
   }
@@ -895,6 +895,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }.getOrNull() ?: return false
     return maybePath.contains("/${app.packageName}/")
   }
+
+  /** Conversations with a call running now and how many people are in each (issue #1352). */
+  suspend fun runningCalls(): Map<String, Int> =
+    read { runningCalls() }?.associate { it.conversationId to it.participantUserIds.size } ?: emptyMap()
+
+  /** Brings the call screen of this device's call to the front. */
+  fun showCall() = graph.calls.bringToFront()
 
   /** Joins (or starts) a conversation's call, e.g. a meeting's. */
   fun startCall(conversationId: String, displayName: String, options: CallOptions = CallOptions()) =

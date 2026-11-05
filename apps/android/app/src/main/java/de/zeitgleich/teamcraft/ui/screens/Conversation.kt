@@ -53,6 +53,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.material.icons.filled.Edit
 import de.zeitgleich.teamcraft.ui.PictureEdits
 import de.zeitgleich.teamcraft.ui.Pictures
+import androidx.compose.material3.Button
+import uniffi.teamcraft_ffi.CallPhase
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -190,6 +192,8 @@ fun ConversationScreen(
   // Counts sends from this screen's composer: each one brings the newest message into view.
   var sentCount by remember { mutableIntStateOf(0) }
   var maybeKeyCatchUp by remember { mutableStateOf<KeyCatchUpItem?>(null) }
+  // People in the call running here now; 0 without one (issue #1352).
+  var runningCallCount by remember(conversationId) { mutableIntStateOf(0) }
   // What the notification that opened it showed, until the store has it (issue #1065).
   var maybeNotified by remember(conversationId) { mutableStateOf<NotifiedConversation?>(null) }
   val feed = remember(conversationId) {
@@ -226,6 +230,7 @@ fun ConversationScreen(
       pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: pinned
       unseenReactions = viewModel.readChat { query(ChatQueries.unseenReactions(conversationId)).unseen } ?: unseenReactions
       joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())
+      runningCallCount = viewModel.runningCalls()[conversationId] ?: 0
     }
   }
   FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
@@ -256,6 +261,7 @@ fun ConversationScreen(
       }
     },
   ) {
+    RunningCallBanner(viewModel, conversationId, conversation?.name.orEmpty(), runningCallCount)
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())
     JoinRequestBanner(joinRequests, viewModel.joinRequests)
     // Messages here wait for their keys (a newly linked device, issue #888): they show as
@@ -501,7 +507,8 @@ private fun ConversationMenu(
     val isNotetakerInCall by produceState(false, conversationId) {
       value = viewModel.isNotetakerInRunningCall(conversationId)
     }
-    PreJoinDialog(name, isNotetakerInCall, onDismiss = { isPreparingCall = false }) { options ->
+    val runningCount by produceState(0, conversationId) { value = viewModel.runningCalls()[conversationId] ?: 0 }
+    PreJoinDialog(name, isNotetakerInCall, runningCount, onDismiss = { isPreparingCall = false }) { options ->
       isPreparingCall = false
       viewModel.startCall(conversationId, name, options)
     }
@@ -1611,6 +1618,7 @@ private val PRIORITIES = listOf(
 internal fun PreJoinDialog(
   name: String,
   isNotetakerInCall: Boolean,
+  runningCount: Int,
   onDismiss: () -> Unit,
   onJoin: (CallOptions) -> Unit,
 ) {
@@ -1618,9 +1626,17 @@ internal fun PreJoinDialog(
   var isMuted by rememberSaveable { mutableStateOf(false) }
   AlertDialog(
     onDismissRequest = onDismiss,
-    title = { Text(stringResource(R.string.call_prejoin_title, name)) },
+    // A call that runs already is joined, not started: the dialog says so, and who is in it.
+    title = { Text(stringResource(if (runningCount > 0) R.string.call_prejoin_join_title else R.string.call_prejoin_title, name)) },
     text = {
       Column {
+        if (runningCount > 0) {
+          Text(
+            pluralStringResource(R.plurals.call_running_people, runningCount, runningCount),
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(bottom = 8.dp),
+          )
+        }
         if (isNotetakerInCall) {
           Text(
             stringResource(R.string.call_prejoin_notetaker),
@@ -1645,6 +1661,34 @@ internal fun PreJoinDialog(
     },
     dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
   )
+}
+
+/**
+ * A call runs in this conversation: who is in it and a Join button, or "Back to the call" when
+ * this device is in it. Joining from here starts with the microphone on and the camera off.
+ */
+@Composable
+private fun RunningCallBanner(viewModel: MainViewModel, conversationId: String, name: String, count: Int) {
+  val calls = TeamCraftApplication.graph(LocalContext.current).calls
+  val maybeState by calls.callState.collectAsState()
+  val isHere = maybeState?.conversationId == conversationId && maybeState?.phase != CallPhase.ENDED
+  if (count == 0 && !isHere) return
+  Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
+    Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+      Icon(Icons.Filled.Call, contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(18.dp))
+      Text(
+        if (isHere) stringResource(R.string.call_in_this_call) else pluralStringResource(R.plurals.call_running_people, count, count),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSecondaryContainer,
+        modifier = Modifier.weight(1f).padding(start = 8.dp),
+      )
+      if (isHere) {
+        TextButton(onClick = { viewModel.showCall() }) { Text(stringResource(R.string.call_back_to)) }
+      } else {
+        Button(onClick = { viewModel.startCall(conversationId, name) }) { Text(stringResource(R.string.call_prejoin_join)) }
+      }
+    }
+  }
 }
 
 /** The composer pill's corner radius: fully round at one line, a soft box when it grows. */
