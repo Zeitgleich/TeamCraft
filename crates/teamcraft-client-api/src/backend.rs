@@ -76,6 +76,17 @@ pub trait ChatBackend {
   fn space_conversations(&self, space: SpaceId) -> Vec<Conversation>;
   /// DMs and group DMs; they live outside spaces.
   fn direct_conversations(&self) -> Vec<Conversation>;
+  /// The channels the user starred, from every space they are a member of: Chats lists them next
+  /// to the favorite DMs (#1152). A left space or channel is not in it. The default asks each
+  /// space; a backend that holds all conversations in one list should override it with one pass.
+  fn favorite_channels(&self) -> Vec<Conversation> {
+    self
+      .spaces()
+      .into_iter()
+      .flat_map(|space| self.space_conversations(space.id))
+      .filter(|conversation| conversation.is_favorite && !conversation.kind.is_direct_like())
+      .collect()
+  }
   /// Meeting chats the user is in (docs/meetings.md): outside spaces and the sidebar's lists, but
   /// reachable by ID for the meeting's call and its chat (#1141). Backends without meetings have
   /// none.

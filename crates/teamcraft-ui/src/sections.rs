@@ -117,6 +117,12 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
   sections
 }
 
+/// Whether Chats lists the conversation: DMs and group DMs, and channels of a space the user starred
+/// (#1152). Any other channel belongs to its space only.
+pub fn is_listed_in_chats(conversation: &Conversation) -> bool {
+  conversation.kind.is_direct_like() || (conversation.is_favorite && conversation.maybe_space.is_some())
+}
+
 /// The sections of Home, in display order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DirectSectionKind {
@@ -194,8 +200,8 @@ pub struct DirectList {
   pub hidden_count: usize,
 }
 
-/// Lists DMs and group DMs (each with the time of its newest message): favorites, then the rest,
-/// both in `sort` order, and last the DMs of deactivated accounts (issue #698). Only those `chip`
+/// Lists DMs and group DMs (each with the time of its newest message), and the favorite channels
+/// of spaces among them (#1152): favorites, then the rest, both in `sort` order, and last the DMs of deactivated accounts (issue #698). Only those `chip`
 /// lets through and whose names contain `filter` (any case) are kept; while filtering the limit
 /// doesn't apply. `limit` 0 shows all; unread conversations stay visible beyond it.
 pub fn build_direct(
@@ -211,7 +217,7 @@ pub fn build_direct(
     .into_iter()
     // Each conversation is one row, however often a caller hands it over (issue #643).
     .filter(|(conversation, _)| seen.insert(conversation.id))
-    .filter(|(conversation, _)| conversation.kind.is_direct_like() && chip.matches(conversation))
+    .filter(|(conversation, _)| is_listed_in_chats(conversation) && chip.matches(conversation))
     .filter(|(conversation, _)| needle.is_empty() || conversation.name.to_lowercase().contains(&needle))
     .collect();
   match sort {
@@ -612,6 +618,98 @@ mod tests {
       .map(|c| c.name.clone())
       .collect();
     assert_eq!(names, ["Amy", "zed"]);
+  }
+
+  /// #1152: the channels a user starred show under Favorites in Chats, next to the favorite DMs.
+  mod favorite_channels_in_chats {
+    use super::*;
+
+    fn starred(id: u64, space: u64) -> Conversation {
+      let mut channel = conversation(id, SidebarCategory::Channels, 0, true);
+      channel.maybe_space = Some(id_from_raw::<SpaceId>(space));
+      channel
+    }
+
+    fn listed(entries: Vec<(Conversation, Option<TimestampMs>)>) -> DirectList {
+      build_direct(entries, DmSort::Recent, 0, "", HomeFilter::All)
+    }
+
+    fn ids(list: &DirectList, kind: DirectSectionKind) -> Vec<u64> {
+      list
+        .sections
+        .iter()
+        .filter(|section| section.kind == kind)
+        .flat_map(|section| section.conversations.iter().map(|c| crate::model::raw_id(c.id)))
+        .collect()
+    }
+
+    #[test]
+    fn a_starred_channel_sits_among_the_favorite_dms_by_recency() {
+      let mut dm = direct(1, 0, Some(10));
+      dm.0.is_favorite = true;
+      let list = listed(vec![dm, (starred(2, 7), Some(20))]);
+      assert_eq!(ids(&list, DirectSectionKind::Favorites), vec![2, 1]);
+      assert!(ids(&list, DirectSectionKind::Conversations).is_empty());
+    }
+
+    #[test]
+    fn a_channel_without_a_star_stays_in_its_space() {
+      let mut plain = starred(2, 7);
+      plain.is_favorite = false;
+      assert!(listed(vec![(plain, Some(1))]).sections.is_empty());
+    }
+
+    #[test]
+    fn handed_over_twice_it_is_one_row() {
+      let list = listed(vec![(starred(2, 7), Some(1)), (starred(2, 7), Some(1))]);
+      assert_eq!(ids(&list, DirectSectionKind::Favorites), vec![2]);
+    }
+
+    #[test]
+    fn the_unread_count_is_the_channels_own_and_is_not_summed_twice() {
+      let mut channel = starred(2, 7);
+      channel.unread_count = 4;
+      let list = listed(vec![(channel.clone(), None)]);
+      let row = &list.sections[0].conversations[0];
+      assert_eq!(row.unread_count, 4);
+      // The space's rail counts it once; the Chats tab counts DMs only (bottom_nav), so the number
+      // of the channel appears in the sum of both exactly once.
+      let direct: Vec<Conversation> = list
+        .sections
+        .iter()
+        .flat_map(|section| {
+          section
+            .conversations
+            .iter()
+            .filter(|c| c.kind.is_direct_like())
+            .cloned()
+        })
+        .collect();
+      assert_eq!(badge_count(&direct), 0);
+      assert_eq!(RailBadge::of(&[channel]).count, 4);
+    }
+
+    #[test]
+    fn the_chips_for_people_and_groups_leave_channels_out_but_unread_keeps_them() {
+      let mut channel = starred(2, 7);
+      channel.unread_count = 1;
+      let entries = vec![(channel, None)];
+      let with = |chip| build_direct(entries.clone(), DmSort::Recent, 0, "", chip);
+      assert!(with(HomeFilter::People).sections.is_empty());
+      assert!(with(HomeFilter::Groups).sections.is_empty());
+      assert_eq!(
+        ids(&with(HomeFilter::Unread), DirectSectionKind::Favorites),
+        vec![2]
+      );
+    }
+
+    #[test]
+    fn the_text_filter_finds_a_starred_channel_by_name() {
+      let mut channel = starred(2, 7);
+      channel.name = "Launch".into();
+      let list = build_direct(vec![(channel, None)], DmSort::Recent, 0, "laun", HomeFilter::All);
+      assert_eq!(ids(&list, DirectSectionKind::Favorites), vec![2]);
+    }
   }
 
   mod direct_page {

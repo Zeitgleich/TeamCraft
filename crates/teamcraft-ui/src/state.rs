@@ -854,6 +854,21 @@ impl AppState {
     })
   }
 
+  /// What Chats lists: [`Self::direct_entries`] and the channels the user starred in their spaces
+  /// (#1152), each with the time of its newest message. Opening one of those switches to its
+  /// space, as opening it from the space does ([`Self::open_conversation`]).
+  pub fn chats_entries(&self) -> Vec<(Conversation, Option<TimestampMs>)> {
+    let channels = self.with_mutes(self.sidebar_list(self.read(|backend| backend.favorite_channels())));
+    let mut entries = self.direct_entries();
+    self.read(|backend| {
+      entries.extend(channels.into_iter().map(|conversation| {
+        let at = backend.last_activity(conversation.id);
+        (conversation, at)
+      }));
+    });
+    entries
+  }
+
   /// Reads from the backend and re-runs the calling reactive scope after any mutation.
   pub fn read<R>(&self, read: impl FnOnce(&dyn Backend) -> R) -> R {
     get_if_observed(self.revision);

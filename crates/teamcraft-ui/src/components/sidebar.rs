@@ -856,7 +856,13 @@ const SIDEBAR_BADGE_CAP: u32 = 99;
 /// One conversation of the sidebar. Built once per row; what it shows follows `conversation`, so a
 /// new count or presence changes the badge or the dot, not the whole row (issue #687).
 #[component]
-pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl IntoView {
+pub fn SidebarItem(
+  #[prop(into)] conversation: Signal<Conversation>,
+  /// The space the channel belongs to, shown under its name where the list is not that space's own
+  /// (a favorite channel in Chats, #1152): names repeat across spaces.
+  #[prop(optional, into)]
+  maybe_space_name: Option<Signal<String>>,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   // A conversation keeps its id and kind.
@@ -952,6 +958,13 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
     } else {
       aria_name
     };
+    let label = match maybe_space_name {
+      Some(space) => i18n.t_with(
+        "sidebar-item-in-space",
+        &[("label", &label), ("space", &space.get())],
+      ),
+      None => label,
+    };
     let label = if is_muted.get() {
       i18n.t_with("sidebar-item-muted-label", &[("label", &label)])
     } else {
@@ -961,6 +974,18 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
       Some(typing) => format!("{label}, {typing}"),
       None => label,
     }
+  };
+
+  // Name and space are two lines that shorten on their own, so a long name never hides the space.
+  let name_view = match maybe_space_name {
+    Some(space) => view! {
+      <span class="sb-stack">
+        <span class="sb-name" translate="no">{move || name.get()}</span>
+        <span class="sb-space" translate="no">{move || space.get()}</span>
+      </span>
+    }
+    .into_any(),
+    None => view! { <span class="sb-name" translate="no">{move || name.get()}</span> }.into_any(),
   };
 
   view! {
@@ -983,9 +1008,7 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
       on:click:capture=move |ev| menu.on_click_capture(&ev)
       on:click=move |_| state.open_conversation(id)
     >
-      {leading} <span class="sb-name" translate="no">
-        {move || name.get()}
-      </span> {move || status_emoji.get().map(|emoji| view! { <span class="sb-status" aria-hidden="true">{emoji}</span> })}
+      {leading} {name_view} {move || status_emoji.get().map(|emoji| view! { <span class="sb-status" aria-hidden="true">{emoji}</span> })}
       {move || {
         typing.get().map(|text| {
           view! {

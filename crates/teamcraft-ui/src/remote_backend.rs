@@ -2191,6 +2191,24 @@ impl ChatBackend for RemoteChat {
       .collect()
   }
 
+  fn favorite_channels(&self) -> Vec<Conversation> {
+    let mirror = self.mirror.borrow();
+    let spaces: HashSet<SpaceId> = mirror.snapshot.spaces.iter().map(|space| space.id).collect();
+    mirror
+      .snapshot
+      .conversations
+      .iter()
+      .filter(|conversation| {
+        conversation.is_favorite
+          && !conversation.kind.is_direct_like()
+          && conversation
+            .maybe_space
+            .is_some_and(|space| spaces.contains(&space))
+      })
+      .cloned()
+      .collect()
+  }
+
   fn direct_conversations(&self) -> Vec<Conversation> {
     let mirror = self.mirror.borrow();
     mirror
@@ -2946,6 +2964,86 @@ mod tests {
         refresh_queued: Rc::new(Cell::new(false)),
         answers: Rc::new(RefCell::new(HashMap::new())),
       }
+    }
+  }
+
+  mod favorite_channels {
+    use super::refresh_plan::backend;
+    use super::*;
+
+    /// #1152: Chats lists the starred channels of the spaces the user is in, nothing else.
+    #[test]
+    fn only_starred_channels_of_spaces_the_user_is_in_are_listed() {
+      let backend = backend();
+      let (kept, left_space, unstarred, direct) = {
+        let mut mirror = backend.mirror.borrow_mut();
+        let spaces: Vec<SpaceId> = mirror.snapshot.spaces.iter().map(|space| space.id).collect();
+        assert!(spaces.len() >= 2, "the mock has several spaces");
+        let in_space = |mirror: &Mirror, space: SpaceId| {
+          mirror
+            .snapshot
+            .conversations
+            .iter()
+            .position(|conversation| conversation.maybe_space == Some(space))
+            .expect("a channel in the space")
+        };
+        let kept = in_space(&mirror, spaces[0]);
+        let left_space = in_space(&mirror, spaces[1]);
+        let unstarred = (0..mirror.snapshot.conversations.len())
+          .find(|index| {
+            *index != kept && mirror.snapshot.conversations[*index].maybe_space == Some(spaces[0])
+          })
+          .expect("a second channel");
+        let direct = mirror
+          .snapshot
+          .conversations
+          .iter()
+          .position(|conversation| conversation.kind.is_direct_like())
+          .expect("a DM");
+        for conversation in &mut mirror.snapshot.conversations {
+          conversation.is_favorite = false;
+        }
+        for index in [kept, left_space, direct] {
+          mirror.snapshot.conversations[index].is_favorite = true;
+        }
+        // The user left the second space: its channels may still be in the snapshot for a moment.
+        mirror.snapshot.spaces.retain(|space| space.id != spaces[1]);
+        let id = |index: usize| mirror.snapshot.conversations[index].id;
+        (id(kept), id(left_space), id(unstarred), id(direct))
+      };
+
+      let listed: Vec<ConversationId> = backend.favorite_channels().iter().map(|c| c.id).collect();
+
+      assert_eq!(listed, vec![kept]);
+      assert!(!listed.contains(&left_space) && !listed.contains(&unstarred) && !listed.contains(&direct));
+    }
+
+    #[test]
+    fn removing_the_star_removes_the_entry() {
+      let backend = backend();
+      let id = {
+        let mut mirror = backend.mirror.borrow_mut();
+        let conversation = mirror
+          .snapshot
+          .conversations
+          .iter_mut()
+          .find(|conversation| conversation.maybe_space.is_some())
+          .expect("a channel");
+        conversation.is_favorite = true;
+        conversation.id
+      };
+      assert!(backend.favorite_channels().iter().any(|c| c.id == id));
+
+      backend
+        .mirror
+        .borrow_mut()
+        .snapshot
+        .conversations
+        .iter_mut()
+        .filter(|conversation| conversation.id == id)
+        .for_each(|conversation| conversation.is_favorite = false);
+
+      assert!(backend.favorite_channels().iter().all(|c| c.id != id));
     }
   }
 

@@ -48,6 +48,10 @@ extension ConversationItem {
   /// DMs and group DMs live outside spaces and have their own tab.
   var isDirect: Bool { kind == .direct || kind == .group }
 
+  /// Whether the Home tab lists it: DMs and group DMs, and the channels of a space the user starred
+  /// (#1152). The channel stays under Favorites in its space too.
+  var isListedInHome: Bool { isDirect || (isFavorite && maybeSpaceId != nil) }
+
   /// The name lists and titles show: the notes to self have none of their own (they are named
   /// after the other people, and there are none), so they are called "Notes" in the user's
   /// language, like the web and desktop (`notes-title`, issue #829).
@@ -81,7 +85,7 @@ func channelSections(_ conversations: [ConversationItem]) -> [ConversationSectio
   return sections
 }
 
-/// The Home tab: favorites, then the rest, each the most recent first (`lastActivity`: newest message
+/// The Home tab: favorites (starred channels of spaces among them, #1152), then the rest, each the most recent first (`lastActivity`: newest message
 /// per conversation; by name without one). Only conversations `chip` lets through whose names
 /// contain `filter` (any case) are kept. Empty sections are left out.
 func directSections(
@@ -94,9 +98,12 @@ func directSections(
     let right = lastActivity[rhs.id] ?? .distantPast
     return left == right ? byName(lhs, rhs) : left > right
   }
+  var seen = Set<String>()
   let direct = conversations
+    // Each conversation is one row, however often a caller hands it over.
+    .filter { seen.insert($0.id).inserted }
     .filter {
-      $0.isDirect && chip.matches($0) && (needle.isEmpty || $0.listName.localizedCaseInsensitiveContains(needle))
+      $0.isListedInHome && chip.matches($0) && (needle.isEmpty || $0.listName.localizedCaseInsensitiveContains(needle))
     }
     .sorted(by: byRecency)
   let favorites = direct.filter(\.isFavorite)

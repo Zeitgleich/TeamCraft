@@ -185,7 +185,8 @@ struct ConversationListView: View {
               .task(id: section.id) { await loadSpaceMenu(for: section) }
           ) {
             ForEach(section.conversations, id: \.id) { conversation in
-              ConversationRow(conversation: conversation, maybePreview: previews[conversation.id])
+              ConversationRow(
+                conversation: conversation, maybePreview: previews[conversation.id], showsSpace: tab == .home)
                 .tag(conversation.id)
                 .swipeActions(edge: .leading) { readButton(for: conversation) }
                 .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
@@ -479,6 +480,8 @@ struct ConversationListView: View {
 struct ConversationRow: View {
   let conversation: ConversationItem
   var maybePreview: ChatPreview?
+  /// Names the space under a channel's name, where the list is not that space's own (#1152).
+  var showsSpace = false
 
   private var isUnread: Bool { conversation.unreadCount > 0 }
 
@@ -513,6 +516,14 @@ struct ConversationRow: View {
               .font(.caption)
               .foregroundStyle(isUnread ? Theme.accent : Theme.textMuted)
           }
+        }
+        if showsSpace, let space = conversation.maybeSpaceName {
+          // Its own line, so a long channel name never hides the space.
+          Text(verbatim: space)
+            .font(.caption)
+            .foregroundStyle(Theme.textMuted)
+            .lineLimit(1)
+            .truncationMode(.tail)
         }
         HStack {
           previewText

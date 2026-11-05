@@ -2,6 +2,8 @@
 //! `conversations.space_id` is null for them), so they get their own entry on the space rail and
 //! their own sidebar, as in Element or Discord: newest first, with a text filter, filter chips and "new message".
 
+use std::collections::HashMap;
+
 use leptos::prelude::*;
 
 use crate::channel_access::{can_invite_to, can_start_any_direct};
@@ -12,13 +14,13 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::setup_checklist::SetupChecklist;
 use crate::components::sidebar::{
-  EntriesDisclosure, EntriesToggle, GlobalEntries, ListFilter, ListFilterField, ListFilterToggle,
+  EntriesDisclosure, EntriesToggle, GlobalEntries, ListFilter, ListFilterField, ListFilterToggle, SidebarItem,
 };
 
 use crate::components::people_picker::PeoplePicker;
 use crate::entry_actions::MenuEntry;
 use crate::i18n::use_i18n;
-use crate::model::{Conversation, ConversationKind, User, UserId};
+use crate::model::{Conversation, ConversationKind, SpaceId, User, UserId};
 use crate::prefs::DmSort;
 use crate::reactive::{items_by_key, keyed_item};
 use crate::sections::{DirectList, DirectSectionKind, HomeFilter, build_direct};
@@ -44,9 +46,12 @@ pub fn HomeSidebar() -> impl IntoView {
       .prefs
       .with(|prefs| (prefs.sidebar.dm_sort, prefs.sidebar.dm_limit as usize));
     let limit = if show_all.get() { 0 } else { limit };
-    build_direct(state.direct_entries(), sort, limit, &query.get(), chip.get())
+    build_direct(state.chats_entries(), sort, limit, &query.get(), chip.get())
   });
-  let has_any = Memo::new(move |_| state.read(|backend| !backend.direct_conversations().is_empty()));
+  let has_any = Memo::new(move |_| {
+    state
+      .read(|backend| !backend.direct_conversations().is_empty() || !backend.favorite_channels().is_empty())
+  });
   let is_filtered_out = Memo::new(move |_| list.with(|list| list.sections.is_empty()));
 
   view! {
@@ -191,7 +196,18 @@ fn DirectOptions() -> impl IntoView {
 
 #[component]
 fn DirectSections(list: Memo<DirectList>, show_all: RwSignal<bool>) -> impl IntoView {
+  let state = use_app_state();
   let i18n = use_i18n();
+  // One lookup for all channel rows; it changes only when a space does.
+  let space_names = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .spaces()
+        .into_iter()
+        .map(|space| (space.id, space.name))
+        .collect::<HashMap<SpaceId, String>>()
+    })
+  });
   let hidden = Memo::new(move |_| list.with(|list| list.hidden_count));
   // Sections and rows are built once and follow the list (issue #687): a new message reorders the
   // rows and changes a count, it doesn't build the avatars again.
@@ -224,7 +240,26 @@ fn DirectSections(list: Memo<DirectList>, show_all: RwSignal<bool>) -> impl Into
             <h3 id=heading_id class="sb-section-title" class:visually-hidden=is_notes>{move || i18n.t(kind.title_key())}</h3>
             <ul>
               <For each=move || conversations.get() key=|conv| conv.id let:conv>
-                <li><DirectItem conversation=keyed_item(by_id, conv.id, conv) /></li>
+                <li>
+                  {
+                    let item = keyed_item(by_id, conv.id, conv.clone());
+                    if conv.kind.is_direct_like() {
+                      view! { <DirectItem conversation=item /> }.into_any()
+                    } else {
+                      // A starred channel of a space (#1152): the row of the space's own list, and
+                      // the space under its name.
+                      let space = Signal::derive(move || {
+                        item.with(|conv| {
+                          conv
+                            .maybe_space
+                            .and_then(|space| space_names.with(|names| names.get(&space).cloned()))
+                            .unwrap_or_default()
+                        })
+                      });
+                      view! { <SidebarItem conversation=item maybe_space_name=space /> }.into_any()
+                    }
+                  }
+                </li>
               </For>
             </ul>
           </section>
