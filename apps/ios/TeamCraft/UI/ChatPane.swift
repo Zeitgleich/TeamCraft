@@ -771,14 +771,17 @@ struct ChatPane: View {
   private func schedule(dueAtMs: Int64) async {
     let body = emojiConvert(text: draft.trimmingCharacters(in: .whitespacesAndNewlines))
     let replying = maybeReplying
+    let replyingImage = maybeReplyingImage
     draft = ""
     maybeReplying = nil
+    maybeReplyingImage = nil
     let request = SendRequest(
       conversationId: conversation.id, maybeThreadId: threadId, body: body,
       maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId)
     if !(await model.performChecked(.scheduleMessage(request, dueAtMs: dueAtMs))) {
       draft = body
       maybeReplying = replying
+      maybeReplyingImage = replyingImage
       isSendFailed = true
     }
   }
