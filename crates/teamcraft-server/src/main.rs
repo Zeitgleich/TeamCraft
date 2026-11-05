@@ -269,6 +269,7 @@ async fn run() -> anyhow::Result<()> {
         .and_then(|meetings| meetings.caldav.clone()),
     })),
     rate_limits: Arc::new(RateLimits::new(&config.security.rate_limits)),
+    directory_filters: Arc::default(),
     brands: Arc::new(brands),
     image_decodes: Arc::new(tokio::sync::Semaphore::new(
       config.limits.max_concurrent_image_decodes.max(1),

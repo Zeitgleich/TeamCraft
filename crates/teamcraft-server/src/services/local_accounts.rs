@@ -158,7 +158,7 @@ pub async fn create_local_guest(
     ));
   }
   // The guest gets the space, the channels and the expiry through the invite, applied at the first
-  // sign-in like for every verified e-mail address.
+  // sign-in like for every verified e-mail address. One already open for this address does that too.
   state
     .database
     .create_invite(&NewInvite {

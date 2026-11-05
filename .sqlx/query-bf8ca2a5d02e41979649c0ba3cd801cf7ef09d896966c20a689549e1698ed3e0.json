@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.id, c.space_id AS \"space_id!\", s.name AS space_name, c.name AS \"name!\", c.topic, c.visibility,\n                mine.user_id IS NOT NULL AS \"is_member!\",\n                (SELECT count(*) FROM memberships n WHERE n.conversation_id = c.id) AS \"member_count!\"\n         FROM conversations c\n         JOIN spaces s ON s.id = c.space_id AND s.deleted_at IS NULL AND s.archived_at IS NULL\n         LEFT JOIN memberships mine ON mine.conversation_id = c.id AND mine.user_id = $1\n         WHERE c.kind = 'channel'\n           AND c.deleted_at IS NULL\n           AND c.archived_at IS NULL\n           AND c.name IS NOT NULL\n           AND (mine.user_id IS NOT NULL OR (c.visibility = 'public' AND EXISTS (\n                 SELECT 1 FROM space_members m\n                 WHERE m.space_id = c.space_id AND m.user_id = $1\n                   AND (m.expires_at IS NULL OR m.expires_at > now()))))\n           AND (c.name ILIKE $2 OR c.topic ILIKE $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND ($4::bigint IS NULL OR (c.name, c.id) >\n                 (SELECT last.name, last.id FROM conversations last WHERE last.id = $4))\n         ORDER BY c.name, c.id\n         LIMIT $5",
+  "query": "SELECT c.id, c.space_id AS \"space_id!\", s.name AS space_name, c.name AS \"name!\", c.topic, c.visibility,\n                mine.user_id IS NOT NULL AS \"is_member!\",\n                (SELECT count(*) FROM memberships n WHERE n.conversation_id = c.id) AS \"member_count!\"\n         FROM conversations c\n         JOIN spaces s ON s.id = c.space_id AND s.deleted_at IS NULL AND s.archived_at IS NULL\n         LEFT JOIN memberships mine ON mine.conversation_id = c.id AND mine.user_id = $1\n         WHERE c.kind = 'channel'\n           AND c.deleted_at IS NULL\n           AND c.archived_at IS NULL\n           AND c.name IS NOT NULL\n           AND (mine.user_id IS NOT NULL OR (c.visibility = 'public' AND EXISTS (\n                 SELECT 1 FROM space_members m\n                 WHERE m.space_id = c.space_id AND m.user_id = $1\n                   AND (m.expires_at IS NULL OR m.expires_at > now()))))\n           AND (c.name ILIKE $2 OR c.topic ILIKE $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND ($4::bigint IS NULL OR (c.name, c.id) > ($6::text, $4))\n         ORDER BY c.name, c.id\n         LIMIT $5",
   "describe": {
     "columns": [
       {
@@ -88,7 +88,8 @@
         "Text",
         "Int8",
         "Int8",
-        "Int8"
+        "Int8",
+        "Text"
       ]
     },
     "nullable": [
@@ -102,5 +103,5 @@
       null
     ]
   },
-  "hash": "471bd2d24a9d70961b0f5b941ef870bff71b6223efd78e314005b0c5ea488a13"
+  "hash": "bf8ca2a5d02e41979649c0ba3cd801cf7ef09d896966c20a689549e1698ed3e0"
 }

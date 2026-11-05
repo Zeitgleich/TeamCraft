@@ -5,15 +5,16 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{
-  ConversationId, ConversationVisibility, InviteId, PresenceState, SpaceId, SpaceRole, UnixMillis, UserId,
-  UserKind, UserSummary,
+  ConversationId, ConversationVisibility, InviteId, PresenceState, SpaceId, SpaceRole, UnixMillis, UserKind,
+  UserSummary,
 };
 
 /// Query of `GET /api/v1/directory/people`. Filters combine; bots are never listed.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct DirectoryPeopleQuery {
-  /// Matched against name, username, title and department; empty lists everybody, page by page.
+  /// Matched against the name as the directory policy shows it, username, title and department;
+  /// empty lists everybody, page by page.
   #[serde(default)]
   pub query: String,
   /// Only members or only guests (the External tab).
@@ -31,9 +32,9 @@ pub struct DirectoryPeopleQuery {
   /// Only members of this space; needs the right to see its roster.
   #[serde(rename = "space_id", default, skip_serializing_if = "Option::is_none")]
   pub maybe_space_id: Option<SpaceId>,
-  /// The last person of the previous page.
+  /// `next_after` of the previous page, as it came.
   #[serde(rename = "after", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_after: Option<UserId>,
+  pub maybe_after: Option<String>,
 }
 
 /// One person of the directory, with the profile facts a card shows.
@@ -51,9 +52,9 @@ pub struct DirectoryPerson {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct DirectoryPeopleResponse {
   pub people: Vec<DirectoryPerson>,
-  /// Absent on the last page.
+  /// Where the next page starts, opaque to clients. Absent on the last page.
   #[serde(rename = "next_after", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_next_after: Option<UserId>,
+  pub maybe_next_after: Option<String>,
 }
 
 /// Query of `GET /api/v1/directory/filters`.
@@ -87,9 +88,9 @@ pub struct DirectoryChannelsQuery {
   /// Only channels of this space.
   #[serde(rename = "space_id", default, skip_serializing_if = "Option::is_none")]
   pub maybe_space_id: Option<SpaceId>,
-  /// The last channel of the previous page.
+  /// `next_after` of the previous page, as it came.
   #[serde(rename = "after", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_after: Option<ConversationId>,
+  pub maybe_after: Option<String>,
 }
 
 /// A channel across the caller's spaces: one they are in, or a public one of a space they are in.
@@ -109,9 +110,9 @@ pub struct DirectoryChannel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct DirectoryChannelsResponse {
   pub channels: Vec<DirectoryChannel>,
-  /// Absent on the last page.
+  /// Where the next page starts, opaque to clients. Absent on the last page.
   #[serde(rename = "next_after", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_next_after: Option<ConversationId>,
+  pub maybe_next_after: Option<String>,
 }
 
 /// Query of `GET /api/v1/directory/invitations`.
@@ -165,13 +166,13 @@ mod tests {
   #[test]
   fn people_queries_read_their_filters_and_leave_out_what_is_unset() {
     let parsed: DirectoryPeopleQuery = serde_json::from_value(json!({
-      "query": "ann", "kind": "guest", "department": "Sales", "title": "Lead", "after": "42"
+      "query": "ann", "kind": "guest", "department": "Sales", "title": "Lead", "after": "42:Ann"
     }))
     .unwrap();
     assert_eq!(parsed.maybe_kind, Some(UserKind::Guest));
     assert_eq!(parsed.maybe_department.as_deref(), Some("Sales"));
     assert_eq!(parsed.maybe_title.as_deref(), Some("Lead"));
-    assert_eq!(parsed.maybe_after.map(|id| id.to_string()).as_deref(), Some("42"));
+    assert_eq!(parsed.maybe_after.as_deref(), Some("42:Ann"));
     assert_eq!(
       serde_json::to_value(DirectoryPeopleQuery::default()).unwrap(),
       json!({"query": ""})

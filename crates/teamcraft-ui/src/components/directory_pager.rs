@@ -61,6 +61,8 @@ pub struct Pager<T: Send + Sync + 'static> {
   generation: StoredValue<u64>,
   reloads: RwSignal<u32>,
   path: Signal<String>,
+  /// Taken where the component is built: context can't be read in an async task or a later event.
+  maybe_client: StoredValue<Option<RestClient>, LocalStorage>,
 }
 
 impl<T: Send + Sync + 'static> Clone for Pager<T> {
@@ -84,6 +86,9 @@ impl<T: Clone + Send + Sync + 'static> Pager<T> {
       generation: StoredValue::new(0),
       reloads: RwSignal::new(0),
       path,
+      maybe_client: StoredValue::new_local(
+        use_session().map(|session| RestClient::new(session.authenticator())),
+      ),
     };
     Effect::new(move |_| {
       pager.reloads.track();
@@ -91,6 +96,11 @@ impl<T: Clone + Send + Sync + 'static> Pager<T> {
       pager.fetch::<P>(path, false);
     });
     pager
+  }
+
+  /// The client to act on a row with; `None` without a session.
+  pub fn client(&self) -> Option<RestClient> {
+    self.maybe_client.get_value()
   }
 
   pub fn reload(&self) {
@@ -106,7 +116,7 @@ impl<T: Clone + Send + Sync + 'static> Pager<T> {
       return;
     }
     self.is_loading_more.set(true);
-    let path = format!("{}&after={next}", self.path.get_untracked());
+    let path = format!("{}&after={}", self.path.get_untracked(), encoded(&next));
     self.fetch::<P>(path, true);
   }
 
@@ -136,13 +146,12 @@ impl<T: Clone + Send + Sync + 'static> Pager<T> {
       self.is_loading_more.set(false);
     }
     let mine = self.generation.get_value();
-    let Some(session) = use_session() else {
+    let Some(client) = self.client() else {
       self.load.set(ListLoad::Failed {
         failure: LoadFailure::Other,
       });
       return;
     };
-    let client = RestClient::new(session.authenticator());
     leptos::task::spawn_local(async move {
       let answer: Result<P, RestError> = client.get(&path).await;
       if pager.generation.try_get_value() != Some(mine) {
@@ -182,10 +191,14 @@ pub fn query_path(route: &str, parameters: &[(&str, &str)]) -> String {
   let query = parameters
     .iter()
     .filter(|(_, value)| !value.is_empty())
-    .map(|(key, value)| format!("{key}={}", String::from(js_sys::encode_uri_component(value))))
+    .map(|(key, value)| format!("{key}={}", encoded(value)))
     .collect::<Vec<_>>()
     .join("&");
   format!("{route}?{query}")
+}
+
+fn encoded(value: &str) -> String {
+  String::from(js_sys::encode_uri_component(value))
 }
 
 /// "Show more", or why there is no more to show.

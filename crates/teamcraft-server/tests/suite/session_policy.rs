@@ -443,6 +443,60 @@ mod directory {
   }
 
   #[tokio::test]
+  async fn with_full_names_hidden_the_directory_searches_and_sorts_by_username() {
+    let app = app!();
+    let (carol, dave, erin) = (member("carol"), member("dave"), member("erin"));
+    user_id(&app, &carol).await;
+    let dave_id = user_id(&app, &dave).await;
+    let erin_id = user_id(&app, &erin).await;
+    // By full name Erin comes first, by username Dave.
+    for (id, name) in [(&dave_id, "Zed Secret"), (&erin_id, "Abe Hidden")] {
+      sqlx::query("UPDATE users SET display_name = $1 WHERE id = $2")
+        .bind(name)
+        .bind(id.parse::<i64>().unwrap())
+        .execute(app.sql_pool())
+        .await
+        .unwrap();
+    }
+    let people = |path: &'static str| {
+      let (app, carol) = (&app, &carol);
+      async move {
+        let reply = app.get(carol, path).await;
+        reply.body["people"]
+          .as_array()
+          .unwrap()
+          .iter()
+          .map(|person| person["user"]["username"].as_str().unwrap().to_owned())
+          .collect::<Vec<_>>()
+      }
+    };
+    assert_eq!(people("/directory/people?query=secret").await, ["dave"]);
+    assert_eq!(people("/directory/people?query=e").await[..2], ["erin", "dave"]);
+
+    publish_policy(
+      &app,
+      1,
+      |p| {
+        p["directory"] =
+          json!({"display_name_format": "as_provided", "shows_full_name": false, "shows_email": false})
+      },
+    )
+    .await;
+    assert!(
+      people("/directory/people?query=secret").await.is_empty(),
+      "a hidden name finds nobody"
+    );
+    assert_eq!(people("/directory/people?query=dave").await, ["dave"]);
+    let ordered = people("/directory/people").await;
+    let (dave_at, erin_at) = (
+      ordered.iter().position(|name| name == "dave").unwrap(),
+      ordered.iter().position(|name| name == "erin").unwrap(),
+    );
+    assert!(dave_at < erin_at, "{ordered:?}");
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn e_mail_addresses_are_shown_to_members_only_when_the_policy_allows() {
     let app = app!();
     let (carol, dave) = (member("carol"), member("dave"));

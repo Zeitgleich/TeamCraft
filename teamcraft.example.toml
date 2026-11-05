@@ -176,6 +176,9 @@ max_directory_results = 50
 max_directory_filter_values = 200
 # How long after an invitation mail the same invitation can be sent again.
 invite_resend_interval_secs = 300
+# How long the values of the directory filters are reused; computing them reads all users. 0 reads them
+# every time.
+directory_filters_cache_secs = 60
 # Largest avatar image in bytes (PNG, JPEG or WebP).
 max_avatar_bytes = 1048576
 # Largest space or channel picture in bytes (one limit for both). Uploads (PNG, JPEG or WebP; no SVG) are re-encoded as PNG of at
@@ -226,7 +229,8 @@ max_devices_per_user = 20
 # Attachments per user that are announced but not uploaded yet, and the bytes of all of a user's attachments.
 max_pending_attachments_per_user = 20
 max_attachment_bytes_per_user = 21474836480
-# Meeting e-mails per organizer and hour (the rest of the invitees are told in the app only).
+# E-mails per person and hour from their meetings (the rest of the invitees are told in the app only)
+# and space invitations. At 0, invitations go without mail and can't be resent.
 max_meeting_mails_per_user_per_hour = 200
 
 # WebSocket gateway at /api/v1/gateway.

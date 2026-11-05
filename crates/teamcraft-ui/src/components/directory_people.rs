@@ -19,7 +19,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::list_status::{ListPlaceholder, ListStatus};
 use crate::i18n::use_i18n;
 use crate::live::presence_status;
-use crate::model::{DeviceSetup, PresenceStatus, User, raw_id};
+use crate::model::{DeviceSetup, PresenceStatus, SpaceMember, SpaceRoster, User, raw_id};
 use crate::reactive::{SetIfAlive, use_debounced};
 use crate::rest::RestClient;
 use crate::session::use_session;
@@ -39,6 +39,15 @@ pub enum PeopleTab {
   External,
 }
 
+/// What the local fallback narrows by. This device knows no one's department or title in bulk, so
+/// those filters match nobody here rather than everybody.
+struct LocalFilter<'a> {
+  needle: &'a str,
+  organization: &'a str,
+  has_profile_filter: bool,
+  am_guest: bool,
+}
+
 /// One card's data: the server's facts, and the live state of somebody this device follows.
 #[derive(Clone, Debug, PartialEq)]
 struct PersonCardData {
@@ -55,6 +64,20 @@ impl PeopleTab {
       Self::People => Some(UserKind::Member),
       Self::External => Some(UserKind::Guest),
     }
+  }
+}
+
+impl LocalFilter<'_> {
+  fn matches(&self, user: &User) -> bool {
+    !user.is_bot
+      && !user.is_deactivated
+      && (self.am_guest || !user.is_guest)
+      && !self.has_profile_filter
+      && (self.organization.is_empty() || user.maybe_organization.as_deref() == Some(self.organization))
+      && (self.needle.is_empty()
+        || format!("{} {}", user.display_name, user.username)
+          .to_lowercase()
+          .contains(self.needle))
   }
 }
 
@@ -93,13 +116,22 @@ pub fn PeopleGrid(tab: PeopleTab) -> impl IntoView {
   let is_hidden_roster = move || am_guest && scope.get().is_some();
 
   let filters = RwSignal::new(DirectoryFiltersResponse::default());
+  let filters_generation = StoredValue::new(0_u64);
+  let maybe_client = StoredValue::new_local(
+    use_session()
+      .filter(|_| !am_guest)
+      .map(|session| RestClient::new(session.authenticator())),
+  );
   Effect::new(move |_| {
     let maybe_space = scope.get();
-    // What was picked in one space may not exist in the next.
+    // What was picked or offered in one space may not exist in the next.
     organization.set(String::new());
     department.set(String::new());
     title.set(String::new());
-    let Some(session) = use_session().filter(|_| !am_guest) else {
+    filters.set(DirectoryFiltersResponse::default());
+    filters_generation.update_value(|generation| *generation += 1);
+    let mine = filters_generation.get_value();
+    let Some(client) = maybe_client.get_value() else {
       return;
     };
     let space = maybe_space.map(|space| space.to_string()).unwrap_or_default();
@@ -107,26 +139,41 @@ pub fn PeopleGrid(tab: PeopleTab) -> impl IntoView {
       "/api/v1/directory/filters",
       &[("kind", &kind_value), ("space_id", &space)],
     );
-    let client = RestClient::new(session.authenticator());
     leptos::task::spawn_local(async move {
-      // The grid works without its filters; they come back with the next visit.
-      if let Ok(values) = client.get::<DirectoryFiltersResponse>(&filters_path).await {
+      // The grid works without its filters; they come back with the next visit. A late answer for
+      // the space before is dropped.
+      if let Ok(values) = client.get::<DirectoryFiltersResponse>(&filters_path).await
+        && filters_generation.try_get_value() == Some(mine)
+      {
         filters.set_if_alive(values);
       }
     });
   });
 
   let has_failed = move || matches!(pager.load.get(), ListLoad::Failed { .. });
-  // The server can't be asked: who this device knows, narrowed here, rather than nothing.
+  // The server can't be asked: who this device knows of this list, narrowed here, rather than
+  // nothing. Read only then: it isn't the list's source.
   let local_people = Memo::new(move |_| {
     if !has_failed() || tab == PeopleTab::External {
       return Vec::new();
     }
     let needle = text.get().trim().to_lowercase();
+    let wanted = LocalFilter {
+      needle: &needle,
+      organization: &organization.get(),
+      has_profile_filter: !department.get().is_empty() || !title.get().is_empty(),
+      am_guest,
+    };
     state
-      .read(|backend| backend.search_people(&needle))
+      .read(|backend| match scope.get() {
+        Some(space) => match backend.space_members(space) {
+          SpaceRoster::Loaded(members) => people_of_roster(backend, &members),
+          SpaceRoster::Loading | SpaceRoster::Hidden => Vec::new(),
+        },
+        None => backend.search_people(&needle),
+      })
       .into_iter()
-      .filter(|user| !user.is_bot && !user.is_deactivated && (am_guest || !user.is_guest))
+      .filter(|user| wanted.matches(user))
       .take(MAX_LOCAL_PEOPLE)
       .map(|user| PersonCardData {
         user,
@@ -264,6 +311,32 @@ fn FilterSelect(
   }
 }
 
+/// The people of a space's roster: somebody this device knows comes with what it knows, the roster's
+/// own facts name the rest. Deactivated accounts stay out, as in every people list.
+fn people_of_roster(backend: &dyn Backend, members: &[SpaceMember]) -> Vec<User> {
+  members
+    .iter()
+    .map(|member| {
+      backend.user(member.user).unwrap_or_else(|| User {
+        id: member.user,
+        username: String::new(),
+        display_name: member.display_name.clone(),
+        presence: PresenceStatus::Offline,
+        maybe_custom_status: None,
+        avatar_hue: (raw_id(member.user) % 360) as u16,
+        is_guest: member.is_guest,
+        is_bot: member.is_bot,
+        maybe_organization: None,
+        device_setup: DeviceSetup::default(),
+        is_deactivated: false,
+        is_deleted: false,
+        maybe_email: None,
+      })
+    })
+    .filter(|user| !user.is_deactivated)
+    .collect()
+}
+
 /// Somebody this device knows comes with their live presence; the server's answer names the rest.
 fn card_data(backend: &dyn Backend, person: &DirectoryPerson) -> PersonCardData {
   let from_answer = user_of_summary(&person.user, presence_status(&person.presence));
@@ -384,6 +457,82 @@ mod tests {
     assert_eq!(facts_line(Some("Lead"), Some("Sales")), "Lead · Sales");
     assert_eq!(facts_line(None, Some("Sales")), "Sales");
     assert_eq!(facts_line(None, None), "");
+  }
+
+  mod local_fallback {
+    use super::*;
+
+    const ANY: LocalFilter<'static> = LocalFilter {
+      needle: "",
+      organization: "",
+      has_profile_filter: false,
+      am_guest: false,
+    };
+
+    fn person() -> User {
+      user_of_summary(
+        &UserSummary {
+          id: "7".parse().unwrap(),
+          maybe_username: Some("ann".to_owned()),
+          display_name: "Ann Lee".to_owned(),
+          kind: UserKind::Member,
+          maybe_email: None,
+          maybe_organization: Some("Org A".to_owned()),
+          maybe_has_devices: None,
+          is_deactivated: false,
+          is_deleted: false,
+        },
+        PresenceStatus::Offline,
+      )
+    }
+
+    #[test]
+    fn text_and_organization_narrow_it() {
+      assert!(ANY.matches(&person()));
+      assert!(LocalFilter { needle: "lee", ..ANY }.matches(&person()));
+      assert!(!LocalFilter { needle: "zed", ..ANY }.matches(&person()));
+      assert!(
+        LocalFilter {
+          organization: "Org A",
+          ..ANY
+        }
+        .matches(&person())
+      );
+      assert!(
+        !LocalFilter {
+          organization: "Org B",
+          ..ANY
+        }
+        .matches(&person())
+      );
+    }
+
+    #[test]
+    fn a_profile_filter_it_cannot_check_finds_nobody() {
+      assert!(
+        !LocalFilter {
+          has_profile_filter: true,
+          ..ANY
+        }
+        .matches(&person())
+      );
+    }
+
+    #[test]
+    fn guests_stay_on_their_own_tab_for_members() {
+      let guest = User {
+        is_guest: true,
+        ..person()
+      };
+      assert!(!ANY.matches(&guest));
+      assert!(
+        LocalFilter {
+          am_guest: true,
+          ..ANY
+        }
+        .matches(&guest)
+      );
+    }
   }
 
   #[test]

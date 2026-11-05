@@ -190,6 +190,74 @@ mod pages {
     app.stop().await;
   }
 
+  #[tokio::test]
+  async fn pages_follow_the_cursor_as_it_came_and_a_private_channel_has_no_position() {
+    let Some(app) = TestApp::start_with(|settings| settings.limits.max_directory_results = 1).await else {
+      return;
+    };
+    let (alice, carol) = (owner(), member("carol"));
+    let carol_id = user_id(&app, &carol).await;
+    let team = create_space(&app, &alice, "Team", "invite_only").await;
+    add_space_member(&app, &alice, &team, &carol_id, "member").await;
+    create_channel(&app, &alice, &team, "aa", "public").await;
+    create_channel(&app, &alice, &team, "cc", "public").await;
+    let hidden = create_channel(&app, &alice, &team, "bb", "private").await;
+
+    let first = app.get(&carol, "/directory/channels").await;
+    assert_eq!(first.body["channels"][0]["name"], json!("aa"));
+    let next = first.body["next_after"].as_str().unwrap();
+    assert!(!next.contains(&hidden));
+    let second = app
+      .get(&carol, &format!("/directory/channels?after={}", encoded(next)))
+      .await;
+    assert_eq!(second.body["channels"][0]["name"], json!("cc"), "{}", second.body);
+
+    // A private channel's ID as a position finds nothing about its name: without its name it is
+    // refused, and any name given is only compared as given.
+    assert_eq!(
+      app
+        .get(&carol, &format!("/directory/channels?after={hidden}"))
+        .await
+        .status,
+      reqwest::StatusCode::BAD_REQUEST
+    );
+    let from_z = app
+      .get(&carol, &format!("/directory/channels?after={hidden}:zz"))
+      .await;
+    assert_eq!(from_z.body["channels"], json!([]), "{}", from_z.body);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn search_text_is_bounded_and_a_nul_is_refused() {
+    let Some(app) = TestApp::start_with(|settings| settings.limits.max_text_length = 10).await else {
+      return;
+    };
+    let carol = member("carol");
+    user_id(&app, &carol).await;
+    for route in ["people", "channels", "invitations"] {
+      for bad in ["query=abcdefghijklmn", "query=a%00b"] {
+        assert_eq!(
+          app.get(&carol, &format!("/directory/{route}?{bad}")).await.status,
+          reqwest::StatusCode::BAD_REQUEST,
+          "{route}: {bad}"
+        );
+      }
+    }
+    assert_eq!(
+      app
+        .get(&carol, "/directory/people?title=abcdefghijklmn")
+        .await
+        .status,
+      reqwest::StatusCode::BAD_REQUEST
+    );
+    app.stop().await;
+  }
+
+  fn encoded(text: &str) -> String {
+    url::form_urlencoded::byte_serialize(text.as_bytes()).collect()
+  }
+
   fn names(body: &Value) -> Vec<&str> {
     body["people"]
       .as_array()
@@ -456,6 +524,79 @@ mod invitations {
       "{}",
       refused.body
     );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn an_address_has_one_open_invitation_per_space() {
+    let Some(app) = TestApp::start().await else { return };
+    let alice = owner();
+    let team = create_space(&app, &alice, "Team", "invite_only").await;
+    let other = create_space(&app, &alice, "Other", "invite_only").await;
+    let invite = |space: String, email: &'static str| {
+      let alice = alice.clone();
+      let app = &app;
+      async move {
+        app
+          .post(
+            &alice,
+            &format!("/spaces/{space}/invites"),
+            json!({"email": email, "role": "member"}),
+          )
+          .await
+          .status
+      }
+    };
+    assert_eq!(invite(team.clone(), "m@example.org").await, StatusCode::CREATED);
+    assert_eq!(invite(team.clone(), "M@Example.org").await, StatusCode::CONFLICT);
+    assert_eq!(invite(other, "m@example.org").await, StatusCode::CREATED);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn invitation_mail_counts_against_the_senders_budget() {
+    let mailer = Arc::new(FakeMailer::default());
+    let Some(app) = TestApp::start_with_mailer(
+      |settings| {
+        settings.limits.max_meeting_mails_per_user_per_hour = 2;
+        settings.limits.invite_resend_interval_secs = 0;
+      },
+      mailer.clone(),
+    )
+    .await
+    else {
+      return;
+    };
+    let alice = owner();
+    let space = create_space(&app, &alice, "Team", "invite_only").await;
+    let path = format!("/spaces/{space}/invites");
+    let first = app
+      .post(&alice, &path, json!({"email": "a@example.org", "role": "member"}))
+      .await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    let resend = format!("{path}/{}/resend", first.id());
+    assert_eq!(
+      app.post(&alice, &resend, json!({})).await.status,
+      StatusCode::NO_CONTENT
+    );
+    assert_eq!(mailer.sent().len(), 2);
+
+    assert_eq!(
+      app.post(&alice, &resend, json!({})).await.status,
+      StatusCode::TOO_MANY_REQUESTS,
+      "a resend past the budget"
+    );
+    let over = app
+      .post(&alice, &path, json!({"email": "b@example.org", "role": "member"}))
+      .await;
+    assert_eq!(over.status, StatusCode::TOO_MANY_REQUESTS, "{}", over.body);
+    let list = app.get(&alice, "/directory/invitations").await;
+    assert_eq!(
+      listed(&list.body),
+      vec!["a@example.org"],
+      "a refused invitation leaves nothing"
+    );
+    assert_eq!(mailer.sent().len(), 2);
     app.stop().await;
   }
 

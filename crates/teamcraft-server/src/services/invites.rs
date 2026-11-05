@@ -13,7 +13,7 @@ use tracing::warn;
 use super::access::{allows, is_guest, is_instance_admin, load_space, space_target};
 use super::audit::{self, Target as AuditTarget};
 use super::convert::{invite_response, offset_date_time, presented_name, unix_millis, user_summary};
-use super::directory::page_size;
+use super::directory::{check_search_text, page_size};
 use super::spaces::require_member_management;
 use crate::auth::AuthenticatedUser;
 use crate::brand::Brand;
@@ -94,7 +94,18 @@ pub async fn create_invite(
       sponsor: caller.user.id,
       maybe_expires_at,
     })
-    .await?;
+    .await?
+    .ok_or_else(|| ApiError::Conflict("this address already has an open invitation to the space".into()))?;
+  let should_send_mail = match state.mailer.get() {
+    Some(_) => match spend_invite_mail(state, caller) {
+      Ok(has_budget) => has_budget,
+      Err(over_budget) => {
+        state.database.delete_invite(invite.id).await?;
+        return Err(over_budget);
+      },
+    },
+    None => false,
+  };
   audit::record(
     state,
     Some(caller.user.id),
@@ -103,14 +114,16 @@ pub async fn create_invite(
     &json!({"role": invite.role.as_str()}),
   )
   .await?;
-  send_invite_mail(
-    state,
-    caller,
-    &access.view.space.name,
-    &invite,
-    maybe_message.as_deref(),
-  )
-  .await;
+  if should_send_mail {
+    send_invite_mail(
+      state,
+      caller,
+      &access.view.space.name,
+      &invite,
+      maybe_message.as_deref(),
+    )
+    .await;
+  }
   Ok(invite_response(&invite))
 }
 
@@ -232,6 +245,23 @@ async fn invite_mail(
   .as_brand(brand)
 }
 
+/// Charges one invitation mail to the caller's hourly mail budget, shared with their meetings: the
+/// instance's mail identity is not for bulk mail. `false` when the budget is 0, which means no mail,
+/// and refused while it is used up.
+fn spend_invite_mail(state: &AppState, caller: &AuthenticatedUser) -> Result<bool, ApiError> {
+  let budget = state.settings.get().limits.max_meeting_mails_per_user_per_hour;
+  if budget == 0 {
+    return Ok(false);
+  }
+  if state.rate_limits.spend_mails(caller.user.id, 1, budget) {
+    Ok(true)
+  } else {
+    Err(ApiError::RateLimited {
+      retry_after_secs: 3600 / u64::from(budget),
+    })
+  }
+}
+
 /// Adds the inviter's own words to the invitation text: in place of `{message}` when the template
 /// has it, else quoted below. Inserted after the other placeholders are filled, so text in the
 /// message is never taken for a placeholder.
@@ -311,6 +341,10 @@ pub async fn resend_invite(
       retry_after_secs: interval_secs,
     });
   }
+  if !spend_invite_mail(state, caller)? {
+    state.database.forget_invite_resend(invite).await?;
+    return Err(ApiError::Conflict("this server sends no invitation mail".into()));
+  }
   let mail = invite_mail(state, caller, &access.view.space.name, &existing, None).await;
   if let Err(error) = mailer.send(&mail).await {
     warn!(%error, invite_id = %invite, "resending the invitation e-mail failed");
@@ -363,6 +397,7 @@ pub async fn list_directory_invitations(
       guest_inviter_spaces.push(space.space.id);
     }
   }
+  check_search_text(state, &query.query)?;
   let page_size = page_size(state);
   let mut found = state
     .database
@@ -381,7 +416,8 @@ pub async fn list_directory_invitations(
   let maybe_next_after = has_more.then(|| found.last().map(|invite| invite.id)).flatten();
   let sponsor_ids: Vec<UserId> = found.iter().map(|invite| invite.sponsor_user_id).collect();
   let sponsors = state.database.get_users(&sponsor_ids).await?;
-  let can_send_mail = state.mailer.get().is_some();
+  let can_send_mail =
+    state.mailer.get().is_some() && state.settings.get().limits.max_meeting_mails_per_user_per_hour > 0;
   let mut invitations = Vec::with_capacity(found.len());
   for invite in found {
     let sponsor = sponsors

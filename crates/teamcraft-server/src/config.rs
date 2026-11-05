@@ -271,6 +271,9 @@ pub struct LimitsConfig {
   pub max_directory_filter_values: u32,
   /// How long after an invitation mail the same invitation can be sent again.
   pub invite_resend_interval_secs: u64,
+  /// How long the values of the directory filters are reused; computing them reads all users. 0
+  /// reads them every time.
+  pub directory_filters_cache_secs: u64,
   /// Largest avatar image.
   pub max_avatar_bytes: u64,
   /// Largest space or channel picture (the one limit for both), after the server re-encoded the
@@ -328,8 +331,9 @@ pub struct LimitsConfig {
   pub max_pending_attachments_per_user: usize,
   /// Bytes of attachments one user may have stored or announced in total.
   pub max_attachment_bytes_per_user: u64,
-  /// Meeting e-mails (invitations, updates, cancellations) one organizer's meetings may send per
-  /// hour; the rest of the invitees are told in the app only.
+  /// E-mails one person's meetings (invitations, updates, cancellations; the rest of the invitees
+  /// are told in the app only) and space invitations may send per hour. At 0, invitations go without
+  /// mail and can't be resent.
   pub max_meeting_mails_per_user_per_hour: u32,
 }
 
@@ -1455,6 +1459,7 @@ impl Default for LimitsConfig {
       max_directory_results: 50,
       max_directory_filter_values: 200,
       invite_resend_interval_secs: 300,
+      directory_filters_cache_secs: 60,
       max_avatar_bytes: 1024 * 1024,
       max_space_image_bytes: teamcraft_proto::DEFAULT_MAX_SPACE_IMAGE_BYTES,
       max_concurrent_image_decodes: 2,

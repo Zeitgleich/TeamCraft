@@ -23,13 +23,18 @@ pub struct DirectoryPeopleFilter<'a> {
   pub maybe_department: Option<&'a str>,
   pub maybe_title: Option<&'a str>,
   pub maybe_space: Option<SpaceId>,
-  pub maybe_after: Option<UserId>,
+  /// The name search and order go by is the username (`directory.shows_full_name` is off).
+  pub hides_full_names: bool,
+  /// Where the previous page ended: its `sort_name` and ID. Compared as given, with no lookup, so a
+  /// position says nothing about rows the viewer may not see.
+  pub maybe_after: Option<(&'a str, UserId)>,
   pub limit: i64,
 }
 
 #[derive(Debug, Clone)]
 pub struct DirectoryPerson {
   pub user: User,
+  pub sort_name: String,
   pub maybe_title: Option<String>,
   pub maybe_department: Option<String>,
 }
@@ -47,7 +52,9 @@ pub struct DirectoryChannelFilter<'a> {
   pub viewer: UserId,
   pub query: &'a str,
   pub maybe_space: Option<SpaceId>,
-  pub maybe_after: Option<ConversationId>,
+  /// Where the previous page ended: its name and ID, compared as given (see
+  /// [`DirectoryPeopleFilter::maybe_after`]).
+  pub maybe_after: Option<(&'a str, ConversationId)>,
   pub limit: i64,
 }
 
@@ -98,12 +105,15 @@ impl Database {
     let rows = sqlx::query!(
       r#"SELECT u.id, u.username, u.display_name, u.kind, u.created_at, u.organization,
                 u.deactivated_at IS NOT NULL AS "is_deactivated!", u.deleted_at IS NOT NULL AS "is_deleted!",
-                p.title AS "title?", p.department AS "department?"
+                p.title AS "title?", p.department AS "department?", shown.sort_name AS "sort_name!"
          FROM users u
          LEFT JOIN user_profiles p ON p.user_id = u.id
+         CROSS JOIN LATERAL (
+           SELECT CASE WHEN $11 THEN COALESCE(u.username, u.display_name) ELSE u.display_name END AS sort_name
+         ) shown
          WHERE u.deactivated_at IS NULL
            AND u.kind <> 'bot'
-           AND (u.display_name ILIKE $2 OR u.username ILIKE $2 OR p.title ILIKE $2 OR p.department ILIKE $2)
+           AND (shown.sort_name ILIKE $2 OR u.username ILIKE $2 OR p.title ILIKE $2 OR p.department ILIKE $2)
            AND ($3::text IS NULL OR u.kind = $3)
            AND ($4::text IS NULL OR u.organization = $4)
            AND ($5::text IS NULL OR p.department = $5)
@@ -115,9 +125,8 @@ impl Database {
            AND (NOT $8 OR EXISTS (
                  SELECT 1 FROM memberships a JOIN memberships b ON a.conversation_id = b.conversation_id
                  WHERE a.user_id = $1 AND b.user_id = u.id))
-           AND ($9::bigint IS NULL OR (u.display_name, u.id) >
-                 (SELECT last.display_name, last.id FROM users last WHERE last.id = $9))
-         ORDER BY u.display_name, u.id
+           AND ($9::bigint IS NULL OR (shown.sort_name, u.id) > ($12::text, $9))
+         ORDER BY shown.sort_name, u.id
          LIMIT $10"#,
       to_db(filter.viewer),
       pattern,
@@ -127,8 +136,10 @@ impl Database {
       filter.maybe_title,
       filter.maybe_space.map(to_db),
       filter.is_restricted_to_shared,
-      filter.maybe_after.map(to_db),
+      filter.maybe_after.map(|(_, id)| to_db(id)),
       filter.limit,
+      filter.hides_full_names,
+      filter.maybe_after.map(|(name, _)| name),
     )
     .fetch_all(self.pool())
     .await?;
@@ -136,6 +147,7 @@ impl Database {
       .into_iter()
       .map(|r| {
         Ok(DirectoryPerson {
+          sort_name: r.sort_name,
           user: user_from_parts(
             r.id,
             r.username,
@@ -225,15 +237,15 @@ impl Database {
                    AND (m.expires_at IS NULL OR m.expires_at > now()))))
            AND (c.name ILIKE $2 OR c.topic ILIKE $2)
            AND ($3::bigint IS NULL OR c.space_id = $3)
-           AND ($4::bigint IS NULL OR (c.name, c.id) >
-                 (SELECT last.name, last.id FROM conversations last WHERE last.id = $4))
+           AND ($4::bigint IS NULL OR (c.name, c.id) > ($6::text, $4))
          ORDER BY c.name, c.id
          LIMIT $5"#,
       to_db(filter.viewer),
       pattern,
       filter.maybe_space.map(to_db),
-      filter.maybe_after.map(to_db),
+      filter.maybe_after.map(|(_, id)| to_db(id)),
       filter.limit,
+      filter.maybe_after.map(|(name, _)| name),
     )
     .fetch_all(self.pool())
     .await?;

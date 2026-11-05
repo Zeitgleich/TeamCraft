@@ -606,9 +606,11 @@ decides what somebody sees, resends and revokes (`InviteReach` in `services/invi
 | Guests                                               | None; the list is refused                       |
 
 Somebody who loses the permission loses their own invitations too; those who manage the space's
-members still have them. Resending goes out at most once per `limits.invite_resend_interval_secs`
-(the invitation's own mail counts), and only for a valid invitation in an unarchived space on a server
-that sends mail. It uses the current directory policy and guest domains, and the personal note of the
+members still have them. An address has one open invitation per space; one that expired makes way for
+a new one. Invitation mail counts against the sender's hourly budget
+(`limits.max_meeting_mails_per_user_per_hour`, shared with their meetings). Resending goes out at most
+once per `limits.invite_resend_interval_secs` (the invitation's own mail counts), and only for a valid
+invitation in an unarchived space on a server that sends mail. It uses the current directory policy and guest domains, and the personal note of the
 first mail isn't repeated, as it was never stored. Revoking and resending are in the audit log.
 
 ### 3.3 Moderation

@@ -424,7 +424,7 @@ pub fn route_class(path: &str) -> &'static str {
     "brand" | "client-compatibility" | "openapi.json" | "server-info" => "public",
     "spaces" => "spaces",
     "sync" => "sync",
-    "me" | "presence" | "user-groups" | "users" => "users",
+    "directory" | "me" | "presence" | "user-groups" | "users" => "users",
     _ => "other",
   }
 }

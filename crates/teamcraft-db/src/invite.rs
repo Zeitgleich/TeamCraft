@@ -35,10 +35,22 @@ pub struct AppliedInvite {
 }
 
 impl Database {
-  pub async fn create_invite(&self, new: &NewInvite<'_>) -> Result<Invite, DbError> {
+  /// `None` if an invitation for this address and space is already open. One that has expired no
+  /// longer counts: it makes way for the new one.
+  pub async fn create_invite(&self, new: &NewInvite<'_>) -> Result<Option<Invite>, DbError> {
+    let mut tx = self.pool().begin().await?;
     sqlx::query!(
+      r#"DELETE FROM invites
+         WHERE space_id = $1 AND lower(email) = lower($2) AND accepted_at IS NULL AND expires_at <= now()"#,
+      to_db(new.space_id),
+      new.email,
+    )
+    .execute(&mut *tx)
+    .await?;
+    let inserted = sqlx::query!(
       r#"INSERT INTO invites (id, space_id, email, space_role, channel_ids, sponsor_user_id, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (space_id, lower(email)) WHERE accepted_at IS NULL DO NOTHING"#,
       to_db(new.id),
       to_db(new.space_id),
       new.email.to_lowercase(),
@@ -47,9 +59,14 @@ impl Database {
       to_db(new.sponsor),
       new.maybe_expires_at,
     )
-    .execute(self.pool())
-    .await?;
-    Ok(Invite {
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    if inserted == 0 {
+      return Ok(None);
+    }
+    Ok(Some(Invite {
       id: new.id,
       space_id: new.space_id,
       email: new.email.to_lowercase(),
@@ -57,7 +74,7 @@ impl Database {
       channel_ids: new.channel_ids.to_vec(),
       sponsor_user_id: new.sponsor,
       maybe_expires_at: new.maybe_expires_at,
-    })
+    }))
   }
 
   pub async fn list_pending_invites(&self, space: SpaceId) -> Result<Vec<Invite>, DbError> {

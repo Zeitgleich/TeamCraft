@@ -75,6 +75,7 @@ pub struct AppState {
   /// The settings in force: the configuration with the admin console's changes on top.
   pub settings: Arc<SettingsCell>,
   pub rate_limits: Arc<RateLimits>,
+  pub directory_filters: Arc<crate::services::directory::FilterValuesCache>,
   /// The server's DPoP nonces and the proofs it has seen. Only in memory, on purpose (e2ee.md §3.1.2).
   pub dpop: Arc<DpopGuard>,
   /// The brands and the host names that select them.

@@ -4,7 +4,7 @@
 
 use leptos::prelude::*;
 use teamcraft_client_api::list_load::{ListLoad, REQUEST_DEADLINE_MS};
-use teamcraft_proto::{DirectoryInvitation, DirectoryInvitationsResponse, InviteId, SpaceRole};
+use teamcraft_proto::{DirectoryInvitation, DirectoryInvitationsResponse, ErrorCode, InviteId, SpaceRole};
 
 use crate::auth::ApiMethod;
 use crate::clock::format_date;
@@ -17,8 +17,7 @@ use crate::components::pending_button::PendingButton;
 use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::i18n::use_i18n;
 use crate::reactive::{SetIfAlive, use_debounced};
-use crate::rest::{RestClient, RestError};
-use crate::session::use_session;
+use crate::rest::RestClient;
 use crate::state::{Overlay, use_app_state};
 
 const SKELETON_ROWS: usize = 4;
@@ -112,19 +111,34 @@ fn InvitationRow(invitation: DirectoryInvitation, pager: Pager<DirectoryInvitati
   let is_resent = RwSignal::new(false);
   let is_confirming = RwSignal::new(false);
   let on_resend = move |_| {
+    let maybe_client = pager.client();
     resend.spawn(async move {
-      call(
-        ApiMethod::Post,
-        format!("/api/v1/spaces/{space}/invites/{id}/resend"),
-      )
-      .await?;
-      is_resent.set_if_alive(true);
-      Ok(())
+      let path = format!("/api/v1/spaces/{space}/invites/{id}/resend");
+      match call(maybe_client, ApiMethod::Post, path).await {
+        Ok(()) => {
+          is_resent.set_if_alive(true);
+          Ok(())
+        },
+        Err(failure) => {
+          // Gone meanwhile (accepted, or revoked elsewhere): the row has nothing left to offer.
+          if is_gone(&failure) {
+            forget(pager, id);
+          }
+          Err(failure)
+        },
+      }
     });
   };
   let on_revoke = move |_| {
+    let maybe_client = pager.client();
     revoke.spawn(async move {
-      call(ApiMethod::Delete, format!("/api/v1/spaces/{space}/invites/{id}")).await?;
+      let path = format!("/api/v1/spaces/{space}/invites/{id}");
+      match call(maybe_client, ApiMethod::Delete, path).await {
+        Ok(()) => {},
+        // Already gone is what was asked for.
+        Err(failure) if is_gone(&failure) => {},
+        Err(failure) => return Err(failure),
+      }
       forget(pager, id);
       Ok(())
     });
@@ -185,18 +199,37 @@ fn InvitationRow(invitation: DirectoryInvitation, pager: Pager<DirectoryInvitati
   }
 }
 
-async fn call(method: ApiMethod, path: String) -> Result<(), ActionFailure> {
-  let Some(session) = use_session() else {
+async fn call(
+  maybe_client: Option<RestClient>,
+  method: ApiMethod,
+  path: String,
+) -> Result<(), ActionFailure> {
+  let Some(client) = maybe_client else {
     return Err(ActionFailure::new(FailureKind::Other, String::new()));
   };
-  let client = RestClient::new(session.authenticator());
   client
     .send(method, &path, None)
     .await
-    .map(|_| ())
-    .map_err(|refusal: RestError| refusal.to_failure())
+    .map_err(|refusal| refusal.to_failure())
+}
+
+fn is_gone(failure: &ActionFailure) -> bool {
+  failure.kind == FailureKind::Server(ErrorCode::InviteNotFound)
 }
 
 fn forget(pager: Pager<DirectoryInvitation>, id: InviteId) {
   pager.remove(|invitation| invitation.id == id);
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn only_a_missing_invitation_counts_as_gone() {
+    let refusal = |code| ActionFailure::new(FailureKind::Server(code), String::new());
+    assert!(is_gone(&refusal(ErrorCode::InviteNotFound)));
+    assert!(!is_gone(&refusal(ErrorCode::Conflict)));
+    assert!(!is_gone(&ActionFailure::new(FailureKind::Network, String::new())));
+  }
 }
