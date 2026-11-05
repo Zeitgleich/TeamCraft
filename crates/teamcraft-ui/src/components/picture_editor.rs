@@ -8,6 +8,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::components::icons::{Icon, IconName};
+use crate::components::modal::trap_tab;
 use crate::i18n::use_i18n;
 use crate::raster;
 use crate::reactive::SetIfAlive;
@@ -44,6 +45,14 @@ pub(crate) fn PictureEditor(
   let is_saving = RwSignal::new(false);
   let is_failed = RwSignal::new(false);
   let picture = NodeRef::<leptos::html::Div>::new();
+  let dialog = NodeRef::<leptos::html::Div>::new();
+  let frame_node = NodeRef::<leptos::html::Div>::new();
+  // The frame takes the focus once the picture shows, so the arrow keys work at once.
+  Effect::new(move |_| {
+    if let Some(element) = frame_node.get() {
+      drop(element.focus());
+    }
+  });
   let drag = StoredValue::new(None::<(Drag, f64, f64)>);
 
   Effect::new(move |_| {
@@ -80,7 +89,11 @@ pub(crate) fn PictureEditor(
   };
   let start = move |ev: web_sys::PointerEvent, what: Drag| {
     ev.stop_propagation();
+    // No text selection or page scroll while dragging; the frame still takes the focus for keys.
     ev.prevent_default();
+    if let Some(element) = frame_node.get_untracked() {
+      drop(element.focus());
+    }
     if let Some(target) = ev
       .current_target()
       .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
@@ -112,11 +125,6 @@ pub(crate) fn PictureEditor(
       "ArrowRight" => (KEY_STEP, 0.0),
       "ArrowUp" => (0.0, -KEY_STEP),
       "ArrowDown" => (0.0, KEY_STEP),
-      "Escape" => {
-        ev.stop_propagation();
-        on_cancel.run(());
-        return;
-      },
       _ => return,
     };
     ev.prevent_default();
@@ -171,7 +179,21 @@ pub(crate) fn PictureEditor(
   };
 
   view! {
-    <div class="picture-editor" role="dialog" aria-modal="true" aria-label=move || i18n.t("picture-edit-title")>
+    <div
+      class="picture-editor"
+      role="dialog"
+      aria-modal="true"
+      aria-label=move || i18n.t("picture-edit-title")
+      node_ref=dialog
+      on:keydown=move |ev: web_sys::KeyboardEvent| match ev.key().as_str() {
+        "Tab" => trap_tab(&ev, dialog),
+        "Escape" => {
+          ev.stop_propagation();
+          on_cancel.run(());
+        },
+        _ => {},
+      }
+    >
       <div class="picture-editor-stage">
         {move || match (is_failed.get(), preview.get()) {
           (true, _) => view! { <p class="picture-editor-failed">{i18n.t("picture-edit-failed")}</p> }.into_any(),
@@ -181,6 +203,7 @@ pub(crate) fn PictureEditor(
               <img class="picture-editor-image" src=url alt="" draggable="false" />
               <div
                 class="picture-editor-frame"
+                node_ref=frame_node
                 role="group"
                 tabindex="0"
                 aria-label=move || i18n.t("picture-crop-area")
@@ -190,7 +213,6 @@ pub(crate) fn PictureEditor(
                 style:height=move || format!("{:.3}%", frame.get().height() * 100.0)
                 on:pointerdown=move |ev| start(ev, Drag::Frame)
                 on:keydown=on_key
-                data-autofocus=""
               >
                 {corner(CropCorner::TopLeft, "is-top-left")}
                 {corner(CropCorner::TopRight, "is-top-right")}
