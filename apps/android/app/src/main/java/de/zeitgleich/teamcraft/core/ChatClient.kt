@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.core
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -17,9 +19,37 @@ import uniffi.teamcraft_ffi.TeamCraft
 class ChatClient(
   /** The app's "Deleted user" in the user's language; `null` for readers that show no old messages. */
   private val deletedUserName: (() -> String)? = null,
+  /**
+   * The store's change counter ([CoreRepository.changeCount]), when the reader has one: the snapshot
+   * is then read and decoded once per change and shared by every screen that asks.
+   */
+  private val maybeChanges: (() -> Long)? = null,
   private val core: suspend () -> TeamCraft,
 ) {
+  private val snapshotLock = Mutex()
+  private var maybeKept: Pair<Long, ChatSnapshot>? = null
+
+  /**
+   * The whole workspace (users, spaces, conversations). Decoding it takes hundreds of milliseconds
+   * on a slow phone with a large workspace, so it is kept until the next change.
+   */
   suspend fun snapshot(): ChatSnapshot {
+    val changes = maybeChanges ?: return readSnapshot()
+    return snapshotLock.withLock {
+      // Read before the snapshot: a change while it is read makes the next caller read again.
+      val version = changes()
+      maybeKept?.takeIf { it.first == version }?.second
+        ?: readSnapshot().also { maybeKept = version to it }
+    }
+  }
+
+  /**
+   * The snapshot read last, maybe from before the newest change, or `null` before the first read: a
+   * screen shows names and which messages are the user's own with it at once, then reads afresh.
+   */
+  fun maybeKeptSnapshot(): ChatSnapshot? = maybeKept?.second
+
+  private suspend fun readSnapshot(): ChatSnapshot {
     val snapshot = WireJson.decodeFromString(ChatSnapshot.serializer(), core().snapshot())
     return deletedUserName?.let { snapshot.namingDeletedUsers(it()) } ?: snapshot
   }

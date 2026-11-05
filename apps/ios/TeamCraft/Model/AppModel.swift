@@ -666,12 +666,17 @@ final class AppModel {
     }
   }
 
-  /// The newest message of each conversation, for the chat list. Local reads only.
+  /// The line under each conversation of the chat list, in one local read for the whole list: the
+  /// newest message people wrote (joins and renames only when nothing was written nearby). Unlike
+  /// opening a conversation, it doesn't move the catch-up focus.
   func chatPreviews(_ conversations: [ConversationItem], myId: String) async -> [String: ChatPreview] {
+    let ids = conversations.map(\.id)
+    let directIds = Set(conversations.filter { $0.kind == .direct }.map(\.id))
+    guard let items = try? await core().chatPreviews(conversationIds: ids) else { return [:] }
     var previews: [String: ChatPreview] = [:]
-    for conversation in conversations {
-      guard let latest = await messages(conversationId: conversation.id, limit: 1).last else { continue }
-      previews[conversation.id] = chatPreview(latest, myId: myId, isOneToOne: conversation.kind == .direct)
+    for item in items {
+      let message = item.message.namingDeletedAuthor()
+      previews[item.conversationId] = chatPreview(message, myId: myId, isOneToOne: directIds.contains(item.conversationId))
     }
     return previews
   }

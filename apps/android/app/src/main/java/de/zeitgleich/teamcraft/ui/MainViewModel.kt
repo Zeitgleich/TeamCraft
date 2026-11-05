@@ -30,6 +30,9 @@ import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.R
@@ -170,7 +173,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   val changeCount: StateFlow<Long> = graph.core.changeCount
 
   /** The chat features over the core's JSON bridge. */
-  val chat = ChatClient(::deletedUserName) { graph.core.core() }
+  val chat = ChatClient(::deletedUserName, maybeChanges = { graph.core.changeCount.value }) { graph.core.core() }
   private val failures = MutableStateFlow<Int?>(null)
 
   /** Files picked in a composer and not sent yet, by conversation and thread. */
@@ -534,22 +537,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Where a share can go (notes first, then by last activity), or null when it can't be read. */
   suspend fun shareTargets(): List<ConversationItem>? = read { shareTargets() }
 
+  private val chatListState = MutableStateFlow(ChatListState())
+  private val chatListLock = Mutex()
+
   /**
-   * The newest message of each conversation, for the chat list. Reads the local store only (one
-   * small window per conversation); names come from the snapshot.
+   * The chat list's conversations and previews, kept here so that going back to the list shows it at
+   * once instead of loading it again; the list refreshes it on every change while it is shown.
    */
-  suspend fun chatPreviews(conversations: List<ConversationItem>): Map<String, ChatListEntry> {
-    val snapshot = readChat { snapshot() } ?: return emptyMap()
-    return conversations.mapNotNull { conversation ->
-      val latest = readChat { latest(conversation.id, 1).messages.lastOrNull() } ?: return@mapNotNull null
-      val preview = chatPreview(
-        message = latest,
-        myId = snapshot.me.id,
-        authorName = snapshot.name(latest.author),
-        isOneToOne = conversation.kind == ConversationKind.DIRECT,
-      )
-      conversation.id to ChatListEntry(preview, latest.id)
-    }.toMap()
+  val chatList: StateFlow<ChatListState> = chatListState
+
+  /** Reads the conversations, shows them, then reads their previews. One refresh at a time. */
+  suspend fun refreshChatList(myId: String) = chatListLock.withLock {
+    val conversations = conversations()
+    chatListState.update { it.copy(maybeConversations = conversations) }
+    val previews = chatPreviews(conversations, myId)
+    chatListState.update { it.copy(previews = previews) }
+  }
+
+  /**
+   * The line under each conversation of the chat list, in one read of the local store for the whole
+   * list (the newest message people wrote; joins and renames only when nothing was written nearby).
+   */
+  suspend fun chatPreviews(conversations: List<ConversationItem>, myId: String): Map<String, ChatListEntry> {
+    val isOneToOne = conversations.associate { it.id to (it.kind == ConversationKind.DIRECT) }
+    val items = read { chatPreviews(conversations.map { it.id }) } ?: return emptyMap()
+    return items.associate { item ->
+      val message = namedAuthor(item.message)
+      item.conversationId to ChatListEntry(chatPreview(message, myId, isOneToOne[item.conversationId] == true), message.id)
+    }
   }
 
   /**
@@ -1029,6 +1044,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // core can be opened any more to post new ones.
     graph.push.beginSignOut()
     linkRequestList.value = emptyList()
+    chatListState.value = ChatListState()
     review.value = null
     graph.calls.hangUp()
     graph.push.unregister()

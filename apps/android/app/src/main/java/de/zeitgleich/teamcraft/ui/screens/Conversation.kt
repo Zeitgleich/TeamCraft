@@ -47,12 +47,16 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledIconButton
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -168,10 +172,10 @@ fun ConversationScreen(
   onOpenConversation: (String) -> Unit = {},
 ) {
   val changes by viewModel.changeCount.collectAsState()
-  var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
-  var messages by remember { mutableStateOf<List<Message>>(emptyList()) }
-  var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
-  var pinned by remember { mutableStateOf<List<Message>>(emptyList()) }
+  var snapshot by remember { mutableStateOf(viewModel.chat.maybeKeptSnapshot()) }
+  var messages by remember(conversationId) { mutableStateOf<List<Message>>(emptyList()) }
+  var extras by remember(conversationId) { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
+  var pinned by remember(conversationId) { mutableStateOf<List<Message>>(emptyList()) }
   // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
   var joinRequests by remember { mutableStateOf<List<JoinRequestItem>>(emptyList()) }
   var firstUnread by remember { mutableStateOf<FirstUnread>(FirstUnread.Loading) }
@@ -197,20 +201,26 @@ fun ConversationScreen(
     val maybeMessage = viewModel.readChat { query(ChatQueries.firstUnread(conversationId)).maybeMessage }
     firstUnread = maybeMessage?.let { FirstUnread.At(it) } ?: FirstUnread.None
   }
-  LaunchedEffect(changes, conversationId) {
-    snapshot = viewModel.readChat { snapshot() }
-    val maybeTail = feed.reread()
-    messages = maybeTail?.messages ?: emptyList()
-    hasOlder = maybeTail?.hasOlder ?: false
-    serverHistory = viewModel.readChat { query(ChatQueries.olderHistory(conversationId)).olderHistory } ?: serverHistory
-    isAskingServer = false
-    maybeKeyCatchUp = viewModel.keyCatchUp()
-    // After the messages: once the store has the notified one, the core no longer names it.
-    maybeNotified = viewModel.notifiedConversation(conversationId)
-    extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
-    pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: emptyList()
-    unseenReactions = viewModel.readChat { query(ChatQueries.unseenReactions(conversationId)).unseen } ?: UnseenReactions()
-    joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())
+  LaunchedEffect(conversationId) {
+    // One pass after another, each with the newest state: while syncing, changes come faster than a
+    // pass, and restarting on each would keep cancelling the reads behind the messages. The
+    // messages come first; the snapshot (names, the header) is shared with the other screens.
+    viewModel.changeCount.collect {
+      val maybeTail = feed.reread()
+      messages = maybeTail?.messages ?: emptyList()
+      hasOlder = maybeTail?.hasOlder ?: false
+      // Reactions, files and receipts belong to the bubbles: right after them.
+      extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras
+      snapshot = viewModel.readChat { snapshot() } ?: snapshot
+      serverHistory = viewModel.readChat { query(ChatQueries.olderHistory(conversationId)).olderHistory } ?: serverHistory
+      isAskingServer = false
+      maybeKeyCatchUp = viewModel.keyCatchUp()
+      // After the messages: once the store has the notified one, the core no longer names it.
+      maybeNotified = viewModel.notifiedConversation(conversationId)
+      pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: pinned
+      unseenReactions = viewModel.readChat { query(ChatQueries.unseenReactions(conversationId)).unseen } ?: unseenReactions
+      joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())
+    }
   }
   FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
   LaunchedEffect(conversationId, messages.size) { viewModel.markRead(conversationId) }
@@ -318,17 +328,20 @@ fun ThreadScreen(
   onOpenPermalink: (String) -> Unit = {},
 ) {
   val changes by viewModel.changeCount.collectAsState()
-  var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
+  var snapshot by remember { mutableStateOf(viewModel.chat.maybeKeptSnapshot()) }
   var messages by remember { mutableStateOf<List<Message>>(emptyList()) }
   var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
   var isFollowed by remember { mutableStateOf(false) }
   var sentCount by remember { mutableIntStateOf(0) }
   val rights = rememberRights(viewModel, conversationId, changes)
-  LaunchedEffect(changes, threadId) {
-    snapshot = viewModel.readChat { snapshot() }
-    messages = viewModel.readChat { query(ChatQueries.thread(conversationId, threadId)).messages } ?: emptyList()
-    extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
-    isFollowed = viewModel.readChat { query(ChatQueries.isThreadFollowed(conversationId, threadId)).value } ?: false
+  LaunchedEffect(threadId) {
+    // As in the conversation: one pass after another, the messages first.
+    viewModel.changeCount.collect {
+      messages = viewModel.readChat { query(ChatQueries.thread(conversationId, threadId)).messages } ?: messages
+      snapshot = viewModel.readChat { snapshot() } ?: snapshot
+      extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras
+      isFollowed = viewModel.readChat { query(ChatQueries.isThreadFollowed(conversationId, threadId)).value } ?: isFollowed
+    }
   }
   FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
   LaunchedEffect(threadId, messages.size) { viewModel.act(ChatActions.markThreadRead(conversationId, threadId)) }
@@ -1054,7 +1067,8 @@ internal fun Composer(
   var wantsAcknowledgement by rememberSaveable(conversationId) { mutableStateOf(false) }
   var isSilent by rememberSaveable(conversationId) { mutableStateOf(false) }
   var alsoToChannel by rememberSaveable(conversationId) { mutableStateOf(false) }
-  var isOptionsOpen by remember { mutableStateOf(false) }
+  var isAttachOpen by remember { mutableStateOf(false) }
+  var isSendOptionsOpen by remember { mutableStateOf(false) }
   val replyTarget by ReplyTarget.current.collectAsState()
   val maybeReply = replyTarget?.takeIf { it.conversation == conversationId && maybeThread == null }
   val pickers = rememberAttachmentPickers(viewModel) { picked -> files = files + picked }
@@ -1208,7 +1222,13 @@ internal fun Composer(
       stringResource(R.string.option_also_to_channel).takeIf { alsoToChannel },
     )
     if (flags.isNotEmpty()) {
-      Text(flags.joinToString(" · "), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 16.dp))
+      // What the next send carries, as a chip that opens the options again.
+      AssistChip(
+        onClick = { isSendOptionsOpen = true },
+        label = { Text(flags.joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        leadingIcon = { Icon(painterResource(R.drawable.ic_notification), contentDescription = null, modifier = Modifier.size(16.dp)) },
+        modifier = Modifier.padding(horizontal = 12.dp),
+      )
     }
     ComposerField(
       text = text,
@@ -1223,13 +1243,15 @@ internal fun Composer(
       canSend = canSend,
       isSendWithEnter = isSendWithEnter,
       focus = focus,
-      onAttach = { isOptionsOpen = true },
+      onAttach = { isAttachOpen = true },
       onCamera = pickers.takePhoto,
       onSend = ::trySend,
+      onSendOptions = { isSendOptionsOpen = true },
     )
   }
-  if (isOptionsOpen) {
-    AttachSheet(pickers, onDismiss = { isOptionsOpen = false }) {
+  if (isAttachOpen) AttachSheet(pickers, onDismiss = { isAttachOpen = false })
+  if (isSendOptionsOpen) {
+    SendOptionsSheet(onDismiss = { isSendOptionsOpen = false }) {
       SendOptionsSection(
         priority = priority,
         onPriority = { priority = it },
@@ -1247,7 +1269,8 @@ internal fun Composer(
 /**
  * The message field as in the common messengers (#315, #704): a rounded pill with attach on the
  * left and the camera on the right inside it, and a round accent send button beside it, disabled
- * while there is nothing to send. Voice messages don't exist yet, so the button is always "send".
+ * while there is nothing to send. A long-press on it opens how the message is sent (priority,
+ * receipts, silent), as Telegram's and Signal's send buttons do.
  */
 @Composable
 private fun ComposerField(
@@ -1259,6 +1282,7 @@ private fun ComposerField(
   onAttach: () -> Unit,
   onCamera: () -> Unit,
   onSend: () -> Unit,
+  onSendOptions: () -> Unit,
 ) {
   Row(
     Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 6.dp),
@@ -1310,18 +1334,7 @@ private fun ComposerField(
         }
       }
     }
-    FilledIconButton(
-      onClick = onSend,
-      enabled = canSend,
-      shape = CircleShape,
-      colors = IconButtonDefaults.filledIconButtonColors(
-        disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-      ),
-      modifier = Modifier.padding(start = 6.dp, bottom = 4.dp).size(SEND_BUTTON_SIZE),
-    ) {
-      Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.send))
-    }
+    SendButton(canSend, onSend, onSendOptions)
   }
 }
 
@@ -1352,7 +1365,48 @@ private fun EmojiSuggestions(text: String, onPick: (String) -> Unit) {
   }
 }
 
-/** Priority, read confirmation, silent and "also send to channel", in the composer's "+" sheet. */
+/** The round send button: tap sends, long-press (also with nothing typed yet) sets how. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SendButton(canSend: Boolean, onSend: () -> Unit, onSendOptions: () -> Unit) {
+  val haptics = LocalHapticFeedback.current
+  val scheme = MaterialTheme.colorScheme
+  Box(
+    Modifier
+      .padding(start = 6.dp, bottom = 4.dp)
+      .size(SEND_BUTTON_SIZE)
+      .clip(CircleShape)
+      .background(if (canSend) scheme.primary else scheme.surfaceContainerHigh)
+      .combinedClickable(
+        role = Role.Button,
+        onClickLabel = stringResource(R.string.send),
+        onLongClickLabel = stringResource(R.string.send_options),
+        onClick = { if (canSend) onSend() },
+        onLongClick = {
+          haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+          onSendOptions()
+        },
+      )
+      .semantics { if (!canSend) disabled() },
+    contentAlignment = Alignment.Center,
+  ) {
+    Icon(
+      Icons.AutoMirrored.Filled.Send,
+      contentDescription = stringResource(R.string.send),
+      tint = if (canSend) scheme.onPrimary else scheme.onSurfaceVariant.copy(alpha = 0.6f),
+    )
+  }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SendOptionsSheet(onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+  ModalBottomSheet(onDismissRequest = onDismiss) {
+    Column(Modifier.padding(bottom = 24.dp), content = content)
+  }
+}
+
+/** Priority, read confirmation, silent and "also send to channel": the send button's long-press. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SendOptionsSection(
@@ -1365,7 +1419,6 @@ private fun SendOptionsSection(
   maybeAlsoToChannel: Boolean?,
   onAlsoToChannel: (Boolean) -> Unit,
 ) {
-  HorizontalDivider(Modifier.padding(vertical = 8.dp))
   Text(
     stringResource(R.string.send_options),
     style = MaterialTheme.typography.titleSmall,
