@@ -40,6 +40,9 @@ pub struct Upkeep {
   /// When scheduled messages were last looked at.
   #[cfg(feature = "ui")]
   last_scheduled_check_ms: i64,
+  /// When reading the list of scheduled messages last failed.
+  #[cfg(feature = "ui")]
+  maybe_scheduled_read_failed_ms: Option<i64>,
   /// The gateway connection the list of scheduled messages was read for.
   #[cfg(feature = "ui")]
   maybe_scheduled_connection: Option<u64>,
@@ -68,6 +71,8 @@ impl Upkeep {
       last_local_check_ms: i64::MIN,
       #[cfg(feature = "ui")]
       last_scheduled_check_ms: i64::MIN,
+      #[cfg(feature = "ui")]
+      maybe_scheduled_read_failed_ms: None,
       #[cfg(feature = "ui")]
       maybe_scheduled_connection: None,
       uploads: UploadMode::Inline,
@@ -157,13 +162,26 @@ impl Upkeep {
     client: &mut Client<A, S>,
     now: i64,
   ) -> bool {
+    let interval_ms = i64::try_from(self.interval.as_millis()).unwrap_or(i64::MAX);
     if let Some(connection) = client
       .gateway_connections()
       .filter(|connection| self.maybe_scheduled_connection != Some(*connection))
+      // After a failed read not before the interval, like the account data.
+      .filter(|_| {
+        self
+          .maybe_scheduled_read_failed_ms
+          .is_none_or(|failed| now.abs_diff(failed) >= interval_ms.unsigned_abs())
+      })
     {
       match client.refresh_scheduled().await {
-        Ok(()) => self.maybe_scheduled_connection = Some(connection),
-        Err(error) => tracing::debug!(%error, "scheduled messages not read yet"),
+        Ok(()) => {
+          self.maybe_scheduled_connection = Some(connection);
+          self.maybe_scheduled_read_failed_ms = None;
+        },
+        Err(error) => {
+          self.maybe_scheduled_read_failed_ms = Some(now);
+          tracing::debug!(%error, "scheduled messages not read yet");
+        },
       }
     }
     if now >= self.last_scheduled_check_ms

@@ -793,6 +793,7 @@ mod tests {
             "oidc_sync",
             "partition_maintenance",
             "retention",
+            "scheduled_messages",
             "urgent_scheduler",
           ]),
         ),
