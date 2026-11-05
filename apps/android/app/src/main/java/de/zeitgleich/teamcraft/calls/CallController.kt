@@ -262,7 +262,12 @@ class CallController(
 
   /** Starts (or joins) the conversation's call, with the choices of the pre-join dialog. */
   fun startCall(conversationId: String, displayName: String, callOptions: CallOptions = CallOptions()) {
-    if (maybeSession != null || joining.value) return
+    if (maybeSession != null || joining.value) {
+      // Already in (or joining) a call: show it instead of doing nothing.
+      Log.i(TAG, "call: already in a call, showing it")
+      showCall()
+      return
+    }
     failure.value = null
     options = callOptions
     addTelecomCall(conversationId, displayName, CallAttributesCompat.DIRECTION_OUTGOING)
@@ -344,6 +349,7 @@ class CallController(
    */
   private fun addTelecomCall(conversationId: String, displayName: String, direction: Int, isJoinClaimed: Boolean = false) {
     if (maybeTelecomJob?.isActive == true) {
+      Log.w(TAG, "Telecom: the previous call is still being added or ended")
       if (isJoinClaimed) joining.value = false
       return
     }
@@ -372,6 +378,7 @@ class CallController(
             Log.i(TAG, "Telecom: disconnected by the system")
             if (joining.value) abandonJoin()
             leave()
+            maybeTelecomJob?.cancel()
           },
           onSetActive = {},
           onSetInactive = { maybeSession?.setMuted(true) },
@@ -408,10 +415,15 @@ class CallController(
     }
   }
 
-  /** Ends the Telecom call once the engine's call ended (left, removed, ended by the host). */
+  /**
+   * Ends the Telecom call once the engine's call ended (left, removed, ended by the host), and with
+   * it this call's job: its collectors never end on their own, and a job still running made the
+   * next call's button do nothing.
+   */
   private suspend fun endWithEngine(call: CallControlScope) {
     state.first { it?.phase == CallPhase.ENDED }
     call.disconnect(DisconnectCause(DisconnectCause.LOCAL))
+    maybeTelecomJob?.cancel()
   }
 
   /** Called by [CallActivity] with the answer to the microphone permission request. */
