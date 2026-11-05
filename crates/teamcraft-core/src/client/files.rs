@@ -1356,6 +1356,30 @@ pub fn transfer_state(
   records::get_json(store, Table::FileTransfers, &attachment.to_string())
 }
 
+/// Forgets the downloads whose files were deleted (`paths`, by the app's trimming of its download
+/// folder), so they show as remote at once and are fetched again when opened, instead of pointing a
+/// viewer at a file that is gone. Returns how many it forgot.
+pub fn forget_deleted_downloads(
+  store: &impl LocalStore,
+  paths: &[std::path::PathBuf],
+) -> Result<usize, CoreError> {
+  if paths.is_empty() {
+    return Ok(0);
+  }
+  let mut forgotten = 0;
+  for (key, bytes) in store.list(Table::FileTransfers)? {
+    // Other records live in this table too (failed uploads, abandoned files): not a state, skipped.
+    let Ok(TransferState::Local { path }) = serde_json::from_slice::<TransferState>(&bytes) else {
+      continue;
+    };
+    if paths.iter().any(|deleted| deleted == std::path::Path::new(&path)) {
+      store.delete(Table::FileTransfers, &key)?;
+      forgotten += 1;
+    }
+  }
+  Ok(forgotten)
+}
+
 pub fn share_links(
   store: &impl LocalStore,
   attachment: AttachmentId,
@@ -1758,6 +1782,55 @@ mod tests {
     assert!(!staged.exists());
     assert!(original.exists());
     std::fs::remove_dir_all(&root).unwrap();
+  }
+
+  #[test]
+  fn deleted_downloads_are_forgotten_and_everything_else_stays() {
+    let store = crate::store::MemoryStore::new();
+    use teamcraft_proto::{Id, Snowflake};
+    let id = |raw: i64| AttachmentId::from_snowflake(Snowflake::new(raw).unwrap());
+    let (gone, kept, coming) = (id(1), id(2), id(3));
+    set_transfer(
+      &store,
+      gone,
+      &TransferState::Local {
+        path: "/downloads/old.png".into(),
+      },
+    )
+    .unwrap();
+    set_transfer(
+      &store,
+      kept,
+      &TransferState::Local {
+        path: "/downloads/new.png".into(),
+      },
+    )
+    .unwrap();
+    set_transfer(&store, coming, &TransferState::Downloading { total_bytes: 9 }).unwrap();
+    records::put_json(&store, Table::FileTransfers, ABANDONED_KEY, &vec![kept]).unwrap();
+
+    let deleted = [std::path::PathBuf::from("/downloads/old.png")];
+    assert_eq!(forget_deleted_downloads(&store, &deleted).unwrap(), 1);
+
+    assert_eq!(
+      transfer_state(&store, gone).unwrap(),
+      None,
+      "shows as remote again"
+    );
+    assert_eq!(
+      transfer_state(&store, kept).unwrap(),
+      Some(TransferState::Local {
+        path: "/downloads/new.png".into()
+      })
+    );
+    assert!(transfer_state(&store, coming).unwrap().is_some());
+    assert!(
+      records::get_json::<Vec<AttachmentId>>(&store, Table::FileTransfers, ABANDONED_KEY)
+        .unwrap()
+        .is_some(),
+      "records of another kind stay"
+    );
+    assert_eq!(forget_deleted_downloads(&store, &[]).unwrap(), 0);
   }
 
   #[test]

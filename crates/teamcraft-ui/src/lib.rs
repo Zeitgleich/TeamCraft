@@ -62,6 +62,7 @@ pub mod lightbox;
 pub mod live;
 /// The message Markdown subset; shared with the mobile apps through teamcraft-client-api.
 pub use teamcraft_client_api::markdown;
+pub mod animated_images;
 pub mod media_cache;
 pub mod media_formats;
 pub mod media_layout;

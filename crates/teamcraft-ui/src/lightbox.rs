@@ -21,6 +21,7 @@ pub use teamcraft_client_api::media_viewer::{Direction, MediaPages, MediaScope a
 use teamcraft_proto::AttachmentId;
 
 use crate::model::MessageId;
+use crate::prefs::AnimatedImages;
 use crate::video_controls::PlayerCommand;
 
 /// Largest zoom, relative to the fitted size (the same on every platform).
@@ -60,7 +61,7 @@ pub enum MediaKind {
   /// A still image: zoom, pan and rotate.
   Image,
   /// A GIF or APNG: like an image, but it moves, so it can be paused (and starts paused when the
-  /// user asked the system for reduced motion).
+  /// "Animated images" setting or the system's reduced motion says so, #201).
   Animated,
   /// Played by the browser's own `<video>` with its controls.
   Video,
@@ -291,11 +292,12 @@ impl MediaKind {
     matches!(self, Self::Image | Self::Animated)
   }
 
-  /// An animated image starts paused when the user prefers reduced motion; a video never plays by
-  /// itself.
-  pub fn starts_paused(self, prefers_reduced_motion: bool) -> bool {
+  /// An animated image starts paused when it only moves on request or the system asks for less
+  /// motion, whatever the setting; "on hover" plays otherwise, as the viewer has no hover to wait
+  /// for and opening it asked to see the picture. A video never plays by itself.
+  pub fn starts_paused(self, mode: AnimatedImages, prefers_reduced_motion: bool) -> bool {
     match self {
-      Self::Animated => prefers_reduced_motion,
+      Self::Animated => prefers_reduced_motion || mode == AnimatedImages::OnTap,
       Self::Image | Self::Video => false,
     }
   }
@@ -1312,12 +1314,19 @@ mod tests {
     }
 
     #[test]
-    fn only_animated_images_pause_for_reduced_motion() {
-      assert!(MediaKind::Animated.starts_paused(true));
-      assert!(!MediaKind::Animated.starts_paused(false));
-      assert!(!MediaKind::Image.starts_paused(true));
+    fn only_animated_images_start_paused_and_only_on_request() {
+      assert!(MediaKind::Animated.starts_paused(AnimatedImages::OnTap, false));
+      assert!(!MediaKind::Animated.starts_paused(AnimatedImages::OnHover, false));
+      assert!(!MediaKind::Animated.starts_paused(AnimatedImages::Autoplay, false));
+      for mode in AnimatedImages::ALL {
+        assert!(
+          MediaKind::Animated.starts_paused(mode, true),
+          "reduced motion, {mode:?}"
+        );
+      }
+      assert!(!MediaKind::Image.starts_paused(AnimatedImages::OnTap, true));
       assert!(
-        !MediaKind::Video.starts_paused(true),
+        !MediaKind::Video.starts_paused(AnimatedImages::OnTap, true),
         "videos never play by themselves anyway"
       );
     }

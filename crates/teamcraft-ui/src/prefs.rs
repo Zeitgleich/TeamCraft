@@ -501,12 +501,49 @@ impl ImageSize {
   }
 }
 
+/// When animated images move in the conversation (#201).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnimatedImages {
+  Autoplay,
+  /// While the mouse is over them; a touch screen has no hover, so there it is [`Self::OnTap`].
+  OnHover,
+  /// Only after pressing their play button.
+  OnTap,
+}
+
+impl AnimatedImages {
+  pub const ALL: [AnimatedImages; 3] = [Self::Autoplay, Self::OnHover, Self::OnTap];
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Autoplay => "autoplay",
+      Self::OnHover => "hover",
+      Self::OnTap => "tap",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|value| value.slug() == slug)
+  }
+
+  /// The setting on this device: it follows the account, reduced motion is the device's, so nothing
+  /// starts by itself where the system asks for less motion.
+  pub fn effective(self, prefers_reduced_motion: bool) -> Self {
+    match self {
+      Self::Autoplay if prefers_reduced_motion => Self::OnTap,
+      other => other,
+    }
+  }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DisplayPrefs {
   pub density: Density,
   /// Size of pictures in the conversation.
   pub image_size: ImageSize,
+  pub animated_images: AnimatedImages,
   /// The custom status emoji of the author next to the name in messages.
   pub show_status_in_messages: bool,
   /// Size of the whole interface, Ctrl/Cmd + `+` / `-` / `0`.
@@ -523,6 +560,7 @@ impl Default for DisplayPrefs {
     Self {
       density: Density::Comfortable,
       image_size: ImageSize::Large,
+      animated_images: AnimatedImages::Autoplay,
       show_status_in_messages: true,
       zoom: Zoom::DEFAULT,
       text_size: TextSize::DEFAULT,

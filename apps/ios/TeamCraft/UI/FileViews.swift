@@ -10,6 +10,11 @@ struct AttachmentView: View {
   @Environment(\.openPicture) private var maybeOpenPicture
   @Environment(\.openVideo) private var maybeOpenVideo
   @Environment(\.imageActions) private var maybeImageActions
+  @Environment(\.accessibilityReduceMotion) private var isMotionReduced
+  @Environment(\.areAnimationsCovered) private var areAnimationsCovered
+  @Environment(\.scenePhase) private var scenePhase
+  @Environment(\.displayScale) private var displayScale
+  @AppStorage(AnimatedImagesSetting.key) private var animatedImages = AnimatedImagesSetting.fallback.rawValue
   let file: FileInfo
   /// A tile of an album, sized by the album, instead of the large preview.
   var isTile = false
@@ -23,6 +28,8 @@ struct AttachmentView: View {
   @State private var maybePreviewURL: URL?
   @State private var isPreviewRefused = false
   @State private var isWaitingToOpen = false
+  @State private var animation = AnimationPlayer()
+  @State private var playChoice = PlayChoice.unset
   @State private var maybeVideo: FileInfo?
 
   var body: some View {
@@ -77,6 +84,18 @@ struct AttachmentView: View {
       .buttonStyle(.plain)
       .accessibilityLabel(Text(file.fileName))
       .accessibilityValue(maybeHiddenCount.map { Text("album_more_pictures \($0)") } ?? Text(verbatim: ""))
+      // Beside the picture's button, not in it: a tap here stops or starts it (#201), a tap on the
+      // rest opens the viewer as on any picture.
+      .overlay(alignment: .topLeading) {
+        if canMoveHere { AnimationButton(isMoving: isGoing, action: toggleMotion) }
+      }
+      .overlay(alignment: .bottomLeading) {
+        if canMoveHere && !isMoving {
+          AnimationBadge(
+            text: file.transfer.state == "failed" ? Text("animation_failed") : Text(verbatim: AnimationKind.label(file.mediaType)))
+        }
+      }
+      .task(id: motionTask) { await runMotion() }
       if file.transfer.isCancellable { UploadActions(file: file) }
     }
     .quickLookPreview($maybePreviewURL)
@@ -89,9 +108,88 @@ struct AttachmentView: View {
     }
   }
 
+  // MARK: Animated images (#201)
+
+  private var mayMove: Bool { file.isImage && AnimationKind.mayMove(file.mediaType) && !isPlainSurface }
+
+  /// Pictures in the plain preview (search, files) stay still: only the conversation's tiles move.
+  private var isPlainSurface: Bool { !isTile && maybeMediaWidth == nil }
+
+  private var localPath: String? { file.transfer.state == "local" ? file.transfer.path : nil }
+
+  private var canMoveHere: Bool {
+    mayMove && (AnimationKind.isAnimation(file.mediaType) || animation.maybeMoves == true) && animation.maybeMoves != false
+  }
+
+  private var wantsToMove: Bool {
+    playChoice.wantsToMove(AnimatedImagesSetting.stored(animatedImages).effective(isMotionReduced: isMotionReduced))
+  }
+
+  /// It moves right now, or will as soon as its file is here.
+  private var isGoing: Bool { isMoving || (wantsToMove && file.transfer.state == "downloading") }
+
+  private var isVisible: Bool { scenePhase == .active && !areAnimationsCovered }
+
+  private var isMoving: Bool { wantsToMove && isVisible && localPath != nil }
+
+  /// What `runMotion` depends on; the running task ends when it changes.
+  private var motionTask: MotionTask {
+    MotionTask(mayMove: mayMove, state: file.transfer.state, path: localPath, isMoving: isMoving, wantsToMove: wantsToMove)
+  }
+
+  private struct MotionTask: Equatable {
+    let mayMove: Bool
+    let state: String
+    let path: String?
+    let isMoving: Bool
+    let wantsToMove: Bool
+  }
+
+  private func toggleMotion() {
+    let wasGoing = isGoing
+    playChoice = wasGoing ? .paused : .playing
+    // Asked for by hand: on any network and at any size.
+    if !wasGoing, file.transfer.state == "remote" || file.transfer.state == "failed" { fetchFile() }
+  }
+
+  private func fetchFile() {
+    Task {
+      await model.perform(
+        .downloadAttachment(conversationId: file.conversation, messageId: file.message, fileId: file.fileId))
+    }
+  }
+
+  /// `.task` runs this while the tile is on screen and cancels it when the tile leaves.
+  private func runMotion() async {
+    guard mayMove else { return }
+    guard let path = localPath else {
+      guard AnimationKind.isAnimation(file.mediaType), wantsToMove, isVisible, playChoice == .unset,
+        file.sizeBytes <= AnimationKind.maxAutomaticBytes, file.transfer.state == "remote"
+      else { return }
+      // Cancelled when the tile leaves, so a tile scrolled past fetches nothing; a fetch once started
+      // runs on.
+      try? await Task.sleep(for: AnimationKind.fetchSettle)
+      guard !Task.isCancelled,
+        fetchesOriginalAutomatically(
+          setting: OriginalDownloadSetting.current.setting, isMetered: NetworkMonitor.shared.isMetered),
+        AutoFetchBudget.shared.take(file.sizeBytes)
+      else { return }
+      fetchFile()
+      return
+    }
+    if isMoving {
+      await animation.run(path: path, maxPixels: tileMaxPixels)
+      if animation.hasEnded { playChoice = .paused }
+    } else if animation.maybeMoves == nil {
+      await animation.probe(path: path)
+    }
+  }
+
+  private var tileMaxPixels: CGFloat { (maybeMediaWidth ?? 240) * displayScale }
+
   private func tile(_ image: UIImage) -> some View {
     Color.clear
-      .overlay { Image(uiImage: image).resizable().scaledToFill() }
+      .overlay { Image(uiImage: animation.maybeFrame ?? image).resizable().scaledToFill() }
       .overlay {
         if let hidden = maybeHiddenCount {
           // The pictures beyond the album's tiles; they open in the viewer.
@@ -115,7 +213,7 @@ struct AttachmentView: View {
     let size = bubblePictureSize(image, room: width)
     return Color.clear
       .frame(width: size.width, height: size.height)
-      .overlay { Image(uiImage: image).resizable().scaledToFill() }
+      .overlay { Image(uiImage: animation.maybeFrame ?? image).resizable().scaledToFill() }
       .clipShape(RoundedRectangle(cornerRadius: bubbleMediaCornerRadius, style: .continuous))
       .overlay(alignment: .bottom) {
         if let progress = file.transfer.maybeProgress { ProgressView(value: progress).padding(6) }
@@ -161,6 +259,7 @@ struct AttachmentView: View {
   }
 
   private func preview(_ path: String) {
+    DownloadUse.mark(path)
     maybePreviewURL = VideoFileCheck.previewURL(path: path, mediaType: file.mediaType)
     isPreviewRefused = maybePreviewURL == nil
   }
@@ -461,6 +560,7 @@ struct FilesGalleryView: View {
       } else if file.opensInVideoPlayer {
         maybeVideo = file
       } else if file.transfer.state == "local", let path = file.transfer.path {
+        DownloadUse.mark(path)
         maybePreviewURL = VideoFileCheck.previewURL(path: path, mediaType: file.mediaType)
         isPreviewRefused = maybePreviewURL == nil
       } else if file.transfer.state == "remote" || file.transfer.state == "failed" {

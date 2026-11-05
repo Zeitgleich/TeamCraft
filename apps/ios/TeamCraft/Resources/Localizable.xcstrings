@@ -1,6 +1,150 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "animated_images_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animated images"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animierte Bilder"
+          }
+        }
+      }
+    },
+    "animated_images_autoplay": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatic"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Automatisch"
+          }
+        }
+      }
+    },
+    "animated_images_tap": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On tap"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beim Tippen"
+          }
+        }
+      }
+    },
+    "animated_images_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GIFs and other moving pictures. Automatic fetches them like original images (see above). With Reduce Motion on in the system settings, they don't start by themselves."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GIFs und andere bewegte Bilder. „Automatisch“ lädt sie wie Originalbilder (siehe oben). Ist „Bewegung reduzieren“ in den Systemeinstellungen an, starten sie nicht von selbst."
+          }
+        }
+      }
+    },
+    "animation_play": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play animation"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animation abspielen"
+          }
+        }
+      }
+    },
+    "animation_pause": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pause animation"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animation anhalten"
+          }
+        }
+      }
+    },
+    "animation_state_playing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animated image, playing"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animiertes Bild, wird abgespielt"
+          }
+        }
+      }
+    },
+    "animation_state_paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animated image, paused"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animiertes Bild, angehalten"
+          }
+        }
+      }
+    },
+    "animation_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Didn't load"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht geladen"
+          }
+        }
+      }
+    },
     "video_unplayable": {
       "localizations": {
         "en": {

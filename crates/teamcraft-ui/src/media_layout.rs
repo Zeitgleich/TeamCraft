@@ -205,14 +205,11 @@ pub fn format_duration(duration_ms: u64) -> String {
   }
 }
 
-/// Whether an inline preview downloads the full file: pictures within the size limit do, an
-/// animated one only when the user doesn't ask for reduced motion (its thumbnail stays still then),
-/// and videos never play by themselves.
-pub fn loads_inline(kind: MediaKind, size_bytes: u64, prefers_reduced_motion: bool) -> bool {
-  let fits = size_bytes <= MAX_INLINE_LOAD_BYTES;
+/// Whether an inline preview may download the full file: pictures within the size limit may (an
+/// animated one when it is to move, #201), and videos never play by themselves.
+pub fn loads_inline(kind: MediaKind, size_bytes: u64) -> bool {
   match kind {
-    MediaKind::Image => fits,
-    MediaKind::Animated => fits && !prefers_reduced_motion,
+    MediaKind::Image | MediaKind::Animated => size_bytes <= MAX_INLINE_LOAD_BYTES,
     MediaKind::Video => false,
   }
 }
@@ -351,11 +348,11 @@ mod tests {
   }
 
   #[test]
-  fn only_pictures_within_the_limit_load_and_gifs_not_under_reduced_motion() {
-    assert!(loads_inline(MediaKind::Image, 2_000_000, true));
-    assert!(!loads_inline(MediaKind::Image, MAX_INLINE_LOAD_BYTES + 1, false));
-    assert!(loads_inline(MediaKind::Animated, 900_000, false));
-    assert!(!loads_inline(MediaKind::Animated, 900_000, true));
-    assert!(!loads_inline(MediaKind::Video, 1_000, false));
+  fn only_pictures_within_the_limit_load() {
+    assert!(loads_inline(MediaKind::Image, 2_000_000));
+    assert!(!loads_inline(MediaKind::Image, MAX_INLINE_LOAD_BYTES + 1));
+    assert!(loads_inline(MediaKind::Animated, 900_000));
+    assert!(!loads_inline(MediaKind::Animated, MAX_INLINE_LOAD_BYTES + 1));
+    assert!(!loads_inline(MediaKind::Video, 1_000));
   }
 }

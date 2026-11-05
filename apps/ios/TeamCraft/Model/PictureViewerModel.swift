@@ -245,9 +245,11 @@ final class PictureViewerModel {
       guard files[key] != nil else { return }
       if let image = maybeImage {
         originals[key] = image
-      } else {
+      } else if FileManager.default.fileExists(atPath: path) {
         unreadable.insert(key)
       }
+      // A file that is gone (the core trimmed its downloads) isn't unreadable: the core shows it as
+      // remote again, and the viewer fetches or offers the original.
     }
   }
 }
@@ -261,6 +263,7 @@ enum PictureDecoder {
   }
 
   static func decode(path: String, maxPixels: CGFloat) -> UIImage? {
+    DownloadUse.mark(path)
     let url = URL(fileURLWithPath: path)
     guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
     else { return nil }
@@ -272,5 +275,13 @@ enum PictureDecoder {
     ]
     guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
     return UIImage(cgImage: image)
+  }
+}
+
+/// The core trims its download folder least recently used first, by the files' modification time:
+/// opening a file counts as using it.
+enum DownloadUse {
+  static func mark(_ path: String) {
+    try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path)
   }
 }
