@@ -31,7 +31,7 @@
 //! it.
 
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -651,6 +651,21 @@ fn status_response(status: StatusCode) -> ErrorResponse {
   let mut response = ErrorResponse::new(None);
   *response.status_mut() = status;
   response
+}
+
+/// Warns when the listener is on every address while only a proxy on this machine is trusted
+/// ([`FallbackConfig::listens_wider_than_its_proxies`]): the container image's `[::]:8082` run with
+/// host networking, or behind a proxy in another container that isn't listed (#1226).
+pub(crate) fn warn_if_listening_wider_than_its_proxies(config: &FallbackConfig, addr: SocketAddr) {
+  if config.listens_wider_than_its_proxies(addr) {
+    warn!(
+      %addr,
+      "the call fallback listens on every address but trusts only a proxy on this machine: with \
+       host networking set TEAMCRAFT_SFU_FALLBACK_BIND to a loopback address (it is plain HTTP for \
+       the proxy alone), behind a proxy in another container list it in \
+       TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES"
+    );
+  }
 }
 
 /// Warns when the process may run out of descriptors before the fallback hits its limits. Running

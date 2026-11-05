@@ -235,6 +235,7 @@ impl Sfu {
     let maybe_fallback_listener = config.fallback.maybe_bind_addr.and_then(|addr| {
       bind_dual_stack(addr)
         .inspect_err(|error| error!(%addr, %error, "no call fallback: its port can't be bound"))
+        .inspect(|_| fallback::warn_if_listening_wider_than_its_proxies(&config.fallback, addr))
         .ok()
     });
     if maybe_fallback_listener.is_some() {
