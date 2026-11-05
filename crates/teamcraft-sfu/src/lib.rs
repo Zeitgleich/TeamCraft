@@ -24,3 +24,4 @@ pub mod room;
 pub mod server;
 pub mod signaling;
 pub mod speakers;
+mod switch;

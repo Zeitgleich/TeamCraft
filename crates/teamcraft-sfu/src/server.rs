@@ -19,7 +19,8 @@
 //! client that didn't come back) can't keep a device in a call for good.
 //!
 //! Networks that block UDP reach the same rooms through the WebSocket fallback ([`crate::fallback`]),
-//! admitted by the same [`admit`].
+//! admitted by the same [`admit`]. A session there moves to a QUIC connection once one gets through
+//! ([`crate::switch`], #1309): that connection starts with `switch` instead of `join`.
 
 use std::{
   future::Future,
@@ -34,11 +35,12 @@ use std::{
 use socket2::{Domain, Protocol, Socket, Type};
 use teamcraft_proto::{
   CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, ErrorBody, ErrorCode,
-  SFU_GOING_AWAY_CLOSE_CODE, SfuControlRequest, SfuRosterReport,
+  SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, SfuControlRequest, SfuRosterReport,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 use wtransport::{
@@ -52,11 +54,12 @@ use crate::{
   config::SfuConfig,
   fallback,
   net::bind_dual_stack,
-  prejoin::PreJoinLimiter,
+  prejoin::{PreJoinLimiter, PreJoinSlot},
   rejoin::{RejoinLimiter, RejoinTurn},
   reporting::{NoReporter, ParticipantReporter},
-  room::{JoinOutcome, ParticipantHandle, Room, RoomError, RoomStats, Rooms, SessionId},
-  signaling::{EventSequence, Outgoing, SignalingError, read_message, write_message},
+  room::{JoinOutcome, ParticipantHandle, ParticipantLink, Room, RoomError, RoomStats, Rooms, SessionId},
+  signaling::{Dequeued, Handover, Outgoing, SignalQueue, SignalingError, read_message, write_message},
+  switch::{SwitchRegistration, SwitchSecret, SwitchSecrets, SwitchTarget},
 };
 
 /// How often senders get feedback on their datagrams (uplink bandwidth estimation) and layer
@@ -99,6 +102,8 @@ pub(crate) struct Shared {
   pub(crate) fallback_connections: AtomicUsize,
   /// Told the operator of a forwarded address from somebody who isn't a trusted proxy.
   pub(crate) has_warned_of_forwarding: AtomicBool,
+  /// The secrets that move running sessions to another connection (#1309).
+  pub(crate) switch_secrets: SwitchSecrets,
 }
 
 /// Carries out meeting host controls on this SFU's calls (see [`crate::control`]).
@@ -148,6 +153,35 @@ pub(crate) struct Admitted {
   pub(crate) room: Arc<Room>,
   pub(crate) grant: JoinGrant,
   pub(crate) session_id: SessionId,
+  /// What its `joined` carried, to keep while the session runs ([`register_switch`]).
+  pub(crate) maybe_switch_secret: Option<SwitchSecret>,
+}
+
+/// The writer task of a QUIC session's signaling stream.
+struct SessionWriter {
+  task: JoinHandle<WriterEnd>,
+  /// It has the session's queue: from the start, or once the connection it took the session over
+  /// from handed it on.
+  has_queue: Arc<AtomicBool>,
+}
+
+/// Why a QUIC session's signaling writer stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriterEnd {
+  /// The stream failed, or the queue ended with the session.
+  Stopped,
+  /// The session moved to another connection, and the queue went there (#1309).
+  HandedOver,
+  /// The connection this one took the session over from went before handing on its queue.
+  Orphaned,
+}
+
+/// How serving a QUIC session ended, short of an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Served {
+  Ended,
+  HandedOver,
+  Orphaned,
 }
 
 /// A first frame the session is refused for: what to tell the client, and how the session ended.
@@ -223,6 +257,7 @@ impl Sfu {
         roster_now: Arc::new(Notify::new()),
         fallback_connections: AtomicUsize::new(0),
         has_warned_of_forwarding: AtomicBool::new(false),
+        switch_secrets: SwitchSecrets::default(),
       }),
     })
   }
@@ -407,6 +442,10 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   .await
   .map_err(|_| SessionError::JoinTimeout)??;
 
+  if let CallClientMessage::Switch { secret } = &first {
+    return take_over(shared, connection, (send, recv), secret.as_slice(), prejoin_slot).await;
+  }
+
   let (signal_tx, signal_rx) = mpsc::channel(shared.config.signaling_queue_len.max(1));
   let handle = ParticipantHandle {
     link: Arc::new(connection.clone()),
@@ -416,6 +455,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     room,
     grant,
     session_id,
+    maybe_switch_secret,
   } = match admit(shared, first, handle).await {
     Admission::Admitted(admitted) => admitted,
     Admission::Refused(refusal) => {
@@ -425,11 +465,86 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   };
 
   drop(prejoin_slot);
+  let handover = Arc::new(Handover::default());
+  let registration = register_switch(shared, maybe_switch_secret, &room, grant, session_id, &handover);
   let session = ParticipantSession::new(Arc::clone(&room), grant, signal_tx, shared);
-  let (end, result) = session.run(connection, send, recv, signal_rx).await;
+  let writer = SessionWriter::spawn(send, SignalQueue::new(signal_rx, handover));
+  let (end, result) = session.run(connection, recv, writer).await;
+  drop(session);
+  // The connection is gone: so is the way to move it.
+  drop(registration);
+  release_slot(shared, &room, grant, session_id, end).await;
+  result
+}
+
+/// A connection that takes over a session of its client instead of joining (#1309): `secret` is
+/// what that session's `joined` carried. It went through the same limits before this as a join,
+/// but it needs no token and takes no turn of the join pace: nobody joins, nothing re-keys. The
+/// answer is `switched` (or an error, then the close), and the first thing on the stream; the
+/// session's events follow once the old connection sent what was queued for it.
+async fn take_over(
+  shared: &Shared,
+  connection: Connection,
+  (mut send, recv): (SendStream, RecvStream),
+  secret: &[u8],
+  prejoin_slot: PreJoinSlot,
+) -> Result<(), SessionError> {
+  let Some(SwitchTarget {
+    room,
+    grant,
+    session_id: from,
+    handover,
+  }) = shared.switch_secrets.take(secret)
+  else {
+    debug!("switch refused: no running session has this secret");
+    let error = ErrorBody::new(ErrorCode::InvalidJoinToken, "no session to take over");
+    reject(&mut send, CallServerMessage::Error { error }).await;
+    return Ok(());
+  };
+  let arrives = handover.prepare();
+  let link: Arc<dyn ParticipantLink> = Arc::new(connection.clone());
+  let (session_id, signal_tx) = match shared.rooms.switch(&room, grant.device_id, from, link) {
+    Ok(switched) => switched,
+    Err(error) => {
+      handover.cancel();
+      debug!(call_id = %grant.call_id, participant_id = %grant.device_id, %error, "switch refused");
+      let error = ErrorBody::new(ErrorCode::Unavailable, error.to_string());
+      reject(&mut send, CallServerMessage::Error { error }).await;
+      return Ok(());
+    },
+  };
+  // Only the old connection's queue may hold on to it: when that goes unsent, so does the queue.
+  drop(handover);
+  drop(prejoin_slot);
+  if let Err(error) = write_message(&mut send, &CallServerMessage::Switched).await {
+    // Reading tells how the connection went.
+    debug!(%error, "could not confirm a switch");
+  }
+  let session = ParticipantSession::new(Arc::clone(&room), grant, signal_tx, shared);
+  let writer = SessionWriter::spawn_taken_over(send, arrives);
+  let (end, result) = session.run(connection, recv, writer).await;
   drop(session);
   release_slot(shared, &room, grant, session_id, end).await;
   result
+}
+
+/// Keeps the secret `joined` carried while the session runs, so its client can move it to another
+/// connection (#1309). `None` without a secret.
+pub(crate) fn register_switch<'a>(
+  shared: &'a Shared,
+  maybe_secret: Option<SwitchSecret>,
+  room: &Arc<Room>,
+  grant: JoinGrant,
+  session_id: SessionId,
+  handover: &Arc<Handover>,
+) -> Option<SwitchRegistration<'a>> {
+  let target = SwitchTarget {
+    room: Arc::clone(room),
+    grant,
+    session_id,
+    handover: Arc::clone(handover),
+  };
+  shared.switch_secrets.register(maybe_secret?, target)
 }
 
 /// The join every session starts with, whichever transport brought it: the first message must be
@@ -483,7 +598,10 @@ pub(crate) async fn admit(shared: &Shared, first: CallClientMessage, handle: Par
       });
     },
   }
-  let (room, session_id, outcome) = match shared.rooms.join(grant, capabilities, handle) {
+  // In `joined`, for this session only: a client on the fallback moves it to QUIC with it (#1309).
+  let maybe_switch_secret = SwitchSecret::random();
+  let maybe_wire_secret = maybe_switch_secret.as_ref().map(SwitchSecret::to_wire);
+  let (room, session_id, outcome) = match shared.rooms.join(grant, capabilities, handle, maybe_wire_secret) {
     Ok(joined) => joined,
     Err(error) => {
       let code = match error {
@@ -513,6 +631,7 @@ pub(crate) async fn admit(shared: &Shared, first: CallClientMessage, handle: Par
     room,
     grant,
     session_id,
+    maybe_switch_secret,
   })
 }
 
@@ -595,18 +714,28 @@ impl ParticipantSession {
     }
   }
 
-  /// Runs a QUIC session until the client disconnects or violates the protocol.
+  /// Runs a QUIC session until the client disconnects or violates the protocol, or the session
+  /// moves to another connection.
   async fn run(
     &self,
     connection: Connection,
-    send: SendStream,
     recv: RecvStream,
-    signal_rx: mpsc::Receiver<Outgoing>,
+    writer: SessionWriter,
   ) -> (SessionEnd, Result<(), SessionError>) {
-    let result = self.serve(&connection, send, recv, signal_rx).await;
+    let SessionWriter { mut task, has_queue } = writer;
+    let result = self.serve(&connection, recv, &mut task).await;
+    task.abort();
     // A failed stream read says little; the connection's close reason tells a loss from a close.
     // Still open means the session failed on its own (a protocol violation): closed by us.
     let end = match &result {
+      Ok(Served::HandedOver) => {
+        // Everything queued for it went out: the client reads up to this close, then the new one.
+        ParticipantLink::close_gracefully(&connection, SFU_SWITCHED_CLOSE_CODE, b"switched").await;
+        SessionEnd::Closed
+      },
+      Ok(Served::Orphaned) => SessionEnd::Lost,
+      // It took the session over, but its events never came: the client rejoins into the slot.
+      _ if !has_queue.load(Ordering::Acquire) => SessionEnd::Lost,
       Err(SessionError::Connection(error)) => session_end(error),
       _ => match tokio::time::timeout(Duration::ZERO, connection.closed()).await {
         Ok(error) => session_end(&error),
@@ -619,17 +748,15 @@ impl ParticipantSession {
       ?end,
       "session closed"
     );
-    (end, result)
+    (end, result.map(|_| ()))
   }
 
   async fn serve(
     &self,
     connection: &Connection,
-    send: SendStream,
     mut recv: RecvStream,
-    signal_rx: mpsc::Receiver<Outgoing>,
-  ) -> Result<(), SessionError> {
-    let writer = tokio::spawn(write_signaling(send, signal_rx));
+    writer: &mut JoinHandle<WriterEnd>,
+  ) -> Result<Served, SessionError> {
     let signaling = async {
       loop {
         let message = read_message::<CallClientMessage>(&mut recv, self.max_bytes).await?;
@@ -642,13 +769,20 @@ impl ParticipantSession {
         self.on_datagram(&datagram.payload());
       }
     };
-    let result: Result<(), SessionError> = tokio::select! {
+    let written = async {
+      match writer.await {
+        Ok(WriterEnd::HandedOver) => Served::HandedOver,
+        Ok(WriterEnd::Orphaned) => Served::Orphaned,
+        // A broken stream shows on the reading side too, with the connection's close reason.
+        Ok(WriterEnd::Stopped) | Err(_) => std::future::pending().await,
+      }
+    };
+    tokio::select! {
       result = signaling => result,
       result = media => result,
-      () = self.periodic() => Ok(()),
-    };
-    writer.abort();
-    result
+      () = self.periodic() => Ok(Served::Ended),
+      served = written => Ok(served),
+    }
   }
 
   /// One media datagram from the client.
@@ -715,14 +849,52 @@ fn session_end(error: &wtransport::error::ConnectionError) -> SessionEnd {
   }
 }
 
-async fn write_signaling(mut send: SendStream, mut signal_rx: mpsc::Receiver<Outgoing>) {
-  let mut sequence = EventSequence::default();
-  while let Some(outgoing) = signal_rx.recv().await {
-    if let Err(error) = write_message(&mut send, &sequence.frame(outgoing)).await {
-      debug!(%error, "signaling write failed");
-      return;
+impl SessionWriter {
+  /// The writer of a session that starts on this connection.
+  fn spawn(send: SendStream, queue: SignalQueue) -> Self {
+    Self {
+      task: tokio::spawn(write_signaling(send, queue)),
+      has_queue: Arc::new(AtomicBool::new(true)),
     }
   }
+
+  /// The writer of a session this connection took over: it writes once the old connection sent
+  /// what was queued for it and handed the queue on.
+  fn spawn_taken_over(send: SendStream, arrives: oneshot::Receiver<SignalQueue>) -> Self {
+    let has_queue = Arc::new(AtomicBool::new(false));
+    let marking = Arc::clone(&has_queue);
+    let task = tokio::spawn(async move {
+      match arrives.await {
+        Ok(queue) => {
+          marking.store(true, Ordering::Release);
+          write_signaling(send, queue).await
+        },
+        Err(_) => WriterEnd::Orphaned,
+      }
+    });
+    Self { task, has_queue }
+  }
+}
+
+/// Writes the session's queue to the stream until it fails or the session moves on.
+async fn write_signaling(mut send: SendStream, mut queue: SignalQueue) -> WriterEnd {
+  while let Some(next) = queue.next().await {
+    match next {
+      Dequeued::Message(message) => {
+        if let Err(error) = write_message(&mut send, &message).await {
+          debug!(%error, "signaling write failed");
+          return WriterEnd::Stopped;
+        }
+      },
+      Dequeued::HandOver => {
+        if !queue.hand_over() {
+          debug!("the connection the session moved to went first");
+        }
+        return WriterEnd::HandedOver;
+      },
+    }
+  }
+  WriterEnd::Stopped
 }
 
 async fn reject(send: &mut SendStream, refusal: CallServerMessage) {

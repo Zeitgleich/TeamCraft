@@ -12,6 +12,13 @@
 //! nothing else changes. If the path then stays silent, or it breaks in any other way, or the SFU
 //! goes away (a restart, a deploy), the driver gets a fresh join ticket and rejoins on a new
 //! connection within the SFU's grace period; devices, mute state and tracks carry over.
+//!
+//! A call that had to take the WebSocket fallback tries QUIC again now and then (#1309,
+//! [`QuicRetrySchedule`]). When a QUIC connection opens, it asks the SFU to move the session over
+//! (`switch`, with the secret of the session's `joined`). Once the SFU says `switched`, everything
+//! goes out on QUIC, and the fallback is read up to its close: the events queued for it come
+//! first, so the engine sees one sequence without a gap. The call never leaves its slot or its DAVE
+//! group, and the others notice nothing.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -27,8 +34,9 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 use teamcraft_net::{ATTEMPT_DELAY, RaceError, interleave, race};
 use teamcraft_proto::{
-  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, VideoCodec,
-  VideoLayerInfo, VideoPublicationId, VideoTrackKind, fallback_protocols,
+  Base64Bytes, CallClientMessage, CallServerMessage, DeviceId, ErrorCode, MediaStreamId,
+  SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, VideoCodec, VideoLayerInfo, VideoPublicationId,
+  VideoTrackKind, fallback_protocols,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -54,8 +62,8 @@ use crate::call_engine::{
   OwnPublication, OwnVideoEnd, VideoSendOutcome, VideoStats,
 };
 use crate::call_resilience::{
-  CallTransport, JoinTicket, JoinTicketError, PathMonitor, PathState, ReconnectSchedule, RejoinPacer,
-  ResilienceConfig, connect_preferring_quic, fallback_delay, rejoin_attempt,
+  CallTransport, JoinTicket, JoinTicketError, PathMonitor, PathState, QuicRetrySchedule, ReconnectSchedule,
+  RejoinPacer, ResilienceConfig, connect_preferring_quic, fallback_delay, rejoin_attempt,
 };
 use crate::fallback_link::{
   FallbackOpener, LoopbackOpener, SignalFrames, SocketEnd, SocketInput, is_allowed_url, is_going_away,
@@ -96,6 +104,11 @@ const ROUTE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often the video counters are logged (debug) while own or others' video flows.
 const VIDEO_LOG_INTERVAL: Duration = Duration::from_secs(10);
+/// After the SFU moved the session to QUIC, the fallback has this long to bring what was queued for
+/// it, up to its close (#1309); a link that doesn't is lost, and the call rejoins.
+const SWITCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Datagrams that come on a new QUIC connection before the SFU's `switched`, kept for the engine.
+const MAX_EARLY_DATAGRAMS: usize = 256;
 
 /// A running call.
 pub struct NativeCall {
@@ -749,7 +762,7 @@ async fn run_call(
   engine.join(config.token.clone());
   let mut maybe_screen_audio: Option<ScreenAudio> = None;
   let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel::<(VideoTrackKind, EncodedVideoFrame)>();
-  sinks.flush(&mut engine, &mut capture, connection.maybe_link.as_ref())?;
+  sinks.flush(&mut engine, &mut capture, connection.sending_link())?;
 
   // The sound the call ends with when it is left by choice (the hang-up tone).
   let mut maybe_farewell = None;
@@ -769,6 +782,27 @@ async fn run_call(
         ConnectionEvent::Input(LinkInput::Ended(LinkEnd::GoingAway)) => {
           connection.lose_to_going_away(&mut engine, Instant::now());
         },
+        // The fallback brought everything queued for it: the call goes on on QUIC (#1309).
+        ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Switched)) => {
+          let now = Instant::now();
+          match connection.finish_switch(&mut engine, now).await {
+            Some(early) => {
+              sinks.use_transport(CallTransport::Quic, quic_jitter);
+              for datagram in early {
+                engine.handle_datagram(&datagram, now);
+              }
+            },
+            None => connection.lose(&mut engine, now),
+          }
+        },
+        ConnectionEvent::SwitchDue => connection.start_switch(&engine),
+        ConnectionEvent::SwitchTried(Ok(SwitchedLink { link, early })) => {
+          connection.begin_switch(link, Instant::now());
+          for datagram in early {
+            engine.handle_datagram(&datagram, Instant::now());
+          }
+        },
+        ConnectionEvent::SwitchTried(Err(error)) => connection.on_failed_switch(error, Instant::now()),
         ConnectionEvent::AttemptDue => connection.start_attempt(),
         ConnectionEvent::AttemptFinished(Ok((link, ticket))) => {
           sinks.use_transport(link.transport(), quic_jitter);
@@ -914,7 +948,7 @@ async fn run_call(
         }
       },
     }
-    if let Err(error) = sinks.flush(&mut engine, &mut capture, connection.maybe_link.as_ref()) {
+    if let Err(error) = sinks.flush(&mut engine, &mut capture, connection.sending_link()) {
       break Err(error);
     }
     if engine.take_roster_request()
@@ -932,6 +966,7 @@ async fn run_call(
       connection.refused(&mut engine, retry_after, Instant::now());
     }
     connection.settle(&engine, Instant::now());
+    connection.plan_switch(&engine, Instant::now());
   };
 
   if let Some(mut screen_audio) = maybe_screen_audio {
@@ -980,6 +1015,47 @@ struct CallConnection {
   /// What the current (or last) link went over: a rejoin needn't wait for QUIC if that was the
   /// fallback.
   transport: CallTransport,
+  /// Back to QUIC without a rejoin while on the fallback (#1309).
+  switch: SwitchBack,
+}
+
+/// Moving a call on the fallback back to QUIC without a rejoin (#1309).
+#[derive(Default)]
+struct SwitchBack {
+  /// When to try next; `None` while the call isn't on the fallback, or can't move.
+  maybe_schedule: Option<QuicRetrySchedule>,
+  maybe_try: Option<JoinHandle<SwitchTry>>,
+  /// The QUIC link the SFU moved the session to, while the fallback still brings what was queued
+  /// for it; and since when.
+  maybe_moving: Option<(Link, Instant)>,
+  /// The SFU doesn't know `switch` (it is from before #1309): no more tries in this call.
+  is_unsupported: bool,
+}
+
+/// What a try to move the call to QUIC came to.
+type SwitchTry = Result<SwitchedLink, SwitchError>;
+
+/// A QUIC connection the SFU moved the session to.
+struct SwitchedLink {
+  link: Link,
+  /// The datagrams that came before the SFU's answer, for the engine.
+  early: Vec<Bytes>,
+}
+
+/// Why a try to move the call to QUIC didn't.
+#[derive(Debug, Error)]
+enum SwitchError {
+  #[error("QUIC didn't connect: {0}")]
+  Connect(NativeCallError),
+  /// It doesn't know `switch`.
+  #[error("the SFU can't move a session")]
+  Unsupported,
+  #[error("the SFU refused the switch: {0:?}")]
+  Refused(ErrorCode),
+  /// Nothing came in time. The SFU may have moved the session all the same: the link stays open
+  /// until the call is sure (it reads the fallback up to its close, or rejoins).
+  #[error("no answer to the switch")]
+  NoAnswer(Box<Link>),
 }
 
 /// What a new link needs besides its ticket.
@@ -1030,6 +1106,10 @@ enum ConnectionEvent {
   /// Time for the next rejoin attempt.
   AttemptDue,
   AttemptFinished(Result<(Link, JoinTicket), NativeCallError>),
+  /// Time to try QUIC again from the fallback (#1309).
+  SwitchDue,
+  /// A QUIC connection the SFU moved the session to, or why not.
+  SwitchTried(SwitchTry),
 }
 
 /// What arrives on a link.
@@ -1049,6 +1129,9 @@ enum LinkEnd {
   /// The SFU is shutting down (a restart, a deploy): rejoin, after a random part of a short
   /// spread so the restarted SFU doesn't get every client at once.
   GoingAway,
+  /// The SFU moved the session to another connection (#1309): everything queued for this one came
+  /// before the close.
+  Switched,
 }
 
 impl CallConnection {
@@ -1073,19 +1156,20 @@ impl CallConnection {
       maybe_ticket_source: config.maybe_ticket_source.clone(),
       maybe_fallback_opener: config.maybe_fallback_opener.clone(),
       transport,
+      switch: SwitchBack::default(),
     }
   }
 
-  /// The next input of the current link, or else the next step of rejoining; pending while
-  /// there is nothing to wait for.
+  /// The next input of the current link (or the next step of moving it to QUIC), or else the next
+  /// step of rejoining; pending while there is nothing to wait for.
   async fn next_event(&mut self) -> ConnectionEvent {
     if let Some(link) = &mut self.maybe_link {
-      let input = link
-        .inputs
-        .recv()
-        .await
-        .unwrap_or(LinkInput::Ended(LinkEnd::Lost));
-      return ConnectionEvent::Input(input);
+      tokio::select! {
+        maybe_input = link.inputs.recv() => {
+          return ConnectionEvent::Input(maybe_input.unwrap_or(LinkInput::Ended(LinkEnd::Lost)));
+        },
+        event = self.switch.next_event() => return event,
+      }
     }
     if let Some(attempt) = &mut self.maybe_attempt {
       let result = attempt.await.unwrap_or(Err(NativeCallError::TaskEnded));
@@ -1109,6 +1193,11 @@ impl CallConnection {
     warn!("lost the connection to the call, rejoining");
     link.stop_reading();
     self.lost_links.push(link);
+    // A link the session may have moved to is the SFU's slot as well: kept open, as lost ones are.
+    if let Some(moving) = self.switch.stop() {
+      moving.stop_reading();
+      self.lost_links.push(moving);
+    }
     let was_in_call = engine.is_in_call();
     engine.connection_lost();
     let resilience = self.resilience;
@@ -1151,6 +1240,16 @@ impl CallConnection {
     let Some(link) = &self.maybe_link else {
       return;
     };
+    if self
+      .switch
+      .maybe_moving
+      .as_ref()
+      .is_some_and(|(_, since)| now.saturating_duration_since(*since) >= SWITCH_DRAIN_TIMEOUT)
+    {
+      warn!("the fallback didn't bring what was queued for it after the move to QUIC");
+      self.lose(engine, now);
+      return;
+    }
     self.monitor.on_received_packets(link.received_packets(), now);
     // A TCP connection can't move: on another route it goes silent, and the check below sees that.
     if let Some(remote) = link.maybe_quic_remote()
@@ -1255,15 +1354,239 @@ impl CallConnection {
       .map_or(0, ReconnectSchedule::attempts)
   }
 
+  /// Where the engine's output goes: the link the session moved to as soon as the SFU said so
+  /// (#1309), while the fallback is still read up to its close.
+  fn sending_link(&self) -> Option<&Link> {
+    match &self.switch.maybe_moving {
+      Some((link, _)) => Some(link),
+      None => self.maybe_link.as_ref(),
+    }
+  }
+
+  /// Keeps QUIC tries planned while the call is on the fallback and in it, and the SFU gave a
+  /// secret to move it with; none otherwise.
+  fn plan_switch(&mut self, engine: &CallEngine, now: Instant) {
+    let may_try = self.transport == CallTransport::Fallback
+      && self.maybe_link.is_some()
+      && self.maybe_schedule.is_none()
+      && engine.maybe_switch_secret().is_some()
+      && !self.switch.is_unsupported;
+    if !may_try {
+      if self.switch.maybe_try.is_none() && self.switch.maybe_moving.is_none() {
+        self.switch.maybe_schedule = None;
+      }
+      return;
+    }
+    if self.switch.maybe_schedule.is_none() {
+      debug!("on the fallback: QUIC is tried again later");
+      self.switch.maybe_schedule = Some(QuicRetrySchedule::new(now, &self.resilience));
+    }
+  }
+
+  /// Time for a QUIC try (#1309): a connection to the ticket's SFU that asks to take the session
+  /// over.
+  fn start_switch(&mut self, engine: &CallEngine) {
+    let maybe_secret = engine.maybe_switch_secret().cloned();
+    let is_due = self.transport == CallTransport::Fallback
+      && self.maybe_link.is_some()
+      && self.switch.maybe_try.is_none()
+      && self.switch.maybe_moving.is_none();
+    let (Some(secret), true) = (maybe_secret, is_due) else {
+      // Planned again once it may try.
+      self.switch.maybe_schedule = None;
+      return;
+    };
+    debug!("trying QUIC again");
+    let hashes = accepted_hashes(self.maybe_pinned_hash, &self.ticket.certificate_hashes);
+    let sfu_url = self.ticket.sfu_url.clone();
+    let resilience = self.resilience;
+    // Not due again while it runs: its end plans the next one.
+    self.switch.maybe_try = Some(tokio::spawn(async move {
+      try_switch(&sfu_url, &hashes, &resilience, secret).await
+    }));
+  }
+
+  /// The SFU moved the session to `link` (#1309): the engine's output goes there from now on, and
+  /// the fallback is read up to its close.
+  fn begin_switch(&mut self, link: Link, now: Instant) {
+    if self.maybe_link.is_none() {
+      // Lost meanwhile: kept open like the lost link, for the rejoin.
+      link.stop_reading();
+      self.lost_links.push(link);
+      return;
+    }
+    info!("QUIC gets through again: the call moves to it");
+    self.switch.maybe_moving = Some((link, now));
+  }
+
+  /// The fallback closed after everything queued for it: the call goes on on QUIC. Returns the
+  /// datagrams that came on QUIC before the SFU's answer, if they haven't gone to the engine yet.
+  /// `None` if no move was under way (the SFU moved the session to a link this client gave up on):
+  /// that is a loss.
+  async fn finish_switch(&mut self, engine: &mut CallEngine, now: Instant) -> Option<Vec<Bytes>> {
+    let mut early = Vec::new();
+    if self.switch.maybe_moving.is_none() {
+      // The fallback's close can overtake the try's end, which is due by now: the SFU answered
+      // on QUIC before it closed the fallback.
+      let maybe_tried = match self.switch.maybe_try.take() {
+        Some(running) => Some(
+          running
+            .await
+            .unwrap_or(Err(SwitchError::Connect(NativeCallError::TaskEnded))),
+        ),
+        None => None,
+      };
+      match maybe_tried {
+        Some(Ok(switched)) => {
+          self.begin_switch(switched.link, now);
+          early = switched.early;
+        },
+        Some(Err(error)) => {
+          self.on_failed_switch(error, now);
+          warn!("the SFU moved the call to a connection whose answer didn't come");
+          return None;
+        },
+        None => {
+          warn!("the SFU moved the call to a connection this client gave up on");
+          return None;
+        },
+      }
+    }
+    let (link, _) = self.switch.maybe_moving.take()?;
+    if let Some(old) = self.maybe_link.replace(link) {
+      old.stop_reading();
+      // The SFU reads it until this, for what was sent before the move.
+      old.close_as_leave();
+    }
+    self.transport = CallTransport::Quic;
+    self.monitor = PathMonitor::new(now);
+    self.route = RouteWatch::new();
+    self.switch.maybe_schedule = None;
+    engine.moved_to_another_path();
+    info!("the call moved to QUIC");
+    Some(early)
+  }
+
+  /// A QUIC try that didn't move the call.
+  fn on_failed_switch(&mut self, error: SwitchError, now: Instant) {
+    match error {
+      SwitchError::Unsupported => {
+        info!("the SFU can't move the call back to QUIC: it stays on the fallback");
+        self.switch.is_unsupported = true;
+        self.switch.maybe_schedule = None;
+        return;
+      },
+      SwitchError::NoAnswer(link) => {
+        debug!("no answer to the switch in time");
+        // If the SFU moved the session after all, it is its slot: kept open, as lost links are.
+        link.stop_reading();
+        self.lost_links.push(*link);
+      },
+      error @ (SwitchError::Connect(_) | SwitchError::Refused(_)) => debug!(%error, "QUIC try failed"),
+    }
+    if let Some(schedule) = &mut self.switch.maybe_schedule {
+      schedule.on_failed_try(now, &self.resilience);
+    }
+  }
+
   /// Leaves: the SFU frees the slot at once.
-  fn close(self) {
+  fn close(mut self) {
     if let Some(attempt) = self.maybe_attempt {
       attempt.abort();
     }
-    for link in self.maybe_link.into_iter().chain(self.lost_links) {
+    let maybe_moving = self.switch.stop();
+    for link in self
+      .maybe_link
+      .into_iter()
+      .chain(maybe_moving)
+      .chain(self.lost_links)
+    {
       link.stop_reading();
       link.close_as_leave();
     }
+  }
+}
+
+impl SwitchBack {
+  /// The end of the running try, or the time for the next; pending while the session moves, or
+  /// while there is nothing to try.
+  async fn next_event(&mut self) -> ConnectionEvent {
+    if let Some(running) = &mut self.maybe_try {
+      let result = running
+        .await
+        .unwrap_or(Err(SwitchError::Connect(NativeCallError::TaskEnded)));
+      self.maybe_try = None;
+      return ConnectionEvent::SwitchTried(result);
+    }
+    match (&self.maybe_moving, &self.maybe_schedule) {
+      (None, Some(schedule)) => {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(schedule.next_try_at())).await;
+        ConnectionEvent::SwitchDue
+      },
+      _ => std::future::pending().await,
+    }
+  }
+
+  /// Stops trying (the link is gone, or the call ends); returns the link the session was moving
+  /// to, if it was. Whether the SFU can move sessions at all stays known.
+  fn stop(&mut self) -> Option<Link> {
+    if let Some(running) = self.maybe_try.take() {
+      running.abort();
+    }
+    self.maybe_schedule = None;
+    self.maybe_moving.take().map(|(link, _)| link)
+  }
+}
+
+/// One try to move the call to QUIC (#1309): a connection to the SFU whose first message is
+/// `switch` with `secret`. The SFU's `switched` makes it the call's; a refusal, or no answer within
+/// [`ResilienceConfig::switch_answer_timeout`], keeps the call where it is. Media may come before the
+/// answer (the SFU sends it on the new link at once): it goes back with the link.
+async fn try_switch(
+  sfu_url: &str,
+  certificate_hashes: &[[u8; 32]],
+  resilience: &ResilienceConfig,
+  secret: Base64Bytes,
+) -> SwitchTry {
+  let mut link = Link::open(sfu_url, certificate_hashes, resilience)
+    .await
+    .map_err(SwitchError::Connect)?;
+  if link
+    .signal_out
+    .send(CallClientMessage::Switch { secret })
+    .is_err()
+  {
+    return Err(SwitchError::Connect(NativeCallError::TaskEnded));
+  }
+  let mut early = Vec::new();
+  let answer = async {
+    loop {
+      match link.inputs.recv().await {
+        Some(LinkInput::Datagram(datagram)) => {
+          if early.len() < MAX_EARLY_DATAGRAMS {
+            early.push(datagram);
+          }
+        },
+        other => return other,
+      }
+    }
+  };
+  let answer = tokio::time::timeout(resilience.switch_answer_timeout, answer).await;
+  match answer {
+    Ok(Some(LinkInput::Signal(CallServerMessage::Switched))) => Ok(SwitchedLink { link, early }),
+    // What an SFU from before says to anything but `join`.
+    Ok(Some(LinkInput::Signal(CallServerMessage::Error { error })))
+      if error.error_code == ErrorCode::ProtocolViolation =>
+    {
+      Err(SwitchError::Unsupported)
+    },
+    Ok(Some(LinkInput::Signal(CallServerMessage::Error { error }))) => {
+      Err(SwitchError::Refused(error.error_code))
+    },
+    Ok(_) => Err(SwitchError::Connect(NativeCallError::Connect(
+      "the SFU closed the connection without an answer".into(),
+    ))),
+    Err(_) => Err(SwitchError::NoAnswer(Box::new(link))),
   }
 }
 
@@ -1304,6 +1627,14 @@ fn local_route_to(remote: SocketAddr) -> Option<IpAddr> {
   let socket = UdpSocket::bind(SocketAddr::new(unspecified, 0)).ok()?;
   socket.connect(remote).ok()?;
   Some(socket.local_addr().ok()?.ip())
+}
+
+impl std::fmt::Debug for Link {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("Link")
+      .field("transport", &self.transport())
+      .finish_non_exhaustive()
+  }
 }
 
 impl Drop for Link {
@@ -1593,6 +1924,8 @@ fn link_end(error: &ConnectionError) -> LinkEnd {
 fn application_close_end(code: u64) -> LinkEnd {
   if code == u64::from(SFU_GOING_AWAY_CLOSE_CODE) {
     LinkEnd::GoingAway
+  } else if code == u64::from(SFU_SWITCHED_CLOSE_CODE) {
+    LinkEnd::Switched
   } else if H3_ERROR_CODES.contains(&code) {
     LinkEnd::Lost
   } else {

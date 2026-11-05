@@ -4,6 +4,10 @@
 //! The tests marked `#[ignore]` need UDP really gone: `scripts/sfu-no-udp-test.sh` runs them in a
 //! network namespace of their own with an nft rule that drops every UDP packet. The others stand in
 //! a black-holed QUIC port with a UDP socket that swallows everything, so they run anywhere.
+//!
+//! A call on the fallback moves back to QUIC without a rejoin once UDP gets through (#1309,
+//! `switch_back`): a gate in front of the QUIC port that drops everything until it opens stands in
+//! for the VPN that went away.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::field_reassign_with_default)]
 
@@ -865,6 +869,443 @@ mod quality {
   }
 }
 
+/// A call on the fallback moves back to QUIC without a rejoin once UDP gets through (#1309).
+mod switch_back {
+  use teamcraft_proto::{Base64Bytes, CallEvent, SFU_SWITCHED_CLOSE_CODE};
+  use teamcraft_sfu::rejoin::RejoinLimit;
+  use teamcraft_sfu::signaling::{read_message, write_message};
+  use tokio::net::UdpSocket as TokioUdpSocket;
+  use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, tls::Sha256Digest};
+
+  use super::*;
+
+  const MAX_SIGNALING_BYTES: usize = 1024 * 1024;
+
+  /// The session goes over with its event sequence: the old connection brings what was queued for
+  /// it up to its close, the new one numbers on, and the others hear nothing of it.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  async fn the_session_moves_with_its_events_and_the_others_hear_nothing() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let mut alice = RawFallback::join(&sfu, ALICE).await;
+    let mut bob = QuicSession::join(&sfu, BOB).await;
+    alice.read_until_quiet().await;
+    bob.read_until_quiet().await;
+    let secret = alice.secret();
+
+    let mut moved = QuicSession::switch(&sfu, &secret).await.expect("switched");
+    assert_eq!(alice.read_to_close().await, SFU_SWITCHED_CLOSE_CODE);
+    bob.send(CallClientMessage::SetMuted { is_muted: true }).await;
+    let (seq, event) = moved.next_event().await;
+
+    assert_eq!(seq, alice.last_seq + 1, "numbered on without a gap");
+    assert_eq!(
+      event,
+      CallEvent::ParticipantMuted {
+        device_id: id_of(BOB),
+        is_muted: true
+      }
+    );
+    let heard = bob.read_until_quiet().await;
+    assert!(
+      !heard.iter().any(|event| matches!(
+        event,
+        CallEvent::ParticipantReconnecting { .. }
+          | CallEvent::ParticipantReconnected { .. }
+          | CallEvent::ParticipantLeft { .. }
+          | CallEvent::ParticipantJoined { .. }
+          | CallEvent::DaveProposals { .. }
+      )),
+      "{heard:?}"
+    );
+    // The client closes the old socket once it read the close: no leave.
+    alice.socket.close(None).await.ok();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(sfu.control.room_stats().participants, 2);
+    // The new connection carries the session: what it sends counts.
+    moved.send(CallClientMessage::SetMuted { is_muted: true }).await;
+    let (_, event) = bob.next_event().await;
+    assert_eq!(
+      event,
+      CallEvent::ParticipantMuted {
+        device_id: id_of(ALICE),
+        is_muted: true
+      }
+    );
+  }
+
+  #[tokio::test]
+  async fn an_unknown_or_used_secret_is_refused() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let alice = RawFallback::join(&sfu, ALICE).await;
+    assert_eq!(
+      QuicSession::switch(&sfu, &[7; 32]).await.err(),
+      Some(ErrorCode::InvalidJoinToken)
+    );
+    let _moved = QuicSession::switch(&sfu, &alice.secret())
+      .await
+      .expect("switched");
+    assert_eq!(
+      QuicSession::switch(&sfu, &alice.secret()).await.err(),
+      Some(ErrorCode::InvalidJoinToken),
+      "used up"
+    );
+  }
+
+  /// Nobody joins and nothing re-keys: a device that joined as often as the SFU lets it still
+  /// moves its session.
+  #[tokio::test]
+  async fn a_switch_takes_no_turn_of_the_join_pace() {
+    let mut config = SfuConfig::default();
+    config.rejoin = RejoinLimit {
+      burst: 1,
+      interval: Duration::from_secs(3600),
+      max_delay: Duration::ZERO,
+    };
+    let sfu = start_sfu(config).await;
+    let alice = RawFallback::join(&sfu, ALICE).await;
+    let mut again = sfu.connect_socket().await;
+    send_join(&mut again, &token(ALICE)).await;
+    assert_eq!(read_refusal(&mut again).await.0, Some(ErrorCode::RateLimited));
+
+    QuicSession::switch(&sfu, &alice.secret())
+      .await
+      .expect("switched");
+  }
+
+  /// The native client: on the fallback while UDP doesn't get through, on QUIC soon after it does,
+  /// without a rejoin. The other side sees no reconnect and no new DAVE epoch, and media goes on.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn a_call_on_the_fallback_moves_to_quic_when_udp_gets_through() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let gate = UdpGate::start(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), sfu.quic_port)).await;
+    let resilience = ResilienceConfig {
+      fallback_after: FALLBACK_AFTER,
+      quic_retry_interval: Duration::from_millis(500),
+      max_quic_retry_interval: Duration::from_secs(1),
+      ..ResilienceConfig::default()
+    };
+    let mut authenticators = authenticators();
+    let (gated_url, quic_url) = (gate.quic_url(), sfu.quic_url());
+    let (mut alice, mut bob) = tokio::join!(
+      sfu.native_client_with(
+        &gated_url,
+        sfu.fallback_addr,
+        (ALICE, 440.0),
+        authenticators.remove(&ALICE),
+        resilience,
+      ),
+      sfu.native_client(&quic_url, BOB, 550.0, authenticators.remove(&BOB)),
+    );
+    assert_eq!(wait_for_transport(&mut alice).await, CallTransport::Fallback);
+    assert_eq!(wait_for_transport(&mut bob).await, CallTransport::Quic);
+    let epoch = wait_until_secured(&mut alice, &mut bob).await;
+    assert_eq!(sfu.control.fallback_connections(), 1);
+    // Tries that don't get through leave the call where it is.
+    let closed_for = tokio::time::sleep(Duration::from_secs(2));
+    tokio::pin!(closed_for);
+    loop {
+      tokio::select! {
+        () = &mut closed_for => break,
+        Some(event) = alice.next_event() => assert!(
+          !matches!(event, CallEngineEvent::TransportChanged(_) | CallEngineEvent::Reconnecting),
+          "{event:?}"
+        ),
+        Some(_) = bob.next_event() => {},
+      }
+    }
+
+    gate.open();
+    let wait = async {
+      loop {
+        tokio::select! {
+          Some(event) = alice.next_event() => match event {
+            CallEngineEvent::TransportChanged(CallTransport::Quic) => return,
+            CallEngineEvent::Reconnecting => panic!("Alice rejoined"),
+            _ => {},
+          },
+          Some(event) = bob.next_event() => match event {
+            CallEngineEvent::ParticipantReconnecting(_) | CallEngineEvent::ParticipantLeft(_) => {
+              panic!("Bob saw Alice go: {event:?}")
+            },
+            CallEngineEvent::Secured { epoch: new, .. } => panic!("re-keyed from {epoch} to {new}"),
+            _ => {},
+          },
+        }
+      }
+    };
+    tokio::time::timeout(Duration::from_secs(30), wait)
+      .await
+      .expect("the call didn't move to QUIC");
+    wait_until(|| sfu.control.fallback_connections() == 0).await;
+    assert_eq!(sfu.control.room_stats().participants, 2);
+
+    let report = run_call_from(alice, bob, CALL_DURATION, true).await;
+    report.assert_media_flowed();
+  }
+
+  /// Both clients agreed on a DAVE epoch; returns it.
+  async fn wait_until_secured(alice: &mut NativeCall, bob: &mut NativeCall) -> u64 {
+    let wait = async {
+      let (mut alice_epoch, mut bob_epoch) = (None, None);
+      loop {
+        tokio::select! {
+          Some(event) = alice.next_event() => if let CallEngineEvent::Secured { epoch, .. } = event {
+            alice_epoch = Some(epoch);
+          },
+          Some(event) = bob.next_event() => if let CallEngineEvent::Secured { epoch, .. } = event {
+            bob_epoch = Some(epoch);
+          },
+        }
+        if let (Some(alice_epoch), Some(bob_epoch)) = (alice_epoch, bob_epoch)
+          && alice_epoch == bob_epoch
+        {
+          return bob_epoch;
+        }
+      }
+    };
+    tokio::time::timeout(Duration::from_secs(10), wait)
+      .await
+      .expect("not secured")
+  }
+
+  /// A raw client on the fallback, and what it read so far.
+  struct RawFallback {
+    socket: Socket,
+    last_seq: u64,
+    maybe_secret: Option<Base64Bytes>,
+  }
+
+  impl RawFallback {
+    async fn join(sfu: &RunningSfu, device: u64) -> Self {
+      let (mut socket, _) = sfu.connect_with_token(&token(device)).await.unwrap();
+      send_join(&mut socket, &token(device)).await;
+      let mut joined = Self {
+        socket,
+        last_seq: 0,
+        maybe_secret: None,
+      };
+      let reading = async {
+        while joined.maybe_secret.is_none() {
+          joined.read_one().await.expect("socket ended");
+        }
+      };
+      tokio::time::timeout(Duration::from_secs(5), reading)
+        .await
+        .expect("no joined");
+      joined
+    }
+
+    fn secret(&self) -> Vec<u8> {
+      self.maybe_secret.as_ref().expect("joined").as_slice().to_vec()
+    }
+
+    async fn read_until_quiet(&mut self) {
+      while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(300), self.read_one()).await {}
+    }
+
+    /// Reads up to the close frame; its code.
+    async fn read_to_close(&mut self) -> u32 {
+      let reading = async {
+        loop {
+          if let Some(Some(code)) = self.read_one().await {
+            return code;
+          }
+        }
+      };
+      tokio::time::timeout(Duration::from_secs(5), reading)
+        .await
+        .expect("no close")
+    }
+
+    /// One frame: `Some(Some(code))` for a close, `Some(None)` for anything else, `None` when the
+    /// socket ended. Events must come in order.
+    async fn read_one(&mut self) -> Option<Option<u32>> {
+      let message = self.socket.next().await?.ok()?;
+      let Message::Binary(bytes) = message else {
+        return Some(None);
+      };
+      match FallbackFrame::decode(&bytes).unwrap() {
+        FallbackFrame::Signal(body) => {
+          if let CallServerMessage::Event { seq, event } = serde_json::from_slice(body).unwrap() {
+            assert_eq!(seq, self.last_seq + 1);
+            self.last_seq = seq;
+            if let CallEvent::Joined {
+              maybe_switch_secret, ..
+            } = event
+            {
+              self.maybe_secret = maybe_switch_secret;
+            }
+          }
+          Some(None)
+        },
+        FallbackFrame::Close { code, .. } => Some(Some(code)),
+        _ => Some(None),
+      }
+    }
+  }
+
+  /// A raw client on QUIC.
+  struct QuicSession {
+    _connection: Connection,
+    send: SendStream,
+    recv: RecvStream,
+  }
+
+  impl QuicSession {
+    async fn join(sfu: &RunningSfu, device: u64) -> Self {
+      let mut session = Self::connect(sfu).await;
+      session
+        .send(CallClientMessage::Join {
+          token: token(device),
+          capabilities: MediaCapabilities::default(),
+        })
+        .await;
+      loop {
+        let (_, event) = session.next_event().await;
+        if matches!(event, CallEvent::Joined { .. }) {
+          return session;
+        }
+      }
+    }
+
+    /// Takes the session of `secret` over; the error code the SFU refused that with.
+    async fn switch(sfu: &RunningSfu, secret: &[u8]) -> Result<Self, ErrorCode> {
+      let mut session = Self::connect(sfu).await;
+      session
+        .send(CallClientMessage::Switch {
+          secret: Base64Bytes::new(secret.to_vec()),
+        })
+        .await;
+      let answer = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_message::<CallServerMessage>(&mut session.recv, MAX_SIGNALING_BYTES),
+      )
+      .await
+      .expect("no answer")
+      .unwrap();
+      match answer {
+        CallServerMessage::Switched => Ok(session),
+        CallServerMessage::Error { error } => Err(error.error_code),
+        other => panic!("answered {other:?}"),
+      }
+    }
+
+    async fn connect(sfu: &RunningSfu) -> Self {
+      let config = ClientConfig::builder()
+        .with_bind_default()
+        .with_server_certificate_hashes([Sha256Digest::new(sfu.certificate_hash)])
+        .build();
+      let connection = Endpoint::client(config)
+        .unwrap()
+        .connect(sfu.quic_url())
+        .await
+        .unwrap();
+      let (send, recv) = connection.open_bi().await.unwrap().await.unwrap();
+      Self {
+        _connection: connection,
+        send,
+        recv,
+      }
+    }
+
+    async fn send(&mut self, message: CallClientMessage) {
+      write_message(&mut self.send, &message).await.unwrap();
+    }
+
+    /// The next event and its number.
+    async fn next_event(&mut self) -> (u64, CallEvent) {
+      let reading = async {
+        loop {
+          if let CallServerMessage::Event { seq, event } =
+            read_message::<CallServerMessage>(&mut self.recv, MAX_SIGNALING_BYTES)
+              .await
+              .unwrap()
+          {
+            return (seq, event);
+          }
+        }
+      };
+      tokio::time::timeout(Duration::from_secs(5), reading)
+        .await
+        .expect("no event")
+    }
+
+    async fn read_until_quiet(&mut self) -> Vec<CallEvent> {
+      let mut events = Vec::new();
+      while let Ok((_, event)) =
+        tokio::time::timeout(Duration::from_millis(300), self.next_event_or_wait()).await
+      {
+        events.push(event);
+      }
+      events
+    }
+
+    /// [`Self::next_event`] without its own timeout.
+    async fn next_event_or_wait(&mut self) -> (u64, CallEvent) {
+      loop {
+        if let CallServerMessage::Event { seq, event } =
+          read_message::<CallServerMessage>(&mut self.recv, MAX_SIGNALING_BYTES)
+            .await
+            .unwrap()
+        {
+          return (seq, event);
+        }
+      }
+    }
+  }
+
+  /// Stands in front of the SFU's QUIC port: drops everything until it opens, then relays each
+  /// client address's packets through a socket of its own.
+  struct UdpGate {
+    addr: SocketAddr,
+    is_open: Arc<std::sync::atomic::AtomicBool>,
+  }
+
+  impl UdpGate {
+    async fn start(upstream: SocketAddr) -> Self {
+      let socket = Arc::new(TokioUdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
+      let addr = socket.local_addr().unwrap();
+      let is_open = Arc::new(std::sync::atomic::AtomicBool::new(false));
+      let opened = Arc::clone(&is_open);
+      tokio::spawn(async move {
+        let mut relays: HashMap<SocketAddr, Arc<TokioUdpSocket>> = HashMap::new();
+        let mut buffer = vec![0u8; 65_536];
+        while let Ok((length, client)) = socket.recv_from(&mut buffer).await {
+          if !opened.load(Ordering::Relaxed) {
+            continue;
+          }
+          let relay = match relays.get(&client) {
+            Some(relay) => Arc::clone(relay),
+            None => {
+              let relay = Arc::new(TokioUdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap());
+              relay.connect(upstream).await.unwrap();
+              let (back, reading) = (Arc::clone(&socket), Arc::clone(&relay));
+              tokio::spawn(async move {
+                let mut buffer = vec![0u8; 65_536];
+                while let Ok(length) = reading.recv(&mut buffer).await {
+                  let _ = back.send_to(&buffer[..length], client).await;
+                }
+              });
+              relays.insert(client, Arc::clone(&relay));
+              relay
+            },
+          };
+          let _ = relay.send(&buffer[..length]).await;
+        }
+      });
+      Self { addr, is_open }
+    }
+
+    fn open(&self) {
+      self.is_open.store(true, Ordering::Relaxed);
+    }
+
+    fn quic_url(&self) -> String {
+      format!("https://{}{CALL_PATH}", self.addr)
+    }
+  }
+}
+
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 struct RunningSfu {
@@ -1038,6 +1479,29 @@ impl RunningSfu {
     frequency_hz: f32,
     maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
   ) -> NativeCall {
+    let resilience = ResilienceConfig {
+      fallback_after: FALLBACK_AFTER,
+      ..ResilienceConfig::default()
+    };
+    self
+      .native_client_with(
+        quic_url,
+        fallback_addr,
+        (device, frequency_hz),
+        maybe_authenticator,
+        resilience,
+      )
+      .await
+  }
+
+  async fn native_client_with(
+    &self,
+    quic_url: &str,
+    fallback_addr: SocketAddr,
+    (device, frequency_hz): (u64, f32),
+    maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
+    resilience: ResilienceConfig,
+  ) -> NativeCall {
     let mut config = NativeCallConfig::new(
       quic_url.to_owned(),
       token(device),
@@ -1055,10 +1519,7 @@ impl RunningSfu {
     );
     config.maybe_certificate_hash = Some(self.certificate_hash);
     config.maybe_fallback_url = Some(format!("ws://{fallback_addr}{CALL_FALLBACK_PATH}"));
-    config.resilience = ResilienceConfig {
-      fallback_after: FALLBACK_AFTER,
-      ..ResilienceConfig::default()
-    };
+    config.resilience = resilience;
     config.source = AudioSource::Tone {
       frequency_hz,
       amplitude: 0.3,
@@ -1119,7 +1580,18 @@ async fn run_call(alice: NativeCall, bob: NativeCall) -> CallReport {
 }
 
 /// Alice sends video and both send audio for `duration`; counts what arrived and leaves.
-async fn run_call_for(mut alice: NativeCall, mut bob: NativeCall, duration: Duration) -> CallReport {
+async fn run_call_for(alice: NativeCall, bob: NativeCall, duration: Duration) -> CallReport {
+  run_call_from(alice, bob, duration, false).await
+}
+
+/// [`run_call_for`] for a call that may be secured already (`is_secured`): Alice publishes at once
+/// then, a new epoch isn't waited for.
+async fn run_call_from(
+  mut alice: NativeCall,
+  mut bob: NativeCall,
+  duration: Duration,
+  is_secured: bool,
+) -> CallReport {
   let mut report = CallReport::default();
   let layers = vec![VideoLayerInfo {
     layer: 0,
@@ -1128,6 +1600,10 @@ async fn run_call_for(mut alice: NativeCall, mut bob: NativeCall, duration: Dura
     max_framerate: 30,
     max_bitrate_bps: 300_000,
   }];
+  if is_secured {
+    report.was_secured = true;
+    alice.publish_video(VideoTrackKind::Camera, VideoCodec::Vp9, layers.clone());
+  }
   let start = Instant::now();
   let mut maybe_stream = None;
   let deadline = tokio::time::Instant::now() + duration;

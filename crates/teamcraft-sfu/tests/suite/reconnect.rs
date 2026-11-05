@@ -20,9 +20,9 @@ use teamcraft_media::rtp::{AudioLevel, RtpTimestamp};
 use teamcraft_media::uplink_layers::UplinkPolicy;
 use teamcraft_media::video::EncodedVideoFrame;
 use teamcraft_proto::{
-  AudioCodec, CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, Id, MediaCapabilities,
-  MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, Snowflake, UserId, VideoCodec, VideoLayerInfo,
-  VideoPublicationId, VideoTrackKind,
+  AudioCodec, CallClientMessage, CallEvent, CallId, DeviceId, Id, MediaCapabilities, MediaStreamId,
+  SFU_GOING_AWAY_CLOSE_CODE, Snowflake, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId,
+  VideoTrackKind,
 };
 use teamcraft_sfu::auth::JoinGrant;
 use teamcraft_sfu::config::SfuConfig;
@@ -799,7 +799,10 @@ impl Network {
     let mut has_moved = false;
     while let Ok(outgoing) = connection.signals.try_recv() {
       has_moved = true;
-      let message: CallServerMessage = connection.sequence.frame(outgoing);
+      // No session of these moves to another connection.
+      let Some(message) = connection.sequence.frame(outgoing) else {
+        continue;
+      };
       client.engine.handle_signal(message, now).unwrap();
     }
     let datagrams: Vec<Vec<u8>> = connection.link.inbox.lock().unwrap().drain(..).collect();
@@ -823,7 +826,7 @@ impl Network {
       device_id: device(id),
       maybe_conversation_id: None,
     };
-    let (room, session, outcome) = self.rooms.join(grant, capabilities, handle).unwrap();
+    let (room, session, outcome) = self.rooms.join(grant, capabilities, handle, None).unwrap();
     self.client_mut(id).maybe_connection = Some(MemoryConnection {
       link,
       signals,
