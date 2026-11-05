@@ -33,7 +33,7 @@ enum PushPresentation: Equatable {
       return canFilter ? .callKit : .callAlert
     case .test:
       return .test
-    case .dismiss, .unknown:
+    case .dismiss, .scheduledSeal, .unknown:
       return canFilter ? .drop : .quietGeneric
     }
   }
