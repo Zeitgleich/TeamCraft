@@ -18,6 +18,13 @@ extension AppModel {
     waitingShare = inbox.oldest(except: handedOver)
   }
 
+  /// Somebody signed in: a share kept through a session that ran out is only for the same person.
+  func claimWaitingShare(for userId: String) {
+    guard let inbox = ShareInbox.shared() else { return }
+    isShareGoneForAccount = inbox.claim(for: userId)
+    loadWaitingShare()
+  }
+
   /// Where a share can go: conversations the user may post in, each with its last activity.
   func shareTargets() async -> [ConversationItem] {
     (try? await core().shareTargets()) ?? []
@@ -25,21 +32,23 @@ extension AppModel {
 
   /// The picker's choice: the conversation opens with its composer filled in.
   func sendShare(_ share: StagedShare, to conversationId: String) {
+    shareImportError = nil
     shareHandover = ShareHandover(conversationId: conversationId, share: share)
     waitingShare = nil
     openConversationId = conversationId
   }
 
   func discardShare(_ share: StagedShare) {
+    shareImportError = nil
     ShareInbox.shared()?.delete(share.id)
     loadWaitingShare()
   }
 
   /// The composer of `conversationId` takes the share over, once. Files that can't be attached (over
-  /// the upload limit, gone) stay in the inbox and the picker comes back with them; the error is for
-  /// the composer to show. The handover ends last: `ChatPane`'s task is keyed by it, and ending it
+  /// the upload limit, gone) stay in the inbox and the picker comes back with them and says why: it
+  /// opens at this moment, so an alert of the composer's would be refused. The handover ends last: `ChatPane`'s task is keyed by it, and ending it
   /// first would cancel the task that is taking the share.
-  func takeShare(for conversationId: String) async -> (text: String, files: [PickedFile], error: AttachmentError?)? {
+  func takeShare(for conversationId: String) async -> (text: String, files: [PickedFile])? {
     guard !isTakingShare, let handover = shareHandover, handover.conversationId == conversationId,
       let inbox = ShareInbox.shared()
     else { return nil }
@@ -70,8 +79,9 @@ extension AppModel {
       rest.leftOut = 0
       try? inbox.commit(rest)
     }
+    shareImportError = maybeError
     shareHandover = nil
     loadWaitingShare()
-    return (handover.share.text, files, maybeError)
+    return (handover.share.text, files)
   }
 }

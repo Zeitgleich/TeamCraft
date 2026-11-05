@@ -76,6 +76,27 @@ final class ShareInboxTests: XCTestCase {
     XCTAssertFalse(left.contains(cutShort.id))
   }
 
+  func testAShareStaysForTheSamePersonAndGoesForAnother() throws {
+    XCTAssertFalse(inbox.claim(for: "1"), "nobody signed in before")
+    let share = try inbox.begin()
+    try inbox.commit(share)
+    XCTAssertFalse(inbox.claim(for: "1"))
+    XCTAssertNotNil(inbox.oldest())
+
+    XCTAssertTrue(inbox.claim(for: "2"))
+    XCTAssertNil(inbox.oldest())
+    XCTAssertFalse(inbox.claim(for: "3"), "nothing left to lose")
+  }
+
+  func testAfterASignOutNobodyOwnsWhatIsSharedNext() throws {
+    inbox.claim(for: "1")
+    inbox.wipe()
+    let share = try inbox.begin()
+    try inbox.commit(share)
+    XCTAssertFalse(inbox.claim(for: "2"))
+    XCTAssertNotNil(inbox.oldest())
+  }
+
   private func sourceFile() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try Data("content".utf8).write(to: url)

@@ -41,6 +41,12 @@ struct RootView: View {
       if let share = model.waitingShare, !isReady, !isStarting { ShareWaitingNotice(share: share) }
     }
     .sheet(item: shareToPick) { share in SharePickerView(share: share) }
+    .alert(
+      "share_other_account",
+      isPresented: Binding(get: { model.isShareGoneForAccount }, set: { model.isShareGoneForAccount = $0 })
+    ) {
+      Button("done", role: .cancel) {}
+    }
     .appLinkQuestions(model)
     .task(id: appLinkMoment) { await model.actOnAppLink() }
     // Every touch counts for presence; the core reports it at most every 30 s (issue #472).

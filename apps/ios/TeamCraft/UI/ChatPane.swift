@@ -93,7 +93,6 @@ struct ChatPane: View {
       guard isDraftLoaded, threadId == nil, let shared = await model.takeShare(for: conversation.id) else { return }
       if !shared.text.isEmpty { draft = draft.isEmpty ? shared.text : draft + "\n" + shared.text }
       attachments.append(contentsOf: shared.files)
-      if let error = shared.error { attachmentError = error }
     }
     .task(id: draft) {
       // Saved after a pause in typing; a new keystroke cancels the wait.

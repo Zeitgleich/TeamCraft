@@ -14,6 +14,14 @@ struct SharePickerView: View {
   var body: some View {
     NavigationStack {
       List {
+        switch model.shareImportError {
+        case .tooLarge(let limit):
+          Text("attachment_too_large \(FileSizeText.format(limit))").font(.footnote).foregroundStyle(.red)
+        case .unreadable, .sendFailed:
+          Text("attachment_unreadable").font(.footnote).foregroundStyle(.red)
+        case nil:
+          EmptyView()
+        }
         if share.leftOut > 0 {
           Text("share_left_out \(share.leftOut)")
             .font(.footnote)

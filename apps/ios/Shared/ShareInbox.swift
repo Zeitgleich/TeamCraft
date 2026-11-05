@@ -26,6 +26,7 @@ struct ShareInbox {
   private static let keptFor: TimeInterval = 7 * 24 * 3600
   private static let unfinishedKeptFor: TimeInterval = 3600
   private static let listName = "share.json"
+  private static let ownerName = "owner"
 
   let root: URL
   private let fileManager: FileManager
@@ -72,6 +73,21 @@ struct ShareInbox {
   func commit(_ share: StagedShare) throws {
     let list = folder(of: share.id).appendingPathComponent(Self.listName)
     try JSONEncoder().encode(share).write(to: list, options: .atomic)
+  }
+
+  /// `userId` signed in. What waits from before goes if somebody else signed in last: they would see
+  /// another person's plaintext. Answers whether a share went that way. After a `wipe` (the user signed
+  /// out) nobody is the owner, so what is shared until the next sign-in stays for whoever that is.
+  @discardableResult
+  func claim(for userId: String) -> Bool {
+    let owner = root.appendingPathComponent(Self.ownerName)
+    let maybeOwner = try? String(contentsOf: owner, encoding: .utf8)
+    let isOther = maybeOwner != nil && maybeOwner != userId
+    let hadShare = isOther && oldest() != nil
+    if isOther { wipe() }
+    try? fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    try? userId.write(to: owner, atomically: true, encoding: .utf8)
+    return hadShare
   }
 
   /// The oldest share not in `except`.
@@ -128,7 +144,9 @@ struct ShareInbox {
 
   private func folders() -> [URL] {
     let found = (try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
-    return found.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    return found
+      .filter { $0.lastPathComponent != Self.ownerName }
+      .sorted { $0.lastPathComponent < $1.lastPathComponent }
   }
 
   private func read(_ folder: URL) -> StagedShare? {

@@ -11496,6 +11496,22 @@
           }
         }
       }
+    },
+    "share_other_account": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Something shared before this sign-in was removed: it was kept for the person signed in before you."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Etwas, das vor dieser Anmeldung geteilt wurde, ist entfernt: Es war für die Person aufbewahrt, die zuvor angemeldet war."
+          }
+        }
+      }
     }
   },
   "version": "1.0"
