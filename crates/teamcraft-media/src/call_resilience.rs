@@ -15,6 +15,10 @@
 //!    the engine rejoins the call ([`crate::call_engine::CallEngine::rejoin`]); the SFU keeps the
 //!    device's slot for a grace period, a restarted SFU starts a fresh room. [`ReconnectSchedule`]
 //!    paces the attempts with back-off and jitter, and gives up when the grace period is over.
+//!    [`RejoinPacer`] paces the rejoins themselves: a network that keeps dropping the call right
+//!    after each rejoin gets a growing pause before the next one, since every rejoin re-keys the
+//!    whole call. The SFU holds devices to a pace of its own (#1227) and refuses a join that comes
+//!    too soon with the time to wait; that refusal is a failed attempt, not the end of the call.
 //!
 //! Every attempt connects with what its own join ticket says: the SFU's URL, and the SHA-256s of
 //! its certificate where that is self-signed. A restarted SFU may come back with a new certificate,
@@ -22,6 +26,7 @@
 //!
 //! Pure state: time is passed in, so all of it is tested without a network.
 
+use std::collections::VecDeque;
 use std::collections::hash_map::RandomState;
 use std::fmt;
 use std::future::{Future, poll_fn};
@@ -64,6 +69,16 @@ pub struct ResilienceConfig {
   /// instance offers one (ARCHITECTURE.md §6.6). Long enough for a slow handshake with a lost packet
   /// or two: a network where QUIC works never gets this far, and whichever connects first wins.
   pub fallback_after: Duration,
+  /// A call back for this long after a rejoin counts as stable: its next loss is rejoined at once.
+  pub stable_after: Duration,
+  /// Lost again sooner: the rejoin waits this long first, doubling with each further quick loss up
+  /// to `max_flap_pause`. Every rejoin re-keys the whole call, and the SFU limits how often a device
+  /// may join (#1227); a network that keeps dropping stays below that limit at this pace.
+  pub first_flap_pause: Duration,
+  pub max_flap_pause: Duration,
+  /// Ping the SFU this often on the fallback, whatever else arrives: the answers time the round trip
+  /// for the video stats, which QUIC measures by itself.
+  pub round_trip_interval: Duration,
 }
 
 /// What carries a call to the SFU.
@@ -94,6 +109,26 @@ pub enum PathState {
   /// Silent for too long: give up on this connection.
   Dead,
 }
+
+/// Pauses the rejoins of a call whose connection keeps dropping soon after each one.
+#[derive(Debug, Clone, Default)]
+pub struct RejoinPacer {
+  maybe_back_at: Option<Instant>,
+  quick_losses: u32,
+}
+
+/// Times the answers to pings: the round trip of a path that doesn't measure it itself (the
+/// fallback's WebSocket).
+#[derive(Debug, Clone, Default)]
+pub struct RoundTripTimer {
+  /// The pings not yet answered, oldest first; a few, so a round trip longer than the ping interval
+  /// is still measured.
+  pending: VecDeque<(u64, Instant)>,
+  maybe_smoothed: Option<Duration>,
+}
+
+/// Pings kept waiting for their answer.
+const MAX_PENDING_PINGS: usize = 8;
 
 /// Paces rejoin attempts within the grace period.
 #[derive(Debug, Clone)]
@@ -144,6 +179,10 @@ impl Default for ResilienceConfig {
       max_retry_interval: Duration::from_secs(2),
       going_away_spread: Duration::from_secs(1),
       fallback_after: Duration::from_secs(3),
+      stable_after: Duration::from_secs(30),
+      first_flap_pause: Duration::from_secs(1),
+      max_flap_pause: Duration::from_secs(10),
+      round_trip_interval: Duration::from_secs(2),
     }
   }
 }
@@ -279,6 +318,23 @@ impl ReconnectSchedule {
     }
   }
 
+  /// The first attempt waits at least `pause`, what [`RejoinPacer::on_lost`] asks for, and up to
+  /// half of it more, so devices that dropped together don't come back together. Never less: the
+  /// pause keeps the device below the SFU's limit on joins.
+  pub fn pause_first_attempt(&mut self, now: Instant, pause: Duration) {
+    if self.attempts == 0 && !pause.is_zero() {
+      let jittered = pause + (pause / 2).mul_f64(self.jitter.next_fraction());
+      self.next_attempt_at = self.next_attempt_at.max(now + jittered);
+    }
+  }
+
+  /// The SFU refused the join and asked to wait `retry_after` (it joins this call too often): a
+  /// failed attempt, and the next one not before then.
+  pub fn on_join_refused(&mut self, now: Instant, retry_after: Duration, config: &ResilienceConfig) {
+    self.on_failed_attempt(now, config);
+    self.next_attempt_at = self.next_attempt_at.max(now + retry_after);
+  }
+
   /// Makes the next attempt due at once (the network came back).
   pub fn hurry(&mut self, now: Instant) {
     self.next_attempt_at = self.next_attempt_at.min(now);
@@ -291,6 +347,71 @@ impl ReconnectSchedule {
 
   pub fn attempts(&self) -> u32 {
     self.attempts
+  }
+}
+
+impl RejoinPacer {
+  /// The call's connection was lost at `now`: how long its first rejoin attempt should wait. At
+  /// once after a stable stretch, longer with each loss that follows a rejoin quickly.
+  pub fn on_lost(&mut self, now: Instant, config: &ResilienceConfig) -> Duration {
+    let is_quick = self
+      .maybe_back_at
+      .is_some_and(|back_at| now.saturating_duration_since(back_at) < config.stable_after);
+    self.quick_losses = if is_quick {
+      self.quick_losses.saturating_add(1)
+    } else {
+      0
+    };
+    if self.quick_losses == 0 {
+      return Duration::ZERO;
+    }
+    let factor = 2u32.saturating_pow((self.quick_losses - 1).min(16));
+    config
+      .first_flap_pause
+      .saturating_mul(factor)
+      .min(config.max_flap_pause)
+  }
+
+  /// The call is back after a rejoin at `now`.
+  pub fn on_back(&mut self, now: Instant) {
+    self.maybe_back_at = Some(now);
+  }
+}
+
+impl RoundTripTimer {
+  /// A ping `id` went out at `now`.
+  pub fn on_ping(&mut self, id: u64, now: Instant) {
+    if self.pending.len() >= MAX_PENDING_PINGS {
+      self.pending.pop_front();
+    }
+    self.pending.push_back((id, now));
+  }
+
+  /// The answer to ping `id` arrived at `now`. Answers come in order, so the pings before it went
+  /// unanswered. Smoothed as TCP does (RFC 6298: an eighth of each new sample).
+  pub fn on_answer(&mut self, id: u64, now: Instant) {
+    let Some(position) = self.pending.iter().position(|(pending, _)| *pending == id) else {
+      return;
+    };
+    let (_, sent_at) = self.pending[position];
+    self.pending.drain(..=position);
+    let sample = now.saturating_duration_since(sent_at);
+    self.maybe_smoothed = Some(match self.maybe_smoothed {
+      Some(smoothed) => smoothed.mul_f64(7.0 / 8.0) + sample / 8,
+      None => sample,
+    });
+  }
+
+  /// The round trip measured so far.
+  pub fn smoothed(&self) -> Option<Duration> {
+    self.maybe_smoothed
+  }
+
+  /// [`Self::smoothed`] in whole milliseconds, as the video stats show it.
+  pub fn smoothed_ms(&self) -> Option<u32> {
+    self
+      .maybe_smoothed
+      .map(|rtt| u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX))
   }
 }
 
@@ -783,6 +904,130 @@ mod tests {
     let browser = ResilienceConfig::browser();
     assert!(browser.handover_timeout > Duration::from_secs(2));
     assert!(browser.handover_timeout < browser.stall_timeout);
+  }
+
+  mod pacing {
+    use super::*;
+
+    #[test]
+    fn a_loss_after_a_stable_stretch_rejoins_at_once() {
+      let start = Instant::now();
+      let mut pacer = RejoinPacer::default();
+      assert_eq!(pacer.on_lost(start, &config()), Duration::ZERO, "the first loss");
+      pacer.on_back(at(start, 1_000));
+      assert_eq!(pacer.on_lost(at(start, 40_000), &config()), Duration::ZERO);
+    }
+
+    #[test]
+    fn losses_right_after_rejoining_pause_longer_each_time() {
+      let start = Instant::now();
+      let mut pacer = RejoinPacer::default();
+      let mut now = start;
+      let mut pauses = Vec::new();
+      for _ in 0..7 {
+        let pause = pacer.on_lost(now, &config());
+        pauses.push(pause.as_secs());
+        // Back after the pause, lost again two seconds later.
+        now += pause;
+        pacer.on_back(now);
+        now += Duration::from_secs(2);
+      }
+      assert_eq!(pauses, vec![0, 1, 2, 4, 8, 10, 10]);
+      // Stable again: the next loss rejoins at once.
+      pacer.on_back(now);
+      assert_eq!(
+        pacer.on_lost(now + config().stable_after, &config()),
+        Duration::ZERO
+      );
+    }
+
+    /// A network that drops the call a second after each rejoin stays below the SFU's default limit
+    /// of five joins at once and one per ten seconds: no join of it is even delayed.
+    #[test]
+    fn a_flapping_network_stays_below_the_sfus_pace() {
+      let (burst, interval) = (5.0, 10.0);
+      let start = Instant::now();
+      let mut pacer = RejoinPacer::default();
+      let mut tokens: f64 = burst - 1.0;
+      let mut last_join = start;
+      let mut now = start + Duration::from_secs(1);
+      for _ in 0..200 {
+        // The shortest the jitter makes of the pause: all of it.
+        now += pacer.on_lost(now, &config());
+        tokens = (tokens + now.duration_since(last_join).as_secs_f64() / interval).min(burst);
+        assert!(tokens >= 1.0, "refused after {:?}", now.duration_since(start));
+        tokens -= 1.0;
+        last_join = now;
+        pacer.on_back(now);
+        now += Duration::from_secs(1);
+      }
+    }
+
+    #[test]
+    fn a_refused_join_waits_as_long_as_the_sfu_asked() {
+      let start = Instant::now();
+      let mut schedule = ReconnectSchedule::with_jitter(start, Duration::from_secs(30), Jitter::seeded(1));
+      schedule.on_join_refused(start, Duration::from_secs(7), &config());
+      assert_eq!(schedule.next_attempt_at(), at(start, 7_000));
+      assert_eq!(schedule.attempts(), 1);
+      assert!(!schedule.has_expired(at(start, 7_000)), "the call goes on");
+    }
+
+    #[test]
+    fn a_first_attempt_waits_about_the_pause() {
+      let start = Instant::now();
+      let mut schedule = ReconnectSchedule::with_jitter(start, Duration::from_secs(30), Jitter::seeded(1));
+      schedule.pause_first_attempt(start, Duration::from_secs(4));
+      let wait = schedule.next_attempt_at().duration_since(start);
+      assert!(
+        wait >= Duration::from_secs(4) && wait <= Duration::from_secs(6),
+        "{wait:?}"
+      );
+    }
+  }
+
+  mod round_trip {
+    use super::*;
+
+    #[test]
+    fn answers_time_their_pings_and_smooth_the_round_trip() {
+      let start = Instant::now();
+      let mut timer = RoundTripTimer::default();
+      assert_eq!(timer.smoothed(), None);
+      timer.on_ping(1, start);
+      timer.on_answer(1, at(start, 80));
+      assert_eq!(timer.smoothed_ms(), Some(80));
+      timer.on_ping(2, at(start, 1_000));
+      timer.on_answer(2, at(start, 1_160));
+      // 7/8 of 80 plus 1/8 of 160.
+      assert_eq!(timer.smoothed_ms(), Some(90));
+    }
+
+    #[test]
+    fn a_round_trip_longer_than_the_ping_interval_is_still_measured() {
+      let start = Instant::now();
+      let mut timer = RoundTripTimer::default();
+      for id in 0..3u64 {
+        timer.on_ping(id, at(start, id * 1_000));
+      }
+      // The answer to the first ping comes after the third went out.
+      timer.on_answer(0, at(start, 2_500));
+      assert_eq!(timer.smoothed_ms(), Some(2_500));
+      // Unknown or repeated answers change nothing.
+      timer.on_answer(0, at(start, 9_000));
+      timer.on_answer(99, at(start, 9_000));
+      assert_eq!(timer.smoothed_ms(), Some(2_500));
+    }
+
+    #[test]
+    fn only_a_few_pings_wait_for_their_answer() {
+      let start = Instant::now();
+      let mut timer = RoundTripTimer::default();
+      for id in 0..100u64 {
+        timer.on_ping(id, start);
+      }
+      assert_eq!(timer.pending.len(), MAX_PENDING_PINGS);
+    }
   }
 
   mod tickets {

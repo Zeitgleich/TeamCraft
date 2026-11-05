@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::{Bytes, Error as WebSocketError, Message};
 use tracing::{debug, warn};
 use url::{Host, Url};
 
-use crate::fallback_socket::ControlFrames;
+use crate::fallback_socket::{ControlFrames, FallbackSender};
 
 /// How a call socket is opened: plain, only to a loopback address, in development tools and tests.
 /// The apps bring their own, with their trust store and the system's proxy.
@@ -123,10 +123,12 @@ pub(crate) fn is_allowed_url(url: &str) -> bool {
 }
 
 /// Reads until the socket ends. Every frame counts for the path's liveness, pings included (the
-/// SFU's come every second): the same evidence QUIC's packet count gives.
+/// SFU's come every second): the same evidence QUIC's packet count gives. The SFU's answers to
+/// `sender`'s pings time the round trip.
 pub(crate) async fn read_socket(
   mut stream: Pin<Box<dyn Stream<Item = Result<Message, WebSocketError>> + Send>>,
   received: Arc<AtomicU64>,
+  sender: FallbackSender,
   mut deliver: impl FnMut(SocketInput) -> bool + Send,
 ) -> SocketEnd {
   while let Some(item) = stream.next().await {
@@ -142,7 +144,11 @@ pub(crate) async fn read_socket(
       Message::Binary(bytes) => bytes,
       // The WebSocket's own close: the frame with the reason would have come first.
       Message::Close(_) => return SocketEnd::Lost,
-      Message::Ping(_) | Message::Pong(_) | Message::Text(_) | Message::Frame(_) => continue,
+      Message::Pong(payload) => {
+        sender.on_pong(&payload);
+        continue;
+      },
+      Message::Ping(_) | Message::Text(_) | Message::Frame(_) => continue,
     };
     match decode(bytes) {
       Ok(Decoded::Input(input)) => {
@@ -282,12 +288,17 @@ mod tests {
       ];
       let received = Arc::new(AtomicU64::new(0));
       let mut datagrams = Vec::new();
-      let end = read_socket(Box::pin(stream::iter(frames)), Arc::clone(&received), |input| {
-        if let SocketInput::Datagram(bytes) = input {
-          datagrams.push(bytes);
-        }
-        true
-      })
+      let end = read_socket(
+        Box::pin(stream::iter(frames)),
+        Arc::clone(&received),
+        sender(),
+        |input| {
+          if let SocketInput::Datagram(bytes) = input {
+            datagrams.push(bytes);
+          }
+          true
+        },
+      )
       .await;
       assert_eq!(end, SocketEnd::Closed(SFU_GOING_AWAY_CLOSE_CODE));
       assert!(is_going_away(SFU_GOING_AWAY_CLOSE_CODE));
@@ -298,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn a_socket_that_just_ends_is_lost_not_closed() {
       let received = Arc::new(AtomicU64::new(0));
-      let end = read_socket(Box::pin(stream::empty()), received, |_| true).await;
+      let end = read_socket(Box::pin(stream::empty()), received, sender(), |_| true).await;
       assert_eq!(end, SocketEnd::Lost);
     }
 
@@ -306,8 +317,34 @@ mod tests {
     async fn the_websockets_own_close_is_lost_too() {
       let received = Arc::new(AtomicU64::new(0));
       let frames = vec![Ok(Message::Close(None))];
-      let end = read_socket(Box::pin(stream::iter(frames)), received, |_| true).await;
+      let end = read_socket(Box::pin(stream::iter(frames)), received, sender(), |_| true).await;
       assert_eq!(end, SocketEnd::Lost);
+    }
+
+    #[tokio::test]
+    async fn the_sfus_answers_to_numbered_pings_time_the_round_trip() {
+      let sender = sender();
+      // What the writer would send: ping 0, noted as sent now.
+      let Message::Ping(payload) = sender.ping_for_test() else {
+        panic!("a ping");
+      };
+      tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+      let frames = vec![
+        Ok(Message::Pong(Bytes::from_static(b"not a number"))),
+        Ok(Message::Pong(payload)),
+      ];
+      let received = Arc::new(AtomicU64::new(0));
+      read_socket(Box::pin(stream::iter(frames)), received, sender.clone(), |_| true).await;
+      let round_trip = sender.round_trip().expect("measured");
+      assert!(
+        round_trip >= std::time::Duration::from_millis(30),
+        "{round_trip:?}"
+      );
+      assert!(round_trip < std::time::Duration::from_secs(5), "{round_trip:?}");
+    }
+
+    fn sender() -> FallbackSender {
+      FallbackSender::new(crate::fallback_queue::MediaQueueConfig::default())
     }
 
     fn binary(frame: Vec<u8>) -> Message {

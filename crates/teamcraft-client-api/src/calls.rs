@@ -643,7 +643,8 @@ pub struct IncomingCall {
 pub enum CallsUnavailableReason {
   /// This app has no call support at all.
   NotInThisApp,
-  /// The browser lacks what calls need (WebTransport, WebCodecs audio, AudioWorklet).
+  /// The browser lacks what calls need (WebCodecs audio, AudioWorklet), or has no WebTransport on
+  /// an instance without the WebSocket fallback.
   BrowserUnsupported,
   /// TeamCraft is open in another tab of this browser, which runs the account; calls run there.
   OtherTab,

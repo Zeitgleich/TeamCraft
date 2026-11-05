@@ -92,6 +92,33 @@ mod transport_choice {
     println!("black-holed QUIC port: {report:?}");
   }
 
+  /// QUIC measures the round trip itself; on the fallback the SFU's answers to the client's pings
+  /// time it, for the video stats (#1227).
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn the_video_stats_show_the_round_trip_on_the_fallback_too() {
+    let sfu = start_sfu(SfuConfig::default()).await;
+    let black_hole = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let quic_url = format!("https://{}{CALL_PATH}", black_hole.local_addr().unwrap());
+    let (mut alice, bob) = two_clients(&sfu, &quic_url).await;
+    assert_eq!(wait_for_transport(&mut alice).await, CallTransport::Fallback);
+    let measuring = async {
+      loop {
+        let report = alice.video_stats().await.expect("the call runs");
+        if let Some(rtt_ms) = report.maybe_rtt_ms {
+          return rtt_ms;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+      }
+    };
+    let rtt_ms = tokio::time::timeout(Duration::from_secs(10), measuring)
+      .await
+      .expect("no round trip on the fallback");
+    // Loopback: well under a second.
+    assert!(rtt_ms < 1_000, "{rtt_ms} ms");
+    alice.leave().await.ok();
+    bob.leave().await.ok();
+  }
+
   /// What goes over the wire on the fallback is DAVE's work: a viewer reads the frame, the bytes on
   /// the socket toward it don't show it. (The client's direction is masked by the WebSocket anyway.)
   #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -379,6 +406,151 @@ mod slots {
     let mut other = sfu.connect_socket().await;
     send_join(&mut other, &token(BOB)).await;
     wait_for_joined(&mut other).await;
+  }
+}
+
+/// Joins are paced per call and device (#1227), the same on both transports: a member who loops
+/// connect, join, drop can't make the call's DAVE group re-key with every cycle.
+mod join_pace {
+  use teamcraft_proto::CallEvent;
+  use teamcraft_sfu::rejoin::RejoinLimit;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn a_looping_member_is_held_to_the_pace_and_told_when_to_come_back() {
+    let mut config = SfuConfig::default();
+    config.rejoin = RejoinLimit {
+      burst: 3,
+      interval: Duration::from_secs(60),
+      max_delay: Duration::from_millis(200),
+    };
+    config.reconnect_grace = Duration::from_secs(60);
+    let sfu = start_sfu(config).await;
+    let mut bob = sfu.connect_socket().await;
+    send_join(&mut bob, &token(BOB)).await;
+    wait_for_joined(&mut bob).await;
+
+    let (mut joined, mut refused) = (0, 0);
+    for _ in 0..20 {
+      let mut socket = sfu.connect_socket().await;
+      send_join(&mut socket, &token(ALICE)).await;
+      match first_answer(&mut socket).await {
+        Answer::Joined => {
+          joined += 1;
+          // Dropped without a close: lost, as a looping client would leave it. Bob's group re-keys
+          // without Alice.
+          drop(socket);
+          wait_for_signal(&mut bob, |message| {
+            matches!(
+              message,
+              CallServerMessage::Event {
+                event: CallEvent::ParticipantReconnecting { .. },
+                ..
+              }
+            )
+          })
+          .await;
+        },
+        Answer::Refused {
+          error_code,
+          maybe_retry_after_secs,
+        } => {
+          assert_eq!(error_code, ErrorCode::RateLimited);
+          let retry_after = maybe_retry_after_secs.expect("a refusal says when to come back");
+          assert!((50..=60).contains(&retry_after), "{retry_after}");
+          refused += 1;
+        },
+      }
+    }
+    assert_eq!((joined, refused), (3, 17));
+    // The refused attempts changed nothing in the call: Bob hears of no further comings and goings.
+    let changes = count_events(&mut bob, |event| {
+      matches!(
+        event,
+        CallEvent::ParticipantReconnecting { .. }
+          | CallEvent::ParticipantReconnected { .. }
+          | CallEvent::ParticipantJoined { .. }
+      )
+    })
+    .await;
+    assert_eq!(changes, 0);
+    assert_eq!(sfu.control.room_stats().participants, 2, "Alice keeps her place");
+  }
+
+  #[tokio::test]
+  async fn a_join_whose_turn_is_near_waits_for_it_instead_of_failing() {
+    let mut config = SfuConfig::default();
+    config.rejoin = RejoinLimit {
+      burst: 1,
+      interval: Duration::from_millis(500),
+      max_delay: Duration::from_secs(2),
+    };
+    let sfu = start_sfu(config).await;
+    let mut socket = sfu.connect_socket().await;
+    send_join(&mut socket, &token(ALICE)).await;
+    wait_for_joined(&mut socket).await;
+    drop(socket);
+    let reconnected_at = Instant::now();
+    let mut socket = sfu.connect_socket().await;
+    send_join(&mut socket, &token(ALICE)).await;
+    assert!(matches!(first_answer(&mut socket).await, Answer::Joined));
+    let waited = reconnected_at.elapsed();
+    assert!(waited >= Duration::from_millis(300), "{waited:?}");
+  }
+
+  /// What the SFU answered a join with.
+  enum Answer {
+    Joined,
+    Refused {
+      error_code: ErrorCode,
+      maybe_retry_after_secs: Option<u64>,
+    },
+  }
+
+  async fn first_answer(socket: &mut Socket) -> Answer {
+    let reading = async {
+      loop {
+        let message = socket.next().await.expect("socket ended").expect("socket failed");
+        let Message::Binary(bytes) = message else {
+          continue;
+        };
+        let FallbackFrame::Signal(body) = FallbackFrame::decode(&bytes).unwrap() else {
+          continue;
+        };
+        match serde_json::from_slice(body).unwrap() {
+          CallServerMessage::Event {
+            event: CallEvent::Joined { .. },
+            ..
+          } => return Answer::Joined,
+          CallServerMessage::Error { error } => {
+            return Answer::Refused {
+              error_code: error.error_code,
+              maybe_retry_after_secs: error.maybe_retry_after_secs,
+            };
+          },
+          _ => {},
+        }
+      }
+    };
+    tokio::time::timeout(Duration::from_secs(5), reading)
+      .await
+      .expect("no answer to the join")
+  }
+
+  /// The events of `wanted` kind that arrive until the socket is quiet for a moment.
+  async fn count_events(socket: &mut Socket, wanted: impl Fn(&CallEvent) -> bool) -> usize {
+    let mut count = 0;
+    while let Ok(Some(Ok(message))) = tokio::time::timeout(Duration::from_millis(500), socket.next()).await {
+      if let Message::Binary(bytes) = message
+        && let FallbackFrame::Signal(body) = FallbackFrame::decode(&bytes).unwrap()
+        && let CallServerMessage::Event { event, .. } = serde_json::from_slice(body).unwrap()
+        && wanted(&event)
+      {
+        count += 1;
+      }
+    }
+    count
   }
 }
 
