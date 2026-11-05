@@ -18,6 +18,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
 import androidx.compose.runtime.mutableStateMapOf
@@ -145,14 +146,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val shareState = MutableStateFlow<ShareState?>(null)
   /** Shares on their way into a composer; they leave the inbox once it has their files. */
   private val handedOverShares = HashSet<String>()
-  private var shareCopy: Job? = null
+  private val shareCopies = ArrayList<Job>()
   private var shareBeingCopied: SharedContent? = null
+  private val shareFailure = MutableStateFlow(false)
+
+  /** A share couldn't be kept (full disk, too many waiting); the user has to be told. */
+  val hasShareFailed: StateFlow<Boolean> = shareFailure
 
   /** What another app shared, until the user picked a conversation or discarded it (issue #208). */
   val share: StateFlow<ShareState?> = shareState
 
   /** A copy under way must start over if the process is killed: its intent is not yet used up. */
-  val isCopyingShare: Boolean get() = shareCopy?.isActive == true
+  val isCopyingShare: Boolean get() = shareCopies.any { it.isActive }
+
+  fun shareFailureShown() {
+    shareFailure.value = false
+  }
 
   val appState: StateFlow<AppState> = state
   val isBusy: StateFlow<Boolean> = busy
@@ -263,6 +272,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       maybeStored != null && start is ServerStart.ReplaceStored -> {
         // The organization locked another server: this account can't stay on the device.
         endSession()
+        forgetWaitingShares()
         graph.servers.forget(maybeStored.address.origin)
         forgetActiveServer()
         checkServer(start.address)
@@ -513,10 +523,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   fun signOut() = launchBusy {
     endSession()
-    // What waits to be shared doesn't outlive the session on this device.
-    shareCopy?.cancel()
-    withContext(Dispatchers.IO) { shareInbox.wipe() }
-    shareState.value = null
+    forgetWaitingShares()
     state.value = AppState.SignedOut()
   }
 
@@ -761,12 +768,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   fun receiveShare(content: SharedContent) {
     if (isCopyingShare && shareBeingCopied == content) return
-    val previous = shareCopy
+    shareCopies.removeAll { !it.isActive }
+    val maybePrevious = shareCopies.lastOrNull()
     shareBeingCopied = content
     if (shareState.value == null) shareState.value = ShareState.Preparing
-    shareCopy = viewModelScope.launch {
-      previous?.join()
-      withContext(Dispatchers.IO) { shareInbox.stage(content, shareSources(content), System.currentTimeMillis()) }
+    shareCopies += viewModelScope.launch {
+      maybePrevious?.join()
+      val copy = currentCoroutineContext()[Job]
+      val result = withContext(Dispatchers.IO) {
+        shareInbox.stage(content, shareSources(content), System.currentTimeMillis()) { copy?.isActive == false }
+      }
+      if (result is ShareStageResult.Failed) shareFailure.value = true
       refreshShare()
     }
   }
@@ -774,9 +786,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** The waiting share goes without a conversation: the user said so. */
   fun discardShare() {
     val maybeId = (shareState.value as? ShareState.Ready)?.share?.id
-    if (maybeId == null) shareCopy?.cancel()
     viewModelScope.launch {
-      shareCopy?.join()
+      if (maybeId == null) cancelShareCopies()
       maybeId?.let { id -> withContext(Dispatchers.IO) { shareInbox.delete(id) } }
       refreshShare()
     }
@@ -801,16 +812,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
-  /** The composer has the share: it leaves the inbox. */
-  suspend fun finishShare(share: StagedShare) {
-    withContext(Dispatchers.IO) { shareInbox.delete(share.id) }
+  /** The composer has the share: it leaves the inbox, except [failed] files, which wait for a retry. */
+  suspend fun finishShare(share: StagedShare, failed: List<StagedShareFile>) {
+    withContext(Dispatchers.IO) {
+      if (failed.isEmpty()) shareInbox.delete(share.id) else shareInbox.keepOnly(share, failed)
+    }
     handedOverShares.remove(share.id)
     refreshShare()
   }
 
+  /** Stops copies and waits for them, so that nothing of theirs appears after what follows. */
+  private suspend fun cancelShareCopies() {
+    val copies = shareCopies.toList()
+    copies.forEach { it.cancel() }
+    copies.joinAll()
+    shareCopies.removeAll(copies)
+  }
+
+  /** What waits to be shared doesn't outlive the session on this device. */
+  private suspend fun forgetWaitingShares() {
+    cancelShareCopies()
+    withContext(Dispatchers.IO) { shareInbox.wipe() }
+    handedOverShares.clear()
+    PendingShare.current.value = null
+    shareState.value = null
+  }
+
   private suspend fun refreshShare() {
     val maybeNext = withContext(Dispatchers.IO) { shareInbox.oldest(except = handedOverShares) }
-    val isCopyingAnother = currentCoroutineContext()[Job] != shareCopy && isCopyingShare
+    val maybeThisCopy = currentCoroutineContext()[Job]
+    val isCopyingAnother = shareCopies.any { it.isActive && it != maybeThisCopy }
     shareState.value = maybeNext?.let { ShareState.Ready(it) } ?: ShareState.Preparing.takeIf { isCopyingAnother }
   }
 
@@ -1285,11 +1316,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
  */
 private const val MAX_IMPORT_BYTES = 4L * 1024 * 1024 * 1024
 
-/** Copies `input` to `output`; false (and stops) once more than `maxBytes` arrived. */
-internal fun copyAtMost(input: InputStream, output: OutputStream, maxBytes: Long): Boolean {
+/** Copies `input` to `output`; false (and stops) once more than `maxBytes` arrived or on [isCancelled]. */
+internal fun copyAtMost(
+  input: InputStream,
+  output: OutputStream,
+  maxBytes: Long,
+  isCancelled: () -> Boolean = { false },
+): Boolean {
   val buffer = ByteArray(64 * 1024)
   var total = 0L
   while (true) {
+    if (isCancelled()) return false
     val count = input.read(buffer)
     if (count < 0) return true
     total += count

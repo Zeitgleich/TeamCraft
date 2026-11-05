@@ -84,6 +84,7 @@
   <string name="share_nothing_title">Nichts übernommen</string>
   <string name="share_nothing">Die andere App hat nichts gesendet, was TeamCraft lesen kann. Teile es noch einmal.</string>
   <string name="share_waiting">Was du geteilt hast, bleibt auf diesem Gerät. Melde dich an oder entsperre die App, um eine Unterhaltung zu wählen.</string>
+  <string name="share_failed">Was du geteilt hast, konnte nicht aufbewahrt werden: Das Gerät ist voll oder es wartet schon zu viel. Wähle eine Unterhaltung für das Wartende oder schaffe Platz, und teile es noch einmal.</string>
   <string name="share_discard">Verwerfen</string>
   <string name="share_recent">Zuletzt</string>
   <string name="share_no_match">Keine Unterhaltung passt.</string>

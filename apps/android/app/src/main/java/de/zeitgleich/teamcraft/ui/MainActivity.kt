@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.ui
 
 import android.content.Intent
+import android.widget.Toast
 import android.content.pm.ActivityInfo
 import android.os.Build
 import android.os.Bundle
@@ -75,7 +76,8 @@ class MainActivity : FragmentActivity() {
     // Locked at a cold start; a rotation or a recreated activity keeps the unlocked state.
     isLocked.value = AppLockPrefs.prefs(this).isEnabled && !isUnlockedInProcess
     if (!isLocked.value) isUnlockedInProcess = true
-    openConversation.value = conversationToOpen(intent)
+    // Not again when the activity is recreated: a kept intent was acted on.
+    if (savedInstanceState == null) openConversation.value = conversationToOpen(intent)
     // Not again when the activity is recreated with an intent already taken, nor when the system
     // starts it from the recent apps with the old share's intent; an unfinished copy starts over.
     val isShareTaken = savedInstanceState?.getBoolean(KEY_SHARE_TAKEN) == true ||
@@ -90,6 +92,13 @@ class MainActivity : FragmentActivity() {
         val state by viewModel.appState.collectAsState()
         val isSettingUp = state !is AppState.Ready
         val maybeShare by viewModel.share.collectAsState()
+        val hasShareFailed by viewModel.hasShareFailed.collectAsState()
+        LaunchedEffect(hasShareFailed) {
+          if (hasShareFailed) {
+            Toast.makeText(this@MainActivity, R.string.share_failed, Toast.LENGTH_LONG).show()
+            viewModel.shareFailureShown()
+          }
+        }
         LaunchedEffect(isSettingUp) { keepUprightWhileSettingUp(isSettingUp) }
         // The automatic sign-in retry (issue #1063) opens the browser like the user's own sign-in.
         LaunchedEffect(Unit) { viewModel.loginRetryIntents.collect { intent -> loginLauncher.launch(intent) } }
@@ -180,6 +189,8 @@ class MainActivity : FragmentActivity() {
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
+    // A recreated activity must see this intent: a copy cut short by a kill starts over from it.
+    setIntent(intent)
     conversationToOpen(intent)?.let { openConversation.value = it }
     sharedContent(intent, packageName)?.let(viewModel::receiveShare)
     appLinkOf(intent)?.let { appLink.value = it }
