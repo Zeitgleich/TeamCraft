@@ -84,6 +84,19 @@ no exit, the composer's focus ring blinking along, and rows of the menu drawn ov
   `a_popover_opened_once_stays_open_while_the_pointer_rests` counts every time the menu is added and
   removed while the pointer rests on its button and after a second press.
 
+## Follow-ups (#429)
+
+- Tab indicator: items added after mount are observed for resize from the mutation callback
+  (`sliding_indicator.rs`, `observe_items`), so a tab that changes width later moves the indicator.
+- Toast FLIP: the places recorded for the next glide are refreshed, without playing, when a toast or
+  the stack changes size (details opened) and on a window resize (`toast_motion.rs`). One
+  `ResizeObserver` and one `resize` listener, both removed on unmount; no polling.
+- Toast swipe: `touch-action: pan-y` is no longer under `(pointer: coarse)`. A touch laptop reports a
+  fine primary pointer, so the browser took the horizontal pan and fired `pointercancel`. The property
+  only affects touch input, so mouse and pen are unchanged.
+- Not done here: reaction pop retargeting and the idle CPU / channel-switch p95 measurement stay open
+  on the issue.
+
 ## Checked and fine
 
 - No `transition: all`, no animated `width`/`height`/`margin`/`top`/`left`, no `scale(0)`; the smallest
