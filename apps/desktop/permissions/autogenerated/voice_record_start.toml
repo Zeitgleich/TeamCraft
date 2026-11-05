@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-record-start"
+description = "Enables the voice_record_start command without any pre-configured scope."
+commands.allow = ["voice_record_start"]
+
+[[permission]]
+identifier = "deny-voice-record-start"
+description = "Denies the voice_record_start command without any pre-configured scope."
+commands.deny = ["voice_record_start"]

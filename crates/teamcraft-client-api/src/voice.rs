@@ -45,6 +45,60 @@ pub enum RecordingStop {
   Background,
   /// The microphone went away (unplugged, taken by another app).
   MicrophoneLost,
+  /// The user left the conversation the recording is for.
+  Left,
+}
+
+/// A recording in the desktop app's shell as the composer polls it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RecordingStatus {
+  /// The meter's level, 0.0 to 1.0.
+  pub level: f32,
+  pub elapsed_ms: u64,
+  /// Set once the recording stopped by itself: the composer then finishes it.
+  #[serde(rename = "stop", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_stop: Option<RecordingStop>,
+}
+
+/// A take the desktop app's shell finished, kept in its private folder until sent or discarded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellTake {
+  /// The take's file in the shell's recording folder; only the shell reads it.
+  pub path: String,
+  pub duration_ms: u64,
+  pub waveform: Vec<u8>,
+  #[serde(rename = "stop", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_stop: Option<RecordingStop>,
+}
+
+/// Why the desktop app's shell couldn't start a recording; the composer words it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingRefusal {
+  /// No microphone, or the system refused it (permission).
+  Microphone,
+  /// Another recording runs (another window).
+  Busy,
+  Failed,
+}
+
+impl RecordingRefusal {
+  /// The error text a refused command answers with, and back.
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Microphone => "voice_microphone",
+      Self::Busy => "voice_busy",
+      Self::Failed => "voice_failed",
+    }
+  }
+
+  pub fn parse(text: &str) -> Self {
+    match text {
+      "voice_microphone" => Self::Microphone,
+      "voice_busy" => Self::Busy,
+      _ => Self::Failed,
+    }
+  }
 }
 
 impl Waveform {

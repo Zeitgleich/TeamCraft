@@ -29,6 +29,8 @@ pub enum VoiceStop {
   Call,
   Background,
   MicrophoneLost,
+  /// The user left the conversation (the apps' own reason).
+  Left,
 }
 
 /// A finished take.
@@ -188,6 +190,7 @@ impl From<RecordingStop> for VoiceStop {
       RecordingStop::Call => Self::Call,
       RecordingStop::Background => Self::Background,
       RecordingStop::MicrophoneLost => Self::MicrophoneLost,
+      RecordingStop::Left => Self::Left,
     }
   }
 }
@@ -199,6 +202,7 @@ impl From<VoiceStop> for RecordingStop {
       VoiceStop::Call => Self::Call,
       VoiceStop::Background => Self::Background,
       VoiceStop::MicrophoneLost => Self::MicrophoneLost,
+      VoiceStop::Left => Self::Left,
     }
   }
 }

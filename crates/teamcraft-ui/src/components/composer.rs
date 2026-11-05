@@ -509,6 +509,7 @@ pub fn Composer(
           source: FileSource::Bytes { bytes },
           maybe_thumbnail: file.maybe_thumbnail,
           maybe_duration_ms: file.maybe_duration_ms,
+          maybe_waveform: None,
         }),
         FileContent::Large(picked) => large.push((
           file.name,
@@ -558,6 +559,7 @@ pub fn Composer(
               source,
               maybe_thumbnail,
               maybe_duration_ms,
+              maybe_waveform: None,
             }),
             Err(error) => {
               tracing::warn!(%error, "a large file could not be handed to the core");

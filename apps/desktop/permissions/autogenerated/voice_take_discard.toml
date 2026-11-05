@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-take-discard"
+description = "Enables the voice_take_discard command without any pre-configured scope."
+commands.allow = ["voice_take_discard"]
+
+[[permission]]
+identifier = "deny-voice-take-discard"
+description = "Denies the voice_take_discard command without any pre-configured scope."
+commands.deny = ["voice_take_discard"]

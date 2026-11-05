@@ -158,12 +158,7 @@ impl VoiceRecorder {
   /// didn't (a call, the app went to the background); the take keeps the first reason.
   pub fn finish(mut self, maybe_reason: Option<RecordingStop>) -> Result<VoiceTake, VoiceRecordingError> {
     if let Some(reason) = maybe_reason {
-      drop(
-        self
-          .shared
-          .stop
-          .compare_exchange(0, stop_code(reason), Ordering::Relaxed, Ordering::Relaxed),
-      );
+      stop_by_itself(&self.shared, reason);
     }
     let written = self.join()?;
     let maybe_stop = self.maybe_stop();
@@ -316,12 +311,16 @@ fn record(
   Ok(Written { samples, levels })
 }
 
+/// Records why the recording stopped; the first reason stays.
 fn stop_by_itself(shared: &Shared, reason: RecordingStop) {
-  drop(
-    shared
-      .stop
-      .compare_exchange(0, stop_code(reason), Ordering::Relaxed, Ordering::Relaxed),
-  );
+  // An `Err` means a reason was recorded before: it is kept.
+  if shared
+    .stop
+    .compare_exchange(0, stop_code(reason), Ordering::Relaxed, Ordering::Relaxed)
+    .is_err()
+  {
+    debug!(?reason, "the voice recording had stopped already");
+  }
 }
 
 fn stop_code(reason: RecordingStop) -> u8 {
@@ -330,6 +329,7 @@ fn stop_code(reason: RecordingStop) -> u8 {
     RecordingStop::Call => 2,
     RecordingStop::Background => 3,
     RecordingStop::MicrophoneLost => 4,
+    RecordingStop::Left => 5,
   }
 }
 
@@ -339,6 +339,7 @@ fn stop_of(code: u8) -> Option<RecordingStop> {
     2 => Some(RecordingStop::Call),
     3 => Some(RecordingStop::Background),
     4 => Some(RecordingStop::MicrophoneLost),
+    5 => Some(RecordingStop::Left),
     _ => None,
   }
 }
@@ -367,6 +368,7 @@ mod tests {
       RecordingStop::Call,
       RecordingStop::Background,
       RecordingStop::MicrophoneLost,
+      RecordingStop::Left,
     ] {
       assert_eq!(stop_of(stop_code(reason)), Some(reason));
     }

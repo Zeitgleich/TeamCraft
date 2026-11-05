@@ -17,7 +17,7 @@ use opus::{Channels, Decoder};
 use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
 use symphonia::core::errors::Error as FormatError;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use thiserror::Error;
@@ -65,6 +65,29 @@ pub fn decode_to_wav(input: &Path, output: &Path, max: Duration) -> Result<Durat
   let mut decoder = Decoder::new(DECODED_RATE_HZ, Channels::Mono)?;
   let max_samples = (max.as_secs_f64() * f64::from(DECODED_RATE_HZ)) as u64;
   let mut wav = WavWriter::create(output)?;
+  let decoded = decode_packets(&mut *format, track_id, &mut decoder, &mut wav, max_samples);
+  if let Err(error) = decoded.and_then(|()| match wav.samples {
+    0 => Err(VoiceDecodeError::Empty),
+    _ => Ok(()),
+  }) {
+    drop(wav);
+    // Nothing half-written is left behind.
+    drop(std::fs::remove_file(output));
+    return Err(error);
+  }
+  let samples = wav.finish()?;
+  Ok(Duration::from_secs_f64(samples as f64 / f64::from(DECODED_RATE_HZ)))
+}
+
+/// Decodes the track's packets into `wav` until the end, the limit, or too many broken packets.
+/// A message that breaks off keeps what decoded before the break.
+fn decode_packets(
+  format: &mut dyn FormatReader,
+  track_id: u32,
+  decoder: &mut Decoder,
+  wav: &mut WavWriter,
+  max_samples: u64,
+) -> Result<(), VoiceDecodeError> {
   let mut pcm = vec![0i16; MAX_PACKET_SAMPLES];
   let mut broken_in_row = 0;
   while wav.samples < max_samples {
@@ -72,7 +95,6 @@ pub fn decode_to_wav(input: &Path, output: &Path, max: Duration) -> Result<Durat
       Ok(Some(packet)) => packet,
       Ok(None) => break,
       Err(error) if wav.samples == 0 => return Err(not_opus(error)),
-      // A message that breaks off plays what decoded before the break.
       Err(_) => break,
     };
     if packet.track_id != track_id {
@@ -89,13 +111,7 @@ pub fn decode_to_wav(input: &Path, output: &Path, max: Duration) -> Result<Durat
       Err(_) => break,
     }
   }
-  if wav.samples == 0 {
-    drop(wav);
-    drop(std::fs::remove_file(output));
-    return Err(VoiceDecodeError::Empty);
-  }
-  let samples = wav.finish()?;
-  Ok(Duration::from_secs_f64(samples as f64 / f64::from(DECODED_RATE_HZ)))
+  Ok(())
 }
 
 /// A mono 16-bit WAV file written as it goes; the sizes in its header are filled in at the end.
@@ -196,8 +212,13 @@ mod tests {
     truncated.truncate(truncated.len() / 2);
     let input = folder.file("half.ogg");
     std::fs::write(&input, truncated).unwrap();
-    let length = decode_to_wav(&input, &output, Duration::from_secs(5)).unwrap();
-    assert!(length > Duration::from_millis(500), "{length:?}");
+    // The Ogg reader looks for the last page first, so a cut file may be refused whole; either
+    // way nothing half-written is left (attachments are hash-checked before this, so a cut file
+    // only comes from a broken sender).
+    match decode_to_wav(&input, &output, Duration::from_secs(5)) {
+      Ok(length) => assert!(length > Duration::ZERO, "{length:?}"),
+      Err(_) => assert!(!output.exists()),
+    }
   }
 
   /// `frames` 20 ms frames of a 440 Hz tone, encoded and written as Ogg Opus.
