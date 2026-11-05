@@ -65,6 +65,7 @@ const MAX_SHARED_TEXT_CHARS = 64 * 1024;
 // What may wait at once, so that a site posting forms here can't fill the disk.
 const MAX_WAITING_SHARES = 5;
 const MAX_WAITING_BYTES = 4 * 1024 * 1024 * 1024;
+let shareQueue = Promise.resolve();
 // A share nobody picked a conversation for goes after this long (plaintext at rest).
 const SHARE_KEPT_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -158,7 +159,14 @@ function isShare(request) {
 // Keeps what the system's share sheet sent and opens the app. A page of another site can post a form
 // here too, so such a request is dropped; either way nothing is sent without the user picking a
 // conversation and pressing send. A failure comes back to the page in the address (`share-failed`).
-async function receiveShare(request) {
+// One at a time, so that two posts at once can't both pass the caps.
+function receiveShare(request) {
+  const received = shareQueue.then(() => keepShare(request));
+  shareQueue = received.catch(() => {});
+  return received;
+}
+
+async function keepShare(request) {
   if (request.mode !== 'navigate' || isFromAnotherSite(request)) return Response.redirect('/', 303);
   const id = `${Date.now()}-${crypto.randomUUID()}`;
   const cache = await caches.open(SHARE_CACHE);
@@ -167,9 +175,12 @@ async function receiveShare(request) {
     const waiting = await waitingShares(cache);
     if (waiting.count >= MAX_WAITING_SHARES) return Response.redirect('/?share-failed', 303);
     let room = MAX_WAITING_BYTES - waiting.bytes;
-    // Told up front: a body that can't fit isn't even parsed.
-    if (Number(request.headers.get('content-length')) > room) return Response.redirect('/?share-failed', 303);
-    const form = await request.formData();
+    // The browser's own blob on disk first: a form navigation has no `content-length` to go by, and
+    // a body that can't fit isn't parsed into files at all.
+    const body = await request.blob();
+    if (body.size > room) return Response.redirect('/?share-failed', 303);
+    const headers = { 'content-type': request.headers.get('content-type') || '' };
+    const form = await new Response(body, { headers }).formData();
     const text = (name) => {
       const value = form.get(name);
       return typeof value === 'string' ? value.slice(0, MAX_SHARED_TEXT_CHARS) : '';

@@ -259,9 +259,7 @@ impl SessionControl {
         // A sign-out in a tab closed before it finished may have left a cache behind (#749).
         crate::persisted_media::sweep_signed_out().await;
       },
-      Err(AuthError::KeyLost) => self
-        .state
-        .set_if_alive(SessionState::SignedOut(Some(LoginProblem::DeviceKeyLost))),
+      Err(AuthError::KeyLost) => self.signed_out_with_problem(LoginProblem::DeviceKeyLost).await,
       // The provider refused the stored sign-in: say so instead of a bare sign-in screen.
       Err(AuthError::Denied(_)) => self
         .state
@@ -486,6 +484,13 @@ impl SessionControl {
     self.next_core_round();
     self.is_account_unconfirmed.set_if_alive(false);
     self.close_account_data(cached_user).await;
+    self.signed_out_with_problem(problem).await;
+  }
+
+  /// To the sign-in screen with `problem`; a share that was waiting goes if the problem ends the
+  /// person's place on this device.
+  async fn signed_out_with_problem(&self, problem: LoginProblem) {
+    settle_waiting_share(&problem).await;
     self.state.set_if_alive(SessionState::SignedOut(Some(problem)));
   }
 
@@ -656,6 +661,8 @@ impl SessionControl {
   }
 
   pub fn sign_out(&self) {
+    // What other apps shared and still waits for a conversation doesn't outlive the user's sign-out.
+    spawn_local(crate::share_into::discard_waiting());
     self.sign_out_with(None);
   }
 
@@ -673,10 +680,8 @@ impl SessionControl {
     spawn_local(async move {
       // Pictures of this account don't outlive the session on this device (#749).
       crate::persisted_media::clear(maybe_user).await;
-      // Nor does what other apps shared and still waits for a conversation, unless the session
-      // only ran out: the same person signs in again, and the share waits for that.
-      if !keeps_waiting_share(maybe_problem.as_ref()) {
-        crate::share_into::discard_waiting().await;
+      if let Some(problem) = &maybe_problem {
+        settle_waiting_share(problem).await;
       }
       if tauri::has_core()
         && let Err(error) = remote_backend::stop_core().await
@@ -837,8 +842,14 @@ impl SessionControl {
       .and_then(interpret_me_response);
     match outcome {
       // The desktop shell hosts the client core, whose enrollment replaces the demo welcome step.
-      Ok(me) if tauri::has_core() => self.start_core(me).await,
+      // Before anything of the app shows: a share left from a session that ran out isn't for
+      // somebody else signing in now.
+      Ok(me) if tauri::has_core() => {
+        crate::share_into::claim_for(&me.id.to_string()).await;
+        self.start_core(me).await;
+      },
       Ok(me) => {
+        crate::share_into::claim_for(&me.id.to_string()).await;
         let is_ready = load_string(&device_ready_key(&me)).is_some();
         self.state.set_if_alive(if is_ready {
           SessionState::Ready(me)
@@ -848,7 +859,7 @@ impl SessionControl {
       },
       Err(problem) => {
         // A role-less account stays signed in at the identity provider; the login screen offers to sign out.
-        self.state.set_if_alive(SessionState::SignedOut(Some(problem)));
+        self.signed_out_with_problem(problem).await;
       },
     }
   }
@@ -892,14 +903,25 @@ fn local_problem(error: &AuthError) -> LocalSignInProblem {
   }
 }
 
-/// Whether a share waiting for a conversation survives this end of the session. An end the user
-/// didn't choose and that says nothing about who comes back keeps it; signing out and an account that
-/// can't stay on this device don't.
-fn keeps_waiting_share(maybe_problem: Option<&LoginProblem>) -> bool {
+/// Whether `problem` ends the person's place on this device, so that a share waiting for a
+/// conversation goes with it. Anything else (a session that ran out, a refused or failed attempt, a
+/// server that can't be reached) says nothing of the kind: the share waits, and the next sign-in
+/// decides by who signs in (`share_into::claim_for`).
+fn ends_share_owner(problem: &LoginProblem) -> bool {
   matches!(
-    maybe_problem,
-    Some(LoginProblem::SessionExpired | LoginProblem::SessionEnded | LoginProblem::SessionTimedOut)
+    problem,
+    LoginProblem::NoTeamcraftRole
+      | LoginProblem::AccountDeactivated
+      | LoginProblem::AccountDeleted
+      | LoginProblem::DeviceBindingRequired
+      | LoginProblem::DeviceKeyLost
   )
+}
+
+async fn settle_waiting_share(problem: &LoginProblem) {
+  if ends_share_owner(problem) {
+    crate::share_into::discard_waiting().await;
+  }
 }
 
 fn problem_from_auth(error: &AuthError) -> LoginProblem {
@@ -1023,13 +1045,57 @@ pub fn interpret_me_response(response: ApiResponse) -> Result<GetMeResponse, Log
 mod tests {
   use super::*;
 
-  #[test]
-  fn a_waiting_share_outlives_only_a_session_that_ran_out() {
-    assert!(keeps_waiting_share(Some(&LoginProblem::SessionExpired)));
-    assert!(keeps_waiting_share(Some(&LoginProblem::SessionTimedOut)));
-    assert!(!keeps_waiting_share(None), "the user signed out");
-    assert!(!keeps_waiting_share(Some(&LoginProblem::DeviceKeyLost)));
-    assert!(!keeps_waiting_share(Some(&LoginProblem::AccountDeactivated)));
+  mod waiting_share {
+    use super::*;
+
+    #[test]
+    fn the_servers_refusal_of_the_account_ends_it() {
+      for (code, status) in [
+        ("account_deactivated", 403),
+        ("account_deleted", 403),
+        ("no_teamcraft_role", 403),
+        ("dpop_required", 401),
+      ] {
+        let answer = ApiResponse {
+          status,
+          body: format!(r#"{{"error_code":"{code}","message":"refused"}}"#),
+        };
+        let AccountVerdict::Refused(problem) = account_verdict(Ok(answer), false) else {
+          panic!("{code} is no refusal");
+        };
+        assert!(ends_share_owner(&problem), "{code}");
+      }
+      let AccountVerdict::Refused(problem) = account_verdict(Err(AuthError::KeyLost), false) else {
+        panic!("a lost key is a refusal");
+      };
+      assert!(ends_share_owner(&problem));
+    }
+
+    #[test]
+    fn a_session_that_ran_out_or_a_failed_attempt_keeps_it() {
+      for outcome in [
+        Err(AuthError::Denied("expired".to_owned())),
+        Err(AuthError::StateMismatch),
+        Err(AuthError::AuthorizationRefused(
+          "temporarily_unavailable".to_owned(),
+        )),
+      ] {
+        let RestoreVerdict::Over(Some(problem)) = restore_verdict(outcome) else {
+          panic!("these end the restore with a problem");
+        };
+        assert!(!ends_share_owner(&problem), "{problem:?}");
+      }
+      for problem in [
+        LoginProblem::SessionEnded,
+        LoginProblem::SessionTimedOut,
+        LoginProblem::ServerUnreachable,
+        LoginProblem::Cancelled,
+        LoginProblem::CoreStopped,
+        LoginProblem::Failed("text".to_owned()),
+      ] {
+        assert!(!ends_share_owner(&problem), "{problem:?}");
+      }
+    }
   }
 
   const ME: &str = r#"{"id":"42","username":"alice","display_name":"Alice","role":"owner"}"#;

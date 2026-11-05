@@ -323,3 +323,4 @@ share-into-choose = Choose
 share-into-discard = Discard
 share-into-failed = What you shared could not be received. Share it again.
 share-into-read-failed = What you shared could not be read. Share it again.
+share-into-other-account = Something shared before this sign-in was removed: it was kept for the person signed in before you.

@@ -27,6 +27,7 @@ use crate::i18n::{I18n, use_i18n};
 use crate::media_formats::media_type_for;
 use crate::model::{ConversationId, TimestampMs};
 use crate::reactive::SetIfAlive;
+use crate::settings::{load_string, store_string};
 use crate::shell_drop::{self, ShellFile};
 use crate::state::{AppState, Overlay, use_app_state};
 
@@ -46,6 +47,8 @@ const SHOWN_TEXT_CHARS: usize = 200;
 const MAX_LISTED: usize = 100;
 /// A share nobody picked a conversation for goes after this long (`SHARE_KEPT_MS` in `sw.js`).
 const SHARE_KEPT_MS: TimestampMs = 7 * 24 * 60 * 60 * 1000;
+/// `localStorage`: who last signed in here. A share survives a session that ran out, for that person.
+const SHARE_OWNER_KEY: &str = "teamcraft.share-owner";
 
 thread_local! {
   /// The app's inbox, for the sign-out, which outlives the components it was started from.
@@ -260,8 +263,26 @@ impl ShareInbox {
   }
 }
 
+/// `user` signed in: what waits from before goes if somebody else signed in last. They would see
+/// another person's plaintext. A share made while nobody was known to be signed in stays.
+pub async fn claim_for(user: &str) {
+  if is_share_of_another(load_string(SHARE_OWNER_KEY).as_deref(), user) {
+    let had_share = CURRENT
+      .get()
+      .is_some_and(|inbox| inbox.maybe_waiting.try_with_untracked(Option::is_some) == Some(true));
+    discard_waiting().await;
+    // async-ok: CURRENT is a thread-local cell; the signal inside is written with set_if_alive.
+    if had_share && let Some(inbox) = CURRENT.get() {
+      inbox.maybe_failure.set_if_alive(Some("share-into-other-account"));
+    }
+  }
+  store_string(SHARE_OWNER_KEY, user);
+}
+
 /// The waiting share goes (sign-out): what was shared doesn't outlive the session on this device.
+/// Nobody is the owner of what is shared after this.
 pub async fn discard_waiting() {
+  store_string(SHARE_OWNER_KEY, "");
   if let Some(inbox) = CURRENT.get() {
     inbox.maybe_waiting.set_if_alive(None);
     inbox.wants_picker.set_if_alive(false);
@@ -553,6 +574,10 @@ fn clean_file_name(name: &str) -> String {
   }
 }
 
+fn is_share_of_another(maybe_owner: Option<&str>, user: &str) -> bool {
+  maybe_owner.is_some_and(|owner| owner != user)
+}
+
 /// Whether a share (its ID starts with the time it arrived) is past its time; an ID without a time
 /// is nothing the service worker wrote.
 fn is_share_expired(id: &str, now: TimestampMs) -> bool {
@@ -833,6 +858,16 @@ mod tests {
     assert_eq!(share_id_of_meta("https://a.example/share/12-ab/file/0"), None);
     assert_eq!(share_id_of_meta("https://a.example/share//meta"), None);
     assert_eq!(share_id_of_meta("https://a.example/other"), None);
+  }
+
+  #[test]
+  fn only_somebody_else_than_the_last_user_loses_a_waiting_share() {
+    assert!(is_share_of_another(Some("1"), "2"));
+    assert!(!is_share_of_another(Some("1"), "1"));
+    assert!(
+      !is_share_of_another(None, "2"),
+      "nobody signed in since the sign-out"
+    );
   }
 
   #[test]

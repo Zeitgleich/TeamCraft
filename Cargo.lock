@@ -10961,6 +10961,7 @@ dependencies = [
  "futures-util",
  "gtk",
  "image",
+ "libc",
  "oauth2",
  "objc2",
  "objc2-core-graphics",

@@ -69,12 +69,18 @@ pub fn shared_files_finish(store: State<'_, Arc<DroppedFilesState>>) {
   store.finish_share();
 }
 
+/// Resolves the paths off the main thread: all three callers run on it, and a hung network mount
+/// must not freeze the window. The page hears of the share once that is done.
 fn receive(app: &AppHandle, paths: Vec<PathBuf>) {
   debug!(count = paths.len(), "files shared to the app");
-  app.state::<Arc<DroppedFilesState>>().shared(paths);
-  if let Err(error) = app.emit_to(tray::MAIN_WINDOW, SHARED_FILES_EVENT, "") {
-    debug!(%error, "could not tell the webview about shared files");
-  }
+  let store = app.state::<Arc<DroppedFilesState>>().inner().clone();
+  let app = app.clone();
+  tauri::async_runtime::spawn_blocking(move || {
+    store.shared(paths);
+    if let Err(error) = app.emit_to(tray::MAIN_WINDOW, SHARED_FILES_EVENT, "") {
+      debug!(%error, "could not tell the webview about shared files");
+    }
+  });
 }
 
 /// The paths after `--share`, absolute: a second launch started elsewhere names them relative to its

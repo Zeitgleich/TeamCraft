@@ -323,3 +323,4 @@ share-into-choose = Auswählen
 share-into-discard = Verwerfen
 share-into-failed = Was du geteilt hast, konnte nicht empfangen werden. Teile es noch einmal.
 share-into-read-failed = Was du geteilt hast, konnte nicht gelesen werden. Teile es noch einmal.
+share-into-other-account = Etwas, das vor dieser Anmeldung geteilt wurde, ist entfernt: Es war für die Person aufbewahrt, die zuvor angemeldet war.

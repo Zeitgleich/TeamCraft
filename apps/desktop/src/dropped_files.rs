@@ -109,37 +109,30 @@ impl DroppedFilesState {
   }
 
   /// The files of the drop the page hasn't asked for yet, readable by ID from now on. Folders and
-  /// files that are gone are left out. Empty when nothing was dropped recently.
+  /// files that are gone are left out. Empty when nothing was dropped recently. The file system is
+  /// asked outside the lock: a hung network mount must not hold up everything else that takes it.
   pub fn take(&self, now: Instant) -> Vec<DroppedFile> {
-    let mut store = self.lock();
-    let Some(pending) = store.maybe_pending.take() else {
-      return Vec::new();
+    let pending = {
+      let mut store = self.lock();
+      let Some(pending) = store.maybe_pending.take() else {
+        return Vec::new();
+      };
+      store.readable.clear();
+      pending
     };
-    store.readable.clear();
     if now.saturating_duration_since(pending.dropped_at) > PENDING_FOR {
       return Vec::new();
     }
+    let found: Vec<(PathBuf, u64)> = pending.paths.into_iter().filter_map(resolved_file).collect();
+    let mut store = self.lock();
     let mut files = Vec::new();
-    for path in pending.paths {
-      // The user dropped what a link points to, and that is what they see and what goes out.
-      let Ok(path) = path.canonicalize() else {
-        tracing::debug!("a dropped file is gone");
-        continue;
-      };
-      let Ok(metadata) = std::fs::metadata(&path) else {
-        tracing::debug!("a dropped file is gone");
-        continue;
-      };
-      if !metadata.is_file() {
-        tracing::debug!("a dropped folder or special file was left out");
-        continue;
-      }
+    for (path, size_bytes) in found {
       let id = store.next_id;
       store.next_id = store.next_id.wrapping_add(1);
       files.push(DroppedFile {
         id,
         name: display_name(&path),
-        size_bytes: metadata.len(),
+        size_bytes,
       });
       store.keep_stageable(id, path.clone());
       store.readable.insert(id, path);
@@ -149,7 +142,8 @@ impl DroppedFilesState {
 
   /// Files were shared to the app from outside; they join a share that still waits, without the
   /// ones it has already. Links are resolved now: the user sees the name of the file that goes out,
-  /// and that file is what is read later, whatever the link points to by then.
+  /// and that file is what is read later, whatever the link points to by then. This asks the file
+  /// system, so never on the main thread (shared_files.rs).
   pub fn shared(&self, paths: Vec<PathBuf>) {
     let count = paths.len();
     let resolved: Vec<PathBuf> = paths
@@ -304,15 +298,55 @@ fn read_chunk(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
     return Err(std::io::Error::other("the file is larger than a drop may be"));
   }
   let length = CHUNK_BYTES.min(READ_MAX_BYTES - offset);
-  // The path was resolved on receipt: something else there now is not what the user was shown.
-  if !std::fs::symlink_metadata(path)?.is_file() {
-    return Err(std::io::Error::other("no longer the file that was dropped"));
-  }
-  let mut file = File::open(path)?;
+  let mut file = open_regular(path)?;
   file.seek(SeekFrom::Start(offset))?;
   let mut chunk = Vec::new();
   file.take(length).read_to_end(&mut chunk)?;
   Ok(chunk)
+}
+
+/// The user dropped what a link points to, and that is what they see and what goes out. `None` for
+/// a folder, a special file or one that is gone.
+fn resolved_file(path: PathBuf) -> Option<(PathBuf, u64)> {
+  let Ok(path) = path.canonicalize() else {
+    tracing::debug!("a dropped file is gone");
+    return None;
+  };
+  match std::fs::metadata(&path) {
+    Ok(metadata) if metadata.is_file() => Some((path, metadata.len())),
+    Ok(_) => {
+      tracing::debug!("a dropped folder or special file was left out");
+      None
+    },
+    Err(_) => {
+      tracing::debug!("a dropped file is gone");
+      None
+    },
+  }
+}
+
+/// Opens a path resolved on receipt, for reading, if it is still a regular file: something else
+/// there now isn't what the user was shown. On Unix the check is the open itself (no following a
+/// link, no blocking on a pipe) and the open handle. On Windows the path is checked before the open:
+/// `FILE_FLAG_OPEN_REPARSE_POINT` would also keep cloud placeholders (OneDrive) from being fetched,
+/// so a link swapped in between check and open is a known gap (docs/robustness-audit.md).
+pub fn open_regular(path: &Path) -> std::io::Result<File> {
+  let mut options = File::options();
+  options.read(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+  }
+  #[cfg(not(unix))]
+  if !std::fs::symlink_metadata(path)?.is_file() {
+    return Err(std::io::Error::other("no longer a regular file"));
+  }
+  let file = options.open(path)?;
+  if !file.metadata()?.is_file() {
+    return Err(std::io::Error::other("no longer a regular file"));
+  }
+  Ok(file)
 }
 
 /// The local paths a `text/uri-list` names (RFC 2483: one URI per line, `#` comments, CRLF), in

@@ -4,9 +4,11 @@
 //! each one a raw IPC request, and the message names the staged copy's path; the core reads it one
 //! part at a time while it goes up and deletes it afterwards (`maybe_upload_staging_dir`).
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+use crate::dropped_files::open_regular;
 
 /// Largest chunk the webview may send at once.
 pub const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024;
@@ -21,8 +23,6 @@ pub enum StagingError {
   ChunkTooLarge,
   #[error("the chunk at {offset} doesn't continue the staged file, which has {staged} bytes")]
   OutOfOrder { offset: u64, staged: u64 },
-  #[error("the file to stage is no longer a regular file")]
-  NotAFile,
   #[error("the staged file could not be written: {0}")]
   Io(#[from] std::io::Error),
 }
@@ -62,14 +62,9 @@ pub fn copy_file(directory: &Path, id: &str, source: &Path) -> Result<PathBuf, S
   if id.len() != STAGE_ID_LEN || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
     return Err(StagingError::InvalidId);
   }
-  // `source` was resolved on receipt: anything else there now (a link, a pipe, which would block
-  // here) isn't what the user was shown.
-  if !std::fs::symlink_metadata(source)?.is_file() {
-    return Err(StagingError::NotAFile);
-  }
+  let mut input = open_regular(source)?;
   create_private_dir(directory)?;
   let path = directory.join(id);
-  let mut input = File::open(source)?;
   let mut output = create_private_file(&path)?;
   if let Err(error) = std::io::copy(&mut input, &mut output) {
     // A partial copy would only wait for the next sweep.
@@ -122,18 +117,17 @@ mod tests {
     let gone = directory.join("gone");
     assert!(copy_file(&staging, &"1".repeat(STAGE_ID_LEN), &gone).is_err());
     assert!(!staging.join("1".repeat(STAGE_ID_LEN)).exists());
-    assert!(matches!(
-      copy_file(&staging, &id, &staging),
-      Err(StagingError::NotAFile)
-    ));
+    assert!(copy_file(&staging, &id, &staging).is_err(), "a folder");
     #[cfg(unix)]
     {
       let link = directory.join("link");
       std::os::unix::fs::symlink(&source, &link).unwrap();
-      assert!(matches!(
-        copy_file(&staging, &id, &link),
-        Err(StagingError::NotAFile)
-      ));
+      assert!(copy_file(&staging, &id, &link).is_err(), "a link swapped in");
+      // A pipe nobody writes to would block a plain open for good.
+      let pipe = directory.join("pipe");
+      let made = std::process::Command::new("mkfifo").arg(&pipe).status().unwrap();
+      assert!(made.success());
+      assert!(copy_file(&staging, &id, &pipe).is_err(), "a pipe swapped in");
     }
     std::fs::remove_dir_all(&directory).unwrap();
   }

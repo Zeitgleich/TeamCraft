@@ -4504,7 +4504,8 @@ a release after the service workers that handle it (#1324), so no browser offers
 share target. With the field, the browser POSTs what was shared to `/share-target`. A service worker
 that knows the path answers that itself and keeps the content in a cache of its own, in the clear like
 any picked file, until the user picked a conversation (at most 7 days, at most 5 shares and 4 GiB;
-wiped at sign-out). From there it takes the normal encrypted send.
+wiped at sign-out, when the account can't stay on the device, and when somebody else signs in after a
+session ran out). From there it takes the normal encrypted send.
 
 What this doesn't cover: with no active worker that knows the path (never installed, evicted, or one
 from before this handling), the browser sends the POST with the plaintext to the network. The proxy
