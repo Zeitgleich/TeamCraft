@@ -87,9 +87,13 @@ the change, and people taken off the list are removed from the group.
    gets a one-time invite of their own (as for the shared guest link, step 5). Personal one-time links (`#invite=<token>`, a host's "One-time
    link", and the links mailed to external invitees before #987) still work; their guests always
    wait for a host's click.
-   The organizer sees who waits on the meeting's card and, while in the meeting's call, on the
-   call screen; a host who isn't the organizer (a chat admin) sees it on the call screen while in
-   the call. A knock (`lobby_join`) reloads the lobby at once, without polling.
+   Hosts see who waits on the meeting's card and, while in the meeting's call, on the call screen.
+   The meeting list (`GET /meetings`) marks each meeting whose lobby the caller hosts with
+   `can_host_lobby: true` (the rule of the lobby's `is_host`: organizer or chat admin, in the
+   meeting chat, meeting scheduled; #1305), so the devices of a host who isn't the organizer ask
+   for its lobby and show it on the card outside the call too. With an older server, which sends
+   no flag, such a host sees it on the call screen only, while in the call. A knock (`lobby_join`)
+   reloads the lobby at once, without polling.
 5. **Shared guest link** (`PUT /meetings/{id}/shared-guest-link`, hosts only): since #987 this is
    the meeting link itself. Every guest who uses it gets a one-time invite of their own
    (`shared_invite_id` names the link), so the rest is step 4. The link lets at most
