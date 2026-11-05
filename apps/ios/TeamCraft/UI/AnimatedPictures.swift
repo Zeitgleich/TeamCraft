@@ -47,6 +47,14 @@ enum AnimationKind {
   /// The longest side of a viewer's frames: each one is decoded as it comes, so less than a still
   /// picture's limit.
   static let viewerMaxPixels: CGFloat = 2048
+  /// A file over these isn't animated: it reaches the decoder from others, without a tap.
+  static let maxFramePixels = 16_000_000
+  static let maxFrames = 3000
+  /// What tiles fetch by themselves per run of the app; after it a tap fetches, so a channel can't
+  /// fill the cache.
+  static let maxAutomaticBytesPerRun: Int64 = 256 * 1024 * 1024
+  /// How long a tile has to stay on screen before it fetches by itself: fast scrolling fetches nothing.
+  static let fetchSettle: Duration = .milliseconds(300)
 
   /// Formats that always move: the tile offers play and fetches the file when it is to move.
   static func isAnimation(_ mediaType: String) -> Bool {
@@ -69,6 +77,25 @@ enum AnimationKind {
   }
 }
 
+/// What tiles may still fetch by themselves.
+struct AutoFetchBudget {
+  let maxBytes: Int64
+  private var spentBytes: Int64 = 0
+
+  init(maxBytes: Int64) {
+    self.maxBytes = maxBytes
+  }
+
+  /// Takes `bytes` from the budget; `false` when they don't fit, and then nothing is taken.
+  mutating func take(_ bytes: Int64) -> Bool {
+    guard spentBytes + bytes <= maxBytes else { return false }
+    spentBytes += bytes
+    return true
+  }
+
+  @MainActor static var shared = AutoFetchBudget(maxBytes: AnimationKind.maxAutomaticBytesPerRun)
+}
+
 /// Reads the frames of an animated file with ImageIO, one at a time and scaled down while decoding:
 /// memory holds the frame on screen, whatever the file's length.
 final class AnimationFrames: @unchecked Sendable {
@@ -89,11 +116,27 @@ final class AnimationFrames: @unchecked Sendable {
     self.source = source
     self.maxPixels = maxPixels
     count = CGImageSourceGetCount(source)
+    let first = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] ?? [:]
+    guard Self.isWithinLimits(properties: first, count: count) else { return nil }
     let container = CGImageSourceCopyProperties(source, nil) as? [CFString: Any] ?? [:]
     maybeLoops = Self.loops(in: container)
   }
 
+  /// Reads the size from the file's metadata, before any frame is decoded. No size counts as too large.
+  static func isWithinLimits(properties: [CFString: Any], count: Int) -> Bool {
+    guard count <= AnimationKind.maxFrames,
+      let width = properties[kCGImagePropertyPixelWidth] as? Int,
+      let height = properties[kCGImagePropertyPixelHeight] as? Int,
+      width > 0, height > 0,
+      width <= AnimationKind.maxFramePixels / height
+    else { return false }
+    return true
+  }
+
   func frame(at index: Int) -> (image: UIImage, delay: TimeInterval)? {
+    // A later frame can name another size than the first.
+    let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any] ?? [:]
+    guard Self.isWithinLimits(properties: properties, count: count) else { return nil }
     let options: [CFString: Any] = [
       kCGImageSourceCreateThumbnailFromImageAlways: true,
       kCGImageSourceCreateThumbnailWithTransform: true,
@@ -101,7 +144,6 @@ final class AnimationFrames: @unchecked Sendable {
       kCGImageSourceThumbnailMaxPixelSize: maxPixels,
     ]
     guard let image = CGImageSourceCreateThumbnailAtIndex(source, index, options as CFDictionary) else { return nil }
-    let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any] ?? [:]
     return (UIImage(cgImage: image), Self.delay(in: properties))
   }
 
@@ -162,7 +204,9 @@ final class AnimationPlayer {
   /// Shows frames until cancelled or the file's loops are done. Paused, the last frame stays.
   func run(path: String, maxPixels: CGFloat) async {
     guard let frames = await Task.detached(priority: .utility, operation: {
-      AnimationFrames(path: path, maxPixels: maxPixels)
+      // The core keeps the most recently used downloads when it trims its folder.
+      try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path)
+      return AnimationFrames(path: path, maxPixels: maxPixels)
     }).value else {
       maybeMoves = false
       return

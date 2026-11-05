@@ -163,12 +163,18 @@ struct AttachmentView: View {
   private func runMotion() async {
     guard mayMove else { return }
     guard let path = localPath else {
-      let isAutomatic = playChoice == .unset && file.sizeBytes <= AnimationKind.maxAutomaticBytes
-        && fetchesOriginalAutomatically(
-          setting: OriginalDownloadSetting.current.setting, isMetered: NetworkMonitor.shared.isMetered)
-      if AnimationKind.isAnimation(file.mediaType), wantsToMove, isVisible, isAutomatic, file.transfer.state == "remote" {
-        fetchFile()
-      }
+      guard AnimationKind.isAnimation(file.mediaType), wantsToMove, isVisible, playChoice == .unset,
+        file.sizeBytes <= AnimationKind.maxAutomaticBytes, file.transfer.state == "remote"
+      else { return }
+      // Cancelled when the tile leaves, so a tile scrolled past fetches nothing; a fetch once started
+      // runs on.
+      try? await Task.sleep(for: AnimationKind.fetchSettle)
+      guard !Task.isCancelled,
+        fetchesOriginalAutomatically(
+          setting: OriginalDownloadSetting.current.setting, isMetered: NetworkMonitor.shared.isMetered),
+        AutoFetchBudget.shared.take(file.sizeBytes)
+      else { return }
+      fetchFile()
       return
     }
     if isMoving {

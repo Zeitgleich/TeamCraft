@@ -186,14 +186,13 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
       .settings
       .prefs
       .with_untracked(|prefs| prefs.display.animated_images)
-      .effective(prefers_reduced_motion())
   });
   // An animation found only once the file arrived starts paused like any other.
   Effect::new(move |previous: Option<Option<MediaKind>>| {
     let now = kind.get();
     if previous == Some(Some(MediaKind::Image))
       && now == Some(MediaKind::Animated)
-      && MediaKind::Animated.starts_paused(motion_mode.get_untracked())
+      && MediaKind::Animated.starts_paused(motion_mode.get_untracked(), prefers_reduced_motion())
     {
       is_paused.set(true);
     }
@@ -498,7 +497,7 @@ struct LoadInputs {
   arrival: RwSignal<Arrival>,
   viewport: RwSignal<Viewport>,
   is_paused: RwSignal<bool>,
-  /// The "Animated images" setting on this device (#201), read when a file comes on screen.
+  /// The "Animated images" setting (#201), read when a file comes on screen.
   motion_mode: Signal<crate::prefs::AnimatedImages>,
   retries: RwSignal<u32>,
   ticket: StoredValue<u64>,
@@ -546,7 +545,7 @@ fn load_current(inputs: LoadInputs) {
     is_paused.set(
       kind
         .get_untracked()
-        .is_some_and(|kind| kind.starts_paused(motion_mode.get_untracked())),
+        .is_some_and(|kind| kind.starts_paused(motion_mode.get_untracked(), prefers_reduced_motion())),
     );
     // Replacing the old values drops their URLs, which releases the previous file right away.
     // The sharper inline rendition when the conversation already loaded it, else the thumbnail.

@@ -32,13 +32,13 @@ use crate::components::audio_card::{AudioCard, is_audio_card};
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::prefers_reduced_motion;
-use crate::components::lightbox_controls::still_frame;
+use crate::components::lightbox_controls::small_still_frame;
 use crate::components::message_actions::{copy_to_clipboard, reply_to_file};
 use crate::components::sheet::PopoverBackdrop;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::{I18n, use_i18n};
 use crate::lightbox::{MediaKey, MediaKind};
-use crate::media_cache::{self, Rendition};
+use crate::media_cache::{self, INLINE_RENDITION_SIDE, Rendition};
 use crate::media_formats::animation_label;
 use crate::media_layout::{
   EmbedImage, MAX_INLINE_VIDEO_BYTES, fit_picture, format_duration, inline_size, loads_inline, thumbnail_size,
@@ -425,18 +425,6 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       if is_wanted && !is_loading.get() && !has_failed.get() && full.with_untracked(Option::is_none) {
         inline.start();
       }
-      let maybe_animation = full.with(|url| url.clone().filter(|url| url.is_animated()));
-      let Some(url) = maybe_animation.filter(|_| !has_thumbnail) else {
-        return;
-      };
-      if still.with_untracked(Option::is_some) {
-        return;
-      }
-      spawn_local(async move {
-        if let Some(frame) = still_frame(url.as_str()).await {
-          drop(still.try_set(Some(Rc::new(frame))));
-        }
-      });
     });
   }
   // A picture that doesn't move shows itself; one that does stays still under its moving copy.
@@ -475,6 +463,23 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     }
   });
   let is_moving = move || moving_src().is_some();
+  // Only once it stops, and at the size the conversation shows: a sender can leave out the thumbnail.
+  let is_still_asked = StoredValue::new(false);
+  Effect::new(move |_| {
+    let maybe_animation = full.with(|url| url.clone().filter(|url| url.is_animated()));
+    let Some(url) = maybe_animation.filter(|_| !has_thumbnail && !is_moving()) else {
+      return;
+    };
+    if is_still_asked.get_value() {
+      return;
+    }
+    is_still_asked.set_value(true);
+    spawn_local(async move {
+      if let Some(frame) = small_still_frame(url.as_str(), INLINE_RENDITION_SIDE).await {
+        still.try_set(Some(Rc::new(frame)));
+      }
+    });
+  });
   let is_coming = move || plays() && is_loading.get();
   // The file couldn't come down for an image the user asked to see move: say so and offer a retry.
   Effect::new(move |_| {

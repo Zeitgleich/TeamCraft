@@ -825,6 +825,16 @@ impl TeamCraft {
   /// downloads and share links. Admin actions stay on desktop and web.
   pub async fn act(&self, action_json: String) -> Result<(), TeamCraftError> {
     let action: ChatAction = bridge::from_json(&action_json)?;
+    if matches!(action, ChatAction::DownloadAttachment { .. }) {
+      self
+        .call(|engine| {
+          Box::pin(async move {
+            engine.trim_downloads_before_fetch();
+            Ok(())
+          })
+        })
+        .await?;
+    }
     if bridge::needs_client(&action) {
       return self.call(move |engine| Box::pin(engine.act(action))).await;
     }

@@ -103,6 +103,7 @@ import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.FileInfo
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.AnimationButton
+import de.zeitgleich.teamcraft.ui.AnimationRead
 import de.zeitgleich.teamcraft.ui.AnimationView
 import de.zeitgleich.teamcraft.ui.MediaPrefs
 import de.zeitgleich.teamcraft.ui.OriginalState
@@ -386,7 +387,7 @@ private fun PicturePage(
     val decoded = full
     val maybeShown = (decoded as? FullImage.Ready)?.bitmap ?: maybeThumbnail
     // Only the page on screen reads its file as an animation (#201).
-    val maybeAnimation = rememberAnimation(maybePath?.takeIf { isCurrent && isPossiblyMoving(file.mediaType) }, maxSidePx)
+    val maybeAnimation = (rememberAnimation(maybePath?.takeIf { isCurrent && isPossiblyMoving(file.mediaType) }, maxSidePx) as? AnimationRead.Moving)?.drawable
     val context = LocalContext.current
     val mode by remember(context) { MediaPrefs.prefs(context) }.animatedImages.collectAsState()
     val startMode = mode.effective(rememberMotionReduced())

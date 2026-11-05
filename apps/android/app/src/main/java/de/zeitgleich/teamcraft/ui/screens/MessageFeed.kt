@@ -141,8 +141,10 @@ import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.MarkupColors
 import de.zeitgleich.teamcraft.ui.MentionNames
+import de.zeitgleich.teamcraft.ui.AUTO_FETCH_SETTLE_MS
 import de.zeitgleich.teamcraft.ui.AnimationBadge
 import de.zeitgleich.teamcraft.ui.AnimationButton
+import de.zeitgleich.teamcraft.ui.AnimationRead
 import de.zeitgleich.teamcraft.ui.AnimationView
 import de.zeitgleich.teamcraft.ui.FeedMotion
 import de.zeitgleich.teamcraft.ui.LocalFeedMotion
@@ -150,6 +152,7 @@ import de.zeitgleich.teamcraft.ui.MAX_AUTO_ANIMATION_BYTES
 import de.zeitgleich.teamcraft.ui.MediaPrefs
 import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.PlayChoice
+import de.zeitgleich.teamcraft.ui.animationFetchBudget
 import de.zeitgleich.teamcraft.ui.animationLabel
 import de.zeitgleich.teamcraft.ui.isAnimationType
 import de.zeitgleich.teamcraft.ui.isAppResumed
@@ -1571,13 +1574,19 @@ private fun BoxScope.TilePicture(file: FileInfo) {
   // A file that is still here only needs reading once it is to move, or when only reading says
   // whether it moves at all.
   val maybePath = file.transfer.path?.takeIf { file.transfer.state == "local" && (isWanted || choice == PlayChoice.PAUSED || !isKnownAnimation) }
-  val maybeAnimation = rememberAnimation(maybePath, THUMBNAIL_DECODE_PX)
-  val canMoveHere = isKnownAnimation || maybeAnimation != null
-  LaunchedEffect(file.fileId, file.transfer.state, isWanted, motion.mode) {
-    val isAutomatic = choice == PlayChoice.UNSET && file.sizeBytes <= MAX_AUTO_ANIMATION_BYTES && motion.fetchesNow()
-    if (isKnownAnimation && isWanted && isAutomatic && file.transfer.state == "remote") motion.fetch(file)
+  val read = rememberAnimation(maybePath, THUMBNAIL_DECODE_PX)
+  val maybeAnimation = (read as? AnimationRead.Moving)?.drawable
+  // A file that turned out not to move here has nothing to play.
+  val canMoveHere = if (isKnownAnimation) read !is AnimationRead.Still else maybeAnimation != null
+  val isOnView = isResumed && !motion.isCovered
+  // Cancelled when the row leaves, so a row scrolled past fetches nothing; a fetch once started runs on.
+  LaunchedEffect(file.fileId, file.transfer.state, isWanted, isOnView) {
+    val isAutomatic = choice == PlayChoice.UNSET && file.sizeBytes <= MAX_AUTO_ANIMATION_BYTES
+    if (!isKnownAnimation || !isWanted || !isOnView || !isAutomatic || file.transfer.state != "remote") return@LaunchedEffect
+    delay(AUTO_FETCH_SETTLE_MS)
+    if (motion.fetchesNow() && animationFetchBudget.take(file.sizeBytes)) motion.fetch(file)
   }
-  val isMoving = maybeAnimation != null && isWanted && isResumed && !motion.isCovered
+  val isMoving = maybeAnimation != null && isWanted && isOnView
   if (maybeAnimation != null) {
     AnimationView(
       maybeAnimation,

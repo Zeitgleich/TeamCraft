@@ -19,10 +19,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -34,6 +38,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.currentStateAsState
 import de.zeitgleich.teamcraft.R
@@ -44,6 +49,15 @@ import kotlinx.coroutines.withContext
 
 /** Largest animated file a tile fetches by itself; a bigger one moves in the viewer (as on the web). */
 const val MAX_AUTO_ANIMATION_BYTES = 16L * 1024 * 1024
+
+/** A file with more pixels a frame isn't animated: it reaches the decoder from others, without a tap. */
+const val MAX_ANIMATION_PIXELS = 16_000_000L
+
+/** What tiles fetch by themselves per run of the app; after it a tap fetches, so a channel can't fill the cache. */
+const val MAX_AUTO_FETCH_BYTES_PER_RUN = 256L * 1024 * 1024
+
+/** How long a tile has to stay in the list before it fetches by itself: fast scrolling fetches nothing. */
+const val AUTO_FETCH_SETTLE_MS = 300L
 
 /** The shade under the play button and the format badge, and the button's size (a 44 dp target). */
 private const val CONTROL_SCRIM = 0.55f
@@ -71,6 +85,30 @@ fun wantsToMove(mode: AnimatedImagesMode, choice: PlayChoice): Boolean =
     PlayChoice.UNSET -> mode == AnimatedImagesMode.AUTOPLAY
   }
 
+/** Whether a frame of this size may be animated. */
+fun isWithinAnimationLimit(width: Int, height: Int): Boolean = width.toLong() * height <= MAX_ANIMATION_PIXELS
+
+/**
+ * `stop()` also reports an end, on a later turn of the main thread. Only what was meant to go on and
+ * no longer runs reached the end of the file's loops.
+ */
+fun isRealEnd(wantsPlaying: Boolean, isRunning: Boolean): Boolean = wantsPlaying && !isRunning
+
+/** What tiles may still fetch by themselves. */
+class AutoFetchBudget(private val maxBytes: Long) {
+  private var spentBytes = 0L
+
+  /** Takes `bytes` from the budget; `false` when they don't fit, and then nothing is taken. */
+  @Synchronized
+  fun take(bytes: Long): Boolean {
+    if (spentBytes + bytes > maxBytes) return false
+    spentBytes += bytes
+    return true
+  }
+}
+
+val animationFetchBudget = AutoFetchBudget(MAX_AUTO_FETCH_BYTES_PER_RUN)
+
 /** Formats that always move: the tile offers play and fetches the file when it is to move. */
 fun isAnimationType(mediaType: String): Boolean = mediaTypeEssence(mediaType) in setOf("image/gif", "image/apng")
 
@@ -97,13 +135,17 @@ data class FeedMotion(
 
 val LocalFeedMotion = compositionLocalOf { FeedMotion() }
 
-/** This device's animated image mode, after the system's "remove animations". */
+/** The system's "remove animations", read again whenever the app comes back to the front. */
 @Composable
 fun rememberMotionReduced(): Boolean {
   val resolver = LocalContext.current.contentResolver
-  return remember(resolver) {
-    Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+  fun read() = Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+  var isReduced by remember(resolver) { mutableStateOf(read()) }
+  LifecycleResumeEffect(resolver) {
+    isReduced = read()
+    onPauseOrDispose {}
   }
+  return isReduced
 }
 
 /** Whether the app is in front: nothing moves behind the lock screen or in the background. */
@@ -113,34 +155,57 @@ fun isAppResumed(): Boolean {
   return lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
 }
 
+/** How reading a file as an animation went. */
+sealed interface AnimationRead {
+  /** Nothing read yet: no file, or it is being read. */
+  data object Waiting : AnimationRead
+
+  /** It doesn't move here: one frame, unreadable, over the limit, or a system older than Android 9. */
+  data object Still : AnimationRead
+
+  data class Moving(val drawable: AnimatedImageDrawable) : AnimationRead
+}
+
 /**
- * The file as an animation at about `maxSidePx`; `null` while it is read, on old systems (animated
- * decoding starts with Android 9) and when it turns out not to move. The drawable only holds the
- * frames around the one on screen, and only works while it is drawn.
+ * The file as an animation at about `maxSidePx`. The drawable only holds the frames around the one
+ * on screen, and only works while it is drawn.
  */
 @Composable
-fun rememberAnimation(maybePath: String?, maxSidePx: Int): AnimatedImageDrawable? {
-  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
-  val maybeDrawable by produceState<AnimatedImageDrawable?>(null, maybePath, maxSidePx) {
-    value = maybePath?.let { decodeAnimation(it, maxSidePx) }
+fun rememberAnimation(maybePath: String?, maxSidePx: Int): AnimationRead {
+  val read by produceState<AnimationRead>(AnimationRead.Waiting, maybePath, maxSidePx) {
+    value = when {
+      maybePath == null -> AnimationRead.Waiting
+      Build.VERSION.SDK_INT < Build.VERSION_CODES.P -> AnimationRead.Still
+      else -> decodeAnimation(maybePath, maxSidePx)?.let { AnimationRead.Moving(it) } ?: AnimationRead.Still
+    }
   }
-  return maybeDrawable
+  return read
 }
 
 @RequiresApi(Build.VERSION_CODES.P)
 private suspend fun decodeAnimation(path: String, maxSidePx: Int): AnimatedImageDrawable? =
   withContext(Dispatchers.IO) {
     runCatching {
-      val source = ImageDecoder.createSource(File(path))
-      ImageDecoder.decodeDrawable(source) { decoder, info, _ ->
+      val file = File(path)
+      // The core keeps the most recently used downloads when it trims its folder.
+      file.setLastModified(System.currentTimeMillis())
+      ImageDecoder.decodeDrawable(ImageDecoder.createSource(file)) { decoder, info, _ ->
+        // Thrown out of the header listener before any frame is decoded; `runCatching` takes it.
+        require(isWithinAnimationLimit(info.size.width, info.size.height)) { "too many pixels" }
         decoder.setTargetSampleSize(sampleSize(info.size.width, info.size.height, maxSidePx))
       } as? AnimatedImageDrawable
     }.getOrNull()
   }
 
+/** Whether the view still means the drawable to run; read when it reports an end. */
+private class PlaybackGate {
+  var wantsPlaying = false
+}
+
 /**
  * An animation on screen: stopped it keeps its frame. Leaving the composition (scrolled away) stops
- * it for good. `onEnded` tells that a file with a limited number of loops finished.
+ * it for good. `onEnded` tells that a file with a limited number of loops finished, not that
+ * somebody stopped it.
  */
 @RequiresApi(Build.VERSION_CODES.P)
 @Composable
@@ -151,9 +216,21 @@ fun AnimationView(
   modifier: Modifier = Modifier,
   onEnded: () -> Unit = {},
 ) {
-  val callback = remember(drawable) {
-    object : Animatable2.AnimationCallback() {
-      override fun onAnimationEnd(ended: Drawable?) = onEnded()
+  val currentOnEnded by rememberUpdatedState(onEnded)
+  val gate = remember(drawable) { PlaybackGate() }
+  DisposableEffect(drawable) {
+    drawable.registerAnimationCallback(
+      object : Animatable2.AnimationCallback() {
+        override fun onAnimationEnd(ended: Drawable?) {
+          if (isRealEnd(gate.wantsPlaying, drawable.isRunning)) currentOnEnded()
+        }
+      },
+    )
+    onDispose {
+      gate.wantsPlaying = false
+      // The callback stays registered, it dies with the drawable: `stop()` posts a walk over the
+      // callback list, and unregistering the last one nulls the list, which crashes that walk.
+      if (drawable.isRunning) drawable.stop()
     }
   }
   AndroidView(
@@ -164,19 +241,12 @@ fun AnimationView(
       }
     },
     update = { view ->
-      if (view.drawable !== drawable) {
-        (view.drawable as? AnimatedImageDrawable)?.stop()
-        view.setImageDrawable(drawable)
-        drawable.registerAnimationCallback(callback)
-      }
+      if (view.drawable !== drawable) view.setImageDrawable(drawable)
+      gate.wantsPlaying = isPlaying
       if (isPlaying && !drawable.isRunning) drawable.start()
       if (!isPlaying && drawable.isRunning) drawable.stop()
     },
-    onRelease = { view ->
-      drawable.stop()
-      drawable.unregisterAnimationCallback(callback)
-      view.setImageDrawable(null)
-    },
+    onRelease = { view -> view.setImageDrawable(null) },
     modifier = modifier,
   )
 }

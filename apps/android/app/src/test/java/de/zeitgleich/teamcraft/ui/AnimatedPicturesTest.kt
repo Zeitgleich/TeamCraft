@@ -29,6 +29,29 @@ class AnimatedPicturesTest {
   }
 
   @Test
+  fun `a stop is no end of the file`() {
+    assertFalse("stopped on purpose", isRealEnd(wantsPlaying = false, isRunning = false))
+    assertFalse("stopped and started again before the report", isRealEnd(wantsPlaying = true, isRunning = true))
+    assertTrue("the file's loops are over", isRealEnd(wantsPlaying = true, isRunning = false))
+  }
+
+  @Test
+  fun `only frames within the limit are animated, without overflowing`() {
+    assertTrue(isWithinAnimationLimit(4000, 4000))
+    assertFalse(isWithinAnimationLimit(4001, 4000))
+    assertFalse(isWithinAnimationLimit(Int.MAX_VALUE, Int.MAX_VALUE))
+  }
+
+  @Test
+  fun `the fetch budget stops at its limit and takes nothing then`() {
+    val budget = AutoFetchBudget(maxBytes = 10)
+    assertTrue(budget.take(6))
+    assertFalse(budget.take(5))
+    assertTrue(budget.take(4))
+    assertFalse(budget.take(1))
+  }
+
+  @Test
   fun `media types are compared by their essence`() {
     assertTrue(isAnimationType(" Image/GIF; foo=bar"))
     assertTrue(isAnimationType("image/apng"))

@@ -79,8 +79,9 @@ const PUSH_FETCH_BUDGET: Duration = Duration::from_secs(4);
 /// short once begun.
 const PUSH_FOLLOW_MIN_LEFT: Duration = Duration::from_secs(2);
 /// The decrypted downloads an account keeps: the disk cache the apps reopen pictures and files from
-/// without downloading them again. Above it the least recently used go at start (a deleted file is
-/// fetched again when opened: its transfer shows as remote).
+/// without downloading them again. Above it the least recently used go at start and before every
+/// download, as apps fetch by themselves while they run (a deleted file is fetched again when opened:
+/// its transfer shows as remote). Partial downloads live elsewhere, so none of them goes.
 const MAX_DOWNLOADS_BYTES: u64 = 1024 * 1024 * 1024;
 /// Plaintext copies of files waiting to be uploaded, one folder per account below it.
 const UPLOAD_STAGING_DIR: &str = "outgoing";
@@ -646,6 +647,11 @@ impl Engine {
         Ok(())
       },
     }
+  }
+
+  /// Makes room before a download: the folder stays at its limit while the app runs.
+  pub(crate) fn trim_downloads_before_fetch(&self) {
+    trim_downloads(&self.download_dir, MAX_DOWNLOADS_BYTES);
   }
 
   fn open_client(&mut self) -> Result<(), OpenError> {

@@ -292,12 +292,12 @@ impl MediaKind {
     matches!(self, Self::Image | Self::Animated)
   }
 
-  /// An animated image starts paused when it only moves on request ([`AnimatedImages::effective`]);
-  /// the viewer has no hover to wait for, and opening it asked to see the picture. A video never
-  /// plays by itself.
-  pub fn starts_paused(self, mode: AnimatedImages) -> bool {
+  /// An animated image starts paused when it only moves on request or the system asks for less
+  /// motion, whatever the setting; "on hover" plays otherwise, as the viewer has no hover to wait
+  /// for and opening it asked to see the picture. A video never plays by itself.
+  pub fn starts_paused(self, mode: AnimatedImages, prefers_reduced_motion: bool) -> bool {
     match self {
-      Self::Animated => mode == AnimatedImages::OnTap,
+      Self::Animated => prefers_reduced_motion || mode == AnimatedImages::OnTap,
       Self::Image | Self::Video => false,
     }
   }
@@ -1315,12 +1315,18 @@ mod tests {
 
     #[test]
     fn only_animated_images_start_paused_and_only_on_request() {
-      assert!(MediaKind::Animated.starts_paused(AnimatedImages::OnTap));
-      assert!(!MediaKind::Animated.starts_paused(AnimatedImages::OnHover));
-      assert!(!MediaKind::Animated.starts_paused(AnimatedImages::Autoplay));
-      assert!(!MediaKind::Image.starts_paused(AnimatedImages::OnTap));
+      assert!(MediaKind::Animated.starts_paused(AnimatedImages::OnTap, false));
+      assert!(!MediaKind::Animated.starts_paused(AnimatedImages::OnHover, false));
+      assert!(!MediaKind::Animated.starts_paused(AnimatedImages::Autoplay, false));
+      for mode in AnimatedImages::ALL {
+        assert!(
+          MediaKind::Animated.starts_paused(mode, true),
+          "reduced motion, {mode:?}"
+        );
+      }
+      assert!(!MediaKind::Image.starts_paused(AnimatedImages::OnTap, true));
       assert!(
-        !MediaKind::Video.starts_paused(AnimatedImages::OnTap),
+        !MediaKind::Video.starts_paused(AnimatedImages::OnTap, true),
         "videos never play by themselves anyway"
       );
     }

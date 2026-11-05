@@ -102,6 +102,8 @@ struct PictureViewer: View {
     return PicturePage(
       maybeFile: maybeFile,
       maybeOriginal: model.originals[key],
+      // The pager prepares its neighbours: only the page on screen moves.
+      isCurrent: model.currentKey.map { $0 == key } ?? true,
       state: state,
       maxZoom: model.maxZoom,
       doubleTapZoom: model.doubleTapZoom,
@@ -239,6 +241,7 @@ private struct PicturePage: View {
   @State private var playChoice = PlayChoice.unset
   let maybeFile: FileInfo?
   let maybeOriginal: UIImage?
+  let isCurrent: Bool
   let state: OriginalState
   let maxZoom: CGFloat
   let doubleTapZoom: CGFloat
@@ -288,13 +291,15 @@ private struct PicturePage: View {
   }
 
   private var motionTask: MotionTask {
-    MotionTask(maybePath: maybeAnimationPath, isMoving: wantsToMove && scenePhase == .active)
+    MotionTask(maybePath: isCurrent ? maybeAnimationPath : nil, isMoving: isMoving)
   }
+
+  private var isMoving: Bool { wantsToMove && isCurrent && scenePhase == .active }
 
   /// Cancelled when the page leaves the screen or the animation is to stop.
   private func runMotion() async {
-    guard let path = maybeAnimationPath else { return }
-    if wantsToMove && scenePhase == .active {
+    guard isCurrent, let path = maybeAnimationPath else { return }
+    if isMoving {
       await animation.run(path: path, maxPixels: AnimationKind.viewerMaxPixels)
       if animation.hasEnded { playChoice = .paused }
     } else if animation.maybeMoves == nil {
