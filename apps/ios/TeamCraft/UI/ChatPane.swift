@@ -14,6 +14,8 @@ struct ChatPane: View {
   @State private var messages: [MessageItem] = []
   /// People in the call running here; 0 without one (issue #1352).
   @State private var runningCallCount = 0
+  /// The picked picture being edited before it is sent (issue #1354).
+  @State private var maybeEditingPicture: PickedFile?
   @State private var draft = ""
   /// The stored draft was read; saving before that would overwrite it with the empty field.
   @State private var isDraftLoaded = false
@@ -115,6 +117,11 @@ struct ChatPane: View {
     .onChange(of: scenePhase) { _, phase in
       // Leaving the app saves at once: it may be suspended and killed before the pause is over.
       if phase == .background { Task { await saveDraft() } }
+    }
+    .fullScreenCover(item: $maybeEditingPicture) { file in
+      PictureEditorView(file: file) { edited in
+        attachments = attachments.map { $0.id == file.id ? edited : $0 }
+      }
     }
     .sheet(item: $maybeForwarding) { target in
       ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
@@ -586,17 +593,49 @@ struct ChatPane: View {
     ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 6) {
         ForEach(attachments) { file in
-          Button { attachments.removeAll { $0.id == file.id } } label: {
-            Label(file.fileName, systemImage: "xmark.circle.fill")
-              .labelStyle(.titleAndIcon).font(.caption).lineLimit(1)
-              .padding(.horizontal, 10).padding(.vertical, 6)
-              .background(Theme.accentSoft).clipShape(Capsule())
+          if PictureEdits.isEditable(file.mediaType) {
+            pictureChip(file)
+          } else {
+            fileChip(file)
           }
-          .buttonStyle(.plain)
-          .accessibilityLabel(Text(file.fileName))
         }
       }
     }
+  }
+
+  /// A picked picture as itself: a tap opens the editor (crop and rotate), the corner removes it.
+  private func pictureChip(_ file: PickedFile) -> some View {
+    Button { maybeEditingPicture = file } label: {
+      PickedPictureThumbnail(path: file.path)
+      .frame(width: 56, height: 56)
+      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+      .overlay(alignment: .bottomLeading) {
+        Image(systemName: "crop.rotate").font(.caption2).padding(4)
+          .foregroundStyle(.white).background(.black.opacity(0.5), in: Circle()).padding(3)
+      }
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(Text("composer_edit_picture \(file.fileName)"))
+    .overlay(alignment: .topTrailing) {
+      Button { attachments.removeAll { $0.id == file.id } } label: {
+        Image(systemName: "xmark.circle.fill").symbolRenderingMode(.palette)
+          .foregroundStyle(.white, .black.opacity(0.6))
+      }
+      .buttonStyle(.plain)
+      .offset(x: 6, y: -6)
+      .accessibilityLabel(Text("composer_remove_file \(file.fileName)"))
+    }
+  }
+
+  private func fileChip(_ file: PickedFile) -> some View {
+    Button { attachments.removeAll { $0.id == file.id } } label: {
+      Label(file.fileName, systemImage: "xmark.circle.fill")
+        .labelStyle(.titleAndIcon).font(.caption).lineLimit(1)
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .background(Theme.accentSoft).clipShape(Capsule())
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(Text(file.fileName))
   }
 
   private var canSubmit: Bool {
