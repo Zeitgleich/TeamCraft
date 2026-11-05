@@ -55,6 +55,9 @@
   <string name="react_quick">Mit %1$s reagieren</string>
   <string name="file_open">Öffnen</string>
   <string name="image_unreadable">Dieses Bild kann nicht angezeigt werden.</string>
+  <string name="video_play">Video abspielen</string>
+  <string name="video_unplayable">Dieses Video kann auf diesem Gerät nicht abgespielt werden.</string>
+  <string name="video_loading">Video wird geladen (%1$s)</string>
   <string name="image_open_with">Mit anderer App öffnen</string>
   <string name="close">Schließen</string>
   <string name="share">Teilen</string>

@@ -243,6 +243,8 @@ video-unmute = Unmute
 video-volume = Volume
 video-fullscreen = Full screen
 video-exit-fullscreen = Exit full screen
+video-speed = Playback speed: { $speed }
+video-repeat = Repeat
 # A video the app's player can't play (#804); $packages are Linux package names
 video-unplayable = This video can't be played here.
 video-unplayable-install = This system lacks a video decoder. Install { $packages }, then restart TeamCraft.

@@ -7,8 +7,15 @@ use std::time::Duration;
 
 /// Seconds the arrow keys seek.
 pub const SEEK_STEP_SECONDS: f64 = 5.0;
+/// Seconds J and L seek, the longer step players use those keys for.
+pub const LONG_SEEK_STEP_SECONDS: f64 = 10.0;
+/// One frame back or forward (`,` and `.`). The video element doesn't say a video's frame rate;
+/// at 30 frames per second, the common one, this lands on the neighbouring frame.
+pub const FRAME_STEP_SECONDS: f64 = 1.0 / 30.0;
 /// Volume step of the up and down arrow keys.
 pub const VOLUME_STEP: f64 = 0.1;
+/// The speeds the speed button goes through.
+pub const PLAYBACK_SPEEDS: [f64; 6] = [1.0, 1.25, 1.5, 2.0, 0.5, 0.75];
 /// How long a video may give no sign of playing before the player says it can't be played (#804):
 /// from the file being there to its length and size being known, and from "play" to the first
 /// frame or the clock moving. The file is already decrypted in memory, so a webview that can play
@@ -49,6 +56,10 @@ pub enum PlayerCommand {
   SeekBy(f64),
   SeekToStart,
   SeekToEnd,
+  /// To this share of the video, in tenths (the digit keys).
+  SeekToTenth(u8),
+  /// Pauses and moves one frame: forward (positive) or back, in seconds.
+  StepFrame(f64),
   /// Louder (positive) or quieter.
   VolumeBy(f64),
   ToggleMute,
@@ -66,13 +77,17 @@ impl PlayerCommand {
       " " | "k" | "K" => Some(Self::TogglePlay),
       "ArrowLeft" => Some(Self::SeekBy(-SEEK_STEP_SECONDS)),
       "ArrowRight" => Some(Self::SeekBy(SEEK_STEP_SECONDS)),
+      "j" | "J" => Some(Self::SeekBy(-LONG_SEEK_STEP_SECONDS)),
+      "l" | "L" => Some(Self::SeekBy(LONG_SEEK_STEP_SECONDS)),
+      "," => Some(Self::StepFrame(-FRAME_STEP_SECONDS)),
+      "." => Some(Self::StepFrame(FRAME_STEP_SECONDS)),
       "Home" => Some(Self::SeekToStart),
       "End" => Some(Self::SeekToEnd),
       "ArrowUp" => Some(Self::VolumeBy(VOLUME_STEP)),
       "ArrowDown" => Some(Self::VolumeBy(-VOLUME_STEP)),
       "m" | "M" => Some(Self::ToggleMute),
       "f" | "F" => Some(Self::ToggleFullscreen),
-      _ => None,
+      _ => digit_of(key).map(Self::SeekToTenth),
     }
   }
 }
@@ -85,6 +100,31 @@ pub fn seek_target(current: f64, delta: f64, duration: f64) -> f64 {
     true => target.min(duration),
     false => target,
   }
+}
+
+/// The position `tenths` tenths into the video; `None` while its length is unknown.
+pub fn tenth_target(tenths: u8, duration: f64) -> Option<f64> {
+  (duration.is_finite() && duration > 0.0).then(|| duration * f64::from(tenths) / 10.0)
+}
+
+/// The speed after `current` on the speed button, back to normal after the last one; normal for a
+/// speed it doesn't list.
+pub fn next_speed(current: f64) -> f64 {
+  let index = PLAYBACK_SPEEDS.iter().position(|speed| *speed == current);
+  index.map_or(PLAYBACK_SPEEDS[0], |index| {
+    PLAYBACK_SPEEDS[(index + 1) % PLAYBACK_SPEEDS.len()]
+  })
+}
+
+/// A speed as the button shows it ("1×", "1.25×").
+pub fn format_speed(speed: f64) -> String {
+  format!("{speed}×")
+}
+
+/// The time under the pointer on the scrubber: `pointer_x` from its left edge, `width` wide. `None`
+/// while the length is unknown or the scrubber has no width.
+pub fn scrubber_time(pointer_x: f64, width: f64, duration: f64) -> Option<f64> {
+  (duration.is_finite() && width > 0.0).then(|| (pointer_x / width).clamp(0.0, 1.0) * duration)
 }
 
 /// The volume `delta` from `current`, between silent and full.
@@ -123,6 +163,14 @@ pub fn format_seconds(seconds: f64) -> String {
     0 => format!("{minutes}:{seconds:02}"),
     _ => format!("{hours}:{minutes:02}:{seconds:02}"),
   }
+}
+
+/// The value of a single digit key.
+fn digit_of(key: &str) -> Option<u8> {
+  let mut chars = key.chars();
+  let digit = chars.next()?.to_digit(10)?;
+  // Invariant: `to_digit(10)` is below 10, which fits a u8.
+  chars.next().is_none().then_some(digit as u8)
 }
 
 impl PlaybackState {
@@ -170,6 +218,12 @@ mod tests {
         ("ArrowDown", PlayerCommand::VolumeBy(-VOLUME_STEP)),
         ("m", PlayerCommand::ToggleMute),
         ("F", PlayerCommand::ToggleFullscreen),
+        ("j", PlayerCommand::SeekBy(-LONG_SEEK_STEP_SECONDS)),
+        ("L", PlayerCommand::SeekBy(LONG_SEEK_STEP_SECONDS)),
+        (",", PlayerCommand::StepFrame(-FRAME_STEP_SECONDS)),
+        (".", PlayerCommand::StepFrame(FRAME_STEP_SECONDS)),
+        ("0", PlayerCommand::SeekToTenth(0)),
+        ("9", PlayerCommand::SeekToTenth(9)),
       ];
       for (key, command) in cases {
         assert_eq!(PlayerCommand::for_key(key, false), Some(command), "{key}");
@@ -179,7 +233,9 @@ mod tests {
     #[test]
     fn other_keys_and_shortcuts_are_left_alone() {
       assert_eq!(PlayerCommand::for_key("Escape", false), None);
-      assert_eq!(PlayerCommand::for_key("j", false), None);
+      assert_eq!(PlayerCommand::for_key("x", false), None);
+      assert_eq!(PlayerCommand::for_key("F5", false), None);
+      assert_eq!(PlayerCommand::for_key("12", false), None);
       assert_eq!(
         PlayerCommand::for_key("f", true),
         None,
@@ -203,6 +259,37 @@ mod tests {
         "the duration isn't known yet"
       );
       assert_eq!(seek_target(10.0, 5.0, f64::INFINITY), 15.0);
+    }
+
+    #[test]
+    fn digits_jump_to_tenths_once_the_length_is_known() {
+      assert_eq!(tenth_target(0, 60.0), Some(0.0));
+      assert_eq!(tenth_target(5, 60.0), Some(30.0));
+      assert_eq!(tenth_target(9, 60.0), Some(54.0));
+      assert_eq!(tenth_target(5, f64::NAN), None);
+      assert_eq!(tenth_target(5, f64::INFINITY), None);
+      assert_eq!(tenth_target(5, 0.0), None);
+    }
+
+    #[test]
+    fn the_speed_button_goes_round_from_normal() {
+      let mut speed = 1.0;
+      for expected in [1.25, 1.5, 2.0, 0.5, 0.75, 1.0] {
+        speed = next_speed(speed);
+        assert_eq!(speed, expected);
+      }
+      assert_eq!(next_speed(3.0), 1.0, "a speed the button doesn't list");
+      assert_eq!(format_speed(1.0), "1×");
+      assert_eq!(format_speed(1.25), "1.25×");
+    }
+
+    #[test]
+    fn the_scrubber_names_the_time_under_the_pointer() {
+      assert_eq!(scrubber_time(50.0, 200.0, 60.0), Some(15.0));
+      assert_eq!(scrubber_time(-5.0, 200.0, 60.0), Some(0.0));
+      assert_eq!(scrubber_time(500.0, 200.0, 60.0), Some(60.0));
+      assert_eq!(scrubber_time(50.0, 200.0, f64::NAN), None);
+      assert_eq!(scrubber_time(50.0, 0.0, 60.0), None);
     }
 
     #[test]
