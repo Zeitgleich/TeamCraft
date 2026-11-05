@@ -43,7 +43,9 @@ use crate::workspace::WorkspaceState;
 pub const MAX_LEDGER_ENTRIES: usize = 1024;
 /// Sources in force per conversation; the oldest ones count.
 pub const MAX_ACTIVE_SOURCES: usize = 50;
-/// Source pictures a device keeps per conversation; the ones not named for the longest go first.
+/// Source pictures a device keeps per conversation, for each of the two ways one arrives (from an
+/// admin, from a bot); the ones not named for the longest go first. Apart, so a bot can't push out
+/// the pictures admins set, which the bridge hands on.
 pub const MAX_KEPT_PICTURES: usize = 64;
 
 /// Everything this device learned about a conversation's sources.
@@ -122,6 +124,13 @@ struct RenamedRecord {
   #[serde(rename = "server_id", default, skip_serializing_if = "Option::is_none")]
   maybe_server_id: Option<MessageId>,
   name: String,
+}
+
+/// How a picture reached this device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PictureFrom {
+  Admin,
+  Bot,
 }
 
 /// The newest picture change; the bytes are kept apart, so reading the ledger stays cheap (the
@@ -209,10 +218,15 @@ impl SourceLedger {
         let Some(name) = clean_source_name(name) else {
           return false;
         };
-        let is_newer = entry
-          .maybe_renamed
-          .as_ref()
-          .is_none_or(|existing| !is_before(maybe_server_id, existing.maybe_server_id));
+        let is_newer = entry.maybe_renamed.as_ref().is_none_or(|existing| {
+          !is_before(maybe_server_id, existing.maybe_server_id)
+            || is_own_change_sent(
+              sender,
+              existing.by,
+              existing.maybe_server_id,
+              existing.name == name,
+            )
+        });
         let record = RenamedRecord {
           by: sender,
           maybe_server_id,
@@ -236,10 +250,15 @@ impl SourceLedger {
           ))),
           None => None,
         };
-        let is_newer = entry
-          .maybe_picture
-          .as_ref()
-          .is_none_or(|existing| !is_before(maybe_server_id, existing.maybe_server_id));
+        let is_newer = entry.maybe_picture.as_ref().is_none_or(|existing| {
+          !is_before(maybe_server_id, existing.maybe_server_id)
+            || is_own_change_sent(
+              sender,
+              existing.by,
+              existing.maybe_server_id,
+              existing.maybe_sha256 == maybe_sha256,
+            )
+        });
         let record = PictureRecord {
           by: sender,
           maybe_server_id,
@@ -310,6 +329,15 @@ impl SourceLedger {
   }
 }
 
+impl PictureFrom {
+  fn other(self) -> Self {
+    match self {
+      Self::Admin => Self::Bot,
+      Self::Bot => Self::Admin,
+    }
+  }
+}
+
 impl SourceAuthority {
   /// The authority as this device's store knows it: the admins of `workspace` while
   /// `is_roster_fresh`, minus anybody the server calls a guest or bot (which only takes rights
@@ -370,7 +398,7 @@ pub(crate) fn apply_source_change(
       ..
     } = change
   {
-    keep_picture(store, conversation, picture)?;
+    keep_picture(store, conversation, picture, PictureFrom::Admin)?;
   }
   Ok(())
 }
@@ -407,7 +435,7 @@ pub(crate) fn take_message_picture(
   };
   let is_named = SourcePictureHash::from_bytes(source_picture_sha256(picture.as_slice())) == named;
   if is_named && is_known_bot(store, sender)? {
-    keep_picture(store, conversation, picture)?;
+    keep_picture(store, conversation, picture, PictureFrom::Bot)?;
   }
   Ok(())
 }
@@ -423,24 +451,31 @@ pub fn source_picture(
   Ok(maybe_picture.map(Base64Bytes::into_vec))
 }
 
-/// Stores a picture (if valid) under its hash and forgets the ones not named for the longest.
+/// Stores a picture (if valid) under its hash and forgets the ones of that origin not named for
+/// the longest, unless the other origin still holds them.
 fn keep_picture(
   store: &impl LocalStore,
   conversation: ConversationId,
   picture: &Base64Bytes,
+  from: PictureFrom,
 ) -> Result<(), CoreError> {
   if check_source_picture(picture.as_slice()).is_err() {
     return Ok(());
   }
   let sha256 = SourcePictureHash::from_bytes(source_picture_sha256(picture.as_slice()));
-  let index_key = picture_index_key(conversation);
+  let index_key = picture_index_key(conversation, from);
   let mut kept: Vec<SourcePictureHash> =
     records::get_json(store, Table::Account, &index_key)?.unwrap_or_default();
   kept.retain(|existing| *existing != sha256);
   kept.push(sha256);
+  let other_key = picture_index_key(conversation, from.other());
+  let other: Vec<SourcePictureHash> =
+    records::get_json(store, Table::Account, &other_key)?.unwrap_or_default();
   while kept.len() > MAX_KEPT_PICTURES {
     let oldest = kept.remove(0);
-    store.delete(Table::Account, &picture_key(conversation, oldest))?;
+    if !other.contains(&oldest) {
+      store.delete(Table::Account, &picture_key(conversation, oldest))?;
+    }
   }
   records::put_json(store, Table::Account, &picture_key(conversation, sha256), picture)?;
   records::put_json(store, Table::Account, &index_key, &kept)
@@ -473,8 +508,23 @@ fn picture_key(conversation: ConversationId, sha256: SourcePictureHash) -> Strin
   format!("integration_source_pictures/{conversation}/{sha256}")
 }
 
-fn picture_index_key(conversation: ConversationId) -> String {
-  format!("integration_source_pictures/{conversation}")
+fn picture_index_key(conversation: ConversationId, from: PictureFrom) -> String {
+  let from = match from {
+    PictureFrom::Admin => "admin",
+    PictureFrom::Bot => "bot",
+  };
+  format!("integration_source_picture_index/{conversation}/{from}")
+}
+
+/// Whether a numbered change is `sender`'s own change, not numbered until now, coming back from the
+/// outbox: it takes its number, so changes of other admins can win over it from then on.
+fn is_own_change_sent(
+  sender: UserId,
+  existing_by: UserId,
+  existing_server_id: Option<MessageId>,
+  is_same_change: bool,
+) -> bool {
+  sender == existing_by && existing_server_id.is_none() && is_same_change
 }
 
 /// Whether a change numbered `candidate` came before one numbered `existing`. A change not sent yet
@@ -866,6 +916,53 @@ mod tests {
           .unwrap()
           .is_some()
       );
+    }
+
+    #[test]
+    fn a_bot_cant_push_out_the_pictures_admins_set() {
+      let store = store_with_users();
+      let set = picture(1, Some(png(200)));
+      records::put_json(
+        &store,
+        Table::Users,
+        &user(ADMIN).to_string(),
+        &summary(ADMIN, UserKind::Member),
+      )
+      .unwrap();
+      let SourceChange::PictureChanged {
+        maybe_picture: Some(bytes),
+        ..
+      } = &set
+      else {
+        unreachable!("made above")
+      };
+      keep_picture(&store, conversation(), bytes, PictureFrom::Admin).unwrap();
+      for seed in 0..u8::try_from(MAX_KEPT_PICTURES + 1).unwrap() {
+        let identity = identity_with(png(seed), hash(&png(seed)));
+        take_message_picture(&store, conversation(), user(BOT), &identity).unwrap();
+      }
+      assert!(
+        source_picture(&store, conversation(), hash(&png(200)))
+          .unwrap()
+          .is_some()
+      );
+    }
+
+    #[test]
+    fn an_own_change_takes_its_number_so_a_later_one_of_another_admin_wins() {
+      let mut ledger = SourceLedger::default();
+      take(&mut ledger, ADMIN, &created(1, "ci"), 10);
+      // Mine, not sent yet, then sent as 20; another admin's 21 and an older 19.
+      assert!(ledger.apply(user(ADMIN), true, &picture(1, Some(png(1))), 0, None));
+      assert!(ledger.apply(user(ADMIN), true, &picture(1, Some(png(1))), 0, Some(message(20))));
+      assert!(!take(&mut ledger, OTHER_ADMIN, &picture(1, Some(png(2))), 19));
+      assert!(take(&mut ledger, OTHER_ADMIN, &picture(1, Some(png(3))), 21));
+      assert_eq!(shown_hash(&ledger), Some(hash(&png(3))));
+
+      assert!(ledger.apply(user(ADMIN), true, &renamed(1, "Hotline"), 0, None));
+      assert!(ledger.apply(user(ADMIN), true, &renamed(1, "Hotline"), 0, Some(message(30))));
+      assert!(take(&mut ledger, OTHER_ADMIN, &renamed(1, "Pager"), 31));
+      assert_eq!(ledger.active(conversation(), &authority())[0].name, "Pager");
     }
 
     #[test]

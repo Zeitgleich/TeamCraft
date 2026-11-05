@@ -395,6 +395,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           if let Some(head) = meta.maybe_channel_roles_head.take() {
             self.note_channel_roles_head(conversation, &head)?;
           }
+          // The picture is kept once, by its hash; the message only names it.
+          if let Some(identity) = meta.maybe_source.as_deref_mut() {
+            crate::integration_sources::take_message_picture(
+              &self.store,
+              conversation,
+              message.sender_user_id,
+              identity,
+            )?;
+            identity.maybe_picture = None;
+          }
         }
         let stored = StoredMessage {
           conversation_id: conversation,
@@ -635,7 +645,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.store.delete(Table::Outbox, &key)?;
       // An own edit showed at once; with its server ID it now competes with other devices' edits
       // like theirs do (issue #160).
-      if matches!(stored.content, MessageContent::Edit { .. }) {
+      // Source changes too, or other admins' later changes would never win over them here.
+      if matches!(
+        stored.content,
+        MessageContent::Edit { .. } | MessageContent::IntegrationSource { .. }
+      ) {
         apply_control_with(
           &self.store,
           entry.conversation_id,
@@ -803,11 +817,6 @@ fn apply_control_with(
       at_ms,
       maybe_server_id,
     );
-  }
-  if let MessageContent::Text { meta, .. } = content
-    && let Some(identity) = &meta.maybe_source
-  {
-    return crate::integration_sources::take_message_picture(store, conversation, sender, identity);
   }
   if let MessageContent::Notetaker { request } = content {
     // Decrypted in the conversation's group, so `sender` is a member of it; whether the request

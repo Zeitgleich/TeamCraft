@@ -376,8 +376,8 @@ with the bot badge.
 | Where the name shows                          | How it stays marked as a bot                                |
 |-----------------------------------------------|-------------------------------------------------------------|
 | Message, log row, search hit (web, desktop)   | The `BOT` badge beside the name                             |
-| Notification, activity                        | "Hotline (bot)"                                             |
-| Android and iOS: bubble, search, notification | "Hotline (bot)"                                             |
+| Notification, activity                        | "Bot · Hotline"; first, so a long name can't cut it off      |
+| Android and iOS: bubble, search, notification | "Bot · Hotline"; first, so a long name can't cut it off      |
 | Profile and hover card of the name            | The bot's own account: a click tells which bot it really is |
 
 - **In the message.** The bridge adds the source's ID, name and the SHA-256 of its picture to the

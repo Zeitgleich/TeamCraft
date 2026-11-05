@@ -10782,13 +10782,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ (bot)"
+            "value": "Bot · %@"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ (Bot)"
+            "value": "Bot · %@"
           }
         }
       }

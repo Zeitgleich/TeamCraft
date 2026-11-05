@@ -31,7 +31,12 @@ fun NotifiedMessageRow(maybeNotified: NotifiedConversation?, isLoading: Boolean)
   Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
     if (maybeMessage != null && maybeBody != null) {
       maybeMessage.maybeSenderName?.let { sender ->
-        Text(sender, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        Text(
+          // A source's name always says it's a bot.
+          if (maybeMessage.isSenderSource) stringResource(R.string.source_sender, sender) else sender,
+          style = MaterialTheme.typography.labelLarge,
+          fontWeight = FontWeight.SemiBold,
+        )
       }
       Text(maybeBody, style = MaterialTheme.typography.bodyLarge)
     }

@@ -4811,13 +4811,14 @@ sender's (`integration_sources::shown_source`):
    the field and gets nothing.
 2. **The name may be shown:** control and invisible formatting characters (bidi overrides, zero-width)
    are removed, 1 to 80 characters are left. Otherwise the message shows the bot.
-3. **The badge goes with it,** by the same check: everywhere the name shows, the text or the badge says
-   bot, and the profile behind the name is the bot's account.
+3. **The badge goes with it,** by the same check: everywhere the name shows, the badge or a leading "Bot ·"
+   says so, also when a long name is cut off, and the profile behind the name is the bot's account.
 
 A picture a message carries is kept only from a known bot, only if it is the picture the message names
 by hash, and only a PNG of at most 32 KiB and 256 pixels a side by its header, checked before anything
-decodes it. A picture in a `picture_changed` comes under the taking-in rule above, and pictures are
-bounded per conversation (64, the longest unnamed go first).
+decodes it, and then the message keeps only the hash. A picture in a `picture_changed` comes under the
+taking-in rule above. Pictures are bounded per conversation: 64 from admins and 64 from bots, kept
+apart so a bot can't push out what admins set, the longest unnamed going first.
 
 Deliberately **not** checked: that the source ID is in this device's ledger, or that the name is the
 ledger's. A later device has no ledger entry, and a source of the bridge's file has none at all, and they

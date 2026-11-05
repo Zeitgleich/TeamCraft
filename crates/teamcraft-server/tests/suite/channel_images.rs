@@ -289,9 +289,19 @@ async fn an_admin_sets_a_bots_picture_that_everybody_sees_as_its_avatar() {
 
   // A person's account is no bot, and a revoked bot takes no picture.
   let dave_id = user_id(&app, &dave).await;
-  let (status, _) = put_image(&app, &alice, &format!("/admin/bots/{dave_id}/avatar"), "image/jpeg", &jpeg).await;
+  let (status, _) = put_image(
+    &app,
+    &alice,
+    &format!("/admin/bots/{dave_id}/avatar"),
+    "image/jpeg",
+    &jpeg,
+  )
+  .await;
   assert_eq!(status, StatusCode::NOT_FOUND);
-  assert_eq!(app.delete(&alice, &format!("/admin/bots/{bot_id}")).await.status, StatusCode::NO_CONTENT);
+  assert_eq!(
+    app.delete(&alice, &format!("/admin/bots/{bot_id}")).await.status,
+    StatusCode::NO_CONTENT
+  );
   let (status, _) = put_image(&app, &alice, &path, "image/jpeg", &jpeg).await;
   assert_eq!(status, StatusCode::NOT_FOUND);
   app.stop().await;

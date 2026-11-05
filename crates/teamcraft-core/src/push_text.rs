@@ -29,6 +29,9 @@ pub struct NotificationLabels {
   /// "New message from {name}", with [`NAME_PLACEHOLDER`] for the sender.
   #[serde(rename = "new_message_from", default, skip_serializing_if = "Option::is_none")]
   pub maybe_new_message_from: Option<String>,
+  /// "Bot · {name}": the sender is an integration source, which always says it's a bot.
+  #[serde(rename = "source_sender", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_source_sender: Option<String>,
   /// "Photo", for a message whose text is a picture.
   #[serde(rename = "photo", default, skip_serializing_if = "Option::is_none")]
   pub maybe_photo: Option<String>,
@@ -94,7 +97,12 @@ impl NotificationLabels {
 
 /// Title and body for a push preview, by the native apps' rules (see the module docs).
 pub fn notification_text(preview: &PushPreview, labels: &NotificationLabels) -> NotificationText {
-  let maybe_sender = non_blank(preview.maybe_sender_name.as_deref());
+  let maybe_marked = preview
+    .maybe_sender_name
+    .as_deref()
+    .filter(|_| preview.is_sender_source)
+    .map(|name| with_name(&labels.maybe_source_sender, "Bot · {name}", name));
+  let maybe_sender = non_blank(maybe_marked.as_deref().or(preview.maybe_sender_name.as_deref()));
   let maybe_conversation = non_blank(preview.maybe_conversation_name.as_deref());
   match preview.wake_up.kind {
     PushKind::Call => {
@@ -276,8 +284,20 @@ mod tests {
     }
   }
 
+  #[test]
+  fn a_sources_name_says_it_is_a_bot_and_a_persons_doesnt() {
+    let of = |is_sender_source| PushPreview {
+      is_sender_source,
+      ..preview(true, Some("Hotline"), None, PreviewContent::Text("down".into()))
+    };
+    let labels = NotificationLabels::default();
+    assert_eq!(notification_text(&of(true), &labels).title, "Bot · Hotline");
+    assert_eq!(notification_text(&of(false), &labels).title, "Hotline");
+  }
+
   fn german() -> NotificationLabels {
     NotificationLabels {
+      maybe_source_sender: Some("Bot · {name}".into()),
       maybe_new_message: Some("Neue Nachricht".into()),
       maybe_new_message_from: Some("Neue Nachricht von {name}".into()),
       maybe_photo: Some("Foto".into()),

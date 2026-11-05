@@ -34,7 +34,7 @@
   <string name="message_placeholder_failed">This message couldn\'t be decrypted</string>
   <string name="forwarded_from">Forwarded from %1$s</string>
   <string name="replying_to">Replying to %1$s</string>
-  <string name="source_sender">%1$s (bot)</string>
+  <string name="source_sender">Bot · %1$s</string>
   <string name="new_messages">New messages</string>
   <string name="loading_older_messages">Loading older messages…</string>
   <string name="older_history_failed">Older messages could not be loaded.</string>

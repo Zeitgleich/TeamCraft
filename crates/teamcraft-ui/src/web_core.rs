@@ -3339,6 +3339,7 @@ fn notification_labels(locale: crate::i18n::Locale) -> NotificationLabels {
   NotificationLabels {
     maybe_new_message: translate("notify-new-message"),
     maybe_new_message_from: with_name("notify-new-message-from"),
+    maybe_source_sender: with_name("source-sender"),
     maybe_photo: translate("notify-photo"),
     maybe_video: translate("notify-video"),
     maybe_audio: translate("notify-audio"),
