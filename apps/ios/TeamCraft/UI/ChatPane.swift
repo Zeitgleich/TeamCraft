@@ -483,7 +483,7 @@ struct ChatPane: View {
   private func openQuotedPicture(messageId: String, fileId: String) {
     Task {
       let extras = await model.extras(conversationId: conversation.id, messageIds: [messageId])
-      if let file = extras[messageId]?.files.first(where: { $0.fileId == fileId }) {
+      if let file = extras[messageId]?.files?.first(where: { $0.fileId == fileId }) {
         maybeViewing = PictureTarget(file: file)
       } else {
         isPictureGone = true
@@ -1005,7 +1005,7 @@ struct ForwardSheet: View {
       return
     }
     let extras = await model.extras(conversationId: fromConversationId, messageIds: [messageId])
-    guard extras[messageId]?.files.contains(where: { $0.fileId == attachmentId }) == true else {
+    guard extras[messageId]?.files?.contains(where: { $0.fileId == attachmentId }) == true else {
       isFileGone = true
       return
     }
