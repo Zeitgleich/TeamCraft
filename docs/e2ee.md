@@ -2488,8 +2488,7 @@ founded alone fails on decryption.
 
 **Status: design, not implemented.** Nothing below is in the code. The owner decided D1 to D4 (end of this
 section) on 2026-11-05; it needs a crypto review before it is built. It answers whether channel roles need a
-freshness window like the roster's
-(`workspace_max_age`, admin.md §2.3). The short answer: not as a window on the roles. One decision can use a
+freshness window like the roster's (`workspace_max_age`, admin.md §2.3). The short answer: not as a window on the roles. One decision can use a
 time limit, the rest can't, and what helps most is that the entry reaches the members another way.
 
 **The threat.** A hostile server keeps an entry of the role log away from some or all devices, so a demoted
@@ -2508,7 +2507,8 @@ decision by decision:
 The purge isn't in the issue, and it is the only one of these that can't be repaired afterwards. It is open only
 on an anchored channel, which is one a workspace admin founded themselves or whose list they looked at (§4.6.1,
 "What anchors"). Every other channel, so nearly all that were founded at first sight, already takes the retention
-for a channel admin's deletion. The limit below therefore costs and protects less than the row suggests. The merge rule
+for a channel admin's deletion. The limit below therefore costs and protects less than the row suggests.
+The merge rule
 matters less than it looks: a member with a modified client and that server already get an admin past
 `owner_approval`, unannounced (§4.6.2, finding 2). A former owner has no more power than that; they only get
 a line that looks right.
@@ -2564,8 +2564,7 @@ channel that isn't strict stays open to a withheld demotion, as it is to a modif
 
 1. **The entry travels in the channel too (D2).** Whoever signs a role entry and is in the group sends it,
    except for a founding at first sight (below), right after the append, as a hidden encrypted message
-   (`MessageContent::ChannelRolesEntry`, a control message
-   like `IntegrationSource`, through the outbox, so it survives going offline). A device verifies it with the same
+   (`MessageContent::ChannelRolesEntry`, a control message like `IntegrationSource`, through the outbox, so it survives going offline). A device verifies it with the same
    `apply_entry` checks, with the message's server time as the entry's:
    - The next version, valid: accepted, also if the log doesn't show it. The demotion holds, not just the alarm.
    - Valid, but the log doesn't show it after a read: a **proven** alarm. Somebody allowed to sign signed it, so no
@@ -2658,8 +2657,7 @@ Older signers' entries reach the others through the log and heads as before.
 **What implementing it takes** (moderate):
 
 - `teamcraft-core`: the control message and its handling, without foundings (a log read still compares what the log
-shows at a version
-  accepted from a message), the local record of who signed recently and when (additive state: without one, a
+  shows at a version accepted from a message), the local record of who signed recently and when (additive state: without one, a
   device takes the retention), the limit in `verified_by_channel_admin`, proven alarms apart from claimed ones, the
   refusal in `approve_admin_join`, `channel_roles_max_age`.
 - Clients: the refusal's wording at the button, through i18n. The line exists.
