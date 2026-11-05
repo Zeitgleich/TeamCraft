@@ -122,6 +122,7 @@ import de.zeitgleich.teamcraft.ui.HomeFilter
 import de.zeitgleich.teamcraft.ui.channelSections
 import de.zeitgleich.teamcraft.ui.directSections
 import de.zeitgleich.teamcraft.ui.isDirect
+import de.zeitgleich.teamcraft.ui.isListedInHome
 import de.zeitgleich.teamcraft.ui.listName
 import de.zeitgleich.teamcraft.ui.tabBadge
 import de.zeitgleich.teamcraft.ui.toggled
