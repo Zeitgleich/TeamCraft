@@ -190,7 +190,9 @@ fun ChatListScreen(
   // A conversation opened from elsewhere (notification, link) shows in its own tab.
   LaunchedEffect(maybeSelectedId, conversations, isList) {
     conversations?.firstOrNull { it.id == maybeSelectedId }?.let { selected ->
-      if (tab != ChatTab.Activity) tab = if (selected.isDirect || isList) ChatTab.Home else ChatTab.Spaces
+      // A starred channel opened from Home stays there, highlighted under Favorites (#1346).
+      val staysHome = tab == ChatTab.Home && selected.isListedInHome
+      if (tab != ChatTab.Activity && !staysHome) tab = if (selected.isDirect || isList) ChatTab.Home else ChatTab.Spaces
     }
   }
   var maybeFirstSync by remember { mutableStateOf<FirstSyncItem?>(null) }
@@ -501,7 +503,7 @@ private fun SpacesTab(conversations: List<ConversationItem>, list: ListState, on
   }
 }
 
-/** [showsSpace]: name the space under a channel's name, where the list is not that space's own (#1152). */
+/** [showsSpace]: name the space after a channel's name, where the list is not that space's own (#1152). */
 private fun LazyListScope.conversationRows(
   sections: List<Section>,
   list: ListState,
@@ -1001,42 +1003,39 @@ private fun ConversationRow(
     ) {
       if (isChecked) CheckedAvatar() else ConversationAvatar(conversation)
       Column(Modifier.weight(1f).padding(start = 12.dp)) {
-        TitleLine(conversation, maybeEntry)
-        if (showsSpace) {
-          conversation.maybeSpaceName?.let { SpaceLine(it) }
-        }
+        TitleLine(conversation, maybeEntry, maybeSpaceName = conversation.maybeSpaceName.takeIf { showsSpace })
         PreviewLine(conversation, maybeEntry)
       }
     }
   }
 }
 
-/** The space of a channel listed outside it; it shortens on its own line, so a long name never hides it. */
 @Composable
-private fun SpaceLine(name: String) {
-  Text(
-    name,
-    maxLines = 1,
-    overflow = TextOverflow.Ellipsis,
-    style = MaterialTheme.typography.labelSmall,
-    color = MaterialTheme.colorScheme.onSurfaceVariant,
-  )
-}
-
-@Composable
-private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?) {
+private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?, maybeSpaceName: String? = null) {
   val context = LocalContext.current
   val isUnread = conversation.unreadCount > 0u
   Row(verticalAlignment = Alignment.CenterVertically) {
     Text(
       conversation.listName(stringResource(R.string.notes_title)),
-      modifier = Modifier.weight(1f),
+      // With the space after it, both share the line (same row height as the others); the space
+      // gets the smaller share, so the name is cut last (#1346).
+      modifier = if (maybeSpaceName != null) Modifier.weight(2f, fill = false) else Modifier.weight(1f),
       maxLines = 1,
       overflow = TextOverflow.Ellipsis,
       style = MaterialTheme.typography.titleSmall,
       fontWeight = if (isUnread) FontWeight.Bold else FontWeight.Normal,
       color = if (conversation.isMuted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
     )
+    if (maybeSpaceName != null) {
+      Text(
+        maybeSpaceName,
+        modifier = Modifier.weight(1f).padding(start = 6.dp),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+    }
     if (conversation.isMuted) {
       val mutedLabel = stringResource(R.string.chat_muted)
       Icon(
