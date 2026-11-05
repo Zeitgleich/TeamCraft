@@ -18,11 +18,13 @@ use teamcraft_e2e::browser::artifact_dir;
 use teamcraft_e2e::call::join_call;
 use teamcraft_e2e::netem::{Condition, PortConditions};
 use teamcraft_media::call_engine::CallEngineEvent;
+use teamcraft_media::call_native::NativeCall;
 use teamcraft_media::call_resilience::CallTransport;
-use teamcraft_proto::VideoTrackKind;
+use teamcraft_proto::{MediaStreamId, VideoTrackKind};
 
 use crate::web::{
   Rig, WEB_ORIGIN, click_text, sign_in_again, sign_in_as_alice, wait_for_element, wait_for_text,
+  wait_for_text_gone,
 };
 
 /// Fake devices that answer `getUserMedia` without a prompt.
@@ -33,6 +35,9 @@ pub(crate) const MEDIA_ARGS: [&str; 3] = [
 ];
 const CALL_DURATION: Duration = Duration::from_secs(8);
 const SETUP_TIMEOUT: Duration = Duration::from_secs(120);
+/// A call on the fallback tries QUIC about a minute after it got there (48 to 72 s, #1338), and the
+/// move itself takes a handshake and a round trip.
+const BACK_TO_QUIC_TIMEOUT: Duration = Duration::from_secs(110);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_web_client_and_a_native_client_share_a_call() {
@@ -175,6 +180,100 @@ async fn the_web_client_falls_back_on_a_network_without_udp() {
     "the DAVE group with the browser was never established"
   );
   assert!(has_browser_video, "the browser's camera never reached the call");
+  assert!(stats.frames_received > 50, "{stats:?}");
+  let carol_code = stats.maybe_privacy_code.clone().expect("Carol's privacy code");
+  assert!(
+    browser_code.contains(&carol_code),
+    "the browser shows {browser_code:?}, Carol has {carol_code:?}"
+  );
+  drop(conditions);
+  rig.finish().await;
+}
+
+/// UDP comes back during a call that started on the fallback (#1338): the browser tries QUIC about
+/// a minute in, moves its session there without a rejoin and stops saying the network is limited.
+/// The native client in the call (on the same network, so on the fallback too until it moves as
+/// well) sees no reconnect, no leave and no new DAVE epoch, and the browser's camera goes on
+/// reaching it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs the network namespace: scripts/e2e-network.sh"]
+async fn the_web_client_moves_back_to_quic_when_udp_comes_back() {
+  let Some(mut rig) = start_rig_with_fallback().await else {
+    return;
+  };
+  let Some(conditions) = PortConditions::take(1) else {
+    rig.finish().await;
+    return;
+  };
+  conditions.set(Condition::NoUdp);
+  let channel = rig.channel;
+  let certificate_hash = rig.stack.maybe_sfu.as_ref().unwrap().certificate_hash;
+  let page = rig.browser.page.clone();
+  let console = console_log(&page).await;
+  sign_in_and_join_the_channel(&mut rig, &page).await;
+  rig
+    .browser
+    .screenshot_on_failure("web-call-back-to-quic", |page| async move {
+      crate::web::click_text(&page, "browser-channel").await;
+      click_selector(&page, "button[aria-label='Start video call']").await;
+      wait_for_element(&page, ".prejoin").await;
+      click_selector(&page, ".prejoin-actions .btn-primary").await;
+      wait_for_element(&page, ".call-screen").await;
+      wait_for_text(&page, "Limited network, call quality may be lower").await;
+    })
+    .await;
+  let mut carol_call = join_call(&mut rig.carol, channel, certificate_hash, 550.0).await;
+  let (epoch, camera) = wait_for_secured_camera(&mut carol_call).await;
+  // Carol takes the browser's camera herself: its frames show that media goes on after the move.
+  carol_call.subscribe_video(camera, Some(0));
+
+  let logged_before = console.lock().unwrap().len();
+  conditions.set(Condition::Clear);
+  let has_moved = || {
+    console
+      .lock()
+      .unwrap()
+      .iter()
+      .any(|line| line.contains("the call moved to QUIC"))
+  };
+  let deadline = tokio::time::Instant::now() + BACK_TO_QUIC_TIMEOUT;
+  while !has_moved() {
+    if tokio::time::Instant::now() >= deadline {
+      dump_console(&console, &["QUIC", "fallback", "switch", "rejoin"]);
+      panic!("the browser never moved to QUIC");
+    }
+    if let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(200), carol_call.next_event()).await {
+      assert_undisturbed(&event, epoch);
+    }
+  }
+  rig
+    .browser
+    .screenshot_on_failure("web-call-back-to-quic-notice", |page| async move {
+      wait_for_text_gone(&page, "Limited network").await;
+    })
+    .await;
+
+  let mut camera_frames = 0_u32;
+  let deadline = tokio::time::Instant::now() + CALL_DURATION;
+  while let Ok(Some(event)) = tokio::time::timeout_at(deadline, carol_call.next_event()).await {
+    assert_undisturbed(&event, epoch);
+    if matches!(&event, CallEngineEvent::VideoFrame(frame) if frame.stream_id == camera) {
+      camera_frames += 1;
+    }
+  }
+  let browser_code = privacy_code_on(&page).await;
+  let stats = carol_call.leave().await.expect("leaving the call");
+  dump_console(&console, &["QUIC", "fallback", "switch"]);
+  assert!(
+    camera_frames > 10,
+    "{camera_frames} frames of the browser's camera after the move"
+  );
+  assert!(
+    !console.lock().unwrap()[logged_before..]
+      .iter()
+      .any(|line| line.contains("rejoining")),
+    "the browser rejoined"
+  );
   assert!(stats.frames_received > 50, "{stats:?}");
   let carol_code = stats.maybe_privacy_code.clone().expect("Carol's privacy code");
   assert!(
@@ -691,6 +790,64 @@ pub(crate) fn sfu_identity() -> rcgen::CertifiedKey<rcgen::KeyPair> {
     .self_signed(&signing_key)
     .expect("a self-signed certificate");
   rcgen::CertifiedKey { cert, signing_key }
+}
+
+/// Waits until the call with the browser is secured and its camera is published; returns the DAVE
+/// epoch once it settled, and the camera's stream.
+async fn wait_for_secured_camera(call: &mut NativeCall) -> (u64, MediaStreamId) {
+  let (mut maybe_epoch, mut maybe_camera) = (None, None);
+  let deadline = tokio::time::Instant::now() + SETUP_TIMEOUT;
+  while maybe_epoch.is_none() || maybe_camera.is_none() {
+    let event = tokio::time::timeout_at(deadline, call.next_event())
+      .await
+      .expect("the call with the browser was never secured with its camera")
+      .expect("the call ended");
+    match event {
+      CallEngineEvent::Secured { epoch, .. } => maybe_epoch = Some(epoch),
+      CallEngineEvent::VideoPublished(track) if track.kind == VideoTrackKind::Camera => {
+        maybe_camera = Some(track.stream_id);
+      },
+      _ => {},
+    }
+  }
+  // Commits that were on their way still count.
+  let settled = tokio::time::Instant::now() + Duration::from_secs(3);
+  while let Ok(Some(event)) = tokio::time::timeout_at(settled, call.next_event()).await {
+    if let CallEngineEvent::Secured { epoch, .. } = event {
+      maybe_epoch = Some(epoch);
+    }
+  }
+  (maybe_epoch.unwrap(), maybe_camera.unwrap())
+}
+
+/// Fails on anything that shows a device leaving the call or the group re-keying: a move to another
+/// connection is neither.
+fn assert_undisturbed(event: &CallEngineEvent, epoch: u64) {
+  match event {
+    CallEngineEvent::ParticipantReconnecting(_)
+    | CallEngineEvent::ParticipantLeft(_)
+    | CallEngineEvent::ParticipantJoined(_)
+    | CallEngineEvent::Reconnecting
+    | CallEngineEvent::UntrustedRoster
+    | CallEngineEvent::UnauthenticatedKeys
+    | CallEngineEvent::Error(_) => panic!("the call was disturbed: {event:?}"),
+    CallEngineEvent::Secured { epoch: new, .. } if *new != epoch => {
+      panic!("re-keyed from epoch {epoch} to {new}")
+    },
+    _ => {},
+  }
+}
+
+/// Prints the page's console lines that contain one of `needles`.
+fn dump_console(console: &Mutex<Vec<String>>, needles: &[&str]) {
+  for line in console
+    .lock()
+    .unwrap()
+    .iter()
+    .filter(|line| needles.iter().any(|needle| line.contains(needle)))
+  {
+    eprintln!("console: {line}");
+  }
 }
 
 /// Everything the page logs, for the failure output.
