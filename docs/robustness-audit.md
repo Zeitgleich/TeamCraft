@@ -626,3 +626,16 @@ session (the core has no call-state API yet).
   unreadable stores, convergent edits (e2ee.md §9.5). Linking keeps the received keys across a
   restart (#168, e2ee.md §5); a setup given up on drops its device key pair and revokes its device,
   and the receipt is awaited beside the core loop (#415, e2ee.md §3.2, §5).
+
+## Sharing into the app (#208)
+
+Added after the audit above; every client copies a share out of reach of a kill, except where listed.
+Nothing here was run on a device yet: docs/manual-tests/share-into.md.
+
+| Gap                                                                                                                                | Severity   | Owner |
+|------------------------------------------------------------------------------------------------------------------------------------|------------|-------|
+| Desktop: a share waits in memory as a list of paths; a killed app forgets it, the files stay where they are                        | low        | #208  |
+| Web: without an active service worker that knows `/share-target`, the browser posts the plaintext to the web server (e2ee.md §9.3) | medium     | #208  |
+| Web: `formData()` of a very large share is the browser's; not measured                                                             | unverified | #208  |
+| Attachments in a composer (shared or picked) aren't kept across a kill before the send; the outbox starts at send                  | medium     | #208  |
+| iOS: the extension can't open the app; a notification and the sheet's text lead there, and without permission only the text does   | low        | #208  |

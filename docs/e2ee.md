@@ -4492,6 +4492,15 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   auditors a signed list of what a release is. People who need more use the desktop and mobile apps,
   which do not take their code from the server.
 
+**Shares from other apps (#208).** The manifest's `share_target` makes the browser POST what was
+shared to `/share-target`. The service worker answers that request itself and keeps the content in a
+cache of its own, in the clear like any picked file, until the user picked a conversation (at most 7
+days; wiped at sign-out). It goes through the normal encrypted send from there. The limit: with no
+active worker that knows the path (the worker was never installed, was evicted, or an older one is
+still running after the browser already took the new manifest), the browser sends the POST with the
+plaintext to the web server, which refuses it and doesn't store it, but sees it pass. A compromised
+server could keep it, as it could serve a page that leaks anything else (above).
+
 ### 9.4 One owner per store, durable writes (implemented)
 
 Every store is loaded into memory, worked on there and written back. Two cores on the same store
