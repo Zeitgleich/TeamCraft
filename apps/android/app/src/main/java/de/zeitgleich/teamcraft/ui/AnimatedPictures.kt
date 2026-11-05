@@ -176,7 +176,10 @@ fun rememberAnimation(maybePath: String?, maxSidePx: Int): AnimationRead {
     value = when {
       maybePath == null -> AnimationRead.Waiting
       Build.VERSION.SDK_INT < Build.VERSION_CODES.P -> AnimationRead.Still
-      else -> decodeAnimation(maybePath, maxSidePx)?.let { AnimationRead.Moving(it) } ?: AnimationRead.Still
+      else -> decodeAnimation(maybePath, maxSidePx)?.let { AnimationRead.Moving(it) }
+        // A file that is gone (the core trimmed its downloads) says nothing about motion: the core
+        // shows it as remote again.
+        ?: if (File(maybePath).exists()) AnimationRead.Still else AnimationRead.Waiting
     }
   }
   return read

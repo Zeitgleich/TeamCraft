@@ -259,6 +259,7 @@ struct AttachmentView: View {
   }
 
   private func preview(_ path: String) {
+    DownloadUse.mark(path)
     maybePreviewURL = VideoFileCheck.previewURL(path: path, mediaType: file.mediaType)
     isPreviewRefused = maybePreviewURL == nil
   }
@@ -559,6 +560,7 @@ struct FilesGalleryView: View {
       } else if file.opensInVideoPlayer {
         maybeVideo = file
       } else if file.transfer.state == "local", let path = file.transfer.path {
+        DownloadUse.mark(path)
         maybePreviewURL = VideoFileCheck.previewURL(path: path, mediaType: file.mediaType)
         isPreviewRefused = maybePreviewURL == nil
       } else if file.transfer.state == "remote" || file.transfer.state == "failed" {

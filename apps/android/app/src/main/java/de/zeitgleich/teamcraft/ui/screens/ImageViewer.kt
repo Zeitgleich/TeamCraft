@@ -346,9 +346,16 @@ private fun PicturePage(
     maybePath,
     maxSidePx,
   ) {
-    val path = maybePath ?: return@produceState
+    // The state outlives a change of path: a file that went away doesn't stay "unreadable".
+    val path = maybePath ?: run {
+      if (value is FullImage.Unreadable) value = FullImage.Waiting
+      return@produceState
+    }
     if (value is FullImage.Ready) return@produceState
-    value = Pictures.file(path, maxSidePx)?.let { FullImage.Ready(it) } ?: FullImage.Unreadable
+    value = Pictures.file(path, maxSidePx)?.let { FullImage.Ready(it) }
+      // Gone (the core trimmed its downloads): the core shows it as remote again, and the viewer
+      // fetches or offers the original.
+      ?: if (File(path).exists()) FullImage.Unreadable else FullImage.Waiting
   }
   val currentOnTap by rememberUpdatedState(onTap)
   var scale by remember { mutableFloatStateOf(1f) }

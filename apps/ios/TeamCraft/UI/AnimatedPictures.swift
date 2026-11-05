@@ -204,11 +204,11 @@ final class AnimationPlayer {
   /// Shows frames until cancelled or the file's loops are done. Paused, the last frame stays.
   func run(path: String, maxPixels: CGFloat) async {
     guard let frames = await Task.detached(priority: .utility, operation: {
-      // The core keeps the most recently used downloads when it trims its folder.
-      try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: path)
+      DownloadUse.mark(path)
       return AnimationFrames(path: path, maxPixels: maxPixels)
     }).value else {
-      maybeMoves = false
+      // A file that is gone (trimmed) says nothing about motion: the core shows it as remote again.
+      if FileManager.default.fileExists(atPath: path) { maybeMoves = false }
       return
     }
     maybeMoves = frames.count > 1
