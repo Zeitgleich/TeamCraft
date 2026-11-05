@@ -247,6 +247,8 @@ video-unmute = Ton an
 video-volume = Lautstärke
 video-fullscreen = Vollbild
 video-exit-fullscreen = Vollbild beenden
+video-speed = Wiedergabegeschwindigkeit: { $speed }
+video-repeat = Wiederholen
 # Ein Video, das der Player der App nicht abspielen kann (#804); $packages sind Linux-Paketnamen
 video-unplayable = Dieses Video kann hier nicht abgespielt werden.
 video-unplayable-install = Auf diesem System fehlt ein Video-Decoder. Installiere { $packages } und starte TeamCraft neu.

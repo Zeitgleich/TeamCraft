@@ -28,7 +28,7 @@ use crate::lightbox::MediaKey;
 use crate::model::ConversationId;
 use crate::object_url::{FetchError, ObjectUrl, fetch_decrypted, url_for};
 use crate::state::{AppState, MainView};
-use crate::video_controls::{PlayerCommand, seek_target, volume_target};
+use crate::video_controls::{PlayerCommand, seek_target, tenth_target, volume_target};
 
 /// The volume unmuting goes back to when the volume was turned all the way down.
 const UNMUTED_VOLUME: f64 = 0.5;
@@ -164,12 +164,17 @@ impl Parts {
           audio.set_current_time(duration);
         }
       },
+      PlayerCommand::SeekToTenth(tenths) => {
+        if let Some(target) = tenth_target(tenths, audio.duration()) {
+          audio.set_current_time(target);
+        }
+      },
       PlayerCommand::VolumeBy(delta) => self.set_volume(volume_target(audio.volume(), delta)),
       // Unmuted at zero volume would still be silent.
       PlayerCommand::ToggleMute if audio.muted() && audio.volume() == 0.0 => self.set_volume(UNMUTED_VOLUME),
       PlayerCommand::ToggleMute => audio.set_muted(!audio.muted()),
-      // Nothing to show full screen.
-      PlayerCommand::ToggleFullscreen => {},
+      // Nothing to show full screen, and no frames to step through.
+      PlayerCommand::ToggleFullscreen | PlayerCommand::StepFrame(_) => {},
     }
   }
 

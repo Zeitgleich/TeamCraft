@@ -297,7 +297,7 @@ fun ImageViewer(
  * back for a moment) and lets the picture use the cutout area. The bars return when it closes.
  */
 @Composable
-private fun ImmersiveDialogWindow() {
+internal fun ImmersiveDialogWindow() {
   val view = LocalView.current
   DisposableEffect(view) {
     val window = (view.parent as? DialogWindowProvider)?.window ?: return@DisposableEffect onDispose {}

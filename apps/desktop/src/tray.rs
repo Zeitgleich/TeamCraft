@@ -4,7 +4,7 @@
 //! | Platform | Unread badge                                     | Tray click                  |
 //! |----------|--------------------------------------------------|-----------------------------|
 //! | Linux    | launcher badge (LauncherEntry signal), tray dot  | menu only (no click events) |
-//! | macOS    | dock badge, tray dot                             | left click shows the window |
+//! | macOS    | dock badge, tray dot and count in the menu bar   | left click shows the window |
 //! | Windows  | taskbar overlay dot, tray dot                    | left click shows the window |
 //!
 //! The tray dot is a red dot drawn into the tray icon's top right while anything is unread (in the
@@ -323,12 +323,16 @@ fn run_action(app: &AppHandle, action: TrayAction) {
     TrayAction::CheckForUpdates => {
       show_main_window(app);
       crate::updates::check_now(app);
+      // The window says what came of it ("TeamCraft is up to date"); without a page, nothing does.
+      hand_to_window(app, action);
     },
-    other => {
-      if let Err(error) = app.emit_to(MAIN_WINDOW, TRAY_ACTION_EVENT, other.id()) {
-        tracing::debug!(%error, "could not hand the tray action to the window");
-      }
-    },
+    other => hand_to_window(app, other),
+  }
+}
+
+fn hand_to_window(app: &AppHandle, action: TrayAction) {
+  if let Err(error) = app.emit_to(MAIN_WINDOW, TRAY_ACTION_EVENT, action.id()) {
+    tracing::debug!(%error, "could not hand the tray action to the window");
   }
 }
 
@@ -481,6 +485,8 @@ pub fn tray_update(app: AppHandle, last_unread: State<'_, LastUnread>, update: T
     *last = Some(unread);
     drop(last);
     set_badge(&app, unread);
+    #[cfg(target_os = "macos")]
+    set_menu_bar_count(&app, unread);
     if had_unread != (unread > 0) {
       refresh_icon(&app);
     }
@@ -590,6 +596,28 @@ fn set_badge(app: &AppHandle, unread: u32) {
   let result = window.set_overlay_icon((unread > 0).then(unread_dot));
   if let Err(error) = result {
     tracing::debug!(%error, "could not set the unread badge");
+  }
+}
+
+/// macOS: the unread count next to the menu bar icon, as the dock badge shows it; nothing at 0.
+#[cfg(target_os = "macos")]
+fn set_menu_bar_count(app: &AppHandle, unread: u32) {
+  if let Some(tray) = app.tray_by_id(TRAY_ID)
+    && let Err(error) = tray.set_title(menu_bar_count(unread).as_deref())
+  {
+    tracing::debug!(%error, "could not set the menu bar count");
+  }
+}
+
+/// The menu bar text for `unread`: the count, capped as the dock badge is narrow too.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn menu_bar_count(unread: u32) -> Option<String> {
+  /// Above this, the menu bar shows "99+".
+  const MENU_BAR_COUNT_MAX: u32 = 99;
+  match unread {
+    0 => None,
+    1..=MENU_BAR_COUNT_MAX => Some(unread.to_string()),
+    _ => Some(format!("{MENU_BAR_COUNT_MAX}+")),
   }
 }
 
@@ -842,6 +870,14 @@ mod tests {
     assert_eq!(&rgba[(4 * 9 + 4) * 4..(4 * 9 + 4) * 4 + 3], &DOT_COLOR);
     assert_eq!(alpha(4, 1), 0, "ring");
     assert_eq!(alpha(0, 0), 255, "outside");
+  }
+
+  #[test]
+  fn the_menu_bar_shows_the_count_capped_and_nothing_without_unread() {
+    assert_eq!(menu_bar_count(0), None);
+    assert_eq!(menu_bar_count(7).as_deref(), Some("7"));
+    assert_eq!(menu_bar_count(99).as_deref(), Some("99"));
+    assert_eq!(menu_bar_count(100).as_deref(), Some("99+"));
   }
 
   #[test]

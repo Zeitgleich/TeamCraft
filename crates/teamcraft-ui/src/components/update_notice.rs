@@ -609,7 +609,8 @@ fn interval_slug(interval: CheckInterval) -> &'static str {
   }
 }
 
-fn blocker_slug(blocker: UpdateBlocker) -> &'static str {
+/// The i18n slug of an update blocker (`update-off-…`).
+pub(crate) fn blocker_slug(blocker: UpdateBlocker) -> &'static str {
   match blocker {
     UpdateBlocker::Policy => "policy",
     UpdateBlocker::Machine => "machine",

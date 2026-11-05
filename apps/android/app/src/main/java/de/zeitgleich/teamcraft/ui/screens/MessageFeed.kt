@@ -292,6 +292,7 @@ fun MessageFeed(
   val wasNearBottom = remember(items) { Snapshot.withoutReadObservation { listState.isNearBottom() } }
   // Saveable: a rotation keeps the viewer open (the conversation, message and file it opened on).
   var maybeViewing by rememberSaveable { mutableStateOf<List<String>?>(null) }
+  var maybeVideo by rememberSaveable { mutableStateOf<List<String>?>(null) }
   var maybeHighlighted by remember(maybeFocusMessage) { mutableStateOf(maybeFocusMessage) }
   LaunchedEffect(maybeHighlighted) {
     if (maybeHighlighted != null) {
@@ -364,7 +365,11 @@ fun MessageFeed(
   val onOpenFile: (FileInfo) -> Unit = remember(viewModel, context) {
     { file ->
       // Pictures open in the viewer at once (it shows the thumbnail and fetches the original).
-      if (file.isImage && file.maybeThumbnail != null) maybeViewing = PictureTarget.of(file).toList() else openOrDownload(viewModel, file, context)
+      when {
+        file.isImage && file.maybeThumbnail != null -> maybeViewing = PictureTarget.of(file).toList()
+        file.opensInVideoPlayer -> maybeVideo = PictureTarget.of(file).toList()
+        else -> openOrDownload(viewModel, file, context)
+      }
     }
   }
   val mediaPrefs = remember(context) { MediaPrefs.prefs(context) }
@@ -372,7 +377,7 @@ fun MessageFeed(
   val isMotionReduced = rememberMotionReduced()
   val feedMotion = FeedMotion(
     mode = animatedImages.effective(isMotionReduced),
-    isCovered = maybeViewing != null,
+    isCovered = maybeViewing != null || maybeVideo != null,
     fetchesNow = mediaPrefs::fetchesOriginalNow,
     fetch = { file -> viewModel.act(ChatActions.downloadAttachment(file.conversation, file.message, file.fileId)) },
   )
@@ -451,6 +456,9 @@ fun MessageFeed(
       maybeViewing = target.toList()
       onPictureOpened()
     }
+  }
+  maybeVideo?.let(PictureTarget::fromList)?.let { target ->
+    VideoViewer(viewModel, target, onDismiss = { maybeVideo = null })
   }
   maybeViewing?.let(PictureTarget::fromList)?.let { target ->
     ImageViewer(
@@ -974,7 +982,8 @@ private fun Bubble(
   val shape = RoundedCornerShape(corners.topStart, corners.topEnd, corners.bottomEnd, corners.bottomStart)
   val files = maybeExtras?.files.orEmpty()
   val images = files.filter { it.isImage && it.maybeThumbnail != null }
-  val others = files - images.toSet()
+  val videos = files.filter { it.isVideo && it.maybeThumbnail != null }
+  val others = files - images.toSet() - videos.toSet()
   val isDeleted = maybeExtras?.isDeleted == true
   val hasText = !isDeleted && message.body.isNotBlank() && !isOnlyFileLabel(message.body, maybeExtras)
   Surface(color = colors.container, contentColor = colors.content, shape = shape) {
@@ -1007,6 +1016,11 @@ private fun Bubble(
       if (images.isNotEmpty() && !isDeleted) {
         Box(Modifier.padding(top = if (showsName || maybeExtras?.maybeReply != null) 4.dp else 0.dp)) {
           if (images.size >= 2) ImageGrid(images, look.bubbleMax, onOpenFile, onLongPressImage) else ImagePreview(images.first(), look.bubbleMax, onOpenFile)
+        }
+      }
+      if (!isDeleted) {
+        videos.forEach { file ->
+          Box(Modifier.padding(top = 4.dp)) { VideoPreview(file, look.bubbleMax, onOpenFile) }
         }
       }
       Column(textPadding.padding(top = BUBBLE_TEXT_PADDING_V - BUBBLE_MEDIA_PADDING)) {
@@ -1403,6 +1417,27 @@ private fun ImagePreview(file: FileInfo, bubbleMax: Dp, onOpen: (FileInfo) -> Un
       .clickable(onClickLabel = stringResource(R.string.file_open)) { onOpen(file) },
   ) {
     TransferOverlay(file) { TilePicture(file) }
+  }
+}
+
+/** A video's poster at its own shape, with a play mark, its length and its size; a tap opens the player. */
+@Composable
+private fun VideoPreview(file: FileInfo, bubbleMax: Dp, onOpen: (FileInfo) -> Unit) {
+  val thumbnail = file.maybeThumbnail?.bytes ?: return
+  val ratio = remember(thumbnail) { Pictures.aspectRatio(thumbnail) ?: DEFAULT_PREVIEW_RATIO }
+    .coerceIn(MIN_PREVIEW_RATIO, MAX_PREVIEW_RATIO)
+  val width = minOf(bubbleMax - BUBBLE_MEDIA_PADDING * 2, PREVIEW_MAX_HEIGHT * ratio)
+  Box(
+    Modifier
+      .width(width)
+      .aspectRatio(ratio)
+      .clip(RoundedCornerShape(MEDIA_CORNER))
+      .background(MaterialTheme.colorScheme.surfaceVariant)
+      .clickable(onClickLabel = stringResource(R.string.video_play)) { onOpen(file) },
+  ) {
+    TransferOverlay(file) { Thumbnail(file, ContentScale.Crop) }
+    PlayMark(Modifier.align(Alignment.Center))
+    VideoBadge(file, Modifier.align(Alignment.BottomStart))
   }
 }
 

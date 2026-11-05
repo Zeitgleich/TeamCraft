@@ -67,83 +67,42 @@ fn register_with_plugin(
   }
 }
 
-/// A Tauri accelerator as an XDG shortcuts trigger (`CommandOrControl+Shift+Space` →
-/// `CTRL+SHIFT+space`), the portal's preferred trigger. `None` for keys it can't name.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn xdg_trigger(accelerator: &str) -> Option<String> {
-  let mut parts = Vec::new();
-  for part in accelerator.split('+').map(str::trim) {
-    let modifier = match part.to_ascii_lowercase().as_str() {
-      "commandorcontrol" | "cmdorctrl" | "control" | "ctrl" => Some("CTRL"),
-      "shift" => Some("SHIFT"),
-      "alt" | "option" => Some("ALT"),
-      "super" | "meta" | "command" | "cmd" => Some("LOGO"),
-      _ => None,
-    };
-    if let Some(modifier) = modifier {
-      parts.push(modifier.to_owned());
-      continue;
-    }
-    parts.push(xdg_key(part)?);
-  }
-  Some(parts.join("+"))
-}
-
-/// A key as its xkb keysym name.
-fn xdg_key(key: &str) -> Option<String> {
-  let lower = key.to_ascii_lowercase();
-  let name = match lower.as_str() {
-    "space" => "space".to_owned(),
-    "enter" | "return" => "Return".to_owned(),
-    "tab" => "Tab".to_owned(),
-    "backquote" => "grave".to_owned(),
-    _ if lower.len() == 1 && lower.chars().all(|c| c.is_ascii_alphanumeric()) => lower,
-    _ if lower.starts_with('f') && lower[1..].parse::<u8>().is_ok_and(|n| (1..=24).contains(&n)) => {
-      key.to_ascii_uppercase()
-    },
-    _ => return None,
-  };
-  Some(name)
-}
-
 #[cfg(target_os = "linux")]
 mod portal {
   use std::sync::Arc;
 
-  use ashpd::desktop::Session;
-  use ashpd::desktop::global_shortcuts::{GlobalShortcuts, NewShortcut};
-  use futures_util::StreamExt;
   use tauri::{AppHandle, Manager};
-  use tokio::sync::oneshot;
-  use tracing::{info, warn};
+  use tracing::warn;
 
-  use super::{CallHost, PushToTalkState, xdg_trigger};
+  use super::{CallHost, PushToTalkState};
+  use crate::shortcut_portal::{self, xdg_trigger};
 
   const SHORTCUT_ID: &str = "push-to-talk";
   /// Shown by the desktop's shortcut dialog; the portal has no translation hook, so the app's
   /// source language is used.
   const SHORTCUT_DESCRIPTION: &str = "Push to talk";
 
-  /// A bound portal shortcut; dropping `stop` (or sending on it) closes the session.
-  pub(super) struct Binding {
-    stop: oneshot::Sender<()>,
-  }
+  /// The bound portal shortcut; dropping it closes the session.
+  pub(super) type Binding = shortcut_portal::Binding;
 
   pub(super) fn is_wayland() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some()
+    shortcut_portal::is_wayland()
   }
 
   pub(super) async fn register(app: &AppHandle, calls: &Arc<CallHost>, maybe_shortcut: Option<&str>) -> bool {
     let state = app.state::<PushToTalkState>();
     let mut binding = state.binding.lock().await;
-    if let Some(previous) = binding.take() {
-      // The listener ends either way: it also stops when the sender is dropped.
-      let _ = previous.stop.send(());
-    }
+    // The previous session closes before a new one binds the same id.
+    drop(binding.take());
     let Some(shortcut) = maybe_shortcut else {
       return false;
     };
-    match bind(Arc::clone(calls), xdg_trigger(shortcut)).await {
+    let calls = Arc::clone(calls);
+    let on_event = move |is_talking: bool| {
+      let calls = Arc::clone(&calls);
+      async move { calls.set_talking(is_talking).await }
+    };
+    match shortcut_portal::bind(SHORTCUT_ID, SHORTCUT_DESCRIPTION, xdg_trigger(shortcut), on_event).await {
       Ok(new) => {
         *binding = Some(new);
         true
@@ -153,99 +112,5 @@ mod portal {
         false
       },
     }
-  }
-
-  /// Creates a session, asks the desktop to bind the shortcut (it may show a dialog and let the
-  /// user pick another key) and listens for presses and releases until stopped.
-  async fn bind(calls: Arc<CallHost>, maybe_trigger: Option<String>) -> Result<Binding, ashpd::Error> {
-    let portal = GlobalShortcuts::new().await?;
-    let session = portal.create_session(Default::default()).await?;
-    let shortcut =
-      NewShortcut::new(SHORTCUT_ID, SHORTCUT_DESCRIPTION).preferred_trigger(maybe_trigger.as_deref());
-    let bound = portal
-      .bind_shortcuts(&session, &[shortcut], None, Default::default())
-      .await?
-      .response()?;
-    match bound
-      .shortcuts()
-      .iter()
-      .find(|shortcut| shortcut.id() == SHORTCUT_ID)
-    {
-      Some(shortcut) => info!(
-        trigger = shortcut.trigger_description(),
-        "push-to-talk bound through the portal"
-      ),
-      None => {
-        close(&session).await;
-        return Err(ashpd::Error::NoResponse);
-      },
-    }
-    let (stop, stopped) = oneshot::channel();
-    tauri::async_runtime::spawn(listen(portal, session, calls, stopped));
-    Ok(Binding { stop })
-  }
-
-  async fn listen(
-    portal: GlobalShortcuts,
-    session: Session<GlobalShortcuts>,
-    calls: Arc<CallHost>,
-    mut stopped: oneshot::Receiver<()>,
-  ) {
-    let (activated, deactivated) = match (
-      portal.receive_activated().await,
-      portal.receive_deactivated().await,
-    ) {
-      (Ok(activated), Ok(deactivated)) => (activated, deactivated),
-      (Err(error), _) | (_, Err(error)) => {
-        warn!(%error, "push-to-talk events unavailable");
-        close(&session).await;
-        return;
-      },
-    };
-    let mut activated = std::pin::pin!(activated);
-    let mut deactivated = std::pin::pin!(deactivated);
-    // One binding at a time (the previous session is closed first), so the id identifies ours.
-    let ours = |id: &str| id == SHORTCUT_ID;
-    loop {
-      tokio::select! {
-        _ = &mut stopped => break,
-        Some(event) = activated.next() => {
-          if ours(event.shortcut_id()) {
-            calls.set_talking(true).await;
-          }
-        },
-        Some(event) = deactivated.next() => {
-          if ours(event.shortcut_id()) {
-            calls.set_talking(false).await;
-          }
-        },
-        else => break,
-      }
-    }
-    close(&session).await;
-  }
-
-  async fn close(session: &Session<GlobalShortcuts>) {
-    if let Err(error) = session.close().await {
-      // The portal drops the session with our connection anyway.
-      tracing::debug!(%error, "push-to-talk session not closed");
-    }
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn tauri_accelerators_become_xdg_triggers() {
-    assert_eq!(
-      xdg_trigger("CommandOrControl+Shift+Space").as_deref(),
-      Some("CTRL+SHIFT+space")
-    );
-    assert_eq!(xdg_trigger("F8").as_deref(), Some("F8"));
-    assert_eq!(xdg_trigger("Alt+T").as_deref(), Some("ALT+t"));
-    assert_eq!(xdg_trigger("Super+Backquote").as_deref(), Some("LOGO+grave"));
-    assert_eq!(xdg_trigger("Ctrl+MediaPlayPause"), None);
   }
 }
