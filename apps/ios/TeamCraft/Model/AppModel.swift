@@ -218,6 +218,10 @@ final class AppModel {
   /// a prefetch) share the one `flock`; it is released when the last of them lets go, so no job frees
   /// the lock under the sync loop and no job keeps it after it ended.
   @ObservationIgnored private var lockHolders: Set<LockHolder> = []
+  /// The one take of the lock under way: another taker waits for it instead of opening its own.
+  @ObservationIgnored private var maybePendingAcquire: Task<Bool, Never>?
+  /// Counts `stopSyncing` calls, so a take of the lock that ends after one lets it go again.
+  @ObservationIgnored private var syncStops = 0
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
   @ObservationIgnored private var maybeCore: TeamCraft?
   /// Pictures of spaces on disk, by version (AppModel+SpacePictures.swift).
@@ -1502,12 +1506,12 @@ final class AppModel {
     if isSyncing {
       // The background time ran out while syncing, which gave the lock up: take it back. A job may
       // hold it meanwhile; the sync loop then shares it and keeps it once the job is done.
-      if !lockHolders.contains(.sync) { _ = await acquireProcessLock() }
+      if !lockHolders.contains(.sync) { _ = await acquireSyncLock() }
       return
     }
     // Never sync beside the extension: both would refresh the rotating refresh token, and the
     // loser is signed out (docs/e2ee.md §7). It holds the lock at most for its push budget.
-    guard await acquireProcessLock() else { return }
+    guard await acquireSyncLock() else { return }
     isSyncing = true
     do {
       try await core.start()
@@ -1520,10 +1524,19 @@ final class AppModel {
   }
 
   /// Waits for the cross-process lock for the sync loop while the app is in the foreground; `false`
-  /// once it left (the next foreground tries again).
-  private func acquireProcessLock() async -> Bool {
+  /// once it left (the next foreground tries again), and when syncing was stopped meanwhile: then
+  /// a take that succeeded late is let go again.
+  private func acquireSyncLock() async -> Bool {
+    let stops = syncStops
     while UIApplication.shared.applicationState != .background {
-      if await takeProcessLock(for: .sync, timeout: Self.lockWaitSeconds) { return true }
+      if await takeProcessLock(for: .sync, timeout: Self.lockWaitSeconds) {
+        guard stops == syncStops else {
+          releaseProcessLock(for: .sync)
+          return false
+        }
+        return true
+      }
+      guard stops == syncStops else { return false }
       AppLog.setup.notice("waiting for the notification extension to release the store")
     }
     return false
@@ -1538,12 +1551,23 @@ final class AppModel {
     return await operation()
   }
 
-  /// Takes the lock for `holder`, or joins this process's hold of it.
+  /// Takes the lock for `holder`, or joins this process's hold of it. One take runs at a time: a
+  /// second taker waits for it and then joins, so the process never opens two descriptors for it.
   private func takeProcessLock(for holder: LockHolder, timeout: TimeInterval) async -> Bool {
-    if !processLock.isHeld {
-      let lock = processLock
-      guard await Task.detached(operation: { lock.acquire(timeout: timeout) }).value else { return false }
+    while let pending = maybePendingAcquire {
+      _ = await pending.value
     }
+    if processLock.isHeld {
+      lockHolders.insert(holder)
+      return true
+    }
+    let lock = processLock
+    let pending = Task.detached { lock.acquire(timeout: timeout) }
+    maybePendingAcquire = pending
+    let isTaken = await pending.value
+    if maybePendingAcquire == pending { maybePendingAcquire = nil }
+    // Background expiry may have dropped it while this waited to resume.
+    guard isTaken, processLock.isHeld else { return false }
     lockHolders.insert(holder)
     return true
   }
@@ -1586,6 +1610,8 @@ final class AppModel {
   }
 
   private func stopSyncing() async {
+    // Also when not syncing yet: a start still waiting for the lock lets it go once it gets it.
+    syncStops += 1
     guard isSyncing else { return }
     isSyncing = false
     if let core = try? core() { try? await core.stop() }
