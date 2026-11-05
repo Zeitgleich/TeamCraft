@@ -145,6 +145,8 @@ final class AppModel {
   var waitingShare: StagedShare?
   /// A share on its way into its conversation's composer.
   var shareHandover: ShareHandover?
+  /// A composer is taking the handed-over share; a second run of its task leaves it alone.
+  var isTakingShare = false
   /// A link the system handed over, until it was acted on (AppModel+AppLinks.swift).
   var pendingAppLink: String?
   /// The question a waiting link asks.

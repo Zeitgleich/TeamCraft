@@ -36,25 +36,41 @@ extension AppModel {
   }
 
   /// The composer of `conversationId` takes the share over, once. Files that can't be attached (over
-  /// the upload limit, gone) come back as errors for the composer to show.
+  /// the upload limit, gone) stay in the inbox and the picker comes back with them; the error is for
+  /// the composer to show. The handover ends last: `ChatPane`'s task is keyed by it, and ending it
+  /// first would cancel the task that is taking the share.
   func takeShare(for conversationId: String) async -> (text: String, files: [PickedFile], error: AttachmentError?)? {
-    guard let handover = shareHandover, handover.conversationId == conversationId,
+    guard !isTakingShare, let handover = shareHandover, handover.conversationId == conversationId,
       let inbox = ShareInbox.shared()
     else { return nil }
-    shareHandover = nil
+    isTakingShare = true
+    defer { isTakingShare = false }
     let importer = await attachmentImporter()
     var files: [PickedFile] = []
+    var failed: [StagedShareFile] = []
     var maybeError: AttachmentError?
     for file in handover.share.files {
       do {
         files.append(try importer.importPickedMedia(PickedMedia(url: inbox.url(of: file, in: handover.share))))
       } catch let error as AttachmentError {
+        failed.append(file)
         maybeError = error
       } catch {
+        failed.append(file)
         maybeError = .unreadable
       }
     }
-    inbox.delete(handover.share.id)
+    if failed.isEmpty {
+      inbox.delete(handover.share.id)
+    } else {
+      // The text goes to the composer now; only the files wait.
+      var rest = handover.share
+      rest.text = ""
+      rest.files = failed
+      rest.leftOut = 0
+      try? inbox.commit(rest)
+    }
+    shareHandover = nil
     loadWaitingShare()
     return (handover.share.text, files, maybeError)
   }
