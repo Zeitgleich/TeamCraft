@@ -331,6 +331,10 @@ pub struct AppState {
   pub active_inline_video: RwSignal<Option<MediaKey>>,
   /// The one audio player of the app; one attachment plays at a time (#802).
   pub audio: AudioPlayer,
+  /// The one voice recording of the app and its take (#204).
+  pub voice: crate::voice_recorder::VoiceRecorder,
+  /// The speed voice messages play at, remembered on this device.
+  pub voice_speed: RwSignal<teamcraft_client_api::voice::PlaybackSpeed>,
   /// The layout the window's size calls for (`viewport.rs`).
   pub layout: RwSignal<Layout>,
   /// Text of the search box, kept when leaving and re-entering the search page.
@@ -471,6 +475,8 @@ impl AppState {
       before_activity: StoredValue::new(None),
       active_inline_video: RwSignal::new(None),
       audio: AudioPlayer::new(),
+      voice: crate::voice_recorder::VoiceRecorder::new(),
+      voice_speed: RwSignal::new(crate::settings::load_json(crate::components::voice_card::SPEED_KEY).unwrap_or_default()),
       layout: RwSignal::new(current_layout()),
       search_query: RwSignal::new(String::new()),
       switcher_query: RwSignal::new(String::new()),

@@ -352,3 +352,20 @@ select.tv-level { min-width: 0; }
 .file-action { flex: none; }
 .files-list { display: flex; flex-direction: column; gap: .5rem; padding: .5rem 1rem; }
 .files-list .file-card { width: 100%; }
+
+/* Voice messages (#204): the sender's waveform is the scrubber; bars fill as they play. */
+.voice-card { width: min(360px, 100%); }
+.voice-body { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.voice-wave { display: flex; align-items: center; gap: 2px; height: 28px; border-radius: var(--radius-xs); cursor: pointer; touch-action: none; }
+.voice-wave:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 2px; }
+.voice-bar { flex: 1 1 0; min-width: 2px; max-width: 4px; height: var(--bar-height, 20%); border-radius: 1px; background: var(--surface-3); transition: background-color var(--dur-fast) var(--ease-standard); }
+.voice-bar.is-played { background: var(--accent); }
+.voice-meta { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-muted); font-size: var(--text-xs); }
+.voice-time { flex: none; font-variant-numeric: tabular-nums; letter-spacing: var(--tracking-xs); }
+.voice-speed { flex: none; min-width: 40px; height: 28px; padding: 0 8px; border: 0; border-radius: 14px; background: var(--surface-2); color: var(--text); font-size: var(--text-xs); font-weight: 600; font-variant-numeric: tabular-nums; cursor: pointer; }
+@media (hover: hover) and (pointer: fine) { .voice-speed:hover { background: var(--surface-3); } }
+.voice-speed:active { transform: scale(.94); }
+.voice-speed:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .voice-bar, .voice-speed { transition: none; }
+}
