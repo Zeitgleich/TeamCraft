@@ -11,6 +11,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -45,3 +46,19 @@ fun UserAvatar(maybeUserId: String?, modifier: Modifier = Modifier, placeholder:
     }
   }
 }
+
+/**
+ * A person's colour behind their initial: the hue the core gives every user (their ID modulo 360,
+ * `avatar_hue`), so list, header and messages show the same person in the same colour. Without a
+ * user (a group, an integration) the name decides.
+ */
+fun avatarColor(maybeUserId: String?, name: String): Color {
+  val hue = maybeUserId?.toLongOrNull()?.mod(360L)?.toInt() ?: name.hashCode().mod(360)
+  return avatarColorOfHue(hue)
+}
+
+/** The same from a hue the core named ([avatarColor]). */
+fun avatarColorOfHue(hue: Int): Color = Color.hsl(hue.mod(360).toFloat(), AVATAR_SATURATION, AVATAR_LIGHTNESS)
+
+private const val AVATAR_SATURATION = 0.45f
+private const val AVATAR_LIGHTNESS = 0.45f

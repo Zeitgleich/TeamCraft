@@ -10,6 +10,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -32,9 +35,9 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.Conversation
 import de.zeitgleich.teamcraft.core.User
+import de.zeitgleich.teamcraft.ui.avatarColorOfHue
+import de.zeitgleich.teamcraft.ui.avatarColor
 import de.zeitgleich.teamcraft.ui.UserAvatar
-import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
-import de.zeitgleich.teamcraft.ui.theme.darkStatusBarBackdrop
 import uniffi.teamcraft_ffi.NotifiedConversation
 
 /**
@@ -51,7 +54,6 @@ fun ConversationTopBar(
   onBack: () -> Unit,
   actions: @Composable RowScope.() -> Unit,
 ) {
-  val colors = LocalTeamCraftColors.current
   val maybePeer = maybeConversation?.takeIf { it.kind == "Direct" }?.let { conversation ->
     conversation.memberIds.firstOrNull { it != snapshot?.me?.id }?.let { snapshot?.user(it) }
   }
@@ -73,7 +75,7 @@ fun ConversationTopBar(
         Column(Modifier.padding(start = 12.dp)) {
           Text(
             name,
-            style = MaterialTheme.typography.titleLarge,
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.semantics { heading() },
@@ -84,7 +86,7 @@ fun ConversationTopBar(
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
               style = MaterialTheme.typography.bodySmall,
-              color = colors.chromeMuted,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
           }
         }
@@ -97,14 +99,9 @@ fun ConversationTopBar(
     },
     actions = actions,
     windowInsets = TopBarInsets,
-    // Light status-bar icons over the dark chrome, also in light mode.
-    modifier = Modifier.darkStatusBarBackdrop(),
-    colors = TopAppBarDefaults.topAppBarColors(
-      containerColor = colors.chrome,
-      titleContentColor = colors.chromeText,
-      navigationIconContentColor = colors.chromeText,
-      actionIconContentColor = colors.chromeText,
-    ),
+    // The theme's surface, as on the main screen: one header style in light and dark (the status
+    // bar icons follow the theme).
+    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
   )
 }
 
@@ -125,32 +122,33 @@ private fun peerStatus(peer: User): String {
   )
 }
 
-/** The person's picture or initial on their hue with a presence dot, or the channel's marker. */
+/**
+ * The person's picture or initial on their hue with a presence dot, or the channel's marker: a
+ * rounded square with `#` or a lock, as in the lists.
+ */
 @Composable
 private fun HeaderAvatar(name: String, maybeKind: String?, maybePeer: User?) {
-  val colors = LocalTeamCraftColors.current
-  val isPeople = maybeKind == "Direct" || maybeKind == "Group"
-  val label = when (maybeKind) {
-    "Public" -> "#"
-    "Private" -> "◆"
-    // Without a name yet an empty circle, never a question mark.
-    else -> name.firstOrNull()?.uppercase().orEmpty()
+  val scheme = MaterialTheme.colorScheme
+  if (maybeKind == "Public" || maybeKind == "Private") {
+    Box(
+      Modifier.size(HEADER_AVATAR).background(scheme.surfaceContainerHighest, RoundedCornerShape(10.dp)),
+      contentAlignment = Alignment.Center,
+    ) {
+      if (maybeKind == "Private") {
+        Icon(Icons.Filled.Lock, contentDescription = null, tint = scheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+      } else {
+        Text("#", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold), color = scheme.onSurfaceVariant)
+      }
+    }
+    return
   }
-  val hue = (maybePeer?.avatarHue ?: name.hashCode()).mod(360).toFloat()
+  // Without a name yet an empty circle, never a question mark.
+  val label = name.firstOrNull()?.uppercase().orEmpty()
+  val personColor = maybePeer?.let { avatarColorOfHue(it.avatarHue) } ?: avatarColor(null, name)
   Box {
     UserAvatar(maybePeer?.id, Modifier.size(HEADER_AVATAR)) {
-      Box(
-        Modifier
-          .size(HEADER_AVATAR)
-          .background(if (isPeople) Color.hsl(hue, 0.45f, 0.45f) else colors.chromeText.copy(alpha = 0.14f), CircleShape),
-        contentAlignment = Alignment.Center,
-      ) {
-        Text(
-          label,
-          style = MaterialTheme.typography.titleSmall,
-          color = colors.chromeText,
-          modifier = Modifier.clearAndSetSemantics {},
-        )
+      Box(Modifier.size(HEADER_AVATAR).background(personColor, CircleShape), contentAlignment = Alignment.Center) {
+        Text(label, style = MaterialTheme.typography.titleSmall, color = Color.White, modifier = Modifier.clearAndSetSemantics {})
       }
     }
     maybePeer?.let { peer ->
@@ -158,7 +156,7 @@ private fun HeaderAvatar(name: String, maybeKind: String?, maybePeer: User?) {
         Modifier
           .align(Alignment.BottomEnd)
           .size(12.dp)
-          .background(colors.chrome, CircleShape)
+          .background(scheme.surface, CircleShape)
           .padding(2.dp)
           .background(presenceDotColor(peer.presence), CircleShape),
       )

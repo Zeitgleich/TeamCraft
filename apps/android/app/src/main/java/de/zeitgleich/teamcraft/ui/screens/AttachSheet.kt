@@ -12,12 +12,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -111,11 +114,19 @@ private fun newPhotoFile(context: Context): File {
   return File(directory, "photo-${System.currentTimeMillis()}.jpg")
 }
 
+/**
+ * What can be attached, as one row of tiles: the sheet stays short and every picker is in thumb
+ * reach. How a message is sent (priority, receipts, silent) is not here: that is the send button's
+ * long-press ([SendOptionsSheet]), next to what it changes.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit, extra: @Composable ColumnScope.() -> Unit = {}) {
+fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit) {
   ModalBottomSheet(onDismissRequest = onDismiss) {
-    Column(Modifier.padding(bottom = 24.dp)) {
+    Row(
+      Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 28.dp),
+      horizontalArrangement = Arrangement.SpaceEvenly,
+    ) {
       AttachOption(R.drawable.ic_photo_camera, R.string.attach_camera) {
         onDismiss()
         pickers.takePhoto()
@@ -128,25 +139,30 @@ fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit, extra: @Compo
         onDismiss()
         pickers.pickFiles()
       }
-      extra()
     }
   }
 }
 
-/** One picker: the symbol in a tinted circle, then its label (the whole row is the target). */
+/** One picker: the symbol on a tinted rounded square with its label below (the whole tile is the target). */
 @Composable
 private fun AttachOption(@DrawableRes icon: Int, label: Int, onClick: () -> Unit) {
-  Row(
-    Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 10.dp),
-    verticalAlignment = Alignment.CenterVertically,
+  Column(
+    Modifier.width(96.dp).clip(RoundedCornerShape(16.dp)).clickable(onClick = onClick).padding(vertical = 8.dp),
+    horizontalAlignment = Alignment.CenterHorizontally,
+    verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
     Box(
-      Modifier.size(40.dp).background(MaterialTheme.colorScheme.secondaryContainer, CircleShape),
+      Modifier.size(56.dp).background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(16.dp)),
       contentAlignment = Alignment.Center,
     ) {
-      // Decorative: the label next to it names the action.
+      // Decorative: the label under it names the action.
       Icon(painterResource(icon), contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer)
     }
-    Text(stringResource(label), modifier = Modifier.padding(start = 16.dp), style = MaterialTheme.typography.bodyLarge)
+    Text(
+      stringResource(label),
+      style = MaterialTheme.typography.labelLarge,
+      textAlign = TextAlign.Center,
+      maxLines = 2,
+    )
   }
 }
