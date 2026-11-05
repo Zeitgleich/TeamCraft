@@ -130,8 +130,9 @@ the change, and people taken off the list are removed from the group.
    members (`call_move`), and rings the added people in the meeting chat: when its call starts, or
    at once if it runs. Only one of them answering, or the ring timeout, ends that ringing; the people
    moving over don't. The adding app then announces the move in the DM's encryption group (an
-   encrypted `call_moved` event with the room, the added people and the DM call's ID, not shown in
-   the history).
+   encrypted `call_moved` event with the room, the added people and the DM call's ID). The history
+   shows it as a line ("Alice moved the call into 'Call with notetaker'") which, for whoever is in
+   the room, opens it: there the summary lands (issue #1290).
    `call_move` alone moves nobody: a device in the DM's call shows "X moved the call into a meeting
    room and added Y" once the announcement is in, and on the user's tap checks it (announced by a
    member of the DM's group, the room's group holds nobody but the DM's members and the named
