@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
-  BackgroundId, Base64Bytes, CallRosterEntry, CategoryId, HistoryPolicy, OrgBackgroundId, SignInReason,
+  AttachmentId, BackgroundId, Base64Bytes, CallRosterEntry, CategoryId, HistoryPolicy, OrgBackgroundId,
+  SignInReason,
 };
 
 use crate::actions::{
@@ -781,6 +782,9 @@ pub enum ChatAction {
     to: ConversationId,
     #[serde(default)]
     comment: String,
+    /// Only this file of the message (issue #241).
+    #[serde(rename = "attachment", default, skip_serializing_if = "Option::is_none")]
+    maybe_attachment: Option<AttachmentId>,
   },
   SetPinned {
     conversation: ConversationId,
@@ -1228,7 +1232,11 @@ impl ChatAction {
         message,
         to,
         comment,
-      } => backend.forward_message(from, message, to, &comment),
+        maybe_attachment,
+      } => match maybe_attachment {
+        Some(attachment) => backend.forward_attachment(from, message, attachment, to, &comment),
+        None => backend.forward_message(from, message, to, &comment),
+      },
       Self::SetPinned {
         conversation,
         message,
@@ -2203,6 +2211,31 @@ mod tests {
         conversation: id_from_raw(7)
       }
     );
+  }
+
+  #[test]
+  fn a_forward_of_one_file_names_it_and_an_older_forward_still_reads() {
+    let action: ChatAction =
+      serde_json::from_str(r#"{"action":"forward_message","from":"1","message":"2","to":"3"}"#)
+        .expect("parse");
+    let ChatAction::ForwardMessage { maybe_attachment, .. } = &action else {
+      panic!("a forward");
+    };
+    assert_eq!(*maybe_attachment, None);
+    assert!(
+      !serde_json::to_string(&action)
+        .expect("json")
+        .contains("attachment")
+    );
+
+    let action: ChatAction = serde_json::from_str(
+      r#"{"action":"forward_message","from":"1","message":"2","to":"3","comment":"","attachment":"4"}"#,
+    )
+    .expect("parse");
+    let ChatAction::ForwardMessage { maybe_attachment, .. } = action else {
+      panic!("a forward");
+    };
+    assert_eq!(maybe_attachment, Some(id_from_raw(4)));
   }
 
   #[test]

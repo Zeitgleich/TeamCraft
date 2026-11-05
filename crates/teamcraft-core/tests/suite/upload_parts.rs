@@ -227,6 +227,7 @@ fn with_file(conversation: ConversationId, name: &str, source: FileSource) -> Ou
     maybe_thread: None,
     body: String::new(),
     maybe_reply_to: None,
+    maybe_reply_attachment: None,
     priority: MessagePriority::Normal,
     wants_acknowledgement: false,
     is_silent: false,

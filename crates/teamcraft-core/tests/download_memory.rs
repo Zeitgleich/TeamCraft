@@ -54,6 +54,7 @@ async fn a_large_file_comes_down_a_piece_at_a_time() {
     maybe_thread: None,
     body: String::new(),
     maybe_reply_to: None,
+    maybe_reply_attachment: None,
     priority: MessagePriority::Normal,
     wants_acknowledgement: false,
     is_silent: false,

@@ -178,6 +178,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::UseDpopNonce | ErrorCode::InvalidDpopProof => "error-proof-refused",
       ErrorCode::RateLimited => "error-rate-limited",
       ErrorCode::PayloadTooLarge => "error-too-large",
+      ErrorCode::AttachmentNotFound => "error-attachment-gone",
       ErrorCode::Unavailable | ErrorCode::Internal => "error-server-trouble",
       ErrorCode::Conflict | ErrorCode::EpochConflict | ErrorCode::VersionConflict => "error-conflict",
       ErrorCode::GuestDmNotAllowed => "error-guest-dm-not-allowed",

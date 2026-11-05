@@ -12,7 +12,7 @@ use teamcraft_proto::{Base64Bytes, UserId};
 
 use super::{
   AttachmentRef, BookmarkItem, ConversationEvent, EditRecord, Forwarded, LinkPreviewData, MessageContent,
-  MessageMeta, ReplyRef, StoredMessage,
+  MessageMeta, ReplyAttachment, ReplyRef, StoredMessage,
 };
 
 /// What the map, the recency list and the allocator add around one cached message.
@@ -106,6 +106,20 @@ impl AttachmentRef {
 impl ReplyRef {
   fn heap_bytes(&self) -> usize {
     self.excerpt.len()
+      + self
+        .maybe_attachment
+        .as_ref()
+        .map_or(0, ReplyAttachment::heap_bytes)
+  }
+}
+
+impl ReplyAttachment {
+  fn heap_bytes(&self) -> usize {
+    self.file_name.len()
+      + self
+        .maybe_thumbnail
+        .as_ref()
+        .map_or(0, |bytes| bytes.as_slice().len())
   }
 }
 

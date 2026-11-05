@@ -5,7 +5,8 @@
 //! `pinned_messages`, `saved_items`, ...).
 
 use leptos::prelude::*;
-use teamcraft_client_api::actions::MessageExtras;
+use teamcraft_client_api::actions::{FileInfo, MessageExtras, ReplyAttachmentPreview};
+use teamcraft_proto::{AttachmentId, ErrorCode};
 use wasm_bindgen::JsCast;
 
 use crate::channel_access::{ChannelAccess, MessagePermissions};
@@ -16,9 +17,12 @@ use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::rich_text::RichText;
+use crate::feedback::{ActionFailure, FailureKind, PendingAction, report_failure};
 use crate::i18n::use_i18n;
+use crate::lightbox::MediaKey;
 use crate::model::{ConversationId, Message, MessageId, User};
-use crate::state::{Overlay, ReplyTarget, SidePanel, use_app_state};
+use crate::object_url::ObjectUrl;
+use crate::state::{AppState, Overlay, ReplyImage, ReplyTarget, SidePanel, use_app_state};
 
 /// How many characters of a quoted message the composer shows.
 const EXCERPT_CHARS: usize = 120;
@@ -194,6 +198,38 @@ pub fn with_shortcut(label: String, maybe_shortcut: Option<&str>) -> String {
   }
 }
 
+/// Starts a reply to one picture of an album, ready to type (issue #241). The composer of the
+/// conversation has to be open already: the lightbox goes there first.
+pub(crate) fn reply_to_file(state: AppState, file: &FileInfo) {
+  let Ok(attachment) = file.file_id.parse::<AttachmentId>() else {
+    return;
+  };
+  let author_name = file
+    .maybe_sender
+    .and_then(|sender| state.read(|backend| backend.user(sender)))
+    .map(|user| user.display_name)
+    .unwrap_or_default();
+  state.reply_target.set(Some(ReplyTarget {
+    conversation: file.conversation,
+    message: file.message,
+    author_name,
+    excerpt: excerpt(&file.file_name),
+    maybe_image: Some(ReplyImage {
+      attachment,
+      maybe_thumbnail: file.maybe_thumbnail_png.clone(),
+    }),
+  }));
+  request_animation_frame(|| {
+    let maybe_editor = web_sys::window()
+      .and_then(|window| window.document())
+      .and_then(|document| document.query_selector("[data-composer=channel]").ok().flatten())
+      .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
+    if let Some(editor) = maybe_editor {
+      drop(editor.focus());
+    }
+  });
+}
+
 /// Carries out an action on `message`. `maybe_extras` is what the message's row shows.
 pub fn run_message_action(action: MessageAction, message: &Message, maybe_extras: Option<&MessageExtras>) {
   let state = use_app_state();
@@ -216,9 +252,10 @@ pub fn run_message_action(action: MessageAction, message: &Message, maybe_extras
         message: id,
         author_name,
         excerpt: excerpt(&message.body),
+        maybe_image: None,
       }));
     },
-    MessageAction::Forward => state.overlay.set(Overlay::Forward(conversation, id)),
+    MessageAction::Forward => state.overlay.set(Overlay::Forward(conversation, id, None)),
     MessageAction::Save | MessageAction::Unsave => {
       let save = action == MessageAction::Save;
       state.write(|backend| backend.set_saved(conversation, id, save));
@@ -397,11 +434,20 @@ pub fn EditHistoryDialog(conversation: ConversationId, message: MessageId) -> im
   }
 }
 
-/// Pick a conversation, add a comment, forward.
+/// Pick a conversation, add a comment, forward: the message, or with `maybe_attachment` that file.
 #[component]
-pub fn ForwardDialog(from: ConversationId, message: MessageId) -> impl IntoView {
+pub fn ForwardDialog(
+  from: ConversationId,
+  message: MessageId,
+  maybe_attachment: Option<AttachmentId>,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  let pending = PendingAction::new();
+  let title_key = match maybe_attachment.is_some() && files_of(state, from, message).len() > 1 {
+    true => "image-forward",
+    false => "forward-title",
+  };
   let filter = RwSignal::new(String::new());
   let comment = RwSignal::new(String::new());
   let chosen = RwSignal::new(None::<ConversationId>);
@@ -423,14 +469,34 @@ pub fn ForwardDialog(from: ConversationId, message: MessageId) -> impl IntoView 
     ev.prevent_default();
     let Some(to) = chosen.get_untracked() else { return };
     let note = comment.get_untracked();
-    state.write(|backend| backend.forward_message(from, message, to, &note));
-    state.close_overlay();
+    let Some(attachment) = maybe_attachment else {
+      pending.run_and_then(
+        || state.write(|backend| backend.forward_message(from, message, to, &note)),
+        move || close_forward_dialog(state),
+      );
+      return;
+    };
+    // The core sends nothing for a file that went meanwhile (never the whole album instead).
+    let is_gone = !files_of(state, from, message)
+      .iter()
+      .any(|file| file.file_id == attachment.to_string());
+    if is_gone {
+      report_failure(ActionFailure::new(
+        FailureKind::Server(ErrorCode::AttachmentNotFound),
+        "the file to forward is no longer in its message",
+      ));
+      return;
+    }
+    pending.run_and_then(
+      || state.write(|backend| backend.forward_attachment(from, message, attachment, to, &note)),
+      move || close_forward_dialog(state),
+    );
   };
   view! {
     <Modal labelled_by="forward-title" class="modal-small">
       <form on:submit=send>
         <header class="modal-head">
-          <h2 id="forward-title">{move || i18n.t("forward-title")}</h2>
+          <h2 id="forward-title">{move || i18n.t(title_key)}</h2>
           <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
             <Icon name=IconName::Close />
           </button>
@@ -445,7 +511,7 @@ pub fn ForwardDialog(from: ConversationId, message: MessageId) -> impl IntoView 
             prop:value=move || filter.get()
             on:input=move |ev| filter.set(event_target_value(&ev))
           />
-          <ul class="forward-list" role="listbox" aria-label=move || i18n.t("forward-title")>
+          <ul class="forward-list" role="listbox" aria-label=move || i18n.t(title_key)>
             <For each=move || targets.get() key=|conversation| conversation.id let:conversation>
               {
                 let id = conversation.id;
@@ -476,13 +542,91 @@ pub fn ForwardDialog(from: ConversationId, message: MessageId) -> impl IntoView 
         <footer class="modal-foot">
           <span class="grow"></span>
           <button type="button" class="btn" on:click=move |_| state.close_overlay()>{move || i18n.t("cancel")}</button>
-          <button type="submit" class="btn btn-primary" prop:disabled=move || chosen.get().is_none()>
+          <button
+            type="submit"
+            class="btn btn-primary"
+            prop:disabled=move || chosen.get().is_none() || pending.is_pending()
+            aria-busy=move || pending.is_pending().then_some("true")
+          >
+            <Show when=move || pending.is_pending() fallback=|| ()>
+              <span class="spinner" role="status" aria-label=move || i18n.t("action-running")></span>
+            </Show>
             {move || i18n.t("forward-send")}
           </button>
         </footer>
       </form>
     </Modal>
   }
+}
+
+/// The files of a message on this device.
+fn files_of(state: AppState, conversation: ConversationId, message: MessageId) -> Vec<FileInfo> {
+  state
+    .read(|backend| backend.message_extras(conversation, &[message]))
+    .into_iter()
+    .next()
+    .map(|extras| extras.files)
+    .unwrap_or_default()
+}
+
+/// Closes the forward dialog once the core has the forward; it may have gone by itself by then.
+fn close_forward_dialog(state: AppState) {
+  if matches!(state.overlay.try_get_untracked(), Some(Overlay::Forward(..))) {
+    state.close_overlay();
+  }
+}
+
+/// The quote of a reply to one picture: its thumbnail, which outlives the picture, and a way to the
+/// picture while it is there (issue #241).
+#[component]
+pub fn QuotedImage(
+  conversation: ConversationId,
+  maybe_message: Option<MessageId>,
+  name: String,
+  excerpt: String,
+  image: ReplyAttachmentPreview,
+) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let maybe_key = maybe_message
+    .filter(|_| image.can_open)
+    .zip(image.file_id.parse::<AttachmentId>().ok())
+    .map(|(message, attachment)| MediaKey { message, attachment });
+  let file_name = image.file_name;
+  let inner = view! {
+    {match image.maybe_thumbnail_png {
+      Some(thumbnail) => view! { <QuoteThumbnail thumbnail=thumbnail /> }.into_any(),
+      None => view! { <span class="quote-thumb" aria-hidden="true"><Icon name=IconName::Image /></span> }.into_any(),
+    }}
+    <span class="quote-lines">
+      <span class="quote-author" translate="no">{name}</span>
+      <span class="quote-text" translate="no">{excerpt}</span>
+    </span>
+  };
+  match maybe_key {
+    Some(key) => view! {
+      <button
+        type="button"
+        class="msg-quote msg-quote-image"
+        aria-label=move || i18n.t_with("media-open", &[("name", &file_name)])
+        on:click=move |_| state.overlay.set(Overlay::Lightbox(conversation, key))
+      >
+        {inner}
+      </button>
+    }
+    .into_any(),
+    None => view! { <blockquote class="msg-quote msg-quote-image">{inner}</blockquote> }.into_any(),
+  }
+}
+
+/// The small picture of a quote, in a message and above the composer.
+#[component]
+pub fn QuoteThumbnail(thumbnail: Vec<u8>) -> impl IntoView {
+  let maybe_url = ObjectUrl::from_thumbnail(&thumbnail);
+  let maybe_src = maybe_url.as_ref().map(|url| url.as_str().to_owned());
+  // Revoked when the quote leaves the screen.
+  StoredValue::new_local(maybe_url);
+  maybe_src.map(|src| view! { <img class="quote-thumb" src=src alt="" decoding="async" draggable="false" /> })
 }
 
 /// Everything the user saved, newest first.

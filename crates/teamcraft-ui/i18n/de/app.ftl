@@ -218,6 +218,7 @@ error-device-binding-required = Dieser Server nimmt nur Anmeldungen an, die an d
 error-proof-refused = Der Server hat den Nachweis dieses Geräts abgelehnt. Vielleicht verändert ein Proxy die Anfragen, oder der Server kennt diese Adresse nicht: Sag deiner Administration Bescheid.
 error-rate-limited = Zu viele Anfragen auf einmal. Warte einen Moment und versuche es erneut.
 error-too-large = Das ist zu groß für den Server. Versuche es mit etwas Kleinerem.
+error-attachment-gone = Diese Datei ist nicht mehr verfügbar.
 error-server-trouble = Der Server hat gerade ein Problem. Versuche es in ein paar Minuten erneut.
 error-conflict = Jemand hat das gleichzeitig geändert. Sieh dir den aktuellen Stand an und versuche es erneut.
 error-not-found = Das gibt es nicht mehr. Es wurde vielleicht gelöscht oder verschoben.

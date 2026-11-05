@@ -3,6 +3,14 @@
 .menu-danger { color: var(--danger); }
 .msg-quote { margin: 0 0 .25rem; padding: .1rem .6rem; border-inline-start: 3px solid var(--border-strong); color: var(--text-muted); display: flex; flex-direction: column; font-size: var(--text-sm); }
 .quote-author { font-weight: var(--weight-semibold); }
+/* A reply to one picture: its thumbnail beside the lines; a button while the picture is there. */
+.msg-quote-image { flex-direction: row; align-items: center; gap: .5rem; width: fit-content; max-width: 100%; padding-block: .25rem; text-align: start; }
+button.msg-quote-image { border-block: 0; border-inline-end: 0; background: none; font: inherit; font-size: var(--text-sm); cursor: pointer; transition: color var(--dur-fast, .12s) ease; }
+button.msg-quote-image:hover { color: var(--text); }
+.quote-lines { display: flex; flex-direction: column; min-width: 0; }
+.quote-lines .quote-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quote-thumb { display: grid; place-items: center; flex: none; width: 2.5rem; height: 2.5rem; border-radius: 6px; object-fit: cover; background: var(--surface-2, var(--border-strong)); }
+.reply-banner .quote-thumb { width: 1.75rem; height: 1.75rem; border-radius: 4px; }
 .msg-forwarded { display: flex; align-items: center; gap: .35rem; color: var(--text-muted); font-size: var(--text-xs); letter-spacing: var(--tracking-xs); }
 .msg-deleted { color: var(--text-muted); }
 .edit-history { margin: .25rem 0; padding-inline-start: 1.2rem; color: var(--text-muted); font-size: var(--text-sm); }
