@@ -103,6 +103,50 @@ pub struct ExpiredGuest {
   pub maybe_sponsor: Option<UserId>,
 }
 
+/// A guest whose membership is about to run out and who hasn't heard at this lead time yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestNoticeDue {
+  pub space: SpaceId,
+  pub user: UserId,
+  pub maybe_sponsor: Option<UserId>,
+  pub expires_at: OffsetDateTime,
+  pub lead_days: i32,
+}
+
+/// A guest membership ending soon, as one viewer may hear about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiringGuest {
+  pub space: SpaceId,
+  pub space_name: String,
+  pub user: UserId,
+  pub maybe_sponsor: Option<UserId>,
+  pub expires_at: OffsetDateTime,
+  /// The viewer's own role in that space; `None` for a sponsor who left it.
+  pub maybe_viewer_role: Option<SpaceRole>,
+}
+
+/// What the admin console's guest overview asks for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdminGuestListFilter {
+  pub maybe_space: Option<SpaceId>,
+  pub maybe_sponsor: Option<UserId>,
+  pub maybe_expires_by: Option<OffsetDateTime>,
+  pub has_no_sponsor: bool,
+  pub has_never_signed_in: bool,
+  pub limit: i64,
+}
+
+/// One guest membership of the overview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminGuestRow {
+  pub space: SpaceId,
+  pub space_name: String,
+  pub user: UserId,
+  pub maybe_expires_at: Option<OffsetDateTime>,
+  pub maybe_sponsor: Option<UserId>,
+  pub has_signed_in: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewSpaceMember {
   pub space: SpaceId,
@@ -353,6 +397,7 @@ impl Database {
          ON CONFLICT (space_id, user_id) DO UPDATE
            SET role = EXCLUDED.role,
                expires_at = CASE WHEN $6 THEN EXCLUDED.expires_at ELSE space_members.expires_at END,
+               expiry_notice_lead_days = CASE WHEN $6 THEN NULL ELSE space_members.expiry_notice_lead_days END,
                sponsor_user_id = COALESCE(EXCLUDED.sponsor_user_id, space_members.sponsor_user_id)"#,
       to_db(member.space),
       to_db(member.user),
@@ -391,6 +436,145 @@ impl Database {
           space: from_db(row.space_id)?,
           user: from_db(row.user_id)?,
           maybe_sponsor: from_db_opt(row.sponsor_user_id)?,
+        })
+      })
+      .collect()
+  }
+
+  /// Guests a notice is due for at `now`: their expiry lies within a lead time (days, in
+  /// `lead_days`) shorter than that of the last notice for this expiry. Soonest first; a guest
+  /// past two lead times at once gets the shorter one only.
+  pub async fn list_guests_due_notice(
+    &self,
+    now: OffsetDateTime,
+    lead_days: &[i32],
+    limit: i64,
+  ) -> Result<Vec<GuestNoticeDue>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT m.space_id, m.user_id, m.sponsor_user_id, m.expires_at AS "expires_at!",
+                due.lead_days AS "lead_days!"
+         FROM space_members m
+         CROSS JOIN LATERAL (
+           SELECT min(lead) AS lead_days FROM unnest($2::int[]) AS lead
+           WHERE m.expires_at <= $1::timestamptz + make_interval(days => lead)
+         ) due
+         WHERE m.role = 'guest' AND m.expires_at > $1::timestamptz AND due.lead_days IS NOT NULL
+           AND (m.expiry_notice_lead_days IS NULL OR m.expiry_notice_lead_days > due.lead_days)
+         ORDER BY m.expires_at LIMIT $3"#,
+      now,
+      lead_days,
+      limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(GuestNoticeDue {
+          space: from_db(row.space_id)?,
+          user: from_db(row.user_id)?,
+          maybe_sponsor: from_db_opt(row.sponsor_user_id)?,
+          expires_at: row.expires_at,
+          lead_days: row.lead_days,
+        })
+      })
+      .collect()
+  }
+
+  /// Remembers the notice for this expiry. An expiry changed in the meantime starts over.
+  pub async fn record_guest_notice(&self, due: &GuestNoticeDue) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE space_members SET expiry_notice_lead_days = $3
+       WHERE space_id = $1 AND user_id = $2 AND expires_at = $4",
+      to_db(due.space),
+      to_db(due.user),
+      due.lead_days,
+      due.expires_at,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// Guest memberships ending by `until` that `viewer` should hear about: their own, those they
+  /// sponsor and those in spaces they administer. Soonest first.
+  pub async fn list_expiring_guests_for(
+    &self,
+    viewer: UserId,
+    now: OffsetDateTime,
+    until: OffsetDateTime,
+    limit: i64,
+  ) -> Result<Vec<ExpiringGuest>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT m.space_id, s.name AS space_name, m.user_id, m.sponsor_user_id,
+                m.expires_at AS "expires_at!", me.role AS "viewer_role?"
+         FROM space_members m
+         JOIN spaces s ON s.id = m.space_id
+         LEFT JOIN space_members me ON me.space_id = m.space_id AND me.user_id = $1
+         WHERE m.role = 'guest' AND m.expires_at > $2 AND m.expires_at <= $3
+           AND (m.user_id = $1 OR m.sponsor_user_id = $1 OR me.role = 'space_admin')
+         ORDER BY m.expires_at, m.space_id, m.user_id LIMIT $4"#,
+      to_db(viewer),
+      now,
+      until,
+      limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(ExpiringGuest {
+          space: from_db(row.space_id)?,
+          space_name: row.space_name,
+          user: from_db(row.user_id)?,
+          maybe_sponsor: from_db_opt(row.sponsor_user_id)?,
+          expires_at: row.expires_at,
+          maybe_viewer_role: row.viewer_role.map(SpaceRole::from),
+        })
+      })
+      .collect()
+  }
+
+  /// The admin console's guest overview: soonest expiry first, those without one last.
+  pub async fn admin_list_guests(
+    &self,
+    filter: &AdminGuestListFilter,
+  ) -> Result<Vec<AdminGuestRow>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT m.space_id, s.name AS space_name, m.user_id, m.expires_at, m.sponsor_user_id,
+                EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id) AS "has_signed_in!"
+         FROM space_members m
+         JOIN spaces s ON s.id = m.space_id
+         JOIN users u ON u.id = m.user_id AND u.deleted_at IS NULL
+         LEFT JOIN users sponsor ON sponsor.id = m.sponsor_user_id
+         WHERE m.role = 'guest'
+           AND ($1::bigint IS NULL OR m.space_id = $1)
+           AND ($2::bigint IS NULL OR m.sponsor_user_id = $2)
+           AND ($3::timestamptz IS NULL OR m.expires_at <= $3)
+           AND (NOT $4 OR sponsor.id IS NULL OR sponsor.deactivated_at IS NOT NULL OR sponsor.deleted_at IS NOT NULL)
+           AND (NOT $5 OR NOT EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id))
+         ORDER BY m.expires_at ASC NULLS LAST, m.space_id, m.user_id
+         LIMIT $6"#,
+      filter.maybe_space.map(to_db),
+      filter.maybe_sponsor.map(to_db),
+      filter.maybe_expires_by,
+      filter.has_no_sponsor,
+      filter.has_never_signed_in,
+      filter.limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(AdminGuestRow {
+          space: from_db(row.space_id)?,
+          space_name: row.space_name,
+          user: from_db(row.user_id)?,
+          maybe_expires_at: row.expires_at,
+          maybe_sponsor: from_db_opt(row.sponsor_user_id)?,
+          has_signed_in: row.has_signed_in,
         })
       })
       .collect()

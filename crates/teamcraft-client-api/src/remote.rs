@@ -728,6 +728,12 @@ pub enum ChatAction {
   AdminJoinChannel {
     conversation: ConversationId,
   },
+  /// Extends a guest's membership of a space (issue #212).
+  ExtendGuest {
+    space: SpaceId,
+    user: UserId,
+    expires_at_ms: i64,
+  },
   /// An admin asks the owners of a private channel to let them in (admin.md §2.4).
   RequestAdminJoin {
     conversation: ConversationId,
@@ -1195,6 +1201,11 @@ impl ChatAction {
       } => backend.set_presence_until(presence, maybe_until),
       Self::SetCustomStatus { maybe_status } => backend.set_custom_status(maybe_status),
       Self::MarkActivityRead => backend.mark_activity_read(),
+      Self::ExtendGuest {
+        space,
+        user,
+        expires_at_ms,
+      } => backend.extend_guest(space, user, expires_at_ms),
       Self::RequestAdminJoin { conversation } => backend.request_admin_join(conversation),
       Self::WithdrawAdminJoin { conversation } => backend.withdraw_admin_join(conversation),
       Self::ApproveAdminJoin {
@@ -1494,6 +1505,7 @@ pub enum ChatQuery {
   UnseenReactions {
     conversation: ConversationId,
   },
+  ExpiringGuests,
   NewestMessage {
     conversation: ConversationId,
   },
@@ -1642,6 +1654,9 @@ pub enum ChatQuery {
 pub enum ChatAnswer {
   UnseenReactions {
     unseen: crate::model::UnseenReactions,
+  },
+  ExpiringGuests {
+    guests: Vec<teamcraft_proto::ExpiringGuestResponse>,
   },
   Typing {
     typing: Vec<crate::model::TypingNow>,
@@ -1900,6 +1915,9 @@ impl ChatQuery {
       },
       Self::UnseenReactions { conversation } => ChatAnswer::UnseenReactions {
         unseen: backend.unseen_reactions(conversation),
+      },
+      Self::ExpiringGuests => ChatAnswer::ExpiringGuests {
+        guests: backend.expiring_guests(),
       },
       Self::NewestMessage { conversation } => ChatAnswer::Message {
         maybe_message: backend.newest_message(conversation),

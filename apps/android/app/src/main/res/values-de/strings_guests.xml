@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="guest_notice_title">Gastzugänge laufen bald ab</string>
+  <string name="guest_notice_self">Dein Gastzugang zu %1$s endet am %2$s. Bitte die Person, die dich eingeladen hat, ihn zu verlängern.</string>
+  <string name="guest_notice_row">%1$s in %2$s, bis %3$s</string>
+  <plurals name="guest_notice_extend">
+    <item quantity="one">%d Tag mehr</item>
+    <item quantity="other">%d Tage mehr</item>
+  </plurals>
+  <string name="read_only_archived">Dieser Kanal ist archiviert. Du kannst ihn lesen, aber niemand kann hier schreiben.</string>
+  <string name="browse_show_archived">Archivierte Kanäle anzeigen, in denen ich bin</string>
+</resources>

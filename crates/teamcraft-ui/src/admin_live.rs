@@ -19,14 +19,15 @@ use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminConversationSummary, AdminDeviceResponse,
   AdminHealthResponse, AdminInstanceResponse, AdminMailSettingsResponse, AdminSpaceSummary, AdminUserSummary,
   AnnouncementResponse, AssignChannelOwnerRequest, AuditEntryResponse, BrandAssetSlot, ChannelModeration,
-  ConversationVisibility, CreateBrandRequest, ErrorBody, ErrorCode, GetAnnouncementResponse, HistoryPolicy,
-  ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersResponse,
+  ConversationVisibility, CreateBrandRequest, ErrorBody, ErrorCode, ExtendGuestRequest,
+  GetAnnouncementResponse, HistoryPolicy, ListAdminConversationsResponse, ListAdminDevicesResponse,
+  ListAdminGuestsQuery, ListAdminGuestsResponse, ListAdminSpacesResponse, ListAdminUsersResponse,
   ListAuditResponse, ListConversationMembersResponse, ListSpaceMembersResponse, PermissionSchemeResponse,
   RetentionSetting, RetentionStatusResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
   RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest,
-  SetChannelModerationRequest, SetRetentionRequest, SettingsTestResponse, SpaceId, UpdateBrandRequest,
-  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, UpdatePermissionSchemeRequest,
-  UpdateSpaceRequest, UserKind, WorkspacePolicy, WorkspacePolicyResponse,
+  SetChannelModerationRequest, SetRetentionRequest, SettingsTestResponse, SpaceId, UnixMillis,
+  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateConversationRequest, UpdateMailSettingsRequest,
+  UpdatePermissionSchemeRequest, UpdateSpaceRequest, UserKind, WorkspacePolicy, WorkspacePolicyResponse,
 };
 
 use crate::admin::{
@@ -44,6 +45,9 @@ use crate::server_backend::hue_from_seed;
 const REFRESH_DELAY: Duration = Duration::from_millis(500);
 const HEALTH_PATH: &str = "/api/v1/admin/health";
 const LIST_LIMIT: u32 = 200;
+/// Guest memberships the overview shows at once; the filters narrow a longer list, and the console
+/// says that it is cut.
+const GUEST_LIST_LIMIT: u32 = 200;
 /// Pages of channels (and of users) one refresh reads: 1000 entries. Beyond that the console says
 /// the list is cut (issue #1217) instead of ending silently.
 const MAX_LIST_PAGES: usize = 5;
@@ -122,6 +126,8 @@ pub struct AdminData {
   /// `data:` URLs of brand images by `{brand}/{slot}`; loaded when the editor shows them.
   brand_previews: HashMap<String, String>,
   audit_filter: AuditFilter,
+  guests: ListAdminGuestsResponse,
+  guest_query: ListAdminGuestsQuery,
   /// Loaded on demand, when the console shows them; cleared when changed.
   schemes: HashMap<Option<SpaceId>, PermissionSchemeResponse>,
   moderation: HashMap<ConversationId, ChannelModeration>,
@@ -474,6 +480,63 @@ impl AdminLive {
     );
   }
 
+  pub fn guests(&self) -> ListAdminGuestsResponse {
+    self.data.borrow().guests.clone()
+  }
+
+  pub fn set_guest_query(&self, query: ListAdminGuestsQuery) {
+    self.data.borrow_mut().guest_query = query;
+    self.queue_refresh();
+  }
+
+  pub fn extend_guests(&self, guests: Vec<(SpaceId, UserId, i64)>) {
+    let requests = guests
+      .into_iter()
+      .filter_map(|(space, user, expires_at_ms)| {
+        let request = ExtendGuestRequest {
+          expires_at: UnixMillis(expires_at_ms),
+        };
+        let body = serde_json::to_string(&request).ok()?;
+        Some((
+          ApiMethod::Post,
+          format!("/api/v1/spaces/{space}/guests/{user}/extend"),
+          Some(body),
+        ))
+      })
+      .collect();
+    self.run(AdminTask::SendEach { requests });
+  }
+
+  pub fn remove_guests(&self, guests: Vec<(SpaceId, UserId)>) {
+    let requests = guests
+      .into_iter()
+      .map(|(space, user)| {
+        (
+          ApiMethod::Delete,
+          format!("/api/v1/spaces/{space}/members/{user}"),
+          None,
+        )
+      })
+      .collect();
+    self.run(AdminTask::SendEach { requests });
+  }
+
+  /// Archives or restores a channel. The server checks that the caller may; members' apps name the
+  /// change from the server's record (e2ee.md §4.10).
+  pub fn set_channel_archived(&self, channel: ConversationId, is_archived: bool) {
+    let request = UpdateConversationRequest {
+      maybe_is_archived: Some(is_archived),
+      ..UpdateConversationRequest::default()
+    };
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send(
+        ApiMethod::Patch,
+        format!("/api/v1/conversations/{channel}"),
+        Some(body),
+      );
+    }
+  }
+
   pub fn set_audit_filter(&self, filter: AuditFilter) {
     self.data.borrow_mut().audit_filter = filter;
     self.queue_refresh();
@@ -757,6 +820,15 @@ impl AdminLive {
       },
       _ => None,
     };
+    let guests = if reads.has(Reads::GUESTS) && !self.is_quiet() {
+      let guests_path = guests_path(&self.data.borrow().guest_query);
+      settle(
+        self.fetch_result::<ListAdminGuestsResponse>(guests_path).await,
+        &mut errors,
+      )
+    } else {
+      None
+    };
     let audit = if reads.has(Reads::AUDIT) && !self.is_quiet() {
       let audit_path = audit_path(self.data.borrow().audit_filter);
       settle(
@@ -769,6 +841,9 @@ impl AdminLive {
 
     {
       let mut data = self.data.borrow_mut();
+      if let Some(list) = guests {
+        data.guests = list;
+      }
       if let Some(list) = &conversations {
         let channels = channels_of(
           &list.items,
@@ -1390,6 +1465,26 @@ impl AdminLive {
     });
   }
 
+  /// One after the other, so a large selection doesn't hit the rate limit at once; the last failure
+  /// stays on show and the rest still runs.
+  async fn send_each_now(&self, requests: Vec<(ApiMethod, String, Option<String>)>) {
+    let mut maybe_failure = None;
+    for (method, path, maybe_body) in requests {
+      match self.auth.api_request(method, &path, maybe_body).await {
+        Ok(response) if response.status < 300 => {},
+        Ok(response) => {
+          maybe_failure = Some(format!(
+            "{path}: {}",
+            self.refusal_of(&response.body, response.status)
+          ));
+        },
+        Err(error) => maybe_failure = Some(error.to_string()),
+      }
+    }
+    self.data.borrow_mut().maybe_error = maybe_failure;
+    self.queue_refresh();
+  }
+
   async fn send_now(&self, method: ApiMethod, path: String, maybe_body: Option<String>) {
     let message = match self.auth.api_request(method, &path, maybe_body).await {
       Ok(response) if response.status < 300 => None,
@@ -1427,6 +1522,7 @@ impl AdminLive {
         path,
         maybe_body,
       } => self.send_now(method, path, maybe_body).await,
+      AdminTask::SendEach { requests } => self.send_each_now(requests).await,
       AdminTask::SendStored {
         method,
         path,
@@ -1471,6 +1567,10 @@ pub enum AdminTask {
     method: ApiMethod,
     path: String,
     maybe_body: Option<String>,
+  },
+  /// Several, one after the other; a refusal is shown and the rest still runs.
+  SendEach {
+    requests: Vec<(ApiMethod, String, Option<String>)>,
   },
   /// Like `Send`, and the answer replaces the cached copy at once.
   SendStored {
@@ -1579,7 +1679,8 @@ impl Reads {
   const CACHED_MODERATION: Reads = Reads(1 << 14);
   const CACHED_DEVICES: Reads = Reads(1 << 15);
   const HEALTH: Reads = Reads(1 << 16);
-  const ALL: Reads = Reads((1 << 17) - 1);
+  const GUESTS: Reads = Reads(1 << 17);
+  const ALL: Reads = Reads((1 << 18) - 1);
 
   fn has(self, part: Reads) -> bool {
     self.0 & part.0 == part.0
@@ -1592,7 +1693,7 @@ impl Reads {
       AdminSection::Channels => {
         Self::SPACES | Self::CONVERSATIONS | Self::USERS | Self::LEGACY_DETAILS | Self::CACHED_MODERATION
       },
-      AdminSection::Users => Self::USERS | Self::SPACES | Self::CACHED_DEVICES,
+      AdminSection::Users => Self::USERS | Self::SPACES | Self::CACHED_DEVICES | Self::GUESTS,
       AdminSection::Permissions => Self::SPACES | Self::CACHED_SCHEMES,
       AdminSection::Retention => Self::SPACES | Self::CONVERSATIONS | Self::POLICY | Self::LEGACY_DETAILS,
       AdminSection::Audit => Self::AUDIT | Self::SPACES | Self::CONVERSATIONS | Self::USERS,
@@ -1799,6 +1900,21 @@ fn channel_from_wire(
   }
 }
 
+/// `GET /admin/guests` with what the console's filters ask for. IDs and filter names are plain.
+fn guests_path(query: &ListAdminGuestsQuery) -> String {
+  let mut path = format!("/api/v1/admin/guests?limit={GUEST_LIST_LIMIT}");
+  if let Some(space) = query.maybe_space_id {
+    path.push_str(&format!("&space_id={space}"));
+  }
+  if let Some(sponsor) = query.maybe_sponsor_id {
+    path.push_str(&format!("&sponsor_id={sponsor}"));
+  }
+  if let Some(filter) = &query.maybe_filter {
+    path.push_str(&format!("&filter={}", filter.as_str()));
+  }
+  path
+}
+
 fn user_from_wire(summary: &AdminUserSummary, space_names: Vec<String>) -> AdminUser {
   let username = summary.maybe_username.clone().unwrap_or_default();
   let role = summary
@@ -1866,6 +1982,7 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     "user_removed_from_chats" => AuditAction::UserRemovedFromChats,
     "user_deleted" => AuditAction::UserDeleted,
     "invite_created" => AuditAction::GuestInvited,
+    "guest_extended" => AuditAction::GuestExtended,
     "conversation_member_added" | "space_member_added" => AuditAction::MemberAdded,
     "conversation_member_removed" | "space_member_removed" => AuditAction::MemberRemoved,
     "conversation_member_role_changed" | "space_member_role_changed" | "oidc_role_changed" => {

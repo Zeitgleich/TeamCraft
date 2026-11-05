@@ -10,8 +10,8 @@ use common::*;
 use reqwest::StatusCode;
 use serde_json::json;
 use teamcraft_proto::GatewayEvent;
-use teamcraft_server::services::guests::expire_once;
-use teamcraft_server::testing::TestApp;
+use teamcraft_server::services::guests::{expire_once, send_notices_once};
+use teamcraft_server::testing::{TestApp, TestUser};
 use time::{Duration, OffsetDateTime};
 
 macro_rules! app {
@@ -21,6 +21,171 @@ macro_rules! app {
       None => return,
     }
   };
+}
+
+mod notices_and_extending {
+  use super::*;
+
+  /// A guest in a space of `alice`, ending in `days`.
+  async fn guest_ending_in(
+    app: &TestApp,
+    alice: &TestUser,
+    ext: &TestUser,
+    days: i64,
+  ) -> (String, String, i64) {
+    let ext_id = user_id(app, ext).await;
+    let space = create_space(app, alice, "Client", "invite_only").await;
+    let expires_at = (OffsetDateTime::now_utc() + Duration::days(days)).unix_timestamp() * 1000;
+    let reply = app
+      .post(
+        alice,
+        &format!("/spaces/{space}/members"),
+        json!({"user_id": ext_id, "role": "guest", "expires_at": expires_at}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    (space, ext_id, expires_at)
+  }
+
+  #[tokio::test]
+  async fn each_lead_time_gives_one_notice_and_a_new_expiry_starts_over() {
+    let app = app!();
+    let alice = owner();
+    let ext = guest("ext");
+    let (space, ext_id, expires_at) = guest_ending_in(&app, &alice, &ext, 30).await;
+    let at = |days_before: i64| {
+      OffsetDateTime::from_unix_timestamp(expires_at / 1000).unwrap() - Duration::days(days_before)
+    };
+
+    // Default lead times: 14 and 3 days.
+    assert_eq!(
+      send_notices_once(&app.state, at(15)).await.unwrap(),
+      0,
+      "too early"
+    );
+    assert_eq!(send_notices_once(&app.state, at(14)).await.unwrap(), 1, "14 days");
+    assert_eq!(send_notices_once(&app.state, at(13)).await.unwrap(), 0, "once");
+    assert_eq!(send_notices_once(&app.state, at(3)).await.unwrap(), 1, "3 days");
+    assert_eq!(send_notices_once(&app.state, at(2)).await.unwrap(), 0, "once");
+
+    let later = expires_at + 30 * 86_400_000;
+    let reply = app
+      .post(
+        &alice,
+        &format!("/spaces/{space}/guests/{ext_id}/extend"),
+        json!({"expires_at": later}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let again = OffsetDateTime::from_unix_timestamp(later / 1000).unwrap() - Duration::days(3);
+    assert_eq!(
+      send_notices_once(&app.state, again).await.unwrap(),
+      1,
+      "a new expiry starts over"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_guest_past_two_lead_times_hears_once() {
+    let app = app!();
+    let alice = owner();
+    let ext = guest("ext");
+    guest_ending_in(&app, &alice, &ext, 2).await;
+    let now = OffsetDateTime::now_utc();
+    assert_eq!(send_notices_once(&app.state, now).await.unwrap(), 1);
+    assert_eq!(send_notices_once(&app.state, now).await.unwrap(), 0);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn who_extends_how_far_and_what_they_see() {
+    let app = app!();
+    let alice = owner();
+    let ext = guest("ext");
+    let carol = member("carol");
+    let carol_id = user_id(&app, &carol).await;
+    let (space, ext_id, expires_at) = guest_ending_in(&app, &alice, &ext, 5).await;
+    let path = format!("/spaces/{space}/guests/{ext_id}/extend");
+    let later = expires_at + 30 * 86_400_000;
+
+    // The guest sees their own, without an offer; a member who isn't concerned sees nothing.
+    let own = app.get(&ext, "/guests/expiring").await;
+    assert_eq!(own.body["guests"][0]["can_extend"], false, "{}", own.body);
+    assert_eq!(
+      app.get(&carol, "/guests/expiring").await.body["guests"],
+      json!([])
+    );
+
+    assert_eq!(
+      app.post(&ext, &path, json!({"expires_at": later})).await.status,
+      StatusCode::FORBIDDEN,
+      "a guest doesn't extend themself"
+    );
+    assert_eq!(
+      app.post(&carol, &path, json!({"expires_at": later})).await.status,
+      StatusCode::NOT_FOUND,
+      "somebody outside an invite-only space doesn't learn about it"
+    );
+    let reply = app
+      .post(
+        &alice,
+        &format!("/spaces/{space}/members"),
+        json!({"user_id": carol_id, "role": "member"}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(
+      app.post(&carol, &path, json!({"expires_at": later})).await.status,
+      StatusCode::FORBIDDEN,
+      "a member who isn't the sponsor doesn't extend"
+    );
+
+    // Extending is audited, a retry changes nothing and it never shortens.
+    let reply = app.post(&alice, &path, json!({"expires_at": later})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["expires_at"], later);
+    let reply = app.post(&alice, &path, json!({"expires_at": later})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let audit = app.get(&admin(), "/admin/audit").await;
+    assert_eq!(
+      audit.body.to_string().matches("guest_extended").count(),
+      1,
+      "one entry"
+    );
+    assert_eq!(
+      app
+        .post(&alice, &path, json!({"expires_at": expires_at}))
+        .await
+        .status,
+      StatusCode::BAD_REQUEST,
+      "extending doesn't shorten"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_overview_filters_and_is_for_admins() {
+    let app = app!();
+    let alice = owner();
+    let ext = guest("ext");
+    let (_, ext_id, _) = guest_ending_in(&app, &alice, &ext, 5).await;
+
+    assert_eq!(
+      app.get(&member("carol"), "/admin/guests").await.status,
+      StatusCode::FORBIDDEN
+    );
+    assert_eq!(app.get(&ext, "/admin/guests").await.status, StatusCode::FORBIDDEN);
+
+    let all = app.get(&admin(), "/admin/guests").await;
+    assert_eq!(all.status, StatusCode::OK, "{}", all.body);
+    assert_eq!(all.body["guests"][0]["user"]["id"], ext_id);
+    let soon = app.get(&admin(), "/admin/guests?filter=expiring_soon").await;
+    assert_eq!(soon.body["guests"][0]["user"]["id"], ext_id);
+    let unsponsored = app.get(&admin(), "/admin/guests?filter=no_sponsor").await;
+    assert_eq!(unsponsored.body["guests"], json!([]), "alice sponsors");
+    app.stop().await;
+  }
 }
 
 mod expiry {

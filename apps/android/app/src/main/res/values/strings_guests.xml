@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="guest_notice_title">Guest access ending soon</string>
+  <string name="guest_notice_self">Your guest access to %1$s ends on %2$s. Ask the person who invited you to extend it.</string>
+  <string name="guest_notice_row">%1$s in %2$s, until %3$s</string>
+  <plurals name="guest_notice_extend">
+    <item quantity="one">%d more day</item>
+    <item quantity="other">%d more days</item>
+  </plurals>
+  <string name="read_only_archived">This channel is archived. You can read it, but nobody can post here.</string>
+  <string name="browse_show_archived">Show archived channels I\'m in</string>
+</resources>

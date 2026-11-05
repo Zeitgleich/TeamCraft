@@ -586,3 +586,36 @@ async fn someone_in_no_conversation_still_has_their_name() {
   let me = backend_of(&erin).me();
   assert_eq!(me.display_name, "Erin");
 }
+
+mod expiring_guests {
+  use teamcraft_proto::{ExpiringGuestResponse, UnixMillis};
+
+  use super::*;
+
+  #[tokio::test]
+  async fn the_list_is_kept_for_the_ui_and_extending_reads_it_again() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let bob = Peer::enroll(&server, "Bob").await;
+    let space = alice.space().await;
+    let guest: ExpiringGuestResponse = serde_json::from_value(serde_json::json!({
+      "space_id": space.to_string(),
+      "space_name": "Project A",
+      "user": {"id": bob.client.user_id().to_string(), "display_name": "Bob", "kind": "guest"},
+      "expires_at": 1000,
+      "is_own": false,
+      "can_extend": true,
+    }))
+    .unwrap();
+    server.set_expiring_guests(vec![guest.clone()]);
+
+    let ui = backend_of(&alice);
+    assert!(ui.expiring_guests().is_empty(), "nothing read yet");
+    ui.extend_guest(space, guest.user.id, 5000);
+    run_commands(&mut alice, &ui).await;
+
+    let listed = ui.expiring_guests();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].expires_at, UnixMillis(5000));
+  }
+}

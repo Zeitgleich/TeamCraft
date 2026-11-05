@@ -4,7 +4,7 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use teamcraft_proto::ListAdminUsersQuery;
+use teamcraft_proto::{ListAdminGuestsQuery, ListAdminUsersQuery};
 
 use crate::handlers;
 use crate::state::AppState;
@@ -12,6 +12,7 @@ use crate::state::AppState;
 pub(super) fn routes() -> OpenApiRouter<AppState> {
   OpenApiRouter::with_openapi(Schemas::openapi())
     .routes(routes!(handlers::admin_list_users_handler))
+    .routes(routes!(handlers::admin_list_guests_handler))
     .routes(routes!(handlers::admin_delete_user_handler))
     .routes(routes!(handlers::admin_deactivate_user_handler))
     .routes(routes!(handlers::admin_list_user_devices_handler))
@@ -23,5 +24,5 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
 
 /// Schemas in the document that no documented route names: query parameters.
 #[derive(OpenApi)]
-#[openapi(components(schemas(ListAdminUsersQuery)))]
+#[openapi(components(schemas(ListAdminUsersQuery, ListAdminGuestsQuery)))]
 struct Schemas;

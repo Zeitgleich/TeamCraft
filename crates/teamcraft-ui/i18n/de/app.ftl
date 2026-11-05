@@ -261,3 +261,16 @@ app-link-open-browser = Im Browser öffnen
 open-in-app = In der App öffnen
 tray-custom-status = Eigenen Status festlegen…
 tray-new-message = Neue Nachricht…
+
+guest-notice-self = Dein Gastzugang zu { $space } endet am { $date }. Bitte die Person, die dich eingeladen hat, ihn zu verlängern.
+guest-notice-others = { $count ->
+    [one] Der Zugang eines Gastes endet bald.
+   *[other] Der Zugang von { $count } Gästen endet bald.
+}
+guest-notice-show = Anzeigen
+guest-notice-hide = Ausblenden
+guest-notice-row = { $name } in { $space }, bis { $date }
+guest-notice-extend = { $count ->
+    [one] { $count } Tag mehr
+   *[other] { $count } Tage mehr
+}

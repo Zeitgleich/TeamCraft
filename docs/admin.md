@@ -463,6 +463,11 @@ the server's word (#1162).
 | Admin removal or guest expiry of the last member  | As for any removal                                                                                              | Nothing is deleted                                                                                                                   |
 | Leave, active channel, last admin, others present | Refused (409 `last_channel_admin`)                                                                              | The refusal says the way out: make someone else channel admin, or delete the channel                                                 |
 
+Archiving keeps the channel and all of its history. For its members it leaves the lists on every
+platform, the composer gives way to a read-only note, and Browse's "show archived" finds it again;
+search still covers it, because nothing leaves the device. Admins archive and restore from the
+channel's settings or the console (`PATCH /conversations/{id}`), with no group state involved.
+
 An archived channel left without an admin stays for its members: they read it and may leave. Restoring
 it takes an admin (409 `channel_needs_admin`): a workspace admin assigns an owner (below) or deletes it.
 Roles are signed, so the server can't make the restorer one. Archiving and restoring take
@@ -501,7 +506,7 @@ independent of the size of the instance:
 | Delete an account: a tombstone stays on old messages, direct messages go, the sign-in is released                | v1   |
 | Remove a single device (lost phone)                                                                              | v1   |
 | Start org recovery for a user (needs a second admin, see e2ee.md §6.3)                                           | v1   |
-| Invite guests, set expiry and sponsor, see all guests and where they are                                         | v1   |
+| Invite guests, set expiry and sponsor, see all guests and where they are; extend them, also in bulk (§3.2.2)     | v1   |
 | Local accounts: create, reset password/TOTP                                                                      | v1   |
 | OIDC group → role/space mapping                                                                                  | v1   |
 | User groups (`@devteam`)                                                                                         | v1   |
@@ -592,6 +597,40 @@ Deactivation and removal are two steps (issue #631); deletion is the final one (
   server could keep handing them that ciphertext. Removal is what takes them out
   cryptographically: the admin's signed change, committed by members, rotates the keys. The
   server's own removal is only a hint to the clients (security review A8).
+
+#### 3.2.2 Guest expiry (issue #212)
+
+A guest's membership of a space carries an expiry and a sponsor, the person who added or invited
+them. Both are the server's record, like the membership they belong to: nothing here is signed, and
+a compromised server can't gain anything by them that it couldn't by keeping a removed member's
+record. The lead times and the sponsor's limit are part of the signed workspace policy (`guests.`),
+set in the console's security section; the server enforces them.
+
+| Who                                      | Sees in "ending soon" | Extends                                                     |
+|------------------------------------------|-----------------------|-------------------------------------------------------------|
+| Workspace admin, owner, space admin      | Their spaces          | Without limit (at most ten years ahead)                     |
+| Sponsor who still belongs to the space   | Their guests          | To `sponsor_extension_days` from now (default 120), 0: none |
+| Sponsor who left the space               | Their guests          | No                                                          |
+| Other member                             | Nothing               | No                                                          |
+| The guest                                | Their own             | No, also when somebody made a guest a sponsor               |
+
+- **Before the expiry:** at each lead time of `expiry_notice_days` (default 14 and 3 days before) the
+  guest, the sponsor and the space's admins are told once: `guest_terms_update` on the gateway, and a
+  mail to the guest and the sponsor without any guest's or space's name. A guest past two lead times
+  at once hears once. A new expiry starts over. The notice in the app comes from
+  `GET /guests/expiring` and stands until the expiry changes or passes, so somebody who was offline
+  sees it too; a lost mail is not sent again.
+- **Extending** (`POST /spaces/{id}/guests/{user}/extend`, audit `guest_extended`) takes an absolute
+  time, so a retry after a lost response changes nothing, and never shortens. The general member
+  update (`PATCH /spaces/{id}/members/{user}`) keeps to the same limits; only somebody without limit
+  clears an expiry.
+- **Overview:** the guests tab of the console's users section lists every guest membership, soonest
+  expiry first (`GET /admin/guests`), filtered by space, sponsor, expiring soon, no sponsor (none, or
+  deactivated or deleted) and never signed in, with bulk extend and remove.
+- **At the expiry** the guest leaves the space and its channels exactly as with a removal (§3.1.1,
+  e2ee.md §4.6), audit `guest_expired`, and the sponsor and the space's admins are told. Their
+  messages and files stay, under the retention rules like everybody's; nothing is deleted. The account
+  itself remains and signs in to whatever it still belongs to. It takes an admin to deactivate or delete it.
 
 ### 3.3 Moderation
 

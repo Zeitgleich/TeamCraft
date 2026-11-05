@@ -407,6 +407,7 @@ pub async fn update_space_member(
     ensure_not_last_admin(state, id).await?;
   }
   let expiry = changed_expiry(&request.role, request.maybe_expires_at, request.clears_expiry)?;
+  super::guests::check_expiry_change(state, caller, &access, user_id, expiry).await?;
   state
     .database
     .upsert_space_member(&NewSpaceMember {

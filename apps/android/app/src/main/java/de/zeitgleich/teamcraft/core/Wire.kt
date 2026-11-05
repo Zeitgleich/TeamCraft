@@ -76,6 +76,7 @@ data class Conversation(
   @SerialName("is_favorite") val isFavorite: Boolean = false,
   @SerialName("is_muted") val isMuted: Boolean = false,
   @SerialName("can_post") val canPost: Boolean = true,
+  @SerialName("is_archived") val isArchived: Boolean = false,
   val bookmarks: List<Bookmark> = emptyList(),
   /** The user's notes to themself (issue #829); their `name` is empty. Absent from older cores. */
   @SerialName("is_notes_to_self") val isNotesToSelf: Boolean = false,
@@ -408,6 +409,24 @@ data class BrowsableChannel(
   val join: String = "open",
 )
 
+/** A guest membership ending soon (`expiring_guests`), issue #212. */
+@Serializable
+data class ExpiringGuest(
+  @SerialName("space_id") val spaceId: String,
+  @SerialName("space_name") val spaceName: String,
+  val user: ExpiringGuestUser,
+  @SerialName("expires_at") val expiresAt: Long,
+  @SerialName("is_own") val isOwn: Boolean = false,
+  @SerialName("can_extend") val canExtend: Boolean = false,
+  @SerialName("extend_limit") val extendLimit: Long? = null,
+)
+
+@Serializable
+data class ExpiringGuestUser(
+  val id: String,
+  @SerialName("display_name") val displayName: String,
+)
+
 @Serializable
 data class PermalinkTarget(
   val conversation: String,
@@ -438,6 +457,7 @@ data class ChatAnswer(
   val files: List<FileInfo> = emptyList(),
   @SerialName("maybe_bytes") val maybeBytes: Long? = null,
   val channels: List<BrowsableChannel> = emptyList(),
+  val guests: List<ExpiringGuest> = emptyList(),
   val hits: List<SearchHit> = emptyList(),
   val results: SearchResults? = null,
   val value: Boolean = false,

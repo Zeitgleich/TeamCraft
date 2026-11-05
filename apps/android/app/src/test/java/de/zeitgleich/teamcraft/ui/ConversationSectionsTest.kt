@@ -25,6 +25,13 @@ class ConversationSectionsTest {
   }
 
   @Test
+  fun archivedChannelsLeaveTheLists() {
+    val archived = item("1", "old", ConversationKind.PUBLIC, space = "Project A", isFavorite = true).copy(isArchived = true)
+    assertEquals(emptyList<Section>(), channelSections(listOf(archived)))
+    assertEquals(false, archived.isListedInHome)
+  }
+
+  @Test
   fun activityHoldsMentionsFirstThenUnreadNewestFirstWithoutMutedOrRead() {
     val result = activityConversations(
       listOf(

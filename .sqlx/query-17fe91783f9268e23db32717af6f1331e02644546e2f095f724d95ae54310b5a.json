@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.space_id, m.user_id, m.sponsor_user_id, m.expires_at AS \"expires_at!\",\n                due.lead_days AS \"lead_days!\"\n         FROM space_members m\n         CROSS JOIN LATERAL (\n           SELECT min(lead) AS lead_days FROM unnest($2::int[]) AS lead\n           WHERE m.expires_at <= $1::timestamptz + make_interval(days => lead)\n         ) due\n         WHERE m.role = 'guest' AND m.expires_at > $1::timestamptz AND due.lead_days IS NOT NULL\n           AND (m.expiry_notice_lead_days IS NULL OR m.expiry_notice_lead_days > due.lead_days)\n         ORDER BY m.expires_at LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "space_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "space_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "sponsor_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "sponsor_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "expires_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "lead_days!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int4Array",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "17fe91783f9268e23db32717af6f1331e02644546e2f095f724d95ae54310b5a"
+}

@@ -208,6 +208,12 @@ pub enum GatewayEvent {
     space_id: SpaceId,
     user: UserSummary,
   },
+  /// A guest's membership is about to end, or got a new end: read `GET /guests/expiring` again.
+  /// Sent to the guest, the sponsor and the space's admins.
+  GuestTermsUpdate {
+    space_id: SpaceId,
+    user_id: UserId,
+  },
   /// A member acknowledged an urgent message. Sent to the message's sender and to the member's
   /// other devices.
   MessageAck {

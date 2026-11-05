@@ -47,6 +47,8 @@ enum ChatAction {
   /// every device (issue #1009).
   case markReactionsSeen(conversationId: String, messageIds: [String])
   case loadOlderHistory(conversationId: String)
+  /// To an absolute time, so a retry doesn't extend twice; the server checks who may (issue #212).
+  case extendGuest(spaceId: String, userId: String, expiresAtMs: Int64)
   /// The composer's unsent text, kept by the core (synced to the user's devices) so it survives the
   /// app being killed (issue #158). An empty body clears it.
   case setDraft(conversationId: String, maybeThreadId: String?, body: String)
@@ -118,6 +120,8 @@ enum ChatAction {
       object = ["action": "delete_channel", "conversation": conversation]
     case .deleteSpace(let space):
       object = ["action": "delete_space", "space": space]
+    case .extendGuest(let space, let user, let expiresAtMs):
+      object = ["action": "extend_guest", "space": space, "user": user, "expires_at_ms": expiresAtMs]
     case .markReactionsSeen(let conversation, let messages):
       object = ["action": "mark_reactions_seen", "conversation": conversation, "messages": messages]
     case .loadOlderHistory(let conversation):
@@ -187,6 +191,7 @@ enum ChatQuery {
   case permalink(conversationId: String, messageId: String)
   /// The channels of a space the user is in or can join.
   case browseChannels(spaceId: String)
+  case expiringGuests
   /// Others' reactions to the user's messages here that the user hasn't seen.
   case unseenReactions(conversationId: String)
   case olderHistory(conversationId: String)
@@ -217,6 +222,8 @@ enum ChatQuery {
       return jsonText(["kind": "permalink", "conversation": conversation, "message": message])
     case .browseChannels(let space):
       return jsonText(["kind": "browse_channels", "space": space])
+    case .expiringGuests:
+      return jsonText(["kind": "expiring_guests"])
     case .unseenReactions(let conversation):
       return jsonText(["kind": "unseen_reactions", "conversation": conversation])
     case .olderHistory(let conversation):

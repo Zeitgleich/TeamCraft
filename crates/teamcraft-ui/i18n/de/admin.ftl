@@ -916,3 +916,40 @@ policy-role-provider-details = Einstellungen zum Identity Provider
 roster-signing-reported-gone = Der Server meldet, dass { $names } keine Admin-Rolle mehr hat. Wenn der Identity Provider nichts anderes sagt, verschwindet die Person in einigen Tagen von der Admin-Liste, immer eine nach der anderen. Wenn das falsch ist, prüfe den Server: Mehr ist nicht nötig.
 roster-signing-awaiting-owner = Der Identity Provider macht dich zum Eigentümer. Das gilt, sobald die App eines anderen Eigentümers geöffnet war. Ist kein anderer Eigentümer mehr da, bitte deinen Betreiber, dem früheren Eigentümer die Rolle kurz zurückzugeben.
 roster-standing-expired-ask-unnamed = Seit 30 Tagen hat kein Eigentümer die Admin-Liste signiert, daher ruhen die Admin-Rechte in allen Apps. Ein Eigentümer muss nur TeamCraft auf einem Gerät mit seinen Schlüsseln öffnen.
+
+admin-channel-restore = Wiederherstellen
+admin-channel-archive-confirm = Diesen Kanal für alle archivieren? Mitglieder können ihn weiter lesen, aber niemand kann schreiben, und er verschwindet aus ihren Listen. Nichts wird gelöscht, und du kannst ihn hier wiederherstellen.
+admin-guests-filter = Anzeigen
+admin-guests-filter-all = Alle Gäste
+admin-guests-filter-expiring = Laufen bald ab
+admin-guests-filter-no-sponsor = Ohne Betreuung
+admin-guests-filter-never = Nie angemeldet
+admin-guests-any = Alle
+admin-guests-bulk = Ausgewählte Gäste
+admin-guests-selected = { $count ->
+    [one] { $count } Gast ausgewählt
+   *[other] { $count } Gäste ausgewählt
+}
+admin-guests-select = { $name } auswählen
+admin-guests-remove = Entfernen
+admin-guests-remove-confirm = { $count ->
+    [one] Diesen Gast jetzt entfernen? Der Zugang zum Space und seinen Kanälen endet, die betreuende Person wird nicht benachrichtigt. Nachrichten bleiben nach den Aufbewahrungsregeln erhalten.
+   *[other] Diese { $count } Gäste jetzt entfernen? Der Zugang zum Space und seinen Kanälen endet, die betreuenden Personen werden nicht benachrichtigt. Nachrichten bleiben nach den Aufbewahrungsregeln erhalten.
+}
+admin-guests-never = Nie angemeldet
+admin-guests-no-sponsor = Keine Betreuung
+admin-guests-no-expiry = Nie
+policy-guest-notices = Hinweise, bevor der Zugang eines Gastes endet
+policy-guest-notices-hint = Der Gast, die betreuende Person und die Admins des Space bekommen einen Hinweis in der App und per E-Mail. Die E-Mail nennt weder Gast noch Space.
+policy-guest-notices-default = 14 und 3 Tage vorher
+policy-guest-notices-long = 30, 14 und 3 Tage vorher
+policy-guest-notices-short = 7 Tage und 1 Tag vorher
+policy-guest-notices-off = Keine Hinweise
+policy-guest-sponsor-extension = Wie weit Betreuende einen Gast verlängern dürfen
+policy-guest-sponsor-extension-hint = Ab heute. Für Admins gibt es keine Grenze.
+policy-guest-sponsor-none = Betreuende dürfen nicht verlängern
+policy-guest-sponsor-days = { $count ->
+    [one] Bis zu { $count } Tag
+   *[other] Bis zu { $count } Tage
+}
+audit-guest-extended = Gast verlängert

@@ -1479,6 +1479,21 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn expiring_guests(&self) -> Vec<teamcraft_proto::ExpiringGuestResponse> {
+    match self.ask(ChatQuery::ExpiringGuests) {
+      Some(ChatAnswer::ExpiringGuests { guests }) => guests,
+      _ => Vec::new(),
+    }
+  }
+
+  fn extend_guest(&self, space: SpaceId, user: UserId, expires_at_ms: i64) {
+    self.act(ChatAction::ExtendGuest {
+      space,
+      user,
+      expires_at_ms,
+    });
+  }
+
   fn mark_reactions_seen(&self, conversation: ConversationId, messages: Vec<MessageId>) {
     self.act(ChatAction::MarkReactionsSeen {
       conversation,

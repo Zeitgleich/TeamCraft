@@ -545,8 +545,14 @@ pub struct GuestsConfig {
   /// If not empty, guests can only be invited with e-mail addresses of these domains (and their
   /// subdomains); lower case, without `@`.
   pub allowed_email_domains: Vec<String>,
-  /// How often expired guests are removed.
+  /// How often expired guests are removed and notices before the expiry go out.
   pub expiry_check_interval_secs: u64,
+  /// Mail to a guest whose membership ends soon; `{days}` and `{url}` are filled in.
+  pub notice_subject_guest: String,
+  pub notice_body_guest: String,
+  /// Mail to a sponsor whose guests end soon; `{count}` and `{url}` are filled in.
+  pub notice_subject_sponsor: String,
+  pub notice_body_sponsor: String,
 }
 
 impl Default for GuestsConfig {
@@ -555,6 +561,12 @@ impl Default for GuestsConfig {
       default_expiry_days: 90,
       allowed_email_domains: Vec::new(),
       expiry_check_interval_secs: 3600,
+      notice_subject_guest: "Your guest access ends soon".to_owned(),
+      notice_body_guest: "Your guest access ends in {days} days. Ask the person who invited you to extend it.\n\n{url}\n"
+        .to_owned(),
+      notice_subject_sponsor: "Guest access you are responsible for ends soon".to_owned(),
+      notice_body_sponsor: "The access of {count} guests you are responsible for ends soon. Open the app to extend it or let it end.\n\n{url}\n"
+        .to_owned(),
     }
   }
 }

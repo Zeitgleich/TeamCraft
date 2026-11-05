@@ -223,6 +223,7 @@ struct ChatAnswer: Decodable, Sendable {
   let users: [String]?
   let maybeLink: String?
   let channels: [BrowsableChannel]?
+  let guests: [ExpiringGuest]?
   let unseen: UnseenReactions?
   let maybeBody: String?
   let olderHistory: OlderHistory?

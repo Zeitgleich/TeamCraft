@@ -916,3 +916,40 @@ policy-role-provider-details = Identity provider settings
 roster-signing-reported-gone = The server reports that { $names } no longer holds an admin role. Unless the identity provider says otherwise, they come off the roster in a few days, one at a time. If that's wrong, check the server: nothing else is needed.
 roster-signing-awaiting-owner = The identity provider makes you an owner. That's in force as soon as another owner's app has been open. If no other owner is left, ask your operator to give the former owner their role back for a moment.
 roster-standing-expired-ask-unnamed = No owner signed the admin roster within 30 days, so admin rights are paused on every app. An owner only needs to open TeamCraft on a device with their keys.
+
+admin-channel-restore = Restore
+admin-channel-archive-confirm = Archive this channel for everyone? Its members can still read it but nobody can post, and it leaves their lists. Nothing is deleted, and you can restore it here.
+admin-guests-filter = Show
+admin-guests-filter-all = All guests
+admin-guests-filter-expiring = Expiring soon
+admin-guests-filter-no-sponsor = Without a sponsor
+admin-guests-filter-never = Never signed in
+admin-guests-any = Any
+admin-guests-bulk = Selected guests
+admin-guests-selected = { $count ->
+    [one] { $count } guest selected
+   *[other] { $count } guests selected
+}
+admin-guests-select = Select { $name }
+admin-guests-remove = Remove
+admin-guests-remove-confirm = { $count ->
+    [one] Remove this guest now? They lose access to the space and its channels, and their sponsor is not told. Their messages stay under the retention rules.
+   *[other] Remove these { $count } guests now? They lose access to the space and its channels, and their sponsors are not told. Their messages stay under the retention rules.
+}
+admin-guests-never = Never signed in
+admin-guests-no-sponsor = No sponsor
+admin-guests-no-expiry = Never
+policy-guest-notices = Notices before a guest's access ends
+policy-guest-notices-hint = The guest, their sponsor and the space's admins get a notice in the app and by mail. The mail names no guest and no space.
+policy-guest-notices-default = 14 and 3 days before
+policy-guest-notices-long = 30, 14 and 3 days before
+policy-guest-notices-short = 7 and 1 day before
+policy-guest-notices-off = No notices
+policy-guest-sponsor-extension = How far sponsors may extend a guest
+policy-guest-sponsor-extension-hint = From today. Admins aren't limited.
+policy-guest-sponsor-none = Sponsors may not extend
+policy-guest-sponsor-days = { $count ->
+    [one] Up to { $count } day
+   *[other] Up to { $count } days
+}
+audit-guest-extended = Guest extended

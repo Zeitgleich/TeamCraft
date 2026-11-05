@@ -1,0 +1,88 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.space_id, s.name AS space_name, m.user_id, m.expires_at, m.sponsor_user_id,\n                EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id) AS \"has_signed_in!\"\n         FROM space_members m\n         JOIN spaces s ON s.id = m.space_id\n         JOIN users u ON u.id = m.user_id AND u.deleted_at IS NULL\n         LEFT JOIN users sponsor ON sponsor.id = m.sponsor_user_id\n         WHERE m.role = 'guest'\n           AND ($1::bigint IS NULL OR m.space_id = $1)\n           AND ($2::bigint IS NULL OR m.sponsor_user_id = $2)\n           AND ($3::timestamptz IS NULL OR m.expires_at <= $3)\n           AND (NOT $4 OR sponsor.id IS NULL OR sponsor.deactivated_at IS NOT NULL OR sponsor.deleted_at IS NOT NULL)\n           AND (NOT $5 OR NOT EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id))\n         ORDER BY m.expires_at ASC NULLS LAST, m.space_id, m.user_id\n         LIMIT $6",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "space_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "space_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "space_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "expires_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "sponsor_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "sponsor_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "has_signed_in!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz",
+        "Bool",
+        "Bool",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "d85ee1fb9f1faaf7717eb0d4a7453ca25cbe8bb4920326d20fb2b12c636a8ca4"
+}

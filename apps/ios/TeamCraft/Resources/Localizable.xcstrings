@@ -1,6 +1,102 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "browse_show_archived": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show archived channels I'm in"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archivierte Kanäle anzeigen, in denen ich bin"
+          }
+        }
+      }
+    },
+    "guest_notice_extend %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld more days"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld Tage mehr"
+          }
+        }
+      }
+    },
+    "guest_notice_row %@ %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ in %2$@, until %3$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ in %2$@, bis %3$@"
+          }
+        }
+      }
+    },
+    "guest_notice_self %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your guest access to %1$@ ends on %2$@. Ask the person who invited you to extend it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Gastzugang zu %1$@ endet am %2$@. Bitte die Person, die dich eingeladen hat, ihn zu verlängern."
+          }
+        }
+      }
+    },
+    "guest_notice_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Guest access ending soon"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gastzugänge laufen bald ab"
+          }
+        }
+      }
+    },
+    "read_only_archived": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This channel is archived. You can read it, but nobody can post here."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieser Kanal ist archiviert. Du kannst ihn lesen, aber niemand kann hier schreiben."
+          }
+        }
+      }
+    },
     "server_confirm_from_link": {
       "localizations": {
         "en": {

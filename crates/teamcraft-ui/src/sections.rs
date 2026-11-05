@@ -88,6 +88,8 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
   for conversation in conversations
     .iter()
     .filter(|conversation| !conversation.kind.is_direct_like())
+    // Archived channels leave the list; Browse finds them, and the open one stays while it is open.
+    .filter(|conversation| !conversation.is_archived || options.maybe_held_open == Some(conversation.id))
   {
     let is_unread = conversation.unread_count > 0 && !conversation.is_muted;
     let is_held_open = options.maybe_held_open == Some(conversation.id);
@@ -120,7 +122,8 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
 /// Whether Chats lists the conversation: DMs and group DMs, and channels of a space the user starred
 /// (#1152). Any other channel belongs to its space only.
 pub fn is_listed_in_chats(conversation: &Conversation) -> bool {
-  conversation.kind.is_direct_like() || (conversation.is_favorite && conversation.maybe_space.is_some())
+  conversation.kind.is_direct_like()
+    || (conversation.is_favorite && conversation.maybe_space.is_some() && !conversation.is_archived)
 }
 
 /// The sections of Home, in display order.
@@ -727,6 +730,36 @@ mod tests {
   }
 
   /// #1152: the channels a user starred show under Favorites in Chats, next to the favorite DMs.
+  mod archived_channels {
+    use super::*;
+
+    fn archived(id: u64) -> Conversation {
+      let mut channel = conversation(id, SidebarCategory::Channels, 0, true);
+      channel.maybe_space = Some(id_from_raw::<SpaceId>(7));
+      channel.is_archived = true;
+      channel
+    }
+
+    #[test]
+    fn they_leave_the_lists_unless_they_are_open() {
+      let all = [archived(1)];
+      assert!(build_sections(&all, &SidebarOptions::plain(true)).is_empty());
+      assert!(
+        !is_listed_in_chats(&all[0]),
+        "not under Chats either, even when starred"
+      );
+      let open = SidebarOptions {
+        maybe_held_open: Some(all[0].id),
+        ..SidebarOptions::plain(true)
+      };
+      assert_eq!(
+        build_sections(&all, &open).len(),
+        1,
+        "the open one doesn't vanish under the reader"
+      );
+    }
+  }
+
   mod favorite_channels_in_chats {
     use super::*;
 

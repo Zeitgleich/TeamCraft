@@ -82,12 +82,13 @@ val ConversationItem.isDirect: Boolean
  * user starred (#1152). The channel stays under Favorites in its space too.
  */
 val ConversationItem.isListedInHome: Boolean
-  get() = isDirect || (isFavorite && maybeSpaceId != null)
+  get() = isDirect || (isFavorite && maybeSpaceId != null && !isArchived)
 
 /** Channels of the spaces: favorite channels first, then each space (spaces and channels by name). */
 fun channelSections(conversations: List<ConversationItem>): List<Section> {
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
-  val channels = conversations.filterNot { it.isDirect }
+  // Archived channels leave the lists; Browse finds them (issue #212).
+  val channels = conversations.filterNot { it.isDirect || it.isArchived }
   val favorites = channels.filter { it.isFavorite }.sortedWith(byName)
   val bySpace = channels
     .filterNot { it.isFavorite }

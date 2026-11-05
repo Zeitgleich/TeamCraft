@@ -65,7 +65,7 @@ extension ConversationItem {
 
   /// Whether the Home tab lists it: DMs and group DMs, and the channels of a space the user starred
   /// (#1152). The channel stays under Favorites in its space too.
-  var isListedInHome: Bool { isDirect || (isFavorite && maybeSpaceId != nil) }
+  var isListedInHome: Bool { isDirect || (isFavorite && maybeSpaceId != nil && !isArchived) }
 
   /// The name lists and titles show: the notes to self have none of their own (they are named
   /// after the other people, and there are none), so they are called "Notes" in the user's
@@ -80,7 +80,8 @@ private func byName(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
 /// Channels of the spaces: favorite channels first, then each space (spaces and channels by name).
 /// Same grouping as the Android app.
 func channelSections(_ conversations: [ConversationItem]) -> [ConversationSection] {
-  let channels = conversations.filter { !$0.isDirect }
+  // Archived channels leave the lists; Browse finds them (issue #212).
+  let channels = conversations.filter { !$0.isDirect && !$0.isArchived }
   let favorites = channels.filter(\.isFavorite).sorted(by: byName)
   let spaces = Dictionary(grouping: channels.filter { !$0.isFavorite }, by: \.maybeSpaceName)
   let orderedSpaces = spaces.keys.sorted { lhs, rhs in

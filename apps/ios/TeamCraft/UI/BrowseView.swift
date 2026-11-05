@@ -22,6 +22,7 @@ struct BrowseView: View {
   @State private var picked: [String] = []
   @State private var maybePendingDm: [String]?
   @State private var isCreating = false
+  @State private var showsArchived = false
 
   var body: some View {
     NavigationStack {
@@ -71,7 +72,12 @@ struct BrowseView: View {
         if let spaceId, spaces.first(where: { $0.id == spaceId })?.offersChannelCreation == true {
           Button("channel_create", systemImage: "plus") { isCreating = true }
         }
-        let visible = channels.filter { $0.isArchived != true }
+        // Archived channels are hidden from the lists, so this is the way back to the ones the user
+        // is in; nobody can join an archived channel.
+        if channels.contains(where: { $0.isArchived == true && $0.isMember }) {
+          Toggle("browse_show_archived", isOn: $showsArchived)
+        }
+        let visible = channels.filter { $0.isArchived != true || (showsArchived && $0.isMember) }
         if snapshot != nil && visible.isEmpty {
           Text("browse_no_channels").foregroundStyle(Theme.textMuted)
         }
@@ -231,6 +237,7 @@ private struct NewChannelSheet: View {
   @State private var name = ""
   @State private var maybeProblem: TextProblem?
   @State private var isCreating = false
+  @State private var showsArchived = false
   @FocusState private var isFocused: Bool
   @AccessibilityFocusState private var isAccessibilityFocused: Bool
 

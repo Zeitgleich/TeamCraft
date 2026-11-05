@@ -253,6 +253,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       } => self.move_channel(conversation, &request).await,
       CoreCommand::RefreshChannelBrowser { space } => self.refresh_channel_browser(space).await.map(|_| ()),
       CoreCommand::JoinChannel { conversation } => self.join_channel(conversation).await,
+      CoreCommand::ExtendGuest {
+        space,
+        user,
+        expires_at_ms,
+      } => {
+        self
+          .extend_guest(space, user, teamcraft_proto::UnixMillis(expires_at_ms))
+          .await
+      },
       CoreCommand::RequestAdminJoin { conversation } => self.request_admin_join(conversation).await,
       CoreCommand::WithdrawAdminJoin { conversation } => self.withdraw_admin_join(conversation).await,
       CoreCommand::ApproveAdminJoin {

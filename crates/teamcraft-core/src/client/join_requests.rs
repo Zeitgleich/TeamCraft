@@ -11,7 +11,8 @@
 use teamcraft_crypto::membership::HistoryShare;
 use teamcraft_proto::{
   AdminJoinRequestResponse, AdminSelfJoin, ChannelRole, ConversationId, ConversationKind,
-  ConversationResponse, ConversationVisibility, HistoryPolicy, UserId,
+  ConversationResponse, ConversationVisibility, ExtendGuestRequest, HistoryPolicy, SpaceId, UnixMillis,
+  UserId,
 };
 
 use super::Client;
@@ -140,6 +141,33 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     self.refresh_admin_join_requests().await
+  }
+
+  /// Reads the guests ending soon from the server into the store, where the UI reads them.
+  pub(crate) async fn refresh_expiring_guests(&mut self) -> Result<(), CoreError> {
+    let guests = self.api.expiring_guests().await?;
+    read_state::put_expiring_guests(&self.store, &guests)
+  }
+
+  /// After a connect: events in between may be lost. Not fatal: the next one reads it again.
+  pub(crate) async fn refresh_expiring_guests_after_connect(&mut self) {
+    if let Err(error) = self.refresh_expiring_guests().await {
+      tracing::debug!(%error, "could not read the guests ending soon");
+    }
+  }
+
+  /// Extends a guest's membership; the server checks who may, and how far (admin.md §3.2.2).
+  pub async fn extend_guest(
+    &mut self,
+    space: SpaceId,
+    user: UserId,
+    expires_at: UnixMillis,
+  ) -> Result<(), CoreError> {
+    self
+      .api
+      .extend_guest(space, user, &ExtendGuestRequest { expires_at })
+      .await?;
+    self.refresh_expiring_guests().await
   }
 
   /// Reads the open requests from the server into the store, where the UI reads them.

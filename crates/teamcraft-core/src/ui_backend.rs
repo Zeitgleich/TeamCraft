@@ -251,6 +251,12 @@ pub enum CoreCommand {
   JoinChannel {
     conversation: ConversationId,
   },
+  /// A sponsor or admin extends a guest's membership of a space (issue #212).
+  ExtendGuest {
+    space: SpaceId,
+    user: UserId,
+    expires_at_ms: i64,
+  },
   /// An admin asks the owners of a private channel to let them in (admin.md §2.4).
   RequestAdminJoin {
     conversation: ConversationId,
@@ -2646,6 +2652,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn join_requests(&self) -> Vec<teamcraft_client_api::activity::JoinRequest> {
     self.ui_join_requests()
+  }
+
+  fn expiring_guests(&self) -> Vec<teamcraft_proto::ExpiringGuestResponse> {
+    self.read(crate::read_state::expiring_guests(&self.store))
+  }
+
+  fn extend_guest(&self, space: SpaceId, user: UserId, expires_at_ms: i64) {
+    self.command(CoreCommand::ExtendGuest {
+      space,
+      user,
+      expires_at_ms,
+    });
   }
 
   fn request_admin_join(&self, conversation: ConversationId) {

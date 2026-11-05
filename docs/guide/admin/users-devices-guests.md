@@ -47,7 +47,9 @@ A guest is a user with the `guest` role (same realm, see [Keycloak setup](keyclo
    The invite applies when somebody signs in with that e-mail address and the provider has verified
    it (`[policy] invites_require_verified_email`). **No e-mail is sent**: tell the person yourself.
    The inviter is recorded as sponsor.
-3. Review guests regularly (Users and guests > Guests: sponsor, expiry, where they are).
+3. Review guests regularly (Users and guests > Guests): every guest membership, soonest expiry first,
+   filtered by space, sponsor, expiring soon, no sponsor and never signed in, with bulk extend and
+   remove.
 
 ### Guests with their own password
 
@@ -69,7 +71,13 @@ true` with a `session_secret` (32+ random bytes, `TEAMCRAFT_LOCAL_ACCOUNTS__SESS
 
 Guests may also be limited to certain e-mail domains, in the server file (`[guests]
 allowed_email_domains`) and in the signed policy; the check applies to invitations, local guests,
-external meeting invitees and sign-in. Guests expire automatically (90 days by default); the sponsor
+external meeting invitees and sign-in. Before a guest's access ends, the guest, the sponsor and the
+space's admins get a notice in the app and a mail that names no guest and no space (14 and 3 days
+before by default, Administration → Security).
+The sponsor can extend from the notice, up to a limit in the same place (120 days from today by
+default); admins aren't limited. When access ends, the guest leaves the space and its channels; their
+messages and files stay under the retention rules, and the account remains until an admin deactivates
+or deletes it. Guests expire automatically (90 days by default); the sponsor
 is told when it happens.
 
 Rules for guests: see only what they were added to; find only people they share a conversation with;

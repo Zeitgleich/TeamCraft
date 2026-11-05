@@ -643,6 +643,14 @@ pub trait ChatBackend {
     Vec::new()
   }
   fn join_channel(&self, _conversation: ConversationId) {}
+  /// Guest memberships ending soon that concern the user: their own, sponsored, or in a space they
+  /// administer (issue #212).
+  fn expiring_guests(&self) -> Vec<teamcraft_proto::ExpiringGuestResponse> {
+    Vec::new()
+  }
+  /// Extends a guest's membership to `expires_at_ms` (server time). Offer it only where
+  /// [`teamcraft_proto::ExpiringGuestResponse`] allows it; the server checks again.
+  fn extend_guest(&self, _space: SpaceId, _user: UserId, _expires_at_ms: i64) {}
   /// Open spaces of the workspace the user is not in (members only; guests are invited).
   fn joinable_spaces(&self) -> Vec<crate::model::JoinableSpace> {
     Vec::new()
@@ -1135,6 +1143,18 @@ pub trait AdminBackend {
   }
   /// Narrows the audit log; backends that read the server reload it.
   fn set_audit_filter(&self, _filter: AuditFilter) {}
+  /// The guest overview under the query set last (issue #212).
+  fn admin_guests(&self) -> teamcraft_proto::ListAdminGuestsResponse {
+    teamcraft_proto::ListAdminGuestsResponse::default()
+  }
+  fn set_admin_guest_query(&self, _query: teamcraft_proto::ListAdminGuestsQuery) {}
+  /// Extends these guest memberships, one after the other; the list follows with the refresh.
+  fn admin_extend_guests(&self, _guests: Vec<(SpaceId, UserId, i64)>) {}
+  /// Removes these guest memberships from their spaces and channels, one after the other.
+  fn admin_remove_guests(&self, _guests: Vec<(SpaceId, UserId)>) {}
+  /// Archives or restores a channel the admin may not be in; a server record (e2ee.md §4.10), so
+  /// no group state is involved.
+  fn admin_set_channel_archived(&self, _channel: ConversationId, _is_archived: bool) {}
   /// Why the signed policy cannot be changed here (not an owner, no encryption keys on this device).
   fn policy_edit_blocker(&self) -> Option<crate::admin::PolicyBlocker> {
     None
