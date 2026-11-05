@@ -281,6 +281,7 @@ calls-all = Alle Anrufe
 calls-missed = Verpasst
 calls-empty = Anrufe, die du führst, annimmst oder verpasst, erscheinen hier.
 calls-empty-title = Noch keine Anrufe
+calls-space-empty = Anrufe in den Kanälen dieses Space erscheinen hier.
 calls-direction-missed = Verpasst
 calls-direction-incoming = Eingehend
 calls-direction-outgoing = Ausgehend

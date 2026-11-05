@@ -105,6 +105,7 @@ saved-title = Saved items
 saved-open = Open conversation
 saved-empty = Use "Save for later" in a message's menu.
 saved-empty-title = Nothing saved yet
+saved-space-empty = Messages you save from this space's channels show up here.
 sidebar-saved = Saved
 
 # Profiles, people and groups (v1 REST UI)

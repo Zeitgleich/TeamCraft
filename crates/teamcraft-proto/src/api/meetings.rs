@@ -3,7 +3,7 @@ use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
 use crate::{
-  Base64Bytes, ConversationId, IdempotencyKey, MeetingId, UnixMillis, UserId, UserSummary, Weekday,
+  Base64Bytes, ConversationId, IdempotencyKey, MeetingId, SpaceId, UnixMillis, UserId, UserSummary, Weekday,
 };
 
 wire_enum! {
@@ -111,6 +111,10 @@ pub struct CreateMeetingRequest {
   /// Guests wait for the host to admit them (default: yes).
   #[serde(default = "default_true")]
   pub has_lobby: bool,
+  /// The space it is scheduled in: it is listed there (#954). Ignored unless the caller is a member
+  /// of that space.
+  #[serde(rename = "space_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_space: Option<SpaceId>,
   /// Client-generated key that makes a retry of this request return the original result instead
   /// of creating a second one. Optional so older clients keep working.
   #[serde(rename = "idempotency_key", default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +171,10 @@ pub struct CreateInstantMeetingRequest {
   /// that moves into the meeting (docs/meetings.md). No calendar entry and no e-mail.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub invitees: Vec<UserId>,
+  /// The space it is started in: it is listed there (#954). Ignored unless the caller is a member
+  /// of that space.
+  #[serde(rename = "space_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_space: Option<SpaceId>,
   /// Client-generated key that makes a retry of this request return the original result instead
   /// of creating a second one. Optional so older clients keep working.
   #[serde(rename = "idempotency_key", default, skip_serializing_if = "Option::is_none")]
@@ -205,6 +213,9 @@ pub struct MeetingResponse {
   pub organizer_user_id: UserId,
   /// The meeting chat.
   pub conversation_id: ConversationId,
+  /// The space the meeting was scheduled in. Clients list it there; its chat stays outside spaces.
+  #[serde(rename = "space_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_space: Option<SpaceId>,
   /// Link for members; guests get personal links with a token (see `GuestLinkResponse`).
   pub join_url: String,
   #[serde(rename = "recurrence", default, skip_serializing_if = "Option::is_none")]
@@ -480,6 +491,7 @@ mod tests {
     let instant = CreateInstantMeetingRequest {
       maybe_title: None,
       invitees: Vec::new(),
+      maybe_space: None,
       maybe_idempotency_key: Some(key),
     };
     assert_eq!(

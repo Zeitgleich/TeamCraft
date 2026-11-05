@@ -152,6 +152,7 @@ host-remove = Remove
 # Home pages (issue #585)
 meetings-live = Now
 meetings-empty-title = No meetings coming up
+meetings-space-empty = Meetings scheduled in this space show up here.
 guest-own-code = Your code
 guest-organizer-code = The organizer's code
 guest-codes-hint = Whoever wants to be sure can compare: the organizer sees your code next to your name, and their app shows their own code. If one differs, somebody is in between: leave the meeting.

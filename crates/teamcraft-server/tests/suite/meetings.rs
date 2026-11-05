@@ -1184,6 +1184,43 @@ mod email_replies {
 mod instant {
   use super::*;
 
+  /// #954: a meeting is listed in the space it was started in; only a member can put it there.
+  #[tokio::test]
+  async fn a_meeting_belongs_to_a_space_of_its_organizer_only() {
+    let (app, _calendar) = app!();
+    let (alice, bob) = (owner(), member("bob"));
+    let space = create_space(&app, &alice, "Project A", "invite_only").await;
+
+    let of_alice = app
+      .post(&alice, "/meetings/instant", json!({"space_id": space}))
+      .await;
+    assert_eq!(of_alice.status, StatusCode::CREATED, "{}", of_alice.body);
+    assert_eq!(of_alice.body["space_id"], space.as_str());
+
+    // Somebody outside the space gets a meeting of no space, and no hint about the ID.
+    let of_bob = app
+      .post(&bob, "/meetings/instant", json!({"space_id": space}))
+      .await;
+    assert_eq!(of_bob.status, StatusCode::CREATED, "{}", of_bob.body);
+    assert!(of_bob.body.get("space_id").is_none());
+
+    let without = app.post(&alice, "/meetings/instant", json!({})).await;
+    assert!(without.body.get("space_id").is_none());
+
+    let scheduled = app
+      .post(
+        &alice,
+        "/meetings",
+        json!({"title": "Sync", "starts_at": STARTS_AT, "ends_at": ENDS_AT, "space_id": space}),
+      )
+      .await;
+    assert_eq!(scheduled.status, StatusCode::CREATED, "{}", scheduled.body);
+    assert_eq!(scheduled.body["space_id"], space.as_str());
+    let id = scheduled.body["id"].as_str().unwrap();
+    let again = app.get(&alice, &format!("/meetings/{id}")).await;
+    assert_eq!(again.body["space_id"], space.as_str());
+  }
+
   #[tokio::test]
   async fn meet_now_starts_immediately_without_calendar_entry() {
     let (app, calendar) = app!();

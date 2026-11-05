@@ -39,6 +39,8 @@ enum ChatAction {
   case openGroupDm(userIds: [String])
   /// Reads again how far the others read: receipts sent while the app was offline never arrive.
   case refreshReadReceipts(conversationId: String)
+  case refreshSpaceRoster(spaceId: String)
+  case refreshCallHistory
   /// The reactions to these own messages were on screen, or the user jumped to them: seen on
   /// every device (issue #1009).
   case markReactionsSeen(conversationId: String, messageIds: [String])
@@ -98,6 +100,10 @@ enum ChatAction {
       object = ["action": "open_dm", "user": user]
     case .openGroupDm(let users):
       object = ["action": "open_group_dm", "users": users]
+    case .refreshSpaceRoster(let space):
+      object = ["action": "refresh_space_roster", "space": space]
+    case .refreshCallHistory:
+      object = ["action": "refresh_call_history"]
     case .refreshReadReceipts(let conversation):
       object = ["action": "refresh_read_receipts", "conversation": conversation]
     case .leaveChannel(let conversation, let deletesIfLast):
@@ -162,6 +168,10 @@ struct PickedFile: Equatable, Identifiable {
 enum ChatQuery {
   case messageExtras(conversationId: String, messageIds: [String])
   case conversationFiles(conversationId: String)
+  case spaceFiles(spaceId: String)
+  case spaceSavedItems(spaceId: String)
+  case spaceCallHistory(spaceId: String)
+  case spaceMembers(spaceId: String)
   case maxUploadBytes
   case resolvePermalink(link: String)
   case typingUsers(conversationId: String)
@@ -180,6 +190,14 @@ enum ChatQuery {
       return jsonText(["kind": "message_extras", "conversation": conversation, "messages": messages])
     case .conversationFiles(let conversation):
       return jsonText(["kind": "conversation_files", "conversation": conversation])
+    case .spaceFiles(let space):
+      return jsonText(["kind": "space_files", "space": space])
+    case .spaceSavedItems(let space):
+      return jsonText(["kind": "space_saved_items", "space": space])
+    case .spaceCallHistory(let space):
+      return jsonText(["kind": "space_call_history", "space": space])
+    case .spaceMembers(let space):
+      return jsonText(["kind": "space_members", "space": space])
     case .maxUploadBytes:
       return jsonText(["kind": "max_upload_bytes"])
     case .resolvePermalink(let link):

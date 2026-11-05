@@ -433,6 +433,8 @@ data class ChatAnswer(
   val users: List<String> = emptyList(),
   val unseen: UnseenReactions? = null,
   @SerialName("older_history") val olderHistory: String? = null,
+  val calls: List<CallHistoryItem> = emptyList(),
+  val roster: SpaceRoster? = null,
 )
 
 /**
@@ -486,6 +488,8 @@ data class Meeting(
   @SerialName("ends_at") val endsAt: Long,
   val status: String = "",
   @SerialName("conversation_id") val conversationId: String,
+  /** The space it was scheduled in; its chat stays outside spaces. */
+  @SerialName("space_id") val maybeSpaceId: String? = null,
 )
 
 @Serializable

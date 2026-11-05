@@ -33,34 +33,44 @@ import de.zeitgleich.teamcraft.ui.MainViewModel
 @Composable
 fun MeetingsScreen(viewModel: MainViewModel, onBack: () -> Unit) {
   val changes by viewModel.changeCount.collectAsState()
-  val context = LocalContext.current
   var meetings by remember { mutableStateOf<List<Meeting>?>(null) }
   LaunchedEffect(changes) { meetings = viewModel.readChat { meetings() } }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.meetings_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-      val list = meetings.orEmpty().filter { it.status != "cancelled" && it.status != "ended" }.sortedBy { it.startsAt }
+      val list = upcomingMeetings(meetings.orEmpty())
       if (meetings != null && list.isEmpty()) item { EmptyText(R.string.meetings_empty) }
       // A repeating meeting is listed once per occurrence, all with the series' ID.
       items(list, key = { "${it.id}-${it.startsAt}" }) { meeting ->
-        Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-          Column(Modifier.weight(1f)) {
-            Text(meeting.title, style = MaterialTheme.typography.titleMedium)
-            Text(
-              DateUtils.formatDateRange(
-                context,
-                meeting.startsAt,
-                meeting.endsAt,
-                DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME,
-              ),
-              style = MaterialTheme.typography.bodySmall,
-            )
-          }
-          Button(onClick = { viewModel.startCall(meeting.conversationId, meeting.title) }) {
-            Text(stringResource(R.string.meeting_join))
-          }
-        }
+        MeetingRow(viewModel, meeting)
         HorizontalDivider()
       }
+    }
+  }
+}
+
+/** What is still on, soonest first. */
+fun upcomingMeetings(meetings: List<Meeting>): List<Meeting> =
+  meetings.filter { it.status != "cancelled" && it.status != "ended" }.sortedBy { it.startsAt }
+
+/** A meeting's title and time, with the button to join its call. */
+@Composable
+fun MeetingRow(viewModel: MainViewModel, meeting: Meeting) {
+  val context = LocalContext.current
+  Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+    Column(Modifier.weight(1f)) {
+      Text(meeting.title, style = MaterialTheme.typography.titleMedium)
+      Text(
+        DateUtils.formatDateRange(
+          context,
+          meeting.startsAt,
+          meeting.endsAt,
+          DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME,
+        ),
+        style = MaterialTheme.typography.bodySmall,
+      )
+    }
+    Button(onClick = { viewModel.startCall(meeting.conversationId, meeting.title) }) {
+      Text(stringResource(R.string.meeting_join))
     }
   }
 }
