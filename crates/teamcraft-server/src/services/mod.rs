@@ -51,6 +51,7 @@ pub mod push_diagnostics;
 pub mod retention;
 pub mod role_evidence;
 pub mod runtime_settings;
+pub mod scheduled_messages;
 pub mod session;
 pub mod shares;
 pub mod space_images;

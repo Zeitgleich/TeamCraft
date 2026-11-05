@@ -1150,6 +1150,41 @@ internal fun Composer(
     ReplyTarget.current.value = null
     onSent()
   }
+  var isSendLaterOpen by remember { mutableStateOf(false) }
+  // The time while @channel waits for its confirmation; none for a plain send.
+  var maybeSendLaterAt by remember { mutableStateOf<Long?>(null) }
+  // This text's message ID after a failed try, so a retry after a lost answer holds one message. Gone
+  // once the server took it or the text changes: a later message with the same words is another one.
+  var maybeScheduleAttempt by remember { mutableStateOf<Pair<String, String>?>(null) }
+  fun schedule(dueAtMs: Long) {
+    val id = maybeScheduleAttempt?.takeIf { it.first == text }?.second
+      ?: java.util.UUID.randomUUID().toString().replace("-", "")
+    maybeScheduleAttempt = null
+    val options = SendOptions(
+      maybeThread = maybeThread,
+      maybeReplyTo = maybeReply?.messageId,
+      maybeReplyAttachment = maybeReply?.maybeImage?.fileId,
+      priority = priority,
+      wantsAcknowledgement = wantsAcknowledgement,
+      isSilent = isSilent,
+      alsoSendToChannel = alsoToChannel,
+      maybeClientMessageId = id,
+    )
+    val body = text
+    // The server may refuse it: the text comes back, and the failure shows like any other.
+    viewModel.act(ChatActions.schedule(conversationId, emojiConvert(body.trim()), options, dueAtMs)) {
+      text = body
+      maybeScheduleAttempt = body to id
+    }
+    viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
+    text = ""
+    priority = "normal"
+    wantsAcknowledgement = false
+    isSilent = false
+    ReplyTarget.current.value = null
+    maybeSendLaterAt = null
+    onSent()
+  }
   var isConfirmingChannel by remember { mutableStateOf(false) }
   if (isConfirmingChannel) {
     AlertDialog(
@@ -1159,10 +1194,16 @@ internal fun Composer(
       confirmButton = {
         TextButton(onClick = {
           isConfirmingChannel = false
-          send()
+          val maybeAt = maybeSendLaterAt
+          if (maybeAt != null) schedule(maybeAt) else send()
         }) { Text(stringResource(R.string.send)) }
       },
-      dismissButton = { TextButton(onClick = { isConfirmingChannel = false }) { Text(stringResource(R.string.cancel)) } },
+      dismissButton = {
+        TextButton(onClick = {
+          isConfirmingChannel = false
+          maybeSendLaterAt = null
+        }) { Text(stringResource(R.string.cancel)) }
+      },
     )
   }
   val canSend = text.isNotBlank() || files.isNotEmpty()
@@ -1236,6 +1277,7 @@ internal fun Composer(
       text = text,
       onTextChange = {
         text = it
+        if (maybeScheduleAttempt?.first != it) maybeScheduleAttempt = null
         val now = System.currentTimeMillis()
         if (isSharingTyping && shouldNotifyTyping(it, now, maybeLastTypingAt)) {
           maybeLastTypingAt = now
@@ -1272,7 +1314,32 @@ internal fun Composer(
         maybeAlsoToChannel = alsoToChannel.takeIf { maybeThread != null },
         onAlsoToChannel = { alsoToChannel = it },
       )
+      SendLaterRow(
+        viewModel = viewModel,
+        canSchedule = text.isNotBlank() && files.isEmpty(),
+        hasFiles = files.isNotEmpty(),
+        onOpen = {
+          isOptionsOpen = false
+          isSendLaterOpen = true
+        },
+      )
     }
+  }
+  if (isSendLaterOpen) {
+    SendLaterSheet(
+      viewModel = viewModel,
+      onPick = { dueAtMs ->
+        isSendLaterOpen = false
+        val confirmOver = viewModel.confirmChannelOver().toUInt()
+        if (needsChannelConfirmation(text, members.size.toUInt(), confirmOver)) {
+          maybeSendLaterAt = dueAtMs
+          isConfirmingChannel = true
+        } else {
+          schedule(dueAtMs)
+        }
+      },
+      onDismiss = { isSendLaterOpen = false },
+    )
   }
 }
 

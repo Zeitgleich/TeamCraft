@@ -19,10 +19,12 @@ use teamcraft_proto::{
   GetMeResponse, IdentityKeyResponse, InviteId, KeyBagResponse, KeyPackageStatusResponse,
   ListAdminConversationsResponse, ListConversationMembersResponse, ListConversationsResponse,
   ListDevicesResponse, ListInvitesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
-  ListMlsMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, MessageResponse, MlsMessageResponse,
-  MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
-  RegisterDeviceRequest, SearchUsersResponse, SendMessageRequest, SpaceId, SpaceMemberResponse,
-  UpdateSpaceMemberRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
+  ListMlsMessagesResponse, ListScheduledMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse,
+  MessageResponse, MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse,
+  PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, ScheduleMessageRequest, ScheduledMessageId,
+  ScheduledMessageResponse, SearchUsersResponse, SendMessageRequest, SendScheduledMessageResponse, SpaceId,
+  SpaceMemberResponse, UpdateScheduledMessageRequest, UpdateSpaceMemberRequest, UploadIdentityKeyRequest,
+  UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{AdminJoinRequestResponse, ListAdminJoinRequestsResponse};
 use teamcraft_proto::{
@@ -1337,6 +1339,53 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn key_bag(&self) -> Result<KeyBagResponse, ApiError> {
     self.get("/me/key-bag").await
+  }
+
+  async fn schedule_message(
+    &self,
+    conversation: ConversationId,
+    request: &ScheduleMessageRequest,
+  ) -> Result<ScheduledMessageResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/scheduled-messages"),
+        request,
+      )
+      .await
+  }
+
+  async fn list_scheduled_messages(&self) -> Result<ListScheduledMessagesResponse, ApiError> {
+    self.get("/me/scheduled-messages").await
+  }
+
+  async fn update_scheduled_message(
+    &self,
+    id: ScheduledMessageId,
+    request: &UpdateScheduledMessageRequest,
+  ) -> Result<ScheduledMessageResponse, ApiError> {
+    self
+      .send_json(Method::PUT, &format!("/me/scheduled-messages/{id}"), request)
+      .await
+  }
+
+  async fn cancel_scheduled_message(&self, id: ScheduledMessageId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/me/scheduled-messages/{id}"), None)
+      .await
+  }
+
+  async fn send_scheduled_message(
+    &self,
+    id: ScheduledMessageId,
+  ) -> Result<SendScheduledMessageResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/me/scheduled-messages/{id}/send"),
+        &serde_json::json!({}),
+      )
+      .await
   }
 
   fn provider_tokens(&self) -> Option<super::ProviderTokens> {

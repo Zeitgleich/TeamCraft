@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use teamcraft_proto::ScheduledMessageId;
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   AttachmentId, BackgroundId, Base64Bytes, CallRosterEntry, CategoryId, HistoryPolicy, OrgBackgroundId,
@@ -32,6 +33,7 @@ use crate::model::{
   Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
+use crate::scheduled::ScheduledOverview;
 use crate::search::{SavedSearch, SearchHit, SearchResults};
 
 /// Event name the host emits whenever the local store changed (new messages, membership, presence).
@@ -840,6 +842,22 @@ pub enum ChatAction {
     maybe_thread: Option<ThreadId>,
     body: String,
   },
+  /// Keeps the message for `due_at` (server time, docs/scheduled-messages.md); it can't have files.
+  ScheduleMessage {
+    message: OutgoingMessage,
+    due_at: TimestampMs,
+  },
+  UpdateScheduled {
+    id: ScheduledMessageId,
+    body: String,
+    due_at: TimestampMs,
+  },
+  CancelScheduled {
+    id: ScheduledMessageId,
+  },
+  SendScheduledNow {
+    id: ScheduledMessageId,
+  },
   Acknowledge {
     conversation: ConversationId,
     message: MessageId,
@@ -1278,6 +1296,10 @@ impl ChatAction {
         maybe_thread,
         body,
       } => backend.set_draft(conversation, maybe_thread, &body),
+      Self::ScheduleMessage { message, due_at } => backend.schedule_message(message, due_at),
+      Self::UpdateScheduled { id, body, due_at } => backend.update_scheduled(id, &body, due_at),
+      Self::CancelScheduled { id } => backend.cancel_scheduled(id),
+      Self::SendScheduledNow { id } => backend.send_scheduled_now(id),
       Self::Acknowledge {
         conversation,
         message,
@@ -1496,6 +1518,8 @@ pub enum ChatQuery {
     conversation: ConversationId,
   },
   SavedItems,
+  /// [`ChatBackend::scheduled_overview`].
+  ScheduledMessages,
   BackgroundImages,
   OrgBackgrounds,
   Permalink {
@@ -1712,6 +1736,9 @@ pub enum ChatAnswer {
   SavedItems {
     items: Vec<SavedItem>,
   },
+  ScheduledMessages {
+    overview: ScheduledOverview,
+  },
   BackgroundImages {
     images: Vec<BackgroundImageInfo>,
   },
@@ -1872,6 +1899,9 @@ impl ChatQuery {
       },
       Self::SpaceSavedItems { space } => ChatAnswer::SavedItems {
         items: crate::space_scope::saved_items_of_space(backend, space),
+      },
+      Self::ScheduledMessages => ChatAnswer::ScheduledMessages {
+        overview: backend.scheduled_overview(),
       },
       Self::BackgroundImages => ChatAnswer::BackgroundImages {
         images: backend.background_images(),

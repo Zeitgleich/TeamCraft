@@ -214,6 +214,17 @@ impl Database {
     Ok(())
   }
 
+  /// Whether the conversation exists and isn't deleted, whoever asks.
+  pub async fn conversation_exists(&self, conversation: ConversationId) -> Result<bool, DbError> {
+    let maybe_found = sqlx::query_scalar!(
+      "SELECT id FROM conversations WHERE id = $1 AND deleted_at IS NULL",
+      to_db(conversation)
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(maybe_found.is_some())
+  }
+
   pub async fn get_conversation(
     &self,
     conversation: ConversationId,

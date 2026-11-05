@@ -34,7 +34,7 @@ use teamcraft_proto::{
   ConversationVisibility, Id, InviteId, JoinPolicy, ListConversationMembersResponse, ListInvitesResponse,
   MessageId, NotificationLevel, PresenceState, SpaceResponse, SpaceRole, UserKind, UserSummary,
 };
-use teamcraft_proto::{BackgroundId, OrgBackgroundId};
+use teamcraft_proto::{BackgroundId, OrgBackgroundId, ScheduledMessageId};
 use teamcraft_proto::{
   CategoryId, ConversationNotificationSettings, CreateSpaceRequest, EffectiveNotifications, HistoryPolicy,
   MoveChannelRequest, UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
@@ -42,6 +42,7 @@ use teamcraft_proto::{
 
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::receipts::{ReadIndicator, seen_by};
+use teamcraft_client_api::scheduled::ScheduledOverview;
 
 use crate::client::history_gaps::{Gap, read_record as read_gaps_record};
 use crate::client::older_history::{is_failure_current, older_history_record};
@@ -103,6 +104,22 @@ pub enum CoreCommand {
     conversation: ConversationId,
     maybe_thread: Option<ThreadId>,
     body: String,
+  },
+  /// "Send later" (docs/scheduled-messages.md): sealed here, held by the server.
+  ScheduleMessage {
+    message: OutgoingMessage,
+    due_at_ms: i64,
+  },
+  UpdateScheduled {
+    id: ScheduledMessageId,
+    body: String,
+    due_at_ms: i64,
+  },
+  CancelScheduled {
+    id: ScheduledMessageId,
+  },
+  SendScheduledNow {
+    id: ScheduledMessageId,
   },
   SaveSearch {
     id: u64,
@@ -2057,6 +2074,33 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       maybe_thread,
       body: body.to_string(),
     });
+  }
+
+  fn scheduled_overview(&self) -> ScheduledOverview {
+    self.ui_scheduled_overview()
+  }
+
+  fn schedule_message(&self, message: OutgoingMessage, due_at: TimestampMs) {
+    self.command(CoreCommand::ScheduleMessage {
+      message,
+      due_at_ms: due_at,
+    });
+  }
+
+  fn update_scheduled(&self, id: ScheduledMessageId, body: &str, due_at: TimestampMs) {
+    self.command(CoreCommand::UpdateScheduled {
+      id,
+      body: body.to_owned(),
+      due_at_ms: due_at,
+    });
+  }
+
+  fn cancel_scheduled(&self, id: ScheduledMessageId) {
+    self.command(CoreCommand::CancelScheduled { id });
+  }
+
+  fn send_scheduled_now(&self, id: ScheduledMessageId) {
+    self.command(CoreCommand::SendScheduledNow { id });
   }
 
   fn drafts(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::DraftItem> {

@@ -1178,6 +1178,26 @@ mod tests {
     );
   }
 
+  /// A scheduled message is sealed long before it arrives, and carries the head of that moment
+  /// (docs/scheduled-messages.md): a reader who moved on since finds nothing wrong with it.
+  #[test]
+  fn an_older_head_in_a_late_message_raises_nothing() {
+    let alice = Owner::new(1);
+    let mut state = WorkspaceState::default();
+    let sealed_with = state.head();
+    let first = roster(1, &[&alice], Some(1_000), &state);
+    state
+      .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+      .unwrap();
+    let older = WorkspaceHead {
+      maybe_roster_hash: Some(Base64Bytes::new(vec![9; 32])),
+      ..sealed_with
+    };
+    state.note_head(&older);
+    assert!(state.maybe_alarm.is_none());
+    assert!(state.maybe_ahead.is_none());
+  }
+
   mod last_owner {
     use super::*;
 

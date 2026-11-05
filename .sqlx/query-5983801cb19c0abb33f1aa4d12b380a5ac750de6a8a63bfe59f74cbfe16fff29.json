@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO message_client_ids (conversation_id, client_message_id, message_id)\n         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING message_id",
+  "query": "INSERT INTO message_client_ids (conversation_id, client_message_id, message_id)\n       VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING message_id",
   "describe": {
     "columns": [
       {
@@ -26,5 +26,5 @@
       false
     ]
   },
-  "hash": "89df7a0ac32eaee682c8d8dc9f10a680e82d799494cd504dbc0d93d0e622a2c6"
+  "hash": "5983801cb19c0abb33f1aa4d12b380a5ac750de6a8a63bfe59f74cbfe16fff29"
 }

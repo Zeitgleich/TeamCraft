@@ -240,6 +240,7 @@ struct ChatAnswer: Decodable, Sendable {
   var calls: [CallHistoryItem]?
   var roster: SpaceRoster?
   var items: [SavedItem]?
+  var overview: ScheduledOverview?
   var drafts: [DraftItem]?
   var sent: [SentItem]?
 }

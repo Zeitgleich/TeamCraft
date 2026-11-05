@@ -400,6 +400,90 @@ mod what_comes_back {
   }
 }
 
+/// `/v1/info` lists what a gateway delivers (its api.md): a kind it doesn't list isn't sent, so an
+/// older gateway means no wake to seal scheduled messages, not a refused request for each.
+mod kinds {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_gateway_without_the_kind_gets_no_request_and_it_is_no_error_to_retry() {
+    let stack = Stack::start().await;
+    for _ in 0..3 {
+      let outcome = deliver(
+        &stack,
+        PushProvider::Fcm,
+        "fcm-token",
+        PushKind::ScheduledSeal,
+        Urgency::High,
+      )
+      .await;
+      assert!(matches!(outcome, Err(PushError::NotConfigured)), "{outcome:?}");
+    }
+    assert_eq!(stack.fake.push_attempts(), 0);
+    assert_eq!(stack.fake.info_reads(), 1, "read once, not per push");
+  }
+
+  #[tokio::test]
+  async fn a_gateway_that_lists_it_gets_it() {
+    let stack = Stack::start().await;
+    stack.fake.offer_seal();
+    deliver(
+      &stack,
+      PushProvider::Fcm,
+      "fcm-token",
+      PushKind::ScheduledSeal,
+      Urgency::High,
+    )
+    .await
+    .unwrap();
+    let pushes = stack.fake.wait_for(1).await;
+    assert_eq!(pushes[0].request.kind, PushKind::ScheduledSeal);
+    assert_eq!(pushes[0].request.urgency, GatewayUrgency::High);
+  }
+
+  /// Without a list the kind isn't refused for good: the retry queue sends it once the gateway answers.
+  #[tokio::test]
+  async fn an_unreadable_list_makes_it_wait_not_vanish() {
+    let stack = Stack::start().await;
+    stack.fake.offer_seal();
+    stack.fake.set_info_down(true);
+    let outcome = deliver(
+      &stack,
+      PushProvider::Fcm,
+      "fcm-token",
+      PushKind::ScheduledSeal,
+      Urgency::High,
+    )
+    .await;
+    assert!(
+      matches!(
+        outcome,
+        Err(PushError::Unavailable {
+          maybe_retry_after: Some(_),
+          ..
+        })
+      ),
+      "{outcome:?}"
+    );
+    assert_eq!(stack.fake.push_attempts(), 0);
+  }
+
+  #[tokio::test]
+  async fn the_older_kinds_don_t_need_the_list() {
+    let stack = Stack::start().await;
+    deliver(
+      &stack,
+      PushProvider::Fcm,
+      "fcm-token",
+      PushKind::Message,
+      Urgency::High,
+    )
+    .await
+    .unwrap();
+    assert_eq!(stack.fake.info_reads(), 0);
+  }
+}
+
 pub(crate) struct Stack {
   pub(crate) fake: FakeGateway,
   pub(crate) client: std::sync::Arc<GatewayClient>,

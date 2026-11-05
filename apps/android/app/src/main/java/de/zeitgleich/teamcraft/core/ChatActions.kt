@@ -32,6 +32,8 @@ data class SendOptions(
   val isSilent: Boolean = false,
   val alsoSendToChannel: Boolean = false,
   val files: List<PickedFile> = emptyList(),
+  /** Chosen by the composer when a retry must be the same message (a scheduled one). */
+  val maybeClientMessageId: String? = null,
 )
 
 /**
@@ -40,34 +42,50 @@ data class SendOptions(
  */
 object ChatActions {
   fun send(conversation: String, body: String, options: SendOptions = SendOptions()): String = action("send_message") {
+    put("message", outgoing(conversation, body, options))
+  }
+
+  /** Keeps the message for [dueAtMs] (server time, docs/scheduled-messages.md); it can't have files. */
+  fun schedule(conversation: String, body: String, options: SendOptions, dueAtMs: Long) = action("schedule_message") {
+    put("message", outgoing(conversation, body, options))
+    put("due_at", dueAtMs)
+  }
+
+  fun updateScheduled(id: String, body: String, dueAtMs: Long) = action("update_scheduled") {
+    put("id", id)
+    put("body", body)
+    put("due_at", dueAtMs)
+  }
+
+  fun cancelScheduled(id: String) = action("cancel_scheduled") { put("id", id) }
+
+  fun sendScheduledNow(id: String) = action("send_scheduled_now") { put("id", id) }
+
+  private fun outgoing(conversation: String, body: String, options: SendOptions) = buildJsonObject {
+    put("conversation", conversation)
+    options.maybeClientMessageId?.let { put("maybe_client_message_id", it) }
+    put("maybe_thread", options.maybeThread.json())
+    put("body", body)
+    put("maybe_reply_to", options.maybeReplyTo.json())
+    put("maybe_reply_attachment", options.maybeReplyAttachment.json())
+    put("priority", options.priority)
+    put("wants_acknowledgement", options.wantsAcknowledgement)
+    put("is_silent", options.isSilent)
+    put("also_send_to_channel", options.alsoSendToChannel)
     put(
-      "message",
-      buildJsonObject {
-        put("conversation", conversation)
-        put("maybe_thread", options.maybeThread.json())
-        put("body", body)
-        put("maybe_reply_to", options.maybeReplyTo.json())
-        put("maybe_reply_attachment", options.maybeReplyAttachment.json())
-        put("priority", options.priority)
-        put("wants_acknowledgement", options.wantsAcknowledgement)
-        put("is_silent", options.isSilent)
-        put("also_send_to_channel", options.alsoSendToChannel)
-        put(
-          "files",
-          buildJsonArray {
-            options.files.forEach { file ->
-              add(
-                buildJsonObject {
-                  put("file_name", file.fileName)
-                  put("media_type", file.mediaType)
-                  put("source", buildJsonObject { put("kind", "path"); put("path", file.path) })
-                  file.maybeDurationMs?.let { put("duration_ms", it) }
-                  file.maybeWaveform?.let { waveform -> put("waveform", buildJsonArray { waveform.forEach { add(JsonPrimitive(it)) } }) }
-                },
-              )
-            }
-          },
-        )
+      "files",
+      buildJsonArray {
+        options.files.forEach { file ->
+          add(
+            buildJsonObject {
+              put("file_name", file.fileName)
+              put("media_type", file.mediaType)
+              put("source", buildJsonObject { put("kind", "path"); put("path", file.path) })
+              file.maybeDurationMs?.let { put("duration_ms", it) }
+              file.maybeWaveform?.let { waveform -> put("waveform", buildJsonArray { waveform.forEach { add(JsonPrimitive(it)) } }) }
+            },
+          )
+        }
       },
     )
   }
@@ -283,6 +301,8 @@ object ChatQueries {
   fun spaceCallHistory(space: String) = query("space_call_history") { put("space", space) }
 
   fun spaceMembers(space: String) = query("space_members") { put("space", space) }
+
+  fun scheduledMessages() = query("scheduled_messages") {}
 
   fun permalink(conversation: String, message: String) = query("permalink") {
     put("conversation", conversation)

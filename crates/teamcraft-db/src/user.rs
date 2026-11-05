@@ -224,6 +224,14 @@ impl Database {
     Ok(())
   }
 
+  /// The role the user's last sign-in brought, for a decision made with nobody signed in.
+  pub async fn last_oidc_role(&self, id: UserId) -> Result<Option<String>, DbError> {
+    let maybe_role = sqlx::query_scalar!("SELECT oidc_role FROM users WHERE id = $1", to_db(id))
+      .fetch_optional(self.pool())
+      .await?;
+    Ok(maybe_role.flatten())
+  }
+
   pub async fn get_user(&self, id: UserId) -> Result<Option<User>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, username, display_name, kind, created_at, organization,

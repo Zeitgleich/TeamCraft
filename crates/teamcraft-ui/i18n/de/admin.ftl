@@ -924,6 +924,12 @@ roster-signing-reported-gone = Der Server meldet, dass { $names } keine Admin-Ro
 roster-signing-awaiting-owner = Der Identity Provider macht dich zum Eigentümer. Das gilt, sobald die App eines anderen Eigentümers geöffnet war. Ist kein anderer Eigentümer mehr da, bitte deinen Betreiber, dem früheren Eigentümer die Rolle kurz zurückzugeben.
 roster-standing-expired-ask-unnamed = Seit 30 Tagen hat kein Eigentümer die Admin-Liste signiert, daher ruhen die Admin-Rechte in allen Apps. Ein Eigentümer muss nur TeamCraft auf einem Gerät mit seinen Schlüsseln öffnen.
 
+policy-scheduled = Geplante Nachrichten
+policy-scheduled-hint = Der Server hebt sie verschlüsselt auf und gibt sie zu ihrer Zeit frei, egal ob die Geräte der Verfassenden an sind. Er setzt diese Regel durch.
+policy-scheduled-enabled = Nachrichten dürfen geplant werden
+policy-scheduled-enabled-hint = Aus: „Später senden“ verschwindet, und schon geplante Nachrichten gehen nicht von selbst raus: Sie warten, bis ihre Besitzer sie senden oder verwerfen.
+policy-scheduled-horizon = Wie weit im Voraus
+policy-scheduled-cap = Wartende Nachrichten pro Person
 admin-channel-restore = Wiederherstellen
 admin-channel-archive-confirm = Diesen Kanal für alle archivieren? Mitglieder können ihn weiter lesen, aber niemand kann schreiben, und er verschwindet aus ihren Listen. Nichts wird gelöscht, und du kannst ihn hier wiederherstellen.
 admin-guests-filter = Anzeigen

@@ -2494,3 +2494,228 @@ mod diagnostics {
     app.stop().await;
   }
 }
+
+/// The wake to seal scheduled messages again (docs/scheduled-messages.md): a commit with messages
+/// waiting wakes their sender, nothing else does, and a burst makes one push.
+mod wake_to_seal {
+  use time::{Duration as TimeDuration, OffsetDateTime};
+
+  use super::*;
+
+  async fn schedule(app: &TestApp, s: &Scene, n: u8, in_seconds: i64) {
+    let due_at = OffsetDateTime::now_utc() + TimeDuration::seconds(in_seconds);
+    let reply = app
+      .post(
+        &s.alice,
+        &format!("/conversations/{}/scheduled-messages", s.channel),
+        json!({
+          "client_message_id": client_id(n),
+          "sealed": {"device_id": s.alice_device, "content_key_id": "a2V5", "ciphertext": "eA==", "mls_epoch": epoch(app, s).await},
+          "due_at": i64::try_from(due_at.unix_timestamp_nanos() / 1_000_000).unwrap(),
+        }),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+  }
+
+  async fn epoch(app: &TestApp, s: &Scene) -> u64 {
+    let conversation = s.channel.parse().unwrap();
+    app.state.database.current_epoch(conversation).await.unwrap()
+  }
+
+  async fn commit(app: &TestApp, s: &Scene) {
+    let current = epoch(app, s).await;
+    let reply = app
+      .post(
+        &s.carol,
+        &format!("/conversations/{}/mls/commits", s.channel),
+        json!({"device_id": s.carol_push_device, "epoch": current, "commit": "Y29tbWl0", "welcomes": []}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+  }
+
+  fn seal_wakes(seen: &[Recorded]) -> Vec<Recorded> {
+    seen
+      .iter()
+      .filter(|push| push.wake_up.kind == PushKind::ScheduledSeal)
+      .cloned()
+      .collect()
+  }
+
+  #[tokio::test]
+  async fn a_commit_with_a_message_waiting_wakes_its_sender_with_nothing_to_read() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    schedule(&app, &s, 1, 3600).await;
+    commit(&app, &s).await;
+
+    let seen = seal_wakes(&recorder.wait_for(1).await);
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].device, s.alice_device);
+    assert_eq!(seen[0].wake_up.conversation_id.to_string(), s.channel);
+    assert_eq!(seen[0].wake_up.maybe_message_id, None);
+    assert_eq!(seen[0].wake_up.maybe_sender_id, None);
+  }
+
+  #[tokio::test]
+  async fn a_commit_without_any_wakes_nobody() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    commit(&app, &s).await;
+    assert!(seal_wakes(&recorder.wait_for(1).await).is_empty());
+  }
+
+  #[tokio::test]
+  async fn somebody_who_left_isn_t_woken() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    let due_at = OffsetDateTime::now_utc() + TimeDuration::seconds(3600);
+    let scheduled = app
+      .post(
+        &s.carol,
+        &format!("/conversations/{}/scheduled-messages", s.channel),
+        json!({
+          "client_message_id": client_id(1),
+          "sealed": {"device_id": s.carol_push_device, "content_key_id": "a2V5", "ciphertext": "eA==", "mls_epoch": epoch(&app, &s).await},
+          "due_at": i64::try_from(due_at.unix_timestamp_nanos() / 1_000_000).unwrap(),
+        }),
+      )
+      .await;
+    assert_eq!(scheduled.status, StatusCode::OK, "{}", scheduled.body);
+    let carol_id = user_id(&app, &s.carol).await;
+    let left = app
+      .delete(
+        &s.carol,
+        &format!("/conversations/{}/members/{carol_id}", s.channel),
+      )
+      .await;
+    assert_eq!(left.status, StatusCode::NO_CONTENT, "{}", left.body);
+    let current = epoch(&app, &s).await;
+    let reply = app
+      .post(
+        &s.alice,
+        &format!("/conversations/{}/mls/commits", s.channel),
+        json!({"device_id": s.alice_device, "epoch": current, "commit": "Y29tbWl0", "welcomes": []}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert!(seal_wakes(&recorder.wait_for(1).await).is_empty());
+  }
+
+  #[tokio::test]
+  async fn a_burst_of_commits_makes_one_push() {
+    let recorder = Recorder::default();
+    let Some(app) = TestApp::start_with_push(
+      |settings| settings.push.scheduled_wake_coalesce = Duration::from_millis(400),
+      recorder.dispatcher(),
+    )
+    .await
+    else {
+      return;
+    };
+    let s = scene(&app).await;
+    schedule(&app, &s, 1, 3600).await;
+    schedule(&app, &s, 2, 3600).await;
+    for _ in 0..5 {
+      commit(&app, &s).await;
+    }
+    assert_eq!(seal_wakes(&recorder.wait_for(1).await).len(), 1);
+  }
+
+  #[tokio::test]
+  async fn after_a_wake_the_next_one_waits_for_the_minimum_interval() {
+    let recorder = Recorder::default();
+    let Some(app) = TestApp::start_with_push(
+      |settings| settings.push.scheduled_wake_min_interval = Duration::from_secs(3600),
+      recorder.dispatcher(),
+    )
+    .await
+    else {
+      return;
+    };
+    let s = scene(&app).await;
+    schedule(&app, &s, 1, 7200).await;
+    commit(&app, &s).await;
+    assert_eq!(seal_wakes(&recorder.wait_for(1).await).len(), 1);
+    commit(&app, &s).await;
+    assert_eq!(seal_wakes(&recorder.wait_for(2).await).len(), 1);
+  }
+
+  /// A wake that got lost: shortly before its time the scheduler asks once more, once per version.
+  #[tokio::test]
+  async fn the_last_stretch_wakes_again_after_a_pause_without_a_commit() {
+    let recorder = Recorder::default();
+    let Some(app) = TestApp::start_with_push(
+      |settings| settings.push.scheduled_wake_min_interval = Duration::ZERO,
+      recorder.dispatcher(),
+    )
+    .await
+    else {
+      return;
+    };
+    let s = scene(&app).await;
+    schedule(&app, &s, 1, 3600).await;
+    commit(&app, &s).await;
+    assert_eq!(seal_wakes(&recorder.wait_for(1).await).len(), 1);
+
+    let run_due = teamcraft_server::services::scheduled_messages::run_due;
+    let soon = OffsetDateTime::now_utc() + TimeDuration::seconds(3600 - 14 * 60);
+    run_due(&app.state, soon).await.unwrap();
+    assert_eq!(seal_wakes(&recorder.wait_for(2).await).len(), 2);
+    run_due(&app.state, soon + TimeDuration::seconds(5))
+      .await
+      .unwrap();
+    assert_eq!(
+      seal_wakes(&recorder.wait_for(3).await).len(),
+      2,
+      "not on every run"
+    );
+    // The wake may have been lost: once more after the pause.
+    run_due(&app.state, soon + TimeDuration::seconds(5 * 60 + 5))
+      .await
+      .unwrap();
+    assert_eq!(seal_wakes(&recorder.wait_for(3).await).len(), 3);
+  }
+
+  #[tokio::test]
+  async fn held_for_an_old_epoch_it_wakes_again_hourly() {
+    let recorder = Recorder::default();
+    let Some(app) = TestApp::start_with_push(
+      |settings| settings.push.scheduled_wake_min_interval = Duration::ZERO,
+      recorder.dispatcher(),
+    )
+    .await
+    else {
+      return;
+    };
+    let s = scene(&app).await;
+    schedule(&app, &s, 1, 60).await;
+    commit(&app, &s).await;
+    assert_eq!(seal_wakes(&recorder.wait_for(1).await).len(), 1);
+
+    let run_due = teamcraft_server::services::scheduled_messages::run_due;
+    let due = OffsetDateTime::now_utc() + TimeDuration::seconds(61);
+    run_due(&app.state, due).await.unwrap();
+    assert_eq!(
+      seal_wakes(&recorder.wait_for(2).await).len(),
+      2,
+      "held at its time"
+    );
+    run_due(&app.state, due + TimeDuration::seconds(5)).await.unwrap();
+    assert_eq!(seal_wakes(&recorder.wait_for(3).await).len(), 2);
+    run_due(&app.state, due + TimeDuration::seconds(3600 + 5))
+      .await
+      .unwrap();
+    assert_eq!(seal_wakes(&recorder.wait_for(3).await).len(), 3);
+  }
+}

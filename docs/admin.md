@@ -1065,6 +1065,10 @@ by the server alone (the server sends the mail, checks the sizes, applies invite
 server could ignore these settings whether they were signed or not, so a signature would protect
 nothing. Brands, mail and calendar are server-side presentation and transport for the same reason.
 
+"Scheduled messages" under People (signed policy, `scheduled_messages`): whether people may schedule, how
+far ahead, and how many messages one person can have waiting. The server holds these messages encrypted
+and enforces this; docs/scheduled-messages.md.
+
 ### 6.4 What deliberately stays in the configuration file
 
 | Setting                                                           | Why                                                                                                  |
