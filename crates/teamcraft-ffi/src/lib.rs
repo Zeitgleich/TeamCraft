@@ -61,14 +61,14 @@ use teamcraft_core::device_activity::ActivityReports;
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
-  AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
-  ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem, LeaveChoice,
-  LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem, MessagePage, NetworkInterception,
-  NetworkProxy, NotificationAttachmentKind, NotificationContent, NotificationContentSettings,
-  NotificationGap, NotificationSuppression, NotifiedConversation, NotifiedMessage, OrgRecoveryStart,
-  PendingWorkItem, PlaceholderItem, Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind,
-  PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, SpaceMenuItem,
-  StoreProblem, TestPushOutcome, TestPushResult,
+  AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ChatPreviewItem, ConnectionState,
+  ConversationItem, ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem,
+  LeaveChoice, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem, MessagePage,
+  NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
+  NotificationContentSettings, NotificationGap, NotificationSuppression, NotifiedConversation,
+  NotifiedMessage, OrgRecoveryStart, PendingWorkItem, PlaceholderItem, Presence, PushDiagnosticsInfo,
+  PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode,
+  SegmentPrefetchResult, SpaceMenuItem, StoreProblem, TestPushOutcome, TestPushResult,
 };
 
 pub use video::{CameraFrame, VideoFrameRgba};
@@ -456,6 +456,19 @@ impl TeamCraft {
   /// issue #888); `None` while nothing waits. Read again after each change notification.
   pub async fn key_catch_up(&self) -> Result<Option<KeyCatchUpItem>, TeamCraftError> {
     self.read(|reads| reads.key_catch_up()).await
+  }
+
+  /// The line under each conversation of a chat list, in one read for the whole list: the newest
+  /// message people wrote, skipping system lines (joins, renames) where a written one is close by.
+  /// Conversations without messages are left out. Unlike [`Self::messages`] it doesn't move the
+  /// catch-up focus: listing a conversation isn't opening it.
+  pub async fn chat_previews(
+    &self,
+    conversation_ids: Vec<String>,
+  ) -> Result<Vec<ChatPreviewItem>, TeamCraftError> {
+    self
+      .read(move |reads| reads.chat_previews(&conversation_ids))
+      .await
   }
 
   /// The newest `limit` top-level messages, oldest first.

@@ -353,6 +353,15 @@ pub struct MessagePage {
   pub has_older: bool,
 }
 
+/// The line under a conversation in the chat lists ([`crate::TeamCraft::chat_previews`]).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChatPreviewItem {
+  pub conversation_id: String,
+  /// The newest message people wrote, or the newest system line when the conversation's last rows
+  /// are all system lines.
+  pub message: MessageItem,
+}
+
 /// The system events of [`MessageItem::maybe_system_event`]; the message's author is who joined,
 /// left, renamed or changed the topic (issue #769).
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]

@@ -6,7 +6,7 @@
 //! app's sync task drains and runs against the server. After either, the sync task flushes.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use teamcraft_client_api::actions::{
@@ -701,6 +701,28 @@ impl<S: LocalStore> CoreChatBackend<S> {
   pub(crate) fn summaries(&self) -> BTreeMap<UserId, UserSummary> {
     let list: Vec<UserSummary> = self.read(records::list_json(&self.store, Table::Users));
     list.into_iter().map(|user| (user.id, user)).collect()
+  }
+
+  /// The conversations of `spaces` and every direct message, in one pass over the store, in the
+  /// store's order. For the mobile apps' lists: asking per space read and decrypted every
+  /// conversation and user record once per space.
+  pub fn listed_conversations(&self, spaces: &BTreeSet<SpaceId>) -> Vec<Conversation> {
+    let users = self.summaries();
+    let preferences = self.mention_preferences();
+    self
+      .conversations_raw()
+      .iter()
+      .filter(|conversation| {
+        conversation
+          .maybe_space_id
+          .is_some_and(|space| spaces.contains(&space))
+          || matches!(
+            conversation.kind,
+            ConversationKindProto::Dm | ConversationKindProto::Group
+          )
+      })
+      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
+      .collect()
   }
 
   pub(crate) fn conversations_raw(&self) -> Vec<ConversationResponse> {
