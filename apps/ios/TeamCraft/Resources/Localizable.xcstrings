@@ -10776,6 +10776,22 @@
           }
         }
       }
+    },
+    "source_sender %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ (bot)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ (Bot)"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

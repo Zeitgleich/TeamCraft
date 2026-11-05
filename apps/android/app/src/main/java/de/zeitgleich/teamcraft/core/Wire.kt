@@ -102,6 +102,12 @@ data class Bookmark(
 data class Reaction(val emoji: String, val count: Int, @SerialName("reacted_by_me") val reactedByMe: Boolean = false)
 
 @Serializable
+data class MessageSource(
+  val name: String,
+  @SerialName("picture_sha256") val maybePictureSha256: String? = null,
+)
+
+@Serializable
 data class Message(
   val id: String,
   val conversation: String,
@@ -120,6 +126,11 @@ data class Message(
    * empty then; the core replaces the row once it is readable.
    */
   @SerialName("placeholder") val maybePlaceholder: String? = null,
+  /**
+   * Posted by an integration source: shown with this name, marked as a bot, and picture instead of
+   * the account's (docs/bridge.md, "Source identity"). The core sets it on a bot's message only.
+   */
+  @SerialName("source") val maybeSource: MessageSource? = null,
 ) {
   /** Outbox messages carry the pending bit in their ID until the server accepted them. */
   val isPending: Boolean get() = (id.toLongOrNull() ?: 0L) and PENDING_ID_BIT != 0L

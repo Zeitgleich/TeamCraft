@@ -1039,7 +1039,7 @@ impl ChatBackend for MockBackend {
       .collect();
     Some(LinkedMessage::Visible {
       target,
-      message,
+      message: Box::new(message),
       files,
     })
   }

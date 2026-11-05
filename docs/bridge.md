@@ -30,7 +30,8 @@ the VPS that runs the server.
 docs/operations.md, "Metrics"). Source tokens never appear in it.
 
   `icon_url`, `channel` and blocks of the Slack format are ignored: the source's token decides the
-  conversation. Slack markup (`<url|label>`, `<@user>`, `<!here>`) becomes Markdown. A source added
+  conversation. `username` stays a bold line in the message's text and never changes who the message
+  says it is from (see "Source identity"). Slack markup (`<url|label>`, `<@user>`, `<!here>`) becomes Markdown. A source added
   in the app opens one of the two endpoints (its kind); a token on the other one gets `404`.
 
 ```sh
@@ -345,6 +346,7 @@ reads them from the channel itself (e2ee.md §13.1):
 3. "Revoke" sends another control message; the token stops working as soon as the bridge read it,
    and a revoked source never comes back. The list shows the sources in force with who added them
    and when; to replace a leaked URL, revoke the source and add a new one.
+4. "Rename" and "Set picture" send control messages too (see "Source identity"); the URL stays.
 
 Who may: **workspace admins** of the verified roster (admin.md §2.3). Channel roles are signed
 now (e2ee.md §4.6.1), but channel admins don't count here, for the reasons in e2ee.md §13.1.1
@@ -364,6 +366,42 @@ is added (the app offers "Add source" only then): a bot added later reads histor
 When its database is new or was lost, the bridge reads the channels' older history once
 (`[app_sources] history_pages`, 200 pages of 50 messages) for older announcements; sources older than
 that have to be added again.
+
+### Source identity
+
+One bot serves many sources, so a message says which one posted it: in a channel with a hotline and CI
+the two look different, without one bridge per name. People see the source's name and picture, always
+with the bot badge.
+
+| Where the name shows                          | How it stays marked as a bot                                |
+|-----------------------------------------------|-------------------------------------------------------------|
+| Message, log row, search hit (web, desktop)   | The `BOT` badge beside the name                             |
+| Notification, activity                        | "Hotline (bot)"                                             |
+| Android and iOS: bubble, search, notification | "Hotline (bot)"                                             |
+| Profile and hover card of the name            | The bot's own account: a click tells which bot it really is |
+
+- **In the message.** The bridge adds the source's ID, name and the SHA-256 of its picture to the
+  encrypted metadata of each message (`SourceIdentity`). The server sees none of it (e2ee.md §13.1).
+- **Rename and picture** are per source, under Channel settings → Integrations → Sources, for whoever
+  manages sources. New messages show the change as soon as the bridge read it; **older messages keep
+  what they said**, like a name on a sent letter. Messages from before this feature keep the bot's
+  name, and so does an older client.
+- **A webhook's `username` can't override the name.** The token is a URL that often sits in a CI
+  secret or in some tool's settings; the name is what an admin chose. Letting whoever holds the URL
+  pick a name per message would give up that difference for little gain, so `username` stays in the
+  body as a bold line, where it always was. To tell two senders apart, give each its own source.
+- **The picture** is a small PNG, at most 32 KiB and 256 pixels a side. The app crops it and scales it
+  down to fit (128 px, then smaller). It lives in the encrypted control message, and in each device's
+  encrypted store by its hash, so it costs no server storage and shows offline.
+- **Devices that never read the announcement** (a device linked later, a log channel whose retention
+  removed it) still see the name, since each message carries it, and get the picture with the source's
+  first message after a bridge start or a change, then once a day. Until then, or for a source of the
+  bridge's file (which has none), they show the bot's picture.
+- **The bot's picture** is the fallback. Admins set it in the admin console → Integrations
+  (`PUT /api/v1/admin/bots/{id}/avatar`); it is an ordinary profile picture, which the server sees and
+  re-encodes. Without one, the source's initials show.
+- A source of the file shows its `name` from the file and the bot's picture.
+- Log lines are batched per source, so two sources in a channel never share a message and a name.
 
 **Sources in the file.** A bridge on its own host may still list `[[sources]]` (token, conversation,
 mentions) in its configuration, read at start; they serve both endpoints. `[app_sources] enabled =
@@ -388,6 +426,7 @@ without the bridge role the instance's host name has no `/hooks/` route.
 | Create          | `POST /api/v1/admin/bots` (admins); the token is returned once, only its SHA-256 is stored                                                                 |
 | Authenticate    | `Authorization: Bearer tcb_...` on the REST API and in the gateway `identify`                                                                              |
 | Permissions     | Those of a guest: sees only the conversations it was added to                                                                                              |
+| Picture         | `PUT` and `DELETE /admin/bots/{id}/avatar` (admins): the fallback of its sources, see "Source identity"                                                    |
 | Rotate / revoke | `POST /admin/bots/{id}/token` (old token dies at once), `DELETE /admin/bots/{id}` (deactivates the account and removes it from all chats: devices removed, sessions ended) |
 
 A token is a long random string that the server can revoke, so there is no identity provider client
@@ -413,11 +452,13 @@ loopback only: `-p 127.0.0.1:8088:8088`.
   `files.max_files_per_message` unless their options say otherwise.
 - `[[sources]]` in the configuration file are read at start; changing one needs a restart. Sources
   added in the app don't.
-- Sources added in the app have no alert mentions yet (the file's `mentions` has no app equivalent)
-  and no rename in the UI (the control message exists).
+- Sources added in the app have no alert mentions yet (the file's `mentions` has no app equivalent).
 - Channel membership of the bot is managed by members/admins, as for any user; the bridge never
   adds itself.
-- The bot list shows no last-activity time and bots have no picture yet.
+- The bot list shows no last-activity time.
+- The apps show a source's name and picture but don't manage sources; that is web and desktop.
+- A quote of a source's message and the picture viewer name the bot, not the source, and the channel
+  list's last-message line on Android too. A bot's name needs no badge there: it is the account's.
 
 ## Reading a log channel
 

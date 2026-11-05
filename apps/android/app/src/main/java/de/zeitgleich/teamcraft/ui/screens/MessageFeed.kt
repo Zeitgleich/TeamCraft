@@ -138,6 +138,7 @@ import de.zeitgleich.teamcraft.ui.MarkupColors
 import de.zeitgleich.teamcraft.ui.MentionNames
 import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.Pictures
+import de.zeitgleich.teamcraft.ui.SourceAvatar
 import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
 import de.zeitgleich.teamcraft.ui.bubbleCorners
@@ -847,7 +848,9 @@ private fun MessageRow(
       if (showsSender) {
         // The avatar sits by the group's last bubble; the others keep its room so bubbles line up.
         Box(Modifier.size(AVATAR_SIZE)) {
-          if (entry.isGroupEnd) SenderAvatar(maybeAuthor, snapshot?.name(message.author).orEmpty())
+          if (entry.isGroupEnd) {
+            SenderAvatar(maybeAuthor, message.maybeSource?.name ?: snapshot?.name(message.author).orEmpty(), message)
+          }
         }
         Spacer(Modifier.width(AVATAR_GAP))
       } else if (!isMine) {
@@ -902,7 +905,9 @@ private fun Bubble(
       val textPadding = Modifier.padding(horizontal = BUBBLE_TEXT_PADDING_H - BUBBLE_MEDIA_PADDING)
       if (showsName) {
         Text(
-          snapshot?.name(message.author).orEmpty(),
+          // A source's name always says it's a bot.
+          message.maybeSource?.let { stringResource(R.string.source_sender, it.name) }
+            ?: snapshot?.name(message.author).orEmpty(),
           style = MaterialTheme.typography.titleSmall,
           color = nameColor(snapshot?.user(message.author)),
           maxLines = 1,
@@ -1110,20 +1115,28 @@ private fun nameColor(maybeUser: User?): Color {
 
 /** A round avatar: the sender's picture, or their initial on their hue. */
 @Composable
-private fun SenderAvatar(maybeUser: User?, name: String) {
+private fun SenderAvatar(maybeUser: User?, name: String, message: Message) {
   val hue = (maybeUser?.avatarHue ?: 0).mod(360).toFloat()
-  UserAvatar(maybeUser?.id, Modifier.size(AVATAR_SIZE)) {
-    Box(
-      Modifier.size(AVATAR_SIZE).background(Color.hsl(hue, AVATAR_SATURATION, AVATAR_LIGHTNESS), CircleShape),
-      contentAlignment = Alignment.Center,
-    ) {
-      Text(
-        name.firstOrNull()?.uppercase() ?: "?",
-        style = MaterialTheme.typography.labelLarge,
-        color = Color.White,
-        modifier = Modifier.clearAndSetSemantics {},
-      )
+  val account: @Composable () -> Unit = {
+    UserAvatar(maybeUser?.id, Modifier.size(AVATAR_SIZE)) {
+      Box(
+        Modifier.size(AVATAR_SIZE).background(Color.hsl(hue, AVATAR_SATURATION, AVATAR_LIGHTNESS), CircleShape),
+        contentAlignment = Alignment.Center,
+      ) {
+        Text(
+          name.firstOrNull()?.uppercase() ?: "?",
+          style = MaterialTheme.typography.labelLarge,
+          color = Color.White,
+          modifier = Modifier.clearAndSetSemantics {},
+        )
+      }
     }
+  }
+  val maybeSourcePicture = message.maybeSource?.maybePictureSha256
+  if (maybeSourcePicture != null) {
+    SourceAvatar(message.conversation, maybeSourcePicture, Modifier.size(AVATAR_SIZE), account)
+  } else {
+    account()
   }
 }
 

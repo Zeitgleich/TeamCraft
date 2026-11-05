@@ -33,7 +33,10 @@ struct NotificationContentBuilder {
     let tag = NotificationAuthenticator().tag(for: notification.conversationId)
     let text = NotificationText(
       maybeConversationName: notification.maybeConversationName,
-      maybeSenderName: notification.maybeSenderName,
+      // A source's name always says it's a bot.
+      maybeSenderName: notification.maybeSenderName.map {
+        notification.isSenderSource ? strings.sourceSender($0) : $0
+      },
       maybeText: notification.maybeText,
       maybeFileName: notification.maybeFileName,
       maybeAttachmentKind: notification.maybeAttachmentKind,
@@ -196,6 +199,7 @@ struct NotificationStrings {
   let fileText: (String) -> String
   let attachmentText: (NotificationAttachmentKind) -> String
   let newMessageFrom: (String) -> String
+  var sourceSender: (String) -> String = { $0 }
   let callTitle: String
   let callFrom: (String) -> String
   let callUnknown: String
@@ -216,6 +220,7 @@ struct NotificationStrings {
         }
       },
       newMessageFrom: { String(localized: "notification_new_message_from \($0)") },
+      sourceSender: { String(localized: "source_sender \($0)") },
       callTitle: String(localized: "notification_call_title"),
       callFrom: { String(localized: "notification_call_from \($0)") },
       callUnknown: String(localized: "notification_call_unknown"),

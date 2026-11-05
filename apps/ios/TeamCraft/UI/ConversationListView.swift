@@ -579,7 +579,7 @@ struct SearchResultsView: View {
         Button { onSelect(hit) } label: {
           VStack(alignment: .leading, spacing: 2) {
             Text(hit.conversationName).font(.caption).foregroundStyle(Theme.textMuted)
-            Text(hit.message.authorName).font(.subheadline.weight(.semibold))
+            Text(verbatim: hit.message.shownAuthorName).font(.subheadline.weight(.semibold))
             Text(hit.message.body).lineLimit(3)
           }
         }

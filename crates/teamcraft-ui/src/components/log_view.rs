@@ -62,7 +62,7 @@ pub struct Scan {
 pub struct ScanEntry {
   pub sent_at: TimestampMs,
   pub author: UserId,
-  pub maybe_source: Option<teamcraft_client_api::model::MessageSource>,
+  pub maybe_source: Option<Box<teamcraft_client_api::model::MessageSource>>,
   pub entry: LogEntry,
 }
 
@@ -221,7 +221,7 @@ fn FilteredLog(
           let time = format_time_seconds(found.sent_at, locale);
           log_entry_line(
             &time,
-            &log_author(found.author, found.maybe_source.as_ref()),
+            &log_author(found.author, found.maybe_source.as_deref()),
             &found.entry,
             &class,
             found.sent_at,

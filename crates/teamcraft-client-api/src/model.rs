@@ -771,7 +771,7 @@ pub struct Message {
   /// Posted by an integration source: shown with this name and picture instead of the bot's, always
   /// with the bot badge (docs/bridge.md, "Source identity"). Only ever set on a bot's message.
   #[serde(rename = "source", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_source: Option<MessageSource>,
+  pub maybe_source: Option<Box<MessageSource>>,
   /// Set while this device can't read the message (issue #888): a placeholder with the
   /// envelope's sender, time and thread, and an empty `body`. It fills in place once readable.
   #[serde(rename = "placeholder", default, skip_serializing_if = "Option::is_none")]

@@ -181,7 +181,7 @@ fn placeholder_message(message: Message, placeholder: Placeholder, is_grouped: b
 fn log_line(message: &Message, level: LogLevel, locale: &'static str) -> impl IntoView + use<> {
   let time = format_time_seconds(message.sent_at, locale);
   let entries = log_entries(&message.body, level);
-  let author = log_author(message.author, message.maybe_source.as_ref());
+  let author = log_author(message.author, message.maybe_source.as_deref());
   if let [single] = entries.as_slice() {
     let class = format!("msg msg-log level-{}", single.level.slug());
     return log_entry_line(&time, &author, single, &class, message.sent_at).into_any();
@@ -353,7 +353,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     Some(message.author),
     maybe_imported.as_ref().map(|mark| &mark.author),
   )
-  .map(|user| as_source(user, message.maybe_source.as_ref()));
+  .map(|user| as_source(user, message.maybe_source.as_deref()));
   let maybe_source_picture = message
     .maybe_source
     .as_ref()
@@ -1215,6 +1215,37 @@ fn imported_stand_in(display_name: String, is_bot: bool) -> User {
 mod tests {
   use super::*;
   use crate::model::{ConversationId, MessageId, UserId, id_from_raw};
+
+  #[test]
+  fn sources_of_one_bot_group_apart() {
+    let of = |id, name: Option<&str>| Message {
+      maybe_source: name.map(|name| {
+        Box::new(MessageSource {
+          name: name.into(),
+          maybe_picture_sha256: None,
+        })
+      }),
+      ..message(id, 1, 0)
+    };
+    let hotline = of(1, Some("Hotline"));
+    assert!(is_grouped(&of(2, Some("Hotline")), Some(&hotline)));
+    assert!(!is_grouped(&of(3, Some("CI")), Some(&hotline)));
+    assert!(!is_grouped(&of(4, None), Some(&hotline)));
+  }
+
+  #[test]
+  fn a_source_shows_on_the_bots_account() {
+    let bot = imported_stand_in("Webhooks".into(), true);
+    let source = MessageSource {
+      name: "Hotline".into(),
+      maybe_picture_sha256: None,
+    };
+    let shown = as_source(bot.clone(), Some(&source));
+    assert_eq!(shown.display_name, "Hotline");
+    assert_eq!(shown.id, bot.id, "the profile behind the name stays the bot's");
+    assert!(shown.is_bot);
+    assert_eq!(as_source(bot.clone(), None), bot);
+  }
 
   #[test]
   fn grouping_needs_same_author_and_short_gap() {

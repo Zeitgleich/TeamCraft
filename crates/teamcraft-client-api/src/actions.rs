@@ -513,7 +513,7 @@ pub enum LinkedMessage {
   /// The viewer can read the message.
   Visible {
     target: PermalinkTarget,
-    message: Message,
+    message: Box<Message>,
     /// Its attachments, for the chips of the preview.
     #[serde(default)]
     files: Vec<FileInfo>,

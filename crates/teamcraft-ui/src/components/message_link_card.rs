@@ -75,7 +75,7 @@ fn MessageLinkCard(link: String) -> impl IntoView {
       target,
       message,
       files,
-    }) => view! { <VisibleCard target=target message=message files=files /> }.into_any(),
+    }) => view! { <VisibleCard target=target message=*message files=files /> }.into_any(),
   }
 }
 

@@ -4767,11 +4767,12 @@ touching the bridge's configuration. The app generates the source token (256 ran
 `teamcraft-crypto::source_token`), shows the URL once and sends an encrypted control message into
 the channel: `MessageContent::IntegrationSource` with a `SourceChange` (`teamcraft-proto`):
 
-| Change    | Carries                                                                                                                                                |
-|-----------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `created` | random source ID, name, kind (`webhook`, `log`), SHA-256 of the token, options (danger attachments alert, alert levels, rate limit, files per message) |
-| `renamed` | source ID, new name                                                                                                                                    |
-| `revoked` | source ID                                                                                                                                              |
+| Change            | Carries                                                                                                                                                |
+|-------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `created`         | random source ID, name, kind (`webhook`, `log`), SHA-256 of the token, options (danger attachments alert, alert levels, rate limit, files per message) |
+| `renamed`         | source ID, new name                                                                                                                                    |
+| `picture_changed` | source ID, the picture (a small PNG), or nothing to take it away                                                                                       |
+| `revoked`         | source ID                                                                                                                                              |
 
 The message is hidden from the timeline; older clients that don't know the kind keep it as
 `unknown` (also hidden), and unknown changes or kinds are ignored. The token itself never travels;
@@ -4785,7 +4786,7 @@ count here: every bridge reads a role log late, where a founder's claim is trust
 member into a source admin. Each member device (the bridge included) keeps a bounded ledger per channel
 (`teamcraft-core::integration_sources`):
 
-- **Taking in.** A `created` or `renamed` reaches the ledger only from an admin of the verified
+- **Taking in.** A `created`, `renamed` or `picture_changed` reaches the ledger only from an admin of the verified
   roster, fresh at the message's server time; a `revoked` only from such an admin or from the
   source's creator. Changes from anybody else are dropped before the ledger, so a member (or a
   guest) can't fill its 1024 entries and crowd out later sources.
@@ -4797,6 +4798,41 @@ member into a source admin. Each member device (the bridge included) keeps a bou
 - A revocation is final: a revoked source never comes back, whatever arrives later or in which
   order. A rename's newest by server order wins. Of two announcements with the same source ID the
   first the server numbered wins.
+
+**A source's identity on a message** (docs/bridge.md, "Source identity"). The bridge writes
+`MessageMeta::maybe_source` (source ID, name, SHA-256 of the picture, now and then the picture) into
+the encrypted message, so the server learns nothing new, apart from a message about 40 KiB larger once
+a day per source with a picture. What a client checks before it shows that name instead of the
+sender's (`integration_sources::shown_source`):
+
+1. **The sender's account is a bot** (`UserKind::Bot`). The message is signed by a member device
+   (§4.4), so its sender is real; the kind is the server's word. Anything else is ignored and the
+   message shows its sender. So a member, or a person's client changed by its owner, can write
+   the field and gets nothing.
+2. **The name may be shown:** control and invisible formatting characters (bidi overrides, zero-width)
+   are removed, 1 to 80 characters are left. Otherwise the message shows the bot.
+3. **The badge goes with it,** by the same check: everywhere the name shows, the text or the badge says
+   bot, and the profile behind the name is the bot's account.
+
+A picture a message carries is kept only from a known bot, only if it is the picture the message names
+by hash, and only a PNG of at most 32 KiB and 256 pixels a side by its header, checked before anything
+decodes it. A picture in a `picture_changed` comes under the taking-in rule above, and pictures are
+bounded per conversation (64, the longest unnamed go first).
+
+Deliberately **not** checked: that the source ID is in this device's ledger, or that the name is the
+ledger's. A later device has no ledger entry, and a source of the bridge's file has none at all, and they
+should still show a name. A message keeps the name it was sent with, which a rename may have changed
+since. What that leaves open:
+
+- **A bot can claim any name, in the channels it is in.** Whoever runs a bot could already write
+  anything into those channels; the badge says it is a bot. Who adds a bot to a channel decides whom
+  this is trusted to. A second bot in a channel can show the first one's source names.
+- **A token holder can't.** A producer has no say in the name (`username` stays in the text), so a
+  leaked URL gives a sender the source's own name, as it already gave the bot's.
+- **A hostile server** could call a member's account a bot. That member's client then gets a source's
+  name, with the bot badge. The server can already rename any account (display names are directory
+  data), and with the badge this passes as no person, so it gains nothing against a person's name.
+  Calling a bot a person shows the bot's account name, without the source's.
 
 **What the server can still do.** It can withhold or drop messages, as for any content: hold back
 an announcement (the source doesn't work), or, for a bridge whose database is new, leave a

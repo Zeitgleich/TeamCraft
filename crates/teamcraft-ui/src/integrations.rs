@@ -195,7 +195,9 @@ impl NewSource {
 /// Whether a source name may be announced (the receiving devices drop other names).
 pub fn is_valid_source_name(name: &str) -> bool {
   let name = name.trim();
-  name.chars().count() <= MAX_SOURCE_NAME_CHARS && teamcraft_proto::clean_source_name(name).is_some()
+  name.chars().count() <= MAX_SOURCE_NAME_CHARS
+    && !name.chars().any(char::is_control)
+    && teamcraft_proto::clean_source_name(name).is_some()
 }
 
 fn toml_escape(text: &str) -> String {

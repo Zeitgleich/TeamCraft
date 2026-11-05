@@ -602,7 +602,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       // Without the rest of the conversation: a preview shows no reactions or reply counts.
       MessageContent::Text { .. } | MessageContent::File { .. } => LinkedMessage::Visible {
         target,
-        message: self.to_message(&stored, &[]),
+        message: Box::new(self.to_message(&stored, &[])),
         files: self.files_of(&stored, self.importer()),
       },
       // Reactions, edits, events and the like are no message one can link to.

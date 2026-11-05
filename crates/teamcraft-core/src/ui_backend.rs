@@ -1168,7 +1168,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   /// The source a message shows (docs/bridge.md, "Source identity"), checked to come from a bot.
-  fn source_of(&self, stored: &StoredMessage) -> Option<teamcraft_client_api::model::MessageSource> {
+  fn source_of(&self, stored: &StoredMessage) -> Option<Box<teamcraft_client_api::model::MessageSource>> {
     let MessageContent::Text { meta, .. } = &stored.content else {
       return None;
     };
@@ -1178,10 +1178,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
       stored.sender_user_id,
     ));
     let shown = crate::integration_sources::shown_source(identity, is_bot)?;
-    Some(teamcraft_client_api::model::MessageSource {
+    Some(Box::new(teamcraft_client_api::model::MessageSource {
       name: shown.name,
       maybe_picture_sha256: shown.maybe_picture_sha256,
-    })
+    }))
   }
 
   pub(crate) fn to_message(&self, stored: &StoredMessage, all: &[StoredMessage]) -> Message {

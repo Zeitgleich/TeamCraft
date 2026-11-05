@@ -524,6 +524,7 @@ mod tests {
   fn shown() -> Notification {
     Notification {
       conversation: id_from_raw(1),
+      is_source: false,
       title: NotificationTitle::InChannel {
         sender: "Alice".into(),
         channel: "planning".into(),

@@ -77,6 +77,8 @@ fun feedItems(messages: List<Message>, maybeFirstUnread: String?, zone: ZoneId =
 
 private fun continues(previous: Message, message: Message): Boolean =
   previous.author == message.author &&
+    // One bot posts for several sources.
+    previous.maybeSource == message.maybeSource &&
     previous.maybeSystemEvent == null &&
     message.maybeSystemEvent == null &&
     message.sentAt - previous.sentAt in 0..GROUP_WINDOW_MS

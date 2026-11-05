@@ -284,6 +284,11 @@ struct PeopleSnapshot: Decodable, Sendable {
 private var deletedUserName: String { String(localized: "user_deleted_name") }
 
 extension MessageItem {
+  /// The author's name as the app shows it: an integration source's always says it's a bot.
+  var shownAuthorName: String {
+    isAuthorSource ? String(localized: "source_sender \(authorName)") : authorName
+  }
+
   /// The message with `deletedUserName` as its author's name when the author's account was deleted.
   func namingDeletedAuthor() -> MessageItem {
     guard isAuthorDeleted else { return self }
