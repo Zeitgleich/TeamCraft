@@ -16,6 +16,15 @@
     <item quantity="one">%d more picture</item>
     <item quantity="other">%d more pictures</item>
   </plurals>
+  <string name="animated_images_title">Animated images</string>
+  <string name="animated_images_autoplay">Automatic</string>
+  <string name="animated_images_tap">On tap</string>
+  <string name="animated_images_hint">GIFs and other moving pictures. Automatic fetches them like original images (see above). With animations removed in the system settings, they don\'t start by themselves.</string>
+  <string name="animation_play">Play animation</string>
+  <string name="animation_pause">Pause animation</string>
+  <string name="animation_state_playing">Animated image, playing</string>
+  <string name="animation_state_paused">Animated image, paused</string>
+  <string name="animation_failed">Didn\'t load</string>
   <string name="original_download_title">Download original images automatically</string>
   <string name="original_download_always">Always</string>
   <string name="original_download_unmetered">On Wi-Fi only</string>

@@ -102,8 +102,8 @@ pub fn is_svg(media_type: &str) -> bool {
   essence(media_type) == "image/svg+xml"
 }
 
-/// Whether picture bytes are an animation: a GIF, an animated WebP (`ANIM` flag) or an APNG
-/// (`acTL` before the image data). Only the header is read.
+/// Whether picture bytes are an animation: a GIF, an animated WebP (`ANIM` flag), an APNG (`acTL`
+/// before the image data) or an AVIF image sequence (`avis` brand). Only the header is read.
 pub fn is_animated(bytes: &[u8]) -> bool {
   if bytes.starts_with(b"GIF8") {
     return true;
@@ -112,7 +112,24 @@ pub fn is_animated(bytes: &[u8]) -> bool {
     // VP8X: the second bit of its flags byte says "animation".
     return bytes.get(12..16) == Some(b"VP8X") && bytes.get(20).is_some_and(|flags| flags & 0b10 != 0);
   }
-  is_apng(bytes)
+  is_apng(bytes) || is_avif_sequence(bytes)
+}
+
+/// An ISO media file's `ftyp` box (size, type, major brand, minor version, compatible brands) that
+/// names the image sequence brand.
+fn is_avif_sequence(bytes: &[u8]) -> bool {
+  const SEQUENCE_BRAND: &[u8; 4] = b"avis";
+  if bytes.get(4..8) != Some(b"ftyp") {
+    return false;
+  }
+  let Some(size) = bytes.get(..4).and_then(|size| <[u8; 4]>::try_from(size).ok()) else {
+    return false;
+  };
+  let end = (u32::from_be_bytes(size) as usize).min(bytes.len());
+  bytes.get(8..12) == Some(SEQUENCE_BRAND.as_slice())
+    || bytes
+      .get(16..end)
+      .is_some_and(|brands| brands.as_chunks::<4>().0.contains(SEQUENCE_BRAND))
 }
 
 /// Walks the PNG chunks up to the first `IDAT`; an `acTL` before it makes it animated.
@@ -237,6 +254,36 @@ mod tests {
     );
     assert!(!is_animated(&png(&[b"IHDR"])[..12]), "truncated");
     assert!(!is_animated(b""));
+  }
+
+  #[test]
+  fn avif_sequences_are_told_apart_by_their_brands() {
+    let ftyp = |major: &[u8; 4], compatible: &[&[u8; 4]]| {
+      let size = 16 + compatible.len() * 4;
+      let mut bytes = (size as u32).to_be_bytes().to_vec();
+      bytes.extend_from_slice(b"ftyp");
+      bytes.extend_from_slice(major);
+      bytes.extend_from_slice(&[0; 4]);
+      for brand in compatible {
+        bytes.extend_from_slice(*brand);
+      }
+      bytes
+    };
+    assert!(is_animated(&ftyp(b"avis", &[])));
+    assert!(is_animated(&ftyp(b"avif", &[b"mif1", b"avis"])));
+    assert!(!is_animated(&ftyp(b"avif", &[b"mif1", b"miaf"])), "still AVIF");
+    let mut beyond = ftyp(b"avif", &[]);
+    beyond.extend_from_slice(b"avis");
+    assert!(!is_animated(&beyond), "past the box");
+    assert!(!is_animated(&ftyp(b"avif", &[b"avis"])[..18]), "truncated");
+    let mut lying = ftyp(b"avif", &[b"avis"]);
+    lying[..4].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert!(
+      is_animated(&lying),
+      "a size past the end is cut to the bytes there are"
+    );
+    lying[..4].copy_from_slice(&[0, 0, 0, 2]);
+    assert!(!is_animated(&lying), "a size inside the header holds no brands");
   }
 
   #[test]

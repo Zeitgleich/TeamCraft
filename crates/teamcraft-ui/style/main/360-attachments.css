@@ -63,6 +63,21 @@
 @container (max-width: 360px) { .video-volume, .video-duration { display: none; } }
 @container (max-width: 240px) { .video-time { display: none; } }
 @media (prefers-reduced-transparency: reduce) { .video-controls, .video-big-play { background: rgba(20, 22, 30, .92); -webkit-backdrop-filter: none; backdrop-filter: none; } }
+/* An animated picture: its moving copy over the still frame, and the button that stops or starts it
+   (top left, the toolbar has the right). Over the picture on hover or focus; always on a touch screen,
+   and on a still picture that only starts from here. */
+.media-open img.media-moving { position: absolute; inset: 0; transition: none; }
+.media-open img.is-under-moving { visibility: hidden; }
+.media-motion { position: absolute; top: 6px; left: 6px; z-index: 1; display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%; background: rgba(20, 22, 30, .55); -webkit-backdrop-filter: blur(20px) saturate(180%); backdrop-filter: blur(20px) saturate(180%); color: var(--on-fill); cursor: pointer; opacity: 0; transition: opacity var(--dur-fast, .12s) var(--ease-out), transform var(--dur-fast, .12s) var(--ease-out); }
+.media-motion .icon { width: 16px; height: 16px; fill: currentColor; }
+.media-motion .spinner { width: 16px; height: 16px; }
+.media-motion:active { transform: scale(.94); }
+.media-motion:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 2px; }
+.media-motion.is-needed, .media-tile:focus-within .media-motion { opacity: 1; }
+@media (hover: hover) and (pointer: fine) { .media-tile:hover .media-motion { opacity: 1; } }
+@media not ((hover: hover) and (pointer: fine)) { .media-motion { width: 44px; height: 44px; opacity: 1; } .media-motion .icon { width: 20px; height: 20px; } }
+@media (prefers-reduced-motion: reduce) { .media-motion { transition: opacity var(--dur-fast, .12s); } .media-motion:active { transform: none; } }
+@media (prefers-reduced-transparency: reduce) { .media-motion { background: rgba(20, 22, 30, .92); -webkit-backdrop-filter: none; backdrop-filter: none; } }
 .media-gif-badge { position: absolute; left: 8px; bottom: 8px; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, .6); color: var(--on-fill); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: .04em; pointer-events: none; }
 .media-more { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0, 0, 0, .5); color: var(--on-fill); font-size: var(--text-2xl); letter-spacing: var(--tracking-2xl); line-height: var(--leading-2xl); font-weight: var(--weight-semibold); pointer-events: none; }
 /* A picture of the user's own message still going up: its local thumbnail, a turning ring over it,

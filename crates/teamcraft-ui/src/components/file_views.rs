@@ -23,6 +23,7 @@ use teamcraft_client_api::media_viewer::{AlbumGrid, MAX_ALBUM_TILES};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
+use crate::animated_images::{PlayChoice, PlayState, toggled};
 use crate::areas::{self, Place, lazy_area};
 use crate::channel_access::can_share_files;
 use crate::clock::format_date_time;
@@ -31,6 +32,7 @@ use crate::components::audio_card::{AudioCard, is_audio_card};
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::prefers_reduced_motion;
+use crate::components::lightbox_controls::still_frame;
 use crate::components::message_actions::{copy_to_clipboard, reply_to_file};
 use crate::components::sheet::PopoverBackdrop;
 use crate::components::sliding_indicator::SlidingIndicator;
@@ -361,8 +363,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   let has_thumbnail = thumbnail_src.is_some();
   // Revoked when the row leaves the screen.
   StoredValue::new_local(thumbnail);
-  let is_motion_reduced = prefers_reduced_motion();
-  let loads = loads_inline(kind, file.size_bytes, is_motion_reduced);
+  let loads = loads_inline(kind, file.size_bytes);
   // Nothing to show and nothing to load (a format this platform may not decode, too large to fetch
   // by itself): a file card instead of a grey box (issue #337). Videos keep their tile and play in
   // the lightbox.
@@ -380,28 +381,117 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     full: RwSignal::new_local(media_cache::cached(key, Rendition::Inline)),
     is_broken: RwSignal::new(false),
     is_unavailable: RwSignal::new(false),
+    is_loading: RwSignal::new(false),
+    has_failed: RwSignal::new(false),
     has_thumbnail,
   };
   let InlineLoad {
     full,
     is_broken,
     is_unavailable,
+    is_loading,
+    has_failed,
     ..
   } = inline;
-  if full.get_untracked().is_none() && loads {
+  // An animated file only comes down once it is to move (below).
+  if full.get_untracked().is_none() && loads && kind == MediaKind::Image {
     inline.start();
   }
-  // A WebP or APNG that turns out to move stays on its thumbnail under reduced motion, like a GIF.
+  // A WebP, APNG or AVIF only says that it moves once it is here.
+  let is_animation =
+    move || kind == MediaKind::Animated || full.with(|url| url.as_ref().is_some_and(|url| url.is_animated()));
+  let tile_node = NodeRef::<html::Div>::new();
+  let is_on_screen = RwSignal::new(false);
+  watch_on_screen(tile_node, is_on_screen, Signal::derive(is_animation));
+  let is_hovered = RwSignal::new(false);
+  let choice = RwSignal::new(PlayChoice::Unset);
+  let is_motion_reduced = prefers_reduced_motion();
+  let play_state = Memo::new(move |_| PlayState {
+    mode: state
+      .settings
+      .prefs
+      .with(|prefs| prefs.display.animated_images)
+      .effective(is_motion_reduced),
+    choice: choice.get(),
+    is_hovered: is_hovered.get(),
+    is_visible: is_on_screen.get() && !matches!(state.overlay.get(), Overlay::Lightbox(..)),
+  });
+  let plays = move || is_animation() && play_state.get().plays();
+  // Its first frame stands in while it doesn't move; only without a thumbnail is one made from it.
+  let still = RwSignal::new_local(None::<Rc<ObjectUrl>>);
+  if kind != MediaKind::Video {
+    Effect::new(move |_| {
+      let is_wanted = plays() && kind == MediaKind::Animated && loads;
+      if is_wanted && !is_loading.get() && !has_failed.get() && full.with_untracked(Option::is_none) {
+        inline.start();
+      }
+      let maybe_animation = full.with(|url| url.clone().filter(|url| url.is_animated()));
+      let Some(url) = maybe_animation.filter(|_| !has_thumbnail) else {
+        return;
+      };
+      if still.with_untracked(Option::is_some) {
+        return;
+      }
+      spawn_local(async move {
+        if let Some(frame) = still_frame(url.as_str()).await {
+          drop(still.try_set(Some(Rc::new(frame))));
+        }
+      });
+    });
+  }
+  // A picture that doesn't move shows itself; one that does stays still under its moving copy.
   let shown_full = move || {
     full.with(|maybe_url| {
       maybe_url
         .as_ref()
-        .filter(|url| !(is_motion_reduced && url.is_animated()))
+        .filter(|url| !url.is_animated())
         .map(|url| url.as_str().to_owned())
     })
   };
   let is_full = move || shown_full().is_some();
-  let src = move || shown_full().or_else(|| thumbnail_src.clone());
+  let src = move || {
+    shown_full()
+      .or_else(|| still.with(|still| still.as_ref().map(|still| still.as_str().to_owned())))
+      .or_else(|| thumbnail_src.clone())
+  };
+  // Only in the DOM while it moves: a removed image costs no decoding and no timers.
+  let moving_src = move || {
+    plays()
+      .then(|| {
+        full.with(|maybe_url| {
+          maybe_url
+            .as_ref()
+            .filter(|url| url.is_animated())
+            .map(|url| url.as_str().to_owned())
+        })
+      })
+      .flatten()
+  };
+  // Pictures with transparency: the still frame must not show through once the moving one paints.
+  let is_moving_painted = RwSignal::new(false);
+  Effect::new(move |_| {
+    if moving_src().is_none() {
+      is_moving_painted.set(false);
+    }
+  });
+  let is_moving = move || moving_src().is_some();
+  let is_coming = move || plays() && is_loading.get();
+  // The file couldn't come down for an image the user asked to see move: say so and offer a retry.
+  Effect::new(move |_| {
+    if has_failed.get() && choice.get_untracked() == PlayChoice::Playing {
+      is_unavailable.set(true);
+    }
+  });
+  let on_moving_error = move |_| {
+    full.set(None);
+    has_failed.set(true);
+    is_broken.set(!has_thumbnail);
+  };
+  let toggle_motion = move |_| {
+    choice.set(toggled(is_moving() || is_coming()));
+    has_failed.set(false);
+    is_unavailable.set(false);
+  };
   // The browser couldn't decode what it was given: the picture, or the thumbnail before the picture
   // was there. Either way this platform shows it as a file.
   let on_error = move |_| {
@@ -456,13 +546,10 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   let has_size = maybe_dimensions.is_some() || maybe_thumbnail_size.is_some();
   let badge = file.with_value(|file| animation_label(&file.media_type));
   let size_bytes = file.with_value(|file| file.size_bytes);
-  let has_badge = move || {
-    let is_still_gif =
-      kind == MediaKind::Animated && (is_motion_reduced || !loads_inline(kind, size_bytes, false));
-    let is_still_animation =
-      full.with(|maybe_url| maybe_url.as_ref().is_some_and(|url| url.is_animated())) && is_motion_reduced;
-    is_still_gif || is_still_animation
-  };
+  // Says there is motion behind a still frame.
+  let has_badge = move || is_animation() && !is_moving();
+  // Too large to load by itself: it moves in the lightbox.
+  let can_toggle = move || is_animation() && loads;
   let maybe_duration = file
     .with_value(|file| file.maybe_duration_ms)
     .map(format_duration);
@@ -482,10 +569,12 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   let tile = move || {
     let (name, label, badge) = (name.clone(), label.clone(), badge.clone());
     let player_label = label.clone();
+    let open_label = label.clone();
     let maybe_duration = maybe_duration.clone();
     let src = src.clone();
     view! {
       <div
+        node_ref=tile_node
         class="media-tile"
         class:media-single=is_single
         class:has-size=has_size
@@ -493,6 +582,19 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
         style:--media-w=media_width
         style:--media-h=media_height
         on:pointerdown=move |ev: web_sys::PointerEvent| is_touch.set_value(ev.pointer_type() == "touch")
+        // A touch has no hover (the browser still sends these around a tap).
+        on:pointerenter=move |ev: web_sys::PointerEvent| is_hovered.set(ev.pointer_type() != "touch")
+        on:pointerleave=move |_| is_hovered.set(false)
+        // The keyboard's equivalent; a focus left by a click isn't one.
+        on:focusin=move |ev: web_sys::FocusEvent| {
+          let is_keyboard = event_target::<web_sys::Element>(&ev).matches(":focus-visible").unwrap_or(false);
+          if is_keyboard {
+            is_hovered.set(true);
+          }
+        }
+        on:focusout=move |_| {
+          is_hovered.try_set(false);
+        }
         on:contextmenu=move |ev: web_sys::MouseEvent| {
           // A long-press shows the actions. A right click opens the app's menu in the desktop app
           // (#719) and on a picture of an album (#241); otherwise the browser keeps its own ("Save
@@ -510,9 +612,11 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
         <button
           class="media-open"
           data-media-key=key.dom_key()
-          aria-label=move || match playback.is_inline {
-            true => i18n.t_with("video-play", &[("name", &label)]),
-            false => i18n.t_with("media-open", &[("name", &label)]),
+          aria-label=move || match (playback.is_inline, is_animation(), is_moving()) {
+            (true, ..) => i18n.t_with("video-play", &[("name", &open_label)]),
+            (_, true, true) => i18n.t_with("media-open-animated-playing", &[("name", &open_label)]),
+            (_, true, false) => i18n.t_with("media-open-animated-paused", &[("name", &open_label)]),
+            _ => i18n.t_with("media-open", &[("name", &open_label)]),
           }
           on:click=move |_| match playback.is_inline {
             true => playback.start(),
@@ -524,7 +628,8 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
               <img
                 src=src
                 alt=name.clone()
-                class:is-preview=move || !is_full()
+                class:is-preview=move || !is_full() && !is_animation()
+                class:is-under-moving=move || is_moving_painted.get()
                 decoding="async"
                 draggable="false"
                 on:error=on_error
@@ -534,17 +639,46 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
             None => view! { <span class="media-placeholder"><Icon name=file_icon(Some(kind)) /></span> }.into_any(),
 
           }}
+          {move || moving_src().map(|src| view! {
+            <img
+              class="media-moving"
+              src=src
+              alt=""
+              decoding="async"
+              draggable="false"
+              on:load=move |_| is_moving_painted.set(true)
+              on:error=on_moving_error
+            />
+          })}
           {(kind == MediaKind::Video).then(|| view! { <span class="media-play-badge" aria-hidden="true"><Icon name=IconName::Play /></span> })}
           {move || has_badge().then(|| view! { <span class="media-gif-badge" aria-hidden="true">{badge.clone()}</span> })}
           {maybe_duration.map(|duration| view! { <span class="media-duration" aria-hidden="true">{duration}</span> })}
           {maybe_hidden.map(|hidden| view! { <span class="media-more" aria-hidden="true">{format!("+{hidden}")}</span> })}
         </button>
+        {move || can_toggle().then(|| view! {
+          <button
+            class="media-motion"
+            class:is-needed=move || !is_moving() && play_state.get().needs_button()
+            aria-label=move || match is_moving() || is_coming() {
+              true => i18n.t("media-animation-pause"),
+              false => i18n.t("media-animation-play"),
+            }
+            on:click=toggle_motion
+          >
+            {move || match (is_coming() && !is_moving(), is_moving()) {
+              (true, _) => view! { <span class="spinner" aria-hidden="true"></span> }.into_any(),
+              (_, true) => view! { <Icon name=IconName::Pause /> }.into_any(),
+              _ => view! { <Icon name=IconName::Play /> }.into_any(),
+            }}
+          </button>
+        })}
         // Not loaded (offline, server trouble) and nothing else to show: try again on demand.
         {move || is_unavailable.get().then(|| view! {
           <button
             class="btn btn-small media-retry"
             on:click=move |_| {
               is_unavailable.set(false);
+              has_failed.set(false);
               inline.start();
             }
           >
@@ -686,6 +820,45 @@ fn InlineVideo(playback: InlinePlayback, label: String, on_expand: Callback<()>)
 /// The observer and the callback it needs kept alive.
 type VisibilityWatch = (web_sys::IntersectionObserver, Closure<dyn Fn(js_sys::Array)>);
 
+/// Keeps `is_on_screen` true while the element is in view; pictures that don't move (`is_needed`
+/// false) get no observer.
+fn watch_on_screen(node: NodeRef<html::Div>, is_on_screen: RwSignal<bool>, is_needed: Signal<bool>) {
+  let observer: StoredValue<Option<VisibilityWatch>, LocalStorage> = StoredValue::new_local(None);
+  Effect::new(move |_| {
+    let Some(element) = node.get().filter(|_| is_needed.get()) else {
+      return;
+    };
+    if observer.with_value(Option::is_some) {
+      return;
+    }
+    let callback = Closure::<dyn Fn(js_sys::Array)>::new(move |entries: js_sys::Array| {
+      // The newest entry is the last one.
+      let maybe_latest = entries
+        .iter()
+        .filter_map(|entry| entry.dyn_into::<web_sys::IntersectionObserverEntry>().ok())
+        .next_back();
+      if let Some(entry) = maybe_latest {
+        is_on_screen.try_set(entry.is_intersecting());
+      }
+    });
+    match web_sys::IntersectionObserver::new(callback.as_ref().unchecked_ref()) {
+      Ok(created) => {
+        created.observe(&element);
+        observer.set_value(Some((created, callback)));
+      },
+      // Without an observer nothing can tell: rather moving than stuck.
+      Err(_) => is_on_screen.set(true),
+    }
+  });
+  on_cleanup(move || {
+    observer.update_value(|maybe_observer| {
+      if let Some((created, _)) = maybe_observer.take() {
+        created.disconnect();
+      }
+    });
+  });
+}
+
 /// Pauses the video when it scrolls out of view: a message row's video must not play on, unheard of,
 /// behind the list.
 fn pause_when_hidden(video: NodeRef<html::Video>) {
@@ -731,6 +904,9 @@ struct InlineLoad {
   is_broken: RwSignal<bool>,
   /// Not loaded and no thumbnail to show instead: the tile offers "Try again".
   is_unavailable: RwSignal<bool>,
+  is_loading: RwSignal<bool>,
+  /// The last load failed; an animation doesn't try again until the user asks.
+  has_failed: RwSignal<bool>,
   has_thumbnail: bool,
 }
 
@@ -747,13 +923,16 @@ impl InlineLoad {
       full,
       is_broken,
       is_unavailable,
+      is_loading,
+      has_failed,
       has_thumbnail,
       ..
     } = self;
     let media_type = self.media_type.get_value();
+    is_loading.set(true);
     spawn_local(async move {
       let is_wanted = move || full.try_with_untracked(|_| ()).is_some();
-      match media_cache::load(
+      let loaded = media_cache::load(
         conversation,
         key,
         &media_type,
@@ -761,8 +940,10 @@ impl InlineLoad {
         maybe_content_sha256,
         is_wanted,
       )
-      .await
-      {
+      .await;
+      is_loading.try_set(false);
+      has_failed.try_set(loaded.is_err());
+      match loaded {
         // The row may be gone by now: `try_set` drops the URL then.
         Ok(Some(url)) => drop(full.try_set(Some(url))),
         Ok(None) => {},

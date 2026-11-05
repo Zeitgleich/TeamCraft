@@ -29,6 +29,7 @@ import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.calls.CallSoundPrefs
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.security.LockAfter
+import de.zeitgleich.teamcraft.ui.AnimatedImagesMode
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MediaPrefs
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
@@ -150,6 +151,32 @@ fun OriginalDownloadSetting() {
   }
 }
 
+/** Whether animated images start by themselves or from their play button (#201). Takes effect at once. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun AnimatedImagesSetting() {
+  val context = LocalContext.current
+  val prefs = remember { MediaPrefs.prefs(context) }
+  val choice by prefs.animatedImages.collectAsState()
+  Column {
+    Text(stringResource(R.string.animated_images_title))
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      for ((option, label) in ANIMATED_IMAGES_CHOICES) {
+        FilterChip(
+          selected = choice == option,
+          onClick = { prefs.setAnimatedImages(option) },
+          label = { Text(stringResource(label)) },
+        )
+      }
+    }
+    Text(
+      stringResource(R.string.animated_images_hint),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+}
+
 /** One list of all conversations, or Home and Spaces apart (#1151). Takes effect at once. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -213,6 +240,11 @@ private val ORIGINAL_DOWNLOAD_CHOICES = listOf(
   OriginalDownload.ALWAYS to R.string.original_download_always,
   OriginalDownload.UNMETERED_ONLY to R.string.original_download_unmetered,
   OriginalDownload.NEVER to R.string.original_download_never,
+)
+
+private val ANIMATED_IMAGES_CHOICES = listOf(
+  AnimatedImagesMode.AUTOPLAY to R.string.animated_images_autoplay,
+  AnimatedImagesMode.ON_TAP to R.string.animated_images_tap,
 )
 
 private val LOCK_AFTER_CHOICES = listOf(

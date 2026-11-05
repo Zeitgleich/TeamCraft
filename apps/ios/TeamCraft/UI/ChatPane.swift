@@ -153,6 +153,7 @@ struct ChatPane: View {
       }
       messageList
         .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
+        .environment(\.areAnimationsCovered, maybeViewing != nil)
         .environment(\.openQuotedPicture, OpenQuotedPictureAction(run: openQuotedPicture))
         .environment(
           \.imageActions,

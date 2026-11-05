@@ -232,6 +232,11 @@ private struct ForwardTarget: Identifiable {
 /// One page of the viewer: the original when it is here, else the thumbnail (softened when small),
 /// with the original's progress, "Load original" or "Try again" over it.
 private struct PicturePage: View {
+  @Environment(\.accessibilityReduceMotion) private var isMotionReduced
+  @Environment(\.scenePhase) private var scenePhase
+  @AppStorage(AnimatedImagesSetting.key) private var animatedImages = AnimatedImagesSetting.fallback.rawValue
+  @State private var animation = AnimationPlayer()
+  @State private var playChoice = PlayChoice.unset
   let maybeFile: FileInfo?
   let maybeOriginal: UIImage?
   let state: OriginalState
@@ -247,13 +252,53 @@ private struct PicturePage: View {
   var body: some View {
     ZStack(alignment: .bottom) {
       ZoomableImage(
-        image: maybeOriginal ?? thumbnail, maxZoom: maxZoom, doubleTapZoom: doubleTapZoom, onTap: onTap,
+        image: animation.maybeFrame ?? maybeOriginal ?? thumbnail, maxZoom: maxZoom, doubleTapZoom: doubleTapZoom, onTap: onTap,
         onZoomChange: onZoomChange
       )
       .blur(radius: isSoftened ? 12 : 0)
       .accessibilityLabel(Text(maybeFile?.fileName ?? ""))
       .accessibilityAddTraits(.isImage)
       overlay.padding(.bottom, 96)
+      if animation.maybeMoves == true {
+        AnimationButton(isMoving: wantsToMove) { playChoice = wantsToMove ? .paused : .playing }
+          .padding(.trailing, 8).padding(.bottom, 96)
+          .frame(maxWidth: .infinity, alignment: .trailing)
+      }
+    }
+    .task(id: motionTask) { await runMotion() }
+  }
+
+  // MARK: Animated images (#201)
+
+  private var wantsToMove: Bool {
+    playChoice.wantsToMove(AnimatedImagesSetting.stored(animatedImages).effective(isMotionReduced: isMotionReduced))
+  }
+
+  /// A file that may hold an animation, once it is here. Other pictures stay plain images.
+  private var maybeAnimationPath: String? {
+    guard let file = maybeFile, file.transfer.state == "local",
+      AnimationKind.mayMove(file.mediaType) || file.mediaType.lowercased().hasPrefix("image/png")
+    else { return nil }
+    return file.transfer.path
+  }
+
+  private struct MotionTask: Equatable {
+    let maybePath: String?
+    let isMoving: Bool
+  }
+
+  private var motionTask: MotionTask {
+    MotionTask(maybePath: maybeAnimationPath, isMoving: wantsToMove && scenePhase == .active)
+  }
+
+  /// Cancelled when the page leaves the screen or the animation is to stop.
+  private func runMotion() async {
+    guard let path = maybeAnimationPath else { return }
+    if wantsToMove && scenePhase == .active {
+      await animation.run(path: path, maxPixels: AnimationKind.viewerMaxPixels)
+      if animation.hasEnded { playChoice = .paused }
+    } else if animation.maybeMoves == nil {
+      await animation.probe(path: path)
     }
   }
 

@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.text.format.DateUtils
 import android.text.format.Formatter
 import androidx.compose.animation.AnimatedVisibility
@@ -65,8 +66,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -138,7 +141,22 @@ import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.MarkupColors
 import de.zeitgleich.teamcraft.ui.MentionNames
+import de.zeitgleich.teamcraft.ui.AnimationBadge
+import de.zeitgleich.teamcraft.ui.AnimationButton
+import de.zeitgleich.teamcraft.ui.AnimationView
+import de.zeitgleich.teamcraft.ui.FeedMotion
+import de.zeitgleich.teamcraft.ui.LocalFeedMotion
+import de.zeitgleich.teamcraft.ui.MAX_AUTO_ANIMATION_BYTES
+import de.zeitgleich.teamcraft.ui.MediaPrefs
 import de.zeitgleich.teamcraft.ui.PictureTarget
+import de.zeitgleich.teamcraft.ui.PlayChoice
+import de.zeitgleich.teamcraft.ui.animationLabel
+import de.zeitgleich.teamcraft.ui.isAnimationType
+import de.zeitgleich.teamcraft.ui.isAppResumed
+import de.zeitgleich.teamcraft.ui.mayBeAnimated
+import de.zeitgleich.teamcraft.ui.rememberAnimation
+import de.zeitgleich.teamcraft.ui.rememberMotionReduced
+import de.zeitgleich.teamcraft.ui.wantsToMove
 import de.zeitgleich.teamcraft.ui.Pictures
 import de.zeitgleich.teamcraft.ui.SourceAvatar
 import de.zeitgleich.teamcraft.ui.UserAvatar
@@ -349,6 +367,15 @@ fun MessageFeed(
       if (file.isImage && file.maybeThumbnail != null) maybeViewing = PictureTarget.of(file).toList() else openOrDownload(viewModel, file, context)
     }
   }
+  val mediaPrefs = remember(context) { MediaPrefs.prefs(context) }
+  val animatedImages by mediaPrefs.animatedImages.collectAsState()
+  val isMotionReduced = rememberMotionReduced()
+  val feedMotion = FeedMotion(
+    mode = animatedImages.effective(isMotionReduced),
+    isCovered = maybeViewing != null,
+    fetchesNow = mediaPrefs::fetchesOriginalNow,
+    fetch = { file -> viewModel.act(ChatActions.downloadAttachment(file.conversation, file.message, file.fileId)) },
+  )
   // Once per snapshot, not per row: mentions are matched against every user's name.
   val names = remember(snapshot) {
     MentionNames(snapshot?.users.orEmpty().map { it.username.lowercase() }.toSet(), snapshot?.me?.username.orEmpty())
@@ -357,38 +384,40 @@ fun MessageFeed(
   BoxWithConstraints(modifier.fillMaxSize()) {
     val bubbleMax = minOf(maxWidth * BUBBLE_WIDTH_SHARE, BUBBLE_MAX_WIDTH)
     val look = FeedLook(bubbleMax = bubbleMax, showsSenders = showsSenders, names = names)
-    LazyColumn(Modifier.fillMaxSize(), state = listState, reverseLayout = true) {
-      // Rows of one kind reuse each other's layout when they scroll in.
-      items(items, key = { it.key }, contentType = { it.contentType }) { item ->
-        when (item) {
-          is FeedItem.Day -> DayPill(item.date, Modifier.fillMaxWidth().padding(vertical = DAY_DIVIDER_PADDING))
-          FeedItem.Unread -> UnreadDivider()
-          // A placeholder (issue #888) has nothing to reply to or act on yet.
-          is FeedItem.Entry -> SwipeToReply(item.message, maybeOnReply.takeIf { item.message.maybePlaceholder == null }) {
-            MessageRow(
-              viewModel = viewModel,
-              entry = item,
-              maybeExtras = extras[item.message.id],
-              extras = extras,
-              snapshot = snapshot,
-              look = look,
-              onOpenThread = onOpenThread,
-              onOpenFile = onOpenFile,
-              onOpenPicture = { target -> maybeViewing = target.toList() },
-              onLongPress = { onLongPress(item.message) },
-              onLongPressImage = onLongPressImage,
-              maybeOnReply = maybeOnReply,
-              isHighlighted = item.message.id == maybeHighlighted,
-              onOpenPermalink = onOpenPermalink,
-              onOpenConversation = onOpenConversation,
-              canReact = canReact,
-            )
+    CompositionLocalProvider(LocalFeedMotion provides feedMotion) {
+      LazyColumn(Modifier.fillMaxSize(), state = listState, reverseLayout = true) {
+        // Rows of one kind reuse each other's layout when they scroll in.
+        items(items, key = { it.key }, contentType = { it.contentType }) { item ->
+          when (item) {
+            is FeedItem.Day -> DayPill(item.date, Modifier.fillMaxWidth().padding(vertical = DAY_DIVIDER_PADDING))
+            FeedItem.Unread -> UnreadDivider()
+            // A placeholder (issue #888) has nothing to reply to or act on yet.
+            is FeedItem.Entry -> SwipeToReply(item.message, maybeOnReply.takeIf { item.message.maybePlaceholder == null }) {
+              MessageRow(
+                viewModel = viewModel,
+                entry = item,
+                maybeExtras = extras[item.message.id],
+                extras = extras,
+                snapshot = snapshot,
+                look = look,
+                onOpenThread = onOpenThread,
+                onOpenFile = onOpenFile,
+                onOpenPicture = { target -> maybeViewing = target.toList() },
+                onLongPress = { onLongPress(item.message) },
+                onLongPressImage = onLongPressImage,
+                maybeOnReply = maybeOnReply,
+                isHighlighted = item.message.id == maybeHighlighted,
+                onOpenPermalink = onOpenPermalink,
+                onOpenConversation = onOpenConversation,
+                canReact = canReact,
+              )
+            }
           }
         }
+        // Above the oldest row: seen only when the reader is faster than the core.
+        if (older.hasOlder && older.isLoading) item(key = OLDER_LOADING_KEY) { OlderLoadingRow() }
+        if (older.isFailed) item(key = OLDER_FAILED_KEY) { OlderFailedRow(older.onRetry) }
       }
-      // Above the oldest row: seen only when the reader is faster than the core.
-      if (older.hasOlder && older.isLoading) item(key = OLDER_LOADING_KEY) { OlderLoadingRow() }
-      if (older.isFailed) item(key = OLDER_FAILED_KEY) { OlderFailedRow(older.onRetry) }
     }
     FloatingDay(listState, items, Modifier.align(Alignment.TopCenter))
     Column(
@@ -1373,7 +1402,7 @@ private fun ImagePreview(file: FileInfo, bubbleMax: Dp, onOpen: (FileInfo) -> Un
       .background(MaterialTheme.colorScheme.surfaceVariant)
       .clickable(onClickLabel = stringResource(R.string.file_open)) { onOpen(file) },
   ) {
-    TransferOverlay(file) { Thumbnail(file, ContentScale.Crop) }
+    TransferOverlay(file) { TilePicture(file) }
   }
 }
 
@@ -1469,7 +1498,7 @@ private fun AlbumTile(
       )
       .semantics { more?.let { stateDescription = it } },
   ) {
-    TransferOverlay(image) { Thumbnail(image, ContentScale.Crop) }
+    TransferOverlay(image) { TilePicture(image) }
     maybeHidden?.let { hidden ->
       Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = ALBUM_MORE_SCRIM)), contentAlignment = Alignment.Center) {
         Text(
@@ -1487,6 +1516,64 @@ private fun AlbumTile(
 /** The gap between an album's tiles, and the shade under "+N". */
 private val ALBUM_GAP = 3.dp
 private const val ALBUM_MORE_SCRIM = 0.45f
+
+/**
+ * A picture of the conversation: the thumbnail, or for an animated image what moves, with its
+ * button and badge (#201). A tap on the button stops or starts it; a tap elsewhere opens the viewer
+ * as on any picture, and a long press stays the menu.
+ */
+@Composable
+private fun BoxScope.TilePicture(file: FileInfo) {
+  if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || !mayBeAnimated(file.mediaType)) {
+    Thumbnail(file, ContentScale.Crop)
+    return
+  }
+  val motion = LocalFeedMotion.current
+  val isResumed = isAppResumed()
+  var choice by rememberSaveable(file.fileId) { mutableStateOf(PlayChoice.UNSET) }
+  val isWanted = wantsToMove(motion.mode, choice)
+  val isKnownAnimation = isAnimationType(file.mediaType)
+  // A file that is still here only needs reading once it is to move, or when only reading says
+  // whether it moves at all.
+  val maybePath = file.transfer.path?.takeIf { file.transfer.state == "local" && (isWanted || choice == PlayChoice.PAUSED || !isKnownAnimation) }
+  val maybeAnimation = rememberAnimation(maybePath, THUMBNAIL_DECODE_PX)
+  val canMoveHere = isKnownAnimation || maybeAnimation != null
+  LaunchedEffect(file.fileId, file.transfer.state, isWanted, motion.mode) {
+    val isAutomatic = choice == PlayChoice.UNSET && file.sizeBytes <= MAX_AUTO_ANIMATION_BYTES && motion.fetchesNow()
+    if (isKnownAnimation && isWanted && isAutomatic && file.transfer.state == "remote") motion.fetch(file)
+  }
+  val isMoving = maybeAnimation != null && isWanted && isResumed && !motion.isCovered
+  if (maybeAnimation != null) {
+    AnimationView(
+      maybeAnimation,
+      isPlaying = isMoving,
+      contentScale = ContentScale.Crop,
+      modifier = Modifier.fillMaxSize(),
+      onEnded = { choice = PlayChoice.PAUSED },
+    )
+  } else {
+    Thumbnail(file, ContentScale.Crop)
+  }
+  if (!canMoveHere) return
+  val hasFailed = file.transfer.state == "failed"
+  if (!isMoving) {
+    AnimationBadge(
+      if (hasFailed) stringResource(R.string.animation_failed) else animationLabel(file.mediaType),
+      Modifier.align(Alignment.BottomStart),
+    )
+  }
+  val stateLabel = stringResource(if (isMoving) R.string.animation_state_playing else R.string.animation_state_paused)
+  AnimationButton(
+    isMoving = isMoving || (isWanted && file.transfer.isMoving),
+    onClick = {
+      val wasGoing = isMoving || (isWanted && file.transfer.isMoving)
+      choice = if (wasGoing) PlayChoice.PAUSED else PlayChoice.PLAYING
+      // Asked for by hand: on any network and at any size.
+      if (!wasGoing && (file.transfer.state == "remote" || hasFailed)) motion.fetch(file)
+    },
+    modifier = Modifier.align(Alignment.TopStart).semantics { stateDescription = stateLabel },
+  )
+}
 
 /** A preview's picture, decoded in the background; the tile's own color stands in until then. */
 @Composable
