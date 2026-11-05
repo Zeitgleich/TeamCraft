@@ -17,6 +17,7 @@ import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
 import androidx.compose.runtime.mutableStateMapOf
@@ -140,6 +141,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val graph = TeamCraftApplication.graph(application)
   private val state = MutableStateFlow<AppState>(AppState.Starting)
   private val busy = MutableStateFlow(false)
+  private val shareInbox = ShareInbox(File(application.noBackupFilesDir, "share-inbox"), MAX_IMPORT_BYTES)
+  private val shareState = MutableStateFlow<ShareState?>(null)
+  /** Shares on their way into a composer; they leave the inbox once it has their files. */
+  private val handedOverShares = HashSet<String>()
+  private var shareCopy: Job? = null
+  private var shareBeingCopied: SharedContent? = null
+
+  /** What another app shared, until the user picked a conversation or discarded it (issue #208). */
+  val share: StateFlow<ShareState?> = shareState
+
+  /** A copy under way must start over if the process is killed: its intent is not yet used up. */
+  val isCopyingShare: Boolean get() = shareCopy?.isActive == true
 
   val appState: StateFlow<AppState> = state
   val isBusy: StateFlow<Boolean> = busy
@@ -210,6 +223,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private var maybePageOrigin: String? = null
   private var isPageFresh = false
   private var pageFetchedAtMillis = 0L
+
+  init {
+    // What waited when the process ended comes back; what is past its time goes.
+    viewModelScope.launch {
+      withContext(Dispatchers.IO) { shareInbox.prune(System.currentTimeMillis()) }
+      refreshShare()
+    }
+  }
 
   init {
     refresh()
@@ -492,6 +513,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   fun signOut() = launchBusy {
     endSession()
+    // What waits to be shared doesn't outlive the session on this device.
+    shareCopy?.cancel()
+    withContext(Dispatchers.IO) { shareInbox.wipe() }
+    shareState.value = null
     state.value = AppState.SignedOut()
   }
 
@@ -728,6 +753,83 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }.getOrNull()?.let(::cleanFileName)?.takeIf { it.isNotBlank() } ?: "file"
     val type = runCatching { resolver.getType(uri) }.getOrNull() ?: "application/octet-stream"
     stage(name, type) { resolver.openInputStream(uri) }
+  }
+
+  /**
+   * Copies a share into the inbox right away (a URI grant doesn't outlive the task, the copy does).
+   * The same content again (a rotation while it is copied) is not copied twice.
+   */
+  fun receiveShare(content: SharedContent) {
+    if (isCopyingShare && shareBeingCopied == content) return
+    val previous = shareCopy
+    shareBeingCopied = content
+    if (shareState.value == null) shareState.value = ShareState.Preparing
+    shareCopy = viewModelScope.launch {
+      previous?.join()
+      withContext(Dispatchers.IO) { shareInbox.stage(content, shareSources(content), System.currentTimeMillis()) }
+      refreshShare()
+    }
+  }
+
+  /** The waiting share goes without a conversation: the user said so. */
+  fun discardShare() {
+    val maybeId = (shareState.value as? ShareState.Ready)?.share?.id
+    if (maybeId == null) shareCopy?.cancel()
+    viewModelScope.launch {
+      shareCopy?.join()
+      maybeId?.let { id -> withContext(Dispatchers.IO) { shareInbox.delete(id) } }
+      refreshShare()
+    }
+  }
+
+  /** The user picked a conversation: its composer takes over ([finishShare]). */
+  fun handOverShare(share: StagedShare) {
+    handedOverShares.add(share.id)
+    viewModelScope.launch { refreshShare() }
+  }
+
+  /** Moves a shared file into the core's staging folder; `null` when that fails. */
+  suspend fun importSharedFile(share: StagedShare, file: StagedShareFile): PickedFile? = withContext(Dispatchers.IO) {
+    val source = shareInbox.fileOf(share, file)
+    val name = cleanFileName(file.name).ifBlank { "file" }
+    val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
+    val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
+    if (source.renameTo(target)) {
+      PickedFile(fileName = name, mediaType = file.mediaType, path = target.absolutePath)
+    } else {
+      stage(name, file.mediaType) { source.inputStream() }
+    }
+  }
+
+  /** The composer has the share: it leaves the inbox. */
+  suspend fun finishShare(share: StagedShare) {
+    withContext(Dispatchers.IO) { shareInbox.delete(share.id) }
+    handedOverShares.remove(share.id)
+    refreshShare()
+  }
+
+  private suspend fun refreshShare() {
+    val maybeNext = withContext(Dispatchers.IO) { shareInbox.oldest(except = handedOverShares) }
+    val isCopyingAnother = currentCoroutineContext()[Job] != shareCopy && isCopyingShare
+    shareState.value = maybeNext?.let { ShareState.Ready(it) } ?: ShareState.Preparing.takeIf { isCopyingAnother }
+  }
+
+  /** The share's files, each checked and named like a picked file; others count as left out. */
+  private fun shareSources(content: SharedContent): List<ShareSource> {
+    val app = getApplication<Application>()
+    val resolver = app.contentResolver
+    return content.uris.map { uri ->
+      // A share from another app may not point into the app's private files.
+      val isAllowed = isForeignContent(uri.scheme, uri.authority, app.packageName) && !isPrivateFile(uri)
+      val maybeName = runCatching {
+        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+          if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+      }.getOrNull()
+      val name = maybeName?.let(::cleanFileName)?.takeIf { it.isNotBlank() } ?: "file"
+      val type = runCatching { resolver.getType(uri) }.getOrNull() ?: "application/octet-stream"
+      ShareSource(name, type) { if (isAllowed) resolver.openInputStream(uri) else null }
+    }
   }
 
   /** A photo the camera wrote into the app's cache. */

@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import android.widget.Toast
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.draw.clip
@@ -1071,9 +1072,15 @@ internal fun Composer(
     // Text and files shared from another app land in the composer; the user sends them.
     val share = maybePendingShare?.takeIf { it.conversation == conversationId && maybeThread == null } ?: return@LaunchedEffect
     if (!isDraftLoaded) return@LaunchedEffect
-    val imported = share.content.uris.mapNotNull { viewModel.importFile(it) }
+    val imported = share.content.files.mapNotNull { viewModel.importSharedFile(share.content, it) }
     text = listOf(text, share.content.text).filter { it.isNotBlank() }.joinToString("\n")
     files = files + imported
+    val failedCount = share.content.files.size - imported.size
+    if (failedCount > 0) {
+      val failed = context.resources.getQuantityString(R.plurals.share_import_failed, failedCount, failedCount)
+      Toast.makeText(context, failed, Toast.LENGTH_LONG).show()
+    }
+    viewModel.finishShare(share.content)
     // Cleared last: clearing restarts this effect, which would cancel the import.
     PendingShare.current.value = null
     focus.requestFocus()
