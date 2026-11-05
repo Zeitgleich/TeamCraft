@@ -184,4 +184,17 @@ class WireTest {
     assertFalse(profile.canOverrideDisplayName)
     assertEquals(null, profile.maybeDisplayNameOverride)
   }
+
+  @Test
+  fun aReplyToOnePictureDecodesAndAnOlderOneStillDoes() {
+    val reply = WireJson.decodeFromString<ReplyPreview>(
+      """{"maybe_message":"9","author":"5","excerpt":"c.jpg","attachment":{"file_id":"4","file_name":"c.jpg","thumbnail_png":[1,2],"can_open":true}}""",
+    )
+    val image = reply.maybeAttachment!!
+    assertEquals("4", image.fileId)
+    assertEquals(true, image.canOpen)
+    assertEquals(2, image.maybeThumbnail!!.bytes.size)
+    val older = WireJson.decodeFromString<ReplyPreview>("""{"author":"5","excerpt":"hi"}""")
+    assertEquals(null, older.maybeAttachment)
+  }
 }

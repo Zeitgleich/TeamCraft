@@ -124,6 +124,7 @@ import de.zeitgleich.teamcraft.core.FileInfo
 import de.zeitgleich.teamcraft.core.LinkPreview
 import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
+import de.zeitgleich.teamcraft.core.ReplyAttachmentPreview
 import de.zeitgleich.teamcraft.core.ReplyPreview
 import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.core.UnseenReactions
@@ -235,6 +236,13 @@ fun MessageFeed(
   onOpenThread: ((String) -> Unit)?,
   maybeOnReply: ((Message) -> Unit)?,
   onLongPress: (Message) -> Unit,
+  /** Answers one picture of an album. */
+  maybeOnReplyImage: ((FileInfo) -> Unit)? = null,
+  /** A long press on a picture of an album. */
+  onLongPressImage: (FileInfo) -> Unit = {},
+  /** Opens the viewer from outside the feed (the picture's action sheet). */
+  maybeOpenPicture: PictureTarget? = null,
+  onPictureOpened: () -> Unit = {},
   modifier: Modifier = Modifier,
   maybeFocusMessage: String? = null,
   onOpenPermalink: (String) -> Unit = {},
@@ -366,7 +374,9 @@ fun MessageFeed(
               look = look,
               onOpenThread = onOpenThread,
               onOpenFile = onOpenFile,
+              onOpenPicture = { target -> maybeViewing = target.toList() },
               onLongPress = { onLongPress(item.message) },
+              onLongPressImage = onLongPressImage,
               maybeOnReply = maybeOnReply,
               isHighlighted = item.message.id == maybeHighlighted,
               onOpenPermalink = onOpenPermalink,
@@ -407,8 +417,25 @@ fun MessageFeed(
       }
     }
   }
+  LaunchedEffect(maybeOpenPicture) {
+    maybeOpenPicture?.let { target ->
+      maybeViewing = target.toList()
+      onPictureOpened()
+    }
+  }
   maybeViewing?.let(PictureTarget::fromList)?.let { target ->
-    ImageViewer(viewModel, snapshot, target, onDismiss = { maybeViewing = null })
+    ImageViewer(
+      viewModel,
+      snapshot,
+      target,
+      onDismiss = { maybeViewing = null },
+      maybeOnReply = maybeOnReplyImage?.let { reply ->
+        { file: FileInfo ->
+          maybeViewing = null
+          reply(file)
+        }
+      },
+    )
   }
 }
 
@@ -783,7 +810,9 @@ private fun MessageRow(
   look: FeedLook,
   onOpenThread: ((String) -> Unit)?,
   onOpenFile: (FileInfo) -> Unit,
+  onOpenPicture: (PictureTarget) -> Unit,
   onLongPress: () -> Unit,
+  onLongPressImage: (FileInfo) -> Unit,
   maybeOnReply: ((Message) -> Unit)?,
   isHighlighted: Boolean,
   onOpenPermalink: (String) -> Unit,
@@ -882,6 +911,8 @@ private fun MessageRow(
           isMine = isMine,
           showsName = showsSender && !entry.isContinuation,
           onOpenFile = onOpenFile,
+          onOpenPicture = onOpenPicture,
+          onLongPressImage = onLongPressImage,
           onOpenPermalink = onOpenPermalink,
         )
       }
@@ -904,6 +935,8 @@ private fun Bubble(
   isMine: Boolean,
   showsName: Boolean,
   onOpenFile: (FileInfo) -> Unit,
+  onOpenPicture: (PictureTarget) -> Unit,
+  onLongPressImage: (FileInfo) -> Unit,
   onOpenPermalink: (String) -> Unit,
 ) {
   val message = entry.message
@@ -940,11 +973,11 @@ private fun Bubble(
         )
       }
       maybeExtras?.maybeReply?.let { reply ->
-        ReplyQuote(reply, snapshot, extras, colors, Modifier.padding(top = 2.dp).fillMaxWidth())
+        ReplyQuote(reply, message.conversation, snapshot, extras, colors, onOpenPicture, Modifier.padding(top = 2.dp).fillMaxWidth())
       }
       if (images.isNotEmpty() && !isDeleted) {
         Box(Modifier.padding(top = if (showsName || maybeExtras?.maybeReply != null) 4.dp else 0.dp)) {
-          if (images.size >= 2) ImageGrid(images, look.bubbleMax, onOpenFile) else ImagePreview(images.first(), look.bubbleMax, onOpenFile)
+          if (images.size >= 2) ImageGrid(images, look.bubbleMax, onOpenFile, onLongPressImage) else ImagePreview(images.first(), look.bubbleMax, onOpenFile)
         }
       }
       Column(textPadding.padding(top = BUBBLE_TEXT_PADDING_V - BUBBLE_MEDIA_PADDING)) {
@@ -1242,12 +1275,26 @@ private fun UploadLine(viewModel: MainViewModel, file: FileInfo, colors: BubbleC
  * line of the text and, when the quoted message has a picture, its thumbnail.
  */
 @Composable
-private fun ReplyQuote(reply: ReplyPreview, snapshot: ChatSnapshot?, extras: Map<String, MessageExtras>, colors: BubbleColors, modifier: Modifier) {
-  val maybeImage = reply.maybeMessage?.let { extras[it] }?.files?.firstOrNull { it.isImage && it.maybeThumbnail != null }
+private fun ReplyQuote(
+  reply: ReplyPreview,
+  conversation: String,
+  snapshot: ChatSnapshot?,
+  extras: Map<String, MessageExtras>,
+  colors: BubbleColors,
+  onOpenPicture: (PictureTarget) -> Unit,
+  modifier: Modifier,
+) {
+  val maybeQuoted = reply.maybeAttachment
+  val maybeImage = reply.maybeMessage?.takeIf { maybeQuoted == null }?.let { extras[it] }?.files?.firstOrNull { it.isImage && it.maybeThumbnail != null }
+  val maybeTarget = maybeQuoted?.takeIf { it.canOpen }?.let { quoted ->
+    reply.maybeMessage?.let { message -> PictureTarget(conversation, message, quoted.fileId) }
+  }
+  val openLabel = stringResource(R.string.file_open)
   Row(
     modifier
       .clip(RoundedCornerShape(BUBBLE_CORNER_INNER))
       .background(colors.content.copy(alpha = QUOTE_BACKGROUND_ALPHA))
+      .then(if (maybeTarget != null) Modifier.clickable(onClickLabel = openLabel) { onOpenPicture(maybeTarget) } else Modifier)
       .height(IntrinsicSize.Min),
     verticalAlignment = Alignment.CenterVertically,
   ) {
@@ -1272,6 +1319,21 @@ private fun ReplyQuote(reply: ReplyPreview, snapshot: ChatSnapshot?, extras: Map
       Box(Modifier.padding(4.dp).size(40.dp).clip(RoundedCornerShape(6.dp))) {
         Thumbnail(image, ContentScale.Crop)
       }
+    }
+    maybeQuoted?.let { quoted -> QuotedPicture(quoted, colors) }
+  }
+}
+
+/** The thumbnail a reply carries of the picture it answers; it outlives the picture (#241). */
+@Composable
+private fun QuotedPicture(quoted: ReplyAttachmentPreview, colors: BubbleColors) {
+  val maybeBitmap by rememberThumbnail("quote:${quoted.fileId}", quoted.maybeThumbnail?.bytes, THUMBNAIL_DECODE_PX)
+  Box(Modifier.padding(4.dp).size(40.dp).clip(RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) {
+    val bitmap = maybeBitmap
+    if (bitmap != null) {
+      Image(bitmap, contentDescription = quoted.fileName, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+    } else {
+      Icon(painterResource(R.drawable.ic_image), contentDescription = quoted.fileName, tint = colors.muted)
     }
   }
 }
@@ -1355,7 +1417,7 @@ private fun FileCard(file: FileInfo, colors: BubbleColors, onOpen: (FileInfo) ->
  * through all of them.
  */
 @Composable
-private fun ImageGrid(images: List<FileInfo>, bubbleMax: Dp, onOpen: (FileInfo) -> Unit) {
+private fun ImageGrid(images: List<FileInfo>, bubbleMax: Dp, onOpen: (FileInfo) -> Unit, onLongPress: (FileInfo) -> Unit) {
   val layout = remember(images.size) { albumLayout(images.size.toUInt()) }
     ?: AlbumLayout(tiles = images.size.toUInt(), hidden = 0u, isFirstTall = false)
   val shown = images.take(layout.tiles.toInt())
@@ -1364,17 +1426,17 @@ private fun ImageGrid(images: List<FileInfo>, bubbleMax: Dp, onOpen: (FileInfo) 
   fun hiddenAt(index: Int): Int? = if (index == shown.lastIndex && layout.hidden > 0u) layout.hidden.toInt() else null
   if (layout.isFirstTall && shown.size == 3) {
     Row(Modifier.width(width), horizontalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
-      AlbumTile(shown[0], null, Modifier.width(side).height(side * 2 + ALBUM_GAP), onOpen)
+      AlbumTile(shown[0], null, Modifier.width(side).height(side * 2 + ALBUM_GAP), onOpen, onLongPress)
       Column(verticalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
-        AlbumTile(shown[1], null, Modifier.size(side), onOpen)
-        AlbumTile(shown[2], hiddenAt(2), Modifier.size(side), onOpen)
+        AlbumTile(shown[1], null, Modifier.size(side), onOpen, onLongPress)
+        AlbumTile(shown[2], hiddenAt(2), Modifier.size(side), onOpen, onLongPress)
       }
     }
   } else {
     Column(Modifier.width(width), verticalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
       for ((row, pair) in shown.chunked(2).withIndex()) {
         Row(horizontalArrangement = Arrangement.spacedBy(ALBUM_GAP)) {
-          pair.forEachIndexed { column, image -> AlbumTile(image, hiddenAt(row * 2 + column), Modifier.size(side), onOpen) }
+          pair.forEachIndexed { column, image -> AlbumTile(image, hiddenAt(row * 2 + column), Modifier.size(side), onOpen, onLongPress) }
         }
       }
     }
@@ -1383,13 +1445,28 @@ private fun ImageGrid(images: List<FileInfo>, bubbleMax: Dp, onOpen: (FileInfo) 
 
 /** One tile of an album; on the last one, the pictures it doesn't show ("+3"). */
 @Composable
-private fun AlbumTile(image: FileInfo, maybeHidden: Int?, modifier: Modifier, onOpen: (FileInfo) -> Unit) {
+private fun AlbumTile(
+  image: FileInfo,
+  maybeHidden: Int?,
+  modifier: Modifier,
+  onOpen: (FileInfo) -> Unit,
+  onLongPress: (FileInfo) -> Unit,
+) {
   val more = maybeHidden?.let { pluralStringResource(R.plurals.album_more_pictures, it, it) }
+  val haptics = LocalHapticFeedback.current
   Box(
     modifier
       .clip(RoundedCornerShape(MEDIA_CORNER))
       .background(MaterialTheme.colorScheme.surfaceVariant)
-      .clickable(onClickLabel = stringResource(R.string.file_open)) { onOpen(image) }
+      .combinedClickable(
+        onClickLabel = stringResource(R.string.file_open),
+        onLongClickLabel = stringResource(R.string.more),
+        onClick = { onOpen(image) },
+        onLongClick = {
+          haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+          onLongPress(image)
+        },
+      )
       .semantics { more?.let { stateDescription = it } },
   ) {
     TransferOverlay(image) { Thumbnail(image, ContentScale.Crop) }
@@ -1413,7 +1490,7 @@ private const val ALBUM_MORE_SCRIM = 0.45f
 
 /** A preview's picture, decoded in the background; the tile's own color stands in until then. */
 @Composable
-private fun Thumbnail(file: FileInfo, contentScale: ContentScale) {
+internal fun Thumbnail(file: FileInfo, contentScale: ContentScale) {
   val maybeBitmap by rememberThumbnail(thumbnailKey(file), file.maybeThumbnail?.bytes, THUMBNAIL_DECODE_PX)
   maybeBitmap?.let { bitmap ->
     Image(bitmap, contentDescription = file.fileName, contentScale = contentScale, modifier = Modifier.fillMaxSize())

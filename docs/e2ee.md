@@ -868,6 +868,14 @@ shows only the resulting PNG. Thumbnails of SVG are drawn by the sender's browse
 `resvg` on native platforms, with no DTD, no resources loaded and limits on size, element count and
 `<use>` expansion (`teamcraft-core` `svg_thumbnail`).
 
+A reply to one picture of a message with several (issue #241) names its attachment ID and carries a copy
+of its thumbnail and its name, inside the encrypted reply, never the file's key: the quote gives nobody
+the file, and it stays when the picture is deleted or expires, as the quoted text of a reply always has.
+While the quoted message still has the picture, readers show that message's thumbnail rather than the
+copy, so a sender can't put another picture under someone else's name. A forward of one picture carries
+that attachment's reference (key and hash) and nothing else of the message, neither the other files nor
+the text; like every forward it reuses the blob, encrypted inside a new message for the target.
+
 #### 4.5.0 Previews of files
 
 A received `.md`, `.html` or `.pdf` file, or a text file (`.txt`, `.log`, `.json`, `.csv`, `.yaml`, `.toml`,

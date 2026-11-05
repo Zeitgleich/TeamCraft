@@ -26,6 +26,7 @@ async fn replies_priority_and_acknowledgements() {
   alice_ui.send_message(OutgoingMessage {
     maybe_client_message_id: None,
     maybe_reply_to: Some(question.id),
+    maybe_reply_attachment: None,
     priority: MessagePriority::Urgent,
     wants_acknowledgement: true,
     ..outgoing(channel, "I do – please confirm you read this")
@@ -381,6 +382,7 @@ fn outgoing(conversation: ConversationId, body: &str) -> OutgoingMessage {
     maybe_thread: None,
     body: body.into(),
     maybe_reply_to: None,
+    maybe_reply_attachment: None,
     priority: MessagePriority::Normal,
     wants_acknowledgement: false,
     is_silent: false,

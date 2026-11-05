@@ -7,7 +7,7 @@
 //! come from [`crate::backend::ChatBackend::message_extras`] for the rows on screen.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{CategoryId, ClientMessageId, HistoryPolicy, IdempotencyKey};
+use teamcraft_proto::{AttachmentId, CategoryId, ClientMessageId, HistoryPolicy, IdempotencyKey};
 
 use crate::model::{
   ConversationId, ImportedAuthorView, Message, MessageId, SpaceId, ThreadId, TimestampMs, UserId,
@@ -40,6 +40,10 @@ pub struct OutgoingMessage {
   /// Quotes another message of the conversation (the reference travels encrypted).
   #[serde(default)]
   pub maybe_reply_to: Option<MessageId>,
+  /// With `maybe_reply_to`: the one picture of an album the reply answers (issue #241). The core
+  /// ignores it for a message with a single file.
+  #[serde(default)]
+  pub maybe_reply_attachment: Option<AttachmentId>,
   #[serde(default)]
   pub priority: MessagePriority,
   /// Asks every reader to confirm they have read it.
@@ -170,6 +174,22 @@ pub struct ReplyPreview {
   pub author: UserId,
   /// The start of the quoted text; empty if the quoted message is gone or not loaded.
   pub excerpt: String,
+  /// The one picture of an album the reply answers.
+  #[serde(rename = "attachment", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_attachment: Option<ReplyAttachmentPreview>,
+}
+
+/// The picture a reply quotes. It still shows when the picture is gone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyAttachmentPreview {
+  pub file_id: String,
+  pub file_name: String,
+  /// JPEG or PNG, as [`FileInfo::maybe_thumbnail_png`].
+  #[serde(rename = "thumbnail_png", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_thumbnail_png: Option<Vec<u8>>,
+  /// The picture is still in the quoted message on this device: the quote can open it.
+  #[serde(default)]
+  pub can_open: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

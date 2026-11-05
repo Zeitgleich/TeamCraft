@@ -366,7 +366,7 @@ async fn wait_until_sent(page: &Page, text: &str) {
 
 /// Types `text` into the composer and waits until the app has it (it re-renders while it settles and
 /// may lose what was typed into the old field): Enter before that adds a line instead of sending.
-async fn type_into_composer(page: &Page, text: &str) -> chromiumoxide::element::Element {
+pub(crate) async fn type_into_composer(page: &Page, text: &str) -> chromiumoxide::element::Element {
   let deadline = Instant::now() + WAIT;
   loop {
     let composer = wait_for_element(page, "[data-composer]").await;

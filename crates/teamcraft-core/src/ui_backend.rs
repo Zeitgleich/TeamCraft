@@ -43,10 +43,10 @@ use teamcraft_proto::{
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::receipts::{ReadIndicator, seen_by};
 
-use crate::client::bookmarks_key;
 use crate::client::history_gaps::{Gap, read_record as read_gaps_record};
 use crate::client::older_history::{is_failure_current, older_history_record};
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
+use crate::client::{ForwardScope, bookmarks_key};
 use crate::clock::Clock;
 use crate::entry_tally::{self, EntryPass, EntryTally, TallyInputs};
 use crate::error::CoreError;
@@ -2056,7 +2056,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
 
   fn forward_message(&self, from: ConversationId, message: MessageId, to: ConversationId, comment: &str) {
-    self.ui_forward_message(from, message, to, comment);
+    self.ui_forward_message(from, message, ForwardScope::Message, to, comment);
+  }
+
+  fn forward_attachment(
+    &self,
+    from: ConversationId,
+    message: MessageId,
+    attachment: AttachmentId,
+    to: ConversationId,
+    comment: &str,
+  ) {
+    self.ui_forward_message(from, message, ForwardScope::Attachment(attachment), to, comment);
   }
 
   fn set_pinned(&self, conversation: ConversationId, message: MessageId, is_pinned: bool) {
@@ -4330,6 +4341,7 @@ mod tests {
         maybe_thread: None,
         body: body.to_owned(),
         maybe_reply_to: None,
+        maybe_reply_attachment: None,
         priority: MessagePriority::Normal,
         wants_acknowledgement: false,
         is_silent: false,
@@ -5017,11 +5029,16 @@ mod tests {
       #[test]
       fn replies_and_forwards_quote_the_original_author_and_time() {
         let stored = imported_message(IMPORTER, ImportedAuthor::User { user_id: id(2) }, Vec::new());
-        assert_eq!(reply_ref(&stored, Some(id(IMPORTER))).author, id(2));
+        assert_eq!(reply_ref(&stored, Some(id(IMPORTER)), None).author, id(2));
         let authorship = Authorship::of(&stored, Some(id(IMPORTER)));
-        let Some(MessageContent::Text { meta, .. }) =
-          forward_content(&authorship, &stored, "Original".into(), None, "")
-        else {
+        let Some(MessageContent::Text { meta, .. }) = forward_content(
+          &authorship,
+          &stored,
+          ForwardScope::Message,
+          "Original".into(),
+          None,
+          "",
+        ) else {
           panic!("a forward");
         };
         assert_eq!(meta.maybe_forwarded.unwrap().sent_at_ms, 1_600_000_000_000);

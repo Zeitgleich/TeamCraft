@@ -9,7 +9,7 @@
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
-  AdminMailSettingsResponse, AnnouncementResponse, BackgroundId, BrandAssetSlot, CategoryId,
+  AdminMailSettingsResponse, AnnouncementResponse, AttachmentId, BackgroundId, BrandAssetSlot, CategoryId,
   ChannelModeration, CreateBrandRequest, HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role,
   RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SendTestMailRequest,
   SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest, UpdateCalendarSettingsRequest,
@@ -315,6 +315,17 @@ pub trait ChatBackend {
   fn delete_message(&self, _conversation: ConversationId, _message: MessageId) {}
   /// Sends a copy of a message (re-encrypted for the target) with an optional comment.
   fn forward_message(&self, _from: ConversationId, _message: MessageId, _to: ConversationId, _comment: &str) {
+  }
+  /// Sends a copy of one file of a message, without the rest of an album (issue #241). A message with
+  /// only this file goes whole, as with [`Self::forward_message`].
+  fn forward_attachment(
+    &self,
+    _from: ConversationId,
+    _message: MessageId,
+    _attachment: AttachmentId,
+    _to: ConversationId,
+    _comment: &str,
+  ) {
   }
   fn set_pinned(&self, _conversation: ConversationId, _message: MessageId, _is_pinned: bool) {}
   fn pinned_messages(&self, _conversation: ConversationId) -> Vec<Message> {

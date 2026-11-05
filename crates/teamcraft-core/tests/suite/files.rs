@@ -773,6 +773,7 @@ fn with_files(conversation: ConversationId, body: &str, files: Vec<OutgoingFile>
     maybe_thread: None,
     body: body.into(),
     maybe_reply_to: None,
+    maybe_reply_attachment: None,
     priority: MessagePriority::Normal,
     wants_acknowledgement: false,
     is_silent: false,

@@ -200,6 +200,7 @@ fn text(conversation: ConversationId, body: &str) -> OutgoingMessage {
     maybe_thread: None,
     body: body.into(),
     maybe_reply_to: None,
+    maybe_reply_attachment: None,
     priority: MessagePriority::Normal,
     wants_acknowledgement: false,
     is_silent: false,

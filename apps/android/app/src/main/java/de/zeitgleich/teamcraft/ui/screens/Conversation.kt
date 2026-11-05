@@ -1,6 +1,9 @@
 package de.zeitgleich.teamcraft.ui.screens
 
 import androidx.annotation.StringRes
+import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import android.content.ClipboardManager
@@ -98,6 +101,8 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import de.zeitgleich.teamcraft.core.FileInfo
+import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.forms.fieldError
 import de.zeitgleich.teamcraft.ui.forms.requiredTextError
 import de.zeitgleich.teamcraft.ui.forms.supportingText
@@ -140,6 +145,7 @@ import uniffi.teamcraft_ffi.NotifiedConversation
 import uniffi.teamcraft_ffi.emojiConvert
 import uniffi.teamcraft_ffi.emojiSuggestions
 import uniffi.teamcraft_ffi.needsChannelConfirmation
+import android.os.Build
 
 /** Quick reactions in the action sheet. */
 private val QUICK_REACTIONS = listOf("👍", "❤️", "😂", "🎉", "😮", "🙏")
@@ -257,6 +263,9 @@ fun ConversationScreen(
       onOpenThread = onOpenThread,
       maybeOnReply = { message: Message ->
         ReplyTarget.set(conversationId, message, snapshot?.name(message.author).orEmpty())
+      }.takeIf { rights.canPost },
+      maybeOnReplyImage = { file: FileInfo ->
+        ReplyTarget.setImage(file, file.maybeSender?.let { snapshot?.name(it) }.orEmpty())
       }.takeIf { rights.canPost },
       rights = rights,
       modifier = Modifier.weight(1f),
@@ -661,6 +670,7 @@ private fun MessageList(
   sentCount: Int,
   onOpenThread: ((String) -> Unit)?,
   maybeOnReply: ((Message) -> Unit)?,
+  maybeOnReplyImage: ((FileInfo) -> Unit)? = null,
   rights: ConversationRights,
   modifier: Modifier,
   maybeFocusMessage: String?,
@@ -671,6 +681,22 @@ private fun MessageList(
   onReactionsSeen: (List<String>) -> Unit = {},
 ) {
   var maybeSelected by remember { mutableStateOf<Message?>(null) }
+  var maybeSelectedImage by remember { mutableStateOf<FileInfo?>(null) }
+  val imageScope = rememberCoroutineScope()
+  val imageContext = LocalContext.current
+  var maybeViewingFromSheet by remember { mutableStateOf<PictureTarget?>(null) }
+  maybeSelectedImage?.let { image ->
+    ImageActions(
+      viewModel = viewModel,
+      snapshot = snapshot,
+      image = image,
+      maybeOnReply = maybeOnReplyImage,
+      // Goes on after the sheet closed: it may have to download the picture first.
+      onSave = { imageScope.launch { downloadAndSaveToGallery(viewModel, imageContext, image) } },
+      onOpen = { maybeViewingFromSheet = PictureTarget.of(image) },
+      onDismiss = { maybeSelectedImage = null },
+    )
+  }
   MessageFeed(
     viewModel = viewModel,
     snapshot = snapshot,
@@ -680,7 +706,11 @@ private fun MessageList(
     sentCount = sentCount,
     onOpenThread = onOpenThread,
     maybeOnReply = maybeOnReply,
+    maybeOnReplyImage = maybeOnReplyImage,
     onLongPress = { maybeSelected = it },
+    onLongPressImage = { maybeSelectedImage = it },
+    maybeOpenPicture = maybeViewingFromSheet,
+    onPictureOpened = { maybeViewingFromSheet = null },
     modifier = modifier,
     maybeFocusMessage = maybeFocusMessage,
     onOpenPermalink = onOpenPermalink,
@@ -836,6 +866,48 @@ private fun MessageActions(
   }
 }
 
+/** What can be done with one picture of an album (#241): a long press on its tile. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ImageActions(
+  viewModel: MainViewModel,
+  snapshot: ChatSnapshot?,
+  image: FileInfo,
+  maybeOnReply: ((FileInfo) -> Unit)?,
+  onSave: () -> Unit,
+  onOpen: () -> Unit,
+  onDismiss: () -> Unit,
+) {
+  var isForwarding by remember { mutableStateOf(false) }
+  ModalBottomSheet(onDismissRequest = onDismiss) {
+    Column(Modifier.padding(bottom = 24.dp)) {
+      maybeOnReply?.let { reply ->
+        SheetItem(R.string.image_reply) {
+          reply(image)
+          onDismiss()
+        }
+      }
+      SheetItem(R.string.image_forward_one) { isForwarding = true }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        SheetItem(R.string.image_save) {
+          onSave()
+          onDismiss()
+        }
+      }
+      SheetItem(R.string.file_open) {
+        onOpen()
+        onDismiss()
+      }
+    }
+  }
+  if (isForwarding && snapshot != null) {
+    ForwardDialog(snapshot, onPick = { target ->
+      viewModel.forwardFile(image, target)
+      onDismiss()
+    }, onDismiss = { isForwarding = false })
+  }
+}
+
 /** The quick reactions at the top of a message's action sheet, spread over the width. */
 @Composable
 private fun QuickReactions(onReact: (String) -> Unit) {
@@ -938,12 +1010,23 @@ internal fun ForwardDialog(snapshot: ChatSnapshot, onPick: (String) -> Unit, onD
 
 /** The message the composer of a conversation replies to (set from the action sheet). */
 object ReplyTarget {
-  data class Target(val conversation: String, val message: Message, val authorName: String)
+  /** [maybeImage]: the one picture of an album the reply answers (#241). */
+  data class Target(
+    val conversation: String,
+    val messageId: String,
+    val excerpt: String,
+    val authorName: String,
+    val maybeImage: FileInfo? = null,
+  )
 
   val current = kotlinx.coroutines.flow.MutableStateFlow<Target?>(null)
 
   fun set(conversation: String, message: Message, authorName: String) {
-    current.value = Target(conversation, message, authorName)
+    current.value = Target(conversation, message.id, message.body, authorName)
+  }
+
+  fun setImage(file: FileInfo, authorName: String) {
+    current.value = Target(file.conversation, file.message, file.fileName, authorName, file)
   }
 }
 
@@ -1009,7 +1092,8 @@ internal fun Composer(
   fun send() {
     val options = SendOptions(
       maybeThread = maybeThread,
-      maybeReplyTo = maybeReply?.message?.id,
+      maybeReplyTo = maybeReply?.messageId,
+      maybeReplyAttachment = maybeReply?.maybeImage?.fileId,
       priority = priority,
       wantsAcknowledgement = wantsAcknowledgement,
       isSilent = isSilent,
@@ -1059,8 +1143,13 @@ internal fun Composer(
     }
     maybeReply?.let { reply ->
       Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        reply.maybeImage?.let { image ->
+          Box(Modifier.padding(end = 8.dp).size(28.dp).clip(RoundedCornerShape(4.dp))) {
+            Thumbnail(image, ContentScale.Crop)
+          }
+        }
         Text(
-          stringResource(R.string.replying_to, reply.authorName) + ": " + reply.message.body,
+          stringResource(R.string.replying_to, reply.authorName) + ": " + reply.excerpt,
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
           style = MaterialTheme.typography.bodySmall,

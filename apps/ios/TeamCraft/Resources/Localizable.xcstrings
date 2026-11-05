@@ -9502,13 +9502,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Forward message"
+            "value": "Forward"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Nachricht weiterleiten"
+            "value": "Weiterleiten"
           }
         }
       }
@@ -11253,6 +11253,70 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nur Workspace-Admins können den Notetaker zu einem Anruf hinzufügen."
+          }
+        }
+      }
+    },
+    "image_reply": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reply to this image"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auf dieses Bild antworten"
+          }
+        }
+      }
+    },
+    "image_forward_one": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forward this image"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Bild weiterleiten"
+          }
+        }
+      }
+    },
+    "file_gone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This file is no longer available."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Datei ist nicht mehr verfügbar."
+          }
+        }
+      }
+    },
+    "file_download": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Download"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Herunterladen"
           }
         }
       }

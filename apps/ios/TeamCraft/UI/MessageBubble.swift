@@ -133,7 +133,9 @@ struct MessageBubble: View {
           .padding(.top, 4)
       }
       if let reply = maybeExtras?.maybeReply {
-        BubbleReplyQuote(author: displayNames[reply.author] ?? "", excerpt: reply.excerpt, accent: quoteAccent)
+        BubbleReplyQuote(
+          author: displayNames[reply.author] ?? "", excerpt: reply.excerpt, accent: quoteAccent,
+          maybeMessageId: reply.maybeMessage, maybeImage: reply.attachment)
           .padding(.top, showsName ? 4 : 0)
           .bubbleStretch()
       }
@@ -494,13 +496,31 @@ struct BubbleReplyQuote: View {
   let author: String
   let excerpt: String
   let accent: Color
+  var maybeMessageId: String?
+  /// A reply to one picture of an album (#241): its thumbnail, and a way to it while it is there.
+  var maybeImage: ReplyAttachmentPreview?
+
+  @Environment(\.openQuotedPicture) private var maybeOpenQuoted
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 1) {
-      if !author.isEmpty {
-        Text(author).font(.footnote.weight(.semibold)).foregroundStyle(accent).lineLimit(1)
+    if let image = maybeImage, image.canOpen == true, let messageId = maybeMessageId, let open = maybeOpenQuoted {
+      Button { open(messageId, image.fileId) } label: { quote }
+        .buttonStyle(.plain)
+    } else {
+      quote
+    }
+  }
+
+  private var quote: some View {
+    HStack(spacing: 8) {
+      VStack(alignment: .leading, spacing: 1) {
+        if !author.isEmpty {
+          Text(author).font(.footnote.weight(.semibold)).foregroundStyle(accent).lineLimit(1)
+        }
+        Text(excerpt).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
       }
-      Text(excerpt).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+      Spacer(minLength: 0)
+      if let image = maybeImage { QuotedPicture(image: image, side: 40) }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
     .padding(.leading, 11).padding(.trailing, 8).padding(.vertical, 6)
@@ -508,6 +528,25 @@ struct BubbleReplyQuote: View {
     .overlay(alignment: .leading) { Rectangle().fill(accent).frame(width: 3) }
     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     .accessibilityElement(children: .combine)
+  }
+}
+
+/// The thumbnail a reply carries of the picture it answers; it outlives the picture.
+struct QuotedPicture: View {
+  let image: ReplyAttachmentPreview
+  let side: CGFloat
+
+  var body: some View {
+    Group {
+      if let thumbnail = ThumbnailCache.image(forQuote: image) {
+        Image(uiImage: thumbnail).resizable().scaledToFill()
+      } else {
+        Image(systemName: "photo").foregroundStyle(.secondary)
+      }
+    }
+    .frame(width: side, height: side)
+    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    .accessibilityLabel(Text(verbatim: image.fileName))
   }
 }
 

@@ -9,7 +9,9 @@
   <string name="image_try_again">Erneut versuchen</string>
   <string name="image_scope_message">Diese Nachricht</string>
   <string name="image_scope_conversation">Ganzer Chat</string>
-  <string name="image_forward">Nachricht weiterleiten</string>
+  <string name="image_reply">Auf dieses Bild antworten</string>
+  <string name="image_forward_one">Dieses Bild weiterleiten</string>
+  <string name="file_gone">Diese Datei ist nicht mehr verfügbar.</string>
   <plurals name="album_more_pictures">
     <item quantity="one">%d weiteres Bild</item>
     <item quantity="other">%d weitere Bilder</item>

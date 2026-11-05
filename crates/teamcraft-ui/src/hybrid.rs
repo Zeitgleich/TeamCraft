@@ -18,10 +18,10 @@ use teamcraft_proto::OrgBackgroundId;
 
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
-  AdminMailSettingsResponse, AnnouncementResponse, BrandAssetSlot, ChannelModeration, CreateBrandRequest,
-  PermissionSchemeResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection,
-  SchemeChange, SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest,
-  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
+  AdminMailSettingsResponse, AnnouncementResponse, AttachmentId, BrandAssetSlot, ChannelModeration,
+  CreateBrandRequest, PermissionSchemeResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
+  RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse,
+  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use teamcraft_client_api::actions::{
@@ -448,6 +448,19 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn forward_message(&self, from: ConversationId, message: MessageId, to: ConversationId, comment: &str) {
     self.chat.forward_message(from, message, to, comment);
+  }
+
+  fn forward_attachment(
+    &self,
+    from: ConversationId,
+    message: MessageId,
+    attachment: AttachmentId,
+    to: ConversationId,
+    comment: &str,
+  ) {
+    self
+      .chat
+      .forward_attachment(from, message, attachment, to, comment);
   }
 
   fn set_pinned(&self, conversation: ConversationId, message: MessageId, is_pinned: bool) {

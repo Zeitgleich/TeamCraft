@@ -218,6 +218,7 @@ error-device-binding-required = This server only accepts sign-ins bound to your 
 error-proof-refused = The server refused this device's proof of who it is. A proxy may change requests, or the server may not know this address: tell your administrator.
 error-rate-limited = Too many requests at once. Wait a moment and try again.
 error-too-large = That is too large for the server. Try something smaller.
+error-attachment-gone = This file is no longer available.
 error-server-trouble = The server has a problem right now. Try again in a few minutes.
 error-conflict = Someone changed this at the same time. Look at the current state and try again.
 error-not-found = This doesn't exist any more. It may have been deleted or moved.

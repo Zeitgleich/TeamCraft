@@ -28,6 +28,7 @@ class ChatActionsTest {
     assertEquals("7", message["conversation"]!!.jsonPrimitive.content)
     assertEquals(JsonNull, message["maybe_thread"])
     assertEquals("9", message["maybe_reply_to"]!!.jsonPrimitive.content)
+    assertEquals(JsonNull, message["maybe_reply_attachment"])
     assertEquals("urgent", message["priority"]!!.jsonPrimitive.content)
     val file = message["files"]!!.jsonArray[0].jsonObject
     assertEquals("path", file["source"]!!.jsonObject["kind"]!!.jsonPrimitive.content)
@@ -72,5 +73,25 @@ class ChatActionsTest {
       ChatQueries.messageExtras("7", listOf("1", "2")),
     )
     assertEquals("""{"kind":"followed_threads"}""", ChatQueries.followedThreads())
+  }
+
+  @Test
+  fun forwardNamesOneFileOnlyWhenAsked() {
+    assertEquals(
+      """{"action":"forward_message","from":"1","message":"2","to":"3","comment":""}""",
+      ChatActions.forward("1", "2", "3", ""),
+    )
+    assertEquals(
+      """{"action":"forward_message","from":"1","message":"2","to":"3","comment":"","attachment":"4"}""",
+      ChatActions.forward("1", "2", "3", "", "4"),
+    )
+  }
+
+  @Test
+  fun replyNamesOnePicture() {
+    val message = Json.parseToJsonElement(
+      ChatActions.send("7", "this", SendOptions(maybeReplyTo = "9", maybeReplyAttachment = "4")),
+    ).jsonObject["message"]!!.jsonObject
+    assertEquals("4", message["maybe_reply_attachment"]!!.jsonPrimitive.content)
   }
 }

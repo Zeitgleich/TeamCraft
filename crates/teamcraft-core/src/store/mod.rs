@@ -466,7 +466,22 @@ pub struct MessageMeta {
 pub struct ReplyRef {
   pub target: ClientMessageId,
   pub author: UserId,
+  /// The message's text, or the file's name where it has none: all that an older client shows of a
+  /// reply to one picture (it quotes the whole message and ignores `attachment`).
   pub excerpt: String,
+  /// The one picture of an album this reply answers (issue #241).
+  #[serde(rename = "attachment", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_attachment: Option<Box<ReplyAttachment>>,
+}
+
+/// One picture of the quoted message. A copy of its thumbnail travels with the reply, so the quote
+/// stays when the picture is deleted or expires; its key doesn't: a quote gives nobody the file.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyAttachment {
+  pub attachment_id: teamcraft_proto::AttachmentId,
+  pub file_name: String,
+  #[serde(rename = "thumbnail", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_thumbnail: Option<teamcraft_proto::Base64Bytes>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
