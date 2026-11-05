@@ -452,7 +452,7 @@ struct ChatPane: View {
     HStack {
       Rectangle().fill(Theme.accent).frame(width: 3)
       VStack(alignment: .leading, spacing: 2) {
-        Text("replying_to \(message.authorName)").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+        Text("replying_to \(message.shownAuthorName)").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
         Text(oneLine(message.body)).font(.caption).foregroundStyle(Theme.textMuted).lineLimit(1)
       }
       Spacer()

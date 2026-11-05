@@ -22,7 +22,8 @@ use super::files::{
 };
 use crate::api::{ApiError, ServerApi};
 use crate::error::CoreError;
-use crate::store::{AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageMeta};
+use crate::records;
+use crate::store::{AttachmentRef, ImageDimensions, LocalStore, MessageContent, MessageMeta, Table};
 use crate::thumbnail::MAX_THUMBNAIL_BYTES;
 use crate::transfers::TransferGuard;
 
@@ -266,6 +267,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
     };
     self.enqueue(conversation, None, content)
+  }
+}
+
+impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Whether the server refused a queued message for good, so it stays unsent.
+  pub fn is_refused(
+    &self,
+    conversation: ConversationId,
+    message: ClientMessageId,
+  ) -> Result<bool, CoreError> {
+    let key = records::outbox_key(conversation, message);
+    let maybe_entry: Option<records::OutboxEntry> = records::get_json(&self.store, Table::Outbox, &key)?;
+    Ok(maybe_entry.is_some_and(|entry| entry.maybe_last_error.is_some()))
   }
 }
 

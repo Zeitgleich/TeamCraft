@@ -230,6 +230,7 @@ pub fn worker_settings(config: &BridgeConfig) -> WorkerSettings {
     maybe_app_sources: config.app_sources.is_enabled.then_some(AppSourceSettings {
       history_pages: config.app_sources.history_pages,
     }),
+    max_message_bytes: config.files.max_message_bytes,
     max_file_messages: usize::try_from(config.files.max_concurrent_requests).unwrap_or(usize::MAX),
   }
 }

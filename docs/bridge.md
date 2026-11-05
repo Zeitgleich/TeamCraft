@@ -390,7 +390,7 @@ with the bot badge.
   secret or in some tool's settings; the name is what an admin chose. Letting whoever holds the URL
   pick a name per message would give up that difference for little gain, so `username` stays in the
   body as a bold line, where it always was. To tell two senders apart, give each its own source.
-- **The picture** is a small PNG, at most 32 KiB and 256 pixels a side. The app crops it and scales it
+- **The picture** is a small still PNG, at most 32 KiB and 256 pixels a side. The app crops it and scales it
   down to fit (128 px, then smaller). It lives in the encrypted control message, and in each device's
   encrypted store by its hash, so it costs no server storage and shows offline.
 - **Devices that never read the announcement** (a device linked later, a log channel whose retention
@@ -401,6 +401,9 @@ with the bot badge.
   (`PUT /api/v1/admin/bots/{id}/avatar`); it is an ordinary profile picture, which the server sees and
   re-encodes. Without one, the source's initials show.
 - A source of the file shows its `name` from the file and the bot's picture.
+- A message's text and files come first: one too full for the picture goes without, and the next one
+  with room carries it. With no room even for the name it shows the bot's.
+- Removing a source's picture deletes it from devices; older messages then show the bot's picture.
 - Log lines are batched per source, so two sources in a channel never share a message and a name.
 
 **Sources in the file.** A bridge on its own host may still list `[[sources]]` (token, conversation,

@@ -108,7 +108,8 @@ final class NotificationStyleTests: XCTestCase {
   private var strings: NotificationStrings {
     NotificationStrings(
       appName: "TeamCraft", newMessage: "New message", fileText: { "File \($0)" },
-      attachmentText: { "\($0)" }, newMessageFrom: { "New message from \($0)" }, callTitle: "Incoming call",
+      attachmentText: { "\($0)" }, newMessageFrom: { "New message from \($0)" },
+      sourceSender: { "Bot · \($0)" }, callTitle: "Incoming call",
       callFrom: { "Call from \($0)" }, callUnknown: "Someone is calling", testBody: "Test", quietUpdate: "Updated")
   }
 

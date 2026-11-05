@@ -353,7 +353,14 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     Some(message.author),
     maybe_imported.as_ref().map(|mark| &mark.author),
   )
-  .map(|user| as_source(user, message.maybe_source.as_deref()));
+  .map(|user| as_source(user, message.maybe_source.as_deref()))
+  // The bot's account may not be in the client's list yet: the source's name and badge still show.
+  .or_else(|| {
+    message
+      .maybe_source
+      .as_ref()
+      .map(|source| imported_stand_in(source.name.clone(), true))
+  });
   let maybe_source_picture = message
     .maybe_source
     .as_ref()

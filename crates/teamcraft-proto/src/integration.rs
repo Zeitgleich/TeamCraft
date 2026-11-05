@@ -26,6 +26,11 @@ pub const MAX_SOURCE_RATE_LIMIT_PER_MINUTE: u32 = 60_000;
 pub const MAX_SOURCE_FILES_PER_MESSAGE: u32 = 16;
 /// Longest source name, in characters (it shows in the bridge's logs and its notices).
 pub const MAX_SOURCE_NAME_CHARS: usize = 80;
+/// Longest name a message may state before anything is cleaned, in bytes; a message with more loses
+/// its source when it arrives, so no sender can make a device store a large name.
+pub const MAX_SOURCE_NAME_WIRE_BYTES: usize = 1024;
+/// Combining marks kept on one letter of a source's name; more only pile up over other text.
+const MAX_MARKS_PER_LETTER: usize = 4;
 /// Largest source picture, in bytes. It travels inside encrypted messages, so it stays small; the
 /// app scales a picture down until it fits.
 pub const MAX_SOURCE_PICTURE_BYTES: usize = 32 * 1024;
@@ -129,6 +134,8 @@ pub enum SourcePictureError {
   NotPng,
   #[error("a source picture is at most {MAX_SOURCE_PICTURE_SIDE_PX} pixels on each side")]
   TooManyPixels,
+  #[error("a source picture can't be animated")]
+  Animated,
 }
 
 /// Random 128-bit name of a source, chosen by the client that creates it. Wire format: 32 lowercase
@@ -320,21 +327,27 @@ impl<'de> Deserialize<'de> for SourceTokenHash {
   }
 }
 
-/// A source's name as it may be shown: without control and invisible formatting characters (bidi
-/// overrides, zero-width characters, which could dress one name up as another), trimmed, of 1 to
-/// [`MAX_SOURCE_NAME_CHARS`] characters. `None` if nothing valid is left.
+/// A source's name as it may be shown: without control and invisible characters (bidi overrides,
+/// zero-width and blank-looking ones, line separators, tags), which could dress one name up as
+/// another or leave it blank; whitespace collapsed, marks per letter limited, of 1 to
+/// [`MAX_SOURCE_NAME_CHARS`] characters. `None` if nothing visible is left.
 pub fn clean_source_name(name: &str) -> Option<String> {
-  let name: String = name
-    .chars()
-    .filter(|c| !c.is_control() && !is_invisible_format(*c))
-    .collect();
-  let name = name.trim();
-  (!name.is_empty() && name.chars().count() <= MAX_SOURCE_NAME_CHARS).then(|| name.to_owned())
+  let mut kept = String::with_capacity(name.len().min(MAX_SOURCE_NAME_WIRE_BYTES));
+  let mut marks = 0;
+  for c in name.chars().filter(|c| !c.is_control() && !is_invisible(*c)) {
+    marks = if is_combining_mark(c) { marks + 1 } else { 0 };
+    if marks <= MAX_MARKS_PER_LETTER {
+      kept.push(c);
+    }
+  }
+  let name = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+  let is_shown = name.chars().any(|c| !c.is_whitespace() && !is_combining_mark(c));
+  (is_shown && name.chars().count() <= MAX_SOURCE_NAME_CHARS).then_some(name)
 }
 
-/// Checks a source picture before anything decodes it: small, a PNG, and few pixels by its header,
-/// so a tiny file can't unpack into a huge bitmap. PNG alone: no format with scripts (SVG), and one
-/// header to read.
+/// Checks a source picture before anything decodes it: small, a still PNG, and few pixels by its
+/// header, so a tiny file can't unpack into a huge bitmap. PNG alone: no format with scripts (SVG),
+/// and one header to read.
 pub fn check_source_picture(bytes: &[u8]) -> Result<(), SourcePictureError> {
   if bytes.len() > MAX_SOURCE_PICTURE_BYTES {
     return Err(SourcePictureError::TooLarge);
@@ -352,13 +365,47 @@ pub fn check_source_picture(bytes: &[u8]) -> Result<(), SourcePictureError> {
   if width > MAX_SOURCE_PICTURE_SIDE_PX || height > MAX_SOURCE_PICTURE_SIDE_PX {
     return Err(SourcePictureError::TooManyPixels);
   }
-  Ok(())
+  check_png_is_still(bytes)
 }
 
-fn is_invisible_format(c: char) -> bool {
+/// Walks the chunks up to the first image data: an animated PNG says so before it (`acTL`), and it
+/// would ignore the user's reduced motion in an `<img>`.
+fn check_png_is_still(bytes: &[u8]) -> Result<(), SourcePictureError> {
+  let mut at = PNG_SIGNATURE.len();
+  loop {
+    let chunk = bytes.get(at..at + 8).ok_or(SourcePictureError::NotPng)?;
+    match &chunk[4..8] {
+      b"acTL" => return Err(SourcePictureError::Animated),
+      b"IDAT" => return Ok(()),
+      _ => {},
+    }
+    let length = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    // The size limit above keeps this far from overflowing; a wild length just ends past the file.
+    at = at
+      .saturating_add(usize::try_from(length).unwrap_or(usize::MAX))
+      .saturating_add(12);
+  }
+}
+
+/// Unicode's Default_Ignorable_Code_Point, the other format characters, line and paragraph
+/// separators, and the braille blank, which shows as nothing and isn't whitespace.
+fn is_invisible(c: char) -> bool {
   matches!(c,
-    '\u{ad}' | '\u{61c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
-    | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}')
+    '\u{ad}' | '\u{34f}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}'
+    | '\u{890}'..='\u{891}' | '\u{8e2}' | '\u{115f}'..='\u{1160}' | '\u{17b4}'..='\u{17b5}'
+    | '\u{180b}'..='\u{180f}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}'
+    | '\u{2060}'..='\u{206f}' | '\u{2800}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}' | '\u{feff}'
+    | '\u{ffa0}' | '\u{fff0}'..='\u{fffb}' | '\u{110bd}' | '\u{110cd}' | '\u{13430}'..='\u{1343f}'
+    | '\u{1bca0}'..='\u{1bca3}' | '\u{1d173}'..='\u{1d17a}' | '\u{e0000}'..='\u{e0fff}')
+}
+
+/// The blocks of marks that pile up without a limit in practice. Not every mark of every script: a
+/// script's own vowel signs stay as they are.
+fn is_combining_mark(c: char) -> bool {
+  matches!(c,
+    '\u{300}'..='\u{36f}' | '\u{483}'..='\u{489}' | '\u{591}'..='\u{5bd}' | '\u{610}'..='\u{61a}'
+    | '\u{64b}'..='\u{65f}' | '\u{1ab0}'..='\u{1aff}' | '\u{1dc0}'..='\u{1dff}'
+    | '\u{20d0}'..='\u{20ff}' | '\u{fe20}'..='\u{fe2f}')
 }
 
 fn default_alert_levels() -> Vec<String> {
@@ -568,15 +615,67 @@ mod tests {
     }
 
     #[test]
+    fn nothing_invisible_or_line_breaking_stays_in_a_name() {
+      for invisible in [
+        '\u{2028}',
+        '\u{2029}',
+        '\u{3164}',
+        '\u{115f}',
+        '\u{1160}',
+        '\u{ffa0}',
+        '\u{2800}',
+        '\u{34f}',
+        '\u{17b4}',
+        '\u{180b}',
+        '\u{fe0f}',
+        '\u{e0001}',
+        '\u{e0041}',
+        '\u{e0100}',
+        '\u{1d173}',
+      ] {
+        assert_eq!(
+          clean_source_name(&format!("A{invisible}B")).as_deref(),
+          Some("AB"),
+          "{invisible:?}"
+        );
+        assert_eq!(
+          clean_source_name(&invisible.to_string()),
+          None,
+          "alone: {invisible:?}"
+        );
+      }
+    }
+
+    #[test]
+    fn whitespace_collapses_and_marks_are_limited() {
+      assert_eq!(clean_source_name("a  \u{a0} b").as_deref(), Some("a b"));
+      let piled = format!("a{}b", "\u{301}".repeat(79));
+      assert_eq!(
+        clean_source_name(&piled),
+        Some(format!("a{}b", "\u{301}".repeat(4)))
+      );
+      assert_eq!(
+        clean_source_name("\u{301}\u{301}"),
+        None,
+        "marks alone show nothing"
+      );
+      assert_eq!(
+        clean_source_name("Prüfung Größe"),
+        Some("Prüfung Größe".to_owned())
+      );
+      assert_eq!(clean_source_name("Tiếng Việt").as_deref(), Some("Tiếng Việt"));
+    }
+
+    #[test]
     fn only_a_small_png_is_a_source_picture() {
-      assert_eq!(check_source_picture(&png_header(128, 128)), Ok(()));
+      assert_eq!(check_source_picture(&png(128, 128)), Ok(()));
       assert_eq!(check_source_picture(&[]), Err(SourcePictureError::NotPng));
       assert_eq!(
         check_source_picture(b"<svg></svg>"),
         Err(SourcePictureError::NotPng)
       );
       assert_eq!(
-        check_source_picture(&png_header(128, 128)[..20]),
+        check_source_picture(&png(128, 128)[..20]),
         Err(SourcePictureError::NotPng),
         "cut off in the header"
       );
@@ -585,26 +684,56 @@ mod tests {
         Err(SourcePictureError::NotPng)
       );
       assert_eq!(
-        check_source_picture(&png_header(MAX_SOURCE_PICTURE_SIDE_PX + 1, 8)),
+        check_source_picture(&png(MAX_SOURCE_PICTURE_SIDE_PX + 1, 8)),
         Err(SourcePictureError::TooManyPixels)
       );
       assert_eq!(
-        check_source_picture(&png_header(8, 30_000)),
+        check_source_picture(&png(8, 30_000)),
         Err(SourcePictureError::TooManyPixels),
         "a tiny file can claim a huge bitmap"
       );
-      let mut large = png_header(8, 8);
+      let mut large = png(8, 8);
       large.resize(MAX_SOURCE_PICTURE_BYTES + 1, 0);
       assert_eq!(check_source_picture(&large), Err(SourcePictureError::TooLarge));
     }
 
+    #[test]
+    fn an_animated_png_is_refused() {
+      let mut animated = png_header(8, 8);
+      chunk(&mut animated, b"acTL");
+      chunk(&mut animated, b"IDAT");
+      assert_eq!(check_source_picture(&animated), Err(SourcePictureError::Animated));
+      let mut with_text = png_header(8, 8);
+      chunk(&mut with_text, b"tEXt");
+      chunk(&mut with_text, b"IDAT");
+      assert_eq!(check_source_picture(&with_text), Ok(()));
+      let mut wild = png_header(8, 8);
+      wild.extend(u32::MAX.to_be_bytes());
+      wild.extend(*b"tEXt");
+      assert_eq!(check_source_picture(&wild), Err(SourcePictureError::NotPng));
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+      let mut bytes = png_header(width, height);
+      chunk(&mut bytes, b"IDAT");
+      bytes
+    }
+
+    /// The signature and the image header with its 5 other bytes and its checksum.
     fn png_header(width: u32, height: u32) -> Vec<u8> {
       let mut bytes = PNG_SIGNATURE.to_vec();
       bytes.extend(13_u32.to_be_bytes());
       bytes.extend(*b"IHDR");
       bytes.extend(width.to_be_bytes());
       bytes.extend(height.to_be_bytes());
+      bytes.extend([0; 9]);
       bytes
+    }
+
+    fn chunk(bytes: &mut Vec<u8>, kind: &[u8; 4]) {
+      bytes.extend(0_u32.to_be_bytes());
+      bytes.extend(kind);
+      bytes.extend([0; 4]);
     }
   }
 }

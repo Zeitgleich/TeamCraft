@@ -56,10 +56,10 @@ pub use import::{
 };
 pub use integration::{
   DEFAULT_SOURCE_ALERT_LEVELS, DEFAULT_SOURCE_RATE_LIMIT_PER_MINUTE, MAX_SOURCE_ALERT_LEVEL_CHARS,
-  MAX_SOURCE_ALERT_LEVELS, MAX_SOURCE_FILES_PER_MESSAGE, MAX_SOURCE_NAME_CHARS, MAX_SOURCE_PICTURE_BYTES,
-  MAX_SOURCE_PICTURE_SIDE_PX, MAX_SOURCE_RATE_LIMIT_PER_MINUTE, SourceChange, SourceId, SourceIdentity,
-  SourceKind, SourceOptions, SourcePictureError, SourcePictureHash, SourceTokenHash, SourceTokenHashError,
-  check_source_picture, clean_source_name,
+  MAX_SOURCE_ALERT_LEVELS, MAX_SOURCE_FILES_PER_MESSAGE, MAX_SOURCE_NAME_CHARS, MAX_SOURCE_NAME_WIRE_BYTES,
+  MAX_SOURCE_PICTURE_BYTES, MAX_SOURCE_PICTURE_SIDE_PX, MAX_SOURCE_RATE_LIMIT_PER_MINUTE, SourceChange,
+  SourceId, SourceIdentity, SourceKind, SourceOptions, SourcePictureError, SourcePictureHash,
+  SourceTokenHash, SourceTokenHashError, check_source_picture, clean_source_name,
 };
 pub use notetaker::{
   DEFAULT_SUMMARY_MODEL, DEFAULT_SUMMARY_PROMPT, DEFAULT_TRANSCRIPTION_MODEL, LANGUAGE_AUTO, MAX_MODEL_CHARS,

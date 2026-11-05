@@ -203,6 +203,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       client.store.delete_messages(conversation)?;
       client.forget_older_history(conversation)?;
       crate::unseen_reactions::forget(&client.store, conversation)?;
+      crate::integration_sources::forget_conversation(&client.store, conversation)?;
       let id = conversation.to_string();
       let prefix = format!("{conversation}/");
       for table in PER_CONVERSATION_TABLES {

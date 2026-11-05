@@ -19,7 +19,6 @@ use axum::body::Body;
 use futures_util::StreamExt;
 use teamcraft_core::client::direct_uploads::estimated_message_bytes;
 use teamcraft_core::thumbnail::{image_dimensions, thumbnail_within};
-use teamcraft_proto::MAX_SOURCE_PICTURE_BYTES;
 use tokio::sync::{Semaphore, oneshot};
 use tracing::warn;
 
@@ -251,9 +250,7 @@ fn check_message_size(
     .iter()
     .map(|file| (file.file_name.as_str(), file.media_type.as_str()))
     .collect();
-  // The message may carry the source's picture (worker.rs); base64 makes it a third larger.
-  let room_for_picture = MAX_SOURCE_PICTURE_BYTES / 3 * 4 + 256;
-  if estimated_message_bytes(&text, mentions.len(), &names) + room_for_picture > settings.max_message_bytes {
+  if estimated_message_bytes(&text, mentions.len(), &names) > settings.max_message_bytes {
     return Err(HookError::MessageTooLarge);
   }
   Ok(())

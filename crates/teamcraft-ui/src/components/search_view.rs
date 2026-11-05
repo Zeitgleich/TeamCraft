@@ -300,7 +300,8 @@ fn HitCard(hit: SearchHit) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let author_user = state.read(|backend| backend.user(hit.message.author));
-  let is_bot = author_user.as_ref().is_some_and(|user| user.is_bot);
+  // A source is only ever on a bot's message, also when the account isn't in the client's list.
+  let is_bot = hit.message.maybe_source.is_some() || author_user.as_ref().is_some_and(|user| user.is_bot);
   let author = match &hit.message.maybe_source {
     Some(source) => source.name.clone(),
     None => author_user.map(|user| user.display_name).unwrap_or_default(),

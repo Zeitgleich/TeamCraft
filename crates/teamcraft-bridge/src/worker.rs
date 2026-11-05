@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use teamcraft_core::api::{GatewayConnection, ServerApi};
+use teamcraft_core::client::direct_uploads::estimated_message_bytes;
 use teamcraft_core::store::{AttachmentRef, LocalStore};
 use teamcraft_core::{Client, CoreError, HistoryScan};
 use teamcraft_proto::{
@@ -33,6 +34,8 @@ const MAX_WAITING_MESSAGES: usize = 1000;
 /// How often a source's messages carry its picture itself, for devices that never read its
 /// announcement (a device linked later, a log channel whose retention removed it).
 const PICTURE_RESEND_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Room a source's ID, name and picture hash take in a message, at most (80 characters of 4 bytes).
+const IDENTITY_ROOM_BYTES: usize = 640;
 
 #[derive(Debug, Clone, Copy)]
 pub struct WorkerSettings {
@@ -44,6 +47,9 @@ pub struct WorkerSettings {
   /// Messages with files that may wait for their upload (`files.max_concurrent_requests`: the
   /// endpoint lets no more run at once).
   pub max_file_messages: usize,
+  /// The server's message limit (`files.max_message_bytes`): a message's own text and files come
+  /// first; what says who posted it goes along only where it fits.
+  pub max_message_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -385,44 +391,70 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       self.hold(message);
       return Ok(());
     }
-    let identity = self.identity_of(&message.source);
+    let room = self.room_beside(&message);
+    let maybe_identity = (room >= IDENTITY_ROOM_BYTES).then(|| self.identity_of(&message.source, room));
+    let maybe_sent_picture = maybe_identity
+      .as_ref()
+      .filter(|identity| identity.maybe_picture.is_some())
+      .and_then(|identity| identity.maybe_picture_sha256)
+      .map(|sha256| SentPicture {
+        sha256,
+        at: Instant::now(),
+      });
     let Outgoing {
+      source,
       text,
       mentions,
       attachments,
-      ..
     } = message;
-    self
-      .client
-      .queue_text_with_files(conversation, &text, mentions, attachments, Some(identity))?;
+    let queued =
+      self
+        .client
+        .queue_text_with_files(conversation, &text, mentions, attachments, maybe_identity)?;
     if let Err(error) = self.client.flush_outbox().await {
       // The message is in the outbox already when sending fails; it goes out with the next flush.
       debug!(%error, %conversation, "sending is delayed");
     }
+    // Refused for good, the next message of the source carries the picture instead.
+    if let Some(sent) = maybe_sent_picture
+      && !self.client.is_refused(conversation, queued).unwrap_or(false)
+    {
+      self.sent_pictures.insert(source.key.clone(), sent);
+    }
     Ok(())
   }
 
-  /// The source's identity for its next message, with the picture itself when it is due: the
-  /// first message after a start or a change, then once per [`PICTURE_RESEND_INTERVAL`].
-  fn identity_of(&mut self, source: &Source) -> SourceIdentity {
+  /// Bytes of the server's limit a message leaves for what says who posted it.
+  fn room_beside(&self, message: &Outgoing) -> usize {
+    let files: Vec<(&str, &str)> = message
+      .attachments
+      .iter()
+      .map(|file| (file.file_name.as_str(), file.media_type.as_str()))
+      .collect();
+    let used = estimated_message_bytes(&message.text, message.mentions.len(), &files);
+    self.settings.max_message_bytes.saturating_sub(used)
+  }
+
+  /// The source's identity for its next message, with the picture itself when it is due and fits
+  /// into `room`: the first message after a start or a change, then once per
+  /// [`PICTURE_RESEND_INTERVAL`].
+  fn identity_of(&mut self, source: &Source, room: usize) -> SourceIdentity {
     let mut identity = source.identity();
     let Some(sha256) = source.maybe_picture_sha256 else {
       return identity;
     };
-    let now = Instant::now();
-    if !is_picture_due(self.sent_pictures.get(&source.key), sha256, now) {
+    if !is_picture_due(self.sent_pictures.get(&source.key), sha256, Instant::now()) {
       return identity;
     }
     match self
       .client
       .integration_source_picture(source.conversation, sha256)
     {
-      Ok(Some(picture)) => {
+      Ok(Some(picture)) if picture_fits(picture.len(), room) => {
         identity.maybe_picture = Some(Base64Bytes::new(picture));
-        self
-          .sent_pictures
-          .insert(source.key.clone(), SentPicture { sha256, at: now });
       },
+      // A later, smaller message of the source carries it.
+      Ok(Some(_)) => debug!(source = %source.name, "no room for the source's picture in this message"),
       // Devices without it show the bot's picture; the message still names the source.
       Ok(None) => debug!(source = %source.name, "the source's picture is not on this device"),
       Err(error) => warn!(%error, source = %source.name, "reading the source's picture failed"),
@@ -471,6 +503,13 @@ pub(crate) fn alert_text(text: String, is_alert: bool, mentions: &Mentions) -> (
 #[cfg(test)]
 mod picture_tests {
   use super::*;
+
+  #[test]
+  fn a_full_message_goes_without_the_picture() {
+    assert!(picture_fits(3_000, 4_000 + IDENTITY_ROOM_BYTES));
+    assert!(!picture_fits(3_000, 4_000 + IDENTITY_ROOM_BYTES - 1));
+    assert!(!picture_fits(3_000, 0));
+  }
 
   #[test]
   fn a_picture_goes_out_first_on_change_and_then_once_a_day() {
@@ -536,6 +575,12 @@ impl Ord for SourceBatch {
   fn cmp(&self, other: &Self) -> Ordering {
     self.sort_key().cmp(&other.sort_key())
   }
+}
+
+/// Whether a message with `room` left can take the identity with a picture of this size, which
+/// base64 makes a third larger.
+fn picture_fits(picture_bytes: usize, room: usize) -> bool {
+  picture_bytes.div_ceil(3) * 4 + IDENTITY_ROOM_BYTES <= room
 }
 
 fn is_picture_due(maybe_sent: Option<&SentPicture>, sha256: SourcePictureHash, now: Instant) -> bool {

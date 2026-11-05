@@ -78,7 +78,15 @@ impl<S: LocalStore> CoreChatBackend<S> {
       }
       let mut fresh = Vec::new();
       self.with_all_messages(conversation, &mut |messages| {
-        fresh = conversation_items(self.me_id(), maybe_importer, &reads, conversation, messages);
+        let is_bot = |user| self.read(crate::integration_sources::is_known_bot(self.store_ref(), user));
+        fresh = conversation_items(
+          self.me_id(),
+          maybe_importer,
+          &is_bot,
+          &reads,
+          conversation,
+          messages,
+        );
       });
       if let Some(revision) = maybe_revision {
         cache.insert(
@@ -145,6 +153,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
 pub fn build_feed(
   me: UserId,
   maybe_importer: Option<UserId>,
+  is_bot: &dyn Fn(UserId) -> bool,
   conversations: impl IntoIterator<Item = (ConversationId, ConversationReads, Vec<StoredMessage>)>,
 ) -> ActivityFeed {
   let mut items = Vec::new();
@@ -152,6 +161,7 @@ pub fn build_feed(
     items.extend(conversation_items(
       me,
       maybe_importer,
+      is_bot,
       &reads,
       conversation,
       &messages,
@@ -170,6 +180,7 @@ fn feed_of(mut items: Vec<ActivityItem>) -> ActivityFeed {
 fn conversation_items(
   me: UserId,
   maybe_importer: Option<UserId>,
+  is_bot: &dyn Fn(UserId) -> bool,
   reads: &ConversationReads,
   conversation: ConversationId,
   messages: &[StoredMessage],
@@ -190,6 +201,7 @@ fn conversation_items(
         items.push(item(
           stored,
           maybe_importer,
+          is_bot,
           conversation,
           &read,
           ActivityKind::Mention,
@@ -204,6 +216,7 @@ fn conversation_items(
         items.push(item(
           stored,
           maybe_importer,
+          is_bot,
           conversation,
           &read,
           ActivityKind::ThreadReply,
@@ -258,6 +271,7 @@ fn conversation_items(
 fn item(
   stored: &StoredMessage,
   maybe_importer: Option<UserId>,
+  is_bot: &dyn Fn(UserId) -> bool,
   conversation: ConversationId,
   read: &ReadCheck,
   kind: ActivityKind,
@@ -281,7 +295,9 @@ fn item(
       MessageContent::Text { meta, .. } if authorship.maybe_origin.is_none() => meta
         .maybe_source
         .as_deref()
-        .and_then(|identity| crate::integration_sources::shown_source(identity, true))
+        .and_then(|identity| {
+          crate::integration_sources::shown_source(identity, is_bot(stored.sender_user_id))
+        })
         .map(|shown| shown.name),
       _ => None,
     },
@@ -661,10 +677,37 @@ mod tests {
     let feed = build_feed(
       user(ME),
       Some(user(IMPORTER)),
+      &|_| false,
       [(id_from_raw(50), ConversationReads::default(), vec![stored])],
     );
     assert_eq!(feed.items[0].actor, user(ANNA));
     assert_eq!(feed.items[0].at, 1_600_000_000_000);
+  }
+
+  #[test]
+  fn a_source_name_reaches_the_feed_from_a_bot_only() {
+    let mut stored = text(1, ANNA, 100, "hi @me", &[ME], None);
+    if let MessageContent::Text { meta, .. } = &mut stored.content {
+      meta.maybe_source = Some(Box::new(teamcraft_proto::SourceIdentity {
+        maybe_id: None,
+        name: "Hotline".into(),
+        maybe_picture_sha256: None,
+        maybe_picture: None,
+      }));
+    }
+    let of = |is_bot: &dyn Fn(UserId) -> bool, stored: StoredMessage| {
+      build_feed(
+        user(ME),
+        None,
+        is_bot,
+        [(id_from_raw(50), ConversationReads::default(), vec![stored])],
+      )
+      .items[0]
+        .maybe_source_name
+        .clone()
+    };
+    assert_eq!(of(&|_| false, stored.clone()), None);
+    assert_eq!(of(&|_| true, stored).as_deref(), Some("Hotline"));
   }
 
   /// The feed with the conversation read through message `read_through` (0: nothing read).
@@ -677,7 +720,7 @@ mod tests {
   }
 
   fn feed_with(reads: ConversationReads, messages: Vec<StoredMessage>) -> ActivityFeed {
-    build_feed(user(ME), None, [(id_from_raw(50), reads, messages)])
+    build_feed(user(ME), None, &|_| false, [(id_from_raw(50), reads, messages)])
   }
 
   fn kinds(feed: &ActivityFeed) -> Vec<ActivityKind> {

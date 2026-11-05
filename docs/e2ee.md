@@ -4809,16 +4809,26 @@ sender's (`integration_sources::shown_source`):
    (§4.4), so its sender is real; the kind is the server's word. Anything else is ignored and the
    message shows its sender. So a member, or a person's client changed by its owner, can write
    the field and gets nothing.
-2. **The name may be shown:** control and invisible formatting characters (bidi overrides, zero-width)
-   are removed, 1 to 80 characters are left. Otherwise the message shows the bot.
+2. **The name may be shown:** control characters, everything invisible (Unicode's default-ignorable code
+   points, format characters, line separators, blank-looking letters) and more than 4 combining marks on a
+   letter are removed and whitespace collapses; 1 to 80 characters must be left, with something visible.
+   Otherwise the message shows the bot. A message stating a name over 1 KiB loses its source when it
+   arrives, from any sender, so nobody fills a device's store through it.
 3. **The badge goes with it,** by the same check: everywhere the name shows, the badge or a leading "Bot ·"
    says so, also when a long name is cut off, and the profile behind the name is the bot's account.
 
 A picture a message carries is kept only from a known bot, only if it is the picture the message names
-by hash, and only a PNG of at most 32 KiB and 256 pixels a side by its header, checked before anything
-decodes it, and then the message keeps only the hash. A picture in a `picture_changed` comes under the
+by hash, and only a still PNG (no `acTL`, reduced motion holds) of at most 32 KiB and 256 pixels a side by
+its header, checked before anything decodes it, and then the message keeps only the hash. A picture in a `picture_changed` comes under the
 taking-in rule above. Pictures are bounded per conversation: 64 from admins and 64 from bots, kept
-apart so a bot can't push out what admins set, the longest unnamed going first.
+apart so a bot can't push out what admins set, the longest unnamed going first. A second bot can push
+out another bot's copies on devices that never read the announcement; those show the bot's picture until
+the source's next daily resend. A picture an admin takes away is deleted from the device, and older
+messages then show the bot's; everything of a source goes when its conversation is purged.
+
+A device's own rename or picture waits apart from the newest numbered change, shown over it until it was
+sent or refused, so another admin's change arriving meanwhile isn't lost and a refused change (a server's 4xx
+included) stands in nobody's way. Display only, as the bridge reads only what was sent.
 
 Deliberately **not** checked: that the source ID is in this device's ledger, or that the name is the
 ledger's. A later device has no ledger entry, and a source of the bridge's file has none at all, and they

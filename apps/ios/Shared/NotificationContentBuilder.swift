@@ -199,7 +199,7 @@ struct NotificationStrings {
   let fileText: (String) -> String
   let attachmentText: (NotificationAttachmentKind) -> String
   let newMessageFrom: (String) -> String
-  var sourceSender: (String) -> String = { $0 }
+  let sourceSender: (String) -> String
   let callTitle: String
   let callFrom: (String) -> String
   let callUnknown: String

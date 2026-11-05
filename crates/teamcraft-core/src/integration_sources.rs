@@ -29,13 +29,14 @@ use std::collections::{BTreeMap, HashSet};
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::source_token::source_picture_sha256;
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, MessageId, SourceChange, SourceId, SourceIdentity, SourceKind, SourceOptions,
-  SourcePictureHash, SourceTokenHash, UserId, UserKind, UserSummary, check_source_picture, clean_source_name,
+  Base64Bytes, ConversationId, MAX_SOURCE_NAME_WIRE_BYTES, MessageId, SourceChange, SourceId, SourceIdentity,
+  SourceKind, SourceOptions, SourcePictureHash, SourceTokenHash, UserId, UserKind, UserSummary,
+  check_source_picture, clean_source_name,
 };
 
 use crate::error::CoreError;
 use crate::records;
-use crate::store::{LocalStore, Table};
+use crate::store::{LocalStore, MessageMeta, Table};
 use crate::workspace::WorkspaceState;
 
 /// Sources (revoked ones included) a device remembers per conversation; changes about further
@@ -100,6 +101,12 @@ struct LedgerEntry {
   maybe_renamed: Option<RenamedRecord>,
   #[serde(rename = "picture", default, skip_serializing_if = "Option::is_none")]
   maybe_picture: Option<PictureRecord>,
+  /// This device's own rename and picture while they wait to be sent: shown over the numbered ones
+  /// and apart from them, so what other admins change in the meantime isn't lost.
+  #[serde(rename = "pending_rename", default, skip_serializing_if = "Option::is_none")]
+  maybe_pending_rename: Option<RenamedRecord>,
+  #[serde(rename = "pending_picture", default, skip_serializing_if = "Option::is_none")]
+  maybe_pending_picture: Option<PictureRecord>,
   /// Admins (or the creator) who revoked the source; any one of them is enough.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   revoked_by: Vec<UserId>,
@@ -218,26 +225,17 @@ impl SourceLedger {
         let Some(name) = clean_source_name(name) else {
           return false;
         };
-        let is_newer = entry.maybe_renamed.as_ref().is_none_or(|existing| {
-          !is_before(maybe_server_id, existing.maybe_server_id)
-            || is_own_change_sent(
-              sender,
-              existing.by,
-              existing.maybe_server_id,
-              existing.name == name,
-            )
-        });
         let record = RenamedRecord {
           by: sender,
           maybe_server_id,
           name,
         };
-        if is_newer && entry.maybe_renamed.as_ref() != Some(&record) {
-          entry.maybe_renamed = Some(record);
-          true
-        } else {
-          false
-        }
+        take_newest(
+          &mut entry.maybe_renamed,
+          &mut entry.maybe_pending_rename,
+          record,
+          |existing| existing.maybe_server_id,
+        )
       },
       SourceChange::PictureChanged { maybe_picture, .. } => {
         let maybe_sha256 = match maybe_picture {
@@ -250,26 +248,17 @@ impl SourceLedger {
           ))),
           None => None,
         };
-        let is_newer = entry.maybe_picture.as_ref().is_none_or(|existing| {
-          !is_before(maybe_server_id, existing.maybe_server_id)
-            || is_own_change_sent(
-              sender,
-              existing.by,
-              existing.maybe_server_id,
-              existing.maybe_sha256 == maybe_sha256,
-            )
-        });
         let record = PictureRecord {
           by: sender,
           maybe_server_id,
           maybe_sha256,
         };
-        if is_newer && entry.maybe_picture.as_ref() != Some(&record) {
-          entry.maybe_picture = Some(record);
-          true
-        } else {
-          false
-        }
+        take_newest(
+          &mut entry.maybe_picture,
+          &mut entry.maybe_pending_picture,
+          record,
+          |existing| existing.maybe_server_id,
+        )
       },
       SourceChange::Revoked { .. } => {
         if entry.revoked_by.contains(&sender) {
@@ -287,6 +276,42 @@ impl SourceLedger {
     is_changed
   }
 
+  /// Takes this device's own change out of the pending ones: it was sent or refused. Returns
+  /// whether the ledger changed.
+  fn settle(&mut self, change: &SourceChange) -> bool {
+    let Some(entry) = change.source().and_then(|source| self.entries.get_mut(&source)) else {
+      return false;
+    };
+    let is_settled = match change {
+      SourceChange::Renamed { name, .. } => entry
+        .maybe_pending_rename
+        .take_if(|pending| Some(&pending.name) == clean_source_name(name).as_ref())
+        .is_some(),
+      SourceChange::PictureChanged { maybe_picture, .. } => {
+        let sha256 = maybe_picture.as_ref().map(picture_hash);
+        entry
+          .maybe_pending_picture
+          .take_if(|pending| pending.maybe_sha256 == sha256)
+          .is_some()
+      },
+      SourceChange::Created { .. } | SourceChange::Revoked { .. } | SourceChange::Unknown => false,
+    };
+    if is_settled {
+      self.revision += 1;
+    }
+    is_settled
+  }
+
+  /// The picture the source shows now, whoever may have set it.
+  fn current_picture(&self, source: SourceId) -> Option<SourcePictureHash> {
+    let entry = self.entries.get(&source)?;
+    entry
+      .maybe_pending_picture
+      .as_ref()
+      .or(entry.maybe_picture.as_ref())?
+      .maybe_sha256
+  }
+
   /// The sources in force under `authority`, oldest first.
   pub fn active(&self, conversation: ConversationId, authority: &SourceAuthority) -> Vec<ActiveSource> {
     let mut active: Vec<ActiveSource> = self
@@ -299,8 +324,9 @@ impl SourceLedger {
           return None;
         }
         let name = entry
-          .maybe_renamed
+          .maybe_pending_rename
           .as_ref()
+          .or(entry.maybe_renamed.as_ref())
           .filter(|renamed| authority.may_manage(renamed.by))
           .map_or_else(|| created.name.clone(), |renamed| renamed.name.clone());
         Some(ActiveSource {
@@ -313,8 +339,9 @@ impl SourceLedger {
           created_by: created.by,
           created_at_ms: created.at_ms,
           maybe_picture_sha256: entry
-            .maybe_picture
+            .maybe_pending_picture
             .as_ref()
+            .or(entry.maybe_picture.as_ref())
             .filter(|picture| authority.may_manage(picture.by))
             .and_then(|picture| picture.maybe_sha256),
         })
@@ -388,18 +415,70 @@ pub(crate) fn apply_source_change(
 ) -> Result<(), CoreError> {
   let mut ledger = SourceLedger::load(store, conversation)?;
   let is_manager = was_manager(store, sender, at_ms)?;
-  if ledger.apply(sender, is_manager, change, at_ms, maybe_server_id) {
+  let maybe_previous = change.source().and_then(|source| ledger.current_picture(source));
+  let is_applied = ledger.apply(sender, is_manager, change, at_ms, maybe_server_id);
+  if is_applied {
     records::put_json(store, Table::Account, &ledger_key(conversation), &ledger)?;
   }
-  // Also when a newer change won already: an older message may still name this picture.
-  if is_manager
-    && let SourceChange::PictureChanged {
+  match change {
+    // Also when a newer change won already: an older message may still name this picture.
+    SourceChange::PictureChanged {
       maybe_picture: Some(picture),
       ..
-    } = change
-  {
-    keep_picture(store, conversation, picture, PictureFrom::Admin)?;
+    } if is_manager => keep_picture(store, conversation, picture, PictureFrom::Admin)?,
+    // Taken away means gone from this device; older messages then show the bot's picture.
+    SourceChange::PictureChanged {
+      maybe_picture: None, ..
+    } if is_applied => {
+      if let Some(previous) = maybe_previous {
+        forget_picture(store, conversation, previous)?;
+      }
+    },
+    _ => {},
   }
+  Ok(())
+}
+
+/// This device's own change was sent (`maybe_server_id`) or refused (`None`): it stops being
+/// pending, whatever else holds, and once sent it competes by its number like anybody's.
+pub(crate) fn settle_source_change(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  sender: UserId,
+  change: &SourceChange,
+  at_ms: i64,
+  maybe_server_id: Option<MessageId>,
+) -> Result<(), CoreError> {
+  let mut ledger = SourceLedger::load(store, conversation)?;
+  let is_settled = ledger.settle(change);
+  let is_applied = match maybe_server_id {
+    Some(server_id) => {
+      let is_manager = was_manager(store, sender, at_ms)?;
+      ledger.apply(sender, is_manager, change, at_ms, Some(server_id))
+    },
+    None => false,
+  };
+  if is_settled || is_applied {
+    records::put_json(store, Table::Account, &ledger_key(conversation), &ledger)?;
+  }
+  Ok(())
+}
+
+/// Everything this device keeps about a conversation's sources goes with the conversation.
+pub(crate) fn forget_conversation(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<(), CoreError> {
+  for from in [PictureFrom::Admin, PictureFrom::Bot] {
+    let index_key = picture_index_key(conversation, from);
+    let kept: Vec<SourcePictureHash> =
+      records::get_json(store, Table::Account, &index_key)?.unwrap_or_default();
+    for sha256 in kept {
+      store.delete(Table::Account, &picture_key(conversation, sha256))?;
+    }
+    store.delete(Table::Account, &index_key)?;
+  }
+  store.delete(Table::Account, &ledger_key(conversation))?;
   Ok(())
 }
 
@@ -422,9 +501,32 @@ pub fn is_known_bot(store: &impl LocalStore, user: UserId) -> Result<bool, CoreE
   Ok(maybe_summary.is_some_and(|summary| summary.kind == UserKind::Bot))
 }
 
+/// What a received message's source leaves in the stored message: nothing if its name is larger than
+/// any name that may show, so no sender makes this device store a large one; otherwise only the hash
+/// of the picture, which is kept once ([`take_message_picture`]).
+pub(crate) fn take_message_source(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  sender: UserId,
+  meta: &mut MessageMeta,
+) -> Result<(), CoreError> {
+  if meta
+    .maybe_source
+    .as_ref()
+    .is_some_and(|identity| identity.name.len() > MAX_SOURCE_NAME_WIRE_BYTES)
+  {
+    meta.maybe_source = None;
+  }
+  if let Some(identity) = meta.maybe_source.as_deref_mut() {
+    take_message_picture(store, conversation, sender, identity)?;
+    identity.maybe_picture = None;
+  }
+  Ok(())
+}
+
 /// Keeps the picture a received message carries for devices that never read the source's
 /// announcement: only from a bot, only a valid picture that is the one the message names.
-pub(crate) fn take_message_picture(
+fn take_message_picture(
   store: &impl LocalStore,
   conversation: ConversationId,
   sender: UserId,
@@ -433,7 +535,7 @@ pub(crate) fn take_message_picture(
   let (Some(picture), Some(named)) = (&identity.maybe_picture, identity.maybe_picture_sha256) else {
     return Ok(());
   };
-  let is_named = SourcePictureHash::from_bytes(source_picture_sha256(picture.as_slice())) == named;
+  let is_named = picture_hash(picture) == named;
   if is_named && is_known_bot(store, sender)? {
     keep_picture(store, conversation, picture, PictureFrom::Bot)?;
   }
@@ -462,7 +564,7 @@ fn keep_picture(
   if check_source_picture(picture.as_slice()).is_err() {
     return Ok(());
   }
-  let sha256 = SourcePictureHash::from_bytes(source_picture_sha256(picture.as_slice()));
+  let sha256 = picture_hash(picture);
   let index_key = picture_index_key(conversation, from);
   let mut kept: Vec<SourcePictureHash> =
     records::get_json(store, Table::Account, &index_key)?.unwrap_or_default();
@@ -479,6 +581,27 @@ fn keep_picture(
   }
   records::put_json(store, Table::Account, &picture_key(conversation, sha256), picture)?;
   records::put_json(store, Table::Account, &index_key, &kept)
+}
+
+/// Takes a picture off this device, from both origins.
+fn forget_picture(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  sha256: SourcePictureHash,
+) -> Result<(), CoreError> {
+  for from in [PictureFrom::Admin, PictureFrom::Bot] {
+    let index_key = picture_index_key(conversation, from);
+    let mut kept: Vec<SourcePictureHash> =
+      records::get_json(store, Table::Account, &index_key)?.unwrap_or_default();
+    kept.retain(|existing| *existing != sha256);
+    records::put_json(store, Table::Account, &index_key, &kept)?;
+  }
+  store.delete(Table::Account, &picture_key(conversation, sha256))?;
+  Ok(())
+}
+
+fn picture_hash(picture: &Base64Bytes) -> SourcePictureHash {
+  SourcePictureHash::from_bytes(source_picture_sha256(picture.as_slice()))
 }
 
 /// Whether `user` was a source manager at `at_ms` (the message's server time): an admin of the
@@ -516,15 +639,28 @@ fn picture_index_key(conversation: ConversationId, from: PictureFrom) -> String 
   format!("integration_source_picture_index/{conversation}/{from}")
 }
 
-/// Whether a numbered change is `sender`'s own change, not numbered until now, coming back from the
-/// outbox: it takes its number, so changes of other admins can win over it from then on.
-fn is_own_change_sent(
-  sender: UserId,
-  existing_by: UserId,
-  existing_server_id: Option<MessageId>,
-  is_same_change: bool,
+/// Takes a change into a source's newest numbered one, or into the pending one while it has no
+/// number. Returns whether either changed.
+fn take_newest<T: PartialEq>(
+  numbered: &mut Option<T>,
+  pending: &mut Option<T>,
+  record: T,
+  server_id_of: fn(&T) -> Option<MessageId>,
 ) -> bool {
-  sender == existing_by && existing_server_id.is_none() && is_same_change
+  let Some(_) = server_id_of(&record) else {
+    let is_changed = pending.as_ref() != Some(&record);
+    *pending = Some(record);
+    return is_changed;
+  };
+  let is_newer = numbered
+    .as_ref()
+    .is_none_or(|existing| !is_before(server_id_of(&record), server_id_of(existing)));
+  if is_newer && numbered.as_ref() != Some(&record) {
+    *numbered = Some(record);
+    true
+  } else {
+    false
+  }
 }
 
 /// Whether a change numbered `candidate` came before one numbered `existing`. A change not sent yet
@@ -949,17 +1085,123 @@ mod tests {
     }
 
     #[test]
+    fn an_own_change_settles_whatever_order_things_arrive_in() {
+      let mut ledger = SourceLedger::default();
+      take(&mut ledger, ADMIN, &created(1, "ci"), 10);
+      // Mine waits; another admin's 100 arrives; mine goes out as 90: theirs is the newest.
+      let mine = renamed(1, "Mine");
+      assert!(ledger.apply(user(ADMIN), true, &mine, 0, None));
+      assert!(take(&mut ledger, OTHER_ADMIN, &renamed(1, "Theirs"), 100));
+      assert_eq!(
+        ledger.active(conversation(), &authority())[0].name,
+        "Mine",
+        "shown while it waits"
+      );
+      assert!(ledger.settle(&mine));
+      assert!(!ledger.apply(user(ADMIN), true, &mine, 0, Some(message(90))));
+      assert_eq!(ledger.active(conversation(), &authority())[0].name, "Theirs");
+    }
+
+    #[test]
+    fn a_refused_own_change_stands_in_nobodys_way() {
+      let mut ledger = SourceLedger::default();
+      take(&mut ledger, ADMIN, &created(1, "ci"), 10);
+      let mine = picture(1, Some(png(1)));
+      assert!(ledger.apply(user(ADMIN), true, &mine, 0, None));
+      assert!(
+        ledger.settle(&mine),
+        "refused, or sent with a roster that went stale"
+      );
+      assert_eq!(shown_hash(&ledger), None);
+      assert!(take(&mut ledger, OTHER_ADMIN, &picture(1, Some(png(2))), 21));
+      assert_eq!(shown_hash(&ledger), Some(hash(&png(2))));
+    }
+
+    #[test]
+    fn only_the_change_that_was_sent_stops_being_pending() {
+      let mut ledger = SourceLedger::default();
+      take(&mut ledger, ADMIN, &created(1, "ci"), 10);
+      let (first, second) = (renamed(1, "First"), renamed(1, "Second"));
+      assert!(ledger.apply(user(ADMIN), true, &first, 0, None));
+      assert!(ledger.apply(user(ADMIN), true, &second, 0, None));
+      assert!(!ledger.settle(&first));
+      assert_eq!(ledger.active(conversation(), &authority())[0].name, "Second");
+      assert!(ledger.settle(&second));
+    }
+
+    #[test]
+    fn taking_a_picture_away_takes_its_bytes_and_a_purge_takes_everything() {
+      let store = store_with_users();
+      keep_picture(&store, conversation(), &png(1), PictureFrom::Admin).unwrap();
+      forget_picture(&store, conversation(), hash(&png(1))).unwrap();
+      assert_eq!(
+        source_picture(&store, conversation(), hash(&png(1))).unwrap(),
+        None
+      );
+
+      keep_picture(&store, conversation(), &png(2), PictureFrom::Bot).unwrap();
+      keep_picture(&store, conversation(), &png(3), PictureFrom::Admin).unwrap();
+      forget_conversation(&store, conversation()).unwrap();
+      assert_eq!(
+        source_picture(&store, conversation(), hash(&png(2))).unwrap(),
+        None
+      );
+      assert_eq!(
+        source_picture(&store, conversation(), hash(&png(3))).unwrap(),
+        None
+      );
+      assert_eq!(
+        SourceLedger::load(&store, conversation()).unwrap(),
+        SourceLedger::default()
+      );
+    }
+
+    #[test]
+    fn a_large_name_leaves_nothing_in_the_message() {
+      let store = store_with_users();
+      let mut meta = MessageMeta {
+        maybe_source: Some(Box::new(SourceIdentity {
+          name: "x".repeat(MAX_SOURCE_NAME_WIRE_BYTES + 1),
+          ..identity_with(png(1), hash(&png(1)))
+        })),
+        ..MessageMeta::default()
+      };
+      take_message_source(&store, conversation(), user(BOT), &mut meta).unwrap();
+      assert_eq!(meta.maybe_source, None);
+      assert_eq!(
+        source_picture(&store, conversation(), hash(&png(1))).unwrap(),
+        None
+      );
+
+      let mut meta = MessageMeta {
+        maybe_source: Some(Box::new(identity_with(png(1), hash(&png(1))))),
+        ..MessageMeta::default()
+      };
+      take_message_source(&store, conversation(), user(BOT), &mut meta).unwrap();
+      let stored = meta.maybe_source.unwrap();
+      assert_eq!(stored.maybe_picture, None, "the message keeps only the hash");
+      assert_eq!(stored.maybe_picture_sha256, Some(hash(&png(1))));
+      assert!(
+        source_picture(&store, conversation(), hash(&png(1)))
+          .unwrap()
+          .is_some()
+      );
+    }
+
+    #[test]
     fn an_own_change_takes_its_number_so_a_later_one_of_another_admin_wins() {
       let mut ledger = SourceLedger::default();
       take(&mut ledger, ADMIN, &created(1, "ci"), 10);
       // Mine, not sent yet, then sent as 20; another admin's 21 and an older 19.
       assert!(ledger.apply(user(ADMIN), true, &picture(1, Some(png(1))), 0, None));
+      assert!(ledger.settle(&picture(1, Some(png(1)))));
       assert!(ledger.apply(user(ADMIN), true, &picture(1, Some(png(1))), 0, Some(message(20))));
       assert!(!take(&mut ledger, OTHER_ADMIN, &picture(1, Some(png(2))), 19));
       assert!(take(&mut ledger, OTHER_ADMIN, &picture(1, Some(png(3))), 21));
       assert_eq!(shown_hash(&ledger), Some(hash(&png(3))));
 
       assert!(ledger.apply(user(ADMIN), true, &renamed(1, "Hotline"), 0, None));
+      assert!(ledger.settle(&renamed(1, "Hotline")));
       assert!(ledger.apply(user(ADMIN), true, &renamed(1, "Hotline"), 0, Some(message(30))));
       assert!(take(&mut ledger, OTHER_ADMIN, &renamed(1, "Pager"), 31));
       assert_eq!(ledger.active(conversation(), &authority())[0].name, "Pager");
@@ -1005,13 +1247,16 @@ mod tests {
       store
     }
 
-    /// A valid header; `seed` makes each one different.
+    /// A valid header and an empty image chunk; `seed` makes each one different.
     fn png(seed: u8) -> Base64Bytes {
       let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
       bytes.extend(*b"IHDR");
       bytes.extend(8_u32.to_be_bytes());
       bytes.extend(8_u32.to_be_bytes());
-      bytes.push(seed);
+      bytes.extend([seed; 9]);
+      bytes.extend(0_u32.to_be_bytes());
+      bytes.extend(*b"IDAT");
+      bytes.extend([0; 4]);
       Base64Bytes::new(bytes)
     }
 
