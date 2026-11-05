@@ -34,6 +34,7 @@ import de.zeitgleich.teamcraft.core.CoreRepository
 import uniffi.teamcraft_ffi.CallEndReason
 import uniffi.teamcraft_ffi.CallListener
 import uniffi.teamcraft_ffi.CallPhase
+import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.CallSession
 import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.CameraFrame
@@ -82,6 +83,9 @@ class CallController(
   private val failure = MutableStateFlow<JoinFailure?>(null)
   /** [CallActivity] is on screen; a failure it can't show goes to a notification. */
   @Volatile private var isCallScreenVisible = false
+  /** The call somebody else was in with this device: only then does being alone end it. */
+  @Volatile private var hadOthersIn: String? = null
+  @Volatile private var maybeAloneEnd: Job? = null
 
   /** "Add people" and following a move of the call into a meeting room. */
   val moves = CallMoves(
@@ -532,6 +536,35 @@ class CallController(
   private suspend fun displayNameOf(conversationId: String): String =
     conversationNameOf(conversationId) ?: context.getString(R.string.app_name)
 
+  /**
+   * Ends a one-to-one call shortly after the other person hung up ([isLeftAlone]); somebody coming
+   * back in time keeps it.
+   */
+  private fun followOthers(state: CallStateInfo) {
+    if (state.phase != CallPhase.CONNECTED) return
+    val count = state.participantCount.toInt()
+    if (count > 0) {
+      hadOthersIn = state.conversationId
+      maybeAloneEnd?.cancel()
+      maybeAloneEnd = null
+      return
+    }
+    if (hadOthersIn != state.conversationId || maybeAloneEnd?.isActive == true) return
+    maybeAloneEnd = scope.launch {
+      val isOneToOne = runCatching {
+        core.core().conversations().firstOrNull { it.id == state.conversationId }?.kind == ConversationKind.DIRECT
+      }.getOrDefault(false)
+      if (!isOneToOne) return@launch
+      delay(ALONE_END_MS)
+      val now = this@CallController.state.value ?: return@launch
+      val hadOthers = hadOthersIn == now.conversationId
+      if (isLeftAlone(isOneToOne, hadOthers, now.participantCount.toInt(), now.reconnectingCount.toInt())) {
+        Log.i(TAG, "the other person left: ending the call")
+        hangUp()
+      }
+    }
+  }
+
   /** The name of a conversation this device knows; `null` for one it doesn't. */
   private suspend fun conversationNameOf(conversationId: String): String? =
     runCatching { core.core().conversations().firstOrNull { it.id == conversationId }?.name }.getOrNull()
@@ -621,6 +654,7 @@ class CallController(
       // The DM's call this device left for a meeting room ends after the room's call began.
       if (state.conversationId == maybeLeftConversation) return
       this@CallController.state.value = state
+      followOthers(state)
       // The engine is the source of truth: once its call ended, the session, the service and its
       // notification go too, whether or not Telecom reports its disconnect back (endWithEngine
       // ends the Telecom call). Not on the engine's thread, which reports this.
