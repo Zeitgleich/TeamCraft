@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT s.id, s.user_id, s.conversation_id, s.client_message_id, s.sender_device_id, s.thread_id,\n                s.mentioned_user_ids, s.is_urgent, s.content_key_id, s.ciphertext, s.mls_epoch, s.due_at,\n                s.version, s.hold_reason, COALESCE(h.epoch, 0) = s.mls_epoch AS \"is_epoch_current!\"\n         FROM scheduled_messages s\n         LEFT JOIN mls_epoch_heads h ON h.conversation_id = s.conversation_id\n         WHERE s.user_id = $1\n         ORDER BY s.due_at, s.id",
+  "query": "SELECT s.id, s.user_id, s.conversation_id, s.client_message_id, s.sender_device_id, s.thread_id,\n                s.mentioned_user_ids, s.is_urgent, s.content_key_id, s.ciphertext, s.mls_epoch, s.due_at,\n                s.version, s.hold_reason, s.held_at, COALESCE(h.epoch, 0) = s.mls_epoch AS \"is_epoch_current!\"\n         FROM scheduled_messages s\n         LEFT JOIN mls_epoch_heads h ON h.conversation_id = s.conversation_id\n         WHERE s.user_id = $1\n         ORDER BY s.due_at, s.id",
   "describe": {
     "columns": [
       {
@@ -159,6 +159,17 @@
       },
       {
         "ordinal": 14,
+        "name": "held_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "held_at"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
         "name": "is_epoch_current!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -184,8 +195,9 @@
       false,
       false,
       true,
+      true,
       null
     ]
   },
-  "hash": "2a05b9b69a355ba2a5096e92caf0eb64ce81c41dc5d0f2eeb1c8bd82a90af931"
+  "hash": "b51713a7d04479a22524616db0f230356a1fcbb1ba42fddce3db5fee683316f6"
 }

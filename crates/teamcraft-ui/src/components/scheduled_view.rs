@@ -9,7 +9,8 @@ use teamcraft_client_api::scheduled::{
 use teamcraft_proto::{ScheduledMessageId, ScheduledMessagePolicy};
 
 use crate::clock::{
-  format_date_time, format_local_datetime_input, next_monday_at, now_ms, parse_local_datetime, tomorrow_at,
+  format_date, format_date_time, format_local_datetime_input, next_monday_at, now_ms, parse_local_datetime,
+  tomorrow_at,
 };
 use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
@@ -215,6 +216,30 @@ fn ScheduledCard(message: ScheduledMessage, overview: Memo<ScheduledOverview>) -
   let cancelling = PendingAction::new();
   let is_available = can_still_go_out(status);
   let can_edit = is_available && status != ScheduledStatus::PolicyOff;
+  // Gone from the server: only the text is left here, to copy, until the user removes it.
+  let is_removed = status == ScheduledStatus::RemovedByServer;
+  let maybe_removal = message
+    .maybe_removes_at
+    .filter(|_| !is_removed)
+    .map(|removes_at| {
+      i18n.t_with(
+        "scheduled-removal-date",
+        &[("date", &format_date(removes_at, locale))],
+      )
+    });
+  let (cancel_key, question_key, confirm_key) = if is_removed {
+    (
+      "scheduled-dismiss",
+      "scheduled-dismiss-question",
+      "scheduled-dismiss-confirm",
+    )
+  } else {
+    (
+      "scheduled-cancel",
+      "scheduled-cancel-question",
+      "scheduled-cancel-confirm",
+    )
+  };
   let (name, body) = (message.conversation_name.clone(), message.body.clone());
   let edit_body = body.clone();
   view! {
@@ -233,6 +258,7 @@ fn ScheduledCard(message: ScheduledMessage, overview: Memo<ScheduledOverview>) -
       >
         {move || i18n.t(status_key(status))}
       </p>
+      {maybe_removal.map(|removal| view! { <p class="scheduled-status needs-you">{removal}</p> })}
       <Show
         when=move || is_editing.get()
         fallback={
@@ -253,37 +279,39 @@ fn ScheduledCard(message: ScheduledMessage, overview: Memo<ScheduledOverview>) -
           <Show
             when=move || !is_confirming_cancel.get()
             fallback=move || view! {
-              <span class="scheduled-confirm">{move || i18n.t("scheduled-cancel-question")}</span>
+              <span class="scheduled-confirm">{move || i18n.t(question_key)}</span>
               <PendingButton
                 pending=cancelling
                 class="btn btn-small btn-danger"
                 on_click=move |_| cancelling.run(|| state.write(|backend| backend.cancel_scheduled(id)))
               >
-                {move || i18n.t("scheduled-cancel-confirm")}
+                {move || i18n.t(confirm_key)}
               </PendingButton>
               <button class="btn btn-small btn-quiet" on:click=move |_| is_confirming_cancel.set(false)>
                 {move || i18n.t("scheduled-keep")}
               </button>
             }
           >
-            <PendingButton
-              pending=sending
-              class="btn btn-small"
-              is_disabled=Signal::derive(move || !is_available)
-              on_click=move |_| sending.run(|| state.write(|backend| backend.send_scheduled_now(id)))
-            >
-              {move || i18n.t("scheduled-send-now")}
-            </PendingButton>
-            <button class="btn btn-small btn-quiet" prop:disabled=!can_edit on:click=move |_| is_editing.set(true)>
-              {move || i18n.t("scheduled-edit")}
-            </button>
+            <Show when=move || !is_removed fallback=|| ()>
+              <PendingButton
+                pending=sending
+                class="btn btn-small"
+                is_disabled=Signal::derive(move || !is_available)
+                on_click=move |_| sending.run(|| state.write(|backend| backend.send_scheduled_now(id)))
+              >
+                {move || i18n.t("scheduled-send-now")}
+              </PendingButton>
+              <button class="btn btn-small btn-quiet" prop:disabled=!can_edit on:click=move |_| is_editing.set(true)>
+                {move || i18n.t("scheduled-edit")}
+              </button>
+            </Show>
             <Show when=move || is_available fallback=|| ()>
               <button class="btn btn-small btn-quiet" on:click=move |_| state.open_conversation(conversation)>
                 {move || i18n.t("saved-open")}
               </button>
             </Show>
             <button class="btn btn-small btn-quiet" on:click=move |_| is_confirming_cancel.set(true)>
-              {move || i18n.t("scheduled-cancel")}
+              {move || i18n.t(cancel_key)}
             </button>
           </Show>
         </div>
@@ -445,6 +473,7 @@ pub fn needs_attention(status: ScheduledStatus) -> bool {
       | ScheduledStatus::NoPermission
       | ScheduledStatus::ConversationGone
       | ScheduledStatus::ThreadGone
+      | ScheduledStatus::RemovedByServer
   )
 }
 
@@ -459,6 +488,7 @@ fn status_key(status: ScheduledStatus) -> &'static str {
     ScheduledStatus::ConversationGone => "scheduled-status-conversation-gone",
     ScheduledStatus::ThreadGone => "scheduled-status-thread-gone",
     ScheduledStatus::Unreadable => "scheduled-status-unreadable",
+    ScheduledStatus::RemovedByServer => "scheduled-status-removed",
     ScheduledStatus::Unknown => "scheduled-status-unknown",
   }
 }

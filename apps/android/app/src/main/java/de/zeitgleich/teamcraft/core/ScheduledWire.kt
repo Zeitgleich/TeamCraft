@@ -20,10 +20,16 @@ data class ScheduledMessage(
   val body: String = "",
   @SerialName("due_at") val dueAt: Long,
   val status: String = "unknown",
+  @SerialName("maybe_removes_at") val maybeRemovesAt: Long? = null,
 ) {
   /** Whether the message waits for the user to do something. */
   val needsAttention: Boolean
-    get() = status in setOf(STATUS_POLICY_OFF, STATUS_NOT_A_MEMBER, STATUS_NO_PERMISSION, STATUS_CONVERSATION_GONE, STATUS_THREAD_GONE)
+    get() = status in setOf(
+      STATUS_POLICY_OFF, STATUS_NOT_A_MEMBER, STATUS_NO_PERMISSION, STATUS_CONVERSATION_GONE, STATUS_THREAD_GONE, STATUS_REMOVED,
+    )
+
+  /** Gone from the server: only the text is left on the device, until the user removes it. */
+  val isRemoved: Boolean get() = status == STATUS_REMOVED
 
   /** Whether sending it can still make it go out. */
   val canGoOut: Boolean get() = status in setOf(STATUS_WAITING, STATUS_NEEDS_SEALING, STATUS_STALE, STATUS_POLICY_OFF)
@@ -40,6 +46,7 @@ data class ScheduledMessage(
     const val STATUS_CONVERSATION_GONE = "conversation_gone"
     const val STATUS_THREAD_GONE = "thread_gone"
     const val STATUS_UNREADABLE = "unreadable"
+    const val STATUS_REMOVED = "removed_by_server"
   }
 }
 

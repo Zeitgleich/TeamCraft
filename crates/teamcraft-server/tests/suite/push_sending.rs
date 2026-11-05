@@ -2653,7 +2653,7 @@ mod wake_to_seal {
 
   /// A wake that got lost: shortly before its time the scheduler asks once more, once per version.
   #[tokio::test]
-  async fn the_last_stretch_wakes_once_without_a_commit() {
+  async fn the_last_stretch_wakes_again_after_a_pause_without_a_commit() {
     let recorder = Recorder::default();
     let Some(app) = TestApp::start_with_push(
       |settings| settings.push.scheduled_wake_min_interval = Duration::ZERO,
@@ -2669,7 +2669,7 @@ mod wake_to_seal {
     assert_eq!(seal_wakes(&recorder.wait_for(1).await).len(), 1);
 
     let run_due = teamcraft_server::services::scheduled_messages::run_due;
-    let soon = OffsetDateTime::now_utc() + TimeDuration::seconds(3600 - 60);
+    let soon = OffsetDateTime::now_utc() + TimeDuration::seconds(3600 - 14 * 60);
     run_due(&app.state, soon).await.unwrap();
     assert_eq!(seal_wakes(&recorder.wait_for(2).await).len(), 2);
     run_due(&app.state, soon + TimeDuration::seconds(5))
@@ -2678,7 +2678,44 @@ mod wake_to_seal {
     assert_eq!(
       seal_wakes(&recorder.wait_for(3).await).len(),
       2,
-      "once per version"
+      "not on every run"
     );
+    // The wake may have been lost: once more after the pause.
+    run_due(&app.state, soon + TimeDuration::seconds(5 * 60 + 5))
+      .await
+      .unwrap();
+    assert_eq!(seal_wakes(&recorder.wait_for(3).await).len(), 3);
+  }
+
+  #[tokio::test]
+  async fn held_for_an_old_epoch_it_wakes_again_hourly() {
+    let recorder = Recorder::default();
+    let Some(app) = TestApp::start_with_push(
+      |settings| settings.push.scheduled_wake_min_interval = Duration::ZERO,
+      recorder.dispatcher(),
+    )
+    .await
+    else {
+      return;
+    };
+    let s = scene(&app).await;
+    schedule(&app, &s, 1, 60).await;
+    commit(&app, &s).await;
+    assert_eq!(seal_wakes(&recorder.wait_for(1).await).len(), 1);
+
+    let run_due = teamcraft_server::services::scheduled_messages::run_due;
+    let due = OffsetDateTime::now_utc() + TimeDuration::seconds(61);
+    run_due(&app.state, due).await.unwrap();
+    assert_eq!(
+      seal_wakes(&recorder.wait_for(2).await).len(),
+      2,
+      "held at its time"
+    );
+    run_due(&app.state, due + TimeDuration::seconds(5)).await.unwrap();
+    assert_eq!(seal_wakes(&recorder.wait_for(3).await).len(), 2);
+    run_due(&app.state, due + TimeDuration::seconds(3600 + 5))
+      .await
+      .unwrap();
+    assert_eq!(seal_wakes(&recorder.wait_for(3).await).len(), 3);
   }
 }

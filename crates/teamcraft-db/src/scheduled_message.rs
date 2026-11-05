@@ -31,8 +31,24 @@ pub struct StoredScheduledMessage {
   pub due_at: OffsetDateTime,
   pub version: u64,
   pub maybe_hold: Option<ScheduledHoldReason>,
+  /// Since when it is held.
+  pub maybe_held_at: Option<OffsetDateTime>,
   /// Whether the conversation is still in `mls_epoch`, when this was read.
   pub is_epoch_current: bool,
+}
+
+/// When the scheduler wakes a sender's devices without a commit (docs/scheduled-messages.md, "The
+/// wake"): for a wake that got lost, or a device that didn't get through.
+#[derive(Debug, Clone, Copy)]
+pub struct StaleWakes {
+  /// How long before its time a message still under an old epoch is woken for.
+  pub last_stretch: Duration,
+  /// In the last stretch, how long after a wake the next one for the same message may go.
+  pub last_stretch_every: Duration,
+  /// Held at its time for an old epoch: how often its sender is woken again, and for how long
+  /// after the hold.
+  pub held_every: Duration,
+  pub held_for: Duration,
 }
 
 /// What a device seals: the same for a new message and a change of its text.
@@ -68,7 +84,7 @@ pub enum ScheduleOutcome {
 
 #[derive(Debug)]
 pub enum ScheduledUpdateOutcome {
-  Updated(StoredScheduledMessage),
+  Updated(Box<StoredScheduledMessage>),
   VersionConflict { current_version: u64 },
   NotFound,
 }
@@ -156,7 +172,7 @@ impl Database {
     let rows = sqlx::query!(
       r#"SELECT s.id, s.user_id, s.conversation_id, s.client_message_id, s.sender_device_id, s.thread_id,
                 s.mentioned_user_ids, s.is_urgent, s.content_key_id, s.ciphertext, s.mls_epoch, s.due_at,
-                s.version, s.hold_reason, COALESCE(h.epoch, 0) = s.mls_epoch AS "is_epoch_current!"
+                s.version, s.hold_reason, s.held_at, COALESCE(h.epoch, 0) = s.mls_epoch AS "is_epoch_current!"
          FROM scheduled_messages s
          LEFT JOIN mls_epoch_heads h ON h.conversation_id = s.conversation_id
          WHERE s.user_id = $1
@@ -183,6 +199,7 @@ impl Database {
           due_at: row.due_at,
           version: row.version,
           hold_reason: row.hold_reason,
+          held_at: row.held_at,
           is_epoch_current: row.is_epoch_current,
         })
       })
@@ -198,7 +215,7 @@ impl Database {
     let maybe_row = sqlx::query!(
       r#"SELECT s.id, s.user_id, s.conversation_id, s.client_message_id, s.sender_device_id, s.thread_id,
                 s.mentioned_user_ids, s.is_urgent, s.content_key_id, s.ciphertext, s.mls_epoch, s.due_at,
-                s.version, s.hold_reason, COALESCE(h.epoch, 0) = s.mls_epoch AS "is_epoch_current!"
+                s.version, s.hold_reason, s.held_at, COALESCE(h.epoch, 0) = s.mls_epoch AS "is_epoch_current!"
          FROM scheduled_messages s
          LEFT JOIN mls_epoch_heads h ON h.conversation_id = s.conversation_id
          WHERE s.id = $1 AND s.user_id = $2"#,
@@ -224,6 +241,7 @@ impl Database {
           due_at: row.due_at,
           version: row.version,
           hold_reason: row.hold_reason,
+          held_at: row.held_at,
           is_epoch_current: row.is_epoch_current,
         })
       })
@@ -281,7 +299,7 @@ impl Database {
         .get_scheduled_message(id, user)
         .await?
         .ok_or_else(|| DbError::InvalidStoredValue("scheduled message went away".into()))?;
-      return Ok(ScheduledUpdateOutcome::Updated(stored));
+      return Ok(ScheduledUpdateOutcome::Updated(Box::new(stored)));
     }
     Ok(match self.get_scheduled_message(id, user).await? {
       Some(current) => ScheduledUpdateOutcome::VersionConflict {
@@ -328,7 +346,7 @@ impl Database {
            RETURNING s.*)
          SELECT c.id, c.user_id, c.conversation_id, c.client_message_id, c.sender_device_id, c.thread_id,
                 c.mentioned_user_ids, c.is_urgent, c.content_key_id, c.ciphertext, c.mls_epoch, c.due_at,
-                c.version, c.hold_reason, COALESCE(h.epoch, 0) = c.mls_epoch AS "is_epoch_current!"
+                c.version, c.hold_reason, c.held_at, COALESCE(h.epoch, 0) = c.mls_epoch AS "is_epoch_current!"
          FROM claimed c
          LEFT JOIN mls_epoch_heads h ON h.conversation_id = c.conversation_id
          ORDER BY c.due_at, c.id"#,
@@ -356,6 +374,7 @@ impl Database {
           due_at: row.due_at,
           version: row.version,
           hold_reason: row.hold_reason,
+          held_at: row.held_at,
           is_epoch_current: row.is_epoch_current,
         })
       })
@@ -379,13 +398,14 @@ impl Database {
     from_db_all(&rows)
   }
 
-  /// Messages due within `window` of `now` that are still sealed for an old epoch and whose sender's
-  /// devices weren't woken for this version yet: the last stretch before their time, for a wake that
-  /// was lost or came to nothing. Marks them, so each version is asked about once.
-  pub async fn claim_stale_due_soon(
+  /// Messages whose sender's devices should be woken to seal them again, marked as woken now: still
+  /// under an old epoch in the last stretch before their time, or held for an old epoch at their
+  /// time. Each again only after the pause `wakes` names, so a wake that got lost or came to nothing
+  /// is tried again without a push on every run. Only for senders still in the conversation.
+  pub async fn claim_stale_wakes(
     &self,
     now: OffsetDateTime,
-    window: Duration,
+    wakes: StaleWakes,
     limit: i64,
   ) -> Result<Vec<(UserId, ConversationId)>, DbError> {
     let rows = sqlx::query!(
@@ -394,14 +414,22 @@ impl Database {
          WHERE s.id IN (
            SELECT m.id FROM scheduled_messages m
            JOIN mls_epoch_heads h ON h.conversation_id = m.conversation_id
-           WHERE m.hold_reason IS NULL AND m.last_wake_at IS NULL AND h.epoch <> m.mls_epoch
-             AND m.due_at > $1 AND m.due_at <= $1 + make_interval(secs => $2)
+           JOIN memberships ms ON ms.conversation_id = m.conversation_id AND ms.user_id = m.user_id
+           WHERE (m.hold_reason IS NULL AND h.epoch <> m.mls_epoch
+                  AND m.due_at > $1 AND m.due_at <= $1::timestamptz + make_interval(secs => $2)
+                  AND (m.last_wake_at IS NULL OR m.last_wake_at <= $1::timestamptz - make_interval(secs => $3)))
+              OR (m.hold_reason = 'stale_epoch'
+                  AND m.held_at > $1::timestamptz - make_interval(secs => $5)
+                  AND (m.last_wake_at IS NULL OR m.last_wake_at <= $1::timestamptz - make_interval(secs => $4)))
            ORDER BY m.due_at
-           LIMIT $3
+           LIMIT $6
            FOR UPDATE OF m SKIP LOCKED)
          RETURNING s.user_id, s.conversation_id"#,
       now,
-      window.as_secs_f64(),
+      wakes.last_stretch.as_secs_f64(),
+      wakes.last_stretch_every.as_secs_f64(),
+      wakes.held_every.as_secs_f64(),
+      wakes.held_for.as_secs_f64(),
       limit,
     )
     .fetch_all(self.pool())
@@ -412,28 +440,59 @@ impl Database {
       .collect()
   }
 
+  /// Holds whose sender left the conversation since (a message held for an old epoch, say) can't be
+  /// solved any more either: they become `not_a_member`, which the purge then removes in time.
+  /// Returns the senders, to tell their devices.
+  pub async fn hold_departed_scheduled_messages(
+    &self,
+    now: OffsetDateTime,
+    limit: i64,
+  ) -> Result<Vec<UserId>, DbError> {
+    let rows = sqlx::query_scalar!(
+      r#"UPDATE scheduled_messages s
+         SET hold_reason = 'not_a_member', held_at = $1, claimed_until = NULL, version = version + 1
+         WHERE s.id IN (
+           SELECT m.id FROM scheduled_messages m
+           WHERE m.hold_reason IS NOT NULL
+             AND m.hold_reason NOT IN ('sender_inactive', 'not_a_member', 'conversation_gone')
+             AND NOT EXISTS (
+               SELECT 1 FROM memberships ms
+               WHERE ms.conversation_id = m.conversation_id AND ms.user_id = m.user_id)
+           LIMIT $2
+           FOR UPDATE OF m SKIP LOCKED)
+         RETURNING s.user_id"#,
+      now,
+      limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    from_db_all(&rows)
+  }
+
   /// Forgets holds nothing can solve any more once they are older than `max_age`: the ciphertext of
-  /// somebody who left or whose account is off shouldn't stay for good. Returns how many.
+  /// somebody who left or whose account is off shouldn't stay for good. Returns whose they were, so
+  /// their devices learn it (the device keeps the text until the user dismisses it).
   pub async fn purge_dead_scheduled_messages(
     &self,
     now: OffsetDateTime,
     max_age: Duration,
     limit: i64,
-  ) -> Result<u64, DbError> {
-    let purged = sqlx::query!(
+  ) -> Result<Vec<UserId>, DbError> {
+    let rows = sqlx::query_scalar!(
       r#"DELETE FROM scheduled_messages WHERE id IN (
            SELECT id FROM scheduled_messages
            WHERE hold_reason IN ('sender_inactive', 'not_a_member', 'conversation_gone')
              AND held_at <= $1::timestamptz - make_interval(secs => $2)
            LIMIT $3
-           FOR UPDATE SKIP LOCKED)"#,
+           FOR UPDATE SKIP LOCKED)
+         RETURNING user_id"#,
       now,
       max_age.as_secs_f64(),
       limit,
     )
-    .execute(self.pool())
+    .fetch_all(self.pool())
     .await?;
-    Ok(purged.rows_affected())
+    from_db_all(&rows)
   }
 
   /// Notes why a message didn't go out at its time; nothing if it changed since it was read.
@@ -442,14 +501,17 @@ impl Database {
     id: ScheduledMessageId,
     version: u64,
     reason: &ScheduledHoldReason,
+    now: OffsetDateTime,
   ) -> Result<bool, DbError> {
+    // The caller wakes the sender's devices right away; the next wake waits its pause.
     let held = sqlx::query!(
       r#"UPDATE scheduled_messages
-         SET hold_reason = $3, held_at = now(), claimed_until = NULL, version = version + 1
+         SET hold_reason = $3, held_at = $4, last_wake_at = $4, claimed_until = NULL, version = version + 1
          WHERE id = $1 AND version = $2"#,
       to_db(id),
       version_to_db(version)?,
       reason.as_str(),
+      now,
     )
     .execute(self.pool())
     .await?;
@@ -523,6 +585,7 @@ struct Parts<'a> {
   due_at: OffsetDateTime,
   version: i64,
   hold_reason: Option<String>,
+  held_at: Option<OffsetDateTime>,
   is_epoch_current: bool,
 }
 
@@ -545,6 +608,7 @@ fn from_parts(parts: Parts<'_>) -> Result<StoredScheduledMessage, DbError> {
     version: u64::try_from(parts.version)
       .map_err(|_| DbError::InvalidStoredValue("negative version".into()))?,
     maybe_hold: parts.hold_reason.map(ScheduledHoldReason::from),
+    maybe_held_at: parts.held_at,
     is_epoch_current: parts.is_epoch_current,
   })
 }

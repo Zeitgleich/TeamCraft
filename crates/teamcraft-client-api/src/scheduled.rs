@@ -36,6 +36,10 @@ pub struct ScheduledMessage {
   pub is_silent: bool,
   #[serde(default)]
   pub also_send_to_channel: bool,
+  /// Server time when the server removes a hold nothing can solve any more; for
+  /// [`ScheduledStatus::RemovedByServer`] when it did.
+  #[serde(default)]
+  pub maybe_removes_at: Option<TimestampMs>,
 }
 
 /// Where a held message stands. Each one has its own line in every client: nothing waits silently.
@@ -61,6 +65,9 @@ pub enum ScheduledStatus {
   ThreadGone,
   /// This device holds no key for it yet, and its epoch is current: the server sends it at its time.
   Unreadable,
+  /// The server removed it after holding it for the retention; only this device still has the text,
+  /// until the user dismisses it.
+  RemovedByServer,
   /// From a newer version.
   #[serde(other)]
   Unknown,

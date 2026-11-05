@@ -17,11 +17,16 @@ struct ScheduledMessage: Decodable, Equatable, Identifiable, Sendable {
   let body: String
   let dueAt: Int64
   let status: ScheduledStatus
+  /// When the server removes a hold nothing can solve any more.
+  let maybeRemovesAt: Int64?
+
+  /// Gone from the server: only the text is left on the device, until the user removes it.
+  var isRemoved: Bool { status == .removedByServer }
 
   /// Whether the message waits for the user to do something.
   var needsAttention: Bool {
     switch status {
-    case .policyOff, .notAMember, .noPermission, .conversationGone, .threadGone: return true
+    case .policyOff, .notAMember, .noPermission, .conversationGone, .threadGone, .removedByServer: return true
     case .waiting, .needsSealing, .stale, .unreadable, .unknown: return false
     }
   }
@@ -30,7 +35,7 @@ struct ScheduledMessage: Decodable, Equatable, Identifiable, Sendable {
   var canGoOut: Bool {
     switch status {
     case .waiting, .needsSealing, .stale, .policyOff: return true
-    case .notAMember, .noPermission, .conversationGone, .threadGone, .unreadable, .unknown: return false
+    case .notAMember, .noPermission, .conversationGone, .threadGone, .unreadable, .removedByServer, .unknown: return false
     }
   }
 
@@ -48,6 +53,7 @@ enum ScheduledStatus: String, Decodable, Equatable, Sendable {
   case conversationGone = "conversation_gone"
   case threadGone = "thread_gone"
   case unreadable
+  case removedByServer = "removed_by_server"
   case unknown
 
   init(from decoder: Decoder) throws {
@@ -66,6 +72,7 @@ enum ScheduledStatus: String, Decodable, Equatable, Sendable {
     case .conversationGone: return "scheduled_status_conversation_gone"
     case .threadGone: return "scheduled_status_thread_gone"
     case .unreadable: return "scheduled_status_unreadable"
+    case .removedByServer: return "scheduled_status_removed"
     case .unknown: return "scheduled_status_unknown"
     }
   }

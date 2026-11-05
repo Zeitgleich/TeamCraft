@@ -38,4 +38,10 @@
   <string name="scheduled_keep">Keep it</string>
   <string name="scheduled_attention">A scheduled message needs you. Tap to see it.</string>
   <string name="home_entry_scheduled">Scheduled</string>
+  <string name="scheduled_status_removed">The server removed it after holding it this long, so it won\'t go out. The text is only on your devices now: copy it if you still need it.</string>
+  <string name="scheduled_removal_date">The server removes it on %1$s. Copy the text before then if you need it.</string>
+  <string name="scheduled_dismiss">Remove from list</string>
+  <string name="scheduled_dismiss_question">Remove it from this device? Its text is gone from here then.</string>
+  <string name="scheduled_dismiss_confirm">Remove it</string>
+  <string name="error_too_large">That\'s too long for the server. Shorten it and try again.</string>
 </resources>

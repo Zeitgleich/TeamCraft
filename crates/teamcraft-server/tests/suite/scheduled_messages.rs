@@ -669,10 +669,47 @@ mod cleaning_up {
       .await;
     assert_eq!(left.status, StatusCode::NO_CONTENT, "{}", left.body);
     run_due(&app.state, later(61)).await.unwrap();
-    assert_eq!(listed(&app, &s.carol).await.len(), 1, "they still see why");
+    let held = listed(&app, &s.carol).await;
+    assert_eq!(held.len(), 1, "they still see why");
+    assert!(held[0]["removes_at"].is_i64(), "and when it goes: {}", held[0]);
 
     let days = i64::from(app.state.settings.get().limits.scheduled_hold_retention_days);
     run_due(&app.state, later(days * 86_400 + 61)).await.unwrap();
+    assert!(listed(&app, &s.carol).await.is_empty());
+  }
+
+  /// Held for an old epoch, then the sender left: nothing can solve it any more, so it counts as theirs
+  /// no more and goes after the retention like any such hold.
+  #[tokio::test]
+  async fn a_stale_one_whose_sender_left_is_held_as_not_a_member() {
+    let app = app!();
+    let s = scene(&app).await;
+    schedule(&app, &s, 1).await;
+    commit(&app, &s, 0).await;
+    run_due(&app.state, later(61)).await.unwrap();
+    assert_eq!(
+      hold_of_first(&app, &s.carol).await.as_deref(),
+      Some("stale_epoch")
+    );
+    assert!(listed(&app, &s.carol).await[0]["removes_at"].is_null());
+
+    let carol_id = user_id(&app, &s.carol).await;
+    let left = app
+      .delete(
+        &s.carol,
+        &format!("/conversations/{}/members/{carol_id}", s.channel),
+      )
+      .await;
+    assert_eq!(left.status, StatusCode::NO_CONTENT, "{}", left.body);
+    run_due(&app.state, later(62)).await.unwrap();
+    assert_eq!(
+      hold_of_first(&app, &s.carol).await.as_deref(),
+      Some("not_a_member")
+    );
+    assert!(listed(&app, &s.carol).await[0]["removes_at"].is_i64());
+
+    let days = i64::from(app.state.settings.get().limits.scheduled_hold_retention_days);
+    run_due(&app.state, later(days * 86_400 + 63)).await.unwrap();
     assert!(listed(&app, &s.carol).await.is_empty());
   }
 

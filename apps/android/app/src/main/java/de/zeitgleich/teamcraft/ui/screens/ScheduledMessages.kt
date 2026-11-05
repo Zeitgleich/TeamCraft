@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.DatePicker
@@ -119,12 +120,14 @@ fun ScheduledScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: 
   maybeCancelling?.let { message ->
     AlertDialog(
       onDismissRequest = { maybeCancelling = null },
-      title = { Text(stringResource(R.string.scheduled_cancel_question)) },
+      title = {
+        Text(stringResource(if (message.isRemoved) R.string.scheduled_dismiss_question else R.string.scheduled_cancel_question))
+      },
       confirmButton = {
         TextButton(onClick = {
           viewModel.act(ChatActions.cancelScheduled(message.id))
           maybeCancelling = null
-        }) { Text(stringResource(R.string.scheduled_cancel_confirm)) }
+        }) { Text(stringResource(if (message.isRemoved) R.string.scheduled_dismiss_confirm else R.string.scheduled_cancel_confirm)) }
       },
       dismissButton = { TextButton(onClick = { maybeCancelling = null }) { Text(stringResource(R.string.scheduled_keep)) } },
     )
@@ -159,14 +162,34 @@ private fun ScheduledRow(
       style = MaterialTheme.typography.bodySmall,
       color = if (message.needsAttention) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    Text(message.body, maxLines = 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(vertical = 4.dp))
+    message.maybeRemovesAt?.takeIf { !message.isRemoved }?.let { removesAt ->
+      Text(
+        stringResource(
+          R.string.scheduled_removal_date,
+          DateUtils.formatDateTime(context, removesAt, DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_WEEKDAY),
+        ),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.error,
+      )
+    }
+    // Selectable: for a message the server removed, copying the text is all that is left to do.
+    SelectionContainer {
+      Text(
+        message.body,
+        maxLines = if (message.isRemoved) Int.MAX_VALUE else 4,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.padding(vertical = 4.dp),
+      )
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
       if (message.canGoOut) TextButton(onClick = onSendNow) { Text(stringResource(R.string.scheduled_send_now)) }
       if (message.canEdit) TextButton(onClick = onEdit) { Text(stringResource(R.string.scheduled_edit)) }
       if (message.canGoOut) {
         TextButton(onClick = { onOpen(message.conversation) }) { Text(stringResource(R.string.scheduled_open)) }
       }
-      TextButton(onClick = onCancel) { Text(stringResource(R.string.scheduled_cancel)) }
+      TextButton(onClick = onCancel) {
+        Text(stringResource(if (message.isRemoved) R.string.scheduled_dismiss else R.string.scheduled_cancel))
+      }
     }
   }
 }
@@ -181,6 +204,7 @@ private fun statusText(status: String): Int = when (status) {
   ScheduledMessage.STATUS_CONVERSATION_GONE -> R.string.scheduled_status_conversation_gone
   ScheduledMessage.STATUS_THREAD_GONE -> R.string.scheduled_status_thread_gone
   ScheduledMessage.STATUS_UNREADABLE -> R.string.scheduled_status_unreadable
+  ScheduledMessage.STATUS_REMOVED -> R.string.scheduled_status_removed
   else -> R.string.scheduled_status_unknown
 }
 

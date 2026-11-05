@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT s.id, s.user_id, s.conversation_id, s.client_message_id, s.sender_device_id, s.thread_id,\n                s.mentioned_user_ids, s.is_urgent, s.content_key_id, s.ciphertext, s.mls_epoch, s.due_at,\n                s.version, s.hold_reason, COALESCE(h.epoch, 0) = s.mls_epoch AS \"is_epoch_current!\"\n         FROM scheduled_messages s\n         LEFT JOIN mls_epoch_heads h ON h.conversation_id = s.conversation_id\n         WHERE s.id = $1 AND s.user_id = $2",
+  "query": "WITH claimed AS (\n           UPDATE scheduled_messages s\n           SET claimed_until = $1 + make_interval(secs => $2)\n           WHERE s.id IN (\n             SELECT id FROM scheduled_messages\n             WHERE hold_reason IS NULL AND due_at <= $1 AND (claimed_until IS NULL OR claimed_until <= $1)\n             ORDER BY due_at\n             LIMIT $3\n             FOR UPDATE SKIP LOCKED)\n           RETURNING s.*)\n         SELECT c.id, c.user_id, c.conversation_id, c.client_message_id, c.sender_device_id, c.thread_id,\n                c.mentioned_user_ids, c.is_urgent, c.content_key_id, c.ciphertext, c.mls_epoch, c.due_at,\n                c.version, c.hold_reason, c.held_at, COALESCE(h.epoch, 0) = c.mls_epoch AS \"is_epoch_current!\"\n         FROM claimed c\n         LEFT JOIN mls_epoch_heads h ON h.conversation_id = c.conversation_id\n         ORDER BY c.due_at, c.id",
   "describe": {
     "columns": [
       {
@@ -159,6 +159,17 @@
       },
       {
         "ordinal": 14,
+        "name": "held_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "held_at"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
         "name": "is_epoch_current!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -166,7 +177,8 @@
     ],
     "parameters": {
       "Left": [
-        "Int8",
+        "Timestamptz",
+        "Float8",
         "Int8"
       ]
     },
@@ -185,8 +197,9 @@
       false,
       false,
       true,
+      true,
       null
     ]
   },
-  "hash": "04c13f2c178ecb6d43744df9b6173de74990334599ed66bc20a8faddd08c6416"
+  "hash": "518533bc2ba8f96104f244e7f650e9358531798549ede7152fea604b783948fd"
 }

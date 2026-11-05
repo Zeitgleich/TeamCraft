@@ -46,6 +46,10 @@ pub(crate) struct ScheduledEntry {
   /// more): not tried again until the entry changes or the group moves on.
   #[serde(rename = "seal_refused", default, skip_serializing_if = "Option::is_none")]
   pub maybe_seal_refused: Option<SealRefused>,
+  /// The server removed it after its retention (docs/scheduled-messages.md): kept here, so the user
+  /// can still copy the text, until dismissed.
+  #[serde(rename = "removed", default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_removed_by_server: bool,
 }
 
 /// What a refusal to seal was about.
@@ -172,9 +176,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           response,
           maybe_content,
           maybe_seal_refused,
+          is_removed_by_server: false,
         }
       })
-      .collect();
+      .collect::<Vec<_>>();
+    let removed = removed_by_server(known.entries, &entries, listed.server_now);
+    let entries = entries.into_iter().chain(removed).collect();
     write_list(
       &self.store,
       &ScheduledList {
@@ -210,7 +217,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       };
       match self.api.schedule_message(conversation, &request).await {
         Ok(answer) => {
-          self.settle_retry(conversation, &request, &answer, &content).await?;
+          self
+            .settle_retry(conversation, &request, &answer, &content)
+            .await?;
           break;
         },
         Err(error) if !is_retry && error.error_code() == Some(&ErrorCode::EpochConflict) => is_retry = true,
@@ -308,7 +317,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     outcome.map(|_| ()).map_err(CoreError::from)
   }
 
+  /// Cancels a held message; one the server removed already only goes from this device.
   pub(crate) async fn cancel_scheduled(&mut self, id: ScheduledMessageId) -> Result<(), CoreError> {
+    let mut list = read_list(&self.store)?;
+    if list
+      .entries
+      .iter()
+      .any(|entry| entry.response.id == id && entry.is_removed_by_server)
+    {
+      list.entries.retain(|entry| entry.response.id != id);
+      return write_list(&self.store, &list);
+    }
     let outcome = self.api.cancel_scheduled_message(id).await;
     self.refresh_scheduled().await?;
     outcome.map_err(CoreError::from)
@@ -548,6 +567,35 @@ pub(crate) fn read_list(store: &impl LocalStore) -> Result<ScheduledList, CoreEr
 
 fn write_list(store: &impl LocalStore, list: &ScheduledList) -> Result<(), CoreError> {
   records::put_json(store, Table::Account, SCHEDULED_LIST_KEY, list)
+}
+
+/// The entries the server no longer lists because it removed them at their removal date, as far as this
+/// device read them. Something cancelled or released elsewhere has no removal date that passed.
+fn removed_by_server(
+  known: Vec<ScheduledEntry>,
+  listed: &[ScheduledEntry],
+  server_now: UnixMillis,
+) -> Vec<ScheduledEntry> {
+  known
+    .into_iter()
+    .filter(|entry| {
+      !listed
+        .iter()
+        .any(|listed| listed.response.id == entry.response.id)
+    })
+    .filter(|entry| {
+      entry.is_removed_by_server
+        || entry
+          .response
+          .maybe_removes_at
+          .is_some_and(|removes_at| removes_at.0 <= server_now.0)
+    })
+    .filter(|entry| entry.maybe_content.is_some())
+    .map(|entry| ScheduledEntry {
+      is_removed_by_server: true,
+      ..entry
+    })
+    .collect()
 }
 
 /// A message's content without what sealing adds to it at that moment.

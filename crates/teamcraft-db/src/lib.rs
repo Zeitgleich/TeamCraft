@@ -113,7 +113,7 @@ pub use push_retry::{NewPushRetry, PushRetryClaim, PushRetryRow};
 pub use retention::{RetentionTarget, StoredObject, StoredRetention};
 pub use role_evidence::{RoleStanding, StoredRoleEvidence, StoredRoleLoss};
 pub use scheduled_message::{
-  NewScheduledMessage, ReleaseOutcome, ScheduleOutcome, ScheduledUpdateOutcome, SealedParts,
+  NewScheduledMessage, ReleaseOutcome, ScheduleOutcome, ScheduledUpdateOutcome, SealedParts, StaleWakes,
   StoredScheduledMessage,
 };
 pub use server_settings::{StoredBrand, StoredBrandAsset, StoredSetting};

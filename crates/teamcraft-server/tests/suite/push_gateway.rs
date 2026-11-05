@@ -441,6 +441,33 @@ mod kinds {
     assert_eq!(pushes[0].request.urgency, GatewayUrgency::High);
   }
 
+  /// Without a list the kind isn't refused for good: the retry queue sends it once the gateway answers.
+  #[tokio::test]
+  async fn an_unreadable_list_makes_it_wait_not_vanish() {
+    let stack = Stack::start().await;
+    stack.fake.offer_seal();
+    stack.fake.set_info_down(true);
+    let outcome = deliver(
+      &stack,
+      PushProvider::Fcm,
+      "fcm-token",
+      PushKind::ScheduledSeal,
+      Urgency::High,
+    )
+    .await;
+    assert!(
+      matches!(
+        outcome,
+        Err(PushError::Unavailable {
+          maybe_retry_after: Some(_),
+          ..
+        })
+      ),
+      "{outcome:?}"
+    );
+    assert_eq!(stack.fake.push_attempts(), 0);
+  }
+
   #[tokio::test]
   async fn the_older_kinds_don_t_need_the_list() {
     let stack = Stack::start().await;

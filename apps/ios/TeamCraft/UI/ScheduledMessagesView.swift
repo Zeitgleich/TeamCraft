@@ -29,12 +29,12 @@ struct ScheduledMessagesView: View {
       }
     }
     .confirmationDialog(
-      "scheduled_cancel_question",
+      Text(maybeCancelling?.isRemoved == true ? "scheduled_dismiss_question" : "scheduled_cancel_question"),
       isPresented: Binding(get: { maybeCancelling != nil }, set: { if !$0 { maybeCancelling = nil } }),
       titleVisibility: .visible,
       presenting: maybeCancelling
     ) { message in
-      Button("scheduled_cancel_confirm", role: .destructive) {
+      Button(message.isRemoved ? "scheduled_dismiss_confirm" : "scheduled_cancel_confirm", role: .destructive) {
         Task { await model.perform(.cancelScheduled(id: message.id)) }
       }
       Button("scheduled_keep", role: .cancel) {}
@@ -53,10 +53,18 @@ struct ScheduledMessagesView: View {
       Text(message.status.text)
         .font(.caption)
         .foregroundStyle(message.needsAttention ? Theme.danger : Theme.textMuted)
-      Text(verbatim: message.body).lineLimit(4)
+      if let removesAt = message.maybeRemovesAt, !message.isRemoved {
+        Text("scheduled_removal_date \(ScheduleTimes.date(ms: removesAt).formatted(date: .abbreviated, time: .omitted))")
+          .font(.caption)
+          .foregroundStyle(Theme.danger)
+      }
+      // Selectable: for a message the server removed, copying the text is all that is left to do.
+      Text(verbatim: message.body)
+        .lineLimit(message.isRemoved ? nil : 4)
+        .textSelection(.enabled)
     }
     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-      Button("scheduled_cancel", role: .destructive) { maybeCancelling = message }
+      Button(message.isRemoved ? "scheduled_dismiss" : "scheduled_cancel", role: .destructive) { maybeCancelling = message }
     }
     .contextMenu {
       if message.canGoOut {
@@ -67,7 +75,9 @@ struct ScheduledMessagesView: View {
       if message.canEdit {
         Button("scheduled_edit", systemImage: "pencil") { maybeEditing = message }
       }
-      Button("scheduled_cancel", systemImage: "trash", role: .destructive) { maybeCancelling = message }
+      Button(message.isRemoved ? "scheduled_dismiss" : "scheduled_cancel", systemImage: "trash", role: .destructive) {
+        maybeCancelling = message
+      }
     }
     .accessibilityActions {
       if message.canGoOut {

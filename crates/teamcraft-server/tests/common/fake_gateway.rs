@@ -53,6 +53,8 @@ struct Inner {
   is_hanging: bool,
   /// `/v1/info` lists the wake to seal scheduled messages (a gateway that knows it).
   offers_seal: bool,
+  /// `/v1/info` answers 503.
+  is_info_down: bool,
   info_reads: usize,
 }
 
@@ -80,6 +82,11 @@ impl FakeGateway {
   /// From now on `/v1/info` lists the wake to seal scheduled messages.
   pub fn offer_seal(&self) {
     self.inner.lock().unwrap().offers_seal = true;
+  }
+
+  /// `/v1/info` answers 503 while `is_down`.
+  pub fn set_info_down(&self, is_down: bool) {
+    self.inner.lock().unwrap().is_info_down = is_down;
   }
 
   /// How often `/v1/info` was read.
@@ -240,6 +247,9 @@ async fn info(State(fake): State<FakeGateway>) -> Response {
   let (accepts_unbound, offers_seal) = {
     let mut inner = fake.inner.lock().unwrap();
     inner.info_reads += 1;
+    if inner.is_info_down {
+      return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
     (inner.accepts_unbound, inner.offers_seal)
   };
   let mut kinds = vec!["message", "mention", "call", "dismiss", "test"];

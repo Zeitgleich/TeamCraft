@@ -1008,6 +1008,22 @@ impl FakeServer {
     self.lock().scheduled_update_failure = maybe_failure;
   }
 
+  /// Holds every scheduled message as one nothing can solve (the sender left), removed at
+  /// `removes_at_ms`.
+  pub fn hold_scheduled_as_dead(&self, removes_at_ms: i64) {
+    let mut state = self.lock();
+    for (_, entry) in &mut state.scheduled {
+      entry.maybe_hold = Some(teamcraft_proto::ScheduledHoldReason::NotAMember);
+      entry.maybe_removes_at = Some(UnixMillis(removes_at_ms));
+      entry.version += 1;
+    }
+  }
+
+  /// Deletes every scheduled message, as the purge or a cancel elsewhere does.
+  pub fn purge_scheduled(&self) {
+    self.lock().scheduled.clear();
+  }
+
   /// How many updates of held messages reached the server, also those it refused.
   pub fn scheduled_update_attempts(&self) -> u64 {
     self.lock().scheduled_update_attempts
@@ -4780,6 +4796,7 @@ impl ServerApi for FakeServerApi {
         due_at: request.due_at,
         version: 1,
         maybe_hold: None,
+        maybe_removes_at: None,
         is_epoch_current: true,
       };
       state.scheduled.push((me, entry.clone()));

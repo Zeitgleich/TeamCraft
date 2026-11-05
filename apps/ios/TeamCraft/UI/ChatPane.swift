@@ -38,6 +38,7 @@ struct ChatPane: View {
   @State private var isAtBottom = true
   @State private var newBelowCount = 0
   @State private var isSendFailed = false
+  @State private var isScheduleTooLarge = false
   @State private var mentionNames: (usernames: Set<String>, me: String) = ([], "")
   @State private var maybeHighlighted: String?
   @State private var isPermalinkMissing = false
@@ -227,6 +228,9 @@ struct ChatPane: View {
       Text("call_prejoin_notetaker")
     }
     .alert("send_failed", isPresented: $isSendFailed) {
+      Button("done", role: .cancel) {}
+    }
+    .alert("error_too_large", isPresented: $isScheduleTooLarge) {
       Button("done", role: .cancel) {}
     }
     .alert("permalink_unavailable", isPresented: $isPermalinkMissing) {
@@ -841,13 +845,13 @@ struct ChatPane: View {
     let request = SendRequest(
       conversationId: conversation.id, maybeThreadId: threadId, body: body,
       maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId, maybeClientMessageId: id)
-    if !(await model.performChecked(.scheduleMessage(request, dueAtMs: dueAtMs))) {
+    if let failure = await model.performReporting(.scheduleMessage(request, dueAtMs: dueAtMs)) {
       draft = body
+      // After the text: its change would drop the attempt again.
+      maybeScheduleAttempt = (body, id)
       maybeReplying = replying
       maybeReplyingImage = replyingImage
-      isSendFailed = true
-    } else {
-      maybeScheduleAttempt = nil
+      if failure == .tooLarge { isScheduleTooLarge = true } else { isSendFailed = true }
     }
   }
 

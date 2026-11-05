@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use teamcraft_db::{
   NewMessage, NewScheduledMessage, ReleaseOutcome, ScheduleOutcome, ScheduledUpdateOutcome, SealedParts,
-  StoredScheduledMessage,
+  StaleWakes, StoredScheduledMessage,
 };
 use teamcraft_proto::{
   Base64Bytes, ConversationId, DeviceId, GatewayEvent, ListScheduledMessagesResponse, MessageId, Permission,
@@ -32,8 +32,16 @@ const BATCH_SIZE: i64 = 200;
 /// How long a scheduler instance owns the messages it claimed. Longer than a batch takes; after a
 /// crash the next instance takes them over, and a release only ever stores a message once.
 const CLAIM_LEASE: Duration = Duration::from_secs(60);
-/// How long before its time a message still under an old epoch gets one more wake.
-const LAST_STRETCH: Duration = Duration::from_secs(15 * 60);
+/// The wakes without a commit (docs/scheduled-messages.md, "The wake"): in the last 15 minutes
+/// before its time every 5 minutes (as often as `scheduled_wake_min_interval` allows by default), and
+/// for a day after it was held at its time every hour. A wake that got lost is tried again; a phone
+/// that stays off costs at most these.
+const STALE_WAKES: StaleWakes = StaleWakes {
+  last_stretch: Duration::from_secs(15 * 60),
+  last_stretch_every: Duration::from_secs(5 * 60),
+  held_every: Duration::from_secs(60 * 60),
+  held_for: Duration::from_secs(24 * 60 * 60),
+};
 
 /// Holds a message for later. Refuses what the caller couldn't send now, and a ciphertext from
 /// another epoch than the group's current one.
@@ -74,9 +82,9 @@ pub async fn schedule_message(
   match outcome {
     ScheduleOutcome::Created(stored) => {
       tell_devices(state, caller.user.id);
-      Ok(response(&stored))
+      Ok(response(state, &stored))
     },
-    ScheduleOutcome::Existing(stored) => Ok(response(&stored)),
+    ScheduleOutcome::Existing(stored) => Ok(response(state, &stored)),
     ScheduleOutcome::LimitReached => Err(ApiError::ScheduledMessageLimit {
       max: policy.max_per_user,
     }),
@@ -89,7 +97,7 @@ pub async fn list_scheduled_messages(
 ) -> Result<ListScheduledMessagesResponse, ApiError> {
   let stored = state.database.list_scheduled_messages(caller.user.id).await?;
   Ok(ListScheduledMessagesResponse {
-    messages: stored.iter().map(response).collect(),
+    messages: stored.iter().map(|stored| response(state, stored)).collect(),
     server_now: unix_millis(OffsetDateTime::now_utc()),
   })
 }
@@ -150,7 +158,7 @@ pub async fn update_scheduled_message(
   match outcome {
     ScheduledUpdateOutcome::Updated(stored) => {
       tell_devices(state, caller.user.id);
-      Ok(response(&stored))
+      Ok(response(state, &stored))
     },
     ScheduledUpdateOutcome::VersionConflict { current_version } => {
       Err(ApiError::VersionConflict { current_version })
@@ -255,15 +263,27 @@ pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, Api
   let limits = &state.settings.get().limits;
   let hold_max_age =
     Duration::from_secs(u64::from(limits.scheduled_hold_retention_days).saturating_mul(86_400));
-  state
+  // Holds whose sender left since can't be solved any more; they count from now for the purge.
+  for user in state
+    .database
+    .hold_departed_scheduled_messages(now, BATCH_SIZE)
+    .await?
+  {
+    tell_devices(state, user);
+  }
+  // The text's only copy outside the user's devices goes: they keep it to copy until dismissed.
+  for user in state
     .database
     .purge_dead_scheduled_messages(now, hold_max_age, BATCH_SIZE)
-    .await?;
-  // The last stretch: messages still under an old epoch, for a wake that got lost (a restart, a push
-  // service that dropped it). No polling of devices: one wake per version.
+    .await?
+  {
+    tell_devices(state, user);
+  }
+  // Messages still under an old epoch, for a wake that got lost (a restart, a push service that
+  // dropped it, a phone that was off). Not a poll: paced per message by `STALE_WAKES`.
   for (user, conversation) in state
     .database
-    .claim_stale_due_soon(now, LAST_STRETCH, BATCH_SIZE)
+    .claim_stale_wakes(now, STALE_WAKES, BATCH_SIZE)
     .await?
   {
     crate::push::routing::wake_to_seal(state.clone(), user, conversation);
@@ -289,7 +309,7 @@ async fn release_at_time(
 ) -> Result<(), ApiError> {
   let check = match check_release(state, entry).await? {
     Ok(check) => check,
-    Err(reason) => return hold(state, entry, &reason).await,
+    Err(reason) => return hold(state, entry, &reason, now).await,
   };
   let members = member_set(state, entry.conversation_id).await?;
   let mentions = mentions_still_in(&entry.mentioned_user_ids, &members);
@@ -315,7 +335,7 @@ async fn release_at_time(
       tell_devices(state, entry.user_id);
       Ok(())
     },
-    ReleaseOutcome::StaleEpoch { .. } => hold(state, entry, &ScheduledHoldReason::StaleEpoch).await,
+    ReleaseOutcome::StaleEpoch { .. } => hold(state, entry, &ScheduledHoldReason::StaleEpoch, now).await,
     // Cancelled or changed since the claim: the change decides.
     ReleaseOutcome::Changed => Ok(()),
   }
@@ -408,10 +428,11 @@ async fn hold(
   state: &AppState,
   entry: &StoredScheduledMessage,
   reason: &ScheduledHoldReason,
+  now: OffsetDateTime,
 ) -> Result<(), ApiError> {
   if state
     .database
-    .hold_scheduled_message(entry.id, entry.version, reason)
+    .hold_scheduled_message(entry.id, entry.version, reason, now)
     .await?
   {
     tell_devices(state, entry.user_id);
@@ -590,7 +611,14 @@ fn tell_devices(state: &AppState, user: UserId) {
   state.hub.publish([user], &GatewayEvent::ScheduledMessagesUpdate);
 }
 
-fn response(stored: &StoredScheduledMessage) -> ScheduledMessageResponse {
+fn response(state: &AppState, stored: &StoredScheduledMessage) -> ScheduledMessageResponse {
+  let retention_days = state.settings.get().limits.scheduled_hold_retention_days;
+  let maybe_removes_at = stored
+    .maybe_hold
+    .as_ref()
+    .filter(|reason| is_dead(reason))
+    .and(stored.maybe_held_at)
+    .map(|held_at| unix_millis(held_at + time::Duration::days(i64::from(retention_days))));
   ScheduledMessageResponse {
     id: stored.id,
     conversation_id: stored.conversation_id,
@@ -605,8 +633,19 @@ fn response(stored: &StoredScheduledMessage) -> ScheduledMessageResponse {
     due_at: unix_millis(stored.due_at),
     version: stored.version,
     maybe_hold: stored.maybe_hold.clone(),
+    maybe_removes_at,
     is_epoch_current: stored.is_epoch_current,
   }
+}
+
+/// Holds nothing can solve any more: the purge removes them after the retention.
+fn is_dead(reason: &ScheduledHoldReason) -> bool {
+  matches!(
+    reason,
+    ScheduledHoldReason::SenderInactive
+      | ScheduledHoldReason::NotAMember
+      | ScheduledHoldReason::ConversationGone
+  )
 }
 
 #[cfg(test)]

@@ -12320,6 +12320,102 @@
           }
         }
       }
+    },
+    "scheduled_status_removed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server removed it after holding it this long, so it won't go out. The text is only on your devices now: copy it if you still need it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server hat sie nach dieser langen Zeit entfernt, deshalb geht sie nicht raus. Der Text ist jetzt nur noch auf deinen Geräten: Kopiere ihn, falls du ihn noch brauchst."
+          }
+        }
+      }
+    },
+    "scheduled_removal_date %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server removes it on %@. Copy the text before then if you need it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server entfernt sie am %@. Kopiere den Text vorher, falls du ihn brauchst."
+          }
+        }
+      }
+    },
+    "scheduled_dismiss": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove from list"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aus der Liste entfernen"
+          }
+        }
+      }
+    },
+    "scheduled_dismiss_question": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove it from this device? Its text is gone from here then."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Von diesem Gerät entfernen? Der Text ist dann hier weg."
+          }
+        }
+      }
+    },
+    "scheduled_dismiss_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove it"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entfernen"
+          }
+        }
+      }
+    },
+    "error_too_large": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That's too long for the server. Shorten it and try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist zu lang für den Server. Kürze es und versuche es noch einmal."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

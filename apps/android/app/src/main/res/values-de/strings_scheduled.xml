@@ -38,4 +38,10 @@
   <string name="scheduled_keep">Behalten</string>
   <string name="scheduled_attention">Eine geplante Nachricht braucht dich. Tippe, um sie zu sehen.</string>
   <string name="home_entry_scheduled">Geplant</string>
+  <string name="scheduled_status_removed">Der Server hat sie nach dieser langen Zeit entfernt, deshalb geht sie nicht raus. Der Text ist jetzt nur noch auf deinen Geräten: Kopiere ihn, falls du ihn noch brauchst.</string>
+  <string name="scheduled_removal_date">Der Server entfernt sie am %1$s. Kopiere den Text vorher, falls du ihn brauchst.</string>
+  <string name="scheduled_dismiss">Aus der Liste entfernen</string>
+  <string name="scheduled_dismiss_question">Von diesem Gerät entfernen? Der Text ist dann hier weg.</string>
+  <string name="scheduled_dismiss_confirm">Entfernen</string>
+  <string name="error_too_large">Das ist zu lang für den Server. Kürze es und versuche es noch einmal.</string>
 </resources>

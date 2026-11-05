@@ -239,7 +239,8 @@ impl Upkeep {
         // They stay as they are, and the list says what that means. A group that can't be caught up
         // here isn't asked about every few seconds.
         tracing::debug!(%error, "scheduled messages not sealed again yet");
-        self.next_scheduled_check_ms = now.saturating_add(seal_backoff_ms(interval_ms, self.scheduled_seal_failures));
+        self.next_scheduled_check_ms =
+          now.saturating_add(seal_backoff_ms(interval_ms, self.scheduled_seal_failures));
         self.scheduled_seal_failures = self.scheduled_seal_failures.saturating_add(1);
         is_changed
       },

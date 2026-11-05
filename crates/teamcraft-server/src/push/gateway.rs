@@ -36,7 +36,8 @@ const REGISTER_RETRY: Duration = Duration::from_secs(5 * 60);
 const MAX_BOUND_TOKEN_BYTES: usize = 4096;
 /// How long a gateway's list of kinds counts: a gateway update reaches the server within this.
 const KINDS_MAX_AGE: Duration = Duration::from_secs(60 * 60);
-/// How long after a failed read of the list its kinds count as none.
+/// How long after a failed read of the list it is read again. Meanwhile the last list read counts, and
+/// with none read yet a newer kind goes to the retry queue.
 const KINDS_RETRY: Duration = Duration::from_secs(5 * 60);
 /// Most of an error response that is read.
 const MAX_ERROR_BODY_BYTES: usize = 4096;
@@ -65,8 +66,15 @@ pub struct GatewayClient {
   registration: tokio::sync::Mutex<Option<Instant>>,
   /// The gateway's breaker, once [`Self::watch_health`] set it.
   guard: OnceLock<Arc<DependencyGuard>>,
-  /// The kinds the gateway's `/v1/info` listed, and until when that answer counts.
-  kinds: tokio::sync::Mutex<Option<(Instant, Vec<PushKind>)>>,
+  /// The kinds the gateway's `/v1/info` listed last, and when it is read again.
+  kinds: tokio::sync::Mutex<GatewayKinds>,
+}
+
+#[derive(Default)]
+struct GatewayKinds {
+  /// What the last successful read listed; a failed read keeps it.
+  maybe_listed: Option<Vec<PushKind>>,
+  maybe_read_again_at: Option<Instant>,
 }
 
 /// The part of the gateway's `/v1/info` this server reads.
@@ -99,7 +107,7 @@ impl GatewayClient {
       paused_until: Mutex::new(None),
       registration: tokio::sync::Mutex::new(None),
       guard: OnceLock::new(),
-      kinds: tokio::sync::Mutex::new(None),
+      kinds: tokio::sync::Mutex::new(GatewayKinds::default()),
     }))
   }
 
@@ -129,27 +137,36 @@ impl GatewayClient {
   /// Whether the gateway delivers `kind`, as `/v1/info` says (its api.md: servers send only the listed
   /// ones). The kinds of its first version are always taken as offered; a newer kind is only sent to
   /// a gateway that listed it, so an older gateway means no such push, not a refused request each time.
-  /// Read at most once per [`KINDS_MAX_AGE`], and after a failure not before [`KINDS_RETRY`].
-  async fn offers_kind(&self, kind: &PushKind) -> bool {
+  /// Read at most once per [`KINDS_MAX_AGE`], and after a failure not before [`KINDS_RETRY`]. A failed
+  /// read keeps the list read before; with none read yet the push is unavailable for now, so the
+  /// retry queue sends it once the list is known rather than dropping it.
+  async fn offers_kind(&self, kind: &PushKind) -> Result<bool, PushError> {
     if *kind != PushKind::ScheduledSeal {
-      return true;
+      return Ok(true);
     }
     let mut known = self.kinds.lock().await;
-    if let Some((until, kinds)) = known.as_ref()
-      && Instant::now() < *until
-    {
-      return kinds.contains(kind);
+    let now = Instant::now();
+    if known.maybe_read_again_at.is_none_or(|at| now >= at) {
+      match self.read_kinds().await {
+        Ok(kinds) => {
+          known.maybe_listed = Some(kinds);
+          known.maybe_read_again_at = Some(now + KINDS_MAX_AGE);
+        },
+        Err(error) => {
+          warn!(%error, "the push gateway's kinds could not be read");
+          known.maybe_read_again_at = Some(now + KINDS_RETRY);
+        },
+      }
     }
-    let (wait, kinds) = match self.read_kinds().await {
-      Ok(kinds) => (KINDS_MAX_AGE, kinds),
-      Err(error) => {
-        warn!(%error, "the push gateway's kinds could not be read");
-        (KINDS_RETRY, Vec::new())
-      },
-    };
-    let offered = kinds.contains(kind);
-    *known = Some((Instant::now() + wait, kinds));
-    offered
+    match &known.maybe_listed {
+      Some(kinds) => Ok(kinds.contains(kind)),
+      None => Err(PushError::unavailable_for(
+        "the push gateway's kinds are not known yet",
+        known
+          .maybe_read_again_at
+          .map(|at| at.saturating_duration_since(Instant::now())),
+      )),
+    }
   }
 
   async fn read_kinds(&self) -> Result<Vec<PushKind>, reqwest::Error> {
@@ -310,7 +327,7 @@ impl PushSender for GatewaySender {
     message: &'a PushMessage,
   ) -> BoxFuture<'a, Result<(), PushError>> {
     Box::pin(async move {
-      if !self.client.offers_kind(&message.kind).await {
+      if !self.client.offers_kind(&message.kind).await? {
         // Not an error to retry: this gateway can't deliver it, and the note says what that means.
         return Err(PushError::NotConfigured);
       }

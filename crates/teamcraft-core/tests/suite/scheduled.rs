@@ -119,6 +119,49 @@ async fn it_keeps_what_the_composer_set() {
   assert!(shown.is_silent);
 }
 
+mod removed_by_the_server {
+  use super::*;
+
+  /// The server's purge deletes the only copy outside the user's devices: the device keeps the text,
+  /// says what happened, and forgets it once dismissed, without asking the server.
+  #[tokio::test]
+  async fn the_text_stays_until_dismissed() {
+    let mut world = World::new().await;
+    world.schedule("Last copy", MINUTE_MS).await;
+    let removes_at = world.server.server_now_ms() + 10 * MINUTE_MS;
+    world.server.hold_scheduled_as_dead(removes_at);
+    world.phone.client.refresh_scheduled().await.unwrap();
+    let shown = &world.backend().scheduled_overview().messages[0];
+    assert_eq!(shown.status, ScheduledStatus::NotAMember);
+    assert_eq!(shown.maybe_removes_at, Some(removes_at));
+
+    world.move_time(10 * MINUTE_MS);
+    world.server.purge_scheduled();
+    world.phone.client.refresh_scheduled().await.unwrap();
+    let shown = &world.backend().scheduled_overview().messages[0];
+    assert_eq!(shown.status, ScheduledStatus::RemovedByServer);
+    assert_eq!(shown.body, "Last copy");
+
+    let calls = world.calls();
+    let id = world.first_id();
+    world.run(CoreCommand::CancelScheduled { id }).await;
+    assert!(world.backend().scheduled_overview().messages.is_empty());
+    assert_eq!(world.calls(), calls, "nothing to ask the server");
+  }
+
+  #[tokio::test]
+  async fn one_cancelled_elsewhere_just_goes() {
+    let mut world = World::new().await;
+    world.schedule("Cancelled on the laptop", MINUTE_MS).await;
+    let removes_at = world.server.server_now_ms() + 10 * MINUTE_MS;
+    world.server.hold_scheduled_as_dead(removes_at);
+    world.phone.client.refresh_scheduled().await.unwrap();
+    world.server.purge_scheduled();
+    world.phone.client.refresh_scheduled().await.unwrap();
+    assert!(world.backend().scheduled_overview().messages.is_empty());
+  }
+}
+
 mod the_group_moved {
   use super::*;
 
@@ -443,7 +486,12 @@ mod the_group_moved {
         .server
         .set_channel_role_unsigned(world.channel, world.bob.client.user_id(), ChannelRole::Admin);
       world.bob.client.full_sync().await.unwrap();
-      world.bob.client.remove_member(world.channel, phone).await.unwrap();
+      world
+        .bob
+        .client
+        .remove_member(world.channel, phone)
+        .await
+        .unwrap();
       let removed = world.phone.client.sync_mls(world.channel).await;
       assert!(
         !world.phone.client.has_group(world.channel).unwrap(),

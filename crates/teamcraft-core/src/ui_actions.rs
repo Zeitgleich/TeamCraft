@@ -11,7 +11,7 @@ use teamcraft_client_api::model::{
   ThreadId, UserId, is_pending,
 };
 use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
-use teamcraft_client_api::scheduled::{ScheduledMessage, ScheduledOverview, status_of};
+use teamcraft_client_api::scheduled::{ScheduledMessage, ScheduledOverview, ScheduledStatus, status_of};
 use teamcraft_proto::{Base64Bytes, ClientMessageId, SourceChange, SourceId};
 
 use crate::client::previews::queue_preview;
@@ -134,16 +134,21 @@ impl<S: LocalStore> CoreChatBackend<S> {
           maybe_thread: response.maybe_thread_id,
           body,
           due_at: response.due_at.0,
-          status: status_of(
-            response.maybe_hold.as_ref(),
-            response.is_epoch_current,
-            entry.maybe_content.is_some(),
-          ),
+          status: if entry.is_removed_by_server {
+            ScheduledStatus::RemovedByServer
+          } else {
+            status_of(
+              response.maybe_hold.as_ref(),
+              response.is_epoch_current,
+              entry.maybe_content.is_some(),
+            )
+          },
           maybe_reply_to: None,
           priority: meta.map_or(MessagePriority::Normal, |meta| message_priority(meta.priority)),
           wants_acknowledgement: meta.is_some_and(|meta| meta.wants_acknowledgement),
           is_silent: meta.is_some_and(|meta| meta.is_silent),
           also_send_to_channel: meta.is_some_and(|meta| meta.is_also_in_channel),
+          maybe_removes_at: response.maybe_removes_at.map(|at| at.0),
         }
       })
       .collect();

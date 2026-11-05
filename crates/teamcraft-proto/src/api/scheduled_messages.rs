@@ -89,6 +89,10 @@ pub struct ScheduledMessageResponse {
   pub version: u64,
   #[serde(rename = "hold", default, skip_serializing_if = "Option::is_none")]
   pub maybe_hold: Option<ScheduledHoldReason>,
+  /// For a hold nothing can solve any more (the sender left, their account is off, the conversation
+  /// is gone): when the server removes it, after `limits.scheduled_hold_retention_days`.
+  #[serde(rename = "removes_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_removes_at: Option<UnixMillis>,
   /// False once the group left `mls_epoch`: a device should seal it again, ahead of its time.
   pub is_epoch_current: bool,
 }
