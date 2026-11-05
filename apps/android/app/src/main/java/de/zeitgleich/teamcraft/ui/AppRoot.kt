@@ -61,6 +61,7 @@ import de.zeitgleich.teamcraft.ui.screens.OrgRecoveryScreen
 import de.zeitgleich.teamcraft.ui.screens.SearchScreen
 import de.zeitgleich.teamcraft.ui.screens.SettingsScreen
 import de.zeitgleich.teamcraft.ui.screens.SharePickerScreen
+import de.zeitgleich.teamcraft.ui.screens.ShareWaitingNotice
 import de.zeitgleich.teamcraft.ui.screens.StoreRecoveryScreen
 import de.zeitgleich.teamcraft.ui.screens.ThreadScreen
 
@@ -69,8 +70,7 @@ fun AppRoot(
   viewModel: MainViewModel,
   maybeConversationToOpen: String?,
   onConversationOpened: () -> Unit,
-  maybeShare: SharedContent?,
-  onShareHandled: () -> Unit,
+  maybeShare: ShareState?,
   maybeAppLink: String?,
   onAppLinkHandled: () -> Unit,
   onLogin: (Intent) -> Unit,
@@ -198,12 +198,15 @@ fun AppRoot(
           maybeConversationToOpen,
           onConversationOpened,
           maybeShare,
-          onShareHandled,
           maybeOpenedLink?.takeIf { it.step == OpenedAppLinkStep.Navigate },
           onAppLinkHandled,
         )
         LinkRequestPrompts(viewModel, Modifier.align(Alignment.TopCenter))
       }
+    }
+    // Before the signed-in screens a share waits: say so, and that it isn't lost.
+    if (maybeShare != null && state != AppState.Starting && state !is AppState.Ready) {
+      ShareWaitingNotice(onDiscard = viewModel::discardShare, Modifier.align(Alignment.TopCenter))
     }
   }
 }
@@ -214,8 +217,7 @@ private fun ReadyNavigation(
   account: AppState.Ready,
   maybeConversationToOpen: String?,
   onConversationOpened: () -> Unit,
-  maybeShare: SharedContent?,
-  onShareHandled: () -> Unit,
+  maybeShare: ShareState?,
   maybeOpenedLink: OpenedAppLink?,
   onAppLinkHandled: () -> Unit,
 ) {
@@ -271,7 +273,8 @@ private fun ReadyNavigation(
       onConversationOpened()
     }
   }
-  LaunchedEffect(maybeShare) {
+  val maybeShareId = (maybeShare as? ShareState.Ready)?.share?.id
+  LaunchedEffect(maybeShare != null, maybeShareId) {
     if (maybeShare != null) navigation.navigate("share") { launchSingleTop = true }
   }
   NavHost(navController = navigation, startDestination = "chats") {
@@ -413,14 +416,14 @@ private fun ReadyNavigation(
       } else {
         SharePickerScreen(
           viewModel = viewModel,
-          content = content,
-          onPick = { conversation ->
-            PendingShare.current.value = PendingShare.Target(conversation, content)
-            onShareHandled()
+          state = content,
+          onPick = { share, conversation ->
+            PendingShare.current.value = PendingShare.Target(conversation, share)
+            viewModel.handOverShare(share)
             navigation.navigate("conversation/$conversation") { popUpTo("chats") }
           },
           onBack = {
-            onShareHandled()
+            viewModel.discardShare()
             navigation.popBackStack()
           },
         )

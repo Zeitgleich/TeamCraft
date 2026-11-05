@@ -12,16 +12,28 @@ const val MAX_SHARED_FILES = 10
 const val MAX_SHARED_TEXT_CHARS = 64 * 1024
 
 /**
- * Text and files another app shared into TeamCraft, waiting for the user to pick a conversation.
- * [maybeTarget] is the conversation the share sheet's direct share shortcut picked ([ShareShortcuts]).
+ * What an intent brought, until it is copied into the [ShareInbox]. [maybeTarget] is the conversation
+ * the share sheet's direct share shortcut picked ([ShareShortcuts]); [leftOut] counts the URIs not
+ * taken (over [MAX_SHARED_FILES], or into this app's own files).
  */
-data class SharedContent(val text: String, val uris: List<Uri>, val maybeTarget: String? = null) {
+data class SharedContent(
+  val text: String,
+  val uris: List<Uri>,
+  val maybeTarget: String? = null,
+  val leftOut: Int = 0,
+) {
   val isEmpty: Boolean get() = text.isBlank() && uris.isEmpty()
+}
+
+/** Where a share stands: its files still being copied, or waiting for a conversation. */
+sealed interface ShareState {
+  data object Preparing : ShareState
+  data class Ready(val share: StagedShare) : ShareState
 }
 
 /** The shared content the composer of `conversation` picks up once (set by the share picker). */
 object PendingShare {
-  data class Target(val conversation: String, val content: SharedContent)
+  data class Target(val conversation: String, val content: StagedShare)
 
   val current = MutableStateFlow<Target?>(null)
 }
@@ -39,12 +51,26 @@ fun sharedContent(intent: Intent, packageName: String): SharedContent? {
   }
   // A hostile sender can put anything into the extras; a wrong type must not crash the app.
   val text = runCatching { intent.getStringExtra(Intent.EXTRA_TEXT) }.getOrNull().orEmpty()
+  val maybeSubject = runCatching { intent.getStringExtra(Intent.EXTRA_SUBJECT) }.getOrNull()
+  val taken = uris.filter { isForeignContent(it.scheme, it.authority, packageName) }.take(MAX_SHARED_FILES)
   val content = SharedContent(
-    text = text.take(MAX_SHARED_TEXT_CHARS).trim(),
-    uris = uris.filter { isForeignContent(it.scheme, it.authority, packageName) }.take(MAX_SHARED_FILES),
+    text = sharedText(maybeSubject, text),
+    uris = taken,
     maybeTarget = ShareShortcuts.targetOf(intent),
+    leftOut = uris.size - taken.size,
   )
-  return content.takeUnless { it.isEmpty }
+  return content.takeUnless { it.isEmpty && it.leftOut == 0 }
+}
+
+/**
+ * The text of a share. Browsers send a page's title as the subject and only its address as the text;
+ * the title then goes on top. A subject next to other text (a mail's) stays out.
+ */
+fun sharedText(maybeSubject: String?, text: String): String {
+  val body = text.take(MAX_SHARED_TEXT_CHARS).trim()
+  val subject = maybeSubject.orEmpty().trim().take(MAX_SHARED_TEXT_CHARS)
+  val isOnlyAddress = !body.contains(Regex("\\s")) && (body.startsWith("https://") || body.startsWith("http://"))
+  return if (isOnlyAddress && subject.isNotEmpty() && subject != body) "$subject\n$body" else body
 }
 
 /**

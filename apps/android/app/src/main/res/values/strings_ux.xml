@@ -79,6 +79,20 @@
   </plurals>
   <!-- The notes to self, as the web and desktop name them (notes-title). -->
   <string name="notes_title">Notes</string>
+  <plurals name="share_left_out">
+    <item quantity="one">%d file could not be taken: it is too large, unreadable, or there were too many.</item>
+    <item quantity="other">%d files could not be taken: they are too large, unreadable, or there were too many.</item>
+  </plurals>
+  <plurals name="share_import_failed">
+    <item quantity="one">%d shared file could not be attached. Share it again.</item>
+    <item quantity="other">%d shared files could not be attached. Share them again.</item>
+  </plurals>
+  <string name="share_nothing_title">Nothing could be taken</string>
+  <string name="share_nothing">The other app sent nothing TeamCraft can read. Try sharing it again.</string>
+  <string name="share_waiting">What you shared is kept on this device. Sign in or unlock to choose a conversation.</string>
+  <string name="share_failed">What you shared could not be kept: the device is full or too much waits already. Choose a conversation for what waits, or free some space, and share it again.</string>
+  <string name="share_other_account">Something shared before this sign-in was removed: it was kept for the person signed in before you.</string>
+  <string name="share_discard">Discard</string>
   <string name="share_recent">Recent</string>
   <string name="share_no_match">No conversation matches.</string>
   <string name="share_empty_title">Nowhere to share to yet</string>

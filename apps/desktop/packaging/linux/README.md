@@ -268,3 +268,11 @@ doesn't), and it only hides the window to the tray (close to tray, start minimiz
 StatusNotifier host shows the icon: GNOME without the AppIndicator extension has none, and the
 window then stays reachable in the taskbar. The app follows the `org.kde.StatusNotifierWatcher` on
 the session bus, so a panel that starts later is picked up.
+
+## Sharing files from the file manager
+
+`de.zeitgleich.teamcraft.share.desktop` (deb, rpm, Flatpak; hidden from the launcher) offers TeamCraft
+under "Open with" for files, and runs `teamcraft-desktop --share -- %F`: the files reach the running app,
+which asks for a conversation. File managers with their own "Send to" menus (Dolphin service menus,
+Thunar custom actions, Nautilus scripts) can run the same command. The AppImage installs no entry;
+the command works with its path.

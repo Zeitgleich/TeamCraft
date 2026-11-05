@@ -150,3 +150,7 @@ zeroize = "1.9.1"
 # A fake notification service on a peer-to-peer connection, so tests see what a ringing call sends
 # (freedesktop.rs) without a session bus.
 zbus = { version = "5.13", default-features = false, features = ["tokio", "p2p"] }
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW and O_NONBLOCK for opening shared files (no calls into it, so no `unsafe`).
+libc = "0.2"

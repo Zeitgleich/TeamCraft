@@ -8,6 +8,8 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::dropped_files::open_regular;
+
 /// Largest chunk the webview may send at once.
 pub const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 /// Staged copies are named by the webview's random ID: 32 hex digits.
@@ -53,6 +55,25 @@ pub fn append_chunk(directory: &Path, id: &str, offset: u64, chunk: &[u8]) -> Re
   Ok(path)
 }
 
+/// Copies the file at `source` to the staged copy `id` in `directory` as a stream, and returns the
+/// copy's path. The core deletes staged copies when their upload is done, so it gets this copy,
+/// never the user's own file.
+pub fn copy_file(directory: &Path, id: &str, source: &Path) -> Result<PathBuf, StagingError> {
+  if id.len() != STAGE_ID_LEN || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    return Err(StagingError::InvalidId);
+  }
+  let mut input = open_regular(source)?;
+  create_private_dir(directory)?;
+  let path = directory.join(id);
+  let mut output = create_private_file(&path)?;
+  if let Err(error) = std::io::copy(&mut input, &mut output) {
+    // A partial copy would only wait for the next sweep.
+    drop(std::fs::remove_file(&path));
+    return Err(error.into());
+  }
+  Ok(path)
+}
+
 /// The staged copies are plaintext: only this user may list the directory (unix: 0700).
 fn create_private_dir(directory: &Path) -> std::io::Result<()> {
   let mut builder = std::fs::DirBuilder::new();
@@ -74,6 +95,42 @@ fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_copy_leaves_the_users_file_alone_and_a_bad_id_is_refused() {
+    let directory = std::env::temp_dir().join(format!("teamcraft-copy-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("report.pdf");
+    std::fs::write(&source, b"contents").unwrap();
+    let staging = directory.join("staging");
+
+    let id = "0".repeat(STAGE_ID_LEN);
+    let copy = copy_file(&staging, &id, &source).unwrap();
+    assert_eq!(std::fs::read(&copy).unwrap(), b"contents");
+    assert_eq!(copy.parent(), Some(staging.as_path()));
+    assert!(source.exists());
+
+    assert!(matches!(
+      copy_file(&staging, "../../escape", &source),
+      Err(StagingError::InvalidId)
+    ));
+    let gone = directory.join("gone");
+    assert!(copy_file(&staging, &"1".repeat(STAGE_ID_LEN), &gone).is_err());
+    assert!(!staging.join("1".repeat(STAGE_ID_LEN)).exists());
+    assert!(copy_file(&staging, &id, &staging).is_err(), "a folder");
+    #[cfg(unix)]
+    {
+      let link = directory.join("link");
+      std::os::unix::fs::symlink(&source, &link).unwrap();
+      assert!(copy_file(&staging, &id, &link).is_err(), "a link swapped in");
+      // A pipe nobody writes to would block a plain open for good.
+      let pipe = directory.join("pipe");
+      let made = std::process::Command::new("mkfifo").arg(&pipe).status().unwrap();
+      assert!(made.success());
+      assert!(copy_file(&staging, &id, &pipe).is_err(), "a pipe swapped in");
+    }
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
 
   const ID: &str = "0123456789abcdef0123456789abcdef";
 

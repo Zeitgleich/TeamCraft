@@ -73,6 +73,20 @@
   </plurals>
   <!-- The notes to self, as the web and desktop name them (notes-title). -->
   <string name="notes_title">Mein Speicher</string>
+  <plurals name="share_left_out">
+    <item quantity="one">%d Datei konnte nicht übernommen werden: Sie ist zu groß oder nicht lesbar, oder es waren zu viele.</item>
+    <item quantity="other">%d Dateien konnten nicht übernommen werden: Sie sind zu groß oder nicht lesbar, oder es waren zu viele.</item>
+  </plurals>
+  <plurals name="share_import_failed">
+    <item quantity="one">%d geteilte Datei konnte nicht angehängt werden. Teile sie noch einmal.</item>
+    <item quantity="other">%d geteilte Dateien konnten nicht angehängt werden. Teile sie noch einmal.</item>
+  </plurals>
+  <string name="share_nothing_title">Nichts übernommen</string>
+  <string name="share_nothing">Die andere App hat nichts gesendet, was TeamCraft lesen kann. Teile es noch einmal.</string>
+  <string name="share_waiting">Was du geteilt hast, bleibt auf diesem Gerät. Melde dich an oder entsperre die App, um eine Unterhaltung zu wählen.</string>
+  <string name="share_failed">Was du geteilt hast, konnte nicht aufbewahrt werden: Das Gerät ist voll oder es wartet schon zu viel. Wähle eine Unterhaltung für das Wartende oder schaffe Platz, und teile es noch einmal.</string>
+  <string name="share_other_account">Etwas, das vor dieser Anmeldung geteilt wurde, ist entfernt: Es war für die Person aufbewahrt, die zuvor angemeldet war.</string>
+  <string name="share_discard">Verwerfen</string>
   <string name="share_recent">Zuletzt</string>
   <string name="share_no_match">Keine Unterhaltung passt.</string>
   <string name="share_empty_title">Noch nichts zum Teilen</string>

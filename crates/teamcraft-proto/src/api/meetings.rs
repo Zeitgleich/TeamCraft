@@ -224,6 +224,11 @@ pub struct MeetingResponse {
   /// series goes on.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_occurrence_cancelled: bool,
+  /// The caller hosts the meeting's lobby, as `ListLobbyResponse::is_host` would say: organizer or
+  /// chat admin, in the meeting chat, meeting scheduled. Set in the meeting list only, so devices
+  /// ask for the lobby of the meetings a chat admin hosts too (#1305); absent from older servers.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub can_host_lobby: bool,
   pub attendees: Vec<MeetingAttendeeResponse>,
   /// Invitees whose invitation e-mail could not be sent (only set in replies to create and update).
   #[serde(default, skip_serializing_if = "Vec::is_empty")]

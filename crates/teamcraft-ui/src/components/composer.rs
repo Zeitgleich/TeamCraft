@@ -30,7 +30,7 @@ use crate::emoji_support;
 use crate::groups::use_groups;
 use crate::i18n::use_i18n;
 use crate::keys::t_with_shortcuts;
-use crate::large_files;
+use crate::large_files::{self, LargeFile};
 use crate::markdown;
 use crate::media_formats::{displayable_type, essence, is_svg, media_type_for, needs_app_thumbnail};
 use crate::media_layout::{APP_THUMBNAIL_SIDE, thumbnail_type};
@@ -42,6 +42,8 @@ use crate::paste::{PasteKind, paste_from_shell};
 use crate::raster;
 use crate::reactive::SetIfAlive;
 use crate::settings::SendMode;
+use crate::share_into::ShareInbox;
+use crate::shell_drop::ShellFile;
 use crate::slash::{self, Parsed};
 use crate::state::{Overlay, SidePanel, use_app_state};
 use crate::tab_handover::PERSIST_DRAFTS_EVENT;
@@ -68,7 +70,7 @@ const INLINE_STYLES: [InlineStyle; 5] = [
   InlineStyle::Code,
 ];
 
-/// A file chosen, dropped or pasted that waits for the send.
+/// A file chosen, dropped, pasted or shared that waits for the send.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingFile {
   name: String,
@@ -87,7 +89,7 @@ struct PendingFile {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum FileContent {
   Read(Vec<u8>),
-  Large(web_sys::File),
+  Large(LargeFile),
 }
 
 /// Largest picture read whole only for the chip's thumbnail; bigger ones go without.
@@ -1081,7 +1083,7 @@ pub fn Composer(
             let maybe_preview_url = chip_preview_url(&file, &media_type, maybe_thumbnail.as_deref());
             let content = match (is_large, maybe_bytes) {
               (false, Some(bytes)) => FileContent::Read(bytes),
-              _ => FileContent::Large(file.clone()),
+              _ => FileContent::Large(LargeFile::Picked(file.clone())),
             };
             let read = PendingFile {
               name: file.name(),
@@ -1127,9 +1129,8 @@ pub fn Composer(
   };
   // Drops anywhere on the conversation or thread arrive through its drop zone (`FileDrop`). A
   // composer outside one has its own, for the files the desktop shell reads after a drop.
-  let drop_zone =
-    use_context::<DroppedFiles>().unwrap_or_else(|| DroppedFiles(RwSignal::new_local(Vec::new())));
-  let DroppedFiles(dropped) = drop_zone;
+  let drop_zone = use_context::<DroppedFiles>().unwrap_or_default();
+  let DroppedFiles(dropped, dropped_in_shell) = drop_zone;
   Effect::new(move |_| {
     let files = dropped.get();
     if !files.is_empty() {
@@ -1137,6 +1138,32 @@ pub fn Composer(
       add_files(files);
     }
   });
+  Effect::new(move |_| {
+    let files = dropped_in_shell.get();
+    if !files.is_empty() {
+      dropped_in_shell.set(Vec::new());
+      attachments.update(|list| list.extend(files.into_iter().map(pending_file_in_shell)));
+    }
+  });
+  // What another app shared and the user sent here (`share_into`): it waits in the composer, like
+  // anything attached; nothing goes out without the send.
+  if maybe_thread.is_none()
+    && let Some(inbox) = use_context::<ShareInbox>()
+  {
+    Effect::new(move |_| {
+      let Some(element) = editor.get() else { return };
+      let Some(share) = inbox.take_picked_for(conversation) else {
+        return;
+      };
+      if !share.text.is_empty() {
+        drop(element.focus());
+        composer_editor::insert_text(&share.text);
+        after_edit();
+      }
+      add_files(share.files);
+      attachments.update(|list| list.extend(share.in_shell.into_iter().map(pending_file_in_shell)));
+    });
+  }
   // Files are attached; dropped text goes in as plain text, never as the HTML that came with it.
   let on_drop = move |ev: web_sys::DragEvent| {
     // Marks the drop as handled, so the conversation around doesn't attach the files a second time.
@@ -1799,6 +1826,19 @@ fn add_read_file(attachments: RwSignal<Vec<PendingFile>>, file: PendingFile) -> 
   let mut maybe_file = Some(file);
   attachments.try_update(|list| list.extend(maybe_file.take()));
   maybe_file
+}
+
+/// A large file the desktop shell keeps: no thumbnail, since that would mean reading it here; the
+/// core makes the one the message carries.
+fn pending_file_in_shell(file: ShellFile) -> PendingFile {
+  PendingFile {
+    media_type: media_type_for(&file.name, ""),
+    name: file.name.clone(),
+    content: FileContent::Large(LargeFile::InShell(file)),
+    maybe_preview_url: None,
+    maybe_thumbnail: None,
+    maybe_duration_ms: None,
+  }
 }
 
 #[cfg(test)]

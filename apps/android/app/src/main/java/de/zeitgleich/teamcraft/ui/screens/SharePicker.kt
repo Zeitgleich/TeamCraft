@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -19,7 +20,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -39,7 +42,8 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.SectionTitle
 import de.zeitgleich.teamcraft.ui.ShareShortcuts
-import de.zeitgleich.teamcraft.ui.SharedContent
+import de.zeitgleich.teamcraft.ui.ShareState
+import de.zeitgleich.teamcraft.ui.StagedShare
 import de.zeitgleich.teamcraft.ui.listName
 import de.zeitgleich.teamcraft.ui.shareSections
 import de.zeitgleich.teamcraft.ui.theme.Spacing
@@ -60,31 +64,37 @@ private sealed interface ShareTargets {
  * conversation without showing the list.
  */
 @Composable
-fun SharePickerScreen(viewModel: MainViewModel, content: SharedContent, onPick: (String) -> Unit, onBack: () -> Unit) {
+fun SharePickerScreen(
+  viewModel: MainViewModel,
+  state: ShareState,
+  onPick: (StagedShare, String) -> Unit,
+  onBack: () -> Unit,
+) {
+  val maybeContent = (state as? ShareState.Ready)?.share
   val context = LocalContext.current
   val notesTitle = stringResource(R.string.notes_title)
-  var state by remember { mutableStateOf<ShareTargets>(ShareTargets.Loading) }
+  var targets by remember { mutableStateOf<ShareTargets>(ShareTargets.Loading) }
   var attempt by remember { mutableIntStateOf(0) }
   var filter by rememberSaveable { mutableStateOf("") }
   // Once per visit: the order rarely changes while the picker is open.
   var hasPublished by remember { mutableStateOf(false) }
   val pick: (String) -> Unit = { conversation ->
     ShareShortcuts.reportUsed(context, conversation)
-    onPick(conversation)
+    maybeContent?.let { onPick(it, conversation) }
   }
-  LaunchedEffect(attempt) {
+  LaunchedEffect(attempt, maybeContent?.id) {
     // Read again on changes: the notes appear once the first catch-up made them.
     viewModel.changeCount.collect {
       val maybeTargets = viewModel.shareTargets()
       if (maybeTargets == null) {
-        if (state !is ShareTargets.Loaded) state = ShareTargets.Failed
+        if (targets !is ShareTargets.Loaded) targets = ShareTargets.Failed
         return@collect
       }
-      content.maybeTarget?.takeIf { target -> maybeTargets.any { it.id == target } }?.let { target ->
+      maybeContent?.maybeTarget?.takeIf { target -> maybeTargets.any { it.id == target } }?.let { target ->
         pick(target)
         return@collect
       }
-      state = ShareTargets.Loaded(maybeTargets)
+      targets = ShareTargets.Loaded(maybeTargets)
       if (!hasPublished) {
         hasPublished = true
         ShareShortcuts.publish(context, shortcutTargets(maybeTargets, notesTitle))
@@ -96,20 +106,42 @@ fun SharePickerScreen(viewModel: MainViewModel, content: SharedContent, onPick: 
     topBar = {
       ChromeTopBar(
         title = stringResource(R.string.share_title),
-        maybeSubtitle = shareSummary(content),
+        maybeSubtitle = maybeContent?.let { shareSummary(it) },
         maybeOnBack = onBack,
       )
     },
   ) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
-      when (val current = state) {
+      if (maybeContent != null && maybeContent.leftOut > 0) {
+        Text(
+          pluralStringResource(R.plurals.share_left_out, maybeContent.leftOut, maybeContent.leftOut),
+          modifier = Modifier.padding(horizontal = Spacing.l, vertical = Spacing.s),
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.error,
+        )
+      }
+      if (maybeContent == null) {
+        // The files are still being copied; back cancels.
+        LoadingScreen()
+        return@Column
+      }
+      if (maybeContent.isEmpty) {
+        EmptyState(
+          icon = Icons.Filled.Refresh,
+          title = stringResource(R.string.share_nothing_title),
+          text = stringResource(R.string.share_nothing),
+          maybeAction = stringResource(R.string.back) to onBack,
+        )
+        return@Column
+      }
+      when (val current = targets) {
         ShareTargets.Loading -> LoadingScreen()
         ShareTargets.Failed -> EmptyState(
           icon = Icons.Filled.Refresh,
           title = stringResource(R.string.share_load_failed_title),
           text = stringResource(R.string.share_load_failed),
           maybeAction = stringResource(R.string.retry) to {
-            state = ShareTargets.Loading
+            targets = ShareTargets.Loading
             attempt += 1
           },
         )
@@ -207,7 +239,33 @@ private fun shortcutTargets(targets: List<ConversationItem>, notesTitle: String)
     .map { ShareShortcuts.Target(it.id, it.listName(notesTitle)) }
 
 @Composable
-private fun shareSummary(content: SharedContent): String = when {
-  content.uris.isNotEmpty() -> pluralStringResource(R.plurals.share_files, content.uris.size, content.uris.size)
+private fun shareSummary(content: StagedShare): String = when {
+  content.files.isNotEmpty() -> pluralStringResource(R.plurals.share_files, content.files.size, content.files.size)
   else -> content.text
+}
+
+/**
+ * While the sign-in or the app lock comes first: what was shared is kept and comes back after it,
+ * and the user can let it go.
+ */
+@Composable
+fun ShareWaitingNotice(onDiscard: () -> Unit, modifier: Modifier = Modifier) {
+  Surface(
+    modifier = modifier.statusBarsPadding().padding(Spacing.m),
+    shape = MaterialTheme.shapes.medium,
+    tonalElevation = 3.dp,
+    shadowElevation = 3.dp,
+  ) {
+    Row(
+      modifier = Modifier.padding(start = Spacing.l, end = Spacing.s, top = Spacing.xs, bottom = Spacing.xs),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(
+        stringResource(R.string.share_waiting),
+        modifier = Modifier.weight(1f, fill = false),
+        style = MaterialTheme.typography.bodyMedium,
+      )
+      TextButton(onClick = onDiscard) { Text(stringResource(R.string.share_discard)) }
+    }
+  }
 }

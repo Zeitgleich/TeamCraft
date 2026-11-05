@@ -59,6 +59,7 @@ use crate::prefs::{CallPrefs, Zoom};
 use crate::reactive::{OwnerLiveness, use_interval};
 use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
+use crate::share_into::{ShareInbox, ShareNotice};
 use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastAction, ToastTone};
 use crate::toast_motion::{Swipe, use_flip_stack};
 use crate::toast_timer::Hold;
@@ -84,11 +85,14 @@ pub fn App() -> impl IntoView {
   }
   let links = AppLinks::provide();
   links.listen();
+  let inbox = ShareInbox::provide();
+  inbox.listen();
   // Above every screen: sign-in has no top bar, but the window still needs its controls.
   view! {
     <WindowControls />
     {screen(settings)}
     <AppLinkPrompt links=links />
+    <ShareNotice inbox=inbox />
   }
 }
 
@@ -135,6 +139,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let change_source = backend.clone();
   let state = AppState::new(backend, settings, start);
   provide_context(state);
+  if let Some(inbox) = use_context::<ShareInbox>() {
+    inbox.connect_app(state);
+  }
   crate::components::typing_indicator::provide_typing_now(state);
   crate::startup::first_view();
   crate::viewport::watch_layout(state.layout);
@@ -458,6 +465,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::ShareFile(conversation, message, file) => {
           lazy_area(Place::Overlay, move || areas::share_file(conversation, message, file))
         },
+        Overlay::Share => lazy_area(Place::Overlay, || areas::share_into(())),
         Overlay::Forward(from, message, maybe_attachment) => {
           lazy_area(Place::Overlay, move || areas::forward(from, message, maybe_attachment))
         },

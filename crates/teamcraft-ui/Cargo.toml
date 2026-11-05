@@ -32,7 +32,7 @@ web-sys = { version = "0.3", features = [
   "Document", "Element", "Event", "EventTarget", "HtmlElement", "HtmlInputElement", "HtmlTextAreaElement",
   "HtmlCollection", "KeyboardEvent", "MediaQueryList", "CssStyleDeclaration", "Node", "NodeList", "Storage", "Window",
   "DomTokenList", "ScrollToOptions", "ScrollBehavior", "ScrollIntoViewOptions", "ScrollLogicalPosition", "FocusOptions", "File", "FileList", "FilePropertyBag", "Navigator", "ServiceWorkerContainer", "ServiceWorker", "MessageEvent", "ServiceWorkerRegistration", "Location", "History",
-  "Blob", "BlobPropertyBag", "ReadableStream", "Url", "DragEvent", "DataTransfer", "DataTransferItemList", "DataTransferItem", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams", "ResizeObserver", "DomRect",
+  "Blob", "BlobPropertyBag", "Cache", "CacheStorage", "ReadableStream", "Url", "DragEvent", "DataTransfer", "DataTransferItemList", "DataTransferItem", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams", "ResizeObserver", "DomRect",
   "BroadcastChannel", "MouseEvent", "StorageManager", "ServiceWorkerState", "VisibilityState", "NotificationOptions",
   "PointerEvent", "WheelEvent", "HtmlAnchorElement", "HtmlImageElement", "AddEventListenerOptions",
   "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "HtmlMediaElement", "HtmlVideoElement", "Selection", "MediaStream",

@@ -26,6 +26,7 @@ photo and document pickers, Quick Look, the background prefetch task and CallKit
 | `TeamCraft/Resources`  | String Catalogs (en, de), asset catalog (app icon, launch screen colour and logo)                                                |
 | `Shared/`              | Compiled into the app **and** the extension: keychain, App Group, process lock, OIDC session, core factory, notification content |
 | `NotificationService/` | The Notification Service Extension                                                                                               |
+| `ShareExtension/`      | The share sheet's entry: copies what was shared into the App Group, without the core (`Shared/ShareInbox.swift`)                 |
 | `TeamCraftTests/`      | Unit tests (PKCE, OIDC URLs, push payload, lock, notification text, sections, wire models, search filters, Annex B)              |
 | `Generated/`           | `TeamCraftFFI.xcframework` and `Swift/teamcraft_ffi.swift` (not in git)                                                          |
 
@@ -70,7 +71,7 @@ the extension (each links the static library; they are separate processes).
 No server, OIDC issuer or client is built in: see [Server address](#server-address).
 
 Bundle IDs are `de.zeitgleich.teamcraft` (app), `de.zeitgleich.teamcraft.notifications`,
-`de.zeitgleich.teamcraft.Tests`. Change them for your Apple account in `project.yml` together with
+`de.zeitgleich.teamcraft.share` (share extension), `de.zeitgleich.teamcraft.Tests`. Change them for your Apple account in `project.yml` together with
 `APP_GROUP_ID` and `KEYCHAIN_ACCESS_GROUP`.
 
 ## How it works
@@ -258,6 +259,10 @@ Developer account:
 4. `scripts/build-xcframework.sh --device-only`, `xcodegen generate`, then *Product → Archive* in Xcode
    and upload to App Store Connect. `ITSAppUsesNonExemptEncryption` is `true`: the app has encryption
    beyond the OS (export compliance questions apply).
+
+The share extension (`de.zeitgleich.teamcraft.share`) needs its own App ID with the App Group
+capability, the same group as the app; a signed build without it fails to install or says it couldn't
+save what was shared.
 
 There is no signing, fastlane or upload automation yet.
 

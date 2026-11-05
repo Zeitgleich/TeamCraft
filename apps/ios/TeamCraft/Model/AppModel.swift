@@ -143,6 +143,16 @@ final class AppModel {
   var openConversationId: String?
   /// A message to show once its conversation is open (from a message link).
   var focusMessageId: String?
+  /// What another app shared, until the user picked a conversation (AppModel+Share.swift).
+  var waitingShare: StagedShare?
+  /// A share on its way into its conversation's composer.
+  var shareHandover: ShareHandover?
+  /// A composer is taking the handed-over share; a second run of its task leaves it alone.
+  var isTakingShare = false
+  /// Why files of a share couldn't be attached, for the picker that comes back with them.
+  var shareImportError: AttachmentError?
+  /// A share from before the sign-in went: it was kept for the person signed in before.
+  var isShareGoneForAccount = false
   /// A link the system handed over, until it was acted on (AppModel+AppLinks.swift).
   var pendingAppLink: String?
   /// The question a waiting link asks.
@@ -338,6 +348,7 @@ final class AppModel {
         return
       }
       rememberLoginHint(session.loginHint, for: server)
+      claimWaitingShare(for: session.subject)
       container.activeAccount = session.subject
       container.displayName = session.displayName
       await refreshAccountState()
@@ -372,6 +383,7 @@ final class AppModel {
           maybeFailure = .generic
           return
         }
+        claimWaitingShare(for: session.userId)
         container.activeAccount = session.userId
         container.displayName = nil
         await refreshAccountState()
@@ -1385,6 +1397,10 @@ final class AppModel {
     NotificationAuthenticator().removeKey()
     container.wipeDownloads()
     container.pruneUploads(olderThan: 0)
+    // What waits to be shared doesn't outlive the session on this device either.
+    ShareInbox.shared()?.wipe()
+    waitingShare = nil
+    shareHandover = nil
     container.activeAccount = nil
     container.displayName = nil
     UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
@@ -1393,10 +1409,13 @@ final class AppModel {
   }
 
   private func refreshAccountState() async {
-    guard maybeServer != nil, vault.hasSession, container.activeAccount != nil else {
+    guard maybeServer != nil, vault.hasSession, let account = container.activeAccount else {
       phase = .signedOut(nil)
       return
     }
+    // Also for a restored session: only then a later sign-in can tell somebody else from this person.
+    // The same value as at the sign-in, not the core's user ID.
+    claimWaitingShare(for: account)
     do {
       let state = try await core().accountState()
       switch state {
