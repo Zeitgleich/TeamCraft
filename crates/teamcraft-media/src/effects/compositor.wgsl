@@ -2,6 +2,10 @@
 // blurred or replaced background, composited and written back as I420. Compute passes over
 // storage buffers only, so the same shader runs on Vulkan, Metal, D3D12 and in browsers (WebGPU).
 //
+// The input frame is I420, or RGBA (the browser's canvas picture, #1295): the output is I420
+// either way, so the conversion to I420 happens here, on the GPU, in the composite passes. With no
+// background (mode 0) those passes only convert.
+//
 // Colours are BT.601 limited range, like the encoders. The frame width must be a multiple of 8
 // (four packed chroma bytes per invocation).
 
@@ -14,7 +18,7 @@ struct Params {
   small_height: u32,
   image_width: u32,
   image_height: u32,
-  // 1: blur, 2: background image.
+  // 0: no background (the frame as it is), 1: blur, 2: background image.
   mode: u32,
   // Background blur radius in small-buffer pixels.
   radius: u32,
@@ -26,11 +30,12 @@ struct Params {
   smoothing: f32,
   edge_low: f32,
   edge_high: f32,
-  _padding: f32,
+  // 0: the frame is I420, 1: RGBA.
+  input_format: u32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
-// The input frame, I420 bytes packed four to a word.
+// The input frame: I420 bytes packed four to a word, or one RGBA pixel per word.
 @group(0) @binding(1) var<storage, read> frame: array<u32>;
 // The segmenter's person probability, mask_width x mask_height.
 @group(0) @binding(2) var<storage, read> mask_in: array<f32>;
@@ -115,6 +120,9 @@ fn frame_byte(index: u32) -> f32 {
 }
 
 fn frame_rgb(x: u32, y: u32) -> vec3<f32> {
+  if (params.input_format == 1u) {
+    return unpack4x8unorm(frame[y * params.width + x]).rgb * 255.0;
+  }
   let width = params.width;
   let luma_size = width * params.height;
   let chroma_index = (y / 2u) * (width / 2u) + x / 2u;
@@ -238,6 +246,9 @@ fn image_at(x: u32, y: u32) -> vec3<f32> {
 }
 
 fn composited(x: u32, y: u32) -> vec3<f32> {
+  if (params.mode == 0u) {
+    return frame_rgb(x, y);
+  }
   var background: vec3<f32>;
   if (params.mode == 2u) {
     background = image_at(x, y);

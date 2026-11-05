@@ -49,10 +49,10 @@ pub const VALUES: &str = "values";
 pub const MILLISECONDS: &str = "ms";
 pub const DETAIL: &str = "detail";
 
-/// Where the page serves the segmentation model: the `content` of its `<meta>`. Only a path of the
-/// page's own origin (its Content-Security-Policy allows no other).
+/// Where the page serves the segmentation model (NNEF, `.nnef`): the `content` of its `<meta>`. Only
+/// a path of the page's own origin (its Content-Security-Policy allows no other).
 pub fn model_url(maybe_meta: Option<&str>) -> Result<String, EffectsError> {
-  same_origin_path(maybe_meta, ".onnx", "segmentation model")
+  same_origin_path(maybe_meta, ".nnef", "segmentation model")
 }
 
 /// Where the page serves the segmentation worker's script: the `content` of its `<meta>`. Only a
@@ -81,16 +81,18 @@ mod tests {
   #[test]
   fn the_model_comes_from_a_path_of_the_page() {
     assert_eq!(
-      model_url(Some("/models/selfie_segmentation_landscape-0123.onnx")).unwrap(),
-      "/models/selfie_segmentation_landscape-0123.onnx"
+      model_url(Some("/models/selfie_segmentation_landscape-0123.nnef")).unwrap(),
+      "/models/selfie_segmentation_landscape-0123.nnef"
     );
     for refused in [
       None,
       Some(""),
       Some("  "),
-      Some("https://elsewhere.example.com/model.onnx"),
-      Some("//elsewhere.example.com/model.onnx"),
+      Some("https://elsewhere.example.com/model.nnef"),
+      Some("//elsewhere.example.com/model.nnef"),
       Some("/models/model.wasm"),
+      // The apps' ONNX file: the worker reads NNEF only (#1295).
+      Some("/models/selfie_segmentation_landscape-0123.onnx"),
     ] {
       assert!(model_url(refused).is_err(), "{refused:?}");
     }

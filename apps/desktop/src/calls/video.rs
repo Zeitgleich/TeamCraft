@@ -410,7 +410,7 @@ pub(super) fn effects_filter(
       return None;
     },
   };
-  let segmenter = match TractSegmenter::new(&model, SegmentationModel::MEDIAPIPE_LANDSCAPE) {
+  let segmenter = match TractSegmenter::from_onnx(&model, SegmentationModel::MEDIAPIPE_LANDSCAPE) {
     Ok(segmenter) => segmenter,
     Err(error) => {
       warn!(%error, "segmentation model not usable; background effects are off");

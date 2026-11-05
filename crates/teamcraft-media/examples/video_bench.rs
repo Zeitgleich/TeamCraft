@@ -98,7 +98,7 @@ fn main() -> anyhow::Result<()> {
   match std::env::var("TEAMCRAFT_SEGMENTATION_MODEL") {
     Ok(path) => {
       let model = std::fs::read(&path).with_context(|| format!("reading {path}"))?;
-      let mut segmenter = TractSegmenter::new(&model, SegmentationModel::MEDIAPIPE_LANDSCAPE)?;
+      let mut segmenter = TractSegmenter::from_onnx(&model, SegmentationModel::MEDIAPIPE_LANDSCAPE)?;
       report(
         "segmentation (tract, CPU)",
         time(&frames, |frame| {

@@ -57,7 +57,7 @@ on_demand_prefixes = ("teamcraft-segmentation-worker-", "teamcraft-web-segmentat
 def is_photo(path):
     return path.startswith("backgrounds/") and path.count("/") == 1 and path.endswith(".jpg")
 on_demand = sorted(path for path in files
-                   if path.endswith(".onnx") or path.startswith(on_demand_prefixes) or is_photo(path))
+                   if path.endswith(".nnef") or path.startswith(on_demand_prefixes) or is_photo(path))
 lazy = sorted(set(on_demand) | {path for path in files if path.endswith(".wasm") and path not in entry_points})
 manifest = {
     "version": version,

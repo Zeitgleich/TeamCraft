@@ -17,8 +17,9 @@ crate-type = ["cdylib", "rlib"]
 # Built by crates/teamcraft-ui/scripts/build-segmentation.sh (a step of the web build) with
 # WebAssembly SIMD (`+simd128`), which Trunk can't set for one module alone.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# Only tract, the model check and the masks: no call engine, no compositor.
-teamcraft-media = { path = "../teamcraft-media", default-features = false, features = ["segmentation"] }
+# Only tract, the model check and the masks: no call engine, no compositor. The model comes as NNEF
+# (#1295), so tract's ONNX parser stays out (it was most of this module).
+teamcraft-media = { path = "../teamcraft-media", default-features = false, features = ["segmentation-nnef"] }
 console_error_panic_hook = "0.1"
 wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
