@@ -85,4 +85,6 @@
   <string name="space_delete_title">%1$s für alle löschen?</string>
   <string name="space_delete_text">Kanäle, die mit verschwinden: %1$d, mit ihren Nachrichten und Dateien für alle ihre Mitglieder. Das lässt sich nicht rückgängig machen.</string>
   <string name="space_leave_confirm">Verlassen</string>
+  <string name="browse_filter_people">Person suchen</string>
+  <string name="browse_filter_channels">Kanal suchen</string>
 </resources>

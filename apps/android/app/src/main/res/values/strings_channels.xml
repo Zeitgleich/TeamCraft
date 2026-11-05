@@ -85,4 +85,6 @@
   <string name="space_delete_title">Delete %1$s for everyone?</string>
   <string name="space_delete_text">Channels that go with it: %1$d, with their messages and files, for all their members. This can\'t be undone.</string>
   <string name="space_leave_confirm">Leave</string>
+  <string name="browse_filter_people">Find a person</string>
+  <string name="browse_filter_channels">Find a channel</string>
 </resources>

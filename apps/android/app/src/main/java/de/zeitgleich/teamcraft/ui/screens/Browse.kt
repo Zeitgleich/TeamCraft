@@ -20,7 +20,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -47,6 +46,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.ui.text.style.TextOverflow
+import de.zeitgleich.teamcraft.ui.UserAvatar
+import de.zeitgleich.teamcraft.ui.avatarColorOfHue
+import androidx.compose.foundation.border
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.BrowseJoin
 import de.zeitgleich.teamcraft.core.BrowsableChannel
@@ -69,6 +73,8 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
   var channels by remember { mutableStateOf<List<BrowsableChannel>>(emptyList()) }
   var isCreating by remember { mutableStateOf(false) }
   var showsArchived by rememberSaveable { mutableStateOf(false) }
+  // Narrows people (name, username) and channels (name) as the user types: a directory can be long.
+  var filter by rememberSaveable { mutableStateOf("") }
   val pendingJoins by viewModel.joinRequests.pending.collectAsState()
   val snackbars = rememberFailureSnackbars(viewModel)
   val spaces = snapshot?.spaces.orEmpty()
@@ -105,7 +111,8 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
   }
   Scaffold(
     contentWindowInsets = ScreenInsets,
-    topBar = { ChromeTopBar(title = stringResource(R.string.browse_title), maybeOnBack = onBack) },
+    // Opened from "New message", the screen says so (it lists people first).
+    topBar = { ChromeTopBar(title = stringResource(if (isPeopleFirst) R.string.dm_new else R.string.browse_title), maybeOnBack = onBack) },
     snackbarHost = { SnackbarHost(snackbars) },
     bottomBar = {
       if (isShowingPeople && picked.isNotEmpty()) {
@@ -123,10 +130,21 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
           Tab(selected = showPeople, onClick = { showPeople = true }, text = { Text(stringResource(R.string.people)) })
         }
       }
-      val people = snapshot?.users.orEmpty().filter { it.id != snapshot?.me?.id && !it.isBot }
+      CompactSearchField(
+        value = filter,
+        onChange = { filter = it },
+        placeholder = stringResource(if (isShowingPeople) R.string.browse_filter_people else R.string.browse_filter_channels),
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
+      )
+      val needle = filter.trim()
+      val people = snapshot?.users.orEmpty()
+        .filter { it.id != snapshot?.me?.id && !it.isBot }
+        .filter { needle.isEmpty() || it.displayName.contains(needle, ignoreCase = true) || it.username.contains(needle, ignoreCase = true) }
       // Archived channels are hidden from the lists, so this is the way back to the ones the user is
       // in; nobody can join an archived channel.
-      val visibleChannels = channels.filter { !it.isArchived || (showsArchived && it.isMember) }
+      val visibleChannels = channels
+        .filter { !it.isArchived || (showsArchived && it.isMember) }
+        .filter { needle.isEmpty() || it.name.contains(needle, ignoreCase = true) }
       if (isShowingPeople && snapshot != null && people.isEmpty()) {
         EmptyHint(R.string.browse_no_people)
       } else if (isShowingPeople) {
@@ -143,21 +161,40 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
               Modifier
                 .fillMaxWidth()
                 .toggleable(value = isPicked, role = Role.Checkbox) { picked = toggled(picked, user.id) }
-                .padding(16.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
               verticalAlignment = Alignment.CenterVertically,
             ) {
-              Checkbox(checked = isPicked, onCheckedChange = null, modifier = Modifier.padding(end = 12.dp))
-              Column(Modifier.weight(1f)) {
-                Text(user.displayName)
+              Box {
+                UserAvatar(user.id, Modifier.size(40.dp)) {
+                  Box(Modifier.size(40.dp).background(avatarColorOfHue(user.avatarHue), CircleShape), contentAlignment = Alignment.Center) {
+                    Text(user.displayName.firstOrNull()?.uppercase().orEmpty(), color = Color.White, style = MaterialTheme.typography.titleMedium)
+                  }
+                }
+                Box(
+                  Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(14.dp)
+                    .background(MaterialTheme.colorScheme.background, CircleShape),
+                  contentAlignment = Alignment.Center,
+                ) { PresenceDot(user.presence) }
+              }
+              Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text(user.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
                   listOfNotNull("@" + user.username, user.maybeCustomStatus?.let { it.emoji + " " + it.text }).joinToString(" · "),
                   style = MaterialTheme.typography.bodySmall,
                   color = MaterialTheme.colorScheme.onSurfaceVariant,
+                  maxLines = 1,
+                  overflow = TextOverflow.Ellipsis,
                 )
               }
-              PresenceDot(user.presence)
+              // Picked people get a filled check; the others an empty ring, so it reads as a choice.
+              if (isPicked) {
+                Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+              } else {
+                Box(Modifier.padding(2.dp).size(20.dp).border(2.dp, MaterialTheme.colorScheme.outline, CircleShape))
+              }
             }
-            HorizontalDivider()
           }
         }
       } else {
