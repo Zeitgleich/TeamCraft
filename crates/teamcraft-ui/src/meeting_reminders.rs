@@ -453,6 +453,7 @@ mod tests {
       join_url: "https://chat.example.com/meeting/1".into(),
       maybe_recurrence: None,
       is_occurrence_cancelled: false,
+      can_host_lobby: false,
       attendees: vec![attendee(RsvpStatus::Accepted)],
       undelivered_invitations: Vec::new(),
     }

@@ -337,13 +337,14 @@ impl MeetingsClient {
 pub struct MeetingsHub {
   client: StoredValue<MeetingsClient, LocalStorage>,
   pub meetings: RwSignal<Vec<MeetingResponse>>,
-  /// Guests waiting for admission, per meeting (meetings the user organizes, and those whose call
-  /// the user is in: [`Self::in_call`]).
+  /// Guests waiting for admission, per meeting (meetings the user hosts: [`hosts_lobby`], and those
+  /// whose call the user is in: [`Self::in_call`]).
   pub lobbies: RwSignal<Vec<(MeetingId, Vec<LobbyEntry>)>>,
   /// Meetings of somebody else whose call the user is in: their lobby is asked for too, so a host
   /// decides there and an admitter the organizer named lets people of the link in (#1103).
   pub in_call: RwSignal<HashSet<MeetingId>>,
-  /// Meetings of somebody else whose lobby the server let the user decide on (a host).
+  /// Meetings of somebody else whose lobby the server let the user decide on (a host): on the
+  /// meeting's card ([`hosts_lobby`]) and in its call.
   pub cohosted: RwSignal<HashSet<MeetingId>>,
   /// Why the last call failed, for a visible message.
   pub maybe_error: RwSignal<Option<String>>,
@@ -418,8 +419,8 @@ impl MeetingsHub {
     })
   }
 
-  /// Reloads the list, then the lobbies of the meetings `me` organizes and of those whose call
-  /// `me` is in.
+  /// Reloads the list, then the lobbies of the meetings `me` hosts ([`hosts_lobby`]: organizer, or
+  /// chat admin as the list says) and of those whose call `me` is in.
   pub async fn refresh(&self, me: UserId, now: TimestampMs) {
     match self.client().list(now).await {
       Ok(MeetingList {
@@ -697,9 +698,12 @@ pub fn adding_invitees(meeting: &MeetingResponse, me: UserId, users: &[UserId]) 
 }
 
 /// A live meeting where `me` is the host, so guests and members with its link may wait in its
-/// lobby. Also without `has_lobby`: guests of the shared link and members always wait there.
+/// lobby. Also without `has_lobby`: guests of the shared link and members always wait there. The
+/// host is the organizer, or a chat admin the meeting list marks `can_host_lobby` (#1305; older
+/// servers don't, so there only the organizer's devices ask for the lobby outside the call).
 pub fn hosts_lobby(meeting: &MeetingResponse, me: UserId) -> bool {
-  meeting.organizer_user_id == me && meeting.status == teamcraft_proto::MeetingStatus::Scheduled
+  (meeting.organizer_user_id == me || meeting.can_host_lobby)
+    && meeting.status == teamcraft_proto::MeetingStatus::Scheduled
 }
 
 /// Whether the meeting has ended or was cancelled (shown dimmed, no join).
@@ -1702,6 +1706,7 @@ mod tests {
       join_url: String::new(),
       maybe_recurrence: None,
       is_occurrence_cancelled: false,
+      can_host_lobby: false,
       attendees: Vec::new(),
       undelivered_invitations: Vec::new(),
     };
@@ -1712,6 +1717,26 @@ mod tests {
     assert!(!hosts_lobby(&meeting, id_from_raw(2)));
     meeting.status = teamcraft_proto::MeetingStatus::Cancelled;
     assert!(!hosts_lobby(&meeting, organizer));
+  }
+
+  #[test]
+  fn a_chat_admin_the_list_marks_hosts_the_lobby_outside_the_call() {
+    let admin: UserId = id_from_raw(2);
+    let mut meeting = fixture_meeting(id_from_raw(1));
+    assert!(!hosts_lobby(&meeting, admin), "older servers send no flag");
+    meeting.can_host_lobby = true;
+    assert!(hosts_lobby(&meeting, admin));
+    meeting.status = teamcraft_proto::MeetingStatus::Cancelled;
+    assert!(!hosts_lobby(&meeting, admin));
+  }
+
+  #[test]
+  fn a_meeting_without_the_lobby_flag_reads_as_not_hosted() {
+    let mut json = serde_json::to_value(fixture_meeting(id_from_raw(1))).unwrap();
+    assert!(json.get("can_host_lobby").is_none(), "false is left out");
+    json["can_host_lobby"] = serde_json::Value::Bool(true);
+    let meeting: MeetingResponse = serde_json::from_value(json).unwrap();
+    assert!(meeting.can_host_lobby);
   }
 
   #[test]
@@ -1838,6 +1863,7 @@ mod tests {
       join_url: String::new(),
       maybe_recurrence: None,
       is_occurrence_cancelled: false,
+      can_host_lobby: false,
       attendees: Vec::new(),
       undelivered_invitations: Vec::new(),
     }

@@ -1199,6 +1199,26 @@ impl Database {
     Ok(hosts)
   }
 
+  /// The user's role in each of `conversations` they are a member of; the others are left out.
+  /// One query for a whole meeting list (#1305).
+  pub async fn member_roles(
+    &self,
+    user: UserId,
+    conversations: &[ConversationId],
+  ) -> Result<HashMap<ConversationId, ChannelRole>, DbError> {
+    let rows = sqlx::query!(
+      "SELECT conversation_id, role FROM memberships WHERE user_id = $1 AND conversation_id = ANY($2)",
+      to_db(user),
+      &to_db_all(conversations),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| Ok((from_db(row.conversation_id)?, ChannelRole::from(row.role))))
+      .collect()
+  }
+
   /// IDs of users the meeting concerns: organizer and invited users.
   pub async fn meeting_user_ids(&self, meeting: &StoredMeeting) -> Result<Vec<UserId>, DbError> {
     let ids = sqlx::query_scalar!(
