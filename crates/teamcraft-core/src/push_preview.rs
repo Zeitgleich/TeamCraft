@@ -129,7 +129,10 @@ pub async fn push_preview<A: ServerApi>(
     matches!(conversation.kind, ConversationKind::Dm | ConversationKind::Group)
       || !conversation.participants.is_empty()
   });
-  let maybe_conversation_name = maybe_conversation.as_ref().and_then(conversation_name);
+  let maybe_me = records::load_account(store)?.map(|account| account.user_id);
+  let maybe_conversation_name = maybe_conversation
+    .as_ref()
+    .and_then(|conversation| conversation_name(conversation, maybe_me));
   let maybe_sender_name = match wake_up.maybe_sender_id {
     Some(sender) => records::get_json::<UserSummary>(store, Table::Users, &sender.to_string())?
       .map(|user| shown_name(&user))
@@ -509,11 +512,21 @@ impl AttachmentKind {
   }
 }
 
-fn conversation_name(conversation: &ConversationResponse) -> Option<String> {
+/// The conversation's name, or for a DM or group the other people: the user's own name doesn't
+/// belong in it (a call from Alice rang as "Alice, Carol" on Carol's phone).
+fn conversation_name(
+  conversation: &ConversationResponse,
+  maybe_me: Option<teamcraft_proto::UserId>,
+) -> Option<String> {
   if let Some(name) = &conversation.maybe_name {
     return Some(name.clone());
   }
-  let names: Vec<String> = conversation.participants.iter().map(shown_name).collect();
+  let names: Vec<String> = conversation
+    .participants
+    .iter()
+    .filter(|participant| Some(participant.id) != maybe_me)
+    .map(shown_name)
+    .collect();
   (!names.is_empty()).then(|| names.join(", "))
 }
 

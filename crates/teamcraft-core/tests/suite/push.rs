@@ -371,6 +371,8 @@ async fn a_first_direct_message_shows_after_the_app_caught_the_conversation_up()
     .unwrap();
   assert_eq!(preview.content, PreviewContent::Text("are you around?".into()));
   assert_eq!(preview.maybe_sender_name.as_deref(), Some("Carol"));
+  // Named after the other person only: a ring showed "Carol, Bob" on Bob's phone.
+  assert_eq!(preview.maybe_conversation_name.as_deref(), Some("Carol"));
   assert!(preview.is_direct);
   assert!(preview.is_conversation_verified);
   assert_eq!(preview.maybe_gap, None);
