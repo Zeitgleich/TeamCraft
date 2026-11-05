@@ -18,6 +18,12 @@
 //! The answers also time the round trip. QUIC sessions have the browser's own measure; on the
 //! fallback's WebSocket the page pings every [`ResilienceConfig::round_trip_interval`] for it,
 //! however busy the session is (#1227).
+//!
+//! Generations count the sessions. A rejoin's session gets the next one when the current one is
+//! lost; a QUIC session that may take the current one over without a rejoin (#1338,
+//! `switch_back`) gets one of its own while it tries ([`SessionWatch::candidate`]), and it becomes
+//! the current one once the old session closed after the move ([`SessionWatch::moved`]): the same
+//! session goes on over a new transport, never counted as lost.
 
 use std::time::Duration;
 
@@ -39,6 +45,9 @@ const SUSPENDED_TICK_GAP: Duration = Duration::from_secs(2);
 pub(super) struct SessionWatch {
   /// Counts sessions: news of an older one (signals, datagrams, packet counts, its end) is stale.
   generation: u64,
+  /// The last generation handed out, to a rejoin's session or to a candidate: none goes out twice,
+  /// so a candidate's news is never taken for a rejoin's.
+  last_issued: u64,
   is_connected: bool,
   monitor: PathMonitor,
   path_watch: PathWatch,
@@ -163,6 +172,7 @@ impl SessionWatch {
   pub(super) fn new(now: Instant, resilience: ResilienceConfig) -> Self {
     Self {
       generation: 0,
+      last_issued: 0,
       is_connected: true,
       monitor: PathMonitor::new(now),
       path_watch: PathWatch::Untested,
@@ -192,7 +202,7 @@ impl SessionWatch {
   /// now on, news of the lost one is stale.
   pub(super) fn lose(&mut self) -> u64 {
     self.is_connected = false;
-    self.generation += 1;
+    self.generation = self.issue();
     self.maybe_pending_reading = None;
     self.maybe_baseline_until = None;
     self.generation
@@ -202,6 +212,36 @@ impl SessionWatch {
   pub(super) fn relinked(&mut self, generation: u64, now: Instant) {
     self.generation = generation;
     self.is_connected = true;
+    self.watch_afresh(now);
+  }
+
+  /// A generation for a session that may take the current one over without a rejoin (#1338): its
+  /// news isn't current until [`Self::moved`].
+  pub(super) fn candidate(&mut self) -> u64 {
+    self.issue()
+  }
+
+  /// The current session moved to the candidate of `generation` at `now` (the SFU closed the old
+  /// one after everything queued for it): the same session goes on over a new transport. It was
+  /// never lost, so nothing rejoins; its path is watched afresh, as a new session's is.
+  pub(super) fn moved(&mut self, generation: u64, now: Instant) {
+    debug_assert!(generation > self.generation && generation <= self.last_issued);
+    self.generation = generation;
+    self.is_connected = true;
+    self.watch_afresh(now);
+    // The old transport may have been one the browser can't count (the fallback's WebSocket);
+    // whether this one can is found out again.
+    self.path_watch = PathWatch::Untested;
+  }
+
+  /// The next generation, never handed out before.
+  fn issue(&mut self) -> u64 {
+    self.last_issued += 1;
+    self.last_issued
+  }
+
+  /// A session of the current generation starts at `now`: nothing about an older one's path counts.
+  fn watch_afresh(&mut self, now: Instant) {
     self.monitor = PathMonitor::new(now);
     self.maybe_pending_reading = None;
     self.maybe_baseline_until = None;
@@ -808,6 +848,51 @@ mod tests {
       // The old session lives on (falsely declared lost): its signals must not reach the engine.
       assert!(!watch.is_current(old));
       assert!(watch.is_current(next));
+    }
+
+    /// A candidate's generation is no rejoin's: news of a QUIC try is never current before the move,
+    /// and a rejoin after a loss gets a generation of its own (#1338).
+    #[test]
+    fn candidates_and_rejoins_never_share_a_generation() {
+      let start = Instant::now();
+      let mut watch = SessionWatch::new(start, config());
+      let current = watch.generation();
+      let candidate = watch.candidate();
+      assert!(watch.is_current(current));
+      assert!(!watch.is_current(candidate), "a try's news isn't the call's");
+      let rejoin = watch.lose();
+      assert_ne!(rejoin, candidate);
+      watch.relinked(rejoin, at(start, 1_000));
+      assert!(!watch.is_current(candidate));
+      assert!(watch.is_current(rejoin));
+    }
+
+    /// The same session over a new transport: the candidate becomes current without the session
+    /// ever counting as lost, and the old transport's news is stale from then on.
+    #[test]
+    fn a_moved_session_goes_on_under_the_candidates_generation() {
+      let start = Instant::now();
+      let mut watch = SessionWatch::new(start, config());
+      let old = watch.generation();
+      let pending = watch.next_reading().unwrap();
+      let candidate = watch.candidate();
+      watch.moved(candidate, at(start, 1_000));
+      assert!(watch.is_current(candidate));
+      assert!(!watch.is_current(old));
+      // The old transport's count arrives late: no news of the new one, and it doesn't block.
+      assert_eq!(
+        watch.on_reading(pending, PacketCount::Unsupported, at(start, 1_050)),
+        PathVerdict::Unchanged
+      );
+      let fresh = watch.next_reading().expect("the old reading must not block");
+      assert_eq!(fresh.generation, candidate);
+      // Counted afresh: the WebSocket's "no counts" doesn't stick to the QUIC session.
+      assert_eq!(
+        watch.on_reading(fresh, PacketCount::Received(40), at(start, 1_500)),
+        PathVerdict::Unchanged
+      );
+      assert_eq!(read(&mut watch, 40, at(start, 6_000)), PathVerdict::Unchanged);
+      assert_eq!(read(&mut watch, 40, at(start, 6_600)), PathVerdict::Lost);
     }
 
     #[test]
