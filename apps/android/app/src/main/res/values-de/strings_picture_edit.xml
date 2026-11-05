@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="picture_edit">Bild bearbeiten</string>
+  <string name="picture_rotate">Nach links drehen</string>
+  <string name="picture_reset">Zurücksetzen</string>
+  <string name="picture_edit_done">Fertig</string>
+  <string name="picture_edit_failed">Dieses Bild lässt sich nicht bearbeiten. Es wird unverändert gesendet.</string>
+  <string name="picture_crop_area">Zuschnitt: Ecke oder Rahmen ziehen</string>
+  <string name="composer_edit_picture">%1$s bearbeiten</string>
+</resources>

@@ -864,6 +864,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     stage(photo.name, "image/jpeg") { photo.inputStream() }
   }
 
+  /** An edited picture ([de.zeitgleich.teamcraft.ui.screens.PictureEditor]) staged like a picked file. */
+  suspend fun stageEditedPicture(name: String, mediaType: String, bytes: ByteArray): PickedFile? = withContext(Dispatchers.IO) {
+    stage(name, mediaType) { bytes.inputStream() }
+  }
+
   /** Copies into the core's staging folder, at most [MAX_IMPORT_BYTES]. */
   private suspend fun stage(name: String, type: String, open: () -> InputStream?): PickedFile? {
     // The core deletes the copy once it is uploaded (or failed for good).

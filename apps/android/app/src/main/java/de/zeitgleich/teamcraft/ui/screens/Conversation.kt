@@ -47,6 +47,12 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.foundation.layout.offset
+import androidx.compose.material.icons.filled.Edit
+import de.zeitgleich.teamcraft.ui.PictureEdits
+import de.zeitgleich.teamcraft.ui.Pictures
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -1068,6 +1074,8 @@ internal fun Composer(
   var isSilent by rememberSaveable(conversationId) { mutableStateOf(false) }
   var alsoToChannel by rememberSaveable(conversationId) { mutableStateOf(false) }
   var isAttachOpen by remember { mutableStateOf(false) }
+  // The picked picture being edited before it is sent.
+  var maybeEditing by remember { mutableStateOf<PickedFile?>(null) }
   var isSendOptionsOpen by remember { mutableStateOf(false) }
   val replyTarget by ReplyTarget.current.collectAsState()
   val maybeReply = replyTarget?.takeIf { it.conversation == conversationId && maybeThread == null }
@@ -1238,8 +1246,24 @@ internal fun Composer(
       }
     }
     if (files.isNotEmpty()) {
-      FlowRow(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+      FlowRow(
+        Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+      ) {
         for (file in files) {
+          if (PictureEdits.isEditable(file.mediaType)) {
+            // Pictures show as themselves: a tap opens the editor, the corner removes them.
+            PictureAttachment(
+              file = file,
+              onEdit = { maybeEditing = file },
+              onRemove = {
+                files = files - file
+                viewModel.discardFile(file)
+              },
+            )
+            continue
+          }
           val removeLabel = stringResource(R.string.composer_remove_file, file.fileName)
           InputChip(
             selected = false,
@@ -1292,6 +1316,18 @@ internal fun Composer(
     )
   }
   if (isAttachOpen) AttachSheet(pickers, onDismiss = { isAttachOpen = false })
+  maybeEditing?.let { editing ->
+    PictureEditor(
+      viewModel = viewModel,
+      file = editing,
+      onCancel = { maybeEditing = null },
+      onDone = { edited ->
+        files = files.map { if (it == editing) edited else it }
+        viewModel.discardFile(editing)
+        maybeEditing = null
+      },
+    )
+  }
   if (isSendOptionsOpen) {
     SendOptionsSheet(onDismiss = { isSendOptionsOpen = false }) {
       SendOptionsSection(
@@ -1431,6 +1467,55 @@ private fun EmojiSuggestions(text: String, onPick: (String) -> Unit) {
     }
   }
 }
+
+/** A picked picture in the composer: its thumbnail opens the editor, the corner button removes it. */
+@Composable
+private fun PictureAttachment(file: PickedFile, onEdit: () -> Unit, onRemove: () -> Unit) {
+  val maybePicture by produceState<ImageBitmap?>(null, file.path) { value = Pictures.file(file.path, ATTACHMENT_THUMB_PX) }
+  val editLabel = stringResource(R.string.composer_edit_picture, file.fileName)
+  Box(Modifier.size(ATTACHMENT_THUMB)) {
+    Box(
+      Modifier
+        .matchParentSize()
+        .clip(RoundedCornerShape(12.dp))
+        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+        .clickable(onClickLabel = editLabel, onClick = onEdit),
+    ) {
+      maybePicture?.let { Image(it, contentDescription = file.fileName, contentScale = ContentScale.Crop, modifier = Modifier.matchParentSize()) }
+      Icon(
+        Icons.Filled.Edit,
+        contentDescription = null,
+        tint = Color.White,
+        modifier = Modifier
+          .align(Alignment.BottomStart)
+          .padding(4.dp)
+          .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+          .padding(3.dp)
+          .size(14.dp),
+      )
+    }
+    Box(
+      Modifier
+        .align(Alignment.TopEnd)
+        .offset(x = 6.dp, y = (-6).dp)
+        .size(24.dp)
+        .clip(CircleShape)
+        .background(MaterialTheme.colorScheme.inverseSurface)
+        .clickable(onClickLabel = stringResource(R.string.composer_remove_file, file.fileName), onClick = onRemove),
+      contentAlignment = Alignment.Center,
+    ) {
+      Icon(
+        Icons.Filled.Close,
+        contentDescription = stringResource(R.string.composer_remove_file, file.fileName),
+        tint = MaterialTheme.colorScheme.inverseOnSurface,
+        modifier = Modifier.size(16.dp),
+      )
+    }
+  }
+}
+
+private val ATTACHMENT_THUMB = 64.dp
+private const val ATTACHMENT_THUMB_PX = 256
 
 /** The round send button: tap sends, long-press (also with nothing typed yet) sets how. */
 @OptIn(ExperimentalFoundationApi::class)
