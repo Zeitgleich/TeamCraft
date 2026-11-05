@@ -821,6 +821,18 @@ picture every 33 ms, encoded with WebCodecs H.264. Main thread per frame:
   WebGPU where it starts and WebGL2 otherwise.
 - A CPU compositor for Firefox would pay getImageData and RGBx→I420 alone with 9 ms a frame there,
   more than the whole WebGL2 path. Firefox 147 measured 7.0 ms with WebGL2.
+- Since #1295 the WebGPU compositor takes the canvas picture as RGBA and writes I420 itself
+  (`Compositor::apply_rgba`): the composite passes, which converted their result to I420 anyway,
+  read RGB straight from the picture, so the CPU's RGBx→I420 (1.9 ms in Chrome, 2.1 ms in Safari)
+  is gone and the picture is read back once, as before. The upload is 3.7 instead of 1.4 MB a 720p
+  frame. A picture too large for one RGBA buffer of the GPU (beyond 4K at WebGPU's default limits)
+  is still converted on the CPU first. Not measured in browsers yet; natively the GPU's I420 is the
+  CPU's within rounding (tested). `copyExternalImageToTexture` from the `<video>` would also save
+  the getImageData, but wgpu panics where the browser throws on that call, which would take the
+  call module down. WebGL2 for every browser (1.1 ms in Chrome, 4.2 ms in Safari in the same
+  bench) stays a measurement away: one of #964's two Chrome runs with WebGL2 encoded only 60 of
+  165 frames (the encoder fell behind; not looked into), and WebGPU without the conversion should
+  now be close to WebGL2 in Safari.
 
 ### Web client (Chrome)
 
@@ -1945,9 +1957,12 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   background after sign-in; the budget doesn't count it.
 - The background effects (#439) add their compositors (WebGPU and WebGL2) to it, about 57 kB gzip;
   pictures are decoded by the browser. The person segmentation is a module of its own,
-  `teamcraft-web-segmentation` (tract, built with WebAssembly SIMD: 2.09 MB gzip), which the call
-  module runs in a worker, and the model (0.46 MB, 0.26 MB gzip) a file of its own: both are only
-  downloaded when someone first turns an effect on. A photo background's full picture (0.15 to
+  `teamcraft-web-segmentation` (tract, built with WebAssembly SIMD: 1.59 MB gzip), which the call
+  module runs in a worker, and the model (0.56 MB, 0.27 MB gzip) a file of its own: both are only
+  downloaded when someone first turns an effect on. Since #1295 the model comes as NNEF, tract's own
+  format, which the module reads without tract's ONNX parser: 2.09 → 1.59 MB gzip (6.98 → 5.52 MB),
+  the same masks. Of the rest, tract's runtime and optimizer, its kernels and NNEF's registry of
+  every core operator (FFT included) are most; they can't be trimmed from outside tract. A photo background's full picture (0.15 to
   0.4 MB, JPEG) is a file of the web release too, downloaded when the photo is picked. A signed
   release lists them in `on_demand`, so the service worker doesn't fetch them in the background. `check-web-size.py` keeps the call
   module under 1 MB gzip.

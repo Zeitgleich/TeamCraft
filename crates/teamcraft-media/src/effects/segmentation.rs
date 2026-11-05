@@ -1,8 +1,10 @@
 //! Who is the person in the frame: a low-resolution probability mask per frame.
 //!
 //! [`TractSegmenter`] runs a selfie segmentation model (MediaPipe's, Apache-2.0, converted to
-//! ONNX) with tract on the CPU, natively or in WebAssembly. [`EllipseSegmenter`] is the fake for
-//! tests and for checking the compositor without a model.
+//! ONNX) with tract on the CPU, natively or in WebAssembly. The apps load the ONNX file; the
+//! browser loads the same graph as NNEF, tract's own format ([`onnx_to_nnef`]), which needs no
+//! ONNX parser in its worker module (#1295). [`EllipseSegmenter`] is the fake for tests and for
+//! checking the compositor without a model.
 
 use crate::video::VideoFrame;
 
@@ -86,13 +88,11 @@ impl std::fmt::Debug for SegmentationMask {
   }
 }
 
-#[cfg(feature = "segmentation")]
+#[cfg(feature = "segmentation-nnef")]
 mod tract {
   use std::sync::Arc;
 
-  use std::collections::HashMap;
-
-  use tract_onnx::prelude::*;
+  use tract_nnef::prelude::*;
 
   use super::{EffectsError, PersonSegmenter, SegmentationMask};
   use crate::video::VideoFrame;
@@ -150,8 +150,35 @@ mod tract {
 
   impl TractSegmenter {
     /// Loads an ONNX model (its bytes, e.g. read from the app's data files).
-    pub fn new(onnx: &[u8], model: SegmentationModel) -> Result<Self, EffectsError> {
-      let plan = load_plan(onnx, model).map_err(segmentation_error)?;
+    #[cfg(feature = "segmentation")]
+    pub fn from_onnx(onnx: &[u8], model: SegmentationModel) -> Result<Self, EffectsError> {
+      let typed = onnx::typed_model(onnx, model).map_err(segmentation_error)?;
+      Self::with_typed(typed, model)
+    }
+
+    /// Loads the model as NNEF, tract's own format ([`onnx_to_nnef`] made it from the ONNX file):
+    /// the browser's segmentation worker reads it without tract's ONNX parser (#1295). Both run
+    /// the same graph, so the masks are the same.
+    pub fn from_nnef(nnef: &[u8], model: SegmentationModel) -> Result<Self, EffectsError> {
+      let typed = nnef_framework()
+        .model_for_read(&mut std::io::Cursor::new(nnef))
+        .map_err(segmentation_error)?;
+      let input = typed.input_fact(0).map_err(segmentation_error)?;
+      if input.shape.as_concrete() != Some(&model.input_shape()[..]) {
+        return Err(EffectsError::Segmentation(format!(
+          "the model takes {:?}, not {:?}",
+          input.shape,
+          model.input_shape()
+        )));
+      }
+      Self::with_typed(typed, model)
+    }
+
+    fn with_typed(typed: TypedModel, model: SegmentationModel) -> Result<Self, EffectsError> {
+      let plan = typed
+        .into_optimized()
+        .and_then(|optimized| optimized.into_runnable())
+        .map_err(segmentation_error)?;
       Ok(Self {
         plan,
         model,
@@ -160,19 +187,46 @@ mod tract {
     }
   }
 
-  /// Exported models often name their batch dimension (`batch_size`): it stays symbolic while the
-  /// graph's facts are unified, then is fixed to 1 (the frames come one at a time).
-  fn load_plan(onnx: &[u8], model: SegmentationModel) -> TractResult<Plan> {
-    let graph = tract_onnx::onnx().model_for_read(&mut std::io::Cursor::new(onnx))?;
-    let batch = graph.symbols.sym("batch_size");
-    let [_, a, b, c] = model.input_shape().map(TDim::from);
-    let fact = InferenceFact::dt_shape(f32::datum_type(), tvec![batch.clone().into(), a, b, c]);
-    let typed = graph.with_input_fact(0, fact)?.into_typed()?;
-    let batch_of_one = HashMap::from([(batch, TDim::from(1))]);
-    typed
-      .set_symbols(&batch_of_one)?
-      .into_optimized()?
-      .into_runnable()
+  /// The ONNX model as NNEF (a tar archive) for [`TractSegmenter::from_nnef`]: the same typed graph
+  /// [`TractSegmenter::from_onnx`] optimizes, before any optimization, so loading either gives the
+  /// same plan. The archive is the same for the same model and tract version (fixed timestamps,
+  /// sorted entries): the build pins its SHA-256 like the ONNX file's.
+  #[cfg(feature = "segmentation")]
+  pub fn onnx_to_nnef(onnx: &[u8], model: SegmentationModel) -> Result<Vec<u8>, EffectsError> {
+    let typed = onnx::typed_model(onnx, model).map_err(segmentation_error)?;
+    nnef_framework()
+      .write_to_tar_with_config(&typed, Vec::new(), false, true)
+      .map_err(segmentation_error)
+  }
+
+  /// NNEF with tract's core operators and, of its `tract_onnx` extension, only the ONNX operator
+  /// the model needs beyond them (Resize): the extension's others and what they bring along
+  /// (random numbers, tree ensembles) stay out of the browser's module.
+  fn nnef_framework() -> tract_nnef::framework::Nnef {
+    let mut onnx = tract_nnef::internal::Registry::new("tract_onnx");
+    tract_onnx_opl::resize::register(&mut onnx);
+    tract_nnef::nnef().with_registry(onnx)
+  }
+
+  #[cfg(feature = "segmentation")]
+  mod onnx {
+    use std::collections::HashMap;
+
+    use tract_onnx::prelude::*;
+
+    use super::SegmentationModel;
+
+    /// The ONNX model as tract's typed graph, input fixed to `model`'s. Exported models often name
+    /// their batch dimension (`batch_size`): it stays symbolic while the graph's facts are
+    /// unified, then is fixed to 1 (the frames come one at a time).
+    pub(super) fn typed_model(onnx: &[u8], model: SegmentationModel) -> TractResult<TypedModel> {
+      let graph = tract_onnx::onnx().model_for_read(&mut std::io::Cursor::new(onnx))?;
+      let batch = graph.symbols.sym("batch_size");
+      let [_, a, b, c] = model.input_shape().map(TDim::from);
+      let fact = InferenceFact::dt_shape(f32::datum_type(), tvec![batch.clone().into(), a, b, c]);
+      let typed = graph.with_input_fact(0, fact)?.into_typed()?;
+      typed.set_symbols(&HashMap::from([(batch, TDim::from(1))]))
+    }
   }
 
   impl TractSegmenter {
@@ -300,6 +354,8 @@ mod tract {
 }
 
 #[cfg(feature = "segmentation")]
+pub use tract::onnx_to_nnef;
+#[cfg(feature = "segmentation-nnef")]
 pub use tract::{SegmentationModel, TensorLayout, TractSegmenter};
 
 #[cfg(all(test, feature = "segmentation"))]
@@ -322,7 +378,7 @@ pub(super) mod tests {
 
   #[test]
   fn tract_runs_an_nhwc_model_on_the_scaled_frame() {
-    let mut segmenter = TractSegmenter::new(&mean_of_channels_model(), MODEL).unwrap();
+    let mut segmenter = TractSegmenter::from_onnx(&mean_of_channels_model(), MODEL).unwrap();
     // Flat grey (Y=U=V=128) is RGB 130/255 in every channel.
     let frame = VideoFrame::new(
       VideoResolution {
@@ -346,7 +402,7 @@ pub(super) mod tests {
 
   #[test]
   fn tract_runs_on_an_rgba_picture_scaled_to_the_model() {
-    let mut segmenter = TractSegmenter::new(&mean_of_channels_model(), MODEL).unwrap();
+    let mut segmenter = TractSegmenter::from_onnx(&mean_of_channels_model(), MODEL).unwrap();
     // Red 60, green 120, blue 180: the model averages the three channels.
     let picture = [60u8, 120, 180, 255].repeat(32 * 16);
     let mask = segmenter.segment_rgba(32, 16, &picture).unwrap();
@@ -376,8 +432,73 @@ pub(super) mod tests {
 
   #[test]
   fn broken_models_are_errors() {
-    assert!(TractSegmenter::new(b"not a model", MODEL).is_err());
+    assert!(TractSegmenter::from_onnx(b"not a model", MODEL).is_err());
+    assert!(TractSegmenter::from_nnef(b"not a model", MODEL).is_err());
+    assert!(onnx_to_nnef(b"not a model", MODEL).is_err());
   }
+
+  #[test]
+  fn the_nnef_model_segments_like_the_onnx_one() {
+    let onnx = mean_of_channels_model();
+    let nnef = onnx_to_nnef(&onnx, MODEL).unwrap();
+    let mut from_onnx = TractSegmenter::from_onnx(&onnx, MODEL).unwrap();
+    let mut from_nnef = TractSegmenter::from_nnef(&nnef, MODEL).unwrap();
+    // A picture with a different colour in every pixel, so a wrong axis or scale shows.
+    let picture: Vec<u8> = (0..32u32 * 16)
+      .flat_map(|pixel| {
+        [
+          (pixel % 251) as u8,
+          (pixel * 7 % 253) as u8,
+          (pixel * 13 % 255) as u8,
+          255,
+        ]
+      })
+      .collect();
+    let expected = from_onnx.segment_rgba(32, 16, &picture).unwrap();
+    assert_eq!(from_nnef.segment_rgba(32, 16, &picture).unwrap(), expected);
+    let frame = VideoFrame::new(
+      VideoResolution {
+        width: 64,
+        height: 32,
+      },
+      0,
+      (0..64 * 32 * 3 / 2).map(|index| (index % 241) as u8).collect(),
+    )
+    .unwrap();
+    assert_eq!(
+      from_nnef.segment(&frame).unwrap(),
+      from_onnx.segment(&frame).unwrap()
+    );
+  }
+
+  #[test]
+  fn an_nnef_model_for_another_input_is_refused() {
+    let nnef = onnx_to_nnef(&mean_of_channels_model(), MODEL).unwrap();
+    let other = SegmentationModel { width: 16, ..MODEL };
+    assert!(TractSegmenter::from_nnef(&nnef, other).is_err());
+  }
+
+  /// The browser's model file is pinned by its SHA-256 (`models/*.nnef.sha256`), so the conversion
+  /// must give the same archive every time. This pins tract's NNEF writer on a tiny model: when an
+  /// upgrade of tract changes it, the browser's model file likely changed too, and
+  /// `models/fetch-nnef.sh --pin` makes and pins it anew (after checking its masks, see
+  /// `tests/suite/segmentation_model.rs`).
+  #[test]
+  fn the_nnef_archive_is_the_same_every_time() {
+    use sha2::{Digest, Sha256};
+
+    let onnx = mean_of_channels_model();
+    let nnef = onnx_to_nnef(&onnx, MODEL).unwrap();
+    assert_eq!(onnx_to_nnef(&onnx, MODEL).unwrap(), nnef);
+    let sha256: String = Sha256::digest(&nnef)
+      .iter()
+      .map(|byte| format!("{byte:02x}"))
+      .collect();
+    assert_eq!(sha256, TEST_MODEL_NNEF_SHA256, "tract's NNEF writer changed");
+  }
+
+  /// The SHA-256 of `mean_of_channels_model()` as NNEF (tract 0.23.9).
+  const TEST_MODEL_NNEF_SHA256: &str = "56c38d5bebd7be6549a0669e433bc46720302c15271b2ea9a708869f6ddda963";
 
   /// `mask = ReduceMean(image, axis 3, keepdims)`: NHWC in, one channel out, like MediaPipe's.
   pub(in crate::effects) fn mean_of_channels_model() -> Vec<u8> {

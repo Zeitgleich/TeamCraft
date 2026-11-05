@@ -1,6 +1,8 @@
 //! Runs `compositor.wgsl`: uploads the frame and mask, dispatches the passes and reads the result
 //! back. Buffers are kept between frames (the mask history lives on the GPU) and rebuilt when the
-//! frame or mask size changes.
+//! frame or mask size changes. The frame comes as I420 (the apps' cameras) or as RGBA (the
+//! browser's canvas picture, [`Compositor::apply_rgba`]); what comes back is I420 either way, so
+//! the browser's picture is converted on the GPU, in the passes that composite it (#1295).
 
 use std::sync::Arc;
 
@@ -8,7 +10,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use super::{BackgroundEffect, BackgroundImage, BlurStrength, EffectsConfig, EffectsError, SegmentationMask};
-use crate::video::VideoFrame;
+use crate::video::{VideoFrame, VideoResolution};
 
 const SHADER: &str = include_str!("compositor.wgsl");
 /// The blurred background is computed at this fraction of the frame size.
@@ -59,6 +61,23 @@ struct SizeKey {
   height: u32,
   mask_width: u32,
   mask_height: u32,
+  format: InputFormat,
+}
+
+/// How the frame comes in (`Params::input_format` in the shader).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputFormat {
+  I420,
+  /// One RGBA pixel per four bytes, row by row.
+  Rgba,
+}
+
+/// A frame to composite.
+struct Input<'a> {
+  format: InputFormat,
+  resolution: VideoResolution,
+  timestamp_us: u64,
+  data: &'a [u8],
 }
 
 /// Mirrors `Params` in the shader.
@@ -80,7 +99,7 @@ struct Params {
   smoothing: f32,
   edge_low: f32,
   edge_high: f32,
-  padding: f32,
+  input_format: u32,
 }
 
 impl Compositor {
@@ -160,13 +179,79 @@ impl Compositor {
     mask: &SegmentationMask,
     effect: &BackgroundEffect,
   ) -> Result<VideoFrame, EffectsError> {
+    if *effect == BackgroundEffect::None {
+      return Ok(frame.clone());
+    }
+    let input = Input {
+      format: InputFormat::I420,
+      resolution: frame.resolution(),
+      timestamp_us: frame.timestamp_us(),
+      data: frame.data(),
+    };
+    self.run(input, mask, effect).await
+  }
+
+  /// Composites an RGBA picture (`width` x `height`, row by row, as a canvas' `getImageData` gives
+  /// it) with `effect` behind the person in `mask`, and returns it as I420: the browser's camera
+  /// (#1295), whose picture isn't converted on the CPU first that way. `BackgroundEffect::None`
+  /// only converts it. The picture must fit the GPU's buffers ([`Self::takes_rgba`]).
+  pub async fn apply_rgba(
+    &mut self,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    timestamp_us: u64,
+    mask: &SegmentationMask,
+    effect: &BackgroundEffect,
+  ) -> Result<VideoFrame, EffectsError> {
+    let invalid = || EffectsError::InvalidPicture {
+      width,
+      height,
+      bytes: rgba.len(),
+    };
+    let (Ok(frame_width), Ok(frame_height)) = (u16::try_from(width), u16::try_from(height)) else {
+      return Err(invalid());
+    };
+    if height == 0
+      || !height.is_multiple_of(2)
+      || rgba.len() as u64 != u64::from(width) * u64::from(height) * 4
+    {
+      return Err(invalid());
+    }
+    let input = Input {
+      format: InputFormat::Rgba,
+      resolution: VideoResolution {
+        width: frame_width,
+        height: frame_height,
+      },
+      timestamp_us,
+      data: rgba,
+    };
+    self.run(input, mask, effect).await
+  }
+
+  /// Whether an RGBA picture of this size fits the GPU's buffers for [`Self::apply_rgba`] (four
+  /// bytes a pixel, not one and a half: 128 MiB by WebGPU's default limits, so beyond 4K); a
+  /// larger one goes in as I420, converted on the CPU.
+  pub fn takes_rgba(&self, width: u32, height: u32) -> bool {
+    let bytes = u64::from(width) * u64::from(height) * 4;
+    let limits = self.device.limits();
+    bytes <= limits.max_storage_buffer_binding_size && bytes <= limits.max_buffer_size
+  }
+
+  async fn run(
+    &mut self,
+    input: Input<'_>,
+    mask: &SegmentationMask,
+    effect: &BackgroundEffect,
+  ) -> Result<VideoFrame, EffectsError> {
     let (mode, radius) = match effect {
-      BackgroundEffect::None => return Ok(frame.clone()),
+      BackgroundEffect::None => (0, 0),
       BackgroundEffect::Blur(BlurStrength::Light) => (1, 4),
       BackgroundEffect::Blur(BlurStrength::Strong) => (1, 10),
       BackgroundEffect::Image(_) => (2, 0),
     };
-    let resolution = frame.resolution();
+    let resolution = input.resolution;
     if !resolution.width.is_multiple_of(8) {
       return Err(EffectsError::UnsupportedWidth(resolution.width));
     }
@@ -175,6 +260,7 @@ impl Compositor {
       height: u32::from(resolution.height),
       mask_width: mask.width(),
       mask_height: mask.height(),
+      format: input.format,
     };
     self.prepare(key, effect);
     let Some(buffers) = &mut self.maybe_buffers else {
@@ -201,16 +287,23 @@ impl Compositor {
       smoothing: self.config.mask_smoothing,
       edge_low: self.config.edge_low,
       edge_high: self.config.edge_high,
-      padding: 0.0,
+      input_format: match input.format {
+        InputFormat::I420 => 0,
+        InputFormat::Rgba => 1,
+      },
     };
-    buffers.has_history = true;
+    // Without a background the mask isn't used: its history stays as it is.
+    let has_mask = mode != 0;
+    buffers.has_history |= has_mask;
     self
       .queue
       .write_buffer(&buffers.params, 0, bytemuck::bytes_of(&params));
-    self.queue.write_buffer(&buffers.frame, 0, frame.data());
-    self
-      .queue
-      .write_buffer(&buffers.mask_in, 0, bytemuck::cast_slice(mask.values()));
+    self.queue.write_buffer(&buffers.frame, 0, input.data);
+    if has_mask {
+      self
+        .queue
+        .write_buffer(&buffers.mask_in, 0, bytemuck::cast_slice(mask.values()));
+    }
 
     let mut encoder = self
       .device
@@ -224,11 +317,12 @@ impl Compositor {
       });
       pass.set_bind_group(0, &buffers.bind_group, &[]);
       let mask_groups = (groups(key.mask_width), groups(key.mask_height));
-      for pipeline in [
+      let mask_pipelines = [
         &self.pipelines.smooth_mask,
         &self.pipelines.feather_horizontal,
         &self.pipelines.feather_vertical,
-      ] {
+      ];
+      for pipeline in mask_pipelines.into_iter().filter(|_| has_mask) {
         pass.set_pipeline(pipeline);
         pass.dispatch_workgroups(mask_groups.0, mask_groups.1, 1);
       }
@@ -252,7 +346,7 @@ impl Compositor {
     self.queue.submit(Some(encoder.finish()));
 
     let data = read_back(&self.device, &buffers.staging).await?;
-    Ok(VideoFrame::new(resolution, frame.timestamp_us(), data)?)
+    Ok(VideoFrame::new(resolution, input.timestamp_us, data)?)
   }
 
   /// (Re)creates the buffers for this size and uploads a changed background image.
@@ -283,6 +377,10 @@ impl Compositor {
   ) -> Buffers {
     let device = &self.device;
     let frame_bytes = u64::from(key.width) * u64::from(key.height) * 3 / 2;
+    let input_bytes = match key.format {
+      InputFormat::I420 => frame_bytes,
+      InputFormat::Rgba => u64::from(key.width) * u64::from(key.height) * 4,
+    };
     let mask_values = u64::from(key.mask_width) * u64::from(key.mask_height);
     let (small_width, small_height) = small_size(key);
     let buffer = |label: &str, size: u64, usage: wgpu::BufferUsages| {
@@ -299,7 +397,7 @@ impl Compositor {
       std::mem::size_of::<Params>() as u64,
       wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     );
-    let frame = buffer("frame", frame_bytes, storage);
+    let frame = buffer("frame", input_bytes, storage);
     let mask_in = buffer("mask_in", mask_values * 4, storage);
     let masks = buffer("masks", mask_values * 4 * 3, wgpu::BufferUsages::STORAGE);
     let small = buffer(

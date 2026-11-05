@@ -1,6 +1,12 @@
 //! Every command the webview may call is listed here and allowed one by one in
 //! `capabilities/default.json`. A command that is registered in `main.rs` but missing from either
 //! list is refused by Tauri, so a new command is a deliberate decision (docs/security-review.md C3).
+//!
+//! The app embeds the web build (`frontendDist`) without the files only browsers run
+//! ([`frontend::embed_without_web_only_files`]).
+
+#[path = "build/frontend.rs"]
+mod frontend;
 
 /// The commands of the shell, in the order of `main.rs`.
 const COMMANDS: &[&str] = &[
@@ -126,6 +132,9 @@ const COMMANDS: &[&str] = &[
 ];
 
 fn main() {
+  if let Err(error) = frontend::embed_without_web_only_files() {
+    panic!("failed to prepare the embedded web build: {error}");
+  }
   let manifest = tauri_build::AppManifest::new().commands(COMMANDS);
   if let Err(error) = tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest)) {
     // A build script has no other way to report; the message is the whole point.
