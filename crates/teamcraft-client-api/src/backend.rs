@@ -176,6 +176,11 @@ pub trait ChatBackend {
   fn screen_share_policy(&self) -> teamcraft_proto::ScreenSharePolicy {
     teamcraft_proto::ScreenSharePolicy::default()
   }
+  /// Whether voice messages may be recorded and how long (#204): the record button is there only
+  /// when they are on.
+  fn voice_message_policy(&self) -> teamcraft_proto::VoiceMessagePolicy {
+    teamcraft_proto::VoiceMessagePolicy::default()
+  }
 
   /// Whether the user follows the thread (followed threads feed the threads inbox).
   fn is_thread_followed(&self, _conversation: ConversationId, _thread: ThreadId) -> bool {

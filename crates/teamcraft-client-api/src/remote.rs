@@ -283,6 +283,10 @@ pub struct SecuritySnapshot {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_screen_share_policy: Option<teamcraft_proto::ScreenSharePolicy>,
+  /// Voice messages of the verified policy (#204); `None` before one was verified, or from an
+  /// older shell: the defaults.
+  #[serde(rename = "voice_message_policy", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_voice_message_policy: Option<teamcraft_proto::VoiceMessagePolicy>,
   /// The notetaker group of the verified policy (e2ee.md §8.2); `None` before a policy was
   /// verified (or from an older shell), which shows no notetaker controls.
   #[serde(rename = "notetaker", default, skip_serializing_if = "Option::is_none")]

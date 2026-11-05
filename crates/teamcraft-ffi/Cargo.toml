@@ -29,7 +29,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 teamcraft-client-api = { path = "../teamcraft-client-api" }
 teamcraft-crypto = { path = "../teamcraft-crypto" }
 # Calls: the native call driver (WebTransport, Opus, audio devices; AAudio on Android).
-teamcraft-media = { path = "../teamcraft-media", features = ["native"] }
+teamcraft-media = { path = "../teamcraft-media", features = ["native", "voice"] }
 teamcraft-proto.workspace = true
 # The chat bridge speaks the client-api JSON messages (as the desktop IPC does).
 serde.workspace = true

@@ -72,6 +72,9 @@ pub struct PendingFile {
   /// The video's length, from the sender's app; it goes into the attachment's details.
   #[serde(rename = "duration_ms", default, skip_serializing_if = "Option::is_none")]
   pub maybe_duration_ms: Option<u64>,
+  /// A voice message's waveform, from the sender's app; it goes into the attachment's details.
+  #[serde(rename = "waveform", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_waveform: Option<Base64Bytes>,
   /// A large file's upload in parts once announced: a restart continues at its next part.
   #[serde(rename = "parts", default, skip_serializing_if = "Option::is_none")]
   pub maybe_parts: Option<PartsUpload>,
@@ -390,6 +393,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           maybe_thumbnail: None,
           maybe_dimensions: None,
           maybe_duration_ms: None,
+          maybe_waveform: None,
         })
         .collect(),
     };
@@ -844,6 +848,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_thumbnail: maybe_thumbnail.map(Base64Bytes::new),
       maybe_dimensions,
       maybe_duration_ms: file.maybe_duration_ms,
+      maybe_waveform: file.maybe_waveform.clone(),
     };
     Ok((attachment, request, progress))
   }
@@ -1863,6 +1868,7 @@ mod tests {
         maybe_thumbnail: None,
         maybe_dimensions: None,
         maybe_duration_ms: None,
+        maybe_waveform: None,
       }],
     };
     save_pending_upload(&store, &upload).unwrap();
@@ -2064,6 +2070,7 @@ mod tests {
         maybe_thumbnail: None,
         maybe_dimensions: None,
         maybe_duration_ms: None,
+        maybe_waveform: None,
       };
       let json = serde_json::to_value(&file).unwrap();
       assert!(json.get("retry").is_none() && json.get("slot").is_none());

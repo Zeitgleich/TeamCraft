@@ -140,6 +140,10 @@ policy-backup-passphrase-hint = Off: members can't set or change a passphrase an
 policy-screen-share = Screen sharing
 policy-screen-share-uhd = Allow 4K screen sharing
 policy-screen-share-uhd-hint = People can choose 4K for a share (up to 16 Mbit/s per share and viewer, instead of up to 8 at 1440p). Off: every share is sent at up to 1440p.
+policy-voice-messages = Voice messages
+policy-voice-messages-enabled = Allow voice messages
+policy-voice-messages-enabled-hint = People can record a voice message in the composer. It is sent end-to-end encrypted like any audio file. Off: the record button is gone; audio files can still be attached.
+policy-voice-messages-max = Longest voice message
 policy-recovery = Organization recovery
 policy-recovery-hint = Lets admins restore access when someone loses all devices and their passkey.
 policy-recovery-members = Allow for members
@@ -207,7 +211,10 @@ policy-days = { $count ->
    *[other] { $count } days
   }
 policy-idle = Sign out after inactivity
-policy-minutes = { $count } minutes
+policy-minutes = { $count ->
+    [one] { $count } minute
+   *[other] { $count } minutes
+  }
 policy-sharing = Guests and messaging
 policy-guest-domains = Allowed guest email domains
 policy-history = Default history for new members

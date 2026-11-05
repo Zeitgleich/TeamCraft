@@ -847,6 +847,15 @@ pub fn screen_share_policy(store: &impl LocalStore) -> Option<teamcraft_proto::S
     .map(|state| state.policy.screen_share)
 }
 
+/// Voice messages under the verified policy (#204): whether they may be recorded and how long.
+/// `None` before a workspace was verified or when the state can't be read: the defaults.
+pub fn voice_message_policy(store: &impl LocalStore) -> Option<teamcraft_proto::VoiceMessagePolicy> {
+  records::get_json::<WorkspaceState>(store, Table::Workspace, crate::client::WORKSPACE_KEY)
+    .ok()
+    .flatten()
+    .map(|state| state.policy.voice_messages)
+}
+
 /// Which statuses the verified policy allows, for the UI's status menu and the people it shows.
 /// `None` before a workspace was verified or when the state can't be read; the server enforces
 /// the policy either way, so this only decides what the UI offers.

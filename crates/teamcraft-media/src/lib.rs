@@ -21,6 +21,7 @@ pub mod fallback_queue;
 pub mod fallback_socket;
 pub mod fragment;
 pub mod jitter;
+pub mod ogg_opus;
 #[cfg(feature = "message-sounds")]
 pub mod message_sounds;
 #[cfg(feature = "native")]
@@ -110,6 +111,10 @@ pub mod dave;
 pub mod effects;
 #[cfg(feature = "native")]
 mod sfu_address;
+#[cfg(feature = "voice")]
+pub mod voice_decode;
+#[cfg(feature = "voice")]
+pub mod voice_recording;
 #[cfg(feature = "native")]
 pub mod system_audio;
 #[cfg(all(feature = "pipewire", target_os = "linux"))]

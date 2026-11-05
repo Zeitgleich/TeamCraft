@@ -306,6 +306,7 @@ impl Setup {
         source: FileSource::Bytes { bytes: sample() },
         maybe_thumbnail: None,
         maybe_duration_ms: None,
+        maybe_waveform: None,
       }],
     });
     run_commands(&mut alice, &alice_ui).await;

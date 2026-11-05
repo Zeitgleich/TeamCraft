@@ -140,6 +140,10 @@ policy-backup-passphrase-hint = Aus: Mitglieder können keine Passphrase mehr fe
 policy-screen-share = Bildschirmfreigabe
 policy-screen-share-uhd = Bildschirmfreigabe in 4K erlauben
 policy-screen-share-uhd-hint = Personen können für eine Freigabe 4K wählen (bis zu 16 Mbit/s pro Freigabe und Zuschauer statt bis zu 8 bei 1440p). Aus: Jede Freigabe wird mit bis zu 1440p gesendet.
+policy-voice-messages = Sprachnachrichten
+policy-voice-messages-enabled = Sprachnachrichten erlauben
+policy-voice-messages-enabled-hint = Personen können im Eingabefeld eine Sprachnachricht aufnehmen. Sie wird wie jede Audiodatei Ende-zu-Ende-verschlüsselt gesendet. Aus: Die Aufnahmetaste fehlt; Audiodateien lassen sich weiterhin anhängen.
+policy-voice-messages-max = Längste Sprachnachricht
 policy-recovery = Organisations-Wiederherstellung
 policy-recovery-hint = Erlaubt Admins, den Zugang wiederherzustellen, wenn jemand alle Geräte und den Passkey verliert.
 policy-recovery-members = Für Mitglieder erlauben
@@ -207,7 +211,10 @@ policy-days = { $count ->
    *[other] { $count } Tage
   }
 policy-idle = Nach Inaktivität abmelden
-policy-minutes = { $count } Minuten
+policy-minutes = { $count ->
+    [one] { $count } Minute
+   *[other] { $count } Minuten
+  }
 policy-sharing = Gäste und Nachrichten
 policy-guest-domains = Erlaubte E-Mail-Domains für Gäste
 policy-history = Standardverlauf für neue Mitglieder

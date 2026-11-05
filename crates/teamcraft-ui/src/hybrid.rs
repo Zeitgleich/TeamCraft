@@ -414,6 +414,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.screen_share_policy()
   }
 
+  fn voice_message_policy(&self) -> teamcraft_proto::VoiceMessagePolicy {
+    self.chat.voice_message_policy()
+  }
+
   fn set_activity(&self, is_idle: bool) {
     self.chat.set_activity(is_idle);
   }

@@ -120,6 +120,11 @@ impl OpusEncoder {
     Ok(self.encoder.set_packet_loss_perc(i32::from(planned))?)
   }
 
+  /// The encoder's delay in 48 kHz samples: what a file's player drops from the start.
+  pub fn lookahead_samples(&mut self) -> Result<u16, OpusError> {
+    Ok(u16::try_from(self.encoder.get_lookahead()?.max(0)).unwrap_or(u16::MAX))
+  }
+
   /// Encodes one 20 ms frame (interleaved samples for stereo).
   pub fn encode(&mut self, pcm: &[i16]) -> Result<Vec<u8>, OpusError> {
     let expected = self.channels.frame_samples();

@@ -2674,6 +2674,16 @@ impl ChatBackend for RemoteChat {
       .unwrap_or_default()
   }
 
+  fn voice_message_policy(&self) -> teamcraft_proto::VoiceMessagePolicy {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .security
+      .maybe_voice_message_policy
+      .unwrap_or_default()
+  }
+
   fn presence_policy(&self) -> teamcraft_proto::PresencePolicy {
     self
       .mirror
@@ -2903,6 +2913,7 @@ mod tests {
         source: teamcraft_client_api::actions::FileSource::Bytes { bytes: vec![1] },
         maybe_thumbnail: None,
         maybe_duration_ms: None,
+        maybe_waveform: None,
       });
       let blank = outgoing("   ", id);
 

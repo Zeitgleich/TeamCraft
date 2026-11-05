@@ -22,6 +22,8 @@ const GUEST_NOTICE_SCHEDULES: [(&str, &[u32]); 4] = [
 ];
 const SPONSOR_EXTENSION_DAYS: [u32; 6] = [120, 30, 90, 180, 365, 0];
 const APPROVALS: [u8; 2] = [2, 3];
+/// The longest voice message offered, in minutes.
+const VOICE_MINUTES: [u16; 6] = [1, 2, 5, 10, 30, 60];
 
 /// Security policy: the signed settings that the server and every member client enforce.
 #[component]
@@ -30,6 +32,12 @@ pub fn SecuritySection() -> impl IntoView {
   let policy = use_policy_draft();
   let draft = policy.draft;
 
+  let voice_options = Signal::derive(move || {
+    VOICE_MINUTES
+      .into_iter()
+      .map(|minutes| (minutes.to_string(), i18n.t_count("policy-minutes", minutes as usize)))
+      .collect()
+  });
   let session_options = Signal::derive(move || {
     SESSION_HOURS
       .into_iter()
@@ -200,6 +208,29 @@ pub fn SecuritySection() -> impl IntoView {
                 ScreenShareResolution::Standard
               };
             })
+          }
+        />
+      </fieldset>
+
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-voice-messages")}</legend>
+        <CheckRow
+          name="voice_messages_enabled"
+          label=Signal::derive(move || i18n.t("policy-voice-messages-enabled"))
+          hint=Signal::derive(move || i18n.t("policy-voice-messages-enabled-hint"))
+          checked=Signal::derive(move || draft.get().voice_messages.enabled)
+          on_change=move |value| policy.edit(|p| p.voice_messages.enabled = value)
+        />
+        <SelectRow
+          id="policy-voice-max"
+          label=Signal::derive(move || i18n.t("policy-voice-messages-max"))
+          options=voice_options
+          selected=Signal::derive(move || draft.get().voice_messages.max_minutes.to_string())
+          disabled=Signal::derive(move || !draft.get().voice_messages.enabled)
+          on_select=move |value: String| {
+            if let Ok(minutes) = value.parse::<u16>() {
+              policy.edit(|p| p.voice_messages.max_minutes = minutes);
+            }
           }
         />
       </fieldset>

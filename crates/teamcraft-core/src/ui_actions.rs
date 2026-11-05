@@ -982,6 +982,7 @@ mod tests {
       maybe_thumbnail: Some(Base64Bytes::from(b"real".to_vec())),
       maybe_dimensions: None,
       maybe_duration_ms: None,
+      maybe_waveform: None,
     });
     StoredMessage {
       content: MessageContent::Text {
