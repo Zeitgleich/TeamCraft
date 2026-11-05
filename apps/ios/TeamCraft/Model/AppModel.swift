@@ -753,6 +753,24 @@ final class AppModel {
     await answer(.conversationFiles(conversationId: conversationId))?.files ?? []
   }
 
+  // MARK: The views of a space (#954), filtered by the core on this device
+
+  func files(spaceId: String) async -> [FileInfo] {
+    await answer(.spaceFiles(spaceId: spaceId))?.files ?? []
+  }
+
+  func savedItems(spaceId: String) async -> [SavedItem] {
+    await answer(.spaceSavedItems(spaceId: spaceId))?.items ?? []
+  }
+
+  func calls(spaceId: String) async -> [CallHistoryItem] {
+    await answer(.spaceCallHistory(spaceId: spaceId))?.calls ?? []
+  }
+
+  func roster(spaceId: String) async -> SpaceRoster? {
+    await answer(.spaceMembers(spaceId: spaceId))?.roster
+  }
+
   // MARK: Meetings
 
   /// The user's meetings that haven't ended, soonest first.

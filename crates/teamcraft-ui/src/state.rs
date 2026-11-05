@@ -167,7 +167,7 @@ pub enum MainView {
   Search,
   /// Messages the user saved for later.
   Saved,
-  /// Every file the user can see, across conversations.
+  /// The files the user can see, of the selected space or across conversations.
   Files,
   /// Mentions, reactions to the user's messages and replies in their threads.
   Activity,
@@ -811,6 +811,27 @@ impl AppState {
       },
     }
     true
+  }
+
+  /// The space the People, Calls, Meetings, Saved and Files views are scoped to (#954): the one the
+  /// sidebar is showing. `None` where no single space is selected, so they show everything: on
+  /// Home, in Activity, and in the grouped sidebar, which lists all spaces together.
+  pub fn maybe_scoped_space(&self) -> Option<SpaceId> {
+    let is_grouped = self
+      .settings
+      .prefs
+      .with(|prefs| prefs.sidebar.is_grouped_by_space);
+    (self.rail.get() == RailEntry::Space && !is_grouped).then(|| self.space.get())
+  }
+
+  /// The name of the space the views are scoped to, for their headers.
+  pub fn scoped_space_name(&self) -> Option<String> {
+    let space = self.maybe_scoped_space()?;
+    self
+      .read(|backend| backend.spaces())
+      .into_iter()
+      .find(|candidate| candidate.id == space)
+      .map(|found| found.name)
   }
 
   /// Whether switching to Home or a space reopens what was open there (the sidebar setting).
@@ -2567,6 +2588,103 @@ mod tests {
       state.backend_changed();
       assert_eq!(state.route(), Route::Threads);
       assert!(!state.take_follows_url(), "nothing was redirected");
+    }
+  }
+
+  /// #954: what the five views are scoped to follows the sidebar.
+  mod view_scope {
+    use teamcraft_client_api::space_scope::{
+      calls_of_space, files_of_everything, files_of_space, saved_items_of_space,
+    };
+
+    use super::*;
+
+    #[test]
+    fn a_selected_space_scopes_the_views_and_switching_keeps_the_view() {
+      let state = test_state();
+      let spaces = state.read(|backend| backend.spaces());
+      let (first, second) = (spaces[0].id, spaces[1].id);
+      state.open_space(first);
+      state.open_saved();
+      assert_eq!(state.maybe_scoped_space(), Some(first));
+      state.open_space(second);
+      assert_eq!(state.maybe_scoped_space(), Some(second));
+      assert_eq!(state.view.get(), MainView::Saved);
+      assert_eq!(state.scoped_space_name(), Some(spaces[1].name.clone()));
+    }
+
+    #[test]
+    fn home_activity_and_the_grouped_sidebar_show_everything() {
+      let state = test_state();
+      let (space, _) = first_channel(&state);
+      state.open_space(space);
+      state.open_chats();
+      assert_eq!(state.maybe_scoped_space(), None);
+      state.open_space(space);
+      state.open_activity();
+      assert_eq!(state.maybe_scoped_space(), None);
+      state.open_space(space);
+      state
+        .settings
+        .prefs
+        .update(|prefs| prefs.sidebar.is_grouped_by_space = true);
+      assert_eq!(state.maybe_scoped_space(), None);
+    }
+
+    #[test]
+    fn files_and_calls_of_a_space_are_those_of_its_conversations() {
+      let state = test_state();
+      state.read(|backend| {
+        let spaces = backend.spaces();
+        let with_files = spaces
+          .iter()
+          .find(|space| !files_of_space(backend, space.id).is_empty())
+          .expect("the mock has files in a channel");
+        let other = spaces
+          .iter()
+          .find(|space| space.id != with_files.id)
+          .expect("several spaces");
+        assert!(files_of_space(backend, other.id).is_empty());
+        assert_eq!(
+          files_of_space(backend, with_files.id).len(),
+          files_of_everything(backend).len()
+        );
+        // The mock's calls are all in a direct message, which is in no space.
+        assert!(!backend.call_history().is_empty());
+        assert!(
+          spaces
+            .iter()
+            .all(|space| calls_of_space(backend, space.id).is_empty())
+        );
+      });
+    }
+
+    #[test]
+    fn saved_messages_of_a_space_are_those_of_its_conversations() {
+      let state = test_state();
+      let spaces = state.read(|backend| backend.spaces());
+      let (space, other) = (spaces[0].id, spaces[1].id);
+      let (conversation, message) = state.read(|backend| {
+        backend
+          .space_conversations(space)
+          .into_iter()
+          .find_map(|conversation| {
+            let found = backend.messages(conversation.id, 0, 1).into_iter().next()?;
+            Some((conversation.id, found.id))
+          })
+          .expect("the mock's first space has messages")
+      });
+      state.write(|backend| backend.set_saved(conversation, message, true));
+      state.read(|backend| {
+        let ids = |space| -> Vec<MessageId> {
+          saved_items_of_space(backend, space)
+            .into_iter()
+            .map(|item| item.message.id)
+            .collect()
+        };
+        assert!(ids(space).contains(&message));
+        assert!(!ids(other).contains(&message));
+      });
     }
   }
 

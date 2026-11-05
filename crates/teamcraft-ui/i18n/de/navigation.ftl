@@ -105,6 +105,7 @@ saved-title = Gespeicherte Elemente
 saved-open = Unterhaltung öffnen
 saved-empty = Nutze „Für später speichern“ im Menü einer Nachricht.
 saved-empty-title = Noch nichts gespeichert
+saved-space-empty = Nachrichten, die du aus den Kanälen dieses Space speicherst, erscheinen hier.
 sidebar-saved = Gespeichert
 
 # Profiles, people and groups (v1 REST UI)

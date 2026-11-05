@@ -449,6 +449,7 @@ mod tests {
       has_lobby: false,
       organizer_user_id: id_from_raw(2),
       conversation_id: id_from_raw::<ConversationId>(9),
+      maybe_space: None,
       join_url: "https://chat.example.com/meeting/1".into(),
       maybe_recurrence: None,
       is_occurrence_cancelled: false,

@@ -11,6 +11,17 @@ use crate::i18n::I18n;
 use crate::model::{Conversation, ConversationKind, TimestampMs};
 use crate::state::use_app_state;
 
+/// Under a page's title: the space the page is scoped to, so the shorter list explains itself (#954).
+#[component]
+pub fn ScopedSpaceName() -> impl IntoView {
+  let state = use_app_state();
+  move || {
+    state
+      .scoped_space_name()
+      .map(|name| view! { <span class="panel-subtitle" translate="no">{name}</span> })
+  }
+}
+
 /// The picture of a conversation: the other person for a DM (with presence), a group icon for
 /// everything else.
 #[component]

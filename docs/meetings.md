@@ -22,6 +22,7 @@ the change, and people taken off the list are removed from the group.
 |--------------------|--------------------------------------------------------------------------------------------------|
 | Meeting            | `scheduled` (planned, in the calendar, mailed) or `instant` ("Meet now", shared by link)         |
 | Meeting chat       | A conversation of kind `meeting` (no space). Organizer = admin, invited users = members          |
+| Space of a meeting | The space it was scheduled or started in, if the organizer is a member of it (`space_id`, #954)  |
 | Invitee            | A TeamCraft user or an external person identified by e-mail; carries the answer (`rsvp`)         |
 | Meeting link       | `<base>/meeting/<token>#v=<fingerprint>` for everybody; lets the holder knock (see "Links")       |
 | Invite (guest)     | A personal one-time join link for somebody without an account (`meeting_invites`)                |

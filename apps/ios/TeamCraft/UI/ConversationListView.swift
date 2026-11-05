@@ -18,6 +18,8 @@ struct ConversationListView: View {
   @State private var isShowingFilters = false
   @State private var filters = SearchFilters()
   @State private var maybeBrowseTab: BrowseView.Tab?
+  /// The space whose people, calls, meetings, saved messages and files are open (#954).
+  @State private var maybeSpaceViews: SpaceChoice?
   /// DMs live outside spaces (as on desktop), so they have their own tab.
   @State private var tab: ChatTab = .home
   @State private var homeChip: HomeFilter = .all
@@ -135,6 +137,11 @@ struct ConversationListView: View {
       }
     }
     .sheet(isPresented: $isShowingFilters) { SearchFiltersView(filters: $filters) }
+    .sheet(item: $maybeSpaceViews) { choice in
+      SpaceViewsView(
+        account: account, spaces: spaceChoices(conversations), initialSpaceId: choice.id
+      ) { conversationId in selection = conversationId }
+    }
     .sheet(item: $maybeBrowseTab) { tab in
       BrowseView(tab: tab) { conversationId in selection = conversationId }
     }
@@ -189,7 +196,7 @@ struct ConversationListView: View {
         }
         ForEach(shownSections) { section in
           Section(
-            header: Text(title(of: section.title))
+            header: sectionHeader(section)
               .contextMenu { spaceMenu(for: section) }
               .task(id: section.id) { await loadSpaceMenu(for: section) }
           ) {
@@ -390,6 +397,25 @@ struct ConversationListView: View {
   private func loadLeaveChoice(for conversation: ConversationItem) async {
     guard !conversation.isDirect else { return }
     leaveChoices[conversation.id] = await model.conversationLeaveChoice(conversation.id)
+  }
+
+  /// A section's title; a space's opens the views of that space.
+  @ViewBuilder
+  private func sectionHeader(_ section: ConversationSection) -> some View {
+    if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
+      Button {
+        maybeSpaceViews = SpaceChoice(id: spaceId, name: name)
+      } label: {
+        HStack {
+          Text(title(of: section.title))
+          Spacer()
+          Image(systemName: "chevron.right")
+        }
+      }
+      .accessibilityHint(Text("space_views_open"))
+    } else {
+      Text(title(of: section.title))
+    }
   }
 
   /// Mute (its channels follow), mark all read and leave: the menu of a space's header.

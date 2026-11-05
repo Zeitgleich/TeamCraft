@@ -21,7 +21,7 @@ use teamcraft_proto::{
   CreateInstantMeetingRequest, CreateMeetingRequest, GatewayEvent, HistoryPolicy, ListMeetingsQuery,
   ListMeetingsResponse, MeetingAttendeeResponse, MeetingId, MeetingInvitee, MeetingKind, MeetingRecurrence,
   MeetingReplyResponse, MeetingResponse, MeetingStatus, RecurrenceFrequency, RestoreMeetingRequest,
-  RsvpStatus, SetRsvpRequest, UnixMillis, UpdateMeetingRequest, UserId, Weekday,
+  RsvpStatus, SetRsvpRequest, SpaceId, UnixMillis, UpdateMeetingRequest, UserId, Weekday,
 };
 use time::{Duration, OffsetDateTime, PrimitiveDateTime};
 use tracing::warn;
@@ -74,6 +74,7 @@ pub async fn create_meeting(
     .map(|recurrence| recurrence_rule(recurrence, starts_at))
     .transpose()?;
   let attendees = resolve_invitees(state, caller.user.id, &request.invitees).await?;
+  let maybe_space = own_space(state, caller, request.maybe_space).await?;
 
   let id: MeetingId = state.next_id()?;
   let uid = service.uid(id);
@@ -94,6 +95,7 @@ pub async fn create_meeting(
       maybe_participants_key: None,
       is_integration: false,
     },
+    maybe_space,
     title: &title,
     maybe_description: maybe_description.as_deref(),
     starts_at,
@@ -145,6 +147,7 @@ pub async fn create_instant_meeting(
     .map(|user_id| MeetingInvitee::User { user_id: *user_id })
     .collect();
   let attendees = resolve_invitees(state, caller.user.id, &invitees).await?;
+  let maybe_space = own_space(state, caller, request.maybe_space).await?;
   let now = OffsetDateTime::now_utc();
   let id: MeetingId = state.next_id()?;
   let uid = service.uid(id);
@@ -167,6 +170,7 @@ pub async fn create_instant_meeting(
         maybe_participants_key: None,
         is_integration: false,
       },
+      maybe_space,
       title: &title,
       maybe_description: None,
       starts_at: now,
@@ -184,6 +188,22 @@ pub async fn create_instant_meeting(
     announce(state, &meeting).await?;
   }
   respond(state, service, &meeting, Vec::new()).await
+}
+
+/// The space a new meeting belongs to: the asked one if the caller is a member of it. Anything else
+/// lists the meeting outside spaces rather than refusing it: somebody who is in a space's moved
+/// channel but not in the space can still schedule from there, and a stranger's guess at an ID learns
+/// nothing and links nothing.
+async fn own_space(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  maybe_space: Option<SpaceId>,
+) -> Result<Option<SpaceId>, ApiError> {
+  let Some(space) = maybe_space else {
+    return Ok(None);
+  };
+  let maybe_role = state.database.space_role(space, caller.user.id).await?;
+  Ok(maybe_role.map(|_| space))
 }
 
 /// One meeting, for the organizer, invited users and everybody in the meeting chat.
@@ -1672,6 +1692,7 @@ async fn respond_with_link(
     has_lobby: meeting.has_lobby,
     organizer_user_id: meeting.organizer,
     conversation_id: meeting.conversation,
+    maybe_space: meeting.maybe_space,
     join_url,
     maybe_recurrence: meeting
       .maybe_recurrence_rule

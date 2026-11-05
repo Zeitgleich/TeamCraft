@@ -1,6 +1,8 @@
-//! The people directory (everyone in the workspace, with profile facts) and user groups.
+//! The people directory (with profile facts) and user groups. Inside a space it lists the members of
+//! that space, as far as the user may see them (#954); elsewhere everyone in the workspace.
 
 use leptos::prelude::*;
+use teamcraft_client_api::backend::Backend;
 use teamcraft_client_api::list_load::{ListLoad, LoadingList, REQUEST_DEADLINE_MS};
 use teamcraft_proto::{
   CreateUserGroupRequest, ErrorCode, ListUserGroupsResponse, Permission, UserGroupDetailResponse,
@@ -15,13 +17,14 @@ use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::list_status::{ListPlaceholder, ListStatus};
+use crate::components::page::ScopedSpaceName;
 use crate::components::skeleton::ListSkeleton;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::feedback::report_failure;
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::use_i18n;
-use crate::model::{DeviceSetup, User, UserId};
+use crate::model::{DeviceSetup, PresenceStatus, SpaceMember, SpaceRoster, User, UserId, raw_id};
 use crate::profiles::use_profiles;
 use crate::reactive::{SetIfAlive, UpdateIfAlive, use_debounced};
 use crate::rest::RestClient;
@@ -79,7 +82,10 @@ pub fn DirectoryView() -> impl IntoView {
     <section class="directory page-view" aria-label=move || i18n.t("directory-title")>
       <header class="panel-header">
         <CompactBack />
-        <div class="panel-title"><h1>{move || i18n.t("directory-title")}</h1></div>
+        <div class="panel-title">
+          <h1>{move || i18n.t("directory-title")}</h1>
+          <ScopedSpaceName />
+        </div>
         <div class="segmented" role="tablist" aria-label=move || i18n.t("directory-title") on:keydown=on_keydown>
           <SlidingIndicator />
           {DirectoryTab::ALL
@@ -119,9 +125,34 @@ fn PeopleList() -> impl IntoView {
   let directory_query = use_debounced(filter, DIRECTORY_DEBOUNCE_MS);
   // Empty: everybody; otherwise only people of this organization.
   let organization = RwSignal::new(String::new());
+  let scope = Memo::new(move |_| state.maybe_scoped_space());
+  // Inside a space the roster answers; the server's directory isn't asked.
+  let maybe_roster = Memo::new(move |_| {
+    let maybe_space = scope.get();
+    maybe_space.map(|space| state.read(|backend| backend.space_members(space)))
+  });
+  // Each space on its own: what was picked in one may not exist in the next. The roster shown first
+  // is the one this device has; the fresh one follows like any store update.
+  Effect::new(move |_| {
+    let maybe_space = scope.get();
+    organization.set(String::new());
+    if let Some(space) = maybe_space {
+      untrack(|| state.write(|backend| backend.refresh_space_roster(space)));
+    }
+  });
+  let scoped_people = Memo::new(move |_| {
+    let Some(SpaceRoster::Loaded(members)) = maybe_roster.get() else {
+      return Vec::new();
+    };
+    state.read(|backend| people_of_roster(backend, &members))
+  });
   let organizations = Memo::new(move |_| {
-    let mut names: Vec<String> = state
-      .read(|backend| backend.users())
+    let known = if scope.get().is_some() {
+      scoped_people.get()
+    } else {
+      state.read(|backend| backend.users())
+    };
+    let mut names: Vec<String> = known
       .into_iter()
       .filter(|user| !user.is_bot)
       .filter_map(|user| user.maybe_organization)
@@ -136,7 +167,11 @@ fn PeopleList() -> impl IntoView {
     let query = directory_query.get();
     // Who the app knows and the server's directory for the text (one page of it, never everybody):
     // colleagues who share no space or conversation with the user yet are found too.
-    let mut all: Vec<User> = state.read(|backend| backend.search_people(query.trim()));
+    let mut all: Vec<User> = if scope.get().is_some() {
+      scoped_people.get()
+    } else {
+      state.read(|backend| backend.search_people(query.trim()))
+    };
     all.retain(|user| !user.is_bot);
     if !selected.is_empty() {
       all.retain(|user| user.maybe_organization.as_deref() == Some(selected.as_str()));
@@ -171,20 +206,35 @@ fn PeopleList() -> impl IntoView {
   let status = ListStatus::new(
     move || people.with(Vec::is_empty),
     move || {
+      if let Some(roster) = maybe_roster.get() {
+        return match roster {
+          SpaceRoster::Loading => ListLoad::Loading,
+          SpaceRoster::Hidden | SpaceRoster::Loaded(_) => ListLoad::Ready,
+        };
+      }
       let query = directory_query.get();
       if filter.with(|typed| typed.trim() != query.trim()) {
         return ListLoad::Loading;
       }
       state.read(|backend| backend.list_load(&LoadingList::directory(&query)))
     },
-    directory_query.into(),
+    Signal::derive(move || format!("{:?}/{}", scope.get(), directory_query.get())),
     REQUEST_DEADLINE_MS,
   );
   let on_retry = Callback::new(move |()| {
     status.restart();
+    if let Some(space) = scope.get_untracked() {
+      state.write(|backend| backend.refresh_space_roster(space));
+      return;
+    }
     let list = LoadingList::directory(&directory_query.get_untracked());
     state.write(|backend| backend.retry_list(&list));
   });
+  let empty_body_key = move || match maybe_roster.get() {
+    None => "directory-empty",
+    Some(SpaceRoster::Hidden) => "directory-space-hidden",
+    Some(SpaceRoster::Loading | SpaceRoster::Loaded(_)) => "directory-space-empty",
+  };
   view! {
     <div class="page-tools">
       <label class="page-search">
@@ -221,9 +271,45 @@ fn PeopleList() -> impl IntoView {
         on_retry=on_retry
         as_item=true
       >
-        <EmptyState icon=IconName::Users title_key="directory-empty-title" body_key="directory-empty" as_item=true />
+        {move || {
+          let body_key = empty_body_key();
+          view! { <EmptyState icon=IconName::Users title_key="directory-empty-title" body_key=body_key as_item=true /> }
+        }}
       </ListPlaceholder>
     </ul>
+  }
+}
+
+/// The people of a space's roster. Somebody this device knows comes with what it knows (presence,
+/// organization); the roster's own facts name the rest. Deactivated accounts stay out, as in every
+/// people list.
+fn people_of_roster(backend: &dyn Backend, members: &[SpaceMember]) -> Vec<User> {
+  members
+    .iter()
+    .map(|member| {
+      backend
+        .user(member.user)
+        .unwrap_or_else(|| user_of_member(member))
+    })
+    .filter(|user| !user.is_deactivated)
+    .collect()
+}
+
+fn user_of_member(member: &SpaceMember) -> User {
+  User {
+    id: member.user,
+    username: String::new(),
+    display_name: member.display_name.clone(),
+    presence: PresenceStatus::Offline,
+    maybe_custom_status: None,
+    avatar_hue: (raw_id(member.user) % 360) as u16,
+    is_guest: member.is_guest,
+    is_bot: member.is_bot,
+    maybe_organization: None,
+    device_setup: DeviceSetup::default(),
+    is_deactivated: false,
+    is_deleted: false,
+    maybe_email: None,
   }
 }
 

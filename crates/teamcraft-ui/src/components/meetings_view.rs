@@ -24,6 +24,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::meeting_controls::{HostControls, RsvpList};
 use crate::components::message_actions::copy_text;
 use crate::components::modal::Modal;
+use crate::components::page::ScopedSpaceName;
 use crate::components::pending_button::PendingButton;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::feedback::PendingAction;
@@ -34,7 +35,7 @@ use crate::meetings::{
   STATUS_NOT_FOUND, ScheduleForm, SeriesEnd, WEEKDAYS, attending_users, hosts_lobby, is_over, my_rsvp,
   with_verifier,
 };
-use crate::model::{ConversationId, UserId};
+use crate::model::{ConversationId, SpaceId, UserId};
 use crate::reactive::{SetIfAlive, UpdateIfAlive, pause, use_interval_while_visible};
 use crate::route::MeetingHandle;
 use crate::state::{AppState, Overlay, ToastAction, use_app_state};
@@ -63,6 +64,12 @@ pub fn MeetingsView() -> impl IntoView {
   let i18n = use_i18n();
   let hub = expect_context::<MeetingsHub>();
   let me = state.me().id;
+  let scope = Memo::new(move |_| state.maybe_scoped_space());
+  // The server lists the user's meetings; which of them belong to the space is decided here.
+  let meetings = Memo::new(move |_| {
+    let maybe_space = scope.get();
+    hub.meetings.with(|all| meetings_in_scope(all, maybe_space))
+  });
   let reload = move || {
     spawn_local(async move {
       hub.refresh(me, now_ms()).await;
@@ -82,7 +89,11 @@ pub fn MeetingsView() -> impl IntoView {
       let client = hub.client();
       let key = Some(IdempotencyKey::random());
       if let Some(meeting) = hub
-        .run(me, now_ms(), client.start_instant(None, Vec::new(), key))
+        .run(
+          me,
+          now_ms(),
+          client.start_instant(None, Vec::new(), scope.get_untracked(), key),
+        )
         .await
       {
         // The server makes the chat without encryption; an instant meeting invites nobody.
@@ -134,6 +145,7 @@ pub fn MeetingsView() -> impl IntoView {
         <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("meetings-title")}</h1>
+          <ScopedSpaceName />
         </div>
         // Guests join meetings but create none (the server refuses them, docs/meetings.md).
         <Show when=move || can_create fallback=|| ()>
@@ -160,7 +172,7 @@ pub fn MeetingsView() -> impl IntoView {
       <LinkVisitBanner hub=hub visit=visit />
       <div class="meetings-list panel-scroll">
         <For
-          each=move || meeting_days(&hub.meetings.get(), now_ms())
+          each=move || meetings.with(|shown| meeting_days(shown, now_ms()))
           key=|day| (day.day, day.meetings.iter().map(|meeting| (meeting.id, meeting.status.clone(), meeting.attendees.len())).collect::<Vec<_>>())
           let:day
         >
@@ -169,20 +181,34 @@ pub fn MeetingsView() -> impl IntoView {
             {day.meetings.into_iter().map(|meeting| view! { <MeetingCard meeting=meeting /> }).collect_view()}
           </ul>
         </For>
-        <Show when=move || hub.is_loaded.get() && hub.meetings.get().is_empty() fallback=|| ()>
-          <EmptyState
-            icon=IconName::Calendar
-            title_key="meetings-empty-title"
-            body_key="meetings-empty"
-            maybe_action=can_create.then(|| EmptyAction {
-              label_key: "meetings-schedule",
-              on_click: Callback::new(move |()| state.overlay.set(Overlay::ScheduleMeeting)),
-            })
-          />
+        <Show when=move || hub.is_loaded.get() && meetings.with(Vec::is_empty) fallback=|| ()>
+          {move || {
+            let body_key = if scope.get().is_some() { "meetings-space-empty" } else { "meetings-empty" };
+            view! {
+              <EmptyState
+                icon=IconName::Calendar
+                title_key="meetings-empty-title"
+                body_key=body_key
+                maybe_action=can_create.then(|| EmptyAction {
+                  label_key: "meetings-schedule",
+                  on_click: Callback::new(move |()| state.overlay.set(Overlay::ScheduleMeeting)),
+                })
+              />
+            }
+          }}
         </Show>
       </div>
     </section>
   }
+}
+
+/// The meetings a page shows: those of the space it is scoped to, or all of them outside spaces.
+fn meetings_in_scope(meetings: &[MeetingResponse], maybe_space: Option<SpaceId>) -> Vec<MeetingResponse> {
+  meetings
+    .iter()
+    .filter(|meeting| maybe_space.is_none() || meeting.maybe_space == maybe_space)
+    .cloned()
+    .collect()
 }
 
 /// Meetings of one local day, for the day headings.
@@ -1396,9 +1422,11 @@ pub fn ScheduleMeetingDialog(
     }
     match form.get_untracked().to_request(now) {
       Err(found) => refuse(found),
-      Ok(request) => {
+      Ok(mut request) => {
         errors.set(Vec::new());
         is_saving.set(true);
+        // Listed in the space it is scheduled from, so it shows where the user just was.
+        request.maybe_space = untrack(|| state.maybe_scoped_space());
         let has_notetaker = form.get_untracked().maybe_notetaker.is_some();
         spawn_local(async move {
           let client = hub.client();
@@ -1938,6 +1966,20 @@ mod tests {
   }
 
   #[test]
+  fn a_space_lists_its_own_meetings_and_outside_spaces_all_show() {
+    let space: SpaceId = id_from_raw(5);
+    let mut of_space = fixture(1, 1_000);
+    of_space.maybe_space = Some(space);
+    let mut of_other = fixture(2, 2_000);
+    of_other.maybe_space = Some(id_from_raw(6));
+    let without = fixture(3, 3_000);
+    let all = vec![of_space, of_other, without];
+    let ids = |shown: Vec<MeetingResponse>| shown.iter().map(|meeting| meeting.id).collect::<Vec<_>>();
+    assert_eq!(ids(meetings_in_scope(&all, Some(space))), vec![all[0].id]);
+    assert_eq!(ids(meetings_in_scope(&all, None)).len(), 3);
+  }
+
+  #[test]
   fn meetings_are_grouped_by_local_day() {
     assert!(meeting_days(&[], 0).is_empty());
     let day = 1_792_540_800_000;
@@ -1964,6 +2006,7 @@ mod tests {
       has_lobby: true,
       organizer_user_id: id_from_raw(1),
       conversation_id: id_from_raw(9),
+      maybe_space: None,
       join_url: String::new(),
       maybe_recurrence: None,
       is_occurrence_cancelled: false,

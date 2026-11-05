@@ -107,6 +107,8 @@ hover-card-profile = View profile
 # Home pages (issue #585)
 directory-you = You
 directory-empty-title = Nobody found
+directory-space-empty = Nobody in this space matches. Try a different name, title or department.
+directory-space-hidden = Only members of a space can see who is in it.
 directory-loading = Looking for people
 groups-empty-title = No user groups yet
 groups-error-handle = Use 2 to 32 lower-case letters, digits, - or _.

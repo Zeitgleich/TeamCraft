@@ -1444,6 +1444,18 @@ impl ChatAction {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChatQuery {
+  /// The saved messages of one space, by the shared rule ([`crate::space_scope`]).
+  SpaceSavedItems {
+    space: SpaceId,
+  },
+  /// The newest files of one space's conversations, by the shared rule.
+  SpaceFiles {
+    space: SpaceId,
+  },
+  /// The calls in one space's conversations, by the shared rule.
+  SpaceCallHistory {
+    space: SpaceId,
+  },
   MessageExtras {
     conversation: ConversationId,
     messages: Vec<MessageId>,
@@ -1810,6 +1822,9 @@ impl ChatQuery {
       Self::SavedItems => ChatAnswer::SavedItems {
         items: backend.saved_items(),
       },
+      Self::SpaceSavedItems { space } => ChatAnswer::SavedItems {
+        items: crate::space_scope::saved_items_of_space(backend, space),
+      },
       Self::BackgroundImages => ChatAnswer::BackgroundImages {
         images: backend.background_images(),
       },
@@ -1889,6 +1904,9 @@ impl ChatQuery {
       },
       Self::ConversationFiles { conversation } => ChatAnswer::Files {
         files: backend.conversation_files(conversation),
+      },
+      Self::SpaceFiles { space } => ChatAnswer::Files {
+        files: crate::space_scope::files_of_space(backend, space),
       },
       Self::ConversationMedia {
         conversation,
@@ -2000,6 +2018,9 @@ impl ChatQuery {
       Self::CallHistory => ChatAnswer::CallHistory {
         calls: backend.call_history(),
       },
+      Self::SpaceCallHistory { space } => ChatAnswer::CallHistory {
+        calls: crate::space_scope::calls_of_space(backend, space),
+      },
       Self::ListLoad { list } => ChatAnswer::ListLoad {
         load: backend.list_load(&list),
       },
@@ -2018,6 +2039,32 @@ impl ChatQuery {
 mod tests {
   use super::*;
   use crate::model::id_from_raw;
+
+  /// The mobile apps write these by hand (#954); the names are part of the bridge.
+  #[test]
+  fn queries_of_a_space_read_as_the_apps_write_them() {
+    let space = id_from_raw(7);
+    for (json, expected) in [
+      (
+        r#"{"kind":"space_saved_items","space":"7"}"#,
+        ChatQuery::SpaceSavedItems { space },
+      ),
+      (
+        r#"{"kind":"space_files","space":"7"}"#,
+        ChatQuery::SpaceFiles { space },
+      ),
+      (
+        r#"{"kind":"space_call_history","space":"7"}"#,
+        ChatQuery::SpaceCallHistory { space },
+      ),
+    ] {
+      let query: ChatQuery = serde_json::from_str(json).unwrap();
+      assert_eq!(
+        serde_json::to_string(&query).unwrap(),
+        serde_json::to_string(&expected).unwrap()
+      );
+    }
+  }
 
   #[test]
   fn changes_that_live_in_the_outbox_answer_before_the_network() {

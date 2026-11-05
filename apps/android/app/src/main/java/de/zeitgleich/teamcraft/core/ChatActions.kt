@@ -96,6 +96,10 @@ object ChatActions {
 
   fun markRead(conversation: String) = action("mark_read") { put("conversation", conversation) }
 
+  fun refreshSpaceRoster(space: String) = action("refresh_space_roster") { put("space", space) }
+
+  fun refreshCallHistory() = action("refresh_call_history") {}
+
   /** The reactions to these own messages were on screen (or jumped to): seen, on every device. */
   fun markReactionsSeen(conversation: String, messages: List<String>) = action("mark_reactions_seen") {
     put("conversation", conversation)
@@ -248,6 +252,14 @@ object ChatQueries {
   fun pinned(conversation: String) = query("pinned_messages") { put("conversation", conversation) }
 
   fun savedItems() = query("saved_items") {}
+
+  fun spaceSavedItems(space: String) = query("space_saved_items") { put("space", space) }
+
+  fun spaceFiles(space: String) = query("space_files") { put("space", space) }
+
+  fun spaceCallHistory(space: String) = query("space_call_history") { put("space", space) }
+
+  fun spaceMembers(space: String) = query("space_members") { put("space", space) }
 
   fun permalink(conversation: String, message: String) = query("permalink") {
     put("conversation", conversation)

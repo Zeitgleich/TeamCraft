@@ -87,6 +87,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
@@ -239,6 +240,7 @@ fun ChatListScreen(
         )
       },
       spaceMenu = { spaceId, name, isOpen, onDismiss -> SpaceEntryMenu(viewModel, spaceId, name, isOpen, onDismiss) },
+      onOpenSpace = { spaceId -> onNavigate("space/$spaceId") },
     ),
     maybeSelectionBar = if (selected.isEmpty()) {
       null
@@ -347,6 +349,8 @@ internal class ListState(
   val conversationMenu: @Composable (ConversationItem, Boolean, () -> Unit) -> Unit = { _, _, _ -> },
   /** The long-press menu of a space header: id, name, whether it is open, how to close it. */
   val spaceMenu: @Composable (String, String, Boolean, () -> Unit) -> Unit = { _, _, _, _ -> },
+  /** Opens the people, calls, meetings, saved messages and files of a space (#954). */
+  val onOpenSpace: (String) -> Unit = {},
 ) {
   val lastActivity: Map<String, Long> get() = previews.mapValues { it.value.preview.sentAt }
 }
@@ -505,7 +509,7 @@ private fun LazyListScope.conversationRows(
   }
 }
 
-/** A section's header; a space's also opens the space menu on a long-press (#1105). */
+/** A section's header; a space's opens the views of that space, and its menu on a long-press (#1105). */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SectionHeaderWithMenu(section: Section, list: ListState) {
@@ -519,7 +523,8 @@ private fun SectionHeaderWithMenu(section: Section, list: ListState) {
   var isOpen by remember { mutableStateOf(false) }
   Box(
     Modifier.fillMaxWidth().combinedClickable(
-      onClick = {},
+      onClickLabel = stringResource(R.string.space_views_open),
+      onClick = { list.onOpenSpace(maybeSpaceId) },
       onLongClickLabel = stringResource(R.string.entry_space_menu),
       onLongClick = {
         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -528,6 +533,12 @@ private fun SectionHeaderWithMenu(section: Section, list: ListState) {
     ),
   ) {
     SectionHeader(title)
+    Icon(
+      Icons.AutoMirrored.Filled.KeyboardArrowRight,
+      contentDescription = null,
+      tint = MaterialTheme.colorScheme.onSurfaceVariant,
+      modifier = Modifier.align(Alignment.CenterEnd).padding(end = Spacing.m),
+    )
     list.spaceMenu(maybeSpaceId, title.name, isOpen) { isOpen = false }
   }
 }

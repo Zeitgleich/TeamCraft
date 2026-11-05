@@ -152,6 +152,7 @@ host-remove = Entfernen
 # Startseiten (Issue #585)
 meetings-live = Läuft
 meetings-empty-title = Keine Meetings geplant
+meetings-space-empty = Meetings, die in diesem Space geplant werden, erscheinen hier.
 guest-own-code = Dein Code
 guest-organizer-code = Code der Organisatorin oder des Organisators
 guest-codes-hint = Wer sichergehen will, vergleicht: Die Organisatorin oder der Organisator sieht deinen Code neben deinem Namen, ihre oder seine App zeigt den eigenen Code. Weicht einer ab, ist jemand dazwischen: Verlasse das Meeting.
