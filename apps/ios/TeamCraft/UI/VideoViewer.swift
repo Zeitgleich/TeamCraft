@@ -42,8 +42,10 @@ struct VideoViewer: View {
       dismiss()
     }
     .onChange(of: scenePhase) { _, phase in
-      guard phase == .background, lock.isEnabled, case .playing(let player) = self.phase else { return }
-      player.pause()
+      guard case .playing(let player) = self.phase else { return }
+      if phase == .background, lock.isEnabled { player.pause() }
+      // Back from a start held in the background: play has its sound once the user presses it.
+      if phase == .active, !hasAudioSession { startAudioSession() }
     }
     // A call goes first: its screen shows, and the video doesn't talk over it.
     .onChange(of: model.calls.activeCall?.id) { _, maybeCall in
@@ -175,9 +177,14 @@ struct VideoViewer: View {
     let player = AVPlayer(playerItem: item)
     // The decrypted video stays on this device: no AirPlay to whatever is on the network.
     player.allowsExternalPlayback = false
-    startAudioSession()
     phase = .playing(player)
-    player.play()
+    // A download that ended in the background with the lock on doesn't start talking: audio keeps
+    // the app running there. It waits, paused, for the user. The application's state, as `scenePhase`
+    // read through this captured view can be an old value.
+    if !(lock.isEnabled && UIApplication.shared.applicationState == .background) {
+      startAudioSession()
+      player.play()
+    }
     for await status in item.publisher(for: \.status).values where status == .failed {
       player.pause()
       phase = .unplayable(url)
@@ -269,6 +276,13 @@ enum VideoFileCheck {
     defer { try? handle.close() }
     guard let head = try? handle.read(upToCount: headBytes) else { return true }
     return isPlaylist(fileExtension: url.pathExtension, mediaType: mediaType, head: head)
+  }
+
+  /// The URL to hand to QuickLook, which plays videos through the same system code; `nil` for a
+  /// playlist, whatever type its message gave it.
+  static func previewURL(path: String, mediaType: String) -> URL? {
+    let url = URL(fileURLWithPath: path)
+    return isPlaylist(at: url, mediaType: mediaType) ? nil : url
   }
 
   static func isPlaylist(fileExtension: String, mediaType: String, head: Data) -> Bool {
