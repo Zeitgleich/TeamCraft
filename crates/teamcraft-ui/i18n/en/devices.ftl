@@ -81,7 +81,7 @@ enroll-secret-hint = The key from your recovery kit (8 groups of 4 characters), 
 enroll-key-typo = This looks like a recovery key, but a character is wrong. Compare it with your recovery kit.
 enroll-kit-read = The recovery key was read from the file.
 enroll-restore-device = Restore on this computer
-enroll-restore-device-hint = This computer kept a key for your account in its keychain, so you don't need your recovery kit here.
+enroll-restore-device-hint = This computer kept a key for your account, so you don't need your recovery kit here.
 
 ## Recovery kit (e2ee.md §6.5)
 kit-setup-intro = TeamCraft made a recovery key for you. Save the recovery kit: print it or keep it in your password manager. You only need it if you lose all your devices.

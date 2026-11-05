@@ -916,7 +916,7 @@ struct Core {
   maybe_open_retry: Option<OpenRetry>,
   /// The unreadable database was set aside: setup explains why it is asked for again.
   was_store_set_aside: bool,
-  /// Whether the OS keychain holds the account's backup key (e2ee.md §6.5.6), read once.
+  /// Whether this computer keeps the account's backup key (e2ee.md §6.5.6), read once.
   maybe_has_kept_backup_key: Option<bool>,
   /// The UI's snapshot, rebuilt per conversation from what the store's writes touched (#246).
   snapshots: SnapshotCache,
@@ -1336,15 +1336,16 @@ impl Core {
     status
   }
 
-  /// Keeps the account's backup key (e2ee.md §6.5.6). A start with the same key touches nothing;
-  /// without a keychain the recovery kit stays the way back, so a failure is only logged.
+  /// Keeps the account's backup key in the sealed files of local secrets (e2ee.md §6.5.6). A start
+  /// with the same key writes nothing; the recovery kit stays the way back, so a failure is only
+  /// logged.
   fn keep_backup_key(&mut self, client: &Client<Api, Store>) {
     let Some((vault, account)) = self.key.vault() else {
       return;
     };
     match vault.keep_backup_key(account, &client.backup_secret()) {
       Ok(()) => self.maybe_has_kept_backup_key = Some(true),
-      Err(error) => tracing::warn!(%error, "could not keep the backup key in the OS keychain"),
+      Err(error) => tracing::warn!(%error, "could not keep the backup key on this computer"),
     }
   }
 
@@ -1360,7 +1361,7 @@ impl Core {
       .is_some_and(|(vault, account)| match vault.kept_backup_key(account) {
         Ok(maybe_key) => maybe_key.is_some(),
         Err(error) => {
-          tracing::info!(%error, "no backup key kept in the OS keychain");
+          tracing::info!(%error, "could not look for a kept backup key");
           false
         },
       });

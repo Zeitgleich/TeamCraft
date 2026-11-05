@@ -12,7 +12,7 @@ person on a real PC, camera, microphone and GPU yet; see [What needs a real mach
 | Area                  | Windows implementation                                                                              |
 |-----------------------|-----------------------------------------------------------------------------------------------------|
 | Webview               | WebView2 (Evergreen runtime; the installers download it if missing, it ships with Windows 11)       |
-| Refresh token, DB key | Credential Manager through the `keyring` crate (`windows-native-keyring-store`)                     |
+| Refresh token, DB key | Sealed files in the data directory, under a key in Credential Manager (`keyring` crate)             |
 | Local database        | SQLCipher with OpenSSL built from source (`bundled-sqlcipher-vendored-openssl`)                     |
 | OIDC login            | System browser plus the loopback listener on `127.0.0.1` (RFC 8252), same as elsewhere              |
 | Notifications         | `tauri-plugin-notification` (toast); shown under the app's name once installed                      |

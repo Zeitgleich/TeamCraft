@@ -81,7 +81,7 @@ enroll-secret-hint = Der Schlüssel aus deinem Wiederherstellungs-Kit (8 Gruppen
 enroll-key-typo = Das sieht aus wie ein Wiederherstellungsschlüssel, aber ein Zeichen stimmt nicht. Vergleiche ihn mit deinem Wiederherstellungs-Kit.
 enroll-kit-read = Der Wiederherstellungsschlüssel wurde aus der Datei gelesen.
 enroll-restore-device = Auf diesem Computer wiederherstellen
-enroll-restore-device-hint = Dieser Computer hat einen Schlüssel für dein Konto in seinem Schlüsselbund aufbewahrt. Dein Wiederherstellungs-Kit brauchst du hier nicht.
+enroll-restore-device-hint = Dieser Computer hat einen Schlüssel für dein Konto aufbewahrt. Dein Wiederherstellungs-Kit brauchst du hier nicht.
 
 ## Recovery kit (e2ee.md §6.5)
 kit-setup-intro = TeamCraft hat einen Wiederherstellungsschlüssel für dich erstellt. Speichere das Wiederherstellungs-Kit: Drucke es aus oder bewahre es in deinem Passwort-Manager auf. Du brauchst es nur, wenn du alle deine Geräte verlierst.
