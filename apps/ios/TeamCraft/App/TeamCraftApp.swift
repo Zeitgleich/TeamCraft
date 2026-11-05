@@ -24,6 +24,8 @@ struct TeamCraftApp: App {
           switch phase {
           case .active:
             lock.didBecomeActive()
+            // The share extension may have left something, while the app slept or wasn't running.
+            model.loadWaitingShare()
             model.reportActivity(.foreground)
           case .background:
             // First, before anything else runs: the background time for pending sends (#158).

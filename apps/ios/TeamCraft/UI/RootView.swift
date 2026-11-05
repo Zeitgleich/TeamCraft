@@ -37,6 +37,10 @@ struct RootView: View {
       LoadingMarkOverlay(isLoading: isStarting)
     }
     .overlay { if model.isBusy { BusyOverlay() } }
+    .overlay(alignment: .top) {
+      if let share = model.waitingShare, !isReady, !isStarting { ShareWaitingNotice(share: share) }
+    }
+    .sheet(item: shareToPick) { share in SharePickerView(share: share) }
     .appLinkQuestions(model)
     .task(id: appLinkMoment) { await model.actOnAppLink() }
     // Every touch counts for presence; the core reports it at most every 30 s (issue #472).
@@ -53,6 +57,18 @@ struct RootView: View {
     case .ready: "ready \(model.currentServerOrigin ?? "")"
     default: "other \(model.currentServerOrigin ?? "")"
     }
+  }
+
+  private var isReady: Bool {
+    if case .ready = model.phase { return true }
+    return false
+  }
+
+  /// A waiting share opens its picker in the signed-in app; the lock's shield covers it until then.
+  private var shareToPick: Binding<StagedShare?> {
+    Binding(
+      get: { isReady ? model.waitingShare : nil },
+      set: { _ in })
   }
 
   private var isStarting: Bool {

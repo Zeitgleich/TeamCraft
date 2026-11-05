@@ -141,6 +141,10 @@ final class AppModel {
   var openConversationId: String?
   /// A message to show once its conversation is open (from a message link).
   var focusMessageId: String?
+  /// What another app shared, until the user picked a conversation (AppModel+Share.swift).
+  var waitingShare: StagedShare?
+  /// A share on its way into its conversation's composer.
+  var shareHandover: ShareHandover?
   /// A link the system handed over, until it was acted on (AppModel+AppLinks.swift).
   var pendingAppLink: String?
   /// The question a waiting link asks.
@@ -1330,6 +1334,10 @@ final class AppModel {
     NotificationAuthenticator().removeKey()
     container.wipeDownloads()
     container.pruneUploads(olderThan: 0)
+    // What waits to be shared doesn't outlive the session on this device either.
+    ShareInbox.shared()?.wipe()
+    waitingShare = nil
+    shareHandover = nil
     container.activeAccount = nil
     container.displayName = nil
     UserDefaults.standard.removeObject(forKey: Self.pushTokenKey)
