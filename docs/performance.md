@@ -1945,9 +1945,12 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   background after sign-in; the budget doesn't count it.
 - The background effects (#439) add their compositors (WebGPU and WebGL2) to it, about 57 kB gzip;
   pictures are decoded by the browser. The person segmentation is a module of its own,
-  `teamcraft-web-segmentation` (tract, built with WebAssembly SIMD: 2.09 MB gzip), which the call
-  module runs in a worker, and the model (0.46 MB, 0.26 MB gzip) a file of its own: both are only
-  downloaded when someone first turns an effect on. A photo background's full picture (0.15 to
+  `teamcraft-web-segmentation` (tract, built with WebAssembly SIMD: 1.59 MB gzip), which the call
+  module runs in a worker, and the model (0.56 MB, 0.27 MB gzip) a file of its own: both are only
+  downloaded when someone first turns an effect on. Since #1295 the model comes as NNEF, tract's own
+  format, which the module reads without tract's ONNX parser: 2.09 → 1.59 MB gzip (6.98 → 5.52 MB),
+  the same masks. Of the rest, tract's runtime and optimizer, its kernels and NNEF's registry of
+  every core operator (FFT included) are most; they can't be trimmed from outside tract. A photo background's full picture (0.15 to
   0.4 MB, JPEG) is a file of the web release too, downloaded when the photo is picked. A signed
   release lists them in `on_demand`, so the service worker doesn't fetch them in the background. `check-web-size.py` keeps the call
   module under 1 MB gzip.

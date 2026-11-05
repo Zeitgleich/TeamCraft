@@ -6,7 +6,8 @@
 //! an effect on, and the segmentation leaves the page's main thread. The messages are in
 //! `teamcraft_media::effects::worker_protocol`: the worker says it is ready, loads the model the
 //! page names (a file of the build, checked against the SHA-256 this module was built with), then
-//! answers each picture with its person mask.
+//! answers each picture with its person mask. The model is NNEF, tract's own format (#1295): this
+//! module carries no ONNX parser.
 //!
 //! `worker.js` is the worker's script: it loads this module, whose start function takes over the
 //! worker's messages. The build (`crates/teamcraft-ui/scripts/build-segmentation.sh`) compiles the

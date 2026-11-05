@@ -283,7 +283,7 @@ fn main() -> anyhow::Result<()> {
   }
   if let Some(model) = &maybe_model {
     let frame = test_pattern(HD, 0, 0)?;
-    let mut segmenter = TractSegmenter::new(model, SegmentationModel::MEDIAPIPE_LANDSCAPE)?;
+    let mut segmenter = TractSegmenter::from_onnx(model, SegmentationModel::MEDIAPIPE_LANDSCAPE)?;
     stages.push(measure("720p: segmentation only (tract, CPU)", false, |_| {
       std::hint::black_box(segmenter.segment(&frame)?);
       Ok(())
@@ -341,7 +341,7 @@ fn encoder_choices() -> Vec<(&'static str, EncoderFactory)> {
 /// The effect as the encoder thread runs it: segmentation, then the compositor's light blur.
 fn effect_filter(maybe_model: Option<&[u8]>) -> anyhow::Result<FrameFilter> {
   let segmenter: Box<dyn PersonSegmenter> = match maybe_model {
-    Some(model) => Box::new(TractSegmenter::new(
+    Some(model) => Box::new(TractSegmenter::from_onnx(
       model,
       SegmentationModel::MEDIAPIPE_LANDSCAPE,
     )?),

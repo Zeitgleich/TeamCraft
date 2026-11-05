@@ -88,10 +88,14 @@ gstreamer = ["native", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-vide
 effects = ["dep:wgpu", "dep:bytemuck", "dep:futures-channel", "dep:pollster", "dep:zune-jpeg", "dep:zune-png", "dep:jpeg-encoder"]
 # The built-in photo backgrounds, compiled in (about 3.5 MB of JPEG): the desktop app only.
 photo-backgrounds = ["effects"]
-# Person segmentation for the effects with tract (pure-Rust ONNX inference; native and wasm), and
-# the check of a downloaded model against its pinned SHA-256. The browser's segmentation worker is
-# built with it alone, so no other crypto comes along.
-segmentation = ["effects", "dep:tract-onnx", "dep:sha2", "dep:getrandom"]
+# Person segmentation for the effects with tract (pure-Rust inference; native and wasm), the model
+# as NNEF (tract's own format: no ONNX parser), and the check of a downloaded model against its
+# pinned SHA-256. The browser's segmentation worker is built with it alone (#1295: tract's ONNX
+# parser was most of that module), so no other crypto comes along.
+segmentation-nnef = ["effects", "dep:tract-nnef", "dep:tract-onnx-opl", "dep:sha2", "dep:getrandom"]
+# ... and the ONNX model the apps bundle, with tract's ONNX parser: the native apps load it, and the
+# `segmentation_model_nnef` example converts it to NNEF for the browser.
+segmentation = ["segmentation-nnef", "dep:tract-onnx"]
 
 [dependencies]
 teamcraft-proto.workspace = true
@@ -132,6 +136,12 @@ bytemuck = { version = "1", optional = true, features = ["derive"] }
 futures-channel = { version = "0.3.34", optional = true }
 # Segmentation model inference (MediaPipe selfie segmentation as ONNX), MIT/Apache-2.0.
 tract-onnx = { version = "0.23.9", optional = true }
+# The same model as NNEF, tract's own format, for the browser (#1295): read without the ONNX parser.
+# Its `tract_onnx` extension has the ONNX operators the core lacks (the model's Resize). An
+# uncompressed tar (no flate2): the server sends it compressed. Already in the tree through
+# tract-onnx.
+tract-nnef = { version = "0.23.9", optional = true, default-features = false }
+tract-onnx-opl = { version = "0.23.9", optional = true }
 # The downloaded model's SHA-256 (as teamcraft-crypto computes hashes; MIT/Apache-2.0).
 sha2 = { version = "0.11.0", optional = true }
 # Safe libopus bindings; libopus (BSD-3-Clause) is the reference Opus implementation.
@@ -253,6 +263,11 @@ required-features = ["native"]
 [[example]]
 name = "video_bench"
 required-features = ["openh264-source", "segmentation"]
+
+# The segmentation model as NNEF for the browser (#1295; models/fetch-nnef.sh runs it).
+[[example]]
+name = "segmentation_model_nnef"
+required-features = ["segmentation"]
 
 # CPU time and latency of shrinking 4K and 1080p cameras to the 720p send size (issue #537).
 [[example]]

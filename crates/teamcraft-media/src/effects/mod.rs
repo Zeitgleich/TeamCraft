@@ -14,7 +14,7 @@ mod cadence;
 mod chosen;
 mod compositor;
 mod image_file;
-#[cfg(feature = "segmentation")]
+#[cfg(feature = "segmentation-nnef")]
 mod model_file;
 #[cfg(feature = "call-view")]
 mod photo_file;
@@ -35,17 +35,19 @@ pub use image_file::{
   BACKGROUND_MAX_HEIGHT, BACKGROUND_MAX_WIDTH, MAX_BACKGROUND_FILE_BYTES, MAX_DECODED_DIMENSION,
   MAX_DECODED_PIXELS, fitted_size, normalize_background_file,
 };
-#[cfg(feature = "segmentation")]
+#[cfg(feature = "segmentation-nnef")]
 pub use model_file::{ModelCache, SEGMENTATION_MODEL_FILE, check_segmentation_model};
 #[cfg(feature = "call-view")]
 pub use photo_file::{check_photo_file, photo_path};
 #[cfg(feature = "photo-backgrounds")]
 pub use photos::PhotoBackground;
 pub use presets::{PRESET_HEIGHT, PRESET_WIDTH, PresetBackground};
+#[cfg(feature = "segmentation")]
+pub use segmentation::onnx_to_nnef;
 pub use segmentation::{
   EllipseSegmenter, MODEL_INPUT_HEIGHT, MODEL_INPUT_WIDTH, PersonSegmenter, SegmentationMask,
 };
-#[cfg(feature = "segmentation")]
+#[cfg(feature = "segmentation-nnef")]
 pub use segmentation::{SegmentationModel, TensorLayout, TractSegmenter};
 use thiserror::Error;
 pub use worker_protocol::{model_url, worker_url};

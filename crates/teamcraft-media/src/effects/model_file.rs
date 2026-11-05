@@ -1,16 +1,18 @@
-//! The segmentation model as a file the browser downloads (#439). The web build serves it under a
-//! name with its hash (`scripts/finish-calls.sh`), so it is cached for good; the segmentation
-//! worker checks it against the SHA-256 it was built with (the pin `models/fetch.sh` checks too),
-//! so a server can't hand it another model, then parses it once and keeps it for the session.
+//! The segmentation model as a file the browser downloads (#439): the apps' ONNX model as NNEF,
+//! tract's own format (`models/fetch-nnef.sh`), which the segmentation worker reads without tract's
+//! ONNX parser (#1295). The web build serves it under a name with its hash
+//! (`scripts/finish-calls.sh`), so it is cached for good; the segmentation worker checks it against
+//! the SHA-256 it was built with (the pin `models/fetch-nnef.sh` checks too), so a server can't
+//! hand it another model, then parses it once and keeps it for the session.
 
 use sha2::{Digest, Sha256};
 
 use super::{EffectsError, SegmentationModel, TractSegmenter};
 
-/// The model's file name (`crates/teamcraft-media/models`).
-pub const SEGMENTATION_MODEL_FILE: &str = "selfie_segmentation_landscape.onnx";
-/// `<sha256 hex>  <file name>`, as `fetch.sh` reads it.
-const PINNED_SHA256: &str = include_str!("../../models/selfie_segmentation_landscape.onnx.sha256");
+/// The model file's name (`crates/teamcraft-media/models`): an NNEF tar archive.
+pub const SEGMENTATION_MODEL_FILE: &str = "selfie_segmentation_landscape.nnef";
+/// `<sha256 hex>  <file name>`, as `fetch-nnef.sh` reads it.
+const PINNED_SHA256: &str = include_str!("../../models/selfie_segmentation_landscape.nnef.sha256");
 
 /// The model, checked and parsed once: later starts of the effects get a copy at once. A load that
 /// failed isn't kept; the next start tries again.
@@ -20,7 +22,7 @@ pub struct ModelCache {
   maybe_segmenter: Option<TractSegmenter>,
 }
 
-/// Whether `model` is the pinned segmentation model.
+/// Whether `model` is the pinned segmentation model file.
 pub fn check_segmentation_model(model: &[u8]) -> Result<(), EffectsError> {
   check_against(model, pinned_sha256())
 }
@@ -47,7 +49,7 @@ impl ModelCache {
   /// Checks and parses the downloaded `file`, keeps it and returns a segmenter for it.
   pub fn store(&mut self, file: &[u8]) -> Result<TractSegmenter, EffectsError> {
     check_against(file, &self.expected_sha256)?;
-    let segmenter = TractSegmenter::new(file, self.model)?;
+    let segmenter = TractSegmenter::from_nnef(file, self.model)?;
     self.maybe_segmenter = Some(segmenter.clone());
     Ok(segmenter)
   }
@@ -71,11 +73,11 @@ fn check_against(file: &[u8], expected_hex: &str) -> Result<(), EffectsError> {
   }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "segmentation"))]
 mod tests {
   use super::*;
-  use crate::effects::TensorLayout;
   use crate::effects::segmentation::tests::mean_of_channels_model;
+  use crate::effects::{TensorLayout, onnx_to_nnef};
 
   const TEST_MODEL: SegmentationModel = SegmentationModel {
     width: 8,
@@ -85,7 +87,7 @@ mod tests {
   };
 
   #[test]
-  fn the_pin_is_the_one_fetch_sh_checks() {
+  fn the_pin_is_the_one_fetch_nnef_sh_checks() {
     assert_eq!(pinned_sha256().len(), 64);
     assert!(pinned_sha256().bytes().all(|byte| byte.is_ascii_hexdigit()));
     assert!(PINNED_SHA256.trim_end().ends_with(SEGMENTATION_MODEL_FILE));
@@ -94,7 +96,7 @@ mod tests {
 
   #[test]
   fn a_checked_model_is_parsed_once_and_kept() {
-    let file = mean_of_channels_model();
+    let file = test_model_file().unwrap();
     let mut cache = ModelCache::new(&sha256_hex(&file), TEST_MODEL);
     assert!(cache.cached().is_none());
     cache.store(&file).unwrap();
@@ -103,7 +105,7 @@ mod tests {
 
   #[test]
   fn another_file_is_refused_and_not_kept() {
-    let file = mean_of_channels_model();
+    let file = test_model_file().unwrap();
     let mut cache = ModelCache::new(&sha256_hex(b"the pinned model"), TEST_MODEL);
     assert!(matches!(cache.store(&file), Err(EffectsError::Segmentation(_))));
     assert!(cache.cached().is_none(), "the next start tries again");
@@ -111,6 +113,14 @@ mod tests {
     let mut broken = ModelCache::new(&sha256_hex(b"garbage"), TEST_MODEL);
     assert!(broken.store(b"garbage").is_err());
     assert!(broken.cached().is_none());
+    // The ONNX file isn't what the browser loads.
+    let onnx = mean_of_channels_model();
+    let mut onnx_cache = ModelCache::new(&sha256_hex(&onnx), TEST_MODEL);
+    assert!(onnx_cache.store(&onnx).is_err());
+  }
+
+  fn test_model_file() -> Result<Vec<u8>, EffectsError> {
+    onnx_to_nnef(&mean_of_channels_model(), TEST_MODEL)
   }
 
   fn sha256_hex(file: &[u8]) -> String {
