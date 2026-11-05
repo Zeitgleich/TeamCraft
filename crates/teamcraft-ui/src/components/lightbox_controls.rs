@@ -142,7 +142,8 @@ impl MediaActions {
     match self.kind.get_untracked() {
       Some(MediaKind::Animated) => self.is_paused.update(|paused| *paused = !*paused),
       Some(MediaKind::Video) => {
-        let Some(video) = self.video.get_untracked() else {
+        // Not one that left the page and still sits in the NodeRef: it would play unseen.
+        let Some(video) = self.video.get_untracked().filter(|video| video.is_connected()) else {
           return;
         };
         if video.paused() {

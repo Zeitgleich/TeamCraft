@@ -44,6 +44,22 @@ final class VideoViewerTests: XCTestCase {
     XCTAssertTrue(VideoFileCheck.isPlaylist(at: missing, mediaType: "video/mp4"))
   }
 
+  func testQuickLookGetsNoPlaylistWhateverItsType() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let named = folder.appendingPathComponent("list.m3u8")
+    let hidden = folder.appendingPathComponent("list.bin")
+    let plain = folder.appendingPathComponent("plan.pdf")
+    try Data("%PDF-1.7".utf8).write(to: named)
+    try Data("#EXTM3U\n".utf8).write(to: hidden)
+    try Data("%PDF-1.7".utf8).write(to: plain)
+    let type = "application/octet-stream"
+    XCTAssertNil(VideoFileCheck.previewURL(path: named.path, mediaType: type))
+    XCTAssertNil(VideoFileCheck.previewURL(path: hidden.path, mediaType: type))
+    XCTAssertEqual(VideoFileCheck.previewURL(path: plain.path, mediaType: "application/pdf")?.lastPathComponent, "plan.pdf")
+  }
+
   private func decode(mediaType: String, state: String, extra: String = "") throws -> FileInfo {
     let json = """
       {"conversation":"1","message":"7","file_id":"9","file_name":"clip","media_type":"\(mediaType)",

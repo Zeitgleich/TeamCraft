@@ -1235,7 +1235,9 @@ fn run_video_key(ev: &web_sys::KeyboardEvent, video: NodeRef<html::Video>) -> bo
   let has_modifier = ev.ctrl_key() || ev.meta_key() || ev.alt_key();
   let (Some(command), Some(element)) = (
     player_command_for_video(&ev.key(), has_modifier),
-    video.get_untracked(),
+    // A NodeRef keeps its element after it left the page: paged on while the next video loads, this
+    // would play the previous one, with sound and no controls.
+    video.get_untracked().filter(|element| element.is_connected()),
   ) else {
     return false;
   };
