@@ -336,6 +336,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             MainView::Search => lazy_area(Place::Pane, || areas::search(())),
             MainView::Meetings => lazy_area(Place::Pane, || areas::meetings(())),
             MainView::Saved => lazy_area(Place::Pane, || areas::saved(())),
+            MainView::Drafts => lazy_area(Place::Pane, || areas::drafts(())),
             MainView::Files => lazy_area(Place::Pane, || areas::files(())),
             MainView::Activity => lazy_area(Place::Pane, || areas::activity_home(())),
             MainView::Calls => lazy_area(Place::Pane, || areas::call_history(())),

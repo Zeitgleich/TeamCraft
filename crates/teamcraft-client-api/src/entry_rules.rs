@@ -272,6 +272,7 @@ mod tests {
 
   fn conversation(kind: ConversationKind, members: u64) -> Conversation {
     Conversation {
+      maybe_draft_preview: None,
       id: id_from_raw(7),
       maybe_space: None,
       kind,

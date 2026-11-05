@@ -276,6 +276,15 @@ pub fn GlobalEntries(entries: EntriesDisclosure, id: &'static str) -> impl IntoV
       </button>
       <button
         class="sb-item"
+        class:current=move || state.view.get() == MainView::Drafts
+        aria-current=move || (state.view.get() == MainView::Drafts).then_some("page")
+        on:click=move |_| state.open_drafts()
+      >
+        <Icon name=IconName::Compose />
+        <span class="sb-name">{move || i18n.t("sidebar-drafts")}</span>
+      </button>
+      <button
+        class="sb-item"
         class:current=move || state.view.get() == MainView::Files
         aria-current=move || (state.view.get() == MainView::Files).then_some("page")
         on:click=move |_| state.open_files()
@@ -883,6 +892,7 @@ pub fn SidebarItem(
     _ => BadgeTone::Mention,
   });
   let is_catching_up = Memo::new(move |_| conversation.with(|conv| conv.is_catching_up));
+  let has_draft = draft_marker(conversation, id);
   let name = Memo::new(move |_| conversation.with(|conv| conv.name.clone()));
   let me = state.me().id;
   // The other person of a DM.
@@ -974,6 +984,11 @@ pub fn SidebarItem(
     } else {
       label
     };
+    let label = if has_draft.get() {
+      i18n.t_with("sidebar-item-draft-label", &[("label", &label)])
+    } else {
+      label
+    };
     match typing.get() {
       Some(typing) => format!("{label}, {typing}"),
       None => label,
@@ -1034,10 +1049,29 @@ pub fn SidebarItem(
           .then(|| view! { <span class="sb-call" title=i18n.t("presence-in-call")><Icon name=IconName::Phone /></span> })
       }}
       {move || is_muted.get().then(|| view! { <span class="sb-muted-icon" title=i18n.t("sidebar-item-muted")><Icon name=IconName::BellOff /></span> })}
+      {move || has_draft.get().then(|| view! { <DraftMark /> })}
       {move || is_catching_up.get().then(|| view! { <span class="sb-catching-up" aria-hidden="true" title=i18n.t("catching-up")><Icon name=IconName::Clock /></span> })}
       <CountBadge count=badge_count tone=badge_tone is_decorative=true maybe_cap=SIDEBAR_BADGE_CAP />
     </button>
   }
+}
+
+/// Whether a row shows the pencil of a draft (#1220): not on the open conversation, where the text
+/// is in front of the user and the pencil would only blink in while they type. Reads the row's own
+/// entry, so the marker costs the sidebar nothing but a comparison.
+pub(crate) fn draft_marker(conversation: Signal<Conversation>, id: ConversationId) -> Memo<bool> {
+  let state = use_app_state();
+  Memo::new(move |_| {
+    conversation.with(|conv| conv.maybe_draft_preview.is_some())
+      && state.view.get() != MainView::Conversation(id)
+  })
+}
+
+/// The pencil of a row with a draft; the row's label says it for screen readers.
+#[component]
+pub(crate) fn DraftMark() -> impl IntoView {
+  let i18n = use_i18n();
+  view! { <span class="sb-draft" title=move || i18n.t("sidebar-item-draft")><Icon name=IconName::Compose /></span> }
 }
 
 /// How the rows of a sidebar section move after a click on its head: they slide in when it opens

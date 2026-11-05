@@ -197,4 +197,37 @@ class WireTest {
     val older = WireJson.decodeFromString<ReplyPreview>("""{"author":"5","excerpt":"hi"}""")
     assertEquals(null, older.maybeAttachment)
   }
+
+  @Test
+  fun draftsAnswerListsEachDraftWithItsPlace() {
+    val answer = WireJson.decodeFromString(
+      ChatAnswer.serializer(),
+      """
+      {"answer":"drafts","drafts":[
+        {"conversation":"7","maybe_thread":"9","conversation_name":"general","maybe_thread_root":"The plan","body":"half","edited_at":2000},
+        {"conversation":"8","conversation_name":"random","body":"text","edited_at":1000}
+      ]}
+      """,
+    )
+    assertEquals("9", answer.drafts[0].maybeThread)
+    assertEquals("The plan", answer.drafts[0].maybeThreadRoot)
+    assertEquals(null, answer.drafts[1].maybeThread)
+    assertEquals(1000L, answer.drafts[1].editedAt)
+  }
+
+  @Test
+  fun sentMessageOfOnlyFilesHasAnEmptyExcerptAndACount() {
+    val answer = WireJson.decodeFromString(
+      ChatAnswer.serializer(),
+      """
+      {"answer":"sent_messages","sent":[
+        {"conversation":"7","conversation_name":"general","message":"11","excerpt":"","file_count":2,"sent_at":1000},
+        {"conversation":"7","conversation_name":"general","message":"10","excerpt":"hello","sent_at":900}
+      ]}
+      """,
+    )
+    assertEquals(2, answer.sent[0].fileCount)
+    assertEquals("", answer.sent[0].excerpt)
+    assertEquals(0, answer.sent[1].fileCount)
+  }
 }

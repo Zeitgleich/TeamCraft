@@ -1070,6 +1070,11 @@ internal fun Composer(
     // A draft from this or another device of the user.
     if (text.isEmpty()) text = viewModel.readChat { query(ChatQueries.draft(conversationId, maybeThread)).maybeBody }.orEmpty()
     isDraftLoaded = true
+    // Opened from "Drafts & sent" to go on writing (#1220).
+    if (OpenedDraft.current.value == OpenedDraft.Target(conversationId, maybeThread)) {
+      OpenedDraft.current.value = null
+      focus.requestFocus()
+    }
   }
   val maybePendingShare by PendingShare.current.collectAsState()
   LaunchedEffect(maybePendingShare, isDraftLoaded) {

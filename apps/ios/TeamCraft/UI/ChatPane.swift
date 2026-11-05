@@ -87,6 +87,7 @@ struct ChatPane: View {
       let stored = await model.draft(conversationId: conversation.id, threadId: threadId)
       if draft.isEmpty { draft = stored }
       isDraftLoaded = true
+      takeOpenedPlace()
     }
     // What another app shared, once the stored draft is in the composer: the user sends it (#208).
     .task(id: "\(model.shareHandover?.share.id ?? "")/\(isDraftLoaded)") {
@@ -177,6 +178,7 @@ struct ChatPane: View {
       CameraPicker { image in Task { await attach(photo: image) } }
         .ignoresSafeArea()
     }
+    .onChange(of: model.openedPlace) { _, _ in takeOpenedPlace() }
     .navigationDestination(item: $maybeThread) { target in
       ChatPane(conversation: conversation, threadId: target.threadId, account: account)
     }
@@ -678,6 +680,18 @@ struct ChatPane: View {
     else { return }
     maybeLastTypingNotified = .now
     Task { await model.perform(.typing(conversationId: conversation.id)) }
+  }
+
+  /// Goes where "Drafts & sent" asked (#1220): into the thread, whose own pane then takes the rest,
+  /// or to this composer.
+  private func takeOpenedPlace() {
+    guard let place = model.openedPlace, place.conversationId == conversation.id else { return }
+    if place.maybeThreadId == threadId {
+      model.openedPlace = nil
+      if place.isWriting { isComposerFocused = true }
+    } else if threadId == nil, let thread = place.maybeThreadId {
+      maybeThread = ThreadTarget(threadId: thread)
+    }
   }
 
   /// Opens a message link: its thread here, or its conversation (the list switches to it).

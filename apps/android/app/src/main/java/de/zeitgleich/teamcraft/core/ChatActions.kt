@@ -286,6 +286,10 @@ object ChatQueries {
     put("maybe_thread", maybeThread.json())
   }
 
+  fun drafts() = query("drafts") {}
+
+  fun sentMessages() = query("sent_messages") {}
+
   fun files(conversation: String) = query("conversation_files") { put("conversation", conversation) }
 
   fun maxUploadBytes() = query("max_upload_bytes") {}

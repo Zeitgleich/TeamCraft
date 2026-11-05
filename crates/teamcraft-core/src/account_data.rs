@@ -19,6 +19,8 @@ use teamcraft_proto::{
 pub const TOMBSTONE_LIFETIME_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 /// How far the activity read mark may lie ahead of this device's clock.
 const MAX_ACTIVITY_CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+/// Characters of a draft the conversation lists carry (#1220).
+const DRAFT_PREVIEW_CHARS: usize = 80;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountData {
@@ -549,6 +551,35 @@ impl AccountData {
       .map(|entry| entry.value.body.as_str())
   }
 
+  /// The drafts with something written in them, each with when it was last edited, newest first
+  /// (#1220). The edit time is the entry's stamp: it changes with the text only, and older clients
+  /// keep it when they rewrite the record, which they wouldn't do for a new field of [`Draft`].
+  pub fn drafts_by_edit(&self) -> Vec<(&Draft, i64)> {
+    let mut drafts: Vec<(&Draft, i64)> = self
+      .drafts
+      .values()
+      .filter(|entry| !entry.is_removed && !entry.value.body.trim().is_empty())
+      .map(|entry| (&entry.value, entry.updated_at_ms))
+      .collect();
+    drafts.sort_by_key(|(_, edited_at)| std::cmp::Reverse(*edited_at));
+    drafts
+  }
+
+  /// The start of the draft of the conversation's own composer, on one line, for its list entry.
+  pub fn draft_preview(&self, conversation: ConversationId) -> Option<String> {
+    let body = self.draft(conversation, None)?;
+    let line = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() {
+      return None;
+    }
+    if line.chars().count() <= DRAFT_PREVIEW_CHARS {
+      return Some(line);
+    }
+    let mut preview: String = line.chars().take(DRAFT_PREVIEW_CHARS).collect();
+    preview.push('…');
+    Some(preview)
+  }
+
   /// Stores (or, with an empty body, clears) the draft; returns whether anything changed.
   pub fn set_draft(
     &mut self,
@@ -1000,6 +1031,60 @@ mod tests {
     let mut merged = AccountData::default();
     merged.merge(&from_elsewhere, now);
     assert_eq!(merged.activity_read_at_ms(), now + MAX_ACTIVITY_CLOCK_SKEW_MS);
+  }
+
+  #[test]
+  fn drafts_are_listed_by_their_last_edit_without_empty_or_cleared_ones() {
+    let mut data = AccountData::default();
+    let (first, second, third) = (id(1), id(2), id(3));
+    let thread: ThreadId = id(5);
+    data.set_draft(first, None, "older", 10);
+    data.set_draft(second, Some(thread), "newer", 20);
+    data.set_draft(third, None, "   \n ", 30);
+    data.set_draft(first, None, "older", 40);
+    let listed: Vec<(&str, i64)> = data
+      .drafts_by_edit()
+      .into_iter()
+      .map(|(draft, edited_at)| (draft.body.as_str(), edited_at))
+      .collect();
+    assert_eq!(
+      listed,
+      [("newer", 20), ("older", 10)],
+      "saving the same text is no edit"
+    );
+    data.set_draft(second, Some(thread), "", 50);
+    assert_eq!(data.drafts_by_edit().len(), 1);
+  }
+
+  #[test]
+  fn the_list_entry_shows_the_start_of_the_conversations_own_draft() {
+    let mut data = AccountData::default();
+    let conversation = id(1);
+    assert_eq!(data.draft_preview(conversation), None);
+    data.set_draft(conversation, Some(id(5)), "in a thread", 10);
+    assert_eq!(
+      data.draft_preview(conversation),
+      None,
+      "the thread lists mark that one"
+    );
+    data.set_draft(conversation, None, "  first\n\n second  ", 20);
+    assert_eq!(data.draft_preview(conversation).as_deref(), Some("first second"));
+    data.set_draft(conversation, None, &"x".repeat(200), 30);
+    let preview = data.draft_preview(conversation).unwrap();
+    assert_eq!(preview.chars().count(), DRAFT_PREVIEW_CHARS + 1);
+    assert!(preview.ends_with('…'));
+    data.set_draft(conversation, None, "   ", 40);
+    assert_eq!(data.draft_preview(conversation), None);
+  }
+
+  #[test]
+  fn a_draft_record_of_an_older_client_lists_with_its_stamp_as_the_edit_time() {
+    let older =
+      r#"{"drafts":{"1":{"value":{"conversation_id":"1","body":"written earlier"},"updated_at_ms":77}}}"#;
+    let data = AccountData::from_bytes(older.as_bytes()).unwrap();
+    assert_eq!(data.drafts_by_edit()[0].1, 77);
+    let rewritten = AccountData::from_bytes(&data.to_bytes().unwrap()).unwrap();
+    assert_eq!(rewritten, data, "the format did not change");
   }
 
   #[test]

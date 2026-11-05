@@ -34,6 +34,7 @@ use crate::calls::{
 use crate::calls::{
   CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
 };
+use crate::drafts::{DraftItem, SentItem};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, FirstSync, KeyCatchUp, MembershipIssue, Message,
@@ -538,6 +539,15 @@ pub trait ChatBackend {
   }
   /// Stores the draft; an empty body removes it. Call debounced while typing.
   fn set_draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _body: &str) {}
+  /// Every draft of the user, of one space or (`None`) of all conversations, last edited first.
+  fn drafts(&self, _maybe_space: Option<SpaceId>) -> Vec<DraftItem> {
+    Vec::new()
+  }
+  /// The user's newest sent messages, of one space or (`None`) of all conversations, newest first,
+  /// as far as this device holds them.
+  fn sent_messages(&self, _maybe_space: Option<SpaceId>) -> Vec<SentItem> {
+    Vec::new()
+  }
   /// Starts (or finds) the direct conversation with a person; it shows up in the lists when ready.
   fn open_dm(&self, _user: UserId) {}
   /// Starts (or finds) the group DM with exactly these people and the user.

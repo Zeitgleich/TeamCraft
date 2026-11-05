@@ -341,7 +341,7 @@ pub fn Composer(
       is_thread_composer: maybe_thread.is_some(),
       is_thread_open: matches!(state.panel.get_untracked(), SidePanel::Thread { .. }),
     });
-    if composer_focus::should_focus(situation) {
+    if state.take_opened_draft(conversation, maybe_thread) || composer_focus::should_focus(situation) {
       drop(element.focus());
     }
   });
