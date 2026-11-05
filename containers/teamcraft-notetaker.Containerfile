@@ -34,7 +34,7 @@ RUN --mount=type=cache,id=teamcraft-cargo-registry,target=/usr/local/cargo/regis
  && install -D -m 0644 "$(readlink -f "/usr/lib/${multiarch}/libasound.so.2")" "/out/lib/${multiarch}/libasound.so.2" \
  && mkdir -p /out/data
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:83b9b50586253821cf63ffcec87d3d94265a093ad30da232039af962dd8f4edf
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:08476c244888bfb425bae1ae4dd7c17f093e972aab8426883d97f3c6f280f7c1
 LABEL org.opencontainers.image.title="teamcraft-notetaker" \
       org.opencontainers.image.description="TeamCraft notetaker: a call participant that transcribes calls through OpenRouter and posts a summary" \
       org.opencontainers.image.source="https://github.com/Zeitgleich/TeamCraft" \
