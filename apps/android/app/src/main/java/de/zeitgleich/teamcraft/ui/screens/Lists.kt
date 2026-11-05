@@ -46,9 +46,13 @@ fun ThreadsScreen(viewModel: MainViewModel, onOpenThread: (String, String) -> Un
   val changes by viewModel.changeCount.collectAsState()
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
   var threads by remember { mutableStateOf<List<ThreadSummary>?>(null) }
+  var draftThreads by remember { mutableStateOf<Set<Pair<String, String>>>(emptySet()) }
   LaunchedEffect(changes) {
     snapshot = viewModel.readChat { snapshot() }
     threads = viewModel.readChat { query(ChatQueries.followedThreads()).threads }
+    draftThreads = viewModel.readChat { query(ChatQueries.drafts()).drafts }.orEmpty()
+      .mapNotNull { draft -> draft.maybeThread?.let { draft.conversation to it } }
+      .toSet()
   }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.threads_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     LazyColumn(Modifier.fillMaxSize().padding(padding)) {
@@ -68,6 +72,7 @@ fun ThreadsScreen(viewModel: MainViewModel, onOpenThread: (String, String) -> Un
             style = MaterialTheme.typography.bodySmall,
             fontWeight = if (thread.unreadReplies > 0) FontWeight.Bold else FontWeight.Normal,
           )
+          if ((thread.conversation to thread.root.id) in draftThreads) DraftLine(maybePreview = null)
         }
         HorizontalDivider()
       }

@@ -411,7 +411,7 @@ fn text_of(stored: &StoredMessage) -> Option<String> {
   }
 }
 
-fn shorten(text: &str) -> String {
+pub(crate) fn shorten(text: &str) -> String {
   let single_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
   if single_line.chars().count() <= EXCERPT_CHARS {
     return single_line;

@@ -444,6 +444,7 @@ private fun ActivityTab(
     EntryRow(Icons.AutoMirrored.Filled.List, stringResource(R.string.threads_title)) { onNavigate("threads") }
     EntryRow(Icons.Filled.Star, stringResource(R.string.saved_title)) { onNavigate("saved") }
     EntryRow(Icons.Filled.DateRange, stringResource(R.string.scheduled_title)) { onNavigate("scheduled") }
+    EntryRow(Icons.Filled.Edit, stringResource(R.string.drafts_title)) { onNavigate("drafts") }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     if (waiting.isEmpty() && joinRequestCount == 0) {
       RemainingEmptyState(
@@ -653,7 +654,7 @@ private fun NavigationIcon(tab: ChatTab) {
   }
 }
 
-/** The global entries of Home (#237), in one row that never clips: each takes a quarter. */
+/** The global entries of Home (#237), in one row that never clips: each takes an equal share. */
 @Composable
 private fun HomeEntries(onNavigate: (String) -> Unit) {
   Row(
@@ -1041,6 +1042,11 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
 
 @Composable
 private fun PreviewLine(conversation: ConversationItem, maybeEntry: ChatListEntry?) {
+  // A draft stands in for the newest message: it's what the user owes this conversation (#1220).
+  conversation.maybeDraftPreview?.let { preview ->
+    DraftLine(preview)
+    return
+  }
   val isUnread = conversation.unreadCount > 0u
   Row(verticalAlignment = Alignment.CenterVertically) {
     Text(
@@ -1202,6 +1208,7 @@ private val HOME_ENTRIES = listOf(
   Triple("threads", Icons.AutoMirrored.Filled.List, R.string.home_entry_threads),
   Triple("saved", Icons.Filled.Star, R.string.home_entry_saved),
   Triple("scheduled", Icons.Filled.DateRange, R.string.home_entry_scheduled),
+  Triple("drafts", Icons.Filled.Edit, R.string.home_entry_drafts),
   Triple("meetings", Icons.Filled.DateRange, R.string.home_entry_meetings),
   Triple("browse?people=true", Icons.Filled.Person, R.string.home_entry_people),
 )

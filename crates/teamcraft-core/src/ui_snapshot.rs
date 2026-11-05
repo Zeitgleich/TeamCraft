@@ -473,7 +473,10 @@ fn part_of<S: LocalStore>(
     &shared.preferences,
   );
   ConversationChange {
-    conversation: backend.conversation_view(response, &shared.users, counts.unread),
+    conversation: teamcraft_client_api::model::Conversation {
+      maybe_draft_preview: shared.account.draft_preview(response.id),
+      ..backend.conversation_view(response, &shared.users, counts.unread)
+    },
     message_count: counts.messages,
     maybe_last_activity: counts.maybe_last_activity,
   }

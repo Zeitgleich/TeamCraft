@@ -395,6 +395,29 @@ data class SavedItem(
   @SerialName("saved_at") val savedAt: Long,
 )
 
+/** One unsent text, in a conversation or one of its threads (#1220). */
+@Serializable
+data class DraftItem(
+  val conversation: String,
+  @SerialName("maybe_thread") val maybeThread: String? = null,
+  @SerialName("conversation_name") val conversationName: String,
+  @SerialName("maybe_thread_root") val maybeThreadRoot: String? = null,
+  val body: String,
+  @SerialName("edited_at") val editedAt: Long,
+)
+
+/** One message the user sent, as much of it as the list shows (#1220). */
+@Serializable
+data class SentItem(
+  val conversation: String,
+  @SerialName("conversation_name") val conversationName: String,
+  val message: String,
+  @SerialName("maybe_thread") val maybeThread: String? = null,
+  val excerpt: String = "",
+  @SerialName("file_count") val fileCount: Int = 0,
+  @SerialName("sent_at") val sentAt: Long,
+)
+
 @Serializable
 data class BrowsableChannel(
   val conversation: String,
@@ -435,6 +458,8 @@ data class ChatAnswer(
   @SerialName("maybe_target") val maybeTarget: PermalinkTarget? = null,
   @SerialName("maybe_message") val maybeMessage: String? = null,
   @SerialName("maybe_body") val maybeBody: String? = null,
+  val drafts: List<DraftItem> = emptyList(),
+  val sent: List<SentItem> = emptyList(),
   val files: List<FileInfo> = emptyList(),
   @SerialName("maybe_bytes") val maybeBytes: Long? = null,
   val channels: List<BrowsableChannel> = emptyList(),

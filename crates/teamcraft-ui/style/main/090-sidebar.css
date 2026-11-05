@@ -153,6 +153,19 @@
   height: 14px;
 }
 
+/* A draft waits here (#1220). */
+.sb-draft {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.sb-draft .icon {
+  width: 14px;
+  height: 14px;
+}
+
 /* A stable width for the count ("1" up to "99+"), so the name doesn't shift when it changes (#891). */
 .sb-item .badge-count {
   flex: none;

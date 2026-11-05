@@ -3443,6 +3443,8 @@ restored together with them on a new device.
   Settings have their own rule below, without a clock.
 - Other devices pull the key bag when a gateway session starts, and when the `key_bag_update`
   gateway event announces a new version.
+- A draft's last edit is the time of its record (`Stamped`), so the "Drafts & sent" view (#1220) adds
+  nothing to the format; the sent list is read from the local store. The view asks the server nothing.
 - The server sees that the key bag changed and its size, not what changed. Drafts make the key bag
   change while typing; clients upload at most once per sync round.
 - **Trust decisions travel too.** The identity keys the user's devices pinned and the workspace root

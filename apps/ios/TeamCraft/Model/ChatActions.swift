@@ -207,6 +207,10 @@ enum ChatQuery {
   case draft(conversationId: String, maybeThreadId: String?)
   /// The messages waiting for their time, and the workspace's rule for them.
   case scheduledMessages
+  /// Every draft of the user (#1220).
+  case drafts
+  /// The user's recent messages across the conversations (#1220).
+  case sentMessages
 
   var json: String {
     switch self {
@@ -242,6 +246,10 @@ enum ChatQuery {
       return jsonText([
         "kind": "draft", "conversation": conversation, "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(),
       ])
+    case .drafts:
+      return jsonText(["kind": "drafts"])
+    case .sentMessages:
+      return jsonText(["kind": "sent_messages"])
     }
   }
 }

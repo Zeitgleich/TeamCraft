@@ -143,6 +143,8 @@ final class AppModel {
   var openConversationId: String?
   /// A message to show once its conversation is open (from a message link).
   var focusMessageId: String?
+  /// The thread or composer "Drafts & sent" asked for; the conversation's pane takes it (#1220).
+  var openedPlace: OpenedPlace?
   /// What another app shared, until the user picked a conversation (AppModel+Share.swift).
   var waitingShare: StagedShare?
   /// A share on its way into its conversation's composer.
@@ -793,6 +795,14 @@ final class AppModel {
   /// The composer text left unsent in the conversation or thread (empty: none).
   func draft(conversationId: String, threadId: String?) async -> String {
     await answer(.draft(conversationId: conversationId, maybeThreadId: threadId))?.maybeBody ?? ""
+  }
+
+  func drafts() async -> [DraftItem] {
+    await answer(.drafts)?.drafts ?? []
+  }
+
+  func sentMessages() async -> [SentItem] {
+    await answer(.sentMessages)?.sent ?? []
   }
 
   /// Every file of the conversation, newest first as the core lists them.

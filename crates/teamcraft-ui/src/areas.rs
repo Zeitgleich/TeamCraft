@@ -39,6 +39,7 @@ use crate::components::composer_toolbar::{ActiveFormats, FormatAction, FormatToo
 use crate::components::date_jump::{DateJumpMenu, DateJumpPanel};
 use crate::components::directory_view::DirectoryView;
 use crate::components::downloads_menu::DownloadsButton;
+use crate::components::drafts_view::DraftsView;
 use crate::components::emoji_picker::EmojiPickerPanel;
 use crate::components::file_preview::FilePreview;
 use crate::components::files_view::FilesView;
@@ -236,6 +237,7 @@ areas! {
   /// conversation's side panels except the thread.
   saved(_unit: ()) => places: view! { <SavedView /> };
   scheduled(_unit: ()) => places: view! { <ScheduledView /> };
+  drafts(_unit: ()) => places: view! { <DraftsView /> };
   files(_unit: ()) => places: view! { <FilesView /> };
   call_history(_unit: ()) => places: view! { <CallsView /> };
   pins(conversation: ConversationId) => places: view! { <PinsPanel conversation=conversation /> };

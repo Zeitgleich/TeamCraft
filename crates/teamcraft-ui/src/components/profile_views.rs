@@ -497,6 +497,7 @@ mod tests {
     members: &[UserId],
   ) -> Conversation {
     Conversation {
+      maybe_draft_preview: None,
       id: id_from_raw(id),
       maybe_space: maybe_space.map(id_from_raw),
       kind,

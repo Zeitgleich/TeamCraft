@@ -229,3 +229,30 @@ sidebar-scheduled-attention = { $count ->
     [one] 1 message needs you
    *[other] { $count } messages need you
 }
+
+# Drafts and sent (#1220)
+sidebar-drafts = Drafts & sent
+sidebar-item-draft = Draft
+sidebar-item-draft-label = { $label }, draft
+drafts-title = Drafts & sent
+drafts-tab-drafts = Drafts
+drafts-tab-sent = Sent
+drafts-empty-title = No drafts
+drafts-empty = Text you start and don't send waits here, on all your devices.
+drafts-space-empty = Text you start in this space's channels and don't send waits here.
+drafts-in-thread = Thread: { $root }
+drafts-in-thread-unknown = In a thread
+drafts-continue = Continue writing
+drafts-delete = Delete
+drafts-delete-question = Delete this draft on all your devices?
+drafts-show-more = Show more
+sent-empty-title = Nothing sent yet
+sent-empty = Your recent messages from all conversations show up here.
+sent-space-empty = Your recent messages from this space's channels show up here.
+sent-note = Your recent messages, as far as this device has them.
+sent-in-thread = In a thread
+sent-open = Go to message
+sent-files = { $count ->
+    [one] { $count } file
+   *[other] { $count } files
+  }

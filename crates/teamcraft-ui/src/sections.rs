@@ -1270,6 +1270,7 @@ mod tests {
 
   fn conversation(id: u64, category: SidebarCategory, unread: u32, is_favorite: bool) -> Conversation {
     Conversation {
+      maybe_draft_preview: None,
       id: id_from_raw::<ConversationId>(id),
       maybe_space: None,
       kind: ConversationKind::Public,

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="home_entry_drafts">Entwürfe</string>
+  <string name="drafts_title">Entwürfe &amp; Gesendet</string>
+  <string name="drafts_tab_drafts">Entwürfe</string>
+  <string name="drafts_tab_sent">Gesendet</string>
+  <string name="drafts_empty">Text, den du anfängst und nicht sendest, wartet hier, auf allen deinen Geräten.</string>
+  <string name="drafts_in_thread">Thread: %1$s</string>
+  <string name="drafts_delete">Löschen</string>
+  <string name="drafts_delete_question">Diesen Entwurf auf allen deinen Geräten löschen?</string>
+  <string name="draft_marker">Entwurf</string>
+  <string name="draft_preview">Entwurf: %1$s</string>
+  <string name="sent_empty">Deine letzten Nachrichten aus allen Unterhaltungen erscheinen hier.</string>
+  <string name="sent_note">Deine letzten Nachrichten, soweit dieses Gerät sie hat.</string>
+  <string name="sent_in_thread">In einem Thread</string>
+  <plurals name="sent_files">
+    <item quantity="one">%1$d Datei</item>
+    <item quantity="other">%1$d Dateien</item>
+  </plurals>
+</resources>

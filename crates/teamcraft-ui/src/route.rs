@@ -63,6 +63,8 @@ pub enum Route {
   Saved,
   /// `/scheduled`: the messages waiting for their time.
   Scheduled,
+  /// `/drafts`: the user's drafts and sent messages (#1220).
+  Drafts,
   /// `/files`: every file the user can see.
   Files,
   /// `/search`: the search page. The query never goes into the URL.
@@ -152,6 +154,7 @@ impl Route {
       ["people"] => Some(Self::People),
       ["saved"] => Some(Self::Saved),
       ["scheduled"] => Some(Self::Scheduled),
+      ["drafts"] => Some(Self::Drafts),
       ["files"] => Some(Self::Files),
       ["search"] => Some(Self::Search),
       ["settings"] => Some(Self::Settings(SettingsPage::Sections)),
@@ -211,6 +214,7 @@ impl Route {
       Self::People => "/people".to_owned(),
       Self::Saved => "/saved".to_owned(),
       Self::Scheduled => "/scheduled".to_owned(),
+      Self::Drafts => "/drafts".to_owned(),
       Self::Files => "/files".to_owned(),
       Self::Search => "/search".to_owned(),
       Self::Settings(SettingsPage::Sections) => "/settings".to_owned(),
@@ -248,6 +252,7 @@ impl Route {
       | Self::People
       | Self::Saved
       | Self::Scheduled
+      | Self::Drafts
       | Self::Files
       | Self::Search
       | Self::Settings(_)
@@ -683,6 +688,7 @@ mod tests {
       Route::People,
       Route::Saved,
       Route::Scheduled,
+      Route::Drafts,
       Route::Files,
       Route::Search,
       Route::Settings(SettingsPage::Sections),

@@ -38,7 +38,9 @@ import de.zeitgleich.teamcraft.ui.screens.BrowseScreen
 import de.zeitgleich.teamcraft.ui.screens.ChatListScreen
 import de.zeitgleich.teamcraft.ui.screens.ConfirmServerScreen
 import de.zeitgleich.teamcraft.ui.screens.ServerEntryScreen
+import de.zeitgleich.teamcraft.ui.screens.DraftsAndSentScreen
 import de.zeitgleich.teamcraft.ui.screens.FilesScreen
+import de.zeitgleich.teamcraft.ui.screens.OpenedDraft
 import de.zeitgleich.teamcraft.ui.screens.MeetingsScreen
 import uniffi.teamcraft_ffi.AppLinkPlace
 import uniffi.teamcraft_ffi.OpenedAppLink
@@ -376,6 +378,24 @@ private fun ReadyNavigation(
     }
     composable("scheduled") {
       ScheduledScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })
+    }
+    composable("drafts") {
+      DraftsAndSentScreen(
+        viewModel = viewModel,
+        onOpenDraft = { draft ->
+          OpenedDraft.current.value = OpenedDraft.Target(draft.conversation, draft.maybeThread)
+          navigation.navigate(
+            draft.maybeThread?.let { thread -> "thread/${draft.conversation}/$thread" } ?: "conversation/${draft.conversation}",
+          )
+        },
+        onOpenSent = { item ->
+          navigation.navigate(
+            item.maybeThread?.let { thread -> "thread/${item.conversation}/$thread?focus=${item.message}" }
+              ?: "conversation/${item.conversation}?focus=${item.message}",
+          )
+        },
+        onBack = { navigation.popBackStack() },
+      )
     }
     composable("saved") {
       SavedScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })

@@ -17,6 +17,7 @@ pub mod call_window;
 pub mod calls;
 pub mod canvas;
 pub mod custom_status;
+pub mod drafts;
 pub mod emoji;
 pub mod emoji_catalog;
 pub mod entry_rules;

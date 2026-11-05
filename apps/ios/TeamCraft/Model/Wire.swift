@@ -230,6 +230,8 @@ struct ChatAnswer: Decodable, Sendable {
   var roster: SpaceRoster?
   var items: [SavedItem]?
   var overview: ScheduledOverview?
+  var drafts: [DraftItem]?
+  var sent: [SentItem]?
 }
 
 /// How far a conversation's history reaches beyond what this device holds.

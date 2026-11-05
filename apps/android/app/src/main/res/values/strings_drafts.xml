@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="home_entry_drafts">Drafts</string>
+  <string name="drafts_title">Drafts &amp; sent</string>
+  <string name="drafts_tab_drafts">Drafts</string>
+  <string name="drafts_tab_sent">Sent</string>
+  <string name="drafts_empty">Text you start and don\'t send waits here, on all your devices.</string>
+  <string name="drafts_in_thread">Thread: %1$s</string>
+  <string name="drafts_delete">Delete</string>
+  <string name="drafts_delete_question">Delete this draft on all your devices?</string>
+  <string name="draft_marker">Draft</string>
+  <string name="draft_preview">Draft: %1$s</string>
+  <string name="sent_empty">Your recent messages from all conversations show up here.</string>
+  <string name="sent_note">Your recent messages, as far as this device has them.</string>
+  <string name="sent_in_thread">In a thread</string>
+  <plurals name="sent_files">
+    <item quantity="one">%1$d file</item>
+    <item quantity="other">%1$d files</item>
+  </plurals>
+</resources>
