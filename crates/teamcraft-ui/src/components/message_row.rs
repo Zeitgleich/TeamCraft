@@ -3,7 +3,7 @@ use std::time::Duration;
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{FileTransfer, MessagePriority, WorkspaceEvent};
 use teamcraft_client_api::log::{LogEntry, log_entries};
-use teamcraft_client_api::model::MessageSource;
+use teamcraft_client_api::model::{ConversationId, MessageSource};
 use teamcraft_proto::HistoryPolicy;
 
 use crate::channel_access::can_react_in;
@@ -46,6 +46,10 @@ const DELIVERY_TICK_MS: u64 = 2_000;
 
 /// A line's i18n key and its arguments.
 type LineText = (&'static str, Vec<(&'static str, String)>);
+
+/// A workspace event's line: its text, and the conversation it links to (the room a call moved
+/// into, issue #1290).
+type WorkspaceLine = (LineText, Option<ConversationId>);
 
 /// One message in the channel feed or in a thread. The caller recreates it when the message changes.
 #[component]
@@ -306,9 +310,9 @@ fn system_line(
   }
 }
 
-/// The text of `message`'s workspace event (i18n key and arguments), with the names the backend
-/// knows; `None` without one.
-fn workspace_text(message: &Message) -> Memo<Option<LineText>> {
+/// The line of `message`'s workspace event (i18n key and arguments, and where it links), with the
+/// names the backend knows; `None` without one.
+fn workspace_text(message: &Message) -> Memo<Option<WorkspaceLine>> {
   let state = use_app_state();
   let (conversation, message_id) = (message.conversation, message.id);
   Memo::new(move |_| {
@@ -317,25 +321,43 @@ fn workspace_text(message: &Message) -> Memo<Option<LineText>> {
         .message_extras(conversation, &[message_id])
         .into_iter()
         .find(|extras| extras.message == message_id)?;
-      workspace_event_text(&extras.maybe_workspace_event?, |user| {
+      let event = extras.maybe_workspace_event?;
+      let text = workspace_event_text(&event, |user| {
         backend
           .user(user)
           .map(|user| user.display_name)
           .unwrap_or_default()
-      })
+      })?;
+      Some((text, workspace_event_link(&event)))
     })
   })
 }
 
-/// The line showing a workspace event's `text`, while there is one.
-fn workspace_text_line(text: Memo<Option<LineText>>) -> impl IntoView + use<> {
+/// The conversation a workspace event's line links to: the room a call moved into, when the user
+/// is in it (the core names it only then).
+fn workspace_event_link(event: &WorkspaceEvent) -> Option<ConversationId> {
+  match event {
+    WorkspaceEvent::CallMoved { room, room_name, .. } if !room_name.is_empty() => Some(*room),
+    _ => None,
+  }
+}
+
+/// The line showing a workspace event's `text`, while there is one, with a button to the
+/// conversation it links to.
+fn workspace_text_line(text: Memo<Option<WorkspaceLine>>) -> impl IntoView + use<> {
   let i18n = use_i18n();
+  let state = use_app_state();
   move || {
-    text.get().map(|(key, args)| {
+    text.get().map(|((key, args), maybe_link)| {
       let args: Vec<(&str, &str)> = args.iter().map(|(name, value)| (*name, value.as_str())).collect();
       view! {
         <div class="msg msg-system" tabindex="-1" data-nav="row">
           <span class="system-text" translate="no">{i18n.t_with(key, &args)}</span>
+          {maybe_link.map(|room| view! {
+            <button type="button" class="system-link" on:click=move |_| state.open_conversation(room)>
+              {i18n.t("ws-call-moved-open")}
+            </button>
+          })}
         </div>
       }
     })
@@ -1107,6 +1129,14 @@ fn workspace_event_text(
       args.push(("space", space.clone()));
       (key, args)
     },
+    // Issue #1290: the room's name only where the user is in it; the line links to it then.
+    WorkspaceEvent::CallMoved { by, room_name, .. } if room_name.is_empty() => {
+      ("ws-call-moved-unnamed", vec![("by", name_of(*by))])
+    },
+    WorkspaceEvent::CallMoved { by, room_name, .. } => (
+      "ws-call-moved",
+      vec![("by", name_of(*by)), ("room", room_name.clone())],
+    ),
     WorkspaceEvent::Unknown => return None,
   })
 }
@@ -1315,7 +1345,7 @@ mod tests {
       );
       state.backend_changed();
       assert_eq!(
-        text.get_untracked().map(|(key, _)| key),
+        text.get_untracked().map(|((key, _), _)| key),
         Some("ws-admin-joined-added")
       );
     });

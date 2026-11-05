@@ -390,8 +390,9 @@ pub enum ConversationEvent {
     space: String,
   },
   /// The sender added `added` to the conversation's call, which moved into the meeting chat
-  /// `meeting` (docs/meetings.md, "A call becomes a meeting"). Not listed; devices in the call
-  /// follow it only on this announcement from a group member, never on the server's word.
+  /// `meeting` (docs/meetings.md, "A call becomes a meeting"). Devices in the call follow it only
+  /// on this announcement from a group member, never on the server's word. Listed as a line with
+  /// a link to the room (issue #1290); an older version stored it hidden, and such a row stays so.
   CallMoved {
     meeting: ConversationId,
     #[serde(default)]
@@ -1380,9 +1381,6 @@ impl StoredMessage {
           | MessageContent::IndexSegment { .. }
           | MessageContent::IntegrationSource { .. }
           | MessageContent::Notetaker { .. }
-          | MessageContent::Event {
-            event: ConversationEvent::CallMoved { .. }
-          }
       ),
     }
   }

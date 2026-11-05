@@ -156,6 +156,8 @@ fun ConversationScreen(
   onBack: () -> Unit,
   maybeFocusMessage: String? = null,
   onOpenPermalink: (String) -> Unit = {},
+  /** Opens another conversation: the room a call moved into (issue #1290). */
+  onOpenConversation: (String) -> Unit = {},
 ) {
   val changes by viewModel.changeCount.collectAsState()
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
@@ -260,6 +262,7 @@ fun ConversationScreen(
       modifier = Modifier.weight(1f),
       maybeFocusMessage = maybeFocusMessage,
       onOpenPermalink = onOpenPermalink,
+      onOpenConversation = onOpenConversation,
       unseenReactions = unseenReactions,
       onReactionsSeen = { seen -> viewModel.act(ChatActions.markReactionsSeen(conversationId, seen)) },
       older = OlderMessages(
@@ -662,6 +665,7 @@ private fun MessageList(
   modifier: Modifier,
   maybeFocusMessage: String?,
   onOpenPermalink: (String) -> Unit,
+  onOpenConversation: (String) -> Unit = {},
   older: OlderMessages = OlderMessages.None,
   unseenReactions: UnseenReactions = UnseenReactions(),
   onReactionsSeen: (List<String>) -> Unit = {},
@@ -680,6 +684,7 @@ private fun MessageList(
     modifier = modifier,
     maybeFocusMessage = maybeFocusMessage,
     onOpenPermalink = onOpenPermalink,
+    onOpenConversation = onOpenConversation,
     canReact = rights.canReact,
     older = older,
     unseenReactions = unseenReactions,

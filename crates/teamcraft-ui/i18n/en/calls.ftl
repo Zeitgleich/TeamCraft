@@ -51,6 +51,9 @@ call-share-link-hint = Only the organizer can invite people to this meeting. Sha
 call-move-offer = { $name } moved the call into a meeting room and added { $added }.
 call-move-offer-notetaker = { $name } added the notetaker. The call goes on in a meeting room, where what is said is sent to OpenRouter for a transcript. Your audio reaches it only once you join there.
 call-move-join = Join the meeting room
+ws-call-moved = { $by } moved the call into “{ $room }”
+ws-call-moved-unnamed = { $by } moved the call into a meeting room
+ws-call-moved-open = Open the room
 call-effects = Background effects
 effects-system-hint = macOS can apply its own video effects (Portrait, background, Studio Light) on top. If one of them is on, choose "None" here so they don't add up.
 effects-system-open = Open macOS video effects
@@ -332,6 +335,8 @@ calls-loading = Loading calls
 
 ## Notetaker (e2ee.md §8.2)
 call-notetaker-add = Add notetaker
+call-notetaker-refused-guest = Add notetaker: guests can't add the notetaker to a call.
+call-notetaker-refused-admins = Add notetaker: only workspace admins can add the notetaker to a call.
 call-notetaker-remove = Remove notetaker
 call-notetaker-room-title = Call with notetaker
 call-notetaker-joining = The notetaker is being added. While it is in the call, the audio is sent to OpenRouter for the transcript.

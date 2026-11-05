@@ -51,6 +51,9 @@ call-share-link-hint = Nur die Organisatorin oder der Organisator kann Personen 
 call-move-offer = { $name } hat den Anruf in einen Meetingraum verschoben und { $added } hinzugefügt.
 call-move-offer-notetaker = { $name } hat den Notetaker hinzugefügt. Der Anruf geht in einem Meetingraum weiter, wo das Gesprochene für ein Transkript an OpenRouter gesendet wird. Dein Ton erreicht ihn erst, wenn du dort beitrittst.
 call-move-join = Meetingraum beitreten
+ws-call-moved = { $by } hat den Anruf in „{ $room }“ verschoben
+ws-call-moved-unnamed = { $by } hat den Anruf in einen Meetingraum verschoben
+ws-call-moved-open = Raum öffnen
 call-effects = Hintergrundeffekte
 effects-system-hint = macOS kann eigene Videoeffekte darüberlegen (Porträt, Hintergrund, Studiolicht). Ist einer davon an, wähle hier „Keiner“, damit sie sich nicht addieren.
 effects-system-open = Videoeffekte von macOS öffnen
@@ -332,6 +335,8 @@ calls-loading = Anrufe werden geladen
 
 ## Notetaker (e2ee.md §8.2)
 call-notetaker-add = Notetaker hinzufügen
+call-notetaker-refused-guest = Notetaker hinzufügen: Gäste können den Notetaker nicht zu einem Anruf hinzufügen.
+call-notetaker-refused-admins = Notetaker hinzufügen: Nur Workspace-Admins können den Notetaker zu einem Anruf hinzufügen.
 call-notetaker-remove = Notetaker entfernen
 call-notetaker-room-title = Anruf mit Notetaker
 call-notetaker-joining = Der Notetaker wird hinzugefügt. Solange er im Anruf ist, wird der Ton für das Transkript an OpenRouter gesendet.

@@ -102,6 +102,18 @@ pub struct NotetakerCallInfo {
   pub can_invite: bool,
   /// "Remove notetaker" (`send_notetaker_away`).
   pub can_stop: bool,
+  /// Why "Add notetaker" shows, but disabled (issue #1290): the policy doesn't let the user ask it
+  /// in. `None` while the button is offered and where it doesn't show at all.
+  pub maybe_refusal: Option<NotetakerRefusal>,
+}
+
+/// Why the policy doesn't let the user ask the notetaker in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum NotetakerRefusal {
+  /// Guests never ask it in.
+  Guest,
+  /// Only workspace admins may (`inviters: admins`).
+  AdminsOnly,
 }
 
 impl From<teamcraft_client_api::notetaker::NotetakerInCall> for NotetakerCallInfo {
@@ -113,6 +125,10 @@ impl From<teamcraft_client_api::notetaker::NotetakerInCall> for NotetakerCallInf
       is_member: notetaker.is_member,
       can_invite: notetaker.can_invite,
       can_stop: notetaker.can_stop,
+      maybe_refusal: notetaker.maybe_refusal.map(|refusal| match refusal {
+        teamcraft_client_api::notetaker::NotetakerRefusal::Guest => NotetakerRefusal::Guest,
+        teamcraft_client_api::notetaker::NotetakerRefusal::AdminsOnly => NotetakerRefusal::AdminsOnly,
+      }),
     }
   }
 }
@@ -1605,6 +1621,9 @@ mod tests {
         .unwrap()
         .into();
     assert!(!refused.can_invite);
+    // #1290: the apps show the button disabled, with the reason.
+    assert_eq!(refused.maybe_refusal, Some(NotetakerRefusal::AdminsOnly));
+    assert_eq!(offered.maybe_refusal, None);
   }
 
   fn user(raw: i64) -> UserId {

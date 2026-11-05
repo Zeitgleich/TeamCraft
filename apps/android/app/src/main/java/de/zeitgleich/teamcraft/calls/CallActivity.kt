@@ -70,6 +70,7 @@ import kotlinx.coroutines.delay
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.NotetakerCallInfo
+import uniffi.teamcraft_ffi.NotetakerRefusal
 import uniffi.teamcraft_ffi.newRequestKey
 
 private const val MILLIS_PER_SECOND = 1000L
@@ -258,6 +259,10 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
     maybeState?.phase == CallPhase.CONNECTED &&
     notetakerState != NotetakerAddState.Pending &&
     notetakerState != NotetakerAddState.Asked
+  // Who the policy keeps from asking it in sees the item disabled, with the reason (issue #1290).
+  val maybeNotetakerRefusal = maybeNotetaker?.maybeRefusal
+    ?.takeIf { maybeState?.phase == CallPhase.CONNECTED }
+    ?.let(::notetakerRefusalText)
 
   val isConnected = maybeState?.phase == CallPhase.CONNECTED
   var maybeStartedAt by remember { mutableStateOf<Long?>(null) }
@@ -304,6 +309,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       elapsedSeconds = maybeElapsed,
       areControlsShown = areControlsShown,
       names = names,
+      isNotetakerPresent = maybeNotetaker?.isPresent == true,
     ),
     actions = CallUiActions(
       onToggleControls = { areControlsShown = !areControlsShown },
@@ -319,6 +325,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       maybeOnAddNotetaker = maybeNotetaker?.takeIf { canAddNotetaker }?.let { notetaker ->
         { maybeConversationId?.let { calls.moves.addNotetaker(it, notetaker, notetakerRoomTitle, notetakerKey) } }
       },
+      maybeNotetakerRefusal = maybeNotetakerRefusal,
       onHangUp = { calls.hangUp() },
     ),
     banner = {
@@ -502,4 +509,10 @@ private fun AddPeopleDialog(moves: CallMoves, choice: AddPeopleChoice, onClose: 
       TextButton(onClick = close, enabled = !isPending) { Text(stringResource(R.string.cancel)) }
     },
   )
+}
+
+/** Why "Add notetaker" is disabled (issue #1290). */
+private fun notetakerRefusalText(refusal: NotetakerRefusal): Int = when (refusal) {
+  NotetakerRefusal.GUEST -> R.string.call_notetaker_refused_guest
+  NotetakerRefusal.ADMINS_ONLY -> R.string.call_notetaker_refused_admins
 }

@@ -3011,8 +3011,9 @@ fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserI
     | ConversationEvent::MadePrivate
     | ConversationEvent::MadePublic
     | ConversationEvent::Moved { .. }
-    | ConversationEvent::AdminJoined { .. } => (MessageKind::Change, sender),
-    ConversationEvent::CallMoved { .. } | ConversationEvent::Unknown => (MessageKind::User, sender),
+    | ConversationEvent::AdminJoined { .. }
+    | ConversationEvent::CallMoved { .. } => (MessageKind::Change, sender),
+    ConversationEvent::Unknown => (MessageKind::User, sender),
   }
 }
 

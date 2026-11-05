@@ -24,6 +24,20 @@ pub struct NotetakerInCall {
   pub can_invite: bool,
   /// "Remove notetaker".
   pub can_stop: bool,
+  /// Why "Add notetaker" shows, but disabled (issue #1290): the policy doesn't let this user ask
+  /// it in, where somebody who may would be offered the button. `None` while the button is
+  /// offered, and where it isn't shown at all (the notetaker is off, in the call already, or
+  /// can't be brought into this call).
+  pub maybe_refusal: Option<NotetakerRefusal>,
+}
+
+/// Why the policy doesn't let the user ask the notetaker in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotetakerRefusal {
+  /// Guests (and bots) never ask it in.
+  Guest,
+  /// Only workspace admins may ask it in (`inviters: admins`).
+  AdminsOnly,
 }
 
 /// The notetaker of `policy` in a call with `participants` (the others), for the user in a
@@ -47,6 +61,16 @@ pub fn notetaker_in_call(
   let is_member = member_ids.contains(&bot);
   let may_invite = may_ask_in(policy, is_person, is_roster_admin);
   let can_stop = is_present && (policy.can_anyone_stop || may_invite || (is_roster_admin && is_person));
+  let would_offer = policy.active_bot().is_some() && !is_present && (is_member || can_bring_in);
+  let maybe_refusal = if !would_offer || may_invite {
+    None
+  } else if !is_person {
+    Some(NotetakerRefusal::Guest)
+  } else if policy.inviters == NotetakerInviters::Admins {
+    Some(NotetakerRefusal::AdminsOnly)
+  } else {
+    None
+  };
   Some(NotetakerInCall {
     bot,
     transcription_model: policy.transcription_model.clone(),
@@ -54,6 +78,7 @@ pub fn notetaker_in_call(
     is_member,
     can_invite: may_invite && !is_present && (is_member || can_bring_in),
     can_stop,
+    maybe_refusal,
   })
 }
 
@@ -136,6 +161,31 @@ mod tests {
     assert!(admin.can_invite);
     let present = notetaker_in_call(&policy, member, false, &[id(9)], &[id(9)], false).unwrap();
     assert!(!present.can_stop);
+  }
+
+  /// #1290: who the policy keeps from asking it in sees the button disabled, with the reason;
+  /// nobody sees it where it isn't on offer at all.
+  #[test]
+  fn the_button_shows_disabled_with_the_reason_the_policy_gives() {
+    let admins_only = policy(NotetakerInviters::Admins);
+    let member = notetaker_in_call(&admins_only, true, false, &[id(1), id(9)], &[], false).unwrap();
+    assert_eq!(member.maybe_refusal, Some(NotetakerRefusal::AdminsOnly));
+    let admin = notetaker_in_call(&admins_only, true, true, &[id(1), id(9)], &[], false).unwrap();
+    assert_eq!(admin.maybe_refusal, None);
+    let anyone = policy(NotetakerInviters::Members);
+    let guest = notetaker_in_call(&anyone, false, false, &[id(1)], &[], true).unwrap();
+    assert_eq!(guest.maybe_refusal, Some(NotetakerRefusal::Guest));
+    let present = notetaker_in_call(&admins_only, true, false, &[id(9)], &[id(9)], false).unwrap();
+    assert_eq!(present.maybe_refusal, None, "in the call already");
+    let unreachable = notetaker_in_call(&admins_only, true, false, &[id(1)], &[], false).unwrap();
+    assert_eq!(
+      unreachable.maybe_refusal, None,
+      "can't be brought into this call anyway"
+    );
+    let mut off = anyone.clone();
+    off.is_enabled = false;
+    let disabled = notetaker_in_call(&off, false, false, &[id(9)], &[], true).unwrap();
+    assert_eq!(disabled.maybe_refusal, None, "turned off: no button");
   }
 
   #[test]

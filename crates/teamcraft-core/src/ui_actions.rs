@@ -675,7 +675,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
             self.fill_from_meta(&mut extras, meta, conversation, maybe_importer)
           },
           MessageContent::Event { event } => {
-            extras.maybe_workspace_event = workspace_event(event, stored);
+            extras.maybe_workspace_event =
+              workspace_event(event, stored).map(|event| self.with_room_name(event));
           },
           _ => {},
         }
@@ -690,6 +691,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
         Some(extras)
       })
       .collect()
+  }
+
+  /// `event` with the name of the room a call moved into, as the sidebar shows it, if the user is
+  /// in that room (issue #1290): the line links to it then. Other events as they are.
+  fn with_room_name(&self, event: WorkspaceEvent) -> WorkspaceEvent {
+    let WorkspaceEvent::CallMoved { by, room, .. } = event else {
+      return event;
+    };
+    let is_member = self
+      .conversations_raw()
+      .iter()
+      .any(|conversation| conversation.id == room && conversation.maybe_my_membership.is_some());
+    let room_name = is_member
+      .then(|| teamcraft_client_api::backend::ChatBackend::conversation(self, room))
+      .flatten()
+      .map(|conversation| conversation.name)
+      .unwrap_or_default();
+    WorkspaceEvent::CallMoved { by, room, room_name }
   }
 
   fn fill_from_meta(
@@ -863,11 +882,16 @@ fn workspace_event(event: &ConversationEvent, stored: &StoredMessage) -> Option<
       maybe_by,
       space: space.clone(),
     },
+    // The room's name is filled in by the caller ([`CoreChatBackend::with_room_name`]).
+    ConversationEvent::CallMoved { meeting, .. } => WorkspaceEvent::CallMoved {
+      by: actor,
+      room: *meeting,
+      room_name: String::new(),
+    },
     ConversationEvent::Joined
     | ConversationEvent::Left
     | ConversationEvent::Renamed { .. }
     | ConversationEvent::TopicChanged { .. }
-    | ConversationEvent::CallMoved { .. }
     | ConversationEvent::Unknown => return None,
   })
 }

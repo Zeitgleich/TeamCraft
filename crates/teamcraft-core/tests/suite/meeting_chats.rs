@@ -468,6 +468,56 @@ mod call_moves {
     );
   }
 
+  /// Issue #1290: the DM shows the move as a line naming who moved it, which links to the room for
+  /// whoever is in it; the new room's members see its name.
+  #[cfg(feature = "ui")]
+  #[tokio::test]
+  async fn the_dm_shows_a_line_that_links_to_the_room() {
+    use teamcraft_client_api::actions::WorkspaceEvent;
+    use teamcraft_client_api::backend::ChatBackend;
+    use teamcraft_client_api::model::MessageKind;
+
+    let (server, mut alice, mut bob, carol, _) = dm_call().await;
+    let dm = in_dm_call(&mut alice, &mut bob).await;
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id, carol_id]);
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[carol_id])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    for peer in [&alice, &bob] {
+      let backend = common::backend_of(peer);
+      let rows = backend.messages(dm, 0, backend.message_count(dm));
+      let lines: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == MessageKind::Change)
+        .collect();
+      assert_eq!(lines.len(), 1, "{}: one line for the move", peer.name);
+      let extras = backend.message_extras(dm, &[lines[0].id]);
+      let Some(WorkspaceEvent::CallMoved { by, room, room_name }) = extras[0].maybe_workspace_event.clone()
+      else {
+        panic!("{}: not a moved call: {extras:?}", peer.name);
+      };
+      assert_eq!((by, room), (alice_id, meeting), "{}", peer.name);
+      let shown = backend
+        .conversation(meeting)
+        .map(|conversation| conversation.name);
+      assert_eq!(
+        Some(room_name),
+        shown,
+        "{}: named as the sidebar names it",
+        peer.name
+      );
+    }
+  }
+
   #[tokio::test]
   async fn the_dm_stays_as_it_was() {
     let (server, mut alice, mut bob, mut carol, _) = dm_call().await;

@@ -314,6 +314,7 @@ private fun ReadyNavigation(
                   onOpenFiles = { navigation.navigate("files/$selected") },
                   onBack = { maybeSelected = null },
                   onOpenPermalink = openPermalink,
+                  onOpenConversation = { maybeSelected = it },
                 )
               }
             }
@@ -334,6 +335,7 @@ private fun ReadyNavigation(
         onBack = { navigation.popBackStack() },
         maybeFocusMessage = entry.arguments?.getString("focus"),
         onOpenPermalink = openPermalink,
+        onOpenConversation = { navigation.navigate("conversation/$it") },
       )
     }
     composable(

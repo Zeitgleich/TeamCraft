@@ -58,6 +58,9 @@
   <string name="event_pinned">%1$s pinned a message</string>
   <string name="event_moved">%1$s moved this channel to %2$s</string>
   <string name="event_moved_unnamed">%1$s moved this channel to another space</string>
+  <string name="event_call_moved">%1$s moved the call into “%2$s”</string>
+  <string name="event_call_moved_unnamed">%1$s moved the call into a meeting room</string>
+  <string name="event_call_moved_open">Open the room</string>
   <string name="event_archived_unattributed">This channel was archived</string>
   <string name="event_unarchived_unattributed">This channel was restored</string>
   <string name="event_private_unattributed">This channel was made private</string>

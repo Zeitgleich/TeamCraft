@@ -57,6 +57,12 @@ sealed interface SystemLine {
    */
   data class AdminAdded(val name: String, val by: String) : SystemLine
 
+  /**
+   * [by] moved the conversation's call into a meeting room (issue #1290), for example to add the
+   * notetaker. [roomName] and [maybeRoomId] only when the user is in the room: the line opens it.
+   */
+  data class CallMoved(val by: String, val maybeRoomId: String?, val roomName: String) : SystemLine
+
   /** A message without text or files of a kind this version doesn't know. */
   data object Changed : SystemLine
 }
@@ -105,6 +111,9 @@ fun SystemLine.localizedText(): String = when (this) {
     stringResource(R.string.event_admin_joined_approved, name, by)
   } ?: stringResource(R.string.event_admin_joined, name)
   is SystemLine.AdminAdded -> stringResource(R.string.event_admin_joined_added, name, by)
+  is SystemLine.CallMoved ->
+    if (maybeRoomId == null) stringResource(R.string.event_call_moved_unnamed, by)
+    else stringResource(R.string.event_call_moved, by, roomName)
   SystemLine.Changed -> stringResource(R.string.chat_preview_event)
 }
 
@@ -148,6 +157,9 @@ private fun workspaceLine(event: JsonObject, nameOf: (String) -> String): System
       nameOf(event.text("user")),
       event.text("approved_by").takeIf { it.isNotEmpty() }?.let(nameOf),
     )
+    "call_moved" -> event.text("room_name").let { roomName ->
+      SystemLine.CallMoved(by, event.text("room").takeIf { roomName.isNotEmpty() && it.isNotEmpty() }, roomName)
+    }
     else -> null
   }
 }
