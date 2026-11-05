@@ -90,6 +90,11 @@
   scrollbar-width: none;
 }
 
+/* The list layout has one chip more: all of them stay in sight, on two lines where they must. */
+.dm-sidebar.is-list .home-chips {
+  flex-wrap: wrap;
+}
+
 /* Quiet until selected: a tinted pill without an outline, like the filters of a mail app. */
 .home-chip {
   flex: none;

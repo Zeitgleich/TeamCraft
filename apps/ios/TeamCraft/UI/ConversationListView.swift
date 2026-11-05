@@ -21,6 +21,8 @@ struct ConversationListView: View {
   /// DMs live outside spaces (as on desktop), so they have their own tab.
   @State private var tab: ChatTab = .home
   @State private var homeChip: HomeFilter = .all
+  /// Takes effect at once: the view follows the stored value (#1151).
+  @AppStorage(ChatListLayout.key) private var layoutRaw = ChatListLayout.spaces.rawValue
   @State private var dmFilter = ""
   /// A mute from the long-press menu the server didn't take (#903).
   @State private var isMuteFailed = false
@@ -42,7 +44,7 @@ struct ConversationListView: View {
             OfflineBanner()
             if let progress = maybeFirstSync { FirstSyncBar(progress: progress) }
             NotificationPromptCard()
-            if !isSearching && !conversations.isEmpty { tabPicker }
+            if !isSearching && !conversations.isEmpty && !isList { tabPicker }
           }
         }
         .navigationTitle("chats_title")
@@ -143,6 +145,11 @@ struct ConversationListView: View {
 
   private var isSearching: Bool { !fullQuery.isEmpty }
 
+  private var isList: Bool { layoutRaw == ChatListLayout.list.rawValue }
+
+  /// Where the chips and the filter belong: Home, and always in the list layout.
+  private var isHomeShown: Bool { isList || tab == .home }
+
   @ViewBuilder
   private var sidebar: some View {
     if isSearching {
@@ -159,7 +166,9 @@ struct ConversationListView: View {
       }
     } else {
       List(selection: $selection) {
-        if tab == .home {
+        if isHomeShown {
+          // Decided where the channels are (#799): in the list layout, here too.
+          if isList { JoinRequestSection() }
           TextField("dm_filter", text: $dmFilter)
             .textFieldStyle(.roundedBorder)
             .autocorrectionDisabled()
@@ -186,7 +195,7 @@ struct ConversationListView: View {
           ) {
             ForEach(section.conversations, id: \.id) { conversation in
               ConversationRow(
-                conversation: conversation, maybePreview: previews[conversation.id], showsSpace: tab == .home)
+                conversation: conversation, maybePreview: previews[conversation.id], showsSpace: isHomeShown)
                 .tag(conversation.id)
                 .swipeActions(edge: .leading) { readButton(for: conversation) }
                 .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
@@ -203,12 +212,33 @@ struct ConversationListView: View {
             }
           }
         }
+        if isList && dmFilter.isEmpty && homeChip == .all { listSpacesSection }
       }
       .listStyle(.sidebar)
     }
   }
 
+  /// The spaces under the list layout's list: a space's menu and browsing for more are here, since
+  /// no header of a space is left to hold them (#1151).
+  private var listSpacesSection: some View {
+    Section("chats_tab_spaces") {
+      ForEach(listedSpaces(conversations)) { section in
+        Menu {
+          spaceMenu(for: section)
+        } label: {
+          Text(title(of: section.title))
+        }
+        .task(id: section.id) { await loadSpaceMenu(for: section) }
+      }
+      Button("browse_channels", systemImage: "plus") { maybeBrowseTab = .channels }
+    }
+  }
+
   private var shownSections: [ConversationSection] {
+    if isList {
+      return listSections(
+        conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip)
+    }
     switch tab {
     case .spaces: return channelSections(conversations)
     case .home:
@@ -220,7 +250,7 @@ struct ConversationListView: View {
   /// Unread / People / Groups; tapping the selected chip again shows everything.
   private var homeChips: some View {
     HStack {
-      ForEach(HomeFilter.chips, id: \.self) { chip in
+      ForEach(isList ? HomeFilter.listChips : HomeFilter.chips, id: \.self) { chip in
         Button(LocalizedStringKey(chipKey(chip))) { homeChip = homeChip == chip ? .all : chip }
           .buttonStyle(.bordered)
           .tint(homeChip == chip ? Theme.accent : .secondary)
@@ -235,6 +265,7 @@ struct ConversationListView: View {
     case .unread: return "home_filter_unread"
     case .people: return "home_filter_people"
     case .groups: return "home_filter_groups"
+    case .channels: return "channels"
     }
   }
 
@@ -473,6 +504,7 @@ struct ConversationListView: View {
     case .space(let name): return LocalizedStringKey(name)
     case .channels: return "channels"
     case .directMessages: return "direct_messages"
+    case .everything: return "list_conversations"
     }
   }
 }

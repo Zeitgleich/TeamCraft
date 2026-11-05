@@ -87,6 +87,19 @@ pub trait ChatBackend {
       .filter(|conversation| conversation.is_favorite && !conversation.kind.is_direct_like())
       .collect()
   }
+  /// What the list layout lists (#1151): DMs and group DMs, and the channels of every space the
+  /// user is a member of. The default asks each space; a backend that holds all conversations in
+  /// one list should override it with one pass.
+  fn listed_conversations(&self) -> Vec<Conversation> {
+    let mut list = self.direct_conversations();
+    list.extend(
+      self
+        .spaces()
+        .into_iter()
+        .flat_map(|space| self.space_conversations(space.id)),
+    );
+    list
+  }
   /// Meeting chats the user is in (docs/meetings.md): outside spaces and the sidebar's lists, but
   /// reachable by ID for the meeting's call and its chat (#1141). Backends without meetings have
   /// none.

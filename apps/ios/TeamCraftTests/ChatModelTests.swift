@@ -67,6 +67,23 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(TabBadge([starred, list[3]]).unread, 3)
   }
 
+  /// #1151: the list layout holds the DMs and the channels of all spaces, favorites first.
+  func testTheListHoldsDmsAndChannelsOfAllSpacesByRecency() {
+    let list = [
+      item("1", "Amy", kind: .direct),
+      item("2", "general", space: "Project A"),
+      item("3", "general", space: "Project B"),
+      item("4", "release", space: "Project A", favorite: true),
+    ]
+    let at = { (seconds: TimeInterval) in Date(timeIntervalSince1970: seconds) }
+    let sections = listSections(list + [list[0]], lastActivity: ["1": at(20), "2": at(30), "3": at(10)])
+    XCTAssertEqual(sections.map(\.title), [.favorites, .everything])
+    XCTAssertEqual(sections[1].conversations.map(\.id), ["2", "1", "3"])
+    XCTAssertEqual(listSections(list, chip: .channels).flatMap(\.conversations).count, 3)
+    XCTAssertEqual(listSections(list, chip: .people).flatMap(\.conversations).map(\.id), ["1"])
+    XCTAssertEqual(listedSpaces(list).map(\.title), [.space("Project A"), .space("Project B")])
+  }
+
   func testHomeChipsPickUnreadPeopleOrGroups() {
     let list = [
       item("1", "Amy", kind: .direct, unread: 1),

@@ -5,8 +5,9 @@
 use std::collections::HashMap;
 
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
-use crate::channel_access::{can_invite_to, can_start_any_direct};
+use crate::channel_access::{can_invite_to, can_start_any_direct, is_guest};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::channel_view::shown_name;
 use crate::components::entry_menu::EntryMenuTrigger;
@@ -14,27 +15,37 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::setup_checklist::SetupChecklist;
 use crate::components::sidebar::{
-  EntriesDisclosure, EntriesToggle, GlobalEntries, ListFilter, ListFilterField, ListFilterToggle, SidebarItem,
+  EntriesDisclosure, EntriesToggle, GlobalEntries, ListFilter, ListFilterField, ListFilterToggle,
+  SidebarItem, hold_unread_while_open,
 };
+use crate::components::space_tile::SpaceTile;
 
 use crate::components::people_picker::PeoplePicker;
 use crate::entry_actions::MenuEntry;
 use crate::i18n::use_i18n;
-use crate::model::{Conversation, ConversationKind, SpaceId, User, UserId};
+use crate::model::{Conversation, ConversationKind, Space, SpaceId, User, UserId};
 use crate::prefs::DmSort;
 use crate::reactive::{items_by_key, keyed_item};
-use crate::sections::{DirectList, DirectSectionKind, HomeFilter, build_direct};
+use crate::sections::{DirectList, DirectSectionKind, HomeFilter, ListOptions, build_direct, build_list};
 use crate::state::{MainView, Overlay, use_app_state};
 
 /// Display limits offered for the list ("0" shows all).
 const LIMIT_OPTIONS: [u32; 4] = [0, 5, 10, 20];
 
-/// The sidebar of Home.
+/// Rows the list layout adds at a time; a page is several screens, so scrolling doesn't run into
+/// its end (#1151).
+const LIST_PAGE_ROWS: usize = 100;
+/// How far above the end of the list the next page comes in, in pixels.
+const LIST_PAGE_AHEAD_PX: i32 = 800;
+
+/// The sidebar of Home. `is_list`: the list layout's (#1151), which holds the channels of all spaces
+/// too, a page at a time, with the spaces under it.
 #[component]
-pub fn HomeSidebar() -> impl IntoView {
+pub fn HomeSidebar(#[prop(optional)] is_list: bool) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let show_all = RwSignal::new(false);
+  let list_pages = RwSignal::new(1_usize);
   let show_options = RwSignal::new(false);
   let chip = RwSignal::new(HomeFilter::All);
   let filter = ListFilter::new();
@@ -45,17 +56,60 @@ pub fn HomeSidebar() -> impl IntoView {
       .settings
       .prefs
       .with(|prefs| (prefs.sidebar.dm_sort, prefs.sidebar.dm_limit as usize));
+    if is_list {
+      let options = ListOptions {
+        sort,
+        show_unreads_group: state
+          .settings
+          .prefs
+          .with(|prefs| prefs.sidebar.shows_unreads_section),
+        maybe_held_open: state.held_unread.get(),
+        filter: &query.get(),
+        chip: chip.get(),
+        max_rows: list_pages.get() * LIST_PAGE_ROWS,
+      };
+      return build_list(state.list_entries(), &options);
+    }
     let limit = if show_all.get() { 0 } else { limit };
     build_direct(state.chats_entries(), sort, limit, &query.get(), chip.get())
   });
   let has_any = Memo::new(move |_| {
-    state
-      .read(|backend| !backend.direct_conversations().is_empty() || !backend.favorite_channels().is_empty())
+    state.read(|backend| {
+      if is_list {
+        !backend.listed_conversations().is_empty()
+      } else {
+        !backend.direct_conversations().is_empty() || !backend.favorite_channels().is_empty()
+      }
+    })
   });
   let is_filtered_out = Memo::new(move |_| list.with(|list| list.sections.is_empty()));
+  let is_filtering = move || chip.get() != HomeFilter::All || !query.with(|query| query.trim().is_empty());
+  if is_list {
+    hold_unread_while_open(state);
+    // Another filter starts from its first page again.
+    Effect::new(move |_| {
+      chip.track();
+      query.track();
+      if list_pages.get_untracked() != 1 {
+        list_pages.set(1);
+      }
+    });
+  }
+  let show_more = Callback::new(move |()| {
+    if is_list {
+      list_pages.update(|pages| *pages += 1);
+    } else {
+      show_all.set(true);
+    }
+  });
+  let chips: &'static [HomeFilter] = if is_list {
+    &HomeFilter::LIST_CHIPS
+  } else {
+    &HomeFilter::CHIPS
+  };
 
   view! {
-    <nav class="sidebar dm-sidebar" aria-label=move || i18n.t("chats-title")>
+    <nav class="sidebar dm-sidebar" class:is-list=is_list aria-label=move || i18n.t("chats-title")>
       <div class="sidebar-head">
         <h2 class="space-name">{move || i18n.t("chats-title")}</h2>
         <EntriesToggle entries=entries controls="chats-entries" />
@@ -82,13 +136,14 @@ pub fn HomeSidebar() -> impl IntoView {
         </Show>
       </div>
       <Show when=move || show_options.get() fallback=|| ()>
-        <DirectOptions />
+        <DirectOptions is_list=is_list />
       </Show>
       <GlobalEntries entries=entries id="chats-entries" />
       <ListFilterField filter=filter id="chats-filter" label_key="chats-filter" />
       <div class="home-chips" role="group" aria-label=move || i18n.t("home-filters")>
-        {HomeFilter::CHIPS
-          .into_iter()
+        {chips
+          .iter()
+          .copied()
           .map(|kind| {
             view! {
               <button
@@ -106,7 +161,14 @@ pub fn HomeSidebar() -> impl IntoView {
           })
           .collect_view()}
       </div>
-      <div class="sidebar-scroll">
+      <div
+        class="sidebar-scroll"
+        on:scroll=move |ev| {
+          if is_list && list.with_untracked(|list| list.hidden_count) > 0 && is_near_the_end(&ev) {
+            show_more.run(());
+          }
+        }
+      >
         // Only a change between these three builds the list again; its rows follow `list` in place.
         {move || {
           if !has_any.get() {
@@ -114,12 +176,82 @@ pub fn HomeSidebar() -> impl IntoView {
           } else if is_filtered_out.get() {
             view! { <p class="sb-empty">{move || i18n.t("dm-filter-empty")}</p> }.into_any()
           } else {
-            view! { <DirectSections list=list show_all=show_all /> }.into_any()
+            view! { <DirectSections list=list on_show_more=show_more /> }.into_any()
           }
         }}
+        {is_list.then(|| {
+          view! {
+            <Show when=move || !is_filtering() fallback=|| ()>
+              <ListSpaces />
+            </Show>
+          }
+        })}
       </div>
-      <InviteFooter />
+      {(!is_list).then(|| view! { <InviteFooter /> })}
     </nav>
+  }
+}
+
+/// Whether a scroller has come close to the end of its content.
+fn is_near_the_end(ev: &web_sys::Event) -> bool {
+  ev.current_target()
+    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    .is_some_and(|element| {
+      element.scroll_top() + element.client_height() + LIST_PAGE_AHEAD_PX >= element.scroll_height()
+    })
+}
+
+/// The spaces under the list layout's list (#1151): where a space's own actions are, since its
+/// channels are in the list and it has no sidebar. A press opens the space's menu.
+#[component]
+fn ListSpaces() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let spaces = Memo::new(move |_| state.read(|backend| backend.spaces()));
+  view! {
+    <section class="sb-section sb-list-spaces" aria-labelledby="sb-list-spaces-title">
+      <h3 id="sb-list-spaces-title" class="sb-section-title">{move || i18n.t("bottom-nav-spaces")}</h3>
+      <ul>
+        // A new name, color or picture renders the row again, as on the rail.
+        <For
+          each=move || spaces.get()
+          key=|space| (space.id, space.name.clone(), space.hue, space.maybe_image_version.clone())
+          let:space
+        >
+          <li><ListSpaceRow space=space /></li>
+        </For>
+      </ul>
+      <Show when=move || !is_guest(state) fallback=|| ()>
+        <button class="sb-more" on:click=move |_| state.overlay.set(Overlay::BrowseSpaces(None))>
+          {move || i18n.t("rail-add-space")}
+        </button>
+      </Show>
+    </section>
+  }
+}
+
+#[component]
+fn ListSpaceRow(space: Space) -> impl IntoView {
+  let menu = EntryMenuTrigger::new(MenuEntry::Space(space.id));
+  let name = space.name.clone();
+  view! {
+    <button
+      type="button"
+      class="sb-item"
+      class:is-pressing=move || menu.is_pressing()
+      aria-haspopup="menu"
+      on:pointerdown=move |ev| menu.on_pointerdown(&ev)
+      on:pointermove=move |ev| menu.on_pointermove(&ev)
+      on:pointerup=move |_| menu.on_pointerup()
+      on:pointercancel=move |_| menu.on_pointerup()
+      on:contextmenu=move |ev| menu.on_contextmenu(&ev)
+      on:keydown=move |ev| menu.on_keydown(&ev)
+      on:click:capture=move |ev| menu.on_click_capture(&ev)
+      on:click=move |ev| menu.on_click(&ev)
+    >
+      <SpaceTile space=space />
+      <span class="sb-name" translate="no">{name}</span>
+    </button>
   }
 }
 
@@ -140,7 +272,7 @@ fn InviteFooter() -> impl IntoView {
 
 /// Sort order and display limit of the list (moved here from the sidebar settings).
 #[component]
-fn DirectOptions() -> impl IntoView {
+fn DirectOptions(is_list: bool) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let prefs = state.settings.prefs;
@@ -167,35 +299,38 @@ fn DirectOptions() -> impl IntoView {
           })
           .collect_view()}
       </select>
-      <label for="dm-limit">{move || i18n.t("settings-dm-limit")}</label>
-      <select
-        id="dm-limit"
-        class="input"
-        aria-describedby="dm-limit-hint"
-        on:change=move |ev| {
-          if let Ok(limit) = event_target_value(&ev).parse::<u32>() {
-            prefs.update(|all| all.sidebar.dm_limit = limit);
-          }
-        }
-      >
-        {LIMIT_OPTIONS
-          .into_iter()
-          .map(|limit| {
-            view! {
-              <option value=limit.to_string() selected=move || prefs.with(|all| all.sidebar.dm_limit == limit)>
-                {move || i18n.t(&format!("settings-dm-limit-{limit}"))}
-              </option>
+      // The list layout pages through everything by itself; the limit is about the DMs of Chats.
+      {(!is_list).then(|| view! {
+        <label for="dm-limit">{move || i18n.t("settings-dm-limit")}</label>
+        <select
+          id="dm-limit"
+          class="input"
+          aria-describedby="dm-limit-hint"
+          on:change=move |ev| {
+            if let Ok(limit) = event_target_value(&ev).parse::<u32>() {
+              prefs.update(|all| all.sidebar.dm_limit = limit);
             }
-          })
-          .collect_view()}
-      </select>
-      <p id="dm-limit-hint" class="muted-text small">{move || i18n.t("settings-dm-limit-hint")}</p>
+          }
+        >
+          {LIMIT_OPTIONS
+            .into_iter()
+            .map(|limit| {
+              view! {
+                <option value=limit.to_string() selected=move || prefs.with(|all| all.sidebar.dm_limit == limit)>
+                  {move || i18n.t(&format!("settings-dm-limit-{limit}"))}
+                </option>
+              }
+            })
+            .collect_view()}
+        </select>
+        <p id="dm-limit-hint" class="muted-text small">{move || i18n.t("settings-dm-limit-hint")}</p>
+      })}
     </div>
   }
 }
 
 #[component]
-fn DirectSections(list: Memo<DirectList>, show_all: RwSignal<bool>) -> impl IntoView {
+fn DirectSections(list: Memo<DirectList>, on_show_more: Callback<()>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   // One lookup for all channel rows; it changes only when a space does.
@@ -271,7 +406,7 @@ fn DirectSections(list: Memo<DirectList>, show_all: RwSignal<bool>) -> impl Into
       (hidden > 0)
         .then(|| {
           view! {
-            <button class="sb-more" on:click=move |_| show_all.set(true)>
+            <button class="sb-more" on:click=move |_| on_show_more.run(())>
               {move || i18n.t_count("sidebar-show-more", hidden)}
             </button>
           }
@@ -283,8 +418,10 @@ fn DirectSections(list: Memo<DirectList>, show_all: RwSignal<bool>) -> impl Into
 fn section_slug(kind: DirectSectionKind) -> &'static str {
   match kind {
     DirectSectionKind::Notes => "notes",
+    DirectSectionKind::Unreads => "unreads",
     DirectSectionKind::Favorites => "favorites",
     DirectSectionKind::Conversations => "conversations",
+    DirectSectionKind::Everything => "everything",
     DirectSectionKind::Deactivated => "deactivated",
   }
 }

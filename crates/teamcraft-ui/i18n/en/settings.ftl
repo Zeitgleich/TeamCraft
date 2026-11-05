@@ -312,8 +312,12 @@ settings-show-formatting = Show the formatting toolbar
 privacy-last-seen-off = Your administrator switched last seen off for everybody.
 
 # Spaces: moving channels, muting, scoped search, grouped sidebar, channel retention
+settings-sidebar-layout = Chats and channels
+settings-sidebar-layout-hint = Spaces shows direct messages and each space apart. List shows direct messages and the channels of all spaces in one list.
+settings-sidebar-layout-spaces = Spaces
+settings-sidebar-layout-list = List
 settings-sidebar-grouped = Show all spaces in one sidebar
-settings-sidebar-grouped-hint = Lists the channels of every space, grouped by space, instead of using the space switcher.
+settings-sidebar-grouped-hint = Lists the channels of every space, grouped by space, instead of using the space switcher. Applies to the Spaces layout.
 settings-reopen-last = Reopen the last conversation
 settings-reopen-last-hint = When you switch back to Home or a space, open the conversation you had open there. Off: Home shows its overview, and a space opens its first channel.
 

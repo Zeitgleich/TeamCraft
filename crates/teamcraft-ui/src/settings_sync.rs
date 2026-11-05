@@ -119,6 +119,7 @@ synced_prefs! {
   "display.image_size" => display.image_size,
   "display.show_status_in_messages" => display.show_status_in_messages,
   "display.maybe_divider_dwell_secs" => display.maybe_divider_dwell_secs,
+  "sidebar.layout" => sidebar.layout,
   "sidebar.sort" => sidebar.sort,
   "sidebar.dm_sort" => sidebar.dm_sort,
   "sidebar.dm_limit" => sidebar.dm_limit,
