@@ -414,6 +414,36 @@ impl Database {
     Ok(())
   }
 
+  /// Changes the role and expiry of somebody who is still a member (`false`: not any more), so a
+  /// removal at the same moment stands. Only guests expire: anybody else's expiry goes, or a
+  /// promoted guest would drop out of the space at the old date.
+  pub async fn update_space_member(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    role: &SpaceRole,
+    expiry: ExpiryChange,
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"UPDATE space_members SET
+           role = $3,
+           expires_at = CASE WHEN $3 <> 'guest' THEN NULL WHEN $5 THEN $4 ELSE expires_at END,
+           expiry_notice_lead_days = CASE WHEN $5 THEN NULL ELSE expiry_notice_lead_days END
+         WHERE space_id = $1 AND user_id = $2"#,
+      to_db(space),
+      to_db(user),
+      role.as_str(),
+      match expiry {
+        ExpiryChange::Set(at) => Some(at),
+        ExpiryChange::Keep | ExpiryChange::Clear => None,
+      },
+      expiry != ExpiryChange::Keep,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
   /// Guest memberships whose expiry has passed at `now`, oldest first.
   pub async fn list_expired_guests(
     &self,
@@ -630,9 +660,8 @@ impl Database {
     deletes_memberless: bool,
   ) -> Result<crate::SpaceLeft, DbError> {
     let mut tx = self.pool().begin().await?;
-    let left = self
-      .remove_member_in(&mut tx, space, user, deletes_memberless)
-      .await?;
+    Self::lock_member_channels(&mut tx, space, user).await?;
+    let left = Self::remove_member_in(&mut tx, space, user, deletes_memberless).await?;
     tx.commit().await?;
     Ok(left)
   }
@@ -646,6 +675,8 @@ impl Database {
     now: OffsetDateTime,
   ) -> Result<Option<crate::SpaceLeft>, DbError> {
     let mut tx = self.pool().begin().await?;
+    // In the order of a manual removal, channels first, so the two can't deadlock.
+    Self::lock_member_channels(&mut tx, space, user).await?;
     // Held until the commit, so an extension waits and then finds the membership gone.
     let is_expired = sqlx::query_scalar!(
       r#"SELECT user_id FROM space_members
@@ -660,18 +691,16 @@ impl Database {
     if !is_expired {
       return Ok(None);
     }
-    let left = self.remove_member_in(&mut tx, space, user, false).await?;
+    let left = Self::remove_member_in(&mut tx, space, user, false).await?;
     tx.commit().await?;
     Ok(Some(left))
   }
 
-  async fn remove_member_in(
-    &self,
+  async fn lock_member_channels(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     space: SpaceId,
     user: UserId,
-    deletes_memberless: bool,
-  ) -> Result<crate::SpaceLeft, DbError> {
+  ) -> Result<(), DbError> {
     // Against a join or a leave at the same moment: who stays is counted below.
     sqlx::query_scalar!(
       r#"SELECT c.id FROM conversations c JOIN memberships m ON m.conversation_id = c.id
@@ -681,6 +710,15 @@ impl Database {
     )
     .fetch_all(&mut **tx)
     .await?;
+    Ok(())
+  }
+
+  async fn remove_member_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    space: SpaceId,
+    user: UserId,
+    deletes_memberless: bool,
+  ) -> Result<crate::SpaceLeft, DbError> {
     let left = sqlx::query_scalar!(
       r#"DELETE FROM memberships USING conversations c
          WHERE memberships.conversation_id = c.id AND c.space_id = $1 AND memberships.user_id = $2

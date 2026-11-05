@@ -108,9 +108,12 @@ struct ConversationListView: View {
       }
     }
     .searchable(text: $query, prompt: Text("search_hint"))
+    // Once per account: a snapshot is too much to decode on every change for this.
+    .task(id: account.userId) {
+      canBrowseChannels = await model.browseSnapshot()?.canBrowseChannels ?? true
+    }
     .task(id: model.changeCount) {
       conversations = await model.conversations()
-      canBrowseChannels = await model.browseSnapshot()?.canBrowseChannels ?? true
       hasLoaded = true
       maybeFirstSync = await model.firstSync()
       previews = await model.chatPreviews(conversations, myId: account.userId)

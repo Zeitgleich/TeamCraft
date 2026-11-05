@@ -416,6 +416,206 @@ mod notices_and_extending {
     app.stop().await;
   }
 
+  /// A removed sponsor and a demoted admin see their list change while connected.
+  #[tokio::test]
+  async fn role_changes_and_removals_tell_the_person_concerned() {
+    let app = app!();
+    let (alice, carol) = (owner(), member("carol"));
+    let carol_id = user_id(&app, &carol).await;
+    let space = create_space(&app, &alice, "Client", "invite_only").await;
+    let path = format!("/spaces/{space}/members");
+    let reply = app
+      .post(&alice, &path, json!({"user_id": carol_id, "role": "space_admin"}))
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    let device = register_device(&app, &carol).await;
+    let mut socket = ws::connect(&app, &carol, &device).await;
+    ws::events(&mut socket, StdDuration::from_millis(200)).await;
+    let is_told = |events: &[GatewayEvent]| {
+      events
+        .iter()
+        .any(|event| matches!(event, GatewayEvent::GuestTermsUpdate))
+    };
+
+    let member_path = format!("{path}/{carol_id}");
+    let reply = app.patch(&alice, &member_path, json!({"role": "member"})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(
+      is_told(&ws::events(&mut socket, StdDuration::from_millis(400)).await),
+      "demoted"
+    );
+
+    assert_eq!(
+      app.delete(&alice, &member_path).await.status,
+      StatusCode::NO_CONTENT
+    );
+    assert!(
+      is_told(&ws::events(&mut socket, StdDuration::from_millis(400)).await),
+      "removed"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_promoted_guest_keeps_no_expiry_and_a_patch_brings_nobody_back() {
+    let app = app!();
+    let (alice, carol) = (owner(), member("carol"));
+    let (space, carol_id, _) = guest_ending_in(&app, &alice, &carol, 5).await;
+    let path = format!("/spaces/{space}/members/{carol_id}");
+
+    let reply = app.patch(&alice, &path, json!({"role": "member"})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(reply.body["expires_at"].is_null(), "{}", reply.body);
+
+    let (space_id, user) = (space.parse().unwrap(), carol_id.parse().unwrap());
+    let database = &app.state.database;
+    database.remove_space_member(space_id, user, false).await.unwrap();
+    let role = teamcraft_proto::SpaceRole::Guest;
+    let keep = teamcraft_db::ExpiryChange::Keep;
+    assert!(
+      !database
+        .update_space_member(space_id, user, &role, keep)
+        .await
+        .unwrap()
+    );
+    assert_eq!(
+      database.space_role(space_id, user).await.unwrap(),
+      None,
+      "still gone"
+    );
+    assert_eq!(
+      app.patch(&alice, &path, json!({"role": "guest"})).await.status,
+      StatusCode::NOT_FOUND
+    );
+    app.stop().await;
+  }
+
+  /// A custom scheme can give members `invite_guest`; that is no licence to demote people.
+  mod demoting {
+    use super::*;
+
+    async fn in_a_space(app: &TestApp, alice: &TestUser) -> (String, String, String) {
+      let (carol, dave) = (member("carol"), member("dave"));
+      let (carol_id, dave_id) = (user_id(app, &carol).await, user_id(app, &dave).await);
+      let space = create_space(app, alice, "Client", "invite_only").await;
+      for (id, role) in [(&carol_id, "member"), (&dave_id, "space_admin")] {
+        let reply = app
+          .post(
+            alice,
+            &format!("/spaces/{space}/members"),
+            json!({"user_id": id, "role": role}),
+          )
+          .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+      }
+      (space, carol_id, dave_id)
+    }
+
+    async fn grant_to_members(app: &TestApp, path: &str, permission: &str) {
+      let reply = app
+        .put(
+          &admin(),
+          path,
+          json!({"changes": [{"role": "member", "permission": permission, "effect": "grant"}]}),
+        )
+        .await;
+      assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    }
+
+    #[tokio::test]
+    async fn a_member_who_may_only_invite_guests_may_not_but_keeps_a_guests_terms() {
+      let app = app!();
+      let alice = owner();
+      let (space, _, dave_id) = in_a_space(&app, &alice).await;
+      let ext = guest("ext");
+      let ext_id = user_id(&app, &ext).await;
+      let reply = app
+        .post(
+          &alice,
+          &format!("/spaces/{space}/members"),
+          json!({"user_id": ext_id, "role": "guest"}),
+        )
+        .await;
+      assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+      grant_to_members(
+        &app,
+        &format!("/admin/spaces/{space}/permission-scheme"),
+        "invite_guest",
+      )
+      .await;
+
+      let carol = member("carol");
+      let reply = app
+        .patch(
+          &carol,
+          &format!("/spaces/{space}/members/{dave_id}"),
+          json!({"role": "guest"}),
+        )
+        .await;
+      assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+      let reply = app
+        .patch(
+          &carol,
+          &format!("/spaces/{space}/members/{ext_id}"),
+          json!({"role": "guest"}),
+        )
+        .await;
+      assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+      app.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_plain_member_and_a_guest_may_not() {
+      let app = app!();
+      let alice = owner();
+      let (space, _, dave_id) = in_a_space(&app, &alice).await;
+      let ext = guest("ext");
+      let ext_id = user_id(&app, &ext).await;
+      let reply = app
+        .post(
+          &alice,
+          &format!("/spaces/{space}/members"),
+          json!({"user_id": ext_id, "role": "guest"}),
+        )
+        .await;
+      assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+      let path = format!("/spaces/{space}/members/{dave_id}");
+      for who in [member("carol"), ext] {
+        let reply = app.patch(&who, &path, json!({"role": "guest"})).await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{}", reply.body);
+      }
+      app.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_space_admin_a_workspace_admin_and_a_grant_may() {
+      let app = app!();
+      let alice = owner();
+      let (space, carol_id, _) = in_a_space(&app, &alice).await;
+      let path = format!("/spaces/{space}/members/{carol_id}");
+      for who in [member("dave"), admin()] {
+        let reply = app.patch(&who, &path, json!({"role": "guest"})).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+        let reply = app.patch(&alice, &path, json!({"role": "member"})).await;
+        assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+      }
+      grant_to_members(&app, "/admin/permission-scheme", "demote_to_guest").await;
+      let erin = member("erin");
+      let erin_id = user_id(&app, &erin).await;
+      let reply = app
+        .post(
+          &alice,
+          &format!("/spaces/{space}/members"),
+          json!({"user_id": erin_id, "role": "member"}),
+        )
+        .await;
+      assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+      let reply = app.patch(&erin, &path, json!({"role": "guest"})).await;
+      assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+      app.stop().await;
+    }
+  }
+
   #[tokio::test]
   async fn a_batch_of_notices_is_one_event() {
     let app = app!();

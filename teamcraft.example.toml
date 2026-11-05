@@ -350,7 +350,7 @@ allowed_email_domains = []
 expiry_check_interval_secs = 3600
 # Mails of those notices. They name no guest and no space. {days}, {count} and {url} are filled in.
 notice_subject_guest = "Your guest access ends soon"
-notice_body_guest_one = "Your guest access ends tomorrow. Ask the person who invited you to extend it.\n\n{url}\n"
+notice_body_guest_one = "Your guest access ends within a day. Ask the person who invited you to extend it.\n\n{url}\n"
 notice_body_guest = "Your guest access ends in {days} days. Ask the person who invited you to extend it.\n\n{url}\n"
 notice_subject_sponsor = "Guest access you are responsible for ends soon"
 notice_body_sponsor_one = "The access of a guest you are responsible for ends soon. Open the app to extend it or let it end.\n\n{url}\n"

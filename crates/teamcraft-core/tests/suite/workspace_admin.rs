@@ -639,6 +639,65 @@ mod expiring_guests {
   }
 }
 
+mod guest_list_refresh {
+  use teamcraft_proto::{GatewayEvent, GatewayServerMessage, UnixMillis};
+
+  use super::*;
+
+  fn event(seq: u64) -> GatewayServerMessage {
+    GatewayServerMessage::Event {
+      seq,
+      event: GatewayEvent::GuestTermsUpdate,
+    }
+  }
+
+  fn guest(expires_at: i64) -> teamcraft_proto::ExpiringGuestResponse {
+    serde_json::from_value(serde_json::json!({
+      "space_id": "1",
+      "space_name": "Project A",
+      "user": {"id": "2", "display_name": "Guest", "kind": "guest"},
+      "expires_at": expires_at,
+      "is_own": false,
+    }))
+    .unwrap()
+  }
+
+  /// A sweep or a bulk action sends hundreds of these; they must not each read the list.
+  #[tokio::test]
+  async fn many_events_read_the_list_once_and_the_last_change_still_arrives() {
+    const LATER_MS: i64 = i64::MAX / 2;
+    let server = FakeServer::new();
+    let clock = std::sync::Arc::new(teamcraft_core::clock::ManualClock::new(1_800_000_000_000));
+    let mut alice = Peer::enroll_on_clock(
+      server.add_user("Alice"),
+      "Alice",
+      common::settings(),
+      Box::new(clock.clone()),
+    )
+    .await;
+    let ui = backend_of(&alice);
+
+    server.set_expiring_guests(vec![guest(LATER_MS)]);
+    alice.client.handle_frame(event(1_000)).await.unwrap();
+    assert_eq!(ui.expiring_guests().len(), 1, "the first event reads at once");
+
+    server.set_expiring_guests(vec![guest(LATER_MS), guest(LATER_MS + 1)]);
+    alice.client.handle_frame(event(1_001)).await.unwrap();
+    alice.client.handle_frame(event(1_002)).await.unwrap();
+    assert_eq!(ui.expiring_guests().len(), 1, "the next ones wait");
+
+    clock.advance(6_000);
+    alice
+      .client
+      .handle_frame(GatewayServerMessage::HeartbeatAck)
+      .await
+      .unwrap();
+    let listed = ui.expiring_guests();
+    assert_eq!(listed.len(), 2, "any later frame reads what waited");
+    assert_eq!(listed[1].expires_at, UnixMillis(LATER_MS + 1));
+  }
+}
+
 mod archived_channels {
   use super::*;
 

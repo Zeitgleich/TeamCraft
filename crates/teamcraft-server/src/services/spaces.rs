@@ -13,7 +13,7 @@ use teamcraft_proto::{
 };
 use time::OffsetDateTime;
 
-use super::access::{is_guest, is_instance_admin, load_space, require, space_target};
+use super::access::{allows, is_guest, is_instance_admin, load_space, require, space_target};
 use super::audit::{self, Target as AuditTarget};
 use super::conversations::{announce_deleted_direct, wake_sweep};
 use super::convert::{category_response, offset_date_time, space_response, unix_millis, user_summary};
@@ -396,12 +396,14 @@ pub async fn update_space_member(
   request: UpdateSpaceMemberRequest,
 ) -> Result<SpaceMemberResponse, ApiError> {
   let access = load_space(state, caller, id).await?;
-  require_member_management(state, caller, &request.role, &access.target())?;
-  let current = state
-    .database
-    .space_role(id, user_id)
-    .await?
-    .ok_or_else(ApiError::user_not_found)?;
+  let maybe_current = state.database.space_role(id, user_id).await?;
+  let is_allowed = permissions_to_change(maybe_current.as_ref(), &request.role)
+    .iter()
+    .any(|permission| allows(state, caller, permission, &access.target()));
+  if !is_allowed {
+    return Err(ApiError::Forbidden("you may not change this member".into()));
+  }
+  let current = maybe_current.ok_or_else(ApiError::user_not_found)?;
   let user = state
     .database
     .get_user(user_id)
@@ -413,17 +415,14 @@ pub async fn update_space_member(
   }
   let expiry = changed_expiry(&request.role, request.maybe_expires_at, request.clears_expiry)?;
   super::guests::check_expiry_change(state, caller, &access, user_id, expiry).await?;
-  state
+  // Only ever a member who is still here: a removal or the expiry at the same moment stands.
+  if !state
     .database
-    .upsert_space_member(&NewSpaceMember {
-      space: id,
-      user: user_id,
-      role: request.role.clone(),
-      expiry,
-      // Whoever changes a member's terms does not become their sponsor.
-      maybe_sponsor: None,
-    })
-    .await?;
+    .update_space_member(id, user_id, &request.role, expiry)
+    .await?
+  {
+    return Err(ApiError::user_not_found());
+  }
   audit::record(
     state,
     Some(caller.user.id),
@@ -432,7 +431,9 @@ pub async fn update_space_member(
     &json!({"user_id": user_id.to_string(), "role": request.role.as_str()}),
   )
   .await?;
-  super::guests::note_expiry_change(state, caller, id, user_id, expiry).await?;
+  if current != request.role || expiry != ExpiryChange::Keep {
+    super::guests::note_terms_change(state, caller, id, user_id, expiry).await?;
+  }
   notify_space(state, id, &GatewayEvent::SpaceUpdate { space_id: id }).await?;
   // A space admin manages every channel of the space: the member's `my_permissions` there changed.
   if current != request.role {
@@ -519,15 +520,15 @@ async fn announce_left(
   remaining_before: &[SpaceMember],
   left: &SpaceLeft,
 ) -> Result<(), ApiError> {
-  if let Some(guest) = remaining_before
+  // A guest concerns the sponsor and the admins too; anybody who left has fewer guests to hear about.
+  let audience = remaining_before
     .iter()
     .find(|member| member.user.id == user_id && member.role == SpaceRole::Guest)
-  {
-    state.hub.publish(
-      super::guests::terms_audience(remaining_before, user_id, guest.maybe_sponsor),
-      &GatewayEvent::GuestTermsUpdate,
+    .map_or_else(
+      || vec![user_id],
+      |guest| super::guests::terms_audience(remaining_before, user_id, guest.maybe_sponsor),
     );
-  }
+  state.hub.publish(audience, &GatewayEvent::GuestTermsUpdate);
   state.hub.publish(
     remaining_before
       .iter()
@@ -725,6 +726,17 @@ pub(super) fn require_member_management(
   require(state, caller, permission, target)
 }
 
+/// What lets somebody change a member to `requested`; any one of them will do. `invite_guest` covers
+/// a guest's terms only: demoting somebody takes `demote_to_guest`, or managing the space's members
+/// (space admins always could, and may demote to a member anyway).
+fn permissions_to_change(maybe_current: Option<&SpaceRole>, requested: &SpaceRole) -> &'static [Permission] {
+  match (maybe_current, requested) {
+    (Some(SpaceRole::Guest), SpaceRole::Guest) => &[Permission::InviteGuest],
+    (_, SpaceRole::Guest) => &[Permission::ManageSpaceMembers, Permission::DemoteToGuest],
+    _ => &[Permission::ManageSpaceMembers],
+  }
+}
+
 /// Guest accounts only ever get the guest role (they can't be promoted by space admins).
 fn check_role_fits_user(kind: &UserKind, role: &SpaceRole) -> Result<(), ApiError> {
   if *kind == UserKind::Guest && *role != SpaceRole::Guest {
@@ -773,6 +785,29 @@ pub(super) async fn notify_space(
 
 #[cfg(test)]
 mod tests {
+  mod changing_a_member {
+    use super::super::*;
+
+    fn needs(current: SpaceRole, requested: SpaceRole) -> &'static [Permission] {
+      permissions_to_change(Some(&current), &requested)
+    }
+
+    #[test]
+    fn inviting_guests_covers_a_guests_terms_and_nothing_else() {
+      use SpaceRole::{Guest, Member, SpaceAdmin};
+      assert_eq!(needs(Guest, Guest), [Permission::InviteGuest]);
+      for current in [Member, SpaceAdmin] {
+        assert!(
+          !needs(current.clone(), Guest).contains(&Permission::InviteGuest),
+          "{current:?}"
+        );
+        assert!(needs(current, Guest).contains(&Permission::DemoteToGuest));
+      }
+      assert_eq!(needs(Guest, Member), [Permission::ManageSpaceMembers]);
+      assert_eq!(needs(Member, SpaceAdmin), [Permission::ManageSpaceMembers]);
+    }
+  }
+
   use super::*;
 
   #[test]

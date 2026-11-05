@@ -20,6 +20,7 @@ use super::convert::{offset_date_time, unix_millis, user_summary};
 use super::spaces::remove_expired;
 use super::workspace::{MAX_GUEST_EXPIRY_DAYS, current_guest_policy};
 use crate::auth::AuthenticatedUser;
+use crate::config::GuestsConfig;
 use crate::error::ApiError;
 use crate::meetings::ical::Method;
 use crate::meetings::mailer::OutgoingMail;
@@ -248,8 +249,9 @@ pub(super) fn check_new_expiry(
   )
 }
 
-/// An expiry changed through the general member update: audited, and those concerned read again.
-pub(super) async fn note_expiry_change(
+/// A role or expiry changed through the general member update: a new expiry is audited, and those
+/// concerned read their list again (a demoted admin's list shrinks, a promoted guest's notice goes).
+pub(super) async fn note_terms_change(
   state: &AppState,
   caller: &AuthenticatedUser,
   space: SpaceId,
@@ -257,7 +259,7 @@ pub(super) async fn note_expiry_change(
   change: ExpiryChange,
 ) -> Result<(), ApiError> {
   let maybe_expires_at = match change {
-    ExpiryChange::Keep => return Ok(()),
+    ExpiryChange::Keep => return publish_member_terms(state, space, user_id).await,
     ExpiryChange::Set(at) => Some(unix_millis(at).0),
     ExpiryChange::Clear => None,
   };
@@ -269,6 +271,10 @@ pub(super) async fn note_expiry_change(
     &json!({"user_id": user_id.to_string(), "expires_at": maybe_expires_at}),
   )
   .await?;
+  publish_member_terms(state, space, user_id).await
+}
+
+async fn publish_member_terms(state: &AppState, space: SpaceId, user_id: UserId) -> Result<(), ApiError> {
   let maybe_sponsor = state
     .database
     .space_member_terms(space, user_id)
@@ -523,7 +529,7 @@ async fn mail_notices(
     outgoing.push((
       *sponsor,
       &config.notice_subject_sponsor,
-      &config.notice_body_sponsor,
+      sponsor_body(config, *count),
       count.to_string(),
       String::new(),
     ));
@@ -532,7 +538,7 @@ async fn mail_notices(
     outgoing.push((
       *guest,
       &config.notice_subject_guest,
-      &config.notice_body_guest,
+      guest_body(config, *days),
       String::new(),
       days.to_string(),
     ));
@@ -562,6 +568,22 @@ async fn mail_notices(
     }
   }
   Ok(())
+}
+
+fn sponsor_body(config: &GuestsConfig, count: u32) -> &String {
+  if count == 1 {
+    &config.notice_body_sponsor_one
+  } else {
+    &config.notice_body_sponsor
+  }
+}
+
+fn guest_body(config: &GuestsConfig, days: i32) -> &String {
+  if days == 1 {
+    &config.notice_body_guest_one
+  } else {
+    &config.notice_body_guest
+  }
 }
 
 /// Whom a guest's terms concern: the guest, the space's admins and the sponsor if still in the space
@@ -733,6 +755,17 @@ mod tests {
       let evening = ExtensionRight::UpTo(time::macros::datetime!(2026-12-05 22:00 UTC));
       assert_eq!(extend_offers(morning, EXPIRES), extend_offers(evening, EXPIRES));
     }
+  }
+
+  #[test]
+  fn the_mail_says_one_where_it_is_one() {
+    let config = GuestsConfig::default();
+    assert_eq!(sponsor_body(&config, 1), &config.notice_body_sponsor_one);
+    assert_eq!(sponsor_body(&config, 2), &config.notice_body_sponsor);
+    assert_eq!(guest_body(&config, 1), &config.notice_body_guest_one);
+    assert_eq!(guest_body(&config, 3), &config.notice_body_guest);
+    assert!(!config.notice_body_sponsor_one.contains("{count}"));
+    assert!(!config.notice_body_guest_one.contains("{days}"));
   }
 
   #[test]

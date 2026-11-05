@@ -566,7 +566,7 @@ impl Default for GuestsConfig {
       allowed_email_domains: Vec::new(),
       expiry_check_interval_secs: 3600,
       notice_subject_guest: "Your guest access ends soon".to_owned(),
-      notice_body_guest_one: "Your guest access ends tomorrow. Ask the person who invited you to extend it.\n\n{url}\n"
+      notice_body_guest_one: "Your guest access ends within a day. Ask the person who invited you to extend it.\n\n{url}\n"
         .to_owned(),
       notice_body_sponsor_one: "The access of a guest you are responsible for ends soon. Open the app to extend it or let it end.\n\n{url}\n"
         .to_owned(),
