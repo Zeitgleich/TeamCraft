@@ -107,6 +107,11 @@ class PushDecisionTest {
   }
 
   @Test
+  fun aWakeToSealShowsNothingAndAsksForTheWork() {
+    assertEquals(PushDecision.SealScheduled, PushDecision.of(push(PushNotificationKind.SCHEDULED_SEAL)))
+  }
+
+  @Test
   fun aDismissWithACallStopsRinging() {
     val wakeUp = push(PushNotificationKind.DISMISS, maybeCallId = "77", maybeBadge = 3u)
     assertEquals(PushDecision.StopRinging("77", 3u), PushDecision.of(wakeUp))

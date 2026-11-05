@@ -382,6 +382,11 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
   }
   check_retention(&policy.retention)?;
   check_call_backgrounds(&policy.call_backgrounds)?;
+  if !policy.scheduled_messages.is_valid() {
+    return Err(ApiError::InvalidRequest(
+      "scheduled_messages limits are out of range".into(),
+    ));
+  }
   Ok(document)
 }
 

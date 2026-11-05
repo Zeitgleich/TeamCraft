@@ -42,6 +42,7 @@ mod push;
 mod push_retry;
 mod retention;
 mod role_evidence;
+mod scheduled_message;
 mod server_settings;
 mod share_link;
 mod snowflake;
@@ -116,6 +117,10 @@ pub use push::{PushDeviceRow, PushRecipientRow};
 pub use push_retry::{NewPushRetry, PushRetryClaim, PushRetryRow};
 pub use retention::{RetentionTarget, StoredObject, StoredRetention};
 pub use role_evidence::{RoleStanding, StoredRoleEvidence, StoredRoleLoss};
+pub use scheduled_message::{
+  NewScheduledMessage, ReleaseOutcome, ScheduleOutcome, ScheduledUpdateOutcome, SealedParts, StaleWakes,
+  StoredScheduledMessage,
+};
 pub use server_settings::{StoredBrand, StoredBrandAsset, StoredSetting};
 pub use share_link::{NewShareLink, ShareLink, ShareTarget};
 pub use snowflake::{Clock, SnowflakeError, SnowflakeGenerator, SystemClock};

@@ -63,6 +63,27 @@ Hover a message and open **More actions**:
 
 **Jump to date** opens a conversation's history at a day.
 
+
+## Send a message later
+
+Open the menu next to the send button (on phones: the + or the paperclip in the composer) and choose
+**Send later**: in an hour, tomorrow morning, Monday morning, or a time you pick. Your scheduled messages
+are under **Scheduled**, where you can edit them, send them right away or cancel them.
+
+The server keeps them, encrypted, and sends them on time, even with all your devices off. One exception:
+if the group changes (someone joins or leaves), one of your devices has to update the encryption first. It
+does that by itself, phones in the background too, though iPhones may not get to it. So a message goes out
+on time unless the group changed and all your devices stayed off; then it goes out when one is back, and
+the list says so. Messages with files can't be scheduled yet.
+
+A message that can't go out any more (you left the conversation, or it was deleted) stays in the list
+with the date the server removes it. After that your devices still keep its text, so you can copy it,
+until you remove it from the list.
+
+If you schedule a message and then someone is removed from the conversation, the message doesn't reach
+them through the app. If the server itself were compromised, though, it could give them the text. Don't
+schedule what they must not read once they're gone.
+
 ## Slash commands
 
 Type `/` in the composer for the list. Commands run on your device. To send text that starts with a

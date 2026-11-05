@@ -12064,6 +12064,646 @@
           }
         }
       }
+    },
+    "schedule_heading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send later"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Später senden"
+          }
+        }
+      }
+    },
+    "schedule_online_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Goes out on time, even with your devices off, unless the group changes and all your devices stay off."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geht pünktlich raus, auch wenn deine Geräte aus sind, außer die Gruppe ändert sich und alle deine Geräte bleiben aus."
+          }
+        }
+      }
+    },
+    "schedule_in_one_hour": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In 1 hour"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In 1 Stunde"
+          }
+        }
+      }
+    },
+    "schedule_tomorrow": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tomorrow morning"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Morgen früh"
+          }
+        }
+      }
+    },
+    "schedule_monday": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Monday morning"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Montag früh"
+          }
+        }
+      }
+    },
+    "schedule_custom_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send at"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Senden um"
+          }
+        }
+      }
+    },
+    "schedule_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schedule"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Planen"
+          }
+        }
+      }
+    },
+    "schedule_error_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Write something first."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schreib zuerst etwas."
+          }
+        }
+      }
+    },
+    "schedule_error_past": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pick a time in the future."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wähle eine Zeit in der Zukunft."
+          }
+        }
+      }
+    },
+    "schedule_error_far": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That is further ahead than your workspace allows."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist weiter im Voraus, als dein Workspace erlaubt."
+          }
+        }
+      }
+    },
+    "scheduled_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scheduled messages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geplante Nachrichten"
+          }
+        }
+      }
+    },
+    "settings_scheduled_summary": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Messages waiting to be sent later"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachrichten, die später rausgehen"
+          }
+        }
+      }
+    },
+    "scheduled_note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server keeps these, encrypted, and sends them on time, even with your devices off. If the group changes (someone joins or leaves), a device of yours must update the encryption first. This iPhone tries in the background, but iOS may delay it or skip it; then a message waits for one of your devices."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server hebt sie verschlüsselt auf und sendet sie pünktlich, auch wenn deine Geräte aus sind. Ändert sich die Gruppe (jemand kommt dazu oder geht), muss zuerst eines deiner Geräte die Verschlüsselung erneuern. Dieses iPhone versucht das im Hintergrund, iOS kann es aber verzögern oder auslassen; dann wartet eine Nachricht auf eines deiner Geräte."
+          }
+        }
+      }
+    },
+    "scheduled_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nothing scheduled. Use \"Send later\" behind the paperclip in the composer."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nichts geplant. Nutze „Später senden“ hinter der Büroklammer im Eingabefeld."
+          }
+        }
+      }
+    },
+    "scheduled_unknown_conversation": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unknown conversation"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unbekannte Unterhaltung"
+          }
+        }
+      }
+    },
+    "scheduled_status_waiting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Goes out on time."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geht pünktlich raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_policy_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your workspace turned scheduling off. It stays here until you send or cancel it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Workspace hat geplante Nachrichten abgeschaltet. Sie bleibt hier, bis du sie sendest oder verwirfst."
+          }
+        }
+      }
+    },
+    "scheduled_status_unknown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your app can't tell what happens to this message. Update it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine App kann nicht sagen, was mit dieser Nachricht passiert. Aktualisiere sie."
+          }
+        }
+      }
+    },
+    "scheduled_send_now": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send now"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jetzt senden"
+          }
+        }
+      }
+    },
+    "scheduled_edit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bearbeiten"
+          }
+        }
+      }
+    },
+    "scheduled_edit_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachricht"
+          }
+        }
+      }
+    },
+    "scheduled_save": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speichern"
+          }
+        }
+      }
+    },
+    "scheduled_cancel": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel message"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachricht verwerfen"
+          }
+        }
+      }
+    },
+    "scheduled_cancel_question": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel this message? Nobody will see it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Nachricht verwerfen? Niemand wird sie sehen."
+          }
+        }
+      }
+    },
+    "scheduled_cancel_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel it"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verwerfen"
+          }
+        }
+      }
+    },
+    "scheduled_keep": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep it"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Behalten"
+          }
+        }
+      }
+    },
+    "scheduled_attention": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A scheduled message needs you"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine geplante Nachricht braucht dich"
+          }
+        }
+      }
+    },
+    "scheduled_status_needs_sealing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The group changed. One of your devices updates the encryption by itself; it goes out on time if one does in time."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Gruppe hat sich geändert. Eines deiner Geräte erneuert die Verschlüsselung von selbst; schafft es das rechtzeitig, geht sie pünktlich raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_stale": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Late: the group changed and none of your devices got to it. It goes out as soon as one does."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verspätet: Die Gruppe hat sich geändert, und keines deiner Geräte kam dazu. Sie geht raus, sobald eines es tut."
+          }
+        }
+      }
+    },
+    "scheduled_status_not_a_member": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You're no longer in this conversation, so it won't go out."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du bist nicht mehr in dieser Unterhaltung, deshalb geht sie nicht raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_no_permission": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You may no longer post in this conversation, so it didn't go out."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du darfst hier nicht mehr schreiben, deshalb ging sie nicht raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_conversation_gone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This conversation was deleted, so it won't go out."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Unterhaltung wurde gelöscht, deshalb geht sie nicht raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_thread_gone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The thread it answers is gone, so it didn't go out."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Den Thread, auf den sie antwortet, gibt es nicht mehr, deshalb ging sie nicht raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_unreadable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device can't read it yet. It still goes out."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät kann sie noch nicht lesen. Sie geht trotzdem raus."
+          }
+        }
+      }
+    },
+    "scheduled_status_removed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server removed it after holding it this long, so it won't go out. The text is only on your devices now: copy it if you still need it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server hat sie nach dieser langen Zeit entfernt, deshalb geht sie nicht raus. Der Text ist jetzt nur noch auf deinen Geräten: Kopiere ihn, falls du ihn noch brauchst."
+          }
+        }
+      }
+    },
+    "scheduled_removal_date %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server removes it on %@. Copy the text before then if you need it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Server entfernt sie am %@. Kopiere den Text vorher, falls du ihn brauchst."
+          }
+        }
+      }
+    },
+    "scheduled_dismiss": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove from list"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aus der Liste entfernen"
+          }
+        }
+      }
+    },
+    "scheduled_dismiss_question": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove it from this device? Its text is gone from here then."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Von diesem Gerät entfernen? Der Text ist dann hier weg."
+          }
+        }
+      }
+    },
+    "scheduled_dismiss_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove it"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entfernen"
+          }
+        }
+      }
+    },
+    "error_too_large": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That's too long for the server. Shorten it and try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist zu lang für den Server. Kürze es und versuche es noch einmal."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="schedule_heading">Später senden</string>
+  <string name="schedule_online_hint">Geht pünktlich raus, auch wenn deine Geräte aus sind, außer die Gruppe ändert sich und alle deine Geräte bleiben aus.</string>
+  <string name="schedule_write_first">Schreib zuerst etwas.</string>
+  <string name="schedule_no_files">Nachrichten mit Dateien können noch nicht warten: Sende sie jetzt.</string>
+  <string name="schedule_in_one_hour">In 1 Stunde</string>
+  <string name="schedule_tomorrow">Morgen früh</string>
+  <string name="schedule_monday">Montag früh</string>
+  <string name="schedule_custom_label">Senden um</string>
+  <string name="schedule_confirm">Planen</string>
+  <string name="schedule_done">Geplant.</string>
+  <string name="schedule_error_empty">Schreib zuerst etwas.</string>
+  <string name="schedule_error_past">Wähle eine Zeit in der Zukunft.</string>
+  <string name="schedule_error_far">Das ist weiter im Voraus, als dein Workspace erlaubt.</string>
+  <string name="scheduled_title">Geplante Nachrichten</string>
+  <string name="scheduled_note">Der Server hebt sie verschlüsselt auf und sendet sie pünktlich, auch wenn deine Geräte aus sind. Ändert sich die Gruppe (jemand kommt dazu oder geht), erneuert dieses Telefon die Verschlüsselung im Hintergrund; nur wenn das nicht klappt und alle deine Geräte aus bleiben, wartet eine Nachricht, bis eines zurück ist. Android kann das verzögern.</string>
+  <string name="scheduled_empty">Nichts geplant. Nutze „Später senden“ hinter dem + im Eingabefeld.</string>
+  <string name="scheduled_unknown_conversation">Unbekannte Unterhaltung</string>
+  <string name="scheduled_status_waiting">Wartet auf ihre Zeit.</string>
+  <string name="scheduled_status_needs_sealing">Die Gruppe hat sich geändert. Eines deiner Geräte erneuert die Verschlüsselung von selbst; schafft es das rechtzeitig, geht sie pünktlich raus.</string>
+  <string name="scheduled_status_stale">Verspätet: Die Gruppe hat sich geändert, und keines deiner Geräte kam dazu. Sie geht raus, sobald eines es tut.</string>
+  <string name="scheduled_status_not_a_member">Du bist nicht mehr in dieser Unterhaltung, deshalb geht sie nicht raus.</string>
+  <string name="scheduled_status_no_permission">Du darfst hier nicht mehr schreiben, deshalb ging sie nicht raus.</string>
+  <string name="scheduled_status_conversation_gone">Diese Unterhaltung wurde gelöscht, deshalb geht sie nicht raus.</string>
+  <string name="scheduled_status_thread_gone">Den Thread, auf den sie antwortet, gibt es nicht mehr, deshalb ging sie nicht raus.</string>
+  <string name="scheduled_status_unreadable">Dieses Gerät kann sie noch nicht lesen. Sie geht trotzdem raus.</string>
+  <string name="scheduled_status_policy_off">Dein Workspace hat geplante Nachrichten abgeschaltet. Sie bleibt hier, bis du sie sendest oder verwirfst.</string>
+  <string name="scheduled_status_unknown">Deine App kann nicht sagen, was mit dieser Nachricht passiert. Aktualisiere sie.</string>
+  <string name="scheduled_send_now">Jetzt senden</string>
+  <string name="scheduled_edit">Bearbeiten</string>
+  <string name="scheduled_edit_text">Nachricht</string>
+  <string name="scheduled_save">Speichern</string>
+  <string name="scheduled_open">Öffnen</string>
+  <string name="scheduled_cancel">Nachricht verwerfen</string>
+  <string name="scheduled_cancel_question">Diese Nachricht verwerfen? Niemand wird sie sehen.</string>
+  <string name="scheduled_cancel_confirm">Verwerfen</string>
+  <string name="scheduled_keep">Behalten</string>
+  <string name="scheduled_attention">Eine geplante Nachricht braucht dich. Tippe, um sie zu sehen.</string>
+  <string name="home_entry_scheduled">Geplant</string>
+  <string name="scheduled_status_removed">Der Server hat sie nach dieser langen Zeit entfernt, deshalb geht sie nicht raus. Der Text ist jetzt nur noch auf deinen Geräten: Kopiere ihn, falls du ihn noch brauchst.</string>
+  <string name="scheduled_removal_date">Der Server entfernt sie am %1$s. Kopiere den Text vorher, falls du ihn brauchst.</string>
+  <string name="scheduled_dismiss">Aus der Liste entfernen</string>
+  <string name="scheduled_dismiss_question">Von diesem Gerät entfernen? Der Text ist dann hier weg.</string>
+  <string name="scheduled_dismiss_confirm">Entfernen</string>
+  <string name="error_too_large">Das ist zu lang für den Server. Kürze es und versuche es noch einmal.</string>
+</resources>

@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     AppModel.shared.calls.start()
     // Background tasks must be registered before launch finishes.
     SegmentPrefetchTask.register()
+    ScheduledSealTask.register()
     return true
   }
 

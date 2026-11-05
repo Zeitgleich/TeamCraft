@@ -294,7 +294,7 @@ private fun kindText(kind: PushNotificationKind): Int = when (kind) {
   PushNotificationKind.CALL -> R.string.push_kind_call
   PushNotificationKind.DISMISS -> R.string.push_kind_dismiss
   PushNotificationKind.TEST -> R.string.push_kind_test
-  PushNotificationKind.UNKNOWN -> R.string.push_kind_unknown
+  PushNotificationKind.SCHEDULED_SEAL, PushNotificationKind.UNKNOWN -> R.string.push_kind_unknown
 }
 
 @StringRes

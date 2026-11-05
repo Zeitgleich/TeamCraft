@@ -45,6 +45,13 @@ pub fn tomorrow_at(ts: TimestampMs, minute_of_day: u16) -> TimestampMs {
   guess - (local_offset_ms(guess) - local_offset_ms(midnight))
 }
 
+/// The next Monday's `minute_of_day` on the local clock ("Monday 08:00"), a week ahead on a Monday.
+pub fn next_monday_at(ts: TimestampMs, minute_of_day: u16) -> TimestampMs {
+  let midnight = end_of_local_week(ts);
+  let guess = midnight + i64::from(minute_of_day) * MS_PER_MINUTE;
+  guess - (local_offset_ms(guess) - local_offset_ms(midnight))
+}
+
 /// Start of the next local day (midnight in the user's time zone).
 pub fn end_of_local_day(ts: TimestampMs) -> TimestampMs {
   (local_day(ts) + 1) * MS_PER_DAY - local_offset_ms(ts)

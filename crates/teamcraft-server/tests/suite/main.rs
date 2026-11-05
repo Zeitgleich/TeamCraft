@@ -71,6 +71,7 @@ mod rendezvous;
 mod rest;
 mod retention;
 mod role_evidence;
+mod scheduled_messages;
 mod security;
 mod session_policy;
 mod shares;

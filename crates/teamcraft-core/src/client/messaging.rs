@@ -618,23 +618,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.store.delete(Table::Outbox, &key)?;
       return Ok(true);
     };
-    let Some(ring) = self
+    let ring_missing_current = self
       .account
       .key_bag
       .ring(convert::conversation(entry.conversation_id))
-      .filter(|ring| ring.current().is_some())
-    else {
+      .is_none_or(|ring| ring.current().is_none());
+    if ring_missing_current {
       return Ok(false);
-    };
-    let mut content = stored.content.clone();
-    if let MessageContent::Text { meta, .. } = &mut content {
-      meta.maybe_workspace_head = Some(Box::new(self.workspace()?.head()));
-      meta.maybe_channel_roles_head = self.channel_roles_head(entry.conversation_id)?.map(Box::new);
     }
-    let plaintext =
-      Zeroizing::new(serde_json::to_vec(&content).map_err(|error| CoreError::Corrupt(error.to_string()))?);
-    let context = self.message_context(entry.conversation_id, entry.client_message_id);
-    let encrypted = encrypt_message(ring, &context, &plaintext, &self.account.device, &mut OsRng)?;
+    let encrypted = self.seal_message(entry.conversation_id, entry.client_message_id, &stored.content)?;
     let request = SendMessageRequest {
       client_message_id: entry.client_message_id,
       device_id: self.account.device_id,
@@ -682,7 +674,37 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(true)
   }
 
-  fn decrypt(&self, message: &MessageResponse) -> Result<MessageContent, CoreError> {
+  /// Encrypts and signs a message under the conversation's current key, carrying this device's heads
+  /// of the workspace log and the channel's roles.
+  pub(super) fn seal_message(
+    &self,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+    content: &MessageContent,
+  ) -> Result<EncryptedMessage, CoreError> {
+    let ring = self
+      .account
+      .key_bag
+      .ring(convert::conversation(conversation))
+      .ok_or(CoreError::NoContentKey(conversation))?;
+    let mut content = content.clone();
+    if let MessageContent::Text { meta, .. } = &mut content {
+      meta.maybe_workspace_head = Some(Box::new(self.workspace()?.head()));
+      meta.maybe_channel_roles_head = self.channel_roles_head(conversation)?.map(Box::new);
+    }
+    let plaintext =
+      Zeroizing::new(serde_json::to_vec(&content).map_err(|error| CoreError::Corrupt(error.to_string()))?);
+    let context = self.message_context(conversation, client_message_id);
+    Ok(encrypt_message(
+      ring,
+      &context,
+      &plaintext,
+      &self.account.device,
+      &mut OsRng,
+    )?)
+  }
+
+  pub(super) fn decrypt(&self, message: &MessageResponse) -> Result<MessageContent, CoreError> {
     let maybe_sender_key = if message.sender_device_id == self.account.device_id {
       Some(self.account.device.public_keys().signing_key)
     } else {

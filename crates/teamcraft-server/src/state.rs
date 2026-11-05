@@ -212,6 +212,10 @@ pub struct PushSettings {
   pub max_rings_per_minute: u32,
   /// How long withdrawals for one conversation are collected before one goes out.
   pub dismiss_coalesce: std::time::Duration,
+  /// A burst of commits within this time makes one wake to seal scheduled messages.
+  pub scheduled_wake_coalesce: std::time::Duration,
+  /// At most one such wake per user and conversation within this time.
+  pub scheduled_wake_min_interval: std::time::Duration,
   pub allow_private_endpoints: bool,
 }
 
@@ -248,7 +252,7 @@ impl PushTtls {
     use teamcraft_proto::PushKind;
     match kind {
       PushKind::Call => self.call,
-      PushKind::Dismiss => self.dismiss,
+      PushKind::Dismiss | PushKind::ScheduledSeal => self.dismiss,
       PushKind::Test => self.test,
       PushKind::Message | PushKind::Mention | PushKind::Unknown(_) => self.message,
     }
@@ -276,6 +280,8 @@ impl Default for PushSettings {
       test_interval: Duration::from_secs(10),
       max_rings_per_minute: 10,
       dismiss_coalesce: Duration::from_millis(3000),
+      scheduled_wake_coalesce: Duration::from_secs(10),
+      scheduled_wake_min_interval: Duration::from_secs(300),
       allow_private_endpoints: false,
     }
   }

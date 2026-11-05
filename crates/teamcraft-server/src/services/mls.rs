@@ -103,6 +103,7 @@ pub async fn post_commit(
     CommitOutcome::EpochConflict { current_epoch } => return Err(ApiError::EpochConflict { current_epoch }),
   };
 
+  super::scheduled_messages::note_epoch_moved(state, conversation);
   let commit_response = response(conversation, request.epoch, request.device_id, &commit);
   state.hub.publish(
     members,

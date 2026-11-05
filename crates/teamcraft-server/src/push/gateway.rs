@@ -14,9 +14,10 @@ use rand_core::{OsRng, RngCore};
 use teamcraft_crypto::push_gateway::{GatewayRequest, GatewayServerKey};
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
-  BOUND_TOKEN_PREFIX, Base64Bytes, GATEWAY_PUSH_PATH, GATEWAY_REGISTER_PATH, GATEWAY_REQUEST_ID_LEN,
-  GATEWAY_SERVER_ID_HEADER, GATEWAY_SIGNATURE_HEADER, GATEWAY_TIMESTAMP_HEADER, GatewayErrorBody,
-  GatewayErrorCode, GatewayPushRequest, GatewayRegisterRequest, GatewayUrgency, PushProvider,
+  BOUND_TOKEN_PREFIX, Base64Bytes, GATEWAY_INFO_PATH, GATEWAY_PUSH_PATH, GATEWAY_REGISTER_PATH,
+  GATEWAY_REQUEST_ID_LEN, GATEWAY_SERVER_ID_HEADER, GATEWAY_SIGNATURE_HEADER, GATEWAY_TIMESTAMP_HEADER,
+  GatewayErrorBody, GatewayErrorCode, GatewayPushRequest, GatewayRegisterRequest, GatewayUrgency, PushKind,
+  PushProvider,
 };
 use tracing::{info, warn};
 use zeroize::Zeroizing;
@@ -33,6 +34,11 @@ const MAX_BACKOFF: Duration = Duration::from_secs(24 * 60 * 60);
 const REGISTER_RETRY: Duration = Duration::from_secs(5 * 60);
 /// Largest sealed token a registration may carry (the gateway refuses more).
 const MAX_BOUND_TOKEN_BYTES: usize = 4096;
+/// How long a gateway's list of kinds counts: a gateway update reaches the server within this.
+const KINDS_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+/// How long after a failed read of the list it is read again. Meanwhile the last list read counts, and
+/// with none read yet a newer kind goes to the retry queue.
+const KINDS_RETRY: Duration = Duration::from_secs(5 * 60);
 /// Most of an error response that is read.
 const MAX_ERROR_BODY_BYTES: usize = 4096;
 
@@ -60,6 +66,22 @@ pub struct GatewayClient {
   registration: tokio::sync::Mutex<Option<Instant>>,
   /// The gateway's breaker, once [`Self::watch_health`] set it.
   guard: OnceLock<Arc<DependencyGuard>>,
+  /// The kinds the gateway's `/v1/info` listed last, and when it is read again.
+  kinds: tokio::sync::Mutex<GatewayKinds>,
+}
+
+#[derive(Default)]
+struct GatewayKinds {
+  /// What the last successful read listed; a failed read keeps it.
+  maybe_listed: Option<Vec<PushKind>>,
+  maybe_read_again_at: Option<Instant>,
+}
+
+/// The part of the gateway's `/v1/info` this server reads.
+#[derive(serde::Deserialize)]
+struct GatewayInfoKinds {
+  #[serde(default)]
+  kinds: Vec<PushKind>,
 }
 
 /// The sender of one provider (APNs or FCM) behind a [`GatewayClient`].
@@ -85,6 +107,7 @@ impl GatewayClient {
       paused_until: Mutex::new(None),
       registration: tokio::sync::Mutex::new(None),
       guard: OnceLock::new(),
+      kinds: tokio::sync::Mutex::new(GatewayKinds::default()),
     }))
   }
 
@@ -109,6 +132,53 @@ impl GatewayClient {
   /// The ID the gateway knows this server by (safe to log: it is a hash of the public key).
   pub fn server_id(&self) -> &str {
     &self.server_id
+  }
+
+  /// Whether the gateway delivers `kind`, as `/v1/info` says (its api.md: servers send only the listed
+  /// ones). The kinds of its first version are always taken as offered; a newer kind is only sent to
+  /// a gateway that listed it, so an older gateway means no such push, not a refused request each time.
+  /// Read at most once per [`KINDS_MAX_AGE`], and after a failure not before [`KINDS_RETRY`]. A failed
+  /// read keeps the list read before; with none read yet the push is unavailable for now, so the
+  /// retry queue sends it once the list is known rather than dropping it.
+  async fn offers_kind(&self, kind: &PushKind) -> Result<bool, PushError> {
+    if *kind != PushKind::ScheduledSeal {
+      return Ok(true);
+    }
+    let mut known = self.kinds.lock().await;
+    let now = Instant::now();
+    if known.maybe_read_again_at.is_none_or(|at| now >= at) {
+      match self.read_kinds().await {
+        Ok(kinds) => {
+          known.maybe_listed = Some(kinds);
+          known.maybe_read_again_at = Some(now + KINDS_MAX_AGE);
+        },
+        Err(error) => {
+          warn!(%error, "the push gateway's kinds could not be read");
+          known.maybe_read_again_at = Some(now + KINDS_RETRY);
+        },
+      }
+    }
+    match &known.maybe_listed {
+      Some(kinds) => Ok(kinds.contains(kind)),
+      None => Err(PushError::unavailable_for(
+        "the push gateway's kinds are not known yet",
+        known
+          .maybe_read_again_at
+          .map(|at| at.saturating_duration_since(Instant::now())),
+      )),
+    }
+  }
+
+  async fn read_kinds(&self) -> Result<Vec<PushKind>, reqwest::Error> {
+    let info: GatewayInfoKinds = self
+      .http
+      .get(format!("{}{GATEWAY_INFO_PATH}", self.base_url))
+      .send()
+      .await?
+      .error_for_status()?
+      .json()
+      .await?;
+    Ok(info.kinds)
   }
 
   /// Makes the gateway know this server's public key. Idempotent; safe to repeat.
@@ -257,6 +327,10 @@ impl PushSender for GatewaySender {
     message: &'a PushMessage,
   ) -> BoxFuture<'a, Result<(), PushError>> {
     Box::pin(async move {
+      if !self.client.offers_kind(&message.kind).await? {
+        // Not an error to retry: this gateway can't deliver it, and the note says what that means.
+        return Err(PushError::NotConfigured);
+      }
       let (maybe_token, maybe_bound_token) = self.token_fields(&target.token)?;
       let mut request_id = [0u8; GATEWAY_REQUEST_ID_LEN];
       OsRng.fill_bytes(&mut request_id);

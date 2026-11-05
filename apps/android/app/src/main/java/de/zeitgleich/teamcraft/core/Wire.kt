@@ -506,6 +506,7 @@ data class ChatAnswer(
   @SerialName("older_history") val olderHistory: String? = null,
   val calls: List<CallHistoryItem> = emptyList(),
   val roster: SpaceRoster? = null,
+  val overview: ScheduledOverview? = null,
 )
 
 /**

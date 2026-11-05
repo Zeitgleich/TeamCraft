@@ -61,6 +61,8 @@ pub enum Route {
   /// `/people`: people and user groups.
   People,
   Saved,
+  /// `/scheduled`: the messages waiting for their time.
+  Scheduled,
   /// `/drafts`: the user's drafts and sent messages (#1220).
   Drafts,
   /// `/files`: every file the user can see.
@@ -151,6 +153,7 @@ impl Route {
       ["meeting", meeting] => MeetingHandle::parse(meeting).map(Self::Meeting),
       ["people"] => Some(Self::People),
       ["saved"] => Some(Self::Saved),
+      ["scheduled"] => Some(Self::Scheduled),
       ["drafts"] => Some(Self::Drafts),
       ["files"] => Some(Self::Files),
       ["search"] => Some(Self::Search),
@@ -210,6 +213,7 @@ impl Route {
       Self::Meeting(meeting) => format!("/meeting/{}", meeting.path_segment()),
       Self::People => "/people".to_owned(),
       Self::Saved => "/saved".to_owned(),
+      Self::Scheduled => "/scheduled".to_owned(),
       Self::Drafts => "/drafts".to_owned(),
       Self::Files => "/files".to_owned(),
       Self::Search => "/search".to_owned(),
@@ -247,6 +251,7 @@ impl Route {
       | Self::Meeting(_)
       | Self::People
       | Self::Saved
+      | Self::Scheduled
       | Self::Drafts
       | Self::Files
       | Self::Search
@@ -682,6 +687,7 @@ mod tests {
       )),
       Route::People,
       Route::Saved,
+      Route::Scheduled,
       Route::Drafts,
       Route::Files,
       Route::Search,

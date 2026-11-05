@@ -770,6 +770,18 @@ MLS: the commits, welcomes and application messages of each group (opaque), and 
 i.e. its member devices' certificates, which the server knows anyway, and the epoch's external public
 key. It holds no secrets; a joiner still needs a credential every member accepts.
 
+**Scheduled messages** ([scheduled-messages.md](scheduled-messages.md), issue #203). The server holds
+a message sealed by the sender's device and releases it at its time. It therefore learns ahead of time
+what it otherwise learns at the send: that a ciphertext exists, its conversation, sender and device, due
+time, size, mentions and the urgent flag. It compares MLS epochs, not keys, since it doesn't know the
+current key: in the epoch of the seal no commit was accepted since, so nobody was removed; once the epoch
+moved, the message waits for a device of the sender to seal it again.
+
+**Accepted risk.** A compromised server working with somebody removed before the message's time can hand
+them the text, because they hold that key. The epoch check only stops an honest server. Before this
+feature, reaching a removed member took withholding a commit from the sender; for a message scheduled
+before the removal it doesn't. The product owner accepted this.
+
 **Message IDs.** The sending client generates a random 128-bit **client message ID** before encrypting.
 The AEAD associated data binds conversation ID, sender user and device, client message ID and
 `content_key_id`, so the server can't move a ciphertext to another conversation, attribute it to another
@@ -3789,7 +3801,13 @@ Details:
 - App and NSE still share the local database (App Group container + keychain access group). Like
   Threema's `ProcessCoordinator`, a cross-process lock ensures only one process syncs with the server at
   a time; Darwin notifications tell the other process to reload.
-- Apple/Google see: that *a* push was sent to *a* device at time T. Nothing else. (Through a push
+- A commit in a conversation where the user holds scheduled messages wakes their devices with a sealed,
+  content-free push of its own kind, coalesced and rate limited (scheduled-messages.md, "The wake").
+  Android: high priority, with `v=0` outside the sealed payload, which only this kind sets: Google learns
+  that the device's user holds a scheduled message and that a group of theirs just changed, not which
+  (accepted, scheduled-messages.md). iOS: silent, and iOS may defer or drop it.
+- Apple/Google see: that *a* push was sent to *a* device at time T. Nothing else, except the type and
+  priority below and that FCM tag. (Through a push
   gateway, the gateway sees the same, plus an opaque ID of the sending server; §7.1.)
 - The server decides *whether* to push using metadata it has anyway: membership, mute settings,
   attention (don't push to the phone while the user looks at a desktop), DND, and the mention list
@@ -3820,8 +3838,8 @@ Details:
   different keys, so nothing could be opened until the next start (issue #826). Sign-out deletes the
   key; the next registration chooses a new one.
 - Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device, or
-  a ring ended: remove it; silent, APNs background push / FCM normal priority, never to Web Push) and
-  `test` (diagnostics). Besides conversation, message, sender, thread and call IDs the sealed wake-up
+  a ring ended: remove it; silent, APNs background push / FCM normal priority, never to Web Push),
+  `scheduled_seal` (above) and `test` (diagnostics). Besides conversation, message, sender, thread and call IDs the sealed wake-up
   carries the badge count and the send time; all of it is inside the ciphertext. What push services
   and a gateway additionally learn is the push type and priority: that a push was a silent withdrawal
   rather than an alert.

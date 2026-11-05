@@ -22,6 +22,10 @@ struct ChatPane: View {
   @State private var attachmentError: AttachmentError?
   @State private var isPickingPhoto = false
   @State private var isPickingDocument = false
+  @State private var isSchedulingSend = false
+  /// This text's message ID until the server took it, so a retry after a lost answer holds one message.
+  @State private var maybeScheduleAttempt: (body: String, id: String)?
+  @State private var isSchedulingAllowed = false
   @State private var isTakingPhoto = false
   @State private var photoSelection: [PhotosPickerItem] = []
   @State private var isShowingFiles = false
@@ -34,6 +38,7 @@ struct ChatPane: View {
   @State private var isAtBottom = true
   @State private var newBelowCount = 0
   @State private var isSendFailed = false
+  @State private var isScheduleTooLarge = false
   @State private var mentionNames: (usernames: Set<String>, me: String) = ([], "")
   @State private var maybeHighlighted: String?
   @State private var isPermalinkMissing = false
@@ -211,6 +216,12 @@ struct ChatPane: View {
     } message: { _ in
       Text("delete_confirm_text")
     }
+    .sheet(isPresented: $isSchedulingSend) {
+      SendLaterSheet { dueAtMs in Task { await schedule(dueAtMs: dueAtMs) } }
+    }
+    .task(id: model.changeCount) {
+      isSchedulingAllowed = await model.scheduledOverview()?.policy.isEnabled == true
+    }
     .alert("call_start", isPresented: notetakerCallBinding, presenting: maybeNotetakerCall) { withVideo in
       Button("call_prejoin_join") { startCall(withVideo: withVideo) }
       Button("cancel", role: .cancel) {}
@@ -218,6 +229,9 @@ struct ChatPane: View {
       Text("call_prejoin_notetaker")
     }
     .alert("send_failed", isPresented: $isSendFailed) {
+      Button("done", role: .cancel) {}
+    }
+    .alert("error_too_large", isPresented: $isScheduleTooLarge) {
       Button("done", role: .cancel) {}
     }
     .alert("permalink_unavailable", isPresented: $isPermalinkMissing) {
@@ -438,6 +452,12 @@ struct ChatPane: View {
                   Button("attach_camera", systemImage: "camera") { isTakingPhoto = true }
                 }
                 Button("attach_file", systemImage: "doc") { isPickingDocument = true }
+                if isSchedulingAllowed {
+                  Divider()
+                  // Text waits in the account data; with files or nothing to send there is nothing it can keep.
+                  Button("schedule_heading", systemImage: "clock") { isSchedulingSend = true }
+                    .disabled(!canSchedule)
+                }
               } label: {
                 composerIcon("paperclip")
               }
@@ -445,7 +465,11 @@ struct ChatPane: View {
             }
             TextField("composer_hint", text: $draft, axis: .vertical)
               .focused($isComposerFocused)
-              .onChange(of: draft) { _, text in announceTyping(text) }
+              .onChange(of: draft) { _, text in
+                announceTyping(text)
+                // Another text is another message, also if the same words come back later.
+                if let attempt = maybeScheduleAttempt, attempt.body != text { maybeScheduleAttempt = nil }
+              }
               .lineLimit(1...6)
               .padding(.vertical, 10)
             // While typing the field needs the room; the camera comes back when it is empty.
@@ -796,6 +820,39 @@ struct ChatPane: View {
   private func react(_ message: MessageItem, _ emoji: String) {
     Task {
       await model.perform(.toggleReaction(conversationId: conversation.id, messageId: message.id, emoji: emoji))
+    }
+  }
+
+  /// Whether the composer holds what can wait: text, without files.
+  private var canSchedule: Bool {
+    attachments.isEmpty && maybeEditing == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  /// A client message ID as the core reads it: 32 lowercase hex digits.
+  private func newClientMessageId() -> String {
+    UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+  }
+
+  /// Hands the composer's text to the server to hold, to go out at `dueAtMs`.
+  private func schedule(dueAtMs: Int64) async {
+    let body = emojiConvert(text: draft.trimmingCharacters(in: .whitespacesAndNewlines))
+    let replying = maybeReplying
+    let replyingImage = maybeReplyingImage
+    draft = ""
+    maybeReplying = nil
+    maybeReplyingImage = nil
+    let id = maybeScheduleAttempt.flatMap { $0.body == body ? $0.id : nil } ?? newClientMessageId()
+    maybeScheduleAttempt = nil
+    let request = SendRequest(
+      conversationId: conversation.id, maybeThreadId: threadId, body: body,
+      maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId, maybeClientMessageId: id)
+    if let failure = await model.performReporting(.scheduleMessage(request, dueAtMs: dueAtMs)) {
+      draft = body
+      // After the text: its change would drop the attempt again.
+      maybeScheduleAttempt = (body, id)
+      maybeReplying = replying
+      maybeReplyingImage = replyingImage
+      if failure == .tooLarge { isScheduleTooLarge = true } else { isSendFailed = true }
     }
   }
 

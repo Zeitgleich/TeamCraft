@@ -323,6 +323,13 @@ pub struct LimitsConfig {
   pub max_welcomes_per_commit: usize,
   /// Encrypted key bag plus wrapped backup keys of one user.
   pub max_key_bag_bytes: usize,
+  /// How often held messages are checked: a scheduled message goes out at most this late.
+  pub scheduled_release_interval_secs: u64,
+  /// The largest held message. Every list of the sender carries it, so far less than a message's
+  /// limit: with `max_per_user` this bounds one list (docs/scheduled-messages.md).
+  pub max_scheduled_ciphertext_bytes: usize,
+  /// How long a held message nothing can solve stays (its sender left, or their account is off).
+  pub scheduled_hold_retention_days: u32,
   /// One signed device list.
   pub max_device_list_bytes: usize,
   /// Active devices one user may have; registering more fails until one is revoked.
@@ -445,6 +452,10 @@ pub struct PushConfig {
   pub max_rings_per_minute: u32,
   /// Withdrawals for one conversation that come within this time go out as one (reading in bursts).
   pub dismiss_coalesce_ms: u64,
+  /// A burst of commits within this time makes one wake to seal scheduled messages.
+  pub scheduled_wake_coalesce_ms: u64,
+  /// At most one such wake per user and conversation within this time.
+  pub scheduled_wake_min_interval_secs: u64,
   pub request_timeout_secs: u64,
   /// Pushes sent in parallel, per pool: APNs and FCM share one, Web Push and UnifiedPush (endpoints
   /// users chose) another.
@@ -1501,6 +1512,9 @@ impl Default for LimitsConfig {
       max_mls_payload_bytes: 1024 * 1024,
       max_welcomes_per_commit: 500,
       max_key_bag_bytes: 1024 * 1024,
+      scheduled_release_interval_secs: 5,
+      max_scheduled_ciphertext_bytes: 64 * 1024,
+      scheduled_hold_retention_days: 30,
       max_device_list_bytes: 64 * 1024,
       max_devices_per_user: 20,
       max_pending_attachments_per_user: 20,
@@ -1550,6 +1564,8 @@ impl Default for PushConfig {
       test_interval_secs: 10,
       max_rings_per_minute: 10,
       dismiss_coalesce_ms: 3000,
+      scheduled_wake_coalesce_ms: 10_000,
+      scheduled_wake_min_interval_secs: 300,
       request_timeout_secs: 10,
       max_concurrent_sends: 32,
       max_concurrent_sends_per_user: 4,

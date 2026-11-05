@@ -57,6 +57,7 @@ use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
 use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;
+use crate::components::scheduled_view::ScheduledView;
 use crate::components::search_view::SearchView;
 use crate::components::security_ui::{
   DeviceApprovalDialog, LinkDeviceDialog, VerifyContactDialog, VerifyKeyDialog,
@@ -235,6 +236,7 @@ areas! {
   /// Home pages a first visit doesn't open (Meetings and People have their own chunks), and a
   /// conversation's side panels except the thread.
   saved(_unit: ()) => places: view! { <SavedView /> };
+  scheduled(_unit: ()) => places: view! { <ScheduledView /> };
   drafts(_unit: ()) => places: view! { <DraftsView /> };
   files(_unit: ()) => places: view! { <FilesView /> };
   call_history(_unit: ()) => places: view! { <CallsView /> };
