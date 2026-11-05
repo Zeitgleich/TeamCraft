@@ -177,6 +177,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::DpopRequired => "error-device-binding-required",
       ErrorCode::UseDpopNonce | ErrorCode::InvalidDpopProof => "error-proof-refused",
       ErrorCode::RateLimited => "error-rate-limited",
+      ErrorCode::InviteAlreadyOpen => "error-invite-already-open",
       ErrorCode::PayloadTooLarge => "error-too-large",
       ErrorCode::AttachmentNotFound => "error-attachment-gone",
       ErrorCode::Unavailable | ErrorCode::Internal => "error-server-trouble",

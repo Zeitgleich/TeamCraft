@@ -552,6 +552,7 @@ impl TestApp {
       policy: Arc::new(PolicyHolder::default()),
       scheme: Arc::new(SchemeStore::default()),
       rate_limits: Arc::new(RateLimits::new(&settings.security.rate_limits)),
+      directory_filters: Arc::default(),
       dpop: Arc::default(),
       brands: Arc::new(
         BrandStore::new(BrandInputs {

@@ -642,6 +642,26 @@ set in the console's security section; the server enforces them.
   messages and files stay, under the retention rules like everybody's; nothing is deleted. The account
   itself remains and signs in to whatever it still belongs to. It takes an admin to deactivate or delete it.
 
+#### 3.2.3 Open invitations (issue #298)
+
+The directory's Invitations tab lists open invitations across spaces, one page at a time. One rule
+decides what somebody sees, resends and revokes (`InviteReach` in `services/invites.rs`):
+
+| Who                                                  | Invitations                                     |
+|------------------------------------------------------|-------------------------------------------------|
+| Holds `manage_space_members` in the space            | All of that space                               |
+| Holds `invite_guest` in the space, without the above | Only guest invitations they sent                |
+| Anyone else in the space, or who has left it         | None; other people's look like they don't exist |
+| Guests                                               | None; the list is refused                       |
+
+Somebody who loses the permission loses their own invitations too; those who manage the space's
+members still have them. An address has one open invitation per space; one that expired makes way for
+a new one, and a guest account only ever takes guest invitations. Invitation mail counts against the sender's hourly budget
+(`limits.max_meeting_mails_per_user_per_hour`, shared with their meetings). Resending goes out at most
+once per `limits.invite_resend_interval_secs` (the invitation's own mail counts), and only for a valid
+invitation in an unarchived space on a server that sends mail. It uses the current directory policy
+and guest domains, and the personal note of the first mail isn't repeated, as it was never stored. Revoking and resending are in the audit log.
+
 ### 3.3 Moderation
 
 Admins can't read reported content unless a member shows it to them:

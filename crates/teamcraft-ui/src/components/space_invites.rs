@@ -314,7 +314,18 @@ fn SpaceText(name: String, maybe_description: Option<String>, member_count: u32)
 /// Whether the server refused an invitation over its address (malformed or not allowed), which the
 /// user fixes in the address field.
 fn is_address_refusal(failure: &ActionFailure) -> bool {
-  failure.kind == FailureKind::Server(ErrorCode::InvalidRequest)
+  matches!(
+    failure.kind,
+    FailureKind::Server(ErrorCode::InvalidRequest | ErrorCode::InviteAlreadyOpen)
+  )
+}
+
+/// What the address field says about the server's refusal of an address it was sent.
+fn address_refusal_key(failure: &ActionFailure) -> &'static str {
+  match failure.kind {
+    FailureKind::Server(ErrorCode::InviteAlreadyOpen) => "invite-email-already-open",
+    _ => "invite-email-refused",
+  }
 }
 
 /// Invites people to a space: from the directory (they join right away), by e-mail (they join when
@@ -345,7 +356,14 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
   let is_busy = move || in_flight.get() != 0;
   let parsed = Memo::new(move |_| EmailList::parse(&emails.get()));
   // The server refused an address it was sent (it stays in the field), not the request as such.
-  let is_address_refused = move || last_failure.with(|maybe| maybe.as_ref().is_some_and(is_address_refusal));
+  let maybe_address_refusal = move || {
+    last_failure.with(|maybe| {
+      maybe
+        .as_ref()
+        .filter(|failure| is_address_refusal(failure))
+        .map(address_refusal_key)
+    })
+  };
   // What is wrong with the addresses, shown below them (forms.md).
   let address_error = move || {
     let list = parsed.get();
@@ -357,7 +375,7 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
         &[("max", &MAX_EMAILS_PER_INVITE.to_string())],
       ))
     } else {
-      is_address_refused().then(|| i18n.t("invite-email-refused"))
+      maybe_address_refusal().map(|key| i18n.t(key))
     }
   };
   // A switch to "member" drops picked guest accounts: they can only be guests.
@@ -676,6 +694,24 @@ mod tests {
 
   mod emails {
     use super::*;
+
+    #[test]
+    fn an_open_invitation_is_named_at_the_address_field() {
+      let refusal = |code| ActionFailure::new(FailureKind::Server(code), String::new());
+      assert!(is_address_refusal(&refusal(ErrorCode::InviteAlreadyOpen)));
+      assert_eq!(
+        address_refusal_key(&refusal(ErrorCode::InviteAlreadyOpen)),
+        "invite-email-already-open"
+      );
+      assert_eq!(
+        address_refusal_key(&refusal(ErrorCode::InvalidRequest)),
+        "invite-email-refused"
+      );
+      assert!(
+        !is_address_refusal(&refusal(ErrorCode::RateLimited)),
+        "the budget is no address's fault"
+      );
+    }
 
     #[test]
     fn addresses_are_split_lowercased_and_deduplicated() {

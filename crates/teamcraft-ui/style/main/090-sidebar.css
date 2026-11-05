@@ -185,24 +185,16 @@
   text-overflow: ellipsis;
 }
 
-/* A channel listed outside its space (a favorite in Chats, #1152): the space under the name, each
-   line shortened on its own. */
-.sb-item:has(.sb-stack) {
-  padding-block: 4px;
-}
-
-.sb-stack {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.sb-stack .sb-name {
-  flex: none;
+/* A channel listed outside its space (a favorite in Chats, #1152, #1346): the space after the name
+   on the same line, so every row is as high as the others. The space shortens first, but keeps room
+   for a few letters; the full name is its tooltip and the row's label. */
+.sb-item .sb-name:has(+ .sb-space) {
+  flex: 0 1 auto;
 }
 
 .sb-space {
+  flex: 1 100 0;
+  min-width: 3ch;
   overflow: hidden;
   color: var(--sb-dim);
   font-size: var(--text-2xs);

@@ -21,7 +21,7 @@ use crate::prefs::{SidebarLayout, SidebarSort};
 use crate::reactive::{SetIfAlive, get_if_observed};
 use crate::route::{HistoryReach, Route};
 use crate::sections::{
-  HomeFilter, ListOptions, apply_favorite_order, build_direct, build_list, build_sections,
+  HomeFilter, ListOptions, apply_favorite_order, build_direct, build_list, build_sections, is_listed_in_chats,
 };
 use crate::security::DeviceApproval;
 use crate::settings::{LastOpenPlace, Settings, last_open, remember_last_open};
@@ -1096,11 +1096,17 @@ impl AppState {
     let Some(conversation) = self.read(|backend| backend.conversation(id)) else {
       return;
     };
-    if let Some(space) = conversation.maybe_space {
-      self.space.set(space);
-      self.rail.set(RailEntry::Space);
-    } else if conversation.kind.is_direct_like() {
-      self.rail.set(RailEntry::Chats);
+    // A starred channel opened from Chats stays there, highlighted in Favorites: the sidebar, the
+    // scoped views (#954) and the selected space don't change (#1346). The same for every way in
+    // (click, switcher, notification, link, keys): where Chats lists the conversation, it stays.
+    let stays_in_chats = self.rail.get_untracked() == RailEntry::Chats && is_listed_in_chats(&conversation);
+    if !stays_in_chats {
+      if let Some(space) = conversation.maybe_space {
+        self.space.set(space);
+        self.rail.set(RailEntry::Space);
+      } else if conversation.kind.is_direct_like() {
+        self.rail.set(RailEntry::Chats);
+      }
     }
     if let SidePanel::Thread {
       conversation: open, ..
@@ -3349,6 +3355,34 @@ mod tests {
         .find(|conversation| conversation.unread_count > 0)
         .map(|conversation| conversation.id)
         .expect("demo data has unread messages")
+    }
+  }
+
+  mod favorite_in_chats {
+    use super::*;
+
+    #[test]
+    fn a_starred_channel_opened_from_chats_leaves_rail_and_space_alone() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      state.write(|backend| backend.set_favorite(channel, true));
+      state.open_chats();
+      state.open_conversation(channel);
+      assert_eq!(state.view.get(), MainView::Conversation(channel));
+      assert_eq!(state.rail.get(), RailEntry::Chats);
+      assert_eq!(state.maybe_scoped_space(), None);
+      assert_eq!(state.space.get(), space);
+    }
+
+    #[test]
+    fn a_channel_that_is_not_starred_still_opens_its_space() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      state.write(|backend| backend.set_favorite(channel, false));
+      state.open_chats();
+      state.open_conversation(channel);
+      assert_eq!(state.rail.get(), RailEntry::Space);
+      assert_eq!(state.space.get(), space);
     }
   }
 

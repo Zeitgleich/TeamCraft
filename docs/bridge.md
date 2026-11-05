@@ -399,7 +399,9 @@ with the bot badge.
   bridge's file (which has none), they show the bot's picture.
 - **The bot's picture** is the fallback. Admins set it in the admin console → Integrations
   (`PUT /api/v1/admin/bots/{id}/avatar`); it is an ordinary profile picture, which the server sees and
-  re-encodes. Without one, the source's initials show.
+  re-encodes. Without one, the source's initials show. The Sources list in the channel settings
+  shows the same: the source's picture, else the bot's when the channel has one bot, else the
+  initials. Who added the source is named in the text only, never pictured.
 - A source of the file shows its `name` from the file and the bot's picture.
 - A message's text and files come first: one too full for the picture goes without, and the next one
   with room carries it. With no room even for the name it shows the bot's.

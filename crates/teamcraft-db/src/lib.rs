@@ -17,6 +17,7 @@ mod conversation;
 mod database;
 mod device;
 mod device_list;
+mod directory;
 mod email_digest;
 mod error;
 mod idempotency;
@@ -83,6 +84,10 @@ pub use conversation::{
 pub use database::{Database, DatabaseOptions};
 pub use device::{Device, NewDevice};
 pub use device_list::{DeviceList, DeviceListOutcome};
+pub use directory::{
+  DirectoryChannel, DirectoryChannelFilter, DirectoryFilterValues, DirectoryInvitation,
+  DirectoryInvitationFilter, DirectoryPeopleFilter, DirectoryPerson,
+};
 pub use email_digest::{DueDigest, StoredEmailDigest};
 pub use error::DbError;
 pub use idempotency::Created;

@@ -388,7 +388,7 @@ impl Database {
   }
 }
 
-fn user_from_parts(
+pub(crate) fn user_from_parts(
   id: i64,
   maybe_username: Option<String>,
   display_name: String,
@@ -410,13 +410,13 @@ fn user_from_parts(
 }
 
 /// Whether an account is deactivated and whether it was deleted, as read from its row.
-struct AccountFlags {
-  is_deactivated: bool,
-  is_deleted: bool,
+pub(crate) struct AccountFlags {
+  pub(crate) is_deactivated: bool,
+  pub(crate) is_deleted: bool,
 }
 
 /// Escapes `%`, `_` and `\` so user input is matched literally by `ILIKE`.
-fn escape_like(input: &str) -> String {
+pub(crate) fn escape_like(input: &str) -> String {
   input
     .replace('\\', "\\\\")
     .replace('%', "\\%")

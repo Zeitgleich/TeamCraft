@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE invites SET last_sent_at = now()\n         WHERE id = $1 AND accepted_at IS NULL\n           AND last_sent_at <= now() - make_interval(secs => $2::double precision)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "74d6f70cd8d1f2a912dee3c5d558c727981bd7faab97a7d9019314f3b720cc07"
+}
