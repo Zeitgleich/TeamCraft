@@ -9,7 +9,7 @@ use leptos::prelude::*;
 
 pub use teamcraft_client_api::calls::*;
 use teamcraft_client_api::failure::CallFailure;
-use teamcraft_client_api::model::{ConversationId, UserId};
+use teamcraft_client_api::model::{ConversationId, TimestampMs, UserId};
 use teamcraft_client_api::remote::CoreConnection;
 use teamcraft_proto::MediaStreamId;
 
@@ -118,6 +118,23 @@ pub struct AudioMenuEntry {
 
 /// How long "Call ended" shows before the app is back in the chat (#997).
 const CALL_ENDED_SHOWN: Duration = Duration::from_millis(1500);
+/// How often [`CallState::elapsed_ms`] moves on during a call.
+const CALL_CLOCK_TICK_MS: u64 = 1000;
+
+/// Milliseconds from `joined_at` to `now_ms`; a clock set back counts as no time.
+pub fn elapsed_ms(joined_at: TimestampMs, now_ms: TimestampMs) -> u64 {
+  u64::try_from(now_ms.saturating_sub(joined_at)).unwrap_or(0)
+}
+
+/// Keeps [`CallState::elapsed_ms`] ticking while a call runs, and quiet otherwise. Started once by
+/// the app; it ends with the app's scope.
+pub fn run_call_clock(call: CallState) {
+  crate::reactive::use_interval_while(
+    CALL_CLOCK_TICK_MS,
+    move || call.phase.get() == CallPhase::Active,
+    move || call.tick(crate::clock::now_ms()),
+  );
+}
 
 /// Ids browsers give stand-ins for other devices: Chrome's "default" and Windows'
 /// "communications" device. They are no device of their own to offer.
@@ -293,6 +310,15 @@ pub struct CallState {
   pub is_chat_open: RwSignal<bool>,
   /// The quality picked for others' videos in this call (#967); Auto where none is listed.
   pub video_qualities: RwSignal<HashMap<MediaStreamId, VideoQuality>>,
+  /// How long this device has been in the call, in milliseconds; `None` outside one. Ticks once a
+  /// second while [`run_call_clock`] runs (the app starts it), so anything showing the duration
+  /// reads it from here: the tray's call header shows the whole minutes (#1293).
+  pub elapsed_ms: RwSignal<Option<u64>>,
+  /// The tray's "End for everyone…" (#1293): the host controls of the call screen open with the
+  /// ending waiting to be confirmed; they reset it.
+  pub is_end_for_everyone_asked: RwSignal<bool>,
+  /// When this device entered the call (wall clock), the start of [`CallState::elapsed_ms`].
+  joined_at: StoredValue<Option<TimestampMs>>,
   /// The video whose quality menu is open.
   pub maybe_quality_menu: RwSignal<Option<MediaStreamId>>,
   /// The camera the backend was told about or uses on its own ([`CallState::send_camera_choice`]).
@@ -337,6 +363,9 @@ impl CallState {
       is_chat_open: RwSignal::new(false),
       video_qualities: RwSignal::new(HashMap::new()),
       maybe_quality_menu: RwSignal::new(None),
+      elapsed_ms: RwSignal::new(None),
+      is_end_for_everyone_asked: RwSignal::new(false),
+      joined_at: StoredValue::new(None),
       sent_camera: StoredValue::new(String::new()),
       sent_microphone: StoredValue::new(String::new()),
       sent_speakers: StoredValue::new(String::new()),
@@ -548,6 +577,7 @@ impl CallState {
     self.effect.set(active.background);
     self.has_ended.set(false);
     self.incoming.set(None);
+    self.start_clock();
     self.phase.set(CallPhase::Active);
   }
 
@@ -562,6 +592,7 @@ impl CallState {
     self.has_hand_raised.set(false);
     self.is_deafened.set(false);
     self.has_ended.set(false);
+    self.start_clock();
     self.phase.set(CallPhase::Active);
     if let Some(request) = self.maybe_request.get_untracked() {
       // The media layer starts as chosen, in one action (#453): a muted microphone stays muted
@@ -604,8 +635,29 @@ impl CallState {
     self.maybe_quality_menu.set(None);
     self.is_audio_menu_open.set(false);
     self.maybe_audio_offer.set(None);
+    self.joined_at.set_value(None);
+    self.elapsed_ms.set(None);
+    self.is_end_for_everyone_asked.set(false);
     if was_active {
       self.emit(CallEvent::Leave);
+    }
+  }
+
+  /// Starts counting the call's duration; a call that is already running (it moves on into a
+  /// meeting room) keeps its count.
+  fn start_clock(&self) {
+    if self.phase.get_untracked() == CallPhase::Active && self.joined_at.get_value().is_some() {
+      return;
+    }
+    let now = crate::clock::now_ms();
+    self.joined_at.set_value(Some(now));
+    self.elapsed_ms.set(Some(0));
+  }
+
+  /// Brings [`CallState::elapsed_ms`] up to `now_ms`.
+  fn tick(&self, now_ms: TimestampMs) {
+    if let Some(joined_at) = self.joined_at.try_get_value().flatten() {
+      self.elapsed_ms.try_set(Some(elapsed_ms(joined_at, now_ms)));
     }
   }
 
