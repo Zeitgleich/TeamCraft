@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use teamcraft_core::client::OutgoingFile;
-use teamcraft_e2e::call::{join_call, run_call};
+use teamcraft_e2e::call::{hold_call, join_call};
 use teamcraft_e2e::scenario::space_with;
 use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::{ConversationId, UserId};
@@ -108,12 +108,12 @@ async fn serve_a_large_workspace_to_a_device() {
         eprintln!("WORKSPACE: calling in {conversation} for {duration:?}");
         let alice_call = join_call(&mut alice, conversation, hash, 330.0).await;
         if is_direct {
-          let stats = run_call(alice_call, duration).await;
+          let stats = hold_call(alice_call, duration).await;
           eprintln!("WORKSPACE: call ended: {stats:?}");
         } else {
           let bob_call = join_call(&mut bob, conversation, hash, 550.0).await;
           let (alice_stats, bob_stats) =
-            tokio::join!(run_call(alice_call, duration), run_call(bob_call, duration));
+            tokio::join!(hold_call(alice_call, duration), hold_call(bob_call, duration));
           eprintln!("WORKSPACE: call ended: {alice_stats:?} {bob_stats:?}");
         }
       },

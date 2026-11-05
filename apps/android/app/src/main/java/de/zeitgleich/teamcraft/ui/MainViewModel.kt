@@ -1276,6 +1276,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Also started on every foreground, which keeps trying and tells the user (issue #1142).
     runCatching { graph.core.core().start() }
       .onFailure { Log.w(TAG, "sync not started: ${it.javaClass.simpleName}") }
+    // The call listener too: right after the first setup nothing else starts it until the app
+    // comes to the foreground again, and calls in the meantime didn't ring.
+    runCatching { graph.calls.start() }
+      .onFailure { Log.w(TAG, "calls not started: ${it.javaClass.simpleName}") }
     graph.push.register()
     return AppState.Ready(ready.userId, ready.displayName, ready.identityFingerprint)
   }

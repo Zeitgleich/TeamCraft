@@ -93,6 +93,24 @@ pub async fn join_call(
 }
 
 /// Lets the call run for `duration`, fails on trust problems, then leaves and returns the statistics.
+/// Like [`run_call`] for a call a person joins on a device by hand: whatever happens is reported
+/// (they may not answer, or not in time), nothing fails. The events seen, then the statistics.
+pub async fn hold_call(mut call: NativeCall, duration: Duration) -> (Vec<String>, Option<CallStats>) {
+  let deadline = tokio::time::Instant::now() + duration;
+  let mut events = Vec::new();
+  while let Ok(Some(event)) = tokio::time::timeout_at(deadline, call.next_event()).await {
+    if !matches!(
+      event,
+      CallEngineEvent::AudioFrame { .. }
+        | CallEngineEvent::VideoFrame(_)
+        | CallEngineEvent::ActiveSpeakers(_)
+    ) {
+      events.push(format!("{event:?}"));
+    }
+  }
+  (events, call.leave().await.ok())
+}
+
 pub async fn run_call(mut call: NativeCall, duration: Duration) -> CallStats {
   let deadline = tokio::time::Instant::now() + duration;
   let mut is_secured = false;
