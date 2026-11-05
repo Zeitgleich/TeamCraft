@@ -1,7 +1,9 @@
 //! The directory's paged lists: people, the values of their filters, channels across spaces and
 //! open invitations. Who may ask what is decided by the server's services.
 
-use teamcraft_proto::{ConversationId, ConversationVisibility, InviteId, SpaceId, SpaceRole, UserId, UserKind};
+use teamcraft_proto::{
+  ConversationId, ConversationVisibility, InviteId, SpaceId, SpaceRole, UserId, UserKind,
+};
 use time::OffsetDateTime;
 
 use crate::database::Database;

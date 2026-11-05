@@ -113,3 +113,34 @@ directory-loading = Personen werden gesucht
 groups-empty-title = Noch keine Benutzergruppen
 groups-error-handle = Verwende 2 bis 32 Kleinbuchstaben, Ziffern, - oder _.
 groups-error-handle-taken = Dieses Kürzel verwendet schon eine Gruppe oder eine Person.
+
+directory-channels = Kanäle
+directory-external = Extern
+directory-invitations = Einladungen
+directory-department = Abteilung
+directory-all-departments = Alle Abteilungen
+directory-job-title = Position
+directory-all-titles = Alle Positionen
+directory-show-more = Mehr anzeigen
+directory-narrow-down = Mehr passen hier nicht hin. Suche oder filtere, um die übrigen zu finden.
+directory-offline-note = Der Server ist nicht erreichbar. Das sind die Personen, die dieses Gerät kennt.
+directory-external-empty = Keine passenden Gäste. Gäste sind Personen von außen, die in einen Space oder Kanal eingeladen wurden.
+directory-channel-filter = Kanal suchen
+directory-channels-loading = Kanäle werden gesucht
+directory-channels-empty-title = Keine Kanäle gefunden
+directory-channels-empty = Versuche einen anderen Namen oder ein anderes Thema. Private Kanäle erscheinen hier erst, wenn du darin bist.
+directory-channel-members = { $count ->
+    [one] { $count } Mitglied
+   *[other] { $count } Mitglieder
+}
+directory-invitation-filter = Einladung nach Adresse suchen
+directory-invitations-loading = Einladungen werden gesucht
+directory-invitations-empty-title = Keine offenen Einladungen
+directory-invitations-empty = Einladungen, die du verwalten kannst, stehen hier, bis sich die Person anmeldet.
+directory-invited-by = Eingeladen von { $name }
+directory-invitation-expires = Gültig bis { $date }
+directory-invitation-expired = Abgelaufen
+directory-resend = Erneut senden
+directory-resent = Erneut gesendet
+directory-revoke = Zurückziehen
+directory-revoke-confirm = Einladung für { $email } zurückziehen? Die Person tritt bei der Anmeldung dann nicht bei.

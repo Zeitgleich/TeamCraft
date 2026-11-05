@@ -4,8 +4,8 @@ use serde_json::json;
 use teamcraft_db::{DirectoryInvitationFilter, NewInvite, SpaceListing};
 use teamcraft_proto::{
   ConversationKind, CreateInviteRequest, DirectoryInvitation, DirectoryInvitationsQuery,
-  DirectoryInvitationsResponse, InviteId, InviteResponse, ListInvitesResponse, Permission, SpaceId, SpaceRole,
-  Target, UserId,
+  DirectoryInvitationsResponse, InviteId, InviteResponse, ListInvitesResponse, Permission, SpaceId,
+  SpaceRole, Target, UserId,
 };
 use time::OffsetDateTime;
 use tracing::warn;
@@ -315,7 +315,9 @@ pub async fn resend_invite(
   if let Err(error) = mailer.send(&mail).await {
     warn!(%error, invite_id = %invite, "resending the invitation e-mail failed");
     state.database.forget_invite_resend(invite).await?;
-    return Err(ApiError::Unavailable("the mail server did not take the mail".into()));
+    return Err(ApiError::Unavailable(
+      "the mail server did not take the mail".into(),
+    ));
   }
   audit::record(
     state,
@@ -425,7 +427,9 @@ async fn manageable_invite(
     .database
     .get_invite(invite)
     .await?
-    .filter(|existing| existing.space_id == space && reach.covers(caller.user.id, &existing.role, existing.sponsor_user_id))
+    .filter(|existing| {
+      existing.space_id == space && reach.covers(caller.user.id, &existing.role, existing.sponsor_user_id)
+    })
     .ok_or_else(ApiError::invite_not_found)
 }
 
@@ -512,12 +516,10 @@ mod tests {
 
 #[cfg(test)]
 mod reach_tests {
-  use teamcraft_proto::{Id, Snowflake};
-
   use super::*;
 
   fn user(raw: u64) -> UserId {
-    Id::new(Snowflake(raw))
+    raw.to_string().parse().unwrap()
   }
 
   #[test]
@@ -527,7 +529,10 @@ mod reach_tests {
       has_own_guests: true,
     };
     assert!(reach.covers(user(1), &SpaceRole::Guest, user(1)));
-    assert!(!reach.covers(user(1), &SpaceRole::Guest, user(2)), "somebody else's");
+    assert!(
+      !reach.covers(user(1), &SpaceRole::Guest, user(2)),
+      "somebody else's"
+    );
     assert!(!reach.covers(user(1), &SpaceRole::Member, user(1)), "not a guest");
   }
 

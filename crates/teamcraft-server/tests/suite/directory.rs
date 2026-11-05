@@ -77,7 +77,11 @@ mod pages {
       let person = member(name);
       user_id(&app, &person).await;
       let saved = app
-        .put(&person, "/me/profile", json!({"department": department, "title": "Lead"}))
+        .put(
+          &person,
+          "/me/profile",
+          json!({"department": department, "title": "Lead"}),
+        )
         .await;
       assert_eq!(saved.status, reqwest::StatusCode::OK, "{}", saved.body);
     }
@@ -89,7 +93,9 @@ mod pages {
       let people = page.body["people"].as_array().unwrap();
       assert!(people.len() <= 2);
       seen.extend(people.iter().map(|person| person["user"]["id"].clone()));
-      let Some(next) = page.body["next_after"].as_str() else { break };
+      let Some(next) = page.body["next_after"].as_str() else {
+        break;
+      };
       path = format!("/directory/people?query=&after={next}");
     }
     let unique: std::collections::HashSet<_> = seen.iter().map(ToString::to_string).collect();
@@ -99,7 +105,10 @@ mod pages {
     assert_eq!(names(&sales.body), vec!["dora", "emil"]);
     assert_eq!(sales.body["people"][0]["department"], json!("Sales"));
     assert_eq!(sales.body["people"][0]["title"], json!("Lead"));
-    assert_eq!(names(&app.get(&carol, "/directory/people?query=finance").await.body), vec!["fred"]);
+    assert_eq!(
+      names(&app.get(&carol, "/directory/people?query=finance").await.body),
+      vec!["fred"]
+    );
 
     let filters = app.get(&carol, "/directory/filters").await;
     assert_eq!(filters.body["departments"], json!(["Finance", "Sales"]));
@@ -284,7 +293,9 @@ mod invitations {
 
   #[tokio::test]
   async fn the_list_shows_each_role_what_it_may_manage() {
-    let Some((f, alice, sponsor, plain, outsider, ext)) = fixture().await else { return };
+    let Some((f, alice, sponsor, plain, outsider, ext)) = fixture().await else {
+      return;
+    };
     let all = vec!["g@example.org", "m@example.org"];
     let list = |user: TestUser| {
       let app = &f.app;
@@ -293,7 +304,10 @@ mod invitations {
     assert_eq!(listed(&list(alice.clone()).await.body), all, "owner");
     assert_eq!(listed(&list(sponsor.clone()).await.body), all, "space admin");
     assert!(listed(&list(plain.clone()).await.body).is_empty(), "plain member");
-    assert!(listed(&list(outsider.clone()).await.body).is_empty(), "not in the space");
+    assert!(
+      listed(&list(outsider.clone()).await.body).is_empty(),
+      "not in the space"
+    );
     assert_eq!(list(ext.clone()).await.status, StatusCode::FORBIDDEN, "guest");
     let first = list(alice).await;
     assert_eq!(first.body["invitations"][0]["can_resend"], json!(true));
@@ -302,7 +316,9 @@ mod invitations {
 
   #[tokio::test]
   async fn a_sponsor_who_lost_the_right_to_invite_no_longer_manages_their_invitations() {
-    let Some((f, alice, sponsor, ..)) = fixture().await else { return };
+    let Some((f, alice, sponsor, ..)) = fixture().await else {
+      return;
+    };
     let sponsor_id = user_id(&f.app, &sponsor).await;
     let reply = f
       .app
@@ -335,7 +351,9 @@ mod invitations {
 
   #[tokio::test]
   async fn resend_and_revoke_are_refused_per_role() {
-    let Some((f, alice, _sponsor, plain, outsider, ext)) = fixture().await else { return };
+    let Some((f, alice, _sponsor, plain, outsider, ext)) = fixture().await else {
+      return;
+    };
     let resend = format!("/spaces/{}/invites/{}/resend", f.space, f.owners_member);
     let revoke = format!("/spaces/{}/invites/{}", f.space, f.owners_member);
     let before = f.mailer.sent().len();
@@ -385,6 +403,59 @@ mod invitations {
     // The invitation's own mail just went out.
     let limited = app.post(&alice, &path, json!({})).await;
     assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS, "{}", limited.body);
+    // A mail that could not be sent doesn't count: the next try need not wait.
+    app
+      .state
+      .database
+      .forget_invite_resend(reply.id().parse().unwrap())
+      .await
+      .unwrap();
+    let before = mailer.sent().len();
+    let sent = app.post(&alice, &path, json!({})).await;
+    assert_eq!(sent.status, StatusCode::NO_CONTENT, "{}", sent.body);
+    assert_eq!(mailer.sent().len(), before + 1);
+    assert_eq!(
+      app.post(&alice, &path, json!({})).await.status,
+      StatusCode::TOO_MANY_REQUESTS,
+      "two clicks send one mail"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_mail_server_refusing_the_mail_is_the_callers_answer() {
+    let mailer = Arc::new(FakeMailer::default());
+    mailer.refuse("m@example.org");
+    let Some(app) = TestApp::start_with_mailer(
+      |settings| settings.limits.invite_resend_interval_secs = 0,
+      mailer.clone(),
+    )
+    .await
+    else {
+      return;
+    };
+    let alice = owner();
+    let space = create_space(&app, &alice, "Team", "invite_only").await;
+    let reply = app
+      .post(
+        &alice,
+        &format!("/spaces/{space}/invites"),
+        json!({"email": "m@example.org", "role": "member"}),
+      )
+      .await;
+    assert_eq!(
+      reply.status,
+      StatusCode::CREATED,
+      "the invite stands without its mail"
+    );
+    let path = format!("/spaces/{space}/invites/{}/resend", reply.id());
+    let refused = app.post(&alice, &path, json!({})).await;
+    assert_eq!(
+      refused.status,
+      StatusCode::SERVICE_UNAVAILABLE,
+      "{}",
+      refused.body
+    );
     app.stop().await;
   }
 

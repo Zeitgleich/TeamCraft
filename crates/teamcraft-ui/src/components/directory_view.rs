@@ -1,22 +1,20 @@
-//! The people directory (with profile facts) and user groups. Inside a space it lists the members of
-//! that space, as far as the user may see them (#954); elsewhere everyone in the workspace.
+//! The directory: people, channels, external people, user groups and open invitations (#298). Inside
+//! a space each list shows that space, as far as the user may see it (#954); elsewhere everything.
 
 use leptos::prelude::*;
-use teamcraft_client_api::backend::Backend;
-use teamcraft_client_api::list_load::{ListLoad, LoadingList, REQUEST_DEADLINE_MS};
 use teamcraft_proto::{
   CreateUserGroupRequest, ErrorCode, ListUserGroupsResponse, Permission, UserGroupDetailResponse,
   UserGroupId, UserGroupResponse,
 };
 
 use crate::auth::ApiMethod;
-use crate::calls::{CallKind, CallPhase, CallRequest};
-use crate::channel_access::can_in_workspace_now;
-use crate::components::avatar::{Avatar, AvatarSize};
+use crate::channel_access::{can_in_workspace_now, is_guest};
 use crate::components::compact_back::CompactBack;
+use crate::components::directory_channels::ChannelDirectory;
+use crate::components::directory_invitations::InvitationList;
+use crate::components::directory_people::{PeopleGrid, PeopleTab};
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
-use crate::components::list_status::{ListPlaceholder, ListStatus};
 use crate::components::page::ScopedSpaceName;
 use crate::components::skeleton::ListSkeleton;
 use crate::components::sliding_indicator::SlidingIndicator;
@@ -24,21 +22,14 @@ use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::feedback::report_failure;
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::use_i18n;
-use crate::model::{DeviceSetup, PresenceStatus, SpaceMember, SpaceRoster, User, UserId, raw_id};
-use crate::profiles::use_profiles;
-use crate::reactive::{SetIfAlive, UpdateIfAlive, use_debounced};
+use crate::model::{Space, SpaceId, UserId};
+use crate::reactive::{SetIfAlive, UpdateIfAlive};
 use crate::rest::RestClient;
 use crate::session::use_session;
 use crate::state::{Overlay, use_app_state};
 
-/// People shown at once; the filter narrows a larger workspace down.
-const MAX_ROWS: usize = 200;
-/// Placeholder rows while the server's directory answers.
-const PEOPLE_SKELETON_ROWS: usize = 5;
 /// Placeholder rows while the user groups load.
 const GROUP_SKELETON_ROWS: usize = 3;
-/// The directory on the server is asked once typing paused this long.
-const DIRECTORY_DEBOUNCE_MS: u64 = 250;
 
 /// Element ID of the panel the directory tabs control.
 const DIRECTORY_PANEL_ID: &str = "directory-panel";
@@ -51,19 +42,36 @@ const GROUP_HANDLE_CHARS: std::ops::RangeInclusive<usize> = 2..=32;
 /// no field (a reserved handle or a name over the instance's limit), so it stays a toast.
 const GROUP_SERVER_FIELDS: [(ErrorCode, &str); 1] = [(ErrorCode::Conflict, GROUP_HANDLE_ID)];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum DirectoryTab {
   People,
+  Channels,
+  External,
   Groups,
+  Invitations,
 }
 
 impl DirectoryTab {
-  const ALL: [Self; 2] = [Self::People, Self::Groups];
+  /// The tabs this user is offered: guests have no directory beyond who they share a conversation
+  /// with (docs/admin.md), and Invitations is for who can invite.
+  fn offered(am_guest: bool, can_invite: bool) -> Vec<Self> {
+    if am_guest {
+      return vec![Self::People, Self::Groups];
+    }
+    let mut tabs = vec![Self::People, Self::Channels, Self::External, Self::Groups];
+    if can_invite {
+      tabs.push(Self::Invitations);
+    }
+    tabs
+  }
 
   fn label_key(self) -> &'static str {
     match self {
       Self::People => "directory-people",
+      Self::Channels => "directory-channels",
+      Self::External => "directory-external",
       Self::Groups => "directory-groups",
+      Self::Invitations => "directory-invitations",
     }
   }
 
@@ -74,10 +82,13 @@ impl DirectoryTab {
 
 #[component]
 pub fn DirectoryView() -> impl IntoView {
+  let state = use_app_state();
   let i18n = use_i18n();
   let tab = RwSignal::new(DirectoryTab::People);
+  let offered =
+    Memo::new(move |_| DirectoryTab::offered(is_guest(state), !inviting_spaces(state).is_empty()));
   let on_keydown =
-    move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, &DirectoryTab::ALL, tab, DirectoryTab::tab_id);
+    move |ev: web_sys::KeyboardEvent| on_tab_keys(&ev, &offered.get_untracked(), tab, DirectoryTab::tab_id);
   view! {
     <section class="directory page-view" aria-label=move || i18n.t("directory-title")>
       <header class="panel-header">
@@ -88,288 +99,96 @@ pub fn DirectoryView() -> impl IntoView {
         </div>
         <div class="segmented" role="tablist" aria-label=move || i18n.t("directory-title") on:keydown=on_keydown>
           <SlidingIndicator />
-          {DirectoryTab::ALL
-            .into_iter()
-            .map(|value| {
-              view! {
-                <button
-                  id=value.tab_id()
-                  role="tab"
-                  aria-selected=move || (tab.get() == value).to_string()
-                  aria-controls=DIRECTORY_PANEL_ID
-                  tabindex=move || roving_tabindex(tab.get() == value)
-                  on:click=move |_| tab.set(value)
-                >
-                  {move || i18n.t(value.label_key())}
-                </button>
-              }
-            })
-            .collect_view()}
+          <For each=move || offered.get() key=|value| *value let:value>
+            <button
+              id=value.tab_id()
+              role="tab"
+              aria-selected=move || (tab.get() == value).to_string()
+              aria-controls=DIRECTORY_PANEL_ID
+              tabindex=move || roving_tabindex(tab.get() == value)
+              on:click=move |_| tab.set(value)
+            >
+              {move || i18n.t(value.label_key())}
+            </button>
+          </For>
         </div>
       </header>
       <div class="panel-scroll directory-body" role="tabpanel" id=DIRECTORY_PANEL_ID aria-labelledby=move || tab.get().tab_id()>
         {move || match tab.get() {
-          DirectoryTab::People => view! { <PeopleList /> }.into_any(),
+          DirectoryTab::People => view! { <PeopleGrid tab=PeopleTab::People /> }.into_any(),
+          DirectoryTab::Channels => view! { <ChannelDirectory /> }.into_any(),
+          DirectoryTab::External => view! { <PeopleGrid tab=PeopleTab::External /> }.into_any(),
           DirectoryTab::Groups => view! { <UserGroups /> }.into_any(),
+          DirectoryTab::Invitations => view! { <InvitationList /> }.into_any(),
         }}
       </div>
     </section>
   }
 }
 
+/// "Invite people": for the space on screen, the only space the user may invite to, or a choice of
+/// them. Only offered where the user may invite anybody; the dialog then offers the roles.
 #[component]
-fn PeopleList() -> impl IntoView {
+pub fn InvitePeopleButton() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let filter = RwSignal::new(String::new());
-  let directory_query = use_debounced(filter, DIRECTORY_DEBOUNCE_MS);
-  // Empty: everybody; otherwise only people of this organization.
-  let organization = RwSignal::new(String::new());
-  let scope = Memo::new(move |_| state.maybe_scoped_space());
-  // Inside a space the roster answers; the server's directory isn't asked.
-  let maybe_roster = Memo::new(move |_| {
-    let maybe_space = scope.get();
-    maybe_space.map(|space| state.read(|backend| backend.space_members(space)))
-  });
-  // Each space on its own: what was picked in one may not exist in the next. The roster shown first
-  // is the one this device has; the fresh one follows like any store update.
-  Effect::new(move |_| {
-    let maybe_space = scope.get();
-    organization.set(String::new());
-    if let Some(space) = maybe_space {
-      untrack(|| state.write(|backend| backend.refresh_space_roster(space)));
+  let spaces = Memo::new(move |_| {
+    let mut spaces = inviting_spaces(state);
+    if let Some(scoped) = state.maybe_scoped_space() {
+      spaces.retain(|space| space.id == scoped);
     }
+    spaces
   });
-  let scoped_people = Memo::new(move |_| {
-    let Some(SpaceRoster::Loaded(members)) = maybe_roster.get() else {
-      return Vec::new();
-    };
-    state.read(|backend| people_of_roster(backend, &members))
-  });
-  let organizations = Memo::new(move |_| {
-    let known = if scope.get().is_some() {
-      scoped_people.get()
-    } else {
-      state.read(|backend| backend.users())
-    };
-    let mut names: Vec<String> = known
-      .into_iter()
-      .filter(|user| !user.is_bot)
-      .filter_map(|user| user.maybe_organization)
-      .collect();
-    names.sort();
-    names.dedup();
-    names
-  });
-  let people = Memo::new(move |_| {
-    let needle = filter.get().trim().to_lowercase();
-    let selected = organization.get();
-    let query = directory_query.get();
-    // Who the app knows and the server's directory for the text (one page of it, never everybody):
-    // colleagues who share no space or conversation with the user yet are found too.
-    let mut all: Vec<User> = if scope.get().is_some() {
-      scoped_people.get()
-    } else {
-      state.read(|backend| backend.search_people(query.trim()))
-    };
-    all.retain(|user| !user.is_bot);
-    if !selected.is_empty() {
-      all.retain(|user| user.maybe_organization.as_deref() == Some(selected.as_str()));
-    }
-    all.sort_by_key(|user| user.display_name.to_lowercase());
-    let hub = use_profiles();
-    all
-      .into_iter()
-      .filter(|user| {
-        if needle.is_empty() {
-          return true;
+  let open = move |space: SpaceId| state.overlay.set(Overlay::InvitePeople(space));
+  move || {
+    let spaces = spaces.get();
+    match spaces.as_slice() {
+      [] => ().into_any(),
+      [only] => {
+        let id = only.id;
+        view! {
+          <button type="button" class="btn btn-primary directory-invite" on:click=move |_| open(id)>
+            <Icon name=IconName::UserPlus />
+            {move || i18n.t("invite-title")}
+          </button>
         }
-        let facts = hub
-          .and_then(|hub| hub.profile(user.id))
-          .map(|profile| {
-            format!(
-              "{} {}",
-              profile.maybe_title.unwrap_or_default(),
-              profile.maybe_department.unwrap_or_default()
-            )
-          })
-          .unwrap_or_default();
-        format!("{} {} {facts}", user.display_name, user.username)
-          .to_lowercase()
-          .contains(&needle)
-      })
-      .take(MAX_ROWS)
-      .collect::<Vec<_>>()
-  });
-  // Nobody matching is only news once the server's directory had its say; the typing that hasn't
-  // reached it yet counts as waiting too.
-  let status = ListStatus::new(
-    move || people.with(Vec::is_empty),
-    move || {
-      if let Some(roster) = maybe_roster.get() {
-        return match roster {
-          SpaceRoster::Loading => ListLoad::Loading,
-          SpaceRoster::Hidden | SpaceRoster::Loaded(_) => ListLoad::Ready,
-        };
-      }
-      let query = directory_query.get();
-      if filter.with(|typed| typed.trim() != query.trim()) {
-        return ListLoad::Loading;
-      }
-      state.read(|backend| backend.list_load(&LoadingList::directory(&query)))
-    },
-    Signal::derive(move || format!("{:?}/{}", scope.get(), directory_query.get())),
-    REQUEST_DEADLINE_MS,
-  );
-  let on_retry = Callback::new(move |()| {
-    status.restart();
-    if let Some(space) = scope.get_untracked() {
-      state.write(|backend| backend.refresh_space_roster(space));
-      return;
+        .into_any()
+      },
+      many => {
+        let options = many.to_vec();
+        view! {
+          <label class="visually-hidden" for="directory-invite-space">{move || i18n.t("invite-title")}</label>
+          <select
+            id="directory-invite-space"
+            class="input page-select directory-invite-choice"
+            prop:value=""
+            on:change=move |ev| {
+              let chosen = event_target_value(&ev);
+              if let Ok(space) = chosen.parse::<SpaceId>() {
+                open(space);
+              }
+              if let Some(select) = ev.target().and_then(|target| wasm_bindgen::JsCast::dyn_into::<web_sys::HtmlSelectElement>(target).ok()) {
+                select.set_value("");
+              }
+            }
+          >
+            <option value="">{move || i18n.t("invite-title")}</option>
+            {options.into_iter().map(|space| view! { <option value=space.id.to_string() translate="no">{space.name.clone()}</option> }).collect_view()}
+          </select>
+        }
+        .into_any()
+      },
     }
-    let list = LoadingList::directory(&directory_query.get_untracked());
-    state.write(|backend| backend.retry_list(&list));
-  });
-  let empty_body_key = move || match maybe_roster.get() {
-    None => "directory-empty",
-    Some(SpaceRoster::Hidden) => "directory-space-hidden",
-    Some(SpaceRoster::Loading | SpaceRoster::Loaded(_)) => "directory-space-empty",
-  };
-  view! {
-    <div class="page-tools">
-      <label class="page-search">
-        <span class="visually-hidden">{move || i18n.t("directory-filter")}</span>
-        <Icon name=IconName::Search />
-        <input
-          id="directory-filter"
-          class="input"
-          type="search"
-          autocomplete="off"
-          placeholder=move || i18n.t("directory-filter")
-          prop:value=move || filter.get()
-          on:input=move |ev| filter.set(event_target_value(&ev))
-        />
-      </label>
-      <Show when=move || !organizations.get().is_empty() fallback=|| ()>
-        <label class="visually-hidden" for="directory-organization">{move || i18n.t("directory-organization")}</label>
-        <select id="directory-organization" class="input page-select" prop:value=move || organization.get() on:change=move |ev| organization.set(event_target_value(&ev))>
-          <option value="">{move || i18n.t("directory-all-organizations")}</option>
-          <For each=move || organizations.get() key=|name| name.clone() let:name>
-            <option value=name.clone() translate="no">{name.clone()}</option>
-          </For>
-        </select>
-      </Show>
-    </div>
-    <ul class="person-list page-rows">
-      <For each=move || people.get() key=|user| (user.id, user.presence) let:user>
-        <PersonRow user=user />
-      </For>
-      <ListPlaceholder
-        phase=status.phase
-        rows=PEOPLE_SKELETON_ROWS
-        label=Signal::derive(move || i18n.t("directory-loading"))
-        on_retry=on_retry
-        as_item=true
-      >
-        {move || {
-          let body_key = empty_body_key();
-          view! { <EmptyState icon=IconName::Users title_key="directory-empty-title" body_key=body_key as_item=true /> }
-        }}
-      </ListPlaceholder>
-    </ul>
   }
 }
 
-/// The people of a space's roster. Somebody this device knows comes with what it knows (presence,
-/// organization); the roster's own facts name the rest. Deactivated accounts stay out, as in every
-/// people list.
-fn people_of_roster(backend: &dyn Backend, members: &[SpaceMember]) -> Vec<User> {
-  members
-    .iter()
-    .map(|member| {
-      backend
-        .user(member.user)
-        .unwrap_or_else(|| user_of_member(member))
-    })
-    .filter(|user| !user.is_deactivated)
+/// The spaces the user may invite somebody to.
+fn inviting_spaces(state: crate::state::AppState) -> Vec<Space> {
+  state
+    .read(|backend| backend.spaces())
+    .into_iter()
+    .filter(|space| space.can_add_members || space.can_invite_guests)
     .collect()
-}
-
-fn user_of_member(member: &SpaceMember) -> User {
-  User {
-    id: member.user,
-    username: String::new(),
-    display_name: member.display_name.clone(),
-    presence: PresenceStatus::Offline,
-    maybe_custom_status: None,
-    avatar_hue: (raw_id(member.user) % 360) as u16,
-    is_guest: member.is_guest,
-    is_bot: member.is_bot,
-    maybe_organization: None,
-    device_setup: DeviceSetup::default(),
-    is_deactivated: false,
-    is_deleted: false,
-    maybe_email: None,
-  }
-}
-
-#[component]
-fn PersonRow(user: User) -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let id = user.id;
-  let facts = move || {
-    use_profiles().and_then(|hub| hub.profile(id)).map(|profile| {
-      [profile.maybe_title, profile.maybe_department]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ")
-    })
-  };
-  let is_me = id == state.me().id;
-  let no_devices = user.device_setup == DeviceSetup::NoDevices;
-  let direct = (!is_me).then(|| state.direct_with(&[id])).flatten();
-  // Hidden, not failing after the click: a guest who may not start conversations is offered none.
-  let can_message = crate::channel_access::can_start_direct(state, &[id]);
-  view! {
-    <li class="page-row person-row">
-      <button class="page-row-main person-main" on:click=move |_| state.overlay.set(Overlay::UserProfile(id))>
-        <Avatar user=user.clone() size=AvatarSize::Large show_presence=true />
-        <span class="page-row-text person-text">
-          <span class="page-row-title person-name" translate="no">
-            {user.display_name.clone()}
-            {is_me.then(|| view! { " " <span class="badge">{move || i18n.t("directory-you")}</span> })}
-          </span>
-          <span class="page-row-detail person-facts" translate="no">{facts}</span>
-          {no_devices.then(|| view! { <span class="page-row-detail">{move || i18n.t("directory-no-devices")}</span> })}
-        </span>
-        <crate::components::profile_views::InMeetingBadge user=id />
-        {(user.is_guest && state.shows_guest_markers()).then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
-        <crate::components::org_badge::OrgBadge organization=user.maybe_organization.clone() />
-      </button>
-      {(!is_me).then(|| view! {
-        <span class="page-row-actions">
-          {can_message.then(|| view! {
-            <button class="icon-btn" aria-label=move || i18n.t("profile-message") title=move || i18n.t("profile-message") on:click=move |_| state.open_direct(id)>
-              <Icon name=IconName::Chat />
-            </button>
-          })}
-          {direct.map(|conversation| view! {
-            <button
-              class="icon-btn"
-              aria-label=move || i18n.t("profile-call")
-              title=move || i18n.t("profile-call")
-              disabled=move || state.call.phase.get() != CallPhase::Idle || !state.read(|backend| backend.has_calls())
-              on:click=move |_| state.call.prepare(CallRequest { conversation, kind: CallKind::Direct }, false)
-            >
-              <Icon name=IconName::Phone />
-            </button>
-          })}
-        </span>
-      })}
-    </li>
-  }
 }
 
 /// A typed group handle as the server stores it: without a leading `@`, lower case.
@@ -611,6 +430,22 @@ fn GroupMembers(
 mod tests {
   use super::*;
   use crate::feedback::{ActionFailure, FailureKind};
+
+  #[test]
+  fn guests_are_offered_only_what_they_may_see() {
+    assert_eq!(
+      DirectoryTab::offered(true, true),
+      vec![DirectoryTab::People, DirectoryTab::Groups]
+    );
+  }
+
+  #[test]
+  fn invitations_are_offered_to_who_can_invite() {
+    assert!(DirectoryTab::offered(false, true).contains(&DirectoryTab::Invitations));
+    let without = DirectoryTab::offered(false, false);
+    assert!(!without.contains(&DirectoryTab::Invitations));
+    assert!(without.contains(&DirectoryTab::Channels) && without.contains(&DirectoryTab::External));
+  }
   use crate::form_errors::server_error_field;
 
   #[test]

@@ -593,6 +593,24 @@ Deactivation and removal are two steps (issue #631); deletion is the final one (
   cryptographically: the admin's signed change, committed by members, rotates the keys. The
   server's own removal is only a hint to the clients (security review A8).
 
+#### Open invitations
+
+The directory's Invitations tab lists open invitations across spaces, one page at a time. One rule
+decides what somebody sees, resends and revokes (`InviteReach` in `services/invites.rs`):
+
+| Who                                                  | Invitations                                     |
+|------------------------------------------------------|-------------------------------------------------|
+| Holds `manage_space_members` in the space            | All of that space                               |
+| Holds `invite_guest` in the space, without the above | Only guest invitations they sent                |
+| Anyone else in the space, or who has left it         | None; other people's look like they don't exist |
+| Guests                                               | None; the list is refused                       |
+
+Somebody who loses the permission loses their own invitations too; those who manage the space's
+members still have them. Resending goes out at most once per `limits.invite_resend_interval_secs`
+(the invitation's own mail counts), and only for a valid invitation in an unarchived space on a server
+that sends mail. It uses the current directory policy and guest domains, and the personal note of the
+first mail isn't repeated, as it was never stored. Revoking and resending are in the audit log.
+
 ### 3.3 Moderation
 
 Admins can't read reported content unless a member shows it to them:

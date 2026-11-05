@@ -113,3 +113,34 @@ directory-loading = Looking for people
 groups-empty-title = No user groups yet
 groups-error-handle = Use 2 to 32 lower-case letters, digits, - or _.
 groups-error-handle-taken = This handle is already used by a group or a person.
+
+directory-channels = Channels
+directory-external = External
+directory-invitations = Invitations
+directory-department = Department
+directory-all-departments = All departments
+directory-job-title = Title
+directory-all-titles = All titles
+directory-show-more = Show more
+directory-narrow-down = That's as many as fit here. Search or filter to find the rest.
+directory-offline-note = Can't reach the server. These are the people this device knows.
+directory-external-empty = No guests match. Guests are people from outside who were invited to a space or channel.
+directory-channel-filter = Find a channel
+directory-channels-loading = Looking for channels
+directory-channels-empty-title = No channels found
+directory-channels-empty = Try a different name or topic. Private channels only show here once you're in them.
+directory-channel-members = { $count ->
+    [one] { $count } member
+   *[other] { $count } members
+}
+directory-invitation-filter = Find an invitation by address
+directory-invitations-loading = Looking for invitations
+directory-invitations-empty-title = No open invitations
+directory-invitations-empty = Invitations you can manage show here until the person signs in.
+directory-invited-by = Invited by { $name }
+directory-invitation-expires = Valid until { $date }
+directory-invitation-expired = Expired
+directory-resend = Send again
+directory-resent = Sent again
+directory-revoke = Revoke
+directory-revoke-confirm = Revoke the invitation for { $email }? They won't join when they sign in.

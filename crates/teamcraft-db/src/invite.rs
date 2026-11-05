@@ -135,7 +135,7 @@ impl Database {
   /// The mail of a resend could not be sent: the next try need not wait.
   pub async fn forget_invite_resend(&self, invite: InviteId) -> Result<(), DbError> {
     sqlx::query!(
-      "UPDATE invites SET last_sent_at = created_at WHERE id = $1",
+      "UPDATE invites SET last_sent_at = to_timestamp(0) WHERE id = $1",
       to_db(invite)
     )
     .execute(self.pool())

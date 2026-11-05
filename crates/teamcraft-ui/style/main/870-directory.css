@@ -1,0 +1,173 @@
+/* The directory (#298): five tabs that may not fit a phone, and the people grid. */
+
+.directory .panel-header {
+  flex-wrap: wrap;
+}
+
+.directory .segmented {
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.directory .segmented button {
+  flex: none;
+}
+
+.directory-tools {
+  flex-wrap: wrap;
+}
+
+.directory-tools .page-search {
+  flex-basis: 220px;
+}
+
+.directory-tools .page-select {
+  flex: 0 1 auto;
+  max-width: 200px;
+}
+
+.directory-invite {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+}
+
+.people-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: var(--space-3);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.people-grid:empty {
+  display: none;
+}
+
+.person-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  transition: background-color 120ms ease-out;
+}
+
+.person-card-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-4) var(--space-3) var(--space-3);
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  color: inherit;
+  text-align: center;
+  transition: transform 100ms ease-out;
+}
+
+.person-card-main:active {
+  transform: scale(0.98);
+}
+
+.person-card-main .avatar {
+  margin-bottom: var(--space-2);
+}
+
+.person-card-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+}
+
+.person-card-facts,
+.person-card-presence {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.person-card-facts:empty {
+  display: none;
+}
+
+.person-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-1);
+}
+
+.person-card-badges:empty {
+  display: none;
+}
+
+.person-card-actions {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-1);
+  padding: 0 var(--space-3) var(--space-3);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .person-card:hover,
+  .person-card:focus-within {
+    background: var(--surface-2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .person-card-main:active {
+    transform: none;
+  }
+}
+
+.directory-channel,
+.directory-invitation {
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+}
+
+.directory-row-text {
+  flex-basis: 200px;
+}
+
+.directory-invitation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.directory-more {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-4) 0;
+  text-align: center;
+}
+
+.directory-offline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
