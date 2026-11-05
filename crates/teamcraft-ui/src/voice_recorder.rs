@@ -296,7 +296,7 @@ impl VoiceRecorder {
       .try_get_value()
       .flatten()
       .ok_or("the take is gone")?;
-    let generation = parts.generation.get_value();
+    let generation = parts.generation.try_get_value().ok_or("the recorder is gone")?;
     parts.maybe_phase.try_set(Some(RecorderPhase::Finishing));
     match hand_over(source).await {
       Ok((file_name, media_type, source)) => {
