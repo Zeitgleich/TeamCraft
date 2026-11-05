@@ -220,3 +220,4 @@ entry-menu-leave-space = Space verlassen
 entry-menu-leave-space-confirm = { $name } verlassen? Du verlässt auch alle seine Kanäle. Kanäle, in denen nur du bist, werden gelöscht.
 entry-menu-leave-last-space-admin = Ernenne zuerst jemand anderen zum Space-Admin.
 entry-menu-settings = Einstellungen…
+sidebar-item-in-space = { $label }, in { $space }

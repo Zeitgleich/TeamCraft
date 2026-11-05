@@ -172,6 +172,36 @@
   text-overflow: ellipsis;
 }
 
+/* A channel listed outside its space (a favorite in Chats, #1152): the space under the name, each
+   line shortened on its own. */
+.sb-item:has(.sb-stack) {
+  padding-block: 4px;
+}
+
+.sb-stack {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.sb-stack .sb-name {
+  flex: none;
+}
+
+.sb-space {
+  overflow: hidden;
+  color: var(--sb-dim);
+  font-size: var(--text-2xs);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-item.current .sb-space {
+  color: inherit;
+}
+
 .sb-status {
   font-size: var(--text-sm);
 }

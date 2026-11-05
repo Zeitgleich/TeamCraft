@@ -57,6 +57,43 @@ class ConversationSectionsTest {
   }
 
   @Test
+  fun aStarredChannelListsUnderHomeFavoritesAndStaysUnderFavoritesInItsSpace() {
+    val all = listOf(
+      item("1", "Amy", ConversationKind.DIRECT, isFavorite = true),
+      item("2", "release", ConversationKind.PUBLIC, space = "Project A", isFavorite = true, unread = 3u),
+      item("3", "general", ConversationKind.PUBLIC, space = "Project A"),
+    )
+    val home = directSections(all, lastActivity = mapOf("1" to 10L, "2" to 20L))
+    assertEquals(listOf(SectionTitle.Favorites), home.map { it.title })
+    assertEquals(listOf("release", "Amy"), home[0].conversations.map { it.name })
+    assertEquals(listOf("release"), channelSections(all).first { it.title == SectionTitle.Favorites }.conversations.map { it.name })
+  }
+
+  @Test
+  fun aChannelHandedOverTwiceIsOneRowAndAnUnstarredOneIsNone() {
+    val starred = item("2", "release", ConversationKind.PUBLIC, space = "Project A", isFavorite = true)
+    val home = directSections(listOf(starred, starred, item("3", "general", ConversationKind.PUBLIC, space = "Project A")))
+    assertEquals(listOf("release"), home.flatMap { it.conversations }.map { it.name })
+  }
+
+  @Test
+  fun removingTheStarTakesTheChannelOutOfHome() {
+    val channel = item("2", "release", ConversationKind.PUBLIC, space = "Project A", isFavorite = false)
+    assertEquals(emptyList<Section>(), directSections(listOf(channel)))
+  }
+
+  @Test
+  fun theHomeTabCountsOnlyDirectMessagesSoAStarredChannelIsNotCountedTwice() {
+    val all = listOf(
+      item("1", "Amy", ConversationKind.DIRECT, unread = 1u),
+      item("2", "release", ConversationKind.PUBLIC, space = "Project A", isFavorite = true, unread = 4u),
+    )
+    val (direct, channels) = all.partition { it.isDirect }
+    assertEquals(TabBadge(mentions = 0, unread = 1), tabBadge(direct))
+    assertEquals(TabBadge(mentions = 0, unread = 4), tabBadge(channels))
+  }
+
+  @Test
   fun directMessagesFilterIgnoresCase() {
     val list = listOf(item("1", "Amy", ConversationKind.DIRECT), item("2", "Bob", ConversationKind.DIRECT))
     assertEquals(listOf("Amy"), directSections(list, filter = " aM").flatMap { it.conversations }.map { it.name })

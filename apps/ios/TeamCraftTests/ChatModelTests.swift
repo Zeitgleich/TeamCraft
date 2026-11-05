@@ -49,6 +49,24 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(directSections(list, filter: " sAm").flatMap(\.conversations).map(\.id), ["2", "1"])
   }
 
+  /// #1152: a starred channel lists in Home next to the favorite DMs, once, and stays in its space.
+  func testStarredChannelsListInHomeOnceAndStayInTheirSpace() {
+    let starred = item("2", "release", space: "Team A", favorite: true, unread: 3)
+    let list = [
+      item("1", "Sam", kind: .direct, favorite: true), starred, starred,
+      item("3", "general", space: "Team A"),
+    ]
+    let home = directSections(list, lastActivity: ["1": Date(timeIntervalSince1970: 10)])
+    XCTAssertEqual(home.map(\.title), [.favorites])
+    XCTAssertEqual(home[0].conversations.map(\.id), ["1", "2"])
+    XCTAssertEqual(channelSections([starred, list[3]]).first?.conversations.map(\.id), ["2"])
+    // Removing the star takes it out of Home.
+    XCTAssertTrue(directSections([item("2", "release", space: "Team A")]).isEmpty)
+    // The Home tab counts DMs only, so the channel's unread is counted once, in its space.
+    XCTAssertEqual(TabBadge(list.filter { $0.isDirect }).unread, 0)
+    XCTAssertEqual(TabBadge([starred, list[3]]).unread, 3)
+  }
+
   func testHomeChipsPickUnreadPeopleOrGroups() {
     let list = [
       item("1", "Amy", kind: .direct, unread: 1),

@@ -67,6 +67,13 @@ fun ConversationItem.listName(notesTitle: String): String = if (isNotesToSelf) n
 val ConversationItem.isDirect: Boolean
   get() = kind == ConversationKind.DIRECT || kind == ConversationKind.GROUP
 
+/**
+ * Whether the Home tab lists the conversation: DMs and group DMs, and the channels of a space the
+ * user starred (#1152). The channel stays under Favorites in its space too.
+ */
+val ConversationItem.isListedInHome: Boolean
+  get() = isDirect || (isFavorite && maybeSpaceId != null)
+
 /** Channels of the spaces: favorite channels first, then each space (spaces and channels by name). */
 fun channelSections(conversations: List<ConversationItem>): List<Section> {
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
@@ -86,7 +93,7 @@ fun channelSections(conversations: List<ConversationItem>): List<Section> {
 }
 
 /**
- * The Home tab: favorites, then the rest, each the most recent first (`lastActivity`: newest
+ * The Home tab: favorites (starred channels of spaces among them, #1152), then the rest, each the most recent first (`lastActivity`: newest
  * message per conversation; by name without one). Only conversations `chip` lets through whose
  * names contain `filter` (any case) are kept. Empty sections are left out.
  */
@@ -100,7 +107,8 @@ fun directSections(
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
   val byRecency = compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName)
   val direct = conversations
-    .filter { it.isDirect && chip.matches(it) && (needle.isEmpty() || it.name.contains(needle, ignoreCase = true)) }
+    .distinctBy { it.id }
+    .filter { it.isListedInHome && chip.matches(it) && (needle.isEmpty() || it.name.contains(needle, ignoreCase = true)) }
     .sortedWith(byRecency)
   val (favorites, rest) = direct.partition { it.isFavorite }
   return buildList {

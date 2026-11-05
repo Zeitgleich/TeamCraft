@@ -220,3 +220,4 @@ entry-menu-leave-space = Leave space
 entry-menu-leave-space-confirm = Leave { $name }? You also leave all of its channels. Channels only you are in are deleted.
 entry-menu-leave-last-space-admin = Make someone else space admin first.
 entry-menu-settings = Settings…
+sidebar-item-in-space = { $label }, in { $space }

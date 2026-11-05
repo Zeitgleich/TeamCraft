@@ -122,6 +122,7 @@ import de.zeitgleich.teamcraft.ui.HomeFilter
 import de.zeitgleich.teamcraft.ui.channelSections
 import de.zeitgleich.teamcraft.ui.directSections
 import de.zeitgleich.teamcraft.ui.isDirect
+import de.zeitgleich.teamcraft.ui.isListedInHome
 import de.zeitgleich.teamcraft.ui.listName
 import de.zeitgleich.teamcraft.ui.tabBadge
 import de.zeitgleich.teamcraft.ui.toggled
@@ -340,7 +341,7 @@ internal class ListState(
 private fun HomeTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit) {
   var dmFilter by rememberSaveable { mutableStateOf("") }
   var homeChip by rememberSaveable { mutableStateOf(HomeFilter.All) }
-  if (conversations.none { it.isDirect }) {
+  if (conversations.none { it.isListedInHome }) {
     Column(Modifier.fillMaxSize()) {
       HomeEntries(onNavigate)
       RemainingEmptyState(
@@ -358,7 +359,7 @@ private fun HomeTab(conversations: List<ConversationItem>, list: ListState, onNa
     item(key = "filter") { DirectFilter(dmFilter, onChange = { dmFilter = it }) }
     item(key = "chips") { HomeChips(homeChip, onSelect = { homeChip = if (homeChip == it) HomeFilter.All else it }) }
     if (sections.isEmpty()) item(key = "no-match") { EmptyHint(stringResource(R.string.dm_filter_empty)) }
-    conversationRows(sections, list)
+    conversationRows(sections, list, showsSpace = true)
   }
 }
 
@@ -419,7 +420,13 @@ private fun SpacesTab(conversations: List<ConversationItem>, list: ListState, on
   }
 }
 
-private fun LazyListScope.conversationRows(sections: List<Section>, list: ListState, hasHeader: Boolean = true) {
+/** [showsSpace]: name the space under a channel's name, where the list is not that space's own (#1152). */
+private fun LazyListScope.conversationRows(
+  sections: List<Section>,
+  list: ListState,
+  hasHeader: Boolean = true,
+  showsSpace: Boolean = false,
+) {
   for (section in sections) {
     if (hasHeader) item(key = "section-${section.title}") { SectionHeaderWithMenu(section, list) }
     items(section.conversations, key = { "${section.title}-${it.id}" }) { conversation ->
@@ -430,6 +437,7 @@ private fun LazyListScope.conversationRows(sections: List<Section>, list: ListSt
         isSelected = conversation.id == list.maybeSelectedId,
         isChecked = conversation.id in list.selection,
         isSelecting = list.selection.isNotEmpty(),
+        showsSpace = showsSpace,
         onClick = { list.onOpen(conversation.id) },
         onLongPress = { list.onLongPress(conversation.id) },
         menu = { isOpen, onDismiss -> list.conversationMenu(conversation, isOpen, onDismiss) },
@@ -753,6 +761,7 @@ private fun SwipeableConversationRow(
   isSelected: Boolean,
   isChecked: Boolean,
   isSelecting: Boolean,
+  showsSpace: Boolean,
   onClick: () -> Unit,
   onLongPress: () -> Unit,
   menu: @Composable (Boolean, () -> Unit) -> Unit,
@@ -785,6 +794,7 @@ private fun SwipeableConversationRow(
         actions,
         isSelected,
         isChecked,
+        showsSpace,
         onClick,
         onLongPress = { if (isSelecting) onLongPress() else isMenuOpen = true },
       )
@@ -854,6 +864,7 @@ private fun ConversationRow(
   actions: RowActions,
   isSelected: Boolean,
   isChecked: Boolean,
+  showsSpace: Boolean,
   onClick: () -> Unit,
   onLongPress: () -> Unit,
 ) {
@@ -892,10 +903,25 @@ private fun ConversationRow(
       if (isChecked) CheckedAvatar() else ConversationAvatar(conversation)
       Column(Modifier.weight(1f).padding(start = 12.dp)) {
         TitleLine(conversation, maybeEntry)
+        if (showsSpace) {
+          conversation.maybeSpaceName?.let { SpaceLine(it) }
+        }
         PreviewLine(conversation, maybeEntry)
       }
     }
   }
+}
+
+/** The space of a channel listed outside it; it shortens on its own line, so a long name never hides it. */
+@Composable
+private fun SpaceLine(name: String) {
+  Text(
+    name,
+    maxLines = 1,
+    overflow = TextOverflow.Ellipsis,
+    style = MaterialTheme.typography.labelSmall,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+  )
 }
 
 @Composable
