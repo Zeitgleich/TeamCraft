@@ -180,6 +180,9 @@ pub const DEVICE_PREFS: &[&str] = &[
   "calls.screen_mode",
   "calls.screen_resolution",
   "calls.camera_quality",
+  // Which keys are free depends on the machine.
+  "calls.mute_shortcut_enabled",
+  "calls.mute_shortcut",
   "notifications.attention_input_secs",
   "notifications.message_sound",
   "notifications.own_sound_limits",

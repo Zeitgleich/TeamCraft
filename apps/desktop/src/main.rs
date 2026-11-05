@@ -25,6 +25,7 @@ mod external_links;
 #[cfg(target_os = "linux")]
 mod freedesktop;
 mod message_sound;
+mod mute_shortcut;
 mod notifications;
 mod reconnect;
 mod ringtone;
@@ -132,6 +133,7 @@ fn main() -> anyhow::Result<()> {
     .manage(ringtone::RingtoneState::default())
     .manage(message_sound::MessageSoundState::default())
     .manage(calls::push_to_talk::PushToTalkState::default())
+    .manage(mute_shortcut::MuteShortcutState::default())
     .manage(CoreHost::new(tokens))
     .manage(Arc::new(DroppedFilesState::default()))
     .setup(move |app| {
@@ -341,6 +343,7 @@ fn main() -> anyhow::Result<()> {
       shell_prefs::shell_prefs_set,
       tray::tray_update,
       tray::tray_menu_set,
+      mute_shortcut::mute_shortcut_set,
       tray::set_zoom,
       updates::update_status,
       updates::update_check,

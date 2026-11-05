@@ -598,6 +598,23 @@ pub async fn tray_menu_set(model: &teamcraft_client_api::tray_menu::TrayMenuMode
   }
 }
 
+/// Desktop only: asks the shell for the global mute shortcut (`None` releases it). With
+/// `is_active` false the shortcut is only tried, so the settings can say whether it can be had.
+pub async fn mute_shortcut_set(
+  maybe_shortcut: Option<&str>,
+  is_active: bool,
+) -> teamcraft_client_api::tray_menu::MuteShortcutStatus {
+  use teamcraft_client_api::tray_menu::MuteShortcutStatus;
+  if !is_available() {
+    return MuteShortcutStatus::Unavailable;
+  }
+  let args = serde_json::json!({ "maybe_shortcut": maybe_shortcut, "is_active": is_active });
+  call::<MuteShortcutStatus>("mute_shortcut_set", &args)
+    .await
+    .inspect_err(|error| tracing::debug!(%error, "could not set the mute shortcut"))
+    .unwrap_or(MuteShortcutStatus::Unavailable)
+}
+
 /// Desktop only: zooms the webview (percent, 100 = normal).
 pub async fn set_zoom(percent: u16) {
   if !is_available() {
