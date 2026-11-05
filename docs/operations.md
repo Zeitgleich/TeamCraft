@@ -286,27 +286,17 @@ the server itself is down.
   `TEAMCRAFT_SFU_FALLBACK_BIND`, plain HTTP: **never publish this port**, the join token would go in
   the clear. The default is `127.0.0.1:8082`, for a proxy on the same machine; the container image
   sets `[::]:8082`, since the proxy is another container there, so don't publish it and don't run
-  that image with host networking without changing it. If the port can't be bound, the SFU logs an
-  error and runs on without the fallback. **An existing deployment has to add this**, or clients on
-  such networks keep failing to join as before; nothing else breaks without it:
+  that image with host networking without changing it (the reference deployment does run the SFU
+  with host networking: there it is `127.0.0.1:8082`). The SFU warns at start when it listens on
+  every address but trusts only a proxy on the machine itself, which is one of those two mistakes.
+  If the port can't be bound, the SFU logs an error and runs on without the fallback. **An existing
+  deployment has to add the route**, or clients on such networks keep failing to join as before;
+  nothing else breaks without it. Configurations for Caddy and nginx (Plesk included), the order of
+  the rollout and how to check it: [Call fallback through the proxy](#call-fallback-through-the-proxy).
   - The reverse proxy serves `wss://<SFU host>/call/fallback` on 443 and passes it to that port:
     WebSocket upgrade allowed, no response buffering, idle timeout above a few seconds (the SFU pings
     each second), `X-Forwarded-For` set. The SFU host name needs a TCP/443 route and a certificate;
-    the bundled playbook's certificate already covers `sfu.<host>`. In nginx (tested without TLS):
-
-    ```nginx
-    location /call/fallback {
-      proxy_pass http://sfu:8082;
-      proxy_http_version 1.1;
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
-      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-      proxy_buffering off;
-      proxy_read_timeout 30s;
-    }
-    ```
-
-    The deployment repository (Zeitgleich/teamcraft-deploy) needs this route and the setting below.
+    the bundled playbook's certificate already covers `sfu.<host>`.
   - `TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES` names the proxy: addresses or networks, comma-separated
     (`172.18.0.0/16`). Only from these peers does the last `X-Forwarded-For` entry count for the
     limit of 16 unjoined connections per address (an IPv6 /64 is one address). The default is the
@@ -381,6 +371,114 @@ the server itself is down.
   roster over `[calls] sfu_control_url` (and otherwise from the SFU's next roster) and takes over
   the calls that kept running, without ringing again. Calls whose join tokens came from a server
   before 1.0.8 can't be taken over (the tokens don't name the conversation).
+
+### Call fallback through the proxy
+
+What the reverse proxy needs so that clients on networks that block UDP reach the SFU's fallback on
+TCP 443 (#1226). The server and the apps need nothing for it: from 1.0.20 on the server offers
+`wss://<host of sfu_url>/call/fallback` with every join token, and a client uses it only when QUIC
+doesn't connect. Until the route exists such a client fails to join, as it did before there was a
+fallback.
+
+**The SFU's listener.** Where the proxy is decides the SFU's two settings:
+
+- **Proxy on the same machine, SFU with host networking** (the reference deployment: Caddy or the
+  host's nginx, rootless Podman with `Network=host`): `TEAMCRAFT_SFU_FALLBACK_BIND=127.0.0.1:8082`,
+  the address the proxy forwards to (`[::1]:8082` if that is IPv6). The image's `[::]:8082` would
+  listen on every address of the host, plain HTTP, guarded only by the firewall. The default trusted
+  proxy, the machine itself, fits.
+- **Proxy in another container**: keep the image's `[::]:8082`, don't publish the port, and set
+  `TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES` to the proxy's address or its container network.
+
+Take another port if 8082 is in use on the host (the SFU logs `no call fallback: its port can't be
+bound` and runs on without it). The defaults need about 1,216 descriptors (1024 joined, 128 unjoined
+and a margin): the SFU warns at start when `RLIMIT_NOFILE` is lower; in Quadlet,
+`PodmanArgs=--ulimit=nofile=4096:4096` raises it (for rootless Podman, up to the user's hard limit).
+
+**Caddy** (the bundled proxy of the reference deployment). Caddy passes WebSocket upgrades, doesn't
+buffer them, and sets `X-Forwarded-For` to the client's address; a path matcher without `*` is exact:
+
+```caddy
+sfu.chat.example.com {
+	handle /call/fallback {
+		reverse_proxy 127.0.0.1:8082 {
+			# Otherwise a reload of Caddy closes every call on the fallback at once (they rejoin).
+			stream_close_delay 5m
+		}
+	}
+	handle {
+		respond "TeamCraft SFU" 200
+	}
+}
+```
+
+**nginx**, also as Plesk's "Additional nginx directives" of the domain that serves the SFU's host
+name:
+
+```nginx
+location = /call/fallback {
+  proxy_pass http://127.0.0.1:8082;
+  proxy_http_version 1.1;
+  proxy_set_header Upgrade $http_upgrade;
+  proxy_set_header Connection "upgrade";
+  # The client's address, replacing whatever the client sent (the SFU takes the last entry).
+  proxy_set_header X-Forwarded-For $remote_addr;
+  proxy_buffering off;
+  proxy_read_timeout 30s;
+  proxy_send_timeout 30s;
+}
+```
+
+Keep the `=`: nginx prefers a regular-expression location over a plain prefix one, so behind a
+regex catch-all (Plesk's directives of the reference deployment have one) `location /call/fallback`
+would send the fallback to the chat server. When the SFU's host name is an alias of the chat domain
+(one Plesk domain, one certificate), the location answers on the other names as well; no harm, only
+clients given the SFU's URL ask for it. With a CDN or a second proxy in front, use
+`$proxy_add_x_forwarded_for` and list the inner proxy as trusted instead.
+
+Other proxies need the same four things: the exact path, the upgrade, no buffering, and
+`X-Forwarded-For`. Apache (2.4.47 or later): `ProxyPass "/call/fallback"
+"http://127.0.0.1:8082/call/fallback" upgrade=websocket`; HAProxy and Traefik pass upgrades on
+their own (HAProxy: `timeout tunnel` of at least 30 s).
+
+**Order of the rollout.** Each step is safe without the next one:
+
+1. SFU and server of 1.0.21 or later (the SFU before or with the server). Calls on QUIC don't change.
+2. The SFU's bind address and, for a proxy in another container, the trusted proxies; restart the
+   SFU. Running calls rejoin within seconds (above).
+3. The route in the proxy; reload it.
+4. Check it (below).
+5. Once no app from before #1297 is left: `TEAMCRAFT_SFU_FALLBACK_REQUIRE_UPGRADE_TOKEN=1`.
+
+To roll back, remove the route (clients behave as before it) or stop offering the fallback with
+`[calls] sfu_fallback_enabled = false`.
+
+**Checking it**, from outside the server:
+
+```sh
+curl -sS -o /dev/null -w '%{http_code}\n' --http1.1 --max-time 10 \
+  -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' https://sfu.chat.example.com/call/fallback
+```
+
+- `101`: the SFU took the upgrade (and closes it 3 s later for want of a `join`). The route works.
+- `401`: the SFU as well, with `TEAMCRAFT_SFU_FALLBACK_REQUIRE_UPGRADE_TOKEN=1`.
+- `200` or `404`: the request didn't reach the SFU (Caddy's placeholder, the chat server, or a
+  prefix location losing to a regex one).
+- `502` or `504`: the proxy can't reach the SFU's port (bind address, port, firewall), or the
+  request had no upgrade headers: to a plain `GET` the SFU doesn't answer at all.
+
+Then a call from a client with UDP blocked (a guest network, or a firewall rule on the client that
+drops UDP to the SFU's port) joins after about 3 s and shows "Limited network, call quality may be
+lower"; `teamcraft_sfu_fallback_connections` in the SFU's metrics counts it, and the SFU logs no
+warning about `X-Forwarded-For`.
+
+**In the reference deployment** (Zeitgleich/teamcraft-deploy) this means: a port `sfu_fallback`
+(8082) among the loopback ports, checked by the preflight like the others;
+`Environment=TEAMCRAFT_SFU_FALLBACK_BIND=<upstream address>:<that port>` in the SFU's Quadlet unit;
+the Caddy route above in the SFU's site; for deployments without Caddy, the location in the generated
+nginx, Plesk, Apache, HAProxy and Traefik configurations of the SFU's host name, which so far only
+gets a certificate; and the `curl` check in the self-check.
 
 ### Company proxies, TLS inspection and captive portals (clients)
 
