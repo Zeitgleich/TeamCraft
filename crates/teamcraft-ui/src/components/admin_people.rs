@@ -11,6 +11,10 @@ use crate::i18n::use_i18n;
 /// Away timeouts an admin can pick, from the server's minimum up; `0` lets the devices decide
 /// (kept so workspaces without a timeout show and keep their choice).
 const AWAY_MINUTES: [u32; 6] = [5, 10, 15, 30, 60, 0];
+/// What the console offers for how far ahead a message may be scheduled.
+const SCHEDULE_HORIZON_DAYS: [u32; 5] = [7, 30, 90, 365, 730];
+/// What the console offers for how many messages one person can have waiting.
+const SCHEDULE_PER_USER: [u32; 5] = [10, 25, 50, 100, 500];
 const PRESET_DURATIONS: [u32; 6] = [0, 30, 60, 240, 480, 1440];
 const MAX_PRESETS: usize = 20;
 
@@ -140,6 +144,52 @@ pub fn PeopleSection() -> impl IntoView {
           hint=Signal::derive(move || i18n.t("policy-auto-follow-hint"))
           checked=Signal::derive(move || draft.get().threads.auto_follows_mentioned_threads)
           on_change=move |value| policy.edit(|p| p.threads.auto_follows_mentioned_threads = value)
+        />
+      </fieldset>
+
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-scheduled")}</legend>
+        <p class="muted-text small">{move || i18n.t("policy-scheduled-hint")}</p>
+        <CheckRow
+          name="scheduled_messages"
+          label=Signal::derive(move || i18n.t("policy-scheduled-enabled"))
+          hint=Signal::derive(move || i18n.t("policy-scheduled-enabled-hint"))
+          checked=Signal::derive(move || draft.get().scheduled_messages.is_enabled)
+          on_change=move |value| policy.edit(|p| p.scheduled_messages.is_enabled = value)
+        />
+        <SelectRow
+          id="policy-scheduled-horizon"
+          label=Signal::derive(move || i18n.t("policy-scheduled-horizon"))
+          options=Signal::derive(move || {
+            with_current(&SCHEDULE_HORIZON_DAYS, draft.get().scheduled_messages.max_horizon_days)
+              .into_iter()
+              .map(|days| (days.to_string(), i18n.t_count("policy-days", days as usize)))
+              .collect()
+          })
+          selected=Signal::derive(move || draft.get().scheduled_messages.max_horizon_days.to_string())
+          disabled=Signal::derive(move || !draft.get().scheduled_messages.is_enabled)
+          on_select=move |value: String| {
+            if let Ok(days) = value.parse::<u32>() {
+              policy.edit(|p| p.scheduled_messages.max_horizon_days = days);
+            }
+          }
+        />
+        <SelectRow
+          id="policy-scheduled-cap"
+          label=Signal::derive(move || i18n.t("policy-scheduled-cap"))
+          options=Signal::derive(move || {
+            with_current(&SCHEDULE_PER_USER, draft.get().scheduled_messages.max_per_user)
+              .into_iter()
+              .map(|count| (count.to_string(), count.to_string()))
+              .collect()
+          })
+          selected=Signal::derive(move || draft.get().scheduled_messages.max_per_user.to_string())
+          disabled=Signal::derive(move || !draft.get().scheduled_messages.is_enabled)
+          on_select=move |value: String| {
+            if let Ok(count) = value.parse::<u32>() {
+              policy.edit(|p| p.scheduled_messages.max_per_user = count);
+            }
+          }
         />
       </fieldset>
 
@@ -308,6 +358,16 @@ fn name_format_of(slug: &str) -> DisplayNameFormat {
     "username" => DisplayNameFormat::Username,
     _ => DisplayNameFormat::AsProvided,
   }
+}
+
+/// The choices of a limit, with the value in force when it is another one (set through the API).
+fn with_current(choices: &[u32], current: u32) -> Vec<u32> {
+  let mut all = choices.to_vec();
+  if !all.contains(&current) {
+    all.push(current);
+    all.sort_unstable();
+  }
+  all
 }
 
 #[cfg(test)]

@@ -67,10 +67,20 @@ wire_enum! {
     /// The signed workspace policy does not let members replace the name from the identity provider
     /// (`directory.allow_display_name_override`).
     DisplayNameOverrideNotAllowed => "display_name_override_not_allowed",
+    /// An invitation for the address is open in the space already; revoke it to invite anew.
+    InviteAlreadyOpen => "invite_already_open",
     /// No OpenRouter API key is stored for the notetaker (admin.md §3.7).
     NotetakerKeyNotFound => "notetaker_key_not_found",
     UserGroupNotFound => "user_group_not_found",
     MfaRequired => "mfa_required",
+    /// The message isn't held any more, or isn't the caller's (docs/scheduled-messages.md).
+    ScheduledMessageNotFound => "scheduled_message_not_found",
+    /// The workspace doesn't allow scheduling messages.
+    ScheduledMessagesDisabled => "scheduled_messages_disabled",
+    /// The caller holds as many scheduled messages as the workspace allows.
+    ScheduledMessageLimit => "scheduled_message_limit",
+    /// The time has passed or lies beyond the workspace's horizon.
+    ScheduledTimeInvalid => "scheduled_time_invalid",
     Conflict => "conflict",
     EpochConflict => "epoch_conflict",
     VersionConflict => "version_conflict",
@@ -319,10 +329,15 @@ mod tests {
       ErrorCode::ShareUnavailable,
       ErrorCode::RecoveryPassphraseNotAllowed,
       ErrorCode::DisplayNameOverrideNotAllowed,
+      ErrorCode::InviteAlreadyOpen,
       ErrorCode::NotetakerKeyNotFound,
       ErrorCode::UnknownHost,
       ErrorCode::BrandAssetNotFound,
       ErrorCode::UserGroupNotFound,
+      ErrorCode::ScheduledMessageNotFound,
+      ErrorCode::ScheduledMessagesDisabled,
+      ErrorCode::ScheduledMessageLimit,
+      ErrorCode::ScheduledTimeInvalid,
       ErrorCode::Conflict,
       ErrorCode::EpochConflict,
       ErrorCode::VersionConflict,

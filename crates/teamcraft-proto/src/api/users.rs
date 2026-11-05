@@ -294,6 +294,9 @@ wire_enum! {
     /// The conversation was read on another device, or a ring ended: remove what was shown. Sent
     /// silently (APNs background push, FCM normal priority); never shows anything by itself.
     Dismiss => "dismiss",
+    /// The group of a message the user scheduled changed: the device seals it again under the current
+    /// key (docs/scheduled-messages.md). Shows nothing and says nothing but the conversation, sealed.
+    ScheduledSeal => "scheduled_seal",
     /// A test push the user asked for in the notification diagnostics.
     Test => "test",
   }
@@ -302,7 +305,7 @@ wire_enum! {
 impl PushKind {
   /// Whether the wake-up is meant to show something to the user (and may wake a dozing phone).
   pub fn is_visible(&self) -> bool {
-    !matches!(self, Self::Dismiss)
+    !matches!(self, Self::Dismiss | Self::ScheduledSeal)
   }
 }
 

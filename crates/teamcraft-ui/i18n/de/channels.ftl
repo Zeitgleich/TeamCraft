@@ -237,6 +237,7 @@ invite-email-hint = Für Personen ohne Konto. Sie erhalten eine E-Mail und trete
 invite-email-invalid = Bitte prüfe diese Adressen: { $addresses }
 invite-email-too-many = Höchstens { $max } Adressen auf einmal.
 invite-email-refused = Der Server hat diese Adressen abgelehnt. Prüfe sie und sende noch einmal.
+invite-email-already-open = Für eine dieser Adressen ist in diesem Space schon eine Einladung offen. Unter Personen, Einladungen kannst du sie erneut senden oder zurückziehen.
 invite-message = Persönliche Nachricht (optional)
 invite-message-hint = Wird den Einladungs-E-Mails hinzugefügt.
 invite-done = { $count ->

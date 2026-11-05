@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM scheduled_messages WHERE id IN (\n           SELECT id FROM scheduled_messages\n           WHERE hold_reason IN ('sender_inactive', 'not_a_member', 'conversation_gone')\n             AND held_at <= $1::timestamptz - make_interval(secs => $2)\n           LIMIT $3\n           FOR UPDATE SKIP LOCKED)\n         RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Float8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fafe2b945f801142b69e40d22c4a290718aed8c02724dcb94484b6a1dfad0a0f"
+}

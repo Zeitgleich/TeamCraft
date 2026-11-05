@@ -133,6 +133,8 @@ struct ConversationListView: View {
     // A conversation opened from elsewhere (notification, link, new message) shows in its own tab.
     .onChange(of: selection) { _, id in
       if let selected = conversations.first(where: { $0.id == id }) {
+        // A starred channel opened from Home stays there, highlighted under Favorites (#1346).
+        if tab == .home && selected.isListedInHome { return }
         tab = selected.isDirect ? .home : .spaces
       }
     }
@@ -193,6 +195,7 @@ struct ConversationListView: View {
         if isHomeShown {
           // Decided where the channels are (#799): in the list layout, here too.
           if isList { JoinRequestSection() }
+          ScheduledAttentionSection()
           GuestNoticeSection()
           TextField("dm_filter", text: $dmFilter)
             .textFieldStyle(.roundedBorder)
@@ -566,7 +569,7 @@ struct ConversationListView: View {
 struct ConversationRow: View {
   let conversation: ConversationItem
   var maybePreview: ChatPreview?
-  /// Names the space under a channel's name, where the list is not that space's own (#1152).
+  /// Names the space after a channel's name, where the list is not that space's own (#1152).
   var showsSpace = false
 
   private var isUnread: Bool { conversation.unreadCount > 0 }
@@ -587,6 +590,16 @@ struct ConversationRow: View {
           Text(conversation.listName)
             .fontWeight(isUnread ? .semibold : .regular)
             .lineLimit(1)
+          if showsSpace, let space = conversation.maybeSpaceName {
+            // After the name on the same line, so every row is as high as the others; it shortens
+            // first (#1346).
+            Text(verbatim: space)
+              .font(.caption)
+              .foregroundStyle(Theme.textMuted)
+              .lineLimit(1)
+              .truncationMode(.tail)
+              .layoutPriority(-1)
+          }
           if conversation.isMuted {
             Image(systemName: "bell.slash").font(.caption).foregroundStyle(Theme.textMuted)
               .accessibilityLabel(Text("chat_muted"))
@@ -602,14 +615,6 @@ struct ConversationRow: View {
               .font(.caption)
               .foregroundStyle(isUnread ? Theme.accent : Theme.textMuted)
           }
-        }
-        if showsSpace, let space = conversation.maybeSpaceName {
-          // Its own line, so a long channel name never hides the space.
-          Text(verbatim: space)
-            .font(.caption)
-            .foregroundStyle(Theme.textMuted)
-            .lineLimit(1)
-            .truncationMode(.tail)
         }
         HStack {
           previewText

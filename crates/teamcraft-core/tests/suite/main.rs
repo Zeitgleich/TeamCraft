@@ -60,6 +60,7 @@ mod recovery_kit;
 mod removal_followups;
 mod role_signing;
 mod runner;
+mod scheduled;
 mod search;
 mod sending;
 mod server_changes;

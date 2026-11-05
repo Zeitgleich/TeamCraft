@@ -18,7 +18,8 @@ class FcmService : FirebaseMessagingService() {
     // Called on a background thread; FCM allows about 10 s of work for a high-priority message.
     // Whatever takes longer continues as expedited work.
     // Withdrawals are sent with normal priority and show nothing; the others must show something.
-    val isVisible = message.originalPriority == RemoteMessage.PRIORITY_HIGH
+    // `v=0`: high priority to get through Doze, but there is nothing to show, also if it can't be opened.
+    val isVisible = message.originalPriority == RemoteMessage.PRIORITY_HIGH && message.data["v"] != "0"
     // FCM lowered it: counted, so a diagnostics export shows it (notifications.md).
     if (message.priority != message.originalPriority) {
       TeamCraftApplication.graph(this).pushStats.record(PushPath.FCM_DEPRIORITIZED)

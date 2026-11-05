@@ -58,6 +58,15 @@ pub enum ApiError {
   /// The MLS group left the epoch the request was created for (first commit wins).
   #[error("the group is in epoch {current_epoch}; fetch the backlog and rebase")]
   EpochConflict { current_epoch: u64 },
+  /// The workspace doesn't allow scheduling messages.
+  #[error("scheduling messages is turned off in this workspace")]
+  ScheduledMessagesDisabled,
+  /// The caller holds as many scheduled messages as the workspace allows.
+  #[error("at most {max} scheduled messages")]
+  ScheduledMessageLimit { max: u32 },
+  /// The time of a scheduled message has passed or lies beyond the horizon.
+  #[error("invalid time: {0}")]
+  ScheduledTimeInvalid(String),
   /// Compare-and-swap on a versioned object failed.
   #[error("the stored version is {current_version}, not the expected one")]
   VersionConflict { current_version: u64 },
@@ -143,6 +152,9 @@ pub enum ApiError {
   /// The signed policy does not let members replace the name from the identity provider.
   #[error("the workspace policy does not allow changing the display name")]
   DisplayNameOverrideNotAllowed,
+  /// An invitation for the address is open in the space already (one per address and space).
+  #[error("an invitation for this address is open; revoke it first")]
+  InviteAlreadyOpen,
   /// The request arrived on a host name no brand is configured for and `unknown_host = "reject"`.
   #[error("this host name is not served here")]
   UnknownHost,
@@ -301,6 +313,13 @@ impl ApiError {
     }
   }
 
+  pub fn scheduled_message_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::ScheduledMessageNotFound,
+      what: "scheduled message",
+    }
+  }
+
   pub fn key_bag_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::KeyBagNotFound,
@@ -354,6 +373,7 @@ impl ApiError {
       ) => StatusCode::UNAUTHORIZED,
       Self::Auth(AuthError::NoTeamcraftRole | AuthError::AccountDeactivated)
       | Self::Forbidden(_)
+      | Self::ScheduledMessagesDisabled
       | Self::GuestDmNotAllowed
       | Self::ImportNotAllowed
       | Self::RecoveryPassphraseNotAllowed
@@ -366,6 +386,7 @@ impl ApiError {
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
       Self::NotAChannel
       | Self::InvalidRequest(_)
+      | Self::ScheduledTimeInvalid(_)
       | Self::InvalidKeyPackage(_)
       | Self::LastOwner
       | Self::NotSpaceMember => StatusCode::BAD_REQUEST,
@@ -381,8 +402,10 @@ impl ApiError {
       | Self::ChannelNeedsAdmin
       | Self::ImportWindowFull
       | Self::KeyPackageExhausted
+      | Self::ScheduledMessageLimit { .. }
       | Self::EpochConflict { .. }
-      | Self::VersionConflict { .. } => StatusCode::CONFLICT,
+      | Self::VersionConflict { .. }
+      | Self::InviteAlreadyOpen => StatusCode::CONFLICT,
       Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
       Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
       Self::Unavailable(_) | Self::Busy { .. } | Self::DependencyDown { .. } => {
@@ -419,6 +442,7 @@ impl ApiError {
       Self::LocalAccountsDisabled => ErrorCode::LocalAccountsDisabled,
       Self::RecoveryPassphraseNotAllowed => ErrorCode::RecoveryPassphraseNotAllowed,
       Self::DisplayNameOverrideNotAllowed => ErrorCode::DisplayNameOverrideNotAllowed,
+      Self::InviteAlreadyOpen => ErrorCode::InviteAlreadyOpen,
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::LastOwner => ErrorCode::LastOwner,
@@ -435,6 +459,9 @@ impl ApiError {
       Self::CallDeviceLimit { .. } => ErrorCode::CallDeviceLimit,
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
       Self::InvalidKeyPackage(_) => ErrorCode::InvalidKeyPackage,
+      Self::ScheduledMessagesDisabled => ErrorCode::ScheduledMessagesDisabled,
+      Self::ScheduledMessageLimit { .. } => ErrorCode::ScheduledMessageLimit,
+      Self::ScheduledTimeInvalid(_) => ErrorCode::ScheduledTimeInvalid,
       Self::EpochConflict { .. } => ErrorCode::EpochConflict,
       Self::VersionConflict { .. } => ErrorCode::VersionConflict,
       Self::PayloadTooLarge(_) => ErrorCode::PayloadTooLarge,
@@ -718,6 +745,11 @@ mod tests {
         ErrorCode::DisplayNameOverrideNotAllowed,
       ),
       (
+        ApiError::InviteAlreadyOpen,
+        StatusCode::CONFLICT,
+        ErrorCode::InviteAlreadyOpen,
+      ),
+      (
         ApiError::NotSpaceMember,
         StatusCode::BAD_REQUEST,
         ErrorCode::NotSpaceMember,
@@ -851,6 +883,35 @@ mod tests {
       "object_storage is unavailable, try again later"
     );
     assert_eq!(error.retry_after_secs(), Some(1), "at least a second");
+  }
+
+  #[test]
+  fn scheduled_message_errors_have_their_status_and_code() {
+    for (error, status, code) in [
+      (
+        ApiError::scheduled_message_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::ScheduledMessageNotFound,
+      ),
+      (
+        ApiError::ScheduledMessagesDisabled,
+        StatusCode::FORBIDDEN,
+        ErrorCode::ScheduledMessagesDisabled,
+      ),
+      (
+        ApiError::ScheduledMessageLimit { max: 3 },
+        StatusCode::CONFLICT,
+        ErrorCode::ScheduledMessageLimit,
+      ),
+      (
+        ApiError::ScheduledTimeInvalid("x".into()),
+        StatusCode::BAD_REQUEST,
+        ErrorCode::ScheduledTimeInvalid,
+      ),
+    ] {
+      assert_eq!(error.status(), status, "{error}");
+      assert_eq!(error.error_code(), code, "{error}");
+    }
   }
 
   #[tokio::test]

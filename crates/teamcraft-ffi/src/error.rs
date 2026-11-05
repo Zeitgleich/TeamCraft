@@ -82,6 +82,10 @@ pub enum TeamCraftError {
   /// (`call_device_limit`, HTTP 409 on the join token): leave on one of them first.
   #[error("call device limit reached: {0}")]
   CallDeviceLimit(String),
+  /// The server refused it as too large (`payload_too_large`, HTTP 413): a scheduled message over its
+  /// cap, say. The app says it is too long instead of a generic failure.
+  #[error("too large: {0}")]
+  TooLarge(String),
   /// Anything else the core reported.
   #[error("{0}")]
   Core(String),
@@ -95,6 +99,9 @@ impl From<CoreError> for TeamCraftError {
       },
       CoreError::Api(api) if api.error_code() == Some(&ErrorCode::CallDeviceLimit) => {
         Self::CallDeviceLimit(api.to_string())
+      },
+      CoreError::Api(api) if api.error_code() == Some(&ErrorCode::PayloadTooLarge) => {
+        Self::TooLarge(api.to_string())
       },
       CoreError::Api(api) if api.is_transient() => Self::Network(api.to_string()),
       CoreError::NotEnrolled => Self::NotEnrolled,
@@ -195,6 +202,19 @@ mod tests {
     use teamcraft_proto::ErrorBody;
 
     use super::*;
+
+    #[test]
+    fn a_refusal_as_too_large_has_its_own_error() {
+      let refused = CoreError::Api(ApiError::Status {
+        status: 413,
+        maybe_body: Some(ErrorBody::new(ErrorCode::PayloadTooLarge, "over the cap")),
+        maybe_retry_after: None,
+      });
+      assert!(matches!(
+        TeamCraftError::from(refused),
+        TeamCraftError::TooLarge(_)
+      ));
+    }
 
     #[test]
     fn the_join_token_refusal_has_its_own_error() {

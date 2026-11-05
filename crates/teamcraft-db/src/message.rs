@@ -59,70 +59,40 @@ impl Database {
   /// Stores a message once per client message ID.
   pub async fn store_message(&self, new: &NewMessage<'_>) -> Result<StoreOutcome, DbError> {
     let mut tx = self.pool().begin().await?;
-    let inserted = sqlx::query_scalar!(
-      r#"INSERT INTO message_client_ids (conversation_id, client_message_id, message_id)
-         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING message_id"#,
-      to_db(new.conversation_id),
-      new.client_message_id.as_bytes().as_slice(),
-      to_db(new.id),
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    if inserted.is_none() {
-      let existing = sqlx::query_scalar!(
-        "SELECT message_id FROM message_client_ids WHERE conversation_id = $1 AND client_message_id = $2",
-        to_db(new.conversation_id),
-        new.client_message_id.as_bytes().as_slice(),
-      )
-      .fetch_one(&mut *tx)
-      .await?;
-      tx.commit().await?;
-      let message = self
-        .get_message(new.conversation_id, from_db(existing)?)
-        .await?
-        .ok_or_else(|| DbError::InvalidStoredValue("client ID without message".into()))?;
-      return Ok(StoreOutcome {
-        message,
-        is_new: false,
-      });
-    }
-
-    sqlx::query!(
-      r#"INSERT INTO messages (id, conversation_id, thread_id, sender_device_id, sender_user_id, content_key_id,
-                               mentioned_user_ids, ciphertext, client_message_id, is_urgent)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
-      to_db(new.id),
-      to_db(new.conversation_id),
-      new.maybe_thread_id.map(to_db),
-      to_db(new.sender_device_id),
-      to_db(new.sender_user_id),
-      new.content_key_id,
-      &to_db_all(new.mentioned_user_ids),
-      new.ciphertext,
-      new.client_message_id.as_bytes().as_slice(),
-      new.is_urgent,
-    )
-    .execute(&mut *tx)
-    .await?;
+    let maybe_stored = store_message_in(&mut tx, new).await?;
     tx.commit().await?;
+    match maybe_stored {
+      Some(message) => Ok(StoreOutcome {
+        message,
+        is_new: true,
+      }),
+      None => Ok(StoreOutcome {
+        message: self
+          .get_message_by_client_id(new.conversation_id, new.client_message_id)
+          .await?
+          .ok_or_else(|| DbError::InvalidStoredValue("client ID without message".into()))?,
+        is_new: false,
+      }),
+    }
+  }
 
-    let message = StoredMessage {
-      id: new.id,
-      client_message_id: new.client_message_id,
-      conversation_id: new.conversation_id,
-      sender_user_id: new.sender_user_id,
-      sender_device_id: new.sender_device_id,
-      maybe_thread_id: new.maybe_thread_id,
-      mentioned_user_ids: new.mentioned_user_ids.to_vec(),
-      is_urgent: new.is_urgent,
-      content_key_id: new.content_key_id.to_vec(),
-      ciphertext: new.ciphertext.to_vec(),
-    };
-    Ok(StoreOutcome {
-      message,
-      is_new: true,
-    })
+  /// The message stored under a client message ID.
+  pub(crate) async fn get_message_by_client_id(
+    &self,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+  ) -> Result<Option<StoredMessage>, DbError> {
+    let maybe_id = sqlx::query_scalar!(
+      "SELECT message_id FROM message_client_ids WHERE conversation_id = $1 AND client_message_id = $2",
+      to_db(conversation),
+      client_message_id.as_bytes().as_slice(),
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    match maybe_id {
+      Some(id) => self.get_message(conversation, from_db(id)?).await,
+      None => Ok(None),
+    }
   }
 
   pub async fn get_message(
@@ -227,6 +197,55 @@ impl Database {
     };
     Ok(rows)
   }
+}
+
+/// Stores a message inside `tx`, once per client message ID: the message, or `None` if that ID is
+/// taken already.
+pub(crate) async fn store_message_in(
+  tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+  new: &NewMessage<'_>,
+) -> Result<Option<StoredMessage>, DbError> {
+  let inserted = sqlx::query_scalar!(
+    r#"INSERT INTO message_client_ids (conversation_id, client_message_id, message_id)
+       VALUES ($1, $2, $3) ON CONFLICT DO NOTHING RETURNING message_id"#,
+    to_db(new.conversation_id),
+    new.client_message_id.as_bytes().as_slice(),
+    to_db(new.id),
+  )
+  .fetch_optional(&mut **tx)
+  .await?;
+  if inserted.is_none() {
+    return Ok(None);
+  }
+  sqlx::query!(
+    r#"INSERT INTO messages (id, conversation_id, thread_id, sender_device_id, sender_user_id, content_key_id,
+                             mentioned_user_ids, ciphertext, client_message_id, is_urgent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
+    to_db(new.id),
+    to_db(new.conversation_id),
+    new.maybe_thread_id.map(to_db),
+    to_db(new.sender_device_id),
+    to_db(new.sender_user_id),
+    new.content_key_id,
+    &to_db_all(new.mentioned_user_ids),
+    new.ciphertext,
+    new.client_message_id.as_bytes().as_slice(),
+    new.is_urgent,
+  )
+  .execute(&mut **tx)
+  .await?;
+  Ok(Some(StoredMessage {
+    id: new.id,
+    client_message_id: new.client_message_id,
+    conversation_id: new.conversation_id,
+    sender_user_id: new.sender_user_id,
+    sender_device_id: new.sender_device_id,
+    maybe_thread_id: new.maybe_thread_id,
+    mentioned_user_ids: new.mentioned_user_ids.to_vec(),
+    is_urgent: new.is_urgent,
+    content_key_id: new.content_key_id.to_vec(),
+    ciphertext: new.ciphertext.to_vec(),
+  }))
 }
 
 #[allow(clippy::too_many_arguments)] // flat row columns, mapped in one place

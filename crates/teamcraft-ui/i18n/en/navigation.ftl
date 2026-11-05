@@ -225,6 +225,11 @@ entry-menu-leave-space-confirm = Leave { $name }? You also leave all of its chan
 entry-menu-leave-last-space-admin = Make someone else space admin first.
 entry-menu-settings = Settings…
 sidebar-item-in-space = { $label }, in { $space }
+sidebar-scheduled = Scheduled
+sidebar-scheduled-attention = { $count ->
+    [one] 1 message needs you
+   *[other] { $count } messages need you
+}
 
 # Drafts and sent (#1220)
 sidebar-drafts = Drafts & sent

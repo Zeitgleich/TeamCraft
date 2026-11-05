@@ -19,13 +19,15 @@ use teamcraft_proto::{
   ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage, GetMeResponse, HistoryPolicy, Id,
   IdempotencyKey, IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse,
   ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
-  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListSpaceMembersResponse,
-  ListSpacesResponse, MessageId, MessageResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse,
-  MoveChannelRequest, MyMembership, NotificationLevel, PostMlsCommitRequest, PostMlsCommitResponse,
-  PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, Role, SendMessageRequest,
-  SetPresenceRequest, SetReadPositionRequest, Snowflake, SpaceHead, SpaceId, SpaceMemberResponse,
-  SpaceResponse, SpaceRole, SyncHeadsResponse, UnixMillis, UpdateConversationMemberRequest,
-  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
+  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListScheduledMessagesResponse,
+  ListSpaceMembersResponse, ListSpacesResponse, MessageId, MessageResponse, MlsMessageId, MlsMessageKind,
+  MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel, PostMlsCommitRequest,
+  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, Role,
+  ScheduleMessageRequest, ScheduledHoldReason, ScheduledMessageId, ScheduledMessageResponse,
+  SendMessageRequest, SendScheduledMessageResponse, SetPresenceRequest, SetReadPositionRequest, Snowflake,
+  SpaceHead, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, SyncHeadsResponse, UnixMillis,
+  UpdateConversationMemberRequest, UpdateScheduledMessageRequest, UploadIdentityKeyRequest,
+  UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
 };
 use teamcraft_proto::{AdminJoinRequestChange, AdminJoinRequestResponse};
 use teamcraft_proto::{
@@ -185,6 +187,13 @@ struct State {
   conversations: BTreeMap<ConversationId, Conversation>,
   welcomes: Vec<MlsMessageResponse>,
   key_bags: HashMap<UserId, KeyBagResponse>,
+  /// Held messages with their owners; the real rules are tested against the real server.
+  scheduled: Vec<(UserId, ScheduledMessageResponse)>,
+  next_scheduled: i64,
+  /// Scripted answers to `update_scheduled_message`: always, or for the next one only.
+  scheduled_update_failure: Option<(u16, ErrorCode)>,
+  next_scheduled_update_failure: Option<(u16, ErrorCode)>,
+  scheduled_update_attempts: u64,
   device_lists: HashMap<UserId, DeviceListResponse>,
   sessions: HashMap<String, Session>,
   offline_users: HashSet<UserId>,
@@ -995,6 +1004,37 @@ impl FakeServer {
   /// The custom status the server keeps for the user (set through `PUT /me/status`).
   pub fn custom_status(&self, user: UserId) -> Option<teamcraft_proto::CustomStatus> {
     self.lock().custom_statuses.get(&user).cloned()
+  }
+
+  /// Every update of a held message answers with this from now on.
+  pub fn fail_scheduled_updates(&self, maybe_failure: Option<(u16, ErrorCode)>) {
+    self.lock().scheduled_update_failure = maybe_failure;
+  }
+
+  /// Holds every scheduled message as one nothing can solve (the sender left), removed at
+  /// `removes_at_ms`.
+  pub fn hold_scheduled_as_dead(&self, removes_at_ms: i64) {
+    let mut state = self.lock();
+    for (_, entry) in &mut state.scheduled {
+      entry.maybe_hold = Some(teamcraft_proto::ScheduledHoldReason::NotAMember);
+      entry.maybe_removes_at = Some(UnixMillis(removes_at_ms));
+      entry.version += 1;
+    }
+  }
+
+  /// Deletes every scheduled message, as the purge or a cancel elsewhere does.
+  pub fn purge_scheduled(&self) {
+    self.lock().scheduled.clear();
+  }
+
+  /// How many updates of held messages reached the server, also those it refused.
+  pub fn scheduled_update_attempts(&self) -> u64 {
+    self.lock().scheduled_update_attempts
+  }
+
+  /// The next update of a held message answers with this.
+  pub fn fail_next_scheduled_update(&self, failure: (u16, ErrorCode)) {
+    self.lock().next_scheduled_update_failure = Some(failure);
   }
 
   /// The server's clock now (the system clock plus [`FakeServer::advance_clock`]).
@@ -1952,6 +1992,71 @@ impl FakeServerApi {
         Err(ApiError::Network("fake server: answer lost".into()))
       },
     }
+  }
+}
+
+impl FakeServerApi {
+  /// What the server's scheduler does at `now` for this user's held messages: same epoch, released;
+  /// otherwise held. Returns how many went out.
+  pub async fn release_due_scheduled(&self) -> usize {
+    let due: Vec<ScheduledMessageResponse> = self
+      .server
+      .lock()
+      .scheduled
+      .iter()
+      .filter(|(owner, _)| *owner == self.user)
+      .map(|(_, entry)| entry.clone())
+      .collect();
+    let now = self.server.server_now_ms();
+    let mut released = 0;
+    for entry in due
+      .into_iter()
+      .filter(|entry| entry.due_at.0 <= now && entry.maybe_hold.is_none())
+    {
+      let is_current = self
+        .server
+        .lock()
+        .conversations
+        .get(&entry.conversation_id)
+        .is_some_and(|conversation| conversation.epoch == entry.mls_epoch);
+      if is_current {
+        self
+          .server
+          .lock()
+          .scheduled
+          .retain(|(_, held)| held.id != entry.id);
+        if self
+          .send_message(entry.conversation_id, &sent_request(&entry))
+          .await
+          .is_ok()
+        {
+          released += 1;
+        }
+      } else if let Some((_, held)) = self
+        .server
+        .lock()
+        .scheduled
+        .iter_mut()
+        .find(|(_, held)| held.id == entry.id)
+      {
+        held.maybe_hold = Some(ScheduledHoldReason::StaleEpoch);
+        held.version += 1;
+      }
+    }
+    released
+  }
+}
+
+/// The request a release amounts to.
+fn sent_request(entry: &ScheduledMessageResponse) -> SendMessageRequest {
+  SendMessageRequest {
+    client_message_id: entry.client_message_id,
+    device_id: entry.sender_device_id,
+    content_key_id: entry.content_key_id.clone(),
+    ciphertext: entry.ciphertext.clone(),
+    maybe_thread_id: entry.maybe_thread_id,
+    mentioned_user_ids: entry.mentioned_user_ids.clone(),
+    is_urgent: entry.is_urgent,
   }
 }
 
@@ -4680,6 +4785,202 @@ impl ServerApi for FakeServerApi {
         .cloned()
         .ok_or_else(|| ApiError::status(404, ErrorCode::KeyBagNotFound, "no key bag"))
     })
+  }
+
+  async fn schedule_message(
+    &self,
+    conversation: ConversationId,
+    request: &ScheduleMessageRequest,
+  ) -> Result<ScheduledMessageResponse, ApiError> {
+    self.with(|state, me| {
+      let current_epoch = state.member_conversation(conversation, me)?.epoch;
+      if request.sealed.mls_epoch != current_epoch {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::EpochConflict,
+          format!("the group is in epoch {current_epoch}"),
+        ));
+      }
+      if request.due_at.0 <= state.now_ms() {
+        return Err(ApiError::status(
+          400,
+          ErrorCode::ScheduledTimeInvalid,
+          "the time has passed",
+        ));
+      }
+      if let Some((_, found)) = state.scheduled.iter().find(|(owner, entry)| {
+        *owner == me
+          && entry.conversation_id == conversation
+          && entry.client_message_id == request.client_message_id
+      }) {
+        return Ok(found.clone());
+      }
+      let entry = ScheduledMessageResponse {
+        id: {
+          state.next_scheduled += 1;
+          ScheduledMessageId::from_snowflake(
+            Snowflake::new(state.next_scheduled)
+              .map_err(|_| ApiError::status(500, ErrorCode::Internal, "no more scheduled IDs"))?,
+          )
+        },
+        conversation_id: conversation,
+        client_message_id: request.client_message_id,
+        sender_device_id: request.sealed.device_id,
+        maybe_thread_id: request.maybe_thread_id,
+        content_key_id: request.sealed.content_key_id.clone(),
+        ciphertext: request.sealed.ciphertext.clone(),
+        mentioned_user_ids: request.sealed.mentioned_user_ids.clone(),
+        is_urgent: request.sealed.is_urgent,
+        mls_epoch: request.sealed.mls_epoch,
+        due_at: request.due_at,
+        version: 1,
+        maybe_hold: None,
+        maybe_removes_at: None,
+        is_epoch_current: true,
+      };
+      state.scheduled.push((me, entry.clone()));
+      state.publish([me], &GatewayEvent::ScheduledMessagesUpdate);
+      Ok(entry)
+    })
+  }
+
+  async fn list_scheduled_messages(&self) -> Result<ListScheduledMessagesResponse, ApiError> {
+    self.with(|state, me| {
+      let server_now = state.now_ms();
+      let mut messages = Vec::new();
+      for (owner, entry) in &state.scheduled {
+        if *owner == me {
+          let mut entry = entry.clone();
+          entry.is_epoch_current = state
+            .conversations
+            .get(&entry.conversation_id)
+            .is_some_and(|conversation| conversation.epoch == entry.mls_epoch);
+          messages.push(entry);
+        }
+      }
+      messages.sort_by_key(|entry| entry.due_at.0);
+      Ok(ListScheduledMessagesResponse {
+        messages,
+        server_now: UnixMillis(server_now),
+      })
+    })
+  }
+
+  async fn update_scheduled_message(
+    &self,
+    id: ScheduledMessageId,
+    request: &UpdateScheduledMessageRequest,
+  ) -> Result<ScheduledMessageResponse, ApiError> {
+    self.with(|state, me| {
+      state.scheduled_update_attempts += 1;
+      if let Some((status, code)) = state
+        .next_scheduled_update_failure
+        .take()
+        .or_else(|| state.scheduled_update_failure.clone())
+      {
+        return Err(ApiError::status(status, code, "scripted"));
+      }
+      let conversation = state
+        .scheduled
+        .iter()
+        .find(|(owner, entry)| *owner == me && entry.id == id)
+        .map(|(_, entry)| entry.conversation_id)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::ScheduledMessageNotFound, "not held"))?;
+      let current_epoch = state.member_conversation(conversation, me)?.epoch;
+      if request
+        .maybe_sealed
+        .as_ref()
+        .is_some_and(|sealed| sealed.mls_epoch != current_epoch)
+      {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::EpochConflict,
+          format!("the group is in epoch {current_epoch}"),
+        ));
+      }
+      let Some((_, entry)) = state
+        .scheduled
+        .iter_mut()
+        .find(|(owner, entry)| *owner == me && entry.id == id)
+      else {
+        return Err(ApiError::status(
+          404,
+          ErrorCode::ScheduledMessageNotFound,
+          "not held",
+        ));
+      };
+      if entry.version != request.expected_version {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::VersionConflict,
+          "changed meanwhile",
+        ));
+      }
+      entry.due_at = request.due_at;
+      if let Some(sealed) = &request.maybe_sealed {
+        entry.sender_device_id = sealed.device_id;
+        entry.content_key_id = sealed.content_key_id.clone();
+        entry.ciphertext = sealed.ciphertext.clone();
+        entry.mentioned_user_ids = sealed.mentioned_user_ids.clone();
+        entry.is_urgent = sealed.is_urgent;
+        entry.mls_epoch = sealed.mls_epoch;
+      }
+      entry.version += 1;
+      entry.maybe_hold = None;
+      let updated = entry.clone();
+      state.publish([me], &GatewayEvent::ScheduledMessagesUpdate);
+      Ok(updated)
+    })
+  }
+
+  async fn cancel_scheduled_message(&self, id: ScheduledMessageId) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let before = state.scheduled.len();
+      state
+        .scheduled
+        .retain(|(owner, entry)| !(*owner == me && entry.id == id));
+      if state.scheduled.len() == before {
+        return Err(ApiError::status(
+          404,
+          ErrorCode::ScheduledMessageNotFound,
+          "not held",
+        ));
+      }
+      state.publish([me], &GatewayEvent::ScheduledMessagesUpdate);
+      Ok(())
+    })
+  }
+
+  async fn send_scheduled_message(
+    &self,
+    id: ScheduledMessageId,
+  ) -> Result<SendScheduledMessageResponse, ApiError> {
+    let entry = self.with(|state, me| {
+      let entry = state
+        .scheduled
+        .iter()
+        .find(|(owner, entry)| *owner == me && entry.id == id)
+        .map(|(_, entry)| entry.clone())
+        .ok_or_else(|| ApiError::status(404, ErrorCode::ScheduledMessageNotFound, "not held"))?;
+      let current_epoch = state.member_conversation(entry.conversation_id, me)?.epoch;
+      if entry.mls_epoch != current_epoch {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::EpochConflict,
+          format!("the group is in epoch {current_epoch}"),
+        ));
+      }
+      state.scheduled.retain(|(_, held)| held.id != id);
+      Ok(entry)
+    })?;
+    let message = self
+      .send_message(entry.conversation_id, &sent_request(&entry))
+      .await?;
+    self.with(|state, me| {
+      state.publish([me], &GatewayEvent::ScheduledMessagesUpdate);
+      Ok(())
+    })?;
+    Ok(SendScheduledMessageResponse { message })
   }
 
   fn provider_tokens(&self) -> Option<super::ProviderTokens> {

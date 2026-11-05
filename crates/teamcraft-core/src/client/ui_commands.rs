@@ -121,6 +121,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_thread,
         body,
       } => self.update_account_data(|data, now| data.set_draft(conversation, maybe_thread, &body, now)),
+      // On the heap: sealing catches the group up, a big future that would otherwise sit in the frame
+      // of every caller of this dispatch (the desktop core thread, 1 MiB on Windows).
+      CoreCommand::ScheduleMessage { message, due_at_ms } => {
+        Box::pin(self.schedule_message(message, due_at_ms)).await
+      },
+      CoreCommand::UpdateScheduled { id, body, due_at_ms } => {
+        Box::pin(self.update_scheduled(id, body, due_at_ms)).await
+      },
+      CoreCommand::CancelScheduled { id } => Box::pin(self.cancel_scheduled(id)).await,
+      CoreCommand::SendScheduledNow { id } => Box::pin(self.send_scheduled_now(id)).await,
       CoreCommand::SaveSearch { id, name, query } => self.update_account_data(|data, now| {
         data.save_search(id, &name, &query, now);
         true

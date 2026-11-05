@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT s.user_id FROM scheduled_messages s\n         JOIN memberships m ON m.conversation_id = s.conversation_id AND m.user_id = s.user_id\n         WHERE s.conversation_id = $1 AND (s.hold_reason IS NULL OR s.hold_reason = 'stale_epoch')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d421b4568594368980d9012735e7fd7fe96ab203433bfd5a34e7439054413f8b"
+}

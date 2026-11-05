@@ -11,9 +11,11 @@ use teamcraft_client_api::model::{
   ThreadId, UserId, is_pending,
 };
 use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
+use teamcraft_client_api::scheduled::{ScheduledMessage, ScheduledOverview, ScheduledStatus, status_of};
 use teamcraft_proto::{Base64Bytes, ClientMessageId, SourceChange, SourceId};
 
 use crate::client::previews::queue_preview;
+use crate::client::scheduled::{message_priority, read_list};
 use crate::client::{
   ForwardScope, album_attachment, apply_control, forward_content, imported_author_name, reply_ref,
   stored_account_data,
@@ -93,6 +95,70 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
+  pub(crate) fn ui_scheduled_overview(&self) -> ScheduledOverview {
+    let list = self.read(read_list(self.store_ref()));
+    let policy = self.verified_policy().scheduled_messages;
+    let server_now = self.now_ms().saturating_add(list.server_offset_ms);
+    if list.entries.is_empty() {
+      return ScheduledOverview {
+        messages: Vec::new(),
+        policy,
+        server_now,
+      };
+    }
+    let users = self.summaries();
+    let preferences = self.mention_preferences();
+    let names: std::collections::BTreeMap<ConversationId, String> = self
+      .conversations_raw()
+      .iter()
+      .map(|conversation| {
+        (
+          conversation.id,
+          self.to_conversation(conversation, &users, &preferences).name,
+        )
+      })
+      .collect();
+    let messages = list
+      .entries
+      .iter()
+      .map(|entry| {
+        let response = &entry.response;
+        let (body, meta) = match &entry.maybe_content {
+          Some(MessageContent::Text { body, meta, .. }) => (body.clone(), Some(meta)),
+          _ => (String::new(), None),
+        };
+        ScheduledMessage {
+          id: response.id,
+          conversation: response.conversation_id,
+          conversation_name: names.get(&response.conversation_id).cloned().unwrap_or_default(),
+          maybe_thread: response.maybe_thread_id,
+          body,
+          due_at: response.due_at.0,
+          status: if entry.is_removed_by_server {
+            ScheduledStatus::RemovedByServer
+          } else {
+            status_of(
+              response.maybe_hold.as_ref(),
+              response.is_epoch_current,
+              entry.maybe_content.is_some(),
+            )
+          },
+          maybe_reply_to: None,
+          priority: meta.map_or(MessagePriority::Normal, |meta| message_priority(meta.priority)),
+          wants_acknowledgement: meta.is_some_and(|meta| meta.wants_acknowledgement),
+          is_silent: meta.is_some_and(|meta| meta.is_silent),
+          also_send_to_channel: meta.is_some_and(|meta| meta.is_also_in_channel),
+          maybe_removes_at: response.maybe_removes_at.map(|at| at.0),
+        }
+      })
+      .collect();
+    ScheduledOverview {
+      messages,
+      policy,
+      server_now,
+    }
+  }
+
   pub(crate) fn ui_draft(
     &self,
     conversation: ConversationId,
@@ -110,20 +176,39 @@ impl<S: LocalStore> CoreChatBackend<S> {
 pub const PERMALINK_PREFIX: &str = "teamcraft:/c/";
 
 impl<S: LocalStore> CoreChatBackend<S> {
-  pub(crate) fn ui_send_message(&self, message: OutgoingMessage) {
-    let conversation = message.conversation;
+  /// What a text message says, with the quote and mentions a send works out. Also for a message that
+  /// is sealed now and sent later.
+  pub(crate) fn ui_text_content(&self, message: OutgoingMessage) -> MessageContent {
+    let meta = self.outgoing_meta(&message);
+    self.text_content(&message, meta)
+  }
+
+  fn outgoing_meta(&self, message: &OutgoingMessage) -> MessageMeta {
     let maybe_reply_to = message
       .maybe_reply_to
-      .and_then(|id| self.find_stored(conversation, id))
+      .and_then(|id| self.find_stored(message.conversation, id))
       .map(|target| reply_ref(&target, self.importer(), message.maybe_reply_attachment));
-    let meta = MessageMeta {
+    MessageMeta {
       maybe_reply_to,
       priority: priority_of(message.priority),
       wants_acknowledgement: message.wants_acknowledgement,
       is_silent: message.is_silent,
       is_also_in_channel: message.also_send_to_channel && message.maybe_thread.is_some(),
       ..MessageMeta::default()
-    };
+    }
+  }
+
+  fn text_content(&self, message: &OutgoingMessage, meta: MessageMeta) -> MessageContent {
+    MessageContent::Text {
+      body: message.body.clone(),
+      mentions: self.mentions_in(message.conversation, &message.body),
+      meta,
+    }
+  }
+
+  pub(crate) fn ui_send_message(&self, message: OutgoingMessage) {
+    let conversation = message.conversation;
+    let meta = self.outgoing_meta(&message);
     if !message.files.is_empty() {
       self.ui_send_files(
         conversation,
@@ -138,19 +223,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
     if message.body.trim().is_empty() {
       return;
     }
-    let mentions = self.mentions_in(conversation, &message.body);
     let body = message.body.clone();
-    let content = MessageContent::Text {
-      body: message.body,
-      mentions,
-      meta,
-    };
-    let maybe_id = self.enqueue_as(
-      conversation,
-      message.maybe_thread,
-      content,
-      message.maybe_client_message_id,
-    );
+    let (maybe_thread, maybe_id) = (message.maybe_thread, message.maybe_client_message_id);
+    let content = self.text_content(&message, meta);
+    let maybe_id = self.enqueue_as(conversation, maybe_thread, content, maybe_id);
     if let Some(id) = maybe_id {
       self.queue_link_preview(conversation, id, &body);
     }

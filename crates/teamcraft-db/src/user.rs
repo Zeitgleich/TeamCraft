@@ -224,6 +224,14 @@ impl Database {
     Ok(())
   }
 
+  /// The role the user's last sign-in brought, for a decision made with nobody signed in.
+  pub async fn last_oidc_role(&self, id: UserId) -> Result<Option<String>, DbError> {
+    let maybe_role = sqlx::query_scalar!("SELECT oidc_role FROM users WHERE id = $1", to_db(id))
+      .fetch_optional(self.pool())
+      .await?;
+    Ok(maybe_role.flatten())
+  }
+
   pub async fn get_user(&self, id: UserId) -> Result<Option<User>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, username, display_name, kind, created_at, organization,
@@ -388,7 +396,7 @@ impl Database {
   }
 }
 
-fn user_from_parts(
+pub(crate) fn user_from_parts(
   id: i64,
   maybe_username: Option<String>,
   display_name: String,
@@ -410,13 +418,13 @@ fn user_from_parts(
 }
 
 /// Whether an account is deactivated and whether it was deleted, as read from its row.
-struct AccountFlags {
-  is_deactivated: bool,
-  is_deleted: bool,
+pub(crate) struct AccountFlags {
+  pub(crate) is_deactivated: bool,
+  pub(crate) is_deleted: bool,
 }
 
 /// Escapes `%`, `_` and `\` so user input is matched literally by `ILIKE`.
-fn escape_like(input: &str) -> String {
+pub(crate) fn escape_like(input: &str) -> String {
   input
     .replace('\\', "\\\\")
     .replace('%', "\\%")

@@ -18,14 +18,16 @@ use teamcraft_bridge::sources::SourceRegistry;
 use teamcraft_bridge::worker::Worker;
 use teamcraft_core::api::{HttpGateway, HttpServerApi, StaticToken};
 use teamcraft_core::clock::SystemClock;
+use teamcraft_core::integration_sources::{is_known_bot, shown_source};
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_core::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
-use teamcraft_crypto::source_token::SourceToken;
+use teamcraft_crypto::source_token::{SourceToken, source_picture_sha256};
 use teamcraft_proto::{
-  ConversationId, SourceChange, SourceId, SourceKind, SourceOptions, SourceTokenHash, UserId,
+  Base64Bytes, ConversationId, SourceChange, SourceId, SourceIdentity, SourceKind, SourceOptions,
+  SourcePictureHash, SourceTokenHash, UserId,
 };
 use teamcraft_server::testing::{TestApp, TestUser};
 use tokio::sync::mpsc;
@@ -479,6 +481,74 @@ async fn sources_added_in_the_app_work_without_configuration_and_survive_a_resta
     let identity = meta.maybe_source.as_deref().unwrap();
     assert_eq!(identity.maybe_id, Some(source));
     assert_eq!(identity.name, "ci");
+    assert_eq!(
+      identity.maybe_picture_sha256, None,
+      "no picture set yet: the bot's shows"
+    );
+    let bot = message.sender_user_id;
+    assert!(is_known_bot(setup.bob_store.as_ref(), bot).unwrap());
+
+    // alice renames the source and gives it a picture on her device: bob, another member, sees
+    // both on the next message, not only alice (issue #1299).
+    let picture = small_png();
+    let picture_sha256 = SourcePictureHash::from_bytes(source_picture_sha256(&picture));
+    setup
+      .alice
+      .send_source_change(
+        channel,
+        SourceChange::Renamed {
+          source,
+          name: "Deploys".into(),
+        },
+      )
+      .await
+      .unwrap();
+    setup
+      .alice
+      .send_source_change(
+        channel,
+        SourceChange::PictureChanged {
+          source,
+          maybe_picture: Some(Base64Bytes::new(picture.clone())),
+        },
+      )
+      .await
+      .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let renamed = loop {
+      assert!(
+        Instant::now() < deadline,
+        "timed out waiting for the renamed source"
+      );
+      let sent = post(&hook, "application/json", r#"{"text":"after the rename"}"#).await;
+      assert_eq!(sent, reqwest::StatusCode::OK);
+      tokio::time::sleep(Duration::from_millis(500)).await;
+      setup.bob.pump(&mut setup.bob_gateway).await.unwrap();
+      let maybe_renamed = source_identities(&setup.bob_store, channel)
+        .into_iter()
+        .find(|(_, identity)| identity.name == "Deploys" && identity.maybe_picture_sha256.is_some());
+      if let Some(found) = maybe_renamed {
+        break found;
+      }
+    };
+    let (sender, identity) = renamed;
+    assert_eq!(sender, bot);
+    assert_eq!(identity.maybe_id, Some(source));
+    assert_eq!(identity.maybe_picture_sha256, Some(picture_sha256));
+    assert_eq!(
+      identity.maybe_picture, None,
+      "a device keeps only the hash in the message"
+    );
+    let shown = shown_source(&identity, is_known_bot(setup.bob_store.as_ref(), sender).unwrap()).unwrap();
+    assert_eq!(shown.name, "Deploys");
+    assert_eq!(
+      setup
+        .bob
+        .integration_source_picture(channel, picture_sha256)
+        .unwrap(),
+      Some(picture),
+      "the member's device holds the picture the message names"
+    );
     endpoints.shutdown().await;
   };
   let (client, ()) = tokio::join!(worker.run(), script);
@@ -504,6 +574,35 @@ async fn sources_added_in_the_app_work_without_configuration_and_survive_a_resta
   };
   let _ = tokio::join!(worker.run(), script);
   setup.app.stop().await;
+}
+
+/// The sender and source identity of every top-level text message that states one.
+fn source_identities(store: &MemoryStore, conversation: ConversationId) -> Vec<(UserId, SourceIdentity)> {
+  store
+    .messages(conversation, MessageFilter::TopLevel)
+    .unwrap()
+    .into_iter()
+    .filter_map(|message| match message.content {
+      MessageContent::Text { meta, .. } => meta
+        .maybe_source
+        .map(|identity| (message.sender_user_id, *identity)),
+      _ => None,
+    })
+    .collect()
+}
+
+/// A valid PNG header (8 × 8 pixels) and an empty image chunk: all a source picture is checked for.
+fn small_png() -> Vec<u8> {
+  let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+  bytes.extend(*b"IHDR");
+  bytes.extend(8_u32.to_be_bytes());
+  bytes.extend(8_u32.to_be_bytes());
+  bytes.extend([8, 6, 0, 0, 0]);
+  bytes.extend([0; 4]);
+  bytes.extend(0_u32.to_be_bytes());
+  bytes.extend(*b"IDAT");
+  bytes.extend([0; 4]);
+  bytes
 }
 
 fn created(name: &str, kind: SourceKind, token: &SourceToken) -> (SourceId, SourceChange) {

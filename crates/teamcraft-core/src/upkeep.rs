@@ -16,6 +16,19 @@ use crate::api::ServerApi;
 use crate::client::Client;
 use crate::store::LocalStore;
 
+/// How often a device looks for scheduled messages to seal again: one local read, and a key change
+/// usually comes with a gateway event long before their time.
+#[cfg(feature = "ui")]
+const SCHEDULED_CHECK_MS: i64 = 15_000;
+/// How often a device reads the list because the gateway said it changed: a burst costs one read.
+#[cfg(feature = "ui")]
+const SCHEDULED_READ_PACE_MS: i64 = 5_000;
+/// The longest a failed round of sealing waits for the next, doubling up to it from the interval.
+/// Shorter than the server's last stretch, so that an entry that fails doesn't hold up another that
+/// only needs one round before its time.
+#[cfg(feature = "ui")]
+const SCHEDULED_SEAL_BACKOFF_MAX_MS: i64 = 600_000;
+
 /// What runs on every tick, with the state of the work that runs less often.
 #[derive(Clone, Debug)]
 pub struct Upkeep {
@@ -32,6 +45,24 @@ pub struct Upkeep {
   has_reported_refusal: bool,
   /// When the roster and workspace head were last checked.
   last_local_check_ms: i64,
+  /// When scheduled messages were last looked at, to notice this device's clock jumping back.
+  #[cfg(feature = "ui")]
+  last_scheduled_check_ms: i64,
+  /// When they are looked at next.
+  #[cfg(feature = "ui")]
+  next_scheduled_check_ms: i64,
+  /// Rounds of sealing that failed in a row: they pace the next one.
+  #[cfg(feature = "ui")]
+  scheduled_seal_failures: u32,
+  /// When reading the list of scheduled messages last failed.
+  #[cfg(feature = "ui")]
+  maybe_scheduled_read_failed_ms: Option<i64>,
+  /// When the list was last read because the gateway said it changed.
+  #[cfg(feature = "ui")]
+  last_scheduled_event_read_ms: i64,
+  /// The gateway connection the list of scheduled messages was read for.
+  #[cfg(feature = "ui")]
+  maybe_scheduled_connection: Option<u64>,
   uploads: UploadMode,
 }
 
@@ -55,6 +86,18 @@ impl Upkeep {
       has_failed: false,
       has_reported_refusal: false,
       last_local_check_ms: i64::MIN,
+      #[cfg(feature = "ui")]
+      last_scheduled_check_ms: i64::MIN,
+      #[cfg(feature = "ui")]
+      next_scheduled_check_ms: i64::MIN,
+      #[cfg(feature = "ui")]
+      scheduled_seal_failures: 0,
+      #[cfg(feature = "ui")]
+      maybe_scheduled_read_failed_ms: None,
+      #[cfg(feature = "ui")]
+      last_scheduled_event_read_ms: i64::MIN,
+      #[cfg(feature = "ui")]
+      maybe_scheduled_connection: None,
       uploads: UploadMode::Inline,
     }
   }
@@ -121,11 +164,102 @@ impl Upkeep {
       Ok(loaded) => is_changed |= loaded > 0,
       Err(error) => tracing::debug!(%error, "imported history not read further yet"),
     }
+    #[cfg(feature = "ui")]
+    {
+      // On the heap: sealing catches groups up, too big a future for the frame of every tick's caller.
+      is_changed |= Box::pin(self.tend_scheduled(client, now)).await;
+    }
     let is_flushed = match self.uploads {
       UploadMode::Inline => flush(client).await,
       UploadMode::Host => flush_sends(client).await,
     };
     is_changed | is_flushed
+  }
+
+  /// Keeps this device's view of the scheduled messages (docs/scheduled-messages.md) and seals again
+  /// what the group left behind. The list is read once per gateway connection (events bring changes
+  /// in between); the check is a local read every [`SCHEDULED_CHECK_MS`] and no request while nothing
+  /// is stale.
+  #[cfg(feature = "ui")]
+  async fn tend_scheduled<A: ServerApi, S: LocalStore>(
+    &mut self,
+    client: &mut Client<A, S>,
+    now: i64,
+  ) -> bool {
+    let interval_ms = i64::try_from(self.interval.as_millis()).unwrap_or(i64::MAX);
+    let mut is_changed = false;
+    if let Some(connection) = client
+      .gateway_connections()
+      .filter(|connection| self.maybe_scheduled_connection != Some(*connection))
+      // After a failed read not before the interval, like the account data.
+      .filter(|_| {
+        self
+          .maybe_scheduled_read_failed_ms
+          .is_none_or(|failed| now.abs_diff(failed) >= interval_ms.unsigned_abs())
+      })
+    {
+      match client.refresh_scheduled().await {
+        Ok(()) => {
+          self.maybe_scheduled_connection = Some(connection);
+          self.maybe_scheduled_read_failed_ms = None;
+          self.seal_soon(now);
+          is_changed = true;
+        },
+        Err(error) => {
+          self.maybe_scheduled_read_failed_ms = Some(now);
+          tracing::debug!(%error, "scheduled messages not read yet");
+        },
+      }
+    }
+    if now.abs_diff(self.last_scheduled_event_read_ms) >= SCHEDULED_READ_PACE_MS.unsigned_abs()
+      && client.take_scheduled_list_stale()
+    {
+      self.last_scheduled_event_read_ms = now;
+      match client.refresh_scheduled().await {
+        Ok(()) => {
+          self.seal_soon(now);
+          is_changed = true;
+        },
+        Err(error) => {
+          tracing::debug!(%error, "scheduled messages not read yet");
+          client.note_scheduled_list_stale();
+        },
+      }
+    }
+    if !self.is_scheduled_check_due(now, interval_ms) {
+      return is_changed;
+    }
+    self.last_scheduled_check_ms = now;
+    match client.seal_stale_scheduled().await {
+      Ok(sealed) => {
+        self.scheduled_seal_failures = 0;
+        self.next_scheduled_check_ms = now.saturating_add(SCHEDULED_CHECK_MS);
+        is_changed || sealed > 0
+      },
+      Err(error) => {
+        // They stay as they are, and the list says what that means. A group that can't be caught up
+        // here isn't asked about every few seconds.
+        tracing::debug!(%error, "scheduled messages not sealed again yet");
+        self.next_scheduled_check_ms =
+          now.saturating_add(seal_backoff_ms(interval_ms, self.scheduled_seal_failures));
+        self.scheduled_seal_failures = self.scheduled_seal_failures.saturating_add(1);
+        is_changed
+      },
+    }
+  }
+
+  /// Something changed on the server or a connection came back: what failed may work now.
+  #[cfg(feature = "ui")]
+  fn seal_soon(&mut self, now: i64) {
+    self.scheduled_seal_failures = 0;
+    self.next_scheduled_check_ms = self.next_scheduled_check_ms.min(now);
+  }
+
+  /// Due at its time, and at once when this device's clock jumped back by more than the interval: the
+  /// time it waits for may be far away now.
+  #[cfg(feature = "ui")]
+  fn is_scheduled_check_due(&self, now: i64, interval_ms: i64) -> bool {
+    now >= self.next_scheduled_check_ms || now < self.last_scheduled_check_ms.saturating_sub(interval_ms)
   }
 
   /// Due after a new gateway connection and after a local change; after a failed attempt not
@@ -230,4 +364,12 @@ pub async fn flush_sends<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>)
     Err(error) => tracing::debug!(%error, "queued actions not sent"),
   }
   is_changed
+}
+
+/// How long the next round waits after `failures` earlier failures in a row: the interval, doubling.
+#[cfg(feature = "ui")]
+fn seal_backoff_ms(interval_ms: i64, failures: u32) -> i64 {
+  interval_ms
+    .saturating_mul(1_i64.checked_shl(failures.min(16)).unwrap_or(i64::MAX))
+    .min(SCHEDULED_SEAL_BACKOFF_MAX_MS.max(interval_ms))
 }

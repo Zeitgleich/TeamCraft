@@ -496,6 +496,7 @@ impl TestApp {
     settings.security.rate_limits.is_enabled = false;
     // Withdrawals coalesce for a moment only, so tests see them quickly.
     settings.push.dismiss_coalesce = Duration::from_millis(50);
+    settings.push.scheduled_wake_coalesce = Duration::from_millis(50);
     // One retry worker per pool: hundreds of parallel test apps share the dev Postgres's connections.
     settings.push.retry.workers = 1;
     customize(&mut settings);
@@ -552,6 +553,7 @@ impl TestApp {
       policy: Arc::new(PolicyHolder::default()),
       scheme: Arc::new(SchemeStore::default()),
       rate_limits: Arc::new(RateLimits::new(&settings.security.rate_limits)),
+      directory_filters: Arc::default(),
       dpop: Arc::default(),
       brands: Arc::new(
         BrandStore::new(BrandInputs {

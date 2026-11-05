@@ -188,6 +188,9 @@ pub enum GatewayEvent {
   KeyBagUpdate {
     version: u64,
   },
+  /// The user's scheduled messages changed: one was added, changed, cancelled, released or held. Sent
+  /// to the user's own devices, which read the list again (docs/scheduled-messages.md).
+  ScheduledMessagesUpdate,
   /// The announcement banner changed or ended. Clients fetch it again.
   AnnouncementUpdate,
   /// A health check raised an alert or one was resolved (docs/operations.md "Health and alerts").

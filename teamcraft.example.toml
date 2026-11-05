@@ -171,6 +171,14 @@ max_text_length = 1000
 default_page_size = 50
 max_page_size = 200
 max_directory_results = 50
+# Values each directory filter (organization, department, title) offers at most; the most common ones
+# when there are more.
+max_directory_filter_values = 200
+# How long after an invitation mail the same invitation can be sent again.
+invite_resend_interval_secs = 300
+# How long the values of the directory filters are reused; computing them reads all users. 0 reads them
+# every time.
+directory_filters_cache_secs = 60
 # Largest avatar image in bytes (PNG, JPEG or WebP).
 max_avatar_bytes = 1048576
 # Largest space or channel picture in bytes (one limit for both). Uploads (PNG, JPEG or WebP; no SVG) are re-encoded as PNG of at
@@ -214,6 +222,13 @@ max_mls_payload_bytes = 1048576
 max_welcomes_per_commit = 500
 # Encrypted key bag and wrapped backup keys of one user.
 max_key_bag_bytes = 1048576
+# How often held messages are checked: a scheduled message goes out at most this late.
+scheduled_release_interval_secs = 5
+# The largest held message; every list of the sender carries it, so far less than a message's limit.
+max_scheduled_ciphertext_bytes = 65536
+# How long a held message nothing can solve stays (its sender left, their account is off, the conversation
+# is gone). The list shows the date; the sender's devices keep the text after it until dismissed.
+scheduled_hold_retention_days = 30
 # One signed device list.
 max_device_list_bytes = 65536
 # Active devices per user.
@@ -221,7 +236,8 @@ max_devices_per_user = 20
 # Attachments per user that are announced but not uploaded yet, and the bytes of all of a user's attachments.
 max_pending_attachments_per_user = 20
 max_attachment_bytes_per_user = 21474836480
-# Meeting e-mails per organizer and hour (the rest of the invitees are told in the app only).
+# E-mails per person and hour from their meetings (the rest of the invitees are told in the app only)
+# and space invitations. At 0, invitations go without mail and can't be resent.
 max_meeting_mails_per_user_per_hour = 200
 
 # WebSocket gateway at /api/v1/gateway.
@@ -565,6 +581,10 @@ test_interval_secs = 10
 max_rings_per_minute = 10
 # Withdrawals ("read elsewhere") for one conversation within this time go out as one.
 dismiss_coalesce_ms = 3000
+# A burst of commits within this time makes one wake to seal scheduled messages again, and there is at
+# most one such wake per user and conversation per interval (docs/scheduled-messages.md).
+scheduled_wake_coalesce_ms = 10000
+scheduled_wake_min_interval_secs = 300
 request_timeout_secs = 10
 # Per pool: APNs/FCM share one, Web Push/UnifiedPush (endpoints users chose) another.
 max_concurrent_sends = 32

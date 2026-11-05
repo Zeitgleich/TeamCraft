@@ -63,6 +63,7 @@ pub enum BackgroundJob {
   OidcSync,
   PartitionMaintenance,
   Retention,
+  ScheduledMessages,
   UrgentScheduler,
 }
 
@@ -135,7 +136,7 @@ impl DpopOutcome {
 }
 
 impl BackgroundJob {
-  const ALL: [Self; 8] = [
+  const ALL: [Self; 9] = [
     Self::DatabaseCheck,
     Self::EmailDigest,
     Self::GuestExpiry,
@@ -143,6 +144,7 @@ impl BackgroundJob {
     Self::OidcSync,
     Self::PartitionMaintenance,
     Self::Retention,
+    Self::ScheduledMessages,
     Self::UrgentScheduler,
   ];
 
@@ -155,6 +157,7 @@ impl BackgroundJob {
       Self::OidcSync => "oidc_sync",
       Self::PartitionMaintenance => "partition_maintenance",
       Self::Retention => "retention",
+      Self::ScheduledMessages => "scheduled_messages",
       Self::UrgentScheduler => "urgent_scheduler",
     }
   }
@@ -424,7 +427,7 @@ pub fn route_class(path: &str) -> &'static str {
     "brand" | "client-compatibility" | "openapi.json" | "server-info" => "public",
     "guests" | "spaces" => "spaces",
     "sync" => "sync",
-    "me" | "presence" | "user-groups" | "users" => "users",
+    "directory" | "me" | "presence" | "user-groups" | "users" => "users",
     _ => "other",
   }
 }
@@ -791,6 +794,7 @@ mod tests {
             "oidc_sync",
             "partition_maintenance",
             "retention",
+            "scheduled_messages",
             "urgent_scheduler",
           ]),
         ),

@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE scheduled_messages s\n         SET hold_reason = 'not_a_member', held_at = $1, claimed_until = NULL, version = version + 1\n         WHERE s.id IN (\n           SELECT m.id FROM scheduled_messages m\n           WHERE m.hold_reason IS NOT NULL\n             AND m.hold_reason NOT IN ('sender_inactive', 'not_a_member', 'conversation_gone')\n             AND NOT EXISTS (\n               SELECT 1 FROM memberships ms\n               WHERE ms.conversation_id = m.conversation_id AND ms.user_id = m.user_id)\n           LIMIT $2\n           FOR UPDATE OF m SKIP LOCKED)\n         RETURNING s.user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b2052007e2b98360b15763cf028b4de1de21b6df2c79e81a0fd96c880d9fdf9a"
+}

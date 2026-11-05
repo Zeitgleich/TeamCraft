@@ -11,6 +11,7 @@ use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
 use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::icons::{Icon, IconName};
+use crate::components::scheduled_view::needs_attention;
 use crate::components::space_tile::SpaceTile;
 use crate::components::typing_indicator::{TypingDots, typing_text};
 use crate::entry_actions::MenuEntry;
@@ -280,6 +281,7 @@ pub fn GlobalEntries(entries: EntriesDisclosure, id: &'static str) -> impl IntoV
         <Icon name=IconName::Bookmark />
         <span class="sb-name">{move || i18n.t("sidebar-saved")}</span>
       </button>
+      <ScheduledEntry />
       <button
         class="sb-item"
         class:current=move || state.view.get() == MainView::Drafts
@@ -877,7 +879,7 @@ const SIDEBAR_BADGE_CAP: u32 = 99;
 #[component]
 pub fn SidebarItem(
   #[prop(into)] conversation: Signal<Conversation>,
-  /// The space the channel belongs to, shown under its name where the list is not that space's own
+  /// The space the channel belongs to, shown after its name where the list is not that space's own
   /// (a favorite channel in Chats, #1152): names repeat across spaces.
   #[prop(optional, into)]
   maybe_space_name: Option<Signal<String>>,
@@ -1001,13 +1003,12 @@ pub fn SidebarItem(
     }
   };
 
-  // Name and space are two lines that shorten on their own, so a long name never hides the space.
+  // Name and space share one line, so every row has the same height; the space shortens first
+  // and stays in the tooltip.
   let name_view = match maybe_space_name {
     Some(space) => view! {
-      <span class="sb-stack">
-        <span class="sb-name" translate="no">{move || name.get()}</span>
-        <span class="sb-space" translate="no">{move || space.get()}</span>
-      </span>
+      <span class="sb-name" translate="no">{move || name.get()}</span>
+      <span class="sb-space" translate="no" title=move || space.get()>{move || space.get()}</span>
     }
     .into_any(),
     None => view! { <span class="sb-name" translate="no">{move || name.get()}</span> }.into_any(),
@@ -1109,5 +1110,47 @@ fn close_section(phase: RwSignal<SectionPhase>) {
 fn end_phase(ev: &leptos::ev::AnimationEvent, phase: RwSignal<SectionPhase>) {
   if ev.target() == ev.current_target() {
     phase.set(SectionPhase::Still);
+  }
+}
+
+/// The way to the messages waiting for their time: offered while scheduling is allowed or something
+/// waits, with the number of those that need the user (docs/scheduled-messages.md: nothing waits
+/// silently).
+#[component]
+fn ScheduledEntry() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let overview = Memo::new(move |_| state.read(|backend| backend.scheduled_overview()));
+  let is_offered =
+    move || overview.with(|overview| overview.policy.is_enabled || !overview.messages.is_empty());
+  let waiting_for_me = Memo::new(move |_| {
+    overview.with(|overview| {
+      let count = overview
+        .messages
+        .iter()
+        .filter(|message| needs_attention(message.status))
+        .count();
+      u32::try_from(count).unwrap_or(u32::MAX)
+    })
+  });
+  view! {
+    <Show when=is_offered fallback=|| ()>
+      <button
+        class="sb-item"
+        class:current=move || state.view.get() == MainView::Scheduled
+        aria-current=move || (state.view.get() == MainView::Scheduled).then_some("page")
+        on:click=move |_| state.open_scheduled()
+      >
+        <Icon name=IconName::Clock />
+        <span class="sb-name">{move || i18n.t("sidebar-scheduled")}</span>
+        <span
+          class="visually-hidden"
+          prop:hidden=move || waiting_for_me.get() == 0
+        >
+          {move || i18n.t_count("sidebar-scheduled-attention", waiting_for_me.get() as usize)}
+        </span>
+        <CountBadge count=waiting_for_me is_decorative=true maybe_cap=SIDEBAR_BADGE_CAP />
+      </button>
+    </Show>
   }
 }

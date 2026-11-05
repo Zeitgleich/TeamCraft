@@ -917,6 +917,12 @@ roster-signing-reported-gone = The server reports that { $names } no longer hold
 roster-signing-awaiting-owner = The identity provider makes you an owner. That's in force as soon as another owner's app has been open. If no other owner is left, ask your operator to give the former owner their role back for a moment.
 roster-standing-expired-ask-unnamed = No owner signed the admin roster within 30 days, so admin rights are paused on every app. An owner only needs to open TeamCraft on a device with their keys.
 
+policy-scheduled = Scheduled messages
+policy-scheduled-hint = The server holds these encrypted and releases them at their time, whether their author's devices are on or not. It enforces this rule.
+policy-scheduled-enabled = People can schedule messages
+policy-scheduled-enabled-hint = Off: "Send later" goes away, and messages already scheduled don't go out by themselves: they wait until their owner sends or cancels them.
+policy-scheduled-horizon = How far ahead
+policy-scheduled-cap = Waiting messages per person
 admin-channel-restore = Restore
 admin-channel-archive-confirm = Archive this channel for everyone? Its members can still read it but nobody can post, and it leaves their lists. Nothing is deleted, and you can restore it here.
 admin-guests-filter = Show

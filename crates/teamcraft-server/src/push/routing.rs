@@ -440,6 +440,54 @@ pub async fn dismiss_read(
   send_dismissal(&state, user, &devices, wake_up).await;
 }
 
+/// Wakes the user's offline devices to seal their scheduled messages in `conversation` again
+/// (docs/scheduled-messages.md): nothing shows, and the push service sees a push, no more than for a
+/// message. A burst of commits makes one wake, and there is at most one per
+/// `scheduled_wake_min_interval` per user and conversation; a later commit in that time waits for its
+/// end instead of being lost. A push gateway that doesn't list the kind means no wake for store apps.
+pub fn wake_to_seal(state: AppState, user: UserId, conversation: ConversationId) {
+  let settings = state.settings.get().push.clone();
+  let Some(delay) = state.push_tracker.queue_seal_wake(
+    user,
+    conversation,
+    settings.scheduled_wake_coalesce,
+    settings.scheduled_wake_min_interval,
+  ) else {
+    return;
+  };
+  tokio::spawn(async move {
+    tokio::time::sleep(delay).await;
+    state.push_tracker.take_seal_wake(user, conversation);
+    // Online devices read the list, the others get the push.
+    state
+      .hub
+      .publish([user], &teamcraft_proto::GatewayEvent::ScheduledMessagesUpdate);
+    let rows = match state.database.list_push_devices(user).await {
+      Ok(rows) => rows,
+      Err(error) => {
+        warn!(%error, "listing push devices for a wake failed");
+        return;
+      },
+    };
+    let wake_up = PushWakeUp {
+      kind: PushKind::ScheduledSeal,
+      conversation_id: conversation,
+      maybe_message_id: None,
+      maybe_sender_id: None,
+      is_urgent: false,
+      maybe_thread_id: None,
+      maybe_call_id: None,
+      maybe_badge: None,
+      maybe_sent_at: Some(now_millis()),
+    };
+    for row in rows {
+      if can_dismiss(&row.provider) && !state.hub.is_device_connected(user, row.device) {
+        delivery::spawn(state.clone(), user, row, wake_up.clone());
+      }
+    }
+  });
+}
+
 /// Sends a test wake-up to one of the user's devices and says how the push service took it.
 pub async fn send_test(
   state: &AppState,
