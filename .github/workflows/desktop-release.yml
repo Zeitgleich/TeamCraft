@@ -290,7 +290,7 @@ jobs:
           base="https://gstreamer.freedesktop.org/data/pkg/osx/$GSTREAMER_VERSION"
           for package in gstreamer-1.0 gstreamer-1.0-devel; do
             file="$package-$GSTREAMER_VERSION-universal.pkg"
-            curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$file" "$base/$file"
+            curl --fail --silent --show-error --location --http1.1 --retry 5 --retry-all-errors --continue-at - --output "$RUNNER_TEMP/$file" "$base/$file"
           done
           cd "$RUNNER_TEMP"
           echo "d371ab04a7632713626836c2fc234e863cc98484c74c473eba99b0fbd9b3a3fe  gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
@@ -302,7 +302,7 @@ jobs:
         run: |
           set -euo pipefail
           file="cargo-tauri-aarch64-apple-darwin.zip"
-          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$file" \
+          curl --fail --silent --show-error --location --http1.1 --retry 5 --retry-all-errors --continue-at - --output "$RUNNER_TEMP/$file" \
             "https://github.com/tauri-apps/tauri/releases/download/tauri-cli-v$TEAMCRAFT_TAURI_CLI_VERSION/$file"
           echo "f71a34ada728ca2d1a51c28d6d21639e1e080898ec69ec8d49c5da3b7e8bc1be  $RUNNER_TEMP/$file" | shasum -a 256 -c -
           unzip -q "$RUNNER_TEMP/$file" cargo-tauri -d "$RUNNER_TEMP/tauri-cli"

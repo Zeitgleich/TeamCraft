@@ -349,7 +349,7 @@ jobs:
           }
           $file = "gstreamer-1.0-msvc-x86_64-$env:GSTREAMER_VERSION.exe"
           $installer = Join-Path $env:RUNNER_TEMP $file
-          curl.exe --fail --silent --show-error --location --output $installer "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GSTREAMER_VERSION/msvc/$file"
+          curl.exe --fail --silent --show-error --location --http1.1 --retry 5 --retry-all-errors --continue-at - --output $installer "https://gstreamer.freedesktop.org/data/pkg/windows/$env:GSTREAMER_VERSION/msvc/$file"
           if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLower() -ne $env:GSTREAMER_SHA256) { throw "GStreamer installer hash mismatch" }
           $install = Start-Process -Wait -PassThru -FilePath $installer -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=C:\gstreamer", "/LOG=$env:RUNNER_TEMP\gstreamer-install.log"
           if ($install.ExitCode -ne 0) { throw "GStreamer installer exited with $($install.ExitCode)" }
@@ -402,7 +402,7 @@ jobs:
           base="https://gstreamer.freedesktop.org/data/pkg/osx/$GSTREAMER_VERSION"
           for package in gstreamer-1.0 gstreamer-1.0-devel; do
             file="$package-$GSTREAMER_VERSION-universal.pkg"
-            curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$file" "$base/$file"
+            curl --fail --silent --show-error --location --http1.1 --retry 5 --retry-all-errors --continue-at - --output "$RUNNER_TEMP/$file" "$base/$file"
           done
           cd "$RUNNER_TEMP"
           echo "d371ab04a7632713626836c2fc234e863cc98484c74c473eba99b0fbd9b3a3fe  gstreamer-1.0-$GSTREAMER_VERSION-universal.pkg" | shasum -a 256 -c -
