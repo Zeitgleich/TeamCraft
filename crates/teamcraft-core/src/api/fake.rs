@@ -254,6 +254,7 @@ struct State {
   /// the server keeps them until they expire.
   admin_join_requests: BTreeMap<(ConversationId, UserId), FakeJoinRequest>,
   expiring_guests: Vec<ExpiringGuestResponse>,
+  refuses_posts_in: BTreeSet<ConversationId>,
   /// Relayed binary frames still to be lost on the way (a flaky connection during linking).
   relay_frames_to_lose: u32,
   /// Like the server: a repeated idempotency key returns the first space / channel.
@@ -999,6 +1000,11 @@ impl FakeServer {
   /// The server's clock now (the system clock plus [`FakeServer::advance_clock`]).
   pub fn server_now_ms(&self) -> i64 {
     self.lock().now_ms()
+  }
+
+  /// From now on posting here is refused for good, as in a channel somebody just archived.
+  pub fn refuse_posts_in(&self, conversation: ConversationId) {
+    self.lock().refuses_posts_in.insert(conversation);
   }
 
   /// What `GET /guests/expiring` lists, for any caller.
@@ -3703,6 +3709,13 @@ impl ServerApi for FakeServerApi {
   ) -> Result<MessageResponse, ApiError> {
     self.with(|state, me| {
       state.ensure_own_device(me, request.device_id)?;
+      if state.refuses_posts_in.contains(&conversation) {
+        return Err(ApiError::Status {
+          status: 403,
+          maybe_body: None,
+          maybe_retry_after: None,
+        });
+      }
       let existing = state
         .member_conversation(conversation, me)?
         .messages

@@ -109,16 +109,20 @@ pub fn GuestsOverview() -> impl IntoView {
         </select>
       </label>
     </div>
-    <Show when=move || !selected.with(HashSet::is_empty) fallback=|| ()>
+    <Show when=move || !chosen().is_empty() fallback=|| ()>
       <div class="admin-toolbar guest-bulk" role="group" aria-label=move || i18n.t("admin-guests-bulk")>
-        <span>{move || i18n.t_count("admin-guests-selected", selected.with(HashSet::len))}</span>
+        <span>{move || i18n.t_count("admin-guests-selected", chosen().len())}</span>
+        {move || {
+          let without_expiry = chosen().iter().filter(|guest| guest.maybe_expires_at.is_none()).count();
+          (without_expiry > 0).then(|| view! { <span class="muted-text small">{move || i18n.t_count("admin-guests-skipped", without_expiry)}</span> })
+        }}
         <button type="button" class="btn btn-small" on:click=move |_| extend(30)>{move || i18n.t_count("guest-notice-extend", 30)}</button>
         <button type="button" class="btn btn-small" on:click=move |_| extend(90)>{move || i18n.t_count("guest-notice-extend", 90)}</button>
         <button type="button" class="btn btn-small btn-danger" on:click=move |_| is_confirming_removal.set(true)>{move || i18n.t("admin-guests-remove")}</button>
       </div>
       <Show when=move || is_confirming_removal.get() fallback=|| ()>
         <div class="guest-bulk" role="alert">
-          <p>{move || i18n.t_count("admin-guests-remove-confirm", selected.with(HashSet::len))}</p>
+          <p>{move || i18n.t_count("admin-guests-remove-confirm", chosen().len())}</p>
           <button type="button" class="btn btn-small btn-danger" on:click=move |_| remove()>{move || i18n.t("admin-guests-remove")}</button>
           <button type="button" class="btn btn-small" on:click=move |_| is_confirming_removal.set(false)>{move || i18n.t("cancel")}</button>
         </div>

@@ -549,9 +549,13 @@ pub struct GuestsConfig {
   pub expiry_check_interval_secs: u64,
   /// Mail to a guest whose membership ends soon; `{days}` and `{url}` are filled in.
   pub notice_subject_guest: String,
+  /// With one day left.
+  pub notice_body_guest_one: String,
   pub notice_body_guest: String,
   /// Mail to a sponsor whose guests end soon; `{count}` and `{url}` are filled in.
   pub notice_subject_sponsor: String,
+  /// About one guest.
+  pub notice_body_sponsor_one: String,
   pub notice_body_sponsor: String,
 }
 
@@ -562,6 +566,10 @@ impl Default for GuestsConfig {
       allowed_email_domains: Vec::new(),
       expiry_check_interval_secs: 3600,
       notice_subject_guest: "Your guest access ends soon".to_owned(),
+      notice_body_guest_one: "Your guest access ends tomorrow. Ask the person who invited you to extend it.\n\n{url}\n"
+        .to_owned(),
+      notice_body_sponsor_one: "The access of a guest you are responsible for ends soon. Open the app to extend it or let it end.\n\n{url}\n"
+        .to_owned(),
       notice_body_guest: "Your guest access ends in {days} days. Ask the person who invited you to extend it.\n\n{url}\n"
         .to_owned(),
       notice_subject_sponsor: "Guest access you are responsible for ends soon".to_owned(),

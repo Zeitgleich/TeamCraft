@@ -24,11 +24,21 @@ pub struct ExpiringGuestResponse {
   pub expires_at: UnixMillis,
   /// It's the caller's own membership: the notice speaks to them.
   pub is_own: bool,
-  /// Whether the caller may extend this membership at all. Never the guest themself.
-  pub can_extend: bool,
-  /// The latest time the caller may extend to; absent: no limit but the server's maximum.
-  #[serde(rename = "extend_limit", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_extend_limit: Option<UnixMillis>,
+  /// What the caller may extend this membership to; empty: nothing. Never the guest themself.
+  #[serde(default)]
+  pub extend_offers: Vec<GuestExtendOffer>,
+}
+
+/// One way to extend a guest. The server decides them, so that all apps offer the same and what is
+/// offered is accepted. Stable through the day, so a list read again doesn't count as changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct GuestExtendOffer {
+  /// What to send as `expires_at`.
+  pub until: UnixMillis,
+  /// By this many days; absent: as far as the caller's limit goes, which is less than the days on
+  /// offer, so the apps name the date.
+  #[serde(rename = "days", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

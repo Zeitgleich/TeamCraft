@@ -7,25 +7,22 @@ struct ExpiringGuest: Decodable, Identifiable, Equatable, Sendable {
     let displayName: String
   }
 
-  static let dayMs: Int64 = 24 * 60 * 60 * 1000
-  private static let extendDays: [Int64] = [30, 90]
+  /// What the user may extend to, as the server decided it; without `days`, as far as their limit
+  /// goes.
+  struct Offer: Decodable, Equatable, Hashable, Sendable {
+    let until: Int64
+    let days: Int64?
+
+    var untilDate: Date { Date(timeIntervalSince1970: Double(until) / 1000) }
+  }
 
   let spaceId: String
   let spaceName: String
   let user: Person
   let expiresAt: Int64
   let isOwn: Bool
-  let canExtend: Bool
-  let extendLimit: Int64?
+  let extendOffers: [Offer]?
 
   var id: String { spaceId + "/" + user.id }
   var expiresAtDate: Date { Date(timeIntervalSince1970: Double(expiresAt) / 1000) }
-
-  /// What the user may offer: nothing without the right, nothing past their limit (the server's word).
-  var extendOptions: [Int64] {
-    guard canExtend else { return [] }
-    return Self.extendDays.filter { days in
-      extendLimit.map { expiresAt + days * Self.dayMs <= $0 } ?? true
-    }
-  }
 }

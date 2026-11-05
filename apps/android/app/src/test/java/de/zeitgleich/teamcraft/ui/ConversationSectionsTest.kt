@@ -29,6 +29,8 @@ class ConversationSectionsTest {
     val archived = item("1", "old", ConversationKind.PUBLIC, space = "Project A", isFavorite = true).copy(isArchived = true)
     assertEquals(emptyList<Section>(), channelSections(listOf(archived)))
     assertEquals(false, archived.isListedInHome)
+    assertEquals(listOf(SectionTitle.Archived), channelSections(listOf(archived), listsArchived = true).map { it.title })
+    assertEquals(TabBadge(mentions = 0, unread = 0), tabBadge(listOf(archived.copy(mentionCount = 2u, unreadCount = 3u))))
   }
 
   @Test

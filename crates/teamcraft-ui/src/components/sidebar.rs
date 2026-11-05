@@ -19,8 +19,8 @@ use crate::meetings::MeetingsHub;
 use crate::model::{Conversation, ConversationId, ConversationKind, PresenceStatus, SpaceId};
 use crate::reactive::{items_by_key, keyed_item};
 use crate::sections::{
-  GroupedSidebar, RowBadgeTone, Section, SectionKind, SpaceGroup, badge_count, build_grouped, build_sections,
-  move_favorite, row_badge,
+  GroupedSidebar, RowBadgeTone, Section, SectionKind, SidebarOptions, SpaceGroup, badge_count, build_grouped,
+  build_sections, move_favorite, row_badge,
 };
 use crate::settings::{load_json, store_json};
 use crate::state::{AppState, MainView, Overlay, use_app_state};
@@ -120,14 +120,20 @@ pub fn Sidebar() -> impl IntoView {
   let sections = Memo::new(move |_| {
     build_sections(
       &listed.get(),
-      &state.settings.sidebar_options(state.held_unread.get()),
+      &SidebarOptions {
+        lists_archived: is_guest(state),
+        ..state.settings.sidebar_options(state.held_unread.get())
+      },
     )
   });
   let grouped = Memo::new(move |_| {
     build_grouped(
       &spaces.get(),
       &listed.get(),
-      &state.settings.sidebar_options(state.held_unread.get()),
+      &SidebarOptions {
+        lists_archived: is_guest(state),
+        ..state.settings.sidebar_options(state.held_unread.get())
+      },
     )
   });
   view! {

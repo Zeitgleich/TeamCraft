@@ -940,7 +940,7 @@ admin-guests-never = Never signed in
 admin-guests-no-sponsor = No sponsor
 admin-guests-no-expiry = Never
 policy-guest-notices = Notices before a guest's access ends
-policy-guest-notices-hint = The guest, their sponsor and the space's admins get a notice in the app and by mail. The mail names no guest and no space.
+policy-guest-notices-hint = The guest, their sponsor and the space's admins get a notice in the app. The guest and the sponsor also get a mail, which names no guest and no space.
 policy-guest-notices-default = 14 and 3 days before
 policy-guest-notices-long = 30, 14 and 3 days before
 policy-guest-notices-short = 7 and 1 day before
@@ -953,3 +953,8 @@ policy-guest-sponsor-days = { $count ->
    *[other] Up to { $count } days
 }
 audit-guest-extended = Guest extended
+audit-channel-restored = Channel restored
+admin-guests-skipped = { $count ->
+    [one] One of them never expires and is left out when extending.
+   *[other] { $count } of them never expire and are left out when extending.
+}

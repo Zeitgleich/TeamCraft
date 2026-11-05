@@ -121,7 +121,7 @@ pub struct ExpiringGuest {
   pub user: UserId,
   pub maybe_sponsor: Option<UserId>,
   pub expires_at: OffsetDateTime,
-  /// The viewer's own role in that space; `None` for a sponsor who left it.
+  /// The viewer's own role in that space; `None` for somebody the list shows only their own row.
   pub maybe_viewer_role: Option<SpaceRole>,
 }
 
@@ -451,9 +451,12 @@ impl Database {
     limit: i64,
   ) -> Result<Vec<GuestNoticeDue>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT m.space_id, m.user_id, m.sponsor_user_id, m.expires_at AS "expires_at!",
+      r#"SELECT m.space_id, m.user_id, sponsor.id AS "sponsor_user_id?", m.expires_at AS "expires_at!",
                 due.lead_days AS "lead_days!"
          FROM space_members m
+         JOIN users guest ON guest.id = m.user_id AND guest.deactivated_at IS NULL AND guest.deleted_at IS NULL
+         LEFT JOIN space_members sm ON sm.space_id = m.space_id AND sm.user_id = m.sponsor_user_id
+         LEFT JOIN users sponsor ON sponsor.id = sm.user_id AND sponsor.deactivated_at IS NULL AND sponsor.deleted_at IS NULL
          CROSS JOIN LATERAL (
            SELECT min(lead) AS lead_days FROM unnest($2::int[]) AS lead
            WHERE m.expires_at <= $1::timestamptz + make_interval(days => lead)
@@ -481,9 +484,10 @@ impl Database {
       .collect()
   }
 
-  /// Remembers the notice for this expiry. An expiry changed in the meantime starts over.
-  pub async fn record_guest_notice(&self, due: &GuestNoticeDue) -> Result<(), DbError> {
-    sqlx::query!(
+  /// Remembers the notice for this expiry. An expiry changed in the meantime starts over: then this
+  /// says `false`, and the notice is not sent.
+  pub async fn record_guest_notice(&self, due: &GuestNoticeDue) -> Result<bool, DbError> {
+    let result = sqlx::query!(
       "UPDATE space_members SET expiry_notice_lead_days = $3
        WHERE space_id = $1 AND user_id = $2 AND expires_at = $4",
       to_db(due.space),
@@ -493,7 +497,27 @@ impl Database {
     )
     .execute(self.pool())
     .await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
+  }
+
+  /// Moves a guest's expiry later, and only that: a membership that was removed, a guest who became
+  /// a member meanwhile and a later expiry somebody else set all stay as they are (`false`).
+  pub async fn extend_guest_expiry(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    at: OffsetDateTime,
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      "UPDATE space_members SET expires_at = $3, expiry_notice_lead_days = NULL
+       WHERE space_id = $1 AND user_id = $2 AND role = 'guest' AND expires_at < $3",
+      to_db(space),
+      to_db(user),
+      at,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
   }
 
   /// Guest memberships ending by `until` that `viewer` should hear about: their own, those they
@@ -512,7 +536,7 @@ impl Database {
          JOIN spaces s ON s.id = m.space_id
          LEFT JOIN space_members me ON me.space_id = m.space_id AND me.user_id = $1
          WHERE m.role = 'guest' AND m.expires_at > $2 AND m.expires_at <= $3
-           AND (m.user_id = $1 OR m.sponsor_user_id = $1 OR me.role = 'space_admin')
+           AND (m.user_id = $1 OR (m.sponsor_user_id = $1 AND me.user_id IS NOT NULL) OR me.role = 'space_admin')
          ORDER BY m.expires_at, m.space_id, m.user_id LIMIT $4"#,
       to_db(viewer),
       now,
@@ -606,6 +630,48 @@ impl Database {
     deletes_memberless: bool,
   ) -> Result<crate::SpaceLeft, DbError> {
     let mut tx = self.pool().begin().await?;
+    let left = self
+      .remove_member_in(&mut tx, space, user, deletes_memberless)
+      .await?;
+    tx.commit().await?;
+    Ok(left)
+  }
+
+  /// Removes a guest whose membership has run out at `now`. `None`: it hasn't any more, somebody
+  /// extended it or made the guest a member after the list was read, or it is gone. Nothing changes.
+  pub async fn remove_expired_guest(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    now: OffsetDateTime,
+  ) -> Result<Option<crate::SpaceLeft>, DbError> {
+    let mut tx = self.pool().begin().await?;
+    // Held until the commit, so an extension waits and then finds the membership gone.
+    let is_expired = sqlx::query_scalar!(
+      r#"SELECT user_id FROM space_members
+         WHERE space_id = $1 AND user_id = $2 AND role = 'guest' AND expires_at <= $3 FOR UPDATE"#,
+      to_db(space),
+      to_db(user),
+      now,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if !is_expired {
+      return Ok(None);
+    }
+    let left = self.remove_member_in(&mut tx, space, user, false).await?;
+    tx.commit().await?;
+    Ok(Some(left))
+  }
+
+  async fn remove_member_in(
+    &self,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    space: SpaceId,
+    user: UserId,
+    deletes_memberless: bool,
+  ) -> Result<crate::SpaceLeft, DbError> {
     // Against a join or a leave at the same moment: who stays is counted below.
     sqlx::query_scalar!(
       r#"SELECT c.id FROM conversations c JOIN memberships m ON m.conversation_id = c.id
@@ -613,7 +679,7 @@ impl Database {
       to_db(space),
       to_db(user),
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     let left = sqlx::query_scalar!(
       r#"DELETE FROM memberships USING conversations c
@@ -622,21 +688,20 @@ impl Database {
       to_db(space),
       to_db(user),
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     sqlx::query!(
       "DELETE FROM space_members WHERE space_id = $1 AND user_id = $2",
       to_db(space),
       to_db(user)
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     let deleted = if deletes_memberless {
-      crate::channel_deletion::mark_memberless_private_deleted(&mut tx, &left, user).await?
+      crate::channel_deletion::mark_memberless_private_deleted(tx, &left, user).await?
     } else {
       Vec::new()
     };
-    tx.commit().await?;
     Ok(crate::SpaceLeft {
       left: left.into_iter().map(from_db).collect::<Result<_, _>>()?,
       deleted: deleted.into_iter().map(from_db).collect::<Result<_, _>>()?,

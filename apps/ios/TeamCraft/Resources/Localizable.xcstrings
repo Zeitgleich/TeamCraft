@@ -33,6 +33,38 @@
         }
       }
     },
+    "guest_notice_extend_until %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Until %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bis %@"
+          }
+        }
+      }
+    },
+    "guest_notice_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't extend the guest. Try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gast konnte nicht verlängert werden. Versuch es noch einmal."
+          }
+        }
+      }
+    },
     "guest_notice_row %@ %@ %@": {
       "localizations": {
         "en": {
@@ -93,6 +125,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Dieser Kanal ist archiviert. Du kannst ihn lesen, aber niemand kann hier schreiben."
+          }
+        }
+      }
+    },
+    "section_archived": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archived"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Archiviert"
           }
         }
       }

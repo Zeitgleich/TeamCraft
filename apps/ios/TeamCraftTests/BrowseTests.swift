@@ -68,16 +68,15 @@ final class BrowseTests: XCTestCase {
     XCTAssertEqual(decoded.spaces?.map(\.offersChannelCreation), [false, true])
   }
 
-  func testGuestExtendOffersStayWithinTheServersWord() throws {
-    func guest(canExtend: Bool, limitDays: Int64?) -> ExpiringGuest {
-      ExpiringGuest(
-        spaceId: "1", spaceName: "Project A", user: .init(id: "2", displayName: "Guest"), expiresAt: 0,
-        isOwn: false, canExtend: canExtend, extendLimit: limitDays.map { $0 * ExpiringGuest.dayMs })
-    }
-    XCTAssertEqual(guest(canExtend: false, limitDays: nil).extendOptions, [])
-    XCTAssertEqual(guest(canExtend: true, limitDays: nil).extendOptions, [30, 90])
-    XCTAssertEqual(guest(canExtend: true, limitDays: 40).extendOptions, [30])
-    XCTAssertEqual(guest(canExtend: true, limitDays: 10).extendOptions, [])
+  func testGuestNoticesDecodeTheServersOffers() throws {
+    let json = #"""
+      {"answer":"expiring_guests","guests":[{"space_id":"1","space_name":"Project A",
+       "user":{"id":"2","display_name":"Guest","kind":"guest"},"expires_at":1000,"is_own":false,
+       "extend_offers":[{"until":2000,"days":30},{"until":3000}]}]}
+      """#
+    let guest = try XCTUnwrap(Wire.decode(ChatAnswer.self, from: json)?.guests?.first)
+    XCTAssertEqual(guest.extendOffers?.first?.days, 30)
+    XCTAssertNil(guest.extendOffers?.last?.days)
   }
 
   func testBrowseActionsOnTheWire() {

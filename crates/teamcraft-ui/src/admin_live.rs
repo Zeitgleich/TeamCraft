@@ -1465,23 +1465,21 @@ impl AdminLive {
     });
   }
 
-  /// One after the other, so a large selection doesn't hit the rate limit at once; the last failure
-  /// stays on show and the rest still runs.
+  /// One after the other, so a large selection doesn't hit the rate limit at once; the rest still
+  /// runs after a failure, and every failure is on show.
   async fn send_each_now(&self, requests: Vec<(ApiMethod, String, Option<String>)>) {
-    let mut maybe_failure = None;
+    let mut failures = Vec::new();
     for (method, path, maybe_body) in requests {
       match self.auth.api_request(method, &path, maybe_body).await {
         Ok(response) if response.status < 300 => {},
-        Ok(response) => {
-          maybe_failure = Some(format!(
-            "{path}: {}",
-            self.refusal_of(&response.body, response.status)
-          ));
-        },
-        Err(error) => maybe_failure = Some(error.to_string()),
+        Ok(response) => failures.push(format!(
+          "{path}: {}",
+          self.refusal_of(&response.body, response.status)
+        )),
+        Err(error) => failures.push(format!("{path}: {error}")),
       }
     }
-    self.data.borrow_mut().maybe_error = maybe_failure;
+    self.data.borrow_mut().maybe_error = (!failures.is_empty()).then(|| failures.join("; "));
     self.queue_refresh();
   }
 
@@ -1983,6 +1981,8 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     "user_deleted" => AuditAction::UserDeleted,
     "invite_created" => AuditAction::GuestInvited,
     "guest_extended" => AuditAction::GuestExtended,
+    "channel_archived" => AuditAction::ChannelArchived,
+    "channel_restored" => AuditAction::ChannelRestored,
     "conversation_member_added" | "space_member_added" => AuditAction::MemberAdded,
     "conversation_member_removed" | "space_member_removed" => AuditAction::MemberRemoved,
     "conversation_member_role_changed" | "space_member_role_changed" | "oidc_role_changed" => {
@@ -2312,7 +2312,7 @@ mod tests {
       // Eleven lists, the further pages of channels (2) and users (1), the audit log, and one
       // request per space: 27 requests in all, once, where the console used to make about 650.
       assert!(
-        paths.len() <= 11 + 3 + 1 + SPACES as usize,
+        paths.len() <= 11 + 3 + 1 + 1 + SPACES as usize,
         "{} requests: {paths:?}",
         paths.len()
       );

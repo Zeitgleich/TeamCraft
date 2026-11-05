@@ -1,22 +1,23 @@
 //! Guest lifecycle (PLAN.md §12, issue #212): guests expire, they and their sponsor hear about it
 //! beforehand, and who may extend them is decided here (admin.md §3.2.2).
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
-use teamcraft_db::{AdminGuestListFilter, ExpiryChange, GuestNoticeDue, NewSpaceMember, User};
+use teamcraft_db::{AdminGuestListFilter, ExpiryChange, GuestNoticeDue, SpaceMember, User};
 use teamcraft_proto::{
   AdminGuestFilter, AdminGuestResponse, ExpiringGuestResponse, ExtendGuestRequest, GatewayEvent,
-  ListAdminGuestsQuery, ListAdminGuestsResponse, ListExpiringGuestsResponse, Permission, SpaceId,
-  SpaceMemberResponse, SpaceRole, Target, UserId,
+  GuestExtendOffer, ListAdminGuestsQuery, ListAdminGuestsResponse, ListExpiringGuestsResponse, Permission,
+  SpaceId, SpaceMemberResponse, SpaceRole, Target, UserId,
 };
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, Time, UtcOffset};
 use tracing::warn;
 
 use super::access::{SpaceAccess, allows, is_guest, load_space, require, space_target};
 use super::audit::{self, Target as AuditTarget};
 use super::convert::{offset_date_time, unix_millis, user_summary};
-use super::spaces::remove_everywhere;
+use super::spaces::remove_expired;
 use super::workspace::{MAX_GUEST_EXPIRY_DAYS, current_guest_policy};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -28,6 +29,49 @@ use crate::state::AppState;
 const BATCH: i64 = 200;
 /// Guests one person's "ending soon" list shows.
 const EXPIRING_LIST_LIMIT: i64 = 100;
+/// How far the notice offers to extend, in days.
+const EXTEND_OFFER_DAYS: [u32; 2] = [30, 90];
+
+/// Removes guests whose membership expired at `now` from their space and its channels, and tells the
+/// guest, the sponsor and the space's admins. Returns how many were removed.
+pub async fn expire_once(state: &AppState, now: OffsetDateTime) -> Result<usize, ApiError> {
+  let expired = state.database.list_expired_guests(now, BATCH).await?;
+  let mut removed = 0;
+  for guest in expired {
+    let Some(user) = state.database.get_user(guest.user).await? else {
+      continue;
+    };
+    let members = state.database.list_space_members(guest.space).await?;
+    let audience = terms_audience(&members, guest.user, guest.maybe_sponsor);
+
+    match remove_expired(state, guest.space, guest.user, now).await {
+      Ok(Some(_)) => {},
+      // Extended or made a member since the list was read.
+      Ok(None) => continue,
+      Err(error) => {
+        warn!(%error, space_id = %guest.space, "removing an expired guest failed");
+        continue;
+      },
+    }
+    audit::record(
+      state,
+      None,
+      "guest_expired",
+      Some(AuditTarget::new("space", guest.space)),
+      &json!({"user_id": guest.user.to_string()}),
+    )
+    .await?;
+    state.hub.publish(
+      audience,
+      &GatewayEvent::GuestExpired {
+        space_id: guest.space,
+        user: user_summary(state, &user),
+      },
+    );
+    removed += 1;
+  }
+  Ok(removed)
+}
 
 /// How far a caller may extend a guest's membership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,7 +120,39 @@ fn right_of(
   )
 }
 
-/// Extends a guest: an absolute time, so that a retry changes nothing. Never shortens.
+/// What a caller with `right` can extend a guest to: days on top of the expiry, and where their limit
+/// is nearer than that, the limit. The limit counts from the start of the day, so the list stays the
+/// same all day and what it offers is still within the limit when it is taken.
+fn extend_offers(right: ExtensionRight, expires_at: OffsetDateTime) -> Vec<GuestExtendOffer> {
+  let maybe_limit = match right {
+    ExtensionRight::None => return Vec::new(),
+    ExtensionRight::Unlimited => None,
+    ExtensionRight::UpTo(limit) => Some(limit.to_offset(UtcOffset::UTC).replace_time(Time::MIDNIGHT)),
+  };
+  let mut offers: Vec<GuestExtendOffer> = Vec::new();
+  for days in EXTEND_OFFER_DAYS {
+    let full = expires_at + Duration::days(i64::from(days));
+    match maybe_limit {
+      Some(limit) if limit <= expires_at => {},
+      Some(limit) if limit < full => {
+        if !offers.iter().any(|offer| offer.maybe_days.is_none()) {
+          offers.push(GuestExtendOffer {
+            until: unix_millis(limit),
+            maybe_days: None,
+          });
+        }
+      },
+      _ => offers.push(GuestExtendOffer {
+        until: unix_millis(full),
+        maybe_days: Some(days),
+      }),
+    }
+  }
+  offers
+}
+
+/// Extends a guest: an absolute time, so that a retry changes nothing. Never shortens, and a removal,
+/// a promotion or a later extension at the same moment stands (the database decides).
 pub async fn extend(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -85,31 +161,9 @@ pub async fn extend(
   request: ExtendGuestRequest,
 ) -> Result<SpaceMemberResponse, ApiError> {
   let access = load_space(state, caller, space).await?;
-  if state.database.space_role(space, user_id).await? != Some(SpaceRole::Guest) {
-    return Err(ApiError::user_not_found());
-  }
-  let user = state
-    .database
-    .get_user(user_id)
-    .await?
-    .ok_or_else(ApiError::user_not_found)?;
-  let (maybe_expires, maybe_sponsor) = state
-    .database
-    .space_member_terms(space, user_id)
-    .await?
-    .ok_or_else(ApiError::user_not_found)?;
+  let maybe_terms = state.database.space_member_terms(space, user_id).await?;
+  let maybe_sponsor = maybe_terms.and_then(|(_, sponsor)| sponsor);
   let now = OffsetDateTime::now_utc();
-  let at = offset_date_time(request.expires_at)
-    .filter(|at| *at > now && *at <= now + Duration::days(i64::from(MAX_GUEST_EXPIRY_DAYS)))
-    .ok_or_else(|| ApiError::InvalidRequest("expires_at must be in the future, within ten years".into()))?;
-  let Some(current) = maybe_expires else {
-    return Err(ApiError::Conflict("this guest does not expire".into()));
-  };
-  if at < current {
-    return Err(ApiError::InvalidRequest(
-      "extending can't shorten the membership".into(),
-    ));
-  }
   let right = right_of(
     state,
     caller,
@@ -118,20 +172,32 @@ pub async fn extend(
     access.view.maybe_role.is_some(),
     now,
   );
+  // First: somebody who may not extend learns nothing about who is a guest here.
+  if right == ExtensionRight::None {
+    return Err(ApiError::Forbidden("you may not extend this guest".into()));
+  }
+  if state.database.space_role(space, user_id).await? != Some(SpaceRole::Guest) {
+    return Err(ApiError::user_not_found());
+  }
+  let user = state
+    .database
+    .get_user(user_id)
+    .await?
+    .ok_or_else(ApiError::user_not_found)?;
+  let at = offset_date_time(request.expires_at)
+    .filter(|at| *at > now && *at <= now + Duration::days(i64::from(MAX_GUEST_EXPIRY_DAYS)))
+    .ok_or_else(|| ApiError::InvalidRequest("expires_at must be in the future, within ten years".into()))?;
+  let Some((Some(current), _)) = maybe_terms else {
+    return Err(ApiError::Conflict("this guest does not expire".into()));
+  };
+  if at < current {
+    return Err(ApiError::InvalidRequest(
+      "extending can't shorten the membership".into(),
+    ));
+  }
   ensure_within(right, at)?;
 
-  // The same time again is a retry after a lost response: nothing changes, nobody hears twice.
-  if at != current {
-    state
-      .database
-      .upsert_space_member(&NewSpaceMember {
-        space,
-        user: user_id,
-        role: SpaceRole::Guest,
-        expiry: ExpiryChange::Set(at),
-        maybe_sponsor: None,
-      })
-      .await?;
+  let expires_at = if state.database.extend_guest_expiry(space, user_id, at).await? {
     audit::record(
       state,
       Some(caller.user.id),
@@ -141,13 +207,74 @@ pub async fn extend(
     )
     .await?;
     publish_terms(state, space, user_id, maybe_sponsor).await?;
-  }
+    at
+  } else {
+    // A retry, somebody who extended further, or it changed under this request: what stands now.
+    if state.database.space_role(space, user_id).await? != Some(SpaceRole::Guest) {
+      return Err(ApiError::user_not_found());
+    }
+    state
+      .database
+      .space_member_terms(space, user_id)
+      .await?
+      .and_then(|(expires, _)| expires)
+      .ok_or_else(ApiError::user_not_found)?
+  };
   Ok(SpaceMemberResponse {
     user: user_summary(state, &user),
     role: SpaceRole::Guest,
-    maybe_expires_at: Some(unix_millis(at)),
+    maybe_expires_at: Some(unix_millis(expires_at)),
     maybe_sponsor_user_id: maybe_sponsor,
   })
+}
+
+/// The sponsor's limit also holds for a new membership with an expiry of the caller's choice, or
+/// removing and adding again would go around it. The caller becomes the sponsor.
+pub(super) fn check_new_expiry(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  target: &Target,
+  at: OffsetDateTime,
+) -> Result<(), ApiError> {
+  ensure_within(
+    extension_right(
+      is_guest(caller),
+      allows(state, caller, &Permission::ManageSpaceMembers, target),
+      true,
+      current_guest_policy(state).effective_sponsor_extension_days(),
+      OffsetDateTime::now_utc(),
+    ),
+    at,
+  )
+}
+
+/// An expiry changed through the general member update: audited, and those concerned read again.
+pub(super) async fn note_expiry_change(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  space: SpaceId,
+  user_id: UserId,
+  change: ExpiryChange,
+) -> Result<(), ApiError> {
+  let maybe_expires_at = match change {
+    ExpiryChange::Keep => return Ok(()),
+    ExpiryChange::Set(at) => Some(unix_millis(at).0),
+    ExpiryChange::Clear => None,
+  };
+  audit::record(
+    state,
+    Some(caller.user.id),
+    "guest_extended",
+    Some(AuditTarget::new("space", space)),
+    &json!({"user_id": user_id.to_string(), "expires_at": maybe_expires_at}),
+  )
+  .await?;
+  let maybe_sponsor = state
+    .database
+    .space_member_terms(space, user_id)
+    .await?
+    .and_then(|(_, sponsor)| sponsor);
+  publish_terms(state, space, user_id, maybe_sponsor).await
 }
 
 /// The limits also hold for the general member update: only somebody without limit clears an
@@ -230,11 +357,7 @@ pub async fn list_expiring(
         user: user_summary(state, user),
         expires_at: unix_millis(row.expires_at),
         is_own: row.user == caller.user.id,
-        can_extend: right != ExtensionRight::None,
-        maybe_extend_limit: match right {
-          ExtensionRight::UpTo(limit) => Some(unix_millis(limit)),
-          ExtensionRight::None | ExtensionRight::Unlimited => None,
-        },
+        extend_offers: extend_offers(right, row.expires_at),
       })
     })
     .collect();
@@ -308,9 +431,10 @@ async fn users_by_id(
   Ok(users.into_iter().map(|user| (user.id, user)).collect())
 }
 
-/// Sends the notices due at `now`: an event for whoever is online, whose apps read the list again,
-/// and one mail per person. The mails name no guest and no space. A lost mail is not sent again:
-/// the notice in the app stands until the expiry. Returns how many memberships were noticed.
+/// Sends the notices due at `now`: one event for everybody concerned, whose apps read the list
+/// again, and one mail per person. The mails name no guest and no space. A lost mail is not sent
+/// again: the notice in the app stands until the expiry. A guest whose notice fails, or whose expiry
+/// changed meanwhile, doesn't hold up the others. Returns how many memberships were noticed.
 pub async fn send_notices_once(state: &AppState, now: OffsetDateTime) -> Result<usize, ApiError> {
   let lead_days: Vec<i32> = current_guest_policy(state)
     .effective_notice_days()
@@ -326,9 +450,19 @@ pub async fn send_notices_once(state: &AppState, now: OffsetDateTime) -> Result<
     .await?;
   let mut sponsored: HashMap<UserId, u32> = HashMap::new();
   let mut guests: HashMap<UserId, i32> = HashMap::new();
+  let mut audience: HashSet<UserId> = HashSet::new();
+  let mut members: HashMap<SpaceId, Vec<SpaceMember>> = HashMap::new();
+  let mut sent = 0;
   for notice in &due {
-    state.database.record_guest_notice(notice).await?;
-    publish_terms(state, notice.space, notice.user, notice.maybe_sponsor).await?;
+    match note_notice(state, notice, &mut members, &mut audience).await {
+      Ok(true) => {},
+      Ok(false) => continue,
+      Err(error) => {
+        warn!(%error, space_id = %notice.space, "a guest expiry notice failed");
+        continue;
+      },
+    }
+    sent += 1;
     if let Some(sponsor) = notice.maybe_sponsor {
       *sponsored.entry(sponsor).or_default() += 1;
     }
@@ -338,8 +472,31 @@ pub async fn send_notices_once(state: &AppState, now: OffsetDateTime) -> Result<
       .and_modify(|left| *left = days.min(*left))
       .or_insert(days);
   }
+  if !audience.is_empty() {
+    state.hub.publish(audience, &GatewayEvent::GuestTermsUpdate);
+  }
   mail_notices(state, &sponsored, &guests).await?;
-  Ok(due.len())
+  Ok(sent)
+}
+
+/// Records one notice and adds whom it concerns; `false` when the expiry moved meanwhile and nothing
+/// is to be said. The space's members are read once per run.
+async fn note_notice(
+  state: &AppState,
+  notice: &GuestNoticeDue,
+  members: &mut HashMap<SpaceId, Vec<SpaceMember>>,
+  audience: &mut HashSet<UserId>,
+) -> Result<bool, ApiError> {
+  if let Entry::Vacant(slot) = members.entry(notice.space) {
+    slot.insert(state.database.list_space_members(notice.space).await?);
+  }
+  if !state.database.record_guest_notice(notice).await? {
+    return Ok(false);
+  }
+  if let Some(listed) = members.get(&notice.space) {
+    audience.extend(terms_audience(listed, notice.user, notice.maybe_sponsor));
+  }
+  Ok(true)
 }
 
 fn days_left(notice: &GuestNoticeDue, now: OffsetDateTime) -> i32 {
@@ -407,75 +564,34 @@ async fn mail_notices(
   Ok(())
 }
 
-/// Tells the guest, the sponsor and the space's admins to read the list again.
+/// Whom a guest's terms concern: the guest, the space's admins and the sponsor if still in the space
+/// (a private space tells nothing to somebody who was removed from it).
+pub(super) fn terms_audience(
+  members: &[SpaceMember],
+  guest: UserId,
+  maybe_sponsor: Option<UserId>,
+) -> Vec<UserId> {
+  members
+    .iter()
+    .filter(|member| member.role == SpaceRole::SpaceAdmin || Some(member.user.id) == maybe_sponsor)
+    .map(|member| member.user.id)
+    .chain([guest])
+    .collect()
+}
+
+/// Tells those concerned to read the list again.
 async fn publish_terms(
   state: &AppState,
   space: SpaceId,
   user: UserId,
   maybe_sponsor: Option<UserId>,
 ) -> Result<(), ApiError> {
-  let mut audience: Vec<UserId> = state
-    .database
-    .list_space_members(space)
-    .await?
-    .into_iter()
-    .filter(|member| member.role == SpaceRole::SpaceAdmin)
-    .map(|member| member.user.id)
-    .collect();
-  audience.push(user);
-  audience.extend(maybe_sponsor);
+  let members = state.database.list_space_members(space).await?;
   state.hub.publish(
-    audience,
-    &GatewayEvent::GuestTermsUpdate {
-      space_id: space,
-      user_id: user,
-    },
+    terms_audience(&members, user, maybe_sponsor),
+    &GatewayEvent::GuestTermsUpdate,
   );
   Ok(())
-}
-
-/// Removes guests whose membership expired at `now` from their space and its channels, and tells
-/// the sponsor and the space's admins. Returns how many were removed.
-pub async fn expire_once(state: &AppState, now: OffsetDateTime) -> Result<usize, ApiError> {
-  let expired = state.database.list_expired_guests(now, BATCH).await?;
-  let mut removed = 0;
-  for guest in expired {
-    let Some(user) = state.database.get_user(guest.user).await? else {
-      continue;
-    };
-    // Admins to inform: the space's admins plus the sponsor (who may have left or been demoted).
-    let mut audience: Vec<_> = state
-      .database
-      .list_space_members(guest.space)
-      .await?
-      .into_iter()
-      .filter(|member| member.role == SpaceRole::SpaceAdmin)
-      .map(|member| member.user.id)
-      .collect();
-    audience.extend(guest.maybe_sponsor);
-
-    if let Err(error) = remove_everywhere(state, guest.space, guest.user, false).await {
-      warn!(%error, space_id = %guest.space, "removing an expired guest failed");
-      continue;
-    }
-    audit::record(
-      state,
-      None,
-      "guest_expired",
-      Some(AuditTarget::new("space", guest.space)),
-      &json!({"user_id": guest.user.to_string()}),
-    )
-    .await?;
-    state.hub.publish(
-      audience,
-      &GatewayEvent::GuestExpired {
-        space_id: guest.space,
-        user: user_summary(state, &user),
-      },
-    );
-    removed += 1;
-  }
-  Ok(removed)
 }
 
 #[cfg(test)]
@@ -565,6 +681,58 @@ mod tests {
     assert!(ensure_within(ExtensionRight::UpTo(limit), limit + Duration::seconds(1)).is_err());
     assert!(ensure_within(ExtensionRight::None, NOW).is_err());
     assert!(ensure_within(ExtensionRight::Unlimited, limit + Duration::days(1000)).is_ok());
+  }
+
+  mod offers {
+    use super::*;
+
+    const EXPIRES: OffsetDateTime = time::macros::datetime!(2026-11-10 12:00 UTC);
+
+    fn days_and_until(right: ExtensionRight) -> Vec<(Option<u32>, OffsetDateTime)> {
+      extend_offers(right, EXPIRES)
+        .into_iter()
+        .map(|offer| (offer.maybe_days, offset_date_time(offer.until).unwrap()))
+        .collect()
+    }
+
+    #[test]
+    fn nobody_without_the_right_gets_any() {
+      assert!(days_and_until(ExtensionRight::None).is_empty());
+    }
+
+    #[test]
+    fn admins_and_sponsors_with_room_get_both() {
+      let both = vec![
+        (Some(30), EXPIRES + Duration::days(30)),
+        (Some(90), EXPIRES + Duration::days(90)),
+      ];
+      assert_eq!(days_and_until(ExtensionRight::Unlimited), both);
+      assert_eq!(
+        days_and_until(ExtensionRight::UpTo(NOW + Duration::days(120))),
+        both
+      );
+    }
+
+    /// The "up to 30 days" preset: the button stays, as far as the limit goes, and is accepted.
+    #[test]
+    fn a_nearer_limit_is_offered_as_itself_once() {
+      let right = ExtensionRight::UpTo(NOW + Duration::days(30));
+      let midnight = time::macros::datetime!(2026-12-05 0:00 UTC);
+      assert_eq!(days_and_until(right), vec![(None, midnight)]);
+      assert!(ensure_within(right, midnight).is_ok());
+    }
+
+    #[test]
+    fn a_limit_before_the_expiry_offers_nothing() {
+      assert!(days_and_until(ExtensionRight::UpTo(NOW + Duration::days(1))).is_empty());
+    }
+
+    #[test]
+    fn they_stay_the_same_through_the_day() {
+      let morning = ExtensionRight::UpTo(time::macros::datetime!(2026-12-05 8:00 UTC));
+      let evening = ExtensionRight::UpTo(time::macros::datetime!(2026-12-05 22:00 UTC));
+      assert_eq!(extend_offers(morning, EXPIRES), extend_offers(evening, EXPIRES));
+    }
   }
 
   #[test]

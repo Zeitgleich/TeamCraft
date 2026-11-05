@@ -160,6 +160,7 @@ pub enum AuditAction {
   OwnerAssigned,
   GuestInvited,
   ChannelArchived,
+  ChannelRestored,
   /// A sponsor or admin gave a guest more time (issue #212).
   GuestExtended,
   ChannelDeleted,
@@ -187,7 +188,7 @@ pub enum AuditAction {
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 30] = [
+  pub const ALL: [AuditAction; 31] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
@@ -200,6 +201,7 @@ impl AuditAction {
     Self::OwnerAssigned,
     Self::GuestInvited,
     Self::ChannelArchived,
+    Self::ChannelRestored,
     Self::GuestExtended,
     Self::ChannelDeleted,
     Self::SpaceDeleted,
@@ -234,6 +236,7 @@ impl AuditAction {
       Self::OwnerAssigned => "owner-assigned",
       Self::GuestInvited => "guest-invited",
       Self::ChannelArchived => "channel-archived",
+      Self::ChannelRestored => "channel-restored",
       Self::GuestExtended => "guest-extended",
       Self::ChannelDeleted => "channel-deleted",
       Self::SpaceDeleted => "space-deleted",

@@ -534,6 +534,7 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
           }
         })
       }}
+      <Show when=move || delete_access.can(&Permission::ManageChannelProperties) fallback=|| ()>
       <button
         type="button"
         class="btn"
@@ -547,6 +548,7 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
       >
         {move || i18n.t(if current.with(|channel| channel.is_archived) { "admin-channel-restore" } else { "admin-archive" })}
       </button>
+      </Show>
     </div>
     <Show when=move || is_confirming_archive.get() fallback=|| ()>
       <div class="detail-actions" role="alert">

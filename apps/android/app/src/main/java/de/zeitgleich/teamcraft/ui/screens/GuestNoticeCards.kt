@@ -20,19 +20,6 @@ import de.zeitgleich.teamcraft.ui.theme.Spacing
 import java.text.DateFormat
 import java.util.Date
 
-private val EXTEND_DAYS = listOf(30L, 90L)
-private const val DAY_MS = 24L * 60 * 60 * 1000
-
-/** What the user may offer: nothing without the right, nothing past their limit (the server's word). */
-fun guestExtendOptions(guest: ExpiringGuest): List<Long> =
-  if (!guest.canExtend) {
-    emptyList()
-  } else {
-    EXTEND_DAYS.filter { days ->
-      guest.extendLimit?.let { limit -> guest.expiresAt + days * DAY_MS <= limit } ?: true
-    }
-  }
-
 /**
  * Guest memberships ending soon, at the top of Activity (issue #212): the guest's own, and for the
  * sponsor and the space's admins the ones they can extend.
@@ -55,9 +42,16 @@ fun GuestNoticeSection(guests: List<ExpiringGuest>, onExtend: (ExpiringGuest, Lo
         } else {
           Text(stringResource(R.string.guest_notice_row, guest.user.displayName, guest.spaceName, date))
           Row(horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
-            guestExtendOptions(guest).forEach { days ->
-              OutlinedButton(onClick = { onExtend(guest, guest.expiresAt + days * DAY_MS) }) {
-                Text(pluralStringResource(R.plurals.guest_notice_extend, days.toInt(), days.toInt()))
+            guest.extendOffers.forEach { offer ->
+              OutlinedButton(onClick = { onExtend(guest, offer.until) }) {
+                val days = offer.days
+                Text(
+                  if (days != null) {
+                    pluralStringResource(R.plurals.guest_notice_extend, days, days)
+                  } else {
+                    stringResource(R.string.guest_notice_extend_until, dates.format(Date(offer.until)))
+                  },
+                )
               }
             }
           }

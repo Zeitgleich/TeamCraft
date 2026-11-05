@@ -274,3 +274,4 @@ guest-notice-extend = { $count ->
     [one] { $count } Tag mehr
    *[other] { $count } Tage mehr
 }
+guest-notice-extend-until = Bis { $date }

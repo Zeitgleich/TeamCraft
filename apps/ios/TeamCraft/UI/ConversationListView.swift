@@ -9,6 +9,8 @@ struct ConversationListView: View {
   /// The local store was read once: until then an empty list is not "no chats yet" (no flash of
   /// the empty state at start; the store answers at once, offline too).
   @State private var hasLoaded = false
+  /// Guests can't: they find archived channels in the list instead. Offered until the core says.
+  @State private var canBrowseChannels = true
   @State private var previews: [String: ChatPreview] = [:]
   @State private var selection: String?
   @State private var query = ""
@@ -103,6 +105,7 @@ struct ConversationListView: View {
     .searchable(text: $query, prompt: Text("search_hint"))
     .task(id: model.changeCount) {
       conversations = await model.conversations()
+      canBrowseChannels = await model.browseSnapshot()?.canBrowseChannels ?? true
       hasLoaded = true
       maybeFirstSync = await model.firstSync()
       previews = await model.chatPreviews(conversations, myId: account.userId)
@@ -248,7 +251,7 @@ struct ConversationListView: View {
         conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip)
     }
     switch tab {
-    case .spaces: return channelSections(conversations)
+    case .spaces: return channelSections(conversations, listsArchived: !canBrowseChannels)
     case .home:
       return directSections(
         conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip)
@@ -528,6 +531,7 @@ struct ConversationListView: View {
   private func title(of title: SectionTitle) -> LocalizedStringKey {
     switch title {
     case .favorites: return "favorites"
+    case .archived: return "section_archived"
     case .space(let name): return LocalizedStringKey(name)
     case .channels: return "channels"
     case .directMessages: return "direct_messages"

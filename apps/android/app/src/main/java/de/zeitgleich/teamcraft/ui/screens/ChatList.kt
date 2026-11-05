@@ -480,7 +480,7 @@ private fun ActivityTab(
  */
 @Composable
 private fun SpacesTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit, canBrowse: Boolean) {
-  val sections = channelSections(conversations)
+  val sections = channelSections(conversations, listsArchived = !canBrowse)
   if (sections.isEmpty()) {
     EmptyState(
       icon = Icons.Filled.Search,
@@ -817,6 +817,7 @@ internal fun EmptyHint(text: String) {
 internal fun SectionHeader(title: SectionTitle) {
   val text = when (title) {
     SectionTitle.Favorites -> stringResource(R.string.favorites)
+    SectionTitle.Archived -> stringResource(R.string.section_archived)
     SectionTitle.Channels -> stringResource(R.string.channels)
     SectionTitle.DirectMessages -> stringResource(R.string.direct_messages)
     SectionTitle.Everything -> stringResource(R.string.list_conversations)

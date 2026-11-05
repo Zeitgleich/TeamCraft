@@ -360,6 +360,11 @@ pub async fn add_space_member(
     ));
   }
   let expiry = new_member_expiry(state, &request.role, request.maybe_expires_at)?;
+  if let ExpiryChange::Set(at) = expiry
+    && request.maybe_expires_at.is_some()
+  {
+    super::guests::check_new_expiry(state, caller, &access.target(), at)?;
+  }
 
   state
     .database
@@ -427,6 +432,7 @@ pub async fn update_space_member(
     &json!({"user_id": user_id.to_string(), "role": request.role.as_str()}),
   )
   .await?;
+  super::guests::note_expiry_change(state, caller, id, user_id, expiry).await?;
   notify_space(state, id, &GatewayEvent::SpaceUpdate { space_id: id }).await?;
   // A space admin manages every channel of the space: the member's `my_permissions` there changed.
   if current != request.role {
@@ -486,6 +492,42 @@ pub async fn remove_everywhere(
     .database
     .remove_space_member(id, user_id, deletes_memberless)
     .await?;
+  announce_left(state, id, user_id, &remaining_before, &left).await?;
+  Ok(left)
+}
+
+/// Removes a guest whose membership ran out at `now`, unless somebody extended it or made them a
+/// member after the expiry job read its list: then `None`, and nothing changed.
+pub(super) async fn remove_expired(
+  state: &AppState,
+  id: SpaceId,
+  user_id: UserId,
+  now: OffsetDateTime,
+) -> Result<Option<SpaceLeft>, ApiError> {
+  let remaining_before = state.database.list_space_members(id).await?;
+  let Some(left) = state.database.remove_expired_guest(id, user_id, now).await? else {
+    return Ok(None);
+  };
+  announce_left(state, id, user_id, &remaining_before, &left).await?;
+  Ok(Some(left))
+}
+
+async fn announce_left(
+  state: &AppState,
+  id: SpaceId,
+  user_id: UserId,
+  remaining_before: &[SpaceMember],
+  left: &SpaceLeft,
+) -> Result<(), ApiError> {
+  if let Some(guest) = remaining_before
+    .iter()
+    .find(|member| member.user.id == user_id && member.role == SpaceRole::Guest)
+  {
+    state.hub.publish(
+      super::guests::terms_audience(remaining_before, user_id, guest.maybe_sponsor),
+      &GatewayEvent::GuestTermsUpdate,
+    );
+  }
   state.hub.publish(
     remaining_before
       .iter()
@@ -515,7 +557,7 @@ pub async fn remove_everywhere(
   if !left.deleted.is_empty() {
     wake_sweep(state);
   }
-  Ok(left)
+  Ok(())
 }
 
 /// The expiry of a newly added member: guests get the given one or the configured default.

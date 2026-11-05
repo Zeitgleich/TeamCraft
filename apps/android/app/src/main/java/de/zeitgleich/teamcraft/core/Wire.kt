@@ -417,8 +417,14 @@ data class ExpiringGuest(
   val user: ExpiringGuestUser,
   @SerialName("expires_at") val expiresAt: Long,
   @SerialName("is_own") val isOwn: Boolean = false,
-  @SerialName("can_extend") val canExtend: Boolean = false,
-  @SerialName("extend_limit") val extendLimit: Long? = null,
+  @SerialName("extend_offers") val extendOffers: List<GuestExtendOffer> = emptyList(),
+)
+
+/** What the user may extend to, as the server decided it; without `days`, as far as their limit goes. */
+@Serializable
+data class GuestExtendOffer(
+  val until: Long,
+  val days: Int? = null,
 )
 
 @Serializable

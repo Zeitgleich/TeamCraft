@@ -7,6 +7,8 @@
     <item quantity="one">%d more day</item>
     <item quantity="other">%d more days</item>
   </plurals>
+  <string name="guest_notice_extend_until">Until %s</string>
+  <string name="section_archived">Archived</string>
   <string name="read_only_archived">This channel is archived. You can read it, but nobody can post here.</string>
   <string name="browse_show_archived">Show archived channels I\'m in</string>
 </resources>

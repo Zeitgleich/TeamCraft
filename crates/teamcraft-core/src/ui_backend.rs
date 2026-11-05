@@ -2655,7 +2655,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
 
   fn expiring_guests(&self) -> Vec<teamcraft_proto::ExpiringGuestResponse> {
-    self.read(crate::read_state::expiring_guests(&self.store))
+    // Past its time an entry says nothing any more, also before the server's event gets here.
+    let mut guests = self.read(crate::read_state::expiring_guests(&self.store));
+    let now = self.clock.now_ms();
+    guests.retain(|guest| guest.expires_at.0 > now);
+    guests
   }
 
   fn extend_guest(&self, space: SpaceId, user: UserId, expires_at_ms: i64) {

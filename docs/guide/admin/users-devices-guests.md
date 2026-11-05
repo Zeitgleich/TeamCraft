@@ -74,7 +74,7 @@ allowed_email_domains`) and in the signed policy; the check applies to invitatio
 external meeting invitees and sign-in. Before a guest's access ends, the guest, the sponsor and the
 space's admins get a notice in the app and a mail that names no guest and no space (14 and 3 days
 before by default, Administration → Security).
-The sponsor can extend from the notice, up to a limit in the same place (120 days from today by
+The sponsor, while still in the space, can extend from the notice, up to a limit in the same place (120 days from today by
 default); admins aren't limited. When access ends, the guest leaves the space and its channels; their
 messages and files stay under the retention rules, and the account remains until an admin deactivates
 or deletes it. Guests expire automatically (90 days by default); the sponsor

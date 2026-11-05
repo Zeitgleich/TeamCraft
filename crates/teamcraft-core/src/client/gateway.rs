@@ -224,7 +224,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.trace_lap("link requests");
           self.refresh_admin_join_requests_after_connect().await;
           self.refresh_expiring_guests_after_connect().await;
-          self.refresh_expiring_guests_after_connect().await;
           self.trace_finish("resumed");
           return Ok(GatewayStart {
             connection,
@@ -285,6 +284,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.refresh_link_requests().await;
     self.trace_lap("link requests");
     self.refresh_admin_join_requests_after_connect().await;
+    self.refresh_expiring_guests_after_connect().await;
     self.trace_finish("fresh");
     Ok(GatewayStart {
       connection,
@@ -662,7 +662,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         read_state::update_marks(&self.store, |marks| marks.meetings += 1)
       },
       // The list is read again; the change itself is only a hint (issue #212).
-      GatewayEvent::GuestExpired { .. } | GatewayEvent::GuestTermsUpdate { .. } => {
+      GatewayEvent::GuestExpired { .. } | GatewayEvent::GuestTermsUpdate => {
         if let Err(error) = self.refresh_expiring_guests().await {
           // Not fatal: the next connect reads the list again.
           tracing::debug!(%error, "could not read the guests ending soon");

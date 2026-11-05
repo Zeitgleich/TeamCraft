@@ -940,7 +940,7 @@ admin-guests-never = Nie angemeldet
 admin-guests-no-sponsor = Keine Betreuung
 admin-guests-no-expiry = Nie
 policy-guest-notices = Hinweise, bevor der Zugang eines Gastes endet
-policy-guest-notices-hint = Der Gast, die betreuende Person und die Admins des Space bekommen einen Hinweis in der App und per E-Mail. Die E-Mail nennt weder Gast noch Space.
+policy-guest-notices-hint = Der Gast, die betreuende Person und die Admins des Space bekommen einen Hinweis in der App. Der Gast und die betreuende Person bekommen außerdem eine E-Mail, die weder Gast noch Space nennt.
 policy-guest-notices-default = 14 und 3 Tage vorher
 policy-guest-notices-long = 30, 14 und 3 Tage vorher
 policy-guest-notices-short = 7 Tage und 1 Tag vorher
@@ -953,3 +953,8 @@ policy-guest-sponsor-days = { $count ->
    *[other] Bis zu { $count } Tage
 }
 audit-guest-extended = Gast verlängert
+audit-channel-restored = Kanal wiederhergestellt
+admin-guests-skipped = { $count ->
+    [one] Einer davon läuft nie ab und wird beim Verlängern ausgelassen.
+   *[other] { $count } davon laufen nie ab und werden beim Verlängern ausgelassen.
+}

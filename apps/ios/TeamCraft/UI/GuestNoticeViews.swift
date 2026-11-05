@@ -4,6 +4,8 @@ import SwiftUI
 /// sponsor and the space's admins the ones they can extend.
 struct GuestNoticeSection: View {
   @Environment(AppModel.self) private var model
+  @State private var pendingId: String?
+  @State private var hasFailed = false
 
   var body: some View {
     if !model.expiringGuests.isEmpty {
@@ -13,6 +15,9 @@ struct GuestNoticeSection: View {
         }
       } header: {
         Text("guest_notice_title")
+      }
+      .alert("guest_notice_failed", isPresented: $hasFailed) {
+        Button("cancel", role: .cancel) {}
       }
     }
   }
@@ -26,17 +31,29 @@ struct GuestNoticeSection: View {
       VStack(alignment: .leading, spacing: 6) {
         Text("guest_notice_row \(guest.user.displayName) \(guest.spaceName) \(date)")
         HStack {
-          ForEach(guest.extendOptions, id: \.self) { days in
-            Button("guest_notice_extend \(days)") {
-              let expiresAtMs = guest.expiresAt + days * ExpiringGuest.dayMs
-              Task {
-                await model.perform(.extendGuest(spaceId: guest.spaceId, userId: guest.user.id, expiresAtMs: expiresAtMs))
+          ForEach(guest.extendOffers ?? [], id: \.self) { offer in
+            Button {
+              Task { await extend(guest, to: offer) }
+            } label: {
+              if let days = offer.days {
+                Text("guest_notice_extend \(days)")
+              } else {
+                Text("guest_notice_extend_until \(offer.untilDate.formatted(date: .abbreviated, time: .omitted))")
               }
             }
             .buttonStyle(.bordered)
+            .disabled(pendingId == guest.id)
           }
         }
       }
     }
+  }
+
+  private func extend(_ guest: ExpiringGuest, to offer: ExpiringGuest.Offer) async {
+    pendingId = guest.id
+    let maybeFailure = await model.performReporting(
+      .extendGuest(spaceId: guest.spaceId, userId: guest.user.id, expiresAtMs: offer.until))
+    pendingId = nil
+    hasFailed = maybeFailure != nil
   }
 }
