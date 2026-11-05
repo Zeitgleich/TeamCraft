@@ -109,7 +109,7 @@ pub fn HomeSidebar(#[prop(optional)] is_list: bool) -> impl IntoView {
   };
 
   view! {
-    <nav class="sidebar dm-sidebar" aria-label=move || i18n.t("chats-title")>
+    <nav class="sidebar dm-sidebar" class:is-list=is_list aria-label=move || i18n.t("chats-title")>
       <div class="sidebar-head">
         <h2 class="space-name">{move || i18n.t("chats-title")}</h2>
         <EntriesToggle entries=entries controls="chats-entries" />
