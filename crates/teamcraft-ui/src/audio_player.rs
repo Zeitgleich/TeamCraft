@@ -74,8 +74,9 @@ pub struct AudioRequest {
   pub format: AudioFormat,
   /// The playback rate: 1.0, or a voice message's chosen speed.
   pub rate: f64,
-  /// A voice message (#204): Opus the shell can decode where the webview can't play it.
-  pub is_voice: bool,
+  /// A voice message (#204), with the workspace's longest: Opus the shell can decode where the
+  /// webview can't play it, no longer than that.
+  pub maybe_voice_max_seconds: Option<u32>,
 }
 
 /// The `<audio>` element and the listeners it needs kept alive.
@@ -331,7 +332,7 @@ impl Parts {
     let maybe_request = self.maybe_request.try_get_value().flatten();
     let has_tried = self.has_tried_decoding.try_get_value().unwrap_or(true);
     if let Some(request) = maybe_request
-      && request.is_voice
+      && request.maybe_voice_max_seconds.is_some()
       && !has_tried
       && crate::auth::tauri::is_available()
     {
@@ -347,7 +348,8 @@ impl Parts {
     let generation = self.generation.try_get_value().unwrap_or_default();
     self.phase.try_set(AudioPhase::Loading);
     spawn_local(async move {
-      let result = decoded_wav(request.conversation, request.key).await;
+      let max_seconds = request.maybe_voice_max_seconds.unwrap_or_default();
+      let result = decoded_wav(request.conversation, request.key, max_seconds).await;
       if self.generation.try_get_value() != Some(generation) {
         return;
       }
@@ -578,23 +580,58 @@ fn apply_rate(audio: &web_sys::HtmlMediaElement, rate: f64) {
 }
 
 /// A voice message decoded to WAV by the desktop app's shell, as a URL.
-async fn decoded_wav(conversation: ConversationId, key: MediaKey) -> Result<ObjectUrl, String> {
+async fn decoded_wav(
+  conversation: ConversationId,
+  key: MediaKey,
+  max_seconds: u32,
+) -> Result<ObjectUrl, String> {
+  #[derive(serde::Deserialize)]
+  struct Decoded {
+    token: String,
+    size_bytes: u64,
+  }
   let args = serde_json::json!({
     "conversation": conversation,
     "message": key.message,
     "file_id": key.attachment.to_string(),
+    "max_seconds": max_seconds,
   });
-  let js_args =
-    js_sys::JSON::parse(&args.to_string()).map_err(|_| "could not encode the arguments".to_owned())?;
-  let answer = crate::auth::tauri::invoke("voice_playback_wav", js_args)
-    .await
-    .map_err(|error| error.to_string())?;
-  if !answer.is_instance_of::<js_sys::ArrayBuffer>() {
-    return Err("unreadable answer of voice_playback_wav".to_owned());
+  let decoded = crate::auth::tauri::call::<Decoded>("voice_playback_prepare", &args).await?;
+  let read = read_decoded(&decoded.token, decoded.size_bytes).await;
+  let release = serde_json::json!({ "token": decoded.token });
+  if let Err(error) = crate::auth::tauri::call::<()>("voice_playback_release", &release).await {
+    tracing::debug!(%error, "a decoded voice message was not deleted");
   }
-  url_for(&js_sys::Uint8Array::new(&answer), "audio/wav", None)
-    .await
-    .map_err(|error| error.to_string())
+  let parts = read?;
+  let bag = web_sys::BlobPropertyBag::new();
+  bag.set_type("audio/wav");
+  let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)
+    .map_err(|_| "the decoded voice message could not be put together".to_owned())?;
+  ObjectUrl::from_blob(&blob).ok_or_else(|| "no URL for the decoded voice message".to_owned())
+}
+
+/// Reads a decoded voice message from the shell in parts (no single huge IPC message).
+async fn read_decoded(token: &str, size_bytes: u64) -> Result<js_sys::Array, String> {
+  let parts = js_sys::Array::new();
+  let mut offset = 0u64;
+  while offset < size_bytes {
+    let args = serde_json::json!({ "token": token, "offset": offset });
+    let js_args =
+      js_sys::JSON::parse(&args.to_string()).map_err(|_| "could not encode the arguments".to_owned())?;
+    let answer = crate::auth::tauri::invoke("voice_playback_read", js_args)
+      .await
+      .map_err(|error| error.to_string())?;
+    if !answer.is_instance_of::<js_sys::ArrayBuffer>() {
+      return Err("unreadable answer of voice_playback_read".to_owned());
+    }
+    let chunk = js_sys::Uint8Array::new(&answer);
+    if chunk.length() == 0 {
+      break;
+    }
+    offset += u64::from(chunk.length());
+    parts.push(&chunk);
+  }
+  Ok(parts)
 }
 
 /// The decrypted file as a URL of its audio type.

@@ -20,6 +20,7 @@ use crate::lightbox::MediaKey;
 use crate::settings;
 use crate::state::use_app_state;
 use crate::video_controls::{PlayerCommand, format_seconds};
+use crate::voice_recorder::is_in_call;
 
 /// Where the chosen speed is remembered.
 pub const SPEED_KEY: &str = "voice-playback-speed";
@@ -83,14 +84,19 @@ pub fn VoiceCard(file: FileInfo) -> impl IntoView {
   };
   let status = transfer_status(&file.transfer, actions);
   let conversation = file.conversation;
+  let max_seconds = state.read(|backend| backend.voice_message_policy()).max_seconds();
   let press = move || {
+    // No voice message plays over a call (#204).
+    if is_in_call(state) {
+      return;
+    }
     state.active_inline_video.set(None);
     player.press(AudioRequest {
       conversation,
       key,
       format,
       rate: speed.get_untracked().rate(),
-      is_voice: true,
+      maybe_voice_max_seconds: Some(max_seconds),
     });
   };
   let cycle_speed = move |_| {
@@ -137,6 +143,9 @@ pub fn VoiceCard(file: FileInfo) -> impl IntoView {
   };
   let play_label = move || {
     let length = format_seconds(duration());
+    if is_in_call(state) && phase.get() != Some(AudioPhase::Playing) {
+      return i18n.t("voice-in-call-playback");
+    }
     let key = match phase.get() {
       Some(AudioPhase::Playing) => "voice-pause",
       Some(AudioPhase::Loading) => "voice-loading",
@@ -211,7 +220,10 @@ pub fn VoiceCard(file: FileInfo) -> impl IntoView {
         class:is-playing=move || phase.get() == Some(AudioPhase::Playing)
         aria-label=play_label
         aria-busy=move || (phase.get() == Some(AudioPhase::Loading)).to_string()
-        disabled=move || phase.get() == Some(AudioPhase::Failed(AudioFailure::Unplayable))
+        disabled=move || {
+          phase.get() == Some(AudioPhase::Failed(AudioFailure::Unplayable))
+            || (is_in_call(state) && phase.get() != Some(AudioPhase::Playing))
+        }
         on:click=move |_| press()
       >
         {move || match phase.get() {

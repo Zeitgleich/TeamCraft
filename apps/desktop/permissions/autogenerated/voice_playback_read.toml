@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-playback-read"
+description = "Enables the voice_playback_read command without any pre-configured scope."
+commands.allow = ["voice_playback_read"]
+
+[[permission]]
+identifier = "deny-voice-playback-read"
+description = "Denies the voice_playback_read command without any pre-configured scope."
+commands.deny = ["voice_playback_read"]

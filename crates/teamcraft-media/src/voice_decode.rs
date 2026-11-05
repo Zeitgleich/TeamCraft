@@ -5,11 +5,12 @@
 //!
 //! The output is a 16-bit mono WAV file at 24 kHz, which is all a voice needs: about 2.9 MB a
 //! minute. Input and output are streamed, so a long message costs no memory; decoding stops at the
-//! limit given, so a hostile file can't fill the disk. The file is the caller's to keep in private
+//! limit given and at the length the input's size can plausibly hold ([`plausible_length`]), so a
+//! small hostile file can't fill the disk or memory. The file is the caller's to keep in private
 //! storage and delete.
 
 use std::fs::File;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Cursor, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
 use symphonia::core::errors::Error as FormatError;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
-use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 use thiserror::Error;
 
@@ -28,6 +29,9 @@ pub const DECODED_RATE_HZ: u32 = 24_000;
 const MAX_PACKET_SAMPLES: usize = 2_880;
 /// Broken packets in a row after which the rest of the file is given up.
 const MAX_BROKEN_PACKETS: usize = 16;
+/// The fewest bytes a second of Opus takes in a container: a silent 20 ms packet is a few bytes,
+/// so 100 bytes a second is below anything real. Bounds what a small file can decode to.
+const MIN_BYTES_PER_SECOND: u64 = 100;
 
 #[derive(Debug, Error)]
 pub enum VoiceDecodeError {
@@ -42,10 +46,57 @@ pub enum VoiceDecodeError {
   File(#[from] std::io::Error),
 }
 
-/// Decodes the Opus file at `input` into a WAV file at `output`, at most `max` long. Returns the
-/// decoded length.
+/// Decodes the Opus file at `input` into a WAV file at `output`, at most `max` long (and at most
+/// what its size can hold). Returns the decoded length.
 pub fn decode_to_wav(input: &Path, output: &Path, max: Duration) -> Result<Duration, VoiceDecodeError> {
-  let source = MediaSourceStream::new(Box::new(File::open(input)?), Default::default());
+  let file = File::open(input)?;
+  let max = max.min(plausible_length(file.metadata()?.len()));
+  into_file(output, |wav| decode_source(Box::new(file), wav, max))
+}
+
+/// Like [`decode_to_wav`] from bytes in memory: the decrypted file needn't touch the disk.
+pub fn decode_bytes_to_wav(
+  bytes: Vec<u8>,
+  output: &Path,
+  max: Duration,
+) -> Result<Duration, VoiceDecodeError> {
+  into_file(output, |wav| decode_bytes(bytes, wav, max))
+}
+
+/// Decodes Opus `bytes` as WAV into `output` (a file, or memory for tests and fuzzing), with the
+/// same limits as [`decode_to_wav`].
+pub fn decode_bytes<W: Write + Seek>(
+  bytes: Vec<u8>,
+  output: W,
+  max: Duration,
+) -> Result<Duration, VoiceDecodeError> {
+  let max = max.min(plausible_length(bytes.len() as u64));
+  decode_source(Box::new(Cursor::new(bytes)), output, max)
+}
+
+/// The longest a voice message of `size_bytes` can plausibly play ([`MIN_BYTES_PER_SECOND`]).
+pub fn plausible_length(size_bytes: u64) -> Duration {
+  Duration::from_secs(size_bytes / MIN_BYTES_PER_SECOND)
+}
+
+/// Runs `decode` into a new file at `output`; nothing half-written is left behind on failure.
+fn into_file(
+  output: &Path,
+  decode: impl FnOnce(BufWriter<File>) -> Result<Duration, VoiceDecodeError>,
+) -> Result<Duration, VoiceDecodeError> {
+  let decoded = decode(BufWriter::new(File::create(output)?));
+  if decoded.is_err() {
+    drop(std::fs::remove_file(output));
+  }
+  decoded
+}
+
+fn decode_source<W: Write + Seek>(
+  input: Box<dyn MediaSource>,
+  output: W,
+  max: Duration,
+) -> Result<Duration, VoiceDecodeError> {
+  let source = MediaSourceStream::new(input, Default::default());
   let mut format = symphonia::default::get_probe()
     .probe(
       &Hint::new(),
@@ -69,18 +120,10 @@ pub fn decode_to_wav(input: &Path, output: &Path, max: Duration) -> Result<Durat
   // libopus mixes a stereo stream down to the one channel asked for.
   let mut decoder = Decoder::new(DECODED_RATE_HZ, Channels::Mono)?;
   let max_samples = (max.as_secs_f64() * f64::from(DECODED_RATE_HZ)) as u64;
-  let mut wav = WavWriter::create(output)?;
-  let decoded = decode_packets(&mut *format, track_id, &mut decoder, &mut wav, max_samples);
-  let checked = match (decoded, wav.samples) {
-    (Err(error), _) => Err(error),
-    (Ok(()), 0) => Err(VoiceDecodeError::Empty),
-    (Ok(()), _) => Ok(()),
-  };
-  if let Err(error) = checked {
-    drop(wav);
-    // Nothing half-written is left behind.
-    drop(std::fs::remove_file(output));
-    return Err(error);
+  let mut wav = WavWriter::new(output)?;
+  decode_packets(&mut *format, track_id, &mut decoder, &mut wav, max_samples)?;
+  if wav.samples == 0 {
+    return Err(VoiceDecodeError::Empty);
   }
   let samples = wav.finish()?;
   Ok(Duration::from_secs_f64(
@@ -94,7 +137,7 @@ fn decode_packets(
   format: &mut dyn FormatReader,
   track_id: u32,
   decoder: &mut Decoder,
-  wav: &mut WavWriter,
+  wav: &mut WavWriter<impl Write + Seek>,
   max_samples: u64,
 ) -> Result<(), VoiceDecodeError> {
   let mut pcm = vec![0i16; MAX_PACKET_SAMPLES];
@@ -124,14 +167,13 @@ fn decode_packets(
 }
 
 /// A mono 16-bit WAV file written as it goes; the sizes in its header are filled in at the end.
-struct WavWriter {
-  file: BufWriter<File>,
+struct WavWriter<W: Write + Seek> {
+  file: W,
   samples: u64,
 }
 
-impl WavWriter {
-  fn create(path: &Path) -> Result<Self, std::io::Error> {
-    let mut file = BufWriter::new(File::create(path)?);
+impl<W: Write + Seek> WavWriter<W> {
+  fn new(mut file: W) -> Result<Self, std::io::Error> {
     file.write_all(&wav_header(0))?;
     Ok(Self { file, samples: 0 })
   }
@@ -179,7 +221,6 @@ mod tests {
   use std::path::PathBuf;
 
   use super::*;
-  use crate::audio_codec::{OpusEncoder, OpusEncoderConfig};
   use crate::audio_frame::FRAME_SAMPLES_PER_CHANNEL;
   use crate::ogg_opus::OggOpusWriter;
 
@@ -233,14 +274,29 @@ mod tests {
     }
   }
 
+  #[test]
+  fn a_small_file_decodes_no_longer_than_its_size_allows() {
+    assert_eq!(plausible_length(1_000), Duration::from_secs(10));
+    let folder = Folder::new("bytes");
+    let output = folder.file("out.wav");
+    let bytes = ogg_opus(500);
+    let length = decode_bytes_to_wav(bytes.clone(), &output, Duration::from_secs(60)).unwrap();
+    assert!(length <= plausible_length(bytes.len() as u64));
+    assert!(length > Duration::from_secs(9), "{length:?}");
+  }
+
+  #[test]
+  fn decodes_into_memory() {
+    let mut wav = Cursor::new(Vec::new());
+    let length = decode_bytes(ogg_opus(50), &mut wav, Duration::from_secs(60)).unwrap();
+    assert!((length.as_secs_f64() - 1.0).abs() < 0.05, "{length:?}");
+    assert_eq!(&wav.get_ref()[..4], b"RIFF");
+  }
+
   /// `frames` 20 ms frames of a 440 Hz tone, encoded and written as Ogg Opus.
   fn ogg_opus(frames: usize) -> Vec<u8> {
-    let mut encoder = OpusEncoder::new(OpusEncoderConfig {
-      has_dtx: false,
-      ..OpusEncoderConfig::default()
-    })
-    .unwrap();
-    let pre_skip = encoder.lookahead_samples().unwrap();
+    let mut encoder = opus::Encoder::new(48_000, Channels::Mono, opus::Application::Voip).unwrap();
+    let pre_skip = u16::try_from(encoder.get_lookahead().unwrap()).unwrap();
     let mut writer = OggOpusWriter::new(Vec::new(), pre_skip).unwrap();
     for frame in 0..frames {
       let pcm: Vec<i16> = (0..FRAME_SAMPLES_PER_CHANNEL)
@@ -250,7 +306,10 @@ mod tests {
         })
         .collect();
       writer
-        .push(encoder.encode(&pcm).unwrap(), FRAME_SAMPLES_PER_CHANNEL as u32)
+        .push(
+          encoder.encode_vec(&pcm, 1275).unwrap(),
+          FRAME_SAMPLES_PER_CHANNEL as u32,
+        )
         .unwrap();
     }
     writer.finish().unwrap()

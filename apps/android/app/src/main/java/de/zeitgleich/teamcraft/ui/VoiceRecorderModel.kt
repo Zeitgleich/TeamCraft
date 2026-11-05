@@ -137,9 +137,18 @@ class VoiceRecorderModel(
           runCatching { VoiceRecording.start(path, maxSeconds.toUInt()) }
         }
         result.onSuccess { recording ->
+          // Stopped, discarded or interrupted while the microphone opened: nothing was recorded.
+          val isStillLocked = whenMicrophoneOpened(state.value)
+          if (isStillLocked == null) {
+            withContext(Dispatchers.IO) {
+              recording.cancel()
+              recording.destroy()
+            }
+            abandonFocus()
+            if (state.value is VoiceState.Finishing) state.value = VoiceState.Idle
+            return@withLock
+          }
           maybeRecording = recording
-          // The finger may have let go while the microphone opened: the start state says how.
-          val isStillLocked = (state.value as? VoiceState.Starting)?.isLocked ?: isLocked
           state.value = VoiceState.Recording(owner, isStillLocked, 0, emptyList())
           maybePoll = scope.launch { poll(owner) }
         }.onFailure { error ->
@@ -245,6 +254,21 @@ class VoiceRecorderModel(
     state.value = VoiceState.Idle
   }
 
+  /** Sign-out or another account: a recording ends without a take, and every take is deleted. */
+  suspend fun forgetAll() {
+    lock.withLock {
+      maybePoll?.cancel()
+      state.value = VoiceState.Idle
+      withContext(Dispatchers.IO) {
+        maybeRecording?.cancel()
+        maybeRecording?.destroy()
+        maybeRecording = null
+        voiceClearTakes(takes.absolutePath)
+      }
+      abandonFocus()
+    }
+  }
+
   fun refusalShown() {
     refusals.value = null
   }
@@ -308,6 +332,13 @@ class VoiceRecorderModel(
     maybeFocus = null
   }
 }
+
+/**
+ * What a recording whose microphone just opened does, by the state meanwhile: still starting, it
+ * records (hands-free or held, as the finger left it: the result); anything else (a stop, a
+ * discard, an interrupt came first) means `null`, and the recording is dropped.
+ */
+fun whenMicrophoneOpened(state: VoiceState): Boolean? = (state as? VoiceState.Starting)?.isLocked
 
 /** Whether the app is in a call or one rings: no recording then, and a running one stops. */
 fun inCallFlow(call: StateFlow<*>, ring: StateFlow<*>, scope: CoroutineScope): StateFlow<Boolean> {

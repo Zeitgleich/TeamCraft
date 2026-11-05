@@ -17,7 +17,7 @@ struct TeamCraftApp: App {
         .task {
           updateShield(phase: scenePhase)
           // Voice takes left by a crash or a killed app are never sent; decoded copies go too (#204).
-          VoiceFolders.clearAtStart()
+          VoiceFolders.clearAll()
           // A cold launch may never report a change of `scenePhase` to active (`onChange` below).
           model.loadWaitingShare()
           await model.bootstrap()

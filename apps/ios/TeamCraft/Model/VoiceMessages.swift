@@ -18,7 +18,8 @@ enum VoiceFolders {
   static var takes: URL { prepared("voice-takes") }
   static var playback: URL { prepared("voice-playback") }
 
-  static func clearAtStart() {
+  /// Empties both folders: at start (takes left by a killed app) and at sign-out.
+  static func clearAll() {
     for folder in [takes, playback] {
       let entries = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
       for entry in entries { try? FileManager.default.removeItem(at: entry) }
@@ -286,8 +287,15 @@ final class VoiceRecorder {
     } catch {
       throw AttachmentError.unreadable
     }
+    let picked: PickedFile
+    do {
+      picked = try importer.importPickedMedia(PickedMedia(url: named))
+    } catch {
+      // The take goes back where it was and stays in review for another try.
+      try? FileManager.default.moveItem(at: named, to: source)
+      throw error
+    }
     reset()
-    let picked = try importer.importPickedMedia(PickedMedia(url: named))
     return PickedFile(
       fileName: picked.fileName, mediaType: "audio/ogg", path: picked.path, maybeDurationMs: take.durationMs,
       maybeWaveform: take.waveform)

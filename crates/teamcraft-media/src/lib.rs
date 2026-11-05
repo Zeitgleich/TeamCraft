@@ -117,7 +117,7 @@ pub mod system_audio;
 pub mod system_audio_pipewire;
 #[cfg(all(feature = "wasapi-loopback", target_os = "windows"))]
 pub mod system_audio_wasapi;
-#[cfg(feature = "voice")]
+#[cfg(feature = "voice-decode")]
 pub mod voice_decode;
 #[cfg(feature = "voice")]
 pub mod voice_recording;

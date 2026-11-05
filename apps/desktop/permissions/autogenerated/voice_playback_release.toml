@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-playback-release"
+description = "Enables the voice_playback_release command without any pre-configured scope."
+commands.allow = ["voice_playback_release"]
+
+[[permission]]
+identifier = "deny-voice-playback-release"
+description = "Denies the voice_playback_release command without any pre-configured scope."
+commands.deny = ["voice_playback_release"]

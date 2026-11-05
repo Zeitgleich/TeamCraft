@@ -8,8 +8,10 @@
 //!   done; the recording folder is emptied at every start, so a take left by a crash is never
 //!   sent.
 //! - Voice messages the webview can't play (Ogg or WebM Opus in the macOS webview) are decoded
-//!   here to WAV ([`voice_playback_wav`]) in a private folder that only holds the file while it
-//!   is read.
+//!   here from memory to WAV ([`voice_playback_prepare`]), no longer than the workspace's limit
+//!   and than the file's size can hold, into a private folder; the webview reads it in parts and
+//!   lets go of it ([`voice_playback_release`]). The decrypted Opus never touches the disk.
+//! - Sign-out ([`stop_for_sign_out`]) cancels a recording and deletes every take.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -26,18 +28,29 @@ use teamcraft_media::voice_recording::{VoiceRecorder, VoiceRecordingError, clear
 use teamcraft_proto::{ConversationId, MAX_VOICE_MESSAGE_MINUTES, MessageId};
 
 use crate::core::commands::CoreHost;
-use crate::video_playback::{create_private_dir, write_private};
+use crate::video_playback::create_private_dir;
 
 /// The private folder of takes, in the app's cache folder.
 const TAKES_FOLDER: &str = "voice-takes";
 /// The private folder of voice messages decoded for playback.
 const PLAYBACK_FOLDER: &str = "voice-playback";
+/// The most of a decoded file one read hands the webview.
+const PLAYBACK_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
 
 /// The recording under way, if any; one at a time for the whole app.
 #[derive(Default)]
 pub struct VoiceState {
   maybe_recorder: Mutex<Option<VoiceRecorder>>,
   takes: AtomicU64,
+  /// Numbers the decoded files, so two decodes never share one.
+  decodes: AtomicU64,
+}
+
+/// A decoded voice message ready to be read.
+#[derive(Debug, serde::Serialize)]
+pub struct DecodedVoice {
+  token: String,
+  size_bytes: u64,
 }
 
 /// Empties the recording and playback folders, left over from the last run.
@@ -47,6 +60,15 @@ pub fn clear_voice_folders(app: &AppHandle) {
       clear_takes(&folder);
     }
   }
+}
+
+/// Sign-out: a recording ends without a take and every take and decoded file is deleted.
+pub fn stop_for_sign_out(app: &AppHandle) {
+  let state = app.state::<VoiceState>();
+  if let Some(recorder) = take_recorder(&state) {
+    recorder.cancel();
+  }
+  clear_voice_folders(app);
 }
 
 /// Starts recording from the system's default microphone, for at most `max_seconds`.
@@ -176,41 +198,86 @@ pub fn voice_take_discard(app: AppHandle, path: String) -> Result<(), String> {
   fs::remove_file(take).map_err(|error| error.to_string())
 }
 
-/// A voice message decoded to WAV, for a webview that can't play its Opus (macOS). The plaintext
-/// and the WAV only exist in the private folder while this runs.
+/// Decodes a voice message to WAV for a webview that can't play its Opus (macOS), at most
+/// `max_seconds` (the workspace's limit) long. The webview then reads it with
+/// [`voice_playback_read`] and lets go of it with [`voice_playback_release`].
 #[tauri::command(rename_all = "snake_case")]
-pub async fn voice_playback_wav(
+pub async fn voice_playback_prepare(
   app: AppHandle,
   host: State<'_, CoreHost>,
+  state: State<'_, VoiceState>,
   conversation: ConversationId,
   message: MessageId,
   file_id: String,
-) -> Result<tauri::ipc::Response, String> {
+  max_seconds: u32,
+) -> Result<DecodedVoice, String> {
   let plaintext = host
     .current()?
     .attachment(conversation, message, file_id, AttachmentPriority::Now)
     .await?;
   let folder = private_folder(&app, PLAYBACK_FOLDER).map_err(|error| error.to_string())?;
-  let input = folder.join(format!("{message}.opus"));
-  let output = folder.join(format!("{message}.wav"));
-  write_private(&input, plaintext.expose_secret()).map_err(|error| error.to_string())?;
-  let max = Duration::from_secs(u64::from(MAX_VOICE_MESSAGE_MINUTES) * 60 + 60);
+  let token = format!("{:016x}", state.decodes.fetch_add(1, Ordering::Relaxed));
+  let output = folder.join(format!("{token}.wav"));
+  let max_minutes = u32::from(MAX_VOICE_MESSAGE_MINUTES);
+  let max = Duration::from_secs(u64::from(max_seconds.clamp(1, max_minutes * 60)));
+  let bytes = plaintext.expose_secret().to_vec();
   let decoded = tokio::task::spawn_blocking({
-    let (input, output) = (input.clone(), output.clone());
-    move || voice_decode::decode_to_wav(&input, &output, max).map(|_| fs::read(&output))
+    let output = output.clone();
+    move || voice_decode::decode_bytes_to_wav(bytes, &output, max)
   })
   .await;
-  drop(fs::remove_file(&input));
-  drop(fs::remove_file(&output));
   match decoded {
-    Ok(Ok(Ok(wav))) => Ok(tauri::ipc::Response::new(wav)),
-    Ok(Ok(Err(error))) => Err(error.to_string()),
+    Ok(Ok(_)) => {
+      let size_bytes = fs::metadata(&output).map_err(|error| error.to_string())?.len();
+      Ok(DecodedVoice { token, size_bytes })
+    },
     Ok(Err(error)) => {
       tracing::debug!(%error, conversation_id = %conversation, "a voice message did not decode");
       Err("not playable".to_owned())
     },
     Err(_) => Err("not playable".to_owned()),
   }
+}
+
+/// Up to 4 MiB of a decoded voice message from `offset`.
+#[tauri::command(rename_all = "snake_case")]
+pub fn voice_playback_read(
+  app: AppHandle,
+  token: String,
+  offset: u64,
+) -> Result<tauri::ipc::Response, String> {
+  use std::io::{Read, Seek, SeekFrom};
+
+  let path = decoded_path(&app, &token)?;
+  let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+  file
+    .seek(SeekFrom::Start(offset))
+    .map_err(|error| error.to_string())?;
+  let mut chunk = Vec::new();
+  file
+    .take(PLAYBACK_CHUNK_BYTES)
+    .read_to_end(&mut chunk)
+    .map_err(|error| error.to_string())?;
+  Ok(tauri::ipc::Response::new(chunk))
+}
+
+/// Deletes a decoded voice message once the webview holds it.
+#[tauri::command(rename_all = "snake_case")]
+pub fn voice_playback_release(app: AppHandle, token: String) -> Result<(), String> {
+  let path = decoded_path(&app, &token)?;
+  match fs::remove_file(path) {
+    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+    _ => Ok(()),
+  }
+}
+
+/// The decoded file of `token`; only tokens [`voice_playback_prepare`] hands out (hex digits).
+fn decoded_path(app: &AppHandle, token: &str) -> Result<PathBuf, String> {
+  if token.len() != 16 || !token.chars().all(|char| char.is_ascii_hexdigit()) {
+    return Err("not a decoded voice message".to_owned());
+  }
+  let folder = private_folder(app, PLAYBACK_FOLDER).map_err(|error| error.to_string())?;
+  Ok(folder.join(format!("{token}.wav")))
 }
 
 fn take_recorder(state: &VoiceState) -> Option<VoiceRecorder> {

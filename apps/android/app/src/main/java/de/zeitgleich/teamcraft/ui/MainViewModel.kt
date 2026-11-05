@@ -1044,6 +1044,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     graph.push.beginSignOut()
     linkRequestList.value = emptyList()
     review.value = null
+    // A recording and its take don't outlive the account on this device (#204).
+    voicePlayer.stop()
+    voice.forgetAll()
     graph.calls.hangUp()
     graph.push.unregister()
     // A setup given up on leaves no keys behind, and its device is revoked (issue #415).

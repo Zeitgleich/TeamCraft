@@ -1408,6 +1408,10 @@ final class AppModel {
   /// Signs the active account out on this device: push registration, keys, session and local
   /// plaintext go; the server entry stays.
   private func endSession() async {
+    // A recording, its take and decoded voice messages don't outlive the account here (#204).
+    VoicePlayer.shared.stop()
+    VoiceRecorder.shared.discard()
+    VoiceFolders.clearAll()
     await stopSyncing()
     await clearSpacePictures()
     // Before the keys go: deletes the push key here, ends the sealed device token at the gateway

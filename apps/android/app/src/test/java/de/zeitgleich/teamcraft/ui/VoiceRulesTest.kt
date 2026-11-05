@@ -23,6 +23,16 @@ import org.junit.Test
 /** Voice messages (#204): speeds, the hold gesture, the policy and the wire shapes. */
 class VoiceRulesTest {
   @Test
+  fun aRecordingWhoseMicrophoneOpensLateKeepsGoingOnlyIfStillStarting() {
+    val owner = VoiceOwner("1", null)
+    assertEquals(true, whenMicrophoneOpened(VoiceState.Starting(owner, isLocked = true)))
+    assertEquals(false, whenMicrophoneOpened(VoiceState.Starting(owner, isLocked = false)))
+    // Stopped, discarded or interrupted while the microphone opened: dropped, never stuck at 0:00.
+    assertNull(whenMicrophoneOpened(VoiceState.Finishing(owner)))
+    assertNull(whenMicrophoneOpened(VoiceState.Idle))
+  }
+
+  @Test
   fun speedsCycleAndAreRememberedByName() {
     assertEquals(VoiceSpeed.ONE_AND_HALF, VoiceSpeed.NORMAL.next())
     assertEquals(VoiceSpeed.NORMAL, VoiceSpeed.DOUBLE.next())

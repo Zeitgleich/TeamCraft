@@ -282,42 +282,75 @@ impl VoiceRecorder {
   }
 
   /// The take as a file for the message (stopping the recording first if it runs), and the
-  /// recorder free again. `Err` with a reason for the log when it can't be handed over.
-  pub async fn take_file(self) -> Result<OutgoingFile, String> {
+  /// recorder free again. `Ok(None)` while a hand-over already runs. On `Err` (a reason for the
+  /// log) the take stays for another try.
+  pub async fn take_file(self) -> Result<Option<OutgoingFile>, String> {
     let parts = self.parts().ok_or("the recorder is gone")?;
     let info = match parts.maybe_phase.get_untracked() {
       Some(RecorderPhase::Review(info)) => info,
       Some(RecorderPhase::Starting | RecorderPhase::Recording) => self.finish(None).await?,
-      _ => return Err("no take to send".to_owned()),
+      _ => return Ok(None),
     };
     let source = parts
       .maybe_source
-      .try_update_value(Option::take)
+      .try_get_value()
       .flatten()
       .ok_or("the take is gone")?;
-    parts.maybe_phase.try_set(None);
-    parts.maybe_owner.try_set(None);
-    let (file_name, media_type, source) = match source {
-      TakeSource::Browser { blob, format } => {
-        let file_name = file_name_now(format.extension);
-        let source = browser_source(&blob, &file_name, format).await?;
-        (file_name, format.media_type, source)
+    parts.maybe_phase.try_set(Some(RecorderPhase::Finishing));
+    match hand_over(source).await {
+      Ok((file_name, media_type, source)) => {
+        parts.maybe_source.try_set_value(None);
+        parts.maybe_phase.try_set(None);
+        parts.maybe_owner.try_set(None);
+        Ok(Some(OutgoingFile {
+          file_name,
+          media_type: media_type.to_owned(),
+          source,
+          maybe_thumbnail: None,
+          maybe_duration_ms: Some(info.duration_ms),
+          maybe_waveform: Some(info.waveform),
+        }))
       },
-      TakeSource::Shell { path } => {
-        let file_name = file_name_now("ogg");
-        let args = json!({ "path": path, "file_name": file_name });
-        let staged = tauri::call::<String>("voice_take_stage", &args).await?;
-        (file_name, "audio/ogg", FileSource::Path { path: staged })
+      Err(error) => {
+        parts.maybe_phase.try_set(Some(RecorderPhase::Review(info)));
+        Err(error)
       },
-    };
-    Ok(OutgoingFile {
-      file_name,
-      media_type: media_type.to_owned(),
-      source,
-      maybe_thumbnail: None,
-      maybe_duration_ms: Some(info.duration_ms),
-      maybe_waveform: Some(info.waveform),
-    })
+    }
+  }
+
+  /// Ends whatever runs at once and deletes the take: the signed-in app goes away (sign-out,
+  /// another account). Works from a cleanup, where the reactive values may already be gone: a
+  /// recording in the page stops its microphone when dropped, and the shell is told to cancel.
+  pub fn release_now(self) {
+    self.stop_ticker();
+    let maybe_parts = self.parts();
+    let maybe_source =
+      maybe_parts.and_then(|parts| parts.maybe_source.try_update_value(Option::take).flatten());
+    drop(maybe_parts.and_then(|parts| parts.maybe_browser.try_update_value(Option::take).flatten()));
+    if let Some(parts) = maybe_parts {
+      parts.generation.try_update_value(|generation| *generation += 1);
+      parts.maybe_phase.try_set(None);
+      parts.maybe_owner.try_set(None);
+    }
+    if tauri::is_available() {
+      spawn_local(async move {
+        drop(tauri::call::<()>("voice_record_cancel", &json!({})).await);
+        if let Some(TakeSource::Shell { path }) = maybe_source {
+          drop(tauri::call::<()>("voice_take_discard", &json!({ "path": path })).await);
+        }
+      });
+    }
+  }
+
+  /// Stops `key`'s recording when its composer goes (the thread panel closed); its take stays.
+  pub fn interrupt_for(self, key: ComposerKey, reason: RecordingStop) {
+    let is_owner = self
+      .parts()
+      .and_then(|parts| parts.maybe_owner.try_get_untracked().flatten())
+      .is_some_and(|owner| owner == key);
+    if is_owner {
+      self.interrupt(reason);
+    }
   }
 
   /// Stops the recording and keeps the take; returns what the composer shows of it.
@@ -528,6 +561,32 @@ impl BrowserRecording {
   }
 }
 
+/// Gives a take to the core: the browser's bytes or file, or the shell's take moved into the
+/// upload staging folder. Returns the name, type and source of the attachment.
+async fn hand_over(source: TakeSource) -> Result<(String, &'static str, FileSource), String> {
+  match source {
+    TakeSource::Browser { blob, format } => {
+      let file_name = file_name_now(format.extension);
+      let source = browser_source(&blob, &file_name, format).await?;
+      Ok((file_name, format.media_type, source))
+    },
+    TakeSource::Shell { path } => {
+      let file_name = file_name_now("ogg");
+      let args = json!({ "path": path, "file_name": file_name });
+      let staged = tauri::call::<String>("voice_take_stage", &args).await?;
+      Ok((file_name, "audio/ogg", FileSource::Path { path: staged }))
+    },
+  }
+}
+
+/// A recording dropped anywhere (the app's state disposed at sign-out, a discard) stops its
+/// microphone: the browser's recording indicator never stays on for nothing.
+impl Drop for BrowserRecording {
+  fn drop(&mut self) {
+    self.release();
+  }
+}
+
 /// Opens the microphone in the page and starts recording.
 async fn start_in_browser() -> Result<BrowserRecording, RecordingRefusal> {
   let format = browser_format().ok_or(RecordingRefusal::Failed)?;
@@ -697,14 +756,21 @@ fn now() -> f64 {
     .map_or(0.0, |performance| performance.now())
 }
 
+/// Whether a call runs or rings: no recording starts and no voice message plays then (#204).
+pub fn is_in_call(state: crate::state::AppState) -> bool {
+  state.call.phase.get() != teamcraft_client_api::calls::CallPhase::Idle
+    || state.call.incoming.with(Option::is_some)
+}
+
 /// Stops a recording when a call starts or rings, the page goes to the background or the user
-/// leaves the conversation, and pauses voice and audio playback for a call (#204).
+/// leaves the conversation, and pauses voice and audio playback for a call (#204). Ends the
+/// recording and deletes the take when the signed-in app goes.
 pub fn interrupt_when_needed(state: crate::state::AppState) {
   let recorder = state.voice;
+  // Sign-out or another account: the signed-in app goes, and the recording and take with it.
+  on_cleanup(move || recorder.release_now());
   Effect::new(move |_| {
-    let is_in_call = state.call.phase.get() != teamcraft_client_api::calls::CallPhase::Idle
-      || state.call.incoming.with(Option::is_some);
-    if is_in_call {
+    if is_in_call(state) {
       recorder.interrupt(RecordingStop::Call);
       state.audio.pause();
     }

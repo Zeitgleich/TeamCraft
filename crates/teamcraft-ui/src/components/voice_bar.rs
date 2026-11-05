@@ -18,7 +18,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 use crate::video_controls::format_seconds;
-use crate::voice_recorder::{ComposerKey, RecorderPhase};
+use crate::voice_recorder::{ComposerKey, RecorderPhase, is_in_call};
 
 /// A press held this long records while held.
 const HOLD_DELAY: Duration = Duration::from_millis(300);
@@ -49,9 +49,11 @@ struct Hold {
 #[component]
 pub fn VoiceButton(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Callback<()>) -> impl IntoView {
   let i18n = use_i18n();
-  let recorder = use_app_state().voice;
+  let state = use_app_state();
+  let recorder = state.voice;
   let maybe_hold = RwSignal::new(None::<Hold>);
-  let is_busy_elsewhere = move || recorder.is_busy_elsewhere(key);
+  // Another composer's take, or a call: no recording starts (#204).
+  let is_busy_elsewhere = move || recorder.is_busy_elsewhere(key) || is_in_call(state);
   let is_active = move || recorder.phase_for(key).is_some();
   let on_pointer_down = move |ev: web_sys::PointerEvent| {
     if ev.button() != 0 || is_active() || is_busy_elsewhere() {
@@ -118,9 +120,14 @@ pub fn VoiceButton(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Ca
       recorder.press(key, max_seconds);
     }
   };
-  let label = move || match is_busy_elsewhere() {
-    true => i18n.t("voice-busy-elsewhere"),
-    false => i18n.t("voice-record"),
+  let label = move || {
+    if is_in_call(state) {
+      i18n.t("voice-in-call")
+    } else if recorder.is_busy_elsewhere(key) {
+      i18n.t("voice-busy-elsewhere")
+    } else {
+      i18n.t("voice-record")
+    }
   };
   view! {
     <button
@@ -144,7 +151,8 @@ pub fn VoiceButton(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Ca
 #[component]
 pub fn VoiceBar(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Callback<()>) -> impl IntoView {
   let i18n = use_i18n();
-  let recorder = use_app_state().voice;
+  let state = use_app_state();
+  let recorder = state.voice;
   let phase = Memo::new(move |_| recorder.phase_for(key));
   move || {
     let current = phase.get()?;
@@ -152,7 +160,7 @@ pub fn VoiceBar(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Callb
       RecorderPhase::Explaining => view! {
         <p class="voice-text">{move || i18n.t("voice-explain")}</p>
         <button class="btn btn-small" on:click=move |_| recorder.discard()>{move || i18n.t("cancel")}</button>
-        <button class="btn btn-small btn-primary" on:click=move |_| recorder.start(max_seconds)>
+        <button class="btn btn-small btn-primary" disabled=move || is_in_call(state) on:click=move |_| recorder.start(max_seconds)>
           {move || i18n.t("voice-explain-continue")}
         </button>
       }
@@ -209,7 +217,7 @@ pub fn VoiceBar(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Callb
       RecorderPhase::Refused(refusal) => view! {
         <p class="voice-text file-error" role="alert">{move || i18n.t(refusal_key(refusal))}</p>
         <button class="btn btn-small" on:click=move |_| recorder.discard()>{move || i18n.t("close")}</button>
-        <button class="btn btn-small btn-primary" on:click=move |_| recorder.start(max_seconds)>{move || i18n.t("voice-try-again")}</button>
+        <button class="btn btn-small btn-primary" disabled=move || is_in_call(state) on:click=move |_| recorder.start(max_seconds)>{move || i18n.t("voice-try-again")}</button>
       }
       .into_any(),
     };

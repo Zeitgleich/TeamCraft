@@ -5,6 +5,7 @@ use wasm_bindgen::JsCast;
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::scheduled::ScheduleCheck;
+use teamcraft_client_api::voice::RecordingStop;
 use teamcraft_proto::ClientMessageId;
 use wasm_bindgen_futures::JsFuture;
 
@@ -709,6 +710,8 @@ pub fn Composer(
   let voice_policy = state.read(|backend| backend.voice_message_policy());
   let can_record = voice_policy.enabled && VoiceRecorder::is_supported();
   let voice_max_seconds = voice_policy.max_seconds();
+  // A thread panel that closes takes its recording's microphone along; the take stays.
+  on_cleanup(move || state.voice.interrupt_for(voice_key, RecordingStop::Left));
   let send_voice = move || {
     let maybe_reply = state
       .reply_target
@@ -735,7 +738,8 @@ pub fn Composer(
     };
     leptos::task::spawn_local(async move {
       match state.voice.take_file().await {
-        Ok(file) => {
+        Ok(None) => {},
+        Ok(Some(file)) => {
           message.files.push(file);
           state.reply_target.try_set(None);
           priority.try_set(MessagePriority::Normal);

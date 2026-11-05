@@ -62,7 +62,9 @@ message-sounds = ["dep:teamcraft-client-api"]
 sound-files = ["native", "message-sounds", "dep:symphonia"]
 # Voice messages (#204): recording to Ogg Opus (`voice_recording`) and decoding Ogg or WebM Opus
 # to WAV for players that read neither (`voice_decode`: iOS, the macOS webview).
-voice = ["native", "dep:teamcraft-client-api", "dep:symphonia"]
+voice = ["native", "voice-decode", "dep:teamcraft-client-api"]
+# Only the decoder (libopus and symphonia, no audio devices): the fuzz target builds this.
+voice-decode = ["dep:opus", "dep:symphonia"]
 
 # Microphones and speakers through PipeWire as well (#1072): cpal's PipeWire host for the streams,
 # its PulseAudio host (native protocol, pure Rust) where no PipeWire daemon runs, ALSA last.
