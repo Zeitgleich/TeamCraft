@@ -1,4 +1,4 @@
-// Service worker of the web client: wake-ups for pushes, and the check that the app code is the
+// Service worker of the web client: wake-ups for pushes, shares from other apps, and the check that the app code is the
 // release that was signed (docs/e2ee.md §9.3).
 //
 // Verification. `scripts/sign-web-release.sh` writes `release.json` (every file of the bundle with
@@ -52,6 +52,16 @@ const STATE_CACHE = 'teamcraft-sw-state';
 const PENDING_STATE = '/pending';
 const PUSH_CONFIG_CACHE = 'teamcraft-push-config';
 const PUSH_WASM = '__PUSH_WASM__';
+
+// Sharing into the installed app (#208, the manifest's `share_target`). The content stays in this
+// browser: it waits in a cache of its own until the signed-in page takes it (share_into.rs), and
+// nothing goes to the server. File bodies are the browser's blobs on disk, not held in memory.
+const SHARE_PATH = '/share-target';
+const SHARE_CACHE = 'teamcraft-share-inbox';
+const MAX_SHARED_FILES = 10;
+const MAX_SHARED_TEXT_CHARS = 64 * 1024;
+// A share nobody picked a conversation for goes after this long (plaintext at rest).
+const SHARE_KEPT_MS = 7 * 24 * 60 * 60 * 1000;
 
 let status = { state: IS_PINNED ? 'pending' : 'unsigned', version: '', key_fingerprint: '', reason: '' };
 // Which release each page was loaded with (client ID -> { version, at }), and releases that were
@@ -117,6 +127,11 @@ self.addEventListener('message', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+  // Before everything else: a development build (no pinned key) takes shares too.
+  if (isShare(event.request)) {
+    event.respondWith(receiveShare(event.request));
+    return;
+  }
   if (!IS_PINNED) return;
   const request = event.request;
   const url = new URL(request.url);
@@ -126,6 +141,72 @@ self.addEventListener('fetch', (event) => {
     restored.then(() => (status.state === 'verified' ? fromVerifiedCache(event, url) : fetch(request))),
   );
 });
+
+function isShare(request) {
+  if (request.method !== 'POST') return false;
+  const url = new URL(request.url);
+  return url.origin === self.location.origin && url.pathname === SHARE_PATH;
+}
+
+// Keeps what the system's share sheet sent and opens the app. A page of another site can post a form
+// here too, so such a request is dropped; either way nothing is sent without the user picking a
+// conversation and pressing send. A failure comes back to the page in the address (`share-failed`).
+async function receiveShare(request) {
+  if (request.mode !== 'navigate' || isFromAnotherSite(request)) return Response.redirect('/', 303);
+  const id = `${Date.now()}-${crypto.randomUUID()}`;
+  const cache = await caches.open(SHARE_CACHE);
+  try {
+    await pruneShares(cache);
+    const form = await request.formData();
+    const text = (name) => {
+      const value = form.get(name);
+      return typeof value === 'string' ? value.slice(0, MAX_SHARED_TEXT_CHARS) : '';
+    };
+    const sent = form.getAll('files').filter((file) => file instanceof File);
+    const files = [];
+    for (const file of sent.slice(0, MAX_SHARED_FILES)) {
+      const path = `/share/${id}/file/${files.length}`;
+      await cache.put(path, new Response(file));
+      files.push({ path, name: file.name, media_type: file.type });
+    }
+    const left_out = Math.max(0, sent.length - MAX_SHARED_FILES);
+    const meta = { title: text('title'), text: text('text'), url: text('url'), files, left_out };
+    // Last: a share without its list is incomplete, and the next share prunes it.
+    await cache.put(`/share/${id}/meta`, new Response(JSON.stringify(meta)));
+    return Response.redirect('/', 303);
+  } catch (error) {
+    await deleteShare(cache, id);
+    return Response.redirect('/?share-failed', 303);
+  }
+}
+
+function isFromAnotherSite(request) {
+  if (!request.referrer) return false;
+  try {
+    return new URL(request.referrer).origin !== self.location.origin;
+  } catch (error) {
+    return true;
+  }
+}
+
+async function deleteShare(cache, id) {
+  const prefix = `/share/${id}/`;
+  for (const key of await cache.keys()) {
+    if (new URL(key.url).pathname.startsWith(prefix)) await cache.delete(key);
+  }
+}
+
+// Shares past their time, and pieces of one that was cut short (no list after a day).
+async function pruneShares(cache) {
+  const now = Date.now();
+  const entries = (await cache.keys()).map((key) => new URL(key.url).pathname.split('/'));
+  const ids = new Set(entries.map((parts) => parts[2]));
+  const listed = new Set(entries.filter((parts) => parts[3] === 'meta').map((parts) => parts[2]));
+  for (const id of ids) {
+    const age = now - Number.parseInt(id, 10);
+    if (!(age < SHARE_KEPT_MS) || (!listed.has(id) && age > 24 * 60 * 60 * 1000)) await deleteShare(cache, id);
+  }
+}
 
 async function restoreStatus() {
   if (!IS_PINNED) return;

@@ -6,3 +6,29 @@
 .modal-body .app-link-host { margin-block: var(--space-3); }
 /* "Open in the app" (app_links.rs): a button in the banner row, not a link in a text. */
 .open-in-app a.btn { text-decoration: none; }
+
+/* Sharing into the app (share_into.rs). */
+.share-into-notice {
+  position: fixed;
+  inset-block-start: var(--space-3);
+  inset-inline: var(--space-4);
+  margin-inline: auto;
+  width: fit-content;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  font-size: var(--text-sm);
+  z-index: 60;
+}
+.share-into-notice[role="alert"] { background: var(--mention-bg); color: var(--mention-text); }
+.share-into-summary { color: var(--text-muted); margin: 0 0 var(--space-2); overflow-wrap: anywhere; }
+.share-into-targets { max-height: 22rem; overflow: auto; margin-top: var(--space-2); }
+.share-into-targets .forward-list { max-height: none; overflow: visible; margin: 0; }
+.share-into-section-title { margin: var(--space-2) 0 var(--space-1); font-size: var(--text-xs); font-weight: var(--weight-semibold); color: var(--text-muted); }

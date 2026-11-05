@@ -10,7 +10,7 @@ use crate::auth::tauri;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
 use crate::reactive::SetIfAlive;
-use crate::shell_drop::{self, FILES_DROPPED_EVENT};
+use crate::shell_drop::{self, FILES_DROPPED_EVENT, ShellFile};
 use crate::state::{AppState, use_app_state};
 
 thread_local! {
@@ -22,9 +22,19 @@ thread_local! {
   static HOVERED_ZONE: Cell<Option<DroppedFiles>> = const { Cell::new(None) };
 }
 
-/// Files dropped on a conversation or thread, handed to its composer (provided by [`FileDrop`]).
+/// Files dropped on a conversation or thread, handed to its composer (provided by [`FileDrop`]):
+/// those the page has, and large ones that stay with the desktop shell.
 #[derive(Clone, Copy)]
-pub struct DroppedFiles(pub RwSignal<Vec<web_sys::File>, LocalStorage>);
+pub struct DroppedFiles(
+  pub RwSignal<Vec<web_sys::File>, LocalStorage>,
+  pub RwSignal<Vec<ShellFile>, LocalStorage>,
+);
+
+impl Default for DroppedFiles {
+  fn default() -> Self {
+    Self(RwSignal::new_local(Vec::new()), RwSignal::new_local(Vec::new()))
+  }
+}
 
 /// What a drop brings (see [`take_drop`]).
 pub enum DropContent {
@@ -56,7 +66,7 @@ pub struct FileDrop {
 impl FileDrop {
   /// A drop zone whose files reach the composer below it; `can_post` false ignores drags.
   pub fn provide(can_post: bool) -> Self {
-    let dropped = DroppedFiles(RwSignal::new_local(Vec::new()));
+    let dropped = DroppedFiles::default();
     provide_context(dropped);
     let depth = RwSignal::new(0_i32);
     // A drag cancelled with Esc or ended elsewhere leaves no `dragleave` on some engines.
@@ -229,11 +239,8 @@ pub(crate) async fn attach_from_shell(
   state: AppState,
   i18n: I18n,
 ) {
-  let maybe_upload_limit = state.read(|backend| backend.max_upload_bytes());
-  let limit = maybe_upload_limit.map_or(shell_drop::READ_MAX_BYTES, |upload| {
-    upload.min(shell_drop::READ_MAX_BYTES)
-  });
-  let taken = match shell_drop::take(limit).await {
+  let maybe_limit = state.read(|backend| backend.max_upload_bytes());
+  let taken = match shell_drop::take(maybe_limit).await {
     Ok(taken) => taken,
     Err(error) => {
       tracing::warn!(%error, "could not read the dropped files");
@@ -241,17 +248,16 @@ pub(crate) async fn attach_from_shell(
       return;
     },
   };
-  // The upload limit has its own message; a file only too large to drop says how to attach it.
-  let too_large_key = match maybe_upload_limit.is_some_and(|upload| upload <= shell_drop::READ_MAX_BYTES) {
-    true => "composer-file-too-large",
-    false => "drop-file-too-large",
-  };
   for name in &taken.too_large {
-    let text = i18n.t_with(too_large_key, &[("name", name), ("limit", &format_bytes(limit))]);
+    let limit = format_bytes(maybe_limit.unwrap_or_default());
+    let text = i18n.t_with("composer-file-too-large", &[("name", name), ("limit", &limit)]);
     state.show_error(text, "the dropped file is larger than the limit".to_owned());
   }
   match maybe_target {
-    Some(DroppedFiles(target)) if !taken.files.is_empty() => target.set_if_alive(taken.files),
+    Some(DroppedFiles(target, in_shell)) if !taken.files.is_empty() || !taken.in_shell.is_empty() => {
+      target.set_if_alive(taken.files);
+      in_shell.set_if_alive(taken.in_shell);
+    },
     _ if !taken.was_dropped && lists_files => report_unreadable_drop(state, i18n),
     _ => {},
   }

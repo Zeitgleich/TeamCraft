@@ -4,7 +4,7 @@
 //! each one a raw IPC request, and the message names the staged copy's path; the core reads it one
 //! part at a time while it goes up and deletes it afterwards (`maybe_upload_staging_dir`).
 
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -53,6 +53,25 @@ pub fn append_chunk(directory: &Path, id: &str, offset: u64, chunk: &[u8]) -> Re
   Ok(path)
 }
 
+/// Copies the file at `source` to the staged copy `id` in `directory` as a stream, and returns the
+/// copy's path. The core deletes staged copies when their upload is done, so it gets this copy,
+/// never the user's own file.
+pub fn copy_file(directory: &Path, id: &str, source: &Path) -> Result<PathBuf, StagingError> {
+  if id.len() != STAGE_ID_LEN || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    return Err(StagingError::InvalidId);
+  }
+  create_private_dir(directory)?;
+  let path = directory.join(id);
+  let mut input = File::open(source)?;
+  let mut output = create_private_file(&path)?;
+  if let Err(error) = std::io::copy(&mut input, &mut output) {
+    // A partial copy would only wait for the next sweep.
+    drop(std::fs::remove_file(&path));
+    return Err(error.into());
+  }
+  Ok(path)
+}
+
 /// The staged copies are plaintext: only this user may list the directory (unix: 0700).
 fn create_private_dir(directory: &Path) -> std::io::Result<()> {
   let mut builder = std::fs::DirBuilder::new();
@@ -74,6 +93,30 @@ fn create_private_file(path: &Path) -> std::io::Result<std::fs::File> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_copy_leaves_the_users_file_alone_and_a_bad_id_is_refused() {
+    let directory = std::env::temp_dir().join(format!("teamcraft-copy-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let source = directory.join("report.pdf");
+    std::fs::write(&source, b"contents").unwrap();
+    let staging = directory.join("staging");
+
+    let id = "0".repeat(STAGE_ID_LEN);
+    let copy = copy_file(&staging, &id, &source).unwrap();
+    assert_eq!(std::fs::read(&copy).unwrap(), b"contents");
+    assert_eq!(copy.parent(), Some(staging.as_path()));
+    assert!(source.exists());
+
+    assert!(matches!(
+      copy_file(&staging, "../../escape", &source),
+      Err(StagingError::InvalidId)
+    ));
+    let gone = directory.join("gone");
+    assert!(copy_file(&staging, &"1".repeat(STAGE_ID_LEN), &gone).is_err());
+    assert!(!staging.join("1".repeat(STAGE_ID_LEN)).exists());
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
 
   const ID: &str = "0123456789abcdef0123456789abcdef";
 

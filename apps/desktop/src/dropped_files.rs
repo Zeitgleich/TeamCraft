@@ -8,9 +8,12 @@
 //! no `drop` at all, the shell tells it after [`FALLBACK_DELAY`] so the files still reach the drop
 //! zone under the pointer.
 //!
-//! The page can only read files the user dropped on the window just now, never a path it names.
+//! The page can only read files the user dropped on the window just now, or shared to the app from
+//! outside (shared_files.rs), never a path it names. A large file isn't read at all: the shell copies
+//! it to the upload staging directory when the message is sent, so it never passes through the
+//! webview's memory (`core_stage_dropped_file`, #208).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -32,11 +35,15 @@ const FALLBACK_DELAY: Duration = Duration::from_millis(500);
 const PENDING_FOR: Duration = Duration::from_secs(10);
 /// Files of one drop the page may read; a bigger drop keeps the first ones.
 const MAX_FILES_PER_DROP: usize = 100;
-/// Largest dropped file the page may read: it holds the file in memory until it is staged for the
-/// upload. Bigger files are attached with the + button (the file picker hands over the file itself).
-pub const READ_MAX_BYTES: u64 = 512 * 1024 * 1024;
+/// Largest dropped file the page may read whole; the page stages larger ones through the shell.
+const READ_MAX_BYTES: u64 = 512 * 1024 * 1024;
 /// One read of a dropped file; the page asks chunk by chunk.
 const CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+/// Files of earlier drops and shares that can still be staged, for the composers holding them. The
+/// oldest go first; such a file then says it can't be attached when the message is sent.
+const MAX_STAGEABLE_FILES: usize = 256;
+/// Files one share may bring; more arriving while it waits are left out, and the page is told.
+const MAX_SHARED_FILES: usize = 100;
 
 /// The dropped files the page may read, shared by the GTK signal handlers and the commands.
 #[derive(Default)]
@@ -58,6 +65,25 @@ struct DropStore {
   next_id: u32,
   /// Counts drops, so a late fallback timer knows whether its drop is still waiting.
   generation: u64,
+  /// Files from `--share` or the system's "Open with", until the user chose where they go or
+  /// discarded them. In memory: a share is only a list of files that stay where they are.
+  shared: Vec<SharedPath>,
+  /// How many files of the waiting share were over [`MAX_SHARED_FILES`].
+  shared_left_out: usize,
+  /// Everything the page was told about in this run, for staging when the message is sent.
+  stageable: BTreeMap<u32, PathBuf>,
+}
+
+struct SharedPath {
+  id: u32,
+  path: PathBuf,
+}
+
+/// What waits to be shared: the files that still exist, and how many were left out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SharedFiles {
+  pub files: Vec<DroppedFile>,
+  pub left_out: usize,
 }
 
 struct PendingDrop {
@@ -111,9 +137,72 @@ impl DroppedFilesState {
         name: display_name(&path),
         size_bytes: metadata.len(),
       });
+      store.keep_stageable(id, path.clone());
       store.readable.insert(id, path);
     }
     files
+  }
+
+  /// Files were shared to the app from outside; they join a share that still waits, without the
+  /// ones it has already.
+  pub fn shared(&self, paths: Vec<PathBuf>) {
+    let mut store = self.lock();
+    for path in paths {
+      if store.shared.iter().any(|known| known.path == path) {
+        continue;
+      }
+      if store.shared.len() == MAX_SHARED_FILES {
+        store.shared_left_out += 1;
+        continue;
+      }
+      let id = store.next_id;
+      store.next_id = store.next_id.wrapping_add(1);
+      store.keep_stageable(id, path.clone());
+      store.shared.push(SharedPath { id, path });
+    }
+  }
+
+  /// The waiting share; folders and files that are gone count as left out. It stays until
+  /// [`Self::finish_share`], so a reload of the page finds it again.
+  pub fn waiting_share(&self) -> SharedFiles {
+    let (paths, left_out) = {
+      let store = self.lock();
+      let paths: Vec<(u32, PathBuf)> = store
+        .shared
+        .iter()
+        .map(|shared| (shared.id, shared.path.clone()))
+        .collect();
+      (paths, store.shared_left_out)
+    };
+    let mut files = Vec::new();
+    let mut gone = 0;
+    for (id, path) in paths {
+      match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => files.push(DroppedFile {
+          id,
+          name: display_name(&path),
+          size_bytes: metadata.len(),
+        }),
+        _ => gone += 1,
+      }
+    }
+    SharedFiles {
+      files,
+      left_out: left_out + gone,
+    }
+  }
+
+  /// The user chose where the waiting share goes, or discarded it. Files already attached stay
+  /// stageable.
+  pub fn finish_share(&self) {
+    let mut store = self.lock();
+    store.shared.clear();
+    store.shared_left_out = 0;
+  }
+
+  /// The path to stage for the file `id`, if the page was told about it.
+  pub fn stageable_path(&self, id: u32) -> Option<PathBuf> {
+    self.lock().stageable.get(&id).cloned()
   }
 
   /// The page attached the drop's files itself (the webview handed them over): nothing to read.
@@ -134,12 +223,28 @@ impl DroppedFilesState {
   }
 
   fn path_of(&self, id: u32) -> Option<PathBuf> {
-    self.lock().readable.get(&id).cloned()
+    let store = self.lock();
+    store.readable.get(&id).cloned().or_else(|| {
+      store
+        .shared
+        .iter()
+        .find(|shared| shared.id == id)
+        .map(|shared| shared.path.clone())
+    })
   }
 
   fn lock(&self) -> MutexGuard<'_, DropStore> {
     // A panic while holding the lock leaves plain data behind; it stays usable.
     self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
+}
+
+impl DropStore {
+  fn keep_stageable(&mut self, id: u32, path: PathBuf) {
+    self.stageable.insert(id, path);
+    while self.stageable.len() > MAX_STAGEABLE_FILES {
+      self.stageable.pop_first();
+    }
   }
 }
 
@@ -414,6 +519,57 @@ mod tests {
       assert_eq!(state.path_of(files[0].id), Some(file));
       assert!(state.take(now).is_empty(), "a drop is taken once");
       assert_eq!(state.path_of(files[0].id + 1), None);
+    }
+
+    #[test]
+    fn a_share_waits_until_it_is_finished_and_its_files_stay_stageable() {
+      let directory = scratch_dir("share");
+      let file = directory.join("report.pdf");
+      std::fs::write(&file, b"12345").unwrap();
+      let state = DroppedFilesState::default();
+
+      state.shared(vec![file.clone(), directory.join("gone.pdf"), file.clone()]);
+      let waiting = state.waiting_share();
+      assert_eq!(waiting.files.len(), 1, "the same file twice counts once");
+      assert_eq!(waiting.left_out, 1, "a file that is gone is reported");
+      assert_eq!(
+        state.waiting_share(),
+        waiting,
+        "listing doesn't consume the share"
+      );
+      let id = waiting.files[0].id;
+      assert_eq!(state.path_of(id), Some(file.clone()));
+
+      state.finish_share();
+      assert!(state.waiting_share().files.is_empty());
+      assert_eq!(state.path_of(id), None, "no longer readable");
+      assert_eq!(
+        state.stageable_path(id),
+        Some(file),
+        "the composer may still send it"
+      );
+    }
+
+    #[test]
+    fn a_share_is_bounded_and_says_how_much_it_left_out() {
+      let state = DroppedFilesState::default();
+      let paths = (0..MAX_SHARED_FILES + 2).map(|index| PathBuf::from(format!("/gone/{index}")));
+      state.shared(paths.collect());
+      assert_eq!(state.waiting_share().left_out, MAX_SHARED_FILES + 2);
+      assert_eq!(state.lock().shared.len(), MAX_SHARED_FILES);
+    }
+
+    #[test]
+    fn only_the_newest_files_stay_stageable() {
+      let state = DroppedFilesState::default();
+      state.shared(vec![PathBuf::from("/first")]);
+      state.finish_share();
+      for index in 0..MAX_STAGEABLE_FILES {
+        state.shared(vec![PathBuf::from(format!("/next/{index}"))]);
+        state.finish_share();
+      }
+      assert_eq!(state.stageable_path(0), None);
+      assert!(state.stageable_path(1).is_some());
     }
 
     #[test]

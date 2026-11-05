@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=TeamCraft
+GenericName=Send to a conversation
+Comment=Send files to a TeamCraft conversation
+Exec=teamcraft-desktop --share %F
+Icon=de.zeitgleich.teamcraft
+Terminal=false
+NoDisplay=true
+Categories=Network;Chat;InstantMessaging;
+StartupWMClass=teamcraft-desktop
+MimeType=application/octet-stream;application/*;audio/*;image/*;text/*;video/*;

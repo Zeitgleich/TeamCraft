@@ -3,23 +3,26 @@
 //! A second process would open the same encrypted store with its own copy in memory, and the
 //! device's MLS state and outbox would fork. A second launch therefore hands its arguments to the
 //! running instance (Windows: named mutex and window message, Linux: D-Bus, macOS: a Unix socket),
-//! which shows its window, and exits. Where that fails (Linux without a session bus) the store's
+//! which takes any files to share (`shared_files.rs`), shows its window, and exits. Where that fails (Linux without a session bus) the store's
 //! file lock (`teamcraft_core::store::StoreLock`) keeps the second process off the store.
+
+use std::path::Path;
 
 use tauri::Wry;
 use tauri::plugin::TauriPlugin;
 use tracing::debug;
 
-use crate::tray;
+use crate::{shared_files, tray};
 
 /// The plugin; registered before every other one, so a second launch ends before it does anything.
 pub fn plugin() -> TauriPlugin<Wry> {
-  tauri_plugin_single_instance::init(|app, args, _working_directory| {
+  tauri_plugin_single_instance::init(|app, args, working_directory| {
     // The deep-link plugin has already taken any link in `args` (`deep-link` feature): deep_links.rs.
     debug!(
       argument_count = args.len(),
       "second instance started; showing the first"
     );
+    shared_files::receive_args(app, &args, Path::new(&working_directory));
     tray::show_main_window(app);
   })
 }

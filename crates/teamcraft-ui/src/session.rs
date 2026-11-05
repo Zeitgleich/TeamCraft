@@ -671,6 +671,11 @@ impl SessionControl {
     spawn_local(async move {
       // Pictures of this account don't outlive the session on this device (#749).
       crate::persisted_media::clear(maybe_user).await;
+      // Nor does what other apps shared and still waits for a conversation; an expired session
+      // isn't the user's choice, and the share waits for the next sign-in.
+      if maybe_problem.is_none() {
+        crate::share_into::discard_waiting().await;
+      }
       if tauri::has_core()
         && let Err(error) = remote_backend::stop_core().await
       {

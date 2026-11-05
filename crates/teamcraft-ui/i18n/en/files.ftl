@@ -154,7 +154,6 @@ crop-uploading = Saving…
 ## Daily-use improvements (docs/ux-backlog.md)
 drop-files-here = Drop to attach
 drop-files-unreadable = The dropped files couldn’t be read. Attach them with the + button instead.
-drop-file-too-large = { $name } is larger than { $limit }, too large to attach by dropping it. Attach it with the + button instead.
 paste-picture-failed = The picture on the clipboard couldn’t be pasted.
 
 ## Window controls of the desktop app's own title bar
@@ -306,3 +305,24 @@ downloads-failed-missing = Failed: no longer on the server
 downloads-failed-corrupted = Failed: the file arrived damaged
 downloads-failed-disk = Failed: couldn’t be written
 downloads-failed-too-large = Failed: file too large
+
+share-into-title = Share to…
+share-into-filter = Find a conversation
+share-into-recent = Recent
+share-into-others = All conversations
+share-into-no-match = No conversation matches.
+share-into-empty = Conversations you can write in show up here once they have synced.
+share-into-files = { $count ->
+    [one] { $count } file
+   *[other] { $count } files
+  }
+share-into-left-out = { $count ->
+    [one] { $count } file was left out: it is gone or there were too many.
+   *[other] { $count } files were left out: they are gone or there were too many.
+  }
+share-into-waiting-choose = Something you shared waits for a conversation.
+share-into-waiting-signed-out = What you shared is kept on this device. Sign in or unlock to choose a conversation.
+share-into-choose = Choose
+share-into-discard = Discard
+share-into-failed = What you shared could not be received. Share it again.
+share-into-read-failed = What you shared could not be read. Share it again.

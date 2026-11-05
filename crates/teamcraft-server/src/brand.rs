@@ -987,6 +987,19 @@ fn web_manifest(display_name: &str, colors: &BrandColors, assets: &HashMap<Strin
     "theme_color": chrome,
     "background_color": chrome,
     "icons": icons,
+    // Sharing into the installed web app (#208). The client's service worker takes this request;
+    // it keeps the content in the browser, and it never reaches the server (docs/e2ee.md §9.3).
+    "share_target": {
+      "action": "/share-target",
+      "method": "POST",
+      "enctype": "multipart/form-data",
+      "params": {
+        "title": "title",
+        "text": "text",
+        "url": "url",
+        "files": [{ "name": "files", "accept": ["*/*"] }],
+      },
+    },
   })
   .to_string()
 }
@@ -1425,6 +1438,10 @@ mod tests {
       assert_eq!(manifest["display"], "standalone");
       assert_eq!(manifest["start_url"], "/");
       assert_eq!(manifest["theme_color"], "#202a3c");
+      // The service worker (crates/teamcraft-ui/sw.js) answers exactly this request.
+      assert_eq!(manifest["share_target"]["action"], "/share-target");
+      assert_eq!(manifest["share_target"]["method"], "POST");
+      assert_eq!(manifest["share_target"]["params"]["files"][0]["name"], "files");
       let other: serde_json::Value =
         serde_json::from_str(&registry.by_id("b").unwrap().web_manifest).unwrap();
       assert_eq!(other["theme_color"], DEFAULT_CHROME_COLOR);

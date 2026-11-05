@@ -29,6 +29,7 @@ mod mute_shortcut;
 mod notifications;
 mod reconnect;
 mod ringtone;
+mod shared_files;
 mod shell_prefs;
 mod single_instance;
 #[cfg(target_os = "linux")]
@@ -207,6 +208,7 @@ fn main() -> anyhow::Result<()> {
       #[cfg(any(target_os = "macos", windows))]
       watch_native_network(app.handle());
       deep_links::collect(app.handle());
+      shared_files::collect(app.handle());
       Ok(())
     })
     .on_page_load(|webview, payload| {
@@ -294,6 +296,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_save_attachment,
       core::commands::core_save_attachments,
       core::commands::core_stage_file,
+      core::commands::core_stage_dropped_file,
       core::commands::core_stop,
       core::media::core_media_get,
       core::media::core_media_put,
@@ -302,6 +305,8 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_reset_store,
       dropped_files::dropped_files_take,
       dropped_files::dropped_file_read,
+      shared_files::shared_files_list,
+      shared_files::shared_files_finish,
       clipboard_paste::clipboard_paste_files,
       clipboard_paste::clipboard_read_image,
       calls::commands::call_snapshot,
@@ -369,6 +374,9 @@ fn main() -> anyhow::Result<()> {
       // macOS: clicking the dock icon brings back a window that was closed to the tray.
       #[cfg(target_os = "macos")]
       tauri::RunEvent::Reopen { .. } => tray::show_main_window(app),
+      // macOS: "Open With" in the Finder and files dropped on the dock icon (shared_files.rs).
+      #[cfg(target_os = "macos")]
+      tauri::RunEvent::Opened { urls } => shared_files::receive_opened(app, &urls),
       _ => {},
     });
   Ok(())
