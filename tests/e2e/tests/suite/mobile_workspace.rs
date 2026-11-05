@@ -12,7 +12,9 @@
 //! The app signs in at `http://127.0.0.1:8091` as `carol` (password `carol-dev-pass`; a member, not a
 //! guest like `dave`). Sizes:
 //! `MOBILE_WORKSPACE_SPACES`, `_CHANNELS_PER_SPACE`, `_MESSAGES`, `_LONG_CHANNEL_MESSAGES`, `_IMAGES`;
-//! `_HOLD_SECS` keeps the server up (default 12 hours). Writing a number to the file the log names
+//! `_HOLD_SECS` keeps the server up (default 12 hours); `_PORT` another port than 8091, and
+//! `_WEB_DIR` serves the web client too (built by `tests/e2e/web/build.sh`; it signs in on :8082
+//! or :8083 only). Writing a number to the file the log names
 //! sends that many more messages, spread over the channels and the direct messages, for measuring
 //! a return after new messages arrived.
 //!
@@ -31,6 +33,11 @@ use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::{ConversationId, UserId};
 
 const PORT: u16 = 8091;
+/// The web client's policy: the dev realm's sign-in page on :8080 besides the server itself.
+const WEB_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
+  img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; \
+  connect-src 'self' http://127.0.0.1:8080 ws: wss: https:; worker-src 'self' blob:; \
+  frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const IMAGES: [&[u8]; 3] = [
   include_bytes!("../../../../assets/backgrounds/lake-morning.jpg"),
   include_bytes!("../../../../assets/backgrounds/empty-room.jpg"),
@@ -57,9 +64,16 @@ async fn serve_a_large_workspace_to_a_device() {
   let user = std::env::var("MOBILE_WORKSPACE_USER").unwrap_or_else(|_| "carol".into());
   let size = Size::from_env();
   let mut builder = Stack::builder()
-    .with_port(PORT)
+    .with_port(port())
     .with_env("TEAMCRAFT_SECURITY__RATE_LIMITS__IS_ENABLED", "false")
     .with_env("TEAMCRAFT_DATABASE__MAX_CONNECTIONS", "16");
+  // The web client too (`tests/e2e/web/build.sh`), so a browser can use the same workspace.
+  // The dev realm lets the web client sign in on :8082 and :8083 only: set MOBILE_WORKSPACE_PORT.
+  if let Some(dir) = std::env::var_os("MOBILE_WORKSPACE_WEB_DIR").filter(|dir| !dir.is_empty()) {
+    builder = builder
+      .with_web_dir(dir.into())
+      .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", WEB_CSP);
+  }
   if size.has_calls {
     // QUIC doesn't pass `adb reverse`; the SFU's WebSocket fallback does (reverse its port too).
     builder = builder.with_call_fallback();
@@ -319,7 +333,15 @@ async fn send(writer: &mut Peer, conversation: ConversationId, index: usize) {
 }
 
 fn burst_file() -> PathBuf {
-  std::env::temp_dir().join(format!("teamcraft-mobile-workspace-{PORT}.burst"))
+  std::env::temp_dir().join(format!("teamcraft-mobile-workspace-{}.burst", port()))
+}
+
+/// `MOBILE_WORKSPACE_PORT`, or 8091.
+fn port() -> u16 {
+  std::env::var("MOBILE_WORKSPACE_PORT")
+    .ok()
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(PORT)
 }
 
 /// What the control file asks for.
