@@ -59,7 +59,7 @@ final class ChatModelTests: XCTestCase {
     let home = directSections(list, lastActivity: ["1": Date(timeIntervalSince1970: 10)])
     XCTAssertEqual(home.map(\.title), [.favorites])
     XCTAssertEqual(home[0].conversations.map(\.id), ["1", "2"])
-    XCTAssertEqual(channelSections(list).first?.conversations.map(\.id), ["2"])
+    XCTAssertEqual(channelSections([starred, list[3]]).first?.conversations.map(\.id), ["2"])
     // Removing the star takes it out of Home.
     XCTAssertTrue(directSections([item("2", "release", space: "Team A")]).isEmpty)
     // The Home tab counts DMs only, so the channel's unread is counted once, in its space.
