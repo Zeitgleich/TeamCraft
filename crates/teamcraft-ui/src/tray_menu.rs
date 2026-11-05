@@ -322,7 +322,7 @@ impl UpdateCheckWatch {
           .flatten()
           .is_some_and(|pending| pending.asked_at == asked_at)
         {
-          self.0.set_value(None);
+          self.0.try_set_value(None);
         }
       },
       std::time::Duration::from_millis(UPDATE_CHECK_PATIENCE_MS.unsigned_abs()),
@@ -344,7 +344,7 @@ impl UpdateCheckWatch {
       };
       if status.state == UpdateState::Checking {
         pending.has_seen_checking = true;
-        self.0.set_value(Some(pending));
+        self.0.try_set_value(Some(pending));
       }
       let text = match check_feedback(&status.state, pending.asked_at, pending.has_seen_checking) {
         CheckFeedback::Wait => return,
@@ -356,7 +356,7 @@ impl UpdateCheckWatch {
         ))),
         CheckFeedback::Failed(message) => Some(i18n.t_with("update-state-failed", &[("message", &message)])),
       };
-      self.0.set_value(None);
+      self.0.try_set_value(None);
       if let Some(text) = text {
         state.show_toast(text);
       }
