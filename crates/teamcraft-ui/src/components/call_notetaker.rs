@@ -22,7 +22,7 @@ use crate::feedback::PendingAction;
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::MeetingsHub;
 use crate::model::UserId;
-use crate::notetaker::{NotetakerInCall, notetaker_in_call};
+use crate::notetaker::{NotetakerInCall, NotetakerRefusal, notetaker_in_call};
 use crate::state::{AppState, use_app_state};
 
 /// How long "joins in a moment" shows after asking, if the notetaker doesn't come.
@@ -303,6 +303,14 @@ fn show_asked(is_asked: RwSignal<bool>) {
     },
     ASKED_NOTICE,
   );
+}
+
+/// The i18n key of why "Add notetaker" is disabled (issue #1290).
+pub fn notetaker_refusal_key(refusal: NotetakerRefusal) -> &'static str {
+  match refusal {
+    NotetakerRefusal::Guest => "call-notetaker-refused-guest",
+    NotetakerRefusal::AdminsOnly => "call-notetaker-refused-admins",
+  }
 }
 
 /// The notice while the notetaker is in the call (for everybody, also who joins later), or while

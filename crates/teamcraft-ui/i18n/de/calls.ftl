@@ -335,6 +335,8 @@ calls-loading = Anrufe werden geladen
 
 ## Notetaker (e2ee.md §8.2)
 call-notetaker-add = Notetaker hinzufügen
+call-notetaker-refused-guest = Notetaker hinzufügen: Gäste können den Notetaker nicht zu einem Anruf hinzufügen.
+call-notetaker-refused-admins = Notetaker hinzufügen: Nur Workspace-Admins können den Notetaker zu einem Anruf hinzufügen.
 call-notetaker-remove = Notetaker entfernen
 call-notetaker-room-title = Anruf mit Notetaker
 call-notetaker-joining = Der Notetaker wird hinzugefügt. Solange er im Anruf ist, wird der Ton für das Transkript an OpenRouter gesendet.
