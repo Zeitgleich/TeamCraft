@@ -673,7 +673,7 @@ async fn focus_composer(page: &Page) {
   }
 }
 
-async fn wait_for_text_gone(page: &Page, needle: &str) {
+pub(crate) async fn wait_for_text_gone(page: &Page, needle: &str) {
   let deadline = Instant::now() + WAIT;
   while body_text(page).await.contains(needle) {
     assert!(

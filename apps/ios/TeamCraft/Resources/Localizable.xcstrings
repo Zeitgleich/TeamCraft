@@ -8881,6 +8881,22 @@
         }
       }
     },
+    "call_limited_network": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Limited network, call quality may be lower"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eingeschränktes Netzwerk, die Gesprächsqualität kann geringer sein"
+          }
+        }
+      }
+    },
     "call_audio_route": {
       "localizations": {
         "en": {

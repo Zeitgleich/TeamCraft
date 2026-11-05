@@ -1494,6 +1494,36 @@ mod tests {
     assert_eq!(state.phase, CallPhase::Connected);
   }
 
+  /// The apps show their "limited network" notice from this flag (issue #1225): it follows the
+  /// transport, also when the call moves back to QUIC without a rejoin.
+  #[test]
+  fn the_fallback_transport_marks_a_limited_network_until_quic_is_back() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let mut reconnecting = BTreeSet::new();
+    let mut roster = BTreeMap::new();
+    let mut muted = BTreeSet::new();
+    state.phase = CallPhase::Connected;
+    assert!(!state.is_on_limited_network);
+    for (transport, is_limited) in [
+      (CallTransport::Fallback, true),
+      (CallTransport::Quic, false),
+      (CallTransport::Fallback, true),
+    ] {
+      assert_eq!(
+        apply_event(
+          &mut state,
+          &mut reconnecting,
+          &mut roster,
+          &mut muted,
+          CallEngineEvent::TransportChanged(transport)
+        ),
+        None
+      );
+      assert_eq!(state.is_on_limited_network, is_limited);
+      assert_eq!(state.phase, CallPhase::Connected);
+    }
+  }
+
   #[test]
   fn a_late_encoded_video_listener_learns_about_published_tracks() {
     let mut video = EncodedVideoBridge::default();
