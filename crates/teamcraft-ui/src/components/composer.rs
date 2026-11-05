@@ -19,6 +19,7 @@ use crate::components::emoji_picker::EmojiPicker;
 use crate::components::file_drop::{DropContent, DroppedFiles, take_drop, transfer_files};
 use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
+use crate::components::message_actions::QuoteThumbnail;
 use crate::components::scheduled_view::refusal_text;
 use crate::components::sheet::MenuSurface;
 use crate::components::typing_indicator::should_notify_typing;
@@ -516,11 +517,15 @@ pub fn Composer(
       }
     }
     let body = text;
-    let maybe_reply_to = state
+    let maybe_reply = state
       .reply_target
       .get_untracked()
-      .filter(|target| target.conversation == conversation)
-      .map(|target| target.message);
+      .filter(|target| target.conversation == conversation);
+    let maybe_reply_attachment = maybe_reply
+      .as_ref()
+      .and_then(|target| target.maybe_image.as_ref())
+      .map(|image| image.attachment);
+    let maybe_reply_to = maybe_reply.map(|target| target.message);
     state.reply_target.set(None);
     let mut message = OutgoingMessage {
       maybe_client_message_id: None,
@@ -528,6 +533,7 @@ pub fn Composer(
       maybe_thread,
       body,
       maybe_reply_to,
+      maybe_reply_attachment,
       priority: priority.get_untracked(),
       wants_acknowledgement: wants_acknowledgement.get_untracked(),
       is_silent: is_silent.get_untracked(),
@@ -1353,6 +1359,7 @@ pub fn Composer(
             .map(|target| {
               view! {
                 <div class="reply-banner">
+                  {target.maybe_image.and_then(|image| image.maybe_thumbnail).map(|thumbnail| view! { <QuoteThumbnail thumbnail=thumbnail /> })}
                   <span class="grow" translate="no">
                     {i18n.t_with("quote-replying-to", &[("name", &target.author_name)])} " — " {target.excerpt}
                   </span>

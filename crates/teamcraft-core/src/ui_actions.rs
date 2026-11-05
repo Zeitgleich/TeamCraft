@@ -3,7 +3,7 @@
 
 use teamcraft_client_api::actions::{
   ForwardedFrom, LinkPreview, LinkedMessage, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage,
-  PermalinkTarget, ReplyPreview, SavedItem, WorkspaceEvent,
+  PermalinkTarget, ReplyAttachmentPreview, ReplyPreview, SavedItem, WorkspaceEvent,
 };
 use teamcraft_client_api::canvas::CanvasState;
 use teamcraft_client_api::model::{
@@ -16,7 +16,10 @@ use teamcraft_proto::{Base64Bytes, ClientMessageId, SourceChange, SourceId};
 
 use crate::client::previews::queue_preview;
 use crate::client::scheduled::{message_priority, server_now_ms};
-use crate::client::{apply_control, forward_content, imported_author_name, reply_ref, stored_account_data};
+use crate::client::{
+  ForwardScope, album_attachment, apply_control, forward_content, imported_author_name, reply_ref,
+  stored_account_data,
+};
 use crate::error::CoreError;
 use crate::imported::Authorship;
 use crate::integration_sources::{SourceAuthority, SourceLedger};
@@ -25,7 +28,7 @@ use crate::read_state;
 use crate::records;
 use crate::store::{
   BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, MessageSlot, Priority,
-  StoredMessage, Table,
+  ReplyAttachment, StoredMessage, Table,
 };
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
@@ -165,7 +168,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let maybe_reply_to = message
       .maybe_reply_to
       .and_then(|id| self.find_stored(conversation, id))
-      .map(|target| reply_ref(&target, self.importer()));
+      .map(|target| reply_ref(&target, self.importer(), message.maybe_reply_attachment));
     let meta = MessageMeta {
       maybe_reply_to,
       priority: priority_of(message.priority),
@@ -287,6 +290,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     &self,
     from: ConversationId,
     message: MessageId,
+    scope: ForwardScope,
     to: ConversationId,
     comment: &str,
   ) {
@@ -310,6 +314,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     match forward_content(
       &authorship,
       &original,
+      scope,
       author_name,
       maybe_conversation_name,
       comment,
@@ -317,7 +322,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       Some(content) => {
         self.enqueue(to, None, content);
       },
-      None => tracing::warn!("this kind of message can't be forwarded"),
+      None => tracing::warn!("this can't be forwarded: a control message, or a file that is gone"),
     }
   }
 
@@ -786,6 +791,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
           Authorship::of(target, maybe_importer).author
         }),
         excerpt: reply.excerpt.clone(),
+        maybe_attachment: reply
+          .maybe_attachment
+          .as_deref()
+          .map(|quoted| quoted_attachment(quoted, maybe_target.as_ref())),
       }
     });
     extras.maybe_forwarded = meta.maybe_forwarded.as_ref().map(|forwarded| ForwardedFrom {
@@ -873,6 +882,27 @@ impl Ticks {
   }
 }
 
+/// What a reader sees of the picture a reply quotes. The quoted message's own thumbnail wins while
+/// it has the picture, so a sender can't show another picture under someone else's name; once the
+/// picture is deleted or expired, the copy in the reply is what's left.
+fn quoted_attachment(
+  quoted: &ReplyAttachment,
+  maybe_target: Option<&StoredMessage>,
+) -> ReplyAttachmentPreview {
+  let maybe_live = maybe_target.and_then(|target| album_attachment(target, quoted.attachment_id));
+  let maybe_thumbnail = maybe_live
+    .and_then(|attachment| attachment.maybe_thumbnail.as_ref())
+    .or(quoted.maybe_thumbnail.as_ref());
+  ReplyAttachmentPreview {
+    file_id: quoted.attachment_id.to_string(),
+    file_name: maybe_live
+      .map_or(&quoted.file_name, |attachment| &attachment.file_name)
+      .clone(),
+    maybe_thumbnail_png: maybe_thumbnail.map(|thumbnail| thumbnail.as_slice().to_vec()),
+    can_open: maybe_live.is_some(),
+  }
+}
+
 fn priority_of(priority: MessagePriority) -> Priority {
   match priority {
     MessagePriority::Normal => Priority::Normal,
@@ -951,4 +981,71 @@ fn workspace_event(event: &ConversationEvent, stored: &StoredMessage) -> Option<
 
 fn is_workspace_authority(authority: &crate::channel_roles::SignerAuthority) -> bool {
   matches!(authority, crate::channel_roles::SignerAuthority::Workspace { .. })
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::Base64Bytes;
+
+  use super::*;
+  use crate::client::reply_ref;
+  use crate::store::tests::{id, message};
+  use crate::store::{AttachmentRef, MessageMeta};
+
+  #[test]
+  fn the_quote_of_a_picture_that_expired_shows_the_copy_in_the_reply() {
+    let quoted = quoted_copy(b"copy");
+    let preview = quoted_attachment(&quoted, None);
+    assert_eq!(preview.maybe_thumbnail_png.as_deref(), Some(&b"copy"[..]));
+    assert_eq!(preview.file_name, "c.jpg");
+    assert!(!preview.can_open);
+  }
+
+  #[test]
+  fn the_quoted_message_decides_while_it_has_the_picture() {
+    let album = album_of(&[id(3), id(4)]);
+    let preview = quoted_attachment(&quoted_copy(b"another picture"), Some(&album));
+    assert_eq!(preview.maybe_thumbnail_png.as_deref(), Some(&b"real"[..]));
+    assert!(preview.can_open);
+  }
+
+  #[test]
+  fn a_picture_removed_from_its_message_can_not_be_opened() {
+    let album = album_of(&[id(4), id(5)]);
+    let preview = quoted_attachment(&quoted_copy(b"copy"), Some(&album));
+    assert_eq!(preview.maybe_thumbnail_png.as_deref(), Some(&b"copy"[..]));
+    assert!(!preview.can_open);
+  }
+
+  fn quoted_copy(thumbnail: &[u8]) -> ReplyAttachment {
+    let album = album_of(&[id(3), id(4)]);
+    let mut quoted = reply_ref(&album, None, Some(id(3))).maybe_attachment.unwrap();
+    quoted.maybe_thumbnail = Some(Base64Bytes::from(thumbnail.to_vec()));
+    *quoted
+  }
+
+  fn album_of(ids: &[teamcraft_proto::AttachmentId]) -> StoredMessage {
+    let attachments = ids.iter().map(|&attachment_id| AttachmentRef {
+      attachment_id,
+      key: Base64Bytes::from(vec![9; 32]),
+      ciphertext_sha256: Base64Bytes::from(vec![8; 32]),
+      file_name: "c.jpg".into(),
+      media_type: "image/jpeg".into(),
+      size_bytes: 10,
+      maybe_thumbnail: Some(Base64Bytes::from(b"real".to_vec())),
+      maybe_dimensions: None,
+      maybe_duration_ms: None,
+    });
+    StoredMessage {
+      content: MessageContent::Text {
+        body: String::new(),
+        mentions: Vec::new(),
+        meta: MessageMeta {
+          attachments: attachments.collect(),
+          ..MessageMeta::default()
+        },
+      },
+      ..message(id(10), 1, Some(101), None, 5_000)
+    }
+  }
 }

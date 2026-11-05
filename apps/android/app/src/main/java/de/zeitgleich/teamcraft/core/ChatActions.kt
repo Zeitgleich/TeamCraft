@@ -15,6 +15,8 @@ data class PickedFile(val fileName: String, val mediaType: String, val path: Str
 data class SendOptions(
   val maybeThread: String? = null,
   val maybeReplyTo: String? = null,
+  /** With [maybeReplyTo]: the one picture of an album the reply answers. */
+  val maybeReplyAttachment: String? = null,
   /** `normal`, `important` or `urgent`. */
   val priority: String = "normal",
   val wantsAcknowledgement: Boolean = false,
@@ -53,6 +55,7 @@ object ChatActions {
     put("maybe_thread", options.maybeThread.json())
     put("body", body)
     put("maybe_reply_to", options.maybeReplyTo.json())
+    put("maybe_reply_attachment", options.maybeReplyAttachment.json())
     put("priority", options.priority)
     put("wants_acknowledgement", options.wantsAcknowledgement)
     put("is_silent", options.isSilent)
@@ -90,11 +93,13 @@ object ChatActions {
     put("message", message)
   }
 
-  fun forward(from: String, message: String, to: String, comment: String) = action("forward_message") {
+  /** Forwards the message, or with [maybeAttachment] that file alone (a message with only it goes whole). */
+  fun forward(from: String, message: String, to: String, comment: String, maybeAttachment: String? = null) = action("forward_message") {
     put("from", from)
     put("message", message)
     put("to", to)
     put("comment", comment)
+    maybeAttachment?.let { put("attachment", it) }
   }
 
   fun setPinned(conversation: String, message: String, isPinned: Boolean) = action("set_pinned") {

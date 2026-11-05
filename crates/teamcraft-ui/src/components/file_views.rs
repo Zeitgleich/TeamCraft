@@ -31,7 +31,7 @@ use crate::components::audio_card::{AudioCard, is_audio_card};
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::prefers_reduced_motion;
-use crate::components::message_actions::copy_to_clipboard;
+use crate::components::message_actions::{copy_to_clipboard, reply_to_file};
 use crate::components::sheet::PopoverBackdrop;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::{I18n, use_i18n};
@@ -417,6 +417,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   let is_pinned = RwSignal::new(false);
   let is_touch = StoredValue::new(false);
   let maybe_menu = attachment_menu::use_attachment_menu();
+  let tile_actions = FileActions::new(state, &file);
   let file = StoredValue::new(file);
   let name = file.with_value(|file| file.file_name.clone());
   let label = name.clone();
@@ -494,12 +495,15 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
         on:pointerdown=move |ev: web_sys::PointerEvent| is_touch.set_value(ev.pointer_type() == "touch")
         on:contextmenu=move |ev: web_sys::MouseEvent| {
           // A long-press shows the actions. A right click opens the app's menu in the desktop app
-          // (#719); the browser keeps its own ("Save image as", "Copy image").
+          // (#719) and on a picture of an album (#241); otherwise the browser keeps its own ("Save
+          // image as", "Copy image").
           if is_touch.get_value() {
             ev.prevent_default();
             is_pinned.update(|pinned| *pinned = !*pinned);
           } else {
-            file.with_value(|file| attachment_menu::open_on_right_click(maybe_menu, &ev, file, false));
+            file.with_value(|file| {
+              attachment_menu::open_on_right_click(maybe_menu, &ev, file, false, tile_actions.is_in_album())
+            });
           }
         }
       >
@@ -787,6 +791,7 @@ fn MediaToolbar(file: FileInfo, #[prop(optional, into)] on_expand: Option<Callba
   let i18n = use_i18n();
   let actions = FileActions::new(state, &file);
   let is_saved = actions.is_saved();
+  let can_reply = actions.can_reply();
   view! {
     <div class="media-toolbar" role="group" aria-label=move || i18n.t("lightbox-toolbar")>
       {on_expand.map(|expand| view! {
@@ -794,7 +799,8 @@ fn MediaToolbar(file: FileInfo, #[prop(optional, into)] on_expand: Option<Callba
       })}
       <ToolbarButton label="file-download" icon=IconName::Download on_click=move || actions.download() />
       {actions.can_share.then(|| view! { <ToolbarButton label="file-share" icon=IconName::Link on_click=move || actions.share() /> })}
-      <ToolbarButton label="lightbox-forward" icon=IconName::Forward on_click=move || actions.forward() />
+      {can_reply.then(|| view! { <ToolbarButton label=actions.reply_label() icon=IconName::Reply on_click=move || actions.reply() /> })}
+      <ToolbarButton label=actions.forward_label() icon=IconName::Forward on_click=move || actions.forward() />
       <button
         class="icon-btn media-tool"
         class:is-active=move || is_saved.get()
@@ -869,7 +875,7 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
   let menu_file = StoredValue::new(file.clone());
   let on_context_menu = move |ev: web_sys::MouseEvent| {
     let is_touch = crate::viewport::is_touch_primary();
-    menu_file.with_value(|file| attachment_menu::open_on_right_click(maybe_menu, &ev, file, is_touch));
+    menu_file.with_value(|file| attachment_menu::open_on_right_click(maybe_menu, &ev, file, is_touch, false));
   };
   // Markdown, HTML, PDF and text files open in the app (#557, #821); one above the preview limit
   // says so there and offers the download.
@@ -1041,7 +1047,7 @@ pub(crate) fn FileMenu(actions: FileActions) -> impl IntoView {
           })}
           <button class="menu-item" role="menuitem" on:click=item(FileActions::forward)>
             <Icon name=IconName::Forward />
-            <span class="menu-label">{move || i18n.t("lightbox-forward")}</span>
+            <span class="menu-label">{move || i18n.t(actions.forward_label())}</span>
           </button>
           <button class="menu-item" role="menuitem" on:click=item(FileActions::toggle_saved)>
             <Icon name=IconName::Bookmark />
@@ -1214,11 +1220,72 @@ impl FileActions {
     }
   }
 
+  /// Forwards this file: of an album only this one, with the core deciding (`ForwardScope`).
   pub(crate) fn forward(self) {
+    let maybe_attachment = self
+      .file_id
+      .with_value(|file_id| file_id.parse::<teamcraft_proto::AttachmentId>().ok());
+    self.state.overlay.set(Overlay::Forward(
+      self.conversation,
+      self.message,
+      maybe_attachment,
+    ));
+  }
+
+  /// Whether the message has other files: then this file's actions are its own, not the message's.
+  pub(crate) fn is_in_album(self) -> bool {
     self
       .state
-      .overlay
-      .set(Overlay::Forward(self.conversation, self.message));
+      .read(|backend| backend.message_extras(self.conversation, &[self.message]))
+      .into_iter()
+      .next()
+      .is_some_and(|extras| extras.files.len() > 1)
+  }
+
+  /// Whether "Reply to this image" applies: a picture of an album, for people who may post.
+  pub(crate) fn can_reply(self) -> bool {
+    self.is_in_album()
+      && self
+        .state
+        .read(|backend| backend.conversation(self.conversation))
+        .is_some_and(|conversation| conversation.can_post)
+  }
+
+  /// The label of the reply, in the file's own word.
+  pub(crate) fn reply_label(self) -> &'static str {
+    match self
+      .media_type
+      .with_value(|media_type| media_type.starts_with("video/"))
+    {
+      true => "video-reply",
+      false => "image-reply",
+    }
+  }
+
+  /// The label of the forward: the file's own word in an album, the message otherwise.
+  pub(crate) fn forward_label(self) -> &'static str {
+    let is_video = self
+      .media_type
+      .with_value(|media_type| media_type.starts_with("video/"));
+    match (self.is_in_album(), is_video) {
+      (true, true) => "video-forward",
+      (true, false) => "image-forward",
+      (false, _) => "lightbox-forward",
+    }
+  }
+
+  /// Starts a reply to this picture in the composer.
+  pub(crate) fn reply(self) {
+    let file_id = self.file_id.get_value();
+    let maybe_file = self
+      .state
+      .read(|backend| backend.message_extras(self.conversation, &[self.message]))
+      .into_iter()
+      .next()
+      .and_then(|extras| extras.files.into_iter().find(|file| file.file_id == file_id));
+    if let Some(file) = maybe_file {
+      reply_to_file(self.state, &file);
+    }
   }
 
   fn toggle_saved(self) {

@@ -988,6 +988,7 @@ fn on_message_action(
           maybe_thread: None,
           body: text,
           maybe_reply_to: None,
+          maybe_reply_attachment: None,
           priority: MessagePriority::Normal,
           wants_acknowledgement: false,
           is_silent: false,

@@ -93,6 +93,8 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import de.zeitgleich.teamcraft.R
@@ -109,6 +111,8 @@ import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.thumbnailKey
 import uniffi.teamcraft_ffi.MediaScope
+import uniffi.teamcraft_ffi.TeamCraftException
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** The folder under Pictures that saved images go to. */
 private const val GALLERY_FOLDER = "TeamCraft"
@@ -134,7 +138,13 @@ private const val DOWNLOAD_POLL_MS = 1000L
  * neighbours are decoded. System bars are hidden while it is open.
  */
 @Composable
-fun ImageViewer(viewModel: MainViewModel, snapshot: ChatSnapshot?, target: PictureTarget, onDismiss: () -> Unit) {
+fun ImageViewer(
+  viewModel: MainViewModel,
+  snapshot: ChatSnapshot?,
+  target: PictureTarget,
+  onDismiss: () -> Unit,
+  maybeOnReply: ((FileInfo) -> Unit)? = null,
+) {
   val context = LocalContext.current
   val state = remember(target) { PictureViewerState(target, viewModel.chat) }
   DisposableEffect(state) {
@@ -259,6 +269,7 @@ fun ImageViewer(viewModel: MainViewModel, snapshot: ChatSnapshot?, target: Pictu
             state.switchScope(chosen)
             scope.launch { state.load() }
           },
+          maybeOnReply = maybeOnReply,
           onForward = { isForwarding = true },
         )
       }
@@ -266,7 +277,7 @@ fun ImageViewer(viewModel: MainViewModel, snapshot: ChatSnapshot?, target: Pictu
     val forwarded = state.currentFile
     if (isForwarding && snapshot != null && forwarded != null) {
       ForwardDialog(snapshot, onPick = { to ->
-        viewModel.act(ChatActions.forward(forwarded.conversation, forwarded.message, to, ""))
+        viewModel.forwardFile(forwarded, to)
         isForwarding = false
       }, onDismiss = { isForwarding = false })
     }
@@ -506,6 +517,7 @@ private fun BottomBar(
   maybeFile: FileInfo?,
   maybeScope: MediaScope?,
   onScope: (MediaScope) -> Unit,
+  maybeOnReply: ((FileInfo) -> Unit)?,
   onForward: () -> Unit,
 ) {
   val context = LocalContext.current
@@ -532,8 +544,14 @@ private fun BottomBar(
       }
     }
     if (maybeFile != null) {
+      maybeOnReply?.let { reply ->
+        IconButton(onClick = { reply(maybeFile) }) {
+          Icon(painterResource(R.drawable.ic_reply), contentDescription = stringResource(R.string.action_reply), tint = Color.White)
+        }
+      }
+      // The picture on screen: of an album only this one, a message with just it goes whole.
       IconButton(onClick = onForward) {
-        Icon(painterResource(R.drawable.ic_forward), contentDescription = stringResource(R.string.image_forward), tint = Color.White)
+        Icon(painterResource(R.drawable.ic_forward), contentDescription = stringResource(R.string.action_forward), tint = Color.White)
       }
     }
   }
@@ -552,6 +570,37 @@ private fun ScopeChip(label: Int, isSelected: Boolean, onClick: () -> Unit) {
       selectedContainerColor = Color.White,
     ),
   )
+}
+
+/** How long a save from a tile waits for the download. */
+private const val SAVE_DOWNLOAD_TIMEOUT_MS = 300_000L
+
+/**
+ * Saves a picture from its tile: downloads it first if this device doesn't have it. The tile shows
+ * the download's progress; a failed or stuck one says so like a failed save.
+ */
+internal suspend fun downloadAndSaveToGallery(viewModel: MainViewModel, context: Context, file: FileInfo) {
+  val maybeLocal = try {
+    withTimeoutOrNull(SAVE_DOWNLOAD_TIMEOUT_MS) {
+      if (file.transfer.state != "local") viewModel.act(ChatActions.downloadAttachment(file.conversation, file.message, file.fileId))
+      viewModel.changeCount.mapNotNull {
+        viewModel.chat.extras(file.conversation, listOf(file.message))[file.message]?.files
+          ?.firstOrNull { it.fileId == file.fileId }
+          ?.transfer?.takeIf { it.state == "local" || it.state == "failed" }
+      }.first()
+    }
+  } catch (failure: TeamCraftException) {
+    null
+  } catch (failure: IllegalStateException) {
+    // Signed out meanwhile.
+    null
+  }
+  val maybePath = maybeLocal?.takeIf { it.state == "local" }?.path
+  if (maybePath == null) {
+    Toast.makeText(context, R.string.image_save_failed, Toast.LENGTH_SHORT).show()
+  } else {
+    saveToGallery(context, maybePath, file)
+  }
 }
 
 /**

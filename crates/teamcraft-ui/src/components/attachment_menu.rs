@@ -17,8 +17,8 @@ use crate::lightbox::MediaKey;
 use crate::preview::PreviewKind;
 use crate::state::{Overlay, use_app_state};
 
-/// Room the menu needs below the pointer before it opens upwards (five entries and a separator).
-const MENU_HEIGHT_PX: i32 = 236;
+/// Room the menu needs below the pointer before it opens upwards (six entries and a separator).
+const MENU_HEIGHT_PX: i32 = 276;
 
 /// A right-clicked file and where the pointer was.
 #[derive(Clone, Debug)]
@@ -55,17 +55,22 @@ pub fn use_attachment_menu() -> Option<RwSignal<Option<AttachmentMenuTarget>>> {
   use_context::<RwSignal<Option<AttachmentMenuTarget>>>()
 }
 
-/// Shows the app's menu for a right click on `file` in the desktop app: cancels the webview's own.
-/// Does nothing in the browser (its menu saves and copies pictures itself), on a touch screen, for a
-/// file still going up, or outside the signed-in shell. `true` if the menu opened.
+/// Shows the app's menu for a right click on `file` in the desktop app, and in the browser on a
+/// picture of an album (`is_album_tile`), which its own menu can't reply to or forward alone: cancels
+/// the webview's own. Does nothing elsewhere in the browser (its menu saves and copies pictures
+/// itself), on a touch screen, for a file still going up, or outside the signed-in shell. `true` if
+/// the menu opened.
 pub fn open_on_right_click(
   maybe_menu: Option<RwSignal<Option<AttachmentMenuTarget>>>,
   ev: &web_sys::MouseEvent,
   file: &FileInfo,
   is_touch: bool,
+  is_album_tile: bool,
 ) -> bool {
   let is_on_server = file.file_id.parse::<u64>().is_ok();
-  let Some(menu) = maybe_menu.filter(|_| tauri::is_available() && !is_touch && is_on_server) else {
+  let Some(menu) =
+    maybe_menu.filter(|_| (tauri::is_available() || is_album_tile) && !is_touch && is_on_server)
+  else {
     return false;
   };
   ev.prevent_default();
@@ -100,6 +105,7 @@ fn MenuFor(target: AttachmentMenuTarget, menu: RwSignal<Option<AttachmentMenuTar
   let actions = FileActions::new(state, &target.file);
   let maybe_open = OpenWith::of(&target.file);
   let can_copy_image = actions.can_copy_image();
+  let can_reply = actions.can_reply();
   let conversation = target.file.conversation;
   let (x, y) = placed_with(target.x, target.y, MENU_HEIGHT_PX);
   // Starts fetching the permalink so "Copy link to message" has it when it is clicked.
@@ -148,6 +154,12 @@ fn MenuFor(target: AttachmentMenuTarget, menu: RwSignal<Option<AttachmentMenuTar
           <span class="menu-label">{move || i18n.t("attachment-menu-open")}</span>
         </button>
       })}
+      {can_reply.then(|| view! {
+        <button class="menu-item" role="menuitem" tabindex="-1" on:click=item(FileActions::reply)>
+          <Icon name=IconName::Reply />
+          <span class="menu-label">{move || i18n.t(actions.reply_label())}</span>
+        </button>
+      })}
       <button class="menu-item" role="menuitem" tabindex="-1" on:click=item(FileActions::download)>
         <Icon name=IconName::Download />
         <span class="menu-label">{move || i18n.t("attachment-menu-save")}</span>
@@ -161,7 +173,7 @@ fn MenuFor(target: AttachmentMenuTarget, menu: RwSignal<Option<AttachmentMenuTar
       <div class="menu-sep" role="separator"></div>
       <button class="menu-item" role="menuitem" tabindex="-1" on:click=item(FileActions::forward)>
         <Icon name=IconName::Forward />
-        <span class="menu-label">{move || i18n.t("lightbox-forward")}</span>
+        <span class="menu-label">{move || i18n.t(actions.forward_label())}</span>
       </button>
       <button class="menu-item" role="menuitem" tabindex="-1" on:click=item(FileActions::copy_message_link)>
         <Icon name=IconName::Link />

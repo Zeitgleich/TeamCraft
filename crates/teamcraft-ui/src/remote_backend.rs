@@ -37,7 +37,9 @@ use teamcraft_client_api::remote::{
 use teamcraft_client_api::scheduled::ScheduledOverview;
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
-use teamcraft_proto::{BackgroundId, CategoryId, ClientMessageId, HistoryPolicy, WebPushKeyResponse};
+use teamcraft_proto::{
+  AttachmentId, BackgroundId, CategoryId, ClientMessageId, HistoryPolicy, WebPushKeyResponse,
+};
 
 use crate::auth::Authenticator;
 use crate::auth::tauri::{call, listen, listen_text};
@@ -1175,6 +1177,24 @@ impl ChatBackend for RemoteChat {
       message,
       to,
       comment: comment.to_owned(),
+      maybe_attachment: None,
+    });
+  }
+
+  fn forward_attachment(
+    &self,
+    from: ConversationId,
+    message: MessageId,
+    attachment: AttachmentId,
+    to: ConversationId,
+    comment: &str,
+  ) {
+    self.act(ChatAction::ForwardMessage {
+      from,
+      message,
+      to,
+      comment: comment.to_owned(),
+      maybe_attachment: Some(attachment),
     });
   }
 
@@ -2966,6 +2986,7 @@ mod tests {
         maybe_thread: None,
         body: body.to_owned(),
         maybe_reply_to: None,
+        maybe_reply_attachment: None,
         priority: Default::default(),
         wants_acknowledgement: false,
         is_silent: false,

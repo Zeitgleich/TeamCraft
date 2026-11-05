@@ -23,7 +23,7 @@ use crate::components::file_views::save_attachment;
 use crate::components::icons::{Icon, IconName};
 use crate::components::lightbox::{FullMedia, sizes};
 use crate::components::lightbox_motion::StageMotion;
-use crate::components::message_actions::copy_to_clipboard;
+use crate::components::message_actions::{copy_to_clipboard, reply_to_file};
 use crate::components::message_row::shown_author;
 use crate::components::sheet::PopoverBackdrop;
 use crate::copy_image::{self, CopiedPicture, CopyRoute};
@@ -154,6 +154,15 @@ impl MediaActions {
       },
       Some(MediaKind::Image) | None => {},
     }
+  }
+
+  /// Leaves the lightbox for the shown picture's message, with a reply to the picture started.
+  fn reply(self) {
+    let Some(file) = self.current_file.get_untracked() else {
+      return;
+    };
+    self.jump_to_message();
+    reply_to_file(self.state, &file);
   }
 
   fn jump_to_message(self) {
@@ -403,6 +412,34 @@ fn MoreMenu(
   let conversation = actions.conversation;
   let can_share = can_share_files(state, conversation);
   let message = move || actions.current.get_untracked().message;
+  // The shown picture's own actions where its message has others, the message's where not (#241).
+  let is_in_album = Memo::new(move |_| {
+    let message = actions.current.get().message;
+    state
+      .read(|backend| backend.message_extras(conversation, &[message]))
+      .into_iter()
+      .next()
+      .is_some_and(|extras| extras.files.len() > 1)
+  });
+  let can_post = state
+    .read(|backend| backend.conversation(conversation))
+    .is_some_and(|conversation| conversation.can_post);
+  let can_reply = move || can_post && is_in_album.get();
+  let reply_label = move || match actions.kind.get() {
+    Some(MediaKind::Video) => "video-reply",
+    _ => "image-reply",
+  };
+  let forward_label = move || match (is_in_album.get(), actions.kind.get()) {
+    (false, _) => "lightbox-forward",
+    (true, Some(MediaKind::Video)) => "video-forward",
+    (true, _) => "image-forward",
+  };
+  let forward = move || {
+    let key = actions.current.get_untracked();
+    state
+      .overlay
+      .set(Overlay::Forward(conversation, key.message, Some(key.attachment)));
+  };
   let is_saved = Memo::new(move |_| {
     let message = actions.current.get().message;
     state
@@ -541,13 +578,15 @@ fn MoreMenu(
               <kbd class="menu-shortcut">{shortcut(Command::CopyImage)}</kbd>
             </button>
           </Show>
-          <button
-            class="menu-item"
-            role="menuitem"
-            on:click=move |_| state.overlay.set(Overlay::Forward(conversation, message()))
-          >
+          <Show when=can_reply fallback=|| ()>
+            <button class="menu-item" role="menuitem" on:click=move |_| actions.reply()>
+              <Icon name=IconName::Reply />
+              <span class="menu-label">{move || i18n.t(reply_label())}</span>
+            </button>
+          </Show>
+          <button class="menu-item" role="menuitem" on:click=move |_| forward()>
             <Icon name=IconName::Forward />
-            <span class="menu-label">{move || i18n.t("lightbox-forward")}</span>
+            <span class="menu-label">{move || i18n.t(forward_label())}</span>
           </button>
           <div class="menu-sep" role="separator"></div>
           <button

@@ -42,8 +42,10 @@ import de.zeitgleich.teamcraft.auth.signInFailureLog
 import de.zeitgleich.teamcraft.auth.isSsoOnly
 import de.zeitgleich.teamcraft.auth.localSignInErrorText
 import de.zeitgleich.teamcraft.calls.CallOptions
+import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ChatQueries
+import de.zeitgleich.teamcraft.core.FileInfo
 import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.core.OwnProfile
 import de.zeitgleich.teamcraft.core.PermalinkTarget
@@ -650,6 +652,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     } catch (failure: IllegalStateException) {
       R.string.error_signed_out
     }
+
+  /**
+   * Forwards one file of a message. The core sends nothing for a file that went meanwhile (never
+   * the rest of the album instead), so that is told here.
+   */
+  fun forwardFile(file: FileInfo, to: String) = viewModelScope.launch {
+    try {
+      val files = chat.extras(file.conversation, listOf(file.message))[file.message]?.files.orEmpty()
+      if (files.any { it.fileId == file.fileId }) {
+        chat.act(ChatActions.forward(file.conversation, file.message, to, "", file.fileId))
+      } else {
+        failures.value = R.string.file_gone
+      }
+    } catch (failure: TeamCraftException) {
+      failures.value = errorText(failure)
+    } catch (failure: IllegalStateException) {
+      // Signed out meanwhile: no account to act for.
+    }
+  }
 
   /** Shows a message once, like a failed action. */
   fun showFailure(@StringRes message: Int) {

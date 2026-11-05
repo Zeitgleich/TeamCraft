@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::synced_settings::StoredSettings;
 use teamcraft_proto::{
-  BackgroundId, Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId, UserId,
+  AttachmentId, BackgroundId, Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId, UserId,
 };
 
 use crate::store::Priority;
@@ -189,6 +189,8 @@ pub struct ScheduledEntry {
   /// The message this one quotes, as the server numbered it.
   #[serde(rename = "reply_to", default, skip_serializing_if = "Option::is_none")]
   pub maybe_reply_to: Option<MessageId>,
+  #[serde(rename = "reply_attachment", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_reply_attachment: Option<AttachmentId>,
   #[serde(default)]
   pub priority: Priority,
   #[serde(default)]
@@ -1002,6 +1004,7 @@ mod tests {
         body: body.to_owned(),
         due_at_ms: 1_000,
         maybe_reply_to: None,
+        maybe_reply_attachment: None,
         priority: Priority::Normal,
         wants_acknowledgement: false,
         is_silent: false,

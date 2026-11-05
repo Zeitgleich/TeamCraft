@@ -145,7 +145,7 @@ pub fn AudioCard(file: FileInfo) -> impl IntoView {
   let menu_file = StoredValue::new(file.clone());
   let on_context_menu = move |ev: web_sys::MouseEvent| {
     let is_touch = crate::viewport::is_touch_primary();
-    menu_file.with_value(|file| attachment_menu::open_on_right_click(maybe_menu, &ev, file, is_touch));
+    menu_file.with_value(|file| attachment_menu::open_on_right_click(maybe_menu, &ev, file, is_touch, false));
   };
   let file_name = name.get_value();
   view! {

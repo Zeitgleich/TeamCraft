@@ -28,6 +28,10 @@ struct ChatPane: View {
   @State private var photoSelection: [PhotosPickerItem] = []
   @State private var isShowingFiles = false
   @State private var maybeReplying: MessageItem?
+  /// The one picture of an album being answered, instead of a whole message (#241).
+  @State private var maybeReplyingImage: FileInfo?
+  @State private var maybeForwardingImage: FileInfo?
+  @State private var isPictureGone = false
   @State private var maybeDeleting: MessageItem?
   @State private var isAtBottom = true
   @State private var newBelowCount = 0
@@ -95,7 +99,13 @@ struct ChatPane: View {
     .sheet(item: $maybeForwarding) { target in
       ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
     }
-    .fullScreenCover(item: $maybeViewing) { target in PictureViewer(target: target) }
+    .sheet(item: $maybeForwardingImage) { file in
+      ForwardSheet(fromConversationId: file.conversation, messageId: file.message, maybeAttachmentId: file.fileId)
+    }
+    .alert("file_gone", isPresented: $isPictureGone) { Button("done", role: .cancel) {} }
+    .fullScreenCover(item: $maybeViewing) { target in
+      PictureViewer(target: target, maybeOnReply: canReply ? startImageReply : nil)
+    }
     .sheet(item: $maybeShowingEdits) { target in
       EditHistorySheet(edits: extras[target.message.id]?.edits ?? [], current: target.message.body)
     }
@@ -135,6 +145,12 @@ struct ChatPane: View {
       }
       messageList
         .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
+        .environment(\.openQuotedPicture, OpenQuotedPictureAction(run: openQuotedPicture))
+        .environment(
+          \.imageActions,
+          ImageActions(
+            maybeReply: canReply ? startImageReply : nil,
+            forward: { file in maybeForwardingImage = file }))
       if let line = typingText(typingNames) {
         Text(line)
           .font(.caption.italic())
@@ -357,8 +373,7 @@ struct ChatPane: View {
     let message = entry.message
     let highlight: Color = maybeHighlighted == message.id ? Theme.accentSoft : .clear
     return SwipeToReply(isEnabled: threadId == nil && !message.isPending && conversation.canPost) {
-      maybeReplying = message
-      isComposerFocused = true
+      startReply(to: message)
     } content: {
       row
     }
@@ -374,8 +389,7 @@ struct ChatPane: View {
       .accessibilityActions {
         if conversation.canPost {
           Button("reply") {
-            maybeReplying = message
-            isComposerFocused = true
+            startReply(to: message)
           }
         }
         if conversation.canReact {
@@ -392,7 +406,11 @@ struct ChatPane: View {
   private var composer: some View {
     if conversation.canPost {
       VStack(alignment: .leading, spacing: 6) {
-        if let replying = maybeReplying { replyBar(replying) }
+        if let image = maybeReplyingImage {
+          imageReplyBar(image)
+        } else if let replying = maybeReplying {
+          replyBar(replying)
+        }
         EmojiSuggestionBar(text: draft) { emoji in draft = completeEmoji(in: draft, with: emoji) }
         if !attachments.isEmpty { attachmentChips }
         HStack(alignment: .bottom, spacing: 8) {
@@ -460,6 +478,54 @@ struct ChatPane: View {
       .foregroundStyle(Theme.textMuted)
       .frame(width: 40, height: 44)
       .contentShape(Rectangle())
+  }
+
+  private var canReply: Bool { threadId == nil && conversation.canPost }
+
+  private func startReply(to message: MessageItem) {
+    maybeReplying = message
+    maybeReplyingImage = nil
+    isComposerFocused = true
+  }
+
+  private func startImageReply(_ file: FileInfo) {
+    maybeReplying = nil
+    maybeReplyingImage = file
+    isComposerFocused = true
+  }
+
+  /// A quote's picture opens in the viewer while it is there; the quoted message may not be loaded.
+  private func openQuotedPicture(messageId: String, fileId: String) {
+    Task {
+      let extras = await model.extras(conversationId: conversation.id, messageIds: [messageId])
+      if let file = extras[messageId]?.files?.first(where: { $0.fileId == fileId }) {
+        maybeViewing = PictureTarget(file: file)
+      } else {
+        isPictureGone = true
+      }
+    }
+  }
+
+  /// The picture being answered, with a way out.
+  private func imageReplyBar(_ file: FileInfo) -> some View {
+    HStack {
+      Rectangle().fill(Theme.accent).frame(width: 3)
+      if let thumbnail = ThumbnailCache.image(for: file) {
+        Image(uiImage: thumbnail).resizable().scaledToFill()
+          .frame(width: 32, height: 32)
+          .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+      }
+      VStack(alignment: .leading, spacing: 2) {
+        Text("replying_to \(file.maybeSender.flatMap { displayNames[$0] } ?? "")")
+          .font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+        Text(verbatim: file.fileName).font(.caption).foregroundStyle(Theme.textMuted).lineLimit(1)
+      }
+      Spacer()
+      Button { maybeReplyingImage = nil } label: { Image(systemName: "xmark.circle.fill") }
+        .foregroundStyle(Theme.textMuted)
+        .accessibilityLabel(Text("cancel"))
+    }
+    .frame(maxHeight: 40)
   }
 
   /// The message being answered, with a way out.
@@ -559,8 +625,7 @@ struct ChatPane: View {
     }
     if threadId == nil && conversation.canPost {
       Button("reply", systemImage: "arrowshape.turn.up.left") {
-        maybeReplying = message
-        isComposerFocused = true
+        startReply(to: message)
       }
       Button("reply_in_thread", systemImage: "bubble.left.and.bubble.right") {
         maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id)
@@ -725,7 +790,7 @@ struct ChatPane: View {
       draft = ""
       maybeEditing = nil
       await model.perform(.editMessage(conversationId: conversation.id, messageId: editing.id, body: body))
-    } else if attachments.isEmpty && maybeReplying == nil {
+    } else if attachments.isEmpty && maybeReplying == nil && maybeReplyingImage == nil {
       guard !body.isEmpty else { return }
       draft = ""
       if !(await model.send(conversationId: conversation.id, threadId: threadId, body: body)) {
@@ -736,15 +801,18 @@ struct ChatPane: View {
     } else {
       let files = attachments
       let replying = maybeReplying
+      let replyingImage = maybeReplyingImage
       draft = ""
       attachments = []
       maybeReplying = nil
+      maybeReplyingImage = nil
       let request = SendRequest(
         conversationId: conversation.id, maybeThreadId: threadId, body: body, files: files,
-        maybeReplyToId: replying?.id)
+        maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId)
       if !(await model.performChecked(.sendMessage(request))) {
         draft = body
         maybeReplying = replying
+        maybeReplyingImage = replyingImage
         if files.isEmpty { isSendFailed = true } else { attachmentError = .sendFailed }
       }
     }
@@ -942,25 +1010,44 @@ struct ForwardSheet: View {
   @Environment(\.dismiss) private var dismiss
   let fromConversationId: String
   let messageId: String
+  /// Only this file of the message (#241).
+  var maybeAttachmentId: String?
 
   @State private var targets: [ConversationItem] = []
+  @State private var isFileGone = false
 
   var body: some View {
     NavigationStack {
       List(targets, id: \.id) { target in
         Button(target.listName) {
-          Task {
-            await model.perform(
-              .forward(fromConversationId: fromConversationId, messageId: messageId, toConversationId: target.id))
-            dismiss()
-          }
+          Task { await forward(to: target.id) }
         }
       }
-      .navigationTitle("forward")
+      .navigationTitle(maybeAttachmentId == nil ? LocalizedStringKey("forward") : LocalizedStringKey("image_forward_one"))
       .navigationBarTitleDisplayMode(.inline)
       .toolbar { ToolbarItem(placement: .cancellationAction) { Button("cancel") { dismiss() } } }
+      .alert("file_gone", isPresented: $isFileGone) { Button("done", role: .cancel) { dismiss() } }
     }
     .task { targets = await model.conversations().filter(\.canPost) }
+  }
+
+  /// The core sends nothing for a file that went meanwhile (never the album instead): says so here.
+  private func forward(to target: String) async {
+    guard let attachmentId = maybeAttachmentId else {
+      await model.perform(
+        .forward(fromConversationId: fromConversationId, messageId: messageId, toConversationId: target))
+      dismiss()
+      return
+    }
+    let extras = await model.extras(conversationId: fromConversationId, messageIds: [messageId])
+    guard extras[messageId]?.files?.contains(where: { $0.fileId == attachmentId }) == true else {
+      isFileGone = true
+      return
+    }
+    await model.perform(
+      .forwardAttachment(
+        fromConversationId: fromConversationId, messageId: messageId, fileId: attachmentId, toConversationId: target))
+    dismiss()
   }
 }
 

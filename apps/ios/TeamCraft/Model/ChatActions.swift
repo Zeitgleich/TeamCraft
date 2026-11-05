@@ -21,6 +21,8 @@ enum ChatAction {
   /// Unread again from `fromMessageId` on (account data, synced to the user's devices).
   case markUnread(conversationId: String, fromMessageId: String)
   case forward(fromConversationId: String, messageId: String, toConversationId: String)
+  /// One file of a message, without the rest of an album (a message with only it goes whole).
+  case forwardAttachment(fromConversationId: String, messageId: String, fileId: String, toConversationId: String)
   case setPinned(conversationId: String, messageId: String, isPinned: Bool)
   case setSaved(conversationId: String, messageId: String, isSaved: Bool)
   /// The user types (send while the text changes; the core throttles).
@@ -85,6 +87,10 @@ enum ChatAction {
       object = ["action": "mark_unread", "conversation": conversation, "from": message]
     case .forward(let from, let message, let to):
       object = ["action": "forward_message", "from": from, "message": message, "to": to, "comment": ""]
+    case .forwardAttachment(let from, let message, let file, let to):
+      object = [
+        "action": "forward_message", "from": from, "message": message, "to": to, "comment": "", "attachment": file,
+      ]
     case .setPinned(let conversation, let message, let isPinned):
       object = ["action": "set_pinned", "conversation": conversation, "message": message, "is_pinned": isPinned]
     case .setSaved(let conversation, let message, let isSaved):
@@ -147,6 +153,8 @@ struct SendRequest: Equatable {
   var body: String
   var files: [PickedFile] = []
   var maybeReplyToId: String?
+  /// With `maybeReplyToId`: the one picture of an album the reply answers.
+  var maybeReplyAttachmentId: String?
 
   var object: [String: Any] {
     [
@@ -154,6 +162,7 @@ struct SendRequest: Equatable {
       "maybe_thread": maybeThreadId.map { $0 as Any } ?? NSNull(),
       "body": body,
       "maybe_reply_to": maybeReplyToId.map { $0 as Any } ?? NSNull(),
+      "maybe_reply_attachment": maybeReplyAttachmentId.map { $0 as Any } ?? NSNull(),
       "priority": "normal",
       "wants_acknowledgement": false,
       "is_silent": false,

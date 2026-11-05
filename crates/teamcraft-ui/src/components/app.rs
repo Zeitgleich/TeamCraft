@@ -458,7 +458,9 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::ShareFile(conversation, message, file) => {
           lazy_area(Place::Overlay, move || areas::share_file(conversation, message, file))
         },
-        Overlay::Forward(from, message) => lazy_area(Place::Overlay, move || areas::forward(from, message)),
+        Overlay::Forward(from, message, maybe_attachment) => {
+          lazy_area(Place::Overlay, move || areas::forward(from, message, maybe_attachment))
+        },
         Overlay::Lightbox(conversation, start) => lazy_area(Place::Overlay, move || areas::lightbox(conversation, start)),
         Overlay::FilePreview(conversation, key) => lazy_area(Place::Overlay, move || areas::file_preview(conversation, key)),
         Overlay::NewSpace => lazy_area(Place::Overlay, || areas::new_space(())),

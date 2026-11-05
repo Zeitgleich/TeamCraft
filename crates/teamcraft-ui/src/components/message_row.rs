@@ -13,7 +13,7 @@ use crate::components::date_jump::DatePill;
 use crate::components::file_views::{LinkPreviewCard, MessageFiles};
 use crate::components::icons::{Icon, IconName};
 use crate::components::long_press::LongPress;
-use crate::components::message_actions::{MessageAction, run_message_action};
+use crate::components::message_actions::{MessageAction, QuotedImage, run_message_action};
 use crate::components::message_link_card::MessageLinkPreviews;
 use crate::components::message_toolbar::{ActiveMessage, ToolbarHost};
 use crate::components::profile_views::UserHoverCard;
@@ -557,13 +557,20 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         .read(|backend| backend.user(reply.author))
         .map(|user| user.display_name)
         .unwrap_or_default();
-      view! {
-        <blockquote class="msg-quote">
-          <span class="quote-author" translate="no">{name}</span>
-          <span class="quote-text" translate="no">
-            {if reply.excerpt.is_empty() { i18n.t("quote-unavailable") } else { reply.excerpt }}
-          </span>
-        </blockquote>
+      match reply.maybe_attachment {
+        Some(image) => view! {
+          <QuotedImage conversation=conversation maybe_message=reply.maybe_message name=name excerpt=reply.excerpt image=image />
+        }
+        .into_any(),
+        None => view! {
+          <blockquote class="msg-quote">
+            <span class="quote-author" translate="no">{name}</span>
+            <span class="quote-text" translate="no">
+              {if reply.excerpt.is_empty() { i18n.t("quote-unavailable") } else { reply.excerpt }}
+            </span>
+          </blockquote>
+        }
+        .into_any(),
       }
     })
   };

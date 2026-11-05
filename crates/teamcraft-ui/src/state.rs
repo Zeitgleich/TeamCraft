@@ -113,6 +113,15 @@ pub struct ReplyTarget {
   pub message: MessageId,
   pub author_name: String,
   pub excerpt: String,
+  /// The one picture of an album the reply answers (issue #241).
+  pub maybe_image: Option<ReplyImage>,
+}
+
+/// The picture a reply answers, as the composer shows it above the field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplyImage {
+  pub attachment: teamcraft_proto::AttachmentId,
+  pub maybe_thumbnail: Option<Vec<u8>>,
 }
 
 /// A space or channel the user just created; it opens as soon as it shows up (the server answers
@@ -229,8 +238,8 @@ pub enum Overlay {
   CancelMeeting(MeetingId, i64),
   /// The link of the meeting just scheduled or started (`MeetingsHub::maybe_created`), to copy.
   MeetingCreated,
-  /// Pick a conversation to forward a message to.
-  Forward(ConversationId, MessageId),
+  /// Pick a conversation to forward a message to, or one file of it.
+  Forward(ConversationId, MessageId, Option<teamcraft_proto::AttachmentId>),
   /// The public links of one file of a message: new ones with options, the live ones with Revoke.
   ShareFile(ConversationId, MessageId, teamcraft_proto::AttachmentId),
   NewSpace,

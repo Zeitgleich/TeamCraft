@@ -229,6 +229,18 @@ data class ReplyPreview(
   @SerialName("maybe_message") val maybeMessage: String? = null,
   val author: String,
   val excerpt: String,
+  /** The one picture of an album the reply answers (#241); it still shows when the picture is gone. */
+  @SerialName("attachment") val maybeAttachment: ReplyAttachmentPreview? = null,
+)
+
+/** The picture a reply quotes. */
+@Serializable
+data class ReplyAttachmentPreview(
+  @SerialName("file_id") val fileId: String,
+  @SerialName("file_name") val fileName: String,
+  @SerialName("thumbnail_png") val maybeThumbnail: ImageBytes? = null,
+  /** The picture is still in the quoted message: the quote can open it. */
+  @SerialName("can_open") val canOpen: Boolean = false,
 )
 
 @Serializable
