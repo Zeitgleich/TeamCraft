@@ -32,6 +32,8 @@
 //! once instead of the others seeing "reconnecting" until the grace period ends.
 
 mod cadence;
+#[cfg(feature = "effects")]
+mod effects_preview;
 mod fallback;
 #[cfg(feature = "effects")]
 mod gl_compositor;
@@ -44,6 +46,8 @@ mod segmentation_worker;
 mod session_watch;
 mod video;
 
+#[cfg(feature = "effects")]
+pub use effects_preview::EffectsPreview;
 #[cfg(feature = "effects")]
 pub use gl_compositor::GlCompositor;
 #[cfg(feature = "effects")]

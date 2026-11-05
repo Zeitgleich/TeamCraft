@@ -315,7 +315,9 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   that the page imports in the background after sign-in, so it isn't part of the app's first
   download; the page keeps the client core and the device key, forwards the gateway's call events,
   and signs and verifies the call key bindings for it (`teamcraft_client_api::page_calls`). Calls run in the
-  tab that runs the client core (e2ee.md §9.4); background effects are desktop-only for now.
+  tab that runs the client core (e2ee.md §9.4). Background effects run in the page too (#439):
+  WebGPU or WebGL2 compositing, the segmentation in a worker of its own that loads with the first
+  effect of the session.
 - Desktop: `cpal` for audio I/O (on Linux through PipeWire, else PulseAudio, else ALSA; devices,
   defaults and hotplug from PipeWire's registry, #1072), `opus`, **`webrtc-audio-processing`** (AEC, noise suppression, AGC) – the only WebRTC component used.
   The media runs in the shell; for each tile on screen the shell sends the decrypted track to the
@@ -324,8 +326,12 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   images (`call_watch_camera`). The UI draws both with the same `LiveVideo` as the browser.
   Before a join, the pre-join screen's check opens the camera and microphone on the device only:
   the camera through the same effects into the self view, the microphone into a level meter
-  (`call_watch_level`; in the browser the call module's `preview_level`). Nothing is encoded or
-  sent; leaving or hiding the screen releases both, and the join takes them over.
+  (`call_watch_level`; in the browser the call module's `preview_level`). In the browser the call
+  module's `EffectsPreview` runs the check's camera through the effects into a canvas whose
+  `captureStream()` is the self view (#1295); without an effect the self view is the camera itself,
+  and the segmentation worker only starts once one is chosen. Nothing is encoded or sent; leaving or
+  hiding the screen releases both, and the join takes them over: the camera with the chosen
+  background, the check's effects showing it until the call's have taken over.
 - Browser support (MDN browser-compat-data, checked 2026-10): WebTransport incl. datagrams in Chrome 97,
   Firefox 114, **Safari / iOS Safari 26.4**; WebCodecs `VideoEncoder`/`VideoDecoder` in Chrome 94,
   Firefox 130, Safari 16.4; `AudioEncoder`/`AudioDecoder` in Safari 26. No WebRTC fallback planned;

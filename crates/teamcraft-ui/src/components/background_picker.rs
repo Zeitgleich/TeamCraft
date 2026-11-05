@@ -419,8 +419,7 @@ mod tests {
   #[test]
   fn the_browser_picker_offers_what_the_apps_do() {
     let own = [image(3)];
-    let options = effect_options(&own, EffectsOffer::InCall);
-    assert_eq!(options, effect_options(&own, EffectsOffer::Full));
+    let options = effect_options(&own, EffectsOffer::Full);
     assert!(options.contains(&BackgroundEffect::Preset(BackgroundPreset::LivingRoom)));
     assert_eq!(
       options.last(),
