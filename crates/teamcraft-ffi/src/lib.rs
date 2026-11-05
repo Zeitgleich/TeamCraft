@@ -18,6 +18,7 @@ mod join_requests;
 mod logging;
 mod markup;
 mod media_viewer;
+mod notetaker;
 mod reads;
 mod row_badge;
 mod server_entry;
@@ -47,6 +48,7 @@ pub use media_viewer::{
   AlbumLayout, MediaScope, MediaViewer, MediaViewerItem, MediaViewerLimits, MediaViewerState,
   OriginalDownload, album_layout, fetches_original_automatically, media_viewer_limits,
 };
+pub use notetaker::NotetakerAddition;
 pub use server_entry::{
   CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
@@ -913,7 +915,7 @@ impl TeamCraft {
   }
 
   /// "Add people" in the DM or group DM call of `conversation_id` (docs/meetings.md, "A call becomes
-  /// a meeting"), or "Add notetaker" in any call where the notetaker is no member: starts a meeting
+  /// a meeting"), or "Add notetaker" where [`Self::bring_in_notetaker`] answers `MoveToRoom`: starts a meeting
   /// room with the people in the call (`in_call`, as the call shows them) and `added`, founds its
   /// encryption with exactly them and moves the call there. The conversation itself doesn't
   /// change. The notetaker among `added` isn't rung but asked in there, if the policy lets the user
@@ -942,9 +944,10 @@ impl TeamCraft {
   /// The notetaker in the call of `conversation_id` with `participant_user_ids` (the others in
   /// the call, as the call engine verified them), for the call screen's "Add notetaker", notice and
   /// "Remove notetaker" (e2ee.md §8.2). `None` without a notetaker in the verified policy. "Add
-  /// notetaker" is offered in every call to whoever the policy lets ask it in: where the notetaker
-  /// is a member it is asked in (`ask_notetaker_in`), anywhere else the call moves into a room with
-  /// it (`add_people_to_call` with the notetaker as the added one; "In every call").
+  /// notetaker" is offered in every call to whoever the policy lets ask it in and runs
+  /// [`Self::bring_in_notetaker`]: asked in where it is a member or can be added, anywhere else the
+  /// call moves into a room with it (`add_people_to_call` with the notetaker as the added one; "In
+  /// every call").
   pub async fn notetaker_in_call(
     &self,
     conversation_id: String,
@@ -953,6 +956,38 @@ impl TeamCraft {
     self
       .read(move |reads| reads.notetaker_in_call(&conversation_id, &participant_user_ids))
       .await
+  }
+
+  /// The others in the call running in `conversation_id` before joining it, as the server's
+  /// roster lists them (user IDs, each once); empty when none runs. Never starts a call. The
+  /// pre-join screen passes them to [`Self::notetaker_in_call`]: its notice says the notetaker is
+  /// in the call (`is_present`), as desktop and web say it.
+  pub async fn call_participants(&self, conversation_id: String) -> Result<Vec<String>, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.call_participants(&conversation_id).await }))
+      .await
+  }
+
+  /// "Add notetaker" in the call of `conversation_id`, the way desktop and web bring it in (e2ee.md
+  /// §8.2, "In every call"): where it is a member it is asked in; in a channel whose members the
+  /// user manages it is added from the channel's integrations (seeing nothing written before,
+  /// into the space as a guest first where the user may put it there), in a meeting the user
+  /// organizes as one of its invitees, and asked in once that went through, so the call stays
+  /// where it is. Anywhere else nothing happens and the answer is `MoveToRoom`: the app moves the
+  /// call into a room with it (`add_people_to_call`). Only for a user the policy lets ask it in.
+  pub async fn bring_in_notetaker(
+    &self,
+    conversation_id: String,
+  ) -> Result<NotetakerAddition, TeamCraftError> {
+    let id = conversation_id.clone();
+    let is_member = self
+      .call(move |engine| Box::pin(async move { engine.add_notetaker(&id).await }))
+      .await?;
+    if !is_member {
+      return Ok(NotetakerAddition::MoveToRoom);
+    }
+    self.ask_notetaker_in(conversation_id).await?;
+    Ok(NotetakerAddition::AskedIn)
   }
 
   /// Asks the notetaker into the call of `conversation_id`, where it is a member (a `join`

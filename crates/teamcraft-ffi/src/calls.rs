@@ -94,9 +94,9 @@ pub struct NotetakerCallInfo {
   pub transcription_model: String,
   /// It is in the call now: the notice shows for everybody.
   pub is_present: bool,
-  /// It is a member of the call's conversation: "Add notetaker" asks it in there
-  /// (`ask_notetaker_in`). Otherwise the call moves into a room with it (`add_people_to_call` with
-  /// the notetaker as the added one).
+  /// It is a member of the call's conversation: "Add notetaker" asks it in there. Otherwise
+  /// `bring_in_notetaker` adds it first where the user can (a channel whose members the user
+  /// manages, a meeting the user organizes), or the call moves into a room with it.
   pub is_member: bool,
   /// "Add notetaker": the policy lets the user ask it in and it isn't in the call yet.
   pub can_invite: bool,
