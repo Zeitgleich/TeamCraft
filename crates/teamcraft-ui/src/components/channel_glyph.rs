@@ -4,8 +4,19 @@
 use leptos::prelude::*;
 
 use crate::components::icons::{Icon, IconName};
-use crate::model::ConversationId;
+use crate::model::{ConversationId, ConversationKind};
 use crate::space_images::{ImageOwner, use_space_images};
+
+/// The icon of a channel kind without a picture; `None` for kinds that are not channels (their
+/// glyph is a person or a group). Log and bot channels keep the console icon until a picture is set.
+pub fn channel_fallback_icon(kind: ConversationKind) -> Option<IconName> {
+  match kind {
+    ConversationKind::Public => Some(IconName::Hash),
+    ConversationKind::Private => Some(IconName::Lock),
+    ConversationKind::Integration => Some(IconName::Terminal),
+    ConversationKind::Direct | ConversationKind::Group => None,
+  }
+}
 
 /// The picture of `conversation` in `maybe_version`, or `fallback` while there is none (or it is
 /// still loading, or the demo has no server). `class` sizes the wrapper.
@@ -28,5 +39,32 @@ pub fn ChannelGlyph(
     }
     .into_any(),
     None => view! { <Icon name=fallback class=class /> }.into_any(),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn channels_fall_back_to_the_icon_of_their_kind() {
+    assert_eq!(
+      channel_fallback_icon(ConversationKind::Public),
+      Some(IconName::Hash)
+    );
+    assert_eq!(
+      channel_fallback_icon(ConversationKind::Private),
+      Some(IconName::Lock)
+    );
+    assert_eq!(
+      channel_fallback_icon(ConversationKind::Integration),
+      Some(IconName::Terminal)
+    );
+  }
+
+  #[test]
+  fn people_have_no_channel_icon() {
+    assert_eq!(channel_fallback_icon(ConversationKind::Direct), None);
+    assert_eq!(channel_fallback_icon(ConversationKind::Group), None);
   }
 }

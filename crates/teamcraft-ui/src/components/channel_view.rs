@@ -5,7 +5,7 @@ use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::channel_access::ChannelAccess;
 use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
 use crate::components::bookmarks::BookmarksBar;
-use crate::components::channel_glyph::ChannelGlyph;
+use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
 use crate::components::compact_back::CompactBack;
 use crate::components::composer::Composer;
 use crate::components::conversation_notify::ConversationBell;
@@ -499,17 +499,10 @@ fn ChannelHeader(
   let title = move || {
     let (kind, name, maybe_person) = identity.get()?;
     let icon = match kind {
-      ConversationKind::Public | ConversationKind::Private => {
-        let fallback = if kind == ConversationKind::Public {
-          IconName::Hash
-        } else {
-          IconName::Lock
-        };
+      ConversationKind::Public | ConversationKind::Private | ConversationKind::Integration => {
+        let fallback = channel_fallback_icon(kind).unwrap_or(IconName::Hash);
         let version = Signal::derive(move || info.get().and_then(|found| found.maybe_image_version));
         view! { <ChannelGlyph conversation=conversation maybe_version=version fallback=fallback class="header-icon" /> }.into_any()
-      },
-      ConversationKind::Integration => {
-        view! { <Icon name=IconName::Terminal class="header-icon" /> }.into_any()
       },
       ConversationKind::Group => view! { <Icon name=IconName::Users class="header-icon" /> }.into_any(),
       ConversationKind::Direct => (move || {
