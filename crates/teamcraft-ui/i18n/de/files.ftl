@@ -330,3 +330,12 @@ share-into-discard = Verwerfen
 share-into-failed = Was du geteilt hast, konnte nicht empfangen werden. Teile es noch einmal.
 share-into-read-failed = Was du geteilt hast, konnte nicht gelesen werden. Teile es noch einmal.
 share-into-other-account = Etwas, das vor dieser Anmeldung geteilt wurde, ist entfernt: Es war für die Person aufbewahrt, die zuvor angemeldet war.
+
+## Editing a picture before it is sent (#1354)
+picture-edit-title = Bild bearbeiten
+picture-edit = { $name } bearbeiten
+picture-rotate = Nach links drehen
+picture-reset = Zurücksetzen
+picture-edit-done = Fertig
+picture-edit-failed = Dieses Bild lässt sich nicht bearbeiten. Es wird unverändert gesendet.
+picture-crop-area = Zuschnitt: Ecke oder Rahmen ziehen oder Pfeiltasten nutzen (mit Umschalt Größe ändern)

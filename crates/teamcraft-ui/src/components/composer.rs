@@ -21,6 +21,7 @@ use crate::components::file_drop::{DropContent, DroppedFiles, take_drop, transfe
 use crate::components::file_views::blob_url;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::QuoteThumbnail;
+use crate::components::picture_editor::PictureEditor;
 use crate::components::scheduled_view::refusal_text;
 use crate::components::sheet::MenuSurface;
 use crate::components::typing_indicator::should_notify_typing;
@@ -305,13 +306,18 @@ pub fn Composer(
   let suggestions_id = StoredValue::new(format!("{editor_id}-suggestions"));
   let editor_id = StoredValue::new(editor_id);
 
+  // The picture being edited before it is sent (#1354), by its place in the list.
+  let editing = RwSignal::new(None::<usize>);
   let attachment_list = move || {
     attachments
       .get()
       .into_iter()
       .enumerate()
-      .map(|(index, file)| (index, file.name, file.maybe_preview_url))
-      .collect::<Vec<(usize, String, Option<String>)>>()
+      .map(|(index, file)| {
+        let is_editable = is_editable_picture(&file);
+        (index, file.name, file.maybe_preview_url, is_editable)
+      })
+      .collect::<Vec<(usize, String, Option<String>, bool)>>()
   };
   // Thumbnails of files that were removed or sent free their object URL.
   Effect::new(move |previous: Option<Vec<String>>| {
@@ -1356,12 +1362,25 @@ pub fn Composer(
       >
         <Show when=move || !attachments.with(Vec::is_empty) fallback=|| ()>
           <ul class="attachment-chips" aria-label=move || i18n.t("composer-attachments")>
-            <For each=attachment_list key=|(i, name, _)| (*i, name.clone()) let:item>
+            <For each=attachment_list key=|(i, name, url, _)| (*i, name.clone(), url.clone()) let:item>
               {
-                let (index, name, maybe_preview_url) = item;
-                let leading = match maybe_preview_url {
-                  Some(url) => view! { <img class="chip-thumb" src=url alt="" /> }.into_any(),
-                  None => view! { <Icon name=IconName::File /> }.into_any(),
+                let (index, name, maybe_preview_url, is_editable) = item;
+                let edit_label = name.clone();
+                let leading = match (maybe_preview_url, is_editable) {
+                  // A picture opens the editor (crop and rotate) from its thumbnail.
+                  (Some(url), true) => view! {
+                    <button
+                      type="button"
+                      class="chip-thumb-button"
+                      aria-label=move || i18n.t_with("picture-edit", &[("name", &edit_label)])
+                      title=move || i18n.t("picture-edit-title")
+                      on:click=move |_| editing.set(Some(index))
+                    >
+                      <img class="chip-thumb" src=url alt="" />
+                    </button>
+                  }.into_any(),
+                  (Some(url), false) => view! { <img class="chip-thumb" src=url alt="" /> }.into_any(),
+                  (None, _) => view! { <Icon name=IconName::File /> }.into_any(),
                 };
                 view! {
                   <li class="chip">
@@ -1380,6 +1399,26 @@ pub fn Composer(
             </For>
           </ul>
         </Show>
+        {move || {
+          let index = editing.get()?;
+          let file = attachments.with_untracked(|list| list.get(index).cloned())?;
+          let FileContent::Read(bytes) = file.content else { return None };
+          let on_done = Callback::new(move |(edited, media_type): (Vec<u8>, String)| {
+            let maybe_url = object_url_of(&edited, &media_type);
+            attachments.update(|list| {
+              if let Some(target) = list.get_mut(index) {
+                target.name = edited_name(&target.name, &media_type);
+                target.media_type = media_type.clone();
+                target.content = FileContent::Read(edited);
+                target.maybe_preview_url = maybe_url;
+                target.maybe_thumbnail = None;
+              }
+            });
+            editing.set(None);
+          });
+          let on_cancel = Callback::new(move |()| editing.set(None));
+          Some(view! { <PictureEditor bytes=bytes media_type=file.media_type on_done=on_done on_cancel=on_cancel /> })
+        }}
         {move || {
           upload_error.get().map(|message| view! { <p class="composer-error" role="alert">{message}</p> })
         }}
@@ -1843,6 +1882,34 @@ fn with_scheme(url: &str) -> String {
 /// Adds a file that was read in the background. The composer may be gone by then (another
 /// conversation was opened while a big file was read): its signals are disposed, and writing them
 /// would panic and abort the whole wasm app (issue #316). Returns the file when nobody took it.
+/// Pictures the editor can open (#1354): read into memory, in a format the browser decodes, and no
+/// animation (cropping a GIF would keep only its first frame).
+fn is_editable_picture(file: &PendingFile) -> bool {
+  matches!(file.content, FileContent::Read(_))
+    && matches!(
+      file.media_type.as_str(),
+      "image/jpeg" | "image/png" | "image/webp"
+    )
+}
+
+/// A JPEG keeps the name with the `.jpg` ending; a PNG keeps its name.
+fn edited_name(name: &str, media_type: &str) -> String {
+  if media_type == "image/png" {
+    return name.to_owned();
+  }
+  let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+  format!("{}.jpg", if stem.is_empty() { "picture" } else { stem })
+}
+
+/// An object URL of the bytes for the chip's thumbnail; the list revokes it when it goes.
+fn object_url_of(bytes: &[u8], media_type: &str) -> Option<String> {
+  let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
+  let options = web_sys::BlobPropertyBag::new();
+  options.set_type(media_type);
+  let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &options).ok()?;
+  web_sys::Url::create_object_url_with_blob(&blob).ok()
+}
+
 fn add_read_file(attachments: RwSignal<Vec<PendingFile>>, file: PendingFile) -> Option<PendingFile> {
   let mut maybe_file = Some(file);
   attachments.try_update(|list| list.extend(maybe_file.take()));
@@ -1865,6 +1932,14 @@ fn pending_file_in_shell(file: ShellFile) -> PendingFile {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn an_edited_picture_is_named_for_its_new_format() {
+    assert_eq!(edited_name("holiday.heic.png", "image/jpeg"), "holiday.heic.jpg");
+    assert_eq!(edited_name("scan.png", "image/png"), "scan.png");
+    assert_eq!(edited_name("photo", "image/jpeg"), "photo.jpg");
+    assert_eq!(edited_name(".jpeg", "image/jpeg"), "picture.jpg");
+  }
 
   #[test]
   fn emoji_suggestions_insert_the_emoji_in_the_skin_tone() {

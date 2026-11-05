@@ -13,6 +13,7 @@
 use std::time::Duration;
 
 use teamcraft_client_api::os_notify::PictureShape;
+use teamcraft_client_api::picture_edit::CropFrame;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -88,6 +89,86 @@ pub async fn app_thumbnail(bytes: &[u8], media_type: &str, max_side: u32) -> Opt
   let blob = rasterize(&js_sys::Uint8Array::from(bytes), media_type, max_side, encoding).await?;
   let buffer = JsFuture::from(blob.array_buffer()).await.ok()?;
   Some(js_sys::Uint8Array::new(&buffer).to_vec())
+}
+
+/// A picture cut to `frame` and turned `quarter_turns_left` quarters to the left (issue #1354), its
+/// longer side at most `max_side`: PNG for a PNG (transparency), JPEG otherwise. Also the editor's
+/// preview (the whole frame, a small side). `None` where the browser can't decode the picture.
+pub async fn edited_picture(
+  bytes: &js_sys::Uint8Array,
+  media_type: &str,
+  quarter_turns_left: u8,
+  frame: CropFrame,
+  max_side: u32,
+) -> Option<web_sys::Blob> {
+  let source = source_url(bytes, displayable_type(media_type)?)?;
+  let image = web_sys::HtmlImageElement::new().ok()?;
+  image.set_src(&source);
+  let is_decoded = decode_within(&image, DECODE_TIMEOUT).await;
+  let canvas = is_decoded
+    .then(|| draw_edited(&image, quarter_turns_left, frame, max_side))
+    .flatten();
+  drop(web_sys::Url::revoke_object_url(&source));
+  image.set_src("");
+  let encoding = match media_type {
+    "image/png" => Encoding::Png,
+    _ => Encoding::Jpeg,
+  };
+  JsFuture::from(to_blob(&canvas?, encoding)?)
+    .await
+    .ok()?
+    .dyn_into()
+    .ok()
+}
+
+/// Draws the frame's part of the picture, turned, into a new canvas: the original is cut first, so
+/// the full-size picture is never turned whole.
+fn draw_edited(
+  image: &web_sys::HtmlImageElement,
+  quarter_turns_left: u8,
+  frame: CropFrame,
+  max_side: u32,
+) -> Option<web_sys::HtmlCanvasElement> {
+  let turns = quarter_turns_left % 4;
+  let (x, y, width, height) = frame.source_rect(turns, image.natural_width(), image.natural_height());
+  let (drawn_width, drawn_height) = target_size(width, height, max_side, false)?;
+  let (canvas_width, canvas_height) = match turns % 2 {
+    1 => (drawn_height, drawn_width),
+    _ => (drawn_width, drawn_height),
+  };
+  let canvas = web_sys::window()?
+    .document()?
+    .create_element("canvas")
+    .ok()?
+    .dyn_into::<web_sys::HtmlCanvasElement>()
+    .ok()?;
+  canvas.set_width(canvas_width);
+  canvas.set_height(canvas_height);
+  let context = canvas
+    .get_context("2d")
+    .ok()??
+    .dyn_into::<web_sys::CanvasRenderingContext2d>()
+    .ok()?;
+  context
+    .translate(f64::from(canvas_width) / 2.0, f64::from(canvas_height) / 2.0)
+    .ok()?;
+  context
+    .rotate(-f64::from(turns) * std::f64::consts::FRAC_PI_2)
+    .ok()?;
+  context
+    .draw_image_with_html_image_element_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
+      image,
+      f64::from(x),
+      f64::from(y),
+      f64::from(width),
+      f64::from(height),
+      -f64::from(drawn_width) / 2.0,
+      -f64::from(drawn_height) / 2.0,
+      f64::from(drawn_width),
+      f64::from(drawn_height),
+    )
+    .ok()?;
+  Some(canvas)
 }
 
 /// How long the browser gets to load a video's first frame before the poster is given up on.
