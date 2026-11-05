@@ -22,38 +22,14 @@ use crate::feedback::PendingAction;
 use crate::i18n::{I18n, use_i18n};
 use crate::meetings::MeetingsHub;
 use crate::model::UserId;
-use crate::notetaker::{NotetakerInCall, NotetakerRefusal, notetaker_in_call};
+use crate::notetaker::{
+  AddRoute, ConversationRights, NotetakerInCall, NotetakerRefusal, add_route, conversation_rights,
+  notetaker_in_call,
+};
 use crate::state::{AppState, use_app_state};
 
 /// How long "joins in a moment" shows after asking, if the notetaker doesn't come.
 const ASKED_NOTICE: Duration = Duration::from_secs(90);
-
-/// How the user can add the notetaker to the conversation of the call, where it is no member yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AddRoute {
-  /// A channel of a space where the user manages members: the bot goes in as from the channel's
-  /// integrations, into the space first (as a guest) where the user may put it there.
-  Channel { joins_space: bool },
-  /// A meeting the user organizes: the bot becomes one of its invitees, which puts it into the
-  /// meeting chat's group (e2ee.md §4.6, "Meeting chats").
-  Meeting(MeetingId),
-  /// A conversation the user can't add the bot to: the call moves into a new meeting room with
-  /// everybody in it and the bot (docs/meetings.md, "A call becomes a meeting"), where the core
-  /// asks it in. The conversation keeps its members and history; the bot never sees them.
-  MoveToRoom,
-}
-
-/// What the user can do in the conversation of the call, which decides the [`AddRoute`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConversationRights {
-  /// A meeting the user organizes.
-  OrganizesMeeting(MeetingId),
-  /// A channel of a space where the user manages members.
-  ManagesChannel { joins_space: bool },
-  /// A DM or group DM (which takes nobody more), a channel whose members the user doesn't manage,
-  /// or a meeting somebody else organizes: the user can't add anybody there.
-  CannotAdd,
-}
 
 /// "Add notetaker" of one call: asks the notetaker in, adding it to the conversation first where
 /// it is no member yet.
@@ -228,38 +204,21 @@ fn use_add_route(
   let access = ChannelAccess::new(state, conversation);
   Memo::new(move |_| {
     let me = state.me().id;
-    let rights = if let Some(meeting) = maybe_hub.and_then(|hub| hub.hosted_meeting_for(conversation, me)) {
-      ConversationRights::OrganizesMeeting(meeting)
-    } else {
-      match state.read(|backend| backend.conversation(conversation)) {
-        Some(found) if found.has_channel_settings() && access.can_add_members() => {
-          let joins_space = state
-            .read(|backend| backend.spaces())
-            .into_iter()
-            .find(|space| Some(space.id) == found.maybe_space)
-            .is_some_and(|space| space.can_add_members || space.can_invite_guests);
-          ConversationRights::ManagesChannel { joins_space }
-        },
-        _ => ConversationRights::CannotAdd,
-      }
+    let maybe_organized = maybe_hub.and_then(|hub| hub.hosted_meeting_for(conversation, me));
+    let rights = match state.read(|backend| backend.conversation(conversation)) {
+      Some(found) => {
+        let spaces = state.read(|backend| backend.spaces());
+        conversation_rights(&found, maybe_organized, access.can_add_members(), &spaces)
+      },
+      None => maybe_organized.map_or(
+        ConversationRights::CannotAdd,
+        ConversationRights::OrganizesMeeting,
+      ),
     };
     // A call move needs the server's real calls; the demo has none.
     let can_move = maybe_hub.is_some() && state.read(|backend| !backend.has_simulated_calls());
     add_route(rights, can_move)
   })
-}
-
-/// Where the user can bring the notetaker in: a meeting the user organizes (as an invitee), a
-/// channel of a space where the user manages members (as from its integrations). Anywhere else
-/// (a DM or group DM, a channel whose members somebody else manages, a meeting somebody else
-/// organizes) its call moves into a meeting room with the notetaker, `can_move`: the app can move
-/// calls; the call stays where it is for those who don't follow (e2ee.md §8.2, "In every call").
-fn add_route(rights: ConversationRights, can_move: bool) -> Option<AddRoute> {
-  match rights {
-    ConversationRights::OrganizesMeeting(meeting) => Some(AddRoute::Meeting(meeting)),
-    ConversationRights::ManagesChannel { joins_space } => Some(AddRoute::Channel { joins_space }),
-    ConversationRights::CannotAdd => can_move.then_some(AddRoute::MoveToRoom),
-  }
 }
 
 /// Adds `bot` to the invitees of `meeting` (which the user organizes) and the meeting chat's

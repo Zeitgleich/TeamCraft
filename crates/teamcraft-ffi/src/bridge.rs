@@ -110,7 +110,8 @@ impl Reads {
 
   /// The notetaker in the call of `conversation_id` with `participants` (the others), as desktop
   /// and web show it (`teamcraft_client_api::notetaker`). The mobile apps can move every call, so
-  /// the notetaker can be brought into any call where the policy lets the user ask it in.
+  /// the notetaker can be brought into any call where the policy lets the user ask it in (added
+  /// where the user can, `Engine::add_notetaker`, moved there otherwise).
   pub(crate) fn notetaker_in_call(
     &self,
     conversation_id: &str,

@@ -1139,9 +1139,21 @@ final class AppModel {
     try? await core().notetakerInCall(conversationId: conversationId, participantUserIds: participants)
   }
 
-  /// Asks the notetaker into the call of `conversationId`, where it is a member.
-  func askNotetakerIn(conversationId: String) async throws {
-    try await core().askNotetakerIn(conversationId: conversationId)
+  /// Whether the call running in `conversationId` has the notetaker in it, for the notice before
+  /// joining (e2ee.md §8.2): who it is comes from the verified policy, who is in the call from the
+  /// server's roster. `false` when none runs or it can't be read.
+  func isNotetakerInRunningCall(conversationId: String) async -> Bool {
+    guard let participants = try? await core().callParticipants(conversationId: conversationId) else {
+      return false
+    }
+    return await notetakerInCall(conversationId: conversationId, participants: participants)?.isPresent ?? false
+  }
+
+  /// "Add notetaker" where the call is: asked in where it is a member or the core could add it
+  /// (a channel whose members the user manages, a meeting the user organizes); `.moveToRoom` where
+  /// the call has to move into a room with it.
+  func bringInNotetaker(conversationId: String) async throws -> NotetakerAddition {
+    try await core().bringInNotetaker(conversationId: conversationId)
   }
 
   /// "Remove notetaker" in the call of `conversationId`.

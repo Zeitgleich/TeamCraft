@@ -70,6 +70,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -477,7 +478,10 @@ private fun ConversationMenu(
     Icon(Icons.Filled.Call, contentDescription = stringResource(R.string.call_start))
   }
   if (isPreparingCall) {
-    PreJoinDialog(name, onDismiss = { isPreparingCall = false }) { options ->
+    val isNotetakerInCall by produceState(false, conversationId) {
+      value = viewModel.isNotetakerInRunningCall(conversationId)
+    }
+    PreJoinDialog(name, isNotetakerInCall, onDismiss = { isPreparingCall = false }) { options ->
       isPreparingCall = false
       viewModel.startCall(conversationId, name, options)
     }
@@ -1376,9 +1380,17 @@ private val PRIORITIES = listOf(
   "urgent" to R.string.priority_urgent,
 )
 
-/** Before a call: join with the camera on or muted. */
+/**
+ * Before a call: join with the camera on or muted. `isNotetakerInCall`: the running call has the
+ * notetaker in it, which the dialog says before joining (e2ee.md §8.2).
+ */
 @Composable
-internal fun PreJoinDialog(name: String, onDismiss: () -> Unit, onJoin: (CallOptions) -> Unit) {
+internal fun PreJoinDialog(
+  name: String,
+  isNotetakerInCall: Boolean,
+  onDismiss: () -> Unit,
+  onJoin: (CallOptions) -> Unit,
+) {
   var isCameraOn by rememberSaveable { mutableStateOf(false) }
   var isMuted by rememberSaveable { mutableStateOf(false) }
   AlertDialog(
@@ -1386,6 +1398,13 @@ internal fun PreJoinDialog(name: String, onDismiss: () -> Unit, onJoin: (CallOpt
     title = { Text(stringResource(R.string.call_prejoin_title, name)) },
     text = {
       Column {
+        if (isNotetakerInCall) {
+          Text(
+            stringResource(R.string.call_prejoin_notetaker),
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(bottom = 8.dp),
+          )
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
           Switch(checked = isCameraOn, onCheckedChange = { isCameraOn = it })
           Text(stringResource(R.string.call_prejoin_camera), modifier = Modifier.padding(start = 8.dp))
