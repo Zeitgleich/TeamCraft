@@ -44,6 +44,13 @@ use thiserror::Error;
 // `std::time` on native; the browser clock on wasm, where `std` has none.
 use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
+/// After the SFU moved a session to QUIC, the fallback has this long to bring what was queued for
+/// it, up to its close (#1309); one that doesn't is lost, and the call rejoins. Native clients and
+/// browsers alike.
+pub const SWITCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Datagrams that come on a new QUIC connection before the SFU's `switched`, kept for the engine.
+pub const MAX_EARLY_DATAGRAMS: usize = 256;
+
 /// Timing of keep-alives, loss detection and rejoining.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResilienceConfig {

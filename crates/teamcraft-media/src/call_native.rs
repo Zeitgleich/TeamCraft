@@ -62,8 +62,9 @@ use crate::call_engine::{
   OwnPublication, OwnVideoEnd, VideoSendOutcome, VideoStats,
 };
 use crate::call_resilience::{
-  CallTransport, JoinTicket, JoinTicketError, PathMonitor, PathState, QuicRetrySchedule, ReconnectSchedule,
-  RejoinPacer, ResilienceConfig, connect_preferring_quic, fallback_delay, rejoin_attempt,
+  CallTransport, JoinTicket, JoinTicketError, MAX_EARLY_DATAGRAMS, PathMonitor, PathState, QuicRetrySchedule,
+  ReconnectSchedule, RejoinPacer, ResilienceConfig, SWITCH_DRAIN_TIMEOUT, connect_preferring_quic,
+  fallback_delay, rejoin_attempt,
 };
 use crate::fallback_link::{
   FallbackOpener, LoopbackOpener, SignalFrames, SocketEnd, SocketInput, is_allowed_url, is_going_away,
@@ -104,11 +105,6 @@ const ROUTE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// How often the video counters are logged (debug) while own or others' video flows.
 const VIDEO_LOG_INTERVAL: Duration = Duration::from_secs(10);
-/// After the SFU moved the session to QUIC, the fallback has this long to bring what was queued for
-/// it, up to its close (#1309); a link that doesn't is lost, and the call rejoins.
-const SWITCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
-/// Datagrams that come on a new QUIC connection before the SFU's `switched`, kept for the engine.
-const MAX_EARLY_DATAGRAMS: usize = 256;
 
 /// A running call.
 pub struct NativeCall {
