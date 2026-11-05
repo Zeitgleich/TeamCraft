@@ -26,7 +26,7 @@ use crate::image_crop::{check_pick, fit_source_picture};
 use crate::integrations::{
   BridgeLocation, NewSource, bridge_base_url, ingest_url, is_valid_source_name, webhook_url,
 };
-use crate::model::{ConversationId, ConversationKind, User};
+use crate::model::{ConversationId, ConversationKind, User, UserId};
 use crate::reactive::SetIfAlive;
 use crate::state::use_app_state;
 
@@ -285,19 +285,22 @@ fn Sources(conversation: ConversationId, has_bot: Signal<bool>) -> impl IntoView
   let can_manage = Signal::derive(move || state.read(|backend| backend.can_manage_integration_sources()));
   // The bot that posts for the sources: its picture stands in for a source without one, as in the
   // messages. With several bots in the channel it isn't known which one serves them.
-  let maybe_bot = Signal::derive(move || {
+  // A memo of the ID, like `has_bot`: the rows' avatars are built again only when it changes, not
+  // on every write to the backend (issue #687).
+  let maybe_bot = Memo::new(move |_| {
     let ids = state
       .read(|backend| backend.conversation(conversation))
       .map(|info| info.member_ids)
       .unwrap_or_default();
-    let mut bots: Vec<User> = state.read(|backend| {
+    let bots: Vec<UserId> = state.read(|backend| {
       ids
         .iter()
         .filter_map(|id| backend.user(*id))
         .filter(|user| user.is_bot)
+        .map(|user| user.id)
         .collect()
     });
-    (bots.len() == 1).then(|| bots.remove(0))
+    stand_in_bot(&bots)
   });
   let maybe_reveal: RwSignal<Option<Revealed>> = RwSignal::new(None);
   view! {
@@ -383,7 +386,7 @@ fn SourceRow(
   conversation: ConversationId,
   source: IntegrationSource,
   can_manage: Signal<bool>,
-  maybe_bot: Signal<Option<User>>,
+  maybe_bot: Memo<Option<UserId>>,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
@@ -402,10 +405,10 @@ fn SourceRow(
   let maybe_source_picture = source.maybe_picture_sha256.map(|sha256| (conversation, sha256));
   let avatar = {
     let source = source.clone();
+    // Read once, untracked: the avatar follows the stand-in bot only.
+    let me = untrack(|| state.me());
     move || {
-      let maybe_bot = maybe_bot.get();
-      let shows_profile_picture = maybe_bot.is_some();
-      let preview = source_preview(maybe_bot.unwrap_or_else(|| state.me()), &source);
+      let (preview, shows_profile_picture) = source_preview(me.clone(), &source, maybe_bot.get());
       view! {
         <Avatar
           user=preview
@@ -473,18 +476,30 @@ fn SourceRow(
   }
 }
 
+/// The bot whose picture stands in for the channel's sources without one: the channel's only bot.
+/// With several it isn't known which one posts for them.
+fn stand_in_bot(bots: &[UserId]) -> Option<UserId> {
+  match bots {
+    [bot] => Some(*bot),
+    _ => None,
+  }
+}
+
 /// What a source's row shows when the source has no picture, as its messages do (docs/bridge.md,
-/// "Source identity"): the picture of `account` when it is the bot that posts for the source,
-/// otherwise the source's initials in its own colour. Never the picture of whoever added the source
-/// or views it (issue #1299); the adder is named in the text.
-fn source_preview(account: User, source: &IntegrationSource) -> User {
-  User {
+/// "Source identity"): the profile picture of `maybe_bot`, the bot that posts for the source, else
+/// the source's initials in its own colour. `me` only fills the fields the avatar doesn't show, and
+/// whether the profile picture may show (the second value) is off without a bot: never the picture
+/// of whoever added the source or views it (issue #1299); the adder is named in the text.
+fn source_preview(me: User, source: &IntegrationSource, maybe_bot: Option<UserId>) -> (User, bool) {
+  let preview = User {
+    id: maybe_bot.unwrap_or(me.id),
     display_name: source.name.clone(),
     avatar_hue: source.name.bytes().fold(0_u16, |hue, byte| {
       (hue.wrapping_mul(31).wrapping_add(u16::from(byte))) % 360
     }),
-    ..account
-  }
+    ..me
+  };
+  (preview, maybe_bot.is_some())
 }
 
 /// Renames a source: an encrypted control message like adding one, so it also works offline.
@@ -857,5 +872,72 @@ fn kind_label(kind: &SourceKind) -> &'static str {
     SourceKind::Webhook => "channel-sources-kind-webhook",
     SourceKind::Log => "channel-sources-kind-log",
     SourceKind::Unknown(_) => "channel-sources-kind-other",
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::model::{DeviceSetup, PresenceStatus, id_from_raw};
+
+  const ME: u64 = 1;
+  const BOT: u64 = 2;
+  const OTHER_BOT: u64 = 3;
+
+  #[test]
+  fn only_the_channels_one_bot_stands_in() {
+    assert_eq!(stand_in_bot(&[]), None);
+    assert_eq!(stand_in_bot(&[user(BOT)]), Some(user(BOT)));
+    assert_eq!(
+      stand_in_bot(&[user(BOT), user(OTHER_BOT)]),
+      None,
+      "unknown which one posts"
+    );
+  }
+
+  #[test]
+  fn a_source_without_picture_shows_the_bots_picture_else_its_initials_never_the_viewers() {
+    let source = source();
+    let (with_bot, shows_bots) = source_preview(me(), &source, Some(user(BOT)));
+    assert_eq!(with_bot.id, user(BOT));
+    assert!(shows_bots);
+    assert_eq!(with_bot.display_name, "Hotline", "the initials are the source's");
+
+    let (without_bot, shows_mine) = source_preview(me(), &source, None);
+    assert!(!shows_mine, "the viewer's own picture never stands in");
+    assert_eq!(without_bot.display_name, "Hotline");
+  }
+
+  fn source() -> IntegrationSource {
+    IntegrationSource {
+      id: SourceId::random(),
+      name: "Hotline".into(),
+      kind: SourceKind::Webhook,
+      created_by: user(ME),
+      created_at_ms: 0,
+      maybe_picture_sha256: None,
+    }
+  }
+
+  fn me() -> User {
+    User {
+      id: user(ME),
+      username: "me".into(),
+      display_name: "Me".into(),
+      presence: PresenceStatus::Online,
+      maybe_custom_status: None,
+      avatar_hue: 0,
+      is_guest: false,
+      is_bot: false,
+      maybe_organization: None,
+      device_setup: DeviceSetup::Unknown,
+      is_deactivated: false,
+      is_deleted: false,
+      maybe_email: None,
+    }
+  }
+
+  fn user(raw: u64) -> UserId {
+    id_from_raw(raw)
   }
 }
