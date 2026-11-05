@@ -1,2 +1,3 @@
 # Fetched by fetch.sh at packaging time; never committed.
 *.onnx
+*.nnef

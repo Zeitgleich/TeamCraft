@@ -14,6 +14,8 @@ workspace = true
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# Points the embedded frontend at the web build without its browser-only files (build/frontend.rs).
+serde_json.workspace = true
 
 [dependencies]
 # tray-icon: the tray icon with its menu and closing the window to the tray.

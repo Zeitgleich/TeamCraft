@@ -6,11 +6,11 @@
 #
 # Background effects (#439): the segmentation worker's script, which build-segmentation.sh built
 # and named, goes into <meta name="teamcraft-segmentation-worker">; the call module starts it when
-# the first effect starts. The segmentation model is named in
+# the first effect starts. The segmentation model, as NNEF (#1295), is named in
 # <meta name="teamcraft-segmentation-model"> under a name with its pinned hash
-# (models/<name>-<hash>.onnx); the worker downloads it. The file is copied there when
-# crates/teamcraft-media/models/fetch.sh fetched it; the web release adds it with
-# add-segmentation-model.sh instead (the desktop app embeds this bundle and has its own copy).
+# (models/<name>-<hash>.nnef); the worker downloads it. The file is copied there when
+# crates/teamcraft-media/models/fetch-nnef.sh made it; the web release adds it with
+# add-segmentation-model.sh instead (the desktop app has its own ONNX copy and leaves this one out).
 # Without it the browser's effects say they couldn't start.
 set -eu
 dist="${TRUNK_STAGING_DIR:?run this as a Trunk hook}"
@@ -54,13 +54,13 @@ if len(workers) != 1:
 meta += f'<meta name="teamcraft-segmentation-worker" content="/{workers[0]}">\n'
 
 model_name = "selfie_segmentation_landscape"
-model_path = os.path.join(models, model_name + ".onnx")
+model_path = os.path.join(models, model_name + ".nnef")
 pinned = open(model_path + ".sha256", encoding="utf-8").read().split()[0]
-model = f"models/{model_name}-{pinned[:16]}.onnx"
+model = f"models/{model_name}-{pinned[:16]}.nnef"
 meta += f'<meta name="teamcraft-segmentation-model" content="/{model}">\n'
 if os.path.isfile(model_path):
     if hashlib.sha256(open(model_path, "rb").read()).hexdigest() != pinned:
-        raise SystemExit(f"finish-calls: {model_path} is not the pinned model (run models/fetch.sh)")
+        raise SystemExit(f"finish-calls: {model_path} is not the pinned model (run models/fetch-nnef.sh)")
     os.makedirs(os.path.join(dist, "models"), exist_ok=True)
     shutil.copyfile(model_path, os.path.join(dist, model))
 open(index_path, "w", encoding="utf-8").write(index.replace("</head>", meta + "</head>", 1))

@@ -1409,8 +1409,8 @@ pub struct CameraEffects {
 
 #[cfg(feature = "effects")]
 impl CameraEffects {
-  /// Composites with WebGPU (Chrome, Edge, Safari): the picture is read from a canvas, turned into
-  /// I420 and read back from the GPU for the encoders.
+  /// Composites with WebGPU (Chrome, Edge, Safari): the picture is read from a canvas, composited
+  /// and turned into I420 on the GPU, and read back for the encoders.
   pub async fn webgpu(
     worker: std::rc::Rc<super::SegmentationWorker>,
     effect: crate::effects::BackgroundEffect,
@@ -1468,9 +1468,9 @@ impl CameraEffects {
 /// Background effects in the browser. The segmentation runs in its worker on a small copy of the
 /// picture whenever the worker is idle and a mask is due ([`MaskCadence`](crate::effects::MaskCadence));
 /// each picture is composited with the newest mask the worker answered with. With WebGPU the
-/// picture goes through a canvas into I420, through the compositor and back into a `VideoFrame`;
-/// with WebGL2 it stays on the GPU and the `VideoFrame` is the compositor's canvas. Without an
-/// effect the picture goes to the encoders as it is, without either detour.
+/// picture goes from a canvas (RGBA) through the compositor, which writes it as I420, back into a
+/// `VideoFrame`; with WebGL2 it stays on the GPU and the `VideoFrame` is the compositor's canvas.
+/// Without an effect the picture goes to the encoders as it is, without either detour.
 #[cfg(feature = "effects")]
 pub(super) mod effects {
   use std::rc::Rc;
@@ -1661,16 +1661,22 @@ pub(super) mod effects {
               .segment(MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, &small)
               .map_err(effects_error)?;
           }
-          let frame = rgbx_to_i420(&pixels, width, height, timestamp_us as u64).map_err(|error| {
-            WebCallError::Browser {
-              context: "effects",
-              message: error.to_string(),
-            }
-          })?;
-          let frame = compositor
-            .apply(&frame, mask, effect)
-            .await
-            .map_err(effects_error)?;
+          let timestamp = timestamp_us as u64;
+          // The GPU turns the RGBA picture into I420 as it composites (#1295); only a picture too
+          // large for its buffers is converted on the CPU first.
+          let frame = if compositor.takes_rgba(width, height) {
+            compositor
+              .apply_rgba(width, height, &pixels, timestamp, mask, effect)
+              .await
+          } else {
+            let frame =
+              rgbx_to_i420(&pixels, width, height, timestamp).map_err(|error| WebCallError::Browser {
+                context: "effects",
+                message: error.to_string(),
+              })?;
+            compositor.apply(&frame, mask, effect).await
+          }
+          .map_err(effects_error)?;
           let init: Object = dictionary(&[
             ("format", JsValue::from_str("I420")),
             ("codedWidth", JsValue::from(width)),
