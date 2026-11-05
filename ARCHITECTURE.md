@@ -407,8 +407,10 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   Capture: PipeWire on Linux (other applications' playback streams linked into our capture,
   ours and those of processes we started, like the WebView's helpers, left out), WASAPI process
   loopback excluding our process tree on Windows, and ScreenCaptureKit with
-  `excludesCurrentProcessAudio` on macOS. The desktop WebView may play no media at all
-  (`media-src 'none'`), so its helper processes have nothing of the call to play. The Flatpak
+  `excludesCurrentProcessAudio` on macOS. The call's own sound never plays in the WebView; video and
+  audio attachments do (`media-src 'self' blob:`, e2ee.md §4.5), and on Linux and Windows the
+  process-tree exclusion leaves those out of the share too. On macOS WebKit plays them in a helper
+  process of its own, which `excludesCurrentProcessAudio` may not cover (not measured, #200). The Flatpak
   needs the PipeWire socket for this; apps/desktop/packaging/linux/README.md explains what that
   grants. "Mute all" by a meeting host also stops everyone's shared sound, at the SFU. The sender's echo canceller also
   gets the shared sound as far-end signal, so the microphone doesn't send it a second time.

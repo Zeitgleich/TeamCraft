@@ -21,6 +21,7 @@ struct AttachmentView: View {
 
   @State private var maybePreviewURL: URL?
   @State private var isWaitingToOpen = false
+  @State private var maybeVideo: FileInfo?
 
   var body: some View {
     withImageMenu(content)
@@ -63,6 +64,10 @@ struct AttachmentView: View {
           } else {
             imagePreview(image)
           }
+        } else if file.isVideo, let image = ThumbnailCache.image(for: file), let width = maybeMediaWidth {
+          bubblePreview(image, width: width)
+            .overlay { VideoPlayMark() }
+            .overlay(alignment: .bottomLeading) { VideoBadge(file: file) }
         } else {
           fileRow
         }
@@ -73,6 +78,7 @@ struct AttachmentView: View {
       if file.transfer.isCancellable { UploadActions(file: file) }
     }
     .quickLookPreview($maybePreviewURL)
+    .fullScreenCover(item: $maybeVideo) { video in VideoViewer(opened: video) }
     .onChange(of: file.transfer.state) { _, state in
       guard isWaitingToOpen, state == "local" || state == "failed" else { return }
       isWaitingToOpen = false
@@ -154,6 +160,10 @@ struct AttachmentView: View {
   private func open() {
     if file.isViewablePicture, let openPicture = maybeOpenPicture {
       openPicture(file)
+      return
+    }
+    if file.opensInVideoPlayer {
+      maybeVideo = file
       return
     }
     switch file.transfer.state {
@@ -263,6 +273,9 @@ struct FileThumbnail: View {
     }
     .frame(width: side, height: side)
     .clipShape(RoundedRectangle(cornerRadius: 8))
+    .overlay {
+      if file.isVideo, file.maybeThumbnailData != nil { VideoPlayMark(side: side * 0.4) }
+    }
   }
 
   private var icon: String {
@@ -375,6 +388,7 @@ struct FilesGalleryView: View {
   @State private var files: [FileInfo]?
   @State private var maybePreviewURL: URL?
   @State private var maybeViewing: PictureTarget?
+  @State private var maybeVideo: FileInfo?
 
   private let columns = [GridItem(.adaptive(minimum: 110), spacing: 8)]
 
@@ -408,6 +422,7 @@ struct FilesGalleryView: View {
     .task(id: LoadKey(changeCount: model.changeCount, source: source)) { files = await load() }
     .quickLookPreview($maybePreviewURL)
     .fullScreenCover(item: $maybeViewing) { target in PictureViewer(target: target) }
+    .fullScreenCover(item: $maybeVideo) { video in VideoViewer(opened: video) }
   }
 
   private struct LoadKey: Hashable {
@@ -433,6 +448,8 @@ struct FilesGalleryView: View {
     Button {
       if file.isViewablePicture {
         maybeViewing = PictureTarget(file: file)
+      } else if file.opensInVideoPlayer {
+        maybeVideo = file
       } else if file.transfer.state == "local", let path = file.transfer.path {
         maybePreviewURL = URL(fileURLWithPath: path)
       } else if file.transfer.state == "remote" || file.transfer.state == "failed" {

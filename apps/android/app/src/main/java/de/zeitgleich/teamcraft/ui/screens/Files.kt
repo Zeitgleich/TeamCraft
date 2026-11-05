@@ -86,6 +86,7 @@ internal fun FilesGrid(viewModel: MainViewModel, files: List<FileInfo>, modifier
   val context = LocalContext.current
   // Saveable: a rotation keeps the viewer open (the conversation, message and file it opened on).
   var maybeViewing by rememberSaveable { mutableStateOf<List<String>?>(null) }
+  var maybeVideo by rememberSaveable { mutableStateOf<List<String>?>(null) }
   // Names for the viewer's sender line and its forward targets; read when it opens.
   var maybeSnapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
   LaunchedEffect(maybeViewing != null) {
@@ -99,6 +100,8 @@ internal fun FilesGrid(viewModel: MainViewModel, files: List<FileInfo>, modifier
           if (file.isImage && file.maybeThumbnail != null) {
             // The viewer shows the thumbnail at once and fetches the original itself.
             maybeViewing = PictureTarget.of(file).toList()
+          } else if (file.opensInVideoPlayer) {
+            maybeVideo = PictureTarget.of(file).toList()
           } else if (file.transfer.state == "local" && path != null) {
             openFile(context, File(path), file.mediaType)
           } else {
@@ -122,12 +125,16 @@ internal fun FilesGrid(viewModel: MainViewModel, files: List<FileInfo>, modifier
               modifier = Modifier.size(40.dp),
             )
           }
+          if (file.isVideo) PlayMark()
         }
         Text(file.fileName, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
         Text(Formatter.formatShortFileSize(context, file.sizeBytes), style = MaterialTheme.typography.labelSmall)
         file.transfer.maybeProgress?.let { LinearProgressIndicator(progress = { it }, modifier = Modifier.fillMaxWidth()) }
       }
     }
+  }
+  maybeVideo?.let(PictureTarget::fromList)?.let { target ->
+    VideoViewer(viewModel, target, onDismiss = { maybeVideo = null })
   }
   maybeViewing?.let(PictureTarget::fromList)?.let { target ->
     ImageViewer(viewModel, maybeSnapshot, target, onDismiss = { maybeViewing = null })
