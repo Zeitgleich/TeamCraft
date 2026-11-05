@@ -303,7 +303,7 @@ fun ConversationScreen(
     if (conversation?.canPost != false) {
       Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot, onSent = { sentCount++ })
     } else {
-      ReadOnlyNote()
+      ReadOnlyNote(isArchived = conversation?.isArchived == true)
     }
   }
 }
@@ -382,9 +382,9 @@ private fun rememberRights(viewModel: MainViewModel, conversationId: String, cha
 
 /** In place of the composer where the user may only read. */
 @Composable
-private fun ReadOnlyNote() {
+private fun ReadOnlyNote(isArchived: Boolean = false) {
   Text(
-    stringResource(R.string.read_only_channel),
+    stringResource(if (isArchived) R.string.read_only_archived else R.string.read_only_channel),
     color = MaterialTheme.colorScheme.onSurfaceVariant,
     modifier = Modifier.padding(16.dp),
   )

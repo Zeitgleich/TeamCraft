@@ -407,6 +407,9 @@ pub struct Client<A, S> {
   /// Events of a resume replay still to come: the counters are read once it has drained, because
   /// `GET /unread` already counts the missed messages the replay delivers (issue #183).
   maybe_replay_left: Option<u64>,
+  /// Gateway events said the guest list changed, and it wasn't read since.
+  are_expiring_guests_stale: bool,
+  maybe_expiring_guests_read_ms: Option<i64>,
   /// What the device last said about its activity; a new gateway session identifies with it.
   device_activity: DeviceActivity,
   /// The conversation the user looks at; a catch-up takes it first (issue #247).
@@ -571,6 +574,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       mls_current: Default::default(),
       maybe_backlog_reads: None,
       maybe_replay_left: None,
+      are_expiring_guests_stale: false,
+      maybe_expiring_guests_read_ms: None,
       device_activity: DeviceActivity::Active,
       member_join_attempts: HashMap::new(),
       device_add_requests_handled: HashMap::new(),

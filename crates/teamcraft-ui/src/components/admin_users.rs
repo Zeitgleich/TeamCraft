@@ -2,8 +2,9 @@ use leptos::prelude::*;
 use teamcraft_proto::Role;
 
 use crate::admin::{AdminUser, DeviceInfo};
-use crate::clock::{format_date_time, format_relative, now_ms};
+use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::{ListCutNotice, SectionHeader};
+use crate::components::admin_guests::GuestsOverview;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::components::pending_button::PendingButton;
@@ -30,14 +31,7 @@ pub fn UsersSection() -> impl IntoView {
   let selected = RwSignal::new(None::<UserId>);
   let now = now_ms();
   let users = Memo::new(move |_| state.read(|backend| backend.admin_users()));
-  let shown = Memo::new(move |_| {
-    let is_guests = tab.get() == UserTab::Guests;
-    users
-      .get()
-      .into_iter()
-      .filter(|entry| entry.maybe_guest.is_some() == is_guests)
-      .collect::<Vec<_>>()
-  });
+  let shown = users;
   let selected_user = Memo::new(move |_| {
     selected
       .get()
@@ -90,6 +84,8 @@ pub fn UsersSection() -> impl IntoView {
         <span>{move || if tab.get() == UserTab::Guests { i18n.t("admin-invite-guest") } else { i18n.t("admin-invite-user") }}</span>
       </button>
     </div>
+    <Show when=move || tab.get() == UserTab::Guests fallback=move || {
+      view! {
     <div class="admin-split">
       <div class="table-wrap">
         <table class="data-table">
@@ -100,22 +96,12 @@ pub fn UsersSection() -> impl IntoView {
               <th scope="col">{move || i18n.t("admin-col-role")}</th>
               <th scope="col" class="num">{move || i18n.t("admin-col-devices")}</th>
               <th scope="col">{move || i18n.t("admin-col-last-seen")}</th>
-              {move || {
-                if tab.get() == UserTab::Guests {
-                  view! {
-                    <th scope="col">{move || i18n.t("admin-col-sponsor")}</th>
-                    <th scope="col">{move || i18n.t("admin-col-expires")}</th>
-                  }
-                  .into_any()
-                } else {
-                  view! { <th scope="col">{move || i18n.t("admin-col-spaces")}</th> }.into_any()
-                }
-              }}
+              <th scope="col">{move || i18n.t("admin-col-spaces")}</th>
             </tr>
           </thead>
           <tbody>
             <For each=move || shown.get() key=|entry| (entry.user.id, entry.is_active, entry.device_count) let:entry>
-              <UserRow entry=entry selected=selected now=now guests=tab.get_untracked() == UserTab::Guests />
+              <UserRow entry=entry selected=selected now=now />
             </For>
           </tbody>
         </table>
@@ -131,6 +117,10 @@ pub fn UsersSection() -> impl IntoView {
         }}
       </aside>
     </div>
+      }
+    }>
+      <GuestsOverview />
+    </Show>
   }
 }
 
@@ -145,25 +135,12 @@ fn role_key(role: &Role) -> &'static str {
 }
 
 #[component]
-fn UserRow(entry: AdminUser, selected: RwSignal<Option<UserId>>, now: i64, guests: bool) -> impl IntoView {
-  let state = use_app_state();
+fn UserRow(entry: AdminUser, selected: RwSignal<Option<UserId>>, now: i64) -> impl IntoView {
   let i18n = use_i18n();
   let id = entry.user.id;
   let is_selected = move || selected.get() == Some(id);
   let seen = move || format_relative(entry.last_seen, now, i18n.locale().tag());
   let role = role_key(&entry.role);
-  let guest_cells = entry.maybe_guest.map(|guest| {
-    let sponsor = state
-      .read(|backend| backend.user(guest.sponsor))
-      .map(|user| user.display_name)
-      .unwrap_or_default();
-    let expires = move || format_date_time(guest.expires_at, i18n.locale().tag());
-    view! {
-      <td translate="no">{sponsor}</td>
-      <td>{expires}</td>
-    }
-  });
-
   let row_name = if entry.user.is_deleted {
     view! { <span class="row-name">{move || i18n.t("user-deleted-name")}</span> }.into_any()
   } else {
@@ -183,11 +160,7 @@ fn UserRow(entry: AdminUser, selected: RwSignal<Option<UserId>>, now: i64, guest
       <td><span class="badge">{move || i18n.t(role)}</span></td>
       <td class="num">{entry.device_count}</td>
       <td>{seen}</td>
-      {if guests {
-        guest_cells.into_any()
-      } else {
-        view! { <td translate="no">{entry.space_names.join(", ")}</td> }.into_any()
-      }}
+      <td translate="no">{entry.space_names.join(", ")}</td>
     </tr>
   }
 }

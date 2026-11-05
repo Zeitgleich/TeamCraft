@@ -793,6 +793,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.browse_channels(space)
   }
 
+  fn expiring_guests(&self) -> Vec<teamcraft_proto::ExpiringGuestResponse> {
+    self.chat.expiring_guests()
+  }
+
+  fn extend_guest(&self, space: SpaceId, user: UserId, expires_at_ms: i64) {
+    self.chat.extend_guest(space, user, expires_at_ms);
+  }
+
   fn join_channel(&self, conversation: ConversationId) {
     self.chat.join_channel(conversation);
   }
@@ -1569,6 +1577,37 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     match &self.maybe_admin {
       Some(admin) => admin.audit_filter(),
       None => AuditFilter::default(),
+    }
+  }
+
+  fn admin_guests(&self) -> teamcraft_proto::ListAdminGuestsResponse {
+    match &self.maybe_admin {
+      Some(admin) => admin.guests(),
+      None => teamcraft_proto::ListAdminGuestsResponse::default(),
+    }
+  }
+
+  fn set_admin_guest_query(&self, query: teamcraft_proto::ListAdminGuestsQuery) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.set_guest_query(query);
+    }
+  }
+
+  fn admin_extend_guests(&self, guests: Vec<(SpaceId, UserId, i64)>) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.extend_guests(guests);
+    }
+  }
+
+  fn admin_remove_guests(&self, guests: Vec<(SpaceId, UserId)>) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.remove_guests(guests);
+    }
+  }
+
+  fn admin_set_channel_archived(&self, channel: ConversationId, is_archived: bool) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.set_channel_archived(channel, is_archived);
     }
   }
 

@@ -35,6 +35,8 @@ pub enum GatewayOutcome {
 /// longer (an app started again, a laptop that slept) the session is likely gone and the reads wait
 /// for the answer, so a refused resume costs no reads. Well under the server's default window.
 const LIKELY_RESUMABLE_MS: i64 = 60_000;
+/// The guest list is read at most this often for gateway events.
+const EXPIRING_GUESTS_MIN_REFRESH_MS: i64 = 5_000;
 
 /// How long each step of the handshake (socket and `hello`, the answer to `resume` or `identify`)
 /// may take when the caller doesn't say: a server that accepts the socket and then stays silent must
@@ -223,6 +225,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           self.refresh_link_requests().await;
           self.trace_lap("link requests");
           self.refresh_admin_join_requests_after_connect().await;
+          self.refresh_expiring_guests_after_connect().await;
           self.trace_finish("resumed");
           return Ok(GatewayStart {
             connection,
@@ -283,6 +286,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.refresh_link_requests().await;
     self.trace_lap("link requests");
     self.refresh_admin_join_requests_after_connect().await;
+    self.refresh_expiring_guests_after_connect().await;
     self.trace_finish("fresh");
     Ok(GatewayStart {
       connection,
@@ -441,14 +445,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           session.last_seq = session.last_seq.max(seq);
         }
         self.persist_sync()?;
-        self.note_replayed_event().await
+        self.note_replayed_event().await?;
       },
       GatewayServerMessage::SessionInvalid => {
         self.sync.maybe_gateway_session = None;
-        self.persist_sync()
+        self.persist_sync()?;
       },
-      GatewayServerMessage::Error { error } => Err(CoreError::Gateway(error.message)),
-      _ => Ok(()),
+      GatewayServerMessage::Error { error } => return Err(CoreError::Gateway(error.message)),
+      _ => {},
+    }
+    self.refresh_stale_expiring_guests().await;
+    Ok(())
+  }
+
+  /// Reads the guest list after a change, but not after each of a sweep's or a bulk action's many
+  /// events: those would hold up the messages behind them. The first reads at once; what follows
+  /// waits for a frame after [`EXPIRING_GUESTS_MIN_REFRESH_MS`], at the latest the next heartbeat's
+  /// answer.
+  async fn refresh_stale_expiring_guests(&mut self) {
+    let now = self.now_ms();
+    let is_due = self
+      .maybe_expiring_guests_read_ms
+      .is_none_or(|read| now.saturating_sub(read) >= EXPIRING_GUESTS_MIN_REFRESH_MS);
+    if !self.are_expiring_guests_stale || !is_due {
+      return;
+    }
+    self.are_expiring_guests_stale = false;
+    self.maybe_expiring_guests_read_ms = Some(now);
+    if let Err(error) = self.refresh_expiring_guests().await {
+      // Not fatal: the next connect reads the list again.
+      tracing::debug!(%error, "could not read the guests ending soon");
     }
   }
 
@@ -668,8 +694,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::MeetingUpdate { .. } | GatewayEvent::LobbyJoin { .. } => {
         read_state::update_marks(&self.store, |marks| marks.meetings += 1)
       },
-      GatewayEvent::GuestExpired { .. }
-      | GatewayEvent::OrgRecoveryUpdate { .. }
+      // The list is read again; the change itself is only a hint (issue #212).
+      GatewayEvent::GuestExpired { .. } | GatewayEvent::GuestTermsUpdate => {
+        self.are_expiring_guests_stale = true;
+        Ok(())
+      },
+      GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }
       | GatewayEvent::UserGroupUpdate { .. }
       | GatewayEvent::LobbyDecision { .. } => Ok(()),

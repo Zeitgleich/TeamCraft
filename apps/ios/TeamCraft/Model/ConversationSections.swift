@@ -8,6 +8,8 @@ enum SectionTitle: Hashable {
   case directMessages
   /// The list layout's conversations that are not favorites (#1151).
   case everything
+  /// Archived channels, for guests, who have no channel browser to find them in.
+  case archived
 }
 
 struct ConversationSection: Identifiable {
@@ -65,7 +67,7 @@ extension ConversationItem {
 
   /// Whether the Home tab lists it: DMs and group DMs, and the channels of a space the user starred
   /// (#1152). The channel stays under Favorites in its space too.
-  var isListedInHome: Bool { isDirect || (isFavorite && maybeSpaceId != nil) }
+  var isListedInHome: Bool { isDirect || (isFavorite && maybeSpaceId != nil && !isArchived) }
 
   /// The name lists and titles show: the notes to self have none of their own (they are named
   /// after the other people, and there are none), so they are called "Notes" in the user's
@@ -79,8 +81,9 @@ private func byName(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
 
 /// Channels of the spaces: favorite channels first, then each space (spaces and channels by name).
 /// Same grouping as the Android app.
-func channelSections(_ conversations: [ConversationItem]) -> [ConversationSection] {
-  let channels = conversations.filter { !$0.isDirect }
+func channelSections(_ conversations: [ConversationItem], listsArchived: Bool = false) -> [ConversationSection] {
+  // Archived channels leave the lists; Browse finds them (issue #212).
+  let channels = conversations.filter { !$0.isDirect && !$0.isArchived }
   let favorites = channels.filter(\.isFavorite).sorted(by: byName)
   let spaces = Dictionary(grouping: channels.filter { !$0.isFavorite }, by: \.maybeSpaceName)
   let orderedSpaces = spaces.keys.sorted { lhs, rhs in
@@ -96,6 +99,10 @@ func channelSections(_ conversations: [ConversationItem]) -> [ConversationSectio
   for space in orderedSpaces {
     let title: SectionTitle = space.map(SectionTitle.space) ?? .channels
     sections.append(ConversationSection(title: title, conversations: (spaces[space] ?? []).sorted(by: byName)))
+  }
+  let archived = conversations.filter { !$0.isDirect && $0.isArchived }
+  if listsArchived && !archived.isEmpty {
+    sections.append(ConversationSection(title: .archived, conversations: archived.sorted(by: byName)))
   }
   return sections
 }
@@ -177,7 +184,9 @@ struct TabBadge: Equatable {
   }
 
   init(_ conversations: [ConversationItem]) {
-    mentions = conversations.reduce(0) { $0 + Int($1.mentionCount) }
-    unread = conversations.filter { !$0.isMuted }.reduce(0) { $0 + Int($1.unreadCount) }
+    // An archived channel has no list row to clear it from.
+    let listed = conversations.filter { !$0.isArchived }
+    mentions = listed.reduce(0) { $0 + Int($1.mentionCount) }
+    unread = listed.filter { !$0.isMuted }.reduce(0) { $0 + Int($1.unreadCount) }
   }
 }

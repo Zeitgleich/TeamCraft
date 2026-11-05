@@ -14,6 +14,7 @@ composer-placeholder = Nachricht an { $name }
 composer-placeholder-untitled = Nachricht schreiben
 composer-placeholder-reply = Antworten …
 composer-readonly = In diesem Kanal kannst du nichts schreiben.
+composer-archived = Dieser Kanal ist archiviert. Du kannst ihn lesen, aber niemand kann hier schreiben.
 composer-label = Nachricht
 composer-attachments = Anhänge
 composer-remove-attachment = Anhang entfernen

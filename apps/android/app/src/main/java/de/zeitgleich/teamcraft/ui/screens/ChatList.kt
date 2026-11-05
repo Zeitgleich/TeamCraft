@@ -114,6 +114,8 @@ import de.zeitgleich.teamcraft.ui.activityConversations
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
+import de.zeitgleich.teamcraft.core.ChatQueries
+import de.zeitgleich.teamcraft.core.ExpiringGuest
 import de.zeitgleich.teamcraft.ui.ChatListEntry
 import de.zeitgleich.teamcraft.ui.ChatPreview
 import de.zeitgleich.teamcraft.ui.MainViewModel
@@ -169,6 +171,7 @@ fun ChatListScreen(
   var previews by remember { mutableStateOf<Map<String, ChatListEntry>>(emptyMap()) }
   // Admins' requests to join channels the user owns: on top of Activity and on its badge.
   var joinRequests by remember { mutableStateOf<List<JoinRequestItem>>(emptyList()) }
+  var expiringGuests by remember { mutableStateOf<List<ExpiringGuest>>(emptyList()) }
   // Long-press starts selecting several conversations, as in WhatsApp; back or the close button ends it.
   var selection by rememberSaveable { mutableStateOf(listOf<String>()) }
   var maybeNotifying by remember { mutableStateOf<String?>(null) }
@@ -199,6 +202,7 @@ fun ChatListScreen(
       conversations = loaded
       maybeFirstSync = viewModel.firstSync()
       joinRequests = viewModel.joinRequests.list()
+      expiringGuests = viewModel.readChat { query(ChatQueries.expiringGuests()).guests } ?: emptyList()
       previews = viewModel.chatPreviews(loaded)
     }
   }
@@ -268,6 +272,12 @@ fun ChatListScreen(
     isGuest = isGuest,
     joinRequestCount = joinRequests.size,
     joinRequests = { JoinRequestSection(joinRequests, viewModel.joinRequests) },
+    guestNoticeCount = expiringGuests.size,
+    guestNotices = {
+      GuestNoticeSection(expiringGuests) { guest, expiresAtMs ->
+        viewModel.act(ChatActions.extendGuest(guest.spaceId, guest.user.id, expiresAtMs))
+      }
+    },
     snackbarHost = { SnackbarHost(snackbars) },
   )
   // Mute or change notifications without opening the conversation.
@@ -302,6 +312,8 @@ internal fun MainScaffold(
   /** Admins' requests waiting for the user's decision: counted on Activity, shown on top of it. */
   joinRequestCount: Int = 0,
   joinRequests: @Composable () -> Unit = {},
+  guestNoticeCount: Int = 0,
+  guestNotices: @Composable () -> Unit = {},
   snackbarHost: @Composable () -> Unit = {},
 ) {
   val isList = layout == ChatListLayout.List
@@ -332,7 +344,7 @@ internal fun MainScaffold(
         maybeConversations == null -> LoadingScreen()
         isList && shownTab == ChatTab.Home -> ListTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
         shownTab == ChatTab.Home -> HomeTab(maybeConversations, list, onNavigate)
-        shownTab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests)
+        shownTab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNoticeCount, guestNotices)
         else -> SpacesTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
       }
     }
@@ -440,6 +452,8 @@ private fun ActivityTab(
   onNavigate: (String) -> Unit,
   joinRequestCount: Int,
   joinRequests: @Composable () -> Unit,
+  guestNoticeCount: Int,
+  guestNotices: @Composable () -> Unit,
 ) {
   val waiting = activityConversations(conversations, list.lastActivity)
   Column(Modifier.fillMaxSize()) {
@@ -448,7 +462,7 @@ private fun ActivityTab(
     EntryRow(Icons.Filled.DateRange, stringResource(R.string.scheduled_title)) { onNavigate("scheduled") }
     EntryRow(Icons.Filled.Edit, stringResource(R.string.drafts_title)) { onNavigate("drafts") }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-    if (waiting.isEmpty() && joinRequestCount == 0) {
+    if (waiting.isEmpty() && joinRequestCount == 0 && guestNoticeCount == 0) {
       RemainingEmptyState(
         icon = Icons.Filled.Done,
         title = stringResource(R.string.activity_empty_title),
@@ -457,6 +471,7 @@ private fun ActivityTab(
       )
     } else {
       LazyColumn(Modifier.fillMaxSize()) {
+        if (guestNoticeCount > 0) item(key = "guest-notices") { guestNotices() }
         if (joinRequestCount > 0) item(key = "join-requests") { joinRequests() }
         conversationRows(listOf(Section(SectionTitle.Activity, waiting)), list, hasHeader = false)
       }
@@ -470,7 +485,7 @@ private fun ActivityTab(
  */
 @Composable
 private fun SpacesTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit, canBrowse: Boolean) {
-  val sections = channelSections(conversations)
+  val sections = channelSections(conversations, listsArchived = !canBrowse)
   if (sections.isEmpty()) {
     EmptyState(
       icon = Icons.Filled.Search,
@@ -811,6 +826,7 @@ internal fun EmptyHint(text: String) {
 internal fun SectionHeader(title: SectionTitle) {
   val text = when (title) {
     SectionTitle.Favorites -> stringResource(R.string.favorites)
+    SectionTitle.Archived -> stringResource(R.string.section_archived)
     SectionTitle.Channels -> stringResource(R.string.channels)
     SectionTitle.DirectMessages -> stringResource(R.string.direct_messages)
     SectionTitle.Everything -> stringResource(R.string.list_conversations)

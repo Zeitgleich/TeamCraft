@@ -7,7 +7,7 @@
 use serde_json::json;
 use teamcraft_db::{AppendOutcome, WorkspaceLogEntry};
 use teamcraft_proto::{
-  AppendWorkspaceLogRequest, Base64Bytes, ComplianceArchiveMode, GatewayEvent, GuestDmStart,
+  AppendWorkspaceLogRequest, Base64Bytes, ComplianceArchiveMode, GatewayEvent, GuestDmStart, GuestPolicy,
   ListWorkspaceLogQuery, ListWorkspaceLogResponse, Permission, PolicyDocument, Target,
   WorkspaceLogEntryResponse, WorkspaceLogKind, WorkspacePolicy, WorkspacePolicyResponse,
 };
@@ -25,7 +25,9 @@ const MAX_SIGNATURE_BYTES: usize = 4096;
 const MAX_LINK_PREVIEW_DOMAINS: usize = 500;
 const MAX_DOMAIN_CHARS: usize = 253;
 const MAX_ORG_RECOVERY_ADMINS: u8 = 10;
-const MAX_GUEST_EXPIRY_DAYS: u32 = 3650;
+pub(super) const MAX_GUEST_EXPIRY_DAYS: u32 = 3650;
+const MAX_GUEST_NOTICES: usize = 5;
+const MAX_GUEST_NOTICE_DAYS: u32 = 365;
 const MIN_PASSWORD_CHARS_FLOOR: u32 = 8;
 const MAX_PASSWORD_CHARS_CEILING: u32 = 128;
 const MAX_STATUS_PRESETS: usize = 20;
@@ -186,6 +188,11 @@ pub fn effective_guest_expiry_days(state: &AppState) -> u32 {
     .guests
     .maybe_default_expiry_days
     .unwrap_or(state.settings.get().guests.default_expiry_days)
+}
+
+/// The guest rules of the signed policy in force.
+pub fn current_guest_policy(state: &AppState) -> GuestPolicy {
+  state.policy.get().guests.clone()
 }
 
 /// Whom guests may start a direct message with: the signed policy, else the server file.
@@ -391,6 +398,21 @@ fn check_guest_and_password_policy(policy: &WorkspacePolicy) -> Result<(), ApiEr
   {
     return Err(ApiError::InvalidRequest(
       "guests.default_expiry_days is too large".into(),
+    ));
+  }
+  if guests.maybe_expiry_notice_days.as_ref().is_some_and(|days| {
+    days.len() > MAX_GUEST_NOTICES || days.iter().any(|day| !(1..=MAX_GUEST_NOTICE_DAYS).contains(day))
+  }) {
+    return Err(ApiError::InvalidRequest(
+      "guests.expiry_notice_days must be a few days before the expiry".into(),
+    ));
+  }
+  if guests
+    .maybe_sponsor_extension_days
+    .is_some_and(|days| days > MAX_GUEST_EXPIRY_DAYS)
+  {
+    return Err(ApiError::InvalidRequest(
+      "guests.sponsor_extension_days is too large".into(),
     ));
   }
   if let Some(chars) = policy.passwords.maybe_min_chars
@@ -626,6 +648,13 @@ mod tests {
       |p| p.guests.allowed_email_domains = vec!["not a domain".into()]
     ));
     assert!(!ok(|p| p.guests.maybe_default_expiry_days = Some(100_000)));
+    assert!(ok(|p| p.guests.maybe_expiry_notice_days = Some(vec![14, 3])));
+    assert!(ok(|p| p.guests.maybe_expiry_notice_days = Some(Vec::new())));
+    assert!(!ok(|p| p.guests.maybe_expiry_notice_days = Some(vec![0])));
+    assert!(!ok(|p| p.guests.maybe_expiry_notice_days = Some(vec![366])));
+    assert!(!ok(|p| p.guests.maybe_expiry_notice_days = Some(vec![1; 6])));
+    assert!(ok(|p| p.guests.maybe_sponsor_extension_days = Some(0)));
+    assert!(!ok(|p| p.guests.maybe_sponsor_extension_days = Some(100_000)));
     assert!(!ok(|p| p.passwords.maybe_min_chars = Some(3)));
     assert!(!ok(|p| p.passwords.maybe_min_chars = Some(500)));
   }

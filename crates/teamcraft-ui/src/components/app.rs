@@ -29,6 +29,7 @@ use crate::components::file_drop;
 use crate::components::first_sync_bar::FirstSyncBar;
 use crate::components::getting_started::GettingStarted;
 use crate::components::guest_join::GuestJoinPage;
+use crate::components::guest_notice::GuestNotice;
 use crate::components::home::{HomeSidebar, HomeStart};
 use crate::components::icons::{Icon, IconName};
 use crate::components::incoming_call::IncomingCallDialog;
@@ -303,6 +304,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <RosterBanner />
         <NotificationPrompt />
         <AnnouncementBanner />
+        <GuestNotice />
         <UpdateNotice />
       </div>
       <TopBar />

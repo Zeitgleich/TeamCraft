@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::live::{AnnouncedPresence, LiveMarks, LiveReceipt, RevisedPresence};
 use teamcraft_proto::{
-  AdminJoinRequestResponse, ConversationId, ConversationUnread, MessageId, MessageResponse, ThreadId,
-  ThreadSummary, UnreadResponse, UserId, UserPresence,
+  AdminJoinRequestResponse, ConversationId, ConversationUnread, ExpiringGuestResponse, MessageId,
+  MessageResponse, ThreadId, ThreadSummary, UnreadResponse, UserId, UserPresence,
 };
 
 use crate::error::CoreError;
@@ -19,6 +19,8 @@ const UNREAD_KEY: &str = "state";
 const MARKS_KEY: &str = "marks";
 /// The open admin join requests the server last listed (admin.md §2.4), next to the counts.
 const ADMIN_JOIN_REQUESTS_KEY: &str = "admin_join_requests";
+/// The guests ending soon the server last listed (issue #212), next to the counts.
+const EXPIRING_GUESTS_KEY: &str = "expiring_guests";
 /// The record in [`Table::Presence`] (whose other keys are user IDs) that heads the presence log
 /// in [`Table::AnnouncedPresence`]. Before 1.0.2 it held the whole log; that form reads as a head
 /// with an empty log.
@@ -55,6 +57,21 @@ pub(crate) fn put_admin_join_requests(
     return Ok(());
   }
   records::put_json(store, Table::Unread, ADMIN_JOIN_REQUESTS_KEY, &requests)
+}
+
+/// The guests ending soon that concern this user, as the server last listed them (issue #212).
+pub fn expiring_guests(store: &impl LocalStore) -> Result<Vec<ExpiringGuestResponse>, CoreError> {
+  Ok(records::get_json(store, Table::Unread, EXPIRING_GUESTS_KEY)?.unwrap_or_default())
+}
+
+pub(crate) fn put_expiring_guests(
+  store: &impl LocalStore,
+  guests: &[ExpiringGuestResponse],
+) -> Result<(), CoreError> {
+  if expiring_guests(store)? == guests {
+    return Ok(());
+  }
+  records::put_json(store, Table::Unread, EXPIRING_GUESTS_KEY, &guests)
 }
 
 /// How far other members of DMs have read, across all conversations.

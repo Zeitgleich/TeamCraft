@@ -66,6 +66,7 @@ use teamcraft_proto::{
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
 use teamcraft_proto::{DevicePushHealth, PushDeliveryCounts, PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{ErrorBody, RendezvousClientMessage, RendezvousServerMessage};
+use teamcraft_proto::{ExpiringGuestResponse, ExtendGuestRequest};
 use teamcraft_proto::{
   GatewayInfoResponse, GatewayLimits, GatewayTokenKey, PushGatewayBinding, PushGatewayResponse, PushProvider,
   WebPushKeyResponse,
@@ -261,6 +262,8 @@ struct State {
   /// Requests of admins to join a private channel (admin.md §2.4.1), kept after a decision like
   /// the server keeps them until they expire.
   admin_join_requests: BTreeMap<(ConversationId, UserId), FakeJoinRequest>,
+  expiring_guests: Vec<ExpiringGuestResponse>,
+  refuses_posts_in: BTreeSet<ConversationId>,
   /// Relayed binary frames still to be lost on the way (a flaky connection during linking).
   relay_frames_to_lose: u32,
   /// Like the server: a repeated idempotency key returns the first space / channel.
@@ -1037,6 +1040,16 @@ impl FakeServer {
   /// The server's clock now (the system clock plus [`FakeServer::advance_clock`]).
   pub fn server_now_ms(&self) -> i64 {
     self.lock().now_ms()
+  }
+
+  /// From now on posting here is refused for good, as in a channel somebody just archived.
+  pub fn refuse_posts_in(&self, conversation: ConversationId) {
+    self.lock().refuses_posts_in.insert(conversation);
+  }
+
+  /// What `GET /guests/expiring` lists, for any caller.
+  pub fn set_expiring_guests(&self, guests: Vec<ExpiringGuestResponse>) {
+    self.lock().expiring_guests = guests;
   }
 
   /// A malicious server makes up a request of `user` to join `conversation`, whatever it is, shows
@@ -2354,6 +2367,25 @@ impl ServerApi for FakeServerApi {
       );
       Ok(())
     })
+  }
+
+  async fn expiring_guests(&self) -> Result<Vec<ExpiringGuestResponse>, ApiError> {
+    Ok(self.server.lock().expiring_guests.clone())
+  }
+
+  async fn extend_guest(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    request: &ExtendGuestRequest,
+  ) -> Result<(), ApiError> {
+    let mut state = self.server.lock();
+    state
+      .expiring_guests
+      .iter_mut()
+      .filter(|guest| guest.space_id == space && guest.user.id == user)
+      .for_each(|guest| guest.expires_at = request.expires_at);
+    Ok(())
   }
 
   async fn admin_join_requests(&self) -> Result<Vec<AdminJoinRequestResponse>, ApiError> {
@@ -3782,6 +3814,13 @@ impl ServerApi for FakeServerApi {
   ) -> Result<MessageResponse, ApiError> {
     self.with(|state, me| {
       state.ensure_own_device(me, request.device_id)?;
+      if state.refuses_posts_in.contains(&conversation) {
+        return Err(ApiError::Status {
+          status: 403,
+          maybe_body: None,
+          maybe_retry_after: None,
+        });
+      }
       let existing = state
         .member_conversation(conversation, me)?
         .messages

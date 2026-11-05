@@ -81,6 +81,7 @@ use teamcraft_proto::{
   CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingId, MeetingResponse,
   PutMeetingAdmittersRequest,
 };
+use teamcraft_proto::{ExpiringGuestResponse, ExtendGuestRequest};
 use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
 use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
@@ -188,6 +189,16 @@ pub trait ServerApi {
   fn reject_device_link(&self, request_id: &str) -> impl Future<Output = Result<(), ApiError>>;
   /// The new device gives up its request.
   fn withdraw_device_link(&self, request_id: &str) -> impl Future<Output = Result<(), ApiError>>;
+
+  /// Guests ending soon that concern the caller (`GET /guests/expiring`).
+  fn expiring_guests(&self) -> impl Future<Output = Result<Vec<ExpiringGuestResponse>, ApiError>>;
+  /// Extends a guest's membership of a space to an absolute time; a retry changes nothing.
+  fn extend_guest(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    request: &ExtendGuestRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
 
   /// The open requests of admins to join private channels the caller owns, and the caller's own
   /// (`GET /admin-join-requests`, admin.md §2.4).

@@ -345,6 +345,22 @@ pub async fn update_conversation(
     &json!({}),
   )
   .await?;
+  if let Some(is_archived) = request.maybe_is_archived
+    && is_archived != access.view.conversation.is_archived
+  {
+    audit::record(
+      state,
+      Some(caller.user.id),
+      if is_archived {
+        "channel_archived"
+      } else {
+        "channel_restored"
+      },
+      Some(AuditTarget::new("conversation", id)),
+      &json!({}),
+    )
+    .await?;
+  }
   for kind in kinds {
     system_events::emit(state, id, kind, Some(caller.user.id), None).await;
   }

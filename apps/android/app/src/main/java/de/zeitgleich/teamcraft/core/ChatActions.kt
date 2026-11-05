@@ -233,6 +233,13 @@ object ChatActions {
     put("changes", buildJsonObject { put("maybe_is_archived", isArchived) })
   }
 
+  /** To an absolute time, so a retry doesn't extend twice; the server checks who may. */
+  fun extendGuest(space: String, user: String, expiresAtMs: Long) = action("extend_guest") {
+    put("space", space)
+    put("user", user)
+    put("expires_at_ms", expiresAtMs)
+  }
+
   fun createChannel(space: String, name: String) = action("create_channel") {
     put("space", space)
     put("name", name)
@@ -315,6 +322,8 @@ object ChatQueries {
   fun maxUploadBytes() = query("max_upload_bytes") {}
 
   fun browseChannels(space: String) = query("browse_channels") { put("space", space) }
+
+  fun expiringGuests() = query("expiring_guests") {}
 
   fun search(text: String) = query("search") { put("query", text) }
 

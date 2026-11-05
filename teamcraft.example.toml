@@ -352,8 +352,16 @@ default_retention_days = 30
 default_expiry_days = 90
 # If not empty, guests can only be invited with e-mail addresses of these domains and their subdomains.
 allowed_email_domains = []
-# How often expired guests are removed from their spaces and channels (their sponsor is told).
+# How often expired guests are removed from their spaces and channels (their sponsor is told) and
+# notices before the expiry go out. When they go out is the workspace policy (admin console).
 expiry_check_interval_secs = 3600
+# Mails of those notices. They name no guest and no space. {days}, {count} and {url} are filled in.
+notice_subject_guest = "Your guest access ends soon"
+notice_body_guest_one = "Your guest access ends within a day. Ask the person who invited you to extend it.\n\n{url}\n"
+notice_body_guest = "Your guest access ends in {days} days. Ask the person who invited you to extend it.\n\n{url}\n"
+notice_subject_sponsor = "Guest access you are responsible for ends soon"
+notice_body_sponsor_one = "The access of a guest you are responsible for ends soon. Open the app to extend it or let it end.\n\n{url}\n"
+notice_body_sponsor = "The access of {count} guests you are responsible for ends soon. Open the app to extend it or let it end.\n\n{url}\n"
 
 # Request limits and response hardening of the API.
 [security]

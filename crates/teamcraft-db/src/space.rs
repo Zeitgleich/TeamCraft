@@ -103,6 +103,50 @@ pub struct ExpiredGuest {
   pub maybe_sponsor: Option<UserId>,
 }
 
+/// A guest whose membership is about to run out and who hasn't heard at this lead time yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestNoticeDue {
+  pub space: SpaceId,
+  pub user: UserId,
+  pub maybe_sponsor: Option<UserId>,
+  pub expires_at: OffsetDateTime,
+  pub lead_days: i32,
+}
+
+/// A guest membership ending soon, as one viewer may hear about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpiringGuest {
+  pub space: SpaceId,
+  pub space_name: String,
+  pub user: UserId,
+  pub maybe_sponsor: Option<UserId>,
+  pub expires_at: OffsetDateTime,
+  /// The viewer's own role in that space; `None` for somebody the list shows only their own row.
+  pub maybe_viewer_role: Option<SpaceRole>,
+}
+
+/// What the admin console's guest overview asks for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AdminGuestListFilter {
+  pub maybe_space: Option<SpaceId>,
+  pub maybe_sponsor: Option<UserId>,
+  pub maybe_expires_by: Option<OffsetDateTime>,
+  pub has_no_sponsor: bool,
+  pub has_never_signed_in: bool,
+  pub limit: i64,
+}
+
+/// One guest membership of the overview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminGuestRow {
+  pub space: SpaceId,
+  pub space_name: String,
+  pub user: UserId,
+  pub maybe_expires_at: Option<OffsetDateTime>,
+  pub maybe_sponsor: Option<UserId>,
+  pub has_signed_in: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewSpaceMember {
   pub space: SpaceId,
@@ -353,6 +397,7 @@ impl Database {
          ON CONFLICT (space_id, user_id) DO UPDATE
            SET role = EXCLUDED.role,
                expires_at = CASE WHEN $6 THEN EXCLUDED.expires_at ELSE space_members.expires_at END,
+               expiry_notice_lead_days = CASE WHEN $6 THEN NULL ELSE space_members.expiry_notice_lead_days END,
                sponsor_user_id = COALESCE(EXCLUDED.sponsor_user_id, space_members.sponsor_user_id)"#,
       to_db(member.space),
       to_db(member.user),
@@ -367,6 +412,36 @@ impl Database {
     .execute(self.pool())
     .await?;
     Ok(())
+  }
+
+  /// Changes the role and expiry of somebody who is still a member (`false`: not any more), so a
+  /// removal at the same moment stands. Only guests expire: anybody else's expiry goes, or a
+  /// promoted guest would drop out of the space at the old date.
+  pub async fn update_space_member(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    role: &SpaceRole,
+    expiry: ExpiryChange,
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"UPDATE space_members SET
+           role = $3,
+           expires_at = CASE WHEN $3 <> 'guest' THEN NULL WHEN $5 THEN $4 ELSE expires_at END,
+           expiry_notice_lead_days = CASE WHEN $5 THEN NULL ELSE expiry_notice_lead_days END
+         WHERE space_id = $1 AND user_id = $2"#,
+      to_db(space),
+      to_db(user),
+      role.as_str(),
+      match expiry {
+        ExpiryChange::Set(at) => Some(at),
+        ExpiryChange::Keep | ExpiryChange::Clear => None,
+      },
+      expiry != ExpiryChange::Keep,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
   }
 
   /// Guest memberships whose expiry has passed at `now`, oldest first.
@@ -391,6 +466,169 @@ impl Database {
           space: from_db(row.space_id)?,
           user: from_db(row.user_id)?,
           maybe_sponsor: from_db_opt(row.sponsor_user_id)?,
+        })
+      })
+      .collect()
+  }
+
+  /// Guests a notice is due for at `now`: their expiry lies within a lead time (days, in
+  /// `lead_days`) shorter than that of the last notice for this expiry. Soonest first; a guest
+  /// past two lead times at once gets the shorter one only.
+  pub async fn list_guests_due_notice(
+    &self,
+    now: OffsetDateTime,
+    lead_days: &[i32],
+    limit: i64,
+  ) -> Result<Vec<GuestNoticeDue>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT m.space_id, m.user_id, sponsor.id AS "sponsor_user_id?", m.expires_at AS "expires_at!",
+                due.lead_days AS "lead_days!"
+         FROM space_members m
+         JOIN users guest ON guest.id = m.user_id AND guest.deactivated_at IS NULL AND guest.deleted_at IS NULL
+         LEFT JOIN space_members sm ON sm.space_id = m.space_id AND sm.user_id = m.sponsor_user_id
+         LEFT JOIN users sponsor ON sponsor.id = sm.user_id AND sponsor.deactivated_at IS NULL AND sponsor.deleted_at IS NULL
+         CROSS JOIN LATERAL (
+           SELECT min(lead) AS lead_days FROM unnest($2::int[]) AS lead
+           WHERE m.expires_at <= $1::timestamptz + make_interval(days => lead)
+         ) due
+         WHERE m.role = 'guest' AND m.expires_at > $1::timestamptz AND due.lead_days IS NOT NULL
+           AND (m.expiry_notice_lead_days IS NULL OR m.expiry_notice_lead_days > due.lead_days)
+         ORDER BY m.expires_at LIMIT $3"#,
+      now,
+      lead_days,
+      limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(GuestNoticeDue {
+          space: from_db(row.space_id)?,
+          user: from_db(row.user_id)?,
+          maybe_sponsor: from_db_opt(row.sponsor_user_id)?,
+          expires_at: row.expires_at,
+          lead_days: row.lead_days,
+        })
+      })
+      .collect()
+  }
+
+  /// Remembers the notice for this expiry. An expiry changed in the meantime starts over: then this
+  /// says `false`, and the notice is not sent.
+  pub async fn record_guest_notice(&self, due: &GuestNoticeDue) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      "UPDATE space_members SET expiry_notice_lead_days = $3
+       WHERE space_id = $1 AND user_id = $2 AND expires_at = $4",
+      to_db(due.space),
+      to_db(due.user),
+      due.lead_days,
+      due.expires_at,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
+  /// Moves a guest's expiry later, and only that: a membership that was removed, a guest who became
+  /// a member meanwhile and a later expiry somebody else set all stay as they are (`false`).
+  pub async fn extend_guest_expiry(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    at: OffsetDateTime,
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      "UPDATE space_members SET expires_at = $3, expiry_notice_lead_days = NULL
+       WHERE space_id = $1 AND user_id = $2 AND role = 'guest' AND expires_at < $3",
+      to_db(space),
+      to_db(user),
+      at,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
+  /// Guest memberships ending by `until` that `viewer` should hear about: their own, those they
+  /// sponsor and those in spaces they administer. Soonest first.
+  pub async fn list_expiring_guests_for(
+    &self,
+    viewer: UserId,
+    now: OffsetDateTime,
+    until: OffsetDateTime,
+    limit: i64,
+  ) -> Result<Vec<ExpiringGuest>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT m.space_id, s.name AS space_name, m.user_id, m.sponsor_user_id,
+                m.expires_at AS "expires_at!", me.role AS "viewer_role?"
+         FROM space_members m
+         JOIN spaces s ON s.id = m.space_id
+         LEFT JOIN space_members me ON me.space_id = m.space_id AND me.user_id = $1
+         WHERE m.role = 'guest' AND m.expires_at > $2 AND m.expires_at <= $3
+           AND (m.user_id = $1 OR (m.sponsor_user_id = $1 AND me.user_id IS NOT NULL) OR me.role = 'space_admin')
+         ORDER BY m.expires_at, m.space_id, m.user_id LIMIT $4"#,
+      to_db(viewer),
+      now,
+      until,
+      limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(ExpiringGuest {
+          space: from_db(row.space_id)?,
+          space_name: row.space_name,
+          user: from_db(row.user_id)?,
+          maybe_sponsor: from_db_opt(row.sponsor_user_id)?,
+          expires_at: row.expires_at,
+          maybe_viewer_role: row.viewer_role.map(SpaceRole::from),
+        })
+      })
+      .collect()
+  }
+
+  /// The admin console's guest overview: soonest expiry first, those without one last.
+  pub async fn admin_list_guests(
+    &self,
+    filter: &AdminGuestListFilter,
+  ) -> Result<Vec<AdminGuestRow>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT m.space_id, s.name AS space_name, m.user_id, m.expires_at, m.sponsor_user_id,
+                EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id) AS "has_signed_in!"
+         FROM space_members m
+         JOIN spaces s ON s.id = m.space_id
+         JOIN users u ON u.id = m.user_id AND u.deleted_at IS NULL
+         LEFT JOIN users sponsor ON sponsor.id = m.sponsor_user_id
+         WHERE m.role = 'guest'
+           AND ($1::bigint IS NULL OR m.space_id = $1)
+           AND ($2::bigint IS NULL OR m.sponsor_user_id = $2)
+           AND ($3::timestamptz IS NULL OR m.expires_at <= $3)
+           AND (NOT $4 OR sponsor.id IS NULL OR sponsor.deactivated_at IS NOT NULL OR sponsor.deleted_at IS NOT NULL)
+           AND (NOT $5 OR NOT EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id))
+         ORDER BY m.expires_at ASC NULLS LAST, m.space_id, m.user_id
+         LIMIT $6"#,
+      filter.maybe_space.map(to_db),
+      filter.maybe_sponsor.map(to_db),
+      filter.maybe_expires_by,
+      filter.has_no_sponsor,
+      filter.has_never_signed_in,
+      filter.limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(AdminGuestRow {
+          space: from_db(row.space_id)?,
+          space_name: row.space_name,
+          user: from_db(row.user_id)?,
+          maybe_expires_at: row.expires_at,
+          maybe_sponsor: from_db_opt(row.sponsor_user_id)?,
+          has_signed_in: row.has_signed_in,
         })
       })
       .collect()
@@ -422,6 +660,47 @@ impl Database {
     deletes_memberless: bool,
   ) -> Result<crate::SpaceLeft, DbError> {
     let mut tx = self.pool().begin().await?;
+    Self::lock_member_channels(&mut tx, space, user).await?;
+    let left = Self::remove_member_in(&mut tx, space, user, deletes_memberless).await?;
+    tx.commit().await?;
+    Ok(left)
+  }
+
+  /// Removes a guest whose membership has run out at `now`. `None`: it hasn't any more, somebody
+  /// extended it or made the guest a member after the list was read, or it is gone. Nothing changes.
+  pub async fn remove_expired_guest(
+    &self,
+    space: SpaceId,
+    user: UserId,
+    now: OffsetDateTime,
+  ) -> Result<Option<crate::SpaceLeft>, DbError> {
+    let mut tx = self.pool().begin().await?;
+    // In the order of a manual removal, channels first, so the two can't deadlock.
+    Self::lock_member_channels(&mut tx, space, user).await?;
+    // Held until the commit, so an extension waits and then finds the membership gone.
+    let is_expired = sqlx::query_scalar!(
+      r#"SELECT user_id FROM space_members
+         WHERE space_id = $1 AND user_id = $2 AND role = 'guest' AND expires_at <= $3 FOR UPDATE"#,
+      to_db(space),
+      to_db(user),
+      now,
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if !is_expired {
+      return Ok(None);
+    }
+    let left = Self::remove_member_in(&mut tx, space, user, false).await?;
+    tx.commit().await?;
+    Ok(Some(left))
+  }
+
+  async fn lock_member_channels(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    space: SpaceId,
+    user: UserId,
+  ) -> Result<(), DbError> {
     // Against a join or a leave at the same moment: who stays is counted below.
     sqlx::query_scalar!(
       r#"SELECT c.id FROM conversations c JOIN memberships m ON m.conversation_id = c.id
@@ -429,8 +708,17 @@ impl Database {
       to_db(space),
       to_db(user),
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
+    Ok(())
+  }
+
+  async fn remove_member_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    space: SpaceId,
+    user: UserId,
+    deletes_memberless: bool,
+  ) -> Result<crate::SpaceLeft, DbError> {
     let left = sqlx::query_scalar!(
       r#"DELETE FROM memberships USING conversations c
          WHERE memberships.conversation_id = c.id AND c.space_id = $1 AND memberships.user_id = $2
@@ -438,21 +726,20 @@ impl Database {
       to_db(space),
       to_db(user),
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await?;
     sqlx::query!(
       "DELETE FROM space_members WHERE space_id = $1 AND user_id = $2",
       to_db(space),
       to_db(user)
     )
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     let deleted = if deletes_memberless {
-      crate::channel_deletion::mark_memberless_private_deleted(&mut tx, &left, user).await?
+      crate::channel_deletion::mark_memberless_private_deleted(tx, &left, user).await?
     } else {
       Vec::new()
     };
-    tx.commit().await?;
     Ok(crate::SpaceLeft {
       left: left.into_iter().map(from_db).collect::<Result<_, _>>()?,
       deleted: deleted.into_iter().map(from_db).collect::<Result<_, _>>()?,

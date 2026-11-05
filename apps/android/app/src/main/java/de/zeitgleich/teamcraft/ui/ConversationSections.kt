@@ -6,6 +6,7 @@ import uniffi.teamcraft_ffi.ConversationKind
 /** A sidebar section, as the desktop shows them. */
 sealed interface SectionTitle {
   data object Favorites : SectionTitle
+  data object Archived : SectionTitle
   data class Space(val name: String) : SectionTitle
   data object Channels : SectionTitle
   data object DirectMessages : SectionTitle
@@ -82,12 +83,13 @@ val ConversationItem.isDirect: Boolean
  * user starred (#1152). The channel stays under Favorites in its space too.
  */
 val ConversationItem.isListedInHome: Boolean
-  get() = isDirect || (isFavorite && maybeSpaceId != null)
+  get() = isDirect || (isFavorite && maybeSpaceId != null && !isArchived)
 
 /** Channels of the spaces: favorite channels first, then each space (spaces and channels by name). */
-fun channelSections(conversations: List<ConversationItem>): List<Section> {
+fun channelSections(conversations: List<ConversationItem>, listsArchived: Boolean = false): List<Section> {
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
-  val channels = conversations.filterNot { it.isDirect }
+  // Archived channels leave the lists; Browse finds them (issue #212).
+  val channels = conversations.filterNot { it.isDirect || it.isArchived }
   val favorites = channels.filter { it.isFavorite }.sortedWith(byName)
   val bySpace = channels
     .filterNot { it.isFavorite }
@@ -99,6 +101,9 @@ fun channelSections(conversations: List<ConversationItem>): List<Section> {
   return buildList {
     if (favorites.isNotEmpty()) add(Section(SectionTitle.Favorites, favorites))
     addAll(bySpace)
+    // Guests have no channel browser to find them in.
+    val archived = conversations.filter { !it.isDirect && it.isArchived }
+    if (listsArchived && archived.isNotEmpty()) add(Section(SectionTitle.Archived, archived.sortedWith(byName)))
   }
 }
 
@@ -174,9 +179,11 @@ data class TabBadge(val mentions: Int, val unread: Int)
  * user), in channels only as "something new". Muted conversations count only mentions.
  */
 fun tabBadge(conversations: List<ConversationItem>): TabBadge {
-  val audible = conversations.filterNot { it.isMuted }
+  // An archived channel has no list row to clear it from.
+  val listed = conversations.filterNot { it.isArchived }
+  val audible = listed.filterNot { it.isMuted }
   return TabBadge(
-    mentions = conversations.sumOf { it.mentionCount.toInt() },
+    mentions = listed.sumOf { it.mentionCount.toInt() },
     unread = audible.sumOf { it.unreadCount.toInt() },
   )
 }

@@ -923,3 +923,44 @@ policy-scheduled-enabled = Nachrichten dürfen geplant werden
 policy-scheduled-enabled-hint = Aus: „Später senden“ verschwindet, und schon geplante Nachrichten gehen nicht von selbst raus: Sie warten, bis ihre Besitzer sie senden oder verwerfen.
 policy-scheduled-horizon = Wie weit im Voraus
 policy-scheduled-cap = Wartende Nachrichten pro Person
+admin-channel-restore = Wiederherstellen
+admin-channel-archive-confirm = Diesen Kanal für alle archivieren? Mitglieder können ihn weiter lesen, aber niemand kann schreiben, und er verschwindet aus ihren Listen. Nichts wird gelöscht, und du kannst ihn hier wiederherstellen.
+admin-guests-filter = Anzeigen
+admin-guests-filter-all = Alle Gäste
+admin-guests-filter-expiring = Laufen bald ab
+admin-guests-filter-no-sponsor = Ohne Betreuung
+admin-guests-filter-never = Nie angemeldet
+admin-guests-any = Alle
+admin-guests-bulk = Ausgewählte Gäste
+admin-guests-selected = { $count ->
+    [one] { $count } Gast ausgewählt
+   *[other] { $count } Gäste ausgewählt
+}
+admin-guests-select = { $name } auswählen
+admin-guests-remove = Entfernen
+admin-guests-remove-confirm = { $count ->
+    [one] Diesen Gast jetzt entfernen? Der Zugang zum Space und seinen Kanälen endet, die betreuende Person wird nicht benachrichtigt. Nachrichten bleiben nach den Aufbewahrungsregeln erhalten.
+   *[other] Diese { $count } Gäste jetzt entfernen? Der Zugang zum Space und seinen Kanälen endet, die betreuenden Personen werden nicht benachrichtigt. Nachrichten bleiben nach den Aufbewahrungsregeln erhalten.
+}
+admin-guests-never = Nie angemeldet
+admin-guests-no-sponsor = Keine Betreuung
+admin-guests-no-expiry = Nie
+policy-guest-notices = Hinweise, bevor der Zugang eines Gastes endet
+policy-guest-notices-hint = Der Gast, die betreuende Person und die Admins des Space bekommen einen Hinweis in der App. Der Gast und die betreuende Person bekommen außerdem eine E-Mail, die weder Gast noch Space nennt.
+policy-guest-notices-default = 14 und 3 Tage vorher
+policy-guest-notices-long = 30, 14 und 3 Tage vorher
+policy-guest-notices-short = 7 Tage und 1 Tag vorher
+policy-guest-notices-off = Keine Hinweise
+policy-guest-sponsor-extension = Wie weit Betreuende einen Gast verlängern dürfen
+policy-guest-sponsor-extension-hint = Ab heute. Für Admins gibt es keine Grenze.
+policy-guest-sponsor-none = Betreuende dürfen nicht verlängern
+policy-guest-sponsor-days = { $count ->
+    [one] Bis zu { $count } Tag
+   *[other] Bis zu { $count } Tage
+}
+audit-guest-extended = Gast verlängert
+audit-channel-restored = Kanal wiederhergestellt
+admin-guests-skipped = { $count ->
+    [one] Einer davon läuft nie ab und wird beim Verlängern ausgelassen.
+   *[other] { $count } davon laufen nie ab und werden beim Verlängern ausgelassen.
+}

@@ -225,6 +225,8 @@ impl PendingEnrollment {
       mls_current: Default::default(),
       maybe_backlog_reads: None,
       maybe_replay_left: None,
+      are_expiring_guests_stale: false,
+      maybe_expiring_guests_read_ms: None,
       device_activity: DeviceActivity::Active,
       member_join_attempts: HashMap::new(),
       device_add_requests_handled: HashMap::new(),

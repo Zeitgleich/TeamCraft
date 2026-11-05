@@ -497,7 +497,7 @@ struct ChatPane: View {
       .padding(.vertical, 8)
       .background(.bar)
     } else {
-      Text("read_only_channel").font(.footnote).foregroundStyle(Theme.textMuted).padding()
+      Text(LocalizedStringKey(conversation.isArchived ? "read_only_archived" : "read_only_channel")).font(.footnote).foregroundStyle(Theme.textMuted).padding()
     }
   }
 
